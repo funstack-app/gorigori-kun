@@ -238,6 +238,7 @@ pub async fn codex_status(state: State<'_, AppState>) -> Result<bool, String> {
 
 /// 起動失敗時の診断情報。フロントのエラー画面に表示し、コピー&ペーストで開発者に送ってもらう用。
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Diagnostics {
     pub os: String,
     pub arch: String,

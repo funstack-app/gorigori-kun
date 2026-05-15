@@ -88,34 +88,28 @@ pub fn resolve_codex_binary(override_path: Option<&Path>) -> Result<PathBuf> {
         ));
     }
 
-    // ① アプリと同じディレクトリに同梱された codex バイナリを最優先 (Windows配布対策)
-    // STΛCK 指示 (2026-05-15): Windows ユーザーが PATH 設定しなくても動くように、
-    // アプリ exe と同階層の codex.exe / codex を自動検出する。
+    // ① アプリと同じディレクトリに同梱された codex-app-server バイナリを最優先
+    // STΛCK 指示 (2026-05-15): Windows ユーザーが Node.js なしで動くように、
+    // ネイティブな codex-app-server.exe を直接起動する。
+    // codex.exe は Node.js ラッパーなので使わない (Windows で Node 必須になってしまう)。
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(exe_dir) = exe_path.parent() {
-            let candidates = if cfg!(windows) {
-                vec!["codex.exe", "codex-app-server.exe"]
+            // app-server 用のネイティブバイナリ名 (Node.js ラッパーは含めない)
+            let server_bin = if cfg!(windows) {
+                "codex-app-server.exe"
             } else {
-                vec!["codex", "codex-app-server"]
+                "codex-app-server"
             };
-            for name in candidates {
-                let cand = exe_dir.join(name);
+            // アプリ exe 同階層
+            let cand = exe_dir.join(server_bin);
+            if cand.is_file() {
+                return Ok(cand);
+            }
+            // Tauri bundle 内 resources ディレクトリ (macOS .app/Contents/Resources, Windows install dir)
+            for rel in ["resources", "../Resources"] {
+                let cand = exe_dir.join(rel).join(server_bin);
                 if cand.is_file() {
                     return Ok(cand);
-                }
-            }
-            // Tauri bundle 内の resources ディレクトリも見る (macOS .app, Windows install dir)
-            for rel in ["resources", "../Resources"] {
-                let res_dir = exe_dir.join(rel);
-                for name in if cfg!(windows) {
-                    vec!["codex.exe"]
-                } else {
-                    vec!["codex"]
-                } {
-                    let cand = res_dir.join(name);
-                    if cand.is_file() {
-                        return Ok(cand);
-                    }
                 }
             }
         }
@@ -202,11 +196,22 @@ pub struct AppServerProcess {
 }
 
 pub async fn spawn_app_server(bin: &Path) -> Result<AppServerProcess> {
+    // バイナリ名で起動引数を切り替え:
+    //   - codex / codex.exe         : `codex app-server` サブコマンド経由 (Node.js ラッパー)
+    //   - codex-app-server(.exe)    : 引数なしで直接 stdio JSON-RPC モード起動
+    let bin_name = bin
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let is_native_server = bin_name.starts_with("codex-app-server");
+
     let mut cmd = Command::new(bin);
-    cmd.arg("app-server")
-        .arg("--listen")
-        .arg("stdio://")
-        .stdin(Stdio::piped())
+    if !is_native_server {
+        // codex (Node.js ラッパー) 経由の場合は app-server サブコマンドを指定
+        cmd.arg("app-server");
+    }
+    cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env("PATH", enriched_path());
