@@ -1,0 +1,64 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "GORI GORI",
+  "version": "0.1.0",
+  "identifier": "app.codexframefactory",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "GORI GORI",
+        "width": 1280,
+        "height": 800,
+        "minWidth": 960,
+        "minHeight": 600
+      }
+    ],
+    "security": {
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "$HOME/**",
+          "$HOME/.codex/**",
+          "$HOME/.codex/generated_images/**",
+          "$APPDATA/segmentation_results/**",
+          "/Volumes/**",
+          "/tmp/**"
+        ]
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "category": "GraphicsDesign",
+    "copyright": "Copyright (c) 2026 STΛCK",
+    "shortDescription": "画像生成と動画用カット生成のためのAIクリエイティブアプリ",
+    "longDescription": "利用者自身の Codex / ChatGPT 認証を使い、画像生成・画像編集・動画用ストーリーカット・マルチアングル生成を行うデスクトップアプリ。",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": [
+      "resources/removebg.swift",
+      "resources/LICENSE.txt"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "12.0"
+    },
+    "windows": {
+      "webviewInstallMode": {
+        "type": "embedBootstrapper"
+      }
+    }
+  }
+}

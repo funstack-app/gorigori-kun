@@ -1,0 +1,77 @@
+{
+  "composition": {
+    "Close Up": "Cinematic close-up portrait of a thoughtful character, eyes sharp, background falling into soft bokeh, shallow depth of field, dramatic side lighting, photorealistic film still, dramatic lighting, 16:9 aspect ratio",
+    "Medium": "Cinematic medium shot of a character from waist up in an atmospheric interior, balanced negative space, practical lights in the background, photorealistic film still, dramatic lighting, 16:9 aspect ratio",
+    "Wide": "Cinematic wide shot of a lone character crossing a vast environment, strong foreground and background depth, sweeping production design, photorealistic film still, dramatic lighting, 16:9 aspect ratio",
+    "Bird's-eye": "Cinematic bird's-eye view looking straight down at a character in a carefully arranged scene, graphic composition and long shadows, photorealistic film still, dramatic lighting, 16:9 aspect ratio",
+    "Dutch Angle": "Cinematic dutch angle shot of a tense character in an urban corridor, diagonal horizon, uneasy energy, hard rim light, photorealistic film still, dramatic lighting, 16:9 aspect ratio",
+    "Over-the-shoulder": "Cinematic over-the-shoulder shot during an intense conversation, foreground shoulder silhouette framing the subject, shallow depth, photorealistic film still, dramatic lighting, 16:9 aspect ratio"
+  },
+  "aspect_ratio": {
+    "16:9": "Cinematic scene showing a wide 16:9 movie frame as the visual subject, expansive horizontal composition with action spread across the frame, photorealistic film still, dramatic lighting, 16:9 aspect ratio",
+    "1:1": "Cinematic scene visualizing a square 1:1 frame inside a wider movie still, centered subject and symmetrical staging, photorealistic film still, dramatic lighting, 16:9 aspect ratio",
+    "9:16": "Cinematic scene visualizing a vertical 9:16 frame inside a wider movie still, tall portrait crop with strong vertical light shafts, photorealistic film still, dramatic lighting, 16:9 aspect ratio",
+    "4:3": "Cinematic scene visualizing a classic 4:3 frame inside a wider movie still, vintage academy-ratio composition with centered blocking, photorealistic film still, dramatic lighting, 16:9 aspect ratio"
+  },
+  "light_source": {
+    "自然光": "Cinematic natural-light scene near a large window, soft daylight wrapping around a subject, realistic shadows and gentle highlights, photorealistic film still, dramatic lighting, 16:9 aspect ratio",
+    "スタジオ": "Cinematic studio-lighting scene with a subject on a minimal set, controlled key light, fill light, and clean background separation, photorealistic film still, dramatic lighting, 16:9 aspect ratio",
+    "逆光": "Cinematic backlit scene with a subject silhouetted against a bright doorway, glowing rim light and atmospheric haze, photorealistic film still, dramatic lighting, 16:9 aspect ratio",
+    "Blue Hour": "Cinematic blue-hour street scene just after sunset, deep cobalt sky, warm practical lights, reflective pavement, photorealistic film still, dramatic lighting, 16:9 aspect ratio",
+    "Candlelight": "Cinematic candlelight scene in a dark room, warm flickering highlights on faces, deep shadows and intimate atmosphere, photorealistic film still, dramatic lighting, 16:9 aspect ratio",
+    "Softbox": "Cinematic softbox-lit portrait setup, large diffused rectangular catchlight, smooth skin tones and controlled falloff, photorealistic film still, dramatic lighting, 16:9 aspect ratio"
+  },
+  "camera_equipment": {
+    "フィルム": "Cinematic film-camera look with a subject captured on an analog motion-picture set, organic grain, gentle highlight rolloff, photorealistic film still, dramatic lighting, 16:9 aspect ratio",
+    "デジタル": "Cinematic digital-camera look with crisp modern detail, clean color separation, controlled dynamic range, photorealistic film still, dramatic lighting, 16:9 aspect ratio",
+    "VHS": "Cinematic VHS-era scene with a late-night analog video mood, soft resolution, scanline texture, chroma noise, photorealistic film still, dramatic lighting, 16:9 aspect ratio",
+    "Sony FX6": "Cinematic Sony FX6 camera look for a modern documentary-style production, natural skin tones, practical location lighting, photorealistic film still, dramatic lighting, 16:9 aspect ratio",
+    "ARRI Alexa Mini": "Cinematic ARRI Alexa Mini camera look on a premium film set, rich highlight rolloff, natural color science, photorealistic film still, dramatic lighting, 16:9 aspect ratio",
+    "iPhone Pro": "Cinematic iPhone Pro camera look for a spontaneous street scene, mobile perspective, sharp HDR detail, natural handheld energy, photorealistic film still, dramatic lighting, 16:9 aspect ratio"
+  },
+  "focal_length": {
+    "8mm": "Cinematic 8mm fisheye ultra-wide shot, exaggerated curved barrel distortion at the edges, extreme wide field of view, person standing very close to the lens with visibly enlarged hands or face, vast expansive background showing the entire environment, immersive perspective, photorealistic film still, dramatic lighting, 16:9 aspect ratio",
+    "35mm": "Cinematic 35mm wide-angle environmental portrait, person from waist up shown together with a complete recognizable location around them, natural mild perspective, balanced foreground and background, room context fully visible, photorealistic film still, dramatic lighting, 16:9 aspect ratio",
+    "50mm": "Cinematic 50mm standard focal length shot, person from mid-chest up with perspective matching the human eye, no distortion, no compression, neutral natural rendering of subject and background at equal scale, photorealistic film still, dramatic lighting, 16:9 aspect ratio",
+    "85mm": "Cinematic 85mm short-telephoto portrait, tight head-and-shoulders close up of one person, very shallow depth of field, creamy out-of-focus background bokeh, flattering facial proportions and slight background compression, photorealistic film still, dramatic lighting, 16:9 aspect ratio",
+    "200mm": "Cinematic 200mm long-telephoto shot, distant subject pulled visually closer with strong telephoto compression, background mountains or city skyline appearing huge directly behind the subject, layered atmospheric depth, photorealistic film still, dramatic lighting, 16:9 aspect ratio"
+  },
+  "lens": {
+    "Anamorphic": "Cinematic anamorphic lens scene with oval bokeh, horizontal lens flare, widescreen blocking, rich depth and atmosphere, photorealistic film still, dramatic lighting, 16:9 aspect ratio",
+    "Fisheye": "Cinematic fisheye lens scene with intentional barrel distortion, energetic close foreground, surreal spatial curvature, photorealistic film still, dramatic lighting, 16:9 aspect ratio",
+    "Macro": "Cinematic macro lens scene focused on a tiny story detail, extreme close focus, tactile texture, shallow depth of field, photorealistic film still, dramatic lighting, 16:9 aspect ratio",
+    "Tilt-shift": "Cinematic tilt-shift lens scene with selective plane of focus, miniature-like city depth, stylized but realistic optics, photorealistic film still, dramatic lighting, 16:9 aspect ratio",
+    "Prime": "Cinematic prime lens scene with crisp subject detail, simple optical character, clean bokeh, precise composition, photorealistic film still, dramatic lighting, 16:9 aspect ratio",
+    "Telephoto": "Cinematic telephoto lens scene with strong compression, layered background shapes, distant subject isolated in space, photorealistic film still, dramatic lighting, 16:9 aspect ratio"
+  },
+  "film": {
+    "Cinestill": "Cinematic Cinestill-inspired night scene with red halation around neon and practical lights, analog grain, urban atmosphere, photorealistic film still, dramatic lighting, 16:9 aspect ratio",
+    "Kodak": "Cinematic Kodak-inspired film stock look with warm skin tones, rich reds and golds, classic motion-picture color, photorealistic film still, dramatic lighting, 16:9 aspect ratio",
+    "Fuji": "Cinematic Fuji-inspired film stock look with nuanced greens, cool shadows, natural landscape color, photorealistic film still, dramatic lighting, 16:9 aspect ratio",
+    "Ilford": "Cinematic Ilford-inspired black-and-white film stock look, silver-rich contrast, textured grain, expressive shadows, photorealistic film still, dramatic lighting, 16:9 aspect ratio",
+    "Ektachrome": "Cinematic Ektachrome-inspired slide film look with vivid blues, crisp contrast, saturated travel-photo atmosphere, photorealistic film still, dramatic lighting, 16:9 aspect ratio",
+    "Portra": "Cinematic Portra-inspired film stock look with soft pastel skin tones, gentle contrast, refined portrait color, photorealistic film still, dramatic lighting, 16:9 aspect ratio"
+  },
+  "photographer": {
+    "Annie Leibovitz": "Cinematic editorial portrait preset thumbnail: dramatic studio staging of an anonymous subject, sculpted key light with rich shadow falloff, opulent wardrobe and refined production design, photorealistic film still, dramatic lighting, 16:9 aspect ratio",
+    "Alec Soth": "Cinematic documentary roadside preset thumbnail: quiet anonymous subject standing in front of a vast American landscape, restrained pastel palette, contemplative stillness, photorealistic film still, dramatic lighting, 16:9 aspect ratio",
+    "Andreas Gursky": "Cinematic monumental large-format preset thumbnail: elevated wide aerial of a vast architectural interior, precise geometric repetition, many tiny anonymous figures dispersed across the frame, photorealistic film still, dramatic lighting, 16:9 aspect ratio",
+    "Daido Moriyama": "Cinematic gritty street photography preset thumbnail: high-grain black-and-white urban night alley, oblique framing, anonymous silhouettes, raw motion blur and harsh contrast, photorealistic film still, dramatic lighting, 16:9 aspect ratio",
+    "Vivian Maier": "Cinematic thumbnail representing the Vivian Maier street-photography preset: reflective storefront portrait, mid-century city mood, candid geometry, photorealistic film still, dramatic lighting, 16:9 aspect ratio"
+  },
+  "cinematic_look": {
+    "Neo noir": "Cinematic neo-noir scene in a rain-soaked city at night, neon reflections, deep shadows, hard edge light, photorealistic film still, dramatic lighting, 16:9 aspect ratio",
+    "Clean commercial": "Cinematic clean commercial scene with premium product-ready lighting, polished surfaces, bright controlled highlights, photorealistic film still, dramatic lighting, 16:9 aspect ratio",
+    "Documentary realism": "Cinematic documentary realism scene with available light, natural gesture, honest location detail, subtle handheld energy, photorealistic film still, dramatic lighting, 16:9 aspect ratio",
+    "Muted drama": "Cinematic muted drama scene with subdued color palette, emotional staging, soft contrast, quiet tension, photorealistic film still, dramatic lighting, 16:9 aspect ratio",
+    "High contrast": "Cinematic high-contrast scene with stark key light, deep blacks, bright highlights, graphic shadow shapes, photorealistic film still, dramatic lighting, 16:9 aspect ratio",
+    "Pastel daylight": "Cinematic pastel daylight scene with soft morning sun, gentle colors, airy shadows, optimistic atmosphere, photorealistic film still, dramatic lighting, 16:9 aspect ratio"
+  },
+  "filter": {
+    "Subtle grain": "Cinematic scene with subtle fine film grain added to a realistic image, clean details preserved, tactile analog texture, photorealistic film still, dramatic lighting, 16:9 aspect ratio",
+    "Halation": "Cinematic scene emphasizing halation around bright practical lights, red-orange glow bleeding softly into shadows, photorealistic film still, dramatic lighting, 16:9 aspect ratio",
+    "Bleach bypass": "Cinematic bleach-bypass scene with desaturated color, silver contrast, gritty highlights and dense shadows, photorealistic film still, dramatic lighting, 16:9 aspect ratio",
+    "Soft bloom": "Cinematic scene with soft bloom on highlights, luminous practical lights, gentle glow without losing realism, photorealistic film still, dramatic lighting, 16:9 aspect ratio",
+    "Matte finish": "Cinematic matte-finish scene with lifted blacks, restrained contrast, soft color rolloff, refined print-like texture, photorealistic film still, dramatic lighting, 16:9 aspect ratio"
+  }
+}

@@ -1,0 +1,76 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Playwright
+test-results/
+playwright-report/
+blob-report/
+playwright/.cache/
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+tests-ui/screenshots/_debug-*.png
+
+# Claude Code local cache
+.claude/
+
+# Local-only working artifacts (mockup iterations, article drafts, etc.)
+explainer/
+design-mockups/iter/
+design-mockups/0*.png
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+
+# 配布前セキュリティクリーニング (2026-05-15) ───────────────
+# 個人ストーリーや本名フルパスを含む可能性のあるリカバリーディレクトリ
+_recovery/
+# テスト用に生成された画像 (実機テストの残骸)
+src-tauri/generated_images/
+# 開発時のバックアップファイル
+*.backup-*
+*.bak-*
+*.bak
+.claude-design/
+# Codex セッション履歴は配布物に含めない
+**/sessions/*.jsonl
+# Beads (個人タスク管理、メアド・個人タスク履歴を含むため配布対象外)
+.beads/
+.agents/
+
+# テスト用 UI スクリーンショット (login 画面など、配布対象外)
+tests-ui/screenshots/
+
+# テスト用 ダミー API キー文字列含むファイル
+tests-ui/screens.spec.ts
+
+# 開発用ドキュメント (個人メモ含む、配布対象外)
+CLAUDE.md
+docs/
+
+# 開発時のローカル作業 (research, _work)
+_work/
+
+# 旧 Git 履歴退避 (個人メアド含む過去 commit、配布対象外)
+.git-backup-*

@@ -1,0 +1,251 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Geist Variable (Vercel) を本文 + UI フォントとして採用。
+ * Magnific (Freepik) の DevTools 確認結果に揃える:
+ *   font-family: Geist, ui-sans-serif, system-ui, ...
+ *   wght: 400 を基本、強調も 500 まで (font-black は重く感じるので避ける)
+ * woff2 1 ファイルで全ウェイト網羅、Tauri オフライン動作 OK。
+ */
+@font-face {
+  font-family: "Geist";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("../node_modules/geist/dist/fonts/geist-sans/Geist-Variable.woff2")
+    format("woff2-variations");
+}
+
+/*
+ * ロゴ専用フォント: Facon
+ * GORIGORI 君ロゴ ("GORI GORI") にのみ適用する。本文には使わない。
+ *
+ * 履歴: Land of Fear → WAVY → Facon
+ * 過去フォントのファイルは残しているが import はしない。
+ */
+@font-face {
+  font-family: "Facon";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("./assets/fonts/Facon.ttf") format("truetype");
+}
+
+.logo-font {
+  font-family: "Facon", "Geist", ui-sans-serif, system-ui, sans-serif;
+  font-weight: 400;
+  letter-spacing: 0.02em;
+}
+
+:root {
+  font-family:
+    "Geist", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", "Hiragino Kaku Gothic ProN", "Hiragino Sans", Meiryo, sans-serif;
+  color-scheme: light;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+body {
+  @apply bg-neutral-100 text-neutral-950;
+}
+
+/*
+ * 暗背景の本文テキスト色を Magnific と同じ #E3E3E3 寄りに揃える。
+ * 純白 (#FFFFFF) は暗背景で目が痛い、neutral-100 (#F5F5F5) より少し落として、
+ * 12px 前後の小フォントでも疲れにくい readability にする。
+ * 必要なら個別箇所で text-neutral-100 等で上書き可。
+ */
+.text-neutral-100 {
+  color: #e3e3e3;
+}
+
+/*
+ * Magnific (Geist) の太字運用に揃える: 通常テキストでは font-black / font-bold
+ * のような過剰なウェイトを使わない。コンポーネント側のクラスを一つ一つ書き換える
+ * のは 285 箇所あって巻き添えリスクが高いので、グローバルに上書きする戦略。
+ *
+ * - .font-black (900) → 600 相当
+ * - .font-bold  (700) → 500 相当
+ *
+ * 例外: ピル / バッジ / 小サイズの判別が要る場面で太字が欲しい時は、
+ * 明示的に `style={{ fontWeight: 700 }}` か別 utility (font-extrabold 等) を使う。
+ * → これにより視認性は維持しつつ、全体トーンが Geist 寄りになる。
+ *
+ * UNLIMITED / NEW ピル (bg-lime-300 + black 文字) など、コントラスト確保のために
+ * 強く効かせたい箇所は別途調整する。
+ */
+.font-black {
+  font-weight: 600 !important;
+}
+.font-bold {
+  font-weight: 500 !important;
+}
+
+/*
+ * 例外復帰: 小ピル系で判別性を保ちたい箇所は font-extrabold で 700 を維持。
+ * 既存コードの font-extrabold は使われていないので、新規導入時のみ。
+ */
+
+/* ============================================================
+ * カラーパターン切替 (3 案を data-theme 属性で瞬時に切り替え)
+ *
+ * 切替方法:
+ *   - キーボードショートカット: ⌥+1 (A 案) / ⌥+2 (B 案) / ⌥+3 (C 案)
+ *   - 画面右下に現在のテーマ名が出る
+ *   - localStorage に保存され、再起動後も継続
+ *   - 値: a (デフォルト = ブランド保持) / b (Linear 紫黒) / c (Figma ニュートラル)
+ *
+ * デザイントークン (3 案共通の名前空間):
+ *   --color-bg-deep:   最深層 (アプリ背景)
+ *   --color-bg-card:   カード/モーダル/ピッカー
+ *   --color-bg-front:  前面/hover/active
+ *   --color-border:    境界線
+ *
+ * アクセント色は Tailwind の任意値クラスで個別指定されているので、
+ * 本切替対象はベース階層 + 境界線のみ。pink-500 / lime-300 のような
+ * アクセントは現状維持 (どの案でも残す)。
+ * ============================================================ */
+
+/*
+ * カラーパターン (A 案: Magnific 寄り、確定版)
+ *
+ * トークン:
+ *   --color-bg-deep   最深層 (アプリ背景)
+ *   --color-bg-card   カード/モーダル/ピッカー
+ *   --color-bg-front  前面/hover
+ *   --color-border    境界線
+ *   --color-accent    主要 CTA (ピンク)
+ *   --color-accent-hover ホバー時
+ *   --color-accent-fg ボタン前景 (白固定)
+ *   --color-success   UNLIMITED/成功 (黄緑)
+ *   --color-success-fg success の前景 (黒)
+ *
+ * 5 案テーマスイッチャは A 確定により撤去。
+ */
+:root {
+  --color-bg-deep: #0a0a0a;
+  --color-bg-card: #161616;
+  --color-bg-front: #1f1f1f;
+  --color-border: #262626;
+  --color-accent: #ec4899; /* pink-500 */
+  --color-accent-hover: #db2777; /* pink-600 */
+  --color-accent-fg: #ffffff;
+  --color-success: #bef264; /* lime-300 */
+  --color-success-fg: #0a0a0a;
+}
+
+/* ============================================================
+ * アクセント色の一括上書き
+ * 既存コードで pink-500 / lime-300 が直接 Tailwind クラスで指定されている
+ * 箇所も、テーマトークンで上書きする。
+ * ============================================================ */
+
+/* 主要 CTA = bg-pink-500 / hover:bg-pink-600 を上書き
+ * :not(:disabled) で disabled 時は Tailwind の disabled:bg-neutral-* に
+ * 優先権を返す。これがないとピンク背景 + グレー disabled 文字になる。
+ */
+.bg-pink-500:not(:disabled) {
+  background-color: var(--color-accent) !important;
+}
+button:disabled.bg-pink-500 {
+  /* disabled は元の neutral へ */
+  background-color: #404040 !important;
+  color: #737373 !important;
+  cursor: not-allowed;
+}
+.hover\:bg-pink-600:hover:not(:disabled) {
+  background-color: var(--color-accent-hover) !important;
+}
+.hover\:bg-pink-400:hover:not(:disabled) {
+  background-color: var(--color-accent-hover) !important;
+}
+.text-pink-300,
+.text-pink-200 {
+  color: var(--color-accent) !important;
+}
+.ring-pink-400\/40 {
+  --tw-ring-color: color-mix(in srgb, var(--color-accent) 40%, transparent) !important;
+}
+.border-pink-400,
+.border-pink-500 {
+  border-color: var(--color-accent) !important;
+}
+.bg-pink-500\/10 {
+  background-color: color-mix(in srgb, var(--color-accent) 10%, transparent) !important;
+}
+.bg-pink-500\/20 {
+  background-color: color-mix(in srgb, var(--color-accent) 20%, transparent) !important;
+}
+.focus\:border-pink-500:focus {
+  border-color: var(--color-accent) !important;
+}
+.hover\:border-pink-400:hover {
+  border-color: var(--color-accent) !important;
+}
+
+/* Success/Compare = bg-lime-300 を上書き (UNLIMITED/NEW ピルは黄緑+黒のまま) */
+.bg-lime-300 {
+  background-color: var(--color-success) !important;
+  color: var(--color-success-fg) !important;
+}
+.hover\:bg-lime-200:hover {
+  background-color: color-mix(in srgb, var(--color-success) 85%, white) !important;
+}
+
+/* ============================================================
+ * ピンク系背景の上の文字色は白統一
+ * 「中の色がバラついて見える」問題対策。
+ * bg-pink-500 / bg-pink-500/20 等の半透明背景の上の文字は、
+ * 元のクラスが text-pink-200 等であっても白に統一する。
+ * これでブランド色 (ピンク) と前景 (白) の関係が一貫する。
+ * ============================================================ */
+.text-pink-100,
+.text-pink-200,
+.text-pink-300,
+.text-pink-400 {
+  color: #ffffff !important;
+}
+
+/* 最深層: アプリ全体背景、ボタン凹み、最暗カード */
+[class*="bg-[#0a0a0a]"],
+[class*="bg-[#0d0d0d]"],
+[class*="bg-[#0f0f0f]"],
+[class*="bg-[#101010]"] {
+  background-color: var(--color-bg-deep) !important;
+}
+
+/* カード/モーダル/ピッカー本体 */
+[class*="bg-[#141414]"],
+[class*="bg-[#151515]"],
+[class*="bg-[#161616]"],
+[class*="bg-[#171717]"],
+[class*="bg-[#181818]"],
+[class*="bg-[#1a1a1a]"],
+[class*="bg-[#1e1e1e]"] {
+  background-color: var(--color-bg-card) !important;
+}
+
+/* 前面/hover */
+[class*="bg-[#1f1f1f]"],
+[class*="bg-[#242424]"] {
+  background-color: var(--color-bg-front) !important;
+}
+
+/* 境界線統一 */
+[class*="border-[#242424]"],
+[class*="border-[#2a2a2a]"],
+[class*="border-[#343434]"],
+[class*="border-[#444]"] {
+  border-color: var(--color-border) !important;
+}

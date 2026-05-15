@@ -1,0 +1,63 @@
+import { useImagePreview } from "../lib/store/imagePreview";
+import { useImages, type GalleryItem } from "../lib/store/images";
+import { useMaskEditor } from "../lib/store/maskEditor";
+import { useThreads } from "../lib/store/threads";
+import type { ContextMenuItem } from "./ContextMenu";
+
+/**
+ * Build the context menu for a generated image. Used by both the gallery
+ * sidebar (VirtualGalleryGrid) and the inline chat thumbnails
+ * (ImageGenerationGroup) so right-click is consistent everywhere.
+ */
+export function buildGalleryItemMenu(
+  item: GalleryItem,
+  ctx: { favorites: Set<string>; onToggleFavorite: (path: string) => void },
+): ContextMenuItem[] {
+  const isFav = ctx.favorites.has(item.path);
+  const cwd = useThreads.getState().cwd;
+  return [
+    {
+      label: "拡大表示",
+      icon: "O",
+      onClick: () => useImagePreview.getState().open(item.path),
+    },
+    {
+      label: "マスクで編集",
+      icon: "M",
+      onClick: () =>
+        useMaskEditor.getState().open({ path: item.path, name: item.name }),
+    },
+    {
+      label: "背景を透過 (Vision)",
+      icon: "B",
+      onClick: () => {
+        void useImages.getState().removeBackground(item.path);
+      },
+    },
+    { kind: "separator" },
+    {
+      label: "名前を付けて保存…",
+      icon: "D",
+      onClick: () => useImages.getState().downloadAs(item.path, item.name),
+    },
+    {
+      label: item.savedTo ? "プロジェクトへ保存済み" : "プロジェクトへ移動",
+      icon: "P",
+      disabled: !cwd || !!item.savedTo,
+      onClick: () => {
+        if (cwd) useImages.getState().saveToProject(item.path, cwd);
+      },
+    },
+    {
+      label: "Finder で表示",
+      icon: "F",
+      onClick: () => useImages.getState().revealInFinder(item.path),
+    },
+    { kind: "separator" },
+    {
+      label: isFav ? "お気に入りから外す" : "お気に入りに追加",
+      icon: "S",
+      onClick: () => ctx.onToggleFavorite(item.path),
+    },
+  ];
+}

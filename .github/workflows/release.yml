@@ -1,0 +1,158 @@
+# Builds release artifacts for the Tauri app and uploads them as a draft
+# GitHub Release.
+#
+# Targets:
+#  - macOS Apple Silicon (.dmg)   [unsigned, requires xattr -cr after install]
+#  - Windows x86_64 (.exe + .zip) [unsigned, includes bundled Codex CLI binaries]
+#
+# Triggered by:
+#  - pushing a `v*` tag
+#  - manually via workflow_dispatch with a `tag` input
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to (re)build the release for, e.g. v0.5.0'
+        type: string
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ─────────────────────────────────────────────────────────────
+  # macOS Apple Silicon (.dmg)
+  # ─────────────────────────────────────────────────────────────
+  macos:
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Build and publish draft release (macOS)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ inputs.tag || github.ref_name }}
+          releaseName: 'GORI GORI KUN ${{ inputs.tag || github.ref_name }}'
+          releaseDraft: true
+          prerelease: false
+          includeRelease: true
+          includeUpdaterJson: false
+          args: '--target aarch64-apple-darwin'
+
+  # ─────────────────────────────────────────────────────────────
+  # Windows x86_64 (.exe + .zip)
+  # STΛCK 指示 (2026-05-15): 友達に渡して動かせる Windows 版を作る
+  # ─────────────────────────────────────────────────────────────
+  windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      # Codex CLI Windows バイナリを公式 GitHub Releases から取得して
+      # Tauri resources ディレクトリに配置する。これで Tauri が
+      # アプリと一緒に同梱してくれる。
+      - name: Fetch Codex CLI binaries (Windows x86_64)
+        shell: pwsh
+        run: |
+          $codexVer = "rust-v0.131.0-alpha.19"
+          $base = "https://github.com/openai/codex/releases/download/$codexVer"
+
+          New-Item -ItemType Directory -Force -Path "src-tauri/resources" | Out-Null
+
+          # codex.exe (CLI 本体)
+          Invoke-WebRequest -Uri "$base/codex-x86_64-pc-windows-msvc.exe.zip" -OutFile "codex.zip"
+          Expand-Archive -Path "codex.zip" -DestinationPath "tmp-codex" -Force
+          Get-ChildItem "tmp-codex" -Recurse | Where-Object { $_.Name -like "*.exe" } | Select-Object -First 1 | ForEach-Object {
+            Move-Item -Path $_.FullName -Destination "src-tauri/resources/codex.exe" -Force
+          }
+          Remove-Item "codex.zip"
+          Remove-Item "tmp-codex" -Recurse -Force
+
+          # codex-app-server.exe (アプリが直接話す JSON-RPC サーバー)
+          Invoke-WebRequest -Uri "$base/codex-app-server-x86_64-pc-windows-msvc.exe.zip" -OutFile "codex-app-server.zip"
+          Expand-Archive -Path "codex-app-server.zip" -DestinationPath "tmp-app-server" -Force
+          Get-ChildItem "tmp-app-server" -Recurse | Where-Object { $_.Name -like "*.exe" } | Select-Object -First 1 | ForEach-Object {
+            Move-Item -Path $_.FullName -Destination "src-tauri/resources/codex-app-server.exe" -Force
+          }
+          Remove-Item "codex-app-server.zip"
+          Remove-Item "tmp-app-server" -Recurse -Force
+
+          Write-Host "✓ Codex binaries staged in src-tauri/resources/"
+          Get-ChildItem "src-tauri/resources" | Format-Table Name, Length
+
+      # tauri.conf.json の resources 配列に Windows 用 codex バイナリを追記
+      - name: Patch tauri.conf.json for Windows bundle
+        shell: pwsh
+        run: |
+          $confPath = "src-tauri/tauri.conf.json"
+          $conf = Get-Content $confPath -Raw | ConvertFrom-Json
+          $existing = @($conf.bundle.resources)
+          $additions = @("resources/codex.exe", "resources/codex-app-server.exe")
+          $conf.bundle.resources = $existing + $additions
+          $conf | ConvertTo-Json -Depth 50 | Set-Content $confPath -Encoding UTF8
+          Write-Host "✓ tauri.conf.json updated:"
+          Get-Content $confPath | Select-String -Pattern "resources" -Context 0,5
+
+      - name: Build and publish draft release (Windows)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ inputs.tag || github.ref_name }}
+          releaseName: 'GORI GORI KUN ${{ inputs.tag || github.ref_name }}'
+          releaseDraft: true
+          prerelease: false
+          includeRelease: true
+          includeUpdaterJson: false
+          args: '--target x86_64-pc-windows-msvc'

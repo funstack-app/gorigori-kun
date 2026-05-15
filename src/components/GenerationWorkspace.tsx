@@ -1,0 +1,1306 @@
+import { useEffect, useMemo, useRef, useState } from "react";
+import { convertFileSrc } from "@tauri-apps/api/core";
+import { PurposeSelector } from "./PurposeSelector";
+import { WorkspaceTabs } from "./WorkspaceTabs";
+import { SceneBuilder, VideoSceneBuilder } from "./scene";
+import { ConstructedPromptPanel } from "./ConstructedPromptPanel";
+import { AdAgentPanel } from "./agents";
+import { EditWorkspace } from "./EditWorkspace";
+import { PlanWorkspace } from "./PlanWorkspace";
+import { useBatches, type BatchWorker } from "../lib/store/batches";
+import { useImagePreview } from "../lib/store/imagePreview";
+import { useImages, type GalleryItem } from "../lib/store/images";
+import {
+  TIMELINE_SIZE_MAX,
+  TIMELINE_SIZE_MIN,
+  useWorkspace,
+  type TimelineSize,
+} from "../lib/store/workspace";
+import { history, sessions as sessionsApi, type PromptHistoryRow, type SessionFull, type TurnWithImages } from "../lib/ipc";
+import { useActiveProject } from "../lib/store/activeProject";
+import { useProjects } from "../lib/store/projects";
+import { useSessions } from "../lib/store/sessions";
+import { ActiveProjectSelector } from "./ActiveProjectSelector";
+import { ensureStoryboardEventListener } from "../lib/storyboard/events";
+import { storyboard } from "../lib/ipc";
+import { useAuth } from "../lib/store/auth";
+import { usePlanChat } from "../lib/store/planChat";
+import { useScenePromptOverride } from "../lib/store/scenePrompt";
+import { useSkillMode } from "../lib/store/skillMode";
+import { useStoryboardRun } from "../lib/store/storyboardRun";
+import { useToasts } from "../lib/store/toasts";
+import { StoryboardCheckpointDialog } from "./StoryboardCheckpointDialog";
+import { StoryboardCutCard } from "./StoryboardCutCard";
+import { SkillRunActions } from "./SkillRunActions";
+
+export function GenerationWorkspace() {
+  const activeTab = useWorkspace((s) => s.activeTab);
+
+  useEffect(() => {
+    void ensureStoryboardEventListener();
+  }, []);
+
+  return (
+    <section className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#121212]">
+      <div className="border-b border-[#242424] bg-[#121212] px-4 py-3">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex items-center gap-3">
+            <WorkspaceTabs />
+            <ActiveProjectSelector />
+          </div>
+          <PurposeSelector />
+        </div>
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-hidden px-4 py-4">
+        {activeTab === "plan" && <PlanWorkspace />}
+        {activeTab === "generate" && <GenerateTab />}
+        {activeTab === "edit" && <EditWorkspace />}
+      </div>
+    </section>
+  );
+}
+
+function GenerateTab() {
+  const purpose = useWorkspace((s) => s.purpose);
+  const skillModeEnabled = useSkillMode((s) => s.enabled);
+  const showStoryboardRun = purpose === "videoStory" && skillModeEnabled;
+
+  // 左パネルは旧 380-520px → 320-360px に縮小（約 2/3）。
+  // スキルモード中だけ右側を実行進捗に差し替え、旧「実行」タブを生成タブへ内包する。
+  return (
+    <div className="grid h-full min-h-0 gap-4 xl:grid-cols-[minmax(300px,360px)_minmax(0,1fr)]">
+      <LeftPanel purpose={purpose} />
+      {showStoryboardRun ? <StoryboardRunPanel /> : <Timeline />}
+    </div>
+  );
+}
+
+function LeftPanel({ purpose }: { purpose: "artwork" | "ad" | "videoStory" }) {
+  const skillModeEnabled = useSkillMode((s) => s.enabled);
+  const title = purpose === "artwork" ? "シーン構築" : purpose === "ad" ? "広告構築" : "ストーリーカット構築";
+
+  return (
+    <section className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-[#2a2a2a] bg-[#181818]">
+      <div className="shrink-0 border-b border-[#242424] px-4 py-3">
+        <h3 className="text-sm font-black text-white">{title}</h3>
+      </div>
+
+      {purpose === "artwork" && (
+        <>
+          <div className="shrink-0 p-3">
+            <SceneBuilder />
+          </div>
+          <div className="flex min-h-0 flex-1 flex-col overflow-hidden border-t border-[#242424] bg-[#181818]">
+            <ConstructedPromptPanel />
+          </div>
+        </>
+      )}
+
+      {purpose === "ad" && (
+        <div className="min-h-0 flex-1 overflow-y-auto p-4">
+          <AdAgentPanel />
+        </div>
+      )}
+
+      {purpose === "videoStory" && (
+        <div className="flex min-h-0 flex-1 flex-col">
+          {skillModeEnabled && (
+            <div className="shrink-0 space-y-3 border-b border-[#242424] p-3">
+              <SkillSettingsPanel />
+            </div>
+          )}
+          {!skillModeEnabled && (
+            <div className="min-h-0 flex-1 overflow-y-auto p-3">
+              <VideoSceneBuilder />
+            </div>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function Timeline() {
+  const batches = useBatches((s) => s.batches);
+  const items = useImages((s) => s.items);
+  const timelineSize = useWorkspace((s) => s.timelineSize);
+
+  // ユーザー要望: チャット履歴で「開く」を押したら、そのセッションの
+  // 生成タイムラインだけを表示する。
+  // useSessions.isFrozen が立っているとき = displayedSession の中身を出す。
+  const isFrozen = useSessions((s) => s.isFrozen);
+  const displayedSession = useSessions((s) => s.displayedSession);
+  const switchToLive = useSessions((s) => s.switchToLive);
+
+  // ユーザー要望: activeProject 連動。
+  // プロジェクトが選ばれていれば、その箱に入っている画像だけを
+  // タイムラインに表示する。未選択なら従来通り全件。
+  const activeProjectId = useActiveProject((s) => s.activeProjectId);
+  const activeProject = useProjects((s) =>
+    activeProjectId ? s.projects.find((p) => p.id === activeProjectId) ?? null : null,
+  );
+  const projectImagePaths = useMemo(() => {
+    if (!activeProject) return null;
+    return new Set(activeProject.items.map((it) => it.imagePath));
+  }, [activeProject]);
+
+  // Sort batches newest-first.
+  const orderedBatchesRaw = [...batches].sort(
+    (a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0),
+  );
+
+  // プロジェクト指定時の batches フィルタ。
+  //
+  // ユーザー指摘 (継続): プロジェクトを選択すると、新規生成中バッチの
+  // 「生成中」ペンディングは出るのにグリッドが出てこない。
+  //
+  // 原因:
+  //   生成走り始めの workers は status='running' / 'pending' で path が無く、
+  //   activeProject に画像が紐付くのは workerCompleted の瞬間。
+  //   「全 worker が completed && in project」を要件にすると、走り始め直後は
+  //   まだ project に未登録 → バッチごと隠してしまっていた。
+  //
+  // 対応:
+  //   - **進行中バッチ (= 1 件でも完了していない worker がある) は常に表示**
+  //     完了画像は workerCompleted で activeProject に自動追加されるので、
+  //     完了した瞬間からそのバッチも「絞り込み対象として正しく」見える。
+  //   - 全 worker が完了済みのバッチだけ projectImagePaths でフィルタを適用
+  //     (= 過去のバッチ。プロジェクト外なら隠す)
+  //   - workers レベルのフィルタも、進行中バッチではしない
+  //     (生成中グリッドのプレースホルダが消えるのを防ぐ)
+  const orderedBatches = projectImagePaths
+    ? orderedBatchesRaw.filter((b) => {
+        const allDone = b.workers.every((w) => w.status !== "running" && w.status !== "pending");
+        if (!allDone) return true; // 進行中は常に表示
+        // 完了済バッチは「1 件でも project に入ってる」なら表示
+        return b.workers.some(
+          (w) =>
+            w.status === "completed" &&
+            w.path &&
+            projectImagePaths.has(w.path),
+        );
+      })
+    : orderedBatchesRaw;
+
+  // 「過去の生成」: 全セッション横断の turn 履歴（バッチ単位）を時系列降順で表示。
+  // ユーザー指摘:
+  //   - 制作タブに移動するとタイムラインがリセットされて見える
+  //   - 過去の生成は「ログごとに」リスト表示してほしい
+  // → useImages.items を一括グリッドにせず、turns_recent (PromptHistoryRow[]) で
+  //   バッチ単位に分けて表示する。各行クリックで turn_get → 中身画像を展開。
+  const [pastBatches, setPastBatches] = useState<PromptHistoryRow[]>([]);
+  const [pastLoading, setPastLoading] = useState(false);
+
+  // batches が変わる = 新規生成が走った可能性 → 履歴を再ロード。
+  // それ以外は items.length の変化（外部追加やライブラリスキャン）で再ロード。
+  const batchesSignal = batches.length;
+  const itemsSignal = items.length;
+  useEffect(() => {
+    let cancelled = false;
+    setPastLoading(true);
+    history
+      .recent(60)
+      .then((rows) => {
+        if (!cancelled) setPastBatches(rows);
+      })
+      .catch((err) => console.error("history.recent failed", err))
+      .finally(() => {
+        if (!cancelled) setPastLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [batchesSignal, itemsSignal]);
+
+  // 現在 batches に出ている turn id は除外（重複表示防止）。
+  // 現状 batches 側は dbTurnId を直接持たないので、最近 5 件分はラフに除外する。
+  const recentlyShownPrompts = new Set(
+    orderedBatches.map((b) => b.prompt ?? "").filter(Boolean),
+  );
+  const pastFiltered = pastBatches.filter(
+    (row) => !recentlyShownPrompts.has(row.prompt),
+  );
+
+  const showPastSection = pastFiltered.length > 0;
+  const isEmpty = orderedBatches.length === 0 && pastFiltered.length === 0 && !pastLoading;
+
+  // frozen mode: チャット履歴で「開く」を押した状態。
+  // displayedSession.turns をバッチブロック化して表示し、ライブ batches や
+  // 過去履歴は出さない（過去セッションを閲覧する文脈に集中）。
+  if (isFrozen && displayedSession) {
+    return (
+      <FrozenSessionTimeline
+        session={displayedSession}
+        size={timelineSize}
+        onLeave={switchToLive}
+      />
+    );
+  }
+
+  return (
+    <section className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-[#2a2a2a] bg-[#181818]">
+      <div className="flex items-center justify-between gap-3 border-b border-[#242424] px-4 py-3">
+        <div className="flex items-center gap-3">
+          <h3 className="text-sm font-black text-white">生成タイムライン</h3>
+          <span className="rounded border border-[#343434] bg-[#101010] px-2 py-1 text-[10px] font-bold text-neutral-500">
+            {activeProject ? activeProject.items.length : items.length}
+          </span>
+          {activeProject && (
+            <span
+              className="rounded-full bg-pink-500/15 px-2 py-0.5 text-[10px] font-bold text-pink-200 ring-1 ring-pink-500/30"
+              title="プロジェクト内のみ表示中"
+            >
+              ◱ {activeProject.name}
+            </span>
+          )}
+        </div>
+        <TimelineSizeToggle />
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-y-auto p-4">
+        {isEmpty ? (
+          <div className="rounded-lg border border-dashed border-[#343434] bg-[#101010] p-8 text-center text-xs font-medium text-neutral-500">
+            生成すると、ここに新しいバッチが上に追加されます
+          </div>
+        ) : (
+          <div className="space-y-6">
+            {orderedBatches.length > 0 && (
+              <div className="space-y-4">
+                {orderedBatches.map((batch) => (
+                  <BatchBlock
+                    key={batch.batchId}
+                    batchId={batch.batchId}
+                    workers={batch.workers}
+                    count={batch.count}
+                    startedAt={batch.startedAt}
+                    prompt={batch.prompt}
+                    size={timelineSize}
+                    provider={batch.provider}
+                    modelDisplayName={batch.modelDisplayName}
+                    compareMode={batch.compareMode}
+                    batchStatus={batch.status}
+                  />
+                ))}
+              </div>
+            )}
+            {pastLoading && pastFiltered.length === 0 && (
+              <p className="rounded-lg border border-dashed border-[#343434] bg-[#101010] p-4 text-center text-[11px] text-neutral-500">
+                過去の生成を読み込み中...
+              </p>
+            )}
+            {showPastSection && (
+              <PastBatchList
+                rows={pastFiltered}
+                size={timelineSize}
+                projectImagePaths={projectImagePaths}
+              />
+            )}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+/**
+ * チャット履歴で「開く」を押した時に表示する、frozen セッションのタイムライン。
+ *
+ * displayedSession.turns を時系列降順でバッチブロック化。各 turn の images は
+ * すでに SessionFull に含まれているので追加 fetch なし。
+ *
+ * 上部にバナー: 「📜 [セッション名] を表示中・ライブに戻る」
+ * ライブに戻るボタン → useSessions.switchToLive で通常タイムラインに復帰
+ */
+function FrozenSessionTimeline({
+  session,
+  size,
+  onLeave,
+}: {
+  session: SessionFull;
+  size: TimelineSize;
+  onLeave: () => void;
+}) {
+  const orderedTurns = useMemo(
+    () =>
+      [...session.turns].sort((a, b) => b.createdAt - a.createdAt),
+    [session.turns],
+  );
+  const totalImages = useMemo(
+    () => orderedTurns.reduce((acc, t) => acc + t.images.length, 0),
+    [orderedTurns],
+  );
+  return (
+    <section className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-pink-400/40 bg-[#181818]">
+      <div className="flex items-center justify-between gap-3 border-b border-pink-400/30 bg-pink-500/5 px-4 py-3">
+        <div className="flex min-w-0 items-center gap-3">
+          <span className="rounded-full bg-pink-500/20 px-2 py-0.5 text-[10px] font-bold text-pink-200 ring-1 ring-pink-400/40">
+            📜 セッション表示
+          </span>
+          <h3 className="truncate text-sm font-black text-white">
+            {session.session.title}
+          </h3>
+          <span className="shrink-0 rounded border border-[#343434] bg-[#101010] px-2 py-0.5 text-[10px] font-bold text-neutral-400">
+            {orderedTurns.length} ログ / {totalImages} 枚
+          </span>
+        </div>
+        <div className="flex items-center gap-2">
+          <TimelineSizeToggle />
+          <button
+            type="button"
+            onClick={onLeave}
+            className="h-7 rounded-md border border-[#343434] bg-[#0b0b0b] px-3 text-[11px] font-bold text-neutral-300 hover:border-pink-400 hover:text-white"
+            title="現在のライブセッションに戻る"
+          >
+            ライブに戻る
+          </button>
+        </div>
+      </div>
+      <div className="min-h-0 flex-1 overflow-y-auto p-4">
+        {orderedTurns.length === 0 ? (
+          <div className="rounded-lg border border-dashed border-[#343434] bg-[#101010] p-8 text-center text-xs text-neutral-500">
+            このセッションには生成記録がありません
+          </div>
+        ) : (
+          <div className="space-y-4">
+            {orderedTurns.map((turn) => (
+              <FrozenTurnBlock key={turn.id} turn={turn} size={size} />
+            ))}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function FrozenTurnBlock({
+  turn,
+  size,
+}: {
+  turn: TurnWithImages;
+  size: TimelineSize;
+}) {
+  return (
+    <div className="rounded-lg border border-[#2a2a2a] bg-[#101010]">
+      <div className="border-b border-[#242424] p-3">
+        <p className="line-clamp-2 text-[11px] text-neutral-300">
+          {turn.prompt || "(プロンプトなし)"}
+        </p>
+        <p className="mt-1 flex items-center gap-2 text-[10px] text-neutral-500">
+          <span>{formatDateTime(turn.createdAt)}</span>
+          <span className="rounded bg-[#1f1f1f] px-1.5 py-px text-[9px] font-bold text-neutral-300">
+            {turn.images.length} 枚
+          </span>
+          <ModelTagPill
+            provider={turn.provider}
+            modelDisplayName={turn.modelDisplayName}
+          />
+          {turn.model && (
+            <span className="text-[9px] text-neutral-600">{turn.model}</span>
+          )}
+        </p>
+      </div>
+      <div className="p-3">
+        {turn.images.length === 0 ? (
+          <p className="text-[11px] text-neutral-500">
+            この生成には画像が記録されていません（プロンプトのみ）。
+          </p>
+        ) : (
+          <div className={`grid gap-2 ${gridColsClass(size)}`}>
+            {turn.images.map((img) => (
+              <button
+                key={img.id}
+                type="button"
+                onClick={() => useImagePreview.getState().open(img.path)}
+                className="aspect-square overflow-hidden rounded border border-[#343434] bg-[#0f0f0f] hover:border-pink-400"
+              >
+                <img
+                  src={convertFileSrc(img.path)}
+                  alt=""
+                  className="h-full w-full object-cover"
+                  loading="lazy"
+                />
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * 過去の生成バッチをログ単位（PromptHistoryRow = turn）でリスト表示する。
+ * 各行はクリック展開で turn_get を呼び、中身画像を BatchBlock 風に表示する。
+ *
+ * BatchBlock との違い:
+ * - 進行中 / 失敗の status はない（過去ログなので全件成功扱い）
+ * - 画像は遅延ロード（行を開いたタイミングで turn_get を呼ぶ）
+ */
+function PastBatchList({
+  rows,
+  size,
+  projectImagePaths,
+}: {
+  rows: PromptHistoryRow[];
+  size: TimelineSize;
+  /** activeProject が選ばれていれば、その画像 path セット。null なら全件表示。 */
+  projectImagePaths: Set<string> | null;
+}) {
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between gap-2 px-1">
+        <span className="text-[11px] font-bold text-neutral-300">
+          過去の生成{projectImagePaths ? "（プロジェクト内のみ）" : `（${rows.length} 件）`}
+        </span>
+        <span className="text-[10px] text-neutral-500">クリックで展開</span>
+      </div>
+      <div className="space-y-2">
+        {rows.map((row) => (
+          <PastBatchRow
+            key={row.id}
+            row={row}
+            size={size}
+            projectImagePaths={projectImagePaths}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function PastBatchRow({
+  row,
+  size,
+  projectImagePaths,
+}: {
+  row: PromptHistoryRow;
+  size: TimelineSize;
+  projectImagePaths: Set<string> | null;
+}) {
+  const [detail, setDetail] = useState<TurnWithImages | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  // ユーザー指摘: 「折りたたみ式だとサイズスライダーが効いている実感がない」
+  // → 各バッチを最初から展開し、画像グリッドが常に見える状態にする。
+  // turn_get は行ごとに 1 回だけ叩く。
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    sessionsApi
+      .getTurn(row.id)
+      .then((t: TurnWithImages) => {
+        if (!cancelled) setDetail(t);
+      })
+      .catch((err: unknown) => console.error("turn fetch failed", err))
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [row.id]);
+
+  // プロジェクト指定時は images をフィルタ。ヒット 0 件なら行ごと隠す。
+  const visibleImages = detail
+    ? projectImagePaths
+      ? detail.images.filter((img) => projectImagePaths.has(img.path))
+      : detail.images
+    : [];
+  // ロード完了済 + プロジェクト絞り込み時 + 該当画像 0 → このバッチは
+  // プロジェクト外なので行ごと描画しない (空のカードを増やさない)。
+  if (!loading && projectImagePaths && visibleImages.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className="rounded-lg border border-[#2a2a2a] bg-[#101010]">
+      <div className="flex items-center gap-3 border-b border-[#242424] p-3">
+        <div className="min-w-0 flex-1">
+          <p className="line-clamp-2 text-[11px] text-neutral-300">
+            {row.prompt || "(プロンプトなし)"}
+          </p>
+          <p className="mt-1 flex items-center gap-2 text-[10px] text-neutral-500">
+            <span>{formatDateTime(row.createdAt)}</span>
+            <span className="rounded bg-[#1f1f1f] px-1.5 py-px text-[9px] font-bold text-neutral-300">
+              {projectImagePaths
+                ? `${visibleImages.length} 枚 (元 ${row.count})`
+                : `${row.count} 枚`}
+            </span>
+            <span className="text-[9px] text-neutral-600">{row.kind}</span>
+            <ModelTagPill
+              provider={row.provider ?? detail?.provider}
+              modelDisplayName={row.modelDisplayName ?? detail?.modelDisplayName}
+            />
+          </p>
+        </div>
+      </div>
+      <div className="p-3">
+        {loading && (
+          <p className="text-[11px] text-neutral-500">画像を読み込み中...</p>
+        )}
+        {!loading && visibleImages.length > 0 && (
+          <div className={`grid gap-2 ${gridColsClass(size)}`}>
+            {visibleImages.map((img) => (
+              <button
+                key={img.id}
+                type="button"
+                onClick={() => useImagePreview.getState().open(img.path)}
+                className="aspect-square overflow-hidden rounded border border-[#343434] bg-[#0f0f0f] hover:border-pink-400"
+              >
+                <img
+                  src={convertFileSrc(img.path)}
+                  alt=""
+                  className="h-full w-full object-cover"
+                  loading="lazy"
+                />
+              </button>
+            ))}
+          </div>
+        )}
+        {!loading && detail && visibleImages.length === 0 && !projectImagePaths && (
+          <p className="text-[11px] text-neutral-500">
+            この生成には画像が記録されていません（プロンプトのみ記録）。
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function formatDateTime(ms: number): string {
+  const d = new Date(ms);
+  const now = new Date();
+  const sameDay =
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate();
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  if (sameDay) return `今日 ${hh}:${mm}`;
+  const M = d.getMonth() + 1;
+  const D = d.getDate();
+  return `${M}/${D} ${hh}:${mm}`;
+}
+
+/**
+ * サムネ密度のスライダー。値はそのままグリッド列数（少ない = サムネ大）。
+ * range input で連続調整できる。Tailwind grid-cols-N は静的解析のため
+ * gridColsClass で数値→クラス文字列にマップする。
+ */
+function TimelineSizeToggle() {
+  const timelineSize = useWorkspace((s) => s.timelineSize);
+  const setTimelineSize = useWorkspace((s) => s.setTimelineSize);
+  return (
+    <label
+      className="inline-flex items-center gap-2 rounded-md border border-[#343434] bg-[#101010] px-2 py-1"
+      title="サムネを大きく ⇔ 小さく"
+    >
+      <span className="text-[10px] font-bold text-neutral-500">大</span>
+      <input
+        type="range"
+        min={TIMELINE_SIZE_MIN}
+        max={TIMELINE_SIZE_MAX}
+        step={1}
+        value={timelineSize}
+        onChange={(event) => setTimelineSize(Number(event.target.value))}
+        className="h-1 w-24 cursor-pointer accent-pink-500"
+        aria-label="タイムラインのサムネサイズ"
+      />
+      <span className="text-[10px] font-bold text-neutral-500">小</span>
+      <span className="ml-1 w-5 text-center text-[10px] font-black tabular-nums text-neutral-300">
+        {timelineSize}
+      </span>
+    </label>
+  );
+}
+
+/**
+ * 数値サイズからグリッドの Tailwind クラスへ。
+ * Tailwind は文字列を静的に解析するため、grid-cols-N は事前に書き出しておく。
+ *
+ * - 小さい size = 列数少 = サムネ大（widest）
+ * - 大きい size = 列数多 = サムネ小（denser）
+ *
+ * sm/lg ブレークポイントは size を基準に +1〜+2 列、画面が広いほど詰める。
+ */
+const COL_BASE: Record<number, string> = {
+  2: "grid-cols-1 sm:grid-cols-2",
+  3: "grid-cols-2 sm:grid-cols-3",
+  4: "grid-cols-2 sm:grid-cols-3 lg:grid-cols-4",
+  5: "grid-cols-3 sm:grid-cols-4 lg:grid-cols-5",
+  6: "grid-cols-3 sm:grid-cols-5 lg:grid-cols-6",
+  7: "grid-cols-4 sm:grid-cols-6 lg:grid-cols-7",
+  8: "grid-cols-4 sm:grid-cols-6 lg:grid-cols-8",
+};
+
+function gridColsClass(size: TimelineSize): string {
+  return COL_BASE[size] ?? COL_BASE[4];
+}
+
+function BatchBlock({
+  batchId,
+  workers,
+  count,
+  startedAt,
+  prompt,
+  size,
+  provider,
+  modelDisplayName,
+  compareMode,
+  batchStatus,
+}: {
+  batchId: string;
+  workers: BatchWorker[];
+  count: number;
+  startedAt?: number;
+  prompt?: string;
+  size: TimelineSize;
+  provider?: string;
+  modelDisplayName?: string;
+  compareMode?: boolean;
+  batchStatus: "running" | "completed" | "cancelling" | "cancelled";
+}) {
+  const completed = workers.filter((w) => w.status === "completed").length;
+  const failed = workers.filter((w) => w.status === "failed").length;
+  const total = count;
+
+  let status: string;
+  if (batchStatus === "cancelled") status = "中止 (credits 消費済)";
+  else if (batchStatus === "cancelling") status = "中止中...";
+  else if (completed === total) status = `完了 ${completed}枚`;
+  else if (failed > 0 && completed + failed === total)
+    status = `${completed}枚成功 / ${failed}件失敗`;
+  else status = `生成中 ${completed}/${total}`;
+
+  return (
+    <div className="rounded-lg border border-[#303030] bg-[#101010] p-3">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="text-[11px] font-bold text-neutral-300">{status}</span>
+          <ModelTagPill
+            provider={provider}
+            modelDisplayName={modelDisplayName}
+            compareMode={compareMode}
+            count={count}
+          />
+        </div>
+        <div className="ml-auto flex shrink-0 items-center gap-2">
+          {batchStatus === "running" && provider === "higgsfield" && (
+            <button
+              type="button"
+              onClick={() => {
+                void useBatches.getState().cancelBatch(batchId).catch(console.error);
+              }}
+              className="inline-flex items-center gap-1 rounded-md border border-red-400/40 bg-red-500/10 px-1.5 py-0.5 text-[10px] font-bold text-red-300 hover:bg-red-500/20"
+              title="ローカル待機を中止します。サーバー側ジョブは完遂、credits は消費されます。"
+            >
+              中止 (credits 消費)
+            </button>
+          )}
+          {batchStatus === "cancelling" && (
+            <span className="text-[10px] font-bold text-red-400">中止中...</span>
+          )}
+          {batchStatus === "cancelled" && (
+            <span className="text-[10px] font-bold text-red-400">
+              中止 (credits 消費済)
+            </span>
+          )}
+          {startedAt && (
+            <span className="text-[10px] font-medium text-neutral-500">
+              {formatTime(startedAt)}
+            </span>
+          )}
+        </div>
+      </div>
+      {prompt && (
+        <p className="mb-2 line-clamp-2 text-[10px] text-neutral-500">
+          {prompt}
+        </p>
+      )}
+      <div className={`grid gap-2 ${gridColsClass(size)}`}>
+        {workers.map((worker) => (
+          <WorkerTile key={`${batchId}-${worker.idx}`} worker={worker} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ModelTagPill({
+  provider,
+  modelDisplayName,
+  compareMode,
+  count,
+}: {
+  provider?: string | null;
+  modelDisplayName?: string | null;
+  compareMode?: boolean;
+  count?: number;
+}) {
+  if (!provider) return null;
+  const providerLabel = provider === "higgsfield" ? "Higgsfield" : "Codex";
+  const label =
+    compareMode && provider === "higgsfield"
+      ? `${providerLabel} · ${count ?? 0} models compared`
+      : modelDisplayName
+        ? `${providerLabel} · ${modelDisplayName}`
+        : null;
+  if (!label) return null;
+  return (
+    <span className="inline-flex h-4 shrink-0 items-center rounded bg-pink-500/20 px-1.5 text-[9px] font-bold text-pink-200">
+      {label}
+    </span>
+  );
+}
+
+function WorkerTile({ worker }: { worker: BatchWorker }) {
+  const caption = worker.modelDisplayName;
+  if (worker.status === "completed") {
+    return (
+      <div className="min-w-0">
+        <button
+          type="button"
+          onClick={() => useImagePreview.getState().open(worker.path)}
+          className="aspect-square w-full overflow-hidden rounded border border-[#343434] bg-[#0f0f0f] hover:border-pink-400"
+        >
+          <img
+            src={convertFileSrc(worker.path)}
+            alt=""
+            className="h-full w-full object-cover"
+          />
+        </button>
+        {caption && (
+          <p className="mt-1 truncate text-[10px] font-medium text-neutral-400">
+            {caption}
+          </p>
+        )}
+      </div>
+    );
+  }
+  return (
+    <div className="min-w-0">
+      <div
+        className={[
+          "flex aspect-square items-center justify-center rounded border text-[10px] font-bold",
+          worker.status === "failed"
+            ? "border-red-500/50 bg-red-950/30 text-red-400"
+            : "border-[#343434] bg-[#181818] text-neutral-400",
+        ].join(" ")}
+      >
+        {worker.status === "failed" ? "失敗" : "生成中"}
+      </div>
+      {caption && (
+        <p className="mt-1 truncate text-[10px] font-bold text-pink-300">
+          {caption}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function formatTime(ms: number): string {
+  const date = new Date(ms);
+  const hh = String(date.getHours()).padStart(2, "0");
+  const mm = String(date.getMinutes()).padStart(2, "0");
+  return `${hh}:${mm}`;
+}
+
+// Suppress unused warnings while keeping the import for legacy gallery item type.
+export type { GalleryItem };
+
+function StoryboardRunPanel() {
+  const run = useStoryboardRun();
+  const usedPercent = useAuth((s) => s.rateLimits?.primary?.usedPercent ?? 0);
+  const pushToast = useToasts((s) => s.push);
+  const [debugOpen, setDebugOpen] = useState(false);
+  const [debugLogContent, setDebugLogContent] = useState<string | null>(null);
+  const [debugLoading, setDebugLoading] = useState(false);
+  const completedToastShown = useRef(false);
+
+  // 完了済み run の debug-log.json を読み込む。構造化プロンプト履歴をUIで確認するため。
+  const loadDebugLog = async () => {
+    if (!run.activeRunId) return;
+    setDebugLoading(true);
+    try {
+      const content = await storyboard.readDebugLog(run.activeRunId);
+      setDebugLogContent(content);
+    } catch (err) {
+      setDebugLogContent(
+        `デバッグログ読み込み失敗: ${String(err)}\n\n` +
+          `(まだ run が完了していない場合は、完了後に再度試してください。\n` +
+          ` 完了済みの run でも、~/.codex/generated_images/gori-storyboard-{runId}/debug-log.json が存在しない場合は表示できません。)`,
+      );
+    } finally {
+      setDebugLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (run.status !== "completed" || completedToastShown.current) return;
+    completedToastShown.current = true;
+    pushToast({ kind: "success", text: "連続カット生成が完了しました。採用カットをプロジェクトへ追加しました。", ttlMs: 4200 });
+  }, [run.status, pushToast]);
+
+  const cuts = useMemo(() => {
+    const items = Array.from(run.cuts.values());
+    if (run.params?.sceneConstruction) {
+      return run.params.sceneConstruction.cuts.map((sceneCut) => {
+        const existing = run.cuts.get(sceneCut.cut_id);
+        return existing
+          ? { ...existing, description: sceneCut.description }
+          : {
+              cutId: sceneCut.cut_id,
+              description: sceneCut.description,
+              status: "pending" as const,
+              takes: [],
+              selectedTakeId: null,
+            };
+      });
+    }
+    return items;
+  }, [run.cuts, run.params]);
+
+  const totalCuts = run.totalCuts || run.params?.sceneConstruction?.total_cuts || cuts.length;
+  const done = cuts.filter((cut) => cut.status === "confirmed").length;
+  const progress = totalCuts > 0 ? Math.round((done / totalCuts) * 100) : 0;
+  const checkpointCuts = cuts.slice(0, 3);
+
+  return (
+    <section className="relative flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-[#2a2a2a] bg-[#181818]">
+      {run.checkpointCutId && (
+        <StoryboardCheckpointDialog
+          cuts={checkpointCuts}
+          onContinue={run.dismissCheckpoint}
+          onReset={() => {
+            run.reset();
+            pushToast({ kind: "info", text: "方向性チェックをリセットしました。", ttlMs: 2400 });
+          }}
+          onRegenerateCut={() => {
+            run.dismissCheckpoint();
+            pushToast({ kind: "info", text: "Cut3再生成は次フェーズで手動再実行に接続します。", ttlMs: 3200 });
+          }}
+        />
+      )}
+
+      <div className="border-b border-[#242424] bg-[#161616] px-4 py-3">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-black text-white">🎬 連続カット生成 - {statusLabel(run.status)}</h3>
+            <p className="mt-0.5 text-[11px] text-neutral-500">run: {run.activeRunId ?? "未開始"}</p>
+          </div>
+          <div className="flex items-center gap-2 text-[11px] font-bold">
+            <span className="rounded border border-[#343434] bg-[#101010] px-2 py-1 text-neutral-300">レート使用率: {Math.round(usedPercent)}%</span>
+            {run.manifestPath && <span className="rounded bg-emerald-500/15 px-2 py-1 text-emerald-200">manifest 保存済み</span>}
+          </div>
+        </div>
+      </div>
+
+      <div className="border-b border-[#242424] px-4 py-3">
+        <div className="flex items-center gap-3">
+          <span className="text-xs font-black text-white">進捗: {done}/{totalCuts} カット</span>
+          <div className="h-2 min-w-0 flex-1 overflow-hidden rounded-full bg-[#2a2a2a]">
+            <div className="h-full bg-pink-500" style={{ width: `${progress}%` }} />
+          </div>
+          <span className="w-10 text-right text-xs font-black tabular-nums text-neutral-300">{progress}%</span>
+        </div>
+        {run.lastError && <p className="mt-2 text-[11px] font-bold text-red-200">{run.lastError}</p>}
+      </div>
+
+      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
+        {run.status === "completed" && <SkillRunActions cuts={cuts} />}
+        {cuts.length === 0 ? (
+          <div className="rounded-lg border border-dashed border-[#343434] bg-[#101010] p-8 text-center text-xs text-neutral-500">
+            実行すると、ここにカット進捗が表示されます。
+          </div>
+        ) : (
+          <div className="grid gap-3 xl:grid-cols-2">
+            {cuts.map((cut) => <StoryboardCutCard key={cut.cutId} cut={cut} />)}
+          </div>
+        )}
+      </div>
+
+      <div className="flex items-center justify-between gap-2 border-t border-[#242424] bg-[#161616] px-4 py-3">
+        <div className="flex gap-2">
+          <button type="button" onClick={() => run.setStatus("paused")} className="rounded border border-[#343434] px-3 py-1.5 text-xs font-bold text-neutral-300 hover:text-white">一時停止</button>
+          <button type="button" onClick={run.reset} className="rounded border border-red-400/40 px-3 py-1.5 text-xs font-bold text-red-200 hover:bg-red-500/10">中断</button>
+        </div>
+        <button type="button" onClick={() => setDebugOpen(!debugOpen)} className="rounded border border-[#343434] px-3 py-1.5 text-xs font-bold text-neutral-300 hover:text-white">デバッグログ表示</button>
+      </div>
+
+      {debugOpen && (
+        <div className="max-h-96 overflow-auto border-t border-[#242424] bg-[#0b0b0b] p-3">
+          <div className="mb-2 flex items-center gap-2">
+            <button
+              type="button"
+              onClick={loadDebugLog}
+              disabled={!run.activeRunId || debugLoading}
+              className="rounded border border-[#343434] px-3 py-1 text-[11px] font-bold text-neutral-200 hover:border-pink-400 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+              title="完了済み run の構造化プロンプト履歴を読み込む"
+            >
+              {debugLoading ? "読み込み中..." : "📋 構造化プロンプト履歴を読み込む"}
+            </button>
+            <span className="text-[10px] text-neutral-500">
+              {run.activeRunId ? `run: ${run.activeRunId}` : "run なし"}
+            </span>
+          </div>
+          {debugLogContent ? (
+            <details open className="mb-2 rounded border border-[#242424] bg-[#0f0f0f] p-2">
+              <summary className="cursor-pointer text-[11px] font-bold text-pink-300">
+                構造化プロンプト履歴 (debug-log.json)
+              </summary>
+              <pre className="mt-2 whitespace-pre-wrap break-words text-[11px] leading-relaxed text-neutral-200">
+                {debugLogContent}
+              </pre>
+            </details>
+          ) : null}
+          <details open className="rounded border border-[#242424] bg-[#0f0f0f] p-2">
+            <summary className="cursor-pointer text-[11px] font-bold text-neutral-400">
+              入力パラメータ + イベント履歴
+            </summary>
+            <pre className="mt-2 whitespace-pre-wrap break-words text-[11px] leading-relaxed text-neutral-300">
+              {JSON.stringify({ params: run.params, events: run.debugLog }, null, 2)}
+            </pre>
+          </details>
+          {/*
+            STΛCK 指示 (2026-05-15): UI 操作ログ(採用/再生成/スキップ等)も
+            デバッグログに表示する。失敗カットとエラーを別枠で強調。
+          */}
+          <details open className="mt-2 rounded border border-[#242424] bg-[#0f0f0f] p-2">
+            <summary className="cursor-pointer text-[11px] font-bold text-amber-300">
+              UI 操作ログ (採用/再生成/スキップ/復旧)
+            </summary>
+            <pre className="mt-2 whitespace-pre-wrap break-words text-[11px] leading-relaxed text-neutral-300">
+              {run.uiDebugLog.length === 0
+                ? "(まだ UI 操作なし)"
+                : run.uiDebugLog
+                    .map(
+                      (l) =>
+                        `[${new Date(l.ts).toLocaleTimeString()}] ${l.level.toUpperCase()}: ${l.message}`,
+                    )
+                    .join("\n")}
+            </pre>
+          </details>
+          {(() => {
+            const failedCuts = Array.from(run.cuts.values()).filter(
+              (c) => c.status === "failed",
+            );
+            if (failedCuts.length === 0) return null;
+            return (
+              <details open className="mt-2 rounded border border-red-500/40 bg-red-500/5 p-2">
+                <summary className="cursor-pointer text-[11px] font-bold text-red-200">
+                  失敗カット ({failedCuts.length}件)
+                </summary>
+                <ul className="mt-2 space-y-1 text-[11px] text-red-100">
+                  {failedCuts.map((c) => (
+                    <li key={c.cutId}>
+                      <span className="font-mono">{c.cutId}</span>: {c.error ?? "原因不明"}
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            );
+          })()}
+          {run.pastRuns.length > 0 && (
+            <details className="mt-2 rounded border border-[#242424] bg-[#0f0f0f] p-2">
+              <summary className="cursor-pointer text-[11px] font-bold text-sky-300">
+                過去 run ({run.pastRuns.length}件)
+              </summary>
+              <ul className="mt-2 space-y-1 text-[11px] text-neutral-300">
+                {run.pastRuns.map((p) => (
+                  <li key={p.runId} className="rounded bg-[#0b0b0b] p-1.5">
+                    <p className="font-mono text-[10px] text-neutral-500">
+                      {p.runId}
+                    </p>
+                    <p>
+                      {p.confirmedCuts} / {p.totalCuts} カット採用 · {p.status}
+                    </p>
+                    <p className="mt-0.5 text-[10px] text-neutral-400">
+                      {p.storyDigest}
+                    </p>
+                  </li>
+                ))}
+              </ul>
+            </details>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function statusLabel(status: ReturnType<typeof useStoryboardRun.getState>["status"]): string {
+  if (status === "running") return "実行中";
+  if (status === "paused") return "一時停止";
+  if (status === "completed") return "完了";
+  if (status === "failed") return "失敗";
+  return "待機中";
+}
+
+function SkillSettingsPanel() {
+  const selectedSkillId = useSkillMode((s) => s.selectedSkillId);
+  const candidatesPerCut = useSkillMode((s) => s.candidatesPerCut);
+  const setCandidatesPerCut = useSkillMode((s) => s.setCandidatesPerCut);
+  const setSelectedSkillId = useSkillMode((s) => s.setSelectedSkillId);
+  const storyboardParams = usePlanChat((s) => s.storyboardParams);
+  const sceneConstruction = usePlanChat((s) => s.sceneConstruction);
+  const scenePromptOverride = useScenePromptOverride((s) => s.value);
+  const messages = usePlanChat((s) => s.messages);
+  const beginRun = useStoryboardRun((s) => s.beginRun);
+  const usedPercent = useAuth((s) => s.rateLimits?.primary?.usedPercent ?? 0);
+  const pushToast = useToasts((s) => s.push);
+  const [starting, setStarting] = useState(false);
+
+  useEffect(() => {
+    if (usedPercent > 90 && candidatesPerCut !== 1) {
+      setCandidatesPerCut(1);
+      pushToast({ kind: "info", text: "レート使用率が90%を超えたため、直列1案に切り替えました。", ttlMs: 3600 });
+    } else if (usedPercent > 80) {
+      pushToast({ kind: "info", text: "レート使用率が高めです。", ttlMs: 2800 });
+    }
+  }, [usedPercent, candidatesPerCut, setCandidatesPerCut, pushToast]);
+
+  useEffect(() => {
+    if (!selectedSkillId) setSelectedSkillId("gori-storyboard");
+  }, [selectedSkillId, setSelectedSkillId]);
+
+  const latestAssistant = [...messages].reverse().find((msg) => msg.role === "assistant")?.text;
+  const storyPrompt = (scenePromptOverride || latestAssistant || "ストーリーカット").replace(/\n?\[STORYBOARD_PARAMS\][\s\S]*$/g, "").trim();
+  const canRun = selectedSkillId === "gori-storyboard" && Boolean(storyboardParams?.character_reference_path && sceneConstruction);
+
+  const runSkill = async () => {
+    if (!storyboardParams || !sceneConstruction) {
+      pushToast({ kind: "error", text: "企画タブで動画パラメータとシーン構成を確定してください。", ttlMs: 3600 });
+      return;
+    }
+    setStarting(true);
+    try {
+      const params = {
+        storyPrompt,
+        characterReferenceImage: storyboardParams.character_reference_path,
+        styleReferenceImage: storyboardParams.style_reference_path,
+        aspectRatio: storyboardParams.aspect_ratio,
+        durationSeconds: storyboardParams.duration_seconds,
+        tempo: storyboardParams.tempo,
+        candidatesPerCut,
+        cwd: undefined,
+        sceneConstruction,
+      };
+      const runId = await storyboard.run(params);
+      beginRun(runId, params);
+      pushToast({ kind: "success", text: "gori-storyboard を起動しました。", ttlMs: 2400 });
+    } catch (error) {
+      pushToast({ kind: "error", text: `スキル起動に失敗しました: ${String(error)}`, ttlMs: 6000 });
+    } finally {
+      setStarting(false);
+    }
+  };
+
+  const [detailOpen, setDetailOpen] = useState(false);
+  return (
+    <div className="space-y-3 rounded-lg border border-[#343434] bg-[#101010] p-3 text-xs">
+      {selectedSkillId === "gori-storyboard" && (
+        <>
+          {/*
+            「現在の構成」サマリー = コンパクト固定表示。
+            詳細(全カット一覧)はモーダルで開く。
+            STΛCK 指示 (2026-05-15): 縦伸ばし廃止、レイアウト元に戻す。
+          */}
+          <div className="rounded border border-[#2a2a2a] bg-[#0b0b0b] p-2 text-[11px] text-neutral-300">
+            <div className="flex items-center justify-between gap-2">
+              <p className="font-black text-white">現在の構成</p>
+              <button
+                type="button"
+                onClick={() => setDetailOpen(true)}
+                disabled={!storyboardParams && !sceneConstruction}
+                className="rounded border border-[#343434] bg-[#0b0b0b] px-2 py-0.5 text-[10px] font-bold text-neutral-300 hover:border-pink-400 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                詳細を見る
+              </button>
+            </div>
+            <p className="mt-1">
+              尺 {storyboardParams?.duration_seconds ?? "—"}秒 /
+              {" "}アスペクト {storyboardParams?.aspect_ratio ?? "—"} /
+              {" "}カット {sceneConstruction?.total_cuts ?? "—"}
+            </p>
+            <p className="mt-1">レート使用率: {Math.round(usedPercent)}%</p>
+            {usedPercent > 90 && (
+              <p className="mt-1 font-bold text-yellow-200">
+                90%超過のため直列1案のみ実行します。
+              </p>
+            )}
+          </div>
+
+          <div className="space-y-1.5">
+            <p className="font-bold text-neutral-300">候補数モード</p>
+            <label className="flex items-center gap-2 rounded border border-[#2a2a2a] px-2 py-1.5">
+              <input
+                type="radio"
+                checked={candidatesPerCut === 3}
+                disabled={usedPercent > 90}
+                onChange={() => setCandidatesPerCut(3)}
+              />
+              <span>並列3案（高品質、レート消費大）</span>
+            </label>
+            <label className="flex items-center gap-2 rounded border border-[#2a2a2a] px-2 py-1.5">
+              <input
+                type="radio"
+                checked={candidatesPerCut === 1}
+                onChange={() => setCandidatesPerCut(1)}
+              />
+              <span>直列1案（標準、レート消費小、再生成2回まで）</span>
+            </label>
+          </div>
+
+          <ReferenceSummary
+            label="キャラ参照画像"
+            path={storyboardParams?.character_reference_path}
+          />
+          <ReferenceSummary
+            label="スタイル参照画像"
+            path={storyboardParams?.style_reference_path}
+          />
+
+          <button
+            type="button"
+            onClick={runSkill}
+            disabled={!canRun || starting}
+            className="w-full rounded-lg bg-pink-500 px-3 py-2 text-sm font-black text-white hover:bg-pink-400 disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-500"
+          >
+            {starting ? "起動中..." : "▶ 実行"}
+          </button>
+
+          {detailOpen && (
+            <StoryboardDetailModal
+              params={storyboardParams}
+              construction={sceneConstruction}
+              onClose={() => setDetailOpen(false)}
+            />
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+/**
+ * 「詳細を見る」モーダル。カット数が多くてもスクロールで全件確認可能。
+ */
+function StoryboardDetailModal({
+  params,
+  construction,
+  onClose,
+}: {
+  params: ReturnType<typeof usePlanChat.getState>["storyboardParams"];
+  construction: ReturnType<typeof usePlanChat.getState>["sceneConstruction"];
+  onClose: () => void;
+}) {
+  return (
+    <div
+      className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
+      onClick={onClose}
+    >
+      <div
+        className="flex max-h-[85vh] w-full max-w-2xl flex-col rounded-2xl border border-[#343434] bg-[#1a1a1a] shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <header className="flex items-center justify-between border-b border-[#2a2a2a] px-5 py-4">
+          <div>
+            <h2 className="text-base font-black text-white">現在の構成</h2>
+            <p className="mt-0.5 text-[11px] text-neutral-500">
+              尺 {params?.duration_seconds ?? "—"}秒 /
+              {" "}アスペクト {params?.aspect_ratio ?? "—"} /
+              {" "}テンポ {params?.tempo ?? "—"} /
+              {" "}カット {construction?.total_cuts ?? "—"}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-md border border-[#343434] bg-[#101010] px-2.5 py-1 text-xs font-bold text-neutral-400 hover:border-pink-400 hover:text-white"
+          >
+            閉じる
+          </button>
+        </header>
+        <div className="overflow-y-auto px-5 py-4">
+          <StoryboardConfigDetail params={params} construction={construction} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * 「現在の構成」エリアに表示する詳細。
+ * storyboardParams と sceneConstruction の中身を読みやすく整形して全カット見せる。
+ */
+function StoryboardConfigDetail({
+  params,
+  construction,
+}: {
+  params: ReturnType<typeof usePlanChat.getState>["storyboardParams"];
+  construction: ReturnType<typeof usePlanChat.getState>["sceneConstruction"];
+}) {
+  if (!params && !construction) {
+    return (
+      <p className="text-neutral-500">
+        企画タブでストーリーを確定すると、決まった内容がここに表示されます。
+      </p>
+    );
+  }
+  return (
+    <div className="space-y-3">
+      {(params as Record<string, unknown> | null)?.story_prompt ? (
+        <section>
+          <p className="text-[10px] font-black uppercase tracking-wider text-pink-300">
+            ストーリー
+          </p>
+          <p className="mt-1 whitespace-pre-wrap leading-relaxed text-neutral-200">
+            {String((params as Record<string, unknown>).story_prompt)}
+          </p>
+        </section>
+      ) : null}
+      {params && (params as Record<string, unknown>).intent ? (
+        <section>
+          <p className="text-[10px] font-black uppercase tracking-wider text-pink-300">
+            ねらい (伝えたいこと)
+          </p>
+          <p className="mt-1 leading-relaxed text-neutral-200">
+            {String((params as Record<string, unknown>).intent)}
+          </p>
+        </section>
+      ) : null}
+      {construction?.cuts && construction.cuts.length > 0 && (
+        <section>
+          <p className="text-[10px] font-black uppercase tracking-wider text-pink-300">
+            カット構成 ({construction.cuts.length} カット)
+          </p>
+          <ol className="mt-1 space-y-1.5">
+            {construction.cuts.map((cut, idx) => (
+              <li
+                key={cut.cut_id || idx}
+                className="rounded border border-[#2a2a2a] bg-[#101010] px-2 py-1.5"
+              >
+                <p className="text-[10px] font-bold text-neutral-400">
+                  #{idx + 1} · {cut.duration_seconds ?? "?"}秒
+                </p>
+                <p className="mt-0.5 leading-relaxed text-neutral-200">
+                  {cut.description ?? "—"}
+                </p>
+              </li>
+            ))}
+          </ol>
+        </section>
+      )}
+    </div>
+  );
+}
+
+function ReferenceSummary({ label, path }: { label: string; path?: string }) {
+  return (
+    <div className="rounded border border-[#2a2a2a] bg-[#0b0b0b] p-2 text-[11px]">
+      <p className="font-bold text-neutral-300">{label}</p>
+      <p className="mt-1 truncate font-mono text-neutral-500">{path || "未設定"}</p>
+    </div>
+  );
+}
