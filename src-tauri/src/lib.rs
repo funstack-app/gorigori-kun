@@ -62,7 +62,9 @@ pub fn log_dir() -> Option<std::path::PathBuf> {
 
 #[doc(hidden)]
 pub mod __test_support {
-    pub use crate::codex::process::{resolve_codex_binary, spawn_app_server, AppServerProcess};
+    pub use crate::codex::process::{
+        resolve_codex_binary, spawn_app_server, AppServerProcess, StderrBuffer,
+    };
     pub use crate::codex::rpc::{handshake, RpcClient, RpcHandle};
 }
 

@@ -196,12 +196,31 @@ pub struct AppServerProcess {
 }
 
 pub async fn spawn_app_server(bin: &Path) -> Result<AppServerProcess> {
-    // codex バイナリ (codex / codex.exe / codex-app-server.exe いずれも) は
-    // `app-server` サブコマンドを取って JSON-RPC stdio モードで起動する。
-    // 引数なしだと対話 CLI モードに入って "stdin is not a terminal" で失敗する。
+    // バイナリ名で起動引数を切り替え (友達のWindows実機エラーログから確定):
+    //
+    //   codex / codex.exe           : `codex app-server` サブコマンド経由
+    //     (Mac/Linux でも Windows のランチャーでも、CLI として複数機能を持つ)
+    //
+    //   codex-app-server / codex-app-server.exe : 引数なしで直接起動
+    //     (Windows 配布で同梱される 188MB のバイナリ。Usage は [OPTIONS] のみ)
+    //     `app-server` サブコマンドを渡すと
+    //     "error: unexpected argument 'app-server' found" で落ちる
+    let bin_name = bin
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    // ファイル名が "codex-app-server" で始まれば single-binary 配布物と判定。
+    // 例: codex-app-server / codex-app-server.exe /
+    //     codex-app-server-aarch64-apple-darwin / codex-app-server-x86_64-pc-windows-msvc.exe
+    let is_native_app_server = bin_name.starts_with("codex-app-server");
+
     let mut cmd = Command::new(bin);
-    cmd.arg("app-server")
-        .stdin(Stdio::piped())
+    if !is_native_app_server {
+        // codex / codex.exe は app-server サブコマンドが必要
+        cmd.arg("app-server");
+    }
+    cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env("PATH", enriched_path());
