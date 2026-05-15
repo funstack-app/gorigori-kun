@@ -2,9 +2,31 @@ use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Context, Result};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+
+/// Codex app-server の stderr を、起動失敗時にユーザーに見せるためバッファする。
+/// メモリ暴走を防ぐため最新 200 行までに制限。
+#[derive(Clone, Default)]
+pub struct StderrBuffer {
+    inner: Arc<Mutex<Vec<String>>>,
+}
+
+impl StderrBuffer {
+    pub fn push(&self, line: String) {
+        if let Ok(mut buf) = self.inner.lock() {
+            if buf.len() >= 200 {
+                buf.remove(0);
+            }
+            buf.push(line);
+        }
+    }
+    pub fn snapshot(&self) -> Vec<String> {
+        self.inner.lock().ok().map(|b| b.clone()).unwrap_or_default()
+    }
+}
 
 const FALLBACK_PATHS: &[&str] = &[
     "/opt/homebrew/bin/codex",
@@ -139,8 +161,36 @@ pub fn resolve_codex_binary(override_path: Option<&Path>) -> Result<PathBuf> {
         }
     }
 
+    // 全部見つからなかった: ユーザーが見て切り分けできるよう、どこを探したかを全て載せる
+    let mut searched: Vec<String> = Vec::new();
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            searched.push(format!("アプリと同階層: {}", exe_dir.display()));
+            searched.push(format!(
+                "アプリ同階層の resources: {}",
+                exe_dir.join("resources").display()
+            ));
+            searched.push(format!(
+                "アプリ同階層の ../Resources: {}",
+                exe_dir.join("../Resources").display()
+            ));
+        }
+    }
+    searched.push(format!("PATH 環境変数: {:?}", enriched_path()));
+    if let Some(home) = dirs::home_dir() {
+        searched.push(format!("ホーム配下: {}", home.display()));
+    }
+    for p in FALLBACK_PATHS {
+        searched.push(format!("FALLBACK: {p}"));
+    }
+
     Err(anyhow!(
-        "codex binary not found. Install Codex CLI or set the path in Settings."
+        "codex バイナリが見つかりませんでした\n\
+         OS: {} / {}\n\
+         探した場所:\n  - {}",
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        searched.join("\n  - ")
     ))
 }
 
@@ -148,6 +198,7 @@ pub struct AppServerProcess {
     pub child: Child,
     pub stdin: ChildStdin,
     pub stdout: ChildStdout,
+    pub stderr_buf: StderrBuffer,
 }
 
 pub async fn spawn_app_server(bin: &Path) -> Result<AppServerProcess> {
@@ -162,9 +213,20 @@ pub async fn spawn_app_server(bin: &Path) -> Result<AppServerProcess> {
 
     cmd.kill_on_drop(true);
 
-    let mut child = cmd
-        .spawn()
-        .with_context(|| format!("failed to spawn `{} app-server`", bin.display()))?;
+    let mut child = cmd.spawn().with_context(|| {
+        format!(
+            "Codex バイナリの起動に失敗しました\n\
+             コマンド: {} app-server --listen stdio://\n\
+             OS: {} / {}\n\
+             バイナリパス: {}\n\
+             バイナリ存在: {}",
+            bin.display(),
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            bin.display(),
+            bin.is_file()
+        )
+    })?;
     let stdin = child
         .stdin
         .take()
@@ -174,23 +236,26 @@ pub async fn spawn_app_server(bin: &Path) -> Result<AppServerProcess> {
         .take()
         .ok_or_else(|| anyhow!("child stdout not captured"))?;
 
+    let stderr_buf = StderrBuffer::default();
     if let Some(stderr) = child.stderr.take() {
-        spawn_stderr_logger(stderr);
+        spawn_stderr_logger(stderr, stderr_buf.clone());
     }
 
     Ok(AppServerProcess {
         child,
         stdin,
         stdout,
+        stderr_buf,
     })
 }
 
-fn spawn_stderr_logger(stderr: tokio::process::ChildStderr) {
+fn spawn_stderr_logger(stderr: tokio::process::ChildStderr, buf: StderrBuffer) {
     use tokio::io::{AsyncBufReadExt, BufReader};
     tokio::spawn(async move {
         let mut lines = BufReader::new(stderr).lines();
         while let Ok(Some(line)) = lines.next_line().await {
-            tracing::debug!(target: "codex.stderr", "{}", line);
+            tracing::warn!(target: "codex.stderr", "{}", line);
+            buf.push(line);
         }
     });
 }

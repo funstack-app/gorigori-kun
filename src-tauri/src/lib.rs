@@ -44,15 +44,19 @@ async fn apply_provider_model_migration(pool: &sqlx::SqlitePool) -> Result<(), S
     Ok(())
 }
 
-fn log_dir() -> Option<std::path::PathBuf> {
-    let home = dirs::home_dir()?;
+pub fn log_dir() -> Option<std::path::PathBuf> {
     #[cfg(target_os = "macos")]
     {
-        Some(home.join("Library/Logs/gori-gori-kun"))
+        dirs::home_dir().map(|h| h.join("Library/Logs/gori-gori-kun"))
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     {
-        Some(home.join(".local/state/gori-gori-kun"))
+        // Windows 規約: %APPDATA%\gori-gori-kun\logs
+        dirs::data_dir().map(|d| d.join("gori-gori-kun").join("logs"))
+    }
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    {
+        dirs::home_dir().map(|h| h.join(".local/state/gori-gori-kun"))
     }
 }
 
@@ -170,6 +174,7 @@ pub fn run() {
             commands::codex_request,
             commands::codex_resolve_server_request,
             commands::codex_status,
+            commands::codex_diagnostics,
             commands::cloud_supabase::supabase_test_connection,
             commands::cloud_supabase::supabase_save_config,
             commands::cloud_supabase::supabase_get_config,
