@@ -196,22 +196,12 @@ pub struct AppServerProcess {
 }
 
 pub async fn spawn_app_server(bin: &Path) -> Result<AppServerProcess> {
-    // バイナリ名で起動引数を切り替え:
-    //   - codex / codex.exe         : `codex app-server` サブコマンド経由 (Node.js ラッパー)
-    //   - codex-app-server(.exe)    : 引数なしで直接 stdio JSON-RPC モード起動
-    let bin_name = bin
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-    let is_native_server = bin_name.starts_with("codex-app-server");
-
+    // codex バイナリ (codex / codex.exe / codex-app-server.exe いずれも) は
+    // `app-server` サブコマンドを取って JSON-RPC stdio モードで起動する。
+    // 引数なしだと対話 CLI モードに入って "stdin is not a terminal" で失敗する。
     let mut cmd = Command::new(bin);
-    if !is_native_server {
-        // codex (Node.js ラッパー) 経由の場合は app-server サブコマンドを指定
-        cmd.arg("app-server");
-    }
-    cmd.stdin(Stdio::piped())
+    cmd.arg("app-server")
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env("PATH", enriched_path());

@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use codex_image_editor_lib::__test_support as t;
+use codex_frame_factory_lib::__test_support as t;
 use serde_json::json;
 
 #[tokio::test]
