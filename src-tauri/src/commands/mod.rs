@@ -19,6 +19,7 @@ pub mod rpc_bridge;
 pub mod secrets;
 pub mod segment;
 pub mod sessions;
+pub mod skills;
 pub mod stock;
 pub mod storage;
 pub mod storage_cleanup;

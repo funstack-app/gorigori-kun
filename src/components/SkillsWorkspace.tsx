@@ -1,10 +1,19 @@
 import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { BaseDirectory } from "@tauri-apps/api/path";
-import { exists } from "@tauri-apps/plugin-fs";
+import { open as openFileDialog, save as saveFileDialog } from "@tauri-apps/plugin-dialog";
+import { exists, writeTextFile } from "@tauri-apps/plugin-fs";
 
 import { GORI_SKILLS, type GoriSkill } from "../lib/skills/catalog";
+import { useToasts } from "../lib/store/toasts";
 import { activateSkill } from "./SkillBadge";
 import { SkillDetailModal } from "./SkillDetailModal";
+
+type SkillImportResult = {
+  id: string;
+  name: string;
+  installedAt: string;
+};
 
 function relativeSkillPath(skill: GoriSkill) {
   return skill.path.replace(/^~\//, "");
@@ -15,6 +24,7 @@ export function SkillsWorkspace({ onUseSkill }: { onUseSkill?: () => void }) {
     Object.fromEntries(GORI_SKILLS.map((skill) => [skill.id, null])),
   );
   const [detailSkill, setDetailSkill] = useState<GoriSkill | null>(null);
+  const [refreshTick, setRefreshTick] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -35,20 +45,99 @@ export function SkillsWorkspace({ onUseSkill }: { onUseSkill?: () => void }) {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [refreshTick]);
 
   const useSkill = (skill: GoriSkill) => {
     activateSkill(skill);
     onUseSkill?.();
   };
 
+  const toast = useToasts.getState();
+
+  /**
+   * SKILL.md ファイルをユーザーに選んでもらい、~/.codex/skills/ 配下に複製する。
+   * frontmatter の name: フィールドから保存先ディレクトリ名を決める。
+   */
+  const handleImport = async () => {
+    try {
+      const selected = await openFileDialog({
+        multiple: false,
+        directory: false,
+        filters: [
+          { name: "Skill Markdown", extensions: ["md", "markdown"] },
+        ],
+      });
+      if (!selected) return; // キャンセル
+      const path = Array.isArray(selected) ? selected[0] : selected;
+      const result = await invoke<SkillImportResult>("skill_import", {
+        sourcePath: path,
+      });
+      toast.push({
+        kind: "success",
+        text: `スキル「${result.name}」をインポートしました`,
+        ttlMs: 4000,
+      });
+      // 再読み込み (実在チェックを更新)
+      setRefreshTick((n) => n + 1);
+    } catch (err) {
+      toast.push({
+        kind: "error",
+        text: `インポート失敗: ${String(err)}`,
+        ttlMs: 6000,
+      });
+    }
+  };
+
+  /**
+   * 指定スキルの SKILL.md を読んで、ユーザー指定の保存先に書き出す。
+   */
+  const handleExport = async (skill: GoriSkill) => {
+    try {
+      const [content, _id] = await invoke<[string, string]>("skill_export_read", {
+        skillId: skill.id,
+      });
+      const savePath = await saveFileDialog({
+        defaultPath: `${skill.id}-SKILL.md`,
+        filters: [
+          { name: "Skill Markdown", extensions: ["md"] },
+        ],
+      });
+      if (!savePath) return; // キャンセル
+      await writeTextFile(savePath, content);
+      toast.push({
+        kind: "success",
+        text: `スキル「${skill.name}」をエクスポートしました`,
+        ttlMs: 4000,
+      });
+    } catch (err) {
+      toast.push({
+        kind: "error",
+        text: `エクスポート失敗: ${String(err)}`,
+        ttlMs: 6000,
+      });
+    }
+  };
+
+
   return (
     <section className="flex h-full min-h-0 flex-col overflow-hidden bg-[#121212]">
       {/*
-        ヘッダーは外側 (App.tsx の BoardHeader) が「スキル」タイトルを出すので、
-        ここでは内側にもう一段ヘッダーを置かない。
-        説明文も冗長なので省略。
+        ヘッダー右側にスキル import / export ツールバーを置く。
+        外側 (App.tsx の BoardHeader) が「スキル」タイトルを出すので
+        ここではタイトル文言は出さない。
       */}
+      <div className="flex items-center justify-end gap-2 px-5 pt-4">
+        <button
+          type="button"
+          onClick={handleImport}
+          className="flex items-center gap-1.5 rounded-lg border border-[#343434] bg-[#1e1e1e] px-3 py-1.5 text-xs font-bold text-neutral-200 hover:border-pink-400 hover:text-white"
+          title="SKILL.md ファイルを取り込んで、このアプリで使えるようにします"
+        >
+          <span>📥</span>
+          <span>スキルをインポート</span>
+        </button>
+      </div>
+
       <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
           {GORI_SKILLS.map((skill) => {
@@ -115,6 +204,17 @@ export function SkillsWorkspace({ onUseSkill }: { onUseSkill?: () => void }) {
                   >
                     詳細を見る
                   </button>
+                  {/* SKILL.md がローカルに実在するなら export 可能 */}
+                  {status === true && !isComingSoon && (
+                    <button
+                      type="button"
+                      onClick={() => handleExport(skill)}
+                      className="w-full rounded-lg border border-[#242424] bg-transparent px-3 py-1.5 text-[10px] font-bold text-neutral-400 hover:border-neutral-500 hover:text-neutral-200"
+                      title="このスキルの SKILL.md を外部ファイルに書き出します"
+                    >
+                      📤 エクスポート
+                    </button>
+                  )}
                   <p className="text-[10px] leading-relaxed text-neutral-500">
                     {skill.launchHint}
                   </p>
