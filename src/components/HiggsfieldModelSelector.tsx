@@ -228,7 +228,7 @@ export function HiggsfieldModelSelector({ media }: { media: "image" | "video" })
 
 function ModelPickerPopover({
   anchorRect,
-  loadState,
+  loadState: _loadState,
   query,
   onQueryChange,
   sections,
@@ -290,6 +290,7 @@ function ModelPickerPopover({
   }, [selectedModels, prompt, aspect]);
 
   // ボタン下に出すと画面下端で隠れる場合は、ボタン上 (上方向にフリップ) に出す。
+  // anchorRect が無い場合 (初回 mount 等) は画面中央に表示するフォールバック。
   const placement = anchorRect ? computePlacement(anchorRect) : null;
   const style: CSSProperties = placement
     ? {
@@ -300,10 +301,12 @@ function ModelPickerPopover({
         zIndex: 60,
       }
     : {
+        // 画面中央フォールバック (上 20% だと高すぎて違和感あるため中央へ)
         position: "fixed",
-        top: "20%",
+        top: "50%",
         left: "50%",
-        transform: "translateX(-50%)",
+        transform: "translate(-50%, -50%)",
+        maxHeight: "70vh",
         zIndex: 60,
       };
 
@@ -324,15 +327,25 @@ function ModelPickerPopover({
           value={query}
           autoFocus
           onChange={(event) => onQueryChange(event.target.value)}
-          placeholder="Search models"
+          placeholder="モデルを検索"
           className="h-8 w-full rounded-md border border-[#343434] bg-[#101010] px-2 text-xs text-neutral-100 outline-none placeholder:text-neutral-600 focus:border-pink-400"
         />
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto p-2">
+        {/*
+          一番上に「接続先で拡張できます」案内を常時表示。
+          STΛCK 指示 (2026-05-17): 内部実装の説明 (image_gen 等) は
+          ユーザー向け表現として不適切なので削除。代わりに
+          「設定から外部連携するとここが変わります」案内を最初に置く。
+        */}
+        <div className="mb-3 rounded-md border border-[#2a2a2a] bg-[#101010] p-2.5 text-[11px] leading-relaxed text-neutral-400">
+          設定の「接続先」から拡張機能を有効にすると、ここにモデルが増えます。
+        </div>
+
         <div className="mb-3">
           <ModelRow
             title={CODEX_STANDARD_LABEL}
-            description="Higgsfield を使わず通常の Codex image_gen で生成"
+            description="標準モデル。すぐに生成できます"
             icon="C"
             selected={selectedCount === 0}
             disabled={false}
@@ -340,17 +353,6 @@ function ModelPickerPopover({
             variant="muted"
           />
         </div>
-
-        {/* HiggsField 未接続時の案内 (sections が空) */}
-        {(loadState === "missing" || loadState === "needsAuth") && sections.length === 0 && (
-          <div className="rounded-md border border-[#2a2a2a] bg-[#101010] p-3 text-[11px] text-neutral-400">
-            <p className="font-semibold text-neutral-300">拡張モデルを追加できます</p>
-            <p className="mt-1 leading-relaxed">
-              設定タブの「接続先」から HiggsField や他の画像生成サービスを
-              ワンタップで接続すると、ここに選択肢が増えます。
-            </p>
-          </div>
-        )}
 
         {sections.map((section) => (
           <section key={section.title} className="mb-3 last:mb-0">
@@ -539,7 +541,11 @@ function buildSections(
     .sort((a, b) => a.displayName.localeCompare(b.displayName));
   void media;
 
-  return [{ title: "⚡ HiggsField", items: [...featured, ...others] }];
+  const items = [...featured, ...others];
+  // STΛCK 指示 (2026-05-17): items 空のときは HIGGSFIELD セクションを出さない。
+  // 未接続時に「⚡ HIGGSFIELD 0件」と空表示するのは UX 上ノイズ。
+  if (items.length === 0) return [];
+  return [{ title: "HiggsField", items }];
 }
 
 function matchesModel(model: HiggsfieldModelInfo, normalizedQuery: string): boolean {

@@ -1,4 +1,16 @@
-export type SceneAspectRatio = "16:9" | "1:1" | "9:16" | "4:3";
+// GPT Image 2 でサポートする主要アスペクト比 (2026-05-17 拡充)。
+// 横長: 21:9 (シネスコ), 16:9 (動画/YouTube), 3:2 (写真), 4:3 (旧TV)
+// 正方: 1:1 (SNS / Instagram)
+// 縦長: 4:5 (Instagram投稿), 2:3 (ポスター), 9:16 (Reels/TikTok/Stories)
+export type SceneAspectRatio =
+  | "21:9"
+  | "16:9"
+  | "3:2"
+  | "4:3"
+  | "1:1"
+  | "4:5"
+  | "2:3"
+  | "9:16";
 
 export type ReferenceSlotId = "@img1" | "@img2" | "@img3" | "@img4" | "@img5";
 

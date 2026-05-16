@@ -23,10 +23,14 @@ const MAX_COUNT = 30;
  * モデル選択モーダルと同じパターン (SceneOption[] を渡してリスト表示) で使える。
  */
 const ASPECT_RATIO_HINTS: Record<SceneAspectRatio, string> = {
-  "16:9": "横長・動画/シネマ・YouTube",
-  "1:1": "正方形・Instagram/SNS 投稿",
-  "9:16": "縦長・ストーリー/TikTok/Reels",
+  "21:9": "シネマスコープ・超横長",
+  "16:9": "動画/YouTube・標準横長",
+  "3:2": "写真標準・カメラ初期値",
   "4:3": "クラシック・印刷/プレゼン",
+  "1:1": "正方形・Instagram投稿",
+  "4:5": "縦長・Instagram投稿",
+  "2:3": "ポートレート・ポスター",
+  "9:16": "Reels/TikTok/Stories",
 };
 
 const ASPECT_RATIO_PICKER_OPTIONS: SceneOption[] = aspectRatioOptions.map((value) => ({

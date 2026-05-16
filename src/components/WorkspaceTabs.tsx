@@ -1,14 +1,19 @@
 import { useWorkspace, type WorkspaceTab } from "../lib/store/workspace";
 
-type Tab = { id: WorkspaceTab; label: string; beta?: boolean; disabled?: boolean };
+type Tab = {
+  id: WorkspaceTab;
+  label: string;
+  /** 「近日公開」ラベル + 触れない状態 */
+  comingSoon?: boolean;
+  disabled?: boolean;
+};
 
 const TABS: Tab[] = [
   { id: "plan", label: "企画" },
   { id: "generate", label: "生成" },
-  // 編集タブは β 版 + 一部機能が Mac 専用 (背景除去 Vision API / Python segmentation)
-  // のため、配布前は触れない状態にする。
-  // STΛCK 指示 (2026-05-15): クリック不可、押せないように。
-  { id: "edit", label: "編集", beta: true, disabled: true },
+  // 編集タブは現在クローズ。STΛCK 指示 (2026-05-17): β ではなく
+  // 「近日公開」表示にしてワクワク感を演出。クリック不可。
+  { id: "edit", label: "編集", comingSoon: true, disabled: true },
 ];
 
 export function WorkspaceTabs() {
@@ -31,13 +36,7 @@ export function WorkspaceTabs() {
             disabled={isDisabled}
             aria-pressed={isActive}
             aria-disabled={isDisabled}
-            title={
-              isDisabled
-                ? "β版機能 (近日公開予定、現在は利用できません)"
-                : tab.beta
-                  ? "β版機能 (開発中、動作が不安定な場合があります)"
-                  : undefined
-            }
+            title={isDisabled ? "近日公開予定" : undefined}
             className={`relative h-9 rounded-md text-sm font-black transition ${
               isDisabled
                 ? "cursor-not-allowed text-neutral-700"
@@ -47,17 +46,15 @@ export function WorkspaceTabs() {
             }`}
           >
             <span className="align-middle">{tab.label}</span>
-            {tab.beta && (
+            {tab.comingSoon && (
               <span
-                className={`ml-1.5 inline-block rounded px-1 py-0.5 text-[9px] font-black tracking-wider align-middle ${
+                className={`ml-1.5 inline-block rounded px-1.5 py-0.5 text-[9px] font-bold tracking-wide align-middle ${
                   isDisabled
-                    ? "bg-neutral-700 text-neutral-500"
-                    : isActive
-                      ? "bg-pink-500 text-white"
-                      : "bg-pink-500/20 text-pink-300"
+                    ? "bg-neutral-800 text-neutral-500"
+                    : "bg-purple-500/20 text-purple-200"
                 }`}
               >
-                β
+                近日公開
               </span>
             )}
           </button>
