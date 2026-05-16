@@ -309,7 +309,32 @@ export function SettingsConnections() {
                 service={service}
                 connected={connected}
                 mask={service.keyName ? masks[service.keyName] : ""}
-                onSet={() => setSelectedService(service)}
+                onSaveKey={async (value) => {
+                  const key = service.keyName;
+                  if (!key) return;
+                  await secrets.set(key, value);
+                  setMasks((prev) => ({ ...prev, [key]: maskSecret(value) }));
+                  accounts.setSecretPresence(key, true);
+                  push({ kind: "success", text: `${service.name} のキーを保存しました`, ttlMs: 2400 });
+                  // OpenAI キーは Codex 認証も自動実行
+                  if (key === "openai_api_key") {
+                    try {
+                      await auth.loginApiKey(value);
+                      push({
+                        kind: "success",
+                        text: "Codex を OpenAI API キーで初期化しました",
+                        ttlMs: 4000,
+                      });
+                    } catch (err) {
+                      push({
+                        kind: "warn",
+                        text: `キーは保存しましたが Codex 初期化失敗: ${String(err)}`,
+                        ttlMs: 6000,
+                      });
+                    }
+                  }
+                  await accounts.refreshSecrets();
+                }}
                 onDelete={() => void deleteSecret(service)}
               />
             );
@@ -462,10 +487,27 @@ function ConnectionCard(props: {
   service: SecretService;
   connected: boolean;
   mask?: string;
-  onSet: () => void;
+  /** インラインで API キーを入力して保存 */
+  onSaveKey: (key: string) => Promise<void>;
   onDelete: () => void;
 }) {
   const { service, connected } = props;
+  const [expanded, setExpanded] = useState(false);
+  const [keyDraft, setKeyDraft] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const save = async () => {
+    if (!keyDraft.trim() || saving) return;
+    setSaving(true);
+    try {
+      await props.onSaveKey(keyDraft.trim());
+      setKeyDraft("");
+      setExpanded(false);
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
     <article className="flex min-h-44 flex-col justify-between rounded-lg border border-[#2a2a2a] bg-[#151515] p-4">
       <div>
@@ -484,6 +526,41 @@ function ConnectionCard(props: {
         </div>
         <p className="mt-3 min-h-9 text-xs leading-relaxed text-neutral-400">{service.description}</p>
         <p className="mt-2 h-4 font-mono text-[11px] text-neutral-600">{props.mask || ""}</p>
+
+        {/* インライン API キー入力 (展開時のみ表示) */}
+        {expanded && service.keyName && (
+          <div className="mt-3 space-y-2 rounded-md border border-[#343434] bg-[#0d0d0d] p-2">
+            <input
+              type="password"
+              value={keyDraft}
+              onChange={(e) => setKeyDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void save();
+                if (e.key === "Escape") setExpanded(false);
+              }}
+              placeholder="API キーを貼り付け"
+              autoFocus
+              className="h-8 w-full rounded-md border border-[#343434] bg-[#101010] px-2 font-mono text-[11px] text-neutral-100 outline-none focus:border-pink-500"
+            />
+            <div className="flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setExpanded(false)}
+                className="h-7 rounded-md px-2 text-[11px] font-bold text-neutral-400 hover:text-neutral-200"
+              >
+                キャンセル
+              </button>
+              <button
+                type="button"
+                onClick={save}
+                disabled={!keyDraft.trim() || saving}
+                className={`${PRIMARY_BUTTON} h-7 px-3 text-[11px] disabled:cursor-not-allowed disabled:opacity-60`}
+              >
+                {saving ? "保存中..." : "保存"}
+              </button>
+            </div>
+          </div>
+        )}
       </div>
       <div className="mt-4 flex flex-wrap items-center gap-2">
         {service.signupUrl && (
@@ -493,8 +570,12 @@ function ConnectionCard(props: {
         )}
         {service.keyName ? (
           <>
-            <button type="button" onClick={props.onSet} className={`${connected ? MUTED_BUTTON : PRIMARY_BUTTON} h-8 px-3 text-xs`}>
-              {connected ? "再設定" : "キーを設定"}
+            <button
+              type="button"
+              onClick={() => setExpanded((v) => !v)}
+              className={`${connected ? MUTED_BUTTON : PRIMARY_BUTTON} h-8 px-3 text-xs`}
+            >
+              {expanded ? "閉じる" : connected ? "再設定" : "キーを入力"}
             </button>
             {connected && (
               <button type="button" onClick={props.onDelete} className={`${MUTED_BUTTON} h-8 px-3 text-xs`}>
