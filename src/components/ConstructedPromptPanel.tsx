@@ -191,7 +191,13 @@ export function ConstructedPromptPanel() {
         />
       </div>
 
-      <div className="shrink-0 space-y-3 border-t border-[#2a2a2a] p-3">
+      {/*
+        下部コントロール (モデル選択 / 枚数 / アスペクト / 生成ボタン).
+        13 インチ画面 (~720-800 縦) でも生成ボタンに到達できるよう、
+        max-height を 50vh に制限してこの中で縦スクロール可能にする。
+        textarea (上の flex-1) は最低限の高さを保つ。
+      */}
+      <div className="shrink-0 space-y-3 overflow-y-auto border-t border-[#2a2a2a] p-3" style={{ maxHeight: "50vh" }}>
         <HiggsfieldModelSelector media={modelMedia} />
 
         <div className="flex items-center justify-between gap-3">
