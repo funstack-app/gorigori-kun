@@ -54,6 +54,9 @@ export type Project = {
 };
 
 const PROJECTS_LS_KEY = "projects.projects";
+/** localStorage の冗長バックアップ。万一 localStorage が一時的に空でも、
+ *  ここに最後の正常な配列が残っていれば復元できる。 */
+const PROJECTS_LS_BACKUP_KEY = "projects.projects.backup";
 
 function generateId(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -62,19 +65,59 @@ function generateId(): string {
 function readPersisted(): Project[] {
   try {
     const raw = localStorage.getItem(PROJECTS_LS_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? (parsed as Project[]) : [];
-  } catch {
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed as Project[];
+      }
+      // 空配列が保存されていた場合: バックアップに有効データがあれば復元
+      const backup = localStorage.getItem(PROJECTS_LS_BACKUP_KEY);
+      if (backup) {
+        const backupParsed = JSON.parse(backup);
+        if (Array.isArray(backupParsed) && backupParsed.length > 0) {
+          console.warn(
+            "[projects] primary key was empty, restored from backup:",
+            backupParsed.length,
+            "projects",
+          );
+          // バックアップを primary に書き戻す
+          localStorage.setItem(PROJECTS_LS_KEY, backup);
+          return backupParsed as Project[];
+        }
+      }
+      return [];
+    }
+    // primary が無い場合: backup を試す
+    const backup = localStorage.getItem(PROJECTS_LS_BACKUP_KEY);
+    if (backup) {
+      const backupParsed = JSON.parse(backup);
+      if (Array.isArray(backupParsed)) {
+        console.warn(
+          "[projects] primary missing, restored from backup:",
+          backupParsed.length,
+          "projects",
+        );
+        localStorage.setItem(PROJECTS_LS_KEY, backup);
+        return backupParsed as Project[];
+      }
+    }
+    return [];
+  } catch (err) {
+    console.error("[projects] readPersisted failed:", err);
     return [];
   }
 }
 
 function persist(projects: Project[]) {
   try {
-    localStorage.setItem(PROJECTS_LS_KEY, JSON.stringify(projects));
-  } catch {
-    /* private mode / quota — non-fatal */
+    const serialized = JSON.stringify(projects);
+    localStorage.setItem(PROJECTS_LS_KEY, serialized);
+    // 0 件保存は事故 (削除) かもしれないので、バックアップには空配列を書かない
+    if (projects.length > 0) {
+      localStorage.setItem(PROJECTS_LS_BACKUP_KEY, serialized);
+    }
+  } catch (err) {
+    console.error("[projects] persist failed:", err);
   }
 }
 
