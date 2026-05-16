@@ -3,6 +3,7 @@ import { useEffect, useRef } from "react";
 import { GORI_SKILLS, type GoriSkill } from "../lib/skills/catalog";
 import { useSkillMode } from "../lib/store/skillMode";
 import { activateSkill } from "./SkillBadge";
+import { SkillIcon } from "./SkillIcon";
 
 type Props = {
   open: boolean;
@@ -111,19 +112,27 @@ export function SkillPickerPopover({ open, onClose, onPick, anchorRect }: Props)
         )}
         {GORI_SKILLS.map((skill) => {
           const isActive = enabled && selectedSkillId === skill.id;
+          const isLocked = !skill.availableInApp;
           return (
             <button
               key={skill.id}
               type="button"
-              onClick={() => pick(skill)}
+              disabled={isLocked}
+              onClick={() => {
+                if (isLocked) return;
+                pick(skill);
+              }}
               className={`mb-1 flex w-full items-start gap-2 rounded-lg border px-3 py-2 text-left transition ${
+                isLocked
+                  ? "cursor-not-allowed border-[#242424] bg-[#0b0b0b] opacity-55"
+                  :
                 isActive
                   ? "border-pink-400 bg-pink-500/15"
                   : "border-[#2a2a2a] bg-[#0b0b0b] hover:border-pink-400"
               }`}
             >
-              <span className="mt-0.5 text-lg" aria-hidden>
-                {skill.icon}
+              <span className="mt-0.5 text-pink-300" aria-hidden>
+                <SkillIcon id={skill.id} className="h-4 w-4" />
               </span>
               <div className="flex-1 min-w-0">
                 <p
@@ -132,7 +141,11 @@ export function SkillPickerPopover({ open, onClose, onPick, anchorRect }: Props)
                   }`}
                 >
                   {skill.name}
-                  {isActive && (
+                  {isLocked ? (
+                    <span className="ml-2 rounded bg-neutral-800 px-1.5 py-0.5 text-[9px] font-black text-neutral-500">
+                      近日公開
+                    </span>
+                  ) : isActive && (
                     <span className="ml-2 rounded bg-pink-500/30 px-1.5 py-0.5 text-[9px] font-black text-pink-100">
                       使用中
                     </span>

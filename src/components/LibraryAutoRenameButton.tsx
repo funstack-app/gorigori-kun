@@ -299,22 +299,97 @@ export function LibraryAutoRenameButton() {
     }
   };
 
+  const renameByPattern = async (mode: "serial" | "pattern") => {
+    if (running || selected.size === 0) return;
+    const selectedPaths = Array.from(selected);
+    const input =
+      mode === "serial"
+        ? window.prompt("連番の先頭文字を入力してください", "gori")
+        : window.prompt("命名規則を入力してください。{n} が連番になります", "gori-{n}");
+    const rawPattern = input?.trim();
+    if (!rawPattern) return;
+
+    setRunning(true);
+    try {
+      let completed = 0;
+      let failed = 0;
+      for (const [index, path] of selectedPaths.entries()) {
+        const number = String(index + 1).padStart(3, "0");
+        const stem =
+          mode === "serial"
+            ? `${rawPattern}-${number}`
+            : rawPattern.replace(/\{n\}/g, number).replace(/\{index\}/g, number);
+        try {
+          const newPath = await imagesIpc.rename(path, sanitizeJaName(stem) || `image-${number}`);
+          renameLocal(path, newPath);
+          completed += 1;
+        } catch (err) {
+          failed += 1;
+          console.warn("pattern rename failed", { path, stem, error: err });
+        }
+      }
+      if (failed > 0) {
+        pushToast({
+          kind: "warn",
+          text: `${failed} 件はリネームできませんでした`,
+          ttlMs: 4000,
+        });
+      }
+      pushToast({
+        kind: "success",
+        text: `${completed} 件を命名しました`,
+        ttlMs: 3000,
+      });
+      exitMode();
+    } finally {
+      setRunning(false);
+    }
+  };
+
   const disabled = running || selected.size === 0;
 
   return (
-    <button
-      type="button"
-      onClick={handleClick}
-      disabled={disabled}
-      className={[
-        "h-7 rounded-md px-3 text-[11px] font-bold transition",
-        disabled
-          ? "cursor-not-allowed bg-neutral-800 text-neutral-600"
-          : "bg-pink-500 text-white hover:bg-pink-400",
-      ].join(" ")}
-      title="選択中の画像を AI が一括リネーム"
-    >
-      {`✨ AI 自動命名 (${selected.size} 件)`}
-    </button>
+    <div className="flex flex-wrap items-center gap-1.5">
+      <button
+        type="button"
+        onClick={handleClick}
+        disabled={disabled}
+        className={[
+          "h-7 rounded-md px-3 text-[11px] font-bold transition",
+          disabled
+            ? "cursor-not-allowed bg-neutral-800 text-neutral-600"
+            : "bg-pink-500 text-white hover:bg-pink-400",
+        ].join(" ")}
+        title="選択中の画像を AI が一括リネーム"
+      >
+        {`AI 自動命名 (${selected.size} 件)`}
+      </button>
+      <button
+        type="button"
+        onClick={() => void renameByPattern("serial")}
+        disabled={disabled}
+        className={[
+          "h-7 rounded-md border px-3 text-[11px] font-bold transition",
+          disabled
+            ? "cursor-not-allowed border-neutral-800 text-neutral-600"
+            : "border-neutral-300 bg-white text-neutral-700 hover:border-neutral-950 hover:text-neutral-950",
+        ].join(" ")}
+      >
+        連番
+      </button>
+      <button
+        type="button"
+        onClick={() => void renameByPattern("pattern")}
+        disabled={disabled}
+        className={[
+          "h-7 rounded-md border px-3 text-[11px] font-bold transition",
+          disabled
+            ? "cursor-not-allowed border-neutral-800 text-neutral-600"
+            : "border-neutral-300 bg-white text-neutral-700 hover:border-neutral-950 hover:text-neutral-950",
+        ].join(" ")}
+      >
+        規則指定
+      </button>
+    </div>
   );
 }

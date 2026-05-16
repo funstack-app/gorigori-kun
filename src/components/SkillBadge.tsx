@@ -2,6 +2,7 @@ import { useSkillMode } from "../lib/store/skillMode";
 import { useWorkspace } from "../lib/store/workspace";
 import { useToasts } from "../lib/store/toasts";
 import type { GoriSkill } from "../lib/skills/catalog";
+import { SkillIcon } from "./SkillIcon";
 
 export function activateSkill(skill: GoriSkill) {
   const skillMode = useSkillMode.getState();
@@ -51,7 +52,7 @@ export function SkillBadge({
           : "border-[#343434] bg-[#101010] text-neutral-300 hover:border-pink-400 hover:text-white"
       }`}
     >
-      <span aria-hidden>{skill.icon}</span>
+      <SkillIcon id={skill.id} className="h-3.5 w-3.5" />
       <span className="whitespace-nowrap">{compact ? skill.shortName : skill.name}</span>
     </button>
   );

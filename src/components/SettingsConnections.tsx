@@ -45,7 +45,7 @@ const SERVICE_CATEGORIES: ServiceCategory[] = [
     title: "素材",
     services: [
       svc("▧", "Pexels", "完全無料、200 req/時、AI 参照用途 OK (推奨)", "pexels_api_key", "hasPexels", "https://www.pexels.com/api/new/", false),
-      svc("📷", "Unsplash", "無料、Demo 50 req/時、無料版は AI 参照 OK (Unsplash+ は NG)", "unsplash_access_key", "hasUnsplash", "https://unsplash.com/oauth/applications", false),
+      svc("U", "Unsplash", "無料、Demo 50 req/時、無料版は AI 参照 OK (Unsplash+ は NG)", "unsplash_access_key", "hasUnsplash", "https://unsplash.com/oauth/applications", false),
     ],
   },
 ];
@@ -84,7 +84,7 @@ const ROADMAP: { title: string; services: RoadmapService[] }[] = [
   {
     title: "AI 生成 (連携予定)",
     services: [
-      { icon: "💦", name: "Splash", description: "AI 動画/画像生成 (近日対応予定)", badge: "サブスク内完結", detailUrl: "https://splash.so/" },
+      { icon: "S", name: "Splash", description: "AI 動画/画像生成 (近日対応予定)", badge: "サブスク内完結", detailUrl: "https://splash.so/" },
     ],
   },
   {
@@ -98,32 +98,32 @@ const ROADMAP: { title: string; services: RoadmapService[] }[] = [
   {
     title: "API 課金 (安く繋ぎたい人向け)",
     services: [
-      { icon: "🔁", name: "Replicate", description: "100+ OSS モデル統一 API (FLUX/SDXL/Imagen 等)、$0.008〜$0.04/画像", badge: "API 課金", detailUrl: "https://replicate.com/pricing" },
-      { icon: "⚡", name: "fal.ai", description: "高速版モデル特化 (FLUX/SD/動画)、リアルタイム生成向き", badge: "API 課金", detailUrl: "https://fal.ai/pricing" },
-      { icon: "🤝", name: "Together AI", description: "最安級 API (FLUX/SDXL/SD 系)、$0.008/画像〜", badge: "API 課金", detailUrl: "https://www.together.ai/pricing" },
+      { icon: "R", name: "Replicate", description: "100+ OSS モデル統一 API (FLUX/SDXL/Imagen 等)、$0.008〜$0.04/画像", badge: "API 課金", detailUrl: "https://replicate.com/pricing" },
+      { icon: "F", name: "fal.ai", description: "高速版モデル特化 (FLUX/SD/動画)、リアルタイム生成向き", badge: "API 課金", detailUrl: "https://fal.ai/pricing" },
+      { icon: "T", name: "Together AI", description: "最安級 API (FLUX/SDXL/SD 系)、$0.008/画像〜", badge: "API 課金", detailUrl: "https://www.together.ai/pricing" },
     ],
   },
   {
     title: "個別 API",
     services: [
-      { icon: "◎", name: "OpenAI Images API", description: "DALL-E 3 / GPT Image を API 直叩きで生成 (Codex CLI 不要、Free アカウントでも使える)", badge: "API 課金", detailUrl: "https://platform.openai.com/docs/api-reference/images" },
-      { icon: "🌊", name: "Stability AI", description: "Stable Image / SD 3.5 系 API", badge: "API 課金", detailUrl: "https://platform.stability.ai/" },
-      { icon: "💎", name: "Google Gemini", description: "Imagen 4 / Gemini 系", badge: "API 課金", detailUrl: "https://ai.google.dev/" },
-      { icon: "🌲", name: "Black Forest Labs", description: "FLUX 公式プロバイダ", badge: "API 課金", detailUrl: "https://api.bfl.ai/" },
-      { icon: "📐", name: "Ideogram", description: "文字入りデザインに強い画像生成", badge: "API 課金", detailUrl: "https://ideogram.ai/manage-api" },
-      { icon: "🎨", name: "Recraft", description: "ブランド素材・ベクター向け", badge: "API 課金", detailUrl: "https://www.recraft.ai/" },
-      { icon: "🎬", name: "Runway", description: "Gen-4 動画", badge: "API 課金", detailUrl: "https://runwayml.com/pricing" },
-      { icon: "💡", name: "Luma AI", description: "Dream Machine 動画", badge: "API 課金", detailUrl: "https://lumalabs.ai/dream-machine" },
-      { icon: "🌟", name: "Pika", description: "Pika 2.x 動画", badge: "API 課金", detailUrl: "https://pika.art/" },
-      { icon: "🔊", name: "ElevenLabs", description: "音声合成・ナレーション (将来実装予定)", badge: "API 課金", detailUrl: "https://elevenlabs.io/" },
-      { icon: "🔍", name: "Magnific / Freepik", description: "高精細アップスケール", badge: "API 課金", detailUrl: "https://www.magnific.com/api" },
-      { icon: "🧊", name: "Tripo / Meshy", description: "画像→3D モデル", badge: "API 課金", detailUrl: "https://platform.tripo3d.ai/" },
+      { icon: "O", name: "OpenAI Images API", description: "DALL-E 3 / GPT Image を API 直叩きで生成 (Codex CLI 不要、Free アカウントでも使える)", badge: "API 課金", detailUrl: "https://platform.openai.com/docs/api-reference/images" },
+      { icon: "S", name: "Stability AI", description: "Stable Image / SD 3.5 系 API", badge: "API 課金", detailUrl: "https://platform.stability.ai/" },
+      { icon: "G", name: "Google Gemini", description: "Imagen 4 / Gemini 系", badge: "API 課金", detailUrl: "https://ai.google.dev/" },
+      { icon: "B", name: "Black Forest Labs", description: "FLUX 公式プロバイダ", badge: "API 課金", detailUrl: "https://api.bfl.ai/" },
+      { icon: "I", name: "Ideogram", description: "文字入りデザインに強い画像生成", badge: "API 課金", detailUrl: "https://ideogram.ai/manage-api" },
+      { icon: "R", name: "Recraft", description: "ブランド素材・ベクター向け", badge: "API 課金", detailUrl: "https://www.recraft.ai/" },
+      { icon: "R", name: "Runway", description: "Gen-4 動画", badge: "API 課金", detailUrl: "https://runwayml.com/pricing" },
+      { icon: "L", name: "Luma AI", description: "Dream Machine 動画", badge: "API 課金", detailUrl: "https://lumalabs.ai/dream-machine" },
+      { icon: "P", name: "Pika", description: "Pika 2.x 動画", badge: "API 課金", detailUrl: "https://pika.art/" },
+      { icon: "E", name: "ElevenLabs", description: "音声合成・ナレーション (将来実装予定)", badge: "API 課金", detailUrl: "https://elevenlabs.io/" },
+      { icon: "M", name: "Magnific / Freepik", description: "高精細アップスケール", badge: "API 課金", detailUrl: "https://www.magnific.com/api" },
+      { icon: "3D", name: "Tripo / Meshy", description: "画像→3D モデル", badge: "API 課金", detailUrl: "https://platform.tripo3d.ai/" },
     ],
   },
   {
     title: "MCP サーバー (経路定義後に実装)",
     services: [
-      { icon: "📝", name: "Notion / Figma / Drive 等", description: "MCP プリセットあり、画像制作との具体経路 (参照画像取得 等) を定義したら実装", badge: "MCP", detailUrl: "https://modelcontextprotocol.io/" },
+      { icon: "M", name: "Notion / Figma / Drive 等", description: "MCP プリセットあり、画像制作との具体経路 (参照画像取得 等) を定義したら実装", badge: "MCP", detailUrl: "https://modelcontextprotocol.io/" },
     ],
   },
 ];
@@ -784,7 +784,7 @@ function HiggsfieldConnectionCard() {
   return (
     <div className="space-y-3 rounded-xl border border-pink-400/30 bg-pink-500/5 p-3">
       <div className="flex items-center gap-2">
-        <span className="text-lg">⚡</span>
+        <span className="grid h-8 w-8 place-items-center rounded-md border border-pink-400/20 bg-[#101010] text-xs font-black text-pink-200">HF</span>
         <div className="flex-1">
           <div className="flex items-center gap-2">
             <p className="text-sm font-black text-pink-100">HiggsField</p>

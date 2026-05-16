@@ -33,10 +33,35 @@ const ASPECT_RATIO_HINTS: Record<SceneAspectRatio, string> = {
   "9:16": "Reels/TikTok/Stories",
 };
 
+/**
+ * アスペクト比のサムネ SVG を data URI で生成する。
+ * 縦横比に応じた枠線だけのシンプルなプレビュー。
+ */
+function aspectThumbnail(ratio: string): { src: string; alt: string } {
+  const [wStr, hStr] = ratio.split(":");
+  const w = parseInt(wStr, 10) || 1;
+  const h = parseInt(hStr, 10) || 1;
+  const maxSide = 56;
+  const max = Math.max(w, h);
+  const rectW = (w / max) * maxSide;
+  const rectH = (h / max) * maxSide;
+  const x = (64 - rectW) / 2;
+  const y = (64 - rectH) / 2;
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+    <rect x="${x}" y="${y}" width="${rectW}" height="${rectH}" rx="3" fill="#1a1a1a" stroke="#666" stroke-width="1.5"/>
+    <text x="32" y="36" text-anchor="middle" font-family="ui-sans-serif,system-ui" font-size="10" font-weight="700" fill="#bbb">${ratio}</text>
+  </svg>`;
+  return {
+    src: `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`,
+    alt: ratio,
+  };
+}
+
 const ASPECT_RATIO_PICKER_OPTIONS: SceneOption[] = aspectRatioOptions.map((value) => ({
   value,
   hint: ASPECT_RATIO_HINTS[value],
   visual: "aspect",
+  thumbnail: aspectThumbnail(value),
 }));
 
 /**

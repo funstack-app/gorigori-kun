@@ -474,11 +474,13 @@ function CategoryList({
               : "text-neutral-400 hover:bg-[#181818] hover:text-neutral-200",
           ].join(" ")}
         >
-          <span className="flex items-center gap-2">
+          <span className="flex flex-1 items-center gap-2">
             <span className="h-2 w-2 rounded-full bg-neutral-600" />
-            <span>未分類</span>
+            <span className="flex-1 truncate text-left">未分類</span>
           </span>
-          <span className="text-[10px] text-neutral-500">{uncategorizedCount}</span>
+          <span className="shrink-0 rounded bg-[#0f0f0f] px-1.5 py-0.5 text-[10px] font-bold text-neutral-400">
+            {uncategorizedCount}
+          </span>
         </button>
       </div>
     </section>
@@ -568,8 +570,12 @@ function CategoryRow({
           className="h-2 w-2 shrink-0 rounded-full"
           style={{ backgroundColor: category.color }}
         />
-        <span className="truncate">{category.name}</span>
-        <span className="ml-auto shrink-0 text-[10px] text-neutral-500">{count}</span>
+        <span className="truncate flex-1">{category.name}</span>
+        {/* STΛCK 指示 (2026-05-17): 件数バッジを名前の右側に統一表示。
+            「未分類」の表記と揃える。 */}
+        <span className="shrink-0 rounded bg-[#0f0f0f] px-1.5 py-0.5 text-[10px] font-bold text-neutral-400">
+          {count}
+        </span>
       </button>
       <div className="flex items-center gap-1 opacity-0 transition group-hover:opacity-100">
         <button

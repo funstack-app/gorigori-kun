@@ -3,6 +3,7 @@ import { BaseDirectory } from "@tauri-apps/api/path";
 import { readTextFile, exists } from "@tauri-apps/plugin-fs";
 
 import type { GoriSkill } from "../lib/skills/catalog";
+import { SkillIcon } from "./SkillIcon";
 
 type SkillDetailModalProps = {
   skill: GoriSkill;
@@ -61,8 +62,8 @@ export function SkillDetailModal({ skill, onClose }: SkillDetailModalProps) {
       >
         <header className="flex items-start justify-between border-b border-[#2a2a2a] px-5 py-4">
           <div className="flex items-start gap-3">
-            <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-[#101010] text-2xl">
-              {skill.icon}
+            <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-[#101010] text-pink-300">
+              <SkillIcon id={skill.id} className="h-6 w-6" />
             </div>
             <div>
               <h2 className="text-base font-black text-white">{skill.name}</h2>

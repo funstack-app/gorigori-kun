@@ -60,13 +60,16 @@ const PURPOSES: Array<{
   description: string;
   prompt: string;
   workflow: { primary: "image" | "video"; image?: ImageMode; video?: VideoMode };
+  /** α版でまだ触らせない目的。UIには残すが選択不可にする。 */
+  comingSoon?: boolean;
 }> = [
   {
     id: "ad",
     label: "広告画像",
-    description: "SNS/LPで使える完成カット",
+    description: "LPカルーセル広告は近日公開",
     prompt: "広告画像として使える完成度で、商品の魅力が一目で伝わる構図にしてください。",
     workflow: { primary: "image", image: "generate" },
+    comingSoon: true,
   },
   {
     id: "product",
@@ -95,6 +98,7 @@ const PURPOSES: Array<{
     description: "環境固定でカメラだけ動かす",
     prompt: "マルチアングル用に、被写体、環境、位置関係、光を固定し、カメラだけを動かした別角度を作ってください。",
     workflow: { primary: "video", video: "multiAngle" },
+    comingSoon: true,
   },
   {
     id: "removeBg",
@@ -102,6 +106,7 @@ const PURPOSES: Array<{
     description: "背景変更・削除・差し替え",
     prompt: "背景だけを整理し、主役は保ったまま、使いやすい背景に変更してください。",
     workflow: { primary: "image", image: "edit" },
+    comingSoon: true,
   },
   {
     id: "layers",
@@ -109,6 +114,7 @@ const PURPOSES: Array<{
     description: "背景/人物/商品/文字を分ける前提",
     prompt: "後から編集しやすいように、背景、人物、商品、文字を分けて扱える構図にしてください。",
     workflow: { primary: "image", image: "layers" },
+    comingSoon: true,
   },
   {
     id: "export",
@@ -116,6 +122,7 @@ const PURPOSES: Array<{
     description: "採用素材を納品用にまとめる",
     prompt: "採用素材を用途別に整理し、書き出しやすい状態にしてください。",
     workflow: { primary: "image", image: "generate" },
+    comingSoon: true,
   },
 ];
 
@@ -445,14 +452,25 @@ function HomeScreen({
             <button
               key={purpose.id}
               type="button"
+              disabled={purpose.comingSoon}
               onClick={() => {
+                if (purpose.comingSoon) return;
                 useComposer.getState().setText(purpose.prompt);
                 applyPurposeWorkflow(purpose);
                 void onCreate(purpose.label);
               }}
-              className="rounded-2xl border border-[#2a2a2a] bg-[#181818] p-4 text-left shadow-sm transition hover:-translate-y-0.5 hover:border-pink-400 hover:shadow-md"
+              className={`rounded-2xl border p-4 text-left shadow-sm transition ${
+                purpose.comingSoon
+                  ? "cursor-not-allowed border-[#222] bg-[#111] opacity-55"
+                  : "border-[#2a2a2a] bg-[#181818] hover:-translate-y-0.5 hover:border-pink-400 hover:shadow-md"
+              }`}
             >
               <span className="text-lg font-black text-white">{purpose.label}</span>
+              {purpose.comingSoon && (
+                <span className="ml-2 rounded bg-neutral-800 px-1.5 py-0.5 text-[10px] font-black text-neutral-500">
+                  近日公開
+                </span>
+              )}
               <span className="mt-2 block text-xs leading-relaxed text-neutral-400">
                 {purpose.description}
               </span>
@@ -2658,8 +2676,8 @@ function BoardEmptyState() {
           <FlowStepButton
             index="1"
             title="目的"
-            body="広告、商品、サムネ、動画カットから選ぶ"
-            onClick={() => setText(PURPOSES[0].prompt)}
+            body="商品、サムネ、動画カットから選ぶ"
+            onClick={() => setText(PURPOSES.find((p) => p.id === "product")?.prompt ?? "")}
           />
           <FlowStepButton
             index="2"
@@ -2672,7 +2690,9 @@ function BoardEmptyState() {
             title="生成"
             body="下の生成ボタンでまず1案出す"
             onClick={() => {
-              if (!useComposer.getState().text.trim()) setText(PURPOSES[0].prompt);
+              if (!useComposer.getState().text.trim()) {
+                setText(PURPOSES.find((p) => p.id === "product")?.prompt ?? "");
+              }
             }}
           />
         </div>
@@ -2734,17 +2754,28 @@ function PurposeActionCard({ purpose }: { purpose: (typeof PURPOSES)[number] }) 
   return (
     <button
       type="button"
+      disabled={purpose.comingSoon}
       onClick={() => {
+        if (purpose.comingSoon) return;
         applyPurposeWorkflow(purpose);
         useComposer.getState().setText(purpose.prompt);
       }}
       className={`rounded-2xl border p-4 text-left transition hover:-translate-y-0.5 hover:shadow-md ${
-        active
+        purpose.comingSoon
+          ? "cursor-not-allowed border-neutral-200 bg-neutral-100 text-neutral-400 opacity-65"
+          : active
           ? "border-neutral-950 bg-neutral-950 text-white"
           : "border-neutral-200 bg-neutral-50 text-neutral-950 hover:border-blue-300 hover:bg-blue-50"
       }`}
     >
-      <span className="block text-base font-black">{purpose.label}</span>
+      <span className="flex items-center gap-2 text-base font-black">
+        {purpose.label}
+        {purpose.comingSoon && (
+          <span className="rounded bg-neutral-200 px-1.5 py-0.5 text-[10px] font-black text-neutral-500">
+            近日公開
+          </span>
+        )}
+      </span>
       <span className={`mt-1 block text-xs leading-relaxed ${active ? "text-neutral-300" : "text-neutral-500"}`}>
         {purpose.description}
       </span>
@@ -2998,7 +3029,7 @@ function GuidedCommandDock() {
 }
 
 function GuidedActions() {
-  const [selectedPurpose, setSelectedPurpose] = useState<GuidedPurpose>("ad");
+  const [selectedPurpose, setSelectedPurpose] = useState<GuidedPurpose>("product");
   const setText = useComposer((s) => s.setText);
   const setCount = useComposer((s) => s.setCount);
   const setAspect = useComposer((s) => s.setAspect);
@@ -3021,18 +3052,23 @@ function GuidedActions() {
               <button
                 key={purpose.id}
                 type="button"
+                disabled={purpose.comingSoon}
                 onClick={() => {
+                  if (purpose.comingSoon) return;
                   setSelectedPurpose(purpose.id);
                   applyPurposeWorkflow(purpose);
                   setText(purpose.prompt);
                 }}
                 className={`rounded-full border px-2.5 py-1 text-[11px] font-bold transition ${
-                  selectedPurpose === purpose.id
+                  purpose.comingSoon
+                    ? "cursor-not-allowed border-neutral-200 bg-neutral-100 text-neutral-400"
+                    : selectedPurpose === purpose.id
                     ? "border-neutral-950 bg-neutral-950 text-white"
                     : "border-neutral-200 bg-neutral-50 text-neutral-700 hover:border-blue-300 hover:bg-blue-50"
                 }`}
               >
                 {purpose.label}
+                {purpose.comingSoon ? " / 近日公開" : ""}
               </button>
             ))}
           </div>

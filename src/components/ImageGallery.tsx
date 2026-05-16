@@ -84,7 +84,7 @@ export function ImageGallery({
                   : "text-neutral-500 hover:text-rose-600"
               }`}
             >
-              ♥ <span>{favorites.size}</span>
+              お気に入り <span>{favorites.size}</span>
             </button>
           </div>
           <span
@@ -105,7 +105,7 @@ export function ImageGallery({
         <div className="flex flex-1 items-center justify-center px-4">
           <p className="text-center text-xs text-neutral-500">
             {filter === "favorites"
-              ? "お気に入りはまだありません。サムネ右上の ♥ で追加できます。"
+              ? "お気に入りはまだありません。サムネ右上の保存マークで追加できます。"
               : "まだ画像がありません。「夕焼けの東京タワーを 1 枚」のように依頼してみてください。"}
           </p>
         </div>
@@ -274,7 +274,7 @@ function SelectionActionBar({
           onClick={onFavoriteAll}
           className="rounded-md border border-neutral-300 bg-white px-2 py-1 hover:border-rose-500 hover:text-rose-600"
         >
-          ♥ 一括お気に入り
+          一括お気に入り
         </button>
         {cwd && unsavedCount > 0 && (
           <button

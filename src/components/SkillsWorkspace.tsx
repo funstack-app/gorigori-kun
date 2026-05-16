@@ -8,6 +8,7 @@ import { GORI_SKILLS, type GoriSkill } from "../lib/skills/catalog";
 import { useToasts } from "../lib/store/toasts";
 import { activateSkill } from "./SkillBadge";
 import { SkillDetailModal } from "./SkillDetailModal";
+import { SkillIcon } from "./SkillIcon";
 
 type SkillImportResult = {
   id: string;
@@ -133,7 +134,6 @@ export function SkillsWorkspace({ onUseSkill }: { onUseSkill?: () => void }) {
           className="flex items-center gap-1.5 rounded-lg border border-[#343434] bg-[#1e1e1e] px-3 py-1.5 text-xs font-bold text-neutral-200 hover:border-pink-400 hover:text-white"
           title="SKILL.md ファイルを取り込んで、このアプリで使えるようにします"
         >
-          <span>📥</span>
           <span>スキルをインポート</span>
         </button>
       </div>
@@ -154,8 +154,8 @@ export function SkillsWorkspace({ onUseSkill }: { onUseSkill?: () => void }) {
                 }`}
               >
                 <div className="flex items-start justify-between gap-3">
-                  <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-[#101010] text-2xl">
-                    {skill.icon}
+                  <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-[#101010] text-pink-300">
+                    <SkillIcon id={skill.id} className="h-6 w-6" />
                   </div>
                   <span
                     className={`rounded-full px-2 py-0.5 text-[10px] font-black ${
@@ -193,7 +193,7 @@ export function SkillsWorkspace({ onUseSkill }: { onUseSkill?: () => void }) {
                         : "bg-pink-500 text-white hover:bg-pink-400"
                     }`}
                     aria-disabled={isLocked}
-                    title={isLocked ? "β 版以降で公開予定" : undefined}
+                    title={isLocked ? "近日公開予定" : undefined}
                   >
                     {isLocked ? "近日公開" : "使う"}
                   </button>
@@ -212,7 +212,7 @@ export function SkillsWorkspace({ onUseSkill }: { onUseSkill?: () => void }) {
                       className="w-full rounded-lg border border-[#242424] bg-transparent px-3 py-1.5 text-[10px] font-bold text-neutral-400 hover:border-neutral-500 hover:text-neutral-200"
                       title="このスキルの SKILL.md を外部ファイルに書き出します"
                     >
-                      📤 エクスポート
+                      エクスポート
                     </button>
                   )}
                   <p className="text-[10px] leading-relaxed text-neutral-500">

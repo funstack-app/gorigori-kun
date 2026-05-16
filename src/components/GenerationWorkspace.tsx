@@ -403,7 +403,7 @@ function FrozenTurnBlock({
       <div className="p-3">
         {turn.images.length === 0 ? (
           <p className="text-[11px] text-neutral-500">
-            この生成には画像が記録されていません（プロンプトのみ）。
+            画像はまだ記録されていません。
           </p>
         ) : (
           <div className={`grid gap-2 ${gridColsClass(size)}`}>
@@ -453,7 +453,6 @@ function PastBatchList({
         <span className="text-[11px] font-bold text-neutral-300">
           過去の生成{projectImagePaths ? "（プロジェクト内のみ）" : `（${rows.length} 件）`}
         </span>
-        <span className="text-[10px] text-neutral-500">クリックで展開</span>
       </div>
       <div className="space-y-2">
         {rows.map((row) => (
@@ -545,7 +544,13 @@ function PastBatchRow({
               <button
                 key={img.id}
                 type="button"
-                onClick={() => useImagePreview.getState().open(img.path)}
+                onClick={() =>
+                  // STΛCK 指示 (2026-05-17): 矢印キーで他バッチに飛ばない。
+                  // siblings = このバッチ内の画像のみ。
+                  useImagePreview
+                    .getState()
+                    .open(img.path, visibleImages.map((i) => i.path))
+                }
                 className="aspect-square overflow-hidden rounded border border-[#343434] bg-[#0f0f0f] hover:border-pink-400"
               >
                 <img
@@ -560,7 +565,7 @@ function PastBatchRow({
         )}
         {!loading && detail && visibleImages.length === 0 && !projectImagePaths && (
           <p className="text-[11px] text-neutral-500">
-            この生成には画像が記録されていません（プロンプトのみ記録）。
+            画像はまだ記録されていません。
           </p>
         )}
       </div>

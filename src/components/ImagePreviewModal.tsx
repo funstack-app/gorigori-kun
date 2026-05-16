@@ -42,7 +42,8 @@ export function ImagePreviewModal() {
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   // 詳細パネル開閉。デフォルトで開いておく（ユーザーが情報を求めている前提）。
-  const [metaOpen, setMetaOpen] = useState(true);
+  // STΛCK 指示 (2026-05-17): 詳細パネルは常時表示 (トグルなし)
+  const metaOpen = true;
 
   // siblings の文脈で前/次へ移動するヘルパー。siblings prop と fallback どちらでも動く。
   const navigateBy = (delta: 1 | -1) => {
@@ -132,19 +133,8 @@ export function ImagePreviewModal() {
         <div className="flex flex-shrink-0 items-center gap-2">
           <SaveToProjectButton path={path} />
           <SaveAsFormatButton path={path} name={name} />
-          <button
-            type="button"
-            onClick={() => setMetaOpen((prev) => !prev)}
-            className={[
-              "rounded border px-2 py-1 transition",
-              metaOpen
-                ? "border-pink-400 bg-pink-500/15 text-pink-100"
-                : "border-pink-400/60 text-pink-200 hover:bg-pink-500/10",
-            ].join(" ")}
-            title={metaOpen ? "詳細を閉じる" : "詳細を開く"}
-          >
-            ℹ 詳細
-          </button>
+          {/* STΛCK 指示 (2026-05-17): 詳細トグルボタンは削除。
+              ImageMetaPanel は常時下部表示にして UX を簡潔にする。 */}
           <button
             type="button"
             onClick={() => {
@@ -153,7 +143,7 @@ export function ImagePreviewModal() {
             }}
             className="rounded border border-emerald-500/60 px-2 py-1 text-emerald-300 hover:bg-emerald-500/10"
           >
-            🖌 マスクで編集
+            マスクで編集
           </button>
           <button
             ref={closeBtnRef}
