@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { auth, mcp, secrets, type McpServer, type SecretKey } from "../lib/ipc";
+import { auth, higgsfield, mcp, secrets, type McpServer, type SecretKey } from "../lib/ipc";
 import { useAccounts, type SecretsState } from "../lib/store/accounts";
 import { useToasts } from "../lib/store/toasts";
 
@@ -50,25 +50,7 @@ const SERVICE_CATEGORIES: ServiceCategory[] = [
   },
 ];
 
-// OAuth 接続される AI 生成サービス (アカウントタブで接続管理する)
-// 接続先一覧では「ここで接続できますよ」と案内する案内カードを表示する。
-type LinkedService = {
-  icon: string;
-  name: string;
-  description: string;
-  manageHint: string;
-  url?: string;
-};
-
-const LINKED_AI_SERVICES: LinkedService[] = [
-  {
-    icon: "⚡",
-    name: "HiggsField",
-    description: "動画・画像 AI 生成 (Soul/Mix/Speak/Sketch/Edit 等)。クレジットは右上に表示。",
-    manageHint: "「アカウント」タブから接続/解除します",
-    url: "https://higgsfield.ai/",
-  },
-];
+// (旧 LINKED_AI_SERVICES は HiggsfieldConnectionCard に内包したので削除)
 /*
  * OpenAI API カードは UI から再度撤去 (今は Roadmap 行き)。
  * STΛCK は Codex サブスクログインで完結する利用形態なので、画像生成
@@ -314,35 +296,7 @@ export function SettingsConnections() {
         実際の接続管理は「アカウント」タブで行う。ここでは存在を明示する。
       */}
       <ConnectionSection title="AI 生成">
-        {LINKED_AI_SERVICES.map((service) => (
-          <div
-            key={service.name}
-            className="space-y-2 rounded-xl border border-pink-400/30 bg-pink-500/5 p-3"
-          >
-            <div className="flex items-center gap-2">
-              <span className="text-lg">{service.icon}</span>
-              <div className="flex-1">
-                <p className="text-sm font-black text-pink-100">{service.name}</p>
-                <p className="mt-0.5 text-[11px] text-neutral-400">
-                  {service.description}
-                </p>
-              </div>
-            </div>
-            <p className="rounded-lg border border-[#2a2a2a] bg-[#101010] px-2 py-1.5 text-[10px] text-neutral-400">
-              {service.manageHint}
-            </p>
-            {service.url && (
-              <a
-                href={service.url}
-                target="_blank"
-                rel="noreferrer"
-                className="block text-[10px] text-pink-200 underline hover:text-pink-100"
-              >
-                公式サイトを開く ↗
-              </a>
-            )}
-          </div>
-        ))}
+        <HiggsfieldConnectionCard />
       </ConnectionSection>
 
       {SERVICE_CATEGORIES.map((category) => (
@@ -681,6 +635,138 @@ function Modal({ title, children, onClose }: { title: string; children: ReactNod
         </div>
         <div className="mt-4">{children}</div>
       </section>
+    </div>
+  );
+}
+
+/**
+ * Higgsfield ワンタップ接続カード。
+ * STΛCK の設計思想: MOST=GPT Image 2 すぐ動く、おまけ=拡張機能はワンタップで追加。
+ *
+ * 状態:
+ *   - CLI 未インストール    → 接続不可、インストール案内
+ *   - 未認証                → 「接続する」ボタン (一発で OAuth)
+ *   - 認証済み              → 「接続済み」+ プラン/クレジット表示 + 解除ボタン
+ *
+ * 認証完了後は accounts.refreshHiggsfield() を呼んで生成タブの UI に伝播。
+ */
+function HiggsfieldConnectionCard() {
+  const status = useAccounts((s) => s.higgsfield);
+  const refresh = useAccounts((s) => s.refreshHiggsfield);
+  const toast = useToasts.getState();
+  const [busy, setBusy] = useState(false);
+
+  const installed = status.installed;
+  const authed = status.authenticated;
+  const plan = status.plan;
+  const credits = status.credits;
+
+  const connect = async () => {
+    setBusy(true);
+    try {
+      // higgsfield.login は CLI を `auth login` で叩いてブラウザを開く。
+      // CLI 内部で stdout に device code / URL を吐くので、それを toast で
+      // 軽く知らせて、ユーザーがブラウザでログイン完了したら次の refresh で
+      // authenticated=true になる。
+      await higgsfield.login();
+      // 認証完了を確認 (CLI 側がブラウザ完了まで待ってから戻ってくる仕様)
+      await refresh();
+      toast.push({ kind: "success", text: "HiggsField に接続しました", ttlMs: 3000 });
+    } catch (err) {
+      toast.push({
+        kind: "error",
+        text: `HiggsField 接続に失敗: ${String(err)}`,
+        ttlMs: 6000,
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const disconnect = async () => {
+    setBusy(true);
+    try {
+      await higgsfield.logout();
+      await refresh();
+      toast.push({ kind: "success", text: "HiggsField の接続を解除しました", ttlMs: 3000 });
+    } catch (err) {
+      toast.push({
+        kind: "error",
+        text: `HiggsField 接続解除に失敗: ${String(err)}`,
+        ttlMs: 6000,
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="space-y-3 rounded-xl border border-pink-400/30 bg-pink-500/5 p-3">
+      <div className="flex items-center gap-2">
+        <span className="text-lg">⚡</span>
+        <div className="flex-1">
+          <div className="flex items-center gap-2">
+            <p className="text-sm font-black text-pink-100">HiggsField</p>
+            {authed && (
+              <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-black text-emerald-200">
+                接続済み
+              </span>
+            )}
+          </div>
+          <p className="mt-0.5 text-[11px] text-neutral-400">
+            動画・画像 AI 生成 (Soul / Mix / Speak / Sketch / Edit 等)
+          </p>
+        </div>
+      </div>
+
+      {authed && (
+        <div className="grid grid-cols-2 gap-2 rounded-lg border border-[#2a2a2a] bg-[#101010] px-3 py-2 text-[11px]">
+          <div>
+            <p className="text-neutral-500">プラン</p>
+            <p className="font-bold text-neutral-200">{plan ?? "—"}</p>
+          </div>
+          <div>
+            <p className="text-neutral-500">クレジット</p>
+            <p className="font-bold text-neutral-200">
+              {credits !== undefined ? credits.toLocaleString() : "—"}
+            </p>
+          </div>
+        </div>
+      )}
+
+      {!installed ? (
+        <div className="space-y-2">
+          <p className="rounded-lg border border-yellow-500/30 bg-yellow-500/5 px-2 py-1.5 text-[11px] text-yellow-200">
+            HiggsField CLI が見つかりません
+          </p>
+          <a
+            href="https://higgsfield.ai/"
+            target="_blank"
+            rel="noreferrer"
+            className="block rounded-lg border border-[#343434] bg-[#1e1e1e] px-3 py-1.5 text-center text-[11px] font-bold text-neutral-200 hover:border-pink-400 hover:text-white"
+          >
+            HiggsField の使い方を見る ↗
+          </a>
+        </div>
+      ) : !authed ? (
+        <button
+          type="button"
+          disabled={busy}
+          onClick={connect}
+          className="h-9 w-full rounded-lg bg-pink-500 px-3 text-xs font-black text-white transition hover:bg-pink-400 disabled:opacity-60"
+        >
+          {busy ? "接続中…" : "接続する (ワンタップ)"}
+        </button>
+      ) : (
+        <button
+          type="button"
+          disabled={busy}
+          onClick={disconnect}
+          className="h-9 w-full rounded-lg border border-[#343434] bg-[#1e1e1e] px-3 text-xs font-bold text-neutral-300 transition hover:border-rose-400 hover:text-rose-300 disabled:opacity-60"
+        >
+          {busy ? "解除中…" : "接続を解除"}
+        </button>
+      )}
     </div>
   );
 }
