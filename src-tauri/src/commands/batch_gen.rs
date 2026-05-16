@@ -339,6 +339,7 @@ async fn run_one_worker_inner(
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
+    crate::codex::process::no_window_flag(&mut cmd);
 
     let mut child = cmd
         .spawn()

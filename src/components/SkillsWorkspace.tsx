@@ -53,10 +53,16 @@ export function SkillsWorkspace({ onUseSkill }: { onUseSkill?: () => void }) {
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
           {GORI_SKILLS.map((skill) => {
             const status = present[skill.id];
+            const isComingSoon = skill.comingSoon === true;
+            const isLocked = !skill.availableInApp;
             return (
               <article
                 key={skill.id}
-                className="flex min-h-[260px] flex-col rounded-2xl border border-[#2a2a2a] bg-[#181818] p-4 shadow-sm transition hover:border-pink-400"
+                className={`flex min-h-[260px] flex-col rounded-2xl border bg-[#181818] p-4 shadow-sm transition ${
+                  isLocked
+                    ? "border-[#222] opacity-60"
+                    : "border-[#2a2a2a] hover:border-pink-400"
+                }`}
               >
                 <div className="flex items-start justify-between gap-3">
                   <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-[#101010] text-2xl">
@@ -64,14 +70,18 @@ export function SkillsWorkspace({ onUseSkill }: { onUseSkill?: () => void }) {
                   </div>
                   <span
                     className={`rounded-full px-2 py-0.5 text-[10px] font-black ${
-                      status === false
-                        ? "bg-yellow-500/15 text-yellow-200"
-                        : skill.availableInApp
-                          ? "bg-emerald-500/15 text-emerald-200"
-                          : "bg-neutral-500/15 text-neutral-300"
+                      isComingSoon
+                        ? "bg-purple-500/15 text-purple-200"
+                        : status === false
+                          ? "bg-yellow-500/15 text-yellow-200"
+                          : "bg-emerald-500/15 text-emerald-200"
                     }`}
                   >
-                    {status === false ? "未検出" : skill.availableInApp ? "接続済み" : "準備済み"}
+                    {isComingSoon
+                      ? "近日公開"
+                      : status === false
+                        ? "未検出"
+                        : "接続済み"}
                   </span>
                 </div>
 
@@ -86,10 +96,17 @@ export function SkillsWorkspace({ onUseSkill }: { onUseSkill?: () => void }) {
                 <div className="mt-auto space-y-2 pt-4">
                   <button
                     type="button"
-                    onClick={() => useSkill(skill)}
-                    className="w-full rounded-lg bg-pink-500 px-3 py-2 text-xs font-black text-white hover:bg-pink-400"
+                    disabled={isLocked}
+                    onClick={() => !isLocked && useSkill(skill)}
+                    className={`w-full rounded-lg px-3 py-2 text-xs font-black transition ${
+                      isLocked
+                        ? "cursor-not-allowed bg-neutral-700 text-neutral-400"
+                        : "bg-pink-500 text-white hover:bg-pink-400"
+                    }`}
+                    aria-disabled={isLocked}
+                    title={isLocked ? "β 版以降で公開予定" : undefined}
                   >
-                    使う
+                    {isLocked ? "近日公開" : "使う"}
                   </button>
                   <button
                     type="button"

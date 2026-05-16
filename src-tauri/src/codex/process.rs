@@ -7,6 +7,38 @@ use std::sync::{Arc, Mutex};
 use anyhow::{anyhow, Context, Result};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
+/// Windows で `Command::spawn()` するときデフォルトで黒い console window が
+/// 一瞬出てしまう。これを抑制するためのヘルパー。tokio / std どちらの
+/// Command にも `creation_flags(CREATE_NO_WINDOW)` を設定する。
+///
+/// CREATE_NO_WINDOW = 0x08000000 (winbase.h より)
+///
+/// macOS / Linux では no-op。
+#[cfg(windows)]
+pub fn no_window_flag(cmd: &mut Command) -> &mut Command {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    cmd.creation_flags(CREATE_NO_WINDOW)
+}
+
+#[cfg(not(windows))]
+pub fn no_window_flag(cmd: &mut Command) -> &mut Command {
+    cmd
+}
+
+/// std::process::Command 用の同等ヘルパー。
+#[cfg(windows)]
+pub fn no_window_flag_std(cmd: &mut std::process::Command) -> &mut std::process::Command {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    cmd.creation_flags(CREATE_NO_WINDOW)
+}
+
+#[cfg(not(windows))]
+pub fn no_window_flag_std(cmd: &mut std::process::Command) -> &mut std::process::Command {
+    cmd
+}
+
 /// Codex app-server の stderr を、起動失敗時にユーザーに見せるためバッファする。
 /// メモリ暴走を防ぐため最新 200 行までに制限。
 #[derive(Clone, Default)]
@@ -224,6 +256,9 @@ pub async fn spawn_app_server(bin: &Path) -> Result<AppServerProcess> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env("PATH", enriched_path());
+
+    // Windows での黒い console window 抑制
+    no_window_flag(&mut cmd);
 
     cmd.kill_on_drop(true);
 

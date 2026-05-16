@@ -57,6 +57,7 @@ pub async fn codex_describe_image(image_path: String) -> Result<String, String> 
     .stdin(Stdio::piped())
     .stdout(Stdio::piped())
     .stderr(Stdio::piped());
+    crate::codex::process::no_window_flag(&mut cmd);
     cmd.kill_on_drop(true);
 
     let mut child = cmd

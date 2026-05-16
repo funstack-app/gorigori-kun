@@ -58,6 +58,11 @@
     "windows": {
       "webviewInstallMode": {
         "type": "offlineInstaller"
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "startMenuFolder": "GORI GORI KUN",
+        "languages": ["Japanese", "English"]
       }
     }
   }

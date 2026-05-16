@@ -1,7 +1,6 @@
 export type GoriSkillId =
   | "gori-storyboard"
-  | "gori-multi-angle"
-  | "image2-mobile-lp-builder";
+  | "gori-multi-angle";
 
 export type GoriSkill = {
   id: GoriSkillId;
@@ -10,13 +9,17 @@ export type GoriSkill = {
   icon: string;
   description: string;
   path: string;
+  /** アプリ内から直接利用可能なスキル。false の場合はグレイアウト表示。 */
   availableInApp: boolean;
+  /** β 版以降公開予定。グレイアウト + 「近日公開」ラベル表示。 */
+  comingSoon?: boolean;
   launchHint: string;
 };
 
 // 画像生成直結のクリエイティブ系スキルのみ収録。
 // エッセイ生成・UIクローンは「クリエイティブ画像生成ツール」の範囲外。
 // (Codex とのクロスレビュー 2026-05-14 で確定)
+// モバイル LP ビルダーは α 版から外し、β 版以降に延期 (2026-05-17)。
 export const GORI_SKILLS: GoriSkill[] = [
   {
     id: "gori-storyboard",
@@ -38,18 +41,8 @@ export const GORI_SKILLS: GoriSkill[] = [
       "環境と被写体を固定し、ショット距離(クローズアップ/ミディアム/ロング)とアングル(俯瞰/煽り/正面)だけ変えて一気にカット量産。",
     path: "~/.codex/skills/gori-multi-angle",
     availableInApp: false,
-    launchHint: "マルチアングルのスキル実行パネルを開きます (近日公開)。",
-  },
-  {
-    id: "image2-mobile-lp-builder",
-    name: "モバイルLPビルダー",
-    shortName: "Mobile LP",
-    icon: "📱",
-    description:
-      "参照画像からスマホ向けLPの構成とビジュアルを組み立てます。",
-    path: "~/.codex/skills/image2-mobile-lp-builder",
-    availableInApp: false,
-    launchHint: "モバイルLPのスキル実行パネルを開きます。",
+    comingSoon: true,
+    launchHint: "近日公開予定です。",
   },
 ];
 

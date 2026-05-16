@@ -1284,6 +1284,7 @@ async fn generate_one_take(
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    crate::codex::process::no_window_flag(&mut cmd);
 
     let mut child = cmd
         .spawn()
@@ -1421,6 +1422,7 @@ async fn codex_oneshot(
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    crate::codex::process::no_window_flag(&mut cmd);
 
     let mut child = cmd
         .spawn()

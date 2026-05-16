@@ -111,10 +111,20 @@ jobs:
           New-Item -ItemType Directory -Force -Path "src-tauri/resources" | Out-Null
 
           # codex.exe (CLI 本体)
+          # Codex 指摘 (2026-05-16): ファイル名を厳密一致で抽出。helper exe が
+          # 同梱されている場合に誤検出して別バイナリを codex.exe としてリネーム
+          # するのを防ぐ。
           Invoke-WebRequest -Uri "$base/codex-x86_64-pc-windows-msvc.exe.zip" -OutFile "codex.zip"
           Expand-Archive -Path "codex.zip" -DestinationPath "tmp-codex" -Force
-          Get-ChildItem "tmp-codex" -Recurse | Where-Object { $_.Name -like "*.exe" } | Select-Object -First 1 | ForEach-Object {
-            Move-Item -Path $_.FullName -Destination "src-tauri/resources/codex.exe" -Force
+          Get-ChildItem "tmp-codex" -Recurse |
+            Where-Object { $_.Name -eq "codex-x86_64-pc-windows-msvc.exe" } |
+            Select-Object -First 1 |
+            ForEach-Object {
+              Move-Item -Path $_.FullName -Destination "src-tauri/resources/codex.exe" -Force
+            }
+          if (-not (Test-Path "src-tauri/resources/codex.exe")) {
+            Write-Error "Failed to find codex-x86_64-pc-windows-msvc.exe in extracted zip"
+            exit 1
           }
           Remove-Item "codex.zip"
           Remove-Item "tmp-codex" -Recurse -Force
@@ -122,8 +132,15 @@ jobs:
           # codex-app-server.exe (アプリが直接話す JSON-RPC サーバー)
           Invoke-WebRequest -Uri "$base/codex-app-server-x86_64-pc-windows-msvc.exe.zip" -OutFile "codex-app-server.zip"
           Expand-Archive -Path "codex-app-server.zip" -DestinationPath "tmp-app-server" -Force
-          Get-ChildItem "tmp-app-server" -Recurse | Where-Object { $_.Name -like "*.exe" } | Select-Object -First 1 | ForEach-Object {
-            Move-Item -Path $_.FullName -Destination "src-tauri/resources/codex-app-server.exe" -Force
+          Get-ChildItem "tmp-app-server" -Recurse |
+            Where-Object { $_.Name -eq "codex-app-server-x86_64-pc-windows-msvc.exe" } |
+            Select-Object -First 1 |
+            ForEach-Object {
+              Move-Item -Path $_.FullName -Destination "src-tauri/resources/codex-app-server.exe" -Force
+            }
+          if (-not (Test-Path "src-tauri/resources/codex-app-server.exe")) {
+            Write-Error "Failed to find codex-app-server-x86_64-pc-windows-msvc.exe in extracted zip"
+            exit 1
           }
           Remove-Item "codex-app-server.zip"
           Remove-Item "tmp-app-server" -Recurse -Force

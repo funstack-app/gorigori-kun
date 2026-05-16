@@ -48,15 +48,37 @@ export const useAppServer = create<AppServerState>((set, get) => ({
       return;
     }
     set({ status: "starting", error: undefined });
-    try {
-      // load settings first so codexBinaryPath override applies on cold start
-      await useSettings.getState().load();
-      const override = useSettings.getState().settings.codexBinaryPath;
-      const initInfo = await startAppServer(override);
-      set({ status: "ready", initInfo });
-    } catch (err) {
-      set({ status: "error", error: String(err) });
+    // load settings first so codexBinaryPath override applies on cold start
+    await useSettings.getState().load();
+    const override = useSettings.getState().settings.codexBinaryPath;
+
+    // 自動リトライ: 初回 handshake が transport closed 等で失敗することがある
+    // (codex-app-server が stdin 準備完了する前に initialize 投げてしまう競合)。
+    // 再試行で成功するパターンが大半なので、ユーザーには見せずに自動リトライする。
+    const MAX_RETRIES = 3;
+    let lastErr: unknown = null;
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        const initInfo = await startAppServer(override);
+        set({ status: "ready", initInfo, error: undefined });
+        return;
+      } catch (err) {
+        lastErr = err;
+        const msg = String(err);
+        // 既に起動済みなら次回ループで appServerReady が拾うので break
+        if (msg.includes("already running")) {
+          if (await appServerReady()) {
+            set({ status: "ready", error: undefined });
+            return;
+          }
+        }
+        // 次の試行まで少し待つ (子プロセスが完全に落ちる/起動する猶予)
+        if (attempt < MAX_RETRIES) {
+          await new Promise((r) => setTimeout(r, 500 * attempt));
+        }
+      }
     }
+    set({ status: "error", error: String(lastErr) });
   },
 }));
 
