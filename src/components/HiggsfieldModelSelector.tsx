@@ -139,7 +139,9 @@ export function HiggsfieldModelSelector({ media }: { media: "image" | "video" })
     if (!open) setQuery("");
   }, [open]);
 
-  const disabled = loadState !== "ready";
+  // HiggsField 未接続でも GPT Image 2 (デフォルト) を使えるので、
+  // picker を開けるようにする。読み込み中だけ disabled。
+  const disabled = loadState === "loading" || loadState === "idle";
   const selectedJobSetTypes = useMemo(
     () => new Set(selectedModels.map((model) => model.jobSetType)),
     [selectedModels],
@@ -205,6 +207,7 @@ export function HiggsfieldModelSelector({ media }: { media: "image" | "video" })
       {open && (
         <ModelPickerPopover
           anchorRect={anchorRect}
+          loadState={loadState}
           query={query}
           onQueryChange={setQuery}
           sections={sections}
@@ -225,6 +228,7 @@ export function HiggsfieldModelSelector({ media }: { media: "image" | "video" })
 
 function ModelPickerPopover({
   anchorRect,
+  loadState,
   query,
   onQueryChange,
   sections,
@@ -239,6 +243,7 @@ function ModelPickerPopover({
   onClose,
 }: {
   anchorRect: DOMRect | null;
+  loadState: LoadState;
   query: string;
   onQueryChange: (query: string) => void;
   sections: ModelSection[];
@@ -335,6 +340,17 @@ function ModelPickerPopover({
             variant="muted"
           />
         </div>
+
+        {/* HiggsField 未接続時の案内 (sections が空) */}
+        {(loadState === "missing" || loadState === "needsAuth") && sections.length === 0 && (
+          <div className="rounded-md border border-[#2a2a2a] bg-[#101010] p-3 text-[11px] text-neutral-400">
+            <p className="font-semibold text-neutral-300">拡張モデルを追加できます</p>
+            <p className="mt-1 leading-relaxed">
+              設定タブの「接続先」から HiggsField や他の画像生成サービスを
+              ワンタップで接続すると、ここに選択肢が増えます。
+            </p>
+          </div>
+        )}
 
         {sections.map((section) => (
           <section key={section.title} className="mb-3 last:mb-0">
@@ -533,10 +549,18 @@ function matchesModel(model: HiggsfieldModelInfo, normalizedQuery: string): bool
   return haystack.includes(normalizedQuery);
 }
 
+// このアプリの MOST は Codex 経由 GPT Image 2 で生成すること。
+// HiggsField は「契約してる人だけが追加する拡張モデル」という位置づけ。
+//
+// したがって HiggsField CLI が未インストール / 未認証 でも、
+// それは「拡張未接続」という正常状態であり、エラーや警告として
+// 「設定で認証してください」と出すのは設計ミス。常に GPT Image 2 を
+// デフォルトとして表示する。
 function getTriggerText(loadState: LoadState, selectedModels: SelectedModel[]): string {
   if (loadState === "loading" || loadState === "idle") return "モデル一覧を確認中...";
-  if (loadState === "missing" || loadState === "needsAuth") return "設定で認証してください";
-  if (loadState === "error") return "モデル一覧を取得できませんでした";
+  if (loadState === "error") return CODEX_STANDARD_LABEL;
+  // missing / needsAuth は「拡張未接続」というだけで、生成自体は GPT Image 2 で可能
+  if (loadState === "missing" || loadState === "needsAuth") return CODEX_STANDARD_LABEL;
   if (selectedModels.length === 0) return CODEX_STANDARD_LABEL;
   if (selectedModels.length === 1) return selectedModels[0].displayName;
   return `${selectedModels.length} models compared`;
@@ -544,11 +568,11 @@ function getTriggerText(loadState: LoadState, selectedModels: SelectedModel[]): 
 
 function getHelperText(loadState: LoadState, _selectedCount: number): string | null {
   if (loadState === "loading" || loadState === "idle") return "モデル一覧を確認中...";
-  if (loadState === "missing") return "Higgsfield CLI が見つかりません";
-  if (loadState === "needsAuth") return "設定で認証してください";
-  if (loadState === "error") return "モデル一覧を取得できませんでした";
-  // 比較モード時の説明文 (黄色の amber-300) は冗長なので削除。
-  // ボタン文言「N モデルで比較生成」で十分意味が伝わる。
+  // missing / needsAuth でも、ヘルパー文言は出さない。
+  // GPT Image 2 がデフォルトで使えるので、警告を出す必要がない。
+  // 拡張モデルを追加したい人は設定の「接続先」から HiggsField を接続できる。
+  if (loadState === "missing" || loadState === "needsAuth") return null;
+  if (loadState === "error") return null;
   return null;
 }
 
