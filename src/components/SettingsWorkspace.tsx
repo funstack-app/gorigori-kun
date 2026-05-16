@@ -7,13 +7,12 @@ import { useToasts } from "../lib/store/toasts";
 import { SettingsCloudSection } from "./SettingsCloudSection";
 import { SettingsConnections } from "./SettingsConnections";
 import { StorageManagementSection } from "./StorageManagementSection";
-type Tab = "basic" | "storage" | "cloud" | "accounts" | "connections";
+type Tab = "basic" | "storage" | "accounts" | "connections";
 const TABS: Array<{ id: Tab; label: string }> = [
   { id: "basic", label: "基本" },
   { id: "storage", label: "保存先" },
-  { id: "cloud", label: "クラウドストレージ" },
   { id: "accounts", label: "アカウント" },
-  { id: "connections", label: "接続先" },
+  { id: "connections", label: "接続先 (拡張機能)" },
 ];
 const PLAN_LABELS: Record<CodexPlan, string> = {
   free: "Free",
@@ -53,8 +52,17 @@ export function SettingsWorkspace() {
         </nav>
         <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
           {tab === "basic" && <BasicSettings />}
-          {tab === "storage" && <StorageSettingsTab />}
-          {tab === "cloud" && <SettingsCloudSection />}
+          {tab === "storage" && (
+            <div className="space-y-6">
+              {/*
+                ローカルとクラウドの保存先を1つのタブにまとめる。
+                STΛCK 指摘「クラウドストレージ・保存先まわりがわかりづらい」を解消。
+                ローカル (PC内) → クラウド (Supabase) の順で表示。
+              */}
+              <StorageSettingsTab />
+              <SettingsCloudSection />
+            </div>
+          )}
           {tab === "accounts" && <AccountSettings />}
           {tab === "connections" && <SettingsConnections />}
         </div>
