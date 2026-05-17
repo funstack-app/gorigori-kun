@@ -411,7 +411,14 @@ function FrozenTurnBlock({
               <button
                 key={img.id}
                 type="button"
-                onClick={() => useImagePreview.getState().open(img.path)}
+                onClick={() =>
+                  useImagePreview
+                    .getState()
+                    .open(
+                      img.path,
+                      turn.images.map((i) => i.path),
+                    )
+                }
                 className="aspect-square overflow-hidden rounded border border-[#343434] bg-[#0f0f0f] hover:border-pink-400"
               >
                 <img
@@ -725,7 +732,16 @@ function BatchBlock({
       )}
       <div className={`grid gap-2 ${gridColsClass(size)}`}>
         {workers.map((worker) => (
-          <WorkerTile key={`${batchId}-${worker.idx}`} worker={worker} />
+          <WorkerTile
+            key={`${batchId}-${worker.idx}`}
+            worker={worker}
+            siblings={workers
+              .filter(
+                (w): w is Extract<BatchWorker, { status: "completed" }> =>
+                  w.status === "completed",
+              )
+              .map((w) => w.path)}
+          />
         ))}
       </div>
     </div>
@@ -759,14 +775,22 @@ function ModelTagPill({
   );
 }
 
-function WorkerTile({ worker }: { worker: BatchWorker }) {
+function WorkerTile({
+  worker,
+  siblings,
+}: {
+  worker: BatchWorker;
+  siblings?: string[];
+}) {
   const caption = worker.modelDisplayName;
   if (worker.status === "completed") {
     return (
       <div className="min-w-0">
         <button
           type="button"
-          onClick={() => useImagePreview.getState().open(worker.path)}
+          onClick={() =>
+            useImagePreview.getState().open(worker.path, siblings)
+          }
           className="aspect-square w-full overflow-hidden rounded border border-[#343434] bg-[#0f0f0f] hover:border-pink-400"
         >
           <img

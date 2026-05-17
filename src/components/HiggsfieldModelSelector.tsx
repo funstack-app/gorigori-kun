@@ -181,7 +181,7 @@ export function HiggsfieldModelSelector({ media }: { media: "image" | "video" })
           type="button"
           disabled={disabled}
           onClick={toggleOpen}
-          className="flex h-9 w-full items-center justify-between gap-2 rounded-md border border-[#343434] bg-[#101010] px-2.5 text-left text-sm font-semibold text-neutral-100 outline-none transition hover:border-[#444] hover:bg-[#151515] focus:border-pink-500 disabled:cursor-not-allowed disabled:text-neutral-600"
+          className="shrink-13-row flex h-9 w-full items-center justify-between gap-2 rounded-md border border-[#343434] bg-[#101010] px-2.5 text-left text-sm font-semibold text-neutral-100 outline-none transition hover:border-[#444] hover:bg-[#151515] focus:border-pink-500 disabled:cursor-not-allowed disabled:text-neutral-600"
         >
           <span className="truncate">{triggerText}</span>
           {selectedModels.length > 1 && (

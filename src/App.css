@@ -57,19 +57,49 @@ body,
 }
 
 /*
- * STΛCK 指示 (2026-05-17 第4版):
- * 13/15/16 インチで「ちょうど読みやすく、入力欄も確保される」最適化。
+ * STΛCK 指示 (2026-05-17 第5版):
+ * 13インチ Windows 高 DPI (1366×768@150% = 911×512 logical) で
+ * 生成ボタン以下のコントロールが画面外に押し出されていた問題への対処。
  *
- * clamp(min, preferred, max) で画面幅に応じてフォント自動調整:
- *   - 13 インチ(1366px相当): 15px (老眼配慮を最低限維持しつつ密度UP)
- *   - 15 インチ(1680px相当): 15.5px (中間)
- *   - 16 インチ(1920px+):    16px (老眼向け快適サイズ)
+ * 横幅だけでなく「画面高さ」もフォントサイズの判定に入れる。
+ * 縦が短い(=ノートPC 13インチ高DPI)時は font-size を最低 13px まで下げ、
+ * 横が広く縦も広い(=16インチ等)時のみ 16px まで上げる。
  *
- * preferred = 1vw + offset で「画面幅 100px ごとに 約 1px ずつ太る」感じ。
- * 13/15/16 インチで体感的にレイアウトが破綻しないバランス。
+ * - height < 600px: 強制 13px (Tailwind の rem 連動で全体が密度高くなる)
+ * - height < 720px: 14px
+ * - それ以外: 横幅で clamp(15px, ..., 16px)
+ *
+ * 老眼ターゲットは維持したいが、生成できなくなったら本末転倒なので
+ * 「見える」を最優先する。
  */
 html {
   font-size: clamp(15px, 0.6vw + 11.5px, 16px);
+}
+
+/*
+ * 13 インチ専用の縦圧縮ルール。
+ * Windows 13" 高 DPI (1366×768@150% = 911×512 logical) で
+ * 生成ボタンが画面外に押し出される問題への対処。
+ *
+ * 縦が 720px 以下のときだけフォントを縮め、さらに
+ * 「.shrink-13" クラスを付けた要素を圧縮する。
+ * Mac 13/15/16 インチ(縦 900px+) は無影響。
+ */
+@media (max-height: 720px) {
+  html { font-size: 14px; }
+  /* ReferenceRack を 56px → 40px に圧縮 */
+  .shrink-13-rack { height: 2.5rem !important; }
+  /* 下部コントロール枠の padding と余白を詰める */
+  .shrink-13-controls { padding: 0.5rem !important; }
+  .shrink-13-controls > * + * { margin-top: 0.25rem !important; }
+  /* 生成モデル / 枚数 / アスペクト比のボタン高さを 36px → 28px */
+  .shrink-13-row { height: 1.75rem !important; }
+  /* シーン構築の各カードの padding を詰める */
+  .shrink-13-card { padding: 0.5rem !important; }
+}
+
+@media (max-height: 600px) {
+  html { font-size: 13px; }
 }
 
 body {

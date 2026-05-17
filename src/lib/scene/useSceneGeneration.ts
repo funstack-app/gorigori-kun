@@ -190,7 +190,16 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
       // 1 枚も生成できなかった場合は明示エラー扱いにし、toast でも
       // 通知して原因認識を促す。
       if (okCount === 0) {
-        const message = `画像生成に失敗しました。${generationCount}件すべて失敗しています。Codex CLI のパス・認証状況・モデル設定を確認してください。`;
+        // STΛCK 報告 (2026-05-17 第2版): 元の文言は「Codex CLI のパス」を
+        // 決め打ちで示していたが、実態は Higgsfield API のアスペクト比違反
+        // 等のモデル個別エラーが多い。原因を断定せずに「選択中の組み合わせ」
+        // を疑うよう促す表現に変更。
+        const message =
+          `画像生成に失敗しました（${generationCount}件すべて失敗）。\n` +
+          `多くの場合、選んだモデルと対応していないアスペクト比が原因です。\n` +
+          `・アスペクト比を 16:9 / 1:1 / 9:16 に変えて再試行してみてください\n` +
+          `・別のモデルに切り替えても改善する場合があります\n` +
+          `・それでも失敗する場合は、ログインや接続を見直してください`;
         setStatus({ kind: "error", message });
         useToasts.getState().push({
           kind: "error",

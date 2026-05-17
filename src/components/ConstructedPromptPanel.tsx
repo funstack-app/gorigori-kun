@@ -232,7 +232,7 @@ export function ConstructedPromptPanel() {
         STΛCK 指示 (2026-05-17): 内部スクロールではなく、全体が見える
         ことを優先。間隔も space-y-2 に詰めて高さを節約。
       */}
-      <div className="shrink-0 space-y-1.5 border-t border-[#2a2a2a] p-2.5">
+      <div className="shrink-13-controls shrink-0 space-y-1.5 border-t border-[#2a2a2a] p-2.5">
         <HiggsfieldModelSelector media={modelMedia} />
 
         {/*
@@ -247,7 +247,7 @@ export function ConstructedPromptPanel() {
               type="button"
               onClick={decrement}
               disabled={count <= 1}
-              className="h-9 w-9 text-base font-bold text-neutral-300 hover:bg-[#1f1f1f] disabled:cursor-not-allowed disabled:text-neutral-600"
+              className="shrink-13-row h-9 w-9 text-base font-bold text-neutral-300 hover:bg-[#1f1f1f] disabled:cursor-not-allowed disabled:text-neutral-600"
               title="生成枚数を減らす"
             >
               −
@@ -274,14 +274,14 @@ export function ConstructedPromptPanel() {
                   event.currentTarget.blur();
                 }
               }}
-              className="w-9 border-0 bg-transparent text-center text-base font-bold text-neutral-100 outline-none"
+              className="shrink-13-row w-9 border-0 bg-transparent text-center text-base font-bold text-neutral-100 outline-none"
               title="生成枚数"
             />
             <button
               type="button"
               onClick={increment}
               disabled={count >= MAX_COUNT}
-              className="h-9 w-9 text-base font-bold text-neutral-300 hover:bg-[#1f1f1f] disabled:cursor-not-allowed disabled:text-neutral-600"
+              className="shrink-13-row h-9 w-9 text-base font-bold text-neutral-300 hover:bg-[#1f1f1f] disabled:cursor-not-allowed disabled:text-neutral-600"
               title="生成枚数を増やす"
             >
               +
@@ -292,7 +292,7 @@ export function ConstructedPromptPanel() {
           <button
             type="button"
             onClick={() => setAspectPickerOpen(true)}
-            className="flex h-9 min-w-0 flex-1 items-center justify-between gap-2 rounded-md border border-[#343434] bg-[#101010] px-2.5 text-left text-sm font-semibold text-neutral-100 outline-none transition hover:border-[#444] hover:bg-[#151515] focus:border-pink-500"
+            className="shrink-13-row flex h-9 min-w-0 flex-1 items-center justify-between gap-2 rounded-md border border-[#343434] bg-[#101010] px-2.5 text-left text-sm font-semibold text-neutral-100 outline-none transition hover:border-[#444] hover:bg-[#151515] focus:border-pink-500"
             title="アスペクト比を選ぶ"
           >
             <span className="flex min-w-0 items-center gap-1.5">
@@ -419,7 +419,7 @@ function ReferenceRack({
   // - text-[10px] leading-tight で「ライブラリ」「プリセット」も収まる
   // - 13 インチでもボタン縦サイズは変えず、横幅だけ縮む = 老眼でも押せる
   const iconBtn =
-    "flex h-14 w-full min-w-0 flex-col items-center justify-center gap-1 rounded-md border border-[#343434] bg-[#101010] px-1 text-[10px] font-bold leading-tight text-neutral-300 transition hover:border-pink-400 hover:text-white";
+    "shrink-13-rack flex h-14 w-full min-w-0 flex-col items-center justify-center gap-1 rounded-md border border-[#343434] bg-[#101010] px-1 text-[10px] font-bold leading-tight text-neutral-300 transition hover:border-pink-400 hover:text-white";
   return (
     <div className="border-b border-[#2a2a2a] p-3">
       {/* 操作ボタン (アイコン上 / 文字下) を 1 行 5 列で常に横並び */}
