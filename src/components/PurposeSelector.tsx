@@ -10,12 +10,15 @@ type PurposeOption = {
   disabled?: boolean;
 };
 
+// v0.6.9 STΛCK 指示:
+// - 「広告」はβ移行のためグレーアウト (disabled)
+// - 「ストーリーカット」は用途別ではなくスキル経由で起動する設計に統一する
+//   ため、選択肢からは外す (スキル機能の中から実行)
 const PURPOSE_OPTIONS: PurposeOption[] = [
   { value: "artwork", label: "作品" },
-  { value: "ad", label: "広告" },
-  { value: "videoStory", label: "ストーリーカット" },
-  { value: "lpFuture", label: "LP（α以降）", disabled: true },
-  { value: "carouselFuture", label: "カルーセル（α以降）", disabled: true },
+  { value: "ad", label: "広告（β以降）", disabled: true },
+  { value: "lpFuture", label: "LP（β以降）", disabled: true },
+  { value: "carouselFuture", label: "カルーセル（β以降）", disabled: true },
 ];
 
 export function PurposeSelector() {
