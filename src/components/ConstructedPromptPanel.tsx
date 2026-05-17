@@ -410,40 +410,38 @@ function ReferenceRack({
   onOpenSkill: () => void;
   skillButtonRef: React.RefObject<HTMLButtonElement | null>;
 }) {
-  // STΛCK 指示 (2026-05-17): アイコン only + ホバーツールチップに統一。
-  // Figma / Linear / Photoshop と同じプロアプリ的ツールバー。13/15/16
-  // インチどの画面サイズでも崩れない。
-  // - ボタンを h-9 w-9 (= 36px) に統一
-  // - アイコンサイズは内部で h-4 w-4 程度に縮小
-  // - text は sr-only でアクセシビリティ用に保持 (スクリーンリーダー対応)
-  // - title 属性でブラウザネイティブのツールチップ表示
+  // STΛCK 指示 (2026-05-17 再修正): アイコン only は識別しづらいので
+  // 文字を 1 行で表示する。ボタンを横長矩形にして「アイコン + 文字」を
+  // 横並びにし、文字は truncate で 1 行強制 (折り返さない)。
+  // 横並びだと幅を食うが、overflow-x-auto があるので狭いとスクロール可。
   const iconBtn =
-    "flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-[#343434] bg-[#101010] text-neutral-300 transition hover:border-pink-400 hover:text-white";
+    "flex h-9 shrink-0 items-center gap-1.5 rounded-md border border-[#343434] bg-[#101010] px-2.5 text-[11px] font-bold text-neutral-300 transition hover:border-pink-400 hover:text-white";
+  const labelStyle = "whitespace-nowrap";
   return (
     <div className="border-b border-[#2a2a2a] p-3">
-      {/* 1 段目: 操作ボタン行 (アイコン only / ホバーで名前表示) */}
+      {/* 1 段目: 操作ボタン行 (横並びアイコン + テキスト) */}
       <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
         <button
           type="button"
           onClick={onOpenLibrary}
           className={iconBtn}
-          title="ライブラリ — このアプリで生成した画像から選ぶ"
+          title="このアプリで生成した画像から選ぶ"
         >
           <LibraryIcon />
-          <span className="sr-only">ライブラリ</span>
+          <span className={labelStyle}>ライブラリ</span>
         </button>
         <button
           type="button"
           onClick={onOpenStock}
           className={iconBtn}
-          title="素材 — ストック素材 API から写真を検索"
+          title="ストック素材 API から写真を検索"
         >
           <StockIcon />
-          <span className="sr-only">素材</span>
+          <span className={labelStyle}>素材</span>
         </button>
-        <label className={`${iconBtn} cursor-pointer`} title="追加 — ローカル PC から画像を追加">
+        <label className={`${iconBtn} cursor-pointer`} title="ローカル PC から画像を追加">
           <PlusIcon />
-          <span className="sr-only">追加</span>
+          <span className={labelStyle}>追加</span>
           <input
             type="file"
             accept="image/png,image/jpeg,image/webp"
@@ -463,20 +461,20 @@ function ReferenceRack({
           type="button"
           onClick={onOpenPreset}
           className={iconBtn}
-          title="プリセット — 登録済みプロンプトを呼び出す"
+          title="登録済みプロンプトを呼び出す"
         >
           <PresetIcon />
-          <span className="sr-only">プリセット</span>
+          <span className={labelStyle}>プリセット</span>
         </button>
         <button
           ref={skillButtonRef}
           type="button"
           onClick={onOpenSkill}
           className={iconBtn}
-          title="スキル — スキルを呼び出す"
+          title="スキルを呼び出す"
         >
           <SkillIcon />
-          <span className="sr-only">スキル</span>
+          <span className={labelStyle}>スキル</span>
         </button>
       </div>
 
