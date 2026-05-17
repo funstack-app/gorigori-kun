@@ -16,17 +16,19 @@ export function SceneCompactCard({ number, title, summary, onClick }: Props) {
     <button
       type="button"
       onClick={onClick}
-      className="group flex w-full flex-col items-start gap-1 rounded-lg border border-[#2a2a2a] bg-[#101010] p-2.5 text-left transition hover:border-pink-400 hover:bg-[#141414]"
+      className="scene-compact-card group flex w-full flex-col items-start gap-1 rounded-lg border border-[#2a2a2a] bg-[#101010] p-2.5 text-left transition hover:border-pink-400 hover:bg-[#141414]"
     >
       <div className="flex items-center gap-2">
-        <span className="text-[10px] font-black uppercase tracking-wide text-neutral-500">
+        <span className="scene-compact-num text-[10px] font-black uppercase tracking-wide text-neutral-500">
           {number}
         </span>
-        <span className="text-xs font-black text-white">{title}</span>
+        <span className="scene-compact-title text-xs font-black text-white">
+          {title}
+        </span>
       </div>
       <p
         className={[
-          "line-clamp-2 text-[11px] font-medium leading-snug",
+          "scene-compact-summary line-clamp-2 text-[11px] font-medium leading-snug",
           isEmpty ? "text-neutral-600" : "text-neutral-300",
         ].join(" ")}
       >

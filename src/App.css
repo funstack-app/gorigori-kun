@@ -99,6 +99,25 @@ html {
   /* textarea の min-h-[80px] を撤廃して完全に潰せるようにする
      (下部の生成ボタンが画面外に出ないよう、textarea を縮ませる) */
   .shrink-13-textarea { min-height: 0 !important; }
+  /*
+   * STΛCK 指示 (2026-05-17 v0.6.8):
+   * シーン構築の 4 カードを 1 枚あたり 60px → 36px に圧縮し、
+   * プロンプト入力欄の縦幅を確保する。
+   * 「下部(生成ボタン等)優先、プロンプト次点、シーン構築は押せれば良い」
+   * という STΛCK の優先順位に基づく。
+   */
+  .scene-compact-card {
+    padding: 0.375rem 0.5rem !important;
+    gap: 0.125rem !important;
+  }
+  .scene-compact-title { font-size: 0.625rem !important; line-height: 1 !important; }
+  .scene-compact-num   { font-size: 0.5625rem !important; }
+  .scene-compact-summary {
+    font-size: 0.625rem !important;
+    line-height: 1.2 !important;
+    -webkit-line-clamp: 1 !important;
+  }
+  .scene-builder-stack > * + * { margin-top: 0.25rem !important; }
 }
 
 @media (max-height: 600px) {

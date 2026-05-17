@@ -56,7 +56,7 @@ export function SceneBuilder() {
 
   return (
     <>
-      <div className="space-y-2">
+      <div className="scene-builder-stack space-y-2">
         <SceneCompactCard
           number="01"
           title="主役と構図"
