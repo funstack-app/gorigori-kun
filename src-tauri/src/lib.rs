@@ -262,6 +262,8 @@ pub fn run() {
             commands::storage::storage_legacy_summary,
             commands::storage::storage_usage_stats,
             commands::storage::storage_home_dir,
+            commands::storage::projects_read,
+            commands::storage::projects_write,
             commands::stock::stock_search,
             commands::stock::stock_download,
             commands::translate::translate_ja_to_en,

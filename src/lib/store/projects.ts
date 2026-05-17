@@ -1,3 +1,4 @@
+import { invoke } from "@tauri-apps/api/core";
 import { create } from "zustand";
 
 /**
@@ -12,7 +13,12 @@ import { create } from "zustand";
  * - sessions: 進行中の作業セッション（時系列、過去のチャット）
  * - projects: 完成物のアーカイブ箱（用途別、案件別、テーマ別）
  *
- * 永続化: localStorage（MVP）。後で Tauri のファイル DB に移行可。
+ * 永続化 (v0.6.9): Tauri 経由のファイル保存に変更。
+ *   - Mac:   ~/Library/Application Support/app.codexframefactory/projects.json
+ *   - Win:   %APPDATA%/app.codexframefactory/projects.json
+ *
+ * 旧 localStorage に保存されていたデータは、起動時に自動マイグレーションする。
+ * これにより dev版 と 配布版 でデータが共有され、再インストールでも消えない。
  */
 
 export type ProjectItem = {
@@ -62,7 +68,13 @@ function generateId(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function readPersisted(): Project[] {
+/**
+ * localStorage からのデータ救出 (旧版互換)。
+ * v0.6.8 以前は localStorage に保存されていた。新規ファイル保存に
+ * 移行した後も、初回起動時に localStorage に残っているデータがあれば
+ * それを読み出して、ファイルへ移行する。
+ */
+function readFromLocalStorage(): Project[] {
   try {
     const raw = localStorage.getItem(PROJECTS_LS_KEY);
     if (raw) {
@@ -70,55 +82,62 @@ function readPersisted(): Project[] {
       if (Array.isArray(parsed) && parsed.length > 0) {
         return parsed as Project[];
       }
-      // 空配列が保存されていた場合: バックアップに有効データがあれば復元
-      const backup = localStorage.getItem(PROJECTS_LS_BACKUP_KEY);
-      if (backup) {
-        const backupParsed = JSON.parse(backup);
-        if (Array.isArray(backupParsed) && backupParsed.length > 0) {
-          console.warn(
-            "[projects] primary key was empty, restored from backup:",
-            backupParsed.length,
-            "projects",
-          );
-          // バックアップを primary に書き戻す
-          localStorage.setItem(PROJECTS_LS_KEY, backup);
-          return backupParsed as Project[];
-        }
-      }
-      return [];
     }
-    // primary が無い場合: backup を試す
     const backup = localStorage.getItem(PROJECTS_LS_BACKUP_KEY);
     if (backup) {
       const backupParsed = JSON.parse(backup);
-      if (Array.isArray(backupParsed)) {
-        console.warn(
-          "[projects] primary missing, restored from backup:",
-          backupParsed.length,
-          "projects",
-        );
-        localStorage.setItem(PROJECTS_LS_KEY, backup);
+      if (Array.isArray(backupParsed) && backupParsed.length > 0) {
         return backupParsed as Project[];
       }
     }
-    return [];
   } catch (err) {
-    console.error("[projects] readPersisted failed:", err);
-    return [];
+    console.error("[projects] localStorage 読み出し失敗:", err);
+  }
+  return [];
+}
+
+/**
+ * Tauri 経由でファイルから読み出す。
+ * 初期化時、または localStorage が空の時に呼ぶ。
+ */
+async function readFromFile(): Promise<Project[]> {
+  try {
+    const content = await invoke<string>("projects_read");
+    const parsed = JSON.parse(content);
+    if (Array.isArray(parsed)) {
+      return parsed as Project[];
+    }
+  } catch (err) {
+    console.error("[projects] ファイル読み出し失敗:", err);
+  }
+  return [];
+}
+
+/**
+ * Tauri 経由でファイルに書き込む。
+ */
+async function writeToFile(projects: Project[]): Promise<void> {
+  try {
+    const serialized = JSON.stringify(projects);
+    await invoke("projects_write", { content: serialized });
+  } catch (err) {
+    console.error("[projects] ファイル書き込み失敗:", err);
   }
 }
 
 function persist(projects: Project[]) {
+  // 旧 localStorage にも引き続き書く (緊急時の救出経路として)
   try {
     const serialized = JSON.stringify(projects);
     localStorage.setItem(PROJECTS_LS_KEY, serialized);
-    // 0 件保存は事故 (削除) かもしれないので、バックアップには空配列を書かない
     if (projects.length > 0) {
       localStorage.setItem(PROJECTS_LS_BACKUP_KEY, serialized);
     }
   } catch (err) {
-    console.error("[projects] persist failed:", err);
+    console.error("[projects] localStorage 書き込み失敗:", err);
   }
+  // 主たる保存先はファイル (非同期)
+  void writeToFile(projects);
 }
 
 type ProjectsState = {
@@ -137,10 +156,40 @@ type ProjectsState = {
 
   /** 企画チャットログを上書き保存する（差分ではなく毎回スナップショット） */
   setPlanChat: (projectId: string, messages: ProjectChatMessage[]) => void;
+
+  /**
+   * 初期化: ファイルから読み出して store に流し込む。
+   * 起動時に必ず1回呼ぶ。複数回呼ばれても安全 (最後の結果で上書き)。
+   * Tauri が動いていない時 (Vite単体プレビュー等) は localStorage に
+   * フォールバックする。
+   */
+  initialize: () => Promise<void>;
 };
 
 export const useProjects = create<ProjectsState>((set, get) => ({
-  projects: readPersisted(),
+  // 初期値は同期的に localStorage から読む (起動の一瞬を埋めるため)。
+  // 直後に initialize() でファイル側の正値で上書きされる。
+  projects: readFromLocalStorage(),
+
+  initialize: async () => {
+    try {
+      const fromFile = await readFromFile();
+      const fromLs = readFromLocalStorage();
+      // ファイル側が空で localStorage に有効データがあれば、マイグレーション。
+      // ファイル側にデータがあればそれを正とする (ファイルが master)。
+      if (fromFile.length === 0 && fromLs.length > 0) {
+        console.info(
+          "[projects] localStorage から", fromLs.length, "件をファイルへ移行",
+        );
+        await writeToFile(fromLs);
+        set({ projects: fromLs });
+      } else {
+        set({ projects: fromFile });
+      }
+    } catch (err) {
+      console.error("[projects] initialize 失敗:", err);
+    }
+  },
 
   createProject: (name, description) => {
     const now = Date.now();

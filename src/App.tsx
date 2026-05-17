@@ -268,6 +268,11 @@ function SignedInScaffold() {
     useImages.getState().attachListeners();
     useImages.getState().startWatcher();
     useAccounts.getState().refresh();
+    // v0.6.9: プロジェクトをファイル保存に移行。起動時にファイルから読み出し、
+    // 旧 localStorage データがあればファイルへマイグレーション。
+    useProjects.getState().initialize().catch((err) => {
+      console.error("projects.initialize failed", err);
+    });
 
     let cancelled = false;
     const armed: Array<() => void> = [];

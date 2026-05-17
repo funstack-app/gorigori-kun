@@ -374,3 +374,57 @@ fn summarize_files(dir: &Path, file_count: &mut u32, total_bytes: &mut u64) {
         }
     }
 }
+
+// ─────────────────────────────────────────────────────────────────
+// プロジェクト永続化 (v0.6.9)
+//
+// 旧設計: localStorage に projects.projects キーで保存
+//   → WebView ごとに別、dev版↔配布版でデータが共有されない問題
+//
+// 新設計: アプリデータディレクトリの projects.json に保存
+//   - Mac:   ~/Library/Application Support/app.codexframefactory/projects.json
+//   - Win:   %APPDATA%/app.codexframefactory/projects.json
+//   - Linux: ~/.local/share/app.codexframefactory/projects.json
+//   dirs crate の data_dir() で自動解決、クロスプラットフォーム対応。
+//
+// 起動時に旧 localStorage データがあれば、フロント側で自動的に
+// これらのコマンドを呼んでマイグレーションする。
+
+fn projects_file_path() -> Result<PathBuf, String> {
+    // dirs::data_dir() は OS 標準のアプリデータディレクトリを返す。
+    //   Mac:   ~/Library/Application Support
+    //   Win:   %APPDATA% (= C:\Users\<user>\AppData\Roaming)
+    //   Linux: ~/.local/share
+    let data_dir = dirs::data_dir().ok_or_else(|| "アプリデータディレクトリの解決に失敗".to_string())?;
+    let app_dir = data_dir.join("app.codexframefactory");
+    if !app_dir.exists() {
+        fs::create_dir_all(&app_dir)
+            .map_err(|err| format!("アプリディレクトリ作成失敗: {err}"))?;
+    }
+    Ok(app_dir.join("projects.json"))
+}
+
+/// projects.json を読み出す。存在しなければ空配列文字列を返す。
+/// フロント側で JSON.parse して useProjects.projects に代入する。
+#[tauri::command]
+pub async fn projects_read() -> Result<String, String> {
+    let path = projects_file_path()?;
+    if !path.exists() {
+        return Ok("[]".to_string());
+    }
+    fs::read_to_string(&path).map_err(|err| format!("projects.json 読込失敗: {err}"))
+}
+
+/// projects.json に書き込む (上書き)。
+/// フロント側で JSON.stringify した文字列をそのまま渡す。
+/// 失敗時は前のファイルが壊れていないよう、tmp 経由でアトミックに書き換える。
+#[tauri::command]
+pub async fn projects_write(content: String) -> Result<(), String> {
+    let path = projects_file_path()?;
+    let tmp_path = path.with_extension("json.tmp");
+    fs::write(&tmp_path, &content)
+        .map_err(|err| format!("projects.json 一時書込失敗: {err}"))?;
+    fs::rename(&tmp_path, &path)
+        .map_err(|err| format!("projects.json リネーム失敗: {err}"))?;
+    Ok(())
+}
