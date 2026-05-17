@@ -13,6 +13,7 @@ import { useSceneStore } from "../store/scene";
 import { useScenePromptOverride } from "../store/scenePrompt";
 import { useSessions } from "../store/sessions";
 import { useThreads } from "../store/threads";
+import { useToasts } from "../store/toasts";
 
 export type SceneGenerationStatus =
   | { kind: "idle" }
@@ -194,10 +195,20 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
       return result;
     } catch (error) {
       useBatches.getState().removeBatch(tempId);
+      const errorMessage = String(error);
       setStatus({
         kind: "error",
-        message: `画像生成に失敗しました: ${String(error)}`,
+        message: `画像生成に失敗しました: ${errorMessage}`,
       });
+      // STΛCK 報告 (2026-05-17): 生成ボタン押下後 'status エリアの一瞬の表示
+      // しか見えない' 問題対策。toast でも明示通知して、ユーザーが原因を
+      // 確実に認識できるようにする。エラー詳細は ttl 長めで残す。
+      useToasts.getState().push({
+        kind: "error",
+        text: `生成に失敗しました\n${errorMessage}`,
+        ttlMs: 12000,
+      });
+      console.error("[useSceneGeneration] generate failed:", error);
       return null;
     } finally {
       setGenerating(false);

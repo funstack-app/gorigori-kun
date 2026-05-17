@@ -283,7 +283,15 @@ async fn run_one_worker_inner(
         .map_err(|e| format!("tempdir 作成失敗: {e}"))?;
     let tmp_home = tmp.path().to_path_buf();
 
-    // 2. ~/.codex/* を symlink (generated_images だけ独立 dir)
+    // 2. ~/.codex/* を tmp_home に複製 (generated_images だけ独立 dir)
+    //
+    // Unix: シンボリックリンクで参照だけ通す (高速、無料)
+    // Windows: シンボリックリンクは管理者権限必須。代わりに
+    //          ファイル/ディレクトリを再帰コピーする。
+    //          これがないと tmp_home に config.toml / auth.json /
+    //          cache/ などが何も無い状態で codex exec が起動し、
+    //          認証なしエラーで即落ちする (Windows で生成ボタン押下
+    //          後の不発の真因)。
     if codex_home_orig.exists() {
         let entries = std::fs::read_dir(&codex_home_orig)
             .map_err(|e| format!("CODEX_HOME 読み込み失敗: {e}"))?;
@@ -292,9 +300,22 @@ async fn run_one_worker_inner(
             if name == "generated_images" {
                 continue;
             }
+            let src = entry.path();
+            let dst = tmp_home.join(&name);
             #[cfg(unix)]
             {
-                let _ = std::os::unix::fs::symlink(entry.path(), tmp_home.join(&name));
+                let _ = std::os::unix::fs::symlink(&src, &dst);
+            }
+            #[cfg(windows)]
+            {
+                // Windows ではシンボリックリンクが原則使えないので、
+                // ファイルは fs::copy、ディレクトリは再帰コピーで複製する。
+                if let Err(err) = copy_recursive(&src, &dst) {
+                    tracing::warn!(
+                        target: "codex.batch_gen",
+                        "copy {src:?} -> {dst:?} failed: {err}"
+                    );
+                }
             }
         }
     }
@@ -501,4 +522,39 @@ fn short_id() -> String {
         .unwrap_or(0);
     // 16 hex chars — plenty of entropy for a per-batch / per-file id.
     format!("{:016x}", nanos)
+}
+
+/// Windows で `~/.codex/` 配下を per-worker tmp_home に複製するヘルパー。
+/// シンボリックリンクが使えない環境向け。ファイルは fs::copy、
+/// ディレクトリは再帰コピー。
+///
+/// 失敗を error にすると 1 ファイルでも欠けたときバッチ全体が落ちるので、
+/// 個別の Err はログに残しつつ Ok を返す方が頑健。とはいえ呼び出し側
+/// で握りつぶしているので、ここでは普通に Result を返しておく。
+#[cfg(windows)]
+fn copy_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    let metadata = std::fs::metadata(src)?;
+    if metadata.is_file() {
+        // 同名ファイルが既にあれば上書き (空 tmpdir のはずだが安全側)
+        std::fs::copy(src, dst)?;
+        return Ok(());
+    }
+    if metadata.is_dir() {
+        std::fs::create_dir_all(dst)?;
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            let entry_name = entry.file_name();
+            let child_src = entry.path();
+            let child_dst = dst.join(&entry_name);
+            // ネストしたディレクトリも再帰でカバー
+            if let Err(err) = copy_recursive(&child_src, &child_dst) {
+                tracing::warn!(
+                    target: "codex.batch_gen",
+                    "copy_recursive child failed: {child_src:?} -> {child_dst:?}: {err}"
+                );
+            }
+        }
+        return Ok(());
+    }
+    Ok(())
 }
