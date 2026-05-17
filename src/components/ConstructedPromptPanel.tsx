@@ -410,16 +410,17 @@ function ReferenceRack({
   onOpenSkill: () => void;
   skillButtonRef: React.RefObject<HTMLButtonElement | null>;
 }) {
-  // STΛCK 指示 (2026-05-17 再修正): アイコン only は識別しづらいので
-  // 文字を 1 行で表示する。ボタンを横長矩形にして「アイコン + 文字」を
-  // 横並びにし、文字は truncate で 1 行強制 (折り返さない)。
-  // 横並びだと幅を食うが、overflow-x-auto があるので狭いとスクロール可。
+  // STΛCK 指示 (2026-05-17 再修正): アイコン上 / 文字下の縦並び。
+  // 文字は 2 行折り返し許容。ボタンは元のサイズ感に戻して読みやすく。
+  // - h-14 w-16 (= 64×56) で十分な打ちやすさ
+  // - アイコン -> 文字の縦並びは flex-col + gap-1
+  // - 文字は text-[10px] で 2 行になっても収まる
+  // - leading-tight で行間を詰める
   const iconBtn =
-    "flex h-9 shrink-0 items-center gap-1.5 rounded-md border border-[#343434] bg-[#101010] px-2.5 text-[11px] font-bold text-neutral-300 transition hover:border-pink-400 hover:text-white";
-  const labelStyle = "whitespace-nowrap";
+    "flex h-14 w-16 shrink-0 flex-col items-center justify-center gap-1 rounded-md border border-[#343434] bg-[#101010] px-1 text-[10px] font-bold leading-tight text-neutral-300 transition hover:border-pink-400 hover:text-white";
   return (
     <div className="border-b border-[#2a2a2a] p-3">
-      {/* 1 段目: 操作ボタン行 (横並びアイコン + テキスト) */}
+      {/* 1 段目: 操作ボタン行 (アイコン上 / 文字下) */}
       <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
         <button
           type="button"
@@ -428,7 +429,7 @@ function ReferenceRack({
           title="このアプリで生成した画像から選ぶ"
         >
           <LibraryIcon />
-          <span className={labelStyle}>ライブラリ</span>
+          <span className="text-center">ライブラリ</span>
         </button>
         <button
           type="button"
@@ -437,11 +438,11 @@ function ReferenceRack({
           title="ストック素材 API から写真を検索"
         >
           <StockIcon />
-          <span className={labelStyle}>素材</span>
+          <span className="text-center">素材</span>
         </button>
         <label className={`${iconBtn} cursor-pointer`} title="ローカル PC から画像を追加">
           <PlusIcon />
-          <span className={labelStyle}>追加</span>
+          <span className="text-center">追加</span>
           <input
             type="file"
             accept="image/png,image/jpeg,image/webp"
@@ -464,7 +465,7 @@ function ReferenceRack({
           title="登録済みプロンプトを呼び出す"
         >
           <PresetIcon />
-          <span className={labelStyle}>プリセット</span>
+          <span className="text-center">プリセット</span>
         </button>
         <button
           ref={skillButtonRef}
@@ -474,7 +475,7 @@ function ReferenceRack({
           title="スキルを呼び出す"
         >
           <SkillIcon />
-          <span className={labelStyle}>スキル</span>
+          <span className="text-center">スキル</span>
         </button>
       </div>
 

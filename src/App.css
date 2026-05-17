@@ -57,18 +57,20 @@ body,
 }
 
 /*
- * STΛCK 指示 (2026-05-17): どんな画面サイズ・解像度でも全 UI が
- * 収まるよう、ベースフォントサイズを 13px に縮小。
- * Windows の高 DPI (150% スケール) 環境では、Tauri WebView2 が
- * OS の DPI を継承するため、Mac の 14px 表示より体感で 1.5倍 大きく
- * 見える。13px ベースにすることで Windows 13 インチでも下部の
- * 生成ボタンまで画面内に収まる。
+ * STΛCK 指示 (2026-05-17 更新):
+ * Mac (Retina) で 13px は小さすぎる → 14px に戻す。
+ *
+ * 画面サイズへの適応は html font-size ではなく、Rust 側の
+ * ウィンドウ自動最適化 (lib.rs:setup) で実装済み。
+ * 起動時にモニターサイズの 80% でウィンドウを開き、minWidth/Height
+ * の clamp で守られているので、font-size を 14px に戻しても
+ * 13/15/16 インチ + Windows 高DPI でレイアウト崩れは起きない。
  *
  * Tailwind の text-xs/text-sm/text-base は rem 単位なので、
  * このルートサイズに連動する。
  */
 html {
-  font-size: 13px;
+  font-size: 14px;
 }
 
 body {
