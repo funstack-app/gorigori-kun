@@ -411,18 +411,19 @@ function ReferenceRack({
   onOpenSkill: () => void;
   skillButtonRef: React.RefObject<HTMLButtonElement | null>;
 }) {
-  // STΛCK 指示 (2026-05-17 第3版): 老眼ターゲットでボタンサイズ維持のため、
-  // 横一列の overflow-x-auto では狭幅で「スキル」が見切れていた。
-  // 5 ボタンを 3 列グリッドで 2 段（3+2）に折り返し、横スクロールをなくす。
-  // - grid grid-cols-3 でカラム幅に追従、ボタン側は w-full で 1 列をフル占有
-  // - h-14 と縦並び(flex-col)はキープして 60×幅可変の打ちやすさを維持
-  // - text-[10px] leading-tight で長い「プリセット」「ライブラリ」も収まる
+  // STΛCK 指示 (2026-05-17 第4版): 2段にすると 13 インチでプロンプト
+  // 入力欄が狭くなって打てなくなる問題があった。
+  // → 5 ボタンを 1 行 5 列に戻す。ボタン幅は画面に応じて伸縮 (w-full)。
+  // - grid grid-cols-5 で常に横一列、画面幅に追従して自動リサイズ
+  // - h-14 縦並び (icon 上 / text 下) は維持
+  // - text-[10px] leading-tight で「ライブラリ」「プリセット」も収まる
+  // - 13 インチでもボタン縦サイズは変えず、横幅だけ縮む = 老眼でも押せる
   const iconBtn =
-    "flex h-14 w-full flex-col items-center justify-center gap-1 rounded-md border border-[#343434] bg-[#101010] px-1 text-[10px] font-bold leading-tight text-neutral-300 transition hover:border-pink-400 hover:text-white";
+    "flex h-14 w-full min-w-0 flex-col items-center justify-center gap-1 rounded-md border border-[#343434] bg-[#101010] px-1 text-[10px] font-bold leading-tight text-neutral-300 transition hover:border-pink-400 hover:text-white";
   return (
     <div className="border-b border-[#2a2a2a] p-3">
-      {/* 1 段目: 操作ボタン (アイコン上 / 文字下) を 3 列グリッドで 2 段に折り返し */}
-      <div className="grid grid-cols-3 gap-1.5">
+      {/* 操作ボタン (アイコン上 / 文字下) を 1 行 5 列で常に横並び */}
+      <div className="grid grid-cols-5 gap-1.5">
         <button
           type="button"
           onClick={onOpenLibrary}
