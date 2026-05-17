@@ -105,7 +105,7 @@ export function PromptLibraryModal({ open, onClose }: Props) {
         }}
       >
         <div
-          className="flex h-[80vh] w-full max-w-3xl flex-col overflow-hidden rounded-xl border border-neutral-800 bg-neutral-900 shadow-2xl"
+          className="flex max-h-[calc(100vh-2rem)] w-full max-w-3xl flex-col overflow-y-auto rounded-xl border border-neutral-800 bg-neutral-900 shadow-2xl"
           onClick={(e) => e.stopPropagation()}
         >
           <div className="flex items-center justify-between border-b border-neutral-800 px-4 py-3">

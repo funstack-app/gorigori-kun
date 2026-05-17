@@ -57,7 +57,7 @@ export function SkillDetailModal({ skill, onClose }: SkillDetailModalProps) {
       onClick={onClose}
     >
       <div
-        className="flex max-h-[85vh] w-full max-w-3xl flex-col rounded-2xl border border-[#343434] bg-[#1a1a1a] shadow-2xl"
+        className="flex max-h-[calc(100vh-2rem)] w-full max-w-3xl flex-col overflow-y-auto rounded-2xl border border-[#343434] bg-[#1a1a1a] shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         <header className="flex items-start justify-between border-b border-[#2a2a2a] px-5 py-4">

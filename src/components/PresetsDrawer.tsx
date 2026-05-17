@@ -269,7 +269,7 @@ export function PresetsDrawer({ fullPage = false }: { fullPage?: boolean }) {
     return (
       <>
         <div className="grid h-full min-h-0 gap-5 lg:grid-cols-[260px_minmax(0,1fr)]">
-          <aside className="rounded-xl border border-[#2a2a2a] bg-[#181818] p-4">
+          <aside className="min-h-0 overflow-y-auto rounded-xl border border-[#2a2a2a] bg-[#181818] p-4">
             {categoryList}
           </aside>
           <main className="flex min-h-0 flex-col gap-3 rounded-xl border border-[#2a2a2a] bg-[#181818] p-4">
@@ -345,7 +345,7 @@ export function PresetsDrawer({ fullPage = false }: { fullPage?: boolean }) {
     <>
       <div className="flex h-full min-h-0 flex-col gap-3">
         {categoryList}
-        <div className="border-t border-[#242424] pt-3">
+        <div className="flex min-h-0 flex-1 flex-col border-t border-[#242424] pt-3">
           <div className="mb-2 flex items-center justify-between gap-2">
             <h4 className="text-xs font-black text-white">
               {activeCategoryName} のプリセット
@@ -358,7 +358,7 @@ export function PresetsDrawer({ fullPage = false }: { fullPage?: boolean }) {
               ＋ 新規
             </button>
           </div>
-          {presetGrid}
+          <div className="min-h-0 flex-1 overflow-y-auto pr-1">{presetGrid}</div>
         </div>
       </div>
       {presetFormModal}
@@ -666,7 +666,7 @@ function PresetFormModal(props: PresetFormProps) {
       }}
     >
       <div
-        className="w-full max-w-xl rounded-xl border border-[#2a2a2a] bg-[#161616] shadow-2xl"
+        className="max-h-[calc(100vh-2rem)] w-full max-w-xl overflow-y-auto rounded-xl border border-[#2a2a2a] bg-[#161616] shadow-2xl"
         onMouseDown={(event) => event.stopPropagation()}
         role="dialog"
         aria-modal="true"

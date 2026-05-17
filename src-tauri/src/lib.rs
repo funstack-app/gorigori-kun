@@ -110,6 +110,32 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .setup(move |app| {
+            if let Some(window) = app.get_webview_window("main") {
+                if let Some(monitor) = window.current_monitor()? {
+                    let size = monitor.size();
+                    let scale = monitor.scale_factor();
+                    let logical_w = size.width as f64 / scale;
+                    let logical_h = size.height as f64 / scale;
+                    let target_w = (logical_w * 0.8).clamp(820.0, 1400.0);
+                    let target_h = (logical_h * 0.8).clamp(540.0, 900.0);
+
+                    window.set_size(tauri::LogicalSize::new(target_w, target_h))?;
+                    window.center()?;
+
+                    tracing::info!(
+                        target: "codex.window",
+                        "optimized window size: physical={}x{} scale={} logical={:.0}x{:.0} target={:.0}x{:.0}",
+                        size.width,
+                        size.height,
+                        scale,
+                        logical_w,
+                        logical_h,
+                        target_w,
+                        target_h,
+                    );
+                }
+            }
+
             // Initialize the SQLite session-history pool synchronously
             // at startup so every command-side `state.db_pool().await`
             // returns a ready pool. We avoid `tauri-plugin-sql` because

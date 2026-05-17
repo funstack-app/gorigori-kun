@@ -114,7 +114,7 @@ export function ImagePreviewModal() {
   return (
     <div
       ref={dialogRef}
-      className="fixed inset-0 z-50 flex flex-col bg-black/85 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex max-h-[calc(100vh-2rem)] flex-col overflow-y-auto bg-black/85 backdrop-blur-sm"
       role="dialog"
       aria-label="画像プレビュー"
       aria-modal="true"

@@ -192,6 +192,25 @@ function SignedInScaffold() {
   const sessionsStore = useSessions();
   const [drawer, setDrawer] = useState<DrawerKind>(null);
   const [navCollapsed, setNavCollapsed] = useState(false);
+  const navCollapseManualOverrideRef = useRef(false);
+
+  // 960px 未満ではサイドバーを自動 collapse。ユーザー操作後は手動状態を優先する。
+  useEffect(() => {
+    const media = window.matchMedia("(max-width: 960px)");
+    const syncNavCollapsed = () => {
+      if (!navCollapseManualOverrideRef.current) {
+        setNavCollapsed(media.matches);
+      }
+    };
+    syncNavCollapsed();
+    media.addEventListener("change", syncNavCollapsed);
+    return () => media.removeEventListener("change", syncNavCollapsed);
+  }, []);
+
+  const handleSetNavCollapsed = (collapsed: boolean) => {
+    navCollapseManualOverrideRef.current = true;
+    setNavCollapsed(collapsed);
+  };
 
   // ConstructedPromptPanel の「スキル」ボタンからスキルページを開けるようにする
   useEffect(() => {
@@ -361,7 +380,7 @@ function SignedInScaffold() {
         onLogout={logout}
         assetCount={items.length}
         navCollapsed={navCollapsed}
-        onSetNavCollapsed={setNavCollapsed}
+        onSetNavCollapsed={handleSetNavCollapsed}
       />
       {createModalOpen && (
         <div

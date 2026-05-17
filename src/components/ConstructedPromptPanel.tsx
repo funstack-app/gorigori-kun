@@ -413,11 +413,11 @@ function ReferenceRack({
   return (
     <div className="border-b border-[#2a2a2a] p-3">
       {/* 1 段目: 操作ボタン行（ライブラリ / 追加 / プリセット） */}
-      <div className="flex flex-wrap items-center gap-2">
+      <div className="flex items-center gap-2 overflow-x-auto pb-1">
         <button
           type="button"
           onClick={onOpenLibrary}
-          className="flex h-14 w-14 flex-col items-center justify-center gap-1 rounded-md border border-[#343434] bg-[#101010] text-[10px] font-bold text-neutral-300 transition hover:border-pink-400 hover:text-white"
+          className="flex h-11 w-11 shrink-0 flex-col items-center justify-center gap-1 rounded-md border border-[#343434] bg-[#101010] text-[9px] font-bold text-neutral-300 transition hover:border-pink-400 hover:text-white"
           title="このアプリで生成した画像から選ぶ"
         >
           <LibraryIcon />
@@ -426,14 +426,14 @@ function ReferenceRack({
         <button
           type="button"
           onClick={onOpenStock}
-          className="flex h-14 w-14 flex-col items-center justify-center gap-1 rounded-md border border-[#343434] bg-[#101010] text-[10px] font-bold text-neutral-300 transition hover:border-pink-400 hover:text-white"
+          className="flex h-11 w-11 shrink-0 flex-col items-center justify-center gap-1 rounded-md border border-[#343434] bg-[#101010] text-[9px] font-bold text-neutral-300 transition hover:border-pink-400 hover:text-white"
           title="ストック素材 API から写真を検索"
         >
           <StockIcon />
           <span>素材</span>
         </button>
         <label
-          className="flex h-14 w-14 cursor-pointer flex-col items-center justify-center gap-1 rounded-md border border-[#343434] bg-[#101010] text-[10px] font-bold text-neutral-300 transition hover:border-pink-400 hover:text-white"
+          className="flex h-11 w-11 shrink-0 cursor-pointer flex-col items-center justify-center gap-1 rounded-md border border-[#343434] bg-[#101010] text-[9px] font-bold text-neutral-300 transition hover:border-pink-400 hover:text-white"
           title="ローカル PC から画像を追加"
         >
           <PlusIcon />
@@ -456,7 +456,7 @@ function ReferenceRack({
           ref={presetButtonRef}
           type="button"
           onClick={onOpenPreset}
-          className="flex h-14 w-14 flex-col items-center justify-center gap-1 rounded-md border border-[#343434] bg-[#101010] text-[10px] font-bold text-neutral-300 transition hover:border-pink-400 hover:text-white"
+          className="flex h-11 w-11 shrink-0 flex-col items-center justify-center gap-1 rounded-md border border-[#343434] bg-[#101010] text-[9px] font-bold text-neutral-300 transition hover:border-pink-400 hover:text-white"
           title="登録済みプロンプトを呼び出す"
         >
           <PresetIcon />
@@ -466,7 +466,7 @@ function ReferenceRack({
           ref={skillButtonRef}
           type="button"
           onClick={onOpenSkill}
-          className="flex h-14 w-14 flex-col items-center justify-center gap-1 rounded-md border border-[#343434] bg-[#101010] text-[10px] font-bold text-neutral-300 transition hover:border-pink-400 hover:text-white"
+          className="flex h-11 w-11 shrink-0 flex-col items-center justify-center gap-1 rounded-md border border-[#343434] bg-[#101010] text-[9px] font-bold text-neutral-300 transition hover:border-pink-400 hover:text-white"
           title="スキルを呼び出す"
         >
           <SkillIcon />

@@ -51,8 +51,8 @@ export function OptionPickerModal({
         });
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6">
-      <div className="flex h-[80vh] w-full max-w-5xl flex-col overflow-hidden rounded-xl border border-[#262626] bg-[#0f0f0f] shadow-2xl">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+      <div className="flex max-h-[calc(100vh-2rem)] w-full max-w-5xl flex-col overflow-y-auto rounded-xl border border-[#262626] bg-[#0f0f0f] shadow-2xl">
         <div className="flex items-center justify-between border-b border-[#262626] px-6 py-4">
           <div>
             <p className="text-[11px] font-bold uppercase tracking-wider text-neutral-500">

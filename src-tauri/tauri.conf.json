@@ -13,10 +13,10 @@
     "windows": [
       {
         "title": "GORI GORI",
-        "width": 1280,
-        "height": 800,
-        "minWidth": 960,
-        "minHeight": 600
+        "width": 1180,
+        "height": 720,
+        "minWidth": 820,
+        "minHeight": 540
       }
     ],
     "security": {

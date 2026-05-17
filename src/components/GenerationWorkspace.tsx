@@ -69,7 +69,7 @@ function GenerateTab() {
   // 左パネルは旧 380-520px → 320-360px に縮小（約 2/3）。
   // スキルモード中だけ右側を実行進捗に差し替え、旧「実行」タブを生成タブへ内包する。
   return (
-    <div className="grid h-full min-h-0 gap-4 xl:grid-cols-[minmax(300px,360px)_minmax(0,1fr)]">
+    <div className="grid h-full min-h-0 gap-4 md:grid-cols-[minmax(280px,340px)_minmax(0,1fr)]">
       <LeftPanel purpose={purpose} />
       {showStoryboardRun ? <StoryboardRunPanel /> : <Timeline />}
     </div>

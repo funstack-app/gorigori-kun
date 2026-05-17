@@ -73,7 +73,7 @@ function Modal() {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex flex-col bg-black/80 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex max-h-[calc(100vh-2rem)] flex-col overflow-y-auto bg-black/80 backdrop-blur-sm"
       role="dialog"
       aria-label="マスク編集"
     >

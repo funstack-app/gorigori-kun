@@ -366,11 +366,11 @@ export function StockSearchModal({ open, onClose, onPick }: Props) {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
       onClick={onClose}
     >
       <div
-        className="flex h-[82vh] w-full max-w-5xl flex-col overflow-hidden rounded-xl border border-[#2a2a2a] bg-[#181818] shadow-2xl"
+        className="flex max-h-[calc(100vh-2rem)] w-full max-w-5xl flex-col overflow-y-auto rounded-xl border border-[#2a2a2a] bg-[#181818] shadow-2xl"
         onClick={(event) => event.stopPropagation()}
       >
         <div className="flex items-center justify-between gap-3 border-b border-[#242424] px-4 py-3">
@@ -756,7 +756,7 @@ export function StockSearchModal({ open, onClose, onPick }: Props) {
       */}
       {previewPhoto && (
         <div
-          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/90 p-6"
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/90 p-4"
           onClick={(event) => {
             // 親モーダル (素材検索) の onClick={onClose} に届かないよう
             // バブリングを必ず止める。背景クリックではプレビューだけ閉じて、
@@ -766,7 +766,7 @@ export function StockSearchModal({ open, onClose, onPick }: Props) {
           }}
         >
           <div
-            className="relative flex max-h-full max-w-6xl flex-col items-center gap-3"
+            className="relative flex max-h-[calc(100vh-2rem)] max-w-6xl flex-col items-center gap-3 overflow-y-auto"
             onClick={(event) => event.stopPropagation()}
           >
             <img
@@ -823,14 +823,14 @@ export function StockSearchModal({ open, onClose, onPick }: Props) {
       */}
       {analyzeResults.length > 0 && (
         <div
-          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/90 p-6"
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/90 p-4"
           onClick={(event) => {
             event.stopPropagation();
             setAnalyzeResults([]);
           }}
         >
           <div
-            className="flex h-[82vh] w-full max-w-4xl flex-col overflow-hidden rounded-xl border border-[#2a2a2a] bg-[#181818] shadow-2xl"
+            className="flex max-h-[calc(100vh-2rem)] w-full max-w-4xl flex-col overflow-y-auto rounded-xl border border-[#2a2a2a] bg-[#181818] shadow-2xl"
             onClick={(event) => event.stopPropagation()}
           >
             <div className="flex items-center justify-between gap-3 border-b border-[#242424] px-4 py-3">
