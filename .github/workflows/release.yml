@@ -57,6 +57,66 @@ jobs:
       - name: Install npm dependencies
         run: npm ci
 
+      # v0.6.15 STΛCK 指示: Mac 配布版にも Codex CLI を同梱する。
+      # 従来 Windows job だけ codex を同梱していたため、Mac ユーザは
+      # 「codex バイナリが見つかりません」エラーで起動できなかった。
+      - name: Fetch Codex CLI binaries (macOS aarch64)
+        run: |
+          set -e
+          codexVer="rust-v0.131.0-alpha.19"
+          base="https://github.com/openai/codex/releases/download/$codexVer"
+          mkdir -p src-tauri/resources
+
+          # codex (CLI 本体) - aarch64-apple-darwin
+          curl -L -o codex.tar.gz "$base/codex-aarch64-apple-darwin.tar.gz"
+          mkdir -p tmp-codex
+          tar -xzf codex.tar.gz -C tmp-codex
+          # 名前を 'codex' に統一して resources/ に配置
+          find tmp-codex -type f -name "codex-aarch64-apple-darwin" -exec mv {} src-tauri/resources/codex \;
+          if [ ! -f "src-tauri/resources/codex" ]; then
+            echo "Failed to find codex-aarch64-apple-darwin in extracted tar"
+            ls -la tmp-codex/
+            exit 1
+          fi
+          chmod +x src-tauri/resources/codex
+          rm -rf codex.tar.gz tmp-codex
+
+          # codex-app-server (アプリが直接話す JSON-RPC サーバ)
+          curl -L -o codex-app-server.tar.gz "$base/codex-app-server-aarch64-apple-darwin.tar.gz"
+          mkdir -p tmp-app-server
+          tar -xzf codex-app-server.tar.gz -C tmp-app-server
+          find tmp-app-server -type f -name "codex-app-server-aarch64-apple-darwin" -exec mv {} src-tauri/resources/codex-app-server \;
+          if [ ! -f "src-tauri/resources/codex-app-server" ]; then
+            echo "Failed to find codex-app-server-aarch64-apple-darwin"
+            ls -la tmp-app-server/
+            exit 1
+          fi
+          chmod +x src-tauri/resources/codex-app-server
+          rm -rf codex-app-server.tar.gz tmp-app-server
+
+          # 確認
+          ls -lh src-tauri/resources/codex src-tauri/resources/codex-app-server
+
+      # tauri.conf.json の resources 配列に macOS 用 codex バイナリを追記
+      - name: Patch tauri.conf.json for macOS bundle
+        run: |
+          set -e
+          python3 <<'PYEOF'
+          import json
+          path = "src-tauri/tauri.conf.json"
+          with open(path) as f:
+              conf = json.load(f)
+          existing = conf["bundle"].get("resources", [])
+          additions = ["resources/codex", "resources/codex-app-server"]
+          for a in additions:
+              if a not in existing:
+                  existing.append(a)
+          conf["bundle"]["resources"] = existing
+          with open(path, "w") as f:
+              json.dump(conf, f, indent=2, ensure_ascii=False)
+          print("✓ tauri.conf.json updated, resources:", existing)
+          PYEOF
+
       - name: Build and publish draft release (macOS)
         uses: tauri-apps/tauri-action@v0
         env:
