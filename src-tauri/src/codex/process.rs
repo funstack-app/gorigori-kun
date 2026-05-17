@@ -130,7 +130,17 @@ pub fn resolve_codex_cli_binary() -> Result<PathBuf> {
                 return Ok(cand);
             }
             // bundle resources
-            for rel in ["resources", "../Resources"] {
+            // STΛCK 報告 (v0.6.16): Tauri は tauri.conf.json の bundle.resources
+            // 配列のパスを「そのまま保持して」 Contents/Resources/ 配下に置く。
+            // つまり "resources/codex" を指定すると
+            //   Contents/Resources/resources/codex
+            // に配置される (Contents/Resources/codex ではない)。
+            // Mac で codex バイナリが見つからない真の原因はここ。
+            for rel in [
+                "resources",            // exe_dir(=MacOS)/resources/ ← 古いパス、未使用
+                "../Resources",         // Contents/Resources/        ← 旧期待先(空)
+                "../Resources/resources", // Contents/Resources/resources/ ← 実際の配置
+            ] {
                 let cand = exe_dir.join(rel).join(cli_bin);
                 if cand.is_file() {
                     return Ok(cand);
@@ -217,8 +227,15 @@ pub fn resolve_codex_binary(override_path: Option<&Path>) -> Result<PathBuf> {
             if cand.is_file() {
                 return Ok(cand);
             }
-            // Tauri bundle 内 resources ディレクトリ (macOS .app/Contents/Resources, Windows install dir)
-            for rel in ["resources", "../Resources"] {
+            // Tauri bundle 内 resources ディレクトリ。
+            // v0.6.16: Tauri は bundle.resources の "resources/codex-app-server" を
+            // Contents/Resources/resources/codex-app-server に配置するため、
+            // ../Resources/resources も探索対象に加える。
+            for rel in [
+                "resources",
+                "../Resources",
+                "../Resources/resources",
+            ] {
                 let cand = exe_dir.join(rel).join(server_bin);
                 if cand.is_file() {
                     return Ok(cand);
