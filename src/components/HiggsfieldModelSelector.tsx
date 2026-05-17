@@ -172,22 +172,24 @@ export function HiggsfieldModelSelector({ media }: { media: "image" | "video" })
 
   return (
     <div ref={containerRef} className="relative space-y-1">
-      <div className="flex items-center gap-2 text-xs font-medium text-neutral-300">
-        <span className="shrink-0">生成モデル</span>
+      {/* STΛCK 指示 (2026-05-17): 老眼ターゲット向けに行を縦分割。
+          ラベルを上に置いてボタンに横幅をフル開放、ギチギチ感を解消。 */}
+      <div className="space-y-1 text-sm font-medium text-neutral-300">
+        <span className="block text-xs text-neutral-400">生成モデル</span>
         <button
           ref={buttonRef}
           type="button"
           disabled={disabled}
           onClick={toggleOpen}
-          className="flex h-8 min-w-0 flex-1 items-center justify-between gap-2 rounded-md border border-[#343434] bg-[#101010] px-2 text-left text-xs font-semibold text-neutral-100 outline-none transition hover:border-[#444] hover:bg-[#151515] focus:border-pink-500 disabled:cursor-not-allowed disabled:text-neutral-600"
+          className="flex h-9 w-full items-center justify-between gap-2 rounded-md border border-[#343434] bg-[#101010] px-2.5 text-left text-sm font-semibold text-neutral-100 outline-none transition hover:border-[#444] hover:bg-[#151515] focus:border-pink-500 disabled:cursor-not-allowed disabled:text-neutral-600"
         >
           <span className="truncate">{triggerText}</span>
           {selectedModels.length > 1 && (
-            <span className="shrink-0 rounded bg-pink-500/20 px-1.5 py-0.5 text-[10px] font-semibold text-pink-200">
+            <span className="shrink-0 rounded bg-pink-500/20 px-1.5 py-0.5 text-xs font-semibold text-pink-200">
               {selectedModels.length}
             </span>
           )}
-          <span className="shrink-0 text-[10px] text-neutral-500" aria-hidden>
+          <span className="shrink-0 text-xs text-neutral-500" aria-hidden>
             ▾
           </span>
         </button>

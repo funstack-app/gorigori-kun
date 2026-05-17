@@ -236,8 +236,9 @@ export function ConstructedPromptPanel() {
         <HiggsfieldModelSelector media={modelMedia} />
 
         {/*
-          STΛCK 指示 (2026-05-17): 生成枚数とアスペクト比を1行に統合し、
-          Windows 13インチ高 DPI でも全体が見える高さに収める。
+          STΛCK 指示 (2026-05-17 第3版): 老眼ターゲット向けに stepper と
+          アスペクト比ボタンを大きくする。1 行は維持しつつ h-9 に統一して
+          押しやすさを確保。アスペクト比のヒントは text-xs に拡大。
         */}
         <div className="flex items-center gap-2">
           {/* 生成枚数 */}
@@ -246,7 +247,7 @@ export function ConstructedPromptPanel() {
               type="button"
               onClick={decrement}
               disabled={count <= 1}
-              className="h-7 w-7 text-sm font-bold text-neutral-300 hover:bg-[#1f1f1f] disabled:cursor-not-allowed disabled:text-neutral-600"
+              className="h-9 w-9 text-base font-bold text-neutral-300 hover:bg-[#1f1f1f] disabled:cursor-not-allowed disabled:text-neutral-600"
               title="生成枚数を減らす"
             >
               −
@@ -273,14 +274,14 @@ export function ConstructedPromptPanel() {
                   event.currentTarget.blur();
                 }
               }}
-              className="w-8 border-0 bg-transparent text-center text-sm font-bold text-neutral-100 outline-none"
+              className="w-9 border-0 bg-transparent text-center text-base font-bold text-neutral-100 outline-none"
               title="生成枚数"
             />
             <button
               type="button"
               onClick={increment}
               disabled={count >= MAX_COUNT}
-              className="h-7 w-7 text-sm font-bold text-neutral-300 hover:bg-[#1f1f1f] disabled:cursor-not-allowed disabled:text-neutral-600"
+              className="h-9 w-9 text-base font-bold text-neutral-300 hover:bg-[#1f1f1f] disabled:cursor-not-allowed disabled:text-neutral-600"
               title="生成枚数を増やす"
             >
               +
@@ -291,16 +292,16 @@ export function ConstructedPromptPanel() {
           <button
             type="button"
             onClick={() => setAspectPickerOpen(true)}
-            className="flex h-7 min-w-0 flex-1 items-center justify-between gap-2 rounded-md border border-[#343434] bg-[#101010] px-2 text-left text-xs font-semibold text-neutral-100 outline-none transition hover:border-[#444] hover:bg-[#151515] focus:border-pink-500"
+            className="flex h-9 min-w-0 flex-1 items-center justify-between gap-2 rounded-md border border-[#343434] bg-[#101010] px-2.5 text-left text-sm font-semibold text-neutral-100 outline-none transition hover:border-[#444] hover:bg-[#151515] focus:border-pink-500"
             title="アスペクト比を選ぶ"
           >
             <span className="flex min-w-0 items-center gap-1.5">
               <span className="shrink-0 font-bold text-neutral-100">{aspectRatio}</span>
-              <span className="truncate text-[10px] font-medium text-neutral-500">
+              <span className="truncate text-xs font-medium text-neutral-500">
                 {ASPECT_RATIO_HINTS[aspectRatio as SceneAspectRatio] ?? ""}
               </span>
             </span>
-            <span className="shrink-0 text-[10px] text-neutral-500" aria-hidden>
+            <span className="shrink-0 text-xs text-neutral-500" aria-hidden>
               ▾
             </span>
           </button>
@@ -410,18 +411,18 @@ function ReferenceRack({
   onOpenSkill: () => void;
   skillButtonRef: React.RefObject<HTMLButtonElement | null>;
 }) {
-  // STΛCK 指示 (2026-05-17 再修正): アイコン上 / 文字下の縦並び。
-  // 文字は 2 行折り返し許容。ボタンは元のサイズ感に戻して読みやすく。
-  // - h-14 w-16 (= 64×56) で十分な打ちやすさ
-  // - アイコン -> 文字の縦並びは flex-col + gap-1
-  // - 文字は text-[10px] で 2 行になっても収まる
-  // - leading-tight で行間を詰める
+  // STΛCK 指示 (2026-05-17 第3版): 老眼ターゲットでボタンサイズ維持のため、
+  // 横一列の overflow-x-auto では狭幅で「スキル」が見切れていた。
+  // 5 ボタンを 3 列グリッドで 2 段（3+2）に折り返し、横スクロールをなくす。
+  // - grid grid-cols-3 でカラム幅に追従、ボタン側は w-full で 1 列をフル占有
+  // - h-14 と縦並び(flex-col)はキープして 60×幅可変の打ちやすさを維持
+  // - text-[10px] leading-tight で長い「プリセット」「ライブラリ」も収まる
   const iconBtn =
-    "flex h-14 w-16 shrink-0 flex-col items-center justify-center gap-1 rounded-md border border-[#343434] bg-[#101010] px-1 text-[10px] font-bold leading-tight text-neutral-300 transition hover:border-pink-400 hover:text-white";
+    "flex h-14 w-full flex-col items-center justify-center gap-1 rounded-md border border-[#343434] bg-[#101010] px-1 text-[10px] font-bold leading-tight text-neutral-300 transition hover:border-pink-400 hover:text-white";
   return (
     <div className="border-b border-[#2a2a2a] p-3">
-      {/* 1 段目: 操作ボタン行 (アイコン上 / 文字下) */}
-      <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
+      {/* 1 段目: 操作ボタン (アイコン上 / 文字下) を 3 列グリッドで 2 段に折り返し */}
+      <div className="grid grid-cols-3 gap-1.5">
         <button
           type="button"
           onClick={onOpenLibrary}

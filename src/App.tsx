@@ -962,13 +962,13 @@ function DarkGlobalNav({
           onPointerDown={() => setDrawer(null)}
           onClick={() => setDrawer(null)}
           title="制作"
-          className={`flex h-9 w-full items-center gap-3 rounded-lg px-3 text-left text-xs font-bold transition ${
+          className={`flex h-10 w-full items-center gap-3 rounded-lg px-3 text-left text-sm font-bold transition ${
             drawer === null
               ? "bg-[#303030] text-white"
               : "text-neutral-300 hover:bg-[#242424] hover:text-white"
           }`}
         >
-          <span className="flex h-4 w-4 flex-shrink-0 items-center justify-center">
+          <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center">
             <NavIconCreate />
           </span>
           {!collapsed && <span className="whitespace-nowrap">制作</span>}
