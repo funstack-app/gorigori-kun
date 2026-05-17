@@ -410,34 +410,40 @@ function ReferenceRack({
   onOpenSkill: () => void;
   skillButtonRef: React.RefObject<HTMLButtonElement | null>;
 }) {
+  // STΛCK 指示 (2026-05-17): アイコン only + ホバーツールチップに統一。
+  // Figma / Linear / Photoshop と同じプロアプリ的ツールバー。13/15/16
+  // インチどの画面サイズでも崩れない。
+  // - ボタンを h-9 w-9 (= 36px) に統一
+  // - アイコンサイズは内部で h-4 w-4 程度に縮小
+  // - text は sr-only でアクセシビリティ用に保持 (スクリーンリーダー対応)
+  // - title 属性でブラウザネイティブのツールチップ表示
+  const iconBtn =
+    "flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-[#343434] bg-[#101010] text-neutral-300 transition hover:border-pink-400 hover:text-white";
   return (
     <div className="border-b border-[#2a2a2a] p-3">
-      {/* 1 段目: 操作ボタン行（ライブラリ / 追加 / プリセット） */}
-      <div className="flex items-center gap-2 overflow-x-auto pb-1">
+      {/* 1 段目: 操作ボタン行 (アイコン only / ホバーで名前表示) */}
+      <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
         <button
           type="button"
           onClick={onOpenLibrary}
-          className="flex h-11 w-11 shrink-0 flex-col items-center justify-center gap-1 rounded-md border border-[#343434] bg-[#101010] text-[9px] font-bold text-neutral-300 transition hover:border-pink-400 hover:text-white"
-          title="このアプリで生成した画像から選ぶ"
+          className={iconBtn}
+          title="ライブラリ — このアプリで生成した画像から選ぶ"
         >
           <LibraryIcon />
-          <span>ライブラリ</span>
+          <span className="sr-only">ライブラリ</span>
         </button>
         <button
           type="button"
           onClick={onOpenStock}
-          className="flex h-11 w-11 shrink-0 flex-col items-center justify-center gap-1 rounded-md border border-[#343434] bg-[#101010] text-[9px] font-bold text-neutral-300 transition hover:border-pink-400 hover:text-white"
-          title="ストック素材 API から写真を検索"
+          className={iconBtn}
+          title="素材 — ストック素材 API から写真を検索"
         >
           <StockIcon />
-          <span>素材</span>
+          <span className="sr-only">素材</span>
         </button>
-        <label
-          className="flex h-11 w-11 shrink-0 cursor-pointer flex-col items-center justify-center gap-1 rounded-md border border-[#343434] bg-[#101010] text-[9px] font-bold text-neutral-300 transition hover:border-pink-400 hover:text-white"
-          title="ローカル PC から画像を追加"
-        >
+        <label className={`${iconBtn} cursor-pointer`} title="追加 — ローカル PC から画像を追加">
           <PlusIcon />
-          <span>追加</span>
+          <span className="sr-only">追加</span>
           <input
             type="file"
             accept="image/png,image/jpeg,image/webp"
@@ -456,21 +462,21 @@ function ReferenceRack({
           ref={presetButtonRef}
           type="button"
           onClick={onOpenPreset}
-          className="flex h-11 w-11 shrink-0 flex-col items-center justify-center gap-1 rounded-md border border-[#343434] bg-[#101010] text-[9px] font-bold text-neutral-300 transition hover:border-pink-400 hover:text-white"
-          title="登録済みプロンプトを呼び出す"
+          className={iconBtn}
+          title="プリセット — 登録済みプロンプトを呼び出す"
         >
           <PresetIcon />
-          <span>プリセット</span>
+          <span className="sr-only">プリセット</span>
         </button>
         <button
           ref={skillButtonRef}
           type="button"
           onClick={onOpenSkill}
-          className="flex h-11 w-11 shrink-0 flex-col items-center justify-center gap-1 rounded-md border border-[#343434] bg-[#101010] text-[9px] font-bold text-neutral-300 transition hover:border-pink-400 hover:text-white"
-          title="スキルを呼び出す"
+          className={iconBtn}
+          title="スキル — スキルを呼び出す"
         >
           <SkillIcon />
-          <span>スキル</span>
+          <span className="sr-only">スキル</span>
         </button>
       </div>
 
