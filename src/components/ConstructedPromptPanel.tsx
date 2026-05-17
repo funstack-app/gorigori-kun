@@ -201,7 +201,12 @@ export function ConstructedPromptPanel() {
           skillButtonRef={skillButtonRef}
         />
       </div>
-      <div className="flex min-h-0 flex-1 flex-col p-3">
+      {/*
+        textarea は flex-1 で残り高さを取るが、min-h を 80px と低めに設定。
+        画面が低い (13 インチ Windows 高 DPI 等) でも下部の生成ボタンを
+        必ず見せるための「縮みしろ」。
+      */}
+      <div className="flex min-h-[80px] flex-1 flex-col p-3">
         <PromptTextareaWithMentions
           value={isOverriding ? draft : generatedPrompt}
           onChange={onChangeDraft}
@@ -222,21 +227,27 @@ export function ConstructedPromptPanel() {
 
       {/*
         下部コントロール (モデル選択 / 枚数 / アスペクト / 生成ボタン).
-        13 インチ画面 (~720-800 縦) でも生成ボタンに到達できるよう、
-        max-height を 50vh に制限してこの中で縦スクロール可能にする。
-        textarea (上の flex-1) は最低限の高さを保つ。
+        shrink-0 で常に最下部に固定。textarea (上の flex-1) が縮むことで
+        どんな画面高さでも生成ボタンが画面内に見える設計。
+        STΛCK 指示 (2026-05-17): 内部スクロールではなく、全体が見える
+        ことを優先。間隔も space-y-2 に詰めて高さを節約。
       */}
-      <div className="shrink-0 space-y-3 overflow-y-auto border-t border-[#2a2a2a] p-3" style={{ maxHeight: "50vh" }}>
+      <div className="shrink-0 space-y-1.5 border-t border-[#2a2a2a] p-2.5">
         <HiggsfieldModelSelector media={modelMedia} />
 
-        <div className="flex items-center justify-between gap-3">
-          <span className="text-xs font-bold text-neutral-300">生成枚数</span>
-          <div className="inline-flex items-center gap-1 rounded-md border border-[#343434] bg-[#101010]">
+        {/*
+          STΛCK 指示 (2026-05-17): 生成枚数とアスペクト比を1行に統合し、
+          Windows 13インチ高 DPI でも全体が見える高さに収める。
+        */}
+        <div className="flex items-center gap-2">
+          {/* 生成枚数 */}
+          <div className="flex items-center gap-1 rounded-md border border-[#343434] bg-[#101010]">
             <button
               type="button"
               onClick={decrement}
               disabled={count <= 1}
               className="h-7 w-7 text-sm font-bold text-neutral-300 hover:bg-[#1f1f1f] disabled:cursor-not-allowed disabled:text-neutral-600"
+              title="生成枚数を減らす"
             >
               −
             </button>
@@ -248,7 +259,6 @@ export function ConstructedPromptPanel() {
               value={countDraft}
               onFocus={(event) => event.currentTarget.select()}
               onChange={(event) => {
-                // 数字のみ通す。空文字も許可 (途中入力)
                 const sanitized = event.target.value.replace(/[^0-9]/g, "");
                 setCountDraft(sanitized);
               }}
@@ -263,33 +273,28 @@ export function ConstructedPromptPanel() {
                   event.currentTarget.blur();
                 }
               }}
-              className="w-10 border-0 bg-transparent text-center text-sm font-bold text-neutral-100 outline-none"
+              className="w-8 border-0 bg-transparent text-center text-sm font-bold text-neutral-100 outline-none"
+              title="生成枚数"
             />
             <button
               type="button"
               onClick={increment}
               disabled={count >= MAX_COUNT}
               className="h-7 w-7 text-sm font-bold text-neutral-300 hover:bg-[#1f1f1f] disabled:cursor-not-allowed disabled:text-neutral-600"
+              title="生成枚数を増やす"
             >
               +
             </button>
           </div>
-        </div>
 
-        {/*
-          アスペクト比: モデル選択と同じく「現在値ボタン → ポップアップ」型。
-          ボタン内に値 (16:9) + 短い説明 (横長・動画) を併記。
-          OptionPickerModal を流用してカード式に説明文付きで一覧表示する。
-        */}
-        <div className="flex items-center gap-2">
-          <span className="shrink-0 text-xs font-bold text-neutral-300">アスペクト比</span>
+          {/* アスペクト比 */}
           <button
             type="button"
             onClick={() => setAspectPickerOpen(true)}
-            className="flex h-8 min-w-0 flex-1 items-center justify-between gap-2 rounded-md border border-[#343434] bg-[#101010] px-2 text-left text-xs font-semibold text-neutral-100 outline-none transition hover:border-[#444] hover:bg-[#151515] focus:border-pink-500"
+            className="flex h-7 min-w-0 flex-1 items-center justify-between gap-2 rounded-md border border-[#343434] bg-[#101010] px-2 text-left text-xs font-semibold text-neutral-100 outline-none transition hover:border-[#444] hover:bg-[#151515] focus:border-pink-500"
             title="アスペクト比を選ぶ"
           >
-            <span className="flex min-w-0 items-center gap-2">
+            <span className="flex min-w-0 items-center gap-1.5">
               <span className="shrink-0 font-bold text-neutral-100">{aspectRatio}</span>
               <span className="truncate text-[10px] font-medium text-neutral-500">
                 {ASPECT_RATIO_HINTS[aspectRatio as SceneAspectRatio] ?? ""}
@@ -302,7 +307,7 @@ export function ConstructedPromptPanel() {
         </div>
 
         {hasRunningBatch && activeBatchSummary && (
-          <p className="flex items-center justify-between gap-2 text-xs font-semibold text-neutral-400">
+          <p className="flex items-center justify-between gap-2 text-[11px] font-semibold text-neutral-400">
             <span>
               生成中 {runningBatchCount}/{maxConcurrentBatches}
             </span>
@@ -316,7 +321,7 @@ export function ConstructedPromptPanel() {
           type="button"
           onClick={generate}
           disabled={disabled}
-          className="w-full rounded-md bg-pink-500 px-4 py-2.5 text-sm font-bold text-white transition hover:bg-pink-600 disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-500"
+          className="w-full rounded-md bg-pink-500 px-4 py-2 text-sm font-bold text-white transition hover:bg-pink-600 disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-500"
         >
           {isQueueFull
             ? `生成中 ${runningBatchCount}/${maxConcurrentBatches}`
