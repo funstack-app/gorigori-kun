@@ -47,17 +47,17 @@ export function OptionPickerButton({
             )}
           </div>
           <div className="min-w-0 flex-1">
-            <div className="truncate text-xs font-bold text-neutral-100">
+            <div className="truncate text-sm font-bold text-neutral-100">
               {current?.value ?? "選択する"}
             </div>
             {current?.hint && (
-              <div className="truncate text-[10px] text-neutral-500">
+              <div className="truncate text-xs text-neutral-400">
                 {current.hint}
               </div>
             )}
           </div>
         </div>
-        <span className="shrink-0 text-xs font-bold text-neutral-500">
+        <span className="shrink-0 text-sm font-bold text-neutral-500">
           変更
         </span>
       </button>

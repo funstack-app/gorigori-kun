@@ -137,9 +137,9 @@ function PickerCard({
         )}
       </div>
       <div className="border-t border-[#262626] p-3">
-        <div className="text-sm font-bold text-white">{option.value}</div>
+        <div className="text-base font-bold text-white">{option.value}</div>
         {option.hint && (
-          <div className="mt-0.5 text-[11px] text-neutral-500">{option.hint}</div>
+          <div className="mt-1 text-sm text-neutral-300">{option.hint}</div>
         )}
       </div>
       {selected && (

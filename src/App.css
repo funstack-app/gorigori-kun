@@ -57,20 +57,18 @@ body,
 }
 
 /*
- * STΛCK 指示 (2026-05-17 更新):
- * Mac (Retina) で 13px は小さすぎる → 14px に戻す。
+ * STΛCK 指示 (2026-05-17 再更新):
+ * 利用者は 30-50代、老眼の人も多い。読みやすさを最優先にして 15px へ。
  *
- * 画面サイズへの適応は html font-size ではなく、Rust 側の
- * ウィンドウ自動最適化 (lib.rs:setup) で実装済み。
- * 起動時にモニターサイズの 80% でウィンドウを開き、minWidth/Height
- * の clamp で守られているので、font-size を 14px に戻しても
- * 13/15/16 インチ + Windows 高DPI でレイアウト崩れは起きない。
- *
- * Tailwind の text-xs/text-sm/text-base は rem 単位なので、
- * このルートサイズに連動する。
+ * - 14px → 15px (約 7% 拡大)
+ * - Tailwind の rem ベース指定は連動して全体が少し大きくなる
+ * - 画面サイズへの適応は Rust 側の lib.rs:setup ウィンドウ最適化で
+ *   実装済みなので、font-size を上げても 13/15/16 インチ + Windows
+ *   高 DPI でレイアウト崩れは起きない。狭い時は overflow-y-auto で
+ *   スクロール可能になる設計。
  */
 html {
-  font-size: 14px;
+  font-size: 15px;
 }
 
 body {
