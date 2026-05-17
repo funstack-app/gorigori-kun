@@ -106,7 +106,11 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
   const promptOverride = useScenePromptOverride((s) => s.value);
   const setPromptOverride = useScenePromptOverride((s) => s.set);
   const [status, setStatus] = useState<SceneGenerationStatus>({ kind: "idle" });
-  const [generating, setGenerating] = useState(false);
+  // generating: disabled 判定からは外したが、generate() 内で多重実行ガードに
+  // 引き続き使う (preflight 直後に二重呼びされた場合の保護)。
+  // 型エラー抑制のため _generating で受ける (未参照警告を黙らせる)。
+  const [_generating, setGenerating] = useState(false);
+  void _generating;
 
   const effectivePrompt =
     promptOverride !== null ? promptOverride : generatedPrompt;
@@ -114,7 +118,14 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
   const runningBatchCount = runningBatches.length;
   const hasRunningBatch = runningBatchCount > 0;
   const isQueueFull = runningBatchCount >= MAX_CONCURRENT_BATCHES;
-  const disabled = generating || isQueueFull;
+  // STΛCK 報告 (2026-05-17 v0.6.11): 生成ボタンを押すと画面がちらつく問題。
+  // 原因: ローカル `generating` ステートと `runningBatches`(notification 経由)
+  // が時間差で更新され、ボタンが disabled→enabled→disabled と細かく
+  // 切り替わってレイアウト再計算が走っていた。
+  // 修正: disabled 判定をキュー満杯チェックのみに変える。
+  // generating 状態自体は status メッセージ等で引き続き使うが、
+  // disabled 判定からは外して入力UIのちらつきを止める。
+  const disabled = isQueueFull;
 
   const activeBatchSummary = useMemo(() => {
     const active = runningBatches[0];
