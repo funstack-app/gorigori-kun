@@ -22,7 +22,7 @@ use tauri::{AppHandle, Emitter};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
-use crate::codex::process::{enriched_path, resolve_codex_binary};
+use crate::codex::process::{enriched_path, resolve_codex_cli_binary};
 use crate::commands::storage::{project_name_from_cwd, resolve_output_dir, StorageSettings};
 use crate::events::EVENT_IMAGE_BATCH;
 
@@ -97,8 +97,10 @@ pub async fn images_generate_batch(
     if args.count == 0 {
         return Err("count must be >= 1".into());
     }
-    let codex_bin =
-        resolve_codex_binary(None).map_err(|e| format!("codex バイナリの解決に失敗: {e}"))?;
+    // STΛCK 報告 (2026-05-17): app-server を使うと `exec` で失敗するので
+    // CLI 用バイナリを明示解決する。Codex クロスレビューで判明した root cause。
+    let codex_bin = resolve_codex_cli_binary()
+        .map_err(|e| format!("Codex CLI の解決に失敗: {e}"))?;
 
     let codex_home_orig = std::env::var_os("CODEX_HOME")
         .map(PathBuf::from)

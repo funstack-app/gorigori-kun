@@ -6,7 +6,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::time::timeout;
 
-use crate::codex::process::{enriched_path, resolve_codex_binary};
+use crate::codex::process::{enriched_path, resolve_codex_cli_binary};
 
 const CODEX_TEXT_TIMEOUT_SECS: u64 = 60;
 
@@ -29,7 +29,7 @@ pub async fn codex_text_query(
     }
 
     let codex_bin =
-        resolve_codex_binary(None).map_err(|e| format!("codex バイナリの解決に失敗: {e}"))?;
+        resolve_codex_cli_binary().map_err(|e| format!("Codex CLI の解決に失敗: {e}"))?;
     let full_prompt = match system_prompt
         .as_deref()
         .map(str::trim)

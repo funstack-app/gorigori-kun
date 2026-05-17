@@ -109,6 +109,86 @@ pub fn enriched_path() -> OsString {
     OsString::from(parts.join(":"))
 }
 
+/// 画像生成バッチ用に **codex CLI (codex exec を取れるバイナリ)** を解決する。
+///
+/// Codex の v0.131+ には 2 種類のバイナリがある:
+///   - codex (codex.exe): CLI ランチャー。`codex exec ...` で画像生成等を実行できる
+///   - codex-app-server (codex-app-server.exe): JSON-RPC stdio サーバー。
+///     `exec` サブコマンドは持たない (内部で app-server プロトコルを喋るだけ)。
+///
+/// resolve_codex_binary は app-server を最優先で返すので、画像生成バッチで
+/// それを使うと `codex-app-server exec ...` になって即失敗する (Codex 指摘
+/// 2026-05-17)。バッチでは必ずこちらを使う。
+pub fn resolve_codex_cli_binary() -> Result<PathBuf> {
+    // ① アプリと同階層 / resources の codex(.exe) を最優先
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            let cli_bin = if cfg!(windows) { "codex.exe" } else { "codex" };
+            // アプリ exe 同階層
+            let cand = exe_dir.join(cli_bin);
+            if cand.is_file() {
+                return Ok(cand);
+            }
+            // bundle resources
+            for rel in ["resources", "../Resources"] {
+                let cand = exe_dir.join(rel).join(cli_bin);
+                if cand.is_file() {
+                    return Ok(cand);
+                }
+            }
+        }
+    }
+
+    // ② PATH 上の codex
+    let path = enriched_path();
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+    if let Ok(p) = which::which_in(OsStr::new("codex"), Some(&path), &cwd) {
+        return Ok(p);
+    }
+
+    // ③ ホーム配下の代表的な install 先
+    if let Some(home) = dirs::home_dir() {
+        for rel in [
+            ".bun/bin/codex",
+            ".cargo/bin/codex",
+            ".volta/bin/codex",
+            ".npm-global/bin/codex",
+            "Library/pnpm/codex",
+        ] {
+            let cand = home.join(rel);
+            if cand.is_file() {
+                return Ok(cand);
+            }
+        }
+        for prefix in [".nvm/versions/node", ".local/share/mise/installs/node"] {
+            let dir = home.join(prefix);
+            if let Ok(entries) = std::fs::read_dir(&dir) {
+                for entry in entries.flatten() {
+                    let cand = entry.path().join("bin/codex");
+                    if cand.is_file() {
+                        return Ok(cand);
+                    }
+                }
+            }
+        }
+    }
+
+    for p in FALLBACK_PATHS {
+        let cand = PathBuf::from(p);
+        if cand.is_file() {
+            return Ok(cand);
+        }
+    }
+
+    Err(anyhow!(
+        "Codex CLI (codex exec を実行できるバイナリ) が見つかりませんでした\n\
+         画像生成バッチには app-server ではなく `codex exec` が必要です。\n\
+         OS: {} / {}",
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+    ))
+}
+
 pub fn resolve_codex_binary(override_path: Option<&Path>) -> Result<PathBuf> {
     if let Some(p) = override_path {
         if p.is_file() {

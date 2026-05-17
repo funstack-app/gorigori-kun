@@ -6,7 +6,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::time::timeout;
 
-use crate::codex::process::{enriched_path, resolve_codex_binary};
+use crate::codex::process::{enriched_path, resolve_codex_cli_binary};
 
 const CODEX_VISION_TIMEOUT_SECS: u64 = 120;
 const VISION_MODEL: &str = "gpt-5.5";
@@ -24,7 +24,7 @@ pub async fn codex_describe_image(image_path: String) -> Result<String, String> 
     }
 
     let codex_bin =
-        resolve_codex_binary(None).map_err(|e| format!("codex バイナリの解決に失敗: {e}"))?;
+        resolve_codex_cli_binary().map_err(|e| format!("Codex CLI の解決に失敗: {e}"))?;
     let prompt = [
         "添付画像を解析し、この画像をAI画像生成で再現するための英語プロンプトを1行で書いてください。",
         "被写体、構図、レンズ感、照明、色調、質感、背景を具体的に含めること。",

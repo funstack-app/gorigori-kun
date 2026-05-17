@@ -185,8 +185,22 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
         higgsfieldModels: compareMode ? selectedHiggsfieldModels : undefined,
       });
       const okCount = result.generatedPaths.length;
+      // STΛCK 報告 (2026-05-17): 0 枚成功を success として表示すると
+      // 「生成中表示が一瞬で消えたのに何も起きていない」現象になる。
+      // 1 枚も生成できなかった場合は明示エラー扱いにし、toast でも
+      // 通知して原因認識を促す。
+      if (okCount === 0) {
+        const message = `画像生成に失敗しました。${generationCount}件すべて失敗しています。Codex CLI のパス・認証状況・モデル設定を確認してください。`;
+        setStatus({ kind: "error", message });
+        useToasts.getState().push({
+          kind: "error",
+          text: message,
+          ttlMs: 0, // 手動で閉じるまで残す
+        });
+        return result;
+      }
       setStatus({
-        kind: "success",
+        kind: result.failedCount === 0 ? "success" : "error",
         message:
           result.failedCount === 0
             ? `${okCount}枚を生成しました`

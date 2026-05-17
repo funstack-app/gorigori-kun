@@ -17,7 +17,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::time::timeout;
 
-use crate::codex::process::{enriched_path, resolve_codex_binary};
+use crate::codex::process::{enriched_path, resolve_codex_cli_binary};
 use crate::commands::storage::{project_name_from_cwd, resolve_output_dir, StorageSettings};
 use crate::events::EVENT_STORYBOARD;
 use crate::state::AppState;
@@ -241,7 +241,7 @@ pub async fn storyboard_run(
     }
 
     let codex_bin =
-        resolve_codex_binary(None).map_err(|e| format!("codex バイナリの解決に失敗: {e}"))?;
+        resolve_codex_cli_binary().map_err(|e| format!("Codex CLI の解決に失敗: {e}"))?;
     let run_id = format!("{}-{}", timestamp_id(), short_id());
     let task_run_id = run_id.clone();
 
