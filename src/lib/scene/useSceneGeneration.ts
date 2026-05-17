@@ -6,6 +6,7 @@ import {
   type SceneGenerationResult,
 } from "./generate";
 import type { SceneState } from "./types";
+import { useAuth } from "../store/auth";
 import { useBatches } from "../store/batches";
 import { useComposer } from "../store/composer";
 import { useHiggsfieldModel } from "../store/higgsfieldModel";
@@ -128,6 +129,26 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
     const prompt = effectivePrompt.trim();
     if (!prompt) {
       setStatus({ kind: "error", message: "プロンプトが空です" });
+      return null;
+    }
+
+    // STΛCK 報告 (2026-05-17 v0.6.7): 認証未完了で生成すると
+    // 「アスペクト比エラー」と誤表示されて原因特定に30分かかった。
+    // 生成開始前に Codex 認証を再チェックし、未認証なら明確な
+    // メッセージで toast 表示して止める。
+    const authState = useAuth.getState();
+    // 最新の認証状態を取り直す（OAuth完了直後の refresh 遅延対策）
+    await authState.refresh();
+    if (!useAuth.getState().account) {
+      const message =
+        "ChatGPT にログインしていないため、生成できません。\n" +
+        "左下の「ログイン」ボタンから ChatGPT にログインしてください。";
+      setStatus({ kind: "error", message });
+      useToasts.getState().push({
+        kind: "error",
+        text: message,
+        ttlMs: 0,
+      });
       return null;
     }
 

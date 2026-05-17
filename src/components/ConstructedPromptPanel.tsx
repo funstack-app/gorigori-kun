@@ -186,8 +186,20 @@ export function ConstructedPromptPanel() {
   };
 
   return (
-    // 外枠は親（LeftPanel の flex-1 領域）の高さを満たす flex column。
-    // 上から: ラック(shrink-0) / textareaラッパー(flex-1, 内部 textarea を h-full で伸ばす) / 生成コントロール(shrink-0)
+    // STΛCK 報告 (2026-05-17 v0.6.7): 13インチWindows高DPI(縦512px)で
+    // 下部の生成ボタンが画面外に押し出される問題への根本対処。
+    //
+    // Codex クロスレビュー指摘の通り、二重スクロールを避けつつ
+    // 「下部コントロールが必ず見える」を担保する。
+    //
+    // 構造:
+    //   <section h-full min-h-0 flex-col>      ← 外枠固定高さ
+    //     <ReferenceRack shrink-0>             ← 上部、潰れない
+    //     <スクロール領域 flex-1 min-h-0       ← ここだけスクロール
+    //        overflow-y-auto>
+    //       <textarea min-h-[80px]>
+    //     </スクロール領域>
+    //     <下部コントロール shrink-0>          ← 必ず最下部
     <section className="flex h-full min-h-0 flex-col bg-[#181818]">
       <div className="shrink-0">
         <ReferenceRack
@@ -202,11 +214,12 @@ export function ConstructedPromptPanel() {
         />
       </div>
       {/*
-        textarea は flex-1 で残り高さを取るが、min-h を 80px と低めに設定。
-        画面が低い (13 インチ Windows 高 DPI 等) でも下部の生成ボタンを
-        必ず見せるための「縮みしろ」。
+        textarea は flex-1 で残り高さを取る。13インチでは min-h を
+        撤廃して完全に潰せるようにする (下部コントロールが必ず見える)。
+        13インチ以上 (画面高さ 720px超) では @media で復活させ、
+        通常の使用感は維持する。
       */}
-      <div className="flex min-h-[80px] flex-1 flex-col p-3">
+      <div className="shrink-13-textarea flex min-h-[80px] flex-1 flex-col p-3">
         <PromptTextareaWithMentions
           value={isOverriding ? draft : generatedPrompt}
           onChange={onChangeDraft}

@@ -22,7 +22,7 @@ export function SectionAccordion({
       <button
         type="button"
         onClick={() => setOpen((value) => !value)}
-        className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left"
+        className="shrink-13-card flex w-full items-center justify-between gap-3 px-4 py-3 text-left"
       >
         <div className="min-w-0 flex-1">
           <p className="text-[11px] font-bold uppercase tracking-wide text-neutral-500">

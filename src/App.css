@@ -96,6 +96,9 @@ html {
   .shrink-13-row { height: 1.75rem !important; }
   /* シーン構築の各カードの padding を詰める */
   .shrink-13-card { padding: 0.5rem !important; }
+  /* textarea の min-h-[80px] を撤廃して完全に潰せるようにする
+     (下部の生成ボタンが画面外に出ないよう、textarea を縮ませる) */
+  .shrink-13-textarea { min-height: 0 !important; }
 }
 
 @media (max-height: 600px) {
