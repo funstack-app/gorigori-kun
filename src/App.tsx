@@ -1068,7 +1068,9 @@ function StorageIndicator() {
   const [stats, setStats] = useState<import("./lib/ipc").StorageUsageStats | null>(null);
   const [home, setHome] = useState<string | null>(null);
   const cloudUsage = useCloudSupabase((s) => s.usage);
-  const refreshCloud = useCloudSupabase((s) => s.refresh);
+  // v0.6.13 STΛCK 指示: クラウドストレージ連携はβ以降のため、
+  // 起動時/定期の自動接続テストを停止する。
+  // (Supabase RLS 403 エラーが30秒ごとにトースト表示される問題)
 
   useEffect(() => {
     const fetchAll = async () => {
@@ -1077,7 +1079,6 @@ function StorageIndicator() {
         const [s, h] = await Promise.all([storage.usageStats(), storage.homeDir()]);
         setStats(s);
         setHome(h);
-        await refreshCloud().catch(() => undefined);
       } catch {
         /* noop */
       }
@@ -1085,7 +1086,7 @@ function StorageIndicator() {
     void fetchAll();
     const handle = setInterval(() => void fetchAll(), 30_000);
     return () => clearInterval(handle);
-  }, [refreshCloud]);
+  }, []);
 
   if (!stats) return null;
 

@@ -4,7 +4,8 @@ import { useAccounts, type CodexPlan } from "../lib/store/accounts";
 import { useSettings } from "../lib/store/settings";
 import { useThreads } from "../lib/store/threads";
 import { useToasts } from "../lib/store/toasts";
-import { SettingsCloudSection } from "./SettingsCloudSection";
+// SettingsCloudSection は v0.6.13 でα版非表示。β以降で復活予定。
+// import { SettingsCloudSection } from "./SettingsCloudSection";
 import { SettingsConnections } from "./SettingsConnections";
 import { StorageManagementSection } from "./StorageManagementSection";
 type Tab = "basic" | "storage" | "accounts" | "connections";
@@ -55,12 +56,13 @@ export function SettingsWorkspace() {
           {tab === "storage" && (
             <div className="space-y-6">
               {/*
-                ローカルとクラウドの保存先を1つのタブにまとめる。
-                STΛCK 指摘「クラウドストレージ・保存先まわりがわかりづらい」を解消。
-                ローカル (PC内) → クラウド (Supabase) の順で表示。
+                v0.6.13 STΛCK 指示:
+                クラウドストレージ連携 (Supabase) はβ以降で公開予定。
+                α版では RLS 403 エラーで「接続テストに失敗」が出るため、
+                混乱回避のため SettingsCloudSection を非表示にする。
+                ローカル保存先のみ表示する。
               */}
               <StorageSettingsTab />
-              <SettingsCloudSection />
             </div>
           )}
           {tab === "accounts" && <AccountSettings />}
