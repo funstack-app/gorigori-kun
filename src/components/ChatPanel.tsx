@@ -152,7 +152,7 @@ export function ChatPanel() {
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-[#f3f4f6]">
-      <div className="border-b border-neutral-200 bg-white px-5 py-4">
+      <div className="shrink-0 border-b border-neutral-200 bg-white px-5 py-4">
         <div className="mb-4 flex items-start justify-between gap-3">
           <div>
             <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-blue-700">
