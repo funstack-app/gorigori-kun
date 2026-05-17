@@ -56,7 +56,7 @@ export function ImageGallery({
         embedded ? "" : "border-l border-neutral-200"
       }`}
     >
-      <div className="flex items-center justify-between border-b border-neutral-200 bg-stone-50 px-3 py-2 text-xs">
+      <div className="flex shrink-0 items-center justify-between border-b border-neutral-200 bg-stone-50 px-3 py-2 text-xs">
         <span className="font-semibold text-neutral-800">
           画像ライブラリ{" "}
           <span className="text-neutral-500">
@@ -102,7 +102,7 @@ export function ImageGallery({
       </div>
 
       {visibleItems.length === 0 ? (
-        <div className="flex flex-1 items-center justify-center px-4">
+        <div className="flex min-h-0 flex-1 items-center justify-center px-4">
           <p className="text-center text-xs text-neutral-500">
             {filter === "favorites"
               ? "お気に入りはまだありません。サムネ右上の保存マークで追加できます。"

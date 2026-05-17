@@ -110,7 +110,7 @@ export function PromptLibraryModal({ open, onClose }: Props) {
         >
           <div className="flex items-center justify-between border-b border-neutral-800 px-4 py-3">
             <h3 className="text-base font-semibold text-neutral-100">
-              📚 プロンプトライブラリ{" "}
+              プロンプトライブラリ{" "}
               <span className="ml-1 text-xs text-neutral-500">
                 ({items.length})
               </span>
@@ -132,7 +132,7 @@ export function PromptLibraryModal({ open, onClose }: Props) {
                 type="text"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder="🔎 タイトル / 本文 / タグで検索"
+                placeholder="タイトル / 本文 / タグで検索"
                 autoFocus
                 className="flex-1 rounded-md border border-neutral-700 bg-neutral-950 px-2 py-1.5 text-xs text-neutral-100 outline-none focus:border-emerald-500"
               />

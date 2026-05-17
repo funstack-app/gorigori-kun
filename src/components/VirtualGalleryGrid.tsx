@@ -62,7 +62,7 @@ export function VirtualGalleryGrid(props: CellProps) {
   };
 
   return (
-    <div ref={containerRef} className="flex-1 overflow-hidden">
+    <div ref={containerRef} className="min-h-0 flex-1 overflow-hidden">
       {size.width > 0 && size.height > 0 && (
         <Grid<CellPropsInternal>
           columnCount={COLUMNS}

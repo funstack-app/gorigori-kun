@@ -212,13 +212,11 @@ export function ImagePreviewModal() {
             [
               {
                 label: "名前を付けて保存…",
-                icon: "💾",
                 onClick: () =>
                   useImages.getState().downloadAs(path, name),
               },
               {
                 label: "マスクで編集",
-                icon: "🖌",
                 onClick: () => {
                   openMask({ path, name });
                   close();
@@ -226,7 +224,6 @@ export function ImagePreviewModal() {
               },
               {
                 label: "Finder で表示",
-                icon: "📂",
                 onClick: () => useImages.getState().revealInFinder(path),
               },
             ] satisfies ContextMenuItem[]
@@ -420,7 +417,7 @@ function SaveAsFormatButton({ path, name }: { path: string; name: string }) {
         ].join(" ")}
         title="形式を選んで保存"
       >
-        💾 保存
+        保存
       </button>
       {open && (
         <div

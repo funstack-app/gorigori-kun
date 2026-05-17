@@ -68,7 +68,7 @@ export function MessageList({
   const isEmpty = turns.length === 0 && batches.length === 0;
 
   return (
-    <div ref={ref} className="flex-1 space-y-4 overflow-y-auto px-6 py-5">
+    <div ref={ref} className="min-h-0 flex-1 space-y-4 overflow-y-auto px-6 py-5">
       {isEmpty &&
         (emptyHint ?? (
           <p className="text-center text-xs text-neutral-500">
