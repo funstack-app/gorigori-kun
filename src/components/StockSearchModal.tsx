@@ -370,9 +370,16 @@ export function StockSearchModal({ open, onClose, onPick }: Props) {
       onClick={onClose}
     >
       <div
-        className="flex max-h-[calc(100vh-2rem)] w-full max-w-5xl flex-col overflow-y-auto rounded-xl border border-[#2a2a2a] bg-[#181818] shadow-2xl"
+        className="flex max-h-[calc(100vh-2rem)] w-full max-w-5xl min-h-0 flex-col overflow-hidden rounded-xl border border-[#2a2a2a] bg-[#181818] shadow-2xl"
         onClick={(event) => event.stopPropagation()}
       >
+        {/*
+          F-#9 修正 (2026-05-19): 元は overflow-y-auto を親に付けていたため、
+          内側の検索結果エリア (flex-1 + h-full overflow-y-auto) がスクロール
+          できなかった (Windows 11 marche_izm さん報告)。
+          親を overflow-hidden + min-h-0 にして、スクロールは結果エリアだけが
+          持つ単一スクロール構造に変更。検索フォームは常時固定表示される。
+        */}
         <div className="flex items-center justify-between gap-3 border-b border-[#242424] px-4 py-3">
           <h3 className="text-sm font-black text-white">ストック素材検索</h3>
           <button
@@ -830,9 +837,10 @@ export function StockSearchModal({ open, onClose, onPick }: Props) {
           }}
         >
           <div
-            className="flex max-h-[calc(100vh-2rem)] w-full max-w-4xl flex-col overflow-y-auto rounded-xl border border-[#2a2a2a] bg-[#181818] shadow-2xl"
+            className="flex max-h-[calc(100vh-2rem)] w-full max-w-4xl min-h-0 flex-col overflow-hidden rounded-xl border border-[#2a2a2a] bg-[#181818] shadow-2xl"
             onClick={(event) => event.stopPropagation()}
           >
+            {/* F-#9 同じ二重スクロール問題を修正。スクロールは内側 (L856) だけが担当 */}
             <div className="flex items-center justify-between gap-3 border-b border-[#242424] px-4 py-3">
               <h3 className="text-sm font-semibold text-white">
                 画像分析の結果 ({analyzeResults.length} 件)
