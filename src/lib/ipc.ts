@@ -278,8 +278,36 @@ export type HiggsfieldCompareModel = {
   displayName: string;
 };
 
+/**
+ * F-#13 (2026-05-19): Higgsfield 接続デバッグ用の実測情報。
+ * 推測ベースのバグ修正を切るため、UI に「Higgsfield 診断」ボタンを置いて
+ * ユーザーがコピペで送ってくれるための観測コマンド。
+ */
+export type HiggsfieldDebugInfo = {
+  os: string;
+  arch: string;
+  currentPath: string;
+  enrichedPath: string;
+  resolvedBinary: string | null;
+  extensionDir: string;
+  extensionDirExists: boolean;
+  extensionDirListing: string[];
+  versionProbe: HiggsfieldProbeResult;
+  authTokenProbe: HiggsfieldProbeResult;
+  accountProbe: HiggsfieldProbeResult;
+};
+
+export type HiggsfieldProbeResult = {
+  ran: boolean;
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+  error: string | null;
+};
+
 export const higgsfield = {
   status: () => invoke<HiggsfieldStatus>("higgsfield_status"),
+  debug: () => invoke<HiggsfieldDebugInfo>("higgsfield_debug"),
   login: () => invoke<string>("higgsfield_login"),
   logout: () => invoke<void>("higgsfield_logout"),
   listModels: (media: "image" | "video") =>

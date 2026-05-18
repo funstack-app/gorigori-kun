@@ -15,6 +15,32 @@ use crate::codex::process::enriched_path;
 use crate::events::EVENT_IMAGE_BATCH;
 use crate::state::{AppState, HiggsfieldCancellation};
 
+/// Higgsfield CLI を起動する全 std::process::Command にかける共通設定:
+/// - PATH を enriched_path で統一 (拡張パック wrapper 内 / CLI 内部の env node 対策)
+/// - Windows ではコンソールウィンドウを抑制 (CREATE_NO_WINDOW)
+///
+/// Codex クロスレビュー (2026-05-19): 全 Higgsfield Command に統一適用する
+/// ことで「ある操作だけ動く / 動かない」差分をなくす。
+fn prepare_higgsfield_command(cmd: &mut Command) {
+    cmd.env("PATH", enriched_path());
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+}
+
+/// 上記の tokio::process::Command 版。
+fn prepare_higgsfield_tokio_command(cmd: &mut TokioCommand) {
+    cmd.env("PATH", enriched_path());
+    #[cfg(target_os = "windows")]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HiggsfieldStatus {
@@ -171,6 +197,158 @@ pub async fn higgsfield_status() -> Result<HiggsfieldStatus, String> {
     })
 }
 
+/// Higgsfield 接続の状態を「実測」して返すデバッグ専用コマンド。
+///
+/// Codex クロスレビュー (2026-05-19): エラー報告時に「どのバイナリが選ばれ、
+/// どの PATH で実行され、CLI が何を返しているか」をユーザー画面に直接出せる
+/// ようにする。推測ベースの修正ループを切るための観測手段。
+///
+/// 返す情報:
+/// - app の現在の PATH (std::env::var)
+/// - enriched_path() の結果
+/// - resolve_higgsfield_binary() の結果 (見つかったバイナリのフルパス、または未検出)
+/// - 拡張パックのインストール先ディレクトリの存在と中身
+/// - 見つかったバイナリで実行した `--version`, `auth token`, `account status --json` の
+///   stdout/stderr/exit code (それぞれ最初の 500 文字程度に切り詰め)
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HiggsfieldDebugInfo {
+    pub os: String,
+    pub arch: String,
+    pub current_path: String,
+    pub enriched_path: String,
+    pub resolved_binary: Option<String>,
+    pub extension_dir: String,
+    pub extension_dir_exists: bool,
+    pub extension_dir_listing: Vec<String>,
+    pub version_probe: HiggsfieldProbeResult,
+    pub auth_token_probe: HiggsfieldProbeResult,
+    pub account_probe: HiggsfieldProbeResult,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HiggsfieldProbeResult {
+    pub ran: bool,
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub error: Option<String>,
+}
+
+fn truncate_for_debug(s: &str) -> String {
+    const MAX: usize = 800;
+    if s.len() <= MAX {
+        return s.to_string();
+    }
+    let mut out = s[..MAX].to_string();
+    out.push_str("...[truncated]");
+    out
+}
+
+fn probe_higgsfield<const N: usize>(binary: &Path, args: [&str; N]) -> HiggsfieldProbeResult {
+    let mut cmd = Command::new(binary);
+    cmd.args(args);
+    prepare_higgsfield_command(&mut cmd);
+    match cmd.output() {
+        Ok(output) => HiggsfieldProbeResult {
+            ran: true,
+            exit_code: output.status.code(),
+            stdout: truncate_for_debug(&String::from_utf8_lossy(&output.stdout)),
+            stderr: truncate_for_debug(&String::from_utf8_lossy(&output.stderr)),
+            error: None,
+        },
+        Err(e) => HiggsfieldProbeResult {
+            ran: false,
+            exit_code: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            error: Some(e.to_string()),
+        },
+    }
+}
+
+#[tauri::command]
+pub async fn higgsfield_debug() -> Result<HiggsfieldDebugInfo, String> {
+    let current_path = std::env::var("PATH").unwrap_or_default();
+    let enriched = enriched_path().to_string_lossy().into_owned();
+    let resolved = resolve_higgsfield_binary();
+    let resolved_str = resolved.as_ref().map(|p| p.to_string_lossy().into_owned());
+
+    let extension_dir = dirs::data_dir()
+        .map(|d| {
+            d.join("app.codexframefactory")
+                .join("extensions")
+                .join("higgsfield")
+        })
+        .unwrap_or_else(|| PathBuf::from("(data_dir 取得失敗)"));
+    let extension_dir_exists = extension_dir.exists();
+    let mut extension_dir_listing: Vec<String> = Vec::new();
+    if extension_dir_exists {
+        if let Ok(entries) = std::fs::read_dir(&extension_dir) {
+            for entry in entries.flatten() {
+                extension_dir_listing.push(entry.file_name().to_string_lossy().into_owned());
+            }
+        }
+        // bin ディレクトリも見たい
+        let bin_dir = extension_dir.join("bin");
+        if bin_dir.exists() {
+            extension_dir_listing.push("---- bin/ ----".to_string());
+            if let Ok(entries) = std::fs::read_dir(&bin_dir) {
+                for entry in entries.flatten() {
+                    extension_dir_listing
+                        .push(format!("bin/{}", entry.file_name().to_string_lossy()));
+                }
+            }
+        }
+    }
+
+    let (version_probe, auth_token_probe, account_probe) = match resolved.as_ref() {
+        Some(binary) => (
+            probe_higgsfield(binary, ["--version"]),
+            probe_higgsfield(binary, ["auth", "token"]),
+            probe_higgsfield(binary, ["account", "status", "--json"]),
+        ),
+        None => (
+            HiggsfieldProbeResult {
+                ran: false,
+                exit_code: None,
+                stdout: String::new(),
+                stderr: String::new(),
+                error: Some("binary 未検出のためプローブ不可".to_string()),
+            },
+            HiggsfieldProbeResult {
+                ran: false,
+                exit_code: None,
+                stdout: String::new(),
+                stderr: String::new(),
+                error: Some("binary 未検出のためプローブ不可".to_string()),
+            },
+            HiggsfieldProbeResult {
+                ran: false,
+                exit_code: None,
+                stdout: String::new(),
+                stderr: String::new(),
+                error: Some("binary 未検出のためプローブ不可".to_string()),
+            },
+        ),
+    };
+
+    Ok(HiggsfieldDebugInfo {
+        os: std::env::consts::OS.to_string(),
+        arch: std::env::consts::ARCH.to_string(),
+        current_path,
+        enriched_path: enriched,
+        resolved_binary: resolved_str,
+        extension_dir: extension_dir.to_string_lossy().into_owned(),
+        extension_dir_exists,
+        extension_dir_listing,
+        version_probe,
+        auth_token_probe,
+        account_probe,
+    })
+}
+
 #[tauri::command]
 pub async fn higgsfield_login() -> Result<String, String> {
     let binary = resolve_higgsfield_binary().ok_or_else(|| {
@@ -201,8 +379,12 @@ pub async fn higgsfield_list_models(media: String) -> Result<Vec<HiggsfieldModel
         _ => return Err("media は image または video を指定してください。".to_string()),
     };
 
-    let output = Command::new(&binary)
-        .args(["model", "list", media_arg, "--json"])
+    // Codex クロスレビュー (2026-05-19): PATH 継承 + Windows CREATE_NO_WINDOW を
+    // 全 Higgsfield Command に統一適用する prepare_higgsfield_command を経由する。
+    let mut cmd = Command::new(&binary);
+    cmd.args(["model", "list", media_arg, "--json"]);
+    prepare_higgsfield_command(&mut cmd);
+    let output = cmd
         .output()
         .map_err(|e| format!("Higgsfield CLI の実行に失敗しました: {e}"))?;
 
@@ -233,9 +415,10 @@ pub async fn higgsfield_account() -> Result<HiggsfieldAccount, String> {
 
     // PATH に node/npm の bin を含めないと CLI 内部のサブプロセス起動が失敗する
     // 可能性がある (generate_batch 側でも同様の理由で enriched_path を使っている)。
-    let output = Command::new(&binary)
-        .args(["account", "status", "--json"])
-        .env("PATH", enriched_path())
+    let mut cmd = Command::new(&binary);
+    cmd.args(["account", "status", "--json"]);
+    prepare_higgsfield_command(&mut cmd);
+    let output = cmd
         .output()
         .map_err(|e| format!("Higgsfield CLI の実行に失敗しました: {e}"))?;
 
@@ -625,7 +808,7 @@ pub async fn higgsfield_generate_cost(
         cmd.arg("--aspect_ratio").arg(aspect);
     }
     cmd.arg("--json");
-    cmd.env("PATH", enriched_path());
+    prepare_higgsfield_tokio_command(&mut cmd);
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
@@ -675,15 +858,14 @@ fn resolve_higgsfield_binary() -> Option<PathBuf> {
         }
     }
 
-    if let Ok(output) = Command::new("which").arg("higgsfield").output() {
-        if output.status.success() {
-            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !path.is_empty() {
-                let candidate = PathBuf::from(path);
-                if candidate.exists() {
-                    return Some(candidate);
-                }
-            }
+    // Codex クロスレビュー (2026-05-19): 外部 `which` コマンドは
+    // Windows に標準で存在しないため、Rust の which クレートで PATH 上を
+    // 探索する。enriched_path() を渡すことで Finder 起動でも Homebrew や
+    // ~/.npm-global/bin を含む拡張済み PATH を検索対象にできる。
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+    if let Ok(found) = which::which_in("higgsfield", Some(&enriched_path()), &cwd) {
+        if found.exists() {
+            return Some(found);
         }
     }
 
@@ -718,7 +900,12 @@ fn auth_status(binary: &Path) -> bool {
     //   - 認証済み: 現在のアクセストークンを stdout に出力 + exit 0
     //   - 未認証: error を stderr に出して exit non-zero
     // stdout が空でないことも追加条件にして「ヘルプが間違って通る」事故を防ぐ
-    let Ok(output) = Command::new(binary).args(["auth", "token"]).output() else {
+    //
+    // Codex クロスレビュー (2026-05-19): PATH 継承 + Windows CREATE_NO_WINDOW を統一適用。
+    let mut cmd = Command::new(binary);
+    cmd.args(["auth", "token"]);
+    prepare_higgsfield_command(&mut cmd);
+    let Ok(output) = cmd.output() else {
         return false;
     };
     if !output.status.success() {
@@ -729,8 +916,12 @@ fn auth_status(binary: &Path) -> bool {
 }
 
 fn command_text<const N: usize>(binary: &Path, args: [&str; N]) -> Result<String, String> {
-    let output = Command::new(binary)
-        .args(args)
+    // Codex クロスレビュー (2026-05-19): login / logout / --version 等の根幹操作。
+    // prepare_higgsfield_command で PATH + Windows コンソール抑制を統一適用。
+    let mut cmd = Command::new(binary);
+    cmd.args(args);
+    prepare_higgsfield_command(&mut cmd);
+    let output = cmd
         .output()
         .map_err(|e| format!("Higgsfield CLI の実行に失敗しました: {e}"))?;
 
@@ -908,7 +1099,7 @@ async fn run_one_higgsfield_job(
     if let Some(cwd) = args.cwd.as_deref().filter(|s| !s.trim().is_empty()) {
         cmd.current_dir(cwd);
     }
-    cmd.env("PATH", enriched_path());
+    prepare_higgsfield_tokio_command(&mut cmd);
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
@@ -1058,21 +1249,32 @@ fn is_usable_result_ref(value: &str) -> bool {
 async fn save_result_image(src: &str, dest: &Path) -> Result<(), String> {
     let trimmed = src.trim();
     if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
-        let output = TokioCommand::new("curl")
-            .args(["-fsSL", "-o"])
-            .arg(dest)
-            .arg(trimmed)
-            .output()
+        // Codex クロスレビュー (2026-05-19): Windows 10 等で `curl.exe` の存在が
+        // 保証されないため、外部コマンド依存を reqwest に置き換える。
+        // タイムアウト 60s でフェイルセーフを入れる (Higgsfield CDN が遅い時の保護)。
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(60))
+            .build()
+            .map_err(|e| format!("HTTP クライアントの初期化に失敗しました: {e}"))?;
+        let response = client
+            .get(trimmed)
+            .send()
             .await
-            .map_err(|e| format!("curl の実行に失敗しました: {e}"))?;
-        if output.status.success() {
-            return Ok(());
+            .map_err(|e| format!("画像ダウンロードに失敗しました: {e}"))?;
+        if !response.status().is_success() {
+            return Err(format!(
+                "画像ダウンロードに失敗しました: HTTP {}",
+                response.status()
+            ));
         }
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        if stderr.is_empty() {
-            return Err(format!("画像ダウンロードに失敗しました: {}", output.status));
-        }
-        return Err(format!("画像ダウンロードに失敗しました: {stderr}"));
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|e| format!("レスポンス body の読み取りに失敗しました: {e}"))?;
+        tokio::fs::write(dest, &bytes)
+            .await
+            .map_err(|e| format!("ファイル書き込みに失敗しました: {e}"))?;
+        return Ok(());
     }
     std::fs::copy(trimmed, dest)
         .map(|_| ())

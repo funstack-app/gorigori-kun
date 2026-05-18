@@ -322,6 +322,7 @@ pub fn run() {
             commands::images::images_write_upload,
             commands::layer_splitter::layer_splitter_run,
             commands::higgsfield::higgsfield_status,
+            commands::higgsfield::higgsfield_debug,
             commands::higgsfield::higgsfield_login,
             commands::higgsfield::higgsfield_logout,
             commands::higgsfield::higgsfield_list_models,

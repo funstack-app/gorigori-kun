@@ -1,5 +1,11 @@
 import { useEffect, useState } from "react";
-import { higgsfield, storage, type LegacySummary, type StorageSettings } from "../lib/ipc";
+import {
+  higgsfield,
+  storage,
+  type HiggsfieldDebugInfo,
+  type LegacySummary,
+  type StorageSettings,
+} from "../lib/ipc";
 import { useAccounts, type CodexPlan } from "../lib/store/accounts";
 import { useSettings } from "../lib/store/settings";
 import { useThreads } from "../lib/store/threads";
@@ -386,6 +392,9 @@ function StorageSettingsTab() {
 function AccountSettings() {
   const accounts = useAccounts();
   const push = useToasts((s) => s.push);
+  // F-#13: Higgsfield 診断ダイアログ。ユーザー環境の実測情報を取得・表示する。
+  const [debugInfo, setDebugInfo] = useState<HiggsfieldDebugInfo | null>(null);
+  const [debugRunning, setDebugRunning] = useState(false);
   const refresh = async () => {
     await accounts.refresh();
     push({ kind: "success", text: "接続状態を更新しました", ttlMs: 2000 });
@@ -397,6 +406,17 @@ function AccountSettings() {
   const logoutHiggsfield = async () => {
     await higgsfield.logout();
     await accounts.refreshHiggsfield();
+  };
+  const runDebug = async () => {
+    setDebugRunning(true);
+    try {
+      const info = await higgsfield.debug();
+      setDebugInfo(info);
+    } catch (err) {
+      push({ kind: "error", text: `診断に失敗: ${String(err)}` });
+    } finally {
+      setDebugRunning(false);
+    }
   };
   return (
     <Panel title="アカウント / 接続">
@@ -444,9 +464,19 @@ function AccountSettings() {
               </p>
             )}
           </div>
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
             <button type="button" onClick={() => void refresh()} className={`${MUTED_BUTTON} h-9 px-3 text-xs`}>
               テスト接続
+            </button>
+            {/* F-#13: Higgsfield 診断 — 接続できない時に実測情報を吐く */}
+            <button
+              type="button"
+              onClick={() => void runDebug()}
+              disabled={debugRunning}
+              className={`${MUTED_BUTTON} h-9 px-3 text-xs disabled:cursor-not-allowed disabled:opacity-60`}
+              title="Higgsfield CLI のパス・PATH 環境変数・実行結果を表示します。接続できない時のサポート用。"
+            >
+              {debugRunning ? "診断中…" : "診断"}
             </button>
             {accounts.higgsfield.authenticated ? (
               <button type="button" onClick={() => void logoutHiggsfield()} className={`${MUTED_BUTTON} h-9 px-3 text-xs`}>
@@ -460,7 +490,133 @@ function AccountSettings() {
           </div>
         </div>
       </section>
+      {debugInfo && (
+        <HiggsfieldDebugDialog info={debugInfo} onClose={() => setDebugInfo(null)} />
+      )}
     </Panel>
+  );
+}
+
+function HiggsfieldDebugDialog({
+  info,
+  onClose,
+}: {
+  info: HiggsfieldDebugInfo;
+  onClose: () => void;
+}) {
+  const push = useToasts((s) => s.push);
+  const copyAll = async () => {
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(info, null, 2));
+      push({ kind: "success", text: "診断情報をクリップボードにコピーしました", ttlMs: 2500 });
+    } catch (err) {
+      push({ kind: "error", text: `コピーに失敗: ${String(err)}` });
+    }
+  };
+  return (
+    <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/70 p-4" onClick={onClose}>
+      <div
+        className="flex max-h-[85vh] w-full max-w-3xl min-h-0 flex-col rounded-xl border border-[#2a2a2a] bg-[#181818] shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between border-b border-[#242424] px-4 py-3">
+          <div>
+            <h3 className="text-sm font-black text-white">Higgsfield 診断結果</h3>
+            <p className="mt-0.5 text-[10px] text-neutral-500">
+              この情報をサポート (Discord 等) にコピペで送ってください
+            </p>
+          </div>
+          <div className="flex gap-2">
+            <button type="button" onClick={() => void copyAll()} className={`${MUTED_BUTTON} h-8 px-3 text-xs`}>
+              全部コピー
+            </button>
+            <button type="button" onClick={onClose} aria-label="閉じる" className="text-neutral-400 hover:text-white">
+              ×
+            </button>
+          </div>
+        </div>
+        <div className="flex-1 overflow-y-auto p-4">
+          <DebugRow label="OS / Arch" value={`${info.os} / ${info.arch}`} />
+          <DebugRow label="拡張パック存在" value={info.extensionDirExists ? "✓ あり" : "✗ なし"} />
+          <DebugRow label="拡張パックパス" value={info.extensionDir} mono />
+          {info.extensionDirExists && info.extensionDirListing.length > 0 && (
+            <DebugRow
+              label="拡張パック中身"
+              value={info.extensionDirListing.join("\n")}
+              mono
+              multiline
+            />
+          )}
+          <DebugRow label="検出した higgsfield" value={info.resolvedBinary ?? "(未検出)"} mono />
+          <DebugRow label="現在の PATH" value={info.currentPath} mono multiline />
+          <DebugRow label="enriched_path" value={info.enrichedPath} mono multiline />
+          <DebugProbe label="higgsfield --version" probe={info.versionProbe} />
+          <DebugProbe label="higgsfield auth token" probe={info.authTokenProbe} />
+          <DebugProbe label="higgsfield account status --json" probe={info.accountProbe} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function DebugRow({
+  label,
+  value,
+  mono,
+  multiline,
+}: {
+  label: string;
+  value: string;
+  mono?: boolean;
+  multiline?: boolean;
+}) {
+  return (
+    <div className="mb-3">
+      <p className="text-[10px] font-bold uppercase tracking-wide text-neutral-500">{label}</p>
+      <p
+        className={[
+          "mt-0.5 break-all rounded bg-[#101010] p-2 text-[11px] text-neutral-200",
+          mono ? "font-mono" : "",
+          multiline ? "whitespace-pre-wrap" : "",
+        ].join(" ")}
+      >
+        {value || "(空)"}
+      </p>
+    </div>
+  );
+}
+
+function DebugProbe({
+  label,
+  probe,
+}: {
+  label: string;
+  probe: HiggsfieldDebugInfo["versionProbe"];
+}) {
+  return (
+    <div className="mb-3">
+      <p className="text-[10px] font-bold uppercase tracking-wide text-neutral-500">
+        {label}{" "}
+        <span className="text-neutral-400">
+          {probe.ran ? `(exit ${probe.exitCode ?? "?"})` : "(未実行)"}
+        </span>
+      </p>
+      {probe.error && (
+        <p className="mt-0.5 rounded bg-rose-950/40 p-2 text-[11px] font-mono text-rose-200">
+          ERROR: {probe.error}
+        </p>
+      )}
+      {probe.stdout && (
+        <p className="mt-0.5 whitespace-pre-wrap break-all rounded bg-[#101010] p-2 text-[11px] font-mono text-neutral-200">
+          stdout: {probe.stdout}
+        </p>
+      )}
+      {probe.stderr && (
+        <p className="mt-0.5 whitespace-pre-wrap break-all rounded bg-amber-950/40 p-2 text-[11px] font-mono text-amber-200">
+          stderr: {probe.stderr}
+        </p>
+      )}
+    </div>
   );
 }
 function Panel({ title, children }: { title: string; children: React.ReactNode }) {

@@ -70,7 +70,11 @@ const FALLBACK_PATHS: &[&str] = &[
 /// `/usr/bin:/bin:/usr/sbin:/sbin` だけになる。これだと Homebrew や nvm /
 /// mise / volta / npm prefix 配下にいる codex が見つからない。login shell
 /// から $PATH を取り出して補強する。
-fn login_shell_path() -> Option<String> {
+///
+/// Windows / Linux では問題のレイヤーが異なる (Windows は Explorer 起動でも
+/// PATH を継承、Linux は別途設計) ため macOS 専用にする。
+#[cfg(target_os = "macos")]
+fn login_shell_path() -> Option<OsString> {
     let shell = std::env::var_os("SHELL").unwrap_or_else(|| OsString::from("/bin/zsh"));
     let out = std::process::Command::new(&shell)
         .arg("-lic")
@@ -84,8 +88,13 @@ fn login_shell_path() -> Option<String> {
     if s.is_empty() {
         None
     } else {
-        Some(s)
+        Some(OsString::from(s))
     }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn login_shell_path() -> Option<OsString> {
+    None
 }
 
 /// 現プロセスの PATH を login shell の値とマージする (順序保持・重複排除)。
@@ -93,20 +102,26 @@ fn login_shell_path() -> Option<String> {
 /// macOS の Finder / launchd 起動された .app には dotfiles 由来の PATH が
 /// 載らないので、`codex` (Node.js shebang) や `swift` 等を spawn する全箇所で
 /// `Command::env("PATH", enriched_path())` を呼ぶこと。
+///
+/// クロスプラットフォーム対応 (Codex クロスレビュー 2026-05-19):
+/// `std::env::split_paths` / `join_paths` を使うので、Windows の `;` 区切りでも
+/// macOS/Linux の `:` 区切りでも正しく動く。以前は `:` 固定で Windows の PATH を
+/// 破壊していた。
 pub fn enriched_path() -> OsString {
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut parts: Vec<String> = Vec::new();
-    for src in [std::env::var("PATH").ok(), login_shell_path()]
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    let mut parts: Vec<PathBuf> = Vec::new();
+    for src in [std::env::var_os("PATH"), login_shell_path()]
         .into_iter()
         .flatten()
     {
-        for p in src.split(':') {
-            if !p.is_empty() && seen.insert(p.to_string()) {
-                parts.push(p.to_string());
+        for p in std::env::split_paths(&src) {
+            if !p.as_os_str().is_empty() && seen.insert(p.clone()) {
+                parts.push(p);
             }
         }
     }
-    OsString::from(parts.join(":"))
+    std::env::join_paths(parts)
+        .unwrap_or_else(|_| std::env::var_os("PATH").unwrap_or_default())
 }
 
 /// 画像生成バッチ用に **codex CLI (codex exec を取れるバイナリ)** を解決する。
