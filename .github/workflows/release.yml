@@ -30,10 +30,17 @@ concurrency:
 
 jobs:
   # ─────────────────────────────────────────────────────────────
-  # macOS Apple Silicon (.dmg)
+  # macOS (.dmg) - Apple Silicon + Intel の 2ターゲット並列ビルド
+  # v0.6.17 STΛCK 指示: Intel Mac 対応のため matrix 化。
   # ─────────────────────────────────────────────────────────────
   macos:
     runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - aarch64-apple-darwin   # Apple Silicon (M1/M2/M3/M4)
+          - x86_64-apple-darwin    # Intel Mac
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -47,34 +54,35 @@ jobs:
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin
+          targets: ${{ matrix.target }}
 
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
+          key: ${{ matrix.target }}
 
       - name: Install npm dependencies
         run: npm ci
 
       # v0.6.15 STΛCK 指示: Mac 配布版にも Codex CLI を同梱する。
-      # 従来 Windows job だけ codex を同梱していたため、Mac ユーザは
-      # 「codex バイナリが見つかりません」エラーで起動できなかった。
-      - name: Fetch Codex CLI binaries (macOS aarch64)
+      # v0.6.17: matrix で target に応じて aarch64 / x86_64 用 codex を取得。
+      - name: Fetch Codex CLI binaries (macOS ${{ matrix.target }})
         run: |
           set -e
           codexVer="rust-v0.131.0-alpha.19"
           base="https://github.com/openai/codex/releases/download/$codexVer"
+          # matrix.target からファイル名を逆引き
+          codex_arch="${{ matrix.target }}"
           mkdir -p src-tauri/resources
 
-          # codex (CLI 本体) - aarch64-apple-darwin
-          curl -L -o codex.tar.gz "$base/codex-aarch64-apple-darwin.tar.gz"
+          # codex (CLI 本体)
+          curl -L -o codex.tar.gz "$base/codex-${codex_arch}.tar.gz"
           mkdir -p tmp-codex
           tar -xzf codex.tar.gz -C tmp-codex
-          # 名前を 'codex' に統一して resources/ に配置
-          find tmp-codex -type f -name "codex-aarch64-apple-darwin" -exec mv {} src-tauri/resources/codex \;
+          find tmp-codex -type f -name "codex-${codex_arch}" -exec mv {} src-tauri/resources/codex \;
           if [ ! -f "src-tauri/resources/codex" ]; then
-            echo "Failed to find codex-aarch64-apple-darwin in extracted tar"
+            echo "Failed to find codex-${codex_arch} in extracted tar"
             ls -la tmp-codex/
             exit 1
           fi
@@ -82,12 +90,12 @@ jobs:
           rm -rf codex.tar.gz tmp-codex
 
           # codex-app-server (アプリが直接話す JSON-RPC サーバ)
-          curl -L -o codex-app-server.tar.gz "$base/codex-app-server-aarch64-apple-darwin.tar.gz"
+          curl -L -o codex-app-server.tar.gz "$base/codex-app-server-${codex_arch}.tar.gz"
           mkdir -p tmp-app-server
           tar -xzf codex-app-server.tar.gz -C tmp-app-server
-          find tmp-app-server -type f -name "codex-app-server-aarch64-apple-darwin" -exec mv {} src-tauri/resources/codex-app-server \;
+          find tmp-app-server -type f -name "codex-app-server-${codex_arch}" -exec mv {} src-tauri/resources/codex-app-server \;
           if [ ! -f "src-tauri/resources/codex-app-server" ]; then
-            echo "Failed to find codex-app-server-aarch64-apple-darwin"
+            echo "Failed to find codex-app-server-${codex_arch}"
             ls -la tmp-app-server/
             exit 1
           fi
@@ -117,7 +125,7 @@ jobs:
           print("✓ tauri.conf.json updated, resources:", existing)
           PYEOF
 
-      - name: Build and publish draft release (macOS)
+      - name: Build and publish draft release (macOS ${{ matrix.target }})
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -128,7 +136,7 @@ jobs:
           prerelease: false
           includeRelease: true
           includeUpdaterJson: false
-          args: '--target aarch64-apple-darwin'
+          args: '--target ${{ matrix.target }}'
 
   # ─────────────────────────────────────────────────────────────
   # Windows x86_64 (.exe + .zip)
