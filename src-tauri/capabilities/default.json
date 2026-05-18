@@ -18,6 +18,9 @@
     "fs:allow-rename",
     "fs:allow-copy-file",
     "fs:allow-mkdir",
+    "updater:default",
+    "process:default",
+    "process:allow-restart",
     {
       "identifier": "fs:scope",
       "allow": [

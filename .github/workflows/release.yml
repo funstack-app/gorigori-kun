@@ -125,18 +125,30 @@ jobs:
           print("✓ tauri.conf.json updated, resources:", existing)
           PYEOF
 
-      - name: Build and publish draft release (macOS ${{ matrix.target }})
-        uses: tauri-apps/tauri-action@v0
+      - name: Build Tauri bundle (macOS ${{ matrix.target }})
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+        run: |
+          npm run tauri build -- --target ${{ matrix.target }}
+
+      # 配布リポ (funstack-app/gorigori-releases) にアセットをアップロード
+      # v0.6.21: クロスリポ配布 + Tauri Updater 対応
+      - name: Upload assets to release repo (${{ matrix.target }})
+        uses: softprops/action-gh-release@v2
         with:
-          tagName: ${{ inputs.tag || github.ref_name }}
-          releaseName: 'GORI GORI KUN ${{ inputs.tag || github.ref_name }}'
-          releaseDraft: true
+          repository: funstack-app/gorigori-releases
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          name: 'GORI GORI KUN ${{ inputs.tag || github.ref_name }}'
+          draft: true
           prerelease: false
-          includeRelease: true
-          includeUpdaterJson: false
-          args: '--target ${{ matrix.target }}'
+          fail_on_unmatched_files: false
+          files: |
+            src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+            src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz
+            src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz.sig
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PAT }}
 
   # ─────────────────────────────────────────────────────────────
   # Windows x86_64 (.exe + .zip)
@@ -229,18 +241,30 @@ jobs:
           Write-Host "✓ tauri.conf.json updated:"
           Get-Content $confPath | Select-String -Pattern "resources" -Context 0,5
 
-      - name: Build and publish draft release (Windows)
-        uses: tauri-apps/tauri-action@v0
+      - name: Build Tauri bundle (Windows x86_64)
+        shell: pwsh
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+        run: |
+          npm run tauri build -- --target x86_64-pc-windows-msvc
+
+      # 配布リポ (funstack-app/gorigori-releases) にアセットをアップロード
+      - name: Upload assets to release repo (Windows)
+        uses: softprops/action-gh-release@v2
         with:
-          tagName: ${{ inputs.tag || github.ref_name }}
-          releaseName: 'GORI GORI KUN ${{ inputs.tag || github.ref_name }}'
-          releaseDraft: true
+          repository: funstack-app/gorigori-releases
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          name: 'GORI GORI KUN ${{ inputs.tag || github.ref_name }}'
+          draft: true
           prerelease: false
-          includeRelease: true
-          includeUpdaterJson: false
-          args: '--target x86_64-pc-windows-msvc'
+          fail_on_unmatched_files: false
+          files: |
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe.sig
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PAT }}
 
   # ─────────────────────────────────────────────────────────────
   # Higgsfield 拡張パック (Mac aarch64 + Mac x64)
@@ -271,16 +295,18 @@ jobs:
           chmod +x scripts/build-higgsfield-extension.sh
           ./scripts/build-higgsfield-extension.sh ${{ matrix.arch }}
 
-      - name: Upload to release
+      - name: Upload to release repo (Mac ${{ matrix.arch }} 拡張パック)
         uses: softprops/action-gh-release@v2
         with:
+          repository: funstack-app/gorigori-releases
           tag_name: ${{ inputs.tag || github.ref_name }}
+          name: 'GORI GORI KUN ${{ inputs.tag || github.ref_name }}'
           files: dist/GORI-HiggsField-Extension_mac-${{ matrix.arch }}.dmg
           draft: true
           prerelease: false
           fail_on_unmatched_files: true
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PAT }}
 
   # ─────────────────────────────────────────────────────────────
   # Higgsfield 拡張パック (Windows x64)
@@ -300,13 +326,110 @@ jobs:
         shell: pwsh
         run: scripts/build-higgsfield-extension-windows.ps1
 
-      - name: Upload to release
+      - name: Upload to release repo (Windows 拡張パック)
         uses: softprops/action-gh-release@v2
         with:
+          repository: funstack-app/gorigori-releases
           tag_name: ${{ inputs.tag || github.ref_name }}
+          name: 'GORI GORI KUN ${{ inputs.tag || github.ref_name }}'
           files: dist/GORI-HiggsField-Extension_windows.zip
           draft: true
           prerelease: false
           fail_on_unmatched_files: true
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PAT }}
+
+  # ─────────────────────────────────────────────────────────────
+  # updater.json を生成して配布リポへアップロード
+  # 全プラットフォームのビルドが終わってから走る (needs で依存指定)
+  # ─────────────────────────────────────────────────────────────
+  publish-updater:
+    needs: [macos, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Get version from tauri.conf.json
+        id: ver
+        run: |
+          VER=$(python3 -c "import json; print(json.load(open('src-tauri/tauri.conf.json'))['version'])")
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "TAG=${{ inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for assets to be available
+        run: sleep 30
+
+      - name: Download signature files from release repo
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PAT }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -e
+          mkdir -p sigs
+          # 各プラットフォームの署名ファイルを取得 (失敗してもスクリプト全体は続行)
+          for asset in $(gh release view "$TAG" --repo funstack-app/gorigori-releases --json assets --jq '.assets[] | select(.name | endswith(".sig")) | .name'); do
+            gh release download "$TAG" --repo funstack-app/gorigori-releases --pattern "$asset" --dir sigs/ || true
+          done
+          ls -la sigs/ || true
+
+      - name: Generate updater.json
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          python3 <<PYEOF
+          import json
+          import os
+          import glob
+
+          tag = os.environ["TAG"]
+          version = os.environ["VERSION"]
+          base_url = f"https://github.com/funstack-app/gorigori-releases/releases/download/{tag}"
+
+          def read_sig(pattern):
+              files = glob.glob(f"sigs/{pattern}")
+              if files:
+                  with open(files[0]) as f:
+                      return f.read().strip()
+              return ""
+
+          updater = {
+              "version": version,
+              "notes": f"GORI GORI KUN v{version}",
+              "pub_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+              "platforms": {
+                  "darwin-aarch64": {
+                      "signature": read_sig("*aarch64*.app.tar.gz.sig"),
+                      "url": f"{base_url}/GORI.GORI_{version}_aarch64.app.tar.gz",
+                  },
+                  "darwin-x86_64": {
+                      "signature": read_sig("*x64*.app.tar.gz.sig"),
+                      "url": f"{base_url}/GORI.GORI_{version}_x64.app.tar.gz",
+                  },
+                  "windows-x86_64": {
+                      "signature": read_sig("*x64-setup.exe.sig"),
+                      "url": f"{base_url}/GORI.GORI_{version}_x64-setup.exe",
+                  }
+              }
+          }
+
+          with open("updater.json", "w") as f:
+              json.dump(updater, f, indent=2, ensure_ascii=False)
+
+          print("Generated updater.json:")
+          print(json.dumps(updater, indent=2))
+          PYEOF
+
+      - name: Upload updater.json to release repo
+        uses: softprops/action-gh-release@v2
+        with:
+          repository: funstack-app/gorigori-releases
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          name: 'GORI GORI KUN ${{ inputs.tag || github.ref_name }}'
+          files: updater.json
+          draft: false
+          prerelease: false
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PAT }}

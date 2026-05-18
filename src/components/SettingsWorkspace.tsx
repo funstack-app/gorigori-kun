@@ -7,6 +7,7 @@ import { useToasts } from "../lib/store/toasts";
 // SettingsCloudSection は v0.6.13 でα版非表示。β以降で復活予定。
 // import { SettingsCloudSection } from "./SettingsCloudSection";
 import { SettingsConnections } from "./SettingsConnections";
+import { UpdateChecker } from "./UpdateChecker";
 import { StorageManagementSection } from "./StorageManagementSection";
 type Tab = "basic" | "storage" | "accounts" | "connections";
 const TABS: Array<{ id: Tab; label: string }> = [
@@ -52,7 +53,12 @@ export function SettingsWorkspace() {
           </div>
         </nav>
         <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
-          {tab === "basic" && <BasicSettings />}
+          {tab === "basic" && (
+            <div className="space-y-6">
+              <BasicSettings />
+              <UpdateChecker />
+            </div>
+          )}
           {tab === "storage" && (
             <div className="space-y-6">
               {/*
