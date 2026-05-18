@@ -37,7 +37,7 @@
   "plugins": {
     "updater": {
       "endpoints": [
-        "https://github.com/funstack-app/gorigori-kun/releases/latest/download/updater.json"
+        "https://github.com/funstack-app/gorigori-kun/releases/latest/download/latest.json"
       ],
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IERFNDhBNzgzMEE3QkMwODEKUldTQndIc0tnNmRJM3FTbTlkSEJ1ODBrNGpWbVNsSGRHSCt5NEFoN0NDMWh5M0xTTzBwVDYvenYK",
       "windows": {
@@ -48,6 +48,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "category": "GraphicsDesign",
     "copyright": "Copyright (c) 2026 STΛCK",
     "shortDescription": "画像生成と動画用カット生成のためのAIクリエイティブアプリ",

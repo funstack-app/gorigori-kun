@@ -1,5 +1,9 @@
-# Builds release artifacts for the Tauri app and uploads them as a draft
-# GitHub Release.
+# Builds release artifacts for the Tauri app and publishes them as a
+# non-draft GitHub Release.
+#
+# Codex クロスレビュー (2026-05-19): draft release は
+# `releases/latest/download/...` URL から取得できず、Tauri Updater が
+# `latest.json` を読めない。non-draft で publish する。
 #
 # Targets:
 #  - macOS Apple Silicon (.dmg)   [unsigned, requires xattr -cr after install]
@@ -134,7 +138,9 @@ jobs:
         with:
           tagName: ${{ inputs.tag || github.ref_name }}
           releaseName: 'GORI GORI KUN ${{ inputs.tag || github.ref_name }}'
-          releaseDraft: true
+          # Codex指摘 (2026-05-19): draft release は releases/latest/download
+          # URL から取得できないため、updater 経路が壊れる。non-draft で publish する。
+          releaseDraft: false
           prerelease: false
           includeRelease: true
           includeUpdaterJson: true
@@ -240,7 +246,8 @@ jobs:
         with:
           tagName: ${{ inputs.tag || github.ref_name }}
           releaseName: 'GORI GORI KUN ${{ inputs.tag || github.ref_name }}'
-          releaseDraft: true
+          # Codex指摘 (2026-05-19): mac jobs と統一して non-draft で publish
+          releaseDraft: false
           prerelease: false
           includeRelease: true
           includeUpdaterJson: true
@@ -281,7 +288,8 @@ jobs:
           tag_name: ${{ inputs.tag || github.ref_name }}
           name: 'GORI GORI KUN ${{ inputs.tag || github.ref_name }}'
           files: dist/GORI-HiggsField-Extension_mac-${{ matrix.arch }}.dmg
-          draft: true
+          # Codex指摘 (2026-05-19): 本体 jobs と統一して non-draft
+          draft: false
           prerelease: false
           fail_on_unmatched_files: true
         env:
@@ -311,7 +319,96 @@ jobs:
           tag_name: ${{ inputs.tag || github.ref_name }}
           name: 'GORI GORI KUN ${{ inputs.tag || github.ref_name }}'
           files: dist/GORI-HiggsField-Extension_windows.zip
-          draft: true
+          # Codex指摘 (2026-05-19): 本体 jobs と統一して non-draft
+          draft: false
+          prerelease: false
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ─────────────────────────────────────────────────────────────
+  # Updater manifest 集約 (Codex クロスレビュー 2026-05-19)
+  #
+  # 問題: 3 並列の platform job (mac aarch64 / mac x64 / windows) が
+  # tauri-action の includeUpdaterJson: true で各々 latest.json を upsert する。
+  # 最後に成功した 1 job の latest.json だけが残り、他 platform の署名が落ちる。
+  #
+  # 対策: 全 platform 完了後、リリースアセットから .sig を 1 個ずつ取得して
+  # 統合 latest.json を生成・上書きする。これで全 platform の updater が動く。
+  # ─────────────────────────────────────────────────────────────
+  updater-manifest:
+    needs: [macos, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build unified latest.json
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -e
+          TAG_NUM="${TAG#v}"
+          PUB_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          gh release view "$TAG" --json assets --jq '.assets[].name' | sort > /tmp/assets.txt
+          echo "== release assets =="
+          cat /tmp/assets.txt
+
+          fetch_sig() {
+            local name="$1"
+            gh release download "$TAG" -p "$name" -O - 2>/dev/null | tr -d '\n' || echo ""
+          }
+
+          DARWIN_AARCH64_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/GORI.GORI_aarch64.app.tar.gz"
+          DARWIN_X86_64_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/GORI.GORI_x64.app.tar.gz"
+          WINDOWS_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/GORI.GORI_${TAG_NUM}_x64-setup.nsis.zip"
+
+          DARWIN_AARCH64_SIG="$(fetch_sig "GORI.GORI_aarch64.app.tar.gz.sig")"
+          DARWIN_X86_64_SIG="$(fetch_sig "GORI.GORI_x64.app.tar.gz.sig")"
+          WINDOWS_SIG="$(fetch_sig "GORI.GORI_${TAG_NUM}_x64-setup.nsis.zip.sig")"
+
+          echo "== signatures =="
+          echo "darwin-aarch64: ${#DARWIN_AARCH64_SIG} bytes"
+          echo "darwin-x86_64:  ${#DARWIN_X86_64_SIG} bytes"
+          echo "windows-x86_64: ${#WINDOWS_SIG} bytes"
+
+          if [ -z "$DARWIN_AARCH64_SIG" ] || [ -z "$DARWIN_X86_64_SIG" ] || [ -z "$WINDOWS_SIG" ]; then
+            echo "::warning::1つ以上の .sig が見つかりません。latest.json は不完全になります"
+          fi
+
+          cat > /tmp/latest.json <<JSON
+          {
+            "version": "${TAG_NUM}",
+            "notes": "GORI GORI KUN ${TAG}",
+            "pub_date": "${PUB_DATE}",
+            "platforms": {
+              "darwin-aarch64": {
+                "signature": "${DARWIN_AARCH64_SIG}",
+                "url": "${DARWIN_AARCH64_URL}"
+              },
+              "darwin-x86_64": {
+                "signature": "${DARWIN_X86_64_SIG}",
+                "url": "${DARWIN_X86_64_URL}"
+              },
+              "windows-x86_64": {
+                "signature": "${WINDOWS_SIG}",
+                "url": "${WINDOWS_URL}"
+              }
+            }
+          }
+          JSON
+
+          echo "== latest.json =="
+          cat /tmp/latest.json
+
+      - name: Upload latest.json to release (overwrite)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: /tmp/latest.json
+          draft: false
           prerelease: false
           fail_on_unmatched_files: true
         env:
