@@ -655,6 +655,26 @@ pub async fn higgsfield_generate_cost(
 }
 
 fn resolve_higgsfield_binary() -> Option<PathBuf> {
+    // [v0.6.19] GORI GORI 専用 Higgsfield 拡張パックを最優先で探す。
+    // 拡張パックは別配布の dmg/zip でユーザーがインストールする。
+    // インストール先 (固定):
+    //   Mac:   ~/Library/Application Support/app.codexframefactory/extensions/higgsfield/bin/higgsfield
+    //   Win:   %APPDATA%/app.codexframefactory/extensions/higgsfield/bin/higgsfield.cmd
+    // ラッパーは Node.js ポータブル版を内部で使うので、ユーザー環境に
+    // Node.js が無くても動く設計。
+    if let Some(data_dir) = dirs::data_dir() {
+        let ext_bin = if cfg!(windows) { "higgsfield.cmd" } else { "higgsfield" };
+        let ext_path = data_dir
+            .join("app.codexframefactory")
+            .join("extensions")
+            .join("higgsfield")
+            .join("bin")
+            .join(ext_bin);
+        if ext_path.exists() {
+            return Some(ext_path);
+        }
+    }
+
     if let Ok(output) = Command::new("which").arg("higgsfield").output() {
         if output.status.success() {
             let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
