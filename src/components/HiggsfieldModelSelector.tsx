@@ -172,28 +172,37 @@ export function HiggsfieldModelSelector({ media }: { media: "image" | "video" })
 
   return (
     <div ref={containerRef} className="relative space-y-1">
-      {/* STΛCK 指示 (2026-05-17): 老眼ターゲット向けに行を縦分割。
-          ラベルを上に置いてボタンに横幅をフル開放、ギチギチ感を解消。 */}
-      <div className="space-y-1 text-sm font-medium text-neutral-300">
-        <span className="block text-xs text-neutral-400">生成モデル</span>
-        <button
-          ref={buttonRef}
-          type="button"
-          disabled={disabled}
-          onClick={toggleOpen}
-          className="shrink-13-row flex h-9 w-full items-center justify-between gap-2 rounded-md border border-[#343434] bg-[#101010] px-2.5 text-left text-sm font-semibold text-neutral-100 outline-none transition hover:border-[#444] hover:bg-[#151515] focus:border-pink-500 disabled:cursor-not-allowed disabled:text-neutral-600"
-        >
-          <span className="truncate">{triggerText}</span>
-          {selectedModels.length > 1 && (
-            <span className="shrink-0 rounded bg-pink-500/20 px-1.5 py-0.5 text-xs font-semibold text-pink-200">
-              {selectedModels.length}
-            </span>
-          )}
-          <span className="shrink-0 text-xs text-neutral-500" aria-hidden>
-            ▾
+      {/*
+        STΛCK 指示 (2026-05-17): 老眼ターゲット向けに行を縦分割。
+        ラベルを上に置いてボタンに横幅をフル開放、ギチギチ感を解消。
+
+        F-#10 修正 (2026-05-19): marche_izm さん Windows 11 13インチ報告で
+        モデルカードの表示位置に違和感とあるため、ラベル「生成モデル」を
+        ボタン内に統合した左寄せキャプションに変更。
+        他の下部コントロール (枚数/アスペクト) はラベルなしの単行ボタンで
+        揃えているため、ここだけラベルが上にあると縦余白がズレて見える。
+      */}
+      <button
+        ref={buttonRef}
+        type="button"
+        disabled={disabled}
+        onClick={toggleOpen}
+        className="shrink-13-row flex h-9 w-full items-center justify-between gap-2 rounded-md border border-[#343434] bg-[#101010] px-2.5 text-left text-sm font-semibold text-neutral-100 outline-none transition hover:border-[#444] hover:bg-[#151515] focus:border-pink-500 disabled:cursor-not-allowed disabled:text-neutral-600"
+        title="生成モデル"
+      >
+        <span className="shrink-0 text-[11px] font-bold uppercase tracking-wide text-neutral-500">
+          モデル
+        </span>
+        <span className="min-w-0 flex-1 truncate text-right">{triggerText}</span>
+        {selectedModels.length > 1 && (
+          <span className="shrink-0 rounded bg-pink-500/20 px-1.5 py-0.5 text-xs font-semibold text-pink-200">
+            {selectedModels.length}
           </span>
-        </button>
-      </div>
+        )}
+        <span className="shrink-0 text-xs text-neutral-500" aria-hidden>
+          ▾
+        </span>
+      </button>
       {helperText && (
         <p
           className={
