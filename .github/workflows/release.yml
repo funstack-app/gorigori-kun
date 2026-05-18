@@ -241,3 +241,149 @@ jobs:
           includeRelease: true
           includeUpdaterJson: false
           args: '--target x86_64-pc-windows-msvc'
+
+  # ─────────────────────────────────────────────────────────────
+  # Higgsfield 拡張パック (Mac aarch64 + Mac x64)
+  # v0.6.19 STΛCK 指示:
+  # 別配布の拡張パックで Node.js + higgsfield CLI を提供。
+  # ユーザーは GORI 本体 + この拡張パック の 2 つを /Applications にD&D
+  # するだけで Higgsfield 機能が使えるようになる。
+  # ─────────────────────────────────────────────────────────────
+  higgsfield-extension-mac:
+    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        arch:
+          - aarch64
+          - x64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node (build用)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build Higgsfield extension (${{ matrix.arch }})
+        run: |
+          chmod +x scripts/build-higgsfield-extension.sh
+          ./scripts/build-higgsfield-extension.sh ${{ matrix.arch }}
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: dist/GORI-HiggsField-Extension_mac-${{ matrix.arch }}.dmg
+          draft: true
+          prerelease: false
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ─────────────────────────────────────────────────────────────
+  # Higgsfield 拡張パック (Windows x64)
+  # ─────────────────────────────────────────────────────────────
+  higgsfield-extension-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node (build用)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build Higgsfield extension (Windows x64)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $nodeVersion = "v20.18.0"
+          $nodeArch = "x64"
+          $hfPkg = "@higgsfield/cli"
+          $workDir = "$pwd\_work\higgsfield-extension-windows"
+          $distDir = "$pwd\dist"
+          $extDir = "$workDir\payload\higgsfield"
+
+          Remove-Item -Recurse -Force $workDir -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path "$extDir\bin" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$extDir\node_modules" | Out-Null
+          New-Item -ItemType Directory -Force -Path $distDir | Out-Null
+
+          # Node.js Windows zip 取得
+          $nodeZip = "node-$nodeVersion-win-$nodeArch.zip"
+          $nodeUrl = "https://nodejs.org/dist/$nodeVersion/$nodeZip"
+          Write-Host "==> Download $nodeUrl"
+          Invoke-WebRequest -Uri $nodeUrl -OutFile "$workDir\$nodeZip"
+          Expand-Archive -Path "$workDir\$nodeZip" -DestinationPath $workDir -Force
+          $nodeRoot = "$workDir\node-$nodeVersion-win-$nodeArch"
+          Copy-Item "$nodeRoot\node.exe" "$extDir\bin\node.exe"
+          # npm は node_modules\npm
+          Copy-Item -Recurse "$nodeRoot\node_modules\npm" "$extDir\node_modules\"
+
+          # higgsfield CLI を npm install
+          Write-Host "==> npm install $hfPkg"
+          & "$extDir\bin\node.exe" "$extDir\node_modules\npm\bin\npm-cli.js" install --prefix "$extDir" $hfPkg --no-save --no-audit --no-fund --quiet
+
+          # higgsfield ラッパー (.cmd)
+          $hfBin = Get-ChildItem -Path "$extDir\node_modules\@higgsfield\cli" -Filter "higgsfield.js" -Recurse | Select-Object -First 1
+          if (-not $hfBin) {
+              Write-Error "higgsfield.js が見つかりません"
+              exit 1
+          }
+          # 拡張パック内の相対パスにする
+          $hfRel = $hfBin.FullName.Substring($extDir.Length + 1).Replace("\", "\\")
+          $wrapperContent = @"
+@echo off
+setlocal
+set "EXT_ROOT=%~dp0.."
+"%EXT_ROOT%\bin\node.exe" "%EXT_ROOT%\$hfRel" %*
+"@
+          Set-Content -Path "$extDir\bin\higgsfield.cmd" -Value $wrapperContent -NoNewline
+
+          # README
+          @"
+GORI GORI KUN - Higgsfield 拡張パック (Windows)
+================================================
+
+このフォルダごと、以下の場所にコピーしてください:
+  %APPDATA%\app.codexframefactory\extensions\
+
+または同梱のインストーラ.bat をダブルクリックして自動配置できます。
+"@ | Set-Content -Path "$workDir\payload\README.txt" -NoNewline
+
+          # 自動インストーラ .bat
+          $installerContent = @"
+@echo off
+setlocal
+set "SRC=%~dp0higgsfield"
+set "DEST=%APPDATA%\app.codexframefactory\extensions"
+if not exist "%DEST%" mkdir "%DEST%"
+echo Installing Higgsfield extension to %DEST%\higgsfield ...
+if exist "%DEST%\higgsfield" rmdir /S /Q "%DEST%\higgsfield"
+xcopy /E /I /Y "%SRC%" "%DEST%\higgsfield" >nul
+echo.
+echo OK! GORI GORI KUN を再起動してください。
+pause
+"@
+          Set-Content -Path "$workDir\payload\install.bat" -Value $installerContent -NoNewline
+
+          # zip 化
+          $zipPath = "$distDir\GORI-HiggsField-Extension_windows.zip"
+          if (Test-Path $zipPath) { Remove-Item $zipPath }
+          Compress-Archive -Path "$workDir\payload\*" -DestinationPath $zipPath
+          Write-Host "Built: $zipPath"
+          Get-Item $zipPath | Format-Table Name, Length
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: dist/GORI-HiggsField-Extension_windows.zip
+          draft: true
+          prerelease: false
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
