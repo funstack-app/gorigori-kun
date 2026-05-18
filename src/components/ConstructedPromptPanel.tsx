@@ -13,6 +13,11 @@ import { PresetPickerPopover } from "./PresetPickerPopover";
 import { SkillPickerPopover } from "./SkillPickerPopover";
 import { PromptTextareaWithMentions } from "./PromptTextareaWithMentions";
 import { ElementwisePromptEditor } from "./ElementwisePromptEditor";
+import {
+  SaveReferenceSetDialog,
+  ReferenceSetsPickerModal,
+  applyReferenceSet,
+} from "./ReferenceSetDialogs";
 import { ReferenceLibraryModal } from "./ReferenceLibraryModal";
 import { ReferencePicker } from "./ReferencePicker";
 import { StockSearchModal } from "./StockSearchModal";
@@ -93,6 +98,10 @@ export function ConstructedPromptPanel() {
   const [libraryOpen, setLibraryOpen] = useState(false);
   const [stockOpen, setStockOpen] = useState(false);
   const [presetOpen, setPresetOpen] = useState(false);
+  /** F-#6: リファレンスセット呼び出しモーダル */
+  const [refSetsPickerOpen, setRefSetsPickerOpen] = useState(false);
+  /** F-#6: リファレンスセット保存ダイアログ */
+  const [saveRefSetOpen, setSaveRefSetOpen] = useState(false);
   const [aspectPickerOpen, setAspectPickerOpen] = useState(false);
   const [presetAnchor, setPresetAnchor] = useState<DOMRect | null>(null);
   const presetButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -214,6 +223,8 @@ export function ConstructedPromptPanel() {
           presetButtonRef={presetButtonRef}
           onOpenSkill={openSkill}
           skillButtonRef={skillButtonRef}
+          onOpenReferenceSets={() => setRefSetsPickerOpen(true)}
+          onSaveReferenceSet={() => setSaveRefSetOpen(true)}
         />
       </div>
       {/*
@@ -423,6 +434,21 @@ export function ConstructedPromptPanel() {
         onClose={() => setAspectPickerOpen(false)}
       />
       <ReferencePicker />
+      {/* F-#6: リファレンスセット保存ダイアログ */}
+      {saveRefSetOpen && (
+        <SaveReferenceSetDialog
+          references={references}
+          prompt={effectivePrompt}
+          onClose={() => setSaveRefSetOpen(false)}
+        />
+      )}
+      {/* F-#6: リファレンスセット呼び出しモーダル */}
+      {refSetsPickerOpen && (
+        <ReferenceSetsPickerModal
+          onClose={() => setRefSetsPickerOpen(false)}
+          onApply={(set) => applyReferenceSet(set, setPromptOverride)}
+        />
+      )}
     </section>
   );
 }
@@ -444,6 +470,8 @@ function ReferenceRack({
   presetButtonRef,
   onOpenSkill,
   skillButtonRef,
+  onOpenReferenceSets,
+  onSaveReferenceSet,
 }: {
   references: ReturnType<typeof useComposer.getState>["references"];
   onRemove: (path: string) => void;
@@ -453,6 +481,10 @@ function ReferenceRack({
   presetButtonRef: React.RefObject<HTMLButtonElement | null>;
   onOpenSkill: () => void;
   skillButtonRef: React.RefObject<HTMLButtonElement | null>;
+  /** F-#6: リファレンスセット呼び出しポップオーバーを開く */
+  onOpenReferenceSets: () => void;
+  /** F-#6: 現在の参照+プロンプトをセットとして保存ダイアログを開く */
+  onSaveReferenceSet: () => void;
 }) {
   // STΛCK 指示 (2026-05-17 第4版): 2段にすると 13 インチでプロンプト
   // 入力欄が狭くなって打てなくなる問題があった。
@@ -465,8 +497,8 @@ function ReferenceRack({
     "shrink-13-rack flex h-14 w-full min-w-0 flex-col items-center justify-center gap-1 rounded-md border border-[#343434] bg-[#101010] px-1 text-[10px] font-bold leading-tight text-neutral-300 transition hover:border-pink-400 hover:text-white";
   return (
     <div className="border-b border-[#2a2a2a] p-3">
-      {/* 操作ボタン (アイコン上 / 文字下) を 1 行 5 列で常に横並び */}
-      <div className="grid grid-cols-5 gap-1.5">
+      {/* 操作ボタン (アイコン上 / 文字下) を 1 行 6 列で常に横並び (F-#6 でセット追加) */}
+      <div className="grid grid-cols-6 gap-1.5">
         <button
           type="button"
           onClick={onOpenLibrary}
@@ -513,6 +545,15 @@ function ReferenceRack({
           <span className="text-center">プリセット</span>
         </button>
         <button
+          type="button"
+          onClick={onOpenReferenceSets}
+          className={iconBtn}
+          title="保存済みのリファレンスセット (参照画像+プロンプト) を呼び出す"
+        >
+          <ReferenceSetIcon />
+          <span className="text-center">セット</span>
+        </button>
+        <button
           ref={skillButtonRef}
           type="button"
           onClick={onOpenSkill}
@@ -527,6 +568,14 @@ function ReferenceRack({
       {/* 2 段目: 参照画像チップ行（@imgN）。空のときは何も表示しない */}
       {references.length > 0 && (
         <div className="mt-2 flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={onSaveReferenceSet}
+            className="rounded border border-pink-400/60 bg-pink-500/10 px-2 py-1 text-[10px] font-bold text-pink-200 hover:bg-pink-500/20"
+            title="現在の参照画像 + プロンプトをセットとして保存"
+          >
+            + セット保存
+          </button>
           {references.map((ref, index) => (
             <ReferenceChip
               key={ref.path}
@@ -622,6 +671,16 @@ function PlusIcon() {
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <line x1="12" y1="5" x2="12" y2="19" />
       <line x1="5" y1="12" x2="19" y2="12" />
+    </svg>
+  );
+}
+
+function ReferenceSetIcon() {
+  // 重なった2枚のカード — 画像+プロンプトのセットを象徴
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="7" width="13" height="13" rx="2" ry="2" />
+      <path d="M8 7V5a2 2 0 0 1 2-2h11v13a2 2 0 0 1-2 2h-2" />
     </svg>
   );
 }
