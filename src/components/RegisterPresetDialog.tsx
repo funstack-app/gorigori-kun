@@ -41,6 +41,12 @@ export function RegisterPresetDialog({ imagePath, defaultName, onClose }: Props)
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  /**
+   * F-#7 (2026-05-19): プリセットに紐づくキャラ添付画像。
+   * imagePath を初期値として入れておく (= 「この画像から作ったプリセットには
+   * その画像をキャラとして紐付け」がデフォルト)。ユーザーは削除も追加もできる。
+   */
+  const [attachedImages, setAttachedImages] = useState<string[]>([imagePath]);
 
   // 画像 → プロンプト逆引き (ImageMetaPanel と同じ手法)
   useEffect(() => {
@@ -95,6 +101,10 @@ export function RegisterPresetDialog({ imagePath, defaultName, onClose }: Props)
         name: name.trim(),
         prompt: prompt.trim(),
         categoryId,
+        attachedImages:
+          attachedImages.length > 0
+            ? attachedImages.map((path) => ({ path, role: "subject" }))
+            : undefined,
       });
       pushToast({
         kind: "success",
@@ -182,6 +192,53 @@ export function RegisterPresetDialog({ imagePath, defaultName, onClose }: Props)
             placeholder="プリセットとして登録するプロンプト本文"
           />
         </label>
+
+        {/*
+          F-#7 (2026-05-19): キャラ添付画像セクション。
+          初期値は登録元の画像 1 枚。チェックボックスで除外/再追加 (= 0 枚にも
+          できる)。MVP として「いまそこにある画像から選ぶ」UI までは作らず、
+          初期画像 + 「+ 他の画像も追加…」は後追いとする。
+        */}
+        <div className="flex flex-col gap-1.5">
+          <span className="text-[11px] font-bold text-neutral-300">
+            キャラ添付画像 ({attachedImages.length} 枚)
+          </span>
+          <p className="text-[10px] text-neutral-500">
+            プリセット呼び出し時に、この画像も自動で参照に追加されます。
+          </p>
+          <div className="flex flex-wrap gap-2">
+            {attachedImages.length === 0 ? (
+              <button
+                type="button"
+                onClick={() => setAttachedImages([imagePath])}
+                className="rounded border border-dashed border-[#444] px-3 py-2 text-[11px] font-bold text-neutral-400 hover:border-pink-400 hover:text-pink-300"
+              >
+                + 登録元の画像を添付
+              </button>
+            ) : (
+              attachedImages.map((path) => (
+                <div
+                  key={path}
+                  className="group relative h-16 w-16 overflow-hidden rounded border border-[#343434] bg-black"
+                  title={path}
+                >
+                  <SafeImage path={path} className="h-full w-full object-cover" />
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setAttachedImages((prev) => prev.filter((p) => p !== path))
+                    }
+                    className="absolute right-0 top-0 hidden h-5 w-5 items-center justify-center bg-black/80 text-[11px] text-white group-hover:flex hover:text-rose-300"
+                    title="この画像をプリセットから外す"
+                    aria-label="画像を外す"
+                  >
+                    ×
+                  </button>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
 
         <div className="flex items-center justify-end gap-2 pt-1">
           <button

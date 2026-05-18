@@ -116,11 +116,26 @@ export function ConstructedPromptPanel() {
   const aspectRatio = useSceneStore((s) => s.subjectFraming.aspectRatio);
   const setSubjectFramingField = useSceneStore((s) => s.setSubjectFramingField);
 
-  /** プリセット選択時の追記。既存プロンプト末尾に「, 」で繋げる。空なら本文のみ。 */
+  /**
+   * プリセット選択時の追記。既存プロンプト末尾に「, 」で繋げる。空なら本文のみ。
+   *
+   * F-#7 (2026-05-19): プリセットに attachedImages があれば、参照画像として
+   * composer に流し込む。Ta4low さん「プリセットでキャラ画像も呼び出し」対応。
+   */
   const appendPreset = (preset: Preset) => {
     const current = (isOverriding ? draft : generatedPrompt).trim();
     const next = current ? `${current}, ${preset.prompt}` : preset.prompt;
     onChangeDraft(next);
+    if (preset.attachedImages && preset.attachedImages.length > 0) {
+      const refs = preset.attachedImages.map((img) => ({
+        path: img.path,
+        name: img.path.split(/[\\/]/).pop() || "preset image",
+        source: "gallery" as const,
+        // role は string で保存しているので、ReferenceRole の型に合致する場合のみ流す
+        role: img.role as never,
+      }));
+      useComposer.getState().addReferences(refs);
+    }
   };
 
   const openPreset = () => {

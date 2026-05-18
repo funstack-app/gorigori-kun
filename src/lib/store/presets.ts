@@ -90,6 +90,17 @@ export function focusToImageStyle(focus: ThumbnailFocus | undefined): {
   };
 }
 
+/**
+ * F-#7 (2026-05-19): プリセットに添付されるキャラ画像 (= 参照画像) の
+ * 簡略 record。ファイルパスとオプションのロールだけ持ち、プリセット呼び出し時に
+ * composer.references へ流す。
+ */
+export type PresetAttachedImage = {
+  path: string;
+  /** "subject" | "look" 等。composer.ReferenceRole と互換だが、依存を避けて string で持つ */
+  role?: string;
+};
+
 export type Preset = {
   id: string;
   name: string;
@@ -107,6 +118,12 @@ export type Preset = {
   thumbnail?: string;
   /** サムネ表示時のフォーカス点（9-grid）。未指定は中央（cc）。 */
   thumbnailFocus?: ThumbnailFocus;
+  /**
+   * F-#7 (2026-05-19): プリセットに紐づくキャラ添付画像。
+   * Ta4low さん要望「プリセットでキャラ画像も保存」対応。
+   * プリセット呼び出し時に composer.references にも流し込む。
+   */
+  attachedImages?: PresetAttachedImage[];
   /** お気に入りフラグ。Code Manager と同じ仕様（チップで絞り込み可）。 */
   favorite?: boolean;
   createdAt: number;
