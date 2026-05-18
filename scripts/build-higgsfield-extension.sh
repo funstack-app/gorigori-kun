@@ -145,3 +145,16 @@ hdiutil create \
 
 echo "✅ Built: ${DMG_PATH}"
 ls -lh "${DMG_PATH}"
+
+# ───── 4. zip も生成 (アプリ内ワンタップ自動インストール用) ─────
+# STΛCK 指示 (2026-05-19): 真のワンタップ化のため、アプリが reqwest で DL して
+# 内部で展開できる zip 形式も併せて配布する。dmg は手動 DL ユーザー用、
+# zip はアプリ自動インストール用。
+echo "==> zip も生成 (アプリ自動インストール用)"
+ZIP_PATH="${DIST_DIR}/GORI-HiggsField-Extension_mac-${ARCH}.zip"
+rm -f "${ZIP_PATH}"
+# higgsfield/ ディレクトリだけを zip 化 (README とインストーラは含めない)
+# アプリは zip 展開後、higgsfield/ をそのまま extensions/ 配下にコピーするため。
+(cd "${PAYLOAD_DIR}" && zip -r -q "${ZIP_PATH}" higgsfield)
+echo "✅ Built: ${ZIP_PATH}"
+ls -lh "${ZIP_PATH}"

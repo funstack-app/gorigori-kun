@@ -197,6 +197,220 @@ pub async fn higgsfield_status() -> Result<HiggsfieldStatus, String> {
     })
 }
 
+/// 拡張パックの自動インストールの進捗イベント。フロントで進行表示する用。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum HiggsfieldInstallProgress {
+    Started,
+    Downloading { url: String },
+    Downloaded { bytes: usize },
+    Extracting,
+    Installed { path: String },
+    Failed { message: String },
+}
+
+const HIGGSFIELD_INSTALL_EVENT: &str = "higgsfield:install-progress";
+
+fn emit_install_progress(app: &AppHandle, progress: HiggsfieldInstallProgress) {
+    if let Err(e) = app.emit(HIGGSFIELD_INSTALL_EVENT, &progress) {
+        tracing::warn!(target: "codex.higgsfield", error = ?e, "install progress emit failed");
+    }
+}
+
+/// 拡張パック zip の GitHub Release URL を OS / arch から組み立てる。
+///
+/// 命名規則:
+/// - Mac aarch64: GORI-HiggsField-Extension_mac-aarch64.zip
+/// - Mac x86_64:  GORI-HiggsField-Extension_mac-x64.zip
+/// - Windows x86_64: GORI-HiggsField-Extension_windows.zip
+///
+/// 拡張パックは本体と同じタグで配布されるため、`releases/latest/download/` を
+/// 使う (本体アップデートに追従)。
+fn extension_zip_url() -> Result<String, String> {
+    const BASE: &str = "https://github.com/funstack-app/gorigori-kun/releases/latest/download";
+    let asset = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("macos", "aarch64") => "GORI-HiggsField-Extension_mac-aarch64.zip",
+        ("macos", "x86_64") => "GORI-HiggsField-Extension_mac-x64.zip",
+        ("windows", "x86_64") => "GORI-HiggsField-Extension_windows.zip",
+        (os, arch) => {
+            return Err(format!(
+                "未対応の OS / arch です: {os} / {arch}。手動インストールしてください。"
+            ))
+        }
+    };
+    Ok(format!("{BASE}/{asset}"))
+}
+
+/// 拡張パックの zip 内に含まれる higgsfield/ ディレクトリの一意なエントリ名。
+/// Windows 版だけ payload ルートに README.txt と install.bat が含まれるので、
+/// "higgsfield/" プレフィックスを持つエントリだけを抽出する。
+const ZIP_ROOT_PREFIX: &str = "higgsfield/";
+
+fn extension_install_dir() -> Result<PathBuf, String> {
+    let data_dir = dirs::data_dir().ok_or_else(|| "OS のデータディレクトリが取得できません".to_string())?;
+    Ok(data_dir.join("app.codexframefactory").join("extensions"))
+}
+
+/// 拡張パックをアプリ内から自動インストールする (真のワンタップ化、2026-05-19)。
+///
+/// 動作:
+/// 1. OS / arch に合った拡張パック zip を GitHub Release から DL
+/// 2. メモリ上で zip を展開
+/// 3. extensions/higgsfield/ 配下に上書き配置
+/// 4. macOS では bin/node, bin/higgsfield, bin/npm に実行権を付与
+/// 5. インストール直後の Higgsfield 状態を返す
+///
+/// 進捗は EVENT "higgsfield:install-progress" で逐次通知 (UI 進行表示用)。
+#[tauri::command]
+pub async fn higgsfield_install_extension(app: AppHandle) -> Result<HiggsfieldStatus, String> {
+    use std::io::Read;
+    emit_install_progress(&app, HiggsfieldInstallProgress::Started);
+
+    let url = extension_zip_url()?;
+    emit_install_progress(
+        &app,
+        HiggsfieldInstallProgress::Downloading { url: url.clone() },
+    );
+
+    // ── 1. DL ──
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(180))
+        .build()
+        .map_err(|e| format!("HTTP クライアントの初期化に失敗しました: {e}"))?;
+    let response = client.get(&url).send().await.map_err(|e| {
+        let msg = format!("拡張パック zip の DL に失敗しました: {e}");
+        emit_install_progress(
+            &app,
+            HiggsfieldInstallProgress::Failed {
+                message: msg.clone(),
+            },
+        );
+        msg
+    })?;
+    if !response.status().is_success() {
+        let msg = format!(
+            "拡張パック zip の DL に失敗しました: HTTP {} ({})",
+            response.status(),
+            url
+        );
+        emit_install_progress(
+            &app,
+            HiggsfieldInstallProgress::Failed {
+                message: msg.clone(),
+            },
+        );
+        return Err(msg);
+    }
+    let bytes = response.bytes().await.map_err(|e| {
+        let msg = format!("レスポンス body 読み取りに失敗しました: {e}");
+        emit_install_progress(
+            &app,
+            HiggsfieldInstallProgress::Failed {
+                message: msg.clone(),
+            },
+        );
+        msg
+    })?;
+    emit_install_progress(
+        &app,
+        HiggsfieldInstallProgress::Downloaded { bytes: bytes.len() },
+    );
+
+    // ── 2. zip 展開 ──
+    emit_install_progress(&app, HiggsfieldInstallProgress::Extracting);
+    let install_root = extension_install_dir()?;
+    std::fs::create_dir_all(&install_root)
+        .map_err(|e| format!("インストール先ディレクトリの作成に失敗しました: {e}"))?;
+
+    // 既存の higgsfield/ ディレクトリを削除 (上書きインストール)
+    let target = install_root.join("higgsfield");
+    if target.exists() {
+        std::fs::remove_dir_all(&target)
+            .map_err(|e| format!("既存の higgsfield/ 削除に失敗しました: {e}"))?;
+    }
+
+    // zip クレートで in-memory 展開
+    let reader = std::io::Cursor::new(bytes);
+    let mut archive = zip::ZipArchive::new(reader)
+        .map_err(|e| format!("zip の解析に失敗しました: {e}"))?;
+    for i in 0..archive.len() {
+        let mut entry = archive
+            .by_index(i)
+            .map_err(|e| format!("zip entry の読み取りに失敗しました ({i}): {e}"))?;
+        let entry_name = entry.name().to_string();
+        // payload ルートに含まれる README.txt や install.bat は無視。
+        // higgsfield/ 配下のエントリだけを展開する。
+        if !entry_name.starts_with(ZIP_ROOT_PREFIX) {
+            continue;
+        }
+        // zip slip 対策: enclosed_name は ".." を含むエントリで None を返す
+        let safe_name = entry
+            .enclosed_name()
+            .ok_or_else(|| format!("不正な zip entry パス: {entry_name}"))?;
+        let dest = install_root.join(safe_name);
+        if entry.is_dir() {
+            std::fs::create_dir_all(&dest)
+                .map_err(|e| format!("ディレクトリ作成に失敗しました: {e}"))?;
+        } else {
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("ディレクトリ作成に失敗しました: {e}"))?;
+            }
+            let mut buf = Vec::with_capacity(entry.size() as usize);
+            entry
+                .read_to_end(&mut buf)
+                .map_err(|e| format!("entry 読み取りに失敗しました: {e}"))?;
+            std::fs::write(&dest, &buf)
+                .map_err(|e| format!("ファイル書き込みに失敗しました: {e}"))?;
+            // Unix では zip entry の mode を引き継ぐ。
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Some(mode) = entry.unix_mode() {
+                    if let Err(e) = std::fs::set_permissions(
+                        &dest,
+                        std::fs::Permissions::from_mode(mode),
+                    ) {
+                        tracing::warn!(
+                            target: "codex.higgsfield",
+                            error = ?e,
+                            path = %dest.display(),
+                            "set_permissions failed"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // ── 3. macOS では bin/* に念のため実行権を付与 ──
+    // zip 内 unix_mode が欠落しているケース (zip クレートの version によって挙動が変わる)
+    // への保険。bin/ 配下の主要ファイルを 0o755 にする。
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for name in ["node", "higgsfield", "npm"] {
+            let bin = target.join("bin").join(name);
+            if bin.exists() {
+                let _ = std::fs::set_permissions(
+                    &bin,
+                    std::fs::Permissions::from_mode(0o755),
+                );
+            }
+        }
+    }
+
+    emit_install_progress(
+        &app,
+        HiggsfieldInstallProgress::Installed {
+            path: target.to_string_lossy().into_owned(),
+        },
+    );
+
+    // ── 4. インストール後の状態を返す ──
+    higgsfield_status().await
+}
+
 /// Higgsfield 接続の状態を「実測」して返すデバッグ専用コマンド。
 ///
 /// Codex クロスレビュー (2026-05-19): エラー報告時に「どのバイナリが選ばれ、

@@ -287,7 +287,11 @@ jobs:
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
           name: 'GORI GORI KUN ${{ inputs.tag || github.ref_name }}'
-          files: dist/GORI-HiggsField-Extension_mac-${{ matrix.arch }}.dmg
+          # STΛCK 指示 (2026-05-19): dmg はユーザー手動 DL 用、zip はアプリ内
+          # ワンタップ自動インストール用。両方を併せて配布する。
+          files: |
+            dist/GORI-HiggsField-Extension_mac-${{ matrix.arch }}.dmg
+            dist/GORI-HiggsField-Extension_mac-${{ matrix.arch }}.zip
           # Codex指摘 (2026-05-19): 本体 jobs と統一して non-draft
           draft: false
           prerelease: false
@@ -363,11 +367,15 @@ jobs:
 
           DARWIN_AARCH64_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/GORI.GORI_aarch64.app.tar.gz"
           DARWIN_X86_64_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/GORI.GORI_x64.app.tar.gz"
-          WINDOWS_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/GORI.GORI_${TAG_NUM}_x64-setup.nsis.zip"
+          # STΛCK 報告 (2026-05-19): tauri-action v0.6.2 は Windows で
+          # .nsis.zip / .nsis.zip.sig を release にアップロードしない。
+          # 実際に上がるのは .exe / .exe.sig なので、Tauri Updater v2 は
+          # .exe URL でも動くため (NSIS installer を直接実行) こちらを使う。
+          WINDOWS_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/GORI.GORI_${TAG_NUM}_x64-setup.exe"
 
           DARWIN_AARCH64_SIG="$(fetch_sig "GORI.GORI_aarch64.app.tar.gz.sig")"
           DARWIN_X86_64_SIG="$(fetch_sig "GORI.GORI_x64.app.tar.gz.sig")"
-          WINDOWS_SIG="$(fetch_sig "GORI.GORI_${TAG_NUM}_x64-setup.nsis.zip.sig")"
+          WINDOWS_SIG="$(fetch_sig "GORI.GORI_${TAG_NUM}_x64-setup.exe.sig")"
 
           echo "== signatures =="
           echo "darwin-aarch64: ${#DARWIN_AARCH64_SIG} bytes"

@@ -323,6 +323,7 @@ pub fn run() {
             commands::layer_splitter::layer_splitter_run,
             commands::higgsfield::higgsfield_status,
             commands::higgsfield::higgsfield_debug,
+            commands::higgsfield::higgsfield_install_extension,
             commands::higgsfield::higgsfield_login,
             commands::higgsfield::higgsfield_logout,
             commands::higgsfield::higgsfield_list_models,

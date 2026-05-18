@@ -305,9 +305,22 @@ export type HiggsfieldProbeResult = {
   error: string | null;
 };
 
+/**
+ * 拡張パック自動インストール進捗イベント (2026-05-19)。
+ * Rust `HiggsfieldInstallProgress` と一致。
+ */
+export type HiggsfieldInstallProgress =
+  | { kind: "started" }
+  | { kind: "downloading"; url: string }
+  | { kind: "downloaded"; bytes: number }
+  | { kind: "extracting" }
+  | { kind: "installed"; path: string }
+  | { kind: "failed"; message: string };
+
 export const higgsfield = {
   status: () => invoke<HiggsfieldStatus>("higgsfield_status"),
   debug: () => invoke<HiggsfieldDebugInfo>("higgsfield_debug"),
+  installExtension: () => invoke<HiggsfieldStatus>("higgsfield_install_extension"),
   login: () => invoke<string>("higgsfield_login"),
   logout: () => invoke<void>("higgsfield_logout"),
   listModels: (media: "image" | "video") =>

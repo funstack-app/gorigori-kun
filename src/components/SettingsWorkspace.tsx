@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import {
   higgsfield,
   storage,
   type HiggsfieldDebugInfo,
+  type HiggsfieldInstallProgress,
   type LegacySummary,
   type StorageSettings,
 } from "../lib/ipc";
@@ -395,9 +397,70 @@ function AccountSettings() {
   // F-#13: Higgsfield 診断ダイアログ。ユーザー環境の実測情報を取得・表示する。
   const [debugInfo, setDebugInfo] = useState<HiggsfieldDebugInfo | null>(null);
   const [debugRunning, setDebugRunning] = useState(false);
+  /**
+   * 真のワンタップ化 (2026-05-19): アプリ内ボタン一発で拡張パックを DL → 配置 → 検出 する。
+   * 進捗を Tauri event "higgsfield:install-progress" で受け取り、UI に出す。
+   */
+  const [installing, setInstalling] = useState(false);
+  const [installProgress, setInstallProgress] = useState<string>("");
+  useEffect(() => {
+    let unlisten: undefined | (() => void);
+    void (async () => {
+      const handle = await listen<HiggsfieldInstallProgress>(
+        "higgsfield:install-progress",
+        (event) => {
+          const p = event.payload;
+          switch (p.kind) {
+            case "started":
+              setInstallProgress("インストール開始…");
+              break;
+            case "downloading":
+              setInstallProgress("拡張パックをダウンロード中…");
+              break;
+            case "downloaded":
+              setInstallProgress(
+                `ダウンロード完了 (${Math.round(p.bytes / 1024 / 1024)} MB)`,
+              );
+              break;
+            case "extracting":
+              setInstallProgress("展開中…");
+              break;
+            case "installed":
+              setInstallProgress(`配置完了: ${p.path}`);
+              break;
+            case "failed":
+              setInstallProgress(`失敗: ${p.message}`);
+              break;
+          }
+        },
+      );
+      unlisten = handle;
+    })();
+    return () => {
+      unlisten?.();
+    };
+  }, []);
   const refresh = async () => {
     await accounts.refresh();
     push({ kind: "success", text: "接続状態を更新しました", ttlMs: 2000 });
+  };
+  const installExtension = async () => {
+    setInstalling(true);
+    setInstallProgress("インストール開始…");
+    try {
+      await higgsfield.installExtension();
+      await accounts.refreshHiggsfield();
+      push({
+        kind: "success",
+        text: "Higgsfield 拡張パックを自動インストールしました",
+        ttlMs: 3500,
+      });
+      setInstallProgress("");
+    } catch (err) {
+      push({ kind: "error", text: `自動インストールに失敗: ${String(err)}` });
+    } finally {
+      setInstalling(false);
+    }
   };
   const loginHiggsfield = async () => {
     await higgsfield.login();
@@ -453,7 +516,7 @@ function AccountSettings() {
             <h3 className="text-sm font-black text-white">Higgsfield</h3>
             <p className="mt-1 text-xs text-neutral-500">
               {!accounts.higgsfield.installed
-                ? "CLI 未検出"
+                ? "拡張パック未インストール"
                 : accounts.higgsfield.authenticated
                   ? `接続済み${accounts.higgsfield.plan ? ` · ${accounts.higgsfield.plan}` : ""}`
                   : "未認証"}
@@ -463,8 +526,35 @@ function AccountSettings() {
                 credits: {Math.round(accounts.higgsfield.credits)}
               </p>
             )}
+            {installing && installProgress && (
+              <p className="mt-1 text-xs font-semibold text-amber-300">
+                {installProgress}
+              </p>
+            )}
           </div>
           <div className="flex flex-wrap gap-2">
+            {/*
+              真のワンタップ化 (2026-05-19): 拡張パック未検出時はこのボタン1つで
+              GitHub Release から DL → 配置 → 検出 が完結する。
+              既にインストール済みでも「再インストール」用途で残しておく。
+            */}
+            <button
+              type="button"
+              onClick={() => void installExtension()}
+              disabled={installing}
+              className={`${PRIMARY_BUTTON} h-9 px-3 text-xs disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-500`}
+              title={
+                accounts.higgsfield.installed
+                  ? "拡張パックを最新版に再インストール"
+                  : "Higgsfield 拡張パックを自動でダウンロード・配置します"
+              }
+            >
+              {installing
+                ? "インストール中…"
+                : accounts.higgsfield.installed
+                  ? "再インストール"
+                  : "ワンタップ導入"}
+            </button>
             <button type="button" onClick={() => void refresh()} className={`${MUTED_BUTTON} h-9 px-3 text-xs`}>
               テスト接続
             </button>
