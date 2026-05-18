@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { PurposeSelector } from "./PurposeSelector";
 import { SafeImage } from "./SafeImage";
+import { SaveToProjectButton } from "./ImagePreviewModal";
 import { WorkspaceTabs } from "./WorkspaceTabs";
 import { SceneBuilder, VideoSceneBuilder } from "./scene";
 import { ConstructedPromptPanel } from "./ConstructedPromptPanel";
@@ -796,11 +797,21 @@ function WorkerTile({
             className="h-full w-full object-cover"
           />
         </button>
-        {caption && (
-          <p className="mt-1 truncate text-[10px] font-medium text-neutral-400">
-            {caption}
-          </p>
-        )}
+        {/*
+          F-#4 (2026-05-19): NRC さんの要望対応。
+          4 枚同時生成時、バッチ単位ではなく 1 枚ごとに「プロジェクト保存」できる。
+          サムネ下にコンパクトな保存ボタンを置く (caption と同行に折りたたみ)。
+        */}
+        <div className="mt-1 flex items-center gap-1.5">
+          {caption && (
+            <p className="min-w-0 flex-1 truncate text-[10px] font-medium text-neutral-400">
+              {caption}
+            </p>
+          )}
+          <div className="shrink-0 text-[10px]">
+            <SaveToProjectButton path={worker.path} />
+          </div>
+        </div>
       </div>
     );
   }

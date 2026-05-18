@@ -262,8 +262,10 @@ export function ImagePreviewModal() {
 /**
  * 「プロジェクトに保存」ボタン + ポップオーバー。
  * 押すと既存プロジェクト一覧 + 新規作成入力が出てきて、選択でその箱に追加する。
+ *
+ * F-#4 (2026-05-19): export 化して、生成バッチの 1 枚ごとの保存にも再利用。
  */
-function SaveToProjectButton({ path }: { path: string }) {
+export function SaveToProjectButton({ path }: { path: string }) {
   const [open, setOpen] = useState(false);
   const projects = useProjects((s) => s.projects);
   const createProject = useProjects((s) => s.createProject);

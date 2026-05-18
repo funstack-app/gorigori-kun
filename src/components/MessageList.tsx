@@ -7,6 +7,7 @@ import { useBatches, type Batch, type BatchWorker } from "../lib/store/batches";
 import { ContextMenu } from "./ContextMenu";
 import { buildGalleryItemMenu } from "./galleryItemMenu";
 import { RegisterPresetDialog } from "./RegisterPresetDialog";
+import { SaveToProjectButton } from "./ImagePreviewModal";
 
 type TurnEntry = { kind: "turn"; turn: Turn; key: string; sortKey: number };
 type BatchEntry = { kind: "batch"; batch: Batch; key: string; sortKey: number };
@@ -769,11 +770,21 @@ function BatchWorkerCell({
           }}
         />
       </button>
-      {caption && (
-        <p className="mt-1 truncate text-[10px] font-bold text-pink-700">
-          {caption}
-        </p>
-      )}
+      {/*
+        F-#4 (2026-05-19): NRC さん要望対応。バッチ単位ではなく 1 枚ごとに
+        プロジェクトに保存できる小ボタンをサムネ下に置く。caption と同行で
+        コンパクトに収める。
+      */}
+      <div className="mt-1 flex items-center gap-1.5">
+        {caption && (
+          <p className="min-w-0 flex-1 truncate text-[10px] font-bold text-pink-700">
+            {caption}
+          </p>
+        )}
+        <div className="shrink-0 text-[10px]">
+          <SaveToProjectButton path={path} />
+        </div>
+      </div>
     </div>
   );
 }
