@@ -781,6 +781,35 @@ function HiggsfieldConnectionCard() {
     }
   };
 
+  // v0.6.18 STΛCK 指示:
+  // α版では Higgsfield 接続を非表示。理由:
+  //   - Higgsfield CLI は Node.js 必須で、未インストールユーザーが
+  //     「ワンタップ接続」を押すと "env: node: No such file" でエラー
+  //   - 非エンジニアには「煩わしさ」が許容できない
+  //   - α版方針「作品モード(GPT Image 2)だけ」と一致
+  // β版で Node.js + Higgsfield CLI をアプリ内同梱して本格対応する。
+  const ALPHA_HIDE_HIGGSFIELD = true;
+  if (ALPHA_HIDE_HIGGSFIELD && !authed) {
+    return (
+      <div className="space-y-2 rounded-xl border border-[#2a2a2a] bg-[#0f0f0f] p-3 opacity-60">
+        <div className="flex items-center gap-2">
+          <span className="grid h-8 w-8 place-items-center rounded-md border border-[#343434] bg-[#101010] text-xs font-black text-neutral-500">HF</span>
+          <div className="flex-1">
+            <div className="flex items-center gap-2">
+              <p className="text-sm font-black text-neutral-300">HiggsField</p>
+              <span className="rounded-full bg-neutral-500/15 px-2 py-0.5 text-[10px] font-black text-neutral-400">
+                β以降
+              </span>
+            </div>
+            <p className="mt-0.5 text-[11px] text-neutral-500">
+              動画・画像 AI 生成 (Soul / Mix / Speak / Sketch / Edit 等) — β版で公開
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-3 rounded-xl border border-pink-400/30 bg-pink-500/5 p-3">
       <div className="flex items-center gap-2">
