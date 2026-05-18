@@ -1,6 +1,6 @@
 [package]
 name = "gori-gori-kun"
-version = "0.7.0"
+version = "0.7.1"
 description = "GORI GORI KUN — Creative storyboard & image generation desktop app"
 authors = ["STΛCK"]
 edition = "2021"
