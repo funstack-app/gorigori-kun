@@ -68,8 +68,63 @@ pub mod __test_support {
     pub use crate::codex::rpc::{handshake, RpcClient, RpcHandle};
 }
 
+/// Finder 起動の macOS GUI アプリは login shell の `.zshrc` / `.bashrc` を
+/// 読まないため、PATH が `/usr/bin:/bin:/usr/sbin:/sbin` の最小構成になる。
+///
+/// 結果として Homebrew 配下にインストールされた `node` (Apple Silicon は
+/// `/opt/homebrew/bin/node`、Intel は `/usr/local/bin/node`) が見つからず、
+/// Higgsfield 拡張パックの `env node` ベースの shebang が
+/// `env: node: No such file or directory` で落ちる。
+///
+/// 修正: アプリ起動時に Homebrew 標準 prefix と `~/.npm-global/bin` を
+/// 強制的に PATH 先頭付近に追加する。既存 PATH は維持。
+/// (むぎさん Mac Apple Silicon で再現、2026-05-18)
+fn ensure_unix_path_for_gui_apps() {
+    #[cfg(target_os = "macos")]
+    {
+        let mut current = std::env::var("PATH").unwrap_or_default();
+        // 既に含まれていれば追加しない
+        let candidates = [
+            "/opt/homebrew/bin",
+            "/opt/homebrew/sbin",
+            "/usr/local/bin",
+            "/usr/local/sbin",
+        ];
+        // ユーザーの npm global (もしあれば)
+        let home = std::env::var("HOME").unwrap_or_default();
+        let npm_global = format!("{home}/.npm-global/bin");
+        let mut additions: Vec<&str> = Vec::new();
+        for c in candidates {
+            if !current.split(':').any(|p| p == c) {
+                additions.push(c);
+            }
+        }
+        let npm_global_str = npm_global.as_str();
+        if !npm_global.is_empty() && !current.split(':').any(|p| p == npm_global_str) {
+            additions.push(npm_global_str);
+        }
+        if additions.is_empty() {
+            return;
+        }
+        // 既存 PATH の前に追加 (homebrew を見つけやすくする)
+        if current.is_empty() {
+            current = additions.join(":");
+        } else {
+            current = format!("{}:{}", additions.join(":"), current);
+        }
+        // SAFETY: set_var はマルチスレッドで未定義動作の可能性があるが、
+        // run() の冒頭、Tauri ビルダ起動前のシングルスレッド時点で呼ぶため安全。
+        unsafe {
+            std::env::set_var("PATH", &current);
+        }
+        eprintln!("[gori] extended PATH for GUI app: {}", current);
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    ensure_unix_path_for_gui_apps();
+
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
 
@@ -158,6 +213,27 @@ pub fn run() {
                 .app_data_dir()
                 .map_err(|e| format!("app_data_dir failed: {e}"))?;
             std::fs::create_dir_all(&app_data_dir)?;
+
+            // STΛCK 報告 (2026-05-18): Higgsfield 拡張パックの README に
+            // 「app.codexframefactory/extensions/ にコピー」と書いてあるが、
+            // このディレクトリは存在しない場合がある。初回起動時に強制作成して
+            // ユーザーが mkdir なしですぐに extensions/ にドラッグできるようにする。
+            let extensions_dir = app_data_dir.join("extensions");
+            if let Err(e) = std::fs::create_dir_all(&extensions_dir) {
+                tracing::warn!(
+                    target: "codex.storage",
+                    error = ?e,
+                    path = %extensions_dir.display(),
+                    "extensions ディレクトリの自動作成に失敗 (起動は続行)"
+                );
+            } else {
+                tracing::info!(
+                    target: "codex.storage",
+                    path = %extensions_dir.display(),
+                    "extensions ディレクトリを確保しました"
+                );
+            }
+
             let db_path = app_data_dir.join("history.db");
             let db_url = format!("sqlite:{}?mode=rwc", db_path.display());
             tracing::info!(target: "codex.sessions", "db url: {db_url}");
