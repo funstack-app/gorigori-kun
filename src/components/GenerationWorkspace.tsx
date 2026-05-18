@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { convertFileSrc } from "@tauri-apps/api/core";
 import { PurposeSelector } from "./PurposeSelector";
+import { SafeImage } from "./SafeImage";
 import { WorkspaceTabs } from "./WorkspaceTabs";
 import { SceneBuilder, VideoSceneBuilder } from "./scene";
 import { ConstructedPromptPanel } from "./ConstructedPromptPanel";
@@ -421,9 +421,8 @@ function FrozenTurnBlock({
                 }
                 className="aspect-square overflow-hidden rounded border border-[#343434] bg-[#0f0f0f] hover:border-pink-400"
               >
-                <img
-                  src={convertFileSrc(img.path)}
-                  alt=""
+                <SafeImage
+                  path={img.path}
                   className="h-full w-full object-cover"
                   loading="lazy"
                 />
@@ -560,9 +559,8 @@ function PastBatchRow({
                 }
                 className="aspect-square overflow-hidden rounded border border-[#343434] bg-[#0f0f0f] hover:border-pink-400"
               >
-                <img
-                  src={convertFileSrc(img.path)}
-                  alt=""
+                <SafeImage
+                  path={img.path}
                   className="h-full w-full object-cover"
                   loading="lazy"
                 />
@@ -793,9 +791,8 @@ function WorkerTile({
           }
           className="aspect-square w-full overflow-hidden rounded border border-[#343434] bg-[#0f0f0f] hover:border-pink-400"
         >
-          <img
-            src={convertFileSrc(worker.path)}
-            alt=""
+          <SafeImage
+            path={worker.path}
             className="h-full w-full object-cover"
           />
         </button>

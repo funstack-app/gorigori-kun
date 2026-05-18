@@ -1,4 +1,4 @@
-import { convertFileSrc } from "@tauri-apps/api/core";
+import { SafeImage } from "./SafeImage";
 import { useMemo, useState } from "react";
 import { useComposer } from "../lib/store/composer";
 import { useImages, type GalleryItem } from "../lib/store/images";
@@ -265,10 +265,10 @@ function SessionRow({
           title="案件を開く"
         >
           {session.lastImagePath ? (
-            <img
-              src={convertFileSrc(session.lastImagePath)}
-              alt=""
+            <SafeImage
+              path={session.lastImagePath}
               className="h-full w-full object-cover"
+              fallbackLabel="GG"
             />
           ) : (
             <span className="flex h-full w-full items-center justify-center text-[10px] font-black text-neutral-400">
@@ -396,8 +396,8 @@ function HistoryImage({
         className="relative block aspect-square w-full bg-neutral-100"
         title={item.name}
       >
-        <img
-          src={convertFileSrc(item.path)}
+        <SafeImage
+          path={item.path}
           alt={item.name}
           className="h-full w-full object-cover"
           loading="lazy"

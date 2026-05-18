@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Grid, type CellComponentProps } from "react-window";
-import { convertFileSrc } from "@tauri-apps/api/core";
+import { SafeImage } from "./SafeImage";
 import { type GalleryItem } from "../lib/store/images";
 import { useImagePreview } from "../lib/store/imagePreview";
 import { ContextMenu } from "./ContextMenu";
@@ -156,8 +156,8 @@ function Cell({
           title={it.name}
           aria-label={`${it.name} — ダブルクリック=拡大 / 右クリック=メニュー / Cmd+クリック=複数選択`}
         >
-          <img
-            src={convertFileSrc(it.path)}
+          <SafeImage
+            path={it.path}
             alt={it.name}
             className="h-full w-full object-cover"
             loading="lazy"

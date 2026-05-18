@@ -154,6 +154,14 @@ type ProjectsState = {
   ) => ProjectItem | null;
   removeItem: (projectId: string, itemId: string) => void;
 
+  /**
+   * 全プロジェクトを走査して、`imagePath === oldPath` のアイテムを `newPath` に書き換える。
+   * F-#2 修正 (2026-05-19): ライブラリで画像をリネームした際、各プロジェクトの items[].imagePath が
+   * 古いパスを保持していると黒画像になるため、リネーム成功直後に呼び出して整合性を取る。
+   * 該当アイテムが無いプロジェクトは触らない (updatedAt も維持)。
+   */
+  renameItemPath: (oldPath: string, newPath: string) => void;
+
   /** 企画チャットログを上書き保存する（差分ではなく毎回スナップショット） */
   setPlanChat: (projectId: string, messages: ProjectChatMessage[]) => void;
 
@@ -276,6 +284,27 @@ export const useProjects = create<ProjectsState>((set, get) => ({
           }
         : p,
     );
+    persist(next);
+    set({ projects: next });
+  },
+
+  renameItemPath: (oldPath, newPath) => {
+    if (!oldPath || !newPath || oldPath === newPath) return;
+    const now = Date.now();
+    let changed = false;
+    const next = get().projects.map((p) => {
+      let projectChanged = false;
+      const items = p.items.map((it) => {
+        if (it.imagePath === oldPath) {
+          projectChanged = true;
+          changed = true;
+          return { ...it, imagePath: newPath };
+        }
+        return it;
+      });
+      return projectChanged ? { ...p, items, updatedAt: now } : p;
+    });
+    if (!changed) return;
     persist(next);
     set({ projects: next });
   },

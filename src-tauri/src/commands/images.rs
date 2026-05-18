@@ -148,8 +148,15 @@ pub async fn images_save_as(src: String, dest: String) -> Result<(), String> {
 
 /// Rename an image in-place within its current directory. The caller supplies
 /// a file name, not a path; moving between directories is intentionally rejected.
+///
+/// v0.7.3 (F-#2): rename 後に history.db の images.path を UPDATE する。
+/// 旧パスを掴んだままだとライブラリ/制作タブ/プロジェクトで画像が消える。
 #[tauri::command]
-pub async fn images_rename(src: String, new_name: String) -> Result<String, String> {
+pub async fn images_rename(
+    app: AppHandle,
+    src: String,
+    new_name: String,
+) -> Result<String, String> {
     let src_path = PathBuf::from(&src);
     if !src_path.is_absolute() {
         return Err(format!("not an absolute path: {src}"));
@@ -184,7 +191,29 @@ pub async fn images_rename(src: String, new_name: String) -> Result<String, Stri
     }
 
     std::fs::rename(&src_path, &dest).map_err(|e| e.to_string())?;
-    Ok(dest.to_string_lossy().into_owned())
+    let dest_string = dest.to_string_lossy().into_owned();
+
+    // history.db の images.path を更新。pool が無くても rename 自体は成功扱い。
+    if let Some(state) = app.try_state::<AppState>() {
+        if let Some(pool) = state.db_pool().await {
+            let update_result =
+                sqlx::query("UPDATE images SET path = ?1 WHERE path = ?2")
+                    .bind(&dest_string)
+                    .bind(&src)
+                    .execute(&pool)
+                    .await;
+            if let Err(e) = update_result {
+                tracing::warn!(
+                    error = ?e,
+                    old_path = %src,
+                    new_path = %dest_string,
+                    "images_rename: history.db の path 更新に失敗 (rename 自体は成功)"
+                );
+            }
+        }
+    }
+
+    Ok(dest_string)
 }
 
 /// Decode an image and write it to a user-chosen path as PNG or JPEG.

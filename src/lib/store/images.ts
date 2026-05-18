@@ -4,6 +4,7 @@ import {
   onImageGenerated,
   type ImageEvent,
 } from "../ipc";
+import { useProjects } from "./projects";
 
 export type GalleryItem = {
   path: string;
@@ -355,6 +356,13 @@ export const useImages = create<ImagesState>((set, get) => ({
       }
       return { items, knownPaths, selectedPath, selection };
     });
+    // F-#2 修正: 全プロジェクトの items[].imagePath も追従して書き換える。
+    // Rust 側で history.db は UPDATE 済み (images_rename), projects.json はフロント管理。
+    try {
+      useProjects.getState().renameItemPath(oldPath, newPath);
+    } catch (err) {
+      console.warn("[images.renameLocal] projects path 追従に失敗:", err);
+    }
   },
 }));
 
