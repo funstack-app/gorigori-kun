@@ -8,6 +8,7 @@ import { useProjects } from "../lib/store/projects";
 import { useToasts } from "../lib/store/toasts";
 import { ContextMenu, type ContextMenuItem } from "./ContextMenu";
 import { ImageMetaPanel } from "./ImageMetaPanel";
+import { RegisterPresetDialog } from "./RegisterPresetDialog";
 
 export function ImagePreviewModal() {
   const path = useImagePreview((s) => s.path);
@@ -41,6 +42,8 @@ export function ImagePreviewModal() {
   const closeBtnRef = useRef<HTMLButtonElement | null>(null);
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  /** F-#1: プリセット登録ダイアログの開閉。null なら閉じ、文字列なら対象画像 path。 */
+  const [presetTarget, setPresetTarget] = useState<string | null>(null);
   // 詳細パネル開閉。デフォルトで開いておく（ユーザーが情報を求めている前提）。
   // STΛCK 指示 (2026-05-17): 詳細パネルは常時表示 (トグルなし)
   const metaOpen = true;
@@ -211,6 +214,12 @@ export function ImagePreviewModal() {
           items={
             [
               {
+                label: "プリセットに登録…",
+                icon: "P",
+                onClick: () => setPresetTarget(path),
+              },
+              { kind: "separator" },
+              {
                 label: "名前を付けて保存…",
                 onClick: () =>
                   useImages.getState().downloadAs(path, name),
@@ -239,6 +248,13 @@ export function ImagePreviewModal() {
       <div className="border-t border-neutral-800 bg-neutral-900/70 px-4 py-1.5 text-center text-[11px] text-neutral-500">
         Esc または背景クリックで閉じる
       </div>
+      {presetTarget && (
+        <RegisterPresetDialog
+          imagePath={presetTarget}
+          defaultName={name}
+          onClose={() => setPresetTarget(null)}
+        />
+      )}
     </div>
   );
 }

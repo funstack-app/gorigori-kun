@@ -6,6 +6,7 @@ import { useImages } from "../lib/store/images";
 import { useBatches, type Batch, type BatchWorker } from "../lib/store/batches";
 import { ContextMenu } from "./ContextMenu";
 import { buildGalleryItemMenu } from "./galleryItemMenu";
+import { RegisterPresetDialog } from "./RegisterPresetDialog";
 
 type TurnEntry = { kind: "turn"; turn: Turn; key: string; sortKey: number };
 type BatchEntry = { kind: "batch"; batch: Batch; key: string; sortKey: number };
@@ -355,14 +356,30 @@ function GalleryItemContextMenu({
   const item = useImages((s) => s.items.find((it) => it.path === menu.path));
   const favorites = useImages((s) => s.favorites);
   const toggleFavorite = useImages((s) => s.toggleFavorite);
+  const [presetTarget, setPresetTarget] = useState<string | null>(null);
   if (!item) return null;
   return (
-    <ContextMenu
-      x={menu.x}
-      y={menu.y}
-      items={buildGalleryItemMenu(item, { favorites, onToggleFavorite: toggleFavorite })}
-      onClose={onClose}
-    />
+    <>
+      <ContextMenu
+        x={menu.x}
+        y={menu.y}
+        items={buildGalleryItemMenu(item, {
+          favorites,
+          onToggleFavorite: toggleFavorite,
+          onRegisterPreset: (path) => setPresetTarget(path),
+        })}
+        onClose={onClose}
+      />
+      {presetTarget && (
+        <RegisterPresetDialog
+          imagePath={presetTarget}
+          onClose={() => {
+            setPresetTarget(null);
+            onClose();
+          }}
+        />
+      )}
+    </>
   );
 }
 

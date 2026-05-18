@@ -8,14 +8,22 @@ import type { ContextMenuItem } from "./ContextMenu";
  * Build the context menu for a generated image. Used by both the gallery
  * sidebar (VirtualGalleryGrid) and the inline chat thumbnails
  * (ImageGenerationGroup) so right-click is consistent everywhere.
+ *
+ * F-#1 修正 (2026-05-19): `onRegisterPreset` を ctx に渡すと「プリセットに登録」
+ * 項目が先頭ブロックに差し込まれる。f_matsu106 さんの「ライブラリ画像右クリックで
+ * プリセット登録できない」報告への対応。
  */
 export function buildGalleryItemMenu(
   item: GalleryItem,
-  ctx: { favorites: Set<string>; onToggleFavorite: (path: string) => void },
+  ctx: {
+    favorites: Set<string>;
+    onToggleFavorite: (path: string) => void;
+    onRegisterPreset?: (path: string) => void;
+  },
 ): ContextMenuItem[] {
   const isFav = ctx.favorites.has(item.path);
   const cwd = useThreads.getState().cwd;
-  return [
+  const menu: ContextMenuItem[] = [
     {
       label: "拡大表示",
       icon: "O",
@@ -34,6 +42,15 @@ export function buildGalleryItemMenu(
         void useImages.getState().removeBackground(item.path);
       },
     },
+  ];
+  if (ctx.onRegisterPreset) {
+    menu.push({
+      label: "プリセットに登録…",
+      icon: "P",
+      onClick: () => ctx.onRegisterPreset?.(item.path),
+    });
+  }
+  menu.push(
     { kind: "separator" },
     {
       label: "名前を付けて保存…",
@@ -59,5 +76,6 @@ export function buildGalleryItemMenu(
       icon: "S",
       onClick: () => ctx.onToggleFavorite(item.path),
     },
-  ];
+  );
+  return menu;
 }

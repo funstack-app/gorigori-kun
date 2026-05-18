@@ -5,6 +5,7 @@ import { type GalleryItem } from "../lib/store/images";
 import { useImagePreview } from "../lib/store/imagePreview";
 import { ContextMenu } from "./ContextMenu";
 import { buildGalleryItemMenu } from "./galleryItemMenu";
+import { RegisterPresetDialog } from "./RegisterPresetDialog";
 
 const COLUMNS = 3;
 const GAP = 8; // px (matches Tailwind gap-2)
@@ -35,6 +36,8 @@ export function VirtualGalleryGrid(props: CellProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [size, setSize] = useState({ width: 0, height: 0 });
   const [menu, setMenu] = useState<MenuState>(null);
+  /** F-#1: ライブラリ右クリックメニュー → 「プリセット登録」で開くダイアログ。 */
+  const [presetTarget, setPresetTarget] = useState<string | null>(null);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -85,8 +88,15 @@ export function VirtualGalleryGrid(props: CellProps) {
           items={buildGalleryItemMenu(menu.item, {
             favorites: props.favorites,
             onToggleFavorite: props.onToggleFavorite,
+            onRegisterPreset: (path) => setPresetTarget(path),
           })}
           onClose={() => setMenu(null)}
+        />
+      )}
+      {presetTarget && (
+        <RegisterPresetDialog
+          imagePath={presetTarget}
+          onClose={() => setPresetTarget(null)}
         />
       )}
     </div>
