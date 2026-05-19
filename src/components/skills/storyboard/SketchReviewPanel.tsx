@@ -7,6 +7,7 @@ import type {
   StoryboardSketchCut,
   StoryboardSketchVersion,
 } from "../../../lib/storyboard/types";
+import { SketchCanvas } from "./SketchCanvas";
 
 const IMAGE_EXTS = ["png", "jpg", "jpeg", "webp", "gif", "bmp"];
 
@@ -283,9 +284,18 @@ export function SketchReviewPanel() {
             </div>
           </div>
 
-          <div className="flex aspect-video items-center justify-center rounded-md border border-dashed border-[#333] bg-[#0d0d0d] p-4 text-center text-sm text-zinc-200">
-            {cut.userOverride || cut.visualLayout}
+          {/* スケッチ風 Canvas 絵コンテ (アスペクト比は goal から) */}
+          <div className="flex items-center justify-center rounded-md border border-[#333] p-3">
+            <SketchCanvas cut={cut} aspectRatio={goal.aspectRatio} />
           </div>
+
+          {/* 手書き上書きがあるなら下にテキストでも表示 */}
+          {cut.userOverride && (
+            <div className="rounded-md border border-pink-500/30 bg-pink-500/5 px-3 py-2 text-xs text-pink-100">
+              <span className="mr-1 text-[10px] text-pink-300">[手書き上書き]</span>
+              {cut.userOverride}
+            </div>
+          )}
 
           {/* 自由記述エリア */}
           {editing ? (
@@ -320,8 +330,8 @@ export function SketchReviewPanel() {
               <div className="text-sm text-zinc-300">
                 {cut.userOverride ? (
                   <>
-                    <span className="text-[10px] text-pink-300">[手書き上書き] </span>
-                    {cut.userOverride}
+                    <span className="text-[10px] text-zinc-500">意図: </span>
+                    {cut.intent}
                   </>
                 ) : (
                   cut.intent
