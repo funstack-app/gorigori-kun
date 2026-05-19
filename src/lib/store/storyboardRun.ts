@@ -86,6 +86,17 @@ type StoryboardRunState = {
   setGoal: (goal: StoryboardGoal | null) => void;
   pushSketchVersion: (version: StoryboardSketchVersion) => void;
   setActiveSketchVersion: (versionId: string | null) => void;
+  /** スケッチ内の特定カットを部分更新する (自由記述上書き等)。activeSketchVersionId 対象。 */
+  updateSketchCut: (
+    cutId: string,
+    patch: Partial<{
+      intent: string;
+      cameraNote: string;
+      visualLayout: string;
+      userOverride: string;
+      durationSeconds: number;
+    }>,
+  ) => void;
 
   // ===== レビュー UI 操作系 (採用確認待ち時) =====
   /** 表示中の take をユーザー意思で確定 (採用ボタン) */
@@ -295,6 +306,20 @@ export const useStoryboardRun = create<StoryboardRunState>((set) => ({
     })),
 
   setActiveSketchVersion: (versionId) => set({ activeSketchVersionId: versionId }),
+
+  updateSketchCut: (cutId, patch) =>
+    set((s) => {
+      if (s.sketchVersions.length === 0) return s;
+      const targetVersionId = s.activeSketchVersionId ?? s.sketchVersions[s.sketchVersions.length - 1].versionId;
+      const nextVersions = s.sketchVersions.map((v) => {
+        if (v.versionId !== targetVersionId) return v;
+        return {
+          ...v,
+          cuts: v.cuts.map((c) => (c.cutId === cutId ? { ...c, ...patch } : c)),
+        };
+      });
+      return { ...s, sketchVersions: nextVersions };
+    }),
 
   reset: () =>
     set((s) => ({
