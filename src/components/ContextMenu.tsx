@@ -84,9 +84,15 @@ export function ContextMenu({ x, y, items, onClose }: Props) {
             key={it.label}
             type="button"
             role="menuitem"
-          disabled={it.disabled}
-            onClick={() => {
+            disabled={it.disabled}
+            onClick={(event) => {
               if (it.disabled) return;
+              // STΛCK 報告 (2026-05-19): プレビューモーダル内で
+              // 「プリセットに登録…」を押すと、click が親モーダルへ
+              // バブリングして onClick={close} が走り、prefsetTarget セット
+              // 直後にモーダルが閉じる → ダイアログが出ない問題があった。
+              // stopPropagation で根治。
+              event.stopPropagation();
               it.onClick();
               onClose();
             }}

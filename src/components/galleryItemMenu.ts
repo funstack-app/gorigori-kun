@@ -2,6 +2,7 @@ import { useImagePreview } from "../lib/store/imagePreview";
 import { useImages, type GalleryItem } from "../lib/store/images";
 import { useMaskEditor } from "../lib/store/maskEditor";
 import { useThreads } from "../lib/store/threads";
+import { sendImageToPlanForRediscuss } from "../lib/sendToPlan";
 import type { ContextMenuItem } from "./ContextMenu";
 
 /**
@@ -24,6 +25,17 @@ export function buildGalleryItemMenu(
   const isFav = ctx.favorites.has(item.path);
   const cwd = useThreads.getState().cwd;
   const menu: ContextMenuItem[] = [
+    /*
+     * STΛCK 指示 (2026-05-19, NRC さん要望): 最上位の特別アクションとして
+     * 「企画で再検討」を配置。お気に入りの生成画像をベースに、企画タブで
+     * GPT-5.5 と対話しながらプロンプトを練り直す導線。
+     */
+    {
+      label: "企画で再検討",
+      icon: "T",
+      onClick: () => void sendImageToPlanForRediscuss(item.path),
+    },
+    { kind: "separator" },
     {
       label: "拡大表示",
       icon: "O",

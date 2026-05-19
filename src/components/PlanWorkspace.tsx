@@ -8,6 +8,11 @@ import { useScenePromptOverride } from "../lib/store/scenePrompt";
 import { useSkillMode } from "../lib/store/skillMode";
 import { useToasts } from "../lib/store/toasts";
 import { useWorkspace } from "../lib/store/workspace";
+import {
+  PLAN_REDISCUSS_EVENT,
+  type PlanRediscussDetail,
+} from "../lib/sendToPlan";
+import { extractDropped, isImageDrop } from "../lib/dragRef";
 import { PresetPickerPopover } from "./PresetPickerPopover";
 import { ReferenceSetsPickerModal } from "./ReferenceSetDialogs";
 /**
@@ -80,6 +85,29 @@ export function PlanWorkspace() {
     if (!el) return;
     el.scrollTop = el.scrollHeight;
   }, [messages, sending]);
+
+  /**
+   * STΛCK 指示 (2026-05-19, NRC さん要望): 「企画で再検討」アクションで
+   * 画像 + 元プロンプトが送られてきたら、入力欄に自動文を入れて GPT-5.5
+   * との対話を始めやすくする。
+   * - 画像は既に planChat.pendingImages に追加済み (sendToPlan.ts 側)
+   * - draft が空の時だけ自動文を入れる (ユーザーが既に書いてたら邪魔しない)
+   */
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<PlanRediscussDetail>).detail;
+      if (!detail) return;
+      setDraft((prev) => {
+        if (prev.trim().length > 0) return prev;
+        if (detail.originalPrompt) {
+          return `この画像をベースに、プロンプトを練り直したいです。元のプロンプトは以下です:\n\n${detail.originalPrompt}\n\nどう改善できますか?`;
+        }
+        return "この画像をベースに、プロンプトを練り直したいです。どう改善できますか?";
+      });
+    };
+    window.addEventListener(PLAN_REDISCUSS_EVENT, handler);
+    return () => window.removeEventListener(PLAN_REDISCUSS_EVENT, handler);
+  }, []);
 
   /**
    * ストーリーカットスキル判定。
@@ -223,10 +251,28 @@ export function PlanWorkspace() {
       <div
         ref={scrollRef}
         className="min-h-0 flex-1 overflow-y-auto px-4 pb-4 pt-10"
-        onDragOver={(event) => event.preventDefault()}
+        /*
+          STΛCK 指示 (2026-05-19): 企画タブ全体を drop target 化。
+          内部 Reference (ライブラリ画像など) と OS Files を統一的に受け入れ、
+          いずれも添付画像として企画チャットに追加する。
+        */
+        onDragOver={(event) => {
+          if (isImageDrop(event.dataTransfer)) event.preventDefault();
+        }}
         onDrop={(event) => {
           event.preventDefault();
-          if (event.dataTransfer.files.length > 0) void addFiles(event.dataTransfer.files);
+          const { refs, files } = extractDropped(event.dataTransfer);
+          if (refs.length > 0) {
+            addPendingImages(refs.map((r) => r.path));
+            pushToast({
+              kind: "success",
+              text: `画像 ${refs.length} 枚を添付しました`,
+              ttlMs: 2200,
+            });
+          }
+          if (files.length > 0) {
+            void addFiles(files);
+          }
         }}
       >
         {messages.length === 0 ? (
