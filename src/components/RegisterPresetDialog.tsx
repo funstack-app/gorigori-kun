@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import {
   history,
   sessions as sessionsApi,
@@ -8,6 +9,64 @@ import {
 import { usePresets } from "../lib/store/presets";
 import { useToasts } from "../lib/store/toasts";
 import { SafeImage } from "./SafeImage";
+
+/**
+ * 画像 path から 256x256 のサムネ JPEG (base64 data URL) を生成する。
+ *
+ * STΛCK 報告 (2026-05-19): プリセット一覧で「NO THUMBNAIL」と表示される
+ * 問題対策。旧版は thumbnail を未設定で保存していた (MVP 段階のコメント残り)。
+ * Canvas で aspect-cover (中央クロップ) リサイズして data URL 化する。
+ * 1 枚あたり ~30-80KB 程度 (quality 0.85)。
+ *
+ * 失敗時は null を返す (登録は続行、サムネだけ無しになる)。
+ */
+async function generateThumbnailDataUrl(imagePath: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => {
+      try {
+        const SIZE = 256;
+        const canvas = document.createElement("canvas");
+        canvas.width = SIZE;
+        canvas.height = SIZE;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+          resolve(null);
+          return;
+        }
+        // aspect-cover: 短辺をフィットさせて中央クロップ
+        const ratio = img.naturalWidth / img.naturalHeight;
+        let drawW: number;
+        let drawH: number;
+        let drawX: number;
+        let drawY: number;
+        if (ratio >= 1) {
+          // 横長 → 高さを SIZE にして、幅を中央クロップ
+          drawH = SIZE;
+          drawW = SIZE * ratio;
+          drawX = (SIZE - drawW) / 2;
+          drawY = 0;
+        } else {
+          drawW = SIZE;
+          drawH = SIZE / ratio;
+          drawX = 0;
+          drawY = (SIZE - drawH) / 2;
+        }
+        ctx.fillStyle = "#0a0a0a";
+        ctx.fillRect(0, 0, SIZE, SIZE);
+        ctx.drawImage(img, drawX, drawY, drawW, drawH);
+        const dataUrl = canvas.toDataURL("image/jpeg", 0.85);
+        resolve(dataUrl);
+      } catch (err) {
+        console.warn("[generateThumbnailDataUrl] canvas 処理失敗:", err);
+        resolve(null);
+      }
+    };
+    img.onerror = () => resolve(null);
+    img.src = convertFileSrc(imagePath);
+  });
+}
 
 /**
  * 画像をプリセットとして登録する小モーダル。
@@ -93,14 +152,19 @@ export function RegisterPresetDialog({ imagePath, defaultName, onClose }: Props)
     [name, prompt, saving],
   );
 
-  const handleSave = () => {
+  const handleSave = async () => {
     if (!canSave) return;
     setSaving(true);
     try {
+      // STΛCK 報告 (2026-05-19): プリセット一覧で「NO THUMBNAIL」と表示される
+      // 問題対策。登録元画像から 256x256 中央クロップ JPEG を生成して thumbnail
+      // フィールドに保存する。失敗してもプリセット登録自体は続行。
+      const thumbnail = await generateThumbnailDataUrl(imagePath);
       addPreset({
         name: name.trim(),
         prompt: prompt.trim(),
         categoryId,
+        thumbnail: thumbnail ?? undefined,
         attachedImages:
           attachedImages.length > 0
             ? attachedImages.map((path) => ({ path, role: "subject" }))
@@ -265,7 +329,7 @@ export function RegisterPresetDialog({ imagePath, defaultName, onClose }: Props)
           <button
             type="button"
             disabled={!canSave}
-            onClick={handleSave}
+            onClick={() => void handleSave()}
             className="h-9 rounded-md bg-pink-500 px-4 text-xs font-black text-white hover:bg-pink-600 disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-500"
           >
             {saving ? "登録中…" : "登録"}

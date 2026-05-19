@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 
 import { PresetCard } from "./PresetCard";
 import { PresetThumbnailFocusModal } from "./PresetThumbnailFocus";
+import { SafeImage } from "./SafeImage";
+import { extractDropped, isImageDrop } from "../lib/dragRef";
 import {
   focusToImageStyle,
   sortPresets,
@@ -66,6 +68,12 @@ export function PresetsDrawer({ fullPage = false }: { fullPage?: boolean }) {
   const [draftTags, setDraftTags] = useState<string[]>([]);
   const [draftThumbnail, setDraftThumbnail] = useState<string | undefined>(undefined);
   const [draftThumbnailFocus, setDraftThumbnailFocus] = useState<ThumbnailFocus | undefined>(undefined);
+  /**
+   * STΛCK 報告 (2026-05-19): プリセット編集モーダルで attachedImages (キャラ画像)
+   * を表示・編集できなかったため、保存済みでも見えない状態だった。
+   * draftAttachedImages で保持して編集UIに反映する。
+   */
+  const [draftAttachedImages, setDraftAttachedImages] = useState<string[]>([]);
   const [newCategoryName, setNewCategoryName] = useState<string>("");
   const [newCategoryColor, setNewCategoryColor] = useState<string>(DEFAULT_NEW_CATEGORY_COLOR);
   const [query, setQuery] = useState<string>("");
@@ -91,6 +99,7 @@ export function PresetsDrawer({ fullPage = false }: { fullPage?: boolean }) {
     setDraftTags([]);
     setDraftThumbnail(undefined);
     setDraftThumbnailFocus(undefined);
+    setDraftAttachedImages([]);
   };
 
   const startEdit = (preset: Preset) => {
@@ -101,6 +110,10 @@ export function PresetsDrawer({ fullPage = false }: { fullPage?: boolean }) {
     setDraftTags(preset.tags ?? []);
     setDraftThumbnail(preset.thumbnail);
     setDraftThumbnailFocus(preset.thumbnailFocus);
+    // 保存済みの attachedImages を編集UIに復元
+    setDraftAttachedImages(
+      preset.attachedImages ? preset.attachedImages.map((a) => a.path) : [],
+    );
   };
 
   const cancelEdit = () => {
@@ -111,6 +124,7 @@ export function PresetsDrawer({ fullPage = false }: { fullPage?: boolean }) {
     setDraftTags([]);
     setDraftThumbnail(undefined);
     setDraftThumbnailFocus(undefined);
+    setDraftAttachedImages([]);
   };
 
   const savePreset = () => {
@@ -119,6 +133,10 @@ export function PresetsDrawer({ fullPage = false }: { fullPage?: boolean }) {
     if (!name || !prompt) return;
     // サムネが無いなら focus は無意味なので落とす
     const focusOnSave = draftThumbnail ? draftThumbnailFocus : undefined;
+    const attachedImagesForSave =
+      draftAttachedImages.length > 0
+        ? draftAttachedImages.map((path) => ({ path, role: "subject" }))
+        : undefined;
     if (editingPresetId === "__new__") {
       addPreset({
         name,
@@ -128,6 +146,7 @@ export function PresetsDrawer({ fullPage = false }: { fullPage?: boolean }) {
         tags: draftTags.length > 0 ? draftTags : undefined,
         thumbnail: draftThumbnail,
         thumbnailFocus: focusOnSave,
+        attachedImages: attachedImagesForSave,
       });
     } else if (editingPresetId) {
       updatePreset(editingPresetId, {
@@ -137,6 +156,7 @@ export function PresetsDrawer({ fullPage = false }: { fullPage?: boolean }) {
         tags: draftTags.length > 0 ? draftTags : undefined,
         thumbnail: draftThumbnail,
         thumbnailFocus: focusOnSave,
+        attachedImages: attachedImagesForSave,
       });
     }
     cancelEdit();
@@ -196,12 +216,14 @@ export function PresetsDrawer({ fullPage = false }: { fullPage?: boolean }) {
       tags={draftTags}
       thumbnail={draftThumbnail}
       thumbnailFocus={draftThumbnailFocus}
+      attachedImages={draftAttachedImages}
       onChangeName={setDraftName}
       onChangePrompt={setDraftPrompt}
       onChangeDescription={setDraftDescription}
       onChangeTags={setDraftTags}
       onChangeThumbnail={setDraftThumbnail}
       onChangeThumbnailFocus={setDraftThumbnailFocus}
+      onChangeAttachedImages={setDraftAttachedImages}
       onSave={savePreset}
       onCancel={cancelEdit}
     />
@@ -611,12 +633,15 @@ type PresetFormProps = {
   tags: string[];
   thumbnail?: string;
   thumbnailFocus?: ThumbnailFocus;
+  /** F-#7 修正 (2026-05-19): キャラ添付画像 (path 配列) */
+  attachedImages: string[];
   onChangeName: (next: string) => void;
   onChangePrompt: (next: string) => void;
   onChangeDescription: (next: string) => void;
   onChangeTags: (next: string[]) => void;
   onChangeThumbnail: (next: string | undefined) => void;
   onChangeThumbnailFocus: (next: ThumbnailFocus | undefined) => void;
+  onChangeAttachedImages: (next: string[]) => void;
   onSave: () => void;
   onCancel: () => void;
 };
@@ -701,12 +726,14 @@ function PresetForm({
   tags,
   thumbnail,
   thumbnailFocus,
+  attachedImages,
   onChangeName,
   onChangePrompt,
   onChangeDescription,
   onChangeTags,
   onChangeThumbnail,
   onChangeThumbnailFocus,
+  onChangeAttachedImages,
   onSave,
   onCancel,
 }: PresetFormProps) {
@@ -826,6 +853,70 @@ function PresetForm({
         rows={5}
         className="w-full resize-none rounded-md border border-[#343434] bg-[#0b0b0b] p-2 font-mono text-[11px] leading-5 text-neutral-100 outline-none focus:border-pink-400"
       />
+
+      {/*
+        STΛCK 報告 (2026-05-19): プリセット編集モーダルで attachedImages (キャラ画像)
+        を編集できなかったため、保存済みでも見えない状態だった。タグの直前に
+        「キャラ添付画像」セクションを追加。サムネ表示 + ✕ で個別削除可能。
+
+        さらに STΛCK 指示 (2026-05-19): drop target 化。ライブラリ等から画像を
+        ドラッグ&ドロップで追加できる (画像があるエリアからこのエリアへ自由に流す)。
+      */}
+      <div
+        className="space-y-1.5"
+        onDragOver={(event) => {
+          if (isImageDrop(event.dataTransfer)) event.preventDefault();
+        }}
+        onDrop={(event) => {
+          event.preventDefault();
+          const { refs } = extractDropped(event.dataTransfer);
+          if (refs.length === 0) return;
+          const dropped = refs
+            .map((r) => r.path)
+            .filter((p) => !attachedImages.includes(p));
+          if (dropped.length > 0) {
+            onChangeAttachedImages([...attachedImages, ...dropped]);
+          }
+        }}
+      >
+        <span className="text-[10px] font-black uppercase tracking-wide text-neutral-500">
+          キャラ添付画像 ({attachedImages.length} 枚)
+        </span>
+        <p className="text-[10px] text-neutral-500">
+          プリセット呼び出し時にこれらの画像も自動で参照ラックに追加されます。
+          ライブラリやプレビューからドラッグで追加できます。
+        </p>
+        {attachedImages.length > 0 ? (
+          <div className="flex flex-wrap gap-2">
+            {attachedImages.map((path) => (
+              <div
+                key={path}
+                className="group relative h-16 w-16 overflow-hidden rounded border border-[#343434] bg-black"
+                title={path}
+              >
+                <SafeImage path={path} className="h-full w-full object-cover" />
+                <button
+                  type="button"
+                  onClick={() =>
+                    onChangeAttachedImages(
+                      attachedImages.filter((p) => p !== path),
+                    )
+                  }
+                  className="absolute right-0 top-0 hidden h-5 w-5 items-center justify-center bg-black/80 text-[11px] text-white group-hover:flex hover:text-rose-300"
+                  title="この画像をプリセットから外す"
+                  aria-label="画像を外す"
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="rounded border border-dashed border-[#343434] bg-[#0b0b0b] px-3 py-3 text-center text-[11px] text-neutral-500">
+            キャラ画像は紐づいていません — ここに画像をドラッグできます
+          </p>
+        )}
+      </div>
 
       <div className="space-y-1.5">
         <span className="text-[10px] font-black uppercase tracking-wide text-neutral-500">

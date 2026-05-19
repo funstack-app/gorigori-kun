@@ -2,6 +2,7 @@ import {
   focusToImageStyle,
   type Preset,
 } from "../lib/store/presets";
+import { setDragRef } from "../lib/dragRef";
 
 export type PresetCardProps = {
   preset: Preset;
@@ -28,10 +29,30 @@ export function PresetCard({
   const isFavorite = !!preset.favorite;
   const style = focusToImageStyle(preset.thumbnailFocus);
 
+  /*
+    STΛCK 指示 (2026-05-19): プリセットカードを drag source 化。
+    attachedImages の先頭画像 (代表画像) を引っ張り出して参照ラックや
+    他の drop ターゲットに投げ込める。プロンプト本文の drop は未対応
+    (それは「プリセット呼び出し」ボタンの役割)。
+  */
+  const dragRefPath = preset.attachedImages?.[0]?.path;
   return (
     <div
       className="group relative flex aspect-[3/4] flex-col overflow-hidden rounded-lg border border-[#2a2a2a] bg-[#101010] transition hover:border-pink-400"
       data-preset-id={preset.id}
+      draggable={!!dragRefPath}
+      onDragStart={
+        dragRefPath
+          ? (e) => {
+              setDragRef(e.dataTransfer, {
+                path: dragRefPath,
+                name: preset.name,
+                source: "preset",
+                role: "subject",
+              });
+            }
+          : undefined
+      }
     >
       {/* 左上: お気に入り（pink テーマ）。 */}
       {onToggleFavorite && (

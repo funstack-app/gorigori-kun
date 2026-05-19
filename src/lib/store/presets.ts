@@ -271,6 +271,16 @@ export const usePresets = create<PresetsState>((set, get) => ({
       description: data.description?.trim() || undefined,
       tags: data.tags && data.tags.length > 0 ? data.tags : undefined,
       thumbnail: data.thumbnail,
+      thumbnailFocus: data.thumbnailFocus,
+      // STΛCK 報告 (2026-05-19): F-#7 で Preset 型に attachedImages を追加した
+      // が、addPreset 内で参照されておらず localStorage に保存されないバグ。
+      // ここで data.attachedImages を引き継ぐことで「プリセットにキャラ画像が
+      // 登録されない」問題を根治。
+      attachedImages:
+        data.attachedImages && data.attachedImages.length > 0
+          ? data.attachedImages
+          : undefined,
+      favorite: data.favorite,
       createdAt: now,
       updatedAt: now,
     };
