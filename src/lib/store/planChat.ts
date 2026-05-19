@@ -326,7 +326,10 @@ function extractStructuredStoryboard(text: string, messages: PlanMessage[]): { p
       ? source.styleReferencePath
       : attached[1];
 
-  if (!Number.isFinite(duration) || duration <= 0 || !isAspectRatio(aspect) || !tempo || !characterPath) {
+  // STΛCK 指示 (2026-05-20): Phase 1 ゴール深掘りでは画像必須にしない。
+  // characterPath は Phase 2 絵コンテレビュー後 / Phase 3 生成開始時に
+  // 後付けで確定する。ここでは duration/aspect/tempo が揃えば params を作る。
+  if (!Number.isFinite(duration) || duration <= 0 || !isAspectRatio(aspect) || !tempo) {
     return null;
   }
 

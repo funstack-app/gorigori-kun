@@ -34,6 +34,7 @@ export function GoalChatPanel() {
   const send = usePlanChat((s) => s.send);
   const ensureThread = usePlanChat((s) => s.ensureThread);
   const storyboardParams = usePlanChat((s) => s.storyboardParams);
+  const sceneConstruction = usePlanChat((s) => s.sceneConstruction);
   const setSkillEnabled = useSkillMode((s) => s.setEnabled);
   const setSkillId = useSkillMode((s) => s.setSelectedSkillId);
   const skillEnabled = useSkillMode((s) => s.enabled);
@@ -118,9 +119,11 @@ export function GoalChatPanel() {
   }
 
   async function handleFinalize() {
-    // planChat 側に既に storyboardParams を抽出する仕組みがあるので、
-    // それを使えるなら使う。無ければユーザー対話の要約から最低限を組む。
-    if (storyboardParams && storyboardParams.character_reference_path) {
+    // STΛCK 指示 (2026-05-20):
+    //  - Phase 1 では画像必須にしない (構想段階)
+    //  - scene_construction (カット列) が揃えば Phase 2 へ進む
+    //  - 画像 (characterReferencePath) は Phase 2 / Phase 3 で確定させる
+    if (storyboardParams && sceneConstruction) {
       const goal: StoryboardGoal = {
         summary: messages
           .filter((m) => m.role === "assistant")
@@ -133,19 +136,25 @@ export function GoalChatPanel() {
         durationSeconds: storyboardParams.duration_seconds,
         aspectRatio: storyboardParams.aspect_ratio,
         tempo: storyboardParams.tempo,
-        characterReferencePath: storyboardParams.character_reference_path,
+        // Phase 1 で画像未添付なら空文字。Phase 3 で必須化される。
+        characterReferencePath: storyboardParams.character_reference_path || "",
         styleReferencePath: storyboardParams.style_reference_path,
       };
       setGoal(goal);
       setPhase("sketch");
+      useToasts.getState().push({
+        kind: "success",
+        text: "ゴールを確定しました。絵コンテレビューに進みます。",
+        ttlMs: 3000,
+      });
       return;
     }
 
-    // フォールバック: 必要な情報が足りない場合は AI に [FINALIZE_STORYBOARD] を投げる
+    // フォールバック: scene_construction がまだ揃っていない → AI に再要求
     await send("[FINALIZE_STORYBOARD] ここまでの内容で確定 JSON を出してください。");
     useToasts.getState().push({
       kind: "info",
-      text: "AI に確定 JSON を依頼しました。生成完了後、再度「ゴールを確定」を押してください。",
+      text: "AI に確定 JSON を依頼しました。応答後、再度「ゴールを確定」を押してください。",
       ttlMs: 5000,
     });
   }
