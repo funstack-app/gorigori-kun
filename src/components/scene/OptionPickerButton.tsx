@@ -28,14 +28,19 @@ export function OptionPickerButton({
 
   return (
     <div>
-      <p className="mb-1.5 text-xs font-semibold text-neutral-300">{label}</p>
+      <p className="mb-1 text-xs font-semibold text-neutral-300">{label}</p>
+      {/*
+        STΛCK 指示 (2026-05-19): サムネをもう少し大きく、縦幅も少し大きく。
+        h-14 (56px) → h-20 (80px)、サムネ h-9 (36px) → h-14 (56px)、
+        padding と gap も拡大して視認性を上げる。
+      */}
       <button
         type="button"
         onClick={() => setOpen(true)}
-        className="flex w-full items-center justify-between gap-3 rounded-md border border-[#343434] bg-[#101010] p-2 text-left transition hover:border-pink-400 hover:bg-[#1f1f1f]"
+        className="flex h-20 w-full items-center justify-between gap-4 rounded-md border border-[#343434] bg-[#101010] px-4 text-left transition hover:border-pink-400 hover:bg-[#1f1f1f]"
       >
-        <div className="flex min-w-0 items-center gap-3">
-          <div className="aspect-video h-10 shrink-0 overflow-hidden rounded bg-gradient-to-br from-neutral-700 to-neutral-900">
+        <div className="flex min-w-0 items-center gap-4">
+          <div className="aspect-video h-14 shrink-0 overflow-hidden rounded bg-gradient-to-br from-neutral-700 to-neutral-900">
             {current?.thumbnail ? (
               <img
                 src={current.thumbnail.src}
@@ -47,18 +52,18 @@ export function OptionPickerButton({
             )}
           </div>
           <div className="min-w-0 flex-1">
-            <div className="truncate text-sm font-bold text-neutral-100">
+            <div className="truncate text-base font-bold text-neutral-100">
               {current?.value ?? "選択する"}
             </div>
             {current?.hint && (
-              <div className="truncate text-xs text-neutral-400">
+              <div className="truncate text-xs text-neutral-500">
                 {current.hint}
               </div>
             )}
           </div>
         </div>
-        <span className="shrink-0 text-sm font-bold text-neutral-500">
-          変更
+        <span className="shrink-0 text-base text-neutral-500" aria-hidden>
+          ›
         </span>
       </button>
 

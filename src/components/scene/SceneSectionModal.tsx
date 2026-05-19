@@ -36,8 +36,9 @@ export function SceneSectionModal({ open, title, number, onClose, children }: Pr
     >
       {/*
         STΛCK 指示 (2026-05-19): ポップアップサイズを OptionPickerModal と統一。
-        max-w-xl → max-w-5xl、高さも calc(100vh-2rem) で揃える。
-        どのPCサイズでも同じ大きさで操作できる Modal-First UX に統一。
+        max-w-xl → max-w-5xl で横は揃える。高さは中身に応じて自然に伸縮、
+        上限のみ calc(100vh-2rem) で制約 (中身が少ない時はコンパクト、
+        多い時はスクロール)。
       */}
       <div
         className="flex max-h-[calc(100vh-2rem)] w-full max-w-5xl min-h-0 flex-col overflow-hidden rounded-xl border border-[#262626] bg-[#0f0f0f] shadow-2xl"

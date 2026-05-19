@@ -51,8 +51,19 @@ export function OptionPickerModal({
         });
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
-      <div className="flex max-h-[calc(100vh-2rem)] w-full max-w-5xl flex-col overflow-y-auto rounded-xl border border-[#262626] bg-[#0f0f0f] shadow-2xl">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+      onClick={onClose}
+    >
+      {/*
+        STΛCK 指示 (2026-05-19): 外側 overflow-y-auto を外して内側スクロールに
+        一本化。旧版は二重スクロール構造でヘッダ・フィルター・本体が一緒に
+        縦スクロールされ、画面外に見切れる現象が発生していた。
+      */}
+      <div
+        className="flex max-h-[calc(100vh-2rem)] w-full max-w-5xl min-h-0 flex-col overflow-hidden rounded-xl border border-[#262626] bg-[#0f0f0f] shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="flex items-center justify-between border-b border-[#262626] px-6 py-4">
           <div>
             <p className="text-[11px] font-bold uppercase tracking-wider text-neutral-500">
