@@ -30,16 +30,27 @@ export function GenerationProgressPanel() {
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
 
-  // 入場時に run を起動 (まだ起動していなければ)
+  // 入場時に本番 run を起動。
+  // STΛCK 指示 (2026-05-20): Phase 2 で絵コンテ run (sketch_mode=true) を
+  // 走らせている場合、その activeRunId / cuts が残っているので、
+  // 本番 run を起動する前に reset() で一度クリアする (sketchVersions に
+  // 絵コンテ画像は保存済みなので消えない)。
   useEffect(() => {
-    if (activeRunId) return;
     if (!goal || !sceneConstruction) return;
     if (starting) return;
+    // 既に本番 run が走っている (params.sketchMode が false) なら何もしない
+    if (activeRunId) {
+      const cur = useStoryboardRun.getState().params;
+      if (cur && !cur.sketchMode) return;
+    }
 
     (async () => {
       setStarting(true);
       setStartError(null);
       try {
+        // 絵コンテ run の残骸をクリア (sketchVersions / chatMessages / goal は保持される)
+        useStoryboardRun.getState().reset();
+
         const params = {
           storyPrompt: goal.summary || "ストーリーカット",
           characterReferenceImage: goal.characterReferencePath,
@@ -50,6 +61,7 @@ export function GenerationProgressPanel() {
           candidatesPerCut: 1 as 1 | 3,
           cwd: undefined,
           sceneConstruction,
+          sketchMode: false,
         };
         const runId = await storyboard.run(params);
         beginRun(runId, params);

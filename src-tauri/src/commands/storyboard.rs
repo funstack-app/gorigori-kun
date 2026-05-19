@@ -42,6 +42,14 @@ pub struct StoryboardParams {
     pub cwd: Option<String>,
     #[serde(default)]
     pub scene_construction: Option<Value>,
+    /**
+     * 絵コンテ (storyboard panel) 生成モード。
+     * true のとき: 1 candidate に固定 + 評価スキップ + プロンプト末尾に
+     * 「rough pencil sketch, monochrome, hand-drawn」等のスケッチ強制スタイルを差し込む。
+     * 本番カットと明確に違うルックで「これは絵コンテ」と分かる出力を得る。
+     */
+    #[serde(default)]
+    pub sketch_mode: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -393,6 +401,7 @@ async fn run_storyboard_orchestrator(
                 &take_specs,
                 params.cwd.clone(),
                 &params.aspect_ratio,
+                params.sketch_mode,
             )
             .await;
 
@@ -1204,6 +1213,7 @@ async fn generate_cut_takes(
     take_specs: &[(String, u32)],
     cwd: Option<String>,
     aspect_ratio: &str,
+    sketch_mode: bool,
 ) -> Vec<Result<(String, PathBuf), String>> {
     let tasks = take_specs
         .iter()
@@ -1220,6 +1230,7 @@ async fn generate_cut_takes(
                 take_specs.len() as u32,
                 cwd.clone(),
                 aspect_ratio,
+                sketch_mode,
             )
         })
         .collect::<Vec<_>>();
@@ -1239,6 +1250,7 @@ async fn generate_one_take(
     candidate_count: u32,
     cwd: Option<String>,
     aspect_ratio: &str,
+    sketch_mode: bool,
 ) -> Result<(String, PathBuf), String> {
     let tmp = tempfile::Builder::new()
         .prefix(&format!("codex-storyboard-{cut_id}-{take_id}-"))
@@ -1257,6 +1269,7 @@ async fn generate_one_take(
         candidate_index,
         candidate_count,
         aspect_ratio,
+        sketch_mode,
     );
     let mut cmd = Command::new(codex_bin);
     cmd.args([
@@ -1329,9 +1342,35 @@ fn build_generation_prompt(
     candidate_index: u32,
     candidate_count: u32,
     aspect_ratio: &str,
+    sketch_mode: bool,
 ) -> String {
     let prompt_json = serde_json::to_string_pretty(structured_prompt)
         .unwrap_or_else(|_| structured_prompt.to_string());
+
+    if sketch_mode {
+        // 絵コンテモード: 本番カットと明確に違う「鉛筆スケッチ・モノクロ・荒い線」スタイルを強制。
+        // STΛCK 指示 (2026-05-20): 絵コンテは本番と被ってはいけない。
+        return format!(
+            "次の構造化プロンプトに従って、ストーリーボード絵コンテ用のラフスケッチ画像を1枚だけ生成してください。\n\n\
+             ## この画像の役割\n\
+             - cutId: {cut_id}\n\
+             - takeId: {take_id}\n\
+             - 候補 {candidate_index}/{candidate_count}\n\
+             - 参照画像は順に、キャラクター基準、スタイル基準、必要なら直前確定カットです。\n\
+             - これは「絵コンテ」です。本番の写真品質ではなく、紙に鉛筆で描いたラフなスケッチが正解。\n\n\
+             ## 手順\n\
+             1. image_gen ツールを1回だけ呼び出す。\n\
+             2. {aspect_ratio} aspect ratio で生成する。\n\
+             3. 必ず以下のスタイルを厳守:\n\
+                rough pencil sketch on storyboard paper, monochrome graphite drawing, hand-drawn loose linework, low fidelity, no color, no photorealism, traditional film storyboard panel style, quick concept sketch, visible pencil strokes, off-white paper background, minimal shading.\n\
+             4. 構造化プロンプトの shot_type / camera_angle / subject_position / motion / props を必ず構図に反映する (絵コンテとして読めること)。\n\
+             5. 画面内テキスト、ロゴ、透かし、グリッド線、コラージュ、複数パネルは禁止。\n\
+             6. 出力先指定や画像変換は不要です。生成画像は $CODEX_HOME/generated_images/<session>/ig_*.png に保存されます。\n\n\
+             ## Structured Prompt JSON\n{prompt_json}\n\n\
+             最終メッセージは OK または NG <理由> の1行のみ。"
+        );
+    }
+
     format!(
         "次の構造化プロンプトに従って、動画ストーリーボード用の画像を1枚だけ生成してください。\n\n\
          ## この画像の役割\n\

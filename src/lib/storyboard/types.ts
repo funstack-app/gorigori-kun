@@ -48,6 +48,8 @@ export type StoryboardRunParams = {
   candidatesPerCut: 1 | 3;
   cwd?: string;
   sceneConstruction?: SceneConstruction;
+  /** 絵コンテ (storyboard panel) モード。バックエンドでスケッチ強制スタイルに切替。 */
+  sketchMode?: boolean;
 };
 
 export type StoryboardEditMagicLayerStep = {
@@ -183,7 +185,7 @@ export type StoryboardSketchCut = {
   /** ユーザーが手書きで上書きした場合の差分メモ。空なら未編集。 */
   userOverride?: string;
 
-  // === Canvas スケッチ用構造化メタ (任意。AI が返せれば描画品質UP) ===
+  // === スケッチメタ (Canvas 自前描画用 / プロンプト構造化用に両用) ===
   shotType?: StoryboardShotType;
   cameraAngle?: StoryboardCameraAngle;
   subjectPosition?: StoryboardSubjectPosition;
@@ -191,6 +193,12 @@ export type StoryboardSketchCut = {
   cameraMotion?: StoryboardCameraMotion;
   /** 小道具・背景の簡易メモ (例: "金属ケース", "歯車", "煙"). */
   props?: string[];
+
+  // === 絵コンテ画像 (GPT Image 2 でスケッチ風に生成) ===
+  /** バックエンドから到着した絵コンテ画像のパス。未生成なら undefined。 */
+  sketchImagePath?: string;
+  /** 絵コンテ画像の状態。pending=未着手, generating=生成中, done=完了, failed=失敗。 */
+  sketchStatus?: "pending" | "generating" | "done" | "failed";
 };
 
 /**

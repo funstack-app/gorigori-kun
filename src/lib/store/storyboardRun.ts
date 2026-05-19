@@ -95,6 +95,8 @@ type StoryboardRunState = {
       visualLayout: string;
       userOverride: string;
       durationSeconds: number;
+      sketchImagePath: string | undefined;
+      sketchStatus: "pending" | "generating" | "done" | "failed";
     }>,
   ) => void;
 
