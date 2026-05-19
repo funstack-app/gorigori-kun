@@ -1,6 +1,15 @@
 import { create } from "zustand";
 
-import type { SceneGroup, ScoreBundle, StoryboardEvent, StoryboardRunParams } from "../storyboard/types";
+import type {
+  SceneGroup,
+  ScoreBundle,
+  StoryboardChatMessage,
+  StoryboardEvent,
+  StoryboardGoal,
+  StoryboardPhase,
+  StoryboardRunParams,
+  StoryboardSketchVersion,
+} from "../storyboard/types";
 import { useActiveProject } from "./activeProject";
 import { useProjects } from "./projects";
 
@@ -51,11 +60,32 @@ type StoryboardRunState = {
   debugLog: StoryboardEvent[];
   /** 完了した過去 run のサマリー一覧。新しい run を始めても消えない。 */
   pastRuns: PastRunSummary[];
+
+  // ===== β版 4-Phase ワークフロー =====
+  /** 現在の Phase (goal / sketch / generation / review)。 */
+  phase: StoryboardPhase;
+  /** Phase 1: ユーザーと AI の対話ログ。 */
+  chatMessages: StoryboardChatMessage[];
+  /** Phase 1 終了時に確定したゴール。Phase 2 入力になる。 */
+  goal: StoryboardGoal | null;
+  /** Phase 2: 提示したスケッチ案のバージョン履歴 (再生成で増える)。 */
+  sketchVersions: StoryboardSketchVersion[];
+  /** 現在表示中のスケッチ versionId。null なら最新を使う。 */
+  activeSketchVersionId: string | null;
+
   beginRun: (runId: string, params: StoryboardRunParams) => void;
   applyEvent: (e: StoryboardEvent) => void;
   setStatus: (status: StoryboardRunStatus) => void;
   dismissCheckpoint: () => void;
   reset: () => void;
+
+  // ===== Phase 操作 =====
+  setPhase: (phase: StoryboardPhase) => void;
+  appendChatMessage: (msg: Omit<StoryboardChatMessage, "id" | "ts"> & { id?: string; ts?: number }) => void;
+  clearChat: () => void;
+  setGoal: (goal: StoryboardGoal | null) => void;
+  pushSketchVersion: (version: StoryboardSketchVersion) => void;
+  setActiveSketchVersion: (versionId: string | null) => void;
 
   // ===== レビュー UI 操作系 (採用確認待ち時) =====
   /** 表示中の take をユーザー意思で確定 (採用ボタン) */
@@ -86,6 +116,11 @@ const emptyState = {
   lastError: null,
   params: null,
   debugLog: [],
+  phase: "goal" as StoryboardPhase,
+  chatMessages: [] as StoryboardChatMessage[],
+  goal: null as StoryboardGoal | null,
+  sketchVersions: [] as StoryboardSketchVersion[],
+  activeSketchVersionId: null as string | null,
 };
 
 function ensureCut(cuts: Map<string, CutState>, cutId: string): CutState {
@@ -226,6 +261,41 @@ export const useStoryboardRun = create<StoryboardRunState>((set) => ({
 
   setStatus: (status) => set({ status }),
   dismissCheckpoint: () => set({ checkpointCutId: null, status: "running" }),
+
+  // ===== Phase 操作 =====
+  setPhase: (phase) =>
+    set((s) => ({
+      phase,
+      uiDebugLog: [
+        ...s.uiDebugLog,
+        { ts: Date.now(), level: "info" as const, message: `setPhase: ${phase}` },
+      ].slice(-500),
+    })),
+
+  appendChatMessage: (msg) =>
+    set((s) => {
+      const finalized: StoryboardChatMessage = {
+        id: msg.id ?? `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        role: msg.role,
+        text: msg.text,
+        ts: msg.ts ?? Date.now(),
+        probing: msg.probing,
+      };
+      return { chatMessages: [...s.chatMessages, finalized] };
+    }),
+
+  clearChat: () => set({ chatMessages: [] }),
+
+  setGoal: (goal) => set({ goal }),
+
+  pushSketchVersion: (version) =>
+    set((s) => ({
+      sketchVersions: [...s.sketchVersions, version],
+      activeSketchVersionId: version.versionId,
+    })),
+
+  setActiveSketchVersion: (versionId) => set({ activeSketchVersionId: versionId }),
+
   reset: () =>
     set((s) => ({
       ...emptyState,
