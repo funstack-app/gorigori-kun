@@ -7,6 +7,7 @@ import { exists, writeTextFile } from "@tauri-apps/plugin-fs";
 import { GORI_SKILLS, type GoriSkill } from "../lib/skills/catalog";
 import { useSkillMode } from "../lib/store/skillMode";
 import { useToasts } from "../lib/store/toasts";
+import { useWorkspace } from "../lib/store/workspace";
 import { activateSkill } from "./SkillBadge";
 import { SkillDetailModal } from "./SkillDetailModal";
 import { SkillIcon } from "./SkillIcon";
@@ -66,9 +67,12 @@ export function SkillsWorkspace({ onUseSkill }: { onUseSkill?: () => void }) {
   //    storyboardRun.chatMessages はクリアしない)
   //  - skillMode を OFF にするだけで skillUiMode は自動的に default に戻る
   //    (skillMode.ts の syncUiMode → exitSkill)
+  //  - workspace.purpose も "artwork" に戻して旧「ストーリーカット構築」UI が
+  //    残らないようにする (activateSkill が videoStory に変えていたため)
   const stopSkill = (skill: GoriSkill) => {
     setSkillEnabled(false);
     setSelectedSkillId(null);
+    useWorkspace.getState().setPurpose("artwork");
     useToasts.getState().push({
       kind: "info",
       text: `${skill.name} を停止しました。作品モードに戻ります。`,
