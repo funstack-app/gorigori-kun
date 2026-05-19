@@ -44,6 +44,8 @@ export function GoalChatPanel() {
 
   const [draft, setDraft] = useState("");
   const [attachedImages, setAttachedImages] = useState<string[]>([]);
+  // 「ゴール確定」を押した直後フラグ。JSON 応答が来たら自動で Phase2 に進む。
+  const [awaitingFinalize, setAwaitingFinalize] = useState(false);
   const scrollerRef = useRef<HTMLDivElement>(null);
 
   // ストーリーカットスキルを ON にしておく (planChat の prefix 切替条件)
@@ -76,7 +78,8 @@ export function GoalChatPanel() {
   }, [messages]);
 
   // 「ゴール確定」可能か = 数ターン回って AI が storyboardParams を提案できる状態か
-  const canFinalize = messages.length >= 4 && !sending;
+  // awaitingFinalize 中は再クリックを防ぐため無効化する
+  const canFinalize = messages.length >= 4 && !sending && !awaitingFinalize;
 
   async function handleSend() {
     const text = draft.trim();
@@ -118,46 +121,69 @@ export function GoalChatPanel() {
     setAttachedImages((prev) => prev.filter((p) => p !== path));
   }
 
+  // ストア状態を見て StoryboardGoal を組み立てる共通関数。
+  // 「storyboardParams + sceneConstruction が揃っている」前提。
+  function buildAndAdvance() {
+    const params = usePlanChat.getState().storyboardParams;
+    const scene = usePlanChat.getState().sceneConstruction;
+    if (!params || !scene) return false;
+    const goal: StoryboardGoal = {
+      summary: messages
+        .filter((m) => m.role === "assistant")
+        .slice(-2)
+        .map((m) => m.text)
+        .join("\n")
+        .slice(0, 400),
+      characterDescription: "",
+      toneKeywords: [],
+      durationSeconds: params.duration_seconds,
+      aspectRatio: params.aspect_ratio,
+      tempo: params.tempo,
+      characterReferencePath: params.character_reference_path || "",
+      styleReferencePath: params.style_reference_path,
+    };
+    setGoal(goal);
+    setPhase("sketch");
+    useToasts.getState().push({
+      kind: "success",
+      text: "ゴールを確定しました。絵コンテレビューに進みます。",
+      ttlMs: 3000,
+    });
+    return true;
+  }
+
   async function handleFinalize() {
     // STΛCK 指示 (2026-05-20):
     //  - Phase 1 では画像必須にしない (構想段階)
     //  - scene_construction (カット列) が揃えば Phase 2 へ進む
-    //  - 画像 (characterReferencePath) は Phase 2 / Phase 3 で確定させる
+    //  - 「2 回押し」を撲滅: 1 回目で AI に JSON 要求 → 応答後に自動で Phase2 へ
     if (storyboardParams && sceneConstruction) {
-      const goal: StoryboardGoal = {
-        summary: messages
-          .filter((m) => m.role === "assistant")
-          .slice(-2)
-          .map((m) => m.text)
-          .join("\n")
-          .slice(0, 400),
-        characterDescription: "",
-        toneKeywords: [],
-        durationSeconds: storyboardParams.duration_seconds,
-        aspectRatio: storyboardParams.aspect_ratio,
-        tempo: storyboardParams.tempo,
-        // Phase 1 で画像未添付なら空文字。Phase 3 で必須化される。
-        characterReferencePath: storyboardParams.character_reference_path || "",
-        styleReferencePath: storyboardParams.style_reference_path,
-      };
-      setGoal(goal);
-      setPhase("sketch");
-      useToasts.getState().push({
-        kind: "success",
-        text: "ゴールを確定しました。絵コンテレビューに進みます。",
-        ttlMs: 3000,
-      });
+      buildAndAdvance();
       return;
     }
 
-    // フォールバック: scene_construction がまだ揃っていない → AI に再要求
-    await send("[FINALIZE_STORYBOARD] ここまでの内容で確定 JSON を出してください。");
+    // まだ JSON が無い → AI に要求して、応答が来たら自動遷移するモードに入る
+    setAwaitingFinalize(true);
     useToasts.getState().push({
       kind: "info",
-      text: "AI に確定 JSON を依頼しました。応答後、再度「ゴールを確定」を押してください。",
-      ttlMs: 5000,
+      text: "AI に絵コンテ構成を依頼しています…応答後、自動で絵コンテに進みます。",
+      ttlMs: 4000,
     });
+    await send("[FINALIZE_STORYBOARD] ここまでの内容で確定 JSON を出してください。");
   }
+
+  // AI 応答で storyboardParams + sceneConstruction が揃ったタイミングで
+  // awaitingFinalize なら自動で Phase 2 に進める。
+  useEffect(() => {
+    if (!awaitingFinalize) return;
+    if (storyboardParams && sceneConstruction && !sending) {
+      const ok = buildAndAdvance();
+      if (ok) setAwaitingFinalize(false);
+    }
+  // buildAndAdvance は内部で getState() を使うので依存に入れない
+  // (毎レンダーで参照が変わって無限ループになるのを防ぐ)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [awaitingFinalize, storyboardParams, sceneConstruction, sending]);
 
   return (
     <div className="flex h-full flex-col gap-3">
@@ -185,7 +211,7 @@ export function GoalChatPanel() {
               : "cursor-not-allowed bg-zinc-700 text-zinc-400",
           ].join(" ")}
         >
-          ゴールを確定 →
+          {awaitingFinalize ? "AI 応答待ち…" : "ゴールを確定 →"}
         </button>
       </header>
 
