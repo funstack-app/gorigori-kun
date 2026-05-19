@@ -6,6 +6,7 @@ mod events;
 mod images;
 mod secrets;
 mod segmentation;
+mod skill_install;
 mod state;
 mod storage_cleanup;
 
@@ -233,6 +234,10 @@ pub fn run() {
                     "extensions ディレクトリを確保しました"
                 );
             }
+
+            // バンドル同梱スキルを ~/.codex/skills/ に展開する。
+            // (新規ユーザーや mtime 比較で古い場合のみ上書き)
+            crate::skill_install::ensure_bundled_skills(&app.handle());
 
             let db_path = app_data_dir.join("history.db");
             let db_url = format!("sqlite:{}?mode=rwc", db_path.display());

@@ -62,7 +62,16 @@
     ],
     "resources": [
       "resources/removebg.swift",
-      "resources/LICENSE.txt"
+      "resources/LICENSE.txt",
+      "resources/skills/gori-storyboard/SKILL.md",
+      "resources/skills/gori-storyboard/agents/openai.yaml",
+      "resources/skills/gori-storyboard/references/cut-calculator.md",
+      "resources/skills/gori-storyboard/references/evaluator-rubric.md",
+      "resources/skills/gori-storyboard/references/film-grammar.md",
+      "resources/skills/gori-storyboard/references/prompt-builder.md",
+      "resources/skills/gori-storyboard/references/scene-grouping.md",
+      "resources/skills/gori-storyboard/references/story-elicit.md",
+      "resources/skills/gori-storyboard/references/verb-dictionary.md"
     ],
     "macOS": {
       "minimumSystemVersion": "12.0",

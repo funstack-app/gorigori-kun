@@ -1,0 +1,4 @@
+interface:
+  display_name: "GORI Storyboard"
+  short_description: "Generate consistent continuous video storyboard cuts"
+  default_prompt: "Use $gori-storyboard to generate continuous video storyboard cuts with character/style anchoring, scene-group continuity, and AI quality evaluation."
