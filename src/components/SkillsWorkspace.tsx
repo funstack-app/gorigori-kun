@@ -5,6 +5,7 @@ import { open as openFileDialog, save as saveFileDialog } from "@tauri-apps/plug
 import { exists, writeTextFile } from "@tauri-apps/plugin-fs";
 
 import { GORI_SKILLS, type GoriSkill } from "../lib/skills/catalog";
+import { useSkillMode } from "../lib/store/skillMode";
 import { useToasts } from "../lib/store/toasts";
 import { activateSkill } from "./SkillBadge";
 import { SkillDetailModal } from "./SkillDetailModal";
@@ -26,6 +27,12 @@ export function SkillsWorkspace({ onUseSkill }: { onUseSkill?: () => void }) {
   );
   const [detailSkill, setDetailSkill] = useState<GoriSkill | null>(null);
   const [refreshTick, setRefreshTick] = useState(0);
+
+  // 現在 ON になっているスキル ID を購読し、トグル表示の判定に使う
+  const activeSkillId = useSkillMode((s) => s.selectedSkillId);
+  const skillEnabled = useSkillMode((s) => s.enabled);
+  const setSkillEnabled = useSkillMode((s) => s.setEnabled);
+  const setSelectedSkillId = useSkillMode((s) => s.setSelectedSkillId);
 
   useEffect(() => {
     let cancelled = false;
@@ -51,6 +58,22 @@ export function SkillsWorkspace({ onUseSkill }: { onUseSkill?: () => void }) {
   const useSkill = (skill: GoriSkill) => {
     activateSkill(skill);
     onUseSkill?.();
+  };
+
+  // スキルを「停止する」= 作品モード (default UI) に戻す。
+  // STΛCK 指示 (2026-05-20):
+  //  - チャット履歴 / 引き継ぎセクションは保持 (planChat.messages や
+  //    storyboardRun.chatMessages はクリアしない)
+  //  - skillMode を OFF にするだけで skillUiMode は自動的に default に戻る
+  //    (skillMode.ts の syncUiMode → exitSkill)
+  const stopSkill = (skill: GoriSkill) => {
+    setSkillEnabled(false);
+    setSelectedSkillId(null);
+    useToasts.getState().push({
+      kind: "info",
+      text: `${skill.name} を停止しました。作品モードに戻ります。`,
+      ttlMs: 3000,
+    });
   };
 
   const toast = useToasts.getState();
@@ -144,13 +167,16 @@ export function SkillsWorkspace({ onUseSkill }: { onUseSkill?: () => void }) {
             const status = present[skill.id];
             const isComingSoon = skill.comingSoon === true;
             const isLocked = !skill.availableInApp;
+            const isActive = skillEnabled && activeSkillId === skill.id;
             return (
               <article
                 key={skill.id}
                 className={`flex min-h-[260px] flex-col rounded-2xl border bg-[#181818] p-4 shadow-sm transition ${
                   isLocked
                     ? "border-[#222] opacity-60"
-                    : "border-[#2a2a2a] hover:border-pink-400"
+                    : isActive
+                      ? "border-pink-500 ring-1 ring-pink-500/40"
+                      : "border-[#2a2a2a] hover:border-pink-400"
                 }`}
               >
                 <div className="flex items-start justify-between gap-3">
@@ -159,18 +185,22 @@ export function SkillsWorkspace({ onUseSkill }: { onUseSkill?: () => void }) {
                   </div>
                   <span
                     className={`rounded-full px-2 py-0.5 text-[10px] font-black ${
-                      isComingSoon
-                        ? "bg-purple-500/15 text-purple-200"
-                        : status === false
-                          ? "bg-yellow-500/15 text-yellow-200"
-                          : "bg-emerald-500/15 text-emerald-200"
+                      isActive
+                        ? "bg-pink-500/20 text-pink-100"
+                        : isComingSoon
+                          ? "bg-purple-500/15 text-purple-200"
+                          : status === false
+                            ? "bg-yellow-500/15 text-yellow-200"
+                            : "bg-emerald-500/15 text-emerald-200"
                     }`}
                   >
-                    {isComingSoon
-                      ? "近日公開"
-                      : status === false
-                        ? "未検出"
-                        : "接続済み"}
+                    {isActive
+                      ? "使用中"
+                      : isComingSoon
+                        ? "近日公開"
+                        : status === false
+                          ? "未検出"
+                          : "接続済み"}
                   </span>
                 </div>
 
@@ -186,16 +216,36 @@ export function SkillsWorkspace({ onUseSkill }: { onUseSkill?: () => void }) {
                   <button
                     type="button"
                     disabled={isLocked}
-                    onClick={() => !isLocked && useSkill(skill)}
+                    onClick={() => {
+                      if (isLocked) return;
+                      if (isActive) {
+                        stopSkill(skill);
+                      } else {
+                        useSkill(skill);
+                      }
+                    }}
                     className={`w-full rounded-lg px-3 py-2 text-xs font-black transition ${
                       isLocked
                         ? "cursor-not-allowed bg-neutral-700 text-neutral-400"
-                        : "bg-pink-500 text-white hover:bg-pink-400"
+                        : isActive
+                          ? "border border-pink-400 bg-pink-500/15 text-pink-100 hover:bg-pink-500/25"
+                          : "bg-pink-500 text-white hover:bg-pink-400"
                     }`}
                     aria-disabled={isLocked}
-                    title={isLocked ? "近日公開予定" : undefined}
+                    aria-pressed={isActive}
+                    title={
+                      isLocked
+                        ? "近日公開予定"
+                        : isActive
+                          ? "停止して作品モードに戻る"
+                          : undefined
+                    }
                   >
-                    {isLocked ? "近日公開" : "使う"}
+                    {isLocked
+                      ? "近日公開"
+                      : isActive
+                        ? "停止する (作品モードへ)"
+                        : "使う"}
                   </button>
                   <button
                     type="button"
