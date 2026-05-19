@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ApprovalDialog } from "./components/ApprovalDialog";
 import { AuthGate } from "./components/AuthGate";
 import { FirstRunStorageNotice } from "./components/FirstRunStorageNotice";
-import { GenerationWorkspace } from "./components/GenerationWorkspace";
+import { SkillWorkspaceRouter } from "./components/SkillWorkspaceRouter";
 import { ImagePreviewModal } from "./components/ImagePreviewModal";
 import { MaskEditorModal } from "./components/MaskEditorModal";
 import { PromptComposer } from "./components/PromptComposer";
@@ -631,7 +631,11 @@ function WorkspacePage({
     case "settings":
       return <SettingsWorkspace />;
     default:
-      return <GenerationWorkspace />;
+      // STΛCK 指示 (2026-05-20): スキルON時にUIが切り替わる仕組みを有効化。
+      // SkillWorkspaceRouter が useSkillUiMode.activeUiMode を見て、
+      // default なら GenerationWorkspace、storyboard なら StoryboardWorkspace
+      // など、スキル毎に最適化された UI に切り替える。
+      return <SkillWorkspaceRouter />;
   }
 }
 
