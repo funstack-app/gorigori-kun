@@ -32,9 +32,10 @@ export type GoriSkill = {
 // 「近日公開」枠は今後の拡張をワクワクさせるための表示。順次解放していく。
 export const GORI_SKILLS: GoriSkill[] = [
   {
-    // v0.6.11 STΛCK 指示: ストーリーカットはβ移行のためグレーアウト。
-    // 企画→生成タブ遷移の不安定さ、生成「実行中」のまま動かない問題、
-    // デバッグログ表示不足等が未解決のため、α版では非公開。
+    // 2026-05-20 開放: β版で 4-Phase 専用 Workspace (StoryboardWorkspace) を
+    // 実装し、agentic UX (AI が深掘り対話 → 絵コンテ → 生成 → 確認) で
+    // 旧 UI の課題 (タブ遷移の不安定さ、進捗不可視) を解消したため。
+    // 旧 v0.6.11 のグレーアウトは β 専用 UI 待ち状態だったので解除。
     id: "gori-storyboard",
     name: "ストーリーカット生成",
     shortName: "Storyboard",
@@ -42,9 +43,8 @@ export const GORI_SKILLS: GoriSkill[] = [
     description:
       "ストーリーから一貫したカット列を連続生成。キャラ/スタイルを固定して物語を進める。",
     path: "~/.codex/skills/gori-storyboard",
-    availableInApp: false,
-    comingSoon: true,
-    launchHint: "ストーリーカット生成 — β以降",
+    availableInApp: true,
+    launchHint: "AI と対話してカット列を量産",
   },
   {
     id: "gori-multi-angle",
