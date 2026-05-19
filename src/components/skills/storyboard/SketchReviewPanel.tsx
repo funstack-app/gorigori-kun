@@ -8,6 +8,13 @@ import type {
   StoryboardSketchVersion,
 } from "../../../lib/storyboard/types";
 
+const IMAGE_EXTS = ["png", "jpg", "jpeg", "webp", "gif", "bmp"];
+
+function basename(p: string): string {
+  const seg = p.split(/[\\/]/);
+  return seg[seg.length - 1] ?? p;
+}
+
 /**
  * Phase 2: SketchReview
  *
@@ -29,6 +36,7 @@ export function SketchReviewPanel() {
   const pushSketchVersion = useStoryboardRun((s) => s.pushSketchVersion);
   const setActiveSketchVersion = useStoryboardRun((s) => s.setActiveSketchVersion);
   const setPhase = useStoryboardRun((s) => s.setPhase);
+  const setGoal = useStoryboardRun((s) => s.setGoal);
   const sceneConstruction = usePlanChat((s) => s.sceneConstruction);
 
   const activeVersion: StoryboardSketchVersion | null = useMemo(() => {
@@ -77,7 +85,57 @@ export function SketchReviewPanel() {
 
   function handleProceed() {
     if (!activeVersion) return;
+    if (!goal?.characterReferencePath) {
+      useToasts.getState().push({
+        kind: "error",
+        text:
+          "生成にはキャラクターの参照画像が必要です。下の「キャラ参照を選択」から添付してください。",
+        ttlMs: 6000,
+      });
+      return;
+    }
     setPhase("generation");
+  }
+
+  async function pickReference(target: "character" | "style") {
+    try {
+      const { open: openDialog } = await import("@tauri-apps/plugin-dialog");
+      const r = await openDialog({
+        multiple: false,
+        filters: [{ name: "画像", extensions: IMAGE_EXTS }],
+      });
+      if (!r || typeof r !== "string") return;
+      if (!goal) return;
+      setGoal({
+        ...goal,
+        characterReferencePath:
+          target === "character" ? r : goal.characterReferencePath,
+        styleReferencePath:
+          target === "style" ? r : goal.styleReferencePath,
+      });
+      useToasts.getState().push({
+        kind: "success",
+        text: `${target === "character" ? "キャラ" : "スタイル"}参照画像を設定しました。`,
+        ttlMs: 2500,
+      });
+    } catch (err) {
+      useToasts.getState().push({
+        kind: "error",
+        text: `画像の選択に失敗しました: ${(err as Error)?.message ?? err}`,
+        ttlMs: 5000,
+      });
+    }
+  }
+
+  function clearReference(target: "character" | "style") {
+    if (!goal) return;
+    setGoal({
+      ...goal,
+      characterReferencePath:
+        target === "character" ? "" : goal.characterReferencePath,
+      styleReferencePath:
+        target === "style" ? undefined : goal.styleReferencePath,
+    });
   }
 
   if (!goal) {
@@ -99,14 +157,32 @@ export function SketchReviewPanel() {
   return (
     <div className="flex h-full flex-col gap-3">
       <header className="flex items-start justify-between gap-4 rounded-md border border-[#242424] bg-[#161616] px-4 py-3">
-        <div>
+        <div className="min-w-0 flex-1">
           <h2 className="text-sm font-semibold text-zinc-200">Phase 2: 絵コンテレビュー</h2>
           <p className="mt-1 text-xs text-zinc-500 line-clamp-2">{goal.summary}</p>
           <p className="mt-2 text-[11px] text-pink-200">
             ディレクターメモ: {activeVersion.directorNotes}
           </p>
         </div>
-        <div className="flex shrink-0 gap-2">
+
+        {/* 参照画像エリア (キャラ必須 / スタイル任意) */}
+        <div className="flex shrink-0 items-end gap-3">
+          <ReferenceSlot
+            label="キャラ参照 (必須)"
+            path={goal.characterReferencePath}
+            onPick={() => pickReference("character")}
+            onClear={() => clearReference("character")}
+            required
+          />
+          <ReferenceSlot
+            label="スタイル参照 (任意)"
+            path={goal.styleReferencePath}
+            onPick={() => pickReference("style")}
+            onClear={() => clearReference("style")}
+          />
+        </div>
+
+        <div className="flex shrink-0 flex-col gap-2">
           <button
             type="button"
             onClick={handleRegenerate}
@@ -117,7 +193,18 @@ export function SketchReviewPanel() {
           <button
             type="button"
             onClick={handleProceed}
-            className="rounded-md bg-pink-500 px-4 py-2 text-sm font-semibold text-white hover:bg-pink-400"
+            disabled={!goal.characterReferencePath}
+            className={[
+              "rounded-md px-4 py-2 text-sm font-semibold transition",
+              goal.characterReferencePath
+                ? "bg-pink-500 text-white hover:bg-pink-400"
+                : "cursor-not-allowed bg-zinc-700 text-zinc-400",
+            ].join(" ")}
+            title={
+              goal.characterReferencePath
+                ? undefined
+                : "キャラ参照画像を選択してください"
+            }
           >
             この絵コンテで生成 →
           </button>
@@ -154,6 +241,63 @@ export function SketchReviewPanel() {
           </div>
         </footer>
       )}
+    </div>
+  );
+}
+
+function ReferenceSlot({
+  label,
+  path,
+  onPick,
+  onClear,
+  required,
+}: {
+  label: string;
+  path: string | undefined;
+  onPick: () => void;
+  onClear: () => void;
+  required?: boolean;
+}) {
+  return (
+    <div className="flex w-24 flex-col items-center gap-1">
+      <button
+        type="button"
+        onClick={onPick}
+        className={[
+          "flex h-16 w-24 items-center justify-center overflow-hidden rounded-md border transition",
+          path
+            ? "border-[#2a2a2a]"
+            : required
+              ? "border-dashed border-pink-500/50 bg-pink-500/5 hover:border-pink-500"
+              : "border-dashed border-[#2a2a2a] hover:border-pink-500/40",
+        ].join(" ")}
+        title={path ? basename(path) : "クリックで画像を選択"}
+      >
+        {path ? (
+          <img
+            src={`asset://localhost/${encodeURI(path)}`}
+            alt={label}
+            className="h-full w-full object-cover"
+          />
+        ) : (
+          <span className="text-[10px] text-zinc-500">
+            {required ? "選択 (必須)" : "選択"}
+          </span>
+        )}
+      </button>
+      <div className="flex items-center gap-1">
+        <span className="text-[10px] text-zinc-500">{label}</span>
+        {path && (
+          <button
+            type="button"
+            onClick={onClear}
+            className="rounded text-[10px] text-zinc-500 hover:text-pink-300"
+            title="解除"
+          >
+            ×
+          </button>
+        )}
+      </div>
     </div>
   );
 }
