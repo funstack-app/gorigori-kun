@@ -118,6 +118,59 @@ export type StoryboardGoal = {
  * Phase 2 (SketchReview): カット 1 枚分のスケッチ案。
  * 絵コンテ的なざっくりレイアウトと、AI が考えたカット意図のテキスト。
  */
+// ============================================================
+// Canvas スケッチ絵コンテ描画用の構造化メタ (STΛCK 指示 2026-05-20)
+// ============================================================
+
+/** ショットサイズ。被写体の画面占有率 ≒ キャラ描画サイズ。 */
+export type StoryboardShotType =
+  | "extreme_close" // クロースアップより寄り (目元等)
+  | "close"         // クロースアップ (顔)
+  | "medium"        // ミディアム (上半身)
+  | "full"          // フルショット (全身)
+  | "wide"          // ワイド (全身 + 環境)
+  | "extreme_wide"; // 引きの大ワイド
+
+/** カメラアングル。俯瞰 / 煽り等。 */
+export type StoryboardCameraAngle =
+  | "front"   // 正面
+  | "side"    // 横
+  | "back"    // 背面
+  | "three_quarter" // 斜め45°
+  | "high"    // 俯瞰
+  | "low"     // 煽り
+  | "dutch";  // 傾き (ダッチ)
+
+/** 画面内の被写体の位置 (三分割法に近い)。 */
+export type StoryboardSubjectPosition =
+  | "center"
+  | "left"
+  | "right"
+  | "upper_left"
+  | "upper_right"
+  | "lower_left"
+  | "lower_right";
+
+/** 視線方向 (簡易)。Canvas で矢印として描画する。 */
+export type StoryboardGazeDirection =
+  | "to_camera"
+  | "left"
+  | "right"
+  | "up"
+  | "down"
+  | "off_screen";
+
+/** カメラの動き (簡易)。Canvas でベクトル矢印として描画する。 */
+export type StoryboardCameraMotion =
+  | "static"
+  | "pan_left"
+  | "pan_right"
+  | "tilt_up"
+  | "tilt_down"
+  | "dolly_in"
+  | "dolly_out"
+  | "handheld";
+
 export type StoryboardSketchCut = {
   cutId: string;
   order: number;            // 1-based。表示順
@@ -129,6 +182,15 @@ export type StoryboardSketchCut = {
   filmNotes?: string[];
   /** ユーザーが手書きで上書きした場合の差分メモ。空なら未編集。 */
   userOverride?: string;
+
+  // === Canvas スケッチ用構造化メタ (任意。AI が返せれば描画品質UP) ===
+  shotType?: StoryboardShotType;
+  cameraAngle?: StoryboardCameraAngle;
+  subjectPosition?: StoryboardSubjectPosition;
+  gazeDirection?: StoryboardGazeDirection;
+  cameraMotion?: StoryboardCameraMotion;
+  /** 小道具・背景の簡易メモ (例: "金属ケース", "歯車", "煙"). */
+  props?: string[];
 };
 
 /**
