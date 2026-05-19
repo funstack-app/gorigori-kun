@@ -6,6 +6,13 @@ import { useSkillMode } from "../../../lib/store/skillMode";
 import { useToasts } from "../../../lib/store/toasts";
 import type { StoryboardGoal } from "../../../lib/storyboard/types";
 
+const IMAGE_EXTS = ["png", "jpg", "jpeg", "webp", "gif", "bmp"];
+
+function basename(p: string): string {
+  const seg = p.split(/[\\/]/);
+  return seg[seg.length - 1] ?? p;
+}
+
 /**
  * Phase 1: GoalChat
  *
@@ -35,6 +42,7 @@ export function GoalChatPanel() {
   const setPhase = useStoryboardRun((s) => s.setPhase);
 
   const [draft, setDraft] = useState("");
+  const [attachedImages, setAttachedImages] = useState<string[]>([]);
   const scrollerRef = useRef<HTMLDivElement>(null);
 
   // ストーリーカットスキルを ON にしておく (planChat の prefix 切替条件)
@@ -72,8 +80,41 @@ export function GoalChatPanel() {
   async function handleSend() {
     const text = draft.trim();
     if (!text || sending) return;
+    const images = attachedImages.slice();
     setDraft("");
-    await send(text);
+    setAttachedImages([]);
+    await send(text, images.length > 0 ? images : undefined);
+  }
+
+  async function pickImages() {
+    try {
+      const { open: openDialog } = await import("@tauri-apps/plugin-dialog");
+      const r = await openDialog({
+        multiple: true,
+        filters: [{ name: "画像", extensions: IMAGE_EXTS }],
+      });
+      if (!r) return;
+      const paths = (Array.isArray(r) ? r : [r]).filter(
+        (p): p is string => typeof p === "string",
+      );
+      if (paths.length === 0) return;
+      setAttachedImages((prev) => {
+        // 重複を弾く
+        const set = new Set(prev);
+        for (const p of paths) set.add(p);
+        return Array.from(set);
+      });
+    } catch (err) {
+      useToasts.getState().push({
+        kind: "error",
+        text: `画像の選択に失敗しました: ${(err as Error)?.message ?? err}`,
+        ttlMs: 5000,
+      });
+    }
+  }
+
+  function removeAttachment(path: string) {
+    setAttachedImages((prev) => prev.filter((p) => p !== path));
   }
 
   async function handleFinalize() {
@@ -173,7 +214,36 @@ export function GoalChatPanel() {
         </ul>
       </div>
 
-      <div className="flex items-end gap-2 rounded-md border border-[#242424] bg-[#161616] px-3 py-2">
+      <div className="flex flex-col gap-2 rounded-md border border-[#242424] bg-[#161616] px-3 py-2">
+        {attachedImages.length > 0 && (
+          <ul className="flex flex-wrap gap-2">
+            {attachedImages.map((p) => (
+              <li
+                key={p}
+                className="group relative flex items-center gap-2 rounded-md border border-[#2a2a2a] bg-[#0d0d0d] px-2 py-1"
+              >
+                <img
+                  src={`asset://localhost/${encodeURI(p)}`}
+                  alt={basename(p)}
+                  className="h-8 w-8 rounded object-cover"
+                />
+                <span className="max-w-[140px] truncate text-[11px] text-zinc-300">
+                  {basename(p)}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => removeAttachment(p)}
+                  className="rounded p-0.5 text-zinc-500 hover:bg-pink-500/10 hover:text-pink-300"
+                  title="添付を解除"
+                  aria-label="添付を解除"
+                >
+                  <IconClose />
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+
         <textarea
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
@@ -183,24 +253,75 @@ export function GoalChatPanel() {
               void handleSend();
             }
           }}
-          rows={2}
+          rows={4}
           placeholder="作りたい映像を一言で… (⌘+Enter で送信)"
-          className="flex-1 resize-none bg-transparent text-sm text-zinc-200 outline-none placeholder:text-zinc-600"
+          className="w-full resize-none bg-transparent text-sm text-zinc-200 outline-none placeholder:text-zinc-600"
         />
-        <button
-          type="button"
-          onClick={handleSend}
-          disabled={!draft.trim() || sending}
-          className={[
-            "rounded-md px-4 py-2 text-sm font-semibold transition",
-            !draft.trim() || sending
-              ? "cursor-not-allowed bg-zinc-700 text-zinc-400"
-              : "bg-pink-500 text-white hover:bg-pink-400",
-          ].join(" ")}
-        >
-          {sending ? "送信中…" : "送信"}
-        </button>
+
+        <div className="flex items-center justify-between">
+          <button
+            type="button"
+            onClick={pickImages}
+            className="inline-flex items-center gap-1.5 rounded-md border border-[#2a2a2a] px-2.5 py-1.5 text-[11px] text-zinc-300 hover:border-pink-500/40 hover:text-pink-200"
+            title="参照画像を添付"
+            aria-label="参照画像を添付"
+          >
+            <IconPaperclip />
+            <span>画像を添付</span>
+          </button>
+          <button
+            type="button"
+            onClick={handleSend}
+            disabled={!draft.trim() || sending}
+            className={[
+              "rounded-md px-4 py-2 text-sm font-semibold transition",
+              !draft.trim() || sending
+                ? "cursor-not-allowed bg-zinc-700 text-zinc-400"
+                : "bg-pink-500 text-white hover:bg-pink-400",
+            ].join(" ")}
+          >
+            {sending ? "送信中…" : "送信"}
+          </button>
+        </div>
       </div>
     </div>
+  );
+}
+
+// Lucide 風アイコン (viewBox 24, stroke 2, line caps round)
+// 絵文字禁止ルールに従い、既存トンマナと揃える。
+function IconPaperclip() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width="14"
+      height="14"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 17.93 8.83l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+    </svg>
+  );
+}
+
+function IconClose() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width="12"
+      height="12"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M18 6 6 18M6 6l12 12" />
+    </svg>
   );
 }
