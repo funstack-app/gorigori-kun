@@ -1,7 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { PurposeSelector } from "./PurposeSelector";
 import { SafeImage } from "./SafeImage";
-import { SaveToProjectButton } from "./ImagePreviewModal";
 import { WorkspaceTabs } from "./WorkspaceTabs";
 import { SceneBuilder, VideoSceneBuilder } from "./scene";
 import { ConstructedPromptPanel } from "./ConstructedPromptPanel";
@@ -33,6 +31,8 @@ import { useToasts } from "../lib/store/toasts";
 import { StoryboardCheckpointDialog } from "./StoryboardCheckpointDialog";
 import { StoryboardCutCard } from "./StoryboardCutCard";
 import { SkillRunActions } from "./SkillRunActions";
+import { extractDropped, isImageDrop, setDragRef } from "../lib/dragRef";
+import { sendImageToPlanForRediscuss } from "../lib/sendToPlan";
 
 export function GenerationWorkspace() {
   const activeTab = useWorkspace((s) => s.activeTab);
@@ -43,13 +43,15 @@ export function GenerationWorkspace() {
 
   return (
     <section className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#121212]">
+      {/*
+        STΛCK 指示 (2026-05-20): 「用途」セレクタは削除。
+        制作画面は 1 つに統一し、スキルを ON にすることで UI が
+        そのスキルに最適化されたモードに切り替わる仕様に変更する。
+      */}
       <div className="border-b border-[#242424] bg-[#121212] px-4 py-3">
-        <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-          <div className="flex items-center gap-3">
-            <WorkspaceTabs />
-            <ActiveProjectSelector />
-          </div>
-          <PurposeSelector />
+        <div className="flex items-center gap-3">
+          <WorkspaceTabs />
+          <ActiveProjectSelector />
         </div>
       </div>
 
@@ -240,7 +242,25 @@ function Timeline() {
   }
 
   return (
-    <section className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-[#2a2a2a] bg-[#181818]">
+    <section
+      className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-[#2a2a2a] bg-[#181818]"
+      /*
+        STΛCK 指示 (2026-05-19): 生成タイムラインを drop target 化。
+        画像を投げ込むと「企画タブで再検討」を起動 (お気に入りをベースに
+        プロンプトを練り直す導線)。
+      */
+      onDragOver={(event) => {
+        if (isImageDrop(event.dataTransfer)) event.preventDefault();
+      }}
+      onDrop={(event) => {
+        event.preventDefault();
+        const { refs } = extractDropped(event.dataTransfer);
+        const target = refs[0]?.path;
+        if (target) {
+          void sendImageToPlanForRediscuss(target);
+        }
+      }}
+    >
       <div className="flex items-center justify-between gap-3 border-b border-[#242424] px-4 py-3">
         <div className="flex items-center gap-3">
           <h3 className="text-sm font-black text-white">生成タイムライン</h3>
@@ -412,6 +432,15 @@ function FrozenTurnBlock({
               <button
                 key={img.id}
                 type="button"
+                draggable
+                onDragStart={(e) => {
+                  setDragRef(e.dataTransfer, {
+                    path: img.path,
+                    name: img.path.split(/[\\/]/).pop() ?? "generated.png",
+                    source: "gallery",
+                    role: "subject",
+                  });
+                }}
                 onClick={() =>
                   useImagePreview
                     .getState()
@@ -551,6 +580,15 @@ function PastBatchRow({
               <button
                 key={img.id}
                 type="button"
+                draggable
+                onDragStart={(e) => {
+                  setDragRef(e.dataTransfer, {
+                    path: img.path,
+                    name: img.path.split(/[\\/]/).pop() ?? "generated.png",
+                    source: "gallery",
+                    role: "subject",
+                  });
+                }}
                 onClick={() =>
                   // STΛCK 指示 (2026-05-17): 矢印キーで他バッチに飛ばない。
                   // siblings = このバッチ内の画像のみ。
@@ -785,8 +823,21 @@ function WorkerTile({
   if (worker.status === "completed") {
     return (
       <div className="min-w-0">
+        {/*
+          STΛCK 指示 (2026-05-19): 生成タイムラインのバッチサムネを drag source 化。
+          ライブラリや参照ラック等の他 drop ターゲットへ直接ドラッグで移動できる。
+        */}
         <button
           type="button"
+          draggable
+          onDragStart={(e) => {
+            setDragRef(e.dataTransfer, {
+              path: worker.path,
+              name: worker.path.split(/[\\/]/).pop() ?? "generated.png",
+              source: "gallery",
+              role: "subject",
+            });
+          }}
           onClick={() =>
             useImagePreview.getState().open(worker.path, siblings)
           }
@@ -798,20 +849,15 @@ function WorkerTile({
           />
         </button>
         {/*
-          F-#4 (2026-05-19): NRC さんの要望対応。
-          4 枚同時生成時、バッチ単位ではなく 1 枚ごとに「プロジェクト保存」できる。
-          サムネ下にコンパクトな保存ボタンを置く (caption と同行に折りたたみ)。
+          STΛCK 指示 (2026-05-19): サムネ下の「プロジェクトに保存」ボタンは削除。
+          Magnific 風プレビューの右ペインから保存できるため冗長 (4 枚並ぶと UI
+          がうるさかった)。caption のみ残す。
         */}
-        <div className="mt-1 flex items-center gap-1.5">
-          {caption && (
-            <p className="min-w-0 flex-1 truncate text-[10px] font-medium text-neutral-400">
-              {caption}
-            </p>
-          )}
-          <div className="shrink-0 text-[10px]">
-            <SaveToProjectButton path={worker.path} />
-          </div>
-        </div>
+        {caption && (
+          <p className="mt-1 truncate text-[10px] font-medium text-neutral-400">
+            {caption}
+          </p>
+        )}
       </div>
     );
   }
