@@ -34,8 +34,13 @@ export function SceneSectionModal({ open, title, number, onClose, children }: Pr
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6"
       onClick={onClose}
     >
+      {/*
+        STΛCK 指示 (2026-05-19): ポップアップサイズを OptionPickerModal と統一。
+        max-w-xl → max-w-5xl、高さも calc(100vh-2rem) で揃える。
+        どのPCサイズでも同じ大きさで操作できる Modal-First UX に統一。
+      */}
       <div
-        className="flex max-h-[80vh] w-full max-w-xl flex-col overflow-hidden rounded-xl border border-[#2a2a2a] bg-[#181818] shadow-2xl"
+        className="flex max-h-[calc(100vh-2rem)] w-full max-w-5xl min-h-0 flex-col overflow-hidden rounded-xl border border-[#262626] bg-[#0f0f0f] shadow-2xl"
         onClick={(event) => event.stopPropagation()}
       >
         <div className="flex items-center justify-between gap-3 border-b border-[#242424] px-4 py-3">
@@ -49,12 +54,12 @@ export function SceneSectionModal({ open, title, number, onClose, children }: Pr
             type="button"
             onClick={onClose}
             aria-label="閉じる"
-            className="text-neutral-400 hover:text-white"
+            className="rounded-md border border-[#343434] bg-[#101010] px-3 py-1 text-xs font-bold text-neutral-300 hover:border-pink-400 hover:text-white"
           >
-            ×
+            × 閉じる
           </button>
         </div>
-        <div className="min-h-0 flex-1 overflow-y-auto p-4">{children}</div>
+        <div className="min-h-0 flex-1 overflow-y-auto p-6">{children}</div>
       </div>
     </div>
   );

@@ -12,7 +12,7 @@ import { OptionPickerModal } from "./scene/OptionPickerModal";
 import { PresetPickerPopover } from "./PresetPickerPopover";
 import { SkillPickerPopover } from "./SkillPickerPopover";
 import { PromptTextareaWithMentions } from "./PromptTextareaWithMentions";
-import { ElementwisePromptEditor } from "./ElementwisePromptEditor";
+import { ElementwisePromptModal } from "./ElementwisePromptModal";
 import {
   SaveReferenceSetDialog,
   ReferenceSetsPickerModal,
@@ -93,8 +93,12 @@ export function ConstructedPromptPanel() {
   } = useSceneGeneration();
 
   const [draft, setDraft] = useState<string>(generatedPrompt);
-  /** F-#5 (Ta4low さん要望): 要素別編集モード。ON で各要素を個別 textarea に分けて編集する。 */
-  const [elementMode, setElementMode] = useState(false);
+  /**
+   * F-#5 (Ta4low さん要望) + STΛCK 指示 (2026-05-19):
+   * 要素別編集は ConstructedPromptPanel 内のトグルではなく、独立した
+   * 中央モーダルで開く。狭い PC でも十分なサイズで編集できる。
+   */
+  const [elementModalOpen, setElementModalOpen] = useState(false);
   const [libraryOpen, setLibraryOpen] = useState(false);
   const [stockOpen, setStockOpen] = useState(false);
   const [presetOpen, setPresetOpen] = useState(false);
@@ -250,48 +254,36 @@ export function ConstructedPromptPanel() {
       */}
       <div className="shrink-13-textarea flex min-h-[80px] flex-1 flex-col p-3">
         {/*
-          F-#5 (2026-05-19): 要素別編集モードのトグル。
-          ON で textarea ではなく ElementwisePromptEditor を表示。
-          ボタンは右上に小さく置き、通常モードでは目立たない。
+          STΛCK 指示 (2026-05-19): 要素別編集は中央モーダルで開く。
+          ここでは textarea を常に表示し、右上ボタンでモーダルを開く。
+          画面サイズに関係なく十分な編集領域を確保できる。
         */}
         <div className="mb-1.5 flex items-center justify-end gap-1.5">
           <button
             type="button"
-            onClick={() => setElementMode((v) => !v)}
-            className={[
-              "rounded border px-1.5 py-0.5 text-[10px] font-bold transition",
-              elementMode
-                ? "border-pink-400 bg-pink-500/15 text-pink-100"
-                : "border-[#343434] bg-[#101010] text-neutral-400 hover:border-pink-400 hover:text-white",
-            ].join(" ")}
-            title="要素別編集モード — 構図/光/カメラ等を個別 textarea で編集"
+            onClick={() => setElementModalOpen(true)}
+            className="rounded border border-[#343434] bg-[#101010] px-1.5 py-0.5 text-[10px] font-bold text-neutral-400 transition hover:border-pink-400 hover:text-white"
+            title="要素別編集モーダルを開く — 構図/光/カメラ等を中央画面で個別に編集"
           >
-            {elementMode ? "✓ 要素別" : "要素別"}
+            ⛶ 要素別編集
           </button>
         </div>
-        {elementMode ? (
-          <ElementwisePromptEditor
-            prompt={isOverriding ? draft : generatedPrompt}
-            onChange={onChangeDraft}
-          />
-        ) : (
-          <PromptTextareaWithMentions
-            value={isOverriding ? draft : generatedPrompt}
-            onChange={onChangeDraft}
-            references={references}
-            fullHeight
-            placeholder="左で要素を選ぶか、ここに自由記述。@ を打つと参照画像を挿入できます"
-            className="w-full resize-none rounded-md border border-[#343434] bg-[#101010] p-2 pr-9 font-mono text-[11px] leading-5 text-neutral-100 placeholder:text-neutral-600 outline-none transition focus:border-pink-500"
-            topRightSlot={
-              <>
-                <IconButton title="コピー" onClick={copyPrompt} label="copy" />
-                {isOverriding && (
-                  <IconButton title="自動に戻す" onClick={onResetOverride} label="reset" />
-                )}
-              </>
-            }
-          />
-        )}
+        <PromptTextareaWithMentions
+          value={isOverriding ? draft : generatedPrompt}
+          onChange={onChangeDraft}
+          references={references}
+          fullHeight
+          placeholder="左で要素を選ぶか、ここに自由記述。@ を打つと参照画像を挿入できます"
+          className="w-full resize-none rounded-md border border-[#343434] bg-[#101010] p-2 pr-9 font-mono text-[11px] leading-5 text-neutral-100 placeholder:text-neutral-600 outline-none transition focus:border-pink-500"
+          topRightSlot={
+            <>
+              <IconButton title="コピー" onClick={copyPrompt} label="copy" />
+              {isOverriding && (
+                <IconButton title="自動に戻す" onClick={onResetOverride} label="reset" />
+              )}
+            </>
+          }
+        />
       </div>
 
       {/*
@@ -464,6 +456,17 @@ export function ConstructedPromptPanel() {
           onApply={(set) => applyReferenceSet(set, setPromptOverride)}
         />
       )}
+      {/*
+        STΛCK 指示 (2026-05-19): 要素別編集モーダル。
+        ConstructedPromptPanel 内の狭い textarea ではなく、画面中央に大きく開く
+        ことで、どの PC サイズでも快適に編集できる。
+      */}
+      <ElementwisePromptModal
+        open={elementModalOpen}
+        prompt={isOverriding ? draft : generatedPrompt}
+        onClose={() => setElementModalOpen(false)}
+        onApply={onChangeDraft}
+      />
     </section>
   );
 }

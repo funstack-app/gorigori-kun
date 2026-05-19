@@ -123,124 +123,138 @@ export function RegisterPresetDialog({ imagePath, defaultName, onClose }: Props)
       className="fixed inset-0 z-[80] flex items-center justify-center bg-black/70 p-4"
       onClick={onClose}
     >
+      {/*
+        STΛCK 指示 (2026-05-19): ポップアップサイズを OptionPickerModal と統一。
+        ヘッダ(固定) + 本体(スクロール、2列レイアウト) + フッター(固定) 構成。
+        5xl 幅をフル活用して、左に画像プレビュー+メタ情報、右にフォームを並べる。
+      */}
       <div
-        className="flex w-full max-w-lg flex-col gap-3 rounded-xl border border-[#2a2a2a] bg-[#181818] p-5 shadow-2xl"
+        className="flex max-h-[calc(100vh-2rem)] w-full max-w-5xl min-h-0 flex-col overflow-hidden rounded-xl border border-[#262626] bg-[#0f0f0f] shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center justify-between">
-          <h3 className="text-sm font-black text-white">プリセットに登録</h3>
+        {/* ヘッダ */}
+        <div className="flex items-center justify-between border-b border-[#242424] px-6 py-3">
+          <div>
+            <p className="text-[10px] font-black uppercase tracking-wide text-neutral-500">
+              SELECT
+            </p>
+            <h3 className="text-sm font-black text-white">プリセットに登録</h3>
+          </div>
           <button
             type="button"
             onClick={onClose}
             aria-label="閉じる"
-            className="text-neutral-400 hover:text-white"
+            className="rounded-md border border-[#343434] bg-[#101010] px-3 py-1 text-xs font-bold text-neutral-300 hover:border-pink-400 hover:text-white"
           >
-            ×
+            × 閉じる
           </button>
         </div>
 
-        <div className="flex items-start gap-3">
-          <div className="h-20 w-20 flex-shrink-0 overflow-hidden rounded border border-[#343434] bg-black">
-            <SafeImage path={imagePath} className="h-full w-full object-cover" />
-          </div>
-          <div className="min-w-0 flex-1 text-[11px] text-neutral-400">
-            {loading ? (
-              "プロンプトを読み込み中…"
-            ) : error ? (
-              <span className="text-red-400">プロンプト取得に失敗: {error}</span>
-            ) : prompt ? (
-              "生成時のプロンプトを取得しました (編集できます)"
-            ) : (
-              "プロンプトが見つからなかったので、手入力してください"
-            )}
-          </div>
-        </div>
+        {/* 本体: 2列レイアウト */}
+        <div className="grid min-h-0 flex-1 gap-6 overflow-y-auto p-6 md:grid-cols-[280px_1fr]">
+          {/* 左カラム: 画像プレビュー + キャラ添付画像 */}
+          <div className="flex flex-col gap-4">
+            <div className="aspect-square w-full overflow-hidden rounded-lg border border-[#343434] bg-black">
+              <SafeImage path={imagePath} className="h-full w-full object-cover" />
+            </div>
+            <div className="text-[11px] text-neutral-400">
+              {loading ? (
+                "プロンプトを読み込み中…"
+              ) : error ? (
+                <span className="text-red-400">プロンプト取得に失敗: {error}</span>
+              ) : prompt ? (
+                "生成時のプロンプトを取得しました (右側で編集可)"
+              ) : (
+                "プロンプトが見つからなかったので、右側に手入力してください"
+              )}
+            </div>
 
-        <label className="flex flex-col gap-1 text-[11px] font-bold text-neutral-300">
-          名前
-          <input
-            type="text"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            className="h-9 rounded-md border border-[#343434] bg-[#101010] px-3 text-xs text-neutral-100 outline-none focus:border-pink-400"
-          />
-        </label>
-
-        <label className="flex flex-col gap-1 text-[11px] font-bold text-neutral-300">
-          カテゴリ
-          <select
-            value={categoryId ?? ""}
-            onChange={(e) => setCategoryId(e.target.value || null)}
-            className="h-9 rounded-md border border-[#343434] bg-[#101010] px-3 text-xs text-neutral-100 outline-none focus:border-pink-400"
-          >
-            <option value="">未分類</option>
-            {categories.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.name}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        <label className="flex flex-col gap-1 text-[11px] font-bold text-neutral-300">
-          プロンプト
-          <textarea
-            value={prompt}
-            onChange={(e) => setPrompt(e.target.value)}
-            rows={6}
-            className="rounded-md border border-[#343434] bg-[#101010] px-3 py-2 text-xs text-neutral-100 outline-none focus:border-pink-400"
-            placeholder="プリセットとして登録するプロンプト本文"
-          />
-        </label>
-
-        {/*
-          F-#7 (2026-05-19): キャラ添付画像セクション。
-          初期値は登録元の画像 1 枚。チェックボックスで除外/再追加 (= 0 枚にも
-          できる)。MVP として「いまそこにある画像から選ぶ」UI までは作らず、
-          初期画像 + 「+ 他の画像も追加…」は後追いとする。
-        */}
-        <div className="flex flex-col gap-1.5">
-          <span className="text-[11px] font-bold text-neutral-300">
-            キャラ添付画像 ({attachedImages.length} 枚)
-          </span>
-          <p className="text-[10px] text-neutral-500">
-            プリセット呼び出し時に、この画像も自動で参照に追加されます。
-          </p>
-          <div className="flex flex-wrap gap-2">
-            {attachedImages.length === 0 ? (
-              <button
-                type="button"
-                onClick={() => setAttachedImages([imagePath])}
-                className="rounded border border-dashed border-[#444] px-3 py-2 text-[11px] font-bold text-neutral-400 hover:border-pink-400 hover:text-pink-300"
-              >
-                + 登録元の画像を添付
-              </button>
-            ) : (
-              attachedImages.map((path) => (
-                <div
-                  key={path}
-                  className="group relative h-16 w-16 overflow-hidden rounded border border-[#343434] bg-black"
-                  title={path}
-                >
-                  <SafeImage path={path} className="h-full w-full object-cover" />
+            {/* キャラ添付画像 */}
+            <div className="flex flex-col gap-1.5">
+              <span className="text-[11px] font-bold text-neutral-300">
+                キャラ添付画像 ({attachedImages.length} 枚)
+              </span>
+              <p className="text-[10px] text-neutral-500">
+                プリセット呼び出し時に、この画像も自動で参照に追加されます。
+              </p>
+              <div className="flex flex-wrap gap-2">
+                {attachedImages.length === 0 ? (
                   <button
                     type="button"
-                    onClick={() =>
-                      setAttachedImages((prev) => prev.filter((p) => p !== path))
-                    }
-                    className="absolute right-0 top-0 hidden h-5 w-5 items-center justify-center bg-black/80 text-[11px] text-white group-hover:flex hover:text-rose-300"
-                    title="この画像をプリセットから外す"
-                    aria-label="画像を外す"
+                    onClick={() => setAttachedImages([imagePath])}
+                    className="rounded border border-dashed border-[#444] px-3 py-2 text-[11px] font-bold text-neutral-400 hover:border-pink-400 hover:text-pink-300"
                   >
-                    ×
+                    + 登録元の画像を添付
                   </button>
-                </div>
-              ))
-            )}
+                ) : (
+                  attachedImages.map((path) => (
+                    <div
+                      key={path}
+                      className="group relative h-16 w-16 overflow-hidden rounded border border-[#343434] bg-black"
+                      title={path}
+                    >
+                      <SafeImage path={path} className="h-full w-full object-cover" />
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setAttachedImages((prev) => prev.filter((p) => p !== path))
+                        }
+                        className="absolute right-0 top-0 hidden h-5 w-5 items-center justify-center bg-black/80 text-[11px] text-white group-hover:flex hover:text-rose-300"
+                        title="この画像をプリセットから外す"
+                        aria-label="画像を外す"
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          </div>
+
+          {/* 右カラム: 入力フォーム */}
+          <div className="flex flex-col gap-4">
+            <label className="flex flex-col gap-1.5 text-xs font-bold text-neutral-300">
+              名前
+              <input
+                type="text"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                className="h-10 rounded-md border border-[#343434] bg-[#101010] px-3 text-sm text-neutral-100 outline-none focus:border-pink-400"
+              />
+            </label>
+
+            <label className="flex flex-col gap-1.5 text-xs font-bold text-neutral-300">
+              カテゴリ
+              <select
+                value={categoryId ?? ""}
+                onChange={(e) => setCategoryId(e.target.value || null)}
+                className="h-10 rounded-md border border-[#343434] bg-[#101010] px-3 text-sm text-neutral-100 outline-none focus:border-pink-400"
+              >
+                <option value="">未分類</option>
+                {categories.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="flex min-h-0 flex-1 flex-col gap-1.5 text-xs font-bold text-neutral-300">
+              プロンプト
+              <textarea
+                value={prompt}
+                onChange={(e) => setPrompt(e.target.value)}
+                rows={12}
+                className="min-h-[240px] flex-1 resize-none rounded-md border border-[#343434] bg-[#101010] px-3 py-2 text-sm text-neutral-100 outline-none focus:border-pink-400"
+                placeholder="プリセットとして登録するプロンプト本文"
+              />
+            </label>
           </div>
         </div>
 
-        <div className="flex items-center justify-end gap-2 pt-1">
+        {/* フッター */}
+        <div className="flex items-center justify-end gap-2 border-t border-[#242424] px-6 py-3">
           <button
             type="button"
             onClick={onClose}

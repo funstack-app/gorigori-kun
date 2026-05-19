@@ -51,21 +51,28 @@ export function SaveReferenceSetDialog({
       className="fixed inset-0 z-[80] flex items-center justify-center bg-black/70 p-4"
       onClick={onClose}
     >
+      {/* STΛCK 指示 (2026-05-19): OptionPickerModal と統一サイズ */}
       <div
-        className="flex w-full max-w-lg flex-col gap-3 rounded-xl border border-[#2a2a2a] bg-[#181818] p-5 shadow-2xl"
+        className="flex max-h-[calc(100vh-2rem)] w-full max-w-5xl min-h-0 flex-col overflow-hidden rounded-xl border border-[#262626] bg-[#0f0f0f] shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center justify-between">
-          <h3 className="text-sm font-black text-white">リファレンスセットを保存</h3>
+        <div className="flex items-center justify-between border-b border-[#242424] px-6 py-3">
+          <div>
+            <p className="text-[10px] font-black uppercase tracking-wide text-neutral-500">
+              SAVE
+            </p>
+            <h3 className="text-sm font-black text-white">リファレンスセットを保存</h3>
+          </div>
           <button
             type="button"
             onClick={onClose}
             aria-label="閉じる"
-            className="text-neutral-400 hover:text-white"
+            className="rounded-md border border-[#343434] bg-[#101010] px-3 py-1 text-xs font-bold text-neutral-300 hover:border-pink-400 hover:text-white"
           >
-            ×
+            × 閉じる
           </button>
         </div>
+        <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-6">
 
         <div className="rounded-lg border border-[#262626] bg-[#101010] p-2">
           <p className="mb-1.5 text-[10px] font-bold text-neutral-500">
@@ -110,14 +117,16 @@ export function SaveReferenceSetDialog({
           />
         </label>
 
-        <div className="rounded-md border border-[#262626] bg-[#101010] p-2">
+        <div className="rounded-md border border-[#262626] bg-[#101010] p-3">
           <p className="mb-1 text-[10px] font-bold text-neutral-500">プロンプト</p>
           <p className="line-clamp-3 font-mono text-[11px] text-neutral-300">
             {prompt || "(空)"}
           </p>
         </div>
+        </div>
 
-        <div className="flex items-center justify-end gap-2 pt-1">
+        {/* フッター */}
+        <div className="flex items-center justify-end gap-2 border-t border-[#242424] px-6 py-3">
           <button
             type="button"
             onClick={onClose}
@@ -160,19 +169,25 @@ export function ReferenceSetsPickerModal({
       className="fixed inset-0 z-[80] flex items-center justify-center bg-black/70 p-4"
       onClick={onClose}
     >
+      {/* STΛCK 指示 (2026-05-19): OptionPickerModal と統一サイズ */}
       <div
-        className="flex max-h-[80vh] w-full max-w-2xl min-h-0 flex-col rounded-xl border border-[#2a2a2a] bg-[#181818] shadow-2xl"
+        className="flex max-h-[calc(100vh-2rem)] w-full max-w-5xl min-h-0 flex-col overflow-hidden rounded-xl border border-[#262626] bg-[#0f0f0f] shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center justify-between border-b border-[#242424] px-4 py-3">
-          <h3 className="text-sm font-black text-white">リファレンスセット</h3>
+        <div className="flex items-center justify-between border-b border-[#242424] px-6 py-3">
+          <div>
+            <p className="text-[10px] font-black uppercase tracking-wide text-neutral-500">
+              SELECT
+            </p>
+            <h3 className="text-sm font-black text-white">リファレンスセット</h3>
+          </div>
           <button
             type="button"
             onClick={onClose}
             aria-label="閉じる"
-            className="text-neutral-400 hover:text-white"
+            className="rounded-md border border-[#343434] bg-[#101010] px-3 py-1 text-xs font-bold text-neutral-300 hover:border-pink-400 hover:text-white"
           >
-            ×
+            × 閉じる
           </button>
         </div>
 

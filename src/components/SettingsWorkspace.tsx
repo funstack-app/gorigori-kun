@@ -605,12 +605,16 @@ function HiggsfieldDebugDialog({
   };
   return (
     <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/70 p-4" onClick={onClose}>
+      {/* STΛCK 指示 (2026-05-19): OptionPickerModal と統一サイズ */}
       <div
-        className="flex max-h-[85vh] w-full max-w-3xl min-h-0 flex-col rounded-xl border border-[#2a2a2a] bg-[#181818] shadow-2xl"
+        className="flex max-h-[calc(100vh-2rem)] w-full max-w-5xl min-h-0 flex-col overflow-hidden rounded-xl border border-[#262626] bg-[#0f0f0f] shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center justify-between border-b border-[#242424] px-4 py-3">
+        <div className="flex items-center justify-between border-b border-[#242424] px-6 py-3">
           <div>
+            <p className="text-[10px] font-black uppercase tracking-wide text-neutral-500">
+              DEBUG
+            </p>
             <h3 className="text-sm font-black text-white">Higgsfield 診断結果</h3>
             <p className="mt-0.5 text-[10px] text-neutral-500">
               この情報をサポート (Discord 等) にコピペで送ってください
@@ -620,8 +624,13 @@ function HiggsfieldDebugDialog({
             <button type="button" onClick={() => void copyAll()} className={`${MUTED_BUTTON} h-8 px-3 text-xs`}>
               全部コピー
             </button>
-            <button type="button" onClick={onClose} aria-label="閉じる" className="text-neutral-400 hover:text-white">
-              ×
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="閉じる"
+              className="rounded-md border border-[#343434] bg-[#101010] px-3 py-1 text-xs font-bold text-neutral-300 hover:border-pink-400 hover:text-white"
+            >
+              × 閉じる
             </button>
           </div>
         </div>
