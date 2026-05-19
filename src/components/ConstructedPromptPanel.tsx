@@ -4,6 +4,11 @@ import { useSceneGeneration } from "../lib/scene/useSceneGeneration";
 import { aspectRatioOptions, type SceneOption } from "../lib/scene/catalog";
 import type { SceneAspectRatio } from "../lib/scene/types";
 import { useComposer } from "../lib/store/composer";
+import {
+  extractDropped,
+  fileToUploadReference,
+  isImageDrop,
+} from "../lib/dragRef";
 import { useSceneStore } from "../lib/store/scene";
 import { useWorkspace } from "../lib/store/workspace";
 import type { Preset } from "../lib/store/presets";
@@ -41,21 +46,50 @@ const ASPECT_RATIO_HINTS: Record<SceneAspectRatio, string> = {
 
 /**
  * アスペクト比のサムネ SVG を data URI で生成する。
- * 縦横比に応じた枠線だけのシンプルなプレビュー。
+ *
+ * STΛCK 指示 (2026-05-19, 修正版):
+ * - 数字は白で統一 (ピンクはやめる)
+ * - フォントサイズは固定値 (全カードで同じ)
+ * - サムネ枠の中に必ず収まる (max-side を 70% に制限)
+ * - 背景にグラデ、内側カードに薄ストロークでアスペクト比を視覚化
  */
 function aspectThumbnail(ratio: string): { src: string; alt: string } {
   const [wStr, hStr] = ratio.split(":");
   const w = parseInt(wStr, 10) || 1;
   const h = parseInt(hStr, 10) || 1;
-  const maxSide = 56;
-  const max = Math.max(w, h);
-  const rectW = (w / max) * maxSide;
-  const rectH = (h / max) * maxSide;
-  const x = (64 - rectW) / 2;
-  const y = (64 - rectH) / 2;
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
-    <rect x="${x}" y="${y}" width="${rectW}" height="${rectH}" rx="3" fill="#1a1a1a" stroke="#666" stroke-width="1.5"/>
-    <text x="32" y="36" text-anchor="middle" font-family="ui-sans-serif,system-ui" font-size="10" font-weight="700" fill="#bbb">${ratio}</text>
+  // canvas は 16:9 想定 (PickerCard が aspect-video のため)
+  const canvasW = 320;
+  const canvasH = 180;
+  // 内側 rect は canvas の 70% を上限に、アスペクト比に応じて自動調整
+  const maxW = canvasW * 0.7;
+  const maxH = canvasH * 0.7;
+  const ratioWH = w / h;
+  let rectW: number;
+  let rectH: number;
+  if (ratioWH >= maxW / maxH) {
+    // 横長 → 幅で制約
+    rectW = maxW;
+    rectH = rectW / ratioWH;
+  } else {
+    // 縦長 → 高さで制約
+    rectH = maxH;
+    rectW = rectH * ratioWH;
+  }
+  const x = (canvasW - rectW) / 2;
+  const y = (canvasH - rectH) / 2;
+  // 文字サイズは全カード固定 (28px)。色は白。
+  const fontSize = 28;
+  const gradId = `bg-${ratio.replace(":", "x")}`;
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${canvasW}" height="${canvasH}" viewBox="0 0 ${canvasW} ${canvasH}">
+    <defs>
+      <linearGradient id="${gradId}" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0%" stop-color="#1a1a1a"/>
+        <stop offset="100%" stop-color="#0a0a0a"/>
+      </linearGradient>
+    </defs>
+    <rect width="${canvasW}" height="${canvasH}" fill="url(#${gradId})"/>
+    <rect x="${x}" y="${y}" width="${rectW}" height="${rectH}" rx="4" fill="#202020" stroke="#3a3a3a" stroke-width="1"/>
+    <text x="${canvasW / 2}" y="${canvasH / 2 + fontSize * 0.34}" text-anchor="middle" font-family="ui-sans-serif,system-ui,-apple-system,sans-serif" font-size="${fontSize}" font-weight="800" fill="#ffffff" letter-spacing="-1">${ratio}</text>
   </svg>`;
   return {
     src: `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`,
@@ -170,6 +204,28 @@ export function ConstructedPromptPanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [generatedPrompt, promptOverride]);
 
+  /**
+   * STΛCK 指示 (2026-05-19): シーン構築で値を選んだら即プロンプトに反映する。
+   *
+   * 旧版は一度 promptOverride に値が入ると、シーン構築で何を選んでも上書きされ
+   * 続けて反映されなかった (「自動に戻す」ボタンを押すまで止まる)。
+   *
+   * generatedPrompt が変化 = シーン構築 (主役/光/カメラ/スタイル) のどれかが
+   * 更新された = ユーザーがシーン構築 UI を操作した、と判定して promptOverride を
+   * 自動で解除する。
+   *
+   * 注意: 「手書きで textarea を編集」した時の onChangeDraft でも generatedPrompt
+   * は変わらない (=この useEffect は発火しない) ので、手書き編集は壊れない。
+   */
+  useEffect(() => {
+    if (promptOverride !== null && promptOverride !== generatedPrompt) {
+      setPromptOverride(null);
+    }
+    // promptOverride / setPromptOverride を依存に入れない (無限ループ回避)。
+    // 「generatedPrompt が変わる = シーンが変わった」というイベント駆動の意図。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [generatedPrompt]);
+
   const isOverriding = promptOverride !== null;
 
   const onChangeDraft = (next: string) => {
@@ -232,6 +288,14 @@ export function ConstructedPromptPanel() {
     //     </スクロール領域>
     //     <下部コントロール shrink-0>          ← 必ず最下部
     <section className="flex h-full min-h-0 flex-col bg-[#181818]">
+      {/*
+        STΛCK 指示 (2026-05-19): 縦並びを以下に再構成。
+        - 上: 「ライブラリ / 素材 / 追加 / プリセット / セット / スキル」
+              (シーン構築パネルの直下、参照追加系)
+        - 区切り線 (ReferenceRack 内の border-b で既に表現済み)
+        - 中: 「⛶ 要素別編集」ボタン (textarea の直前で目立たせる)
+        - 下: プロンプト textarea
+      */}
       <div className="shrink-0">
         <ReferenceRack
           references={references}
@@ -253,19 +317,15 @@ export function ConstructedPromptPanel() {
         通常の使用感は維持する。
       */}
       <div className="shrink-13-textarea flex min-h-[80px] flex-1 flex-col p-3">
-        {/*
-          STΛCK 指示 (2026-05-19): 要素別編集は中央モーダルで開く。
-          ここでは textarea を常に表示し、右上ボタンでモーダルを開く。
-          画面サイズに関係なく十分な編集領域を確保できる。
-        */}
         <div className="mb-1.5 flex items-center justify-end gap-1.5">
           <button
             type="button"
             onClick={() => setElementModalOpen(true)}
-            className="rounded border border-[#343434] bg-[#101010] px-1.5 py-0.5 text-[10px] font-bold text-neutral-400 transition hover:border-pink-400 hover:text-white"
+            className="flex items-center gap-1.5 rounded border border-[#343434] bg-[#101010] px-2 py-1 text-[10px] font-bold text-neutral-400 transition hover:border-pink-400 hover:text-white"
             title="要素別編集モーダルを開く — 構図/光/カメラ等を中央画面で個別に編集"
           >
-            ⛶ 要素別編集
+            <ElementGridIcon />
+            <span>要素別編集</span>
           </button>
         </div>
         <PromptTextareaWithMentions
@@ -504,17 +564,53 @@ function ReferenceRack({
   /** F-#6: 現在の参照+プロンプトをセットとして保存ダイアログを開く */
   onSaveReferenceSet: () => void;
 }) {
-  // STΛCK 指示 (2026-05-17 第4版): 2段にすると 13 インチでプロンプト
-  // 入力欄が狭くなって打てなくなる問題があった。
-  // → 5 ボタンを 1 行 5 列に戻す。ボタン幅は画面に応じて伸縮 (w-full)。
-  // - grid grid-cols-5 で常に横一列、画面幅に追従して自動リサイズ
-  // - h-14 縦並び (icon 上 / text 下) は維持
-  // - text-[10px] leading-tight で「ライブラリ」「プリセット」も収まる
-  // - 13 インチでもボタン縦サイズは変えず、横幅だけ縮む = 老眼でも押せる
+  // STΛCK 指示 (2026-05-19): どのデバイス幅でもラベル1行表示を厳守。
+  // - 旧版は text-[10px] leading-tight でも幅不足で「ライブラ/リ」と
+  //   2行に折り返していた
+  // - whitespace-nowrap + overflow-hidden で 1 行強制
+  // - text-[9px] にダウンサイズ + tracking-tighter で詰める
+  // - もしそれでも枠から溢れる場合は truncate で省略表示
   const iconBtn =
-    "shrink-13-rack flex h-14 w-full min-w-0 flex-col items-center justify-center gap-1 rounded-md border border-[#343434] bg-[#101010] px-1 text-[10px] font-bold leading-tight text-neutral-300 transition hover:border-pink-400 hover:text-white";
+    "shrink-13-rack flex h-14 w-full min-w-0 flex-col items-center justify-center gap-1 overflow-hidden rounded-md border border-[#343434] bg-[#101010] px-1 text-[9px] font-bold leading-tight tracking-tighter text-neutral-300 transition hover:border-pink-400 hover:text-white";
+  // ラベル <span> 共通クラス: 改行禁止 + はみ出し省略
+  const iconLabel = "block w-full truncate whitespace-nowrap text-center";
+  /*
+    STΛCK 指示 (2026-05-20): ボタン群 (ライブラリ/素材/追加/プリセット/セット/スキル)
+    全体を drop target 化。生成タイムラインや拡大プレビューから画像を
+    投げ込むと、ボタンの「クリックで開く」機能は維持しつつ、参照ラックに
+    画像を直接追加する別経路を提供する。
+  */
+  const handleDrop = (event: React.DragEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const { refs, files } = extractDropped(event.dataTransfer);
+    const composer = useComposer.getState();
+    if (refs.length > 0) {
+      composer.addReferences(
+        refs.map((r) => ({
+          path: r.path,
+          name: r.name,
+          source: r.source,
+          role: r.role,
+        })),
+      );
+    }
+    if (files.length > 0) {
+      void Promise.all(files.map((f) => fileToUploadReference(f))).then(
+        (uploadedRefs) => {
+          composer.addReferences(uploadedRefs);
+        },
+      );
+    }
+  };
   return (
-    <div className="border-b border-[#2a2a2a] p-3">
+    <div
+      className="border-b border-[#2a2a2a] p-3"
+      onDragOver={(event) => {
+        if (isImageDrop(event.dataTransfer)) event.preventDefault();
+      }}
+      onDrop={handleDrop}
+    >
       {/* 操作ボタン (アイコン上 / 文字下) を 1 行 6 列で常に横並び (F-#6 でセット追加) */}
       <div className="grid grid-cols-6 gap-1.5">
         <button
@@ -524,7 +620,7 @@ function ReferenceRack({
           title="このアプリで生成した画像から選ぶ"
         >
           <LibraryIcon />
-          <span className="text-center">ライブラリ</span>
+          <span className={iconLabel}>ライブラリ</span>
         </button>
         <button
           type="button"
@@ -533,11 +629,11 @@ function ReferenceRack({
           title="ストック素材 API から写真を検索"
         >
           <StockIcon />
-          <span className="text-center">素材</span>
+          <span className={iconLabel}>素材</span>
         </button>
         <label className={`${iconBtn} cursor-pointer`} title="ローカル PC から画像を追加">
           <PlusIcon />
-          <span className="text-center">追加</span>
+          <span className={iconLabel}>追加</span>
           <input
             type="file"
             accept="image/png,image/jpeg,image/webp"
@@ -560,7 +656,7 @@ function ReferenceRack({
           title="登録済みプロンプトを呼び出す"
         >
           <PresetIcon />
-          <span className="text-center">プリセット</span>
+          <span className={iconLabel}>プリセット</span>
         </button>
         <button
           type="button"
@@ -569,7 +665,7 @@ function ReferenceRack({
           title="保存済みのリファレンスセット (参照画像+プロンプト) を呼び出す"
         >
           <ReferenceSetIcon />
-          <span className="text-center">セット</span>
+          <span className={iconLabel}>セット</span>
         </button>
         <button
           ref={skillButtonRef}
@@ -579,7 +675,7 @@ function ReferenceRack({
           title="スキルを呼び出す"
         >
           <SkillIcon />
-          <span className="text-center">スキル</span>
+          <span className={iconLabel}>スキル</span>
         </button>
       </div>
 
@@ -699,6 +795,18 @@ function ReferenceSetIcon() {
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <rect x="3" y="7" width="13" height="13" rx="2" ry="2" />
       <path d="M8 7V5a2 2 0 0 1 2-2h11v13a2 2 0 0 1-2 2h-2" />
+    </svg>
+  );
+}
+
+/** 要素別編集 — 4 分割グリッドで「カテゴリ別に分けて編集」を象徴 */
+function ElementGridIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="3" width="7" height="7" rx="1" ry="1" />
+      <rect x="14" y="3" width="7" height="7" rx="1" ry="1" />
+      <rect x="3" y="14" width="7" height="7" rx="1" ry="1" />
+      <rect x="14" y="14" width="7" height="7" rx="1" ry="1" />
     </svg>
   );
 }
