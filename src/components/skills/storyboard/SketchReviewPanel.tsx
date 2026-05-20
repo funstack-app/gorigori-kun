@@ -33,7 +33,6 @@ export function SketchReviewPanel() {
   const sketchVersions = useStoryboardRun((s) => s.sketchVersions);
   const activeSketchVersionId = useStoryboardRun((s) => s.activeSketchVersionId);
   const pushSketchVersion = useStoryboardRun((s) => s.pushSketchVersion);
-  const setActiveSketchVersion = useStoryboardRun((s) => s.setActiveSketchVersion);
   const updateSketchCut = useStoryboardRun((s) => s.updateSketchCut);
   const setPhase = useStoryboardRun((s) => s.setPhase);
   const setGoal = useStoryboardRun((s) => s.setGoal);
@@ -292,14 +291,21 @@ export function SketchReviewPanel() {
     );
   }
 
-  const cut = activeVersion.cuts[cursor];
-  const total = activeVersion.cuts.length;
   const canProceed = Boolean(goal.characterReferencePath);
+  const editingCut = editing ? activeVersion.cuts[cursor] ?? null : null;
+
+  // === 進捗計算 (絵コンテ生成のステータスバー) ===
+  const totalCuts = activeVersion.cuts.length;
+  const doneCount = activeVersion.cuts.filter((c) => c.sketchStatus === "done").length;
+  const generatingCount = activeVersion.cuts.filter((c) => c.sketchStatus === "generating").length;
+  const allDone = doneCount === totalCuts && totalCuts > 0;
+  const progressPercent = totalCuts > 0 ? (doneCount / totalCuts) * 100 : 0;
 
   return (
     <div className="flex h-full flex-col gap-3">
       {/* === ヘッダー === */}
-      <header className="flex items-start justify-between gap-4 rounded-md border border-[#242424] bg-[#161616] px-4 py-3">
+      <header className="flex flex-col gap-3 rounded-md border border-[#242424] bg-[#161616] px-4 py-3">
+        <div className="flex items-start justify-between gap-4">
         <div className="min-w-0 flex-1">
           <h2 className="text-sm font-semibold text-zinc-200">Phase 2: 絵コンテレビュー</h2>
           <p className="mt-1 text-xs text-zinc-500 line-clamp-2">{goal.summary}</p>
@@ -348,194 +354,191 @@ export function SketchReviewPanel() {
             この絵コンテで生成 →
           </button>
         </div>
+        </div>
+
+        {/* === 絵コンテ生成 進捗バー === */}
+        <div className="flex flex-col gap-1">
+          <div className="flex items-center justify-between text-[11px]">
+            <span className={allDone ? "text-emerald-300" : "text-pink-200"}>
+              {allDone
+                ? "絵コンテ生成完了"
+                : generatingCount > 0
+                  ? `絵コンテ生成中…  ${doneCount}/${totalCuts}`
+                  : doneCount === 0
+                    ? `準備中…  0/${totalCuts}`
+                    : `${doneCount}/${totalCuts}`}
+            </span>
+            <span className="text-zinc-500">
+              {Math.round(allDone ? 100 : progressPercent)}%
+            </span>
+          </div>
+          <div className="h-1.5 w-full overflow-hidden rounded-full bg-[#0d0d0d]">
+            <div
+              className={[
+                "h-full transition-all duration-500",
+                allDone ? "bg-emerald-400" : "bg-pink-400",
+              ].join(" ")}
+              style={{ width: `${allDone ? 100 : progressPercent}%` }}
+            />
+          </div>
+        </div>
       </header>
 
-      {/* === カット1枚レビュー === */}
-      <div className="flex min-h-0 flex-1 gap-3">
-        {/* 左ナビ */}
-        <button
-          type="button"
-          onClick={() => setCursor((c) => Math.max(0, c - 1))}
-          disabled={cursor === 0}
-          className={[
-            "flex w-10 shrink-0 items-center justify-center rounded-md border transition",
-            cursor === 0
-              ? "cursor-not-allowed border-[#1f1f1f] text-zinc-700"
-              : "border-[#2a2a2a] text-zinc-300 hover:border-pink-500/40 hover:bg-pink-500/5",
-          ].join(" ")}
-          aria-label="前のカット"
-        >
-          <IconChevronLeft />
-        </button>
-
-        {/* メインカード */}
-        <div className="flex min-h-0 flex-1 flex-col gap-3 rounded-md border border-[#242424] bg-[#101010] p-5">
-          <div className="flex items-center justify-between">
-            <div>
-              <div className="text-[11px] font-semibold uppercase tracking-wider text-pink-200">
-                Cut {cut.order} · {cut.durationSeconds}s
-              </div>
-              <div className="mt-1 text-[10px] text-zinc-500">{cut.cameraNote}</div>
-            </div>
-            <div className="text-[11px] text-zinc-500">
-              {cursor + 1} / {total}
-            </div>
-          </div>
-
-          {/* 絵コンテ画像 (GPT Image 2 で sketch_mode 生成) */}
-          <SketchImageBox cut={cut} aspectRatio={goal.aspectRatio} />
-
-          {/* 手書き上書きがあるなら下にテキストでも表示 */}
-          {cut.userOverride && (
-            <div className="rounded-md border border-pink-500/30 bg-pink-500/5 px-3 py-2 text-xs text-pink-100">
-              <span className="mr-1 text-[10px] text-pink-300">[手書き上書き]</span>
-              {cut.userOverride}
-            </div>
-          )}
-
-          {/* 自由記述エリア */}
-          {editing ? (
-            <div className="space-y-2">
-              <label className="text-[10px] text-zinc-500">自由記述で書き直し</label>
-              <textarea
-                value={draftOverride}
-                onChange={(e) => setDraftOverride(e.target.value)}
-                rows={4}
-                className="w-full resize-none rounded-md border border-[#2a2a2a] bg-[#0d0d0d] p-3 text-sm text-zinc-200 outline-none focus:border-pink-500/50"
-                placeholder="このカットの意図・構図を自分の言葉で書き直す"
-              />
-              <div className="flex gap-2">
-                <button
-                  type="button"
-                  onClick={() => saveEdit(cut)}
-                  className="rounded-md bg-pink-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-pink-400"
-                >
-                  保存
-                </button>
-                <button
-                  type="button"
-                  onClick={cancelEdit}
-                  className="rounded-md border border-[#2a2a2a] px-3 py-1.5 text-xs text-zinc-300 hover:border-pink-500/40"
-                >
-                  キャンセル
-                </button>
-              </div>
-            </div>
-          ) : (
-            <>
-              <div className="text-sm text-zinc-300">
-                {cut.userOverride ? (
-                  <>
-                    <span className="text-[10px] text-zinc-500">意図: </span>
-                    {cut.intent}
-                  </>
-                ) : (
-                  cut.intent
-                )}
-              </div>
-
-              {cut.filmNotes && cut.filmNotes.length > 0 && (
-                <ul className="space-y-1">
-                  {cut.filmNotes.map((note, i) => (
-                    <li key={i} className="text-[11px] text-zinc-500">
-                      · {note}
-                    </li>
-                  ))}
-                </ul>
-              )}
-
-              <div className="mt-auto flex flex-wrap gap-2 pt-2">
-                <button
-                  type="button"
-                  onClick={() => startEdit(cut)}
-                  className="rounded-md border border-pink-500/40 bg-pink-500/10 px-3 py-1.5 text-xs text-pink-200 hover:bg-pink-500/20"
-                >
-                  書き直し
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleRegenerateCut(cut)}
-                  className="rounded-md border border-[#2a2a2a] px-3 py-1.5 text-xs text-zinc-300 hover:border-pink-500/40"
-                >
-                  このカットを再生成
-                </button>
-                {cut.userOverride && (
-                  <button
-                    type="button"
-                    onClick={() => clearOverride(cut)}
-                    className="rounded-md border border-[#2a2a2a] px-3 py-1.5 text-xs text-zinc-500 hover:border-pink-500/40 hover:text-pink-200"
-                  >
-                    上書きを取消
-                  </button>
-                )}
-              </div>
-            </>
-          )}
-        </div>
-
-        {/* 右ナビ */}
-        <button
-          type="button"
-          onClick={() => setCursor((c) => Math.min(total - 1, c + 1))}
-          disabled={cursor >= total - 1}
-          className={[
-            "flex w-10 shrink-0 items-center justify-center rounded-md border transition",
-            cursor >= total - 1
-              ? "cursor-not-allowed border-[#1f1f1f] text-zinc-700"
-              : "border-[#2a2a2a] text-zinc-300 hover:border-pink-500/40 hover:bg-pink-500/5",
-          ].join(" ")}
-          aria-label="次のカット"
-        >
-          <IconChevronRight />
-        </button>
+      {/* === カット割りグリッド (Phase 3 と同じレイアウト感) === */}
+      <div className="min-h-0 flex-1 overflow-y-auto rounded-md border border-[#242424] bg-[#101010] p-4">
+        <ol className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+          {activeVersion.cuts.map((c, i) => (
+            <SketchCutCard
+              key={c.cutId}
+              cut={c}
+              index={i}
+              aspectRatio={goal.aspectRatio}
+              onEdit={() => {
+                setCursor(i);
+                startEdit(c);
+              }}
+              onRegenerate={() => handleRegenerateCut(c)}
+              onClearOverride={() => clearOverride(c)}
+            />
+          ))}
+        </ol>
       </div>
 
-      {/* === フッター: カット番号ジャンプ + バージョン履歴 === */}
-      <footer className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-[#242424] bg-[#161616] px-3 py-2">
-        <div className="flex flex-wrap gap-1">
-          {activeVersion.cuts.map((c, i) => (
-            <button
-              type="button"
-              key={c.cutId}
-              onClick={() => setCursor(i)}
-              className={[
-                "h-7 w-7 rounded text-[11px] font-medium transition",
-                i === cursor
-                  ? "bg-pink-500 text-white"
-                  : c.userOverride
-                    ? "bg-pink-500/15 text-pink-200 hover:bg-pink-500/25"
-                    : "bg-[#1c1c1c] text-zinc-400 hover:bg-pink-500/10",
-              ].join(" ")}
-              title={c.userOverride ? "手書き上書きあり" : undefined}
-            >
-              {i + 1}
-            </button>
-          ))}
-        </div>
-        {sketchVersions.length > 1 && (
-          <div className="flex items-center gap-2">
-            <span className="text-[10px] text-zinc-500">バージョン:</span>
-            <div className="flex flex-wrap gap-1">
-              {sketchVersions.map((v, i) => (
-                <button
-                  type="button"
-                  key={v.versionId}
-                  onClick={() => setActiveSketchVersion(v.versionId)}
-                  className={[
-                    "rounded-full border px-2 py-0.5 text-[10px]",
-                    v.versionId === activeVersion.versionId
-                      ? "border-pink-500 bg-pink-500/15 text-pink-200"
-                      : "border-[#2a2a2a] text-zinc-400 hover:border-pink-500/30",
-                  ].join(" ")}
-                >
-                  v{i + 1}
-                </button>
-              ))}
+      {/* === 自由記述モーダル (書き直し中のカットがあれば表示) === */}
+      {editing && editingCut && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6"
+          onClick={cancelEdit}
+        >
+          <div
+            className="w-full max-w-2xl space-y-3 rounded-lg border border-[#2a2a2a] bg-[#161616] p-5"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-semibold text-zinc-200">
+                CUT {editingCut.order} を書き直し
+              </h3>
+              <span className="text-[10px] text-zinc-500">
+                {editingCut.durationSeconds}s / {editingCut.cameraNote}
+              </span>
+            </div>
+            <textarea
+              value={draftOverride}
+              onChange={(e) => setDraftOverride(e.target.value)}
+              rows={6}
+              autoFocus
+              className="w-full resize-none rounded-md border border-[#2a2a2a] bg-[#0d0d0d] p-3 text-sm text-zinc-200 outline-none focus:border-pink-500/50"
+              placeholder="このカットの意図・構図を自分の言葉で書き直す"
+            />
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={cancelEdit}
+                className="rounded-md border border-[#2a2a2a] px-3 py-1.5 text-xs text-zinc-300 hover:border-pink-500/40"
+              >
+                キャンセル
+              </button>
+              <button
+                type="button"
+                onClick={() => saveEdit(editingCut)}
+                className="rounded-md bg-pink-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-pink-400"
+              >
+                保存
+              </button>
             </div>
           </div>
-        )}
-      </footer>
+        </div>
+      )}
     </div>
+  );
+}
+
+// === カット 1 枚 (Phase 3 のカードと同じトンマナ) ===
+function SketchCutCard({
+  cut,
+  index,
+  aspectRatio,
+  onEdit,
+  onRegenerate,
+  onClearOverride,
+}: {
+  cut: StoryboardSketchCut;
+  index: number;
+  aspectRatio: string;
+  onEdit: () => void;
+  onRegenerate: () => void;
+  onClearOverride: () => void;
+}) {
+  const status = cut.sketchStatus ?? "pending";
+  const statusLabel =
+    status === "done"
+      ? "完了"
+      : status === "generating"
+        ? "生成中…"
+        : status === "failed"
+          ? "失敗"
+          : "順番待ち";
+  const statusColor =
+    status === "done"
+      ? "text-emerald-300"
+      : status === "generating"
+        ? "text-pink-200"
+        : status === "failed"
+          ? "text-red-400"
+          : "text-zinc-500";
+
+  return (
+    <li className="flex flex-col gap-2 rounded-md border border-[#242424] bg-[#1a1a1a] p-3">
+      <div className="flex items-center justify-between">
+        <span className="text-[11px] font-semibold uppercase tracking-wider text-pink-200">
+          Cut {index + 1} · {cut.durationSeconds}s
+        </span>
+        <span className={`text-[11px] ${statusColor}`}>{statusLabel}</span>
+      </div>
+
+      <div className="flex items-center justify-center overflow-hidden rounded-md border border-[#2a2a2a] bg-[#fcfbf5]">
+        <SketchImageBox cut={cut} aspectRatio={aspectRatio} />
+      </div>
+
+      <div className="line-clamp-2 text-xs text-zinc-300">
+        {cut.userOverride ? (
+          <>
+            <span className="text-[10px] text-pink-300">[手書き] </span>
+            {cut.userOverride}
+          </>
+        ) : (
+          cut.intent
+        )}
+      </div>
+
+      <div className="text-[10px] text-zinc-500">{cut.cameraNote}</div>
+
+      <div className="mt-auto flex flex-wrap gap-1 pt-1">
+        <button
+          type="button"
+          onClick={onEdit}
+          className="rounded border border-pink-500/40 bg-pink-500/10 px-2 py-1 text-[10px] text-pink-200 hover:bg-pink-500/20"
+        >
+          書き直し
+        </button>
+        <button
+          type="button"
+          onClick={onRegenerate}
+          className="rounded border border-[#2a2a2a] px-2 py-1 text-[10px] text-zinc-300 hover:border-pink-500/40"
+        >
+          再生成
+        </button>
+        {cut.userOverride && (
+          <button
+            type="button"
+            onClick={onClearOverride}
+            className="rounded border border-[#2a2a2a] px-2 py-1 text-[10px] text-zinc-500 hover:border-pink-500/40 hover:text-pink-200"
+          >
+            上書きを取消
+          </button>
+        )}
+      </div>
+    </li>
   );
 }
 
@@ -668,39 +671,3 @@ function inferFilmNotes(index: number, total: number): string[] {
   return notes;
 }
 
-// Lucide 風アイコン (viewBox 24, stroke 2, round caps)
-function IconChevronLeft() {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      width="18"
-      height="18"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <polyline points="15 18 9 12 15 6" />
-    </svg>
-  );
-}
-
-function IconChevronRight() {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      width="18"
-      height="18"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <polyline points="9 18 15 12 9 6" />
-    </svg>
-  );
-}

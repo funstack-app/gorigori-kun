@@ -114,15 +114,20 @@ export function GenerationProgressPanel() {
     );
   }
 
+  // === 進捗バー算出 ===
+  const totalForBar = ordered.length || totalCuts || 0;
+  const progressPercent = totalForBar > 0 ? (completed / totalForBar) * 100 : 0;
+  const allDoneGen = status === "completed" || (totalForBar > 0 && completed === totalForBar);
+
   return (
     <div className="flex h-full flex-col gap-3">
-      <header className="flex items-start justify-between gap-4 rounded-md border border-[#242424] bg-[#161616] px-4 py-3">
+      <header className="flex flex-col gap-3 rounded-md border border-[#242424] bg-[#161616] px-4 py-3">
+        <div className="flex items-start justify-between gap-4">
         <div>
           <h2 className="text-sm font-semibold text-zinc-200">Phase 3: カット生成中</h2>
           <p className="mt-1 text-xs text-zinc-500">
-            進捗 {completed} / {ordered.length || totalCuts || "?"} カット
-            {starting && " · 起動中…"}
-            {status === "failed" && " · 失敗"}
+            {starting && "起動中…"}
+            {status === "failed" && "失敗"}
           </p>
           {startError && (
             <p className="mt-1 text-[11px] text-red-400">{startError}</p>
@@ -134,6 +139,30 @@ export function GenerationProgressPanel() {
           {goal.styleReferencePath && (
             <RefThumb label="スタイル" path={goal.styleReferencePath} />
           )}
+        </div>
+        </div>
+
+        {/* === 本番カット生成 進捗バー === */}
+        <div className="flex flex-col gap-1">
+          <div className="flex items-center justify-between text-[11px]">
+            <span className={allDoneGen ? "text-emerald-300" : "text-pink-200"}>
+              {allDoneGen
+                ? "本番カット生成完了"
+                : `本番カット生成中…  ${completed}/${totalForBar || "?"}`}
+            </span>
+            <span className="text-zinc-500">
+              {Math.round(allDoneGen ? 100 : progressPercent)}%
+            </span>
+          </div>
+          <div className="h-1.5 w-full overflow-hidden rounded-full bg-[#0d0d0d]">
+            <div
+              className={[
+                "h-full transition-all duration-500",
+                allDoneGen ? "bg-emerald-400" : "bg-pink-400",
+              ].join(" ")}
+              style={{ width: `${allDoneGen ? 100 : progressPercent}%` }}
+            />
+          </div>
         </div>
       </header>
 
