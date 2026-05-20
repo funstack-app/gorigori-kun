@@ -58,6 +58,8 @@ export type StoryboardRunParams = {
   sketchMode?: boolean;
   /** 手動採用モード (P2): AI評価ループをスキップし、ユーザーが take を選ぶ。 */
   manualSelection?: boolean;
+  /** P12: 絵コンテ画像を本生成の追加参考にする (cutId → 画像パス)。 */
+  sketchReferences?: Record<string, string>;
 };
 
 export type StoryboardEditMagicLayerStep = {

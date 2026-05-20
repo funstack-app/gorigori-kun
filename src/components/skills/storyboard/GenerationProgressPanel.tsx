@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 
 import { storyboard } from "../../../lib/ipc";
 import { useStoryboardRun } from "../../../lib/store/storyboardRun";
@@ -39,16 +39,14 @@ export function GenerationProgressPanel() {
   const setGenerationRunStartedAt = useStoryboardRun((s) => s.setGenerationRunStartedAt);
   const generationStarted = generationRunStartedAt !== null;
 
-  // 入場時に本番 run を起動。
-  // STΛCK 指示 (2026-05-20): Phase 2 で絵コンテ run (sketch_mode=true) を
-  // 走らせている場合、その activeRunId / cuts が残っているので、
-  // 本番 run を起動する前に reset() で一度クリアする (sketchVersions に
-  // 絵コンテ画像は保存済みなので消えない)。
-  useEffect(() => {
-    if (generationStarted) return; // ストア管理で重複起動を防ぐ
+  // P11 (2026-05-20 STΛCK 指示): Phase 3 入場時の自動生成 useEffect を撤廃。
+  // 「本生成を開始」ボタンを押すまで何もしない設計に変更。
+  // 鉄則: パネルに入っただけでは絶対に生成を始めない。
+  async function startGeneration() {
+    if (generationStarted) return;
     if (!goal || !sceneConstruction) return;
     if (starting) return;
-    // 既に本番 run が走っている (params.sketchMode が false) なら何もしない
+    // 既に本番 run が走っているなら既起動済みマーク
     if (activeRunId) {
       const cur = useStoryboardRun.getState().params;
       if (cur && !cur.sketchMode) {
@@ -56,73 +54,77 @@ export function GenerationProgressPanel() {
         return;
       }
     }
+    setStarting(true);
+    setStartError(null);
+    try {
+      // 絵コンテ run の残骸をクリア (sketchVersions / chatMessages / goal は保持される)
+      useStoryboardRun.getState().reset();
 
-    (async () => {
-      setStarting(true);
-      setStartError(null);
-      try {
-        // 絵コンテ run の残骸をクリア (sketchVersions / chatMessages / goal は保持される)
-        useStoryboardRun.getState().reset();
+      // P3b: ユーザーが D&D で並べ替えていた場合は sceneConstruction.cuts を
+      // その順序にして本番に渡す。
+      const displayOrder = useStoryboardRun.getState().cutDisplayOrder;
+      const orderedScene = (() => {
+        if (!displayOrder || displayOrder.length === 0) return sceneConstruction;
+        const byCutId = new Map(sceneConstruction.cuts.map((c) => [c.cut_id, c]));
+        const reordered = displayOrder
+          .map((id) => byCutId.get(id))
+          .filter((c): c is NonNullable<typeof c> => Boolean(c));
+        if (reordered.length !== sceneConstruction.cuts.length) {
+          return sceneConstruction;
+        }
+        return { ...sceneConstruction, cuts: reordered };
+      })();
 
-        // P3b: ユーザーが D&D で並べ替えていた場合は sceneConstruction.cuts を
-        // その順序にして本番に渡す。
-        const displayOrder = useStoryboardRun.getState().cutDisplayOrder;
-        const orderedScene = (() => {
-          if (!displayOrder || displayOrder.length === 0) return sceneConstruction;
-          const byCutId = new Map(sceneConstruction.cuts.map((c) => [c.cut_id, c]));
-          const reordered = displayOrder
-            .map((id) => byCutId.get(id))
-            .filter((c): c is NonNullable<typeof c> => Boolean(c));
-          if (reordered.length !== sceneConstruction.cuts.length) {
-            return sceneConstruction; // 整合性が崩れたら元順
+      // P12: 絵コンテ画像を本生成の追加参照として渡す (cutId → 絵コンテ画像パス)
+      const sketchVersions = useStoryboardRun.getState().sketchVersions;
+      const activeSketchVersionId = useStoryboardRun.getState().activeSketchVersionId;
+      const activeSketch =
+        sketchVersions.find((v) => v.versionId === activeSketchVersionId) ??
+        sketchVersions[sketchVersions.length - 1] ??
+        null;
+      const sketchReferences: Record<string, string> = {};
+      if (activeSketch) {
+        for (const c of activeSketch.cuts) {
+          if (c.sketchImagePath) {
+            sketchReferences[c.cutId] = c.sketchImagePath;
           }
-          return { ...sceneConstruction, cuts: reordered };
-        })();
-
-        const params = {
-          storyPrompt: goal.summary || "ストーリーカット",
-          characterReferenceImage: goal.characterReferencePath,
-          styleReferenceImage: goal.styleReferencePath,
-          aspectRatio: goal.aspectRatio,
-          durationSeconds: goal.durationSeconds,
-          tempo: goal.tempo,
-          // P2 + P10 (2026-05-20): ユーザー選択枚数で並列生成、評価ループは廃止
-          // (ユーザーが Phase 4 確認画面で take を手動採用)
-          candidatesPerCut: useStoryboardRun.getState().generationCandidatesPerCut,
-          cwd: undefined,
-          sceneConstruction: orderedScene,
-          sketchMode: false,
-          manualSelection: true,
-        };
-        const runId = await storyboard.run(params);
-        beginRun(runId, params);
-        setGenerationRunStartedAt(Date.now());
-        useToasts.getState().push({
-          kind: "success",
-          text: "ストーリーカット生成を開始しました。",
-          ttlMs: 2400,
-        });
-      } catch (e) {
-        const msg = (e as Error)?.message ?? String(e);
-        setStartError(msg);
-        useToasts.getState().push({
-          kind: "error",
-          text: `生成起動に失敗しました: ${msg}`,
-          ttlMs: 6000,
-        });
-      } finally {
-        setStarting(false);
+        }
       }
-    })();
-  }, [
-    generationStarted,
-    activeRunId,
-    goal,
-    sceneConstruction,
-    starting,
-    beginRun,
-    setGenerationRunStartedAt,
-  ]);
+
+      const params = {
+        storyPrompt: goal.summary || "ストーリーカット",
+        characterReferenceImage: goal.characterReferencePath,
+        styleReferenceImage: goal.styleReferencePath,
+        aspectRatio: goal.aspectRatio,
+        durationSeconds: goal.durationSeconds,
+        tempo: goal.tempo,
+        candidatesPerCut: useStoryboardRun.getState().generationCandidatesPerCut,
+        cwd: undefined,
+        sceneConstruction: orderedScene,
+        sketchMode: false,
+        manualSelection: true,
+        sketchReferences,
+      };
+      const runId = await storyboard.run(params);
+      beginRun(runId, params);
+      setGenerationRunStartedAt(Date.now());
+      useToasts.getState().push({
+        kind: "success",
+        text: "本生成を開始しました。",
+        ttlMs: 2400,
+      });
+    } catch (e) {
+      const msg = (e as Error)?.message ?? String(e);
+      setStartError(msg);
+      useToasts.getState().push({
+        kind: "error",
+        text: `生成起動に失敗しました: ${msg}`,
+        ttlMs: 6000,
+      });
+    } finally {
+      setStarting(false);
+    }
+  }
 
   // P2 修正 (2026-05-20): manual_selection ではユーザー採用待ちなので自動遷移しない。
   // 「最終確認へ」ボタンでユーザー意思で進む。
@@ -211,28 +213,45 @@ export function GenerationProgressPanel() {
           )}
         </div>
 
-        {/* P2: 手動採用モードでは「最終確認へ」ボタンで進む */}
+        {/* P11: 未起動なら「本生成を開始」、起動済みなら「最終確認へ」 */}
         <div className="flex shrink-0 flex-col gap-2">
-          <button
-            type="button"
-            onClick={() => setPhase("review")}
-            disabled={completed === 0}
-            className={[
-              "rounded-md px-4 py-2 text-sm font-semibold transition",
-              completed > 0
-                ? "bg-pink-500 text-white hover:bg-pink-400"
-                : "cursor-not-allowed bg-zinc-700 text-zinc-400",
-            ].join(" ")}
-            title={
-              allAdopted
-                ? "全カット採用済み"
-                : completed === 0
-                  ? "カット完了を待ってください"
-                  : "未採用のカットがありますが、確認画面に進めます"
-            }
-          >
-            最終確認へ →
-          </button>
+          {!generationStarted ? (
+            <button
+              type="button"
+              onClick={startGeneration}
+              disabled={starting}
+              className={[
+                "rounded-md px-4 py-2 text-sm font-semibold transition",
+                starting
+                  ? "cursor-not-allowed bg-zinc-700 text-zinc-400"
+                  : "bg-pink-500 text-white hover:bg-pink-400",
+              ].join(" ")}
+              title={`本生成 (${useStoryboardRun.getState().generationCandidatesPerCut}案/カット) を開始`}
+            >
+              {starting ? "起動中…" : "本生成を開始 →"}
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setPhase("review")}
+              disabled={completed === 0}
+              className={[
+                "rounded-md px-4 py-2 text-sm font-semibold transition",
+                completed > 0
+                  ? "bg-pink-500 text-white hover:bg-pink-400"
+                  : "cursor-not-allowed bg-zinc-700 text-zinc-400",
+              ].join(" ")}
+              title={
+                allAdopted
+                  ? "全カット採用済み"
+                  : completed === 0
+                    ? "カット完了を待ってください"
+                    : "未採用のカットがありますが、確認画面に進めます"
+              }
+            >
+              最終確認へ →
+            </button>
+          )}
         </div>
         </div>
 

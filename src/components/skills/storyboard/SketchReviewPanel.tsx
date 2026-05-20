@@ -179,18 +179,27 @@ export function SketchReviewPanel() {
   }
 
   // === 生成イベント (cuts Map) → 各カットの sketchImagePath を更新 ===
-  // P9 (2026-05-20 STΛCK 指示): 絵コンテ画像は本生成で採用したやつに差し替えない。
-  // 現在の run が sketch_mode のときだけ更新する。本番モードでは絵コンテを
-  // 完全に保持する。
+  // P9 + P14 (2026-05-20 STΛCK 指示): 絵コンテ画像は本生成で採用したやつに
+  // 差し替えない。以下3重ガードで混線を完全排除:
+  //  1. sketchStarted (絵コンテ生成が開始されている)
+  //  2. curParams.sketchMode === true (現在のrunが絵コンテモード)
+  //  3. 全カット done になったら以後同期しない (storeCuts が何であっても触らない)
   useEffect(() => {
     if (!activeVersion) return;
     if (!sketchStarted) return;
     const curParams = useStoryboardRun.getState().params;
-    if (!curParams?.sketchMode) return; // 本番 run 中は絵コンテ更新しない
+    if (!curParams?.sketchMode) return; // 本番 run / runなし時は絵コンテ更新しない
+
+    // 全カット done に達したら同期完全停止 (混線防止の最終ガード)
+    const allDone = activeVersion.cuts.every(
+      (c) => c.sketchStatus === "done" && c.sketchImagePath,
+    );
+    if (allDone) return;
+
     for (const cut of activeVersion.cuts) {
       const stored = storeCuts.get(cut.cutId);
       if (!stored) continue;
-      // 既に done のカットはそのまま保持 (再生成イベント等で上書きされない保護)
+      // 既に done のカットはそのまま保持
       if (cut.sketchStatus === "done" && cut.sketchImagePath) continue;
       const latest = stored.takes[stored.takes.length - 1]?.imagePath;
       const wantStatus: StoryboardSketchCut["sketchStatus"] =

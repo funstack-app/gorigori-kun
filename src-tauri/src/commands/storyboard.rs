@@ -62,6 +62,14 @@ pub struct StoryboardParams {
      */
     #[serde(default)]
     pub manual_selection: bool,
+
+    /**
+     * P12 (2026-05-20 STΛCK 指示): 絵コンテ画像を本生成の追加参照として渡す。
+     * cutId → imagePath のマップ。本番 run (sketch_mode=false) 時に、各カットの
+     * 構図を絵コンテ画像で誘導するために使用。
+     */
+    #[serde(default)]
+    pub sketch_references: std::collections::HashMap<String, String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -605,10 +613,17 @@ async fn run_storyboard_orchestrator(
         let mut global_take_index = 0u32;
 
         for attempt in 0..=MAX_RETRIES_PER_CUT {
+            // P12: cut_id に対応する絵コンテ画像があれば参考として追加
+            let sketch_ref_pathbuf: Option<PathBuf> = params
+                .sketch_references
+                .get(&cut.cut_id)
+                .filter(|p| !p.trim().is_empty())
+                .map(PathBuf::from);
             let reference_images = build_reference_images(
                 &char_ref_path,
                 &style_ref_path,
                 previous_cut_image.as_deref(),
+                sketch_ref_pathbuf.as_deref(),
             );
             let take_specs = (0..candidates_per_cut)
                 .map(|idx| {
@@ -1859,6 +1874,7 @@ fn build_reference_images(
     char_ref: &Path,
     style_ref: &Path,
     previous_cut: Option<&Path>,
+    sketch_ref: Option<&Path>,
 ) -> Vec<PathBuf> {
     let mut refs = vec![char_ref.to_path_buf()];
     if style_ref != char_ref {
@@ -1866,6 +1882,11 @@ fn build_reference_images(
     }
     if let Some(previous) = previous_cut {
         refs.push(previous.to_path_buf());
+    }
+    // P12 (2026-05-20 STΛCK 指示): 絵コンテ画像を参考画像として追加。
+    // 構図を絵コンテに沿って誘導するため、char/style/previous の後ろに置く。
+    if let Some(sketch) = sketch_ref {
+        refs.push(sketch.to_path_buf());
     }
     refs
 }
