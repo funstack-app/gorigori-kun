@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { storyboard } from "../../../lib/ipc";
 import { useStoryboardRun } from "../../../lib/store/storyboardRun";
+import { useImagePreview } from "../../../lib/store/imagePreview";
 import { usePlanChat } from "../../../lib/store/planChat";
 import { useToasts } from "../../../lib/store/toasts";
 
@@ -85,9 +86,9 @@ export function GenerationProgressPanel() {
           aspectRatio: goal.aspectRatio,
           durationSeconds: goal.durationSeconds,
           tempo: goal.tempo,
-          // P2 (2026-05-20): 1カット 3 take 並列生成、評価ループは廃止
+          // P2 + P10 (2026-05-20): ユーザー選択枚数で並列生成、評価ループは廃止
           // (ユーザーが Phase 4 確認画面で take を手動採用)
-          candidatesPerCut: 3 as 1 | 3,
+          candidatesPerCut: useStoryboardRun.getState().generationCandidatesPerCut,
           cwd: undefined,
           sceneConstruction: orderedScene,
           sketchMode: false,
@@ -176,6 +177,13 @@ export function GenerationProgressPanel() {
 
   // === 進捗バー算出 ===
   const totalForBar = ordered.length || totalCuts || 0;
+  // P10: 表示する take slot 数 = 現在 run の candidatesPerCut。run params が
+  // 取れない場合はストアの選択値、それも無ければ 3 にフォールバック。
+  const runParams = useStoryboardRun.getState().params;
+  const slotCount: number =
+    runParams?.candidatesPerCut ??
+    useStoryboardRun.getState().generationCandidatesPerCut ??
+    3;
   const progressPercent = totalForBar > 0 ? (completed / totalForBar) * 100 : 0;
   const allDoneGen = status === "completed" || (totalForBar > 0 && completed === totalForBar);
   // 全カット採用済み判定 (manual_selection で Phase 4 進行ボタン制御に使う)
@@ -302,11 +310,17 @@ export function GenerationProgressPanel() {
                   <span className={`text-[11px] ${statusColor}`}>{statusLabel}</span>
                 </div>
 
-                {/* 3 take 並列サムネ */}
-                <div className="grid grid-cols-3 gap-2">
-                  {[0, 1, 2].map((idx) => {
+                {/* P10: N take 並列サムネ (ユーザー選択枚数) + ダブルクリックプレビュー */}
+                <div
+                  className="grid gap-2"
+                  style={{ gridTemplateColumns: `repeat(${slotCount}, minmax(0, 1fr))` }}
+                >
+                  {Array.from({ length: slotCount }).map((_, idx) => {
                     const take = takes[idx];
                     const isAdopted = take && adoptedTakeId === take.takeId;
+                    const allTakePaths = takes
+                      .map((t) => t.imagePath)
+                      .filter((p): p is string => Boolean(p));
                     return (
                       <div
                         key={idx}
@@ -322,7 +336,11 @@ export function GenerationProgressPanel() {
                             <img
                               src={`asset://localhost/${encodeURI(take.imagePath)}`}
                               alt={`take-${idx + 1}`}
-                              className="h-full w-full object-cover"
+                              className="h-full w-full cursor-zoom-in object-cover"
+                              onDoubleClick={() =>
+                                useImagePreview.getState().open(take.imagePath, allTakePaths)
+                              }
+                              title="ダブルクリックでプレビュー"
                             />
                             {!isAdopted && (
                               <button

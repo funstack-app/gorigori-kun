@@ -38,6 +38,12 @@ export type SceneConstruction = {
   }>;
 };
 
+/**
+ * 同時生成枚数 (1 カットあたりの take 数)。
+ * P10 (2026-05-20): 1 / 2 / 3 から選べるよう拡張 (旧 1 | 3 固定から)。
+ */
+export type CandidatesPerCut = 1 | 2 | 3;
+
 export type StoryboardRunParams = {
   storyPrompt: string;
   characterReferenceImage: string;
@@ -45,7 +51,7 @@ export type StoryboardRunParams = {
   aspectRatio: StoryboardAspectRatio;
   durationSeconds: number;
   tempo: StoryboardTempo;
-  candidatesPerCut: 1 | 3;
+  candidatesPerCut: CandidatesPerCut;
   cwd?: string;
   sceneConstruction?: SceneConstruction;
   /** 絵コンテ (storyboard panel) モード。バックエンドでスケッチ強制スタイルに切替。 */

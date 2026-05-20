@@ -119,6 +119,14 @@ type StoryboardRunState = {
   cutDisplayOrder: string[] | null;
   setCutDisplayOrder: (order: string[] | null) => void;
 
+  // ===== P10: 同時生成枚数 (1カットあたりの take 数) =====
+  // 絵コンテ生成と本番生成で別々に保持する。
+  // (絵コンテは速度優先で 1 デフォルト、本番は選択肢から 3 デフォルト)
+  sketchCandidatesPerCut: 1 | 2 | 3;
+  generationCandidatesPerCut: 1 | 2 | 3;
+  setSketchCandidatesPerCut: (n: 1 | 2 | 3) => void;
+  setGenerationCandidatesPerCut: (n: 1 | 2 | 3) => void;
+
   // ===== レビュー UI 操作系 (採用確認待ち時) =====
   /** 表示中の take をユーザー意思で確定 (採用ボタン) */
   adoptTake: (cutId: string, takeId?: string) => void;
@@ -196,6 +204,9 @@ function ensureCut(cuts: Map<string, CutState>, cutId: string): CutState {
 export const useStoryboardRun = create<StoryboardRunState>((set) => ({
   ...emptyState,
   pastRuns: [],
+  // P10: 同時生成枚数 (デフォルト)
+  sketchCandidatesPerCut: 1 as 1 | 2 | 3,
+  generationCandidatesPerCut: 3 as 1 | 2 | 3,
 
   beginRun: (runId, params) =>
     set((s) => {
@@ -386,6 +397,8 @@ export const useStoryboardRun = create<StoryboardRunState>((set) => ({
   setSketchRunStartedAt: (ts) => set({ sketchRunStartedAt: ts }),
   setGenerationRunStartedAt: (ts) => set({ generationRunStartedAt: ts }),
   setCutDisplayOrder: (order) => set({ cutDisplayOrder: order }),
+  setSketchCandidatesPerCut: (n) => set({ sketchCandidatesPerCut: n }),
+  setGenerationCandidatesPerCut: (n) => set({ generationCandidatesPerCut: n }),
 
   uiDebugLog: [],
   appendDebug: (entry) =>

@@ -20,6 +20,7 @@ import { useStoryboardRun } from "../../../lib/store/storyboardRun";
 import { usePlanChat } from "../../../lib/store/planChat";
 import { useToasts } from "../../../lib/store/toasts";
 import { useImagePreview } from "../../../lib/store/imagePreview";
+import { CandidatesSelect } from "./CandidatesSelect";
 import type {
   StoryboardSketchCut,
   StoryboardSketchVersion,
@@ -53,6 +54,11 @@ export function SketchReviewPanel() {
   const sceneGroups = useStoryboardRun((s) => s.sceneGroups);
   const cutDisplayOrder = useStoryboardRun((s) => s.cutDisplayOrder);
   const setCutDisplayOrder = useStoryboardRun((s) => s.setCutDisplayOrder);
+  // P10: 枚数選択 (絵コンテ用 / 本生成用)
+  const sketchCandidatesPerCut = useStoryboardRun((s) => s.sketchCandidatesPerCut);
+  const setSketchCandidatesPerCut = useStoryboardRun((s) => s.setSketchCandidatesPerCut);
+  const generationCandidatesPerCut = useStoryboardRun((s) => s.generationCandidatesPerCut);
+  const setGenerationCandidatesPerCut = useStoryboardRun((s) => s.setGenerationCandidatesPerCut);
   const setPhase = useStoryboardRun((s) => s.setPhase);
   const setGoal = useStoryboardRun((s) => s.setGoal);
   const sceneConstruction = usePlanChat((s) => s.sceneConstruction);
@@ -147,7 +153,8 @@ export function SketchReviewPanel() {
         aspectRatio: goal.aspectRatio,
         durationSeconds: goal.durationSeconds,
         tempo: goal.tempo,
-        candidatesPerCut: 1 as 1 | 3,
+        // P10: ユーザー選択値を反映 (デフォルト 1)
+        candidatesPerCut: sketchCandidatesPerCut,
         cwd: undefined,
         sceneConstruction,
         sketchMode: true,
@@ -466,27 +473,35 @@ export function SketchReviewPanel() {
 
         <div className="flex shrink-0 flex-col gap-2">
           {!sketchStarted ? (
-            // 絵コンテ未生成: 「絵コンテを生成」ボタン
-            <button
-              type="button"
-              onClick={startSketchGeneration}
-              disabled={sketchStarting || !canProceed}
-              className={[
-                "rounded-md px-4 py-2 text-sm font-semibold transition",
-                canProceed && !sketchStarting
-                  ? "bg-pink-500 text-white hover:bg-pink-400"
-                  : "cursor-not-allowed bg-zinc-700 text-zinc-400",
-              ].join(" ")}
-              title={
-                canProceed
-                  ? "絵コンテを 1 枚ずつ生成 (キャラ参照画像が必要)"
-                  : "キャラ参照画像を選択してください"
-              }
-            >
-              {sketchStarting ? "起動中…" : "絵コンテを生成 →"}
-            </button>
+            // 絵コンテ未生成: 「絵コンテを生成」ボタン + 枚数セレクタ
+            <div className="flex items-center gap-2">
+              <CandidatesSelect
+                value={sketchCandidatesPerCut}
+                onChange={setSketchCandidatesPerCut}
+                label="絵コンテ"
+                disabled={sketchStarting || !canProceed}
+              />
+              <button
+                type="button"
+                onClick={startSketchGeneration}
+                disabled={sketchStarting || !canProceed}
+                className={[
+                  "rounded-md px-4 py-2 text-sm font-semibold transition",
+                  canProceed && !sketchStarting
+                    ? "bg-pink-500 text-white hover:bg-pink-400"
+                    : "cursor-not-allowed bg-zinc-700 text-zinc-400",
+                ].join(" ")}
+                title={
+                  canProceed
+                    ? `絵コンテを ${sketchCandidatesPerCut} 枚ずつ生成 (キャラ参照画像が必要)`
+                    : "キャラ参照画像を選択してください"
+                }
+              >
+                {sketchStarting ? "起動中…" : "絵コンテを生成 →"}
+              </button>
+            </div>
           ) : (
-            // 絵コンテ生成済み: 「別案を依頼」+「この絵コンテで本生成」
+            // 絵コンテ生成済み: 「別案を依頼」+「この絵コンテで本生成」 + 本生成枚数
             <>
               <button
                 type="button"
@@ -495,20 +510,32 @@ export function SketchReviewPanel() {
               >
                 別案を依頼
               </button>
-              <button
-                type="button"
-                onClick={handleProceed}
-                disabled={!canProceed}
-                className={[
-                  "rounded-md px-4 py-2 text-sm font-semibold transition",
-                  canProceed
-                    ? "bg-pink-500 text-white hover:bg-pink-400"
-                    : "cursor-not-allowed bg-zinc-700 text-zinc-400",
-                ].join(" ")}
-                title={canProceed ? undefined : "キャラ参照画像を選択してください"}
-              >
-                この絵コンテで本生成 →
-              </button>
+              <div className="flex items-center gap-2">
+                <CandidatesSelect
+                  value={generationCandidatesPerCut}
+                  onChange={setGenerationCandidatesPerCut}
+                  label="本生成"
+                  disabled={!canProceed}
+                />
+                <button
+                  type="button"
+                  onClick={handleProceed}
+                  disabled={!canProceed}
+                  className={[
+                    "rounded-md px-4 py-2 text-sm font-semibold transition",
+                    canProceed
+                      ? "bg-pink-500 text-white hover:bg-pink-400"
+                      : "cursor-not-allowed bg-zinc-700 text-zinc-400",
+                  ].join(" ")}
+                  title={
+                    canProceed
+                      ? `本生成 (${generationCandidatesPerCut}案/カット) を開始`
+                      : "キャラ参照画像を選択してください"
+                  }
+                >
+                  この絵コンテで本生成 →
+                </button>
+              </div>
             </>
           )}
         </div>
@@ -573,21 +600,29 @@ export function SketchReviewPanel() {
                   strategy={rectSortingStrategy}
                 >
                   <ol className={`grid gap-3 ${gridColsForAspect(goal.aspectRatio)}`}>
-                    {group.cuts.map(({ cut: c, index: i }) => (
-                      <SortableSketchCutCard
-                        key={c.cutId}
-                        cut={c}
-                        index={i}
-                        aspectRatio={goal.aspectRatio}
-                        onEdit={() => {
-                          setCursor(i);
-                          startEdit(c);
-                        }}
-                        onRegenerate={() => handleRegenerateCut(c)}
-                        onRegenerateWithRefs={(refs) => handleRegenerateCut(c, refs)}
-                        onClearOverride={() => clearOverride(c)}
-                      />
-                    ))}
+                    {group.cuts.map(({ cut: c, index: i }) => {
+                      // P10: プレビュー時の兄弟リスト = activeVersion 内の全
+                      //      sketchImagePath を順に並べる。
+                      const siblingPaths = activeVersion.cuts
+                        .map((x) => x.sketchImagePath)
+                        .filter((p): p is string => Boolean(p));
+                      return (
+                        <SortableSketchCutCard
+                          key={c.cutId}
+                          cut={c}
+                          index={i}
+                          aspectRatio={goal.aspectRatio}
+                          siblingPaths={siblingPaths}
+                          onEdit={() => {
+                            setCursor(i);
+                            startEdit(c);
+                          }}
+                          onRegenerate={() => handleRegenerateCut(c)}
+                          onRegenerateWithRefs={(refs) => handleRegenerateCut(c, refs)}
+                          onClearOverride={() => clearOverride(c)}
+                        />
+                      );
+                    })}
                   </ol>
                 </SortableContext>
               </section>
@@ -650,6 +685,7 @@ function SortableSketchCutCard(props: {
   cut: StoryboardSketchCut;
   index: number;
   aspectRatio: string;
+  siblingPaths: string[];
   onEdit: () => void;
   onRegenerate: () => void;
   onRegenerateWithRefs: (refs: string[]) => void;
@@ -676,6 +712,7 @@ function SketchCutCard({
   cut,
   index,
   aspectRatio,
+  siblingPaths,
   onEdit,
   onRegenerate,
   onRegenerateWithRefs,
@@ -684,6 +721,7 @@ function SketchCutCard({
   cut: StoryboardSketchCut;
   index: number;
   aspectRatio: string;
+  siblingPaths: string[];
   onEdit: () => void;
   onRegenerate: () => void;
   onRegenerateWithRefs: (refs: string[]) => void;
@@ -770,7 +808,9 @@ function SketchCutCard({
         aspectRatio={aspectRatio}
         onDoubleClick={() => {
           if (cut.sketchImagePath) {
-            useImagePreview.getState().open(cut.sketchImagePath, []);
+            useImagePreview
+              .getState()
+              .open(cut.sketchImagePath, siblingPaths);
           }
         }}
       />

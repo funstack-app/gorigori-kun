@@ -6,6 +6,7 @@ import { useSkillMode } from "../../../lib/store/skillMode";
 import { useToasts } from "../../../lib/store/toasts";
 import type { StoryboardGoal } from "../../../lib/storyboard/types";
 import { ReferenceLibraryModal } from "../../ReferenceLibraryModal";
+import { CandidatesSelect } from "./CandidatesSelect";
 
 const IMAGE_EXTS = ["png", "jpg", "jpeg", "webp", "gif", "bmp"];
 
@@ -42,6 +43,9 @@ export function GoalChatPanel() {
   const selectedSkillId = useSkillMode((s) => s.selectedSkillId);
   const setGoal = useStoryboardRun((s) => s.setGoal);
   const setPhase = useStoryboardRun((s) => s.setPhase);
+  // P10: 「すぐに本生成」用の枚数選択
+  const generationCandidatesPerCut = useStoryboardRun((s) => s.generationCandidatesPerCut);
+  const setGenerationCandidatesPerCut = useStoryboardRun((s) => s.setGenerationCandidatesPerCut);
 
   const [draft, setDraft] = useState("");
   const [attachedImages, setAttachedImages] = useState<string[]>([]);
@@ -219,20 +223,28 @@ export function GoalChatPanel() {
           >
             {awaitingTarget === "sketch" ? "AI 応答待ち…" : "絵コンテを作る →"}
           </button>
-          <button
-            type="button"
-            onClick={() => handleFinalize("generation")}
-            disabled={!canFinalize}
-            className={[
-              "rounded-md px-4 py-2 text-sm font-semibold transition",
-              canFinalize
-                ? "bg-pink-500 text-white hover:bg-pink-400"
-                : "cursor-not-allowed bg-zinc-700 text-zinc-400",
-            ].join(" ")}
-            title="絵コンテをスキップして本番カット (3案/カット) を生成"
-          >
-            {awaitingTarget === "generation" ? "AI 応答待ち…" : "すぐに本生成 →"}
-          </button>
+          <div className="flex items-center gap-2">
+            <CandidatesSelect
+              value={generationCandidatesPerCut}
+              onChange={setGenerationCandidatesPerCut}
+              label="本生成"
+              disabled={!canFinalize}
+            />
+            <button
+              type="button"
+              onClick={() => handleFinalize("generation")}
+              disabled={!canFinalize}
+              className={[
+                "rounded-md px-4 py-2 text-sm font-semibold transition",
+                canFinalize
+                  ? "bg-pink-500 text-white hover:bg-pink-400"
+                  : "cursor-not-allowed bg-zinc-700 text-zinc-400",
+              ].join(" ")}
+              title={`絵コンテをスキップして本番カット (${generationCandidatesPerCut}案/カット) を生成`}
+            >
+              {awaitingTarget === "generation" ? "AI 応答待ち…" : "すぐに本生成 →"}
+            </button>
+          </div>
         </div>
       </header>
 
