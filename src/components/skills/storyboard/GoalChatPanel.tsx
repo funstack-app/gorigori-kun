@@ -5,6 +5,7 @@ import { useStoryboardRun } from "../../../lib/store/storyboardRun";
 import { useSkillMode } from "../../../lib/store/skillMode";
 import { useToasts } from "../../../lib/store/toasts";
 import type { StoryboardGoal } from "../../../lib/storyboard/types";
+import { ReferenceLibraryModal } from "../../ReferenceLibraryModal";
 
 const IMAGE_EXTS = ["png", "jpg", "jpeg", "webp", "gif", "bmp"];
 
@@ -46,6 +47,8 @@ export function GoalChatPanel() {
   const [attachedImages, setAttachedImages] = useState<string[]>([]);
   // 「ゴール確定」を押した直後フラグ。JSON 応答が来たら自動で Phase2 に進む。
   const [awaitingFinalize, setAwaitingFinalize] = useState(false);
+  // ライブラリピッカー (生成済み画像から選ぶ)
+  const [libraryOpen, setLibraryOpen] = useState(false);
   const scrollerRef = useRef<HTMLDivElement>(null);
 
   // ストーリーカットスキルを ON にしておく (planChat の prefix 切替条件)
@@ -294,16 +297,26 @@ export function GoalChatPanel() {
         />
 
         <div className="flex items-center justify-between">
-          <button
-            type="button"
-            onClick={pickImages}
-            className="inline-flex items-center gap-1.5 rounded-md border border-[#2a2a2a] px-2.5 py-1.5 text-[11px] text-zinc-300 hover:border-pink-500/40 hover:text-pink-200"
-            title="参照画像を添付"
-            aria-label="参照画像を添付"
-          >
-            <IconPaperclip />
-            <span>画像を添付</span>
-          </button>
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={pickImages}
+              className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-[#2a2a2a] text-zinc-300 hover:border-pink-500/40 hover:text-pink-200"
+              title="PC から画像を添付"
+              aria-label="PC から画像を添付"
+            >
+              <IconPaperclip />
+            </button>
+            <button
+              type="button"
+              onClick={() => setLibraryOpen(true)}
+              className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-[#2a2a2a] text-zinc-300 hover:border-pink-500/40 hover:text-pink-200"
+              title="ライブラリから画像を選ぶ"
+              aria-label="ライブラリから画像を選ぶ"
+            >
+              <IconLibrary />
+            </button>
+          </div>
           <button
             type="button"
             onClick={handleSend}
@@ -319,6 +332,19 @@ export function GoalChatPanel() {
           </button>
         </div>
       </div>
+
+      {/* ライブラリピッカー (生成済み画像から添付参照を選ぶ) */}
+      <ReferenceLibraryModal
+        open={libraryOpen}
+        onClose={() => setLibraryOpen(false)}
+        onPick={(path) => {
+          setAttachedImages((prev) => {
+            const set = new Set(prev);
+            set.add(path);
+            return Array.from(set);
+          });
+        }}
+      />
     </div>
   );
 }
@@ -357,6 +383,28 @@ function IconClose() {
       aria-hidden="true"
     >
       <path d="M18 6 6 18M6 6l12 12" />
+    </svg>
+  );
+}
+
+function IconLibrary() {
+  // Lucide images: 重なった2つの画像枠 (ライブラリ表現)
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width="14"
+      height="14"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M18 22H4a2 2 0 0 1-2-2V6" />
+      <path d="m22 13-1.296-1.296a2.41 2.41 0 0 0-3.408 0L11 18" />
+      <circle cx="12" cy="8" r="2" />
+      <rect width="16" height="16" x="6" y="2" rx="2" />
     </svg>
   );
 }

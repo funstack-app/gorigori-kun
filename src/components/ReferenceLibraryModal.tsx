@@ -12,6 +12,11 @@ import { useImages } from "../lib/store/images";
 type Props = {
   open: boolean;
   onClose: () => void;
+  /**
+   * 指定があれば、useComposer.addReference の代わりに onPick(path) を呼ぶ。
+   * Storyboard など Composer に追加せず別ストアに渡したいユースケース用。
+   */
+  onPick?: (path: string, name: string) => void;
 };
 
 /**
@@ -21,7 +26,7 @@ type Props = {
  *
  * Why: Magnific の「履歴」相当。ローカル PC から探す体験は別経路（追加ボタン）に分離。
  */
-export function ReferenceLibraryModal({ open, onClose }: Props) {
+export function ReferenceLibraryModal({ open, onClose, onPick }: Props) {
   const items = useImages((s) => s.items);
   const addReference = useComposer((s) => s.addReference);
   const references = useComposer((s) => s.references);
@@ -51,7 +56,11 @@ export function ReferenceLibraryModal({ open, onClose }: Props) {
   if (!open) return null;
 
   const handlePick = (path: string, name: string) => {
-    addReference({ path, name, source: "gallery" });
+    if (onPick) {
+      onPick(path, name);
+    } else {
+      addReference({ path, name, source: "gallery" });
+    }
     onClose();
   };
 
