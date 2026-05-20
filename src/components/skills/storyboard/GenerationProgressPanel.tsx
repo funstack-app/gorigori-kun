@@ -63,6 +63,21 @@ export function GenerationProgressPanel() {
         // 絵コンテ run の残骸をクリア (sketchVersions / chatMessages / goal は保持される)
         useStoryboardRun.getState().reset();
 
+        // P3b: ユーザーが D&D で並べ替えていた場合は sceneConstruction.cuts を
+        // その順序にして本番に渡す。
+        const displayOrder = useStoryboardRun.getState().cutDisplayOrder;
+        const orderedScene = (() => {
+          if (!displayOrder || displayOrder.length === 0) return sceneConstruction;
+          const byCutId = new Map(sceneConstruction.cuts.map((c) => [c.cut_id, c]));
+          const reordered = displayOrder
+            .map((id) => byCutId.get(id))
+            .filter((c): c is NonNullable<typeof c> => Boolean(c));
+          if (reordered.length !== sceneConstruction.cuts.length) {
+            return sceneConstruction; // 整合性が崩れたら元順
+          }
+          return { ...sceneConstruction, cuts: reordered };
+        })();
+
         const params = {
           storyPrompt: goal.summary || "ストーリーカット",
           characterReferenceImage: goal.characterReferencePath,
@@ -74,7 +89,7 @@ export function GenerationProgressPanel() {
           // (ユーザーが Phase 4 確認画面で take を手動採用)
           candidatesPerCut: 3 as 1 | 3,
           cwd: undefined,
-          sceneConstruction,
+          sceneConstruction: orderedScene,
           sketchMode: false,
           manualSelection: true,
         };

@@ -113,6 +113,12 @@ type StoryboardRunState = {
   setSketchRunStartedAt: (ts: number | null) => void;
   setGenerationRunStartedAt: (ts: number | null) => void;
 
+  // ===== P3b: ユーザーが D&D で並べ替えた表示順 =====
+  // null なら sceneConstruction.cuts の元順序を使う。
+  // cutIds 配列で順序を表現 (重複/欠落はクライアント側でガード)。
+  cutDisplayOrder: string[] | null;
+  setCutDisplayOrder: (order: string[] | null) => void;
+
   // ===== レビュー UI 操作系 (採用確認待ち時) =====
   /** 表示中の take をユーザー意思で確定 (採用ボタン) */
   adoptTake: (cutId: string, takeId?: string) => void;
@@ -166,6 +172,7 @@ const phaseEmptyState = {
   activeSketchVersionId: null as string | null,
   sketchRunStartedAt: null as number | null,
   generationRunStartedAt: null as number | null,
+  cutDisplayOrder: null as string[] | null,
 };
 
 const emptyState = {
@@ -378,6 +385,7 @@ export const useStoryboardRun = create<StoryboardRunState>((set) => ({
 
   setSketchRunStartedAt: (ts) => set({ sketchRunStartedAt: ts }),
   setGenerationRunStartedAt: (ts) => set({ generationRunStartedAt: ts }),
+  setCutDisplayOrder: (order) => set({ cutDisplayOrder: order }),
 
   uiDebugLog: [],
   appendDebug: (entry) =>

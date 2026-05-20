@@ -1,4 +1,19 @@
 import { useEffect, useMemo, useState, type DragEvent } from "react";
+import {
+  DndContext,
+  closestCenter,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from "@dnd-kit/core";
+import {
+  SortableContext,
+  arrayMove,
+  rectSortingStrategy,
+  useSortable,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 
 import { storyboard, type RegenerateCutParams } from "../../../lib/ipc";
 import { useStoryboardRun } from "../../../lib/store/storyboardRun";
@@ -35,6 +50,8 @@ export function SketchReviewPanel() {
   const pushSketchVersion = useStoryboardRun((s) => s.pushSketchVersion);
   const updateSketchCut = useStoryboardRun((s) => s.updateSketchCut);
   const sceneGroups = useStoryboardRun((s) => s.sceneGroups);
+  const cutDisplayOrder = useStoryboardRun((s) => s.cutDisplayOrder);
+  const setCutDisplayOrder = useStoryboardRun((s) => s.setCutDisplayOrder);
   const setPhase = useStoryboardRun((s) => s.setPhase);
   const setGoal = useStoryboardRun((s) => s.setGoal);
   const sceneConstruction = usePlanChat((s) => s.sceneConstruction);
@@ -351,10 +368,28 @@ export function SketchReviewPanel() {
   const allDone = doneCount === totalCuts && totalCuts > 0;
   const progressPercent = totalCuts > 0 ? (doneCount / totalCuts) * 100 : 0;
 
-  // === シーン分け (P3a) ===
-  // sceneGroups がある場合はシーン単位でグルーピング、ない場合は1グループにまとめる
+  // === シーン分け (P3a) / 並べ替え (P3b) ===
+  // 優先順位:
+  //  1. cutDisplayOrder がある (ユーザー D&D 後): flat 一列表示
+  //  2. sceneGroups がある: シーン単位グルーピング
+  //  3. それ以外: 1グループ "シーン 1"
   const groupedCuts = useMemo(() => {
     const cutsByCutId = new Map(activeVersion.cuts.map((c) => [c.cutId, c]));
+    if (cutDisplayOrder && cutDisplayOrder.length > 0) {
+      const orderedCuts = cutDisplayOrder
+        .map((id) => cutsByCutId.get(id))
+        .filter((c): c is StoryboardSketchCut => Boolean(c));
+      return [
+        {
+          id: "user-order",
+          label: "ユーザー並び順",
+          cuts: orderedCuts.map((c) => ({
+            cut: c,
+            index: activeVersion.cuts.findIndex((x) => x.cutId === c.cutId),
+          })),
+        },
+      ];
+    }
     if (sceneGroups.length === 0) {
       return [
         {
@@ -375,7 +410,25 @@ export function SketchReviewPanel() {
           index: activeVersion.cuts.findIndex((x) => x.cutId === c.cutId),
         })),
     }));
-  }, [activeVersion.cuts, sceneGroups]);
+  }, [activeVersion.cuts, sceneGroups, cutDisplayOrder]);
+
+  // D&D で並べ替え。ユーザー D&D が走った瞬間に flat 表示に切り替わる。
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 8 } }));
+  function handleDragEnd(e: DragEndEvent) {
+    if (!e.active || !e.over) return;
+    if (e.active.id === e.over.id) return;
+    if (!activeVersion) return;
+    const currentOrder =
+      cutDisplayOrder ?? activeVersion.cuts.map((c) => c.cutId);
+    const oldIndex = currentOrder.indexOf(String(e.active.id));
+    const newIndex = currentOrder.indexOf(String(e.over.id));
+    if (oldIndex < 0 || newIndex < 0) return;
+    const next = arrayMove(currentOrder, oldIndex, newIndex);
+    setCutDisplayOrder(next);
+  }
+  function resetDisplayOrder() {
+    setCutDisplayOrder(null);
+  }
 
   return (
     <div className="flex h-full flex-col gap-3">
@@ -460,39 +513,58 @@ export function SketchReviewPanel() {
         </div>
       </header>
 
-      {/* === シーン分けタイムライン (P3a) === */}
+      {/* === シーン分けタイムライン (P3a) / D&D 並べ替え (P3b) === */}
       <div className="min-h-0 flex-1 overflow-y-auto rounded-md border border-[#242424] bg-[#101010] p-4">
-        <div className="flex flex-col gap-5">
-          {groupedCuts.map((group) => (
-            <section key={group.id} className="flex flex-col gap-2">
-              <div className="flex items-center gap-2 border-l-2 border-pink-500 pl-2">
-                <h3 className="text-xs font-bold uppercase tracking-wider text-pink-200">
-                  {group.label}
-                </h3>
-                <span className="text-[10px] text-zinc-500">
-                  {group.cuts.length} カット
-                </span>
-              </div>
-              <ol className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                {group.cuts.map(({ cut: c, index: i }) => (
-                  <SketchCutCard
-                    key={c.cutId}
-                    cut={c}
-                    index={i}
-                    aspectRatio={goal.aspectRatio}
-                    onEdit={() => {
-                      setCursor(i);
-                      startEdit(c);
-                    }}
-                    onRegenerate={() => handleRegenerateCut(c)}
-                    onRegenerateWithRefs={(refs) => handleRegenerateCut(c, refs)}
-                    onClearOverride={() => clearOverride(c)}
-                  />
-                ))}
-              </ol>
-            </section>
-          ))}
-        </div>
+        <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+          <div className="flex flex-col gap-5">
+            {groupedCuts.map((group) => (
+              <section key={group.id} className="flex flex-col gap-2">
+                <div className="flex items-center justify-between gap-2 border-l-2 border-pink-500 pl-2">
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-xs font-bold uppercase tracking-wider text-pink-200">
+                      {group.label}
+                    </h3>
+                    <span className="text-[10px] text-zinc-500">
+                      {group.cuts.length} カット
+                    </span>
+                  </div>
+                  {cutDisplayOrder && (
+                    <button
+                      type="button"
+                      onClick={resetDisplayOrder}
+                      className="rounded border border-[#2a2a2a] px-2 py-0.5 text-[10px] text-zinc-400 hover:border-pink-500/40"
+                      title="並び順を元に戻す (シーン分け表示へ)"
+                    >
+                      並びを元に戻す
+                    </button>
+                  )}
+                </div>
+                <SortableContext
+                  items={group.cuts.map(({ cut }) => cut.cutId)}
+                  strategy={rectSortingStrategy}
+                >
+                  <ol className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                    {group.cuts.map(({ cut: c, index: i }) => (
+                      <SortableSketchCutCard
+                        key={c.cutId}
+                        cut={c}
+                        index={i}
+                        aspectRatio={goal.aspectRatio}
+                        onEdit={() => {
+                          setCursor(i);
+                          startEdit(c);
+                        }}
+                        onRegenerate={() => handleRegenerateCut(c)}
+                        onRegenerateWithRefs={(refs) => handleRegenerateCut(c, refs)}
+                        onClearOverride={() => clearOverride(c)}
+                      />
+                    ))}
+                  </ol>
+                </SortableContext>
+              </section>
+            ))}
+          </div>
+        </DndContext>
       </div>
 
       {/* === 自由記述モーダル (書き直し中のカットがあれば表示) === */}
@@ -540,6 +612,32 @@ export function SketchReviewPanel() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// === D&D 並べ替え対応ラッパー (P3b) ===
+function SortableSketchCutCard(props: {
+  cut: StoryboardSketchCut;
+  index: number;
+  aspectRatio: string;
+  onEdit: () => void;
+  onRegenerate: () => void;
+  onRegenerateWithRefs: (refs: string[]) => void;
+  onClearOverride: () => void;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
+    useSortable({ id: props.cut.cutId });
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.5 : 1,
+  };
+  // SketchCutCard 自体は <li>。SortableSketchCutCard は外側で <div ref> を持つ。
+  // <li> が hover で D&D activate distance 内なら listeners 経由でハンドル動作。
+  return (
+    <div ref={setNodeRef} style={style} {...attributes} {...listeners}>
+      <SketchCutCard {...props} />
     </div>
   );
 }
