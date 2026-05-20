@@ -50,6 +50,18 @@ pub struct StoryboardParams {
      */
     #[serde(default)]
     pub sketch_mode: bool,
+
+    /**
+     * 手動採用モード (P2 STΛCK指示 2026-05-20)。
+     * true のとき:
+     *   - AI 評価ループ (evaluate_one_take + select_best_take) を完全にスキップ
+     *   - 全 take を TakeCompleted イベントで流す
+     *   - CutConfirmed は出さず、ユーザー側のフロントから `storyboard_adopt_take` を
+     *     受け取って次カット起動する設計に切り替える (Phase 2.5 で実装)
+     *   - 本実装 (P2) では「全 take 流すまでで止まる」最小版を提供
+     */
+    #[serde(default)]
+    pub manual_selection: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -409,11 +421,12 @@ async fn run_storyboard_orchestrator(
             for item in generated {
                 match item {
                     Ok((take_id, image_path)) => {
-                        // sketch_mode 時は評価をスキップ (鉛筆絵コンテはキャラ一貫性の
-                        // 評価に通らない設計なので、評価ループは絵コンテと噛み合わない)。
-                        // STΛCK 報告 (2026-05-20): 評価ループで shot_001 が何度も
-                        // 再生成され続けて絵コンテ生成が異常に遅くなる問題への対応。
-                        let scores = if params.sketch_mode {
+                        // sketch_mode / manual_selection 時は評価をスキップ。
+                        // STΛCK 指示 (2026-05-20):
+                        //  - sketch_mode: 鉛筆絵コンテはキャラ評価に通らない
+                        //  - manual_selection: 評価ループが「気に入った take を勝手に
+                        //    差し替える」UX を生むため、ユーザー手動採用に委ねる
+                        let scores = if params.sketch_mode || params.manual_selection {
                             ScoreBundle::default()
                         } else {
                             match evaluate_one_take(
@@ -462,8 +475,12 @@ async fn run_storyboard_orchestrator(
                 }
             }
 
-            // sketch_mode は評価スコアを使わず最初の take を即採用、再試行も無し。
-            let picked = if params.sketch_mode {
+            // sketch_mode / manual_selection は評価スコアを使わず最初の take を即採用、
+            // 再試行も無し。manual_selection の場合、本来はユーザー選択を待つ仕様
+            // (Phase 2.5 で実装) だが、P2 最小実装としては「全 take を流して
+            // 1 枚目を即採用 + previous_cut_image 更新」で簡易化する。
+            // ユーザーは Phase 4 確認画面で take 切替できる (既存の adoptTake/selectTake)。
+            let picked = if params.sketch_mode || params.manual_selection {
                 select_first_take(&evaluated_takes)
             } else {
                 select_best_take(&evaluated_takes)

@@ -50,6 +50,8 @@ export type StoryboardRunParams = {
   sceneConstruction?: SceneConstruction;
   /** 絵コンテ (storyboard panel) モード。バックエンドでスケッチ強制スタイルに切替。 */
   sketchMode?: boolean;
+  /** 手動採用モード (P2): AI評価ループをスキップし、ユーザーが take を選ぶ。 */
+  manualSelection?: boolean;
 };
 
 export type StoryboardEditMagicLayerStep = {

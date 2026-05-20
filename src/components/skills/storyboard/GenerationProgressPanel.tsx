@@ -26,6 +26,7 @@ export function GenerationProgressPanel() {
   const activeRunId = useStoryboardRun((s) => s.activeRunId);
   const beginRun = useStoryboardRun((s) => s.beginRun);
   const setPhase = useStoryboardRun((s) => s.setPhase);
+  const adoptTake = useStoryboardRun((s) => s.adoptTake);
   const sceneConstruction = usePlanChat((s) => s.sceneConstruction);
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
@@ -69,10 +70,13 @@ export function GenerationProgressPanel() {
           aspectRatio: goal.aspectRatio,
           durationSeconds: goal.durationSeconds,
           tempo: goal.tempo,
-          candidatesPerCut: 1 as 1 | 3,
+          // P2 (2026-05-20): 1カット 3 take 並列生成、評価ループは廃止
+          // (ユーザーが Phase 4 確認画面で take を手動採用)
+          candidatesPerCut: 3 as 1 | 3,
           cwd: undefined,
           sceneConstruction,
           sketchMode: false,
+          manualSelection: true,
         };
         const runId = await storyboard.run(params);
         beginRun(runId, params);
@@ -104,13 +108,8 @@ export function GenerationProgressPanel() {
     setGenerationRunStartedAt,
   ]);
 
-  // 完了したら次フェーズへ
-  useEffect(() => {
-    if (status === "completed" && totalCuts > 0) {
-      const t = setTimeout(() => setPhase("review"), 800);
-      return () => clearTimeout(t);
-    }
-  }, [status, totalCuts, setPhase]);
+  // P2 修正 (2026-05-20): manual_selection ではユーザー採用待ちなので自動遷移しない。
+  // 「最終確認へ」ボタンでユーザー意思で進む。
 
   const ordered = useMemo(() => {
     if (!sceneConstruction) return [];
@@ -138,6 +137,8 @@ export function GenerationProgressPanel() {
   const totalForBar = ordered.length || totalCuts || 0;
   const progressPercent = totalForBar > 0 ? (completed / totalForBar) * 100 : 0;
   const allDoneGen = status === "completed" || (totalForBar > 0 && completed === totalForBar);
+  // 全カット採用済み判定 (manual_selection で Phase 4 進行ボタン制御に使う)
+  const allAdopted = ordered.every((o) => o.state?.status === "confirmed");
 
   return (
     <div className="flex h-full flex-col gap-3">
@@ -159,6 +160,30 @@ export function GenerationProgressPanel() {
           {goal.styleReferencePath && (
             <RefThumb label="スタイル" path={goal.styleReferencePath} />
           )}
+        </div>
+
+        {/* P2: 手動採用モードでは「最終確認へ」ボタンで進む */}
+        <div className="flex shrink-0 flex-col gap-2">
+          <button
+            type="button"
+            onClick={() => setPhase("review")}
+            disabled={completed === 0}
+            className={[
+              "rounded-md px-4 py-2 text-sm font-semibold transition",
+              completed > 0
+                ? "bg-pink-500 text-white hover:bg-pink-400"
+                : "cursor-not-allowed bg-zinc-700 text-zinc-400",
+            ].join(" ")}
+            title={
+              allAdopted
+                ? "全カット採用済み"
+                : completed === 0
+                  ? "カット完了を待ってください"
+                  : "未採用のカットがありますが、確認画面に進めます"
+            }
+          >
+            最終確認へ →
+          </button>
         </div>
         </div>
 
@@ -187,28 +212,31 @@ export function GenerationProgressPanel() {
       </header>
 
       <div className="min-h-0 flex-1 overflow-y-auto rounded-md border border-[#242424] bg-[#101010] p-4">
-        <ol className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+        <ol className="grid gap-3 md:grid-cols-1 xl:grid-cols-2">
           {ordered.map((o, i) => {
             const s = o.state;
-            const latestTake = s?.takes?.[s.takes.length - 1];
             const statusLabel =
               s?.status === "confirmed"
-                ? "確定"
+                ? "採用済み"
                 : s?.status === "review"
-                  ? "完了"
+                  ? "選択待ち"
                   : s?.status === "running"
                     ? "生成中…"
                     : s?.status === "failed"
                       ? "失敗"
                       : "待機中";
             const statusColor =
-              s?.status === "confirmed" || s?.status === "review"
+              s?.status === "confirmed"
                 ? "text-emerald-300"
-                : s?.status === "running"
-                  ? "text-pink-200"
-                  : s?.status === "failed"
-                    ? "text-red-400"
-                    : "text-zinc-500";
+                : s?.status === "review"
+                  ? "text-amber-300"
+                  : s?.status === "running"
+                    ? "text-pink-200"
+                    : s?.status === "failed"
+                      ? "text-red-400"
+                      : "text-zinc-500";
+            const takes = s?.takes ?? [];
+            const adoptedTakeId = s?.selectedTakeId;
             return (
               <li
                 key={o.cutId}
@@ -220,17 +248,52 @@ export function GenerationProgressPanel() {
                   </span>
                   <span className={`text-[11px] ${statusColor}`}>{statusLabel}</span>
                 </div>
-                <div className="flex aspect-video items-center justify-center overflow-hidden rounded-md border border-dashed border-[#333] bg-[#0d0d0d]">
-                  {latestTake ? (
-                    <img
-                      src={`asset://localhost/${encodeURI(latestTake.imagePath)}`}
-                      alt={o.cutId}
-                      className="h-full w-full object-cover"
-                    />
-                  ) : (
-                    <Spinner running={s?.status === "running"} />
-                  )}
+
+                {/* 3 take 並列サムネ */}
+                <div className="grid grid-cols-3 gap-2">
+                  {[0, 1, 2].map((idx) => {
+                    const take = takes[idx];
+                    const isAdopted = take && adoptedTakeId === take.takeId;
+                    return (
+                      <div
+                        key={idx}
+                        className={[
+                          "group relative flex aspect-video items-center justify-center overflow-hidden rounded-md border bg-[#0d0d0d]",
+                          isAdopted
+                            ? "border-pink-500 ring-2 ring-pink-500/40"
+                            : "border-dashed border-[#333]",
+                        ].join(" ")}
+                      >
+                        {take ? (
+                          <>
+                            <img
+                              src={`asset://localhost/${encodeURI(take.imagePath)}`}
+                              alt={`take-${idx + 1}`}
+                              className="h-full w-full object-cover"
+                            />
+                            {!isAdopted && (
+                              <button
+                                type="button"
+                                onClick={() => adoptTake(o.cutId, take.takeId)}
+                                className="absolute inset-x-0 bottom-0 hidden bg-pink-500/90 py-1 text-[10px] font-semibold text-white group-hover:block"
+                              >
+                                採用
+                              </button>
+                            )}
+                            {isAdopted && (
+                              <div className="absolute inset-x-0 bottom-0 bg-pink-500 py-1 text-center text-[10px] font-bold text-white">
+                                採用中
+                              </div>
+                            )}
+                          </>
+                        ) : (
+                          <Spinner running={s?.status === "running"} />
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
+
                 <div className="line-clamp-2 text-xs text-zinc-300">{o.description}</div>
                 {s?.error && <div className="text-[10px] text-red-400">{s.error}</div>}
               </li>
