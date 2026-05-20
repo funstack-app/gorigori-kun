@@ -150,6 +150,113 @@ struct CutPlan {
     duration_seconds: f64,
 }
 
+// =============================================================
+// P15 (2026-05-20): Continuity Contract / Cut Visual Plan
+// =============================================================
+// 設計参照:
+//   _work/storyboard-v2/codex-session-2.md
+//
+// 業界知見の出典:
+//   - Walter Murch "Rule of Six" (emotion>story>rhythm>eye_trace>plane_2d>space_3d)
+//   - Pixar Story Reel
+//   - 宮崎駿 画コンテ / 新海誠 演出
+//   - Runway Image-to-Video Prompting Guide
+//   - TikTok Creative Best Practices
+//
+// 核心: 「前カットの属性をそのまま渡す」のではなく、
+//       「何を保つ・変える・禁ずるか」を契約として渡す。
+//       これで AI が前カットを真似に行くことを防ぐ。
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ShotSize {
+    ExtremeWide,
+    Wide,
+    Medium,
+    CloseUp,
+    ExtremeCloseUp,
+}
+
+impl ShotSize {
+    fn as_str(&self) -> &'static str {
+        match self {
+            ShotSize::ExtremeWide => "EWS",
+            ShotSize::Wide => "WS",
+            ShotSize::Medium => "MS",
+            ShotSize::CloseUp => "CU",
+            ShotSize::ExtremeCloseUp => "ECU",
+        }
+    }
+
+    /// 0=EWS .. 4=ECU の段階値。隣接 shot の距離計算に使う。
+    fn level(&self) -> i8 {
+        match self {
+            ShotSize::ExtremeWide => 0,
+            ShotSize::Wide => 1,
+            ShotSize::Medium => 2,
+            ShotSize::CloseUp => 3,
+            ShotSize::ExtremeCloseUp => 4,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ScreenDirection {
+    LeftToRight,
+    RightToLeft,
+    TowardCamera,
+    AwayFromCamera,
+    Static,
+}
+
+impl ScreenDirection {
+    fn as_str(&self) -> &'static str {
+        match self {
+            ScreenDirection::LeftToRight => "left_to_right",
+            ScreenDirection::RightToLeft => "right_to_left",
+            ScreenDirection::TowardCamera => "toward_camera",
+            ScreenDirection::AwayFromCamera => "away_from_camera",
+            ScreenDirection::Static => "static",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CutVisualPlan {
+    cut_id: String,
+    scene_group_id: String,
+    cut_role: String,        // establishing / action / detail / reaction / climax / resolution
+    shot_size: ShotSize,
+    screen_direction: ScreenDirection,
+    camera_side: String,     // "axis_left" / "axis_right" / "neutral"
+    subject_position: String, // "left_third" / "center" / "right_third" / ...
+    action_start: String,    // 動作の開始姿勢 (i2v 用)
+    action_end: String,      // 動作の終了姿勢 (i2v 用、次カットの action_start に接続)
+    emotional_intent: String, // 感情・狙い
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct ContinuityContract {
+    /// preserve: 前カットから引き継ぐべき要素
+    preserve: Vec<String>,
+    /// change: 今カットで意図的に変えるべき要素
+    change: Vec<String>,
+    /// forbidden: 絶対やってはいけない変化
+    forbidden: Vec<String>,
+    /// bridge: 動作の接続点 (i2v 用)
+    bridge: Vec<String>,
+}
+
+/// Murch の 6 基準による重み付け。プロンプトに含める。
+/// emotion 51% / story 23% / rhythm 10% / eye_trace 7% / plane_2d 5% / space_3d 4%
+fn murch_priority_text() -> &'static str {
+    "Walter Murch Rule of Six priority weights — emotion:51, story:23, rhythm:10, eye_trace:7, plane_2d:5, space_3d:4. \
+     Prioritize emotional and narrative continuity over spatial continuity when they conflict."
+}
+
 #[derive(Clone, Debug)]
 struct EvaluatedTake {
     take_id: String,
@@ -569,6 +676,11 @@ async fn run_storyboard_orchestrator(
     let mut aborted = false;
     let cuts_count = cuts.len();
 
+    // P15 (2026-05-20): 全カットの VisualPlan を事前に算出する。
+    // これにより隣接カットの shot_size / screen_direction / camera_side が
+    // 機械的に整合する。
+    let visual_plans = plan_visual_continuity(&cuts);
+
     for (cut_index, cut) in cuts.iter().enumerate() {
         let _ = app.emit(
             EVENT_STORYBOARD,
@@ -579,7 +691,7 @@ async fn run_storyboard_orchestrator(
             },
         );
 
-        let structured_prompt = build_structured_prompt(
+        let mut structured_prompt = build_structured_prompt(
             &codex_bin,
             &params,
             &skill_refs,
@@ -594,6 +706,43 @@ async fn run_storyboard_orchestrator(
             tracing::warn!(target: "codex.storyboard", "structured prompt fallback for {}: {err}", cut.cut_id);
             local_structured_prompt(&params, cut, previous_cut_image.as_deref(), &previous_shot_types)
         });
+
+        // P15 (2026-05-20): Continuity Contract と Murch priority を
+        // structured_prompt に差し込む。
+        // ※ sketch_mode (絵コンテ生成) では Contract をスキップ
+        //    (絵コンテはラフスケッチなので連動性ルールは緩める)
+        if !params.sketch_mode {
+            if let Some(curr_plan) = visual_plans.get(cut_index) {
+                let prev_plan = if cut_index > 0 {
+                    visual_plans.get(cut_index - 1)
+                } else {
+                    None
+                };
+                let contract = build_continuity_contract(prev_plan, curr_plan);
+                if let Some(obj) = structured_prompt.as_object_mut() {
+                    obj.insert(
+                        "continuity_contract".to_string(),
+                        serde_json::to_value(&contract).unwrap_or(Value::Null),
+                    );
+                    obj.insert(
+                        "visual_plan".to_string(),
+                        serde_json::json!({
+                            "shot_size": curr_plan.shot_size.as_str(),
+                            "screen_direction": curr_plan.screen_direction.as_str(),
+                            "camera_side": curr_plan.camera_side,
+                            "subject_position": curr_plan.subject_position,
+                            "action_start": curr_plan.action_start,
+                            "action_end": curr_plan.action_end,
+                            "cut_role": curr_plan.cut_role,
+                        }),
+                    );
+                    obj.insert(
+                        "murch_priority".to_string(),
+                        Value::String(murch_priority_text().to_string()),
+                    );
+                }
+            }
+        }
         debug_prompts.push(DebugPromptEntry {
             cut_id: cut.cut_id.clone(),
             structured_prompt: structured_prompt.clone(),
@@ -1227,6 +1376,203 @@ struct CutRoleAssignment {
     purpose: &'static str,
 }
 
+/// P15 (2026-05-20): cut_role から推奨 ShotSize を引く。
+/// Codex セッション2の D 表「cut_role別の推奨shot」を反映。
+fn shot_size_for_role(role: &str) -> ShotSize {
+    match role {
+        "establishing" => ShotSize::Wide,
+        "action" => ShotSize::Medium,
+        "detail" => ShotSize::ExtremeCloseUp,
+        "reaction" => ShotSize::CloseUp,
+        "climax" => ShotSize::CloseUp,
+        "resolution" => ShotSize::Wide,
+        _ => ShotSize::Medium,
+    }
+}
+
+/// P15: 隣接カットで同じ shot_size が連続したら、emotional_intent に応じて
+/// 自然な遷移先 (medium→close or wide) を提案する。Codex セッション2の C マトリクス準拠。
+fn suggest_next_shot_size(prev: &ShotSize, emotional_intent: &str) -> ShotSize {
+    let going_emotional = emotional_intent.contains("感情")
+        || emotional_intent.contains("緊張")
+        || emotional_intent.contains("決意");
+    let going_environmental = emotional_intent.contains("環境")
+        || emotional_intent.contains("広がり")
+        || emotional_intent.contains("呼吸");
+    match prev {
+        ShotSize::ExtremeWide => ShotSize::Wide,
+        ShotSize::Wide => {
+            if going_emotional {
+                ShotSize::Medium
+            } else {
+                ShotSize::Medium
+            }
+        }
+        ShotSize::Medium => {
+            if going_emotional {
+                ShotSize::CloseUp
+            } else if going_environmental {
+                ShotSize::Wide
+            } else {
+                ShotSize::CloseUp
+            }
+        }
+        ShotSize::CloseUp => {
+            if going_environmental {
+                ShotSize::Wide
+            } else {
+                ShotSize::Medium
+            }
+        }
+        ShotSize::ExtremeCloseUp => ShotSize::Medium,
+    }
+}
+
+/// P15: 全カットに対して CutVisualPlan を構築する。
+/// 1. cut_role から初期 shot_size を引く
+/// 2. 隣接カットで同じ shot_size 連続なら suggest_next_shot_size で変更
+/// 3. screen_direction / camera_side は scene_group_id 内で維持
+/// 4. action_end → 次カットの action_start に接続
+fn plan_visual_continuity(cuts: &[CutPlan]) -> Vec<CutVisualPlan> {
+    let mut plans: Vec<CutVisualPlan> = Vec::new();
+    for (i, cut) in cuts.iter().enumerate() {
+        let role_assignment = assign_cut_role(i, cuts.len(), &cut.description);
+        let mut shot_size = shot_size_for_role(role_assignment.role);
+
+        // 隣接カットとの shot_size 衝突を解消
+        if let Some(prev) = plans.last() {
+            if prev.shot_size == shot_size {
+                shot_size = suggest_next_shot_size(&prev.shot_size, &cut.description);
+            }
+            // shot_size の飛躍が大きすぎる場合 (±3 以上) は1段階に丸める
+            let delta = (shot_size.level() - prev.shot_size.level()).abs();
+            if delta >= 3 {
+                shot_size = match prev.shot_size {
+                    ShotSize::ExtremeWide => ShotSize::Medium,
+                    ShotSize::Wide => ShotSize::CloseUp,
+                    ShotSize::Medium => ShotSize::Wide,
+                    ShotSize::CloseUp => ShotSize::Wide,
+                    ShotSize::ExtremeCloseUp => ShotSize::Medium,
+                };
+            }
+        }
+
+        // screen_direction は scene_group 内で前カットを継承、別グループなら static
+        let (screen_direction, camera_side) = match plans.last() {
+            Some(prev) if prev.scene_group_id == cut.scene_group_id => {
+                (prev.screen_direction.clone(), prev.camera_side.clone())
+            }
+            _ => (ScreenDirection::Static, "neutral".to_string()),
+        };
+
+        // action_end → action_start の接続。前カットの end が今カットの start。
+        let action_start = plans
+            .last()
+            .map(|p| p.action_end.clone())
+            .unwrap_or_else(|| "establish character standing posture".to_string());
+
+        // action_end は cut.description から動詞っぽい末尾要素を取り出す簡易ロジック。
+        // 完全な抽出は LLM 任せだが、Rust 側でも一応推定する。
+        let action_end = derive_action_end(&cut.description);
+
+        // subject_position は scene_group の axis に応じて選択 (簡易)
+        let subject_position = match (i % 3, role_assignment.role) {
+            (_, "establishing") | (_, "resolution") => "center".to_string(),
+            (0, _) => "left_third".to_string(),
+            (1, _) => "center".to_string(),
+            _ => "right_third".to_string(),
+        };
+
+        plans.push(CutVisualPlan {
+            cut_id: cut.cut_id.clone(),
+            scene_group_id: cut.scene_group_id.clone(),
+            cut_role: role_assignment.role.to_string(),
+            shot_size,
+            screen_direction,
+            camera_side,
+            subject_position,
+            action_start,
+            action_end,
+            emotional_intent: cut.description.clone(),
+        });
+    }
+    plans
+}
+
+/// 動詞抽出の簡易ロジック。description の末尾フレーズから動作を推定する。
+fn derive_action_end(description: &str) -> String {
+    // 末尾の句読点直前を取る。これが action_end の起点となる。
+    let trimmed = description.trim_end_matches(['.', '。', '!', '?'].as_ref());
+    let last_clause = trimmed
+        .rsplit_once(['、', '，', '.', '。'])
+        .map(|(_, tail)| tail.trim())
+        .unwrap_or(trimmed)
+        .trim();
+    if last_clause.is_empty() {
+        "subject holds final pose".to_string()
+    } else {
+        format!("pose at end of: {last_clause}")
+    }
+}
+
+/// P15: 隣接カットの ContinuityContract を構築する。
+/// 「前カットから何を preserve / change / forbid / bridge するか」を渡す。
+fn build_continuity_contract(
+    prev: Option<&CutVisualPlan>,
+    curr: &CutVisualPlan,
+) -> ContinuityContract {
+    let mut preserve: Vec<String> = vec![
+        "character_id".into(),
+        "costume_palette".into(),
+        "world_rules".into(),
+        "aspect_ratio".into(),
+    ];
+    let mut change: Vec<String> = vec![format!("cut_role: {}", curr.cut_role)];
+    let mut forbidden: Vec<String> = vec![
+        "identity_drift".into(),
+        "costume_drift".into(),
+        "unintroduced_extra_character".into(),
+        "background_teleport".into(),
+        "text_gibberish".into(),
+        "hand_face_artifact".into(),
+    ];
+    let mut bridge: Vec<String> = Vec::new();
+
+    if let Some(p) = prev {
+        // scene_group 内なら 180度ライン・screen_direction を保持
+        if p.scene_group_id == curr.scene_group_id {
+            preserve.push(format!("screen_direction: {}", p.screen_direction.as_str()));
+            preserve.push(format!("camera_side: {}", p.camera_side));
+            forbidden.push("axis_flip_without_bridge".into());
+        }
+
+        // shot_size 比較
+        let delta = curr.shot_size.level() - p.shot_size.level();
+        if delta > 0 {
+            change.push(format!("shot_size: move closer ({} → {})", p.shot_size.as_str(), curr.shot_size.as_str()));
+        } else if delta < 0 {
+            change.push(format!("shot_size: pull back ({} → {})", p.shot_size.as_str(), curr.shot_size.as_str()));
+        }
+
+        // 構図の禁止 (前と同じフレーミングを禁ずる)
+        forbidden.push("exact_same_framing_as_previous".into());
+
+        // 動作橋渡し
+        bridge.push(format!("cut_on_action: continue from \"{}\"", p.action_end));
+        bridge.push(format!("action_start: \"{}\"", curr.action_start));
+    }
+
+    change.push(format!("emphasis: {}", curr.emotional_intent));
+    change.push(format!("subject_position: {}", curr.subject_position));
+
+    ContinuityContract {
+        preserve,
+        change,
+        forbidden,
+        bridge,
+    }
+}
+
 fn assign_cut_role(cut_index: usize, total_cuts: usize, action: &str) -> CutRoleAssignment {
     // Verb-driven overrides take precedence over positional default.
     // If the action strongly implies a specific role, honor it.
@@ -1644,6 +1990,12 @@ fn build_generation_prompt(
          2. {aspect_ratio} aspect ratio / high quality で生成する。\n\
          3. 画面内テキスト、ロゴ、透かし、グリッド、コラージュ、複数パネルは禁止。\n\
          4. 出力先指定や画像変換は不要です。生成画像は $CODEX_HOME/generated_images/<session>/ig_*.png に保存されます。\n\n\
+         ## 重要: Continuity Contract に従う (もし含まれていれば)\n\
+         - JSON に `continuity_contract` がある場合、その preserve/change/forbidden/bridge を厳格に守る。\n\
+         - `visual_plan.shot_size` と `visual_plan.screen_direction` は機械的に決定済み。揺らがせない。\n\
+         - 「前カットの属性を真似る」のではなく「contract が指示する変化」を作る。\n\
+         - `murch_priority` に従い、emotion/story/rhythm を優先。空間整合より感情整合。\n\
+         - bridge.cut_on_action がある場合、前カットの末尾動作から自然に繋がる開始姿勢で描く。\n\n\
          ## Structured Prompt JSON\n{prompt_json}\n\n\
          最終メッセージは OK または NG <理由> の1行のみ。"
     )
