@@ -408,7 +408,9 @@ function RefThumb({ label, path }: { label: string; path: string }) {
         <img
           src={`asset://localhost/${encodeURI(path)}`}
           alt={label}
-          className="h-full w-full object-cover"
+          title="ダブルクリックで拡大"
+          onDoubleClick={() => useImagePreview.getState().open(path, [path])}
+          className="h-full w-full cursor-zoom-in object-cover hover:opacity-80"
         />
       </div>
       <div className="text-[10px] text-zinc-500">{label}</div>

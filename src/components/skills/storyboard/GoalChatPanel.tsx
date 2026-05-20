@@ -4,6 +4,7 @@ import { usePlanChat } from "../../../lib/store/planChat";
 import { useStoryboardRun } from "../../../lib/store/storyboardRun";
 import { useSkillMode } from "../../../lib/store/skillMode";
 import { useToasts } from "../../../lib/store/toasts";
+import { useImagePreview } from "../../../lib/store/imagePreview";
 import type { StoryboardGoal } from "../../../lib/storyboard/types";
 import { ReferenceLibraryModal } from "../../ReferenceLibraryModal";
 import { CandidatesSelect } from "./CandidatesSelect";
@@ -273,6 +274,26 @@ export function GoalChatPanel() {
               <div className="mb-1 text-[10px] uppercase tracking-wider text-zinc-500">
                 {m.role === "user" ? "あなた" : "AI"}
               </div>
+              {/* P20a (2026-05-21): 添付画像があればサムネ表示+ダブルクリックでプレビュー */}
+              {m.attachedImages && m.attachedImages.length > 0 && (
+                <ul className="mb-2 flex flex-wrap gap-2">
+                  {m.attachedImages.map((path) => (
+                    <li key={path}>
+                      <img
+                        src={`asset://localhost/${encodeURI(path)}`}
+                        alt={basename(path)}
+                        title="ダブルクリックで拡大"
+                        onDoubleClick={() =>
+                          useImagePreview
+                            .getState()
+                            .open(path, m.attachedImages ?? [])
+                        }
+                        className="h-20 w-20 cursor-zoom-in rounded border border-pink-500/30 object-cover hover:border-pink-500"
+                      />
+                    </li>
+                  ))}
+                </ul>
+              )}
               <div className="whitespace-pre-wrap leading-relaxed">{m.text}</div>
               {m.streaming && (
                 <div className="mt-1 text-[10px] text-zinc-500">入力中…</div>
@@ -293,7 +314,11 @@ export function GoalChatPanel() {
                 <img
                   src={`asset://localhost/${encodeURI(p)}`}
                   alt={basename(p)}
-                  className="h-8 w-8 rounded object-cover"
+                  title="ダブルクリックで拡大"
+                  onDoubleClick={() =>
+                    useImagePreview.getState().open(p, attachedImages)
+                  }
+                  className="h-8 w-8 cursor-zoom-in rounded object-cover hover:opacity-80"
                 />
                 <span className="max-w-[140px] truncate text-[11px] text-zinc-300">
                   {basename(p)}

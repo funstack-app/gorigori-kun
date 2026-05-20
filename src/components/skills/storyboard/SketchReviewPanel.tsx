@@ -1000,15 +1000,28 @@ function ReferenceSlot({
       <button
         type="button"
         onClick={onPick}
+        // P20b (2026-05-21): 画像があるときダブルクリックで拡大プレビュー
+        onDoubleClick={
+          path
+            ? (e) => {
+                e.stopPropagation();
+                useImagePreview.getState().open(path, [path]);
+              }
+            : undefined
+        }
         className={[
           "flex h-16 w-24 items-center justify-center overflow-hidden rounded-md border transition",
           path
-            ? "border-[#2a2a2a]"
+            ? "cursor-zoom-in border-[#2a2a2a]"
             : required
               ? "border-dashed border-pink-500/50 bg-pink-500/5 hover:border-pink-500"
               : "border-dashed border-[#2a2a2a] hover:border-pink-500/40",
         ].join(" ")}
-        title={path ? basename(path) : "クリックで画像を選択"}
+        title={
+          path
+            ? `${basename(path)} (ダブルクリックで拡大)`
+            : "クリックで画像を選択"
+        }
       >
         {path ? (
           <img
