@@ -34,6 +34,7 @@ export function SketchReviewPanel() {
   const activeSketchVersionId = useStoryboardRun((s) => s.activeSketchVersionId);
   const pushSketchVersion = useStoryboardRun((s) => s.pushSketchVersion);
   const updateSketchCut = useStoryboardRun((s) => s.updateSketchCut);
+  const sceneGroups = useStoryboardRun((s) => s.sceneGroups);
   const setPhase = useStoryboardRun((s) => s.setPhase);
   const setGoal = useStoryboardRun((s) => s.setGoal);
   const sceneConstruction = usePlanChat((s) => s.sceneConstruction);
@@ -305,6 +306,32 @@ export function SketchReviewPanel() {
   const allDone = doneCount === totalCuts && totalCuts > 0;
   const progressPercent = totalCuts > 0 ? (doneCount / totalCuts) * 100 : 0;
 
+  // === シーン分け (P3a) ===
+  // sceneGroups がある場合はシーン単位でグルーピング、ない場合は1グループにまとめる
+  const groupedCuts = useMemo(() => {
+    const cutsByCutId = new Map(activeVersion.cuts.map((c) => [c.cutId, c]));
+    if (sceneGroups.length === 0) {
+      return [
+        {
+          id: "all",
+          label: "シーン 1",
+          cuts: activeVersion.cuts.map((c, i) => ({ cut: c, index: i })),
+        },
+      ];
+    }
+    return sceneGroups.map((g, gi) => ({
+      id: g.id,
+      label: `シーン ${gi + 1}`,
+      cuts: g.cutIds
+        .map((id) => cutsByCutId.get(id))
+        .filter((c): c is StoryboardSketchCut => Boolean(c))
+        .map((c) => ({
+          cut: c,
+          index: activeVersion.cuts.findIndex((x) => x.cutId === c.cutId),
+        })),
+    }));
+  }, [activeVersion.cuts, sceneGroups]);
+
   return (
     <div className="flex h-full flex-col gap-3">
       {/* === ヘッダー === */}
@@ -388,24 +415,38 @@ export function SketchReviewPanel() {
         </div>
       </header>
 
-      {/* === カット割りグリッド (Phase 3 と同じレイアウト感) === */}
+      {/* === シーン分けタイムライン (P3a) === */}
       <div className="min-h-0 flex-1 overflow-y-auto rounded-md border border-[#242424] bg-[#101010] p-4">
-        <ol className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-          {activeVersion.cuts.map((c, i) => (
-            <SketchCutCard
-              key={c.cutId}
-              cut={c}
-              index={i}
-              aspectRatio={goal.aspectRatio}
-              onEdit={() => {
-                setCursor(i);
-                startEdit(c);
-              }}
-              onRegenerate={() => handleRegenerateCut(c)}
-              onClearOverride={() => clearOverride(c)}
-            />
+        <div className="flex flex-col gap-5">
+          {groupedCuts.map((group) => (
+            <section key={group.id} className="flex flex-col gap-2">
+              <div className="flex items-center gap-2 border-l-2 border-pink-500 pl-2">
+                <h3 className="text-xs font-bold uppercase tracking-wider text-pink-200">
+                  {group.label}
+                </h3>
+                <span className="text-[10px] text-zinc-500">
+                  {group.cuts.length} カット
+                </span>
+              </div>
+              <ol className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                {group.cuts.map(({ cut: c, index: i }) => (
+                  <SketchCutCard
+                    key={c.cutId}
+                    cut={c}
+                    index={i}
+                    aspectRatio={goal.aspectRatio}
+                    onEdit={() => {
+                      setCursor(i);
+                      startEdit(c);
+                    }}
+                    onRegenerate={() => handleRegenerateCut(c)}
+                    onClearOverride={() => clearOverride(c)}
+                  />
+                ))}
+              </ol>
+            </section>
           ))}
-        </ol>
+        </div>
       </div>
 
       {/* === 自由記述モーダル (書き直し中のカットがあれば表示) === */}

@@ -121,6 +121,32 @@ export function GenerationProgressPanel() {
     }));
   }, [sceneConstruction, cuts]);
 
+  // P3a: シーン分けグルーピング
+  const sceneGroups = useStoryboardRun((s) => s.sceneGroups);
+  const groupedOrdered = useMemo(() => {
+    const byCutId = new Map(ordered.map((o) => [o.cutId, o]));
+    if (sceneGroups.length === 0) {
+      return [
+        {
+          id: "all",
+          label: "シーン 1",
+          items: ordered.map((o, i) => ({ ...o, displayIndex: i })),
+        },
+      ];
+    }
+    return sceneGroups.map((g, gi) => ({
+      id: g.id,
+      label: `シーン ${gi + 1}`,
+      items: g.cutIds
+        .map((id) => byCutId.get(id))
+        .filter((o): o is (typeof ordered)[number] => Boolean(o))
+        .map((o) => ({
+          ...o,
+          displayIndex: ordered.findIndex((x) => x.cutId === o.cutId),
+        })),
+    }));
+  }, [ordered, sceneGroups]);
+
   const completed = ordered.filter(
     (o) => o.state?.status === "confirmed" || o.state?.status === "review",
   ).length;
@@ -212,8 +238,20 @@ export function GenerationProgressPanel() {
       </header>
 
       <div className="min-h-0 flex-1 overflow-y-auto rounded-md border border-[#242424] bg-[#101010] p-4">
-        <ol className="grid gap-3 md:grid-cols-1 xl:grid-cols-2">
-          {ordered.map((o, i) => {
+        <div className="flex flex-col gap-5">
+          {groupedOrdered.map((group) => (
+            <section key={group.id} className="flex flex-col gap-2">
+              <div className="flex items-center gap-2 border-l-2 border-pink-500 pl-2">
+                <h3 className="text-xs font-bold uppercase tracking-wider text-pink-200">
+                  {group.label}
+                </h3>
+                <span className="text-[10px] text-zinc-500">
+                  {group.items.length} カット
+                </span>
+              </div>
+              <ol className="grid gap-3 md:grid-cols-1 xl:grid-cols-2">
+              {group.items.map((o) => {
+                const i = o.displayIndex;
             const s = o.state;
             const statusLabel =
               s?.status === "confirmed"
@@ -299,7 +337,10 @@ export function GenerationProgressPanel() {
               </li>
             );
           })}
-        </ol>
+              </ol>
+            </section>
+          ))}
+        </div>
       </div>
     </div>
   );
