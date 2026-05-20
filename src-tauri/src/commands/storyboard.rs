@@ -88,6 +88,12 @@ pub struct ScoreBundle {
 pub struct SceneGroup {
     pub id: String,
     pub cut_ids: Vec<String>,
+    /// P18b: シーンの狙い (1文)。各カットの構造化プロンプトに含める。
+    #[serde(default)]
+    pub intent: Option<String>,
+    /// P18b: シーンの大ロケーション (例: "abandoned church nave")。
+    #[serde(default)]
+    pub primary_location: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -696,7 +702,40 @@ async fn run_storyboard_orchestrator(
     if cuts.is_empty() {
         cuts = local_cut_plan(&params);
     }
-    let scene_groups = build_scene_groups(&cuts);
+    let mut scene_groups = build_scene_groups(&cuts);
+    // P18b: AI が scene_construction.scene_groups を返している場合、intent / primary_location を取り込む
+    if let Some(scene_construction) = params.scene_construction.as_ref() {
+        if let Some(ai_groups) = scene_construction.get("sceneGroups").and_then(|v| v.as_array())
+            .or_else(|| scene_construction.get("scene_groups").and_then(|v| v.as_array()))
+        {
+            for ai_group in ai_groups {
+                let id_str = ai_group
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if id_str.is_empty() {
+                    continue;
+                }
+                let intent_str = ai_group
+                    .get("intent")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let location_str = ai_group
+                    .get("primaryLocation")
+                    .or_else(|| ai_group.get("primary_location"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                if let Some(existing) = scene_groups.iter_mut().find(|g| g.id == id_str) {
+                    if existing.intent.is_none() {
+                        existing.intent = intent_str.clone();
+                    }
+                    if existing.primary_location.is_none() {
+                        existing.primary_location = location_str.clone();
+                    }
+                }
+            }
+        }
+    }
     let total_cuts = cuts.len() as u32;
     let candidates_per_cut = normalize_candidates(params.candidates_per_cut);
     let style_ref = params
@@ -771,7 +810,19 @@ async fn run_storyboard_orchestrator(
                 } else {
                     None
                 };
-                let contract = build_continuity_contract(prev_plan, curr_plan);
+                // P18c: 現カットの scene_group の intent / primary_location を取得して渡す
+                let curr_scene_group = scene_groups
+                    .iter()
+                    .find(|g| g.id == curr_plan.scene_group_id);
+                let scene_intent = curr_scene_group.and_then(|g| g.intent.as_deref());
+                let scene_primary_location = curr_scene_group
+                    .and_then(|g| g.primary_location.as_deref());
+                let contract = build_continuity_contract(
+                    prev_plan,
+                    curr_plan,
+                    scene_intent,
+                    scene_primary_location,
+                );
                 if let Some(obj) = structured_prompt.as_object_mut() {
                     obj.insert(
                         "continuity_contract".to_string(),
@@ -1811,33 +1862,12 @@ fn plan_visual_continuity(cuts: &[CutPlan]) -> Vec<CutVisualPlan> {
         });
     }
 
-    // P17c: 5カット以上で POV か OverShoulder が未登場なら中盤カットに強制投入。
-    enforce_pov_or_ots(&mut plans);
+    // P18d (2026-05-21 STΛCK指示): 「ストーリーに無いショットを強制投入するな」
+    // 旧 enforce_pov_or_ots を撤廃。POV/OTS はストーリーが求める時だけ自然に出る。
+    // camera_angle_for_role の reaction/climax 既定値で OTS/POV は候補に入っているので、
+    // 強制投入なしでも適切な役割で自然に登場する。
 
     plans
-}
-
-/// P17c: 5+カットのシーケンスで POV / OverShoulder のどちらかは必ず含める。
-fn enforce_pov_or_ots(plans: &mut [CutVisualPlan]) {
-    if plans.len() < 5 {
-        return;
-    }
-    let has_pov_or_ots = plans.iter().any(|p| {
-        matches!(p.camera_angle, CameraAngle::Pov)
-            || matches!(p.camera_angle, CameraAngle::OverShoulder)
-    });
-    if has_pov_or_ots {
-        return;
-    }
-    // 中盤 (1/3 〜 2/3) のカットを 1 つ選んで POV か OTS に置換
-    let target_idx = plans.len() / 2;
-    if let Some(target) = plans.get_mut(target_idx) {
-        // reaction / detail / climax なら OTS、それ以外なら POV
-        target.camera_angle = match target.cut_role.as_str() {
-            "reaction" | "detail" | "climax" => CameraAngle::OverShoulder,
-            _ => CameraAngle::Pov,
-        };
-    }
 }
 
 /// P17d (2026-05-21): 隣接カット validate — 違反を warn ログに出す。
@@ -1909,9 +1939,15 @@ fn derive_action_end(description: &str) -> String {
 
 /// P15: 隣接カットの ContinuityContract を構築する。
 /// 「前カットから何を preserve / change / forbid / bridge するか」を渡す。
+///
+/// P18c (2026-05-21): scene_group 切替時はルールを大胆に緩める。
+///   - 同一 scene_group: シーン内連続性を厳格化 (screen_direction / axis / 構図変化等)
+///   - scene_group 切替: 新シーンとして自由度を保つ (キャラ identity のみ厳格)
 fn build_continuity_contract(
     prev: Option<&CutVisualPlan>,
     curr: &CutVisualPlan,
+    scene_intent: Option<&str>,
+    scene_primary_location: Option<&str>,
 ) -> ContinuityContract {
     let mut preserve: Vec<String> = vec![
         "character_id".into(),
@@ -1930,50 +1966,102 @@ fn build_continuity_contract(
     ];
     let mut bridge: Vec<String> = Vec::new();
 
+    // シーン情報を change に明示する (AI がシーンの狙いを把握できるように)
+    if let Some(intent) = scene_intent {
+        if !intent.trim().is_empty() {
+            change.push(format!("scene_intent: \"{}\"", intent));
+        }
+    }
+    if let Some(loc) = scene_primary_location {
+        if !loc.trim().is_empty() {
+            change.push(format!("scene_primary_location: \"{}\"", loc));
+        }
+    }
+
     if let Some(p) = prev {
-        // scene_group 内なら 180度ライン・screen_direction を保持
-        if p.scene_group_id == curr.scene_group_id {
+        let same_scene = p.scene_group_id == curr.scene_group_id;
+
+        if same_scene {
+            // === 同一 scene_group: 連続性を厳格に保つ ===
             preserve.push(format!("screen_direction: {}", p.screen_direction.as_str()));
             preserve.push(format!("camera_side: {}", p.camera_side));
             forbidden.push("axis_flip_without_bridge".into());
-        }
+            forbidden.push(format!(
+                "same_camera_angle_as_prev ({})",
+                p.camera_angle.as_str()
+            ));
+            forbidden.push("camera_remaining_in_exact_same_spot_as_prev".into());
+            forbidden.push("exact_same_framing_as_previous".into());
 
-        // shot_size 比較
-        let delta = curr.shot_size.level() - p.shot_size.level();
-        if delta > 0 {
-            change.push(format!("shot_size: move closer ({} → {})", p.shot_size.as_str(), curr.shot_size.as_str()));
-        } else if delta < 0 {
-            change.push(format!("shot_size: pull back ({} → {})", p.shot_size.as_str(), curr.shot_size.as_str()));
-        }
+            // shot_size 比較
+            let delta = curr.shot_size.level() - p.shot_size.level();
+            if delta > 0 {
+                change.push(format!(
+                    "shot_size: move closer ({} → {})",
+                    p.shot_size.as_str(),
+                    curr.shot_size.as_str()
+                ));
+            } else if delta < 0 {
+                change.push(format!(
+                    "shot_size: pull back ({} → {})",
+                    p.shot_size.as_str(),
+                    curr.shot_size.as_str()
+                ));
+            }
 
-        // P17a: camera_angle の変化を明示
-        if std::mem::discriminant(&p.camera_angle) != std::mem::discriminant(&curr.camera_angle) {
+            // camera_angle の変化を明示
+            if std::mem::discriminant(&p.camera_angle) != std::mem::discriminant(&curr.camera_angle)
+            {
+                change.push(format!(
+                    "camera_angle: change to {} ({})",
+                    curr.camera_angle.as_str(),
+                    curr.camera_angle.directive()
+                ));
+            }
+
+            // micro_location の変化を強制
+            if p.micro_location != curr.micro_location {
+                change.push(format!(
+                    "camera_position_within_scene: move from \"{}\" to \"{}\"",
+                    p.micro_location, curr.micro_location
+                ));
+            }
+
+            // 動作橋渡し
+            bridge.push(format!("cut_on_action: continue from \"{}\"", p.action_end));
+            bridge.push(format!("action_start: \"{}\"", curr.action_start));
+        } else {
+            // === scene_group 切替: 連続性ルールを緩める ===
+            // 新シーンとしてフレッシュに作る。キャラ identity と aspect だけ保つ。
+            change.push("new_scene_start: this cut begins a new scene_group".into());
             change.push(format!(
-                "camera_angle: change to {} ({})",
+                "new_setting: {}",
+                scene_primary_location.unwrap_or("(continuation)")
+            ));
+            change.push(format!(
+                "shot_size: {} (chosen for new scene opening)",
+                curr.shot_size.as_str()
+            ));
+            change.push(format!(
+                "camera_angle: {} ({})",
                 curr.camera_angle.as_str(),
                 curr.camera_angle.directive()
             ));
+            // 厳格な制約は外す (axis / framing 連続禁止は不要)
+            // ただしキャラ identity は引き続き厳格に preserve
+            forbidden.push("character_appearance_change".into());
         }
-        forbidden.push(format!(
-            "same_camera_angle_as_prev ({})",
-            p.camera_angle.as_str()
+    } else {
+        // === 最初のカット (prev なし) ===
+        change.push("opening_cut: establish this scene's first frame".into());
+        change.push(format!(
+            "shot_size: {} (opening)",
+            curr.shot_size.as_str()
         ));
-
-        // P17b: micro_location の変化を強制
-        if p.micro_location != curr.micro_location {
-            change.push(format!(
-                "camera_position_within_scene: move from \"{}\" to \"{}\"",
-                p.micro_location, curr.micro_location
-            ));
-        }
-        forbidden.push("camera_remaining_in_exact_same_spot_as_prev".into());
-
-        // 構図の禁止 (前と同じフレーミングを禁ずる)
-        forbidden.push("exact_same_framing_as_previous".into());
-
-        // 動作橋渡し
-        bridge.push(format!("cut_on_action: continue from \"{}\"", p.action_end));
-        bridge.push(format!("action_start: \"{}\"", curr.action_start));
+        change.push(format!(
+            "camera_angle: {}",
+            curr.camera_angle.as_str()
+        ));
     }
 
     change.push(format!("emphasis: {}", curr.emotional_intent));
@@ -2746,6 +2834,8 @@ fn build_scene_groups(cuts: &[CutPlan]) -> Vec<SceneGroup> {
             groups.push(SceneGroup {
                 id: cut.scene_group_id.clone(),
                 cut_ids: vec![cut.cut_id.clone()],
+                intent: None,
+                primary_location: None,
             });
         }
     }

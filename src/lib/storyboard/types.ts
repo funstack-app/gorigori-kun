@@ -7,7 +7,14 @@ export type ScoreBundle = {
   background: number;
 };
 
-export type SceneGroup = { id: string; cutIds: string[] };
+export type SceneGroup = {
+  id: string;
+  cutIds: string[];
+  /** P18b: シーンの狙い (1文)。AI に「このシーンで何を伝えるか」を渡すため。 */
+  intent?: string;
+  /** P18b: シーンの大ロケーション (例: "abandoned church nave")。シーン内で動かない。 */
+  primaryLocation?: string;
+};
 
 export type StoryboardEvent =
   | { kind: "started"; runId: string; totalCuts: number; sceneGroups: SceneGroup[] }
