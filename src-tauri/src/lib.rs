@@ -370,6 +370,7 @@ pub fn run() {
             commands::segment::is_segmentation_model_ready,
             commands::segment::download_segmentation_model,
             commands::storyboard::storyboard_run,
+            commands::storyboard::storyboard_regenerate_cut,
             commands::storyboard::storyboard_read_debug_log,
         ])
         .run(tauri::generate_context!())

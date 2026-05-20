@@ -289,6 +289,158 @@ pub async fn storyboard_run(
     Ok(run_id)
 }
 
+/// 単一カット再生成 (P4 STΛCK 指示 2026-05-20)。
+/// 既存 run で生成済みのカットを、追加参照画像を投げて再度 1 take 生成する。
+///
+/// 流れ:
+///  1. フロントから cut_id + additional_refs (ユーザー投入画像) を受ける
+///  2. 既存 generate_one_take を 1 回だけ呼ぶ (sketch_mode=false, manual_selection=true 扱い)
+///  3. TakeCompleted を既存 EVENT_STORYBOARD で発火 → フロントは既存ストアで自動的に take 追加扱い
+///  4. 評価ループはスキップ (ユーザー手動採用に委ねる)
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegenerateCutParams {
+    pub run_id: String,
+    pub cut_id: String,
+    pub character_reference_image: String,
+    #[serde(default)]
+    pub style_reference_image: Option<String>,
+    #[serde(default)]
+    pub additional_refs: Vec<String>,
+    /// optional intent text。指定があれば structured_prompt 末尾に「USER_DIRECTIVE: ...」で差し込む。
+    #[serde(default)]
+    pub prompt_override: Option<String>,
+    pub aspect_ratio: String,
+    /// 直前確定カット画像 (前後文脈用)。フロントが既知なら渡す。
+    #[serde(default)]
+    pub previous_cut_image: Option<String>,
+    /// 再生成対象カットの description (structured_prompt 構築用)
+    pub cut_description: String,
+    #[serde(default = "default_duration")]
+    pub cut_duration_seconds: f64,
+    #[serde(default)]
+    pub sketch_mode: bool,
+}
+
+fn default_duration() -> f64 {
+    2.0
+}
+
+#[tauri::command]
+pub async fn storyboard_regenerate_cut(
+    app: AppHandle,
+    _state: State<'_, AppState>,
+    params: RegenerateCutParams,
+) -> Result<String, String> {
+    let codex_home_orig = std::env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|h| h.join(".codex")))
+        .ok_or_else(|| "CODEX_HOME を解決できません".to_string())?;
+
+    let codex_bin =
+        resolve_codex_cli_binary().map_err(|e| format!("Codex CLI の解決に失敗: {e}"))?;
+
+    let storage_settings = StorageSettings::load()?;
+    let out_dir = resolve_output_dir(
+        &storage_settings,
+        None,
+        &format!("gori-storyboard-{}", params.run_id),
+    );
+    tokio::fs::create_dir_all(&out_dir)
+        .await
+        .map_err(|e| format!("storyboard 出力先作成失敗: {e}"))?;
+
+    let take_id = format!("re_{}", short_id());
+    let task_app = app.clone();
+    let task_cut_id = params.cut_id.clone();
+    let task_take_id = take_id.clone();
+
+    tokio::spawn(async move {
+        // 参照画像配列を構築:
+        //  1. character_reference_image (必須)
+        //  2. style_reference_image (任意)
+        //  3. previous_cut_image (任意・前後文脈)
+        //  4. additional_refs (ユーザー投入の追加参照、複数可)
+        let mut reference_images: Vec<PathBuf> = vec![PathBuf::from(&params.character_reference_image)];
+        if let Some(style) = params.style_reference_image.as_ref() {
+            if !style.trim().is_empty() {
+                reference_images.push(PathBuf::from(style));
+            }
+        }
+        if let Some(prev) = params.previous_cut_image.as_ref() {
+            if !prev.trim().is_empty() {
+                reference_images.push(PathBuf::from(prev));
+            }
+        }
+        for r in &params.additional_refs {
+            if !r.trim().is_empty() {
+                reference_images.push(PathBuf::from(r));
+            }
+        }
+
+        // 簡易な structured_prompt を組み立てる (フル plan_cuts は走らない)
+        let mut prompt_obj = serde_json::json!({
+            "cut_id": params.cut_id,
+            "description": params.cut_description,
+            "duration_seconds": params.cut_duration_seconds,
+            "aspect_ratio": params.aspect_ratio,
+            "user_directive": params.prompt_override.clone().unwrap_or_default(),
+            "additional_references_count": params.additional_refs.len(),
+        });
+        // user_directive が空文字なら除去 (LLM 混乱回避)
+        if params.prompt_override.is_none()
+            || params.prompt_override.as_deref().unwrap_or("").trim().is_empty()
+        {
+            if let Some(map) = prompt_obj.as_object_mut() {
+                map.remove("user_directive");
+            }
+        }
+
+        let generated = generate_one_take(
+            &codex_bin,
+            &codex_home_orig,
+            &prompt_obj,
+            &reference_images,
+            &out_dir,
+            &params.cut_id,
+            &task_take_id,
+            1,
+            1,
+            None,
+            &params.aspect_ratio,
+            params.sketch_mode,
+        )
+        .await;
+
+        match generated {
+            Ok((tid, image_path)) => {
+                let image_path_string = image_path.to_string_lossy().into_owned();
+                let _ = task_app.emit(
+                    EVENT_STORYBOARD,
+                    StoryboardEvent::TakeCompleted {
+                        cut_id: task_cut_id,
+                        take_id: tid,
+                        image_path: image_path_string,
+                        scores: ScoreBundle::default(),
+                    },
+                );
+            }
+            Err(err) => {
+                tracing::warn!(target: "codex.storyboard", "regenerate_cut failed: {err}");
+                let _ = task_app.emit(
+                    EVENT_STORYBOARD,
+                    StoryboardEvent::CutFailed {
+                        cut_id: task_cut_id,
+                        reason: err,
+                    },
+                );
+            }
+        }
+    });
+
+    Ok(take_id)
+}
+
 async fn run_storyboard_orchestrator(
     app: AppHandle,
     codex_bin: PathBuf,

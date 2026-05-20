@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type DragEvent } from "react";
 
-import { storyboard } from "../../../lib/ipc";
+import { storyboard, type RegenerateCutParams } from "../../../lib/ipc";
 import { useStoryboardRun } from "../../../lib/store/storyboardRun";
 import { usePlanChat } from "../../../lib/store/planChat";
 import { useToasts } from "../../../lib/store/toasts";
@@ -270,14 +270,59 @@ export function SketchReviewPanel() {
     setEditing(false);
   }
 
-  function handleRegenerateCut(cut: StoryboardSketchCut) {
-    // 将来: AI に「カット {order} をこういう内容に書き直して」と部分再依頼する。
-    // 現状は意図を明示するトーストだけ。
-    useToasts.getState().push({
-      kind: "info",
-      text: `Cut ${cut.order} の AI 再生成は実装中です。一旦「書き直し」で手書き上書きしてください。`,
-      ttlMs: 5000,
-    });
+  // P4 (2026-05-20): 単一カット再生成。追加参照画像と自由記述で 1 take 生成する。
+  // additionalRefs を渡せば、ユーザー投入のラフ画像を反映できる。
+  async function handleRegenerateCut(
+    cut: StoryboardSketchCut,
+    additionalRefs: string[] = [],
+  ) {
+    if (!goal?.characterReferencePath) {
+      useToasts.getState().push({
+        kind: "error",
+        text: "キャラ参照画像を先に選んでください。",
+        ttlMs: 4000,
+      });
+      return;
+    }
+    const runId = useStoryboardRun.getState().activeRunId;
+    if (!runId) {
+      useToasts.getState().push({
+        kind: "error",
+        text: "アクティブな run が見つかりません。Phase 1 から始め直してください。",
+        ttlMs: 4000,
+      });
+      return;
+    }
+    const params: RegenerateCutParams = {
+      runId,
+      cutId: cut.cutId,
+      characterReferenceImage: goal.characterReferencePath,
+      styleReferenceImage: goal.styleReferencePath,
+      additionalRefs,
+      promptOverride: cut.userOverride,
+      aspectRatio: goal.aspectRatio,
+      cutDescription: cut.intent,
+      cutDurationSeconds: cut.durationSeconds,
+      sketchMode: true, // Phase 2 では絵コンテモードで再生成
+    };
+    try {
+      updateSketchCut(cut.cutId, { sketchStatus: "generating" });
+      await storyboard.regenerateCut(params);
+      useToasts.getState().push({
+        kind: "info",
+        text:
+          additionalRefs.length > 0
+            ? `Cut ${cut.order} を参照画像で再生成中…`
+            : `Cut ${cut.order} を再生成中…`,
+        ttlMs: 3000,
+      });
+    } catch (e) {
+      useToasts.getState().push({
+        kind: "error",
+        text: `再生成に失敗: ${(e as Error)?.message ?? e}`,
+        ttlMs: 5000,
+      });
+    }
   }
 
   if (!goal) {
@@ -440,6 +485,7 @@ export function SketchReviewPanel() {
                       startEdit(c);
                     }}
                     onRegenerate={() => handleRegenerateCut(c)}
+                    onRegenerateWithRefs={(refs) => handleRegenerateCut(c, refs)}
                     onClearOverride={() => clearOverride(c)}
                   />
                 ))}
@@ -505,6 +551,7 @@ function SketchCutCard({
   aspectRatio,
   onEdit,
   onRegenerate,
+  onRegenerateWithRefs,
   onClearOverride,
 }: {
   cut: StoryboardSketchCut;
@@ -512,8 +559,50 @@ function SketchCutCard({
   aspectRatio: string;
   onEdit: () => void;
   onRegenerate: () => void;
+  onRegenerateWithRefs: (refs: string[]) => void;
   onClearOverride: () => void;
 }) {
+  const [dragOver, setDragOver] = useState(false);
+
+  // D&D: 画像ファイルを受けたら参照画像として再生成
+  function handleDragOver(e: DragEvent) {
+    if (e.dataTransfer.types.includes("Files")) {
+      e.preventDefault();
+      setDragOver(true);
+    }
+  }
+  function handleDragLeave() {
+    setDragOver(false);
+  }
+  function handleDrop(e: DragEvent) {
+    e.preventDefault();
+    setDragOver(false);
+    const files = Array.from(e.dataTransfer.files || []);
+    const imagePaths = files
+      .filter((f) => f.type.startsWith("image/"))
+      .map((f) => (f as File & { path?: string }).path)
+      .filter((p): p is string => Boolean(p));
+    if (imagePaths.length > 0) {
+      onRegenerateWithRefs(imagePaths);
+    }
+  }
+  async function pickRefImages() {
+    try {
+      const { open: openDialog } = await import("@tauri-apps/plugin-dialog");
+      const r = await openDialog({
+        multiple: true,
+        filters: [{ name: "画像", extensions: IMAGE_EXTS }],
+      });
+      if (!r) return;
+      const paths = (Array.isArray(r) ? r : [r]).filter(
+        (p): p is string => typeof p === "string",
+      );
+      if (paths.length > 0) onRegenerateWithRefs(paths);
+    } catch {
+      // noop
+    }
+  }
+
   const status = cut.sketchStatus ?? "pending";
   const statusLabel =
     status === "done"
@@ -533,7 +622,15 @@ function SketchCutCard({
           : "text-zinc-500";
 
   return (
-    <li className="flex flex-col gap-2 rounded-md border border-[#242424] bg-[#1a1a1a] p-3">
+    <li
+      className={[
+        "flex flex-col gap-2 rounded-md border bg-[#1a1a1a] p-3 transition",
+        dragOver ? "border-pink-500 ring-2 ring-pink-500/40" : "border-[#242424]",
+      ].join(" ")}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
       <div className="flex items-center justify-between">
         <span className="text-[11px] font-semibold uppercase tracking-wider text-pink-200">
           Cut {index + 1} · {cut.durationSeconds}s
@@ -544,6 +641,12 @@ function SketchCutCard({
       <div className="flex items-center justify-center overflow-hidden rounded-md border border-[#2a2a2a] bg-[#fcfbf5]">
         <SketchImageBox cut={cut} aspectRatio={aspectRatio} />
       </div>
+
+      {dragOver && (
+        <div className="rounded-md border border-pink-500/50 bg-pink-500/10 px-2 py-1 text-center text-[10px] text-pink-100">
+          画像をドロップして参照付きで再生成
+        </div>
+      )}
 
       <div className="line-clamp-2 text-xs text-zinc-300">
         {cut.userOverride ? (
@@ -572,6 +675,14 @@ function SketchCutCard({
           className="rounded border border-[#2a2a2a] px-2 py-1 text-[10px] text-zinc-300 hover:border-pink-500/40"
         >
           再生成
+        </button>
+        <button
+          type="button"
+          onClick={pickRefImages}
+          className="rounded border border-[#2a2a2a] px-2 py-1 text-[10px] text-zinc-300 hover:border-pink-500/40"
+          title="画像を投げて参照付きで再生成"
+        >
+          参照を投げる
         </button>
         {cut.userOverride && (
           <button

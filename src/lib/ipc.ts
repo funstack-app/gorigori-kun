@@ -430,9 +430,30 @@ export function onStoryboardEvent(
   return listen<StoryboardEvent>(EVENT_STORYBOARD, (event) => cb(event.payload));
 }
 
+/**
+ * P4 (2026-05-20): 単一カット再生成用パラメータ。
+ * ユーザー投入の追加参照画像 + (任意で) 自由記述で 1 take 生成する。
+ */
+export type RegenerateCutParams = {
+  runId: string;
+  cutId: string;
+  characterReferenceImage: string;
+  styleReferenceImage?: string;
+  additionalRefs: string[];
+  promptOverride?: string;
+  aspectRatio: string;
+  previousCutImage?: string;
+  cutDescription: string;
+  cutDurationSeconds?: number;
+  sketchMode?: boolean;
+};
+
 export const storyboard = {
   run: (params: StoryboardRunParams) =>
     invoke<string>("storyboard_run", { params }),
+  /** 単一カットを追加参照画像で再生成 (新 take として TakeCompleted が来る)。 */
+  regenerateCut: (params: RegenerateCutParams) =>
+    invoke<string>("storyboard_regenerate_cut", { params }),
   /** 完了済み run の debug-log.json を読み込む（構造化プロンプト履歴の確認用）。 */
   readDebugLog: (runId: string) =>
     invoke<string>("storyboard_read_debug_log", { runId }),
