@@ -50,6 +50,7 @@ export function SketchReviewPanel() {
   const sketchVersions = useStoryboardRun((s) => s.sketchVersions);
   const activeSketchVersionId = useStoryboardRun((s) => s.activeSketchVersionId);
   const pushSketchVersion = useStoryboardRun((s) => s.pushSketchVersion);
+  const confirmSketchVersion = useStoryboardRun((s) => s.confirmSketchVersion);
   const updateSketchCut = useStoryboardRun((s) => s.updateSketchCut);
   const sceneGroups = useStoryboardRun((s) => s.sceneGroups);
   const cutDisplayOrder = useStoryboardRun((s) => s.cutDisplayOrder);
@@ -77,7 +78,8 @@ export function SketchReviewPanel() {
   // ストア (cuts Map) から絵コンテ画像を読む
   // storyboard.run(sketch_mode=true) はイベントを既存ルートで流すので、
   // cuts Map の takes[0].imagePath を sketchImagePath として参照する
-  const storeCuts = useStoryboardRun((s) => s.cuts);
+  // P19a (2026-05-21): 絵コンテ run 専用の sketchCuts を購読する (本生成 cuts と完全分離)
+  const storeCuts = useStoryboardRun((s) => s.sketchCuts);
   const storeStatus = useStoryboardRun((s) => s.status);
 
   const activeVersion: StoryboardSketchVersion | null = useMemo(() => {
@@ -240,6 +242,23 @@ export function SketchReviewPanel() {
       });
       return;
     }
+    // P19b (2026-05-21 STΛCK指示): 絵コンテを「確定」状態にしてから Phase 3 へ。
+    // confirmed=true の絵コンテだけが本生成の sketchReferences として使われる。
+    // これで「絵コンテ生成中のまま本生成に画像が流れ込む」現象を防ぐ。
+    if (!allDone) {
+      useToasts.getState().push({
+        kind: "error",
+        text: "絵コンテがまだ全カット生成されていません。完了を待ってから確定してください。",
+        ttlMs: 5000,
+      });
+      return;
+    }
+    confirmSketchVersion(activeVersion.versionId);
+    useToasts.getState().push({
+      kind: "success",
+      text: "絵コンテを確定しました。本生成に進みます。",
+      ttlMs: 3000,
+    });
     setPhase("generation");
   }
 
@@ -529,20 +548,22 @@ export function SketchReviewPanel() {
                 <button
                   type="button"
                   onClick={handleProceed}
-                  disabled={!canProceed}
+                  disabled={!canProceed || !allDone}
                   className={[
                     "rounded-md px-4 py-2 text-sm font-semibold transition",
-                    canProceed
+                    canProceed && allDone
                       ? "bg-pink-500 text-white hover:bg-pink-400"
                       : "cursor-not-allowed bg-zinc-700 text-zinc-400",
                   ].join(" ")}
                   title={
-                    canProceed
-                      ? `本生成 (${generationCandidatesPerCut}案/カット) を開始`
-                      : "キャラ参照画像を選択してください"
+                    !allDone
+                      ? "絵コンテが全カット完了するまで待ってください"
+                      : !canProceed
+                        ? "キャラ参照画像を選択してください"
+                        : `絵コンテを確定して本生成 (${generationCandidatesPerCut}案/カット) を開始`
                   }
                 >
-                  この絵コンテで本生成 →
+                  {allDone ? "絵コンテを確定して本生成 →" : "絵コンテ完成待ち…"}
                 </button>
               </div>
             </>

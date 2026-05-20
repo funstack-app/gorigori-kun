@@ -232,4 +232,11 @@ export type StoryboardSketchVersion = {
   cuts: StoryboardSketchCut[];
   /** AI からの全体方針メモ (キャラ一貫性, A-roll/B-roll 比率等)。 */
   directorNotes: string;
+  /**
+   * P19b (2026-05-21 STΛCK指示): ユーザーが「絵コンテを確定」を押した後 true になる。
+   * Phase 3 (本生成) はこの flag が true の sketchVersion からのみ参照画像を取り出す。
+   * これで「絵コンテ生成中のまま本生成に絵コンテ画像が流れ込む」現象を防ぐ。
+   */
+  confirmed?: boolean;
+  confirmedAt?: number;
 };

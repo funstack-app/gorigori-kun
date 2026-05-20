@@ -76,12 +76,15 @@ export function GenerationProgressPanel() {
       })();
 
       // P12: 絵コンテ画像を本生成の追加参照として渡す (cutId → 絵コンテ画像パス)
+      // P19b (2026-05-21): confirmed=true の sketchVersion のみ採用。
+      // 確定前の絵コンテ (生成途中含む) は本生成に流れ込まない。
       const sketchVersions = useStoryboardRun.getState().sketchVersions;
       const activeSketchVersionId = useStoryboardRun.getState().activeSketchVersionId;
-      const activeSketch =
+      const candidate =
         sketchVersions.find((v) => v.versionId === activeSketchVersionId) ??
         sketchVersions[sketchVersions.length - 1] ??
         null;
+      const activeSketch = candidate?.confirmed === true ? candidate : null;
       const sketchReferences: Record<string, string> = {};
       if (activeSketch) {
         for (const c of activeSketch.cuts) {

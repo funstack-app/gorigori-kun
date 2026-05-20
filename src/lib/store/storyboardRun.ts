@@ -50,7 +50,14 @@ export type PastRunSummary = {
 
 type StoryboardRunState = {
   activeRunId: string | null;
+  /**
+   * P19a (2026-05-21 STΛCK指示): 絵コンテと本生成を完全分離。
+   * cuts は **本生成 run 専用** の Map。絵コンテのイベントは sketchCuts に
+   * 振り分けられる。これで Phase 2/3 の混線を物理的に排除する。
+   */
   cuts: Map<string, CutState>;
+  /** 絵コンテ run 専用の cuts Map (P19a)。Phase 2 が購読する。 */
+  sketchCuts: Map<string, CutState>;
   sceneGroups: SceneGroup[];
   status: StoryboardRunStatus;
   totalCuts: number;
@@ -90,6 +97,11 @@ type StoryboardRunState = {
   setGoal: (goal: StoryboardGoal | null) => void;
   pushSketchVersion: (version: StoryboardSketchVersion) => void;
   setActiveSketchVersion: (versionId: string | null) => void;
+  /**
+   * P19b: 絵コンテバージョンを「確定」状態にする。
+   * confirmed=true の sketchVersion からのみ Phase 3 が参照画像を取り出す。
+   */
+  confirmSketchVersion: (versionId: string) => void;
   /** スケッチ内の特定カットを部分更新する (自由記述上書き等)。activeSketchVersionId 対象。 */
   updateSketchCut: (
     cutId: string,
@@ -162,6 +174,7 @@ type StoryboardRunState = {
 const runEmptyState = {
   activeRunId: null,
   cuts: new Map<string, CutState>(),
+  sketchCuts: new Map<string, CutState>(),
   sceneGroups: [],
   status: "idle" as const,
   totalCuts: 0,
@@ -232,9 +245,13 @@ export const useStoryboardRun = create<StoryboardRunState>((set) => ({
             ]
           : s.pastRuns;
       // run 関連だけリセット。phase/goal/sketchVersions/chatMessages は保持する。
+      // P19a: sketch_mode の run が始まる場合は sketchCuts を、本生成なら cuts を新規 Map に。
+      // どちらの run でも「もう片方の Map」は既存値を保持する。
+      const isSketch = params.sketchMode === true;
       return {
         ...runEmptyState,
-        cuts: new Map<string, CutState>(),
+        cuts: isSketch ? s.cuts : new Map<string, CutState>(),
+        sketchCuts: isSketch ? new Map<string, CutState>() : s.sketchCuts,
         pastRuns: archived,
         activeRunId: runId,
         params,
@@ -244,8 +261,18 @@ export const useStoryboardRun = create<StoryboardRunState>((set) => ({
 
   applyEvent: (e) => {
     set((s) => {
-      const cuts = new Map(s.cuts);
       const debugLog = [...s.debugLog, e];
+      // P19a: 現在の run の sketch_mode に応じて、どちらの Map を更新するか決める。
+      // params が null の場合は started イベントを待っているので cuts (本生成) 側を仮で使う。
+      const isSketch = s.params?.sketchMode === true;
+      const sourceMap = isSketch ? s.sketchCuts : s.cuts;
+      const targetMap = new Map(sourceMap);
+
+      // 共通の patch ヘルパー: どちらの Map に書き込んだかを反映する
+      const applyMap = <T extends object>(patch: T) =>
+        isSketch
+          ? ({ ...s, sketchCuts: targetMap, debugLog, ...patch } as typeof s)
+          : ({ ...s, cuts: targetMap, debugLog, ...patch } as typeof s);
 
       if (e.kind === "started") {
         return {
@@ -259,62 +286,70 @@ export const useStoryboardRun = create<StoryboardRunState>((set) => ({
       }
 
       if (e.kind === "cutStarted") {
-        const cut = ensureCut(cuts, e.cutId);
-        cuts.set(e.cutId, {
+        const cut = ensureCut(targetMap, e.cutId);
+        targetMap.set(e.cutId, {
           ...cut,
           sceneGroupId: e.sceneGroupId,
           status: "running",
           error: undefined,
           takeCount: e.takeCount,
         });
-        return { ...s, cuts, status: "running", debugLog };
+        return applyMap({ status: "running" as const });
       }
 
       if (e.kind === "takeCompleted") {
-        const cut = ensureCut(cuts, e.cutId);
+        const cut = ensureCut(targetMap, e.cutId);
         const takes = [
           ...cut.takes.filter((take) => take.takeId !== e.takeId),
           { takeId: e.takeId, imagePath: e.imagePath, scores: e.scores },
         ];
-        cuts.set(e.cutId, { ...cut, status: "review", takes });
-        return { ...s, cuts, status: "running", debugLog };
+        targetMap.set(e.cutId, { ...cut, status: "review", takes });
+        return applyMap({ status: "running" as const });
       }
 
       if (e.kind === "cutCheckpoint") {
-        const cut = ensureCut(cuts, e.cutId);
-        cuts.set(e.cutId, { ...cut, status: cut.status === "pending" ? "review" : cut.status });
-        return { ...s, cuts, checkpointCutId: e.cutId, status: "paused", debugLog };
+        const cut = ensureCut(targetMap, e.cutId);
+        targetMap.set(e.cutId, {
+          ...cut,
+          status: cut.status === "pending" ? "review" : cut.status,
+        });
+        return applyMap({ checkpointCutId: e.cutId, status: "paused" as const });
       }
 
       if (e.kind === "cutConfirmed") {
-        const cut = ensureCut(cuts, e.cutId);
-        cuts.set(e.cutId, {
+        const cut = ensureCut(targetMap, e.cutId);
+        targetMap.set(e.cutId, {
           ...cut,
           status: "confirmed",
           selectedTakeId: e.selectedTakeId,
         });
-        return { ...s, cuts, status: "running", debugLog };
+        return applyMap({ status: "running" as const });
       }
 
       if (e.kind === "cutFailed") {
-        const cut = ensureCut(cuts, e.cutId);
-        cuts.set(e.cutId, { ...cut, status: "failed", error: e.reason });
-        return { ...s, cuts, status: "failed", lastError: e.reason, debugLog };
+        const cut = ensureCut(targetMap, e.cutId);
+        targetMap.set(e.cutId, { ...cut, status: "failed", error: e.reason });
+        return applyMap({ status: "failed" as const, lastError: e.reason });
       }
 
       if (e.kind === "completed") {
-        const activeProjectId = useActiveProject.getState().activeProjectId;
-        if (activeProjectId) {
-          cuts.forEach((cut) => {
-            const take = cut.takes.find((item) => item.takeId === cut.selectedTakeId) ?? cut.takes[0];
-            if (take) {
-              useProjects.getState().addItem(activeProjectId, {
-                imagePath: take.imagePath,
-                prompt: s.params?.storyPrompt,
-                note: `storyboard ${cut.cutId}`,
-              });
-            }
-          });
+        // 本生成 (sketch_mode=false) の完了時のみ採用画像をプロジェクトへ
+        if (!isSketch) {
+          const activeProjectId = useActiveProject.getState().activeProjectId;
+          if (activeProjectId) {
+            targetMap.forEach((cut) => {
+              const take =
+                cut.takes.find((item) => item.takeId === cut.selectedTakeId) ??
+                cut.takes[0];
+              if (take) {
+                useProjects.getState().addItem(activeProjectId, {
+                  imagePath: take.imagePath,
+                  prompt: s.params?.storyPrompt,
+                  note: `storyboard ${cut.cutId}`,
+                });
+              }
+            });
+          }
         }
         return {
           ...s,
@@ -366,6 +401,16 @@ export const useStoryboardRun = create<StoryboardRunState>((set) => ({
 
   setActiveSketchVersion: (versionId) => set({ activeSketchVersionId: versionId }),
 
+  // P19b: 絵コンテ確定
+  confirmSketchVersion: (versionId) =>
+    set((s) => ({
+      sketchVersions: s.sketchVersions.map((v) =>
+        v.versionId === versionId
+          ? { ...v, confirmed: true, confirmedAt: Date.now() }
+          : v,
+      ),
+    })),
+
   updateSketchCut: (cutId, patch) =>
     set((s) => {
       if (s.sketchVersions.length === 0) return s;
@@ -386,6 +431,7 @@ export const useStoryboardRun = create<StoryboardRunState>((set) => ({
     set((s) => ({
       ...runEmptyState,
       cuts: new Map<string, CutState>(),
+      sketchCuts: new Map<string, CutState>(),
       debugLog: [],
       uiDebugLog: [],
       pastRuns: s.pastRuns, // 過去 run のサマリーは保持
