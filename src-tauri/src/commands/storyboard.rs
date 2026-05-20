@@ -210,6 +210,51 @@ enum ScreenDirection {
     Static,
 }
 
+/// P17a (2026-05-21 STΛCK指示): カメラアングルを機械的に多様化する。
+/// STΛCK 体感「アングルがほぼ全部 eye-level、ノペッとした動画になる」への対応。
+/// Codex セッション2 のC マトリクスに「カメラアングル軸」を追加した形。
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum CameraAngle {
+    EyeLevel,      // 目線、共感
+    High,          // 俯瞰、被写体を弱く見せる
+    Low,           // 煽り、被写体を強く見せる
+    Dutch,         // 傾き、不安/狂気
+    BirdsEye,      // 真上から、神視点
+    OverShoulder,  // 肩越し、対話/緊張
+    Pov,           // 主観視点、没入
+    ThreeQuarter,  // 斜め45度、自然
+}
+
+impl CameraAngle {
+    fn as_str(&self) -> &'static str {
+        match self {
+            CameraAngle::EyeLevel => "eye_level",
+            CameraAngle::High => "high_angle",
+            CameraAngle::Low => "low_angle",
+            CameraAngle::Dutch => "dutch_angle",
+            CameraAngle::BirdsEye => "birds_eye",
+            CameraAngle::OverShoulder => "over_shoulder",
+            CameraAngle::Pov => "pov_subjective",
+            CameraAngle::ThreeQuarter => "three_quarter",
+        }
+    }
+
+    /// 自然言語の指示文。AI への構造化プロンプトで使う。
+    fn directive(&self) -> &'static str {
+        match self {
+            CameraAngle::EyeLevel => "shot at character eye-level for direct empathy",
+            CameraAngle::High => "high-angle looking down, making subject appear vulnerable or small",
+            CameraAngle::Low => "low-angle looking up, making subject appear powerful or imposing",
+            CameraAngle::Dutch => "dutch tilt (canted angle, ~10-15deg) to convey unease",
+            CameraAngle::BirdsEye => "bird's-eye top-down view, near 90deg overhead",
+            CameraAngle::OverShoulder => "over-the-shoulder framing of another presence in foreground",
+            CameraAngle::Pov => "first-person POV through the character's eyes",
+            CameraAngle::ThreeQuarter => "three-quarter angle, ~45deg around the subject",
+        }
+    }
+}
+
 impl ScreenDirection {
     fn as_str(&self) -> &'static str {
         match self {
@@ -229,12 +274,14 @@ struct CutVisualPlan {
     scene_group_id: String,
     cut_role: String,        // establishing / action / detail / reaction / climax / resolution
     shot_size: ShotSize,
+    camera_angle: CameraAngle, // P17a: カメラアングル軸
     screen_direction: ScreenDirection,
     camera_side: String,     // "axis_left" / "axis_right" / "neutral"
     subject_position: String, // "left_third" / "center" / "right_third" / ...
     action_start: String,    // 動作の開始姿勢 (i2v 用)
     action_end: String,      // 動作の終了姿勢 (i2v 用、次カットの action_start に接続)
     emotional_intent: String, // 感情・狙い
+    micro_location: String,   // P17b: 同じ大ロケーション内の微小な場所 (nave/altar/pew等)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -679,7 +726,13 @@ async fn run_storyboard_orchestrator(
     // P15 (2026-05-20): 全カットの VisualPlan を事前に算出する。
     // これにより隣接カットの shot_size / screen_direction / camera_side が
     // 機械的に整合する。
+    // P17a/b/c (2026-05-21): camera_angle 多様化 + micro_location 遷移 + POV/OTS 強制投入も同関数内で実施。
     let visual_plans = plan_visual_continuity(&cuts);
+
+    // P17d: 違反 warn ログ。自動修正は plan_visual_continuity で完了済み。
+    for w in validate_neighbor_plans(&visual_plans) {
+        tracing::warn!(target: "codex.storyboard", "[continuity] {}", w);
+    }
 
     for (cut_index, cut) in cuts.iter().enumerate() {
         let _ = app.emit(
@@ -728,9 +781,12 @@ async fn run_storyboard_orchestrator(
                         "visual_plan".to_string(),
                         serde_json::json!({
                             "shot_size": curr_plan.shot_size.as_str(),
+                            "camera_angle": curr_plan.camera_angle.as_str(),
+                            "camera_angle_directive": curr_plan.camera_angle.directive(),
                             "screen_direction": curr_plan.screen_direction.as_str(),
                             "camera_side": curr_plan.camera_side,
                             "subject_position": curr_plan.subject_position,
+                            "micro_location": curr_plan.micro_location,
                             "action_start": curr_plan.action_start,
                             "action_end": curr_plan.action_end,
                             "cut_role": curr_plan.cut_role,
@@ -1443,6 +1499,172 @@ fn shot_size_for_role(role: &str) -> ShotSize {
     }
 }
 
+/// P17a (2026-05-21 STΛCK指示): cut_role から推奨 CameraAngle を引く。
+/// establishing は俯瞰や眼下、action は eye-level や low、reaction は OTS や POV など、
+/// 役割に応じて多様なアングルを散らばらせる初期値を返す。
+/// 隣接カットでの連続を避けるため、plan_visual_continuity 内で再調整する。
+fn camera_angle_for_role(role: &str, cut_index: usize) -> CameraAngle {
+    // cut_index を mod でずらしてバリエーションを作る
+    match role {
+        "establishing" => match cut_index % 3 {
+            0 => CameraAngle::Low,         // 教会の柱を見上げる
+            1 => CameraAngle::High,        // 俯瞰で空間紹介
+            _ => CameraAngle::ThreeQuarter, // 斜めから入場
+        },
+        "action" => match cut_index % 3 {
+            0 => CameraAngle::EyeLevel,
+            1 => CameraAngle::Low,
+            _ => CameraAngle::ThreeQuarter,
+        },
+        "detail" => match cut_index % 3 {
+            0 => CameraAngle::BirdsEye,    // 物の真上 (insert)
+            1 => CameraAngle::EyeLevel,
+            _ => CameraAngle::Low,
+        },
+        "reaction" => match cut_index % 3 {
+            0 => CameraAngle::OverShoulder, // OTS で対話/緊張
+            1 => CameraAngle::EyeLevel,
+            _ => CameraAngle::Pov,          // POV で没入
+        },
+        "climax" => match cut_index % 3 {
+            0 => CameraAngle::Dutch,       // 不安/狂気
+            1 => CameraAngle::Low,         // 強さ
+            _ => CameraAngle::OverShoulder,
+        },
+        "resolution" => match cut_index % 3 {
+            0 => CameraAngle::High,        // 引いて締める
+            1 => CameraAngle::ThreeQuarter,
+            _ => CameraAngle::EyeLevel,
+        },
+        _ => CameraAngle::EyeLevel,
+    }
+}
+
+/// P17b (2026-05-21 STΛCK指示): 「教会の中で移動している感がない、同じ場所でぐるぐる」
+/// 問題への対応。description から主ロケーションを推測し、その内側の micro-location
+/// プリセットを cut_index に応じてローテーションする。
+///
+/// micro_location は「同じ大空間内で物理的に移動した位置」を意味する。
+/// 同じ場所3カット連続を避けることで、カメラが空間内を移動する印象を作る。
+fn micro_locations_for(description: &str) -> Vec<&'static str> {
+    let lower = description.to_lowercase();
+    // 教会
+    if description.contains("教会") || lower.contains("church") || lower.contains("cathedral") {
+        return vec![
+            "near the entrance doors looking inward",
+            "central nave between the pews",
+            "at the altar with candles",
+            "side aisle by stained-glass windows",
+            "front row of pews looking toward the altar",
+            "behind the pulpit",
+            "by a confessional booth",
+            "stone steps leading to the choir loft",
+        ];
+    }
+    // ジム
+    if description.contains("ジム") || lower.contains("gym") {
+        return vec![
+            "by the dumbbell rack",
+            "in front of the squat rack",
+            "on the bench press",
+            "mirror wall reflection",
+            "by the cable machine",
+            "treadmill row",
+            "stretching mat area",
+            "locker hallway",
+        ];
+    }
+    // 廃墟
+    if description.contains("廃墟") || lower.contains("ruin") || lower.contains("abandoned") {
+        return vec![
+            "in front of broken entrance",
+            "down a collapsing corridor",
+            "central atrium with debris",
+            "by a shattered window",
+            "on a rusted staircase",
+            "under a partially fallen ceiling",
+            "next to overgrown machinery",
+            "on the rooftop edge",
+        ];
+    }
+    // ステージ
+    if description.contains("ステージ") || lower.contains("stage") {
+        return vec![
+            "downstage center spotlight",
+            "upstage left in shadow",
+            "wings backstage glimpse",
+            "near the drum riser",
+            "in front of the amp wall",
+            "stage edge facing audience",
+            "above the catwalk lighting rig",
+            "from the back of the venue",
+        ];
+    }
+    // 屋外 (一般)
+    if lower.contains("street") || description.contains("通り") || description.contains("街") {
+        return vec![
+            "intersection corner",
+            "narrow alley",
+            "main avenue sidewalk",
+            "under a neon sign",
+            "by a storefront window",
+            "rooftop view",
+            "across a crosswalk",
+            "near a bus stop",
+        ];
+    }
+    // 屋内一般
+    if lower.contains("room") || description.contains("部屋") {
+        return vec![
+            "by the door",
+            "center of the room",
+            "near the window",
+            "by the wall",
+            "at the desk",
+            "from a high corner",
+            "from the floor level",
+            "from outside through the doorway",
+        ];
+    }
+    // フォールバック (汎用)
+    vec![
+        "front entry framing",
+        "central interior wide view",
+        "side wall close framing",
+        "rear back-angle framing",
+        "near a primary prop in the foreground",
+        "looking out toward open space",
+        "looking inward from edge",
+        "from elevated viewpoint",
+    ]
+}
+
+/// P17a: 同じ camera_angle が直前と被ったら別の angle に切り替える。
+/// 多様性を強制する。
+fn alternate_camera_angle(prev: &CameraAngle, candidate: CameraAngle, cut_index: usize) -> CameraAngle {
+    if std::mem::discriminant(prev) != std::mem::discriminant(&candidate) {
+        return candidate;
+    }
+    // 候補プール (prev 以外) から cut_index ベースで選ぶ
+    let pool = [
+        CameraAngle::EyeLevel,
+        CameraAngle::High,
+        CameraAngle::Low,
+        CameraAngle::ThreeQuarter,
+        CameraAngle::OverShoulder,
+        CameraAngle::Pov,
+        CameraAngle::Dutch,
+        CameraAngle::BirdsEye,
+    ];
+    for offset in 1..pool.len() {
+        let pick = &pool[(cut_index + offset) % pool.len()];
+        if std::mem::discriminant(pick) != std::mem::discriminant(prev) {
+            return pick.clone();
+        }
+    }
+    CameraAngle::ThreeQuarter
+}
+
 /// P15: 隣接カットで同じ shot_size が連続したら、emotional_intent に応じて
 /// 自然な遷移先 (medium→close or wide) を提案する。Codex セッション2の C マトリクス準拠。
 fn suggest_next_shot_size(prev: &ShotSize, emotional_intent: &str) -> ShotSize {
@@ -1488,6 +1710,15 @@ fn suggest_next_shot_size(prev: &ShotSize, emotional_intent: &str) -> ShotSize {
 /// 4. action_end → 次カットの action_start に接続
 fn plan_visual_continuity(cuts: &[CutPlan]) -> Vec<CutVisualPlan> {
     let mut plans: Vec<CutVisualPlan> = Vec::new();
+
+    // P17b: 全カットの description を結合して主ロケーションを推測 → micro_location プール取得
+    let combined_description: String = cuts
+        .iter()
+        .map(|c| c.description.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let micro_pool = micro_locations_for(&combined_description);
+
     for (i, cut) in cuts.iter().enumerate() {
         let role_assignment = assign_cut_role(i, cuts.len(), &cut.description);
         let mut shot_size = shot_size_for_role(role_assignment.role);
@@ -1509,6 +1740,34 @@ fn plan_visual_continuity(cuts: &[CutPlan]) -> Vec<CutVisualPlan> {
                 };
             }
         }
+
+        // P17a: camera_angle を機械的にアサイン。隣接同 angle を避ける。
+        let mut camera_angle = camera_angle_for_role(role_assignment.role, i);
+        if let Some(prev) = plans.last() {
+            camera_angle = alternate_camera_angle(&prev.camera_angle, camera_angle, i);
+        }
+
+        // P17b: micro_location を機械的にアサイン (cut_index ベースでローテーション)。
+        // 同じ micro_location 3連続を避けるため、隣接2つと被らないように選ぶ。
+        let micro_location = {
+            let pool_len = micro_pool.len().max(1);
+            let mut idx = i % pool_len;
+            // 直前2カットと被ったらシフト
+            let recent_locations: Vec<String> = plans
+                .iter()
+                .rev()
+                .take(2)
+                .map(|p| p.micro_location.clone())
+                .collect();
+            for offset in 0..pool_len {
+                let candidate = micro_pool[(i + offset) % pool_len];
+                if !recent_locations.iter().any(|r| r == candidate) {
+                    idx = (i + offset) % pool_len;
+                    break;
+                }
+            }
+            micro_pool[idx].to_string()
+        };
 
         // screen_direction は scene_group 内で前カットを継承、別グループなら static
         let (screen_direction, camera_side) = match plans.last() {
@@ -1541,15 +1800,95 @@ fn plan_visual_continuity(cuts: &[CutPlan]) -> Vec<CutVisualPlan> {
             scene_group_id: cut.scene_group_id.clone(),
             cut_role: role_assignment.role.to_string(),
             shot_size,
+            camera_angle,
             screen_direction,
             camera_side,
             subject_position,
             action_start,
             action_end,
             emotional_intent: cut.description.clone(),
+            micro_location,
         });
     }
+
+    // P17c: 5カット以上で POV か OverShoulder が未登場なら中盤カットに強制投入。
+    enforce_pov_or_ots(&mut plans);
+
     plans
+}
+
+/// P17c: 5+カットのシーケンスで POV / OverShoulder のどちらかは必ず含める。
+fn enforce_pov_or_ots(plans: &mut [CutVisualPlan]) {
+    if plans.len() < 5 {
+        return;
+    }
+    let has_pov_or_ots = plans.iter().any(|p| {
+        matches!(p.camera_angle, CameraAngle::Pov)
+            || matches!(p.camera_angle, CameraAngle::OverShoulder)
+    });
+    if has_pov_or_ots {
+        return;
+    }
+    // 中盤 (1/3 〜 2/3) のカットを 1 つ選んで POV か OTS に置換
+    let target_idx = plans.len() / 2;
+    if let Some(target) = plans.get_mut(target_idx) {
+        // reaction / detail / climax なら OTS、それ以外なら POV
+        target.camera_angle = match target.cut_role.as_str() {
+            "reaction" | "detail" | "climax" => CameraAngle::OverShoulder,
+            _ => CameraAngle::Pov,
+        };
+    }
+}
+
+/// P17d (2026-05-21): 隣接カット validate — 違反を warn ログに出す。
+/// 自動修正は plan_visual_continuity 内で完了している前提。
+#[allow(dead_code)]
+fn validate_neighbor_plans(plans: &[CutVisualPlan]) -> Vec<String> {
+    let mut warnings: Vec<String> = Vec::new();
+    for window in plans.windows(2) {
+        let prev = &window[0];
+        let curr = &window[1];
+
+        // 同 shot_size 連続
+        if prev.shot_size == curr.shot_size {
+            warnings.push(format!(
+                "{} → {}: same shot_size {:?} (avoid jump cut)",
+                prev.cut_id, curr.cut_id, curr.shot_size
+            ));
+        }
+        // 同 camera_angle 連続
+        if std::mem::discriminant(&prev.camera_angle) == std::mem::discriminant(&curr.camera_angle) {
+            warnings.push(format!(
+                "{} → {}: same camera_angle {} (lacks angle variation)",
+                prev.cut_id,
+                curr.cut_id,
+                curr.camera_angle.as_str()
+            ));
+        }
+        // sceneGroup 内で screen_direction 反転
+        if prev.scene_group_id == curr.scene_group_id
+            && prev.screen_direction != curr.screen_direction
+            && prev.screen_direction != ScreenDirection::Static
+            && curr.screen_direction != ScreenDirection::Static
+        {
+            warnings.push(format!(
+                "{} → {}: screen_direction reversal within same scene_group (180-rule risk)",
+                prev.cut_id, curr.cut_id
+            ));
+        }
+    }
+    // micro_location 3連続
+    for window in plans.windows(3) {
+        if window[0].micro_location == window[1].micro_location
+            && window[1].micro_location == window[2].micro_location
+        {
+            warnings.push(format!(
+                "{} ~ {}: same micro_location '{}' for 3 consecutive cuts",
+                window[0].cut_id, window[2].cut_id, window[1].micro_location
+            ));
+        }
+    }
+    warnings
 }
 
 /// 動詞抽出の簡易ロジック。description の末尾フレーズから動作を推定する。
@@ -1607,6 +1946,28 @@ fn build_continuity_contract(
             change.push(format!("shot_size: pull back ({} → {})", p.shot_size.as_str(), curr.shot_size.as_str()));
         }
 
+        // P17a: camera_angle の変化を明示
+        if std::mem::discriminant(&p.camera_angle) != std::mem::discriminant(&curr.camera_angle) {
+            change.push(format!(
+                "camera_angle: change to {} ({})",
+                curr.camera_angle.as_str(),
+                curr.camera_angle.directive()
+            ));
+        }
+        forbidden.push(format!(
+            "same_camera_angle_as_prev ({})",
+            p.camera_angle.as_str()
+        ));
+
+        // P17b: micro_location の変化を強制
+        if p.micro_location != curr.micro_location {
+            change.push(format!(
+                "camera_position_within_scene: move from \"{}\" to \"{}\"",
+                p.micro_location, curr.micro_location
+            ));
+        }
+        forbidden.push("camera_remaining_in_exact_same_spot_as_prev".into());
+
         // 構図の禁止 (前と同じフレーミングを禁ずる)
         forbidden.push("exact_same_framing_as_previous".into());
 
@@ -1617,6 +1978,7 @@ fn build_continuity_contract(
 
     change.push(format!("emphasis: {}", curr.emotional_intent));
     change.push(format!("subject_position: {}", curr.subject_position));
+    change.push(format!("camera_position: \"{}\"", curr.micro_location));
 
     ContinuityContract {
         preserve,
@@ -2051,10 +2413,13 @@ fn build_generation_prompt(
          4. 出力先指定や画像変換は不要です。生成画像は $CODEX_HOME/generated_images/<session>/ig_*.png に保存されます。\n\n\
          ## 重要: Continuity Contract に従う (もし含まれていれば)\n\
          - JSON に `continuity_contract` がある場合、その preserve/change/forbidden/bridge を厳格に守る。\n\
-         - `visual_plan.shot_size` と `visual_plan.screen_direction` は機械的に決定済み。揺らがせない。\n\
+         - `visual_plan.shot_size` `visual_plan.camera_angle` `visual_plan.micro_location` は機械的に決定済み。**揺らがせない**。\n\
+         - 特に `camera_angle_directive` の文言通りにカメラ位置を取る。eye-level に勝手に戻さない。\n\
+         - `micro_location` は同一大空間内でカメラが移動した位置。「同じ場所でぐるぐる」を避けるため、ここに書かれた位置を厳守する。\n\
          - 「前カットの属性を真似る」のではなく「contract が指示する変化」を作る。\n\
          - `murch_priority` に従い、emotion/story/rhythm を優先。空間整合より感情整合。\n\
-         - bridge.cut_on_action がある場合、前カットの末尾動作から自然に繋がる開始姿勢で描く。\n\n\
+         - bridge.cut_on_action がある場合、前カットの末尾動作から自然に繋がる開始姿勢で描く。\n\
+         - 人物を動かすのではなく **カメラを動かす** ことで空間に展開を作る。被写体は同じ場所でも、カメラ位置とアングルを変える。\n\n\
          ## Structured Prompt JSON\n{prompt_json}\n\n\
          最終メッセージは OK または NG <理由> の1行のみ。"
     )
