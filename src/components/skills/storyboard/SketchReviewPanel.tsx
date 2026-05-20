@@ -342,38 +342,11 @@ export function SketchReviewPanel() {
     }
   }
 
-  if (!goal) {
-    return (
-      <div className="flex h-full items-center justify-center text-zinc-500">
-        <div className="text-sm">先に Phase 1 でゴールを確定してください。</div>
-      </div>
-    );
-  }
-
-  if (!activeVersion) {
-    return (
-      <div className="flex h-full items-center justify-center text-zinc-500">
-        <div className="text-sm">絵コンテを生成中…</div>
-      </div>
-    );
-  }
-
-  const canProceed = Boolean(goal.characterReferencePath);
-  const editingCut = editing ? activeVersion.cuts[cursor] ?? null : null;
-
-  // === 進捗計算 (絵コンテ生成のステータスバー) ===
-  const totalCuts = activeVersion.cuts.length;
-  const doneCount = activeVersion.cuts.filter((c) => c.sketchStatus === "done").length;
-  const generatingCount = activeVersion.cuts.filter((c) => c.sketchStatus === "generating").length;
-  const allDone = doneCount === totalCuts && totalCuts > 0;
-  const progressPercent = totalCuts > 0 ? (doneCount / totalCuts) * 100 : 0;
-
   // === シーン分け (P3a) / 並べ替え (P3b) ===
-  // 優先順位:
-  //  1. cutDisplayOrder がある (ユーザー D&D 後): flat 一列表示
-  //  2. sceneGroups がある: シーン単位グルーピング
-  //  3. それ以外: 1グループ "シーン 1"
+  // [React Hooks 規則] useMemo / useSensors は early return の前に配置する必要がある。
+  // activeVersion === null の場合は空配列を返し、レンダリング側で early return する。
   const groupedCuts = useMemo(() => {
+    if (!activeVersion) return [];
     const cutsByCutId = new Map(activeVersion.cuts.map((c) => [c.cutId, c]));
     if (cutDisplayOrder && cutDisplayOrder.length > 0) {
       const orderedCuts = cutDisplayOrder
@@ -410,10 +383,37 @@ export function SketchReviewPanel() {
           index: activeVersion.cuts.findIndex((x) => x.cutId === c.cutId),
         })),
     }));
-  }, [activeVersion.cuts, sceneGroups, cutDisplayOrder]);
+  }, [activeVersion, sceneGroups, cutDisplayOrder]);
 
   // D&D で並べ替え。ユーザー D&D が走った瞬間に flat 表示に切り替わる。
+  // [React Hooks 規則] early return の前に置く。
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 8 } }));
+
+  if (!goal) {
+    return (
+      <div className="flex h-full items-center justify-center text-zinc-500">
+        <div className="text-sm">先に Phase 1 でゴールを確定してください。</div>
+      </div>
+    );
+  }
+
+  if (!activeVersion) {
+    return (
+      <div className="flex h-full items-center justify-center text-zinc-500">
+        <div className="text-sm">絵コンテを生成中…</div>
+      </div>
+    );
+  }
+
+  const canProceed = Boolean(goal.characterReferencePath);
+  const editingCut = editing ? activeVersion.cuts[cursor] ?? null : null;
+
+  // === 進捗計算 (絵コンテ生成のステータスバー) ===
+  const totalCuts = activeVersion.cuts.length;
+  const doneCount = activeVersion.cuts.filter((c) => c.sketchStatus === "done").length;
+  const generatingCount = activeVersion.cuts.filter((c) => c.sketchStatus === "generating").length;
+  const allDone = doneCount === totalCuts && totalCuts > 0;
+  const progressPercent = totalCuts > 0 ? (doneCount / totalCuts) * 100 : 0;
   function handleDragEnd(e: DragEndEvent) {
     if (!e.active || !e.over) return;
     if (e.active.id === e.over.id) return;
