@@ -740,6 +740,59 @@ async fn run_storyboard_orchestrator(
                         "murch_priority".to_string(),
                         Value::String(murch_priority_text().to_string()),
                     );
+                    // P16 (2026-05-20 STΛCK指示): 参照画像の役割を JSON 上でも明示。
+                    // 絵コンテ画像が含まれている場合に、AI が「鉛筆スケッチ」を
+                    // 絵柄として解釈しないよう、構図のみ参考にすることを強制。
+                    let mut roles: Vec<serde_json::Value> = vec![
+                        serde_json::json!({
+                            "slot": 1,
+                            "role": "character_reference",
+                            "use_for": ["face", "body_proportions", "costume_details"],
+                            "do_not_use_for": ["overall_style", "color_palette"]
+                        }),
+                        serde_json::json!({
+                            "slot": 2,
+                            "role": "style_reference",
+                            "use_for": ["overall_look", "color_palette", "lighting", "texture"],
+                            "do_not_use_for": ["character_identity"]
+                        }),
+                    ];
+                    if previous_cut_image.is_some() {
+                        roles.push(serde_json::json!({
+                            "slot": 3,
+                            "role": "previous_confirmed_cut",
+                            "use_for": ["temporal_continuity", "screen_direction_check"],
+                            "do_not_use_for": ["style_change", "character_change"]
+                        }));
+                    }
+                    if params
+                        .sketch_references
+                        .get(&cut.cut_id)
+                        .filter(|p| !p.trim().is_empty())
+                        .is_some()
+                    {
+                        roles.push(serde_json::json!({
+                            "slot": "last",
+                            "role": "storyboard_sketch",
+                            "use_for": [
+                                "composition",
+                                "camera_angle",
+                                "character_position_in_frame",
+                                "framing_intent"
+                            ],
+                            "do_not_use_for": [
+                                "art_style",
+                                "pencil_or_monochrome_look",
+                                "low_fidelity_appearance",
+                                "paper_texture"
+                            ],
+                            "note": "This is a pencil sketch storyboard panel. ONLY borrow composition and camera angle. The final output MUST be a photorealistic/colored frame, not a sketch."
+                        }));
+                    }
+                    obj.insert(
+                        "reference_image_roles".to_string(),
+                        serde_json::Value::Array(roles),
+                    );
                 }
             }
         }
@@ -1985,6 +2038,12 @@ fn build_generation_prompt(
          - takeId: {take_id}\n\
          - 候補 {candidate_index}/{candidate_count}\n\
          - 参照画像は順に、キャラクター基準、スタイル基準、必要なら直前確定カットです。\n\n\
+         ## 参照画像の役割 (重要)\n\
+         参照画像は順番に以下の役割を持ちます。各画像は「指定された役割」だけを参考にしてください。\n\
+         - 1枚目: キャラクター基準画像 — 顔・体型・服のディテールを厳守する。スタイル基準にしてはいけない。\n\
+         - 2枚目: スタイル基準画像 (任意) — 全体のルック、色調、ライティング、質感のリファレンス。**最終出力の絵のスタイルはこの画像に従う**。\n\
+         - 3枚目: 直前確定カット (任意) — 前後の連続性 (キャラ位置・カット間文脈) の参考。スタイルではない。\n\
+         - 4枚目: 絵コンテ画像 (任意、鉛筆スケッチ) — **構図・カメラアングル・キャラ配置・画面内空間のみ参考**。鉛筆線・モノクロ・紙質感などのスタイルは絶対に取り込まない。最終出力は本番カットの写実/カラー画像であるべき。\n\n\
          ## 手順\n\
          1. image_gen ツールを1回だけ呼び出す。\n\
          2. {aspect_ratio} aspect ratio / high quality で生成する。\n\
