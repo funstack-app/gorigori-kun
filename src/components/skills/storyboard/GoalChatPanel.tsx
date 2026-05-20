@@ -45,8 +45,9 @@ export function GoalChatPanel() {
 
   const [draft, setDraft] = useState("");
   const [attachedImages, setAttachedImages] = useState<string[]>([]);
-  // 「ゴール確定」を押した直後フラグ。JSON 応答が来たら自動で Phase2 に進む。
-  const [awaitingFinalize, setAwaitingFinalize] = useState(false);
+  // 「ゴール確定」を押した直後フラグ。JSON 応答が来たら自動で次フェーズに進む。
+  // P7 (2026-05-20): 進む先を sketch / generation で選べるよう保持する。
+  const [awaitingTarget, setAwaitingTarget] = useState<null | "sketch" | "generation">(null);
   // ライブラリピッカー (生成済み画像から選ぶ)
   const [libraryOpen, setLibraryOpen] = useState(false);
   const scrollerRef = useRef<HTMLDivElement>(null);
@@ -81,8 +82,8 @@ export function GoalChatPanel() {
   }, [messages]);
 
   // 「ゴール確定」可能か = 数ターン回って AI が storyboardParams を提案できる状態か
-  // awaitingFinalize 中は再クリックを防ぐため無効化する
-  const canFinalize = messages.length >= 4 && !sending && !awaitingFinalize;
+  // awaitingTarget 中は再クリックを防ぐため無効化する
+  const canFinalize = messages.length >= 4 && !sending && !awaitingTarget;
 
   async function handleSend() {
     const text = draft.trim();
@@ -126,7 +127,8 @@ export function GoalChatPanel() {
 
   // ストア状態を見て StoryboardGoal を組み立てる共通関数。
   // 「storyboardParams + sceneConstruction が揃っている」前提。
-  function buildAndAdvance() {
+  // P7 (2026-05-20): 進む先 Phase を引数で受ける (sketch or generation)。
+  function buildAndAdvance(targetPhase: "sketch" | "generation") {
     const params = usePlanChat.getState().storyboardParams;
     const scene = usePlanChat.getState().sceneConstruction;
     if (!params || !scene) return false;
@@ -146,47 +148,45 @@ export function GoalChatPanel() {
       styleReferencePath: params.style_reference_path,
     };
     setGoal(goal);
-    setPhase("sketch");
+    setPhase(targetPhase);
     useToasts.getState().push({
       kind: "success",
-      text: "ゴールを確定しました。絵コンテレビューに進みます。",
+      text:
+        targetPhase === "sketch"
+          ? "ゴールを確定しました。絵コンテレビューに進みます。"
+          : "ゴールを確定しました。本生成に進みます。",
       ttlMs: 3000,
     });
     return true;
   }
 
-  async function handleFinalize() {
-    // STΛCK 指示 (2026-05-20):
-    //  - Phase 1 では画像必須にしない (構想段階)
-    //  - scene_construction (カット列) が揃えば Phase 2 へ進む
-    //  - 「2 回押し」を撲滅: 1 回目で AI に JSON 要求 → 応答後に自動で Phase2 へ
+  // P7 (2026-05-20): 2 ルート分岐
+  //  - ルートA (絵コンテ経由): finalize("sketch") → Phase 2
+  //  - ルートB (直接本生成): finalize("generation") → Phase 3
+  async function handleFinalize(targetPhase: "sketch" | "generation") {
     if (storyboardParams && sceneConstruction) {
-      buildAndAdvance();
+      buildAndAdvance(targetPhase);
       return;
     }
-
-    // まだ JSON が無い → AI に要求して、応答が来たら自動遷移するモードに入る
-    setAwaitingFinalize(true);
+    setAwaitingTarget(targetPhase);
     useToasts.getState().push({
       kind: "info",
-      text: "AI に絵コンテ構成を依頼しています…応答後、自動で絵コンテに進みます。",
+      text: "AI に絵コンテ構成を依頼しています…応答後、自動で次へ進みます。",
       ttlMs: 4000,
     });
     await send("[FINALIZE_STORYBOARD] ここまでの内容で確定 JSON を出してください。");
   }
 
-  // AI 応答で storyboardParams + sceneConstruction が揃ったタイミングで
-  // awaitingFinalize なら自動で Phase 2 に進める。
+  // AI 応答で揃ったら待機中のターゲットへ自動遷移
   useEffect(() => {
-    if (!awaitingFinalize) return;
+    if (!awaitingTarget) return;
     if (storyboardParams && sceneConstruction && !sending) {
-      const ok = buildAndAdvance();
-      if (ok) setAwaitingFinalize(false);
+      const ok = buildAndAdvance(awaitingTarget);
+      if (ok) setAwaitingTarget(null);
     }
   // buildAndAdvance は内部で getState() を使うので依存に入れない
-  // (毎レンダーで参照が変わって無限ループになるのを防ぐ)
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [awaitingFinalize, storyboardParams, sceneConstruction, sending]);
+  }, [awaitingTarget, storyboardParams, sceneConstruction, sending]);
 
   return (
     <div className="flex h-full flex-col gap-3">
@@ -203,19 +203,37 @@ export function GoalChatPanel() {
             </div>
           )}
         </div>
-        <button
-          type="button"
-          onClick={handleFinalize}
-          disabled={!canFinalize}
-          className={[
-            "shrink-0 rounded-md px-4 py-2 text-sm font-semibold transition",
-            canFinalize
-              ? "bg-pink-500 text-white hover:bg-pink-400"
-              : "cursor-not-allowed bg-zinc-700 text-zinc-400",
-          ].join(" ")}
-        >
-          {awaitingFinalize ? "AI 応答待ち…" : "ゴールを確定 →"}
-        </button>
+        {/* P7: 2 ルート分岐ボタン */}
+        <div className="flex shrink-0 flex-col gap-2">
+          <button
+            type="button"
+            onClick={() => handleFinalize("sketch")}
+            disabled={!canFinalize}
+            className={[
+              "rounded-md border px-4 py-2 text-sm font-semibold transition",
+              canFinalize
+                ? "border-pink-500/40 bg-pink-500/10 text-pink-100 hover:bg-pink-500/20"
+                : "cursor-not-allowed border-[#2a2a2a] bg-zinc-800 text-zinc-500",
+            ].join(" ")}
+            title="まず絵コンテで構図を確認してから本生成 (推奨)"
+          >
+            {awaitingTarget === "sketch" ? "AI 応答待ち…" : "絵コンテを作る →"}
+          </button>
+          <button
+            type="button"
+            onClick={() => handleFinalize("generation")}
+            disabled={!canFinalize}
+            className={[
+              "rounded-md px-4 py-2 text-sm font-semibold transition",
+              canFinalize
+                ? "bg-pink-500 text-white hover:bg-pink-400"
+                : "cursor-not-allowed bg-zinc-700 text-zinc-400",
+            ].join(" ")}
+            title="絵コンテをスキップして本番カット (3案/カット) を生成"
+          >
+            {awaitingTarget === "generation" ? "AI 応答待ち…" : "すぐに本生成 →"}
+          </button>
+        </div>
       </header>
 
       <div

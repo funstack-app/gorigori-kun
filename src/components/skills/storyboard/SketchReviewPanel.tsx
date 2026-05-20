@@ -19,6 +19,7 @@ import { storyboard, type RegenerateCutParams } from "../../../lib/ipc";
 import { useStoryboardRun } from "../../../lib/store/storyboardRun";
 import { usePlanChat } from "../../../lib/store/planChat";
 import { useToasts } from "../../../lib/store/toasts";
+import { useImagePreview } from "../../../lib/store/imagePreview";
 import type {
   StoryboardSketchCut,
   StoryboardSketchVersion,
@@ -112,73 +113,78 @@ export function SketchReviewPanel() {
     if (cursor >= activeVersion.cuts.length) setCursor(0);
   }, [activeVersion, cursor]);
 
-  // === 絵コンテ自動生成 (Phase 2 入場時) ===
-  // STΛCK 指示 (2026-05-20): 絵コンテは GPT Image 2 でスケッチ風に生成する。
-  // SketchCanvas (棒人間Canvas) は撤去し、本物の絵コンテ画像を出す。
-  useEffect(() => {
+  // === 絵コンテ生成 (P7 STΛCK 指示 2026-05-20: 明示ボタン化) ===
+  //
+  // 自動 useEffect は撤廃。「絵コンテを生成」ボタンを押すまで生成しない。
+  // 理由: Phase 2 入場時に自動で走ると、ユーザーが「この絵コンテで生成」を
+  // 押す前から絵コンテも本番も走るような印象になり、UX が一方通行ではなくなる。
+  // ルートを明確にするため、絵コンテはユーザー意思で開始する。
+  async function startSketchGeneration() {
     if (sketchStarted || sketchStarting) return;
     if (!activeVersion) return;
-    if (!goal?.characterReferencePath) return; // キャラ参照がある時のみ起動 (生成に必須)
+    if (!goal?.characterReferencePath) {
+      useToasts.getState().push({
+        kind: "error",
+        text: "キャラ参照画像を選んでから絵コンテを生成してください。",
+        ttlMs: 4000,
+      });
+      return;
+    }
     if (!sceneConstruction) return;
 
-    // 既に絵コンテ画像が全カット揃っているならスキップ
     const allDone = activeVersion.cuts.every((c) => c.sketchImagePath);
     if (allDone) {
       setSketchRunStartedAt(Date.now());
       return;
     }
 
-    (async () => {
-      setSketchStarting(true);
-      try {
-        // 絵コンテ専用 run。candidates_per_cut=1, sketch_mode=true。
-        // 評価はバックエンドでも軽量、フロントは takes[0] をそのまま絵コンテに採用。
-        const params = {
-          storyPrompt: goal.summary || "ストーリーカット",
-          characterReferenceImage: goal.characterReferencePath,
-          styleReferenceImage: goal.styleReferencePath,
-          aspectRatio: goal.aspectRatio,
-          durationSeconds: goal.durationSeconds,
-          tempo: goal.tempo,
-          candidatesPerCut: 1 as 1 | 3,
-          cwd: undefined,
-          sceneConstruction,
-          sketchMode: true,
-        };
-        // 既存 storyboard.run を流用 (バックエンドで sketch_mode=true を受けてスタイル切替)
-        const runId = await storyboard.run(params);
-        useStoryboardRun.getState().beginRun(runId, params);
-        setSketchRunStartedAt(Date.now());
-        useToasts.getState().push({
-          kind: "info",
-          text: "絵コンテをスケッチ生成中…",
-          ttlMs: 2400,
-        });
-      } catch (e) {
-        useToasts.getState().push({
-          kind: "error",
-          text: `絵コンテ生成の起動に失敗: ${(e as Error)?.message ?? e}`,
-          ttlMs: 6000,
-        });
-      } finally {
-        setSketchStarting(false);
-      }
-    })();
-  }, [
-    sketchStarted,
-    sketchStarting,
-    activeVersion,
-    goal,
-    sceneConstruction,
-  ]);
+    setSketchStarting(true);
+    try {
+      const params = {
+        storyPrompt: goal.summary || "ストーリーカット",
+        characterReferenceImage: goal.characterReferencePath,
+        styleReferenceImage: goal.styleReferencePath,
+        aspectRatio: goal.aspectRatio,
+        durationSeconds: goal.durationSeconds,
+        tempo: goal.tempo,
+        candidatesPerCut: 1 as 1 | 3,
+        cwd: undefined,
+        sceneConstruction,
+        sketchMode: true,
+      };
+      const runId = await storyboard.run(params);
+      useStoryboardRun.getState().beginRun(runId, params);
+      setSketchRunStartedAt(Date.now());
+      useToasts.getState().push({
+        kind: "info",
+        text: "絵コンテを生成しています…",
+        ttlMs: 2400,
+      });
+    } catch (e) {
+      useToasts.getState().push({
+        kind: "error",
+        text: `絵コンテ生成の起動に失敗: ${(e as Error)?.message ?? e}`,
+        ttlMs: 6000,
+      });
+    } finally {
+      setSketchStarting(false);
+    }
+  }
 
   // === 生成イベント (cuts Map) → 各カットの sketchImagePath を更新 ===
+  // P9 (2026-05-20 STΛCK 指示): 絵コンテ画像は本生成で採用したやつに差し替えない。
+  // 現在の run が sketch_mode のときだけ更新する。本番モードでは絵コンテを
+  // 完全に保持する。
   useEffect(() => {
     if (!activeVersion) return;
     if (!sketchStarted) return;
+    const curParams = useStoryboardRun.getState().params;
+    if (!curParams?.sketchMode) return; // 本番 run 中は絵コンテ更新しない
     for (const cut of activeVersion.cuts) {
       const stored = storeCuts.get(cut.cutId);
       if (!stored) continue;
+      // 既に done のカットはそのまま保持 (再生成イベント等で上書きされない保護)
+      if (cut.sketchStatus === "done" && cut.sketchImagePath) continue;
       const latest = stored.takes[stored.takes.length - 1]?.imagePath;
       const wantStatus: StoryboardSketchCut["sketchStatus"] =
         stored.status === "running"
@@ -190,8 +196,6 @@ export function SketchReviewPanel() {
               : "pending";
       if (cut.sketchImagePath !== latest || cut.sketchStatus !== wantStatus) {
         updateSketchCut(cut.cutId, {
-          // updateSketchCut の patch は当該フィールド名で受ける
-          // (型は SketchCut の Partial)
           ...({
             sketchImagePath: latest,
             sketchStatus: wantStatus,
@@ -461,27 +465,52 @@ export function SketchReviewPanel() {
         </div>
 
         <div className="flex shrink-0 flex-col gap-2">
-          <button
-            type="button"
-            onClick={handleRegenerate}
-            className="rounded-md border border-[#2a2a2a] px-3 py-2 text-xs text-zinc-300 hover:border-pink-500/40 hover:bg-pink-500/5"
-          >
-            別案を依頼
-          </button>
-          <button
-            type="button"
-            onClick={handleProceed}
-            disabled={!canProceed}
-            className={[
-              "rounded-md px-4 py-2 text-sm font-semibold transition",
-              canProceed
-                ? "bg-pink-500 text-white hover:bg-pink-400"
-                : "cursor-not-allowed bg-zinc-700 text-zinc-400",
-            ].join(" ")}
-            title={canProceed ? undefined : "キャラ参照画像を選択してください"}
-          >
-            この絵コンテで生成 →
-          </button>
+          {!sketchStarted ? (
+            // 絵コンテ未生成: 「絵コンテを生成」ボタン
+            <button
+              type="button"
+              onClick={startSketchGeneration}
+              disabled={sketchStarting || !canProceed}
+              className={[
+                "rounded-md px-4 py-2 text-sm font-semibold transition",
+                canProceed && !sketchStarting
+                  ? "bg-pink-500 text-white hover:bg-pink-400"
+                  : "cursor-not-allowed bg-zinc-700 text-zinc-400",
+              ].join(" ")}
+              title={
+                canProceed
+                  ? "絵コンテを 1 枚ずつ生成 (キャラ参照画像が必要)"
+                  : "キャラ参照画像を選択してください"
+              }
+            >
+              {sketchStarting ? "起動中…" : "絵コンテを生成 →"}
+            </button>
+          ) : (
+            // 絵コンテ生成済み: 「別案を依頼」+「この絵コンテで本生成」
+            <>
+              <button
+                type="button"
+                onClick={handleRegenerate}
+                className="rounded-md border border-[#2a2a2a] px-3 py-2 text-xs text-zinc-300 hover:border-pink-500/40 hover:bg-pink-500/5"
+              >
+                別案を依頼
+              </button>
+              <button
+                type="button"
+                onClick={handleProceed}
+                disabled={!canProceed}
+                className={[
+                  "rounded-md px-4 py-2 text-sm font-semibold transition",
+                  canProceed
+                    ? "bg-pink-500 text-white hover:bg-pink-400"
+                    : "cursor-not-allowed bg-zinc-700 text-zinc-400",
+                ].join(" ")}
+                title={canProceed ? undefined : "キャラ参照画像を選択してください"}
+              >
+                この絵コンテで本生成 →
+              </button>
+            </>
+          )}
         </div>
         </div>
 
@@ -543,7 +572,7 @@ export function SketchReviewPanel() {
                   items={group.cuts.map(({ cut }) => cut.cutId)}
                   strategy={rectSortingStrategy}
                 >
-                  <ol className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                  <ol className={`grid gap-3 ${gridColsForAspect(goal.aspectRatio)}`}>
                     {group.cuts.map(({ cut: c, index: i }) => (
                       <SortableSketchCutCard
                         key={c.cutId}
@@ -736,9 +765,15 @@ function SketchCutCard({
         <span className={`text-[11px] ${statusColor}`}>{statusLabel}</span>
       </div>
 
-      <div className="flex items-center justify-center overflow-hidden rounded-md border border-[#2a2a2a] bg-[#fcfbf5]">
-        <SketchImageBox cut={cut} aspectRatio={aspectRatio} />
-      </div>
+      <SketchImageBox
+        cut={cut}
+        aspectRatio={aspectRatio}
+        onDoubleClick={() => {
+          if (cut.sketchImagePath) {
+            useImagePreview.getState().open(cut.sketchImagePath, []);
+          }
+        }}
+      />
 
       {dragOver && (
         <div className="rounded-md border border-pink-500/50 bg-pink-500/10 px-2 py-1 text-center text-[10px] text-pink-100">
@@ -810,30 +845,53 @@ function aspectClass(a: string): string {
   }
 }
 
+// P8 (2026-05-20): カット全体が見えるよう、アスペクト比に応じてグリッド列数を変える。
+//  - 9:16 (縦長): 4列 (xl) でも横幅が小さく済む
+//  - 1:1, 4:5: 3列
+//  - 16:9 (横長): 2列に絞ってカット全体を確実に表示
+function gridColsForAspect(a: string): string {
+  switch (a) {
+    case "9:16":
+      return "grid-cols-2 md:grid-cols-3 xl:grid-cols-4";
+    case "1:1":
+    case "4:5":
+      return "grid-cols-1 md:grid-cols-2 xl:grid-cols-3";
+    case "16:9":
+    default:
+      return "grid-cols-1 md:grid-cols-2";
+  }
+}
+
 function SketchImageBox({
   cut,
   aspectRatio,
+  onDoubleClick,
 }: {
   cut: StoryboardSketchCut;
   aspectRatio: string;
+  onDoubleClick?: () => void;
 }) {
   const status = cut.sketchStatus ?? "pending";
   const path = cut.sketchImagePath;
-  const box = `flex w-full max-w-[640px] items-center justify-center rounded-md border border-[#2a2a2a] bg-[#fcfbf5] ${aspectClass(aspectRatio)}`;
+  // P8 (2026-05-20): w-full でカード幅をフル使う + アスペクト比でカード高を決める。
+  // これでカード全体が常に正しいアスペクトで描画される。
+  const box = `flex w-full items-center justify-center rounded-md border border-[#2a2a2a] bg-[#fcfbf5] ${aspectClass(aspectRatio)}`;
   if (path && status === "done") {
     return (
-      <div className="flex justify-center">
+      <div className="w-full">
         <img
           src={`asset://localhost/${encodeURI(path)}`}
           alt={`sketch cut ${cut.order}`}
-          className={`${aspectClass(aspectRatio)} max-h-[60vh] max-w-[640px] rounded-md border border-[#2a2a2a] object-contain bg-[#fcfbf5]`}
+          onDoubleClick={onDoubleClick}
+          className={`${aspectClass(aspectRatio)} w-full cursor-zoom-in rounded-md border border-[#2a2a2a] bg-[#fcfbf5] object-cover`}
+          title="ダブルクリックでプレビュー"
         />
       </div>
     );
   }
   if (status === "failed") {
     return (
-      <div className="flex justify-center">
+      <div className="w-full">
         <div className={`${box} flex-col gap-2 text-zinc-500`}>
           <span className="text-sm text-red-400">絵コンテ生成に失敗</span>
           <span className="text-[10px]">後でやり直してください</span>
@@ -843,7 +901,7 @@ function SketchImageBox({
   }
   // pending or generating
   return (
-    <div className="flex justify-center">
+    <div className="w-full">
       <div className={`${box} flex-col gap-3 text-zinc-500`}>
         <div className="h-8 w-8 animate-spin rounded-full border-2 border-pink-500/30 border-t-pink-400" />
         <span className="text-[11px]">
