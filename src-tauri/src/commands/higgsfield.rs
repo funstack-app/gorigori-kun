@@ -15,43 +15,14 @@ use crate::codex::process::enriched_path;
 use crate::events::EVENT_IMAGE_BATCH;
 use crate::state::{AppState, HiggsfieldCancellation};
 
-/// P21 (2026-05-21 STΛCK報告): 拡張パック同梱の bin ディレクトリを PATH 先頭に
-/// 追加した PATH を返す。Higgsfield CLI 内部で `child_process.spawn("node", ...)`
-/// が走った時、ホスト側に Node.js が無くても拡張パック同梱の node が使われる。
-///
-/// 出力例 (macOS):
-///   ~/Library/Application Support/app.codexframefactory/extensions/higgsfield/bin
-///   : (enriched_path() の中身)
-fn higgsfield_enriched_path() -> std::ffi::OsString {
-    let base = enriched_path();
-    // 拡張パック bin ディレクトリ
-    if let Ok(ext_root) = extension_install_dir() {
-        let hf_bin = ext_root.join("higgsfield").join("bin");
-        if hf_bin.is_dir() {
-            // 拡張パック bin を先頭に置く ($PATH の前)
-            let mut parts: Vec<std::path::PathBuf> = vec![hf_bin];
-            for p in std::env::split_paths(&base) {
-                if !p.as_os_str().is_empty() {
-                    parts.push(p);
-                }
-            }
-            if let Ok(joined) = std::env::join_paths(parts) {
-                return joined;
-            }
-        }
-    }
-    base
-}
-
 /// Higgsfield CLI を起動する全 std::process::Command にかける共通設定:
-/// - PATH を higgsfield_enriched_path() で統一 (拡張パック同梱 node を先頭に追加)
+/// - PATH を enriched_path で統一 (拡張パック wrapper 内 / CLI 内部の env node 対策)
 /// - Windows ではコンソールウィンドウを抑制 (CREATE_NO_WINDOW)
 ///
 /// Codex クロスレビュー (2026-05-19): 全 Higgsfield Command に統一適用する
 /// ことで「ある操作だけ動く / 動かない」差分をなくす。
-/// P21 (2026-05-21): ホストに Node.js が無い M4 ユーザー対応。
 fn prepare_higgsfield_command(cmd: &mut Command) {
-    cmd.env("PATH", higgsfield_enriched_path());
+    cmd.env("PATH", enriched_path());
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
@@ -62,7 +33,7 @@ fn prepare_higgsfield_command(cmd: &mut Command) {
 
 /// 上記の tokio::process::Command 版。
 fn prepare_higgsfield_tokio_command(cmd: &mut TokioCommand) {
-    cmd.env("PATH", higgsfield_enriched_path());
+    cmd.env("PATH", enriched_path());
     #[cfg(target_os = "windows")]
     {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
