@@ -1,5 +1,6 @@
 import { create } from "zustand";
 
+import { storyboard } from "../ipc";
 import type {
   SceneGroup,
   ScoreBundle,
@@ -402,6 +403,15 @@ export const useStoryboardRun = create<StoryboardRunState>((set) => ({
           message: `adoptTake: ${cutId} → ${finalTakeId ?? "(none)"}`,
         },
       ];
+      // P2.5 (2026-05-20): 採用結果をサイドカー JSON に永続化 (fire-and-forget)。
+      // アプリ再起動後も storyboard.readAdoptions で復元できる。
+      if (s.activeRunId && finalTakeId) {
+        void storyboard
+          .persistAdoption(s.activeRunId, cutId, finalTakeId)
+          .catch((err) => {
+            console.warn("[storyboardRun] persistAdoption failed:", err);
+          });
+      }
       return { ...s, cuts: next, uiDebugLog: log.slice(-500) };
     }),
 

@@ -454,6 +454,12 @@ export const storyboard = {
   /** 単一カットを追加参照画像で再生成 (新 take として TakeCompleted が来る)。 */
   regenerateCut: (params: RegenerateCutParams) =>
     invoke<string>("storyboard_regenerate_cut", { params }),
+  /** P2.5: ユーザー採用 take を永続化 (adoptions.json サイドカー)。 */
+  persistAdoption: (runId: string, cutId: string, takeId: string) =>
+    invoke<void>("storyboard_persist_adoption", { runId, cutId, takeId }),
+  /** P2.5: 保存済み採用結果を読み込む (cutId → takeId のマップ)。 */
+  readAdoptions: (runId: string) =>
+    invoke<Record<string, string>>("storyboard_read_adoptions", { runId }),
   /** 完了済み run の debug-log.json を読み込む（構造化プロンプト履歴の確認用）。 */
   readDebugLog: (runId: string) =>
     invoke<string>("storyboard_read_debug_log", { runId }),

@@ -218,6 +218,69 @@ struct SceneConstructionCutSnake {
     scene_group_id: Option<String>,
 }
 
+/// P2.5 (2026-05-20): ユーザー採用 take を永続化する。
+///
+/// 設計:
+///   manifest.json は run 完了時に一度書かれるだけで Deserialize 型が定義
+///   されていない。adoption をサイドカー JSON (adoptions.json) として別管理
+///   にして、`storyboard_persist_adoption` で書き込み、
+///   `storyboard_read_adoptions` で起動時に読み込む。
+#[derive(Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct AdoptionsSidecar {
+    run_id: String,
+    /// cutId → takeId
+    adoptions: std::collections::BTreeMap<String, String>,
+}
+
+fn adoptions_sidecar_path(run_id: &str) -> Result<PathBuf, String> {
+    let settings = StorageSettings::load()?;
+    let out_dir = resolve_output_dir(&settings, None, &format!("gori-storyboard-{run_id}"));
+    Ok(out_dir.join("adoptions.json"))
+}
+
+#[tauri::command]
+pub async fn storyboard_persist_adoption(
+    run_id: String,
+    cut_id: String,
+    take_id: String,
+) -> Result<(), String> {
+    let path = adoptions_sidecar_path(&run_id)?;
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| format!("adoptions ディレクトリ作成失敗: {e}"))?;
+    }
+
+    let mut sidecar: AdoptionsSidecar = match tokio::fs::read_to_string(&path).await {
+        Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
+        Err(_) => AdoptionsSidecar::default(),
+    };
+    sidecar.run_id = run_id;
+    sidecar.adoptions.insert(cut_id, take_id);
+
+    let json = serde_json::to_string_pretty(&sidecar)
+        .map_err(|e| format!("adoptions JSON serialize 失敗: {e}"))?;
+    tokio::fs::write(&path, json)
+        .await
+        .map_err(|e| format!("adoptions.json 書き込み失敗: {e}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn storyboard_read_adoptions(
+    run_id: String,
+) -> Result<std::collections::BTreeMap<String, String>, String> {
+    let path = adoptions_sidecar_path(&run_id)?;
+    let raw = match tokio::fs::read_to_string(&path).await {
+        Ok(s) => s,
+        Err(_) => return Ok(Default::default()),
+    };
+    let sidecar: AdoptionsSidecar = serde_json::from_str(&raw)
+        .map_err(|e| format!("adoptions.json parse 失敗: {e}"))?;
+    Ok(sidecar.adoptions)
+}
+
 /// Read the debug-log.json for a given run id.
 /// Returns the JSON content as a string so the UI can pretty-print it.
 /// Used by the "デバッグログ表示" panel to show structured prompts after a run completes.
