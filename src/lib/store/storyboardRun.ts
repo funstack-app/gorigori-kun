@@ -77,7 +77,10 @@ type StoryboardRunState = {
   applyEvent: (e: StoryboardEvent) => void;
   setStatus: (status: StoryboardRunStatus) => void;
   dismissCheckpoint: () => void;
+  /** run 関連だけリセット (phase/goal/sketchVersions/chatMessages は保持) */
   reset: () => void;
+  /** Phase ワークフロー (phase/goal/sketchVersions/chatMessages) もリセット */
+  resetPhases: () => void;
 
   // ===== Phase 操作 =====
   setPhase: (phase: StoryboardPhase) => void;
@@ -118,7 +121,21 @@ type StoryboardRunState = {
   uiDebugLog: Array<{ ts: number; level: "info" | "warn" | "error"; message: string; data?: unknown }>;
 };
 
-const emptyState = {
+/**
+ * STΛCK 報告 (2026-05-20): emptyState で phase/goal/sketchVersions/chatMessages
+ * まで巻き戻していたため、beginRun() が走ると Phase 2 から Phase 1 に
+ * 強制的に戻されてしまうバグがあった。
+ *
+ * これを修正するため、emptyState を 2 つに分割する:
+ *
+ *  - runEmptyState  : run (生成) に関する状態だけ。beginRun/reset で初期化される
+ *  - phaseEmptyState: Phase ワークフロー (goal/sketch等) の状態。
+ *                     ユーザー意思によるリセット (resetAll) でだけ初期化される
+ *
+ * これにより「Phase 1 で確定 → Phase 2 で run 起動 → Phase 2 にとどまる」が
+ * 成立する。
+ */
+const runEmptyState = {
   activeRunId: null,
   cuts: new Map<string, CutState>(),
   sceneGroups: [],
@@ -129,11 +146,19 @@ const emptyState = {
   lastError: null,
   params: null,
   debugLog: [],
+};
+
+const phaseEmptyState = {
   phase: "goal" as StoryboardPhase,
   chatMessages: [] as StoryboardChatMessage[],
   goal: null as StoryboardGoal | null,
   sketchVersions: [] as StoryboardSketchVersion[],
   activeSketchVersionId: null as string | null,
+};
+
+const emptyState = {
+  ...runEmptyState,
+  ...phaseEmptyState,
 };
 
 function ensureCut(cuts: Map<string, CutState>, cutId: string): CutState {
@@ -176,8 +201,10 @@ export const useStoryboardRun = create<StoryboardRunState>((set) => ({
               },
             ]
           : s.pastRuns;
+      // run 関連だけリセット。phase/goal/sketchVersions/chatMessages は保持する。
       return {
-        ...emptyState,
+        ...runEmptyState,
+        cuts: new Map<string, CutState>(),
         pastRuns: archived,
         activeRunId: runId,
         params,
@@ -323,14 +350,19 @@ export const useStoryboardRun = create<StoryboardRunState>((set) => ({
       return { ...s, sketchVersions: nextVersions };
     }),
 
+  // run 関連だけリセット。phase/goal/sketchVersions/chatMessages は保持する。
+  // Phase の状態まで完全初期化したい場合は storyboard/resetAll.ts を使う。
   reset: () =>
     set((s) => ({
-      ...emptyState,
+      ...runEmptyState,
       cuts: new Map<string, CutState>(),
       debugLog: [],
       uiDebugLog: [],
       pastRuns: s.pastRuns, // 過去 run のサマリーは保持
     })),
+
+  resetPhases: () =>
+    set({ ...phaseEmptyState }),
 
   uiDebugLog: [],
   appendDebug: (entry) =>

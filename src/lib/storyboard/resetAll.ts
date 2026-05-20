@@ -26,4 +26,5 @@ export function resetStoryboardSession(): void {
 
   const run = useStoryboardRun.getState();
   run.reset();
+  run.resetPhases();
 }
