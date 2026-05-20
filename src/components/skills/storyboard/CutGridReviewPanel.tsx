@@ -5,6 +5,60 @@ import { useActiveProject } from "../../../lib/store/activeProject";
 import { useProjects } from "../../../lib/store/projects";
 import { useToasts } from "../../../lib/store/toasts";
 import { sendImageToPlanForRediscuss } from "../../../lib/sendToPlan";
+import type { StoryboardSketchCut } from "../../../lib/storyboard/types";
+
+/**
+ * P13 (2026-05-20): i2v 用カメラワークプロンプトを構築する。
+ * Codex セッション2 の E「i2v 動作端点設計」の要素を組み立てる。
+ * 出力例:
+ *   "Camera: medium shot, slow dolly in toward subject's face.
+ *    Subject: starts from neutral standing pose, raises right hand slowly to reach the doorknob.
+ *    Motion: smooth, 2.5 seconds duration.
+ *    Aspect: 16:9. Keep character identity, costume, and lighting consistent with the source image."
+ */
+function buildI2vPrompt(
+  sketch: StoryboardSketchCut | null,
+  cut: { description?: string; duration?: number },
+  aspectRatio: string,
+  cutIndex: number,
+): string {
+  const shotInfo = sketch?.shotType ?? "medium shot";
+  const camera = sketch?.cameraMotion ?? "static";
+  const cameraNote = sketch?.cameraNote ?? "stable camera";
+  const intent = sketch?.intent || cut.description || "";
+  const duration = cut.duration ?? 2.5;
+  const cameraVerb = (() => {
+    switch (camera) {
+      case "pan_left":
+        return "slow pan to the left";
+      case "pan_right":
+        return "slow pan to the right";
+      case "tilt_up":
+        return "smooth tilt up";
+      case "tilt_down":
+        return "smooth tilt down";
+      case "dolly_in":
+        return "gentle dolly push-in toward the subject";
+      case "dolly_out":
+        return "gentle dolly pull-back from the subject";
+      case "handheld":
+        return "subtle handheld float";
+      case "static":
+      default:
+        return "locked camera, no movement";
+    }
+  })();
+  return [
+    `Cut ${cutIndex + 1} — Image-to-Video prompt`,
+    `Camera: ${shotInfo}, ${cameraVerb}. ${cameraNote}.`,
+    intent ? `Subject: ${intent}` : null,
+    `Duration: approx ${duration}s.`,
+    `Aspect ratio: ${aspectRatio}.`,
+    `Maintain character identity, costume color, lighting, and screen direction consistent with the source frame. Avoid identity drift, costume changes, or background teleportation.`,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
 
 /**
  * Phase 4: CutGridReview
@@ -27,6 +81,22 @@ export function CutGridReviewPanel() {
   const addItem = useProjects((s) => s.addItem);
 
   const orderedCuts = useMemo(() => Array.from(cuts.values()), [cuts]);
+  // P13: 絵コンテバージョンから cutId → SketchCut のマップを引いて i2v プロンプトに使う
+  const sketchVersions = useStoryboardRun((s) => s.sketchVersions);
+  const activeSketchVersionId = useStoryboardRun((s) => s.activeSketchVersionId);
+  const sketchByCutId = useMemo(() => {
+    const map = new Map<string, StoryboardSketchCut>();
+    const active =
+      sketchVersions.find((v) => v.versionId === activeSketchVersionId) ??
+      sketchVersions[sketchVersions.length - 1] ??
+      null;
+    if (active) {
+      for (const c of active.cuts) {
+        map.set(c.cutId, c);
+      }
+    }
+    return map;
+  }, [sketchVersions, activeSketchVersionId]);
   const confirmedAll = orderedCuts.every((c) => c.status === "confirmed");
   const allTakeImages = useMemo(
     () =>
@@ -65,6 +135,49 @@ export function CutGridReviewPanel() {
       kind: "success",
       text: `${saved} カットをプロジェクトに保存しました。`,
       ttlMs: 3000,
+    });
+  }
+
+  // P13: 全カットの i2v プロンプトを一括コピー
+  function copyAllI2vPrompts() {
+    const lines: string[] = [];
+    orderedCuts.forEach((c, i) => {
+      const sketch = sketchByCutId.get(c.cutId) ?? null;
+      const duration = sketch?.durationSeconds ?? 2.5;
+      const prompt = buildI2vPrompt(
+        sketch,
+        { description: sketch?.intent, duration },
+        goal?.aspectRatio ?? "16:9",
+        i,
+      );
+      lines.push(prompt);
+      lines.push(""); // separator
+    });
+    const text = lines.join("\n");
+    void navigator.clipboard.writeText(text).then(() => {
+      useToasts.getState().push({
+        kind: "success",
+        text: `${orderedCuts.length} カット分の i2v プロンプトをコピーしました。`,
+        ttlMs: 3000,
+      });
+    });
+  }
+
+  function copySingleI2vPrompt(cutId: string, cutIndex: number) {
+    const sketch = sketchByCutId.get(cutId) ?? null;
+    const duration = sketch?.durationSeconds ?? 2.5;
+    const prompt = buildI2vPrompt(
+      sketch,
+      { description: sketch?.intent, duration },
+      goal?.aspectRatio ?? "16:9",
+      cutIndex,
+    );
+    void navigator.clipboard.writeText(prompt).then(() => {
+      useToasts.getState().push({
+        kind: "success",
+        text: `Cut ${cutIndex + 1} の i2v プロンプトをコピーしました。`,
+        ttlMs: 2500,
+      });
     });
   }
 
@@ -130,6 +243,15 @@ export function CutGridReviewPanel() {
             className="rounded-md bg-pink-500 px-4 py-2 text-sm font-semibold text-white hover:bg-pink-400"
           >
             一括でプロジェクトに保存
+          </button>
+          {/* P13: i2v 用カメラワークプロンプトを一括コピー */}
+          <button
+            type="button"
+            onClick={copyAllI2vPrompts}
+            className="rounded-md border border-[#2a2a2a] px-3 py-2 text-xs text-zinc-300 hover:border-pink-500/40 hover:bg-pink-500/5"
+            title="全カットの Image-to-Video プロンプトをクリップボードへ"
+          >
+            i2v プロンプト一括コピー
           </button>
         </div>
       </header>
@@ -223,7 +345,33 @@ export function CutGridReviewPanel() {
                   >
                     1 枚保存
                   </button>
+                  <button
+                    type="button"
+                    onClick={() => copySingleI2vPrompt(c.cutId, i)}
+                    className="rounded border border-[#2a2a2a] px-2 py-1 text-[10px] text-zinc-300 hover:border-pink-500/40"
+                    title="このカットの Image-to-Video プロンプトをコピー"
+                  >
+                    i2v コピー
+                  </button>
                 </div>
+
+                {/* P13: i2v プロンプトプレビュー */}
+                <details className="rounded border border-[#2a2a2a] bg-[#0d0d0d] p-2">
+                  <summary className="cursor-pointer text-[10px] font-semibold text-zinc-400 hover:text-pink-200">
+                    i2v プロンプトを見る
+                  </summary>
+                  <pre className="mt-2 whitespace-pre-wrap text-[10px] leading-relaxed text-zinc-300">
+                    {buildI2vPrompt(
+                      sketchByCutId.get(c.cutId) ?? null,
+                      {
+                        description: sketchByCutId.get(c.cutId)?.intent,
+                        duration: sketchByCutId.get(c.cutId)?.durationSeconds ?? 2.5,
+                      },
+                      goal?.aspectRatio ?? "16:9",
+                      i,
+                    )}
+                  </pre>
+                </details>
               </li>
             );
           })}
