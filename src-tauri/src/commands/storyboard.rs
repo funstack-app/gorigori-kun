@@ -409,21 +409,29 @@ async fn run_storyboard_orchestrator(
             for item in generated {
                 match item {
                     Ok((take_id, image_path)) => {
-                        let scores = match evaluate_one_take(
-                            &codex_bin,
-                            &image_path,
-                            &char_ref_path,
-                            Some(&style_ref_path),
-                            previous_cut_image.as_deref(),
-                            &skill_refs.evaluator_rubric,
-                            params.cwd.as_deref(),
-                        )
-                        .await
-                        {
-                            Ok(scores) => scores,
-                            Err(err) => {
-                                tracing::warn!(target: "codex.storyboard", "evaluation failed for {} {}: {err}", cut.cut_id, take_id);
-                                ScoreBundle::default()
+                        // sketch_mode 時は評価をスキップ (鉛筆絵コンテはキャラ一貫性の
+                        // 評価に通らない設計なので、評価ループは絵コンテと噛み合わない)。
+                        // STΛCK 報告 (2026-05-20): 評価ループで shot_001 が何度も
+                        // 再生成され続けて絵コンテ生成が異常に遅くなる問題への対応。
+                        let scores = if params.sketch_mode {
+                            ScoreBundle::default()
+                        } else {
+                            match evaluate_one_take(
+                                &codex_bin,
+                                &image_path,
+                                &char_ref_path,
+                                Some(&style_ref_path),
+                                previous_cut_image.as_deref(),
+                                &skill_refs.evaluator_rubric,
+                                params.cwd.as_deref(),
+                            )
+                            .await
+                            {
+                                Ok(scores) => scores,
+                                Err(err) => {
+                                    tracing::warn!(target: "codex.storyboard", "evaluation failed for {} {}: {err}", cut.cut_id, take_id);
+                                    ScoreBundle::default()
+                                }
                             }
                         };
                         let image_path_string = image_path.to_string_lossy().into_owned();
@@ -454,7 +462,13 @@ async fn run_storyboard_orchestrator(
                 }
             }
 
-            if let Some(best) = select_best_take(&evaluated_takes) {
+            // sketch_mode は評価スコアを使わず最初の take を即採用、再試行も無し。
+            let picked = if params.sketch_mode {
+                select_first_take(&evaluated_takes)
+            } else {
+                select_best_take(&evaluated_takes)
+            };
+            if let Some(best) = picked {
                 mark_manifest_take_status(&mut all_takes_for_manifest, &best.take_id, "confirmed");
                 let _ = app.emit(
                     EVENT_STORYBOARD,
@@ -1572,6 +1586,13 @@ fn select_best_take(takes: &[EvaluatedTake]) -> Option<EvaluatedTake> {
                 })
         })
         .cloned()
+}
+
+/// sketch_mode 用: 評価スコアを無視し、最初に生成された take を採用する。
+/// STΛCK 報告 (2026-05-20): 鉛筆絵コンテはキャラ一貫性の評価に通らない
+/// 設計なので、評価ベースの絞り込みは絵コンテと噛み合わない。
+fn select_first_take(takes: &[EvaluatedTake]) -> Option<EvaluatedTake> {
+    takes.first().cloned()
 }
 
 fn has_reject_score(scores: &ScoreBundle) -> bool {
