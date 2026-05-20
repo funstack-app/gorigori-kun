@@ -103,6 +103,15 @@ type StoryboardRunState = {
     }>,
   ) => void;
 
+  // ===== 各 Phase の起動済みフラグ (Phase 間往復で消えないようストア管理) =====
+  // P1 修正 (2026-05-20): SketchReviewPanel / GenerationProgressPanel が
+  // ローカル useState で起動済み判定をしていたため、Phase 切替でアンマウント
+  // → 再マウント時に false に戻り重複 run が起動するバグがあった。
+  sketchRunStartedAt: number | null;
+  generationRunStartedAt: number | null;
+  setSketchRunStartedAt: (ts: number | null) => void;
+  setGenerationRunStartedAt: (ts: number | null) => void;
+
   // ===== レビュー UI 操作系 (採用確認待ち時) =====
   /** 表示中の take をユーザー意思で確定 (採用ボタン) */
   adoptTake: (cutId: string, takeId?: string) => void;
@@ -154,6 +163,8 @@ const phaseEmptyState = {
   goal: null as StoryboardGoal | null,
   sketchVersions: [] as StoryboardSketchVersion[],
   activeSketchVersionId: null as string | null,
+  sketchRunStartedAt: null as number | null,
+  generationRunStartedAt: null as number | null,
 };
 
 const emptyState = {
@@ -363,6 +374,9 @@ export const useStoryboardRun = create<StoryboardRunState>((set) => ({
 
   resetPhases: () =>
     set({ ...phaseEmptyState }),
+
+  setSketchRunStartedAt: (ts) => set({ sketchRunStartedAt: ts }),
+  setGenerationRunStartedAt: (ts) => set({ generationRunStartedAt: ts }),
 
   uiDebugLog: [],
   appendDebug: (entry) =>

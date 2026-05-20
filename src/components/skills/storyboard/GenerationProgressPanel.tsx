@@ -30,18 +30,29 @@ export function GenerationProgressPanel() {
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
 
+  // P1 修正 (2026-05-20): ローカル useState で起動済み判定すると、Phase 切替で
+  // アンマウントされた瞬間にフラグが false に戻り重複 run が走ってしまうため、
+  // ストア (storyboardRun.generationRunStartedAt) で起動済み判定を保持する。
+  const generationRunStartedAt = useStoryboardRun((s) => s.generationRunStartedAt);
+  const setGenerationRunStartedAt = useStoryboardRun((s) => s.setGenerationRunStartedAt);
+  const generationStarted = generationRunStartedAt !== null;
+
   // 入場時に本番 run を起動。
   // STΛCK 指示 (2026-05-20): Phase 2 で絵コンテ run (sketch_mode=true) を
   // 走らせている場合、その activeRunId / cuts が残っているので、
   // 本番 run を起動する前に reset() で一度クリアする (sketchVersions に
   // 絵コンテ画像は保存済みなので消えない)。
   useEffect(() => {
+    if (generationStarted) return; // ストア管理で重複起動を防ぐ
     if (!goal || !sceneConstruction) return;
     if (starting) return;
     // 既に本番 run が走っている (params.sketchMode が false) なら何もしない
     if (activeRunId) {
       const cur = useStoryboardRun.getState().params;
-      if (cur && !cur.sketchMode) return;
+      if (cur && !cur.sketchMode) {
+        setGenerationRunStartedAt(Date.now());
+        return;
+      }
     }
 
     (async () => {
@@ -65,6 +76,7 @@ export function GenerationProgressPanel() {
         };
         const runId = await storyboard.run(params);
         beginRun(runId, params);
+        setGenerationRunStartedAt(Date.now());
         useToasts.getState().push({
           kind: "success",
           text: "ストーリーカット生成を開始しました。",
@@ -82,7 +94,15 @@ export function GenerationProgressPanel() {
         setStarting(false);
       }
     })();
-  }, [activeRunId, goal, sceneConstruction, starting, beginRun]);
+  }, [
+    generationStarted,
+    activeRunId,
+    goal,
+    sceneConstruction,
+    starting,
+    beginRun,
+    setGenerationRunStartedAt,
+  ]);
 
   // 完了したら次フェーズへ
   useEffect(() => {

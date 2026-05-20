@@ -42,8 +42,12 @@ export function SketchReviewPanel() {
   const [editing, setEditing] = useState(false);
   const [draftOverride, setDraftOverride] = useState("");
   // 絵コンテ生成 (sketch_mode=true) の起動状態
+  // P1修正 (2026-05-20): Phase切替でアンマウントされても保持できるようストア管理に変更。
+  // ローカルuseStateだと Phase 2↔3 往復で重複 run が起動するバグの原因になっていた。
   const [sketchStarting, setSketchStarting] = useState(false);
-  const [sketchStarted, setSketchStarted] = useState(false);
+  const sketchRunStartedAt = useStoryboardRun((s) => s.sketchRunStartedAt);
+  const setSketchRunStartedAt = useStoryboardRun((s) => s.setSketchRunStartedAt);
+  const sketchStarted = sketchRunStartedAt !== null;
 
   // ストア (cuts Map) から絵コンテ画像を読む
   // storyboard.run(sketch_mode=true) はイベントを既存ルートで流すので、
@@ -102,7 +106,7 @@ export function SketchReviewPanel() {
     // 既に絵コンテ画像が全カット揃っているならスキップ
     const allDone = activeVersion.cuts.every((c) => c.sketchImagePath);
     if (allDone) {
-      setSketchStarted(true);
+      setSketchRunStartedAt(Date.now());
       return;
     }
 
@@ -126,7 +130,7 @@ export function SketchReviewPanel() {
         // 既存 storyboard.run を流用 (バックエンドで sketch_mode=true を受けてスタイル切替)
         const runId = await storyboard.run(params);
         useStoryboardRun.getState().beginRun(runId, params);
-        setSketchStarted(true);
+        setSketchRunStartedAt(Date.now());
         useToasts.getState().push({
           kind: "info",
           text: "絵コンテをスケッチ生成中…",
