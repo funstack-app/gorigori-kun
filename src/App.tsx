@@ -2117,22 +2117,80 @@ function ProjectDetailPanel({
   onRemoveItem: (itemId: string) => void;
 }) {
   const chat = project.planChat ?? [];
+  const stockCreditCount = project.stockCredits?.length ?? 0;
+  const pushToast = useToasts((s) => s.push);
+
+  /**
+   * 法務対応 (2026-05-21): プロジェクトで使った Pexels 素材のクレジットを
+   * CSV ファイルとして書き出す。商用案件で出典トレースを求められた時の
+   * 証跡として使う。
+   *
+   * 動作:
+   *   1. プロジェクトの stockCredits を CSV 文字列に組み立てる
+   *   2. plugin-dialog.save で保存先をユーザーに選んでもらう
+   *   3. plugin-fs.writeTextFile で書き込む
+   *
+   * 失敗時はトーストで通知する。クレジットゼロでもヘッダ行は出すので、
+   * 空 CSV にはならない (常にエクスポート可能)。
+   */
+  const exportCreditsCsv = async () => {
+    try {
+      const csv = useProjects.getState().buildCreditsCsv(project.id);
+      const { save } = await import("@tauri-apps/plugin-dialog");
+      const safeName = project.name.replace(/[\\/:*?"<>|]/g, "_") || "project";
+      const dest = await save({
+        defaultPath: `${safeName}-credits.csv`,
+        filters: [{ name: "CSV", extensions: ["csv"] }],
+      });
+      if (!dest) {
+        // ユーザーがキャンセル
+        return;
+      }
+      const { writeTextFile } = await import("@tauri-apps/plugin-fs");
+      // Excel 日本語環境の文字化け対策で UTF-8 BOM を先頭に付ける。
+      // BOM 付きでも Numbers / Sheets / Notepad は問題なく読める。
+      await writeTextFile(dest, `﻿${csv}`);
+      pushToast({
+        kind: "success",
+        text: `クレジット CSV を保存しました (${stockCreditCount} 件)`,
+        ttlMs: 4000,
+      });
+    } catch (err) {
+      pushToast({
+        kind: "error",
+        text: `クレジット CSV の保存に失敗しました: ${String(err)}`,
+      });
+    }
+  };
+
   return (
     <div className="mt-6 space-y-4">
       <div className="flex items-center justify-between rounded-xl border border-[#2a2a2a] bg-[#181818] px-4 py-3">
         <div>
           <h4 className="text-sm font-black text-white">{project.name}</h4>
           <p className="mt-0.5 text-[10px] text-neutral-500">
-            企画ログ {chat.length} 通 ・ 画像 {project.items.length} 件 ・ 更新 {relativeTimeJa(project.updatedAt)}
+            企画ログ {chat.length} 通 ・ 画像 {project.items.length} 件
+            {stockCreditCount > 0 && ` ・ 素材 ${stockCreditCount} 件`}
+            ・ 更新 {relativeTimeJa(project.updatedAt)}
           </p>
         </div>
-        <button
-          type="button"
-          onClick={onClose}
-          className="text-xs text-neutral-400 hover:text-white"
-        >
-          閉じる
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => void exportCreditsCsv()}
+            className="rounded-md border border-[#343434] bg-[#101010] px-3 py-1 text-[10px] font-bold text-neutral-300 hover:border-pink-400 hover:text-white"
+            title="使った Pexels 素材の一覧を CSV で書き出す (商用案件の出典トレース用)"
+          >
+            クレジット CSV
+          </button>
+          <button
+            type="button"
+            onClick={onClose}
+            className="text-xs text-neutral-400 hover:text-white"
+          >
+            閉じる
+          </button>
+        </div>
       </div>
 
       {chat.length > 0 && (

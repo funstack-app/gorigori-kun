@@ -44,8 +44,13 @@ const SERVICE_CATEGORIES: ServiceCategory[] = [
   {
     title: "素材",
     services: [
-      svc("▧", "Pexels", "完全無料、200 req/時、AI 参照用途 OK (推奨)", "pexels_api_key", "hasPexels", "https://www.pexels.com/api/new/", false),
-      svc("U", "Unsplash", "無料、Demo 50 req/時、無料版は AI 参照 OK (Unsplash+ は NG)", "unsplash_access_key", "hasUnsplash", "https://unsplash.com/oauth/applications", false),
+      svc("▧", "Pexels", "規約の範囲で無料／商用可／改変可。合成・背景・シーン素材向け。単体再配布・素材集化・AI/ML 用収集は禁止 (200 req/時)", "pexels_api_key", "hasPexels", "https://www.pexels.com/api/new/", false),
+      // Unsplash は法務対応 (2026-05-21) でカタログから撤去。
+      //   理由: Unsplash API Guidelines は (1) アプリ内表示時に写真家・Unsplash
+      //   への attribution を必須としており、(2) ユーザーに developer account
+      //   登録を要求するアプリ設計 (BYO API キー) を推奨していない。
+      //   ゴリゴリくんの BYO 方針と Unsplash 規約が衝突するため、
+      //   素材ソースとしては Pexels のみに絞る。
     ],
   },
 ];

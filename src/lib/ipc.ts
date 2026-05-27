@@ -692,7 +692,7 @@ export type SecretKey =
   | "pika_api_key"
   | "elevenlabs_api_key"
   | "magnific_api_key"
-  | "unsplash_access_key"
+  // unsplash_access_key は法務対応 (2026-05-21) で撤去。
   | "pexels_api_key"
   | "pixabay_api_key"
   | "tripo_api_key"
@@ -710,7 +710,9 @@ export const secrets = {
 };
 
 // ──────────── Stock photos (BYO API keys via OS Keychain) ────────────
-export type StockProvider = "unsplash" | "pexels" | "pixabay";
+// unsplash は法務対応 (2026-05-21) で撤去。
+// pixabay は Rust 側に実装は残るが UI からは提供していない。
+export type StockProvider = "pexels" | "pixabay";
 
 export type StockPhoto = {
   id: string;

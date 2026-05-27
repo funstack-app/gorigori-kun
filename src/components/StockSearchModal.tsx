@@ -1,32 +1,35 @@
 import { useEffect, useMemo, useState } from "react";
 
 import {
-  codexVision,
   stock,
-  translate,
-  type SecretKey,
   type StockPhoto,
-  type StockProvider,
   type StockSearchFilters,
 } from "../lib/ipc";
 import { useAccounts } from "../lib/store/accounts";
-import { usePresets } from "../lib/store/presets";
-import { useScenePromptOverride } from "../lib/store/scenePrompt";
+import { useActiveProject } from "../lib/store/activeProject";
+import { useProjects } from "../lib/store/projects";
 import { useToasts } from "../lib/store/toasts";
+
+/**
+ * `onPick` でストック素材を「参照に追加」する際、写真本体のローカルパス
+ * (path) と一緒にクレジット情報 (stockSource) を呼び出し側に渡す。
+ *
+ * 法務対応 (2026-05-21):
+ *   Pexels の素材を商用合成・PR 動画に使う場合の出典トレース用。
+ *   呼び出し側 (ConstructedPromptPanel など) が Reference.stockSource に
+ *   保存することで、完成物のエクスポート時にクレジット一覧を出せる土台とする。
+ */
+type StockPickSource = {
+  provider: "pexels";
+  photoId: string;
+  author: string;
+  sourceUrl?: string;
+};
 
 type Props = {
   open: boolean;
   onClose: () => void;
-  onPick: (path: string) => void;
-};
-
-type ProviderMeta = {
-  id: StockProvider;
-  label: string;
-  keyName: SecretKey;
-  signupUrl: string;
-  hint: string;
-  licenseNote: string;
+  onPick: (path: string, source: StockPickSource) => void;
 };
 
 type PexelsFilters = {
@@ -35,44 +38,37 @@ type PexelsFilters = {
   perPage: number;
 };
 
-type UnsplashFilters = {
-  orientation: string;
-  orderBy: "relevant" | "latest";
-  perPage: number;
+// 法務対応 (2026-05-21):
+//   - 「画像を分析」(Vision プロンプト化) 機能を撤去
+//   - Unsplash カテゴリを撤去
+//     理由: Unsplash API Guidelines は (1) アプリ内表示時に写真家・Unsplash
+//     への attribution を必須とし、(2) ユーザーへの developer account 登録
+//     要求 (BYO API キー) を推奨していない。ゴリゴリくんの BYO 方針と
+//     衝突するため、素材ソースを Pexels 単独に絞る。
+type ActionKind = "add";
+
+const PEXELS_PROVIDER = {
+  id: "pexels" as const,
+  label: "Pexels",
+  keyName: "pexels_api_key" as const,
+  signupUrl: "https://www.pexels.com/api/new/",
+  hint: "Pexels にログイン → API キーをコピーして貼り付け (無料、申請不要、200 req/時)",
+  // 法務対応 (2026-05-21):
+  //   - Pexels License は商用利用・改変可、クレジット任意
+  //   - 禁止事項を明記: 単体再配布 / 素材集化 / AI/ML 用の収集・データセット化
+  //   - AI モデルへの直接入力 (画像解析・キャプション化・プロンプト抽出含む) は本アプリでは非対応
+  //   - 写真自体のライセンスはクリアでも、肖像権・商標権・建物の意匠権は別。商用利用前に追加確認推奨
+  licenseNote:
+    "Pexels License: 規約の範囲で商用 OK / 改変 OK / クレジット任意。合成・背景・シーン素材として利用可。" +
+    "禁止: 単体再配布 / 素材集化 / AI/ML 用の収集・データセット化 / 画像解析・キャプション化・プロンプト抽出など AI モデルへの直接入力。" +
+    "※ 人物・ロゴ・ブランド・建物・美術作品が写る場合、肖像権・商標権・著作権の追加確認が必要になる場合があります。" +
+    "推薦・提携を示す表現は避けてください。",
 };
-
-type ActionKind = "add" | "analyze" | "translate";
-
-const PROVIDERS: ProviderMeta[] = [
-  {
-    id: "pexels",
-    label: "Pexels",
-    keyName: "pexels_api_key",
-    signupUrl: "https://www.pexels.com/api/new/",
-    hint: "Pexels にログイン → API キーをコピーして貼り付け (無料、申請不要、200 req/時)",
-    licenseNote: "Pexels License: 商用 OK / 改変 OK / 出典任意 / 参照画像用途 OK",
-  },
-  {
-    id: "unsplash",
-    label: "Unsplash",
-    keyName: "unsplash_access_key",
-    signupUrl: "https://unsplash.com/oauth/applications",
-    hint: "Unsplash にログイン → 新規アプリ作成 → Access Key をコピー (Demo 50 req/時)",
-    licenseNote:
-      "Unsplash License (無料版): 商用 OK / 改変 OK / 出典任意 ⚠ Unsplash+ (有料) の画像は AI 用途禁止",
-  },
-];
 
 const DEFAULT_PEXELS_FILTERS: PexelsFilters = {
   orientation: "",
   size: "",
   perPage: 15,
-};
-
-const DEFAULT_UNSPLASH_FILTERS: UnsplashFilters = {
-  orientation: "",
-  orderBy: "relevant",
-  perPage: 10,
 };
 
 function hasJapanese(value: string): boolean {
@@ -83,29 +79,15 @@ export function StockSearchModal({ open, onClose, onPick }: Props) {
   const secretsState = useAccounts((s) => s.secrets);
   const refreshSecrets = useAccounts((s) => s.refreshSecrets);
   const pushToast = useToasts((s) => s.push);
-  const availableProviders = useMemo(
-    () =>
-      PROVIDERS.map((item) => ({
-        ...item,
-        has: item.id === "pexels" ? secretsState.hasPexels : secretsState.hasUnsplash,
-      })),
-    [secretsState.hasPexels, secretsState.hasUnsplash],
-  );
-  const firstConnected = useMemo(
-    () => availableProviders.find((item) => item.has)?.id ?? "pexels",
-    [availableProviders],
-  );
+  // Pexels 単独運用 (2026-05-21 法務対応で Unsplash 撤去)。
+  const connected = secretsState.hasPexels;
 
-  const [provider, setProvider] = useState<StockProvider>(firstConnected);
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
   const [results, setResults] = useState<StockPhoto[]>([]);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const [pexelsFilters, setPexelsFilters] = useState<PexelsFilters>(
     DEFAULT_PEXELS_FILTERS,
-  );
-  const [unsplashFilters, setUnsplashFilters] = useState<UnsplashFilters>(
-    DEFAULT_UNSPLASH_FILTERS,
   );
   const [loading, setLoading] = useState(false);
   const [processingId, setProcessingId] = useState<string | null>(null);
@@ -117,13 +99,7 @@ export function StockSearchModal({ open, onClose, onPick }: Props) {
   // 選択モード: ON でシングルクリックが選択トグル動作になる。
   // OFF だとサムネクリックは無反応 (誤クリックでアクション暴発しないよう)。
   const [selectionMode, setSelectionMode] = useState(false);
-  // 画像分析の結果モーダル: 各画像の (thumbUrl, prompt) を保持
-  const [analyzeResults, setAnalyzeResults] = useState<
-    Array<{ photo: StockPhoto; prompt: string }>
-  >([]);
 
-  const activeProvider = availableProviders.find((item) => item.id === provider);
-  const connected = Boolean(activeProvider?.has);
   const queryHasJapanese = hasJapanese(query);
   const selectedPhotos = useMemo(
     () => results.filter((photo) => selectedIds.has(photo.id)),
@@ -145,14 +121,6 @@ export function StockSearchModal({ open, onClose, onPick }: Props) {
 
   useEffect(() => {
     if (!open) return;
-    setProvider((current) => {
-      const currentProvider = availableProviders.find((item) => item.id === current);
-      return currentProvider?.has ? current : firstConnected;
-    });
-  }, [availableProviders, firstConnected, open]);
-
-  useEffect(() => {
-    if (!open) return;
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") onClose();
     };
@@ -170,30 +138,17 @@ export function StockSearchModal({ open, onClose, onPick }: Props) {
     setProcessingId(null);
     setSelectionMode(false);
     setPreviewPhoto(null);
-    if (provider === "pexels") {
-      setPexelsFilters(DEFAULT_PEXELS_FILTERS);
-    } else if (provider === "unsplash") {
-      setUnsplashFilters(DEFAULT_UNSPLASH_FILTERS);
-    }
-  }, [open, provider]);
+    setPexelsFilters(DEFAULT_PEXELS_FILTERS);
+  }, [open]);
 
   if (!open) return null;
 
-  const buildFilters = (): StockSearchFilters => {
-    if (provider === "pexels") {
-      return {
-        orientation: pexelsFilters.orientation || undefined,
-        size: pexelsFilters.size || undefined,
-        locale: queryHasJapanese ? "ja-JP" : undefined,
-        perPage: pexelsFilters.perPage,
-      };
-    }
-    return {
-      orientation: unsplashFilters.orientation || undefined,
-      orderBy: unsplashFilters.orderBy,
-      perPage: unsplashFilters.perPage,
-    };
-  };
+  const buildFilters = (): StockSearchFilters => ({
+    orientation: pexelsFilters.orientation || undefined,
+    size: pexelsFilters.size || undefined,
+    locale: queryHasJapanese ? "ja-JP" : undefined,
+    perPage: pexelsFilters.perPage,
+  });
 
   const runSearch = async (nextPage = page) => {
     const trimmed = query.trim();
@@ -202,7 +157,7 @@ export function StockSearchModal({ open, onClose, onPick }: Props) {
     setError(null);
     setSelectedIds(new Set());
     try {
-      const photos = await stock.search(provider, trimmed, nextPage, buildFilters());
+      const photos = await stock.search("pexels", trimmed, nextPage, buildFilters());
       setResults(photos);
       setPage(nextPage);
       setLastCredit(photos[0] ?? null);
@@ -213,23 +168,6 @@ export function StockSearchModal({ open, onClose, onPick }: Props) {
       setError(String(err));
     } finally {
       setLoading(false);
-    }
-  };
-
-  const translateQuery = async () => {
-    const trimmed = query.trim();
-    if (provider !== "unsplash" || !trimmed || !queryHasJapanese || actionRunning) return;
-    setActionRunning("translate");
-    setError(null);
-    try {
-      const translated = await translate.jaToEn(trimmed);
-      setQuery(translated);
-      pushToast({ kind: "success", text: `英訳しました: ${translated}`, ttlMs: 4000 });
-    } catch (err) {
-      setError(String(err));
-      pushToast({ kind: "error", text: `英訳に失敗しました: ${String(err)}` });
-    } finally {
-      setActionRunning(null);
     }
   };
 
@@ -249,15 +187,21 @@ export function StockSearchModal({ open, onClose, onPick }: Props) {
 
   const clearSelection = () => setSelectedIds(new Set());
 
-  const downloadSelected = async (): Promise<string[]> => {
-    const paths: string[] = [];
+  /**
+   * 選択済み写真を順番に DL。クレジット保持のため、ローカルパスと一緒に
+   * 元の StockPhoto も返す (StockPickSource の構築に使う)。
+   */
+  const downloadSelected = async (): Promise<
+    Array<{ path: string; photo: StockPhoto }>
+  > => {
+    const results: Array<{ path: string; photo: StockPhoto }> = [];
     for (const photo of selectedPhotos) {
       setProcessingId(photo.id);
       setLastCredit(photo);
-      const path = await stock.download(provider, photo);
-      paths.push(path);
+      const path = await stock.download("pexels", photo);
+      results.push({ path, photo });
     }
-    return paths;
+    return results;
   };
 
   const addSelectedReferences = async () => {
@@ -265,13 +209,32 @@ export function StockSearchModal({ open, onClose, onPick }: Props) {
     setActionRunning("add");
     setError(null);
     try {
-      const paths = await downloadSelected();
-      for (const path of paths) {
-        onPick(path);
+      const entries = await downloadSelected();
+      // アクティブプロジェクトがあれば、クレジットをそこにも記録する
+      // (credits.csv エクスポート用、2026-05-21 法務対応)。
+      const activeProjectId = useActiveProject.getState().activeProjectId;
+      const recordCredit = useProjects.getState().recordStockCredit;
+      for (const { path, photo } of entries) {
+        // クレジット情報を一緒に渡す。商用案件の出典トレース用。
+        onPick(path, {
+          provider: "pexels",
+          photoId: photo.id,
+          author: photo.author || "unknown",
+          sourceUrl: photo.sourceUrl,
+        });
+        if (activeProjectId) {
+          recordCredit(activeProjectId, {
+            provider: "pexels",
+            photoId: photo.id,
+            author: photo.author || "unknown",
+            sourceUrl: photo.sourceUrl,
+            localPath: path,
+          });
+        }
       }
       pushToast({
         kind: "success",
-        text: `${paths.length} 件を参照に追加しました`,
+        text: `${entries.length} 件を参照に追加しました`,
         ttlMs: 3000,
       });
       clearSelection();
@@ -284,85 +247,10 @@ export function StockSearchModal({ open, onClose, onPick }: Props) {
     }
   };
 
-  const analyzeSelectedImages = async () => {
-    if (selectedPhotos.length === 0 || actionRunning) return;
-    setActionRunning("analyze");
-    setError(null);
-    // 結果を蓄積して、終了後に結果モーダルへ。
-    // トーストでの単発表示はやめて、専用画面で 採用 / プリセット登録 へ分岐する。
-    const collected: Array<{ photo: StockPhoto; prompt: string }> = [];
-    try {
-      for (const photo of selectedPhotos) {
-        setProcessingId(photo.id);
-        setLastCredit(photo);
-        const path = await stock.download(provider, photo);
-        const prompt = await codexVision.describeImage(path);
-        collected.push({ photo, prompt });
-      }
-      setAnalyzeResults(collected);
-      clearSelection();
-    } catch (err) {
-      setError(String(err));
-      pushToast({ kind: "error", text: `画像分析に失敗しました: ${String(err)}` });
-      // 途中までの結果も見せる (1 件以上あれば)
-      if (collected.length > 0) setAnalyzeResults(collected);
-    } finally {
-      setProcessingId(null);
-      setActionRunning(null);
-    }
-  };
-
-  /** 採用: シーン構築の promptOverride に反映して、素材検索モーダルごと閉じる */
-  const adoptPrompt = (prompt: string) => {
-    useScenePromptOverride.getState().set(prompt);
-    setAnalyzeResults([]);
-    pushToast({
-      kind: "success",
-      text: "プロンプトを採用しました (シーン構築に反映)",
-      ttlMs: 3000,
-    });
-    onClose();
-  };
-
-  /**
-   * プリセット登録: サイドバー「プリセット」画面と連動する `usePresets` store に保存。
-   * (旧実装は `useSavedPrompts` に保存していたが別の store でサイドバーに出ない問題があった)
-   *
-   * 保存先カテゴリ: 「素材分析」カテゴリがあればそこ、なければ自動作成して「未分類」(null) 回避。
-   * 結果モーダルは閉じない (連続登録可)。
-   */
-  const saveAsPreset = (entry: { photo: StockPhoto; prompt: string }) => {
-    try {
-      const presetsApi = usePresets.getState();
-      // 「素材分析」カテゴリを再利用 or 自動作成
-      const ANALYSIS_CATEGORY = "素材分析";
-      let category = presetsApi.categories.find((c) => c.name === ANALYSIS_CATEGORY);
-      if (!category) {
-        category = presetsApi.addCategory(ANALYSIS_CATEGORY, "#ec4899");
-      }
-      const name =
-        entry.photo.author && entry.photo.author.length > 0
-          ? `${provider}: ${entry.photo.author}`
-          : `${provider} 素材`;
-      presetsApi.addPreset({
-        name,
-        prompt: entry.prompt,
-        categoryId: category.id,
-        tags: [provider],
-        thumbnail: entry.photo.thumbUrl, // サムネ URL を流す (data URL じゃないので表示は MVP)
-      });
-      pushToast({
-        kind: "success",
-        text: `「${name}」をプリセット (素材分析) に登録しました`,
-        ttlMs: 3000,
-      });
-    } catch (err) {
-      pushToast({
-        kind: "error",
-        text: `プリセット登録に失敗しました: ${String(err)}`,
-      });
-    }
-  };
+  // 法務対応 (2026-05-21):
+  //   - 「画像を分析」(Vision プロンプト化) 機能を撤去 (AI 直接入力回避)
+  //   - Unsplash カテゴリも撤去 (BYO API キー方式が Unsplash API Guidelines
+  //     と衝突するため、素材ソースは Pexels 単独に絞る)
 
   return (
     <div
@@ -393,24 +281,21 @@ export function StockSearchModal({ open, onClose, onPick }: Props) {
         </div>
 
         <div className="border-b border-[#242424] px-4 py-3">
+          {/*
+            プロバイダタブは Pexels のみ。Unsplash は法務対応 (2026-05-21) で
+            撤去済み。将来別の素材ソースを足す時は配列化を復活させる。
+          */}
           <div className="flex flex-wrap items-center gap-2">
-            {availableProviders.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => setProvider(item.id)}
-                className={[
-                  "flex h-8 items-center gap-1.5 rounded-md border px-3 text-xs font-bold transition",
-                  provider === item.id
-                    ? "border-pink-400 bg-pink-500/15 text-pink-100"
-                    : "border-[#343434] bg-[#101010] text-neutral-300 hover:border-pink-400 hover:text-white",
-                ].join(" ")}
-                title={item.has ? `${item.label} で検索` : `${item.label} に接続`}
-              >
-                {item.has && <span className="text-lime-400">●</span>}
-                {item.label}
-              </button>
-            ))}
+            <span
+              className={[
+                "flex h-8 items-center gap-1.5 rounded-md border px-3 text-xs font-bold",
+                "border-pink-400 bg-pink-500/15 text-pink-100",
+              ].join(" ")}
+              title={connected ? `${PEXELS_PROVIDER.label} で検索` : `${PEXELS_PROVIDER.label} に接続`}
+            >
+              {connected && <span className="text-lime-400">●</span>}
+              {PEXELS_PROVIDER.label}
+            </span>
           </div>
 
           <form
@@ -428,16 +313,6 @@ export function StockSearchModal({ open, onClose, onPick }: Props) {
               disabled={!connected}
               className="h-9 min-w-52 flex-1 rounded-md border border-[#343434] bg-[#101010] px-3 text-xs text-neutral-100 outline-none focus:border-pink-400 disabled:text-neutral-600"
             />
-            {provider === "unsplash" && (
-              <button
-                type="button"
-                onClick={() => void translateQuery()}
-                disabled={!connected || !query.trim() || !queryHasJapanese || busy}
-                className="h-9 rounded-md border border-[#343434] bg-[#101010] px-3 text-xs font-black text-neutral-200 hover:border-pink-400 hover:text-white disabled:cursor-not-allowed disabled:text-neutral-600"
-              >
-                {actionRunning === "translate" ? "英訳中" : "Aa→ 英訳"}
-              </button>
-            )}
             <button
               type="submit"
               disabled={!connected || !query.trim() || busy}
@@ -473,95 +348,48 @@ export function StockSearchModal({ open, onClose, onPick }: Props) {
           </form>
 
           <div className="mt-3 flex flex-wrap items-center gap-2">
-            {provider === "pexels" ? (
-              <>
-                <FilterSelect
-                  label="向き"
-                  value={pexelsFilters.orientation}
-                  onChange={(value) =>
-                    setPexelsFilters((current) => ({ ...current, orientation: value }))
-                  }
-                  options={[
-                    ["", "すべて"],
-                    ["landscape", "横長"],
-                    ["portrait", "縦長"],
-                    ["square", "正方形"],
-                  ]}
-                />
-                {/*
-                  色フィルター削除 (STΛCK 判断): Pexels API の color は
-                  公式に厳密度の記載なく、実挙動も色が一致しない画像が混ざる
-                  ことが多い。フィルターとして機能しないので UI から外す。
-                  PEXELS_COLORS 定数も削除した。
-                */}
-                <FilterSelect
-                  label="サイズ"
-                  value={pexelsFilters.size}
-                  onChange={(value) =>
-                    setPexelsFilters((current) => ({ ...current, size: value }))
-                  }
-                  options={[
-                    ["", "すべて"],
-                    ["large", "large"],
-                    ["medium", "medium"],
-                    ["small", "small"],
-                  ]}
-                />
-                <span className="h-8 rounded-md border border-[#2a2a2a] bg-[#101010] px-3 py-2 text-[11px] font-bold text-neutral-500">
-                  並び: 関連順固定
-                </span>
-                <NumberSelect
-                  label="件数"
-                  value={pexelsFilters.perPage}
-                  onChange={(value) =>
-                    setPexelsFilters((current) => ({ ...current, perPage: value }))
-                  }
-                  options={[15, 30, 50, 80]}
-                />
-              </>
-            ) : (
-              <>
-                <FilterSelect
-                  label="向き"
-                  value={unsplashFilters.orientation}
-                  onChange={(value) =>
-                    setUnsplashFilters((current) => ({
-                      ...current,
-                      orientation: value,
-                    }))
-                  }
-                  options={[
-                    ["", "すべて"],
-                    ["landscape", "横長"],
-                    ["portrait", "縦長"],
-                    ["squarish", "正方形"],
-                  ]}
-                />
-                {/* 色フィルター削除 (Pexels と同じく挙動が不確実) */}
-                <FilterSelect
-                  label="並び"
-                  value={unsplashFilters.orderBy}
-                  onChange={(value) =>
-                    setUnsplashFilters((current) => ({
-                      ...current,
-                      orderBy: value === "latest" ? "latest" : "relevant",
-                    }))
-                  }
-                  options={[
-                    ["relevant", "関連順"],
-                    ["latest", "新着順"],
-                  ]}
-                />
-                <NumberSelect
-                  label="件数"
-                  value={unsplashFilters.perPage}
-                  onChange={(value) =>
-                    setUnsplashFilters((current) => ({ ...current, perPage: value }))
-                  }
-                  options={[10, 20, 30]}
-                />
-              </>
-            )}
+            <FilterSelect
+              label="向き"
+              value={pexelsFilters.orientation}
+              onChange={(value) =>
+                setPexelsFilters((current) => ({ ...current, orientation: value }))
+              }
+              options={[
+                ["", "すべて"],
+                ["landscape", "横長"],
+                ["portrait", "縦長"],
+                ["square", "正方形"],
+              ]}
+            />
+            {/*
+              色フィルター削除 (STΛCK 判断): Pexels API の color は
+              公式に厳密度の記載なく、実挙動も色が一致しない画像が混ざる
+              ことが多い。フィルターとして機能しないので UI から外す。
+            */}
+            <FilterSelect
+              label="サイズ"
+              value={pexelsFilters.size}
+              onChange={(value) =>
+                setPexelsFilters((current) => ({ ...current, size: value }))
+              }
+              options={[
+                ["", "すべて"],
+                ["large", "large"],
+                ["medium", "medium"],
+                ["small", "small"],
+              ]}
+            />
+            <span className="h-8 rounded-md border border-[#2a2a2a] bg-[#101010] px-3 py-2 text-[11px] font-bold text-neutral-500">
+              並び: 関連順固定
+            </span>
+            <NumberSelect
+              label="件数"
+              value={pexelsFilters.perPage}
+              onChange={(value) =>
+                setPexelsFilters((current) => ({ ...current, perPage: value }))
+              }
+              options={[15, 30, 50, 80]}
+            />
           </div>
         </div>
 
@@ -587,14 +415,6 @@ export function StockSearchModal({ open, onClose, onPick }: Props) {
               </button>
               <button
                 type="button"
-                onClick={() => void analyzeSelectedImages()}
-                disabled={busy}
-                className="h-8 rounded-md border border-[#343434] bg-[#181818] px-3 text-xs font-semibold text-neutral-200 hover:border-pink-400 hover:text-white disabled:cursor-not-allowed disabled:text-neutral-600"
-              >
-                {actionRunning === "analyze" ? "分析中" : "画像を分析"}
-              </button>
-              <button
-                type="button"
                 onClick={clearSelection}
                 disabled={busy}
                 className="h-8 px-2 text-xs font-medium text-neutral-400 hover:text-white disabled:cursor-not-allowed disabled:text-neutral-600"
@@ -617,7 +437,7 @@ export function StockSearchModal({ open, onClose, onPick }: Props) {
             <div className="flex h-full items-center justify-center rounded-lg border border-dashed border-[#343434] bg-[#101010] p-8 text-center text-xs text-neutral-500">
               {connected
                 ? "キーワードを入力して検索してください"
-                : `設定 → 接続先で ${activeProvider?.label ?? "プロバイダ"} の API キーを登録してください`}
+                : `設定 → 接続先で ${PEXELS_PROVIDER.label} の API キーを登録してください`}
             </div>
           ) : (
             /*
@@ -638,7 +458,7 @@ export function StockSearchModal({ open, onClose, onPick }: Props) {
                 const processing = processingId === photo.id;
                 return (
                   <div
-                    key={`${provider}-${photo.id}`}
+                    key={`pexels-${photo.id}`}
                     className={[
                       "group relative mb-3 break-inside-avoid overflow-hidden rounded-md transition",
                       selected
@@ -674,8 +494,8 @@ export function StockSearchModal({ open, onClose, onPick }: Props) {
                         src={photo.thumbUrl}
                         alt={
                           photo.author
-                            ? `${provider} by ${photo.author}`
-                            : `${provider} stock photo`
+                            ? `Pexels by ${photo.author}`
+                            : "Pexels stock photo"
                         }
                         className="block w-full pointer-events-none select-none"
                         loading="lazy"
@@ -695,10 +515,25 @@ export function StockSearchModal({ open, onClose, onPick }: Props) {
                       </span>
                     )}
                     {processing && (
-                      <span className="absolute inset-x-2 bottom-2 rounded bg-pink-500/90 px-2 py-1 text-center text-[10px] font-black text-white">
-                        {actionRunning === "analyze" ? "分析中" : "追加中"}
+                      <span className="absolute inset-x-2 bottom-8 rounded bg-pink-500/90 px-2 py-1 text-center text-[10px] font-black text-white">
+                        追加中
                       </span>
                     )}
+                    {/*
+                      クレジット常時表示 (2026-05-21 法務対応):
+                      Pexels License はクレジット任意だが、商用案件のトレース性を
+                      上げるため画像下に薄く常時表示する。元ページへのリンクは
+                      下部フッターに集約 (ホバーで詳細, 大きな画面遷移はモーダル経由)。
+                    */}
+                    <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/80 via-black/40 to-transparent px-2 py-1 text-[10px] font-semibold text-neutral-200">
+                      <span className="opacity-90">Pexels</span>
+                      {photo.author && (
+                        <>
+                          <span className="opacity-50"> / </span>
+                          <span className="opacity-90">by {photo.author}</span>
+                        </>
+                      )}
+                    </div>
                   </div>
                 );
               })}
@@ -780,8 +615,8 @@ export function StockSearchModal({ open, onClose, onPick }: Props) {
               src={previewPhoto.fullUrl}
               alt={
                 previewPhoto.author
-                  ? `${provider} by ${previewPhoto.author}`
-                  : `${provider} preview`
+                  ? `Pexels by ${previewPhoto.author}`
+                  : "Pexels preview"
               }
               className="max-h-[80vh] max-w-full rounded-lg object-contain shadow-2xl"
               loading="eager"
@@ -822,101 +657,11 @@ export function StockSearchModal({ open, onClose, onPick }: Props) {
       )}
 
       {/*
-        画像分析の結果モーダル (専用画面).
-        各画像のサムネ + Codex Vision が生成したプロンプト + 2 軸アクション:
-          - 採用 → useScenePromptOverride にセットして素材モーダルごと閉じる
-          - プリセットに登録 → useSavedPrompts に保存、結果モーダルは閉じない (連続登録可)
-        背景クリックは閉じる、素材モーダルへ戻る (stopPropagation で親に伝播させない)。
+        画像分析の結果モーダル は法務対応 (2026-05-21) で撤去。
+        Pexels / Unsplash 画像を AI モデルに入力するフローは
+        Unsplash 規約 (AI 学習・データセット禁止) と衝突するため、
+        ストック素材は「合成・シーン素材」用途に限定する設計に統一した。
       */}
-      {analyzeResults.length > 0 && (
-        <div
-          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/90 p-4"
-          onClick={(event) => {
-            event.stopPropagation();
-            setAnalyzeResults([]);
-          }}
-        >
-          <div
-            className="flex max-h-[calc(100vh-2rem)] w-full max-w-4xl min-h-0 flex-col overflow-hidden rounded-xl border border-[#2a2a2a] bg-[#181818] shadow-2xl"
-            onClick={(event) => event.stopPropagation()}
-          >
-            {/* F-#9 同じ二重スクロール問題を修正。スクロールは内側 (L856) だけが担当 */}
-            <div className="flex items-center justify-between gap-3 border-b border-[#242424] px-4 py-3">
-              <h3 className="text-sm font-semibold text-white">
-                画像分析の結果 ({analyzeResults.length} 件)
-              </h3>
-              <button
-                type="button"
-                onClick={() => setAnalyzeResults([])}
-                aria-label="閉じる"
-                className="text-neutral-400 hover:text-white"
-              >
-                ×
-              </button>
-            </div>
-            <div className="min-h-0 flex-1 overflow-y-auto p-4">
-              <ul className="space-y-3">
-                {analyzeResults.map((entry, index) => (
-                  <li
-                    key={`${entry.photo.id}-${index}`}
-                    className="flex flex-col gap-3 rounded-lg border border-[#2a2a2a] bg-[#101010] p-3 sm:flex-row"
-                  >
-                    <img
-                      src={entry.photo.thumbUrl}
-                      alt={entry.photo.author ?? "stock"}
-                      className="h-28 w-28 shrink-0 rounded-md object-cover"
-                    />
-                    <div className="flex min-w-0 flex-1 flex-col gap-3">
-                      <p className="whitespace-pre-wrap text-xs leading-relaxed text-neutral-200">
-                        {entry.prompt}
-                      </p>
-                      <div className="flex flex-wrap items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() => adoptPrompt(entry.prompt)}
-                          className="h-8 rounded-md bg-pink-500 px-3 text-xs font-semibold text-white hover:bg-pink-600"
-                        >
-                          採用 (シーン構築に反映)
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => void saveAsPreset(entry)}
-                          className="h-8 rounded-md border border-[#343434] bg-[#181818] px-3 text-xs font-medium text-neutral-200 hover:border-pink-400 hover:text-white"
-                        >
-                          ★ プリセットに登録
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            void navigator.clipboard.writeText(entry.prompt);
-                            pushToast({
-                              kind: "success",
-                              text: "プロンプトをコピーしました",
-                              ttlMs: 1800,
-                            });
-                          }}
-                          className="h-8 rounded-md border border-[#343434] bg-[#181818] px-3 text-xs font-medium text-neutral-300 hover:border-[#555] hover:text-white"
-                        >
-                          コピー
-                        </button>
-                      </div>
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            </div>
-            <div className="flex items-center justify-end gap-2 border-t border-[#242424] px-4 py-3">
-              <button
-                type="button"
-                onClick={() => setAnalyzeResults([])}
-                className="h-8 rounded-md border border-[#343434] bg-[#101010] px-3 text-xs font-medium text-neutral-300 hover:border-[#555] hover:text-white"
-              >
-                閉じる
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

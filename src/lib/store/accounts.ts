@@ -37,7 +37,7 @@ export type SecretsState = {
   hasPika: boolean;
   hasElevenlabs: boolean;
   hasMagnific: boolean;
-  hasUnsplash: boolean;
+  // hasUnsplash は法務対応 (2026-05-21) で撤去。
   hasPexels: boolean;
   hasPixabay: boolean;
   hasTripo: boolean;
@@ -103,7 +103,7 @@ const SECRET_FIELD_MAP = [
   ["pika_api_key", "hasPika"],
   ["elevenlabs_api_key", "hasElevenlabs"],
   ["magnific_api_key", "hasMagnific"],
-  ["unsplash_access_key", "hasUnsplash"],
+  // unsplash_access_key は法務対応 (2026-05-21) で撤去。
   ["pexels_api_key", "hasPexels"],
   ["pixabay_api_key", "hasPixabay"],
   ["tripo_api_key", "hasTripo"],

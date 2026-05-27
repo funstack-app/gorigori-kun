@@ -470,11 +470,15 @@ export function ConstructedPromptPanel() {
       <StockSearchModal
         open={stockOpen}
         onClose={() => setStockOpen(false)}
-        onPick={(path) => {
+        onPick={(path, stockSource) => {
+          // ストック素材のクレジット情報を Reference に保持する。
+          // 完成作品のエクスポート時に「素材出典一覧」を出すための土台
+          // (2026-05-21 法務対応)。
           addReference({
             path,
             name: path.split(/[\\/]/).pop() || "stock image",
             source: "gallery",
+            stockSource,
           });
           setStockOpen(false);
         }}

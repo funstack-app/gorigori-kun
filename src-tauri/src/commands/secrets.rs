@@ -54,7 +54,9 @@ pub fn secret_list() -> Result<Vec<String>, String> {
         "pika_api_key",
         "elevenlabs_api_key",
         "magnific_api_key",
-        "unsplash_access_key",
+        // unsplash_access_key は法務対応 (2026-05-21) で撤去。
+        // 過去に保存されたキーはキーチェーンに残るが、ここで列挙しないため
+        // secret_list には現れなくなる。
         "pexels_api_key",
         "pixabay_api_key",
         "tripo_api_key",

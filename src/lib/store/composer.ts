@@ -55,6 +55,26 @@ export type ReferenceRole =
   | "pose"
   | "negative";
 
+/**
+ * ストック素材 (Pexels) のクレジット情報。
+ *
+ * 法務対応 (2026-05-21):
+ *   - Pexels License: クレジット任意だが、ユーザーが商用案件で出典を求められた
+ *     時に答えられるよう保持する。完成作品のエクスポート時に「素材出典一覧」
+ *     を出せる導線の土台。
+ *   - 写真自体の著作権はクリアでも、人物の肖像権・ブランドの商標権・建物の
+ *     意匠権は別。商用利用時はユーザー側で追加確認が必要なため、その判断材料
+ *     としても source 情報を残しておく。
+ *   - Unsplash は BYO API キー方式が Unsplash API Guidelines と衝突するため、
+ *     ソースから撤去済み。
+ */
+export type StockSource = {
+  provider: "pexels";
+  photoId: string;
+  author: string;
+  sourceUrl?: string;
+};
+
 export type Reference = {
   path: string;
   name: string;
@@ -68,6 +88,11 @@ export type Reference = {
   source?: ReferenceSource;
   /** What the generator should inherit from this reference. */
   role?: ReferenceRole;
+  /**
+   * Pexels 由来の素材の場合、クレジット情報を保持する。
+   * 未定義の場合は自分のライブラリ / アップロード素材。
+   */
+  stockSource?: StockSource;
 };
 
 type ComposerState = {

@@ -50,49 +50,12 @@ pub async fn stock_search(
         "[stock_search] provider={} query={:?} page={} filters={:?}",
         provider, query, page, filters
     );
+    // 法務対応 (2026-05-21): Unsplash 分岐は撤去。
+    //   理由: Unsplash API Guidelines は BYO API キー方式 (ユーザーに
+    //   developer account 登録を要求する設計) を推奨していない。
+    //   ゴリゴリくんの BYO 方針と衝突するため、素材ソースは Pexels に
+    //   絞った。pixabay は将来用に実装は残す。
     let mut req = match provider {
-        "unsplash" => {
-            let per_page = filters.per_page.unwrap_or(10).clamp(1, 30).to_string();
-            let mut params = vec![
-                ("query", query.to_string()),
-                ("page", page_s.clone()),
-                ("per_page", per_page),
-            ];
-            push_if_valid(
-                &mut params,
-                "orientation",
-                filters.orientation.as_deref(),
-                &["landscape", "portrait", "squarish"],
-            );
-            push_if_valid(
-                &mut params,
-                "color",
-                filters.color.as_deref(),
-                &[
-                    "black_and_white",
-                    "black",
-                    "white",
-                    "yellow",
-                    "orange",
-                    "red",
-                    "purple",
-                    "magenta",
-                    "green",
-                    "teal",
-                    "blue",
-                ],
-            );
-            push_if_valid(
-                &mut params,
-                "order_by",
-                filters.order_by.as_deref(),
-                &["relevant", "latest"],
-            );
-            client
-                .get("https://api.unsplash.com/search/photos")
-                .query(&params)
-                .header("Authorization", format!("Client-ID {key}"))
-        }
         "pexels" => {
             let per_page = filters.per_page.unwrap_or(15).clamp(1, 80).to_string();
             let mut params = vec![
@@ -135,7 +98,7 @@ pub async fn stock_search(
     };
     req = req.header("Accept", "application/json");
 
-    // 実際に Pexels/Unsplash に投げる URL をログ出力 (フィルター動作確認用)
+    // 実際に Pexels に投げる URL をログ出力 (フィルター動作確認用)
     if let Some(cloned) = req.try_clone() {
         if let Ok(built) = cloned.build() {
             eprintln!("[stock_search] outgoing URL: {}", built.url());
@@ -159,7 +122,7 @@ pub async fn stock_search(
         .map_err(|e| request_error(provider, "検索レスポンス", e))?;
 
     Ok(match provider {
-        "unsplash" => parse_unsplash(&json),
+        // unsplash 分岐は法務対応 (2026-05-21) で撤去。
         "pexels" => parse_pexels(&json),
         "pixabay" => parse_pixabay(&json),
         _ => Vec::new(),
@@ -173,26 +136,9 @@ pub async fn stock_download(provider: String, photo: StockPhoto) -> Result<Strin
         return Err("ダウンロード URL が空です".to_string());
     }
 
-    let key = secret_get_for(provider)?;
+    // 法務対応 (2026-05-21): Unsplash 撤去に伴い download_trigger は不使用。
+    let _key = secret_get_for(provider)?;
     let client = Client::new();
-
-    if provider == "unsplash" {
-        if let Some(trigger) = photo.download_trigger.as_deref().filter(|s| !s.is_empty()) {
-            let res = client
-                .get(trigger)
-                .header("Authorization", format!("Client-ID {key}"))
-                .send()
-                .await
-                .map_err(|e| request_error(provider, "ダウンロード記録", e))?;
-            if !res.status().is_success() {
-                return Err(format!(
-                    "{} のダウンロード記録に失敗しました ({})",
-                    label(provider),
-                    res.status()
-                ));
-            }
-        }
-    }
 
     let res = client
         .get(&photo.full_url)
@@ -285,24 +231,7 @@ fn is_hex_color(value: &str) -> bool {
         && value.chars().skip(1).all(|ch| ch.is_ascii_hexdigit())
 }
 
-fn parse_unsplash(json: &Value) -> Vec<StockPhoto> {
-    json.get("results")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .map(|item| StockPhoto {
-            id: string_at(item, &["id"]),
-            thumb_url: string_at(item, &["urls", "thumb"]),
-            full_url: string_at(item, &["urls", "regular"]),
-            author: string_at(item, &["user", "name"]),
-            source_url: optional_string_at(item, &["links", "html"]),
-            download_trigger: optional_string_at(item, &["links", "download_location"]),
-        })
-        .filter(|photo| {
-            !photo.id.is_empty() && !photo.thumb_url.is_empty() && !photo.full_url.is_empty()
-        })
-        .collect()
-}
+// parse_unsplash は法務対応 (2026-05-21) で撤去。
 
 fn parse_pexels(json: &Value) -> Vec<StockPhoto> {
     json.get("photos")
@@ -342,9 +271,9 @@ fn parse_pixabay(json: &Value) -> Vec<StockPhoto> {
         .collect()
 }
 
+// unsplash は法務対応 (2026-05-21) で全分岐から撤去。
 fn normalize_provider(provider: &str) -> Result<&'static str, String> {
     match provider {
-        "unsplash" => Ok("unsplash"),
         "pexels" => Ok("pexels"),
         "pixabay" => Ok("pixabay"),
         _ => Err("unknown provider".to_string()),
@@ -353,7 +282,6 @@ fn normalize_provider(provider: &str) -> Result<&'static str, String> {
 
 fn secret_get_for(provider: &str) -> Result<String, String> {
     let key_name = match provider {
-        "unsplash" => "unsplash_access_key",
         "pexels" => "pexels_api_key",
         "pixabay" => "pixabay_api_key",
         _ => return Err("unknown provider".to_string()),
@@ -365,7 +293,6 @@ fn secret_get_for(provider: &str) -> Result<String, String> {
 
 fn label(provider: &str) -> &'static str {
     match provider {
-        "unsplash" => "Unsplash",
         "pexels" => "Pexels",
         "pixabay" => "Pixabay",
         _ => "stock provider",

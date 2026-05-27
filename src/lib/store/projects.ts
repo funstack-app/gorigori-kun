@@ -46,6 +46,31 @@ export type ProjectChatMessage = {
   createdAt: number;
 };
 
+/**
+ * プロジェクトに紐づくストック素材のクレジット記録 (法務対応 2026-05-21)。
+ *
+ * 用途:
+ *   - 商用案件で「この PR 動画で使った素材は？」と聞かれた時の出典トレース
+ *   - エクスポート時に credits.csv として一覧出力する
+ *
+ * 記録タイミング:
+ *   - StockSearchModal の「参照に追加」時、アクティブプロジェクトがあれば
+ *     useProjects.getState().recordStockCredit(activeProjectId, credit) を呼ぶ
+ *
+ * 重複排除:
+ *   - 同じ photoId が既にあれば addedAt のみ更新 (二重カウントしない)
+ */
+export type StockCredit = {
+  provider: "pexels";
+  photoId: string;
+  author: string;
+  sourceUrl?: string;
+  /** ローカルに保存したファイルパス。後追いで「どの素材か」を辿る用。 */
+  localPath?: string;
+  /** いつ参照に取り込んだか */
+  addedAt: number;
+};
+
 export type Project = {
   id: string;
   name: string;
@@ -55,6 +80,12 @@ export type Project = {
   /** 企画チャット (PlanWorkspace) のログ。アクティブプロジェクト時に
    *  会話完了ごとに上書き保存される。 */
   planChat?: ProjectChatMessage[];
+  /**
+   * このプロジェクトで取り込んだストック素材のクレジット累積ログ。
+   * 法務対応 (2026-05-21): credits.csv エクスポート用の出典トレース。
+   * 未定義の場合は空配列扱い (後方互換)。
+   */
+  stockCredits?: StockCredit[];
   createdAt: number;
   updatedAt: number;
 };
@@ -164,6 +195,23 @@ type ProjectsState = {
 
   /** 企画チャットログを上書き保存する（差分ではなく毎回スナップショット） */
   setPlanChat: (projectId: string, messages: ProjectChatMessage[]) => void;
+
+  /**
+   * ストック素材のクレジットを記録する (法務対応 2026-05-21)。
+   * 同じ photoId が既にあれば addedAt のみ更新 (重複排除)。
+   * プロジェクトが見つからない場合は何もしない。
+   */
+  recordStockCredit: (
+    projectId: string,
+    credit: Omit<StockCredit, "addedAt">,
+  ) => void;
+
+  /**
+   * プロジェクトの stockCredits を CSV 文字列として生成する。
+   * 1 行目はヘッダ。空ログでもヘッダのみ返す。
+   * 法務対応 (2026-05-21): 商用案件の出典トレース用。
+   */
+  buildCreditsCsv: (projectId: string) => string;
 
   /**
    * 初期化: ファイルから読み出して store に流し込む。
@@ -318,4 +366,72 @@ export const useProjects = create<ProjectsState>((set, get) => ({
     persist(next);
     set({ projects: next });
   },
+
+  recordStockCredit: (projectId, credit) => {
+    const projects = get().projects;
+    const target = projects.find((p) => p.id === projectId);
+    if (!target) return;
+    const existing = (target.stockCredits ?? []).find(
+      (c) => c.provider === credit.provider && c.photoId === credit.photoId,
+    );
+    const nextCredit: StockCredit = existing
+      ? { ...existing, ...credit, addedAt: Date.now() }
+      : { ...credit, addedAt: Date.now() };
+    const nextCredits = existing
+      ? (target.stockCredits ?? []).map((c) =>
+          c.provider === existing.provider && c.photoId === existing.photoId
+            ? nextCredit
+            : c,
+        )
+      : [nextCredit, ...(target.stockCredits ?? [])];
+    const next = projects.map((p) =>
+      p.id === projectId
+        ? { ...p, stockCredits: nextCredits, updatedAt: Date.now() }
+        : p,
+    );
+    persist(next);
+    set({ projects: next });
+  },
+
+  buildCreditsCsv: (projectId) => {
+    const target = get().projects.find((p) => p.id === projectId);
+    // 表計算ソフトとの互換重視で UTF-8 BOM を付けない素の CSV を返す。
+    // BOM 付きが必要な呼び出し側 (Excel 日本語環境) はファイル保存時に
+    // 先頭に "﻿" を付ければよい。
+    const header =
+      "provider,photo_id,author,source_url,local_path,added_at_iso,project_id,project_name";
+    if (!target || !target.stockCredits || target.stockCredits.length === 0) {
+      return `${header}\n`;
+    }
+    const projectName = target.name;
+    const rows = target.stockCredits.map((c) => {
+      const addedAtIso = new Date(c.addedAt).toISOString();
+      return [
+        csvEscape(c.provider),
+        csvEscape(c.photoId),
+        csvEscape(c.author),
+        csvEscape(c.sourceUrl ?? ""),
+        csvEscape(c.localPath ?? ""),
+        csvEscape(addedAtIso),
+        csvEscape(target.id),
+        csvEscape(projectName),
+      ].join(",");
+    });
+    return `${header}\n${rows.join("\n")}\n`;
+  },
 }));
+
+/**
+ * CSV の 1 セルをエスケープする。
+ *  - カンマ / 改行 / ダブルクォートのいずれかが含まれていたら全体を "" で囲む
+ *  - 内部のダブルクォートは "" にエスケープ
+ *
+ * 法務対応 (2026-05-21): credits.csv エクスポートで使用。
+ *   著者名にカンマや日本語の括弧が入る可能性があるため、必須。
+ */
+function csvEscape(value: string): string {
+  if (value === "") return "";
+  const needsQuote = /[",\n\r]/.test(value);
+  const escaped = value.replace(/"/g, '""');
+  return needsQuote ? `"${escaped}"` : escaped;
+}
