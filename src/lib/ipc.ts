@@ -714,10 +714,13 @@ export const secrets = {
 // pixabay は Rust 側に実装は残るが UI からは提供していない。
 export type StockProvider = "pexels" | "pixabay";
 
+// 2026-05-27 masonry チラつき修正で width/height 追加。
 export type StockPhoto = {
   id: string;
   thumbUrl: string;
   fullUrl: string;
+  width: number;
+  height: number;
   author: string;
   sourceUrl?: string;
   downloadTrigger?: string;

@@ -258,7 +258,7 @@ export function StockSearchModal({ open, onClose, onPick }: Props) {
       onClick={onClose}
     >
       <div
-        className="flex max-h-[calc(100vh-2rem)] w-full max-w-5xl min-h-0 flex-col overflow-hidden rounded-xl border border-[#2a2a2a] bg-[#181818] shadow-2xl"
+        className="flex h-[calc(100vh-2rem)] max-h-[calc(100vh-2rem)] w-full max-w-5xl min-h-0 flex-col overflow-hidden rounded-xl border border-[#2a2a2a] bg-[#181818] shadow-2xl"
         onClick={(event) => event.stopPropagation()}
       >
         {/*
@@ -268,7 +268,7 @@ export function StockSearchModal({ open, onClose, onPick }: Props) {
           親を overflow-hidden + min-h-0 にして、スクロールは結果エリアだけが
           持つ単一スクロール構造に変更。検索フォームは常時固定表示される。
         */}
-        <div className="flex items-center justify-between gap-3 border-b border-[#242424] px-4 py-3">
+        <div className="flex shrink-0 items-center justify-between gap-3 border-b border-[#242424] px-4 py-3">
           <h3 className="text-sm font-black text-white">ストック素材検索</h3>
           <button
             type="button"
@@ -280,10 +280,14 @@ export function StockSearchModal({ open, onClose, onPick }: Props) {
           </button>
         </div>
 
-        <div className="border-b border-[#242424] px-4 py-3">
+        <div className="shrink-0 border-b border-[#242424] px-4 py-3">
           {/*
             プロバイダタブは Pexels のみ。Unsplash は法務対応 (2026-05-21) で
             撤去済み。将来別の素材ソースを足す時は配列化を復活させる。
+
+            shrink-0 必須 (F-#9 marche_izm さん報告の再修正 2026-05-27):
+            親の flex-col 内でこのヘッダ群が縮むと、検索結果エリアの flex-1 が
+            意図した高さにならず、結果一覧がスクロールできなくなる。
           */}
           <div className="flex flex-wrap items-center gap-2">
             <span
@@ -497,8 +501,15 @@ export function StockSearchModal({ open, onClose, onPick }: Props) {
                             ? `Pexels by ${photo.author}`
                             : "Pexels stock photo"
                         }
+                        width={photo.width || 1}
+                        height={photo.height || 1}
                         className="block w-full pointer-events-none select-none"
                         loading="lazy"
+                        style={
+                          photo.width && photo.height
+                            ? { aspectRatio: `${photo.width}/${photo.height}` }
+                            : undefined
+                        }
                         draggable={false}
                       />
                     </button>
@@ -542,7 +553,12 @@ export function StockSearchModal({ open, onClose, onPick }: Props) {
         </div>
         </div>
 
-        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-[#242424] px-4 py-3">
+        {/*
+          フッターも shrink-0 必須 (F-#9 marche_izm さん報告の再修正 2026-05-27):
+          縮まないことを明示しないと、結果エリアの flex-1 が押し上げられて
+          モーダル全体がオーバーフローし、結果一覧がスクロールできなくなる。
+        */}
+        <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-t border-[#242424] px-4 py-3">
           <div className="min-w-0 text-xs text-neutral-500">
             {lastCredit ? (
               <>

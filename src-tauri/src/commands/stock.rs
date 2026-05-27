@@ -8,10 +8,13 @@ use crate::commands::secrets::secret_get;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+// 2026-05-27 masonry チラつき修正で width/height 追加。
 pub struct StockPhoto {
     pub id: String,
     pub thumb_url: String,
     pub full_url: String,
+    pub width: u32,
+    pub height: u32,
     pub author: String,
     pub source_url: Option<String>,
     pub download_trigger: Option<String>,
@@ -242,6 +245,8 @@ fn parse_pexels(json: &Value) -> Vec<StockPhoto> {
             id: id_at(item, &["id"]),
             thumb_url: string_at(item, &["src", "medium"]),
             full_url: string_at(item, &["src", "large"]),
+            width: u32_at(item, &["width"]),
+            height: u32_at(item, &["height"]),
             author: string_at(item, &["photographer"]),
             source_url: optional_string_at(item, &["url"]),
             download_trigger: None,
@@ -261,6 +266,8 @@ fn parse_pixabay(json: &Value) -> Vec<StockPhoto> {
             id: id_at(item, &["id"]),
             thumb_url: string_at(item, &["previewURL"]),
             full_url: string_at(item, &["largeImageURL"]),
+            width: u32_at(item, &["imageWidth"]),
+            height: u32_at(item, &["imageHeight"]),
             author: string_at(item, &["user"]),
             source_url: optional_string_at(item, &["pageURL"]),
             download_trigger: None,
@@ -318,6 +325,17 @@ fn optional_string_at(value: &Value, path: &[&str]) -> Option<String> {
         current = current.get(*key)?;
     }
     current.as_str().map(str::to_string)
+}
+
+fn u32_at(value: &Value, path: &[&str]) -> u32 {
+    let mut current = value;
+    for key in path {
+        match current.get(*key) {
+            Some(next) => current = next,
+            None => return 0,
+        }
+    }
+    current.as_u64().map(|v| v as u32).unwrap_or(0)
 }
 
 fn id_at(value: &Value, path: &[&str]) -> String {
