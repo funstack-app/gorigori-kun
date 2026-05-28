@@ -270,6 +270,18 @@ export type HiggsfieldModelInfo = {
 // P0-1 mediaType 導入 (2026-05-28 動画タブ準備)
 export type MediaType = "image" | "video";
 
+// P0-2 動画モデル静的定義 (2026-05-28)
+export type HiggsfieldVideoParams = {
+  duration?: number;
+  quality?: string;
+  mode?: string;
+  resolution?: string;
+  sound?: string;
+  genre?: string;
+  modelVariant?: string;
+  i2vInputField?: "input_image" | "medias" | "input_images";
+};
+
 export type HiggsfieldAccount = {
   email: string;
   credits: number;
@@ -279,7 +291,7 @@ export type HiggsfieldAccount = {
 export type HiggsfieldCompareModel = {
   jobSetType: string;
   displayName: string;
-};
+} & HiggsfieldVideoParams;
 
 /**
  * F-#13 (2026-05-19): Higgsfield 接続デバッグ用の実測情報。
@@ -329,29 +341,33 @@ export const higgsfield = {
   listModels: (media: "image" | "video") =>
     invoke<HiggsfieldModelInfo[]>("higgsfield_list_models", { media }),
   account: () => invoke<HiggsfieldAccount>("higgsfield_account"),
-  generateBatch: (args: {
-    jobSetType: string;
-    displayName: string;
-    prompt: string;
-    count: number;
-    aspect?: string;
-    refImagePaths?: string[];
-    cwd?: string;
-    mediaType?: MediaType;
-  }) =>
+  generateBatch: (
+    args: {
+      jobSetType: string;
+      displayName: string;
+      prompt: string;
+      count: number;
+      aspect?: string;
+      refImagePaths?: string[];
+      cwd?: string;
+      mediaType?: MediaType;
+    } & HiggsfieldVideoParams,
+  ) =>
     invoke<{
       batchId: string;
       generatedPaths: string[];
       failedCount: number;
     }>("higgsfield_generate_batch", { args }),
-  generateCompare: (args: {
-    prompt: string;
-    models: HiggsfieldCompareModel[];
-    aspect?: string;
-    refImagePaths?: string[];
-    cwd?: string;
-    mediaType?: MediaType;
-  }) =>
+  generateCompare: (
+    args: {
+      prompt: string;
+      models: HiggsfieldCompareModel[];
+      aspect?: string;
+      refImagePaths?: string[];
+      cwd?: string;
+      mediaType?: MediaType;
+    } & HiggsfieldVideoParams,
+  ) =>
     invoke<{
       batchId: string;
       generatedPaths: string[];

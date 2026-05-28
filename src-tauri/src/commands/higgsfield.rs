@@ -87,6 +87,23 @@ pub struct HiggsfieldBatchArgs {
     /// 動画モデル(kling/seedance/veo等) を指定する時は Some(MediaType::Video) にする。
     #[serde(default)]
     pub media_type: Option<MediaType>,
+    // P0-2 動画モデル静的定義 (2026-05-28)
+    #[serde(default)]
+    pub duration: Option<u32>,
+    #[serde(default)]
+    pub quality: Option<String>,
+    #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub resolution: Option<String>,
+    #[serde(default)]
+    pub sound: Option<String>,
+    #[serde(default)]
+    pub genre: Option<String>,
+    #[serde(default)]
+    pub model_variant: Option<String>,
+    #[serde(default)]
+    pub i2v_input_field: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -101,6 +118,23 @@ pub struct HiggsfieldCompareArgs {
     /// 動画モデル(kling/seedance/veo等) を指定する時は Some(MediaType::Video) にする。
     #[serde(default)]
     pub media_type: Option<MediaType>,
+    // P0-2 動画モデル静的定義 (2026-05-28)
+    #[serde(default)]
+    pub duration: Option<u32>,
+    #[serde(default)]
+    pub quality: Option<String>,
+    #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub resolution: Option<String>,
+    #[serde(default)]
+    pub sound: Option<String>,
+    #[serde(default)]
+    pub genre: Option<String>,
+    #[serde(default)]
+    pub model_variant: Option<String>,
+    #[serde(default)]
+    pub i2v_input_field: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -108,6 +142,23 @@ pub struct HiggsfieldCompareArgs {
 pub struct HiggsfieldCompareModel {
     pub job_set_type: String,
     pub display_name: String,
+    // P0-2 動画モデル静的定義 (2026-05-28)
+    #[serde(default)]
+    pub duration: Option<u32>,
+    #[serde(default)]
+    pub quality: Option<String>,
+    #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub resolution: Option<String>,
+    #[serde(default)]
+    pub sound: Option<String>,
+    #[serde(default)]
+    pub genre: Option<String>,
+    #[serde(default)]
+    pub model_variant: Option<String>,
+    #[serde(default)]
+    pub i2v_input_field: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -904,6 +955,20 @@ pub async fn higgsfield_generate_compare(
             ref_image_paths: args.ref_image_paths.clone(),
             cwd: args.cwd.clone(),
             media_type: args.media_type,
+            duration: model.duration.or(args.duration),
+            quality: model.quality.clone().or_else(|| args.quality.clone()),
+            mode: model.mode.clone().or_else(|| args.mode.clone()),
+            resolution: model.resolution.clone().or_else(|| args.resolution.clone()),
+            sound: model.sound.clone().or_else(|| args.sound.clone()),
+            genre: model.genre.clone().or_else(|| args.genre.clone()),
+            model_variant: model
+                .model_variant
+                .clone()
+                .or_else(|| args.model_variant.clone()),
+            i2v_input_field: model
+                .i2v_input_field
+                .clone()
+                .or_else(|| args.i2v_input_field.clone()),
         };
 
         jobs.spawn(async move {
@@ -1311,6 +1376,19 @@ async fn wait_child_output_or_cancel(
     }
 }
 
+fn i2v_cli_flag(field: Option<&str>) -> String {
+    let Some(field) = field.map(str::trim).filter(|s| !s.is_empty()) else {
+        return "--image".to_string();
+    };
+    if field == "image" {
+        "--image".to_string()
+    } else if field.starts_with("--") {
+        field.to_string()
+    } else {
+        format!("--{field}")
+    }
+}
+
 async fn run_one_higgsfield_job(
     binary: &Path,
     out_dir: &Path,
@@ -1331,9 +1409,36 @@ async fn run_one_higgsfield_job(
     if let Some(aspect) = args.aspect.as_deref().filter(|s| !s.trim().is_empty()) {
         cmd.arg("--aspect_ratio").arg(aspect);
     }
+    // P0-2 動画モデル静的定義 (2026-05-28)
+    if let Some(duration) = args.duration {
+        cmd.arg("--duration").arg(duration.to_string());
+    }
+    if let Some(quality) = args.quality.as_deref().filter(|s| !s.trim().is_empty()) {
+        cmd.arg("--quality").arg(quality);
+    }
+    if let Some(mode) = args.mode.as_deref().filter(|s| !s.trim().is_empty()) {
+        cmd.arg("--mode").arg(mode);
+    }
+    if let Some(resolution) = args.resolution.as_deref().filter(|s| !s.trim().is_empty()) {
+        cmd.arg("--resolution").arg(resolution);
+    }
+    if let Some(sound) = args.sound.as_deref().filter(|s| !s.trim().is_empty()) {
+        cmd.arg("--sound").arg(sound);
+    }
+    if let Some(genre) = args.genre.as_deref().filter(|s| !s.trim().is_empty()) {
+        cmd.arg("--genre").arg(genre);
+    }
+    if let Some(model_variant) = args
+        .model_variant
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+    {
+        cmd.arg("--model").arg(model_variant);
+    }
+    let i2v_flag = i2v_cli_flag(args.i2v_input_field.as_deref());
     for path in args.ref_image_paths.as_deref().unwrap_or(&[]) {
         if !path.trim().is_empty() {
-            cmd.arg("--image").arg(path);
+            cmd.arg(&i2v_flag).arg(path);
         }
     }
     cmd.args([
