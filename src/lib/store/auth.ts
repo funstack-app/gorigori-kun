@@ -25,7 +25,7 @@ type AuthState = {
   loading: boolean;
   loginInProgress: "none" | "chatgpt" | "apiKey";
   error?: string;
-  refresh: () => Promise<void>;
+  refresh: (opts?: { silent?: boolean }) => Promise<void>;
   loginWithApiKey: (apiKey: string) => Promise<void>;
   loginWithChatGPT: () => Promise<void>;
   logout: () => Promise<void>;
@@ -66,8 +66,13 @@ export const useAuth = create<AuthState>((set, get) => ({
     });
   },
 
-  refresh: async () => {
-    set({ loading: true, error: undefined });
+  // silent=true の時は loading フラグを立てない (AuthGate の Splash 差し替えを
+  // 防ぐ)。生成前の認証再チェックなど、画面遷移を伴わせたくない確認で使う。
+  // (Bug修正 2026-05-28: 生成時の白フラッシュ根治)
+  refresh: async (opts?: { silent?: boolean }) => {
+    if (!opts?.silent) {
+      set({ loading: true, error: undefined });
+    }
     try {
       const r = await authIpc.read();
       set({

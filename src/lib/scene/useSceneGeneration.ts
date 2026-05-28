@@ -149,7 +149,9 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
     // メッセージで toast 表示して止める。
     const authState = useAuth.getState();
     // 最新の認証状態を取り直す（OAuth完了直後の refresh 遅延対策）
-    await authState.refresh();
+    // silent: 生成前の認証確認で AuthGate の Splash 差し替え(白フラッシュ)を
+    // 起こさないため loading を立てない (Bug修正 2026-05-28)。
+    await authState.refresh({ silent: true });
     if (!useAuth.getState().account) {
       const message =
         "ChatGPT にログインしていないため、生成できません。\n" +
