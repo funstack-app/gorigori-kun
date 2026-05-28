@@ -3,12 +3,16 @@ import { higgsfield, type ImageBatchEvent, type ImageBatchProvider } from "../ip
 
 // ──────────── Types ────────────
 
+// P0-1 mediaType 導入 (2026-05-28 動画タブ準備)
+export type MediaType = "image" | "video";
+
 export type BatchWorker =
   | {
       idx: number;
       status: "pending" | "running";
       modelJobSetType?: string;
       modelDisplayName?: string;
+      mediaType?: MediaType;
     }
   | {
       idx: number;
@@ -16,6 +20,7 @@ export type BatchWorker =
       path: string;
       modelJobSetType?: string;
       modelDisplayName?: string;
+      mediaType?: MediaType;
     }
   | {
       idx: number;
@@ -23,6 +28,7 @@ export type BatchWorker =
       error: string;
       modelJobSetType?: string;
       modelDisplayName?: string;
+      mediaType?: MediaType;
     };
 
 export type Batch = {
@@ -37,6 +43,7 @@ export type Batch = {
   provider?: ImageBatchProvider;
   modelJobSetType?: string;
   modelDisplayName?: string;
+  mediaType?: MediaType;
   compareMode?: boolean;
 };
 
@@ -53,6 +60,7 @@ type BatchesState = {
     provider?: ImageBatchProvider;
     modelJobSetType?: string;
     modelDisplayName?: string;
+    mediaType?: MediaType;
     compareMode?: boolean;
     workerModels?: { jobSetType: string; displayName: string }[];
   }) => void;
@@ -75,9 +83,11 @@ export const useBatches = create<BatchesState>((set, _get) => ({
     provider,
     modelJobSetType,
     modelDisplayName,
+    mediaType,
     compareMode,
     workerModels,
   }) => {
+    const resolvedMediaType = mediaType ?? "image";
     const batch: Batch = {
       batchId,
       prompt,
@@ -89,12 +99,14 @@ export const useBatches = create<BatchesState>((set, _get) => ({
         status: "pending" as const,
         modelJobSetType: workerModels?.[i]?.jobSetType,
         modelDisplayName: workerModels?.[i]?.displayName,
+        mediaType: resolvedMediaType,
       })),
       status: "running",
       failedCount: 0,
       provider,
       modelJobSetType,
       modelDisplayName,
+      mediaType: resolvedMediaType,
       compareMode,
     };
     set((s) => ({ batches: [...s.batches, batch] }));
@@ -155,6 +167,7 @@ export const useBatches = create<BatchesState>((set, _get) => ({
             provider: e.provider ?? localIdx.b.provider ?? "codex",
             modelJobSetType: e.modelJobSetType ?? localIdx.b.modelJobSetType,
             modelDisplayName: e.modelDisplayName ?? localIdx.b.modelDisplayName,
+            mediaType: e.mediaType ?? localIdx.b.mediaType ?? "image",
           };
           const next = [...batches];
           next[localIdx.i] = updated;
@@ -170,12 +183,14 @@ export const useBatches = create<BatchesState>((set, _get) => ({
           workers: Array.from({ length: e.count }, (_, i) => ({
             idx: i + 1,
             status: "pending" as const,
+            mediaType: e.mediaType ?? "image",
           })),
           status: "running",
           failedCount: 0,
           provider: e.provider ?? "codex",
           modelJobSetType: e.modelJobSetType,
           modelDisplayName: e.modelDisplayName,
+          mediaType: e.mediaType ?? "image",
           compareMode:
             e.provider === "higgsfield" && !e.modelDisplayName && e.count > 1,
         };
@@ -197,8 +212,10 @@ export const useBatches = create<BatchesState>((set, _get) => ({
             status: "running",
             modelJobSetType: e.modelJobSetType ?? prev.modelJobSetType,
             modelDisplayName: e.modelDisplayName ?? prev.modelDisplayName,
+            mediaType: e.mediaType ?? prev.mediaType ?? batch.mediaType ?? "image",
           };
         }
+        batch.mediaType = e.mediaType ?? batch.mediaType ?? "image";
         if (e.modelDisplayName && !batch.modelDisplayName) batch.compareMode = true;
       } else if (e.kind === "workerCompleted") {
         const wi = batch.workers.findIndex((w) => w.idx === e.idx);
@@ -210,8 +227,10 @@ export const useBatches = create<BatchesState>((set, _get) => ({
             path: e.path,
             modelJobSetType: e.modelJobSetType ?? prev.modelJobSetType,
             modelDisplayName: e.modelDisplayName ?? prev.modelDisplayName,
+            mediaType: e.mediaType ?? prev.mediaType ?? batch.mediaType ?? "image",
           };
         }
+        batch.mediaType = e.mediaType ?? batch.mediaType ?? "image";
         if (e.modelDisplayName && !batch.modelDisplayName) batch.compareMode = true;
       } else if (e.kind === "workerFailed") {
         const wi = batch.workers.findIndex((w) => w.idx === e.idx);
@@ -223,8 +242,10 @@ export const useBatches = create<BatchesState>((set, _get) => ({
             error: e.error,
             modelJobSetType: e.modelJobSetType ?? prev.modelJobSetType,
             modelDisplayName: e.modelDisplayName ?? prev.modelDisplayName,
+            mediaType: e.mediaType ?? prev.mediaType ?? batch.mediaType ?? "image",
           };
         }
+        batch.mediaType = e.mediaType ?? batch.mediaType ?? "image";
         if (e.modelDisplayName && !batch.modelDisplayName) batch.compareMode = true;
         batch.failedCount = batch.workers.filter(
           (w) => w.status === "failed",
@@ -235,6 +256,7 @@ export const useBatches = create<BatchesState>((set, _get) => ({
         batch.provider = e.provider ?? batch.provider ?? "codex";
         batch.modelJobSetType = e.modelJobSetType ?? batch.modelJobSetType;
         batch.modelDisplayName = e.modelDisplayName ?? batch.modelDisplayName;
+        batch.mediaType = e.mediaType ?? batch.mediaType ?? "image";
         batch.compareMode =
           batch.compareMode ||
           (batch.provider === "higgsfield" && !batch.modelDisplayName && batch.count > 1);
@@ -251,6 +273,7 @@ export const useBatches = create<BatchesState>((set, _get) => ({
                 path,
                 modelJobSetType: w.modelJobSetType,
                 modelDisplayName: w.modelDisplayName,
+                mediaType: w.mediaType ?? batch.mediaType ?? "image",
               };
             } else {
               batch.workers[i] = {
@@ -259,6 +282,7 @@ export const useBatches = create<BatchesState>((set, _get) => ({
                 error: "no path",
                 modelJobSetType: w.modelJobSetType,
                 modelDisplayName: w.modelDisplayName,
+                mediaType: w.mediaType ?? batch.mediaType ?? "image",
               };
             }
           }

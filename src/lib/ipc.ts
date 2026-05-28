@@ -267,6 +267,9 @@ export type HiggsfieldModelInfo = {
   type: "image" | "video";
 };
 
+// P0-1 mediaType 導入 (2026-05-28 動画タブ準備)
+export type MediaType = "image" | "video";
+
 export type HiggsfieldAccount = {
   email: string;
   credits: number;
@@ -334,6 +337,7 @@ export const higgsfield = {
     aspect?: string;
     refImagePaths?: string[];
     cwd?: string;
+    mediaType?: MediaType;
   }) =>
     invoke<{
       batchId: string;
@@ -346,6 +350,7 @@ export const higgsfield = {
     aspect?: string;
     refImagePaths?: string[];
     cwd?: string;
+    mediaType?: MediaType;
   }) =>
     invoke<{
       batchId: string;
@@ -372,6 +377,7 @@ export type ImageBatchEvent =
       provider?: ImageBatchProvider;
       modelJobSetType?: string;
       modelDisplayName?: string;
+      mediaType?: MediaType;
     }
   | {
       kind: "workerStarted";
@@ -379,6 +385,7 @@ export type ImageBatchEvent =
       idx: number;
       modelJobSetType?: string;
       modelDisplayName?: string;
+      mediaType?: MediaType;
     }
   | {
       kind: "workerCompleted";
@@ -387,6 +394,7 @@ export type ImageBatchEvent =
       path: string;
       modelJobSetType?: string;
       modelDisplayName?: string;
+      mediaType?: MediaType;
     }
   | {
       kind: "workerFailed";
@@ -395,6 +403,7 @@ export type ImageBatchEvent =
       error: string;
       modelJobSetType?: string;
       modelDisplayName?: string;
+      mediaType?: MediaType;
     }
   | {
       kind: "cancelled";
@@ -408,6 +417,7 @@ export type ImageBatchEvent =
       provider?: ImageBatchProvider;
       modelJobSetType?: string;
       modelDisplayName?: string;
+      mediaType?: MediaType;
     };
 
 export function onImageBatch(

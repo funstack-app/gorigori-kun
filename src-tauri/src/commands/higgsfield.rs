@@ -83,6 +83,10 @@ pub struct HiggsfieldBatchArgs {
     pub aspect: Option<String>,
     pub ref_image_paths: Option<Vec<String>>,
     pub cwd: Option<String>,
+    /// 生成メディアタイプ。None なら Image 扱い (後方互換)。
+    /// 動画モデル(kling/seedance/veo等) を指定する時は Some(MediaType::Video) にする。
+    #[serde(default)]
+    pub media_type: Option<MediaType>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -93,6 +97,10 @@ pub struct HiggsfieldCompareArgs {
     pub aspect: Option<String>,
     pub ref_image_paths: Option<Vec<String>>,
     pub cwd: Option<String>,
+    /// 生成メディアタイプ。None なら Image 扱い (後方互換)。
+    /// 動画モデル(kling/seedance/veo等) を指定する時は Some(MediaType::Video) にする。
+    #[serde(default)]
+    pub media_type: Option<MediaType>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -108,6 +116,23 @@ pub struct BatchSummary {
     pub batch_id: String,
     pub generated_paths: Vec<String>,
     pub failed_count: u32,
+}
+
+// P0-1 mediaType 導入 (2026-05-28 動画タブ準備)
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MediaType {
+    Image,
+    Video,
+}
+
+impl MediaType {
+    fn extension(&self) -> &'static str {
+        match self {
+            MediaType::Image => "png",
+            MediaType::Video => "mp4",
+        }
+    }
 }
 
 #[derive(Serialize, Clone)]
@@ -142,6 +167,8 @@ enum HiggsfieldBatchEvent {
         model_job_set_type: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         model_display_name: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        media_type: Option<MediaType>,
     },
     WorkerFailed {
         batch_id: String,
@@ -161,6 +188,8 @@ enum HiggsfieldBatchEvent {
         model_job_set_type: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         model_display_name: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        media_type: Option<MediaType>,
     },
     Cancelled {
         batch_id: String,
@@ -757,6 +786,7 @@ pub async fn higgsfield_generate_batch(
                         path,
                         model_job_set_type: Some(model_job_set_type.clone()),
                         model_display_name: Some(model_display_name.clone()),
+                        media_type: args.media_type,
                     },
                 );
             }
@@ -807,6 +837,7 @@ pub async fn higgsfield_generate_batch(
                 provider: "higgsfield",
                 model_job_set_type: Some(model_job_set_type),
                 model_display_name: Some(model_display_name),
+                media_type: args.media_type,
             },
         );
     }
@@ -872,6 +903,7 @@ pub async fn higgsfield_generate_compare(
             aspect: args.aspect.clone(),
             ref_image_paths: args.ref_image_paths.clone(),
             cwd: args.cwd.clone(),
+            media_type: args.media_type,
         };
 
         jobs.spawn(async move {
@@ -914,6 +946,7 @@ pub async fn higgsfield_generate_compare(
                             path: path.clone(),
                             model_job_set_type: Some(model.job_set_type),
                             model_display_name: Some(model.display_name),
+                            media_type: single_args.media_type,
                         },
                     );
                     CompareWorkerResult {
@@ -980,6 +1013,7 @@ pub async fn higgsfield_generate_compare(
                 provider: "higgsfield",
                 model_job_set_type: None,
                 model_display_name: None,
+                media_type: args.media_type,
             },
         );
     }
@@ -1341,7 +1375,12 @@ async fn run_one_higgsfield_job(
         let preview = serde_json::to_string(&json).unwrap_or_else(|_| "<invalid json>".into());
         format!("Higgsfield 出力 JSON から画像 URL を見つけられませんでした: {preview}")
     })?;
-    let dest = out_dir.join(format!("hf_b{idx:02}_{}.png", short_id()));
+    let media_type = args.media_type.unwrap_or(MediaType::Image);
+    let dest = out_dir.join(format!(
+        "hf_b{idx:02}_{}.{}",
+        short_id(),
+        media_type.extension()
+    ));
     save_result_image(&result_url, &dest).await?;
     Ok(dest.to_string_lossy().into_owned())
 }
