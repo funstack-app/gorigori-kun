@@ -290,7 +290,7 @@ function Timeline() {
               <div className="space-y-4">
                 {orderedBatches.map((batch) => (
                   <BatchBlock
-                    key={batch.batchId}
+                    key={`${batch.startedAt}-${batch.count}`}
                     batchId={batch.batchId}
                     workers={batch.workers}
                     count={batch.count}
@@ -770,7 +770,8 @@ function BatchBlock({
       <div className={`grid gap-2 ${gridColsClass(size)}`}>
         {workers.map((worker) => (
           <WorkerTile
-            key={`${batchId}-${worker.idx}`}
+            // Bug修正 (2026-05-28): local→real batchId の差し替えでタイルを再マウントさせない。
+            key={worker.idx}
             worker={worker}
             siblings={workers
               .filter(

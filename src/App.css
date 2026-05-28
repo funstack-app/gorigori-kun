@@ -43,7 +43,7 @@
   font-family:
     "Geist", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
     "Segoe UI", "Hiragino Kaku Gothic ProN", "Hiragino Sans", Meiryo, sans-serif;
-  color-scheme: light;
+  color-scheme: dark;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
@@ -125,7 +125,8 @@ html {
 }
 
 body {
-  @apply bg-neutral-100 text-neutral-950;
+  /* Bug修正 (2026-05-28): 生成開始時の再描画で白い下地が見えないよう暗色を固定。 */
+  @apply bg-neutral-950 text-neutral-100;
 }
 
 /*

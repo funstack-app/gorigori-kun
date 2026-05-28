@@ -84,23 +84,19 @@ export function PresetPickerPopover({ open, onClose, onPick, anchorRect }: Props
   const categories = usePresets((s) => s.categories);
   const presets = usePresets((s) => s.presets);
   const [query, setQuery] = useState<string>("");
-  // 初期は「お気に入り」を選択。お気に入りが 0 件なら「すべて」に下記 useEffect でフォールバック。
-  const [filter, setFilter] = useState<CategoryFilter>("_fav");
   const containerRef = useRef<HTMLDivElement | null>(null);
   const parsedQuery = useMemo(() => parsePresetQuery(query), [query]);
   const trailingTagFragment = useMemo(() => getTrailingTagFragment(query), [query]);
-
-  // 開いた時にお気に入りが 0 件なら「すべて」表示にフォールバックして空表示を避ける。
-  // ユーザー指摘: お気に入りを最初に出したい、ただし空白だと困る。
   const favoriteCount = useMemo(
     () => presets.filter((p) => p.favorite).length,
     [presets],
   );
-  useEffect(() => {
-    if (open && filter === "_fav" && favoriteCount === 0) {
-      setFilter(null);
-    }
-  }, [open, filter, favoriteCount]);
+  // Bug修正 (2026-05-28): 開いた後のeffectフォールバックではなく、初期表示前に選択を確定する。
+  const [filter, setFilter] = useState<CategoryFilter>(() =>
+    favoriteCount > 0 ? "_fav" : null,
+  );
+  const activeFilter: CategoryFilter =
+    filter === "_fav" && favoriteCount === 0 ? null : filter;
 
   useEffect(() => {
     if (!open) return;
@@ -165,11 +161,11 @@ export function PresetPickerPopover({ open, onClose, onPick, anchorRect }: Props
   /** 表示対象（検索 + カテゴリフィルタ適用済み） */
   const grouped = useMemo(() => {
     let filtered = presets;
-    if (filter === "_fav") {
+    if (activeFilter === "_fav") {
       filtered = filtered.filter((p) => p.favorite);
-    } else if (filter !== null) {
+    } else if (activeFilter !== null) {
       filtered = filtered.filter((p) =>
-        filter === "_uncat" ? p.categoryId === null : p.categoryId === filter,
+        activeFilter === "_uncat" ? p.categoryId === null : p.categoryId === activeFilter,
       );
     }
     filtered = filtered
@@ -191,7 +187,7 @@ export function PresetPickerPopover({ open, onClose, onPick, anchorRect }: Props
       sections.push({ category: null, items: uncategorized });
     }
     return sections;
-  }, [categories, presets, parsedQuery, filter]);
+  }, [categories, presets, parsedQuery, activeFilter]);
 
   if (!open) return null;
 
@@ -224,7 +220,7 @@ export function PresetPickerPopover({ open, onClose, onPick, anchorRect }: Props
       <div className="flex items-center justify-between border-b border-[#242424] px-3 py-2">
         <h3 className="text-xs font-black text-white">プリセット</h3>
         <span className="text-[10px] font-medium text-neutral-500">
-          {filter === null && !query ? `${totalCount} 件` : `${visibleCount} / ${totalCount} 件`}
+          {activeFilter === null && !query ? `${totalCount} 件` : `${visibleCount} / ${totalCount} 件`}
         </span>
       </div>
       <div className="space-y-2 border-b border-[#242424] p-3">
@@ -257,14 +253,14 @@ export function PresetPickerPopover({ open, onClose, onPick, anchorRect }: Props
         <div className="flex items-center gap-1 overflow-x-auto pb-2">
           <FavoriteChip
             count={counts.fav}
-            active={filter === "_fav"}
+            active={activeFilter === "_fav"}
             onClick={() => setFilter("_fav")}
           />
           <CategoryChip
             label="すべて"
             count={counts.all}
             color="#737373"
-            active={filter === null}
+            active={activeFilter === null}
             onClick={() => setFilter(null)}
           />
           {categories.map((cat) => (
@@ -273,7 +269,7 @@ export function PresetPickerPopover({ open, onClose, onPick, anchorRect }: Props
               label={cat.name}
               count={counts.byCat.get(cat.id) ?? 0}
               color={cat.color}
-              active={filter === cat.id}
+              active={activeFilter === cat.id}
               onClick={() => setFilter(cat.id)}
             />
           ))}
@@ -282,7 +278,7 @@ export function PresetPickerPopover({ open, onClose, onPick, anchorRect }: Props
               label="未分類"
               count={uncatCount}
               color="#525252"
-              active={filter === "_uncat"}
+              active={activeFilter === "_uncat"}
               onClick={() => setFilter("_uncat")}
             />
           )}
