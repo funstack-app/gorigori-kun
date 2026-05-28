@@ -16,6 +16,7 @@ import {
   useWorkspace,
   type TimelineSize,
 } from "../lib/store/workspace";
+import { useVideoGen } from "../lib/store/videoGen";
 import { history, sessions as sessionsApi, type PromptHistoryRow, type SessionFull, type TurnWithImages } from "../lib/ipc";
 import { useActiveProject } from "../lib/store/activeProject";
 import { useProjects } from "../lib/store/projects";
@@ -823,6 +824,7 @@ function WorkerTile({
   siblings?: string[];
 }) {
   const caption = worker.modelDisplayName;
+  const canSendToVideo = worker.mediaType !== "video";
   if (worker.status === "completed") {
     return (
       <div className="min-w-0">
@@ -830,27 +832,49 @@ function WorkerTile({
           STΛCK 指示 (2026-05-19): 生成タイムラインのバッチサムネを drag source 化。
           ライブラリや参照ラック等の他 drop ターゲットへ直接ドラッグで移動できる。
         */}
-        <button
-          type="button"
-          draggable
-          onDragStart={(e) => {
-            setDragRef(e.dataTransfer, {
-              path: worker.path,
-              name: worker.path.split(/[\\/]/).pop() ?? "generated.png",
-              source: "gallery",
-              role: "subject",
-            });
-          }}
-          onClick={() =>
-            useImagePreview.getState().open(worker.path, siblings)
-          }
-          className="aspect-square w-full overflow-hidden rounded border border-[#343434] bg-[#0f0f0f] hover:border-pink-400"
-        >
-          <SafeImage
-            path={worker.path}
-            className="h-full w-full object-cover"
-          />
-        </button>
+        <div className="group relative aspect-square w-full overflow-hidden rounded border border-[#343434] bg-[#0f0f0f] hover:border-pink-400">
+          <button
+            type="button"
+            draggable
+            onDragStart={(e) => {
+              setDragRef(e.dataTransfer, {
+                path: worker.path,
+                name: worker.path.split(/[\\/]/).pop() ?? "generated.png",
+                source: "gallery",
+                role: "subject",
+              });
+            }}
+            onClick={() =>
+              useImagePreview.getState().open(worker.path, siblings)
+            }
+            className="h-full w-full overflow-hidden"
+          >
+            <SafeImage
+              path={worker.path}
+              className="h-full w-full object-cover"
+            />
+          </button>
+          {canSendToVideo && (
+            <button
+              type="button"
+              draggable={false}
+              onClick={(e) => {
+                e.stopPropagation();
+                useVideoGen.getState().setSourceImage(worker.path);
+                useWorkspace.getState().setActiveTab("video");
+                useToasts.getState().push({
+                  kind: "success",
+                  text: "動画タブに画像をセットしました",
+                  ttlMs: 3000,
+                });
+              }}
+              className="absolute bottom-1.5 right-1.5 rounded-md border border-pink-300/50 bg-pink-500 px-2 py-1 text-[10px] font-black text-white opacity-0 shadow-lg transition hover:bg-pink-400 focus:opacity-100 group-hover:opacity-100"
+              title="この画像を動画生成タブの元画像に使う"
+            >
+              動画化
+            </button>
+          )}
+        </div>
         {/*
           STΛCK 指示 (2026-05-19): サムネ下の「プロジェクトに保存」ボタンは削除。
           Magnific 風プレビューの右ペインから保存できるため冗長 (4 枚並ぶと UI
