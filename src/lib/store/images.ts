@@ -19,6 +19,12 @@ export type GalleryItem = {
   savedTo?: string;
   /** For derived images: parent reference path. */
   derivedFrom?: string;
+  // 動画対応 (P0-3, 2026-05-28)。未指定は "image" 扱い。
+  mediaType?: "image" | "video";
+  /** 動画のみ。 */
+  durationSeconds?: number;
+  /** 動画サムネイルのパス。 */
+  thumbnailPath?: string;
 };
 
 export type GalleryFilter = "all" | "favorites";

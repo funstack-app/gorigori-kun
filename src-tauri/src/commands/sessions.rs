@@ -78,6 +78,9 @@ pub struct ImageRow {
     pub mtime_ms: i64,
     pub size: i64,
     pub kind: String,
+    pub media_type: String,
+    pub duration_seconds: Option<i64>,
+    pub thumbnail_path: Option<String>,
     pub created_at: i64,
 }
 
@@ -147,6 +150,12 @@ pub struct ImageRecordArgs {
     pub mtime_ms: i64,
     pub size: i64,
     pub kind: String,
+    #[serde(default)]
+    pub media_type: Option<String>,
+    #[serde(default)]
+    pub duration_seconds: Option<i64>,
+    #[serde(default)]
+    pub thumbnail_path: Option<String>,
 }
 
 #[derive(Serialize, Debug)]
@@ -326,7 +335,7 @@ pub async fn session_get_full(app: AppHandle, id: String) -> Result<SessionWithT
         .collect::<Vec<_>>()
         .join(",");
     let image_query = format!(
-        "SELECT id, turn_id, path, mtime_ms, size, kind, created_at \
+        "SELECT id, turn_id, path, mtime_ms, size, kind, media_type, duration_seconds, thumbnail_path, created_at \
          FROM images WHERE turn_id IN ({placeholders}) ORDER BY created_at ASC"
     );
     let mut q = sqlx::query(&image_query);
@@ -352,6 +361,9 @@ pub async fn session_get_full(app: AppHandle, id: String) -> Result<SessionWithT
                 mtime_ms: r.get::<i64, _>("mtime_ms"),
                 size: r.get::<i64, _>("size"),
                 kind: r.get::<String, _>("kind"),
+                media_type: r.get::<String, _>("media_type"),
+                duration_seconds: r.get::<Option<i64>, _>("duration_seconds"),
+                thumbnail_path: r.get::<Option<String>, _>("thumbnail_path"),
                 created_at: r.get::<i64, _>("created_at"),
             });
     }
@@ -450,8 +462,10 @@ pub async fn image_record(app: AppHandle, args: ImageRecordArgs) -> Result<Image
     // INSERT OR IGNORE so the watcher firing twice for the same file
     // (or a manual + watcher double-record) doesn't create duplicate rows.
     // The UNIQUE INDEX on (turn_id, path) added in migration v2 backs this.
+    let media_type = args.media_type.unwrap_or_else(|| "image".to_string());
+
     sqlx::query(
-        "INSERT OR IGNORE INTO images (id, turn_id, path, mtime_ms, size, kind, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT OR IGNORE INTO images (id, turn_id, path, mtime_ms, size, kind, media_type, duration_seconds, thumbnail_path, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
     )
     .bind(&id)
     .bind(&args.turn_id)
@@ -459,6 +473,9 @@ pub async fn image_record(app: AppHandle, args: ImageRecordArgs) -> Result<Image
     .bind(args.mtime_ms)
     .bind(args.size)
     .bind(&args.kind)
+    .bind(&media_type)
+    .bind(args.duration_seconds)
+    .bind(args.thumbnail_path.as_deref())
     .bind(now)
     .execute(&pool)
     .await
@@ -471,6 +488,9 @@ pub async fn image_record(app: AppHandle, args: ImageRecordArgs) -> Result<Image
         mtime_ms: args.mtime_ms,
         size: args.size,
         kind: args.kind,
+        media_type,
+        duration_seconds: args.duration_seconds,
+        thumbnail_path: args.thumbnail_path,
         created_at: now,
     })
 }
@@ -501,7 +521,7 @@ pub async fn turn_get(app: AppHandle, id: String) -> Result<TurnWithImages, Stri
     let ref_image_paths: Vec<String> = serde_json::from_str(&ref_paths_json).unwrap_or_default();
 
     let img_rows = sqlx::query(
-        "SELECT id, turn_id, path, mtime_ms, size, kind, created_at \
+        "SELECT id, turn_id, path, mtime_ms, size, kind, media_type, duration_seconds, thumbnail_path, created_at \
          FROM images WHERE turn_id = ?1 ORDER BY created_at ASC",
     )
     .bind(&turn_id)
@@ -518,6 +538,9 @@ pub async fn turn_get(app: AppHandle, id: String) -> Result<TurnWithImages, Stri
             mtime_ms: r.get::<i64, _>("mtime_ms"),
             size: r.get::<i64, _>("size"),
             kind: r.get::<String, _>("kind"),
+            media_type: r.get::<String, _>("media_type"),
+            duration_seconds: r.get::<Option<i64>, _>("duration_seconds"),
+            thumbnail_path: r.get::<Option<String>, _>("thumbnail_path"),
             created_at: r.get::<i64, _>("created_at"),
         })
         .collect();
@@ -626,7 +649,7 @@ pub async fn session_export(
             serde_json::from_str(&ref_paths_json).unwrap_or_default();
 
         let img_rows = sqlx::query(
-            "SELECT id, turn_id, path, mtime_ms, size, kind, created_at FROM images WHERE turn_id = ?1 ORDER BY created_at ASC",
+            "SELECT id, turn_id, path, mtime_ms, size, kind, media_type, duration_seconds, thumbnail_path, created_at FROM images WHERE turn_id = ?1 ORDER BY created_at ASC",
         )
         .bind(&turn_id)
         .fetch_all(&pool)
@@ -642,6 +665,9 @@ pub async fn session_export(
                 mtime_ms: r.get::<i64, _>("mtime_ms"),
                 size: r.get::<i64, _>("size"),
                 kind: r.get::<String, _>("kind"),
+                media_type: r.get::<String, _>("media_type"),
+                duration_seconds: r.get::<Option<i64>, _>("duration_seconds"),
+                thumbnail_path: r.get::<Option<String>, _>("thumbnail_path"),
                 created_at: r.get::<i64, _>("created_at"),
             })
             .collect();
@@ -666,6 +692,9 @@ pub async fn session_export(
                 "mtimeMs": img.mtime_ms,
                 "size": img.size,
                 "kind": img.kind,
+                "mediaType": img.media_type,
+                "durationSeconds": img.duration_seconds,
+                "thumbnailPath": img.thumbnail_path,
                 "createdAt": img.created_at,
             })).collect::<Vec<_>>(),
         }));

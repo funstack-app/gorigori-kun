@@ -45,6 +45,40 @@ async fn apply_provider_model_migration(pool: &sqlx::SqlitePool) -> Result<(), S
     Ok(())
 }
 
+async fn apply_media_type_migration(pool: &sqlx::SqlitePool) -> Result<(), String> {
+    let _migration_004 = include_str!("../migrations/004_media_type.sql");
+    let rows = sqlx::query("PRAGMA table_info(images)")
+        .fetch_all(pool)
+        .await
+        .map_err(|e| format!("migration 004 table_info failed: {e}"))?;
+    let existing: std::collections::HashSet<String> = rows
+        .iter()
+        .map(|row| row.get::<String, _>("name"))
+        .collect();
+    for (column, sql) in [
+        (
+            "media_type",
+            "ALTER TABLE images ADD COLUMN media_type TEXT NOT NULL DEFAULT 'image'",
+        ),
+        (
+            "duration_seconds",
+            "ALTER TABLE images ADD COLUMN duration_seconds INTEGER",
+        ),
+        (
+            "thumbnail_path",
+            "ALTER TABLE images ADD COLUMN thumbnail_path TEXT",
+        ),
+    ] {
+        if !existing.contains(column) {
+            sqlx::query(sql)
+                .execute(pool)
+                .await
+                .map_err(|e| format!("migration 004 add {column} failed: {e}"))?;
+        }
+    }
+    Ok(())
+}
+
 pub fn log_dir() -> Option<std::path::PathBuf> {
     #[cfg(target_os = "macos")]
     {
@@ -257,8 +291,8 @@ pub fn run() {
                     .execute(&pool)
                     .await
                     .map_err(|e| format!("PRAGMA foreign_keys failed: {e}"))?;
-                // Apply migrations idempotently. They're CREATE TABLE
-                // IF NOT EXISTS so re-running on an existing DB is safe.
+                // Apply migrations idempotently. Base/index migrations are
+                // IF NOT EXISTS; column migrations check PRAGMA table_info first.
                 sqlx::raw_sql(include_str!("../migrations/001_init.sql"))
                     .execute(&pool)
                     .await
@@ -268,6 +302,7 @@ pub fn run() {
                     .await
                     .map_err(|e| format!("migration 002 failed: {e}"))?;
                 apply_provider_model_migration(&pool).await?;
+                apply_media_type_migration(&pool).await?;
                 state_for_init.set_db(pool).await;
                 tracing::info!(target: "codex.sessions", "db ready at {}", db_path.display());
                 Ok::<(), String>(())
