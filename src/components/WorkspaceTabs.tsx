@@ -10,7 +10,8 @@ type Tab = {
 
 const TABS: Tab[] = [
   { id: "plan", label: "企画" },
-  { id: "generate", label: "生成" },
+  { id: "generate", label: "画像生成" },
+  { id: "video", label: "動画生成" },
   // 編集タブは現在クローズ。STΛCK 指示 (2026-05-17): β ではなく
   // 「近日公開」表示にしてワクワク感を演出。クリック不可。
   { id: "edit", label: "編集", comingSoon: true, disabled: true },
@@ -21,7 +22,7 @@ export function WorkspaceTabs() {
   const setActiveTab = useWorkspace((s) => s.setActiveTab);
 
   return (
-    <div className="grid w-full grid-cols-3 rounded-lg border border-[#2a2a2a] bg-[#0f0f0f] p-1 sm:w-[320px]">
+    <div className="grid w-full grid-cols-4 rounded-lg border border-[#2a2a2a] bg-[#0f0f0f] p-1 sm:w-[420px]">
       {TABS.map((tab) => {
         const isActive = activeTab === tab.id;
         const isDisabled = tab.disabled;

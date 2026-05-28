@@ -6,6 +6,7 @@ import { ConstructedPromptPanel } from "./ConstructedPromptPanel";
 import { AdAgentPanel } from "./agents";
 import { EditWorkspace } from "./EditWorkspace";
 import { PlanWorkspace } from "./PlanWorkspace";
+import { VideoGenerationWorkspace } from "./VideoGenerationWorkspace";
 import { useBatches, type BatchWorker } from "../lib/store/batches";
 import { useImagePreview } from "../lib/store/imagePreview";
 import { useImages, type GalleryItem } from "../lib/store/images";
@@ -58,6 +59,7 @@ export function GenerationWorkspace() {
       <div className="min-h-0 flex-1 overflow-hidden px-4 py-4">
         {activeTab === "plan" && <PlanWorkspace />}
         {activeTab === "generate" && <GenerateTab />}
+        {activeTab === "video" && <VideoGenerationWorkspace timeline={<Timeline />} />}
         {activeTab === "edit" && <EditWorkspace />}
       </div>
     </section>

@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-export type WorkspaceTab = "plan" | "generate" | "edit";
+export type WorkspaceTab = "plan" | "generate" | "video" | "edit";
 export type WorkspacePurpose = "artwork" | "ad" | "videoStory";
 
 /**
