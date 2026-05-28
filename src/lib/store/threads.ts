@@ -272,7 +272,7 @@ export const useThreads = create<ThreadsState>((set, get) => ({
         const params: ThreadStartParams = {
           model: opts?.model ?? get().selectedModel ?? persisted.defaultModel,
           cwd,
-          approvalPolicy: persisted.approvalPolicy ?? "on-request",
+          approvalPolicy: persisted.approvalPolicy ?? "never",
           sandbox: persisted.sandbox ?? "workspace-write",
         };
         const r = await rpcRequest<ThreadStartResult>("thread/start", params);

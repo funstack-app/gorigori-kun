@@ -168,7 +168,7 @@ function BasicSettings() {
       <div className="grid gap-3 md:grid-cols-2">
         <Field label="承認ポリシー">
           <select
-            value={draft.approvalPolicy ?? "on-request"}
+            value={draft.approvalPolicy ?? "never"}
             onChange={(e) => update("approvalPolicy", e.target.value as typeof draft.approvalPolicy)}
             className="h-9 w-full rounded-md border border-[#343434] bg-[#101010] px-2 text-xs text-neutral-100"
           >
