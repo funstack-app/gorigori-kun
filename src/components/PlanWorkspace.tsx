@@ -14,7 +14,6 @@ import {
 } from "../lib/sendToPlan";
 import { extractDropped, isImageDrop } from "../lib/dragRef";
 import { PresetPickerPopover } from "./PresetPickerPopover";
-import { ReferenceSetsPickerModal } from "./ReferenceSetDialogs";
 /**
  * 企画ワークスペース。
  *
@@ -503,17 +502,10 @@ function ChatInput({
 }) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const canSend = value.trim().length > 0 || attachments.length > 0;
-  /**
-   * F-#8 (2026-05-19): 企画タブからプリセット/リファレンスセットを呼び出す。
-   * Ta4low さん要望。プロンプト案を練る段階でも蓄積したテンプレを差し込みたい。
-   * - プリセット: 末尾追記 (生成タブと同じ append 挙動)
-   * - リファレンスセット: 添付画像をこの企画チャットの pendingImages に追加し、
-   *   セットの prompt を draft 末尾に追記
-   */
+  /** 企画タブからプリセットを呼び出し、draft 末尾に追記する。 */
   const presetBtnRef = useRef<HTMLButtonElement | null>(null);
   const [presetOpen, setPresetOpen] = useState(false);
   const [presetAnchor, setPresetAnchor] = useState<DOMRect | null>(null);
-  const [refSetOpen, setRefSetOpen] = useState(false);
 
   const onPick = (event: ChangeEvent<HTMLInputElement>) => {
     const files = event.currentTarget.files;
@@ -611,20 +603,6 @@ function ChatInput({
                 <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" />
               </svg>
             </button>
-            {/* F-#8: リファレンスセット呼び出し (添付画像 + プロンプト一括) */}
-            <button
-              type="button"
-              onClick={() => setRefSetOpen(true)}
-              disabled={disabled}
-              title="リファレンスセット呼び出し"
-              aria-label="リファレンスセット呼び出し"
-              className="flex h-8 w-8 items-center justify-center rounded-full text-neutral-400 hover:bg-[#1a1a1a] hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-                <rect x="3" y="7" width="13" height="13" rx="2" ry="2" />
-                <path d="M8 7V5a2 2 0 0 1 2-2h11v13a2 2 0 0 1-2 2h-2" />
-              </svg>
-            </button>
           </div>
           <button
             type="button"
@@ -652,25 +630,6 @@ function ChatInput({
           onChange(next);
         }}
       />
-      {/*
-        F-#8: リファレンスセット呼び出し
-        - 添付画像は onAddFiles ではなく直接 attach 想定だが、plan の入力で
-          File オブジェクトを作るのは難しい。代替として `paths` を受け取る
-          メソッドが必要だが現状は無いので、draft への prompt 追記のみで妥協。
-          (画像参照は次イテレーションで onAddPaths を新設して対応)
-      */}
-      {refSetOpen && (
-        <ReferenceSetsPickerModal
-          onClose={() => setRefSetOpen(false)}
-          onApply={(set) => {
-            const current = value.trim();
-            const next = current
-              ? `${current}\n${set.prompt}`
-              : set.prompt;
-            onChange(next);
-          }}
-        />
-      )}
     </div>
   );
 }

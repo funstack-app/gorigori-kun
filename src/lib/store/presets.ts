@@ -157,6 +157,58 @@ function readPersisted<T>(key: string, fallback: T): T {
   }
 }
 
+/**
+ * 旧 localStorage["referenceSets.sets"] を「セット」カテゴリの Preset へ移行する。
+ * 元キーは migrated_<timestamp> に退避し、ロールバック可能にする。
+ */
+function migrateLegacyReferenceSets(): Preset[] {
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key && key.startsWith("referenceSets.sets.migrated_")) {
+        return [];
+      }
+    }
+
+    const raw = localStorage.getItem("referenceSets.sets");
+    if (!raw) return [];
+
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+
+    const migrated: Preset[] = parsed
+      .filter((rs: any) => rs && typeof rs.id === "string" && typeof rs.prompt === "string")
+      .map((rs: any) => ({
+        id: rs.id,
+        name: rs.name || "無題のセット",
+        prompt: rs.prompt || "",
+        categoryId: "ref-sets",
+        description: rs.description || undefined,
+        tags: undefined,
+        thumbnail: undefined,
+        thumbnailFocus: undefined,
+        attachedImages: Array.isArray(rs.references)
+          ? rs.references
+              .filter((r: any) => r && typeof r.path === "string")
+              .map((r: any) => ({
+                path: r.path,
+                role: typeof r.role === "string" ? r.role : undefined,
+              }))
+          : undefined,
+        favorite: false,
+        createdAt: typeof rs.createdAt === "number" ? rs.createdAt : Date.now(),
+        updatedAt: typeof rs.updatedAt === "number" ? rs.updatedAt : Date.now(),
+      }));
+
+    localStorage.setItem(`referenceSets.sets.migrated_${Date.now()}`, raw);
+    localStorage.removeItem("referenceSets.sets");
+
+    return migrated;
+  } catch {
+    return [];
+  }
+}
+
 /** localStorage から読んだ Preset 配列に focus マイグレートを適用する。 */
 function loadPresets(): Preset[] {
   const raw = readPersisted<Preset[]>(PRESETS_LS_KEY, []);
@@ -206,6 +258,8 @@ const DEFAULT_CATEGORIES: PresetCategory[] = [
   { id: "default-portrait", name: "ポートレート", color: "#ec4899" },
   { id: "default-product", name: "プロダクト", color: "#6366f1" },
   { id: "default-landscape", name: "風景", color: "#10b981" },
+  // 旧リファレンスセットの移行先カテゴリ。
+  { id: "ref-sets", name: "セット", color: "#f59e0b" },
 ];
 
 type PresetsState = {
@@ -229,7 +283,15 @@ type PresetsState = {
 
 export const usePresets = create<PresetsState>((set, get) => ({
   categories: readPersisted<PresetCategory[]>(CATEGORIES_LS_KEY, DEFAULT_CATEGORIES),
-  presets: loadPresets(),
+  presets: (() => {
+    const existing = loadPresets();
+    const migrated = migrateLegacyReferenceSets();
+    if (migrated.length === 0) return existing;
+    const existingIds = new Set(existing.map((p) => p.id));
+    const merged = [...existing, ...migrated.filter((m) => !existingIds.has(m.id))];
+    persist(PRESETS_LS_KEY, merged);
+    return merged;
+  })(),
 
   addCategory: (name, color = "#6366f1", tags) => {
     const category: PresetCategory = {
