@@ -694,32 +694,30 @@ function VideoSettingsModal({
             </div>
             <p className="text-[10px] leading-relaxed text-neutral-500">
               {compareMode
-                ? `${compareModelIds.length}モデルを各デフォルト設定で1本ずつ生成して比較します。下の尺・比率などの個別設定は使いません。`
+                ? `${compareModelIds.length}モデルを比較します。尺・比率は共通で適用、モデル固有設定(モード/解像度等)は各モデルのおすすめ値を使います。`
                 : "2つ以上選ぶと比較モードになります（各モデルはおすすめ設定で生成）。"}
             </p>
           </div>
 
-          {/* 単一モード時のみ: 尺 + 比率 + モデル別パラメータ */}
-          {!compareMode && (
-            <>
-              <div className="grid grid-cols-2 items-end gap-1.5">
-                <DurationControl model={model} value={duration} onChange={onDurationChange} />
-                <AspectControl model={model} value={aspectRatio} onChange={onAspectRatioChange} />
-              </div>
+          {/* 尺 + 比率: 比較モードでも共通設定として効かせる */}
+          <div className="grid grid-cols-2 items-end gap-1.5">
+            <DurationControl model={model} value={duration} onChange={onDurationChange} />
+            <AspectControl model={model} value={aspectRatio} onChange={onAspectRatioChange} />
+          </div>
 
-              {model.extraParams.length > 0 && (
-                <div className="grid grid-cols-2 items-end gap-1.5">
-                  {model.extraParams.map((param) => (
-                    <ExtraParamControl
-                      key={param.name}
-                      param={param}
-                      value={extraParamValues[param.name] ?? String(param.default)}
-                      onChange={(next) => onExtraParamChange(param.name, next)}
-                    />
-                  ))}
-                </div>
-              )}
-            </>
+          {/* モデル別パラメータ(mode/resolution/genre等)は単一モード時のみ
+              (比較時はモデルごとに項目が違うため各デフォルトを使う) */}
+          {!compareMode && model.extraParams.length > 0 && (
+            <div className="grid grid-cols-2 items-end gap-1.5">
+              {model.extraParams.map((param) => (
+                <ExtraParamControl
+                  key={param.name}
+                  param={param}
+                  value={extraParamValues[param.name] ?? String(param.default)}
+                  onChange={(next) => onExtraParamChange(param.name, next)}
+                />
+              ))}
+            </div>
           )}
         </div>
 

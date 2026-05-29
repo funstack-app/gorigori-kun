@@ -79,14 +79,25 @@ export function paramsToVideoArgs(
 }
 
 /**
- * A案: 比較生成では各モデルを「自身のデフォルト設定」で1本ずつ生成する。
- * モデル定義からデフォルトの duration / extraParams を読み、CompareModel を組む。
+ * 比較生成では各モデルを生成する。尺は共通設定 (commonDuration) を各モデルの
+ * 有効範囲に丸めて適用し、モデル固有パラメータ (mode/resolution/genre 等) は
+ * 各モデルのおすすめ値 (param.default) を使う。比率は generateCompare 側で共通適用。
  */
-function toCompareModel(model: VideoModelDefinition): HiggsfieldCompareModel {
+function toCompareModel(
+  model: VideoModelDefinition,
+  commonDuration: number,
+): HiggsfieldCompareModel {
+  // 共通尺をモデルの制約に丸める (enum は最も近い許容値、integer は min/max クランプ)
+  const duration =
+    model.duration.kind === "enum"
+      ? model.duration.values.includes(commonDuration)
+        ? commonDuration
+        : model.duration.default
+      : Math.min(model.duration.max, Math.max(model.duration.min, commonDuration));
   return {
     jobSetType: model.jobSetType,
     displayName: model.label,
-    duration: model.duration.default,
+    duration,
     i2vInputField: model.i2vInputField,
     // extraParams は selected を渡さず空 → 各 param.default が使われる
     ...paramsToVideoArgs(model.extraParams, {}),
@@ -220,9 +231,8 @@ export function useVideoSceneGeneration(): UseVideoSceneGenerationReturn {
       const result = compareMode
         ? await higgsfield.generateCompare({
             prompt,
-            models: compareModels.map(toCompareModel),
-            // 比較は全モデル共通のアスペクト比で揃える (各モデル対応比率は
-            // clampAspect 済みの現在値が無難。auto 非対応モデルもあるため現値を渡す)
+            models: compareModels.map((m) => toCompareModel(m, duration)),
+            // 比率・尺は全モデル共通で適用 (各モデルの制約は toCompareModel 側で丸める)
             aspect: aspectRatio,
             refImagePaths,
             mediaType: "video",
