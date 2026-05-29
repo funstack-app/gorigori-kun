@@ -1376,16 +1376,26 @@ async fn wait_child_output_or_cancel(
     }
 }
 
+/// i2v 入力画像を渡す CLI フラグを返す。
+///
+/// 重要 (2026-05-29 修正): Higgsfield CLI のメディア入力は **メディアフラグ**
+/// (`--image` / `--start-image` / `--video` 等) で渡す。CLI が自動アップロードし、
+/// モデル定義の params 構造 (seedance/kling の `medias` array、veo の `input_image`
+/// object 等) に変換してくれる。
+///
+/// 旧実装は `i2vInputField` ("medias" 等の **params 名**) をそのままフラグ化して
+/// `--medias <path>` を渡していたため、`Invalid types: medias should be array, got
+/// string` で全 i2v 生成が失敗していた。params 名は CLI フラグ名ではない。
+///
+/// 現状の対応モデル (kling3_0 / seedance_2_0 / veo3_1) の i2v 入力はいずれも
+/// 単一の開始画像なので `--image` に統一する。`--start-image` 等が必要な
+/// モデルを追加する場合はここで分岐する。
 fn i2v_cli_flag(field: Option<&str>) -> String {
-    let Some(field) = field.map(str::trim).filter(|s| !s.is_empty()) else {
-        return "--image".to_string();
-    };
-    if field == "image" {
-        "--image".to_string()
-    } else if field.starts_with("--") {
-        field.to_string()
-    } else {
-        format!("--{field}")
+    // 明示的にメディアフラグ ("--start-image" 等) が指定された場合だけ尊重する。
+    // それ以外 (params 名 "medias"/"input_image"/"image"/None) は "--image" に統一。
+    match field.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(f) if f.starts_with("--") => f.to_string(),
+        _ => "--image".to_string(),
     }
 }
 
