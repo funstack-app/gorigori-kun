@@ -379,6 +379,7 @@ export const higgsfield = {
     jobSetType: string;
     prompt: string;
     aspect?: string;
+    duration?: number;
   }) => invoke<number>("higgsfield_generate_cost", args),
 };
 

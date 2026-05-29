@@ -2,134 +2,192 @@ import { NO_SELECT } from "./catalog";
 import type { VideoSceneState } from "./video-types";
 
 /**
- * 動画シーン構築 (useVideoSceneStore) の 6 要素から、英語の動画生成プロンプトを
- * 組み立てる。画像版 buildPrompt.ts と同じ piece() パターン・カンマ区切り・
- * NO_SELECT スキップを踏襲する。
+ * 動画シーン構築 (useVideoSceneStore) の4軸から、i2v 映像文脈型の英語プロンプトを
+ * 組み立てる。
  *
- * 動画モデル (Kling/Seedance/Veo 等) は英語プロンプトの方が安定するため、
- * UI の日本語値を VIDEO_LABELS で英語へ変換してから流す。辞書に無い値
- * (自由記述の主役など) はそのまま渡す。
+ * 設計 (2026-05-29 i2v再設計, Claude + Codex クロスレビュー):
+ * - t2iタグ羅列 (`key: value, ...`) をやめ、短い英文 (映像指示文) にする。
+ * - i2v では first frame に既にある静的情報 (構図/服装/外見) を再説明しない。
+ * - 動き・カメラ・環境変化に振り切る。
+ * - 出力例:
+ *     "The subject slowly walks forward. The camera gently pushes in.
+ *      Rain falls steadily across the scene. Cinematic look."
+ *
+ * 動画モデル (Kling/Seedance/Veo) は英語の方が安定するため、UIの日本語値を
+ * 動詞句・節へ変換する。辞書に無い値 (自由記述の主役) はそのまま使う。
  */
-const VIDEO_LABELS: Record<string, string> = {
-  // 構図
-  "Close Up": "close-up shot",
-  Medium: "medium shot",
-  Wide: "wide shot",
-  "Bird's-eye": "bird's-eye view",
-  "Dutch Angle": "dutch angle",
-  "Over-the-shoulder": "over-the-shoulder shot",
-  // カメラワーク
-  静止: "static camera",
-  パン左: "pan left",
-  パン右: "pan right",
-  チルトアップ: "tilt up",
-  チルトダウン: "tilt down",
-  ドリーイン: "dolly in",
-  ドリーアウト: "dolly out",
-  トラッキング: "tracking shot",
-  クレーン: "crane shot",
-  ハンディ手ブレ: "handheld shaky cam",
-  オービット: "orbit around subject",
-  // カメラ速度
-  スロー: "slow movement",
-  標準: "natural speed",
-  高速: "fast movement",
-  // カメラ開始位置
-  中央: "starting centered",
-  左寄り: "starting from the left",
-  右寄り: "starting from the right",
-  上寄り: "starting from a high angle",
-  下寄り: "starting from a low angle",
-  // 被写体の動き
-  歩く: "walking",
-  走る: "running",
-  近づく: "approaching",
-  離れる: "moving away",
-  後ずさる: "stepping back",
-  振り返る: "turning around",
-  見渡す: "looking around",
-  見上げる: "looking up",
-  見下ろす: "looking down",
-  フレーム侵入: "entering the frame",
-  フレーム退出: "exiting the frame",
-  倒れる: "falling down",
-  座る: "sitting down",
-  跳ぶ: "jumping",
-  笑う: "smiling",
-  泣く: "crying",
-  驚く: "looking surprised",
-  // ライティング
-  自然光: "natural light",
-  スタジオ: "studio lighting",
-  逆光: "backlight",
-  夕暮れ: "golden hour light",
-  キャンドル: "candlelight",
-  ネオン: "neon lighting",
-  フラッシュ: "harsh flash light",
-  // 時間帯
-  朝: "morning",
-  昼: "midday",
-  夕: "dusk",
-  夜: "night",
-  マジックアワー: "magic hour",
-  // 天候
-  晴れ: "clear sky",
-  曇り: "overcast",
-  雨: "rainy",
-  雪: "snowy",
-  霧: "foggy",
-  // スタイル
-  シネマティック: "cinematic look",
-  ドキュメンタリー: "documentary style",
-  ミュージックビデオ: "music video style",
-  CM: "commercial style",
-  雑誌: "editorial style",
-  アニメ: "anime style",
-  フィルム: "film grain look",
-  VHS: "lo-fi VHS look",
-  // テンポ
-  速め: "fast pacing",
-  ゆっくり: "slow pacing",
+
+/** 被写体の動き → 動詞句 (主語のあとに続く) */
+const MOTION_VERB: Record<string, string> = {
+  歩く: "walks forward",
+  走る: "runs forward",
+  近づく: "moves closer to the camera",
+  離れる: "walks away into the distance",
+  後ずさる: "steps backward",
+  振り返る: "turns around to look back",
+  見渡す: "looks around the surroundings",
+  見上げる: "looks up toward the sky",
+  見下ろす: "looks down toward the ground",
+  フレーム侵入: "walks into the frame",
+  フレーム退出: "walks out of the frame",
+  倒れる: "slowly falls to the ground",
+  座る: "sits down",
+  跳ぶ: "jumps up",
+  笑う: "gradually smiles",
+  泣く: "begins to cry softly",
+  驚く: "reacts with surprise",
 };
 
-function hasValue(value: string): boolean {
-  const trimmed = value.trim();
-  return trimmed.length > 0 && trimmed !== NO_SELECT;
+/** 動きの強度 → 副詞 (動詞句の前に挿入) */
+const MOTION_INTENSITY: Record<string, string> = {
+  ゆっくり: "slowly",
+  繊細に: "with subtle motion,",
+  標準: "",
+  力強く: "with bold, energetic motion,",
+  速め: "quickly",
+};
+
+/** カメラの動き → カメラ文 */
+const CAMERA_MOTION: Record<string, string> = {
+  静止: "The camera stays locked-off",
+  パン左: "The camera pans to the left",
+  パン右: "The camera pans to the right",
+  チルトアップ: "The camera tilts up",
+  チルトダウン: "The camera tilts down",
+  ドリーイン: "The camera pushes in toward the subject",
+  ドリーアウト: "The camera pulls back from the subject",
+  トラッキング: "The camera tracks alongside the subject",
+  クレーン: "The camera rises in a crane movement",
+  ハンディ手ブレ: "The camera follows with a subtle handheld shake",
+  オービット: "The camera orbits around the subject",
+};
+
+/** カメラ速度 → 副詞 */
+const CAMERA_SPEED: Record<string, string> = {
+  スロー: "slowly",
+  標準: "",
+  高速: "quickly",
+};
+
+/** ライティング → 動的な光の変化として書く */
+const LIGHTING: Record<string, string> = {
+  自然光: "soft natural light fills the scene",
+  スタジオ: "even studio light wraps the subject",
+  逆光: "backlight rims the subject",
+  夕暮れ: "warm golden light flares across the scene",
+  キャンドル: "warm candlelight flickers",
+  ネオン: "neon light glows across the scene",
+  フラッシュ: "harsh light flashes",
+};
+
+/** 天候 → 環境の動き */
+const WEATHER: Record<string, string> = {
+  晴れ: "under a clear sky",
+  曇り: "under soft overcast light",
+  雨: "rain falls steadily across the scene",
+  雪: "snow drifts gently through the air",
+  霧: "fog rolls slowly through the scene",
+};
+
+/** 環境の動き */
+const ENVIRONMENT: Record<string, string> = {
+  風で草が揺れる: "wind moves through the grass",
+  煙が立ち込める: "smoke drifts through the air",
+  水面の反射: "reflections ripple across the surface",
+  木の葉が舞う: "leaves drift through the air",
+  光が揺らぐ: "light flickers softly",
+};
+
+/** スタイル → 末尾に短く */
+const STYLE: Record<string, string> = {
+  シネマティック: "Cinematic look.",
+  ドキュメンタリー: "Documentary style.",
+  ミュージックビデオ: "Music video style.",
+  CM: "Polished commercial style.",
+  雑誌: "Editorial style.",
+  アニメ: "Anime-style motion.",
+  フィルム: "Film grain look.",
+  VHS: "Lo-fi VHS look.",
+};
+
+function has(value: string): boolean {
+  const t = value.trim();
+  return t.length > 0 && t !== NO_SELECT;
 }
 
-function normalize(value: string): string {
-  const trimmed = value.trim();
-  return VIDEO_LABELS[trimmed] ?? trimmed;
+function lookup(dict: Record<string, string>, value: string): string {
+  return dict[value.trim()] ?? "";
 }
 
-function piece(label: string, value: string): string | null {
-  if (!hasValue(value)) return null;
-  return `${label}: ${normalize(value)}`;
+/** 文の先頭を大文字化し、末尾にピリオドを付ける */
+function sentence(parts: Array<string | undefined>): string {
+  const text = parts
+    .map((p) => (p ?? "").trim())
+    .filter((p) => p.length > 0)
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .replace(/\s+,/g, ",")
+    .trim();
+  if (!text) return "";
+  const capped = text.charAt(0).toUpperCase() + text.slice(1);
+  return capped.endsWith(".") || capped.endsWith(",") ? capped.replace(/,$/, ".") : `${capped}.`;
 }
 
 /**
- * 動画シーン状態からカンマ区切りプロンプトを生成する。
- * 何も選んでいなければ空文字を返す (起動時に 0 要素表示)。
- *
- * 構造:
- *   [主役] [構図] [被写体の動き] [カメラワーク] [カメラ速度]
- *   [開始位置] [ライティング] [時間帯] [天候] [スタイル]
+ * 4軸シーン状態から i2v 映像文脈プロンプトを生成する。
+ * 何も選んでいなければ空文字 (起動時0要素)。
  */
 export function buildVideoScenePrompt(scene: VideoSceneState): string {
-  const pieces: Array<string | null> = [];
+  const sentences: string[] = [];
 
-  const subject = scene.subject.text.trim();
-  if (subject) pieces.push(`subject: ${subject}`);
+  // 主役 (参照ラベル)。自由記述はそのまま、無ければ "The subject"
+  const subjectText = scene.subject.text.trim();
+  const subject = subjectText || "the subject";
 
-  pieces.push(piece("composition", scene.subject.composition));
-  pieces.push(piece("subject motion", scene.motion.verb));
-  pieces.push(piece("camera movement", scene.cameraMovement.motion));
-  pieces.push(piece("camera speed", scene.cameraMovement.speed));
-  pieces.push(piece("camera start", scene.cameraMovement.startPosition));
-  pieces.push(piece("lighting", scene.lighting.source));
-  pieces.push(piece("time of day", scene.lighting.timeOfDay));
-  pieces.push(piece("weather", scene.lighting.weather));
-  pieces.push(piece("style", scene.style.look));
+  // 1. 主役の動き文: "The subject slowly walks forward."
+  if (has(scene.motion.verb)) {
+    const verb = lookup(MOTION_VERB, scene.motion.verb) || scene.motion.verb;
+    const intensity = has(scene.motion.intensity)
+      ? lookup(MOTION_INTENSITY, scene.motion.intensity)
+      : "";
+    sentences.push(sentence([subject, intensity, verb]));
+  } else if (subjectText) {
+    // 動きが無くても主役だけ書きたい場合
+    sentences.push(sentence([subject, "stands in the scene"]));
+  }
 
-  return pieces.filter((p): p is string => p !== null).join(", ");
+  // 2. カメラ文
+  if (has(scene.camera.motion)) {
+    const cam = lookup(CAMERA_MOTION, scene.camera.motion) || `The camera ${scene.camera.motion}`;
+    const speed = has(scene.camera.speed) ? lookup(CAMERA_SPEED, scene.camera.speed) : "";
+    sentences.push(sentence([cam, speed]));
+  }
+
+  // 3. 環境・天候の動き文
+  const envParts: string[] = [];
+  if (has(scene.staging.weather)) {
+    const w = lookup(WEATHER, scene.staging.weather);
+    if (w) envParts.push(w);
+  }
+  if (has(scene.staging.environment)) {
+    const e = lookup(ENVIRONMENT, scene.staging.environment);
+    if (e) envParts.push(e);
+  }
+  if (envParts.length > 0) {
+    sentences.push(sentence([envParts.join(", ")]));
+  }
+
+  // 4. ライティング (動的)
+  if (has(scene.staging.lighting)) {
+    const l = lookup(LIGHTING, scene.staging.lighting);
+    if (l) sentences.push(sentence([l]));
+  }
+
+  // 5. スタイル (末尾)
+  if (has(scene.staging.style)) {
+    const s = lookup(STYLE, scene.staging.style);
+    if (s) sentences.push(s);
+  }
+
+  return sentences.filter((s) => s.length > 0).join(" ");
 }

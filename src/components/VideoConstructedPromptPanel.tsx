@@ -9,7 +9,7 @@ import {
   fileToUploadReference,
   isImageDrop,
 } from "../lib/dragRef";
-import { VIDEO_MODELS, type VideoModelDefinition } from "../lib/videoModels";
+import { VIDEO_MODELS, type VideoModelDefinition, type VideoModelParam } from "../lib/videoModels";
 import type { Preset } from "../lib/store/presets";
 import { PresetPickerPopover } from "./PresetPickerPopover";
 import { SkillPickerPopover } from "./SkillPickerPopover";
@@ -73,6 +73,10 @@ export function VideoConstructedPromptPanel() {
   const setDuration = useVideoGen((s) => s.setDuration);
   const aspectRatio = useVideoGen((s) => s.aspectRatio);
   const setAspectRatio = useVideoGen((s) => s.setAspectRatio);
+  const count = useVideoGen((s) => s.count);
+  const setCount = useVideoGen((s) => s.setCount);
+  const extraParamValues = useVideoGen((s) => s.extraParamValues);
+  const setExtraParam = useVideoGen((s) => s.setExtraParam);
 
   const isOverriding = promptOverride !== null;
 
@@ -158,7 +162,7 @@ export function VideoConstructedPromptPanel() {
     setCost({ kind: "loading", value: fallback, source: "static" });
     const timer = window.setTimeout(() => {
       higgsfield
-        .generateCost({ jobSetType: model.jobSetType, prompt, aspect: aspectRatio })
+        .generateCost({ jobSetType: model.jobSetType, prompt, aspect: aspectRatio, duration })
         .then((value) => {
           if (!cancelled) setCost({ kind: "idle", value, source: "api" });
         })
@@ -170,7 +174,7 @@ export function VideoConstructedPromptPanel() {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [model, effectivePrompt, aspectRatio]);
+  }, [model, effectivePrompt, aspectRatio, duration]);
 
   return (
     <section className="flex h-full min-h-0 flex-col bg-[#181818]">
@@ -217,20 +221,17 @@ export function VideoConstructedPromptPanel() {
         />
       </div>
 
-      <div className="shrink-13-controls shrink-0 space-y-1.5 border-t border-[#2a2a2a] p-2.5">
+      <div className="shrink-13-controls shrink-0 space-y-1 border-t border-[#2a2a2a] p-2">
         {/* モデル */}
-        <div className="space-y-1">
-          <div className="flex items-center justify-between gap-2">
-            <label htmlFor="video-model-select" className="text-[11px] font-black tracking-wide text-neutral-500">
-              モデル
-            </label>
-            <span className="truncate text-[10px] font-bold text-neutral-600">約{model.costEstimate} credits</span>
-          </div>
+        <div className="space-y-0.5">
+          <label htmlFor="video-model-select" className="text-[10px] font-black tracking-wide text-neutral-500">
+            モデル
+          </label>
           <select
             id="video-model-select"
             value={model.id}
             onChange={(event) => setModel(event.currentTarget.value as VideoModelDefinition["id"])}
-            className="h-9 w-full rounded-md border border-[#343434] bg-[#101010] px-2.5 text-sm font-bold text-neutral-100 outline-none transition hover:border-[#444] focus:border-pink-500"
+            className="h-8 w-full rounded-md border border-[#343434] bg-[#101010] px-2 text-xs font-bold text-neutral-100 outline-none transition hover:border-[#444] focus:border-pink-500"
             title={model.description}
           >
             {VIDEO_MODELS.map((item) => (
@@ -242,16 +243,32 @@ export function VideoConstructedPromptPanel() {
         </div>
 
         {/* 尺 + 比率 */}
-        <div className="grid grid-cols-2 gap-2">
+        <div className="grid grid-cols-2 gap-1.5">
           <DurationControl model={model} value={duration} onChange={setDuration} />
           <AspectControl model={model} value={aspectRatio} onChange={setAspectRatio} />
         </div>
 
-        {/* Cost */}
-        <div className="flex items-center justify-between gap-2 rounded-md border border-[#2a2a2a] bg-[#101010] px-2.5 py-2">
-          <span className="text-[11px] font-black tracking-wide text-neutral-500">Cost</span>
-          <CostBadge cost={cost} />
-        </div>
+        {/* モデル別パラメータ (音声/解像度/genre/quality/mode 等。対応モデルだけ) */}
+        {model.extraParams.length > 0 && (
+          <div className="grid grid-cols-2 gap-1.5">
+            {model.extraParams.map((param) => (
+              <ExtraParamControl
+                key={param.name}
+                param={param}
+                value={extraParamValues[param.name] ?? String(param.default)}
+                onChange={(next) => setExtraParam(param.name, next)}
+              />
+            ))}
+          </div>
+        )}
+
+        {/* 生成数 (1〜4) + 合計コスト */}
+        <CountAndCostControl
+          count={count}
+          onChangeCount={setCount}
+          unitCost={cost.value}
+          loading={cost.kind === "loading"}
+        />
 
         {hasRunningBatch && activeBatchSummary && (
           <p className="flex items-center justify-between gap-2 text-[11px] font-semibold text-neutral-400">
@@ -264,7 +281,7 @@ export function VideoConstructedPromptPanel() {
           type="button"
           onClick={() => void generate()}
           disabled={disabled}
-          className="h-11 w-full rounded-md bg-pink-500 px-4 py-2 text-sm font-black text-white transition hover:bg-pink-600 disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-500"
+          className="h-9 w-full rounded-md bg-pink-500 px-4 py-1.5 text-sm font-black text-white transition hover:bg-pink-600 disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-500"
         >
           {isQueueFull ? `生成中 ${runningBatchCount}/${maxConcurrentBatches}` : "動画を生成"}
         </button>
@@ -329,8 +346,8 @@ function DurationControl({
 }) {
   if (model.duration.kind === "enum") {
     return (
-      <div className="space-y-1">
-        <p className="text-[11px] font-black tracking-wide text-neutral-500">尺</p>
+      <div className="space-y-0.5">
+        <p className="text-[10px] font-black tracking-wide text-neutral-500">尺</p>
         <div className="grid grid-cols-3 gap-1">
           {model.duration.values.map((seconds) => (
             <button
@@ -338,7 +355,7 @@ function DurationControl({
               type="button"
               onClick={() => onChange(seconds)}
               className={[
-                "h-9 rounded-md border px-1 text-[11px] font-black transition",
+                "h-8 rounded-md border px-1 text-[10px] font-black transition",
                 value === seconds
                   ? "border-pink-400 bg-pink-500/10 text-white"
                   : "border-[#2a2a2a] bg-[#101010] text-neutral-400 hover:border-neutral-500",
@@ -353,27 +370,22 @@ function DurationControl({
   }
 
   return (
-    <div className="space-y-1">
-      <div className="flex items-center justify-between gap-1">
-        <p className="text-[11px] font-black tracking-wide text-neutral-500">尺</p>
-        <span className="text-[10px] font-bold text-neutral-600">
-          {model.duration.min}〜{model.duration.max}秒
-        </span>
-      </div>
-      <div className="flex h-9 items-center rounded-md border border-[#343434] bg-[#101010]">
+    <div className="space-y-0.5">
+      <p className="text-[10px] font-black tracking-wide text-neutral-500">尺</p>
+      <div className="flex h-8 items-center rounded-md border border-[#343434] bg-[#101010]">
         <button
           type="button"
           onClick={() => onChange(value - 1)}
-          className="h-9 w-9 rounded-l-md text-base font-black text-neutral-300 hover:bg-[#222] hover:text-white"
+          className="h-8 w-8 rounded-l-md text-sm font-black text-neutral-300 hover:bg-[#222] hover:text-white"
           aria-label="尺を短くする"
         >
           −
         </button>
-        <div className="flex-1 text-center text-sm font-black text-white">{value}秒</div>
+        <div className="flex-1 text-center text-xs font-black text-white">{value}秒</div>
         <button
           type="button"
           onClick={() => onChange(value + 1)}
-          className="h-9 w-9 rounded-r-md text-base font-black text-neutral-300 hover:bg-[#222] hover:text-white"
+          className="h-8 w-8 rounded-r-md text-sm font-black text-neutral-300 hover:bg-[#222] hover:text-white"
           aria-label="尺を長くする"
         >
           +
@@ -393,15 +405,15 @@ function AspectControl({
   onChange: (aspectRatio: string) => void;
 }) {
   return (
-    <div className="space-y-1">
-      <label htmlFor="video-aspect-select" className="text-[11px] font-black tracking-wide text-neutral-500">
+    <div className="space-y-0.5">
+      <label htmlFor="video-aspect-select" className="text-[10px] font-black tracking-wide text-neutral-500">
         比率
       </label>
       <select
         id="video-aspect-select"
         value={value}
         onChange={(event) => onChange(event.currentTarget.value)}
-        className="h-9 w-full rounded-md border border-[#343434] bg-[#101010] px-2.5 text-sm font-bold text-neutral-100 outline-none transition hover:border-[#444] focus:border-pink-500"
+        className="h-8 w-full rounded-md border border-[#343434] bg-[#101010] px-2 text-xs font-bold text-neutral-100 outline-none transition hover:border-[#444] focus:border-pink-500"
       >
         {model.aspectRatios.map((ratio) => (
           <option key={ratio} value={ratio}>
@@ -413,15 +425,108 @@ function AspectControl({
   );
 }
 
-function CostBadge({ cost }: { cost: CostState }) {
-  if (cost.value === null) {
-    return <span className="text-[11px] font-bold text-neutral-600">見積もりなし</span>;
+/** モデル別パラメータ (音声/解像度/genre/quality/mode 等) の汎用コントロール */
+function ExtraParamControl({
+  param,
+  value,
+  onChange,
+}: {
+  param: VideoModelParam;
+  value: string;
+  onChange: (next: string) => void;
+}) {
+  if (param.kind === "boolean") {
+    const on = value === "true" || value === "on";
+    return (
+      <div className="space-y-0.5">
+        <p className="text-[10px] font-black tracking-wide text-neutral-500">{param.label}</p>
+        <button
+          type="button"
+          onClick={() => onChange(on ? "off" : "on")}
+          className={[
+            "h-8 w-full rounded-md border px-2 text-xs font-black transition",
+            on
+              ? "border-pink-400 bg-pink-500/10 text-white"
+              : "border-[#343434] bg-[#101010] text-neutral-400 hover:border-neutral-500",
+          ].join(" ")}
+        >
+          {on ? "ON" : "OFF"}
+        </button>
+      </div>
+    );
   }
-  const suffix = cost.kind === "loading" ? "確認中" : cost.source === "api" ? "見積もり" : "目安";
+  if (param.kind === "integer") {
+    return (
+      <div className="space-y-0.5">
+        <p className="text-[10px] font-black tracking-wide text-neutral-500">{param.label}</p>
+        <input
+          type="number"
+          min={param.min}
+          max={param.max}
+          value={value}
+          onChange={(event) => onChange(event.currentTarget.value)}
+          className="h-8 w-full rounded-md border border-[#343434] bg-[#101010] px-2 text-xs font-bold text-neutral-100 outline-none transition hover:border-[#444] focus:border-pink-500"
+        />
+      </div>
+    );
+  }
   return (
-    <span className="rounded-full bg-pink-500/15 px-2 py-1 text-[11px] font-black text-pink-200">
-      約{cost.value} credits（{suffix}）
-    </span>
+    <div className="space-y-0.5">
+      <p className="text-[10px] font-black tracking-wide text-neutral-500">{param.label}</p>
+      <select
+        value={value}
+        onChange={(event) => onChange(event.currentTarget.value)}
+        className="h-8 w-full rounded-md border border-[#343434] bg-[#101010] px-2 text-xs font-bold text-neutral-100 outline-none transition hover:border-[#444] focus:border-pink-500"
+      >
+        {param.values.map((option) => (
+          <option key={option} value={option}>
+            {option}
+          </option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
+/** 生成数 (1〜4) + 合計コスト (単価 × 本数)。「約N credits」だけ表示。 */
+function CountAndCostControl({
+  count,
+  onChangeCount,
+  unitCost,
+  loading,
+}: {
+  count: number;
+  onChangeCount: (n: number) => void;
+  unitCost: number | null;
+  loading: boolean;
+}) {
+  const total = unitCost === null ? null : unitCost * count;
+  return (
+    <div className="space-y-0.5">
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-[10px] font-black tracking-wide text-neutral-500">生成数</p>
+        <span className="text-[11px] font-black text-pink-200">
+          {loading ? "確認中…" : total === null ? "—" : `約${total} credits`}
+        </span>
+      </div>
+      <div className="grid grid-cols-4 gap-1">
+        {[1, 2, 3, 4].map((n) => (
+          <button
+            key={n}
+            type="button"
+            onClick={() => onChangeCount(n)}
+            className={[
+              "h-8 rounded-md border text-xs font-black transition",
+              count === n
+                ? "border-pink-400 bg-pink-500/10 text-white"
+                : "border-[#343434] bg-[#101010] text-neutral-400 hover:border-neutral-500",
+            ].join(" ")}
+          >
+            {n}
+          </button>
+        ))}
+      </div>
+    </div>
   );
 }
 

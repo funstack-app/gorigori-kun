@@ -126,3 +126,24 @@ export const cutDurationOptions: SceneOption[] = [
   { value: "3秒", hint: "標準", visual: "none" },
   { value: "5秒", hint: "ゆっくり", visual: "none" },
 ];
+
+// i2v再設計 (2026-05-29): 動きの強度。旧「テンポ」の置換。
+// i2v では動作の速度・強度が品質を左右する (Codexクロスレビューより)。
+export const motionIntensityOptions: SceneOption[] = [
+  none,
+  { value: "ゆっくり", hint: "穏やかでスロー", visual: "none" },
+  { value: "繊細に", hint: "ごくわずかな動き", visual: "none" },
+  { value: "標準", hint: "自然な速さ", visual: "none" },
+  { value: "力強く", hint: "勢いのある動き", visual: "none" },
+  { value: "速め", hint: "素早い動き", visual: "none" },
+];
+
+// i2v再設計 (2026-05-29): 環境の動き。背景の動きが i2v の品質感を作る。
+export const environmentMotionOptions: SceneOption[] = [
+  none,
+  { value: "風で草が揺れる", hint: "草原・髪・布が揺れる", visual: "none" },
+  { value: "煙が立ち込める", hint: "煙・湯気が漂う", visual: "none" },
+  { value: "水面の反射", hint: "濡れた路面・水面の揺らぎ", visual: "none" },
+  { value: "木の葉が舞う", hint: "落ち葉・花びらが舞う", visual: "none" },
+  { value: "光が揺らぐ", hint: "炎・木漏れ日のちらつき", visual: "none" },
+];

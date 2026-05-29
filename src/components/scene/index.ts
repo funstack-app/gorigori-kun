@@ -7,6 +7,3 @@ export { ReferenceSection } from "./ReferenceSection";
 
 
 export { VideoSceneBuilder } from "./VideoSceneBuilder";
-export { CameraMovementSection } from "./CameraMovementSection";
-export { MotionSection } from "./MotionSection";
-export { PacingSection } from "./PacingSection";

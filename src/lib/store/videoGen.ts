@@ -4,48 +4,41 @@ import { findVideoModel, type VideoModelId } from "../videoModels";
 export type VideoGenState = {
   /** i2v 元画像。null なら t2v */
   sourceImagePath: string | null;
-  /** 被写体の動き。初心者が詰め込みすぎないよう 1 動作だけを想定する */
-  subjectMotion: string;
-  /** カメラの動きプリセットID */
-  cameraMovement: string;
   /** 選択中の動画モデル */
   modelId: VideoModelId;
   /** 生成尺（秒） */
   duration: number;
   /** アスペクト比 */
   aspectRatio: string;
+  /** 1回に生成する本数 (1〜4) */
+  count: number;
+  /** モデル別パラメータの選択値 (param.name → value)。未設定なら各 param.default を使う */
+  extraParamValues: Record<string, string>;
 };
 
 type VideoGenStore = VideoGenState & {
   setSourceImage: (path: string | null) => void;
-  setSubjectMotion: (v: string) => void;
-  setCameraMovement: (v: string) => void;
-  /** モデル変更時は duration / aspect をそのモデルのデフォルトへ戻す */
+  /** モデル変更時は duration / aspect / extraParam をそのモデルのデフォルトへ戻す */
   setModel: (id: VideoModelId) => void;
   setDuration: (n: number) => void;
   setAspectRatio: (v: string) => void;
+  setCount: (n: number) => void;
+  setExtraParam: (name: string, value: string) => void;
   reset: () => void;
 };
 
-export const CAMERA_PRESETS = [
-  { id: "static", label: "固定", phrase: "static camera, locked-off shot" },
-  { id: "zoom_in", label: "ズームイン", phrase: "slow zoom in" },
-  { id: "zoom_out", label: "ズームアウト", phrase: "slow zoom out" },
-  { id: "dolly_in", label: "ドリーイン", phrase: "gentle dolly push-in" },
-  { id: "dolly_out", label: "ドリーアウト", phrase: "gentle dolly pull-out" },
-  { id: "orbit", label: "オービット", phrase: "smooth orbit around subject" },
-  { id: "pan_left", label: "左パン", phrase: "slow pan left" },
-  { id: "pan_right", label: "右パン", phrase: "slow pan right" },
-] as const;
+/** モデルの extraParams からデフォルト値マップを作る */
+function defaultExtraParams(modelId: VideoModelId): Record<string, string> {
+  const model = findVideoModel(modelId);
+  if (!model) return {};
+  const out: Record<string, string> = {};
+  for (const param of model.extraParams) {
+    out[param.name] = String(param.default);
+  }
+  return out;
+}
 
-export const MOTION_PRESETS = [
-  "ゆっくり振り返る",
-  "歩いてくる",
-  "手を伸ばす",
-  "微笑む",
-  "髪をなびかせる",
-  "見上げる",
-] as const;
+export const MAX_VIDEO_COUNT = 4;
 
 const DEFAULT_MODEL_ID: VideoModelId = "kling3_0";
 const DEFAULT_MODEL = findVideoModel(DEFAULT_MODEL_ID);
@@ -53,11 +46,11 @@ const DEFAULT_MODEL = findVideoModel(DEFAULT_MODEL_ID);
 function defaultState(): VideoGenState {
   return {
     sourceImagePath: null,
-    subjectMotion: "",
-    cameraMovement: "static",
     modelId: DEFAULT_MODEL_ID,
     duration: DEFAULT_MODEL?.duration.default ?? 5,
     aspectRatio: DEFAULT_MODEL?.defaultAspectRatio ?? "16:9",
+    count: 1,
+    extraParamValues: defaultExtraParams(DEFAULT_MODEL_ID),
   };
 }
 
@@ -71,27 +64,45 @@ function clampDuration(modelId: VideoModelId, value: number): number {
   return Math.min(model.duration.max, Math.max(model.duration.min, rounded));
 }
 
-export const useVideoGen = create<VideoGenStore>((set, get) => ({
+/** モデルが対応する比率に収まらなければモデルのデフォルト比率へ寄せる */
+function clampAspect(modelId: VideoModelId, value: string): string {
+  const model = findVideoModel(modelId);
+  if (!model) return value;
+  return model.aspectRatios.includes(value) ? value : model.defaultAspectRatio;
+}
+
+function clampCount(value: number): number {
+  const rounded = Math.round(value);
+  return Math.min(MAX_VIDEO_COUNT, Math.max(1, rounded));
+}
+
+export const useVideoGen = create<VideoGenStore>((set) => ({
   ...defaultState(),
   setSourceImage: (sourceImagePath) => set({ sourceImagePath }),
-  setSubjectMotion: (subjectMotion) => set({ subjectMotion }),
-  setCameraMovement: (cameraMovement) => set({ cameraMovement }),
   setModel: (modelId) => {
     const model = findVideoModel(modelId);
-    set({
+    set((state) => ({
       modelId,
-      duration: model?.duration.default ?? get().duration,
-      aspectRatio: model?.defaultAspectRatio ?? get().aspectRatio,
-    });
+      // モデル変更で duration / aspect が非対応になるなら、そのモデルの有効値へ寄せる
+      duration: clampDuration(modelId, model?.duration.default ?? state.duration),
+      aspectRatio: clampAspect(modelId, model?.defaultAspectRatio ?? state.aspectRatio),
+      // 別モデルのパラメータが残らないよう、新モデルのデフォルトで作り直す
+      extraParamValues: defaultExtraParams(modelId),
+    }));
   },
   setDuration: (duration) => {
-    set({ duration: clampDuration(get().modelId, duration) });
+    set((state) => ({ duration: clampDuration(state.modelId, duration) }));
   },
-  setAspectRatio: (aspectRatio) => set({ aspectRatio }),
+  setAspectRatio: (value) => {
+    set((state) => ({ aspectRatio: clampAspect(state.modelId, value) }));
+  },
+  setCount: (count) => set({ count: clampCount(count) }),
+  setExtraParam: (name, value) =>
+    set((state) => ({ extraParamValues: { ...state.extraParamValues, [name]: value } })),
   reset: () => set(defaultState()),
 }));
 
-if (typeof import.meta !== "undefined" && (import.meta as any).env?.DEV) {
-  (window as any).__stores ??= {};
-  (window as any).__stores.videoGen = useVideoGen;
+if (typeof import.meta !== "undefined" && (import.meta as { env?: { DEV?: boolean } }).env?.DEV) {
+  (window as unknown as { __stores?: Record<string, unknown> }).__stores ??= {};
+  (window as unknown as { __stores: Record<string, unknown> }).__stores.videoGen = useVideoGen;
 }

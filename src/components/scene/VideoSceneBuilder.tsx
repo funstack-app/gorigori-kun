@@ -43,7 +43,7 @@ export function VideoSceneBuilder() {
 
   return (
     <>
-      <div className="grid grid-cols-2 gap-2">
+      <div className="scene-builder-stack space-y-2">
         <SceneCompactCard
           number="01"
           title="主役と被写体"

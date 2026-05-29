@@ -46,22 +46,29 @@ function basename(path: string): string {
   return path.split(/[\\/]/).pop() ?? path;
 }
 
-function paramDefaultToVideoArgs(params: VideoModelParam[]): HiggsfieldVideoParams {
+/**
+ * モデルの extraParams を Higgsfield 引数へ変換する。
+ * ユーザーが UI で選んだ値 (selected) を優先し、無ければ param.default にフォールバックする。
+ */
+function paramsToVideoArgs(
+  params: VideoModelParam[],
+  selected: Record<string, string>,
+): HiggsfieldVideoParams {
   const args: HiggsfieldVideoParams = {};
   for (const param of params) {
-    const value = param.default;
+    const value = selected[param.name] ?? String(param.default);
     if (param.name === "model" || param.name === "model_variant") {
-      args.modelVariant = String(value);
+      args.modelVariant = value;
     } else if (param.name === "quality") {
-      args.quality = String(value);
+      args.quality = value;
     } else if (param.name === "mode") {
-      args.mode = String(value);
+      args.mode = value;
     } else if (param.name === "resolution") {
-      args.resolution = String(value);
+      args.resolution = value;
     } else if (param.name === "sound") {
-      args.sound = String(value);
+      args.sound = value;
     } else if (param.name === "genre") {
-      args.genre = String(value);
+      args.genre = value;
     }
   }
   return args;
@@ -69,15 +76,13 @@ function paramDefaultToVideoArgs(params: VideoModelParam[]): HiggsfieldVideoPara
 
 function useVideoSceneSnapshot(): VideoSceneState {
   const subject = useVideoSceneStore((state) => state.subject);
-  const cameraMovement = useVideoSceneStore((state) => state.cameraMovement);
   const motion = useVideoSceneStore((state) => state.motion);
-  const lighting = useVideoSceneStore((state) => state.lighting);
-  const style = useVideoSceneStore((state) => state.style);
-  const pacing = useVideoSceneStore((state) => state.pacing);
+  const camera = useVideoSceneStore((state) => state.camera);
+  const staging = useVideoSceneStore((state) => state.staging);
 
   return useMemo(
-    () => ({ subject, cameraMovement, motion, lighting, style, pacing }),
-    [subject, cameraMovement, motion, lighting, style, pacing],
+    () => ({ subject, motion, camera, staging }),
+    [subject, motion, camera, staging],
   );
 }
 
@@ -97,6 +102,8 @@ export function useVideoSceneGeneration(): UseVideoSceneGenerationReturn {
   const duration = useVideoGen((s) => s.duration);
   const aspectRatio = useVideoGen((s) => s.aspectRatio);
   const modelId = useVideoGen((s) => s.modelId);
+  const count = useVideoGen((s) => s.count);
+  const extraParamValues = useVideoGen((s) => s.extraParamValues);
   const model = findVideoModel(modelId) ?? VIDEO_MODELS[0];
 
   // i2v 元画像: 動画タブの sourceImagePath を優先。無ければ参照ラックの先頭。
@@ -162,7 +169,7 @@ export function useVideoSceneGeneration(): UseVideoSceneGenerationReturn {
       batchId,
       prompt,
       references: refImagePaths.map((path) => ({ path, name: basename(path) })),
-      count: 1,
+      count,
       provider: "higgsfield",
       modelJobSetType: model.jobSetType,
       modelDisplayName: model.label,
@@ -174,13 +181,13 @@ export function useVideoSceneGeneration(): UseVideoSceneGenerationReturn {
         jobSetType: model.jobSetType,
         displayName: model.label,
         prompt,
-        count: 1,
+        count,
         aspect: aspectRatio,
         refImagePaths,
         mediaType: "video",
         duration,
         i2vInputField: model.i2vInputField,
-        ...paramDefaultToVideoArgs(model.extraParams),
+        ...paramsToVideoArgs(model.extraParams, extraParamValues),
       });
 
       if (result.failedCount > 0 || result.generatedPaths.length === 0) {
@@ -209,7 +216,7 @@ export function useVideoSceneGeneration(): UseVideoSceneGenerationReturn {
     } finally {
       setGenerating(false);
     }
-  }, [effectivePrompt, refImagePaths, model, aspectRatio, duration]);
+  }, [effectivePrompt, refImagePaths, model, aspectRatio, duration, count, extraParamValues]);
 
   return {
     scene,
