@@ -15,16 +15,16 @@ export const videoCompositionOptions: SceneOption[] = [
 export const cameraMovementOptions: SceneOption[] = [
   none,
   { value: "静止", hint: "絵を固定して見せる", visual: "camera-cinema" },
-  { value: "パン左", hint: "画面を左へ振る", visual: "camera-cinema" },
+  { value: "パン左", hint: "画面を左へ振る", visual: "camera-cinema", video: "/scene-videos/camera-pan-left.webm" },
   { value: "パン右", hint: "画面を右へ振る", visual: "camera-cinema" },
-  { value: "チルトアップ", hint: "下から上へ見せる", visual: "camera-cinema" },
-  { value: "チルトダウン", hint: "上から下へ見せる", visual: "camera-cinema" },
+  { value: "チルトアップ", hint: "下から上へ見せる", visual: "camera-cinema", video: "/scene-videos/camera-tilt-up.webm" },
+  { value: "チルトダウン", hint: "上から下へ見せる", visual: "camera-cinema", video: "/scene-videos/camera-tilt-down.webm" },
   { value: "ドリーイン", hint: "被写体へ寄る", visual: "focal" },
   { value: "ドリーアウト", hint: "被写体から離れる", visual: "focal" },
   { value: "トラッキング", hint: "被写体に並走", visual: "camera-digital" },
   { value: "クレーン", hint: "大きく上下移動", visual: "frame-aerial" },
-  { value: "ハンディ手ブレ", hint: "臨場感・不安定", visual: "camera-mobile" },
-  { value: "オービット", hint: "被写体の周囲を回る", visual: "lens" },
+  { value: "ハンディ手ブレ", hint: "臨場感・不安定", visual: "camera-mobile", video: "/scene-videos/camera-handheld.webm" },
+  { value: "オービット", hint: "被写体の周囲を回る", visual: "lens", video: "/scene-videos/camera-orbit.webm" },
 ];
 
 export const cameraSpeedOptions: SceneOption[] = [
@@ -45,23 +45,23 @@ export const cameraStartPositionOptions: SceneOption[] = [
 
 export const subjectMotionOptions: SceneOption[] = [
   none,
-  { value: "歩く", hint: "前進系", visual: "style" },
-  { value: "走る", hint: "前進系", visual: "style" },
+  { value: "歩く", hint: "前進系", visual: "style", video: "/scene-videos/motion-walk.webm" },
+  { value: "走る", hint: "前進系", visual: "style", video: "/scene-videos/motion-run.webm" },
   { value: "近づく", hint: "前進系", visual: "style" },
   { value: "離れる", hint: "後退系", visual: "style" },
-  { value: "後ずさる", hint: "後退系", visual: "style" },
-  { value: "振り返る", hint: "振り返り", visual: "style" },
+  { value: "後ずさる", hint: "後退系", visual: "style", video: "/scene-videos/motion-stepback.webm" },
+  { value: "振り返る", hint: "振り返り", visual: "style", video: "/scene-videos/motion-turnaround.webm" },
   { value: "見渡す", hint: "振り返り", visual: "style" },
-  { value: "見上げる", hint: "上下視線", visual: "style" },
-  { value: "見下ろす", hint: "上下視線", visual: "style" },
-  { value: "フレーム侵入", hint: "入退場", visual: "style" },
-  { value: "フレーム退出", hint: "入退場", visual: "style" },
+  { value: "見上げる", hint: "上下視線", visual: "style", video: "/scene-videos/motion-lookup.webm" },
+  { value: "見下ろす", hint: "上下視線", visual: "style", video: "/scene-videos/motion-lookdown.webm" },
+  { value: "フレーム侵入", hint: "入退場", visual: "style", video: "/scene-videos/motion-enter.webm" },
+  { value: "フレーム退出", hint: "入退場", visual: "style", video: "/scene-videos/motion-exit.webm" },
   { value: "倒れる", hint: "落下・着地", visual: "style" },
-  { value: "座る", hint: "落下・着地", visual: "style" },
-  { value: "跳ぶ", hint: "落下・着地", visual: "style" },
-  { value: "笑う", hint: "表情変化", visual: "style" },
-  { value: "泣く", hint: "表情変化", visual: "style" },
-  { value: "驚く", hint: "表情変化", visual: "style" },
+  { value: "座る", hint: "落下・着地", visual: "style", video: "/scene-videos/motion-sit.webm" },
+  { value: "跳ぶ", hint: "落下・着地", visual: "style", video: "/scene-videos/motion-jump.webm" },
+  { value: "笑う", hint: "表情変化", visual: "style", video: "/scene-videos/motion-smile.webm" },
+  { value: "泣く", hint: "表情変化", visual: "style", video: "/scene-videos/motion-cry.webm" },
+  { value: "驚く", hint: "表情変化", visual: "style", video: "/scene-videos/motion-surprised.webm" },
 ];
 
 export const lightingSourceOptions: SceneOption[] = [

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { SceneOption } from "../../lib/scene/catalog";
 import { CinePlaceholder } from "./CinePlaceholder";
 
@@ -124,10 +124,38 @@ function PickerCard({
   selected: boolean;
   onSelect: () => void;
 }) {
+  // ホバー時だけ webm を再生する。一覧では一切ダウンロードしない (preload="none")。
+  // 動きの分かりやすさを見せるための軽量プレビュー。
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const [hovering, setHovering] = useState(false);
+
+  const handleEnter = () => {
+    if (!option.video) return;
+    setHovering(true);
+    const el = videoRef.current;
+    if (el) {
+      el.currentTime = 0;
+      void el.play().catch(() => {
+        // 自動再生がブロックされた場合は静かに無視
+      });
+    }
+  };
+
+  const handleLeave = () => {
+    setHovering(false);
+    const el = videoRef.current;
+    if (el) {
+      el.pause();
+      el.currentTime = 0;
+    }
+  };
+
   return (
     <button
       type="button"
       onClick={onSelect}
+      onMouseEnter={handleEnter}
+      onMouseLeave={handleLeave}
       className={[
         "group relative flex flex-col overflow-hidden rounded-lg border-2 text-left transition",
         selected
@@ -135,7 +163,7 @@ function PickerCard({
           : "border-[#262626] bg-[#181818] hover:border-pink-500/50",
       ].join(" ")}
     >
-      <div className="aspect-video w-full overflow-hidden bg-gradient-to-br from-neutral-700 to-neutral-900">
+      <div className="relative aspect-video w-full overflow-hidden bg-gradient-to-br from-neutral-700 to-neutral-900">
         {option.thumbnail ? (
           <img
             src={option.thumbnail.src}
@@ -145,6 +173,31 @@ function PickerCard({
           />
         ) : (
           <PlaceholderArt label={option.value} />
+        )}
+        {option.video && (
+          <>
+            <video
+              ref={videoRef}
+              src={option.video}
+              muted
+              loop
+              playsInline
+              preload="none"
+              className={[
+                "absolute inset-0 h-full w-full object-cover transition-opacity duration-200",
+                hovering ? "opacity-100" : "opacity-0",
+              ].join(" ")}
+            />
+            {/* 動画ありを示す再生バッジ (ホバー前のヒント) */}
+            <span
+              className={[
+                "pointer-events-none absolute bottom-1.5 right-1.5 flex items-center gap-1 rounded bg-black/60 px-1.5 py-0.5 text-[9px] font-bold text-white transition-opacity",
+                hovering ? "opacity-0" : "opacity-100",
+              ].join(" ")}
+            >
+              ▶ ホバーで再生
+            </span>
+          </>
         )}
       </div>
       <div className="border-t border-[#262626] p-3">

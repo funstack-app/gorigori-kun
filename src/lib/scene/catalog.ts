@@ -35,6 +35,10 @@ export type SceneOption = {
    *  scripts/generate-scene-thumbnails.sh and placed in
    *  /scene-thumbnails/<category>/<slug>.png. */
   thumbnail?: { src: string; alt: string };
+  /** Optional preview video (loop). Placed in /scene-videos/<slug>.webm.
+   *  動き・カメラ系の選択肢でホバー時に再生し、動きを直感的に見せる。
+   *  一覧では読まず (preload="none")、ホバーした1本だけ再生する。 */
+  video?: string;
   /**
    * Optional English prompt fragment. When present, buildPrompt outputs
    * this string verbatim instead of the raw `value`. Used by the unified
