@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { SafeImage } from "./SafeImage";
+import { SafeImage, SafeVideo } from "./SafeImage";
 import { WorkspaceTabs } from "./WorkspaceTabs";
 import { SceneBuilder, VideoSceneBuilder } from "./scene";
 import { ConstructedPromptPanel } from "./ConstructedPromptPanel";
@@ -849,10 +849,18 @@ function WorkerTile({
             }
             className="h-full w-full overflow-hidden"
           >
-            <SafeImage
-              path={worker.path}
-              className="h-full w-full object-cover"
-            />
+            {worker.mediaType === "video" ? (
+              <SafeVideo
+                path={worker.path}
+                hoverPlay
+                className="h-full w-full object-cover"
+              />
+            ) : (
+              <SafeImage
+                path={worker.path}
+                className="h-full w-full object-cover"
+              />
+            )}
           </button>
           {canSendToVideo && (
             <button

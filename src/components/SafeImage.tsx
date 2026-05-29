@@ -1,5 +1,5 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { type ImgHTMLAttributes, useState } from "react";
+import { type ImgHTMLAttributes, type MouseEvent, useState } from "react";
 
 /**
  * 画像ファイルの絶対パスを受け取って `convertFileSrc` 経由で描画する。
@@ -62,6 +62,76 @@ export function SafeImage({
       src={convertFileSrc(path)}
       alt={alt ?? ""}
       className={className}
+      onError={() => setErrored(true)}
+    />
+  );
+}
+
+export type SafeVideoProps = {
+  /** 動画の絶対パス。空文字や undefined ならフォールバックのみ表示。 */
+  path?: string;
+  className?: string;
+  fallbackLabel?: string;
+  /** 再生バー・音量を出すか (タイムラインのタイルは true で音も鳴る)。 */
+  controls?: boolean;
+  /** ホバーで自動再生・離脱で停止 (controls=false のサムネ用)。 */
+  hoverPlay?: boolean;
+};
+
+/**
+ * 動画ファイルの絶対パスを `<video>` で描画する。
+ * 生成結果 (mp4) を SafeImage (<img>) で表示すると再生も音も出ないため、
+ * mediaType=video のタイルはこちらを使う。
+ *
+ * - controls=true: 再生バー + 音量。クリックで再生、音も出る (Seedance の音声トラック)。
+ * - hoverPlay=true: ホバーで再生、離脱で先頭に戻す (軽いサムネプレビュー)。
+ *   一覧での負荷を避けるため preload="metadata" + 自動再生はしない。
+ */
+export function SafeVideo({
+  path,
+  className,
+  fallbackLabel = "動画が見つかりません",
+  controls = false,
+  hoverPlay = false,
+}: SafeVideoProps) {
+  const [errored, setErrored] = useState(false);
+
+  if (!path || errored) {
+    return (
+      <div
+        className={[
+          "flex h-full w-full flex-col items-center justify-center gap-1 bg-neutral-900 px-2 text-center text-[10px] text-neutral-500",
+          className ?? "",
+        ].join(" ")}
+        title={path}
+      >
+        <span className="line-clamp-2 leading-tight">{fallbackLabel}</span>
+      </div>
+    );
+  }
+
+  const onEnter = (e: MouseEvent<HTMLVideoElement>) => {
+    if (!hoverPlay) return;
+    void e.currentTarget.play().catch(() => {});
+  };
+  const onLeave = (e: MouseEvent<HTMLVideoElement>) => {
+    if (!hoverPlay) return;
+    const el = e.currentTarget;
+    el.pause();
+    el.currentTime = 0;
+  };
+
+  return (
+    <video
+      src={convertFileSrc(path)}
+      className={className}
+      controls={controls}
+      muted={!controls}
+      loop={hoverPlay}
+      playsInline
+      preload="metadata"
+      onMouseEnter={onEnter}
+      onMouseLeave={onLeave}
       onError={() => setErrored(true)}
     />
   );

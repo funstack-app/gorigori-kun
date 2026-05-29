@@ -186,34 +186,56 @@ export function ImagePreviewModal() {
           参照ラックや企画タブ等にドラッグで投げ込める。fullscreen 中も draggable
           のままだが、cursor の見た目で zoom-in/out 操作と区別できる。
         */}
-        <img
-          src={convertFileSrc(path)}
-          alt={name}
-          className={
-            fullscreen
-              ? "max-h-screen max-w-full cursor-zoom-out object-contain"
-              : "max-h-full max-w-full cursor-zoom-in object-contain"
-          }
-          draggable
-          onDragStart={(e) => {
-            setDragRef(e.dataTransfer, {
-              path,
-              name,
-              source: "gallery",
-              role: "subject",
-            });
-          }}
-          onClick={(e) => e.stopPropagation()}
-          onDoubleClick={(e) => {
-            e.stopPropagation();
-            setFullscreen((v) => !v);
-          }}
-          title={
-            fullscreen
-              ? "ダブルクリックまたは Esc で通常表示に戻る"
-              : "ダブルクリックで画面いっぱい / ドラッグで他へ移動"
-          }
-        />
+        {/^.+\.(mp4|webm|mov|m4v)$/i.test(path) ? (
+          // 動画は controls 付きで再生 (音も出る)。クリックで再生/一時停止できるよう
+          // モーダルの閉じ操作と競合しないよう stopPropagation。
+          <video
+            src={convertFileSrc(path)}
+            className={
+              fullscreen
+                ? "max-h-screen max-w-full object-contain"
+                : "max-h-full max-w-full object-contain"
+            }
+            controls
+            autoPlay
+            loop
+            playsInline
+            onClick={(e) => e.stopPropagation()}
+            onDoubleClick={(e) => {
+              e.stopPropagation();
+              setFullscreen((v) => !v);
+            }}
+          />
+        ) : (
+          <img
+            src={convertFileSrc(path)}
+            alt={name}
+            className={
+              fullscreen
+                ? "max-h-screen max-w-full cursor-zoom-out object-contain"
+                : "max-h-full max-w-full cursor-zoom-in object-contain"
+            }
+            draggable
+            onDragStart={(e) => {
+              setDragRef(e.dataTransfer, {
+                path,
+                name,
+                source: "gallery",
+                role: "subject",
+              });
+            }}
+            onClick={(e) => e.stopPropagation()}
+            onDoubleClick={(e) => {
+              e.stopPropagation();
+              setFullscreen((v) => !v);
+            }}
+            title={
+              fullscreen
+                ? "ダブルクリックまたは Esc で通常表示に戻る"
+                : "ダブルクリックで画面いっぱい / ドラッグで他へ移動"
+            }
+          />
+        )}
         {canNavigate && !fullscreen && (
           <>
             <button
