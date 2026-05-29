@@ -54,7 +54,7 @@ function basename(path: string): string {
  * モデルの extraParams を Higgsfield 引数へ変換する。
  * ユーザーが UI で選んだ値 (selected) を優先し、無ければ param.default にフォールバックする。
  */
-function paramsToVideoArgs(
+export function paramsToVideoArgs(
   params: VideoModelParam[],
   selected: Record<string, string>,
 ): HiggsfieldVideoParams {

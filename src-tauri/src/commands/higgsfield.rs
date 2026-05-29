@@ -1104,21 +1104,58 @@ pub async fn higgsfield_cancel_batch(
     Ok(())
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HiggsfieldCostArgs {
+    pub job_set_type: String,
+    pub prompt: String,
+    pub aspect: Option<String>,
+    /// 動画モデルの尺。コストは尺に比例するため必須級。
+    pub duration: Option<u32>,
+    /// モデル別パラメータ (kling: mode/sound, seedance: genre/mode/resolution,
+    /// veo: quality/model_variant)。コストはこれらでも変わる。
+    pub quality: Option<String>,
+    pub mode: Option<String>,
+    pub resolution: Option<String>,
+    pub sound: Option<String>,
+    pub genre: Option<String>,
+    pub model_variant: Option<String>,
+}
+
 #[tauri::command]
-pub async fn higgsfield_generate_cost(
-    job_set_type: String,
-    prompt: String,
-    aspect: Option<String>,
-) -> Result<i64, String> {
+pub async fn higgsfield_generate_cost(args: HiggsfieldCostArgs) -> Result<i64, String> {
     let binary = resolve_higgsfield_binary().ok_or_else(|| {
         "Higgsfield CLI が見つかりません。npm install -g @higgsfield/cli を実行してください。"
             .to_string()
     })?;
     let mut cmd = TokioCommand::new(binary);
-    cmd.args(["generate", "cost", &job_set_type]);
-    cmd.arg("--prompt").arg(prompt);
-    if let Some(aspect) = aspect.as_deref().filter(|s| !s.trim().is_empty()) {
+    cmd.args(["generate", "cost", &args.job_set_type]);
+    cmd.arg("--prompt").arg(&args.prompt);
+    // generate create と同じフラグ名で、コストに影響するパラメータを全て渡す。
+    // 渡さないと CLI が default 値でコスト計算するため、UI の表示と実コストがずれる。
+    if let Some(aspect) = args.aspect.as_deref().filter(|s| !s.trim().is_empty()) {
         cmd.arg("--aspect_ratio").arg(aspect);
+    }
+    if let Some(duration) = args.duration {
+        cmd.arg("--duration").arg(duration.to_string());
+    }
+    if let Some(quality) = args.quality.as_deref().filter(|s| !s.trim().is_empty()) {
+        cmd.arg("--quality").arg(quality);
+    }
+    if let Some(mode) = args.mode.as_deref().filter(|s| !s.trim().is_empty()) {
+        cmd.arg("--mode").arg(mode);
+    }
+    if let Some(resolution) = args.resolution.as_deref().filter(|s| !s.trim().is_empty()) {
+        cmd.arg("--resolution").arg(resolution);
+    }
+    if let Some(sound) = args.sound.as_deref().filter(|s| !s.trim().is_empty()) {
+        cmd.arg("--sound").arg(sound);
+    }
+    if let Some(genre) = args.genre.as_deref().filter(|s| !s.trim().is_empty()) {
+        cmd.arg("--genre").arg(genre);
+    }
+    if let Some(model_variant) = args.model_variant.as_deref().filter(|s| !s.trim().is_empty()) {
+        cmd.arg("--model").arg(model_variant);
     }
     cmd.arg("--json");
     prepare_higgsfield_tokio_command(&mut cmd);

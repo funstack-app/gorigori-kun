@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { higgsfield } from "../lib/ipc";
-import { useVideoSceneGeneration } from "../lib/scene/useVideoSceneGeneration";
+import { paramsToVideoArgs, useVideoSceneGeneration } from "../lib/scene/useVideoSceneGeneration";
 import { useComposer } from "../lib/store/composer";
 import { useVideoGen } from "../lib/store/videoGen";
 import {
@@ -166,7 +166,14 @@ export function VideoConstructedPromptPanel() {
     setCost({ kind: "loading", value: fallback, source: "static" });
     const timer = window.setTimeout(() => {
       higgsfield
-        .generateCost({ jobSetType: model.jobSetType, prompt, aspect: aspectRatio, duration })
+        .generateCost({
+          jobSetType: model.jobSetType,
+          prompt,
+          aspect: aspectRatio,
+          duration,
+          // コストは mode/resolution/genre/quality 等でも変わるため全て渡す
+          ...paramsToVideoArgs(model.extraParams, extraParamValues),
+        })
         .then((value) => {
           if (!cancelled) setCost({ kind: "idle", value, source: "api" });
         })
@@ -178,7 +185,7 @@ export function VideoConstructedPromptPanel() {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [model, effectivePrompt, aspectRatio, duration]);
+  }, [model, effectivePrompt, aspectRatio, duration, extraParamValues]);
 
   // 設定サマリ行のラベル。
   // 比較モード: 「N モデルで比較 · 16:9」。単一モード: 「Kling · 9秒 · 16:9 · ...」

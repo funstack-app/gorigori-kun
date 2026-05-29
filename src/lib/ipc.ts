@@ -375,12 +375,14 @@ export const higgsfield = {
     }>("higgsfield_generate_compare", { args }),
   cancelBatch: (batchId: string) =>
     invoke<void>("higgsfield_cancel_batch", { batchId }),
-  generateCost: (args: {
-    jobSetType: string;
-    prompt: string;
-    aspect?: string;
-    duration?: number;
-  }) => invoke<number>("higgsfield_generate_cost", args),
+  generateCost: (
+    args: {
+      jobSetType: string;
+      prompt: string;
+      aspect?: string;
+      duration?: number;
+    } & HiggsfieldVideoParams,
+  ) => invoke<number>("higgsfield_generate_cost", { args }),
 };
 
 /** `codex://image-batch` event payload union (mirrors Rust `BatchEvent`). */
