@@ -55,6 +55,7 @@ export function VideoConstructedPromptPanel() {
 
   const [draft, setDraft] = useState<string>(generatedPrompt);
   const [elementModalOpen, setElementModalOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [libraryOpen, setLibraryOpen] = useState(false);
   const [stockOpen, setStockOpen] = useState(false);
   const [presetOpen, setPresetOpen] = useState(false);
@@ -176,6 +177,16 @@ export function VideoConstructedPromptPanel() {
     };
   }, [model, effectivePrompt, aspectRatio, duration]);
 
+  // 設定サマリ行のラベル (モデル · 尺 · 比率 · モデル別パラメータ)
+  const settingsSummary = [
+    model.label,
+    `${duration}秒`,
+    aspectRatio,
+    ...model.extraParams.map(
+      (param) => `${param.label}${extraParamValues[param.name] ?? String(param.default)}`,
+    ),
+  ].join(" · ");
+
   return (
     <section className="flex h-full min-h-0 flex-col bg-[#181818]">
       <div className="shrink-0">
@@ -222,45 +233,19 @@ export function VideoConstructedPromptPanel() {
       </div>
 
       <div className="shrink-13-controls shrink-0 space-y-1 border-t border-[#2a2a2a] p-2">
-        {/* モデル */}
-        <div className="space-y-0.5">
-          <label htmlFor="video-model-select" className="text-[10px] font-black tracking-wide text-neutral-500">
-            モデル
-          </label>
-          <select
-            id="video-model-select"
-            value={model.id}
-            onChange={(event) => setModel(event.currentTarget.value as VideoModelDefinition["id"])}
-            className="h-8 w-full rounded-md border border-[#343434] bg-[#101010] px-2 text-xs font-bold text-neutral-100 outline-none transition hover:border-[#444] focus:border-pink-500"
-            title={model.description}
-          >
-            {VIDEO_MODELS.map((item) => (
-              <option key={item.id} value={item.id}>
-                {item.label}{item.id === "kling3_0" ? "（おすすめ）" : ""}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        {/* 尺 + 比率 */}
-        <div className="grid grid-cols-2 gap-1.5">
-          <DurationControl model={model} value={duration} onChange={setDuration} />
-          <AspectControl model={model} value={aspectRatio} onChange={setAspectRatio} />
-        </div>
-
-        {/* モデル別パラメータ (音声/解像度/genre/quality/mode 等。対応モデルだけ) */}
-        {model.extraParams.length > 0 && (
-          <div className="grid grid-cols-2 gap-1.5">
-            {model.extraParams.map((param) => (
-              <ExtraParamControl
-                key={param.name}
-                param={param}
-                value={extraParamValues[param.name] ?? String(param.default)}
-                onChange={(next) => setExtraParam(param.name, next)}
-              />
-            ))}
-          </div>
-        )}
+        {/* 設定サマリ行 (モデル/尺/比率/モデル別パラメータ) → タップでモーダル */}
+        <button
+          type="button"
+          onClick={() => setSettingsOpen(true)}
+          className="flex h-8 w-full items-center gap-2 rounded-md border border-[#343434] bg-[#101010] px-2.5 text-left transition hover:border-pink-400"
+          title="モデル・尺・比率・詳細設定を開く"
+        >
+          <SettingsGearIcon />
+          <span className="min-w-0 flex-1 truncate text-[11px] font-bold text-neutral-200">
+            {settingsSummary}
+          </span>
+          <span className="shrink-0 text-[10px] font-black text-neutral-500">変更</span>
+        </button>
 
         {/* 生成数 (1〜4) + 合計コスト */}
         <CountAndCostControl
@@ -325,6 +310,18 @@ export function VideoConstructedPromptPanel() {
         anchorRect={skillAnchor}
       />
       <ReferencePicker />
+      <VideoSettingsModal
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        model={model}
+        onModelChange={setModel}
+        duration={duration}
+        onDurationChange={setDuration}
+        aspectRatio={aspectRatio}
+        onAspectRatioChange={setAspectRatio}
+        extraParamValues={extraParamValues}
+        onExtraParamChange={setExtraParam}
+      />
       <ElementwisePromptModal
         open={elementModalOpen}
         prompt={isOverriding ? draft : generatedPrompt}
@@ -527,6 +524,131 @@ function CountAndCostControl({
         ))}
       </div>
     </div>
+  );
+}
+
+/**
+ * 動画設定モーダル (モデル / 尺 / 比率 / モデル別パラメータ)。
+ * 下部コントロールを圧迫しないよう、頻繁に変えない設定はここに逃がす。
+ * 生成数・生成ボタンは下部常駐のまま。
+ */
+function VideoSettingsModal({
+  open,
+  onClose,
+  model,
+  onModelChange,
+  duration,
+  onDurationChange,
+  aspectRatio,
+  onAspectRatioChange,
+  extraParamValues,
+  onExtraParamChange,
+}: {
+  open: boolean;
+  onClose: () => void;
+  model: VideoModelDefinition;
+  onModelChange: (id: VideoModelDefinition["id"]) => void;
+  duration: number;
+  onDurationChange: (duration: number) => void;
+  aspectRatio: string;
+  onAspectRatioChange: (aspectRatio: string) => void;
+  extraParamValues: Record<string, string>;
+  onExtraParamChange: (name: string, value: string) => void;
+}) {
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, onClose]);
+
+  if (!open) return null;
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-sm rounded-lg border border-[#2a2a2a] bg-[#181818] shadow-2xl"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="flex items-center justify-between border-b border-[#2a2a2a] px-3 py-2.5">
+          <p className="text-xs font-black tracking-wide text-neutral-200">動画の設定</p>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="閉じる"
+            className="flex h-6 w-6 items-center justify-center rounded text-neutral-400 transition hover:bg-[#222] hover:text-white"
+          >
+            ×
+          </button>
+        </div>
+
+        <div className="space-y-3 p-3">
+          {/* モデル */}
+          <div className="space-y-0.5">
+            <label htmlFor="video-model-select" className="text-[10px] font-black tracking-wide text-neutral-500">
+              モデル
+            </label>
+            <select
+              id="video-model-select"
+              value={model.id}
+              onChange={(event) => onModelChange(event.currentTarget.value as VideoModelDefinition["id"])}
+              className="h-9 w-full rounded-md border border-[#343434] bg-[#101010] px-2 text-xs font-bold text-neutral-100 outline-none transition hover:border-[#444] focus:border-pink-500"
+              title={model.description}
+            >
+              {VIDEO_MODELS.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.label}{item.id === "kling3_0" ? "（おすすめ）" : ""}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* 尺 + 比率 */}
+          <div className="grid grid-cols-2 gap-1.5">
+            <DurationControl model={model} value={duration} onChange={onDurationChange} />
+            <AspectControl model={model} value={aspectRatio} onChange={onAspectRatioChange} />
+          </div>
+
+          {/* モデル別パラメータ (音声/解像度/genre/quality/mode 等。対応モデルだけ) */}
+          {model.extraParams.length > 0 && (
+            <div className="grid grid-cols-2 gap-1.5">
+              {model.extraParams.map((param) => (
+                <ExtraParamControl
+                  key={param.name}
+                  param={param}
+                  value={extraParamValues[param.name] ?? String(param.default)}
+                  onChange={(next) => onExtraParamChange(param.name, next)}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="border-t border-[#2a2a2a] p-3">
+          <button
+            type="button"
+            onClick={onClose}
+            className="h-9 w-full rounded-md bg-pink-500 text-sm font-black text-white transition hover:bg-pink-600"
+          >
+            完了
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SettingsGearIcon() {
+  return (
+    <svg className="shrink-0 text-neutral-400" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="3" />
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+    </svg>
   );
 }
 
