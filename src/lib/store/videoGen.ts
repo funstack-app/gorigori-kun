@@ -14,6 +14,12 @@ export type VideoGenState = {
   count: number;
   /** モデル別パラメータの選択値 (param.name → value)。未設定なら各 param.default を使う */
   extraParamValues: Record<string, string>;
+  /**
+   * 比較生成で使うモデル (A案: 各モデルはデフォルト設定で1本ずつ生成)。
+   * - 空配列 = 比較OFF。単一 modelId で従来どおり生成
+   * - 2〜4件 = 比較モード。選んだモデルそれぞれで1本生成して並べる
+   */
+  compareModelIds: VideoModelId[];
 };
 
 type VideoGenStore = VideoGenState & {
@@ -24,6 +30,10 @@ type VideoGenStore = VideoGenState & {
   setAspectRatio: (v: string) => void;
   setCount: (n: number) => void;
   setExtraParam: (name: string, value: string) => void;
+  /** 比較対象モデルを丸ごと差し替える (UI のチェックボックス選択を反映) */
+  setCompareModelIds: (ids: VideoModelId[]) => void;
+  /** 比較対象モデルの1件を ON/OFF する */
+  toggleCompareModel: (id: VideoModelId) => void;
   reset: () => void;
 };
 
@@ -51,7 +61,23 @@ function defaultState(): VideoGenState {
     aspectRatio: DEFAULT_MODEL?.defaultAspectRatio ?? "16:9",
     count: 1,
     extraParamValues: defaultExtraParams(DEFAULT_MODEL_ID),
+    compareModelIds: [],
   };
+}
+
+const MAX_COMPARE_MODELS = 4;
+
+/** 比較モデル配列を正規化 (重複除去・最大4件) */
+function normalizeCompareModelIds(ids: VideoModelId[]): VideoModelId[] {
+  const seen = new Set<VideoModelId>();
+  const next: VideoModelId[] = [];
+  for (const id of ids) {
+    if (seen.has(id) || !findVideoModel(id)) continue;
+    seen.add(id);
+    next.push(id);
+    if (next.length >= MAX_COMPARE_MODELS) break;
+  }
+  return next;
 }
 
 function clampDuration(modelId: VideoModelId, value: number): number {
@@ -99,6 +125,16 @@ export const useVideoGen = create<VideoGenStore>((set) => ({
   setCount: (count) => set({ count: clampCount(count) }),
   setExtraParam: (name, value) =>
     set((state) => ({ extraParamValues: { ...state.extraParamValues, [name]: value } })),
+  setCompareModelIds: (ids) =>
+    set({ compareModelIds: normalizeCompareModelIds(ids) }),
+  toggleCompareModel: (id) =>
+    set((state) => {
+      const exists = state.compareModelIds.includes(id);
+      const next = exists
+        ? state.compareModelIds.filter((x) => x !== id)
+        : [...state.compareModelIds, id];
+      return { compareModelIds: normalizeCompareModelIds(next) };
+    }),
   reset: () => set(defaultState()),
 }));
 

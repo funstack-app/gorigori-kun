@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useState } from "react";
 import { buildVideoScenePrompt } from "./buildVideoScenePrompt";
-import { higgsfield, type HiggsfieldVideoParams } from "../ipc";
+import { higgsfield, type HiggsfieldCompareModel, type HiggsfieldVideoParams } from "../ipc";
 import { useAuth } from "../store/auth";
 import { useBatches } from "../store/batches";
 import { useComposer } from "../store/composer";
@@ -27,6 +27,10 @@ export type UseVideoSceneGenerationReturn = {
   generatedPrompt: string;
   refImagePaths: string[];
   model: VideoModelDefinition;
+  /** 比較モード (2モデル以上選択中) か */
+  compareMode: boolean;
+  /** 比較対象モデル (compareMode 時のみ 2件以上) */
+  compareModels: VideoModelDefinition[];
   promptOverride: string | null;
   setPromptOverride: (value: string | null) => void;
   effectivePrompt: string;
@@ -74,6 +78,21 @@ function paramsToVideoArgs(
   return args;
 }
 
+/**
+ * A案: 比較生成では各モデルを「自身のデフォルト設定」で1本ずつ生成する。
+ * モデル定義からデフォルトの duration / extraParams を読み、CompareModel を組む。
+ */
+function toCompareModel(model: VideoModelDefinition): HiggsfieldCompareModel {
+  return {
+    jobSetType: model.jobSetType,
+    displayName: model.label,
+    duration: model.duration.default,
+    i2vInputField: model.i2vInputField,
+    // extraParams は selected を渡さず空 → 各 param.default が使われる
+    ...paramsToVideoArgs(model.extraParams, {}),
+  };
+}
+
 function useVideoSceneSnapshot(): VideoSceneState {
   const subject = useVideoSceneStore((state) => state.subject);
   const motion = useVideoSceneStore((state) => state.motion);
@@ -104,7 +123,18 @@ export function useVideoSceneGeneration(): UseVideoSceneGenerationReturn {
   const modelId = useVideoGen((s) => s.modelId);
   const count = useVideoGen((s) => s.count);
   const extraParamValues = useVideoGen((s) => s.extraParamValues);
+  const compareModelIds = useVideoGen((s) => s.compareModelIds);
   const model = findVideoModel(modelId) ?? VIDEO_MODELS[0];
+
+  // 比較モード: 2モデル以上選択。各モデルをデフォルト設定で1本ずつ生成する (A案)。
+  const compareModels = useMemo(
+    () =>
+      compareModelIds
+        .map((id) => findVideoModel(id))
+        .filter((m): m is VideoModelDefinition => m !== undefined),
+    [compareModelIds],
+  );
+  const compareMode = compareModels.length >= 2;
 
   // i2v 元画像: 動画タブの sourceImagePath を優先。無ければ参照ラックの先頭。
   const composerReferences = useComposer((s) => s.references);
@@ -160,8 +190,15 @@ export function useVideoSceneGeneration(): UseVideoSceneGenerationReturn {
     }
 
     setGenerating(true);
-    setStatus({ kind: "running", message: "動画生成を開始しています..." });
+    setStatus({
+      kind: "running",
+      message: compareMode
+        ? `${compareModels.length}モデルで比較生成を開始しています...`
+        : "動画生成を開始しています...",
+    });
 
+    // 比較モードは「モデル数」本、単一モードは count 本を生成する。
+    const batchCount = compareMode ? compareModels.length : count;
     const batchId = `local-video-${Date.now()}-${Math.random()
       .toString(36)
       .slice(2, 8)}`;
@@ -169,26 +206,39 @@ export function useVideoSceneGeneration(): UseVideoSceneGenerationReturn {
       batchId,
       prompt,
       references: refImagePaths.map((path) => ({ path, name: basename(path) })),
-      count,
+      count: batchCount,
       provider: "higgsfield",
-      modelJobSetType: model.jobSetType,
-      modelDisplayName: model.label,
+      modelJobSetType: compareMode ? undefined : model.jobSetType,
+      modelDisplayName: compareMode
+        ? `${compareModels.length} モデル比較`
+        : model.label,
+      compareMode,
       mediaType: "video",
     });
 
     try {
-      const result = await higgsfield.generateBatch({
-        jobSetType: model.jobSetType,
-        displayName: model.label,
-        prompt,
-        count,
-        aspect: aspectRatio,
-        refImagePaths,
-        mediaType: "video",
-        duration,
-        i2vInputField: model.i2vInputField,
-        ...paramsToVideoArgs(model.extraParams, extraParamValues),
-      });
+      const result = compareMode
+        ? await higgsfield.generateCompare({
+            prompt,
+            models: compareModels.map(toCompareModel),
+            // 比較は全モデル共通のアスペクト比で揃える (各モデル対応比率は
+            // clampAspect 済みの現在値が無難。auto 非対応モデルもあるため現値を渡す)
+            aspect: aspectRatio,
+            refImagePaths,
+            mediaType: "video",
+          })
+        : await higgsfield.generateBatch({
+            jobSetType: model.jobSetType,
+            displayName: model.label,
+            prompt,
+            count,
+            aspect: aspectRatio,
+            refImagePaths,
+            mediaType: "video",
+            duration,
+            i2vInputField: model.i2vInputField,
+            ...paramsToVideoArgs(model.extraParams, extraParamValues),
+          });
 
       if (result.failedCount > 0 || result.generatedPaths.length === 0) {
         const message =
@@ -216,13 +266,25 @@ export function useVideoSceneGeneration(): UseVideoSceneGenerationReturn {
     } finally {
       setGenerating(false);
     }
-  }, [effectivePrompt, refImagePaths, model, aspectRatio, duration, count, extraParamValues]);
+  }, [
+    effectivePrompt,
+    refImagePaths,
+    model,
+    aspectRatio,
+    duration,
+    count,
+    extraParamValues,
+    compareMode,
+    compareModels,
+  ]);
 
   return {
     scene,
     generatedPrompt,
     refImagePaths,
     model,
+    compareMode,
+    compareModels,
     promptOverride,
     setPromptOverride,
     effectivePrompt,

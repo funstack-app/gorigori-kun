@@ -78,6 +78,9 @@ export function VideoConstructedPromptPanel() {
   const setCount = useVideoGen((s) => s.setCount);
   const extraParamValues = useVideoGen((s) => s.extraParamValues);
   const setExtraParam = useVideoGen((s) => s.setExtraParam);
+  const compareModelIds = useVideoGen((s) => s.compareModelIds);
+  const toggleCompareModel = useVideoGen((s) => s.toggleCompareModel);
+  const compareMode = compareModelIds.length >= 2;
 
   const isOverriding = promptOverride !== null;
 
@@ -177,15 +180,21 @@ export function VideoConstructedPromptPanel() {
     };
   }, [model, effectivePrompt, aspectRatio, duration]);
 
-  // 設定サマリ行のラベル (モデル · 尺 · 比率 · モデル別パラメータ)
-  const settingsSummary = [
-    model.label,
-    `${duration}秒`,
-    aspectRatio,
-    ...model.extraParams.map(
-      (param) => `${param.label}${extraParamValues[param.name] ?? String(param.default)}`,
-    ),
-  ].join(" · ");
+  // 設定サマリ行のラベル。
+  // 比較モード: 「N モデルで比較 · 16:9」。単一モード: 「Kling · 9秒 · 16:9 · ...」
+  const settingsSummary = compareMode
+    ? [
+        `${compareModelIds.length} モデルで比較`,
+        aspectRatio,
+      ].join(" · ")
+    : [
+        model.label,
+        `${duration}秒`,
+        aspectRatio,
+        ...model.extraParams.map(
+          (param) => `${param.label}${extraParamValues[param.name] ?? String(param.default)}`,
+        ),
+      ].join(" · ");
 
   return (
     <section className="flex h-full min-h-0 flex-col bg-[#181818]">
@@ -247,13 +256,24 @@ export function VideoConstructedPromptPanel() {
           <span className="shrink-0 text-[10px] font-black text-neutral-500">変更</span>
         </button>
 
-        {/* 生成数 (1〜4) + 合計コスト */}
-        <CountAndCostControl
-          count={count}
-          onChangeCount={setCount}
-          unitCost={cost.value}
-          loading={cost.kind === "loading"}
-        />
+        {/* 生成数: 比較モードはモデル数固定、単一モードは 1〜4 選択 */}
+        {compareMode ? (
+          <div className="flex items-center justify-between rounded-md border border-[#2a2a2a] bg-[#101010] px-2.5 py-1.5">
+            <span className="text-[10px] font-black tracking-wide text-neutral-500">
+              比較生成
+            </span>
+            <span className="text-[11px] font-bold text-neutral-200">
+              {compareModelIds.length}モデルを各1本
+            </span>
+          </div>
+        ) : (
+          <CountAndCostControl
+            count={count}
+            onChangeCount={setCount}
+            unitCost={cost.value}
+            loading={cost.kind === "loading"}
+          />
+        )}
 
         {hasRunningBatch && activeBatchSummary && (
           <p className="flex items-center justify-between gap-2 text-[11px] font-semibold text-neutral-400">
@@ -268,7 +288,11 @@ export function VideoConstructedPromptPanel() {
           disabled={disabled}
           className="h-9 w-full rounded-md bg-pink-500 px-4 py-1.5 text-sm font-black text-white transition hover:bg-pink-600 disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-500"
         >
-          {isQueueFull ? `生成中 ${runningBatchCount}/${maxConcurrentBatches}` : "動画を生成"}
+          {isQueueFull
+            ? `生成中 ${runningBatchCount}/${maxConcurrentBatches}`
+            : compareMode
+              ? `${compareModelIds.length}モデルで比較生成`
+              : "動画を生成"}
         </button>
 
         {status.kind !== "idle" && (
@@ -321,6 +345,8 @@ export function VideoConstructedPromptPanel() {
         onAspectRatioChange={setAspectRatio}
         extraParamValues={extraParamValues}
         onExtraParamChange={setExtraParam}
+        compareModelIds={compareModelIds}
+        onToggleCompareModel={toggleCompareModel}
       />
       <ElementwisePromptModal
         open={elementModalOpen}
@@ -543,6 +569,8 @@ function VideoSettingsModal({
   onAspectRatioChange,
   extraParamValues,
   onExtraParamChange,
+  compareModelIds,
+  onToggleCompareModel,
 }: {
   open: boolean;
   onClose: () => void;
@@ -554,7 +582,10 @@ function VideoSettingsModal({
   onAspectRatioChange: (aspectRatio: string) => void;
   extraParamValues: Record<string, string>;
   onExtraParamChange: (name: string, value: string) => void;
+  compareModelIds: VideoModelDefinition["id"][];
+  onToggleCompareModel: (id: VideoModelDefinition["id"]) => void;
 }) {
+  const compareMode = compareModelIds.length >= 2;
   useEffect(() => {
     if (!open) return;
     const onKey = (event: KeyboardEvent) => {
@@ -608,24 +639,80 @@ function VideoSettingsModal({
             </select>
           </div>
 
-          {/* 尺 + 比率 */}
-          <div className="grid grid-cols-2 items-end gap-1.5">
-            <DurationControl model={model} value={duration} onChange={onDurationChange} />
-            <AspectControl model={model} value={aspectRatio} onChange={onAspectRatioChange} />
+          {/* 比較生成 (A案: 各モデルをデフォルト設定で1本ずつ並べる) */}
+          <div className="space-y-1.5 rounded-md border border-[#262626] bg-[#101010] p-2.5">
+            <div className="flex items-center justify-between">
+              <p className="text-[10px] font-black tracking-wide text-neutral-500">
+                モデル比較
+              </p>
+              <span className="text-[10px] font-bold text-neutral-500">
+                2〜4モデルで同時生成
+              </span>
+            </div>
+            <div className="grid grid-cols-1 gap-1">
+              {VIDEO_MODELS.map((item) => {
+                const checked = compareModelIds.includes(item.id);
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => onToggleCompareModel(item.id)}
+                    className={[
+                      "flex items-center gap-2 rounded-md border px-2 py-1.5 text-left text-xs font-bold transition",
+                      checked
+                        ? "border-pink-400 bg-pink-500/10 text-white"
+                        : "border-[#2a2a2a] bg-[#181818] text-neutral-300 hover:border-neutral-500",
+                    ].join(" ")}
+                  >
+                    <span
+                      className={[
+                        "flex h-4 w-4 shrink-0 items-center justify-center rounded border text-[10px]",
+                        checked
+                          ? "border-pink-400 bg-pink-500 text-white"
+                          : "border-[#444] bg-transparent text-transparent",
+                      ].join(" ")}
+                    >
+                      ✓
+                    </span>
+                    <span className="flex-1 truncate">
+                      {item.label}
+                      {item.id === "kling3_0" ? "（おすすめ）" : ""}
+                    </span>
+                    <span className="shrink-0 text-[10px] font-normal text-neutral-500">
+                      約{item.costEstimate}cr
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+            <p className="text-[10px] leading-relaxed text-neutral-500">
+              {compareMode
+                ? `${compareModelIds.length}モデルを各デフォルト設定で1本ずつ生成して比較します。下の尺・比率などの個別設定は使いません。`
+                : "2つ以上選ぶと比較モードになります（各モデルはおすすめ設定で生成）。"}
+            </p>
           </div>
 
-          {/* モデル別パラメータ (音声/解像度/genre/quality/mode 等。対応モデルだけ) */}
-          {model.extraParams.length > 0 && (
-            <div className="grid grid-cols-2 items-end gap-1.5">
-              {model.extraParams.map((param) => (
-                <ExtraParamControl
-                  key={param.name}
-                  param={param}
-                  value={extraParamValues[param.name] ?? String(param.default)}
-                  onChange={(next) => onExtraParamChange(param.name, next)}
-                />
-              ))}
-            </div>
+          {/* 単一モード時のみ: 尺 + 比率 + モデル別パラメータ */}
+          {!compareMode && (
+            <>
+              <div className="grid grid-cols-2 items-end gap-1.5">
+                <DurationControl model={model} value={duration} onChange={onDurationChange} />
+                <AspectControl model={model} value={aspectRatio} onChange={onAspectRatioChange} />
+              </div>
+
+              {model.extraParams.length > 0 && (
+                <div className="grid grid-cols-2 items-end gap-1.5">
+                  {model.extraParams.map((param) => (
+                    <ExtraParamControl
+                      key={param.name}
+                      param={param}
+                      value={extraParamValues[param.name] ?? String(param.default)}
+                      onChange={(next) => onExtraParamChange(param.name, next)}
+                    />
+                  ))}
+                </div>
+              )}
+            </>
           )}
         </div>
 
