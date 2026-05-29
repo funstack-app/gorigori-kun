@@ -93,10 +93,11 @@ export const VIDEO_MODELS: VideoModelDefinition[] = [
     id: "veo3_1",
     label: "Google Veo 3.1",
     jobSetType: "veo3_1",
-    description: "Google品質。quality 3段階、duration は 4/6/8 固定。",
+    description: "Google品質。quality 3段階、duration は 8秒固定。",
     aspectRatios: ["16:9", "9:16"],
     defaultAspectRatio: "16:9",
-    duration: { kind: "enum", values: [4, 6, 8], default: 8 },
+    // 実制約 (higgsfield model get veo3_1): 8秒固定 (min 8 / max 8)
+    duration: { kind: "enum", values: [8], default: 8 },
     extraParams: [
       {
         kind: "enum",
