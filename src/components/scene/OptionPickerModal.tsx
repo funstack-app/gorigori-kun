@@ -124,17 +124,25 @@ function PickerCard({
   selected: boolean;
   onSelect: () => void;
 }) {
-  // ホバー時だけ webm を再生する。一覧では一切ダウンロードしない (preload="none")。
-  // 動きの分かりやすさを見せるための軽量プレビュー。
+  // 動画は最初から「停止フレーム」を表示し、ホバーで再生する。
+  // 先頭フレームを確実に描画させるため、メタデータ読込後に currentTime を
+  // 僅かに進めて1フレーム目をデコードさせる。
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [hovering, setHovering] = useState(false);
+
+  const showFirstFrame = () => {
+    const el = videoRef.current;
+    if (el && el.currentTime === 0) {
+      // 0.001 でも進めると先頭フレームが描画される (黒画面防止)
+      el.currentTime = 0.001;
+    }
+  };
 
   const handleEnter = () => {
     if (!option.video) return;
     setHovering(true);
     const el = videoRef.current;
     if (el) {
-      el.currentTime = 0;
       void el.play().catch(() => {
         // 自動再生がブロックされた場合は静かに無視
       });
@@ -146,7 +154,7 @@ function PickerCard({
     const el = videoRef.current;
     if (el) {
       el.pause();
-      el.currentTime = 0;
+      el.currentTime = 0.001; // 先頭フレームに戻す
     }
   };
 
@@ -164,31 +172,24 @@ function PickerCard({
       ].join(" ")}
     >
       <div className="relative aspect-video w-full overflow-hidden bg-gradient-to-br from-neutral-700 to-neutral-900">
-        {option.thumbnail ? (
-          <img
-            src={option.thumbnail.src}
-            alt={option.thumbnail.alt}
-            className="h-full w-full object-cover"
-            loading="lazy"
-          />
-        ) : (
-          <PlaceholderArt label={option.value} />
-        )}
-        {option.video && (
+        {option.video ? (
           <>
+            {/*
+              STΛCK 指示 (2026-05-29): 動画は最初から「停止フレーム」を常時表示し、
+              ホバーで再生する。preload="metadata" で先頭フレームだけ読み込み、
+              ホバー前は play しないので一覧でも軽い。
+            */}
             <video
               ref={videoRef}
               src={option.video}
               muted
               loop
               playsInline
-              preload="none"
-              className={[
-                "absolute inset-0 h-full w-full object-cover transition-opacity duration-200",
-                hovering ? "opacity-100" : "opacity-0",
-              ].join(" ")}
+              preload="metadata"
+              onLoadedMetadata={showFirstFrame}
+              className="absolute inset-0 h-full w-full object-cover"
             />
-            {/* 動画ありを示す再生バッジ (ホバー前のヒント) */}
+            {/* 動画ありを示す再生バッジ (ホバー前のヒント、再生中は消す) */}
             <span
               className={[
                 "pointer-events-none absolute bottom-1.5 right-1.5 flex items-center gap-1 rounded bg-black/60 px-1.5 py-0.5 text-[9px] font-bold text-white transition-opacity",
@@ -198,6 +199,15 @@ function PickerCard({
               ▶ ホバーで再生
             </span>
           </>
+        ) : option.thumbnail ? (
+          <img
+            src={option.thumbnail.src}
+            alt={option.thumbnail.alt}
+            className="h-full w-full object-cover"
+            loading="lazy"
+          />
+        ) : (
+          <PlaceholderArt label={option.value} />
         )}
       </div>
       <div className="border-t border-[#262626] p-3">
