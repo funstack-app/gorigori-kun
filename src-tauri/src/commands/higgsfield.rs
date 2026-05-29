@@ -1523,10 +1523,20 @@ async fn run_one_higgsfield_job(
     }
 
     let json = parse_json_stdout(&output.stdout)?;
-    let result_url = extract_result_image(&json).ok_or_else(|| {
-        let preview = serde_json::to_string(&json).unwrap_or_else(|_| "<invalid json>".into());
-        format!("Higgsfield 出力 JSON から画像 URL を見つけられませんでした: {preview}")
-    })?;
+    let result_url = match extract_result_image(&json) {
+        Some(url) => url,
+        None => {
+            // URL が無い = 多くは status=nsfw/failed。理由を明示して返す。
+            if let Some(reason) = extract_failure_reason(&json) {
+                return Err(reason);
+            }
+            let preview =
+                serde_json::to_string(&json).unwrap_or_else(|_| "<invalid json>".into());
+            return Err(format!(
+                "Higgsfield 出力 JSON から画像 URL を見つけられませんでした: {preview}"
+            ));
+        }
+    };
     let media_type = args.media_type.unwrap_or(MediaType::Image);
     let dest = out_dir.join(format!(
         "hf_b{idx:02}_{}.{}",
@@ -1566,6 +1576,34 @@ fn parse_json_stdout(stdout: &[u8]) -> Result<serde_json::Value, String> {
         "Higgsfield generate create の JSON デコードに失敗しました: {}",
         trimmed
     ))
+}
+
+/// 生成結果 JSON から「失敗理由」を読み取り、ユーザー向けの日本語メッセージを返す。
+/// result_url が空でも status が nsfw/failed 等なら、それを明示する。
+/// 正常 (completed で URL あり) の場合は None。
+fn extract_failure_reason(value: &serde_json::Value) -> Option<String> {
+    // トップが配列ならその先頭、オブジェクトならそのまま見る
+    let obj = value
+        .as_array()
+        .and_then(|arr| arr.first())
+        .unwrap_or(value);
+    let status = obj
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match status.as_str() {
+        "nsfw" => Some(
+            "このプロンプトは Seedance/Higgsfield の安全フィルターにブロックされました (NSFW 判定)。\n\
+             暴力・流血・性的表現などが含まれていると弾かれます。表現を和らげて再試行してください。\n\
+             ※ 同じプロンプトでも Kling / Veo は通ることがあります (モデルごとに判定が違うため)。"
+                .to_string(),
+        ),
+        "failed" | "error" | "cancelled" | "canceled" => Some(format!(
+            "生成がモデル側で失敗しました (status: {status})。プロンプトや設定を変えて再試行してください。"
+        )),
+        _ => None,
+    }
 }
 
 fn extract_result_image(value: &serde_json::Value) -> Option<String> {
