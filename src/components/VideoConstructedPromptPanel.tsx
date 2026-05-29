@@ -344,7 +344,7 @@ function DurationControl({
   if (model.duration.kind === "enum") {
     return (
       <div className="space-y-0.5">
-        <p className="text-[10px] font-black tracking-wide text-neutral-500">尺</p>
+        <p className="block h-3.5 text-[10px] font-black leading-[14px] tracking-wide text-neutral-500">尺</p>
         <div className="grid grid-cols-3 gap-1">
           {model.duration.values.map((seconds) => (
             <button
@@ -368,7 +368,7 @@ function DurationControl({
 
   return (
     <div className="space-y-0.5">
-      <p className="text-[10px] font-black tracking-wide text-neutral-500">尺</p>
+      <p className="block h-3.5 text-[10px] font-black leading-[14px] tracking-wide text-neutral-500">尺</p>
       <div className="flex h-8 items-center rounded-md border border-[#343434] bg-[#101010]">
         <button
           type="button"
@@ -403,7 +403,7 @@ function AspectControl({
 }) {
   return (
     <div className="space-y-0.5">
-      <label htmlFor="video-aspect-select" className="text-[10px] font-black tracking-wide text-neutral-500">
+      <label htmlFor="video-aspect-select" className="block h-3.5 text-[10px] font-black leading-[14px] tracking-wide text-neutral-500">
         比率
       </label>
       <select
@@ -436,7 +436,7 @@ function ExtraParamControl({
     const on = value === "true" || value === "on";
     return (
       <div className="space-y-0.5">
-        <p className="text-[10px] font-black tracking-wide text-neutral-500">{param.label}</p>
+        <p className="block h-3.5 text-[10px] font-black leading-[14px] tracking-wide text-neutral-500">{param.label}</p>
         <button
           type="button"
           onClick={() => onChange(on ? "off" : "on")}
@@ -455,7 +455,7 @@ function ExtraParamControl({
   if (param.kind === "integer") {
     return (
       <div className="space-y-0.5">
-        <p className="text-[10px] font-black tracking-wide text-neutral-500">{param.label}</p>
+        <p className="block h-3.5 text-[10px] font-black leading-[14px] tracking-wide text-neutral-500">{param.label}</p>
         <input
           type="number"
           min={param.min}
@@ -609,14 +609,14 @@ function VideoSettingsModal({
           </div>
 
           {/* 尺 + 比率 */}
-          <div className="grid grid-cols-2 gap-1.5">
+          <div className="grid grid-cols-2 items-end gap-1.5">
             <DurationControl model={model} value={duration} onChange={onDurationChange} />
             <AspectControl model={model} value={aspectRatio} onChange={onAspectRatioChange} />
           </div>
 
           {/* モデル別パラメータ (音声/解像度/genre/quality/mode 等。対応モデルだけ) */}
           {model.extraParams.length > 0 && (
-            <div className="grid grid-cols-2 gap-1.5">
+            <div className="grid grid-cols-2 items-end gap-1.5">
               {model.extraParams.map((param) => (
                 <ExtraParamControl
                   key={param.name}
