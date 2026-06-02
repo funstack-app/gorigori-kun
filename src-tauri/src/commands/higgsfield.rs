@@ -1158,6 +1158,17 @@ pub async fn higgsfield_generate_cost(args: HiggsfieldCostArgs) -> Result<i64, S
         cmd.arg("--model").arg(model_variant);
     }
     cmd.arg("--json");
+    // [debug] 診断用: 渡されたパラメータを記録 (std/fast でコストが変わらない問題の調査)
+    eprintln!(
+        "[higgsfield_cost] job={} mode={:?} resolution={:?} duration={:?} quality={:?} genre={:?} model_variant={:?}",
+        args.job_set_type,
+        args.mode,
+        args.resolution,
+        args.duration,
+        args.quality,
+        args.genre,
+        args.model_variant
+    );
     prepare_higgsfield_tokio_command(&mut cmd);
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
@@ -1168,6 +1179,10 @@ pub async fn higgsfield_generate_cost(args: HiggsfieldCostArgs) -> Result<i64, S
         .map_err(|e| format!("Higgsfield generate cost の実行に失敗しました: {e}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        eprintln!(
+            "[higgsfield_cost] FAILED status={} stderr={}",
+            output.status, stderr
+        );
         if stderr.is_empty() {
             return Err(format!(
                 "Higgsfield generate cost が失敗しました: {}",
@@ -1178,13 +1193,16 @@ pub async fn higgsfield_generate_cost(args: HiggsfieldCostArgs) -> Result<i64, S
     }
 
     let json = parse_json_stdout(&output.stdout)?;
-    json.get("credits")
+    let credits = json
+        .get("credits")
         .and_then(|value| value.as_i64())
         .or_else(|| json.get("credits_exact").and_then(|value| value.as_i64()))
         .ok_or_else(|| {
             let preview = serde_json::to_string(&json).unwrap_or_else(|_| "<invalid json>".into());
             format!("Higgsfield cost JSON から credits を見つけられませんでした: {preview}")
-        })
+        })?;
+    eprintln!("[higgsfield_cost] OK credits={credits}");
+    Ok(credits)
 }
 
 fn resolve_higgsfield_binary() -> Option<PathBuf> {
