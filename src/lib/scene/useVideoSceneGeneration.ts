@@ -251,10 +251,16 @@ export function useVideoSceneGeneration(): UseVideoSceneGenerationReturn {
           });
 
       if (result.failedCount > 0 || result.generatedPaths.length === 0) {
+        // モデル側が返した実際の理由 (NSFW判定・制限コンテンツ等) を最優先で表示する。
+        // 理由が取れない時だけ一般的な再試行ガイドにフォールバックする。
+        const reasons = (result.errors ?? []).filter((r) => r && r.trim().length > 0);
+        const uniqueReasons = Array.from(new Set(reasons));
         const message =
-          "動画生成に失敗しました。\n" +
-          "・モデル・尺・アスペクト比を変えて再試行してください\n" +
-          "・i2v の場合は元画像のアスペクト比とモデルの対応を確認してください";
+          uniqueReasons.length > 0
+            ? "動画生成に失敗しました。\n\n理由:\n" + uniqueReasons.join("\n\n")
+            : "動画生成に失敗しました。\n" +
+              "・モデル・尺・アスペクト比を変えて再試行してください\n" +
+              "・i2v の場合は元画像のアスペクト比とモデルの対応を確認してください";
         setStatus({ kind: "error", message });
         useToasts.getState().push({ kind: "error", text: message, ttlMs: 0 });
         return;

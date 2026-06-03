@@ -167,6 +167,9 @@ pub struct BatchSummary {
     pub batch_id: String,
     pub generated_paths: Vec<String>,
     pub failed_count: u32,
+    /// 失敗した各ワーカーの理由 (NSFW判定・制限コンテンツ等)。
+    /// フロントはこれを表示して原因を明示する (固定文で握り潰さない)。
+    pub errors: Vec<String>,
 }
 
 // P0-1 mediaType 導入 (2026-05-28 動画タブ準備)
@@ -251,6 +254,8 @@ enum HiggsfieldBatchEvent {
 struct CompareWorkerResult {
     idx: u32,
     path: Option<String>,
+    /// 失敗時の理由 (NSFW判定等)。成功時は None。
+    error: Option<String>,
 }
 
 type PipeReadTask = JoinHandle<Result<Vec<u8>, std::io::Error>>;
@@ -794,6 +799,7 @@ pub async fn higgsfield_generate_batch(
 
     let mut generated_paths = Vec::new();
     let mut failed_count = 0u32;
+    let mut error_reasons: Vec<String> = Vec::new();
     let mut cancelled = false;
     for idx in 1..=args.count {
         if cancellation.flag.load(Ordering::SeqCst) {
@@ -845,6 +851,11 @@ pub async fn higgsfield_generate_batch(
                 eprintln!("[higgsfield] worker idx={idx} FAIL: {error}");
                 failed_count += 1;
                 let was_cancelled = is_cancelled_error(&error);
+                // キャンセル以外の実エラー (NSFW判定・制限コンテンツ等) は理由として蓄積し、
+                // BatchSummary 経由でフロントに表示させる (固定文で握り潰さない)。
+                if !was_cancelled {
+                    error_reasons.push(error.clone());
+                }
                 let _ = app.emit(
                     EVENT_IMAGE_BATCH,
                     HiggsfieldBatchEvent::WorkerFailed {
@@ -898,6 +909,7 @@ pub async fn higgsfield_generate_batch(
         batch_id,
         generated_paths,
         failed_count,
+        errors: error_reasons,
     })
 }
 
@@ -1017,10 +1029,12 @@ pub async fn higgsfield_generate_compare(
                     CompareWorkerResult {
                         idx,
                         path: Some(path),
+                        error: None,
                     }
                 }
                 Err(error) => {
                     eprintln!("[higgsfield] compare worker idx={idx} FAIL: {error}");
+                    let reason = error.clone();
                     let _ = app_for_worker.emit(
                         EVENT_IMAGE_BATCH,
                         HiggsfieldBatchEvent::WorkerFailed {
@@ -1031,7 +1045,11 @@ pub async fn higgsfield_generate_compare(
                             model_display_name: Some(model.display_name),
                         },
                     );
-                    CompareWorkerResult { idx, path: None }
+                    CompareWorkerResult {
+                        idx,
+                        path: None,
+                        error: Some(reason),
+                    }
                 }
             }
         });
@@ -1039,15 +1057,21 @@ pub async fn higgsfield_generate_compare(
 
     let mut paths_by_idx = vec![None; args.models.len()];
     let mut failed_count = 0u32;
+    let mut error_reasons: Vec<String> = Vec::new();
     while let Some(result) = jobs.join_next().await {
         match result {
             Ok(worker) => {
                 if let Some(slot) = paths_by_idx.get_mut(worker.idx.saturating_sub(1) as usize) {
                     *slot = worker.path;
                 }
+                // 失敗理由 (NSFW判定等) を回収してフロントに表示させる。
+                if let Some(reason) = worker.error {
+                    error_reasons.push(reason);
+                }
             }
             Err(error) => {
                 eprintln!("[higgsfield] compare worker join error: {error}");
+                error_reasons.push(format!("内部エラー: {error}"));
             }
         }
     }
@@ -1088,6 +1112,7 @@ pub async fn higgsfield_generate_compare(
         batch_id,
         generated_paths,
         failed_count,
+        errors: error_reasons,
     })
 }
 

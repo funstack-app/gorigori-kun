@@ -231,6 +231,7 @@ export const images = {
       batchId: string;
       generatedPaths: string[];
       failedCount: number;
+      errors: string[];
     }>("images_generate_batch", { args }),
 };
 
@@ -357,6 +358,7 @@ export const higgsfield = {
       batchId: string;
       generatedPaths: string[];
       failedCount: number;
+      errors: string[];
     }>("higgsfield_generate_batch", { args }),
   generateCompare: (
     args: {
@@ -372,6 +374,7 @@ export const higgsfield = {
       batchId: string;
       generatedPaths: string[];
       failedCount: number;
+      errors: string[];
     }>("higgsfield_generate_compare", { args }),
   cancelBatch: (batchId: string) =>
     invoke<void>("higgsfield_cancel_batch", { batchId }),
