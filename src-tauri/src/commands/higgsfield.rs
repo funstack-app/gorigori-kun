@@ -1553,6 +1553,8 @@ async fn run_one_higgsfield_job(
         return Err(cancelled_error());
     };
     if !output.status.success() {
+        // CLI は失敗時 stderr に `Error: ...` を出す (exit code != 0)。
+        // 生メッセージをそのまま見せず translate_higgsfield_error でユーザー向けに翻訳する。
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         if stderr.is_empty() {
             return Err(format!(
@@ -1560,16 +1562,14 @@ async fn run_one_higgsfield_job(
                 output.status
             ));
         }
-        return Err(format!(
-            "Higgsfield generate create が失敗しました: {stderr}"
-        ));
+        return Err(translate_higgsfield_error(&stderr));
     }
 
     let json = parse_json_stdout(&output.stdout)?;
     let result_url = match extract_result_image(&json) {
         Some(url) => url,
         None => {
-            // URL が無い = 多くは status=nsfw/failed。理由を明示して返す。
+            // URL が無い = 多くは status=nsfw/failed、またはサーバ error。理由を明示して返す。
             if let Some(reason) = extract_failure_reason(&json) {
                 return Err(reason);
             }
@@ -1624,6 +1624,11 @@ fn parse_json_stdout(stdout: &[u8]) -> Result<serde_json::Value, String> {
 /// 生成結果 JSON から「失敗理由」を読み取り、ユーザー向けの日本語メッセージを返す。
 /// result_url が空でも status が nsfw/failed 等なら、それを明示する。
 /// 正常 (completed で URL あり) の場合は None。
+///
+/// 重要 (2026-06-04): 旧実装は status=nsfw を無条件で「NSFW 判定」と表示していたが、
+/// 実際には別の失敗 (パラメータ不正・クレジット不足等) でも結果 URL が空になり、
+/// それが NSFW と誤認されるケースがあった (STΛCK 指摘)。
+/// status とサーバの error フィールド (error_type 等) の両方を見て区別する。
 fn extract_failure_reason(value: &serde_json::Value) -> Option<String> {
     // トップが配列ならその先頭、オブジェクトならそのまま見る
     let obj = value
@@ -1635,11 +1640,24 @@ fn extract_failure_reason(value: &serde_json::Value) -> Option<String> {
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_ascii_lowercase();
+
+    // サーバが error オブジェクト/文字列を返している場合はそれを最優先で翻訳する。
+    // 例: {"error_type":"not_enough_credits", ...}
+    if let Some(reason) = obj
+        .get("error_type")
+        .and_then(|v| v.as_str())
+        .or_else(|| obj.get("error").and_then(|v| v.as_str()))
+        .map(translate_higgsfield_error)
+    {
+        return Some(reason);
+    }
+
     match status.as_str() {
-        "nsfw" => Some(
-            "このプロンプトは Seedance/Higgsfield の安全フィルターにブロックされました (NSFW 判定)。\n\
+        "nsfw" | "moderated" | "content_moderation" | "rejected" => Some(
+            "このプロンプト/画像は Higgsfield の安全フィルターにブロックされました (コンテンツ判定)。\n\
              暴力・流血・性的表現などが含まれていると弾かれます。表現を和らげて再試行してください。\n\
-             ※ 同じプロンプトでも Kling / Veo は通ることがあります (モデルごとに判定が違うため)。"
+             ※ 心当たりが無い場合でもモデルが過剰判定することがあります。プロンプトの語を少し変える、\n\
+             別モデル (Kling / Veo) を試す、で通ることがあります。"
                 .to_string(),
         ),
         "failed" | "error" | "cancelled" | "canceled" => Some(format!(
@@ -1647,6 +1665,52 @@ fn extract_failure_reason(value: &serde_json::Value) -> Option<String> {
         )),
         _ => None,
     }
+}
+
+/// Higgsfield CLI / API が返すエラー文字列を、ユーザー向けの日本語に翻訳する。
+///
+/// CLI は失敗時 (exit code != 0) に stderr へ `Error: ...` を出す。代表例:
+///   - `Error: Unknown params: sound`            → アプリのパラメータ不正 (開発バグ)
+///   - `Error: Invalid values: mode=xxx (...)`   → アプリのパラメータ不正 (開発バグ)
+///   - `Error: {"error_type":"not_enough_credits"...}` → クレジット不足 (ユーザー操作で解決)
+///   - `Error: prompt: Input should be a valid string` → プロンプト未入力
+/// マッチしないものは原文を維持しつつ前置きだけ付ける (情報を捨てない)。
+fn translate_higgsfield_error(raw: &str) -> String {
+    let text = raw.trim();
+    let lower = text.to_ascii_lowercase();
+
+    if lower.contains("not_enough_credits") || lower.contains("not enough credits") {
+        return "Higgsfield のクレジットが不足しています。\n\
+                higgsfield.ai でクレジットを補充するか、より安いモデル/設定 (尺を短く、解像度を下げる等) で再試行してください。"
+            .to_string();
+    }
+    if lower.contains("unknown params") || lower.contains("invalid values") {
+        return format!(
+            "生成パラメータが不正でした (アプリ側の問題の可能性が高いです)。\n\
+             この内容を開発に共有してください:\n{text}"
+        );
+    }
+    if lower.contains("prompt") && lower.contains("valid string") {
+        return "プロンプトが空です。動きを1つ選ぶか、テキストを入力してください。".to_string();
+    }
+    if lower.contains("nsfw")
+        || lower.contains("moderat")
+        || lower.contains("content policy")
+        || lower.contains("safety")
+    {
+        return "安全フィルターにブロックされました。表現を和らげて再試行してください。".to_string();
+    }
+    if lower.contains("unauthorized") || lower.contains("not authenticated") || lower.contains("auth")
+    {
+        return "Higgsfield の認証が切れている可能性があります。設定からログインし直してください。"
+            .to_string();
+    }
+    if lower.contains("timeout") || lower.contains("timed out") {
+        return "生成がタイムアウトしました。混雑時に起きやすいです。少し待って再試行してください。"
+            .to_string();
+    }
+    // 未知のエラーは握り潰さず、原文を添えて返す。
+    format!("Higgsfield 生成に失敗しました:\n{text}")
 }
 
 fn extract_result_image(value: &serde_json::Value) -> Option<String> {
