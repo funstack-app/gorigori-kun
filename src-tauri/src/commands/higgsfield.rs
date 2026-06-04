@@ -1566,6 +1566,23 @@ async fn run_one_higgsfield_job(
     }
 
     let json = parse_json_stdout(&output.stdout)?;
+    // status が completed 以外 (failed/nsfw/error 等) なら、結果 URL 探索に入らず
+    // 失敗理由を返す。なぜ: failed ジョブでも JSON には入力画像の URL が残るため、
+    // URL 探索フォールバックが入力画像を結果と誤認しうる (Codex 指摘 + 実測の真因)。
+    // status フィールドが無い古い形式は従来どおり URL 探索に進む (後方互換)。
+    if let Some(status_obj) = json.as_array().and_then(|a| a.first()).or(Some(&json)) {
+        if let Some(status) = status_obj.get("status").and_then(|v| v.as_str()) {
+            let s = status.to_ascii_lowercase();
+            if s != "completed" && !s.is_empty() {
+                if let Some(reason) = extract_failure_reason(&json) {
+                    return Err(reason);
+                }
+                return Err(format!(
+                    "Higgsfield 生成が完了しませんでした (status: {s})。再試行してください。"
+                ));
+            }
+        }
+    }
     let result_url = match extract_result_image(&json) {
         Some(url) => url,
         None => {
@@ -1599,7 +1616,7 @@ async fn run_one_higgsfield_job(
         short_id(),
         media_type.extension()
     ));
-    save_result_image(&result_url, &dest).await?;
+    save_result_image(&result_url, &dest, media_type).await?;
     Ok(dest.to_string_lossy().into_owned())
 }
 
@@ -1797,6 +1814,18 @@ fn collect_url_key_strings(value: &serde_json::Value, out: &mut Vec<String>) {
         serde_json::Value::Object(map) => {
             for (key, child) in map {
                 let lower = key.to_ascii_lowercase();
+                // 入力パラメータ (params / medias / input_image / reference 等) は
+                // 「結果」ではないので探索しない。
+                // 重要 (2026-06-04): 生成が failed すると result_url が空になり、再帰
+                // フォールバックが /params/medias/0/data/url (= 入力した start_image の
+                // PNG URL) を拾って結果と誤認し、PNG を .mp4 として保存していた
+                // (STΛCK 指摘・「動画が見つかりません」の真因)。入力側 subtree を除外する。
+                if matches!(
+                    lower.as_str(),
+                    "params" | "medias" | "input_image" | "input_images" | "reference_elements"
+                ) {
+                    continue;
+                }
                 if lower.contains("url") {
                     if let Some(s) = child.as_str().filter(|s| is_usable_result_ref(s)) {
                         out.push(s.to_string());
@@ -1819,7 +1848,29 @@ fn is_usable_result_ref(value: &str) -> bool {
     trimmed.starts_with("http://") || trimmed.starts_with("https://") || Path::new(trimmed).exists()
 }
 
-async fn save_result_image(src: &str, dest: &Path) -> Result<(), String> {
+/// ダウンロードしたバイト列の先頭から実メディア種別を判定し、動画期待なのに
+/// 画像 (PNG/JPEG/GIF/WebP) が来ていたら失敗扱いにする (Codex 指摘・拡張子偽装対策)。
+/// なぜ: URL の拡張子だけでは防げない (拡張子なし URL や、png 中身を別名で配る CDN がある)。
+fn reject_if_image_bytes_for_video(bytes: &[u8], media_type: MediaType) -> Result<(), String> {
+    if !matches!(media_type, MediaType::Video) {
+        return Ok(());
+    }
+    let is_png = bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47]); // \x89PNG
+    let is_jpeg = bytes.starts_with(&[0xFF, 0xD8, 0xFF]);
+    let is_gif = bytes.starts_with(b"GIF8");
+    let is_webp = bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP";
+    if is_png || is_jpeg || is_gif || is_webp {
+        return Err(
+            "動画化に失敗しました (モデルが動画ではなく静止画を返しました)。\n\
+             プロンプトを少し和らげる・尺やモードを変える・別モデル (Kling / Veo) を試す、\n\
+             で通ることがあります。"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+async fn save_result_image(src: &str, dest: &Path, media_type: MediaType) -> Result<(), String> {
     let trimmed = src.trim();
     if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
         // Codex クロスレビュー (2026-05-19): Windows 10 等で `curl.exe` の存在が
@@ -1844,13 +1895,17 @@ async fn save_result_image(src: &str, dest: &Path) -> Result<(), String> {
             .bytes()
             .await
             .map_err(|e| format!("レスポンス body の読み取りに失敗しました: {e}"))?;
+        // 書き込み前に先頭バイトで実種別を検証 (動画期待なのに画像なら弾く)。
+        reject_if_image_bytes_for_video(&bytes, media_type)?;
         tokio::fs::write(dest, &bytes)
             .await
             .map_err(|e| format!("ファイル書き込みに失敗しました: {e}"))?;
         return Ok(());
     }
-    std::fs::copy(trimmed, dest)
-        .map(|_| ())
+    let bytes = std::fs::read(trimmed)
+        .map_err(|e| format!("Higgsfield 出力画像の読み取りに失敗しました: {e}"))?;
+    reject_if_image_bytes_for_video(&bytes, media_type)?;
+    std::fs::write(dest, &bytes)
         .map_err(|e| format!("Higgsfield 出力画像のコピーに失敗しました: {e}"))
 }
 
