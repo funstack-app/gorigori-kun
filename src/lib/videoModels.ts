@@ -64,10 +64,11 @@ export const VIDEO_MODELS: VideoModelDefinition[] = [
     id: "seedance_2_0",
     label: "Seedance 2.0",
     jobSetType: "seedance_2_0",
-    description: "7アスペクト対応、genre/mode/resolution 豊富。",
+    description: "7アスペクト対応、genre/mode/resolution 豊富。最長15秒。",
     aspectRatios: ["auto", "16:9", "9:16", "4:3", "3:4", "1:1", "21:9"],
     defaultAspectRatio: "16:9",
-    duration: { kind: "integer", default: 5, min: 2, max: 10 },
+    // CLI 実測 (2026-06-04): duration=15 まで通る (15秒=67cr)。SHOTLIST も15秒前提。
+    duration: { kind: "integer", default: 5, min: 2, max: 15 },
     extraParams: [
       {
         kind: "enum",
