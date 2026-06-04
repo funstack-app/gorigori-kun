@@ -606,6 +606,50 @@ function VideoSettingsModal({
     return () => window.removeEventListener("keydown", onKey);
   }, [open, onClose]);
 
+  // 比較リストの各モデルのコストを実 API で計算する (静的 costEstimate ではなく)。
+  // 比較生成は「共通 duration を各モデルに丸める + 各モデルおすすめ設定」で走るため、
+  // コスト計算も同じ条件で行う (toCompareModel と整合)。
+  const [compareCosts, setCompareCosts] = useState<Record<string, number>>({});
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void Promise.all(
+        VIDEO_MODELS.map(async (m) => {
+          const d =
+            m.duration.kind === "enum"
+              ? m.duration.values.includes(duration)
+                ? duration
+                : m.duration.default
+              : Math.min(m.duration.max, Math.max(m.duration.min, duration));
+          try {
+            const credits = await higgsfield.generateCost({
+              jobSetType: m.jobSetType,
+              prompt: "preview",
+              aspect: aspectRatio,
+              duration: d,
+              ...paramsToVideoArgs(m.extraParams, {}),
+            });
+            return [m.id, credits] as const;
+          } catch {
+            return null;
+          }
+        }),
+      ).then((pairs) => {
+        if (cancelled) return;
+        const next: Record<string, number> = {};
+        for (const pair of pairs) {
+          if (pair) next[pair[0]] = pair[1];
+        }
+        setCompareCosts(next);
+      });
+    }, 300);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [open, duration, aspectRatio]);
+
   if (!open) return null;
 
   return (
@@ -690,7 +734,7 @@ function VideoSettingsModal({
                       {item.id === "kling3_0" ? "（おすすめ）" : ""}
                     </span>
                     <span className="shrink-0 text-[10px] font-normal text-neutral-500">
-                      約{item.costEstimate}cr
+                      約{compareCosts[item.id] ?? item.costEstimate}cr
                     </span>
                   </button>
                 );
