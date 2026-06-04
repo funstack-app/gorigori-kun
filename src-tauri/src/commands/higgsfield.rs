@@ -1581,6 +1581,19 @@ async fn run_one_higgsfield_job(
         }
     };
     let media_type = args.media_type.unwrap_or(MediaType::Image);
+    // 動画を期待しているのに結果 URL が画像 (.png/.jpg) のことがある。
+    // これは Seedance 等が動画化に失敗し、プレビュー静止画だけ返したケース。
+    // 旧実装は拡張子を見ず常に .mp4 で保存していたため、PNG が .mp4 に偽装され、
+    // <video> が再生できず「動画が見つかりません」になっていた (2026-06-04 STΛCK 指摘)。
+    // 偽装保存せず、失敗として明示する。
+    if matches!(media_type, MediaType::Video) && url_looks_like_image(&result_url) {
+        return Err(
+            "動画化に失敗しました (モデルが動画ではなく静止画を返しました)。\n\
+             プロンプトを少し和らげる・尺やモードを変える・別モデル (Kling / Veo) を試す、\n\
+             で通ることがあります。"
+                .to_string(),
+        );
+    }
     let dest = out_dir.join(format!(
         "hf_b{idx:02}_{}.{}",
         short_id(),
@@ -1588,6 +1601,16 @@ async fn run_one_higgsfield_job(
     ));
     save_result_image(&result_url, &dest).await?;
     Ok(dest.to_string_lossy().into_owned())
+}
+
+/// 結果 URL が静止画 (png/jpg/webp 等) を指していそうか判定する。
+/// クエリ文字列を除いたパス末尾の拡張子で判断する。
+fn url_looks_like_image(url: &str) -> bool {
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    let lower = path.to_ascii_lowercase();
+    [".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"]
+        .iter()
+        .any(|ext| lower.ends_with(ext))
 }
 
 fn parse_json_stdout(stdout: &[u8]) -> Result<serde_json::Value, String> {
