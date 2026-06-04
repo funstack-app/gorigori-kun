@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { higgsfield } from "../lib/ipc";
 import { paramsToVideoArgs, useVideoSceneGeneration } from "../lib/scene/useVideoSceneGeneration";
+import { resolveImageMentions } from "../lib/scene/resolveImageMentions";
 import { useComposer } from "../lib/store/composer";
 import { useVideoGen } from "../lib/store/videoGen";
 import {
@@ -156,7 +157,10 @@ export function VideoConstructedPromptPanel() {
   useEffect(() => {
     let cancelled = false;
     const fallback = model.costEstimate;
-    const prompt = effectivePrompt.trim();
+    // @imgN を除去した本文でコスト計算する。
+    // Higgsfield CLI は --prompt 内の "@..." をファイル参照と解釈するため、
+    // @img1 を残すと "Failed to read img1" でコスト計算が失敗する (2026-06-04 修正)。
+    const prompt = resolveImageMentions(effectivePrompt, references).cleanedPrompt.trim();
     if (!prompt) {
       setCost({ kind: "idle", value: fallback, source: "static" });
       return () => {
@@ -185,7 +189,7 @@ export function VideoConstructedPromptPanel() {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [model, effectivePrompt, aspectRatio, duration, extraParamValues]);
+  }, [model, effectivePrompt, references, aspectRatio, duration, extraParamValues]);
 
   // 設定サマリ行のラベル。
   // 比較モード: 「N モデルで比較 · 16:9」。単一モード: 「Kling · 9秒 · 16:9 · ...」

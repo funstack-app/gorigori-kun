@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { higgsfield, type HiggsfieldModelInfo } from "../lib/ipc";
 import { buildPrompt } from "../lib/scene/buildPrompt";
+import { resolveImageMentions } from "../lib/scene/resolveImageMentions";
 import {
   FEATURED_IMAGE_MODELS,
   FEATURED_VIDEO_MODELS,
@@ -50,12 +51,14 @@ export function HiggsfieldModelSelector({ media }: { media: "image" | "video" })
   const style = useSceneStore((state) => state.style);
   const reference = useSceneStore((state) => state.reference);
   const promptOverride = useScenePromptOverride((s) => s.value);
-  const promptForCost = useMemo(
-    () =>
+  const promptForCost = useMemo(() => {
+    const raw =
       promptOverride ??
-      buildPrompt({ subjectFraming, lightingMood, camera, style, reference }),
-    [promptOverride, subjectFraming, lightingMood, camera, style, reference],
-  );
+      buildPrompt({ subjectFraming, lightingMood, camera, style, reference });
+    // Higgsfield CLI は --prompt 内の "@..." をファイル参照と解釈するため、
+    // @imgN を残すとコスト計算が "Failed to read ..." で失敗する (2026-06-04 修正)。
+    return resolveImageMentions(raw, []).cleanedPrompt;
+  }, [promptOverride, subjectFraming, lightingMood, camera, style, reference]);
   const aspectForCost = subjectFraming.aspectRatio;
 
   useEffect(() => {
