@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useState } from "react";
 import { buildVideoScenePrompt } from "./buildVideoScenePrompt";
+import { resolveImageMentions } from "./resolveImageMentions";
 import { higgsfield, type HiggsfieldCompareModel, type HiggsfieldVideoParams } from "../ipc";
 import { useAuth } from "../store/auth";
 import { useBatches } from "../store/batches";
@@ -183,7 +184,18 @@ export function useVideoSceneGeneration(): UseVideoSceneGenerationReturn {
   }, [runningBatches]);
 
   const generate = useCallback(async (): Promise<void> => {
-    const prompt = effectivePrompt.trim();
+    // @imgN メンションを解決する。本文から @imgN を取り除き、指定された
+    // 参照画像 (登場順・重複排除) を i2v 入力として優先採用する。
+    // メンションが無ければ従来フォールバック (sourceImage / 参照ラック全部) を使う。
+    const mentionResult = resolveImageMentions(
+      effectivePrompt,
+      composerReferences,
+    );
+    const prompt = mentionResult.cleanedPrompt.trim();
+    const effectiveRefPaths =
+      mentionResult.mentioned.length > 0
+        ? mentionResult.mentioned.map((m) => m.path)
+        : refImagePaths;
     if (!prompt) {
       setStatus({ kind: "error", message: "動きを1つ選ぶか書いてください" });
       return;
@@ -216,7 +228,7 @@ export function useVideoSceneGeneration(): UseVideoSceneGenerationReturn {
     useBatches.getState().startBatch({
       batchId,
       prompt,
-      references: refImagePaths.map((path) => ({ path, name: basename(path) })),
+      references: effectiveRefPaths.map((path) => ({ path, name: basename(path) })),
       count: batchCount,
       provider: "higgsfield",
       modelJobSetType: compareMode ? undefined : model.jobSetType,
@@ -234,7 +246,7 @@ export function useVideoSceneGeneration(): UseVideoSceneGenerationReturn {
             models: compareModels.map((m) => toCompareModel(m, duration)),
             // 比率・尺は全モデル共通で適用 (各モデルの制約は toCompareModel 側で丸める)
             aspect: aspectRatio,
-            refImagePaths,
+            refImagePaths: effectiveRefPaths,
             mediaType: "video",
           })
         : await higgsfield.generateBatch({
@@ -243,7 +255,7 @@ export function useVideoSceneGeneration(): UseVideoSceneGenerationReturn {
             prompt,
             count,
             aspect: aspectRatio,
-            refImagePaths,
+            refImagePaths: effectiveRefPaths,
             mediaType: "video",
             duration,
             i2vInputField: model.i2vInputField,
@@ -285,6 +297,7 @@ export function useVideoSceneGeneration(): UseVideoSceneGenerationReturn {
   }, [
     effectivePrompt,
     refImagePaths,
+    composerReferences,
     model,
     aspectRatio,
     duration,

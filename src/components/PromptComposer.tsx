@@ -18,6 +18,7 @@ import { useWorkflow, type ImageMode, type VideoMode } from "../lib/store/workfl
 import { PromptEditorModal } from "./PromptEditorModal";
 import { PromptLibraryModal } from "./PromptLibraryModal";
 import { images as imagesIpc } from "../lib/ipc";
+import { resolveImageMentions } from "../lib/scene/resolveImageMentions";
 
 const IMAGE_EXTS = ["png", "jpg", "jpeg", "webp", "gif", "bmp"];
 
@@ -156,10 +157,9 @@ export function PromptComposer({
     // user could fire several batches into the same FIFO queue.
     if (useThreads.getState().sending) return;
     const snap = takeForSend();
-    const trimmed = snap.text.trim();
     const workflow = useWorkflow.getState();
     const lockedReference = workflow.lockedReference;
-    const effectiveReferences = [...snap.references];
+    let effectiveReferences = [...snap.references];
     if (
       lockedReference &&
       !effectiveReferences.some((ref) => ref.path === lockedReference.path)
@@ -170,6 +170,16 @@ export function PromptComposer({
         source: "gallery",
         role: "subject",
       });
+    }
+    // @imgN メンションを解決する。本文から @imgN を取り除き、指定があれば
+    // その参照画像だけに絞る (mask/role はそのまま保持)。指定が無ければ全参照を使う。
+    const mention = resolveImageMentions(snap.text, effectiveReferences);
+    const trimmed = mention.cleanedPrompt.trim();
+    if (mention.mentioned.length > 0) {
+      const wanted = new Set(mention.mentioned.map((m) => m.path));
+      effectiveReferences = effectiveReferences.filter((ref) =>
+        wanted.has(ref.path),
+      );
     }
     if (!trimmed && effectiveReferences.length === 0) return;
     const finalPrompt = buildGoriPrompt(trimmed, {
