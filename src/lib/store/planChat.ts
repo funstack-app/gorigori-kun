@@ -107,6 +107,10 @@ const STORYBOARD_ROLE_PREFIX = [
   "  - Step6 (P19c): 「映像のタッチは? 実写風 / イラスト / アニメ / 3DCG / 油絵タッチ / 水彩 など」",
   "     ユーザーが「実写」や「イラスト」と答えたら、toneKeywords に必ず反映する。",
   "     例: ['realistic', 'cinematic photo', 'natural lighting'] / ['anime', '2D illustration', 'flat colors']",
+  "  - Step7 (ルック分析・2026-06-06): ユーザーが参照画像 (キャラ/IP) を添付していれば、",
+  "     その画像を **詳細に観察** して、被写体・シルエット・色 (光と影の色変化まで)・素材・各パーツ・ムードを言語化する。",
+  "     これが全カットで使い回す一貫性の核になる (後で look_analysis として JSON に入れる)。",
+  "     対話の中で「この参照画像はこういうルックですね」と要点をユーザーに見せて合意を取ると良い。",
   "",
   "Phase C. AI が構成案を提示 ★必須★:",
   "  尺をテンポで割って **内部的に** カット数を計算 (内部計算式は cut-calculator.md 参照):",
@@ -150,6 +154,38 @@ const STORYBOARD_ROLE_PREFIX = [
   "4. total_cuts は cuts.length と必ず一致。",
   "5. cut_id は shot_001, shot_002 形式で連番。",
   "6. 最低 8 個の cuts を出す (1〜2 個だけのスケルトン JSON は絶対 NG)。Phase C で提示したカット全件分を必ず含める。",
+  "",
+  "【演出の前出し ★最重要・2026-06-06★】",
+  "各 cut には description に加えて、以下の演出フィールドも **必ず** 埋める。",
+  "これにより裏側で毎カット AI 設計する処理が不要になり、生成が大幅に速くなる (18分→数十秒)。",
+  "演出をここで詰めるほど、生成画像の意図一致と品質が上がる。手を抜かない。",
+  "  - cut_role: カットの役割。establishing / action / detail / reaction / climax / resolution のいずれか",
+  "  - shot_type: ショットサイズ。extreme_close / close / medium / full / wide / extreme_wide のいずれか",
+  "  - camera_angle: カメラアングル。front / side / three_quarter / high / low / dutch のいずれか",
+  "  - action_verbs: このカットの動き・アクションを表す動詞の配列。例: ['目を開ける','見上げる']",
+  "  - camera_motion: カメラの動き。static / pan_left / pan_right / tilt_up / tilt_down / dolly_in / dolly_out / handheld のいずれか",
+  "  - must_change: このカットで前カットから変える要素の配列。例: ['カメラアングル','構図']",
+  "  - negative_constraints: このカットで避けるべきこと。例: ['顔の同一性が崩れる','背景が不自然に変わる']",
+  "★多様性ルール: 隣り合うカットで shot_type / camera_angle を必ず変える。同じ寄り引き・同じアングルの連続は禁止。",
+  "  全体で 寄り(close系) / 中(medium系) / 引き(wide系) を最低1つずつ、アングルも3種以上を散らす。",
+  "演出フィールドの cut への記載例:",
+  "  {\"cut_id\":\"shot_001\",\"description\":\"...\",\"duration_seconds\":3.2,\"scene_group_id\":\"awakening\",\"cut_role\":\"establishing\",\"shot_type\":\"wide\",\"camera_angle\":\"high\",\"action_verbs\":[\"目を開ける\"],\"camera_motion\":\"dolly_in\",\"must_change\":[\"構図\"],\"negative_constraints\":[\"顔の同一性が崩れる\"]}",
+  "",
+  "【ルック分析 (look_analysis) ★参照画像があれば必須★】",
+  "ユーザーが参照画像 (キャラ/IP) を添付している場合、Phase B の中でその画像を **詳細に** ルック分析し、",
+  "scene_construction.look_analysis に入れる。これが全カット共通の「一貫性の核」になる。",
+  "Fashion Photo GPT 級の詳細さで、画像生成にそのまま使えるレベルまで言語化する。曖昧な要約は禁止。",
+  "  - subject_identity: 被写体/キャラの正体 (例: 'レトロな機械式カウンターの奥に座る小柄なヒューマノイド型キャラクター')",
+  "  - silhouette: シルエット・体型・全体フォルム",
+  "  - color_profile: 色。**光が当たる部分と影の部分の色変化まで** 書く (例: 'ややくすんだ消防服レッド。肩や袖山はオレンジ寄り、影部はレンガ色に沈む')",
+  "  - material: 素材・質感 (例: '中厚のコットンツイル。光が強く跳ねる頭部のグロス塗装と対比')",
+  "  - key_parts: 各パーツの構造の配列 (頭部/顔/手/服の特徴。一貫させるべき固有ディテール)",
+  "  - identity_anchors: 絶対に維持すべき同一性要素の配列 (これがブレると別人になる)",
+  "  - mood: 全体のムード・世界観 (例: '赤と銅の密室的な世界。制御された熱、孤独な職務')",
+  "  - source_image_path: 分析元の参照画像パス (添付画像欄から)",
+  "look_analysis の記載例:",
+  "  \"look_analysis\":{\"subject_identity\":\"...\",\"silhouette\":\"...\",\"color_profile\":\"...\",\"material\":\"...\",\"key_parts\":[\"...\"],\"identity_anchors\":[\"...\"],\"mood\":\"...\",\"source_image_path\":\"...\"}",
+  "参照画像が無い場合は look_analysis を省略してよい (description ベースで生成する)。",
   "",
   "【シーン (scene_group) 粒度ルール ★最重要★】 (P18a)",
   "1. **1 シーン = 3〜5 カット** で細かく分ける。1 シーン 8+ カットは長すぎる。**全カットを 1 シーンにまとめるのは絶対 NG**。",
@@ -308,24 +344,70 @@ function latestAttachedImages(messages: PlanMessage[]): string[] {
 }
 
 
+/** 文字列フィールドを安全に取り出す (空はundefined)。 */
+function optStr(v: unknown): string | undefined {
+  return typeof v === "string" && v.trim() ? v : undefined;
+}
+/** 文字列配列を安全に取り出す。 */
+function optStrArray(v: unknown): string[] | undefined {
+  if (!Array.isArray(v)) return undefined;
+  const arr = v.filter((x): x is string => typeof x === "string" && x.trim().length > 0);
+  return arr.length ? arr : undefined;
+}
+/** snake/camel 両対応でフィールドを引く。 */
+function pick(o: Record<string, unknown>, snake: string, camel: string): unknown {
+  return o[snake] ?? o[camel];
+}
+
+/** ルック分析を正規化 (2026-06-06)。snake/camel 両対応。 */
+function normalizeLookAnalysis(value: unknown): SceneConstruction["look_analysis"] {
+  if (!value || typeof value !== "object") return undefined;
+  const o = value as Record<string, unknown>;
+  const subjectIdentity = optStr(pick(o, "subject_identity", "subjectIdentity"));
+  const mood = optStr(o.mood);
+  // 最低限 subjectIdentity か mood が無ければルック分析として扱わない。
+  if (!subjectIdentity && !mood) return undefined;
+  return {
+    subjectIdentity: subjectIdentity ?? "",
+    silhouette: optStr(o.silhouette) ?? "",
+    colorProfile: optStr(pick(o, "color_profile", "colorProfile")) ?? "",
+    material: optStr(o.material) ?? "",
+    keyParts: optStrArray(pick(o, "key_parts", "keyParts")) ?? [],
+    identityAnchors: optStrArray(pick(o, "identity_anchors", "identityAnchors")) ?? [],
+    mood: mood ?? "",
+    sourceImagePath: optStr(pick(o, "source_image_path", "sourceImagePath")) ?? "",
+  };
+}
+
 function normalizeSceneConstruction(value: unknown): SceneConstruction | null {
   if (!value || typeof value !== "object") return null;
-  const raw = value as { total_cuts?: unknown; cuts?: unknown };
+  const raw = value as { total_cuts?: unknown; cuts?: unknown; look_analysis?: unknown; lookAnalysis?: unknown };
   if (!Array.isArray(raw.cuts)) return null;
   const cuts = raw.cuts.flatMap((cut, index) => {
     if (!cut || typeof cut !== "object") return [];
-    const item = cut as { cut_id?: unknown; description?: unknown; duration_seconds?: unknown };
+    const item = cut as Record<string, unknown>;
     const description = typeof item.description === "string" ? item.description : "";
     if (!description.trim()) return [];
+    // 演出フィールド (2026-06-06): 企画タブで前出しした演出をそのまま運ぶ。
+    // 値があるものだけ載せる (部分前出しを許容)。snake/camel 両対応。
     return [{
-      cut_id: typeof item.cut_id === "string" && item.cut_id.trim() ? item.cut_id : `shot_${String(index + 1).padStart(3, "0")}`,
+      cut_id: typeof item.cut_id === "string" && (item.cut_id as string).trim() ? (item.cut_id as string) : `shot_${String(index + 1).padStart(3, "0")}`,
       description,
-      duration_seconds: typeof item.duration_seconds === "number" && Number.isFinite(item.duration_seconds) ? item.duration_seconds : 2,
+      duration_seconds: typeof item.duration_seconds === "number" && Number.isFinite(item.duration_seconds) ? (item.duration_seconds as number) : 2,
+      cut_role: optStr(pick(item, "cut_role", "cutRole")),
+      shot_type: optStr(pick(item, "shot_type", "shotType")),
+      camera_angle: optStr(pick(item, "camera_angle", "cameraAngle")),
+      action_verbs: optStrArray(pick(item, "action_verbs", "actionVerbs")),
+      camera_motion: optStr(pick(item, "camera_motion", "cameraMotion")),
+      must_keep: optStrArray(pick(item, "must_keep", "mustKeep")),
+      must_change: optStrArray(pick(item, "must_change", "mustChange")),
+      negative_constraints: optStrArray(pick(item, "negative_constraints", "negativeConstraints")),
     }];
   });
   if (cuts.length === 0) return null;
   const totalCuts = typeof raw.total_cuts === "number" && Number.isFinite(raw.total_cuts) ? raw.total_cuts : cuts.length;
-  return { total_cuts: totalCuts, cuts };
+  const look_analysis = normalizeLookAnalysis(raw.look_analysis ?? raw.lookAnalysis);
+  return { total_cuts: totalCuts, cuts, look_analysis };
 }
 
 function extractStructuredStoryboard(text: string, messages: PlanMessage[]): { params: StoryboardParams; scene: SceneConstruction } | null {
