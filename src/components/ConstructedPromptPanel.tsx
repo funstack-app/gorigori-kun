@@ -207,12 +207,21 @@ export function ConstructedPromptPanel() {
    * 注意: 「手書きで textarea を編集」した時の onChangeDraft でも generatedPrompt
    * は変わらない (=この useEffect は発火しない) ので、手書き編集は壊れない。
    */
+  // 前回の generatedPrompt を保持。マウント直後やタブ切替直後の「初回計算」では
+  // override をクリアしないようにする (企画タブから採用したプロンプトが消えるバグ修正)。
+  const prevGeneratedRef = useRef<string | null>(null);
   useEffect(() => {
+    const prev = prevGeneratedRef.current;
+    prevGeneratedRef.current = generatedPrompt;
+    // 初回 (prev===null): まだシーン構築を操作していない。override は維持する。
+    // 2回目以降で generatedPrompt が「実際に変化」したときだけ = ユーザーが
+    // シーン構築 UI を操作したときだけ override を解除する。
+    if (prev === null) return;
+    if (prev === generatedPrompt) return;
     if (promptOverride !== null && promptOverride !== generatedPrompt) {
       setPromptOverride(null);
     }
     // promptOverride / setPromptOverride を依存に入れない (無限ループ回避)。
-    // 「generatedPrompt が変わる = シーンが変わった」というイベント駆動の意図。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [generatedPrompt]);
 
