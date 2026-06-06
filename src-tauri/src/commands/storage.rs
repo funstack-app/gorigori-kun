@@ -19,6 +19,13 @@ pub struct StorageSettings {
     pub storage_root: String,
     #[serde(default = "default_project_subfolder")]
     pub project_subfolder: bool,
+    /// プロジェクトデータ (projects.json) を保存するフォルダ。
+    /// 未指定 (None) なら従来どおり OS 標準のアプリデータディレクトリ
+    /// (~/Library/Application Support/app.codexframefactory 等) に保存する。
+    /// Google Drive 等のローカル同期フォルダを指定すると、作品データを
+    /// クラウド同期できる (Drive API は使わず、同期フォルダのパス指定方式)。
+    #[serde(default)]
+    pub projects_data_root: Option<String>,
     #[serde(default)]
     pub cloud_supabase_enabled: bool,
     #[serde(default)]
@@ -32,6 +39,7 @@ impl Default for StorageSettings {
         Self {
             storage_root: default_storage_root_string(),
             project_subfolder: true,
+            projects_data_root: None,
             cloud_supabase_enabled: false,
             supabase_project_url: None,
             supabase_bucket_name: None,
@@ -406,7 +414,9 @@ fn summarize_files(dir: &Path, file_count: &mut u32, total_bytes: &mut u64) {
 // 起動時に旧 localStorage データがあれば、フロント側で自動的に
 // これらのコマンドを呼んでマイグレーションする。
 
-fn projects_file_path() -> Result<PathBuf, String> {
+/// OS 標準のアプリデータディレクトリ配下の projects.json パスを返す。
+/// projectsDataRoot が未指定のときのデフォルト保存先 (従来挙動)。
+fn default_projects_file_path() -> Result<PathBuf, String> {
     // dirs::data_dir() は OS 標準のアプリデータディレクトリを返す。
     //   Mac:   ~/Library/Application Support
     //   Win:   %APPDATA% (= C:\Users\<user>\AppData\Roaming)
@@ -418,6 +428,39 @@ fn projects_file_path() -> Result<PathBuf, String> {
             .map_err(|err| format!("アプリディレクトリ作成失敗: {err}"))?;
     }
     Ok(app_dir.join("projects.json"))
+}
+
+/// projects.json の実際の保存パスを解決する。
+///
+/// - StorageSettings.projects_data_root が指定されていれば、その配下の
+///   projects.json を使う (Google Drive 等の同期フォルダを指せる)。
+/// - 未指定なら従来どおり OS 標準のアプリデータディレクトリを使う (後方互換)。
+///
+/// 指定フォルダが存在しない場合は作成する。
+fn projects_file_path() -> Result<PathBuf, String> {
+    let settings = StorageSettings::load()?;
+    projects_file_path_for(settings.projects_data_root.as_deref())
+}
+
+/// projectsDataRoot (Option) からファイルパスを組み立てる。
+/// None なら default_projects_file_path() に委譲する。
+fn projects_file_path_for(projects_data_root: Option<&str>) -> Result<PathBuf, String> {
+    let root = projects_data_root.map(str::trim).filter(|r| !r.is_empty());
+    match root {
+        Some(dir) => {
+            let dir = PathBuf::from(dir);
+            if !dir.exists() {
+                fs::create_dir_all(&dir).map_err(|err| {
+                    format!(
+                        "プロジェクトデータ保存先の作成に失敗 ({}): {err}",
+                        dir.display()
+                    )
+                })?;
+            }
+            Ok(dir.join("projects.json"))
+        }
+        None => default_projects_file_path(),
+    }
 }
 
 /// projects.json を読み出す。存在しなければ空配列文字列を返す。
@@ -442,5 +485,53 @@ pub async fn projects_write(content: String) -> Result<(), String> {
         .map_err(|err| format!("projects.json 一時書込失敗: {err}"))?;
     fs::rename(&tmp_path, &path)
         .map_err(|err| format!("projects.json リネーム失敗: {err}"))?;
+    Ok(())
+}
+
+/// プロジェクトデータ保存先 (projects_data_root) を変更する。
+///
+/// 既存の projects.json を新しい場所へ移行 (コピー) してから設定を保存する。
+/// これにより保存先を切り替えても作品データが消えない。移行は冪等:
+///   - 旧 = 新 のときは何もしない
+///   - 新側に既に projects.json があれば上書きしない (新側を正とする)
+///   - 旧側に projects.json が無ければ移行不要 (新規作成扱い)
+///
+/// `new_root` が空文字列または null なら、デフォルト (アプリデータ
+/// ディレクトリ) に戻す。
+#[tauri::command]
+pub async fn projects_set_data_root(
+    state: State<'_, AppState>,
+    new_root: Option<String>,
+) -> Result<(), String> {
+    let mut settings = StorageSettings::load()?;
+
+    let normalized = new_root
+        .as_deref()
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+        .map(ToOwned::to_owned);
+
+    let old_path = projects_file_path_for(settings.projects_data_root.as_deref())?;
+    let new_path = projects_file_path_for(normalized.as_deref())?;
+
+    // 旧側にデータがあり、新側にまだ無いときだけコピーする (冪等・非破壊)。
+    if old_path != new_path && old_path.exists() && !new_path.exists() {
+        if let Some(parent) = new_path.parent() {
+            fs::create_dir_all(parent).map_err(|err| {
+                format!("プロジェクトデータ保存先の作成に失敗: {err}")
+            })?;
+        }
+        fs::copy(&old_path, &new_path).map_err(|err| {
+            format!(
+                "projects.json の移行に失敗 ({} -> {}): {err}",
+                old_path.display(),
+                new_path.display()
+            )
+        })?;
+    }
+
+    settings.projects_data_root = normalized;
+    settings.save()?;
+    state.set_storage_settings(settings).await;
     Ok(())
 }

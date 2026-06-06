@@ -509,6 +509,12 @@ export type StorageSettings = {
   storageRoot: string;
   /** プロジェクト名でサブフォルダを作成するか。 */
   projectSubfolder: boolean;
+  /**
+   * プロジェクトデータ (projects.json) の保存フォルダ。
+   * 未指定 (null/undefined) なら OS 標準のアプリデータディレクトリに保存する (従来挙動)。
+   * Google Drive 等のローカル同期フォルダを指定すると作品データをクラウド同期できる。
+   */
+  projectsDataRoot?: string | null;
   /** Supabase BYO クラウド連携が有効か。 */
   cloudSupabaseEnabled?: boolean;
   /** Supabase Project URL（anon key は Keychain 保存）。 */
@@ -570,6 +576,13 @@ export const storage = {
   usageStats: () => invoke<StorageUsageStats>("storage_usage_stats"),
   /** ユーザーのホームディレクトリの絶対パスを取得（推奨パス組立用）。 */
   homeDir: () => invoke<string>("storage_home_dir"),
+  /**
+   * プロジェクトデータ (projects.json) の保存先フォルダを変更する。
+   * 既存の projects.json を新しい場所へ移行（コピー）してから設定を保存する。
+   * null / 空文字を渡すと OS 標準のアプリデータディレクトリに戻す。
+   */
+  setProjectsDataRoot: (newRoot: string | null) =>
+    invoke<void>("projects_set_data_root", { newRoot }),
 };
 
 // ──────────── Supabase BYO Cloud ────────────

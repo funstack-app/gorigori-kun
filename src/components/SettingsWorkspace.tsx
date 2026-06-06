@@ -1,22 +1,24 @@
-import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { useEffect, useState } from "react";
 import {
-  higgsfield,
-  storage,
   type HiggsfieldDebugInfo,
   type HiggsfieldInstallProgress,
+  higgsfield,
   type LegacySummary,
   type StorageSettings,
+  storage,
 } from "../lib/ipc";
-import { useAccounts, type CodexPlan } from "../lib/store/accounts";
+import { type CodexPlan, useAccounts } from "../lib/store/accounts";
+import { useProjects } from "../lib/store/projects";
 import { useSettings } from "../lib/store/settings";
 import { useThreads } from "../lib/store/threads";
 import { useToasts } from "../lib/store/toasts";
 // SettingsCloudSection は v0.6.13 でα版非表示。β以降で復活予定。
 // import { SettingsCloudSection } from "./SettingsCloudSection";
 import { SettingsConnections } from "./SettingsConnections";
-import { UpdateChecker } from "./UpdateChecker";
 import { StorageManagementSection } from "./StorageManagementSection";
+import { UpdateChecker } from "./UpdateChecker";
+
 type Tab = "basic" | "storage" | "accounts" | "connections";
 const TABS: Array<{ id: Tab; label: string }> = [
   { id: "basic", label: "基本" },
@@ -109,7 +111,8 @@ function BasicSettings() {
   };
   const onSave = async () => {
     await save(draft);
-    if (draft.defaultModel && draft.defaultModel !== selectedModel) setSelectedModel(draft.defaultModel);
+    if (draft.defaultModel && draft.defaultModel !== selectedModel)
+      setSelectedModel(draft.defaultModel);
     if (draft.defaultEffort) setSelectedEffort(draft.defaultEffort);
     if (draft.defaultCwd) setCwd(draft.defaultCwd);
     push({ kind: "success", text: "基本設定を保存しました", ttlMs: 2400 });
@@ -170,7 +173,9 @@ function BasicSettings() {
         <Field label="承認ポリシー">
           <select
             value={draft.approvalPolicy ?? "never"}
-            onChange={(e) => update("approvalPolicy", e.target.value as typeof draft.approvalPolicy)}
+            onChange={(e) =>
+              update("approvalPolicy", e.target.value as typeof draft.approvalPolicy)
+            }
             className="h-9 w-full rounded-md border border-[#343434] bg-[#101010] px-2 text-xs text-neutral-100"
           >
             <option value="never">承認しない</option>
@@ -190,7 +195,11 @@ function BasicSettings() {
           </select>
         </Field>
       </div>
-      <button type="button" onClick={() => void onSave()} className={`${PRIMARY_BUTTON} h-9 px-4 text-xs`}>
+      <button
+        type="button"
+        onClick={() => void onSave()}
+        className={`${PRIMARY_BUTTON} h-9 px-4 text-xs`}
+      >
         保存
       </button>
     </Panel>
@@ -231,7 +240,11 @@ function WorldContextSettings() {
       const { readTextFile } = await import("@tauri-apps/plugin-fs");
       const content = await readTextFile(picked);
       setDraft(content);
-      push({ kind: "success", text: "ファイルを読み込みました。保存で反映されます。", ttlMs: 2800 });
+      push({
+        kind: "success",
+        text: "ファイルを読み込みました。保存で反映されます。",
+        ttlMs: 2800,
+      });
     } catch (err) {
       push({ kind: "error", text: `ファイルの読み込みに失敗しました: ${String(err)}` });
     }
@@ -259,15 +272,25 @@ function WorldContextSettings() {
           onChange={(e) => setDraft(e.target.value)}
           spellCheck={false}
           rows={10}
-          placeholder={"# 世界観\n- 舞台: ...\n- 主人公: ...\n- トーン: ...\n\n企画チャットがこの設定を踏まえて提案します。"}
+          placeholder={
+            "# 世界観\n- 舞台: ...\n- 主人公: ...\n- トーン: ...\n\n企画チャットがこの設定を踏まえて提案します。"
+          }
           className="min-h-[180px] w-full resize-y rounded-md border border-[#343434] bg-[#101010] px-3 py-2 font-mono text-xs leading-relaxed text-neutral-100 outline-none focus:border-pink-500"
         />
       </Field>
       <div className="flex items-center gap-2">
-        <button type="button" onClick={() => void onSave()} className={`${PRIMARY_BUTTON} h-9 px-4 text-xs`}>
+        <button
+          type="button"
+          onClick={() => void onSave()}
+          className={`${PRIMARY_BUTTON} h-9 px-4 text-xs`}
+        >
           {dirty ? "保存" : "保存済み"}
         </button>
-        <button type="button" onClick={() => void importFile()} className={`${MUTED_BUTTON} h-9 px-3 text-xs`}>
+        <button
+          type="button"
+          onClick={() => void importFile()}
+          className={`${MUTED_BUTTON} h-9 px-3 text-xs`}
+        >
           ファイルから読み込む
         </button>
         {draft.length > 0 && (
@@ -327,10 +350,18 @@ function StorageSettingsTab() {
   // 旧版では現在の storageRoot から逆算していたが、カスタムパス設定時に
   // 「テスト用」のような任意ディレクトリを home と誤認するバグがあった。
   const presets: Array<{ label: string; path: string; hint: string }> = [
-    { label: "Pictures（推奨、Finderで見える）", path: `${home}/Pictures/GORI GORI`, hint: "Mac標準の写真フォルダ" },
+    {
+      label: "Pictures（推奨、Finderで見える）",
+      path: `${home}/Pictures/GORI GORI`,
+      hint: "Mac標準の写真フォルダ",
+    },
     { label: "Documents", path: `${home}/Documents/GORI GORI`, hint: "書類フォルダ" },
     { label: "Desktop", path: `${home}/Desktop/GORI GORI`, hint: "デスクトップ" },
-    { label: "iCloud Drive", path: `${home}/Library/Mobile Documents/com~apple~CloudDocs/GORI GORI`, hint: "iCloud で自動同期" },
+    {
+      label: "iCloud Drive",
+      path: `${home}/Library/Mobile Documents/com~apple~CloudDocs/GORI GORI`,
+      hint: "iCloud で自動同期",
+    },
   ];
 
   // 表示用にパスを短縮する。/Users/{username}/ → ~/ に置換。
@@ -378,10 +409,49 @@ function StorageSettingsTab() {
     }
   };
 
+  // プロジェクトデータ (projects.json) の保存先を変更する。
+  // Rust 側で既存 projects.json を新フォルダへ移行してから設定保存し、
+  // フロント側は projects ストアを再初期化して新ファイルから読み直す。
+  const applyProjectsDataRoot = async (newRoot: string | null) => {
+    setSaving(true);
+    try {
+      await storage.setProjectsDataRoot(newRoot);
+      const next = await storage.getSettings();
+      setSettings(next);
+      // 新しい保存先のファイルから projects を読み直す（移行済みデータを反映）。
+      await useProjects.getState().initialize();
+      push({
+        kind: "success",
+        text: newRoot
+          ? "プロジェクトデータ保存先を更新しました（既存データを移行済み）"
+          : "プロジェクトデータ保存先を既定に戻しました",
+        ttlMs: 3200,
+      });
+    } catch (err) {
+      push({ kind: "error", text: `保存先の変更に失敗: ${String(err)}` });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const pickProjectsDataFolder = async () => {
+    try {
+      const { open: openDialog } = await import("@tauri-apps/plugin-dialog");
+      const r = await openDialog({ directory: true, multiple: false });
+      if (typeof r === "string") void applyProjectsDataRoot(r);
+    } catch (err) {
+      push({ kind: "error", text: `フォルダ選択に失敗: ${String(err)}` });
+    }
+  };
+
   const runMigration = async () => {
     if (!legacy?.exists) return;
     const sizeMb = (legacy.totalBytes / (1024 * 1024)).toFixed(1);
-    if (!window.confirm(`${legacy.fileCount} ファイル (約${sizeMb}MB) を新しい保存先へコピーします。元ファイルは ~/.codex/ に残ります。よろしいですか？`)) {
+    if (
+      !window.confirm(
+        `${legacy.fileCount} ファイル (約${sizeMb}MB) を新しい保存先へコピーします。元ファイルは ~/.codex/ に残ります。よろしいですか？`,
+      )
+    ) {
       return;
     }
     setMigrating(true);
@@ -407,10 +477,18 @@ function StorageSettingsTab() {
       <Field label="現在の保存先">
         <div className="flex gap-2">
           <TextInput value={shortenPath(settings.storageRoot)} onChange={() => undefined} mono />
-          <button type="button" onClick={() => void revealInFinder()} className={`${MUTED_BUTTON} h-9 px-3 text-xs`}>
+          <button
+            type="button"
+            onClick={() => void revealInFinder()}
+            className={`${MUTED_BUTTON} h-9 px-3 text-xs`}
+          >
             Finderで開く
           </button>
-          <button type="button" onClick={() => void pickFolder()} className={`${MUTED_BUTTON} h-9 px-3 text-xs`}>
+          <button
+            type="button"
+            onClick={() => void pickFolder()}
+            className={`${MUTED_BUTTON} h-9 px-3 text-xs`}
+          >
             変更...
           </button>
         </div>
@@ -433,10 +511,15 @@ function StorageSettingsTab() {
                 }`}
               >
                 <div className="flex items-center justify-between gap-2">
-                  <span className="font-bold">{isActive ? "✓ " : ""}{preset.label}</span>
+                  <span className="font-bold">
+                    {isActive ? "✓ " : ""}
+                    {preset.label}
+                  </span>
                   <span className="text-[10px] text-neutral-500">{preset.hint}</span>
                 </div>
-                <div className="mt-0.5 font-mono text-[10px] text-neutral-500">{shortenPath(preset.path)}</div>
+                <div className="mt-0.5 font-mono text-[10px] text-neutral-500">
+                  {shortenPath(preset.path)}
+                </div>
               </button>
             );
           })}
@@ -448,11 +531,63 @@ function StorageSettingsTab() {
           <input
             type="checkbox"
             checked={settings.projectSubfolder}
-            onChange={(e) => void applySettings({ ...settings, projectSubfolder: e.target.checked })}
+            onChange={(e) =>
+              void applySettings({ ...settings, projectSubfolder: e.target.checked })
+            }
             className="h-4 w-4"
           />
-          <span>ON にすると {shortenPath(settings.storageRoot)}/プロジェクト名/{`{画像}`} の構造になる</span>
+          <span>
+            ON にすると {shortenPath(settings.storageRoot)}/プロジェクト名/{`{画像}`} の構造になる
+          </span>
         </label>
+      </Field>
+
+      {/*
+        プロジェクトデータ (projects.json) の保存先。
+        画像 (storageRoot) とは別軸。Google Drive 等のローカル同期フォルダを
+        指定すると、作品データ（プロジェクト一覧・企画チャット等）を別 PC と
+        共有・バックアップできる。未指定なら従来どおりアプリ内部に保存。
+      */}
+      <Field label="プロジェクトデータの保存先（作品一覧・企画ログ）">
+        <p className="mb-1.5 text-[11px] leading-relaxed text-neutral-400">
+          プロジェクト一覧や企画チャットのデータ (projects.json) を保存する場所です。 Google Drive
+          などのローカル同期フォルダ（例:{" "}
+          <span className="font-mono">
+            ~/Library/CloudStorage/GoogleDrive-…/マイドライブ/GORI GORI
+          </span>
+          ）を選ぶと、別の PC とデータを同期・バックアップできます。
+          未設定ならアプリ内部に保存します（従来どおり）。
+        </p>
+        <div className="flex gap-2">
+          <TextInput
+            value={
+              settings.projectsDataRoot
+                ? shortenPath(settings.projectsDataRoot)
+                : "（既定: アプリ内部に保存）"
+            }
+            onChange={() => undefined}
+            mono
+          />
+          <button
+            type="button"
+            disabled={saving}
+            onClick={() => void pickProjectsDataFolder()}
+            className={`${MUTED_BUTTON} h-9 px-3 text-xs disabled:opacity-40`}
+          >
+            フォルダを選ぶ
+          </button>
+          {settings.projectsDataRoot ? (
+            <button
+              type="button"
+              disabled={saving}
+              onClick={() => void applyProjectsDataRoot(null)}
+              className={`${MUTED_BUTTON} h-9 px-3 text-xs disabled:opacity-40`}
+              title="アプリ内部の既定の保存先に戻します（データはコピーで移行されます）"
+            >
+              既定に戻す
+            </button>
+          ) : null}
+        </div>
       </Field>
 
       {legacy?.exists && legacy.fileCount > 0 ? (
@@ -507,9 +642,7 @@ function AccountSettings() {
               setInstallProgress("拡張パックをダウンロード中…");
               break;
             case "downloaded":
-              setInstallProgress(
-                `ダウンロード完了 (${Math.round(p.bytes / 1024 / 1024)} MB)`,
-              );
+              setInstallProgress(`ダウンロード完了 (${Math.round(p.bytes / 1024 / 1024)} MB)`);
               break;
             case "extracting":
               setInstallProgress("展開中…");
@@ -577,10 +710,14 @@ function AccountSettings() {
           <div>
             <h3 className="text-sm font-black text-white">Codex (ChatGPT)</h3>
             <p className="mt-1 text-xs text-neutral-500">
-              {accounts.codex.loggedIn ? accounts.codex.email ?? "ログイン済み" : "未ログイン"}
+              {accounts.codex.loggedIn ? (accounts.codex.email ?? "ログイン済み") : "未ログイン"}
             </p>
           </div>
-          <button type="button" onClick={() => void accounts.loginCodex()} className={`${PRIMARY_BUTTON} h-9 px-3 text-xs`}>
+          <button
+            type="button"
+            onClick={() => void accounts.loginCodex()}
+            className={`${PRIMARY_BUTTON} h-9 px-3 text-xs`}
+          >
             codex login
           </button>
         </div>
@@ -591,7 +728,9 @@ function AccountSettings() {
               type="button"
               onClick={() => accounts.setCodexPlan(plan)}
               className={`h-8 rounded-md text-xs font-bold ${
-                accounts.codex.plan === plan ? "bg-pink-500 text-white" : "text-neutral-400 hover:text-white"
+                accounts.codex.plan === plan
+                  ? "bg-pink-500 text-white"
+                  : "text-neutral-400 hover:text-white"
               }`}
             >
               {PLAN_LABELS[plan]}
@@ -616,9 +755,7 @@ function AccountSettings() {
               </p>
             )}
             {installing && installProgress && (
-              <p className="mt-1 text-xs font-semibold text-amber-300">
-                {installProgress}
-              </p>
+              <p className="mt-1 text-xs font-semibold text-amber-300">{installProgress}</p>
             )}
           </div>
           <div className="flex flex-wrap gap-2">
@@ -644,7 +781,11 @@ function AccountSettings() {
                   ? "再インストール"
                   : "ワンタップ導入"}
             </button>
-            <button type="button" onClick={() => void refresh()} className={`${MUTED_BUTTON} h-9 px-3 text-xs`}>
+            <button
+              type="button"
+              onClick={() => void refresh()}
+              className={`${MUTED_BUTTON} h-9 px-3 text-xs`}
+            >
               テスト接続
             </button>
             {/* F-#13: Higgsfield 診断 — 接続できない時に実測情報を吐く */}
@@ -658,20 +799,26 @@ function AccountSettings() {
               {debugRunning ? "診断中…" : "診断"}
             </button>
             {accounts.higgsfield.authenticated ? (
-              <button type="button" onClick={() => void logoutHiggsfield()} className={`${MUTED_BUTTON} h-9 px-3 text-xs`}>
+              <button
+                type="button"
+                onClick={() => void logoutHiggsfield()}
+                className={`${MUTED_BUTTON} h-9 px-3 text-xs`}
+              >
                 ログアウト
               </button>
             ) : (
-              <button type="button" onClick={() => void loginHiggsfield()} className={`${PRIMARY_BUTTON} h-9 px-3 text-xs`}>
+              <button
+                type="button"
+                onClick={() => void loginHiggsfield()}
+                className={`${PRIMARY_BUTTON} h-9 px-3 text-xs`}
+              >
                 接続
               </button>
             )}
           </div>
         </div>
       </section>
-      {debugInfo && (
-        <HiggsfieldDebugDialog info={debugInfo} onClose={() => setDebugInfo(null)} />
-      )}
+      {debugInfo && <HiggsfieldDebugDialog info={debugInfo} onClose={() => setDebugInfo(null)} />}
     </Panel>
   );
 }
@@ -693,7 +840,10 @@ function HiggsfieldDebugDialog({
     }
   };
   return (
-    <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/70 p-4" onClick={onClose}>
+    <div
+      className="fixed inset-0 z-[80] flex items-center justify-center bg-black/70 p-4"
+      onClick={onClose}
+    >
       {/* STΛCK 指示 (2026-05-19): OptionPickerModal と統一サイズ */}
       <div
         className="flex max-h-[calc(100vh-2rem)] w-full max-w-5xl min-h-0 flex-col overflow-hidden rounded-xl border border-[#262626] bg-[#0f0f0f] shadow-2xl"
@@ -701,16 +851,18 @@ function HiggsfieldDebugDialog({
       >
         <div className="flex items-center justify-between border-b border-[#242424] px-6 py-3">
           <div>
-            <p className="text-[10px] font-black uppercase tracking-wide text-neutral-500">
-              DEBUG
-            </p>
+            <p className="text-[10px] font-black uppercase tracking-wide text-neutral-500">DEBUG</p>
             <h3 className="text-sm font-black text-white">Higgsfield 診断結果</h3>
             <p className="mt-0.5 text-[10px] text-neutral-500">
               この情報をサポート (Discord 等) にコピペで送ってください
             </p>
           </div>
           <div className="flex gap-2">
-            <button type="button" onClick={() => void copyAll()} className={`${MUTED_BUTTON} h-8 px-3 text-xs`}>
+            <button
+              type="button"
+              onClick={() => void copyAll()}
+              className={`${MUTED_BUTTON} h-8 px-3 text-xs`}
+            >
               全部コピー
             </button>
             <button
