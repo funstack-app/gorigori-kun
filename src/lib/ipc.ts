@@ -1,7 +1,16 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type {
+  EditModelProgress,
+  FontInfo,
+  MagicLayerResult,
+  MaskPayload,
+  ModelStatus,
+  PsdComposition,
+  SegmentResult,
+  TextRegion,
+} from "./edit/types";
 import type { StoryboardEvent, StoryboardRunParams } from "./storyboard/types";
-import type { EditModelProgress, FontInfo, MagicLayerResult, MaskPayload, ModelStatus, PsdComposition, SegmentResult, TextRegion } from "./edit/types";
 
 // ──────────── Event names (must match src-tauri/src/events.rs) ────────────
 export const EVENT_NOTIFICATION = "codex://notification";
@@ -35,10 +44,7 @@ export async function appServerReady(): Promise<boolean> {
   return invoke<boolean>("codex_status");
 }
 
-export async function rpcRequest<R = unknown>(
-  method: string,
-  params?: unknown,
-): Promise<R> {
+export async function rpcRequest<R = unknown>(method: string, params?: unknown): Promise<R> {
   return invoke<R>("codex_request", { method, params: params ?? null });
 }
 
@@ -50,36 +56,32 @@ export async function resolveServerRequest(
   return invoke("codex_resolve_server_request", { id, result, error });
 }
 
-export function onNotification(
-  cb: (n: RpcNotification) => void,
-): Promise<UnlistenFn> {
+export function onNotification(cb: (n: RpcNotification) => void): Promise<UnlistenFn> {
   return listen<RpcNotification>(EVENT_NOTIFICATION, (e) => cb(e.payload));
 }
 
-export function onServerRequest(
-  cb: (r: ServerRequest) => void,
-): Promise<UnlistenFn> {
+export function onServerRequest(cb: (r: ServerRequest) => void): Promise<UnlistenFn> {
   return listen<ServerRequest>(EVENT_SERVER_REQUEST, (e) => cb(e.payload));
 }
 
-export function onAppServerStatus(
-  cb: (s: AppServerStatus) => void,
-): Promise<UnlistenFn> {
+export function onAppServerStatus(cb: (s: AppServerStatus) => void): Promise<UnlistenFn> {
   return listen<AppServerStatus>(EVENT_APP_SERVER_STATUS, (e) => cb(e.payload));
 }
 
-
 // ──────────── Edit Tab AI Models ────────────
-export type { EditModelCategory, EditModelProgress, ModelStatus, PsdComposition, PsdLayerSpec } from "./edit/types";
+export type {
+  EditModelCategory,
+  EditModelProgress,
+  ModelStatus,
+  PsdComposition,
+  PsdLayerSpec,
+} from "./edit/types";
 
 export function listenEditModelProgress(
   cb: (progress: EditModelProgress) => void,
 ): Promise<UnlistenFn> {
-  return listen<EditModelProgress>(EVENT_EDIT_MODEL_PROGRESS, (event) =>
-    cb(event.payload),
-  );
+  return listen<EditModelProgress>(EVENT_EDIT_MODEL_PROGRESS, (event) => cb(event.payload));
 }
-
 
 export const editSegment = {
   run: (inputPath: string, projectName?: string | null) =>
@@ -97,14 +99,12 @@ export const editSam2 = {
 
 export const editModels = {
   list: () => invoke<ModelStatus[]>("edit_models_list"),
-  download: (modelIds: string[]) =>
-    invoke<void>("edit_models_download", { modelIds }),
+  download: (modelIds: string[]) => invoke<void>("edit_models_download", { modelIds }),
   delete: (modelId: string) => invoke<void>("edit_models_delete", { modelId }),
 };
 
 export const editOcr = {
-  detect: (inputPath: string) =>
-    invoke<TextRegion[]>("edit_ocr_detect", { inputPath }),
+  detect: (inputPath: string) => invoke<TextRegion[]>("edit_ocr_detect", { inputPath }),
 };
 
 export const editInpaint = {
@@ -163,6 +163,23 @@ export type ImageEvent = {
 
 export type StartWatchResult = { dir: string; watching: boolean };
 
+/** Result of `images_delete_many` (一括削除). One failing path does not
+ * abort the rest, so partial success is reported. */
+export type BatchDeleteResult = {
+  deleted: number;
+  failed: { path: string; error: string }[];
+};
+
+/** Result of `images_relink_missing` (画像パス再リンク).
+ * dbUpdated: history.db で旧→新パスに張り替えた件数。
+ * dbUnresolved: 候補が見つからずスキップした件数 (SafeImage フォールバック対象)。
+ * pathMap: フロント側 (projects.json) が同じ張り替えを適用するための旧→新マップ。 */
+export type RelinkResult = {
+  dbUpdated: number;
+  dbUnresolved: number;
+  pathMap: Record<string, string>;
+};
+
 export const images = {
   startWatcher: () => invoke<StartWatchResult>("images_start_watcher"),
   saveToProject: (src: string, projectDir: string, newName?: string) =>
@@ -171,8 +188,7 @@ export const images = {
       projectDir,
       newName,
     }),
-  revealInFinder: (path: string) =>
-    invoke<void>("images_reveal_in_finder", { path }),
+  revealInFinder: (path: string) => invoke<void>("images_reveal_in_finder", { path }),
   /** Persist a PNG mask alongside `srcPath` under a hidden `.masks/` dir. */
   writeMask: (srcPath: string, pngBytes: Uint8Array) =>
     invoke<string>("images_write_mask", {
@@ -180,18 +196,12 @@ export const images = {
       pngBytes: Array.from(pngBytes),
     }),
   /** Copy an image file to a user-chosen path. */
-  saveAs: (src: string, dest: string) =>
-    invoke<void>("images_save_as", { src, dest }),
+  saveAs: (src: string, dest: string) => invoke<void>("images_save_as", { src, dest }),
   /** Rename an image file in-place within its current directory. */
-  rename: (src: string, newName: string) =>
-    invoke<string>("images_rename", { src, newName }),
+  rename: (src: string, newName: string) => invoke<string>("images_rename", { src, newName }),
   /** Decode and re-encode an image as PNG or JPEG at a user-chosen path. */
-  saveAsFormat: (
-    src: string,
-    dest: string,
-    format: "png" | "jpeg",
-    quality?: number,
-  ) => invoke<void>("images_save_as_format", { src, dest, format, quality }),
+  saveAsFormat: (src: string, dest: string, format: "png" | "jpeg", quality?: number) =>
+    invoke<void>("images_save_as_format", { src, dest, format, quality }),
   /** Run the bundled Vision-API helper to remove the background.
    * Returns the new transparent-PNG path (sibling to src). */
   removeBackground: (srcPath: string, bgColorHex?: string) =>
@@ -199,6 +209,15 @@ export const images = {
   /** Delete an image/video file from disk and drop its history.db row.
    * Used by F-#12 没作品削除. Missing-file is treated as success. */
   deleteFile: (path: string) => invoke<void>("images_delete", { path }),
+  /** Delete multiple media files at once (複数選択での一括削除).
+   * One failing path does not abort the rest; returns deleted count and
+   * per-path failures. */
+  deleteFiles: (paths: string[]) => invoke<BatchDeleteResult>("images_delete_many", { paths }),
+  /** 記録パスと実体のズレを再リンクで解消する (非破壊・冪等)。
+   * α版→β版で画像の保存先が変わり、history.db / projects.json の旧パスに
+   * 実体が無くて「画像が見えない」症状を解消する。history.db は Rust が
+   * 直接張り替え、projects.json 用には旧→新マップを返すのでフロントが適用する。 */
+  relinkMissing: () => invoke<RelinkResult>("images_relink_missing"),
   /** Persist a clipboard-pasted PNG under `~/.codex/generated_images/`
    * so the watcher picks it up and the composer can attach it as a
    * reference. Returns the absolute file path. */
@@ -379,8 +398,7 @@ export const higgsfield = {
       failedCount: number;
       errors: string[];
     }>("higgsfield_generate_compare", { args }),
-  cancelBatch: (batchId: string) =>
-    invoke<void>("higgsfield_cancel_batch", { batchId }),
+  cancelBatch: (batchId: string) => invoke<void>("higgsfield_cancel_batch", { batchId }),
   generateCost: (
     args: {
       jobSetType: string;
@@ -445,23 +463,17 @@ export type ImageBatchEvent =
       mediaType?: MediaType;
     };
 
-export function onImageBatch(
-  cb: (e: ImageBatchEvent) => void,
-): Promise<UnlistenFn> {
+export function onImageBatch(cb: (e: ImageBatchEvent) => void): Promise<UnlistenFn> {
   return listen<ImageBatchEvent>("codex://image-batch", (e) => cb(e.payload));
 }
 
-export function onImageGenerated(
-  cb: (e: ImageEvent) => void,
-): Promise<UnlistenFn> {
+export function onImageGenerated(cb: (e: ImageEvent) => void): Promise<UnlistenFn> {
   return listen<ImageEvent>(EVENT_IMAGE_GENERATED, (e) => cb(e.payload));
 }
 
 export type { StoryboardEvent, StoryboardRunParams };
 
-export function onStoryboardEvent(
-  cb: (event: StoryboardEvent) => void,
-): Promise<UnlistenFn> {
+export function onStoryboardEvent(cb: (event: StoryboardEvent) => void): Promise<UnlistenFn> {
   return listen<StoryboardEvent>(EVENT_STORYBOARD, (event) => cb(event.payload));
 }
 
@@ -484,8 +496,7 @@ export type RegenerateCutParams = {
 };
 
 export const storyboard = {
-  run: (params: StoryboardRunParams) =>
-    invoke<string>("storyboard_run", { params }),
+  run: (params: StoryboardRunParams) => invoke<string>("storyboard_run", { params }),
   /** 単一カットを追加参照画像で再生成 (新 take として TakeCompleted が来る)。 */
   regenerateCut: (params: RegenerateCutParams) =>
     invoke<string>("storyboard_regenerate_cut", { params }),
@@ -496,8 +507,7 @@ export const storyboard = {
   readAdoptions: (runId: string) =>
     invoke<Record<string, string>>("storyboard_read_adoptions", { runId }),
   /** 完了済み run の debug-log.json を読み込む（構造化プロンプト履歴の確認用）。 */
-  readDebugLog: (runId: string) =>
-    invoke<string>("storyboard_read_debug_log", { runId }),
+  readDebugLog: (runId: string) => invoke<string>("storyboard_read_debug_log", { runId }),
 };
 
 // ──────────── Storage Settings ────────────
@@ -565,11 +575,9 @@ export const storage = {
   /** 現在の保存先設定を取得。なければデフォルトを返す。 */
   getSettings: () => invoke<StorageSettings>("storage_get_settings"),
   /** 保存先設定を更新。Watcher も再起動される。 */
-  setSettings: (settings: StorageSettings) =>
-    invoke<void>("storage_set_settings", { settings }),
+  setSettings: (settings: StorageSettings) => invoke<void>("storage_set_settings", { settings }),
   /** ~/.codex/generated_images/ の中身を新保存先にコピー（元ファイルは残す）。 */
-  migrateFromCodexHome: () =>
-    invoke<MigrationResult>("storage_migrate_from_codex_home"),
+  migrateFromCodexHome: () => invoke<MigrationResult>("storage_migrate_from_codex_home"),
   /** ~/.codex/generated_images/ に残っている画像の件数と容量を取得。 */
   legacySummary: () => invoke<LegacySummary>("storage_legacy_summary"),
   /** 現在のローカル保存先の使用容量を取得（サイドバー表示用）。 */
@@ -587,10 +595,8 @@ export const storage = {
 
 // ──────────── Supabase BYO Cloud ────────────
 export const supabaseCloud = {
-  testConnection: (config: SupabaseConfig) =>
-    invoke<void>("supabase_test_connection", { config }),
-  saveConfig: (config: SupabaseConfig) =>
-    invoke<void>("supabase_save_config", { config }),
+  testConnection: (config: SupabaseConfig) => invoke<void>("supabase_test_connection", { config }),
+  saveConfig: (config: SupabaseConfig) => invoke<void>("supabase_save_config", { config }),
   getConfig: () => invoke<SupabaseConfig | null>("supabase_get_config"),
   disconnect: () => invoke<void>("supabase_disconnect"),
   usage: () => invoke<CloudUsage>("supabase_usage"),
@@ -665,20 +671,16 @@ export type ExportSummary = {
 export const sessions = {
   list: () => invoke<Session[]>("sessions_list"),
   create: (title?: string) => invoke<Session>("session_create", { title }),
-  rename: (id: string, title: string) =>
-    invoke<void>("session_rename", { id, title }),
+  rename: (id: string, title: string) => invoke<void>("session_rename", { id, title }),
   delete: (id: string) => invoke<void>("session_delete", { id }),
   getFull: (id: string) => invoke<SessionFull>("session_get_full", { id }),
-  recordTurn: (args: TurnRecordArgs) =>
-    invoke<TurnRow>("turn_record", { args }),
-  recordImage: (args: ImageRecordArgs) =>
-    invoke<ImageRow>("image_record", { args }),
+  recordTurn: (args: TurnRecordArgs) => invoke<TurnRow>("turn_record", { args }),
+  recordImage: (args: ImageRecordArgs) => invoke<ImageRow>("image_record", { args }),
   exportZip: (id: string, destZipPath: string) =>
     invoke<ExportSummary>("session_export", { id, destZipPath }),
   /** Load a past turn (with all generated images) so the chat can
    *  replay it as a frozen card. */
-  getTurn: (id: string) =>
-    invoke<TurnWithImages>("turn_get", { id }),
+  getTurn: (id: string) => invoke<TurnWithImages>("turn_get", { id }),
 };
 
 // ──────────── Prompt history (replaces the session-list UI) ────────────
@@ -696,8 +698,7 @@ export type PromptHistoryRow = {
 };
 
 export const history = {
-  recent: (limit?: number) =>
-    invoke<PromptHistoryRow[]>("turns_recent", { limit }),
+  recent: (limit?: number) => invoke<PromptHistoryRow[]>("turns_recent", { limit }),
 };
 
 // ──────────── Auth ────────────
@@ -714,13 +715,10 @@ export type AccountRead = {
 
 export const auth = {
   read: () => invoke<AccountRead>("auth_read"),
-  loginApiKey: (apiKey: string) =>
-    invoke<unknown>("auth_login_api_key", { apiKey }),
+  loginApiKey: (apiKey: string) => invoke<unknown>("auth_login_api_key", { apiKey }),
   loginChatGPT: () => invoke<{ authUrl?: string }>("auth_login_chatgpt"),
   loginChatGPTDeviceCode: () =>
-    invoke<{ verificationUrl?: string; userCode?: string }>(
-      "auth_login_chatgpt_device_code",
-    ),
+    invoke<{ verificationUrl?: string; userCode?: string }>("auth_login_chatgpt_device_code"),
   logout: () => invoke<unknown>("auth_logout"),
 };
 
@@ -750,8 +748,7 @@ export type SecretKey =
   | "supabase_bucket_name";
 
 export const secrets = {
-  set: (key: SecretKey, value: string) =>
-    invoke<void>("secret_set", { key, value }),
+  set: (key: SecretKey, value: string) => invoke<void>("secret_set", { key, value }),
   get: (key: SecretKey) => invoke<string | null>("secret_get", { key }),
   delete: (key: SecretKey) => invoke<void>("secret_delete", { key }),
   list: () => invoke<SecretKey[]>("secret_list"),
@@ -784,12 +781,7 @@ export type StockSearchFilters = {
 };
 
 export const stock = {
-  search: (
-    provider: StockProvider,
-    query: string,
-    page: number,
-    filters?: StockSearchFilters,
-  ) =>
+  search: (provider: StockProvider, query: string, page: number, filters?: StockSearchFilters) =>
     invoke<StockPhoto[]>("stock_search", {
       provider,
       query,
@@ -805,8 +797,7 @@ export const translate = {
 };
 
 export const codexVision = {
-  describeImage: (imagePath: string) =>
-    invoke<string>("codex_describe_image", { imagePath }),
+  describeImage: (imagePath: string) => invoke<string>("codex_describe_image", { imagePath }),
 };
 
 // ──────────── Codex MCP servers (~/.codex/config.toml) ────────────

@@ -52,6 +52,62 @@ export async function deleteGalleryImage(
 }
 
 /**
+ * 複数の没作品を一括削除する。選択モードのツールバーから使う。
+ * 破壊的操作なので、件数を明示した確認ダイアログを必ず挟む
+ * (単一削除と同じく Tauri ネイティブ ask() を優先、webview フォールバックに window.confirm)。
+ *
+ * 1 件失敗しても残りは続行する Rust 側 (images_delete_many) に合わせ、
+ * 成功したパスだけ表示 (useImages.items) から外す。返り値は削除した件数。
+ */
+export async function deleteGalleryImages(paths: string[]): Promise<number> {
+  if (paths.length === 0) return 0;
+
+  const message = `${paths.length} 枚を削除します。元に戻せません。よろしいですか？`;
+  let ok = false;
+  try {
+    const { ask } = await import("@tauri-apps/plugin-dialog");
+    ok = await ask(message, { title: "没作品の一括削除", kind: "warning" });
+  } catch {
+    ok = window.confirm(message);
+  }
+  if (!ok) return 0;
+
+  try {
+    const result = await imagesIpc.deleteFiles(paths);
+    const failedPaths = new Set(result.failed.map((f) => f.path));
+    for (const path of paths) {
+      // 失敗したパスは実体が残っているので表示からは外さない。
+      if (!failedPaths.has(path)) useImages.getState().remove(path);
+    }
+
+    if (result.failed.length > 0) {
+      useToasts.getState().push({
+        kind: result.deleted > 0 ? "warn" : "error",
+        text:
+          result.deleted > 0
+            ? `${result.deleted} 枚を削除しました（${result.failed.length} 枚は失敗）`
+            : `削除に失敗しました（${result.failed.length} 枚）`,
+        ttlMs: 5000,
+      });
+    } else {
+      useToasts.getState().push({
+        kind: "success",
+        text: `${result.deleted} 枚を削除しました`,
+        ttlMs: 2500,
+      });
+    }
+    return result.deleted;
+  } catch (err) {
+    useToasts.getState().push({
+      kind: "error",
+      text: `一括削除に失敗しました: ${String(err)}`,
+      ttlMs: 5000,
+    });
+    return 0;
+  }
+}
+
+/**
  * Build the context menu for a generated image. Used by both the gallery
  * sidebar (VirtualGalleryGrid) and the inline chat thumbnails
  * (ImageGenerationGroup) so right-click is consistent everywhere.

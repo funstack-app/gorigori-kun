@@ -193,6 +193,17 @@ type ProjectsState = {
    */
   renameItemPath: (oldPath: string, newPath: string) => void;
 
+  /**
+   * 旧→新パスのマップを全プロジェクトのアイテムに一括適用する。
+   *
+   * α版→β版で画像の保存先ディレクトリが変わり、projects.json の items[].imagePath が
+   * 旧パスのまま (実体は別ディレクトリに同名で存在) になって黒画像になる症状の救済。
+   * Rust 側 (images_relink_missing) が history.db を張り替えた結果の path_map を
+   * そのまま渡す想定。マッチしたアイテムが無いプロジェクトは触らない (updatedAt 維持)。
+   * 該当が 1 件も無ければ persist もしない (起動時の no-op で書き込みを増やさない)。
+   */
+  relinkItemPaths: (pathMap: Record<string, string>) => void;
+
   /** 企画チャットログを上書き保存する（差分ではなく毎回スナップショット） */
   setPlanChat: (projectId: string, messages: ProjectChatMessage[]) => void;
 
@@ -361,6 +372,28 @@ export const useProjects = create<ProjectsState>((set, get) => ({
       let projectChanged = false;
       const items = p.items.map((it) => {
         if (it.imagePath === oldPath) {
+          projectChanged = true;
+          changed = true;
+          return { ...it, imagePath: newPath };
+        }
+        return it;
+      });
+      return projectChanged ? { ...p, items, updatedAt: now } : p;
+    });
+    if (!changed) return;
+    persist(next);
+    set({ projects: next });
+  },
+
+  relinkItemPaths: (pathMap) => {
+    if (!pathMap || Object.keys(pathMap).length === 0) return;
+    const now = Date.now();
+    let changed = false;
+    const next = get().projects.map((p) => {
+      let projectChanged = false;
+      const items = p.items.map((it) => {
+        const newPath = pathMap[it.imagePath];
+        if (newPath && newPath !== it.imagePath) {
           projectChanged = true;
           changed = true;
           return { ...it, imagePath: newPath };

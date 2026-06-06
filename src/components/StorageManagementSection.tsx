@@ -1,6 +1,13 @@
 import { useEffect, useState } from "react";
 
-import { storage, storageCleanup, type CleanupInspection, type CleanupReport } from "../lib/ipc";
+import {
+  images,
+  storage,
+  storageCleanup,
+  type CleanupInspection,
+  type CleanupReport,
+} from "../lib/ipc";
+import { useProjects } from "../lib/store/projects";
 import { useToasts } from "../lib/store/toasts";
 
 /**
@@ -14,6 +21,7 @@ export function StorageManagementSection() {
   const [workSize, setWorkSize] = useState<number | null>(null);
   const [workPath, setWorkPath] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [relinking, setRelinking] = useState(false);
   const [lastReport, setLastReport] = useState<CleanupReport | null>(null);
   const pushToast = useToasts((s) => s.push);
 
@@ -35,6 +43,34 @@ export function StorageManagementSection() {
   useEffect(() => {
     void refresh();
   }, []);
+
+  const runRelink = async () => {
+    if (relinking) return;
+    setRelinking(true);
+    try {
+      // history.db は Rust が張り替える。projects.json は返ってきた旧→新マップで適用。
+      const result = await images.relinkMissing();
+      useProjects.getState().relinkItemPaths(result.pathMap);
+      const fixed = result.dbUpdated + Object.keys(result.pathMap).length;
+      if (fixed > 0) {
+        pushToast({
+          kind: "success",
+          text: `画像パスを ${fixed} 件修復しました${
+            result.dbUnresolved > 0 ? ` (見つからなかった: ${result.dbUnresolved} 件)` : ""
+          }`,
+        });
+      } else {
+        pushToast({
+          kind: "success",
+          text: "修復が必要な画像はありませんでした",
+        });
+      }
+    } catch (err) {
+      pushToast({ kind: "error", text: `画像パス修復に失敗: ${String(err)}` });
+    } finally {
+      setRelinking(false);
+    }
+  };
 
   const runCleanup = async () => {
     if (busy) return;
@@ -83,6 +119,18 @@ export function StorageManagementSection() {
         {workPath && (
           <p className="mt-2 truncate text-[10px] text-neutral-500">{workPath}</p>
         )}
+        <button
+          type="button"
+          onClick={runRelink}
+          disabled={relinking}
+          className="mt-3 w-full rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-3 py-2 text-xs font-black text-emerald-100 hover:border-emerald-400 hover:bg-emerald-500/20 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          {relinking ? "修復中…" : "画像が見えない時はここを押す (パス修復)"}
+        </button>
+        <p className="mt-1 text-[10px] leading-relaxed text-neutral-500">
+          昔の作品が黒画像/「画像が見つかりません」になる場合に、記録と実体の
+          ズレを直します。ファイルは移動・削除しません。
+        </p>
       </div>
 
       <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-3">

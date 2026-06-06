@@ -28,6 +28,7 @@ import { useProjects, type Project } from "./lib/store/projects";
 import { useActiveProject } from "./lib/store/activeProject";
 import { useLibrarySelection } from "./lib/store/librarySelection";
 import { LibraryAutoRenameButton } from "./components/LibraryAutoRenameButton";
+import { deleteGalleryImages } from "./components/galleryItemMenu";
 import { useAccounts } from "./lib/store/accounts";
 import { useSettings } from "./lib/store/settings";
 import { useThreads } from "./lib/store/threads";
@@ -270,9 +271,31 @@ function SignedInScaffold() {
     useAccounts.getState().refresh();
     // v0.6.9: プロジェクトをファイル保存に移行。起動時にファイルから読み出し、
     // 旧 localStorage データがあればファイルへマイグレーション。
-    useProjects.getState().initialize().catch((err) => {
-      console.error("projects.initialize failed", err);
-    });
+    // 初期化が終わってから、記録パスと実体のズレを再リンクで解消する。
+    // α版→β版で画像の保存先が変わり、history.db / projects.json の旧パスに
+    // 実体が無くて「画像が見えない」症状を直す (非破壊・冪等)。
+    useProjects
+      .getState()
+      .initialize()
+      .then(() => imagesIpc.relinkMissing())
+      .then((result) => {
+        if (result.dbUpdated > 0 || Object.keys(result.pathMap).length > 0) {
+          // history.db は Rust が張り替え済み。projects.json は旧→新マップで適用。
+          useProjects.getState().relinkItemPaths(result.pathMap);
+          console.info(
+            "[relink] history.db",
+            result.dbUpdated,
+            "件 / projects",
+            Object.keys(result.pathMap).length,
+            "件のパスを再リンク (未解決",
+            result.dbUnresolved,
+            "件)",
+          );
+        }
+      })
+      .catch((err) => {
+        console.error("projects.initialize / relink failed", err);
+      });
 
     let cancelled = false;
     const armed: Array<() => void> = [];
@@ -1659,6 +1682,7 @@ function AssetsWorkspace() {
               </button>
               <LibraryAutoRenameButton />
               <LibraryAddToProjectButton />
+              <LibraryDeleteButton />
               <button
                 type="button"
                 onClick={exitMode}
@@ -1807,6 +1831,47 @@ function AssetsWorkspace() {
         </div>
       )}
     </section>
+  );
+}
+
+/**
+ * ライブラリで選択中の没作品を一括削除するボタン。
+ * 押すと件数を明示した確認ダイアログ → ファイル実体 + history.db 行を削除。
+ * 破壊的操作なので danger スタイル。削除後は選択モードを抜ける。
+ */
+function LibraryDeleteButton() {
+  const selected = useLibrarySelection((s) => s.selected);
+  const exitMode = useLibrarySelection((s) => s.exitMode);
+  const [running, setRunning] = useState(false);
+
+  const disabled = selected.size === 0 || running;
+
+  const handleClick = async () => {
+    if (disabled) return;
+    setRunning(true);
+    try {
+      const deleted = await deleteGalleryImages(Array.from(selected));
+      // 1 枚でも消えたら選択モードを抜ける (残った失敗分を再選択させない)。
+      if (deleted > 0) exitMode();
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  return (
+    <button
+      type="button"
+      onClick={handleClick}
+      disabled={disabled}
+      className={[
+        "h-7 rounded-md px-3 text-[11px] font-bold transition",
+        disabled
+          ? "cursor-not-allowed bg-neutral-800 text-neutral-600"
+          : "bg-rose-600 text-white hover:bg-rose-500",
+      ].join(" ")}
+    >
+      {running ? "削除中…" : `🗑 削除${selected.size > 0 ? ` (${selected.size})` : ""}`}
+    </button>
   );
 }
 
