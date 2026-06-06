@@ -196,6 +196,9 @@ export const images = {
    * Returns the new transparent-PNG path (sibling to src). */
   removeBackground: (srcPath: string, bgColorHex?: string) =>
     invoke<string>("images_remove_background", { srcPath, bgColorHex }),
+  /** Delete an image/video file from disk and drop its history.db row.
+   * Used by F-#12 没作品削除. Missing-file is treated as success. */
+  deleteFile: (path: string) => invoke<void>("images_delete", { path }),
   /** Persist a clipboard-pasted PNG under `~/.codex/generated_images/`
    * so the watcher picks it up and the composer can attach it as a
    * reference. Returns the absolute file path. */

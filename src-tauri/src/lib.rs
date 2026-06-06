@@ -358,6 +358,7 @@ pub fn run() {
             commands::images::images_rename,
             commands::images::images_save_as_format,
             commands::images::images_remove_background,
+            commands::images::images_delete,
             commands::images::images_write_clipboard,
             commands::images::images_write_upload,
             commands::layer_splitter::layer_splitter_run,

@@ -8,6 +8,7 @@ import { useToasts } from "../lib/store/toasts";
 import { sendImageToPlanForRediscuss } from "../lib/sendToPlan";
 import { setDragRef } from "../lib/dragRef";
 import { ContextMenu, type ContextMenuItem } from "./ContextMenu";
+import { deleteGalleryImage } from "./galleryItemMenu";
 import { ImageMetaPanel } from "./ImageMetaPanel";
 import { RegisterPresetDialog } from "./RegisterPresetDialog";
 
@@ -416,6 +417,17 @@ export function ImagePreviewModal() {
               {
                 label: "Finder で表示",
                 onClick: () => useImages.getState().revealInFinder(path),
+              },
+              { kind: "separator" },
+              {
+                // F-#12: 没作品の削除。削除後はプレビューを閉じる。
+                label: "削除…",
+                danger: true,
+                onClick: () => {
+                  void deleteGalleryImage(path, name).then((deleted) => {
+                    if (deleted) close();
+                  });
+                },
               },
             ] satisfies ContextMenuItem[]
           }

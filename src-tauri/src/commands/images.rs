@@ -428,6 +428,65 @@ pub async fn images_remove_background(
     Ok(dest.to_string_lossy().into_owned())
 }
 
+/// Delete an image file from disk and drop its row from history.db.
+///
+/// F-#12 (Ta4low/没作品削除): ライブラリ/プロジェクトの没作品を右クリックから
+/// 物理削除できるようにする。trash クレートを増やすとビルドリスクが上がるため、
+/// `std::fs::remove_file` で直接消す。誤って巨大削除しないよう、対象は
+/// **拡張子が画像/動画のファイル1件のみ**に限定する。
+///
+/// 失敗を握り潰さない方針 (Rust ルール): ファイルが既に無い場合は成功扱い
+/// (UI からの二重削除や watcher 遅延を吸収)、それ以外の I/O エラーは Err で返す。
+#[tauri::command]
+pub async fn images_delete(app: AppHandle, path: String) -> Result<(), String> {
+    let target = PathBuf::from(&path);
+    if !target.is_absolute() {
+        return Err(format!("not an absolute path: {path}"));
+    }
+
+    // ディレクトリ削除を構造的に防ぐ。存在しない場合は二重削除とみなし成功扱い。
+    if target.is_dir() {
+        return Err(format!("refusing to delete a directory: {path}"));
+    }
+
+    if target.exists() {
+        // 画像/動画ファイルのみ許可。設定ファイル等の誤削除を防ぐ。
+        let ext = target
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+            .unwrap_or_default();
+        const ALLOWED: &[&str] = &[
+            "png", "jpg", "jpeg", "webp", "gif", "bmp", "tiff", "mp4", "mov", "webm", "m4v",
+        ];
+        if !ALLOWED.contains(&ext.as_str()) {
+            return Err(format!("refusing to delete non-media file: {path}"));
+        }
+
+        std::fs::remove_file(&target)
+            .map_err(|e| format!("削除に失敗しました ({path}): {e}"))?;
+    }
+
+    // history.db からも該当行を削除。pool が無くてもファイル削除自体は成功扱い。
+    if let Some(state) = app.try_state::<AppState>() {
+        if let Some(pool) = state.db_pool().await {
+            if let Err(e) = sqlx::query("DELETE FROM images WHERE path = ?1")
+                .bind(&path)
+                .execute(&pool)
+                .await
+            {
+                tracing::warn!(
+                    error = ?e,
+                    path = %path,
+                    "images_delete: history.db からの削除に失敗 (ファイル削除自体は成功)"
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

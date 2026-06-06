@@ -1,9 +1,55 @@
+import { images as imagesIpc } from "../lib/ipc";
 import { useImagePreview } from "../lib/store/imagePreview";
 import { useImages, type GalleryItem } from "../lib/store/images";
 import { useMaskEditor } from "../lib/store/maskEditor";
 import { useThreads } from "../lib/store/threads";
+import { useToasts } from "../lib/store/toasts";
 import { sendImageToPlanForRediscuss } from "../lib/sendToPlan";
 import type { ContextMenuItem } from "./ContextMenu";
+
+/**
+ * F-#12 (没作品削除): ライブラリ/プロジェクトの没作品を物理削除する共通処理。
+ * 破壊的操作なので必ず確認ダイアログを挟む。Tauri ネイティブ ask() を優先し、
+ * webview によっては no-op になる window.confirm はフォールバックに回す
+ * (PromptLibraryModal と同方針)。
+ *
+ * 成功時は表示 (useImages.items) からも除外し、トーストで通知する。
+ */
+export async function deleteGalleryImage(
+  path: string,
+  name?: string,
+): Promise<boolean> {
+  const label = name ?? path.split(/[\\/]/).pop() ?? "この画像";
+  let ok = false;
+  try {
+    const { ask } = await import("@tauri-apps/plugin-dialog");
+    ok = await ask(`「${label}」を削除します。元に戻せません。よろしいですか？`, {
+      title: "没作品の削除",
+      kind: "warning",
+    });
+  } catch {
+    ok = window.confirm(`「${label}」を削除します。元に戻せません。よろしいですか？`);
+  }
+  if (!ok) return false;
+
+  try {
+    await imagesIpc.deleteFile(path);
+    useImages.getState().remove(path);
+    useToasts.getState().push({
+      kind: "success",
+      text: "削除しました",
+      ttlMs: 2500,
+    });
+    return true;
+  } catch (err) {
+    useToasts.getState().push({
+      kind: "error",
+      text: `削除に失敗しました: ${String(err)}`,
+      ttlMs: 5000,
+    });
+    return false;
+  }
+}
 
 /**
  * Build the context menu for a generated image. Used by both the gallery
@@ -87,6 +133,14 @@ export function buildGalleryItemMenu(
       label: isFav ? "お気に入りから外す" : "お気に入りに追加",
       icon: "S",
       onClick: () => ctx.onToggleFavorite(item.path),
+    },
+    { kind: "separator" },
+    {
+      // F-#12: 没作品の削除。確認ダイアログ付きでファイル実体ごと消す。
+      label: "削除…",
+      icon: "X",
+      danger: true,
+      onClick: () => void deleteGalleryImage(item.path, item.name),
     },
   );
   return menu;
