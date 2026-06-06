@@ -471,7 +471,7 @@ export function GenerationProgressPanel() {
                       <div
                         key={idx}
                         className={[
-                          "group relative flex aspect-video items-center justify-center overflow-hidden rounded-md border bg-[#0d0d0d]",
+                          `group relative flex ${aspectClass(goal?.aspectRatio ?? "16:9")} items-center justify-center overflow-hidden rounded-md border bg-[#0d0d0d]`,
                           isAdopted
                             ? "border-pink-500 ring-2 ring-pink-500/40"
                             : "border-dashed border-[#333]",
@@ -550,4 +550,19 @@ function Spinner({ running }: { running: boolean }) {
       <div className="text-[10px]">生成中</div>
     </div>
   );
+}
+
+/** アスペクト比文字列から Tailwind の aspect クラスを返す (絵コンテと同じ表示比率に揃える)。 */
+function aspectClass(a: string): string {
+  switch (a) {
+    case "9:16":
+      return "aspect-[9/16]";
+    case "1:1":
+      return "aspect-square";
+    case "4:5":
+      return "aspect-[4/5]";
+    case "16:9":
+    default:
+      return "aspect-video";
+  }
 }

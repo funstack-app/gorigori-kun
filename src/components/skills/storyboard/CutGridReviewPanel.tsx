@@ -378,7 +378,7 @@ export function CutGridReviewPanel() {
                   </span>
                 </div>
 
-                <div className="aspect-video overflow-hidden rounded-md bg-[#0d0d0d]">
+                <div className={`${aspectClass(goal?.aspectRatio ?? "16:9")} overflow-hidden rounded-md bg-[#0d0d0d]`}>
                   <img
                     src={`asset://localhost/${encodeURI(adopted.imagePath)}`}
                     alt={`cut-${i + 1}`}
@@ -503,4 +503,19 @@ export function CutGridReviewPanel() {
       )}
     </div>
   );
+}
+
+/** アスペクト比文字列から Tailwind の aspect クラスを返す (絵コンテと同じ表示比率に揃える)。 */
+function aspectClass(a: string): string {
+  switch (a) {
+    case "9:16":
+      return "aspect-[9/16]";
+    case "1:1":
+      return "aspect-square";
+    case "4:5":
+      return "aspect-[4/5]";
+    case "16:9":
+    default:
+      return "aspect-video";
+  }
 }

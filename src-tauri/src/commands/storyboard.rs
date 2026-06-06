@@ -2673,9 +2673,21 @@ fn build_generation_prompt(
          - 4枚目: 絵コンテ画像 (任意、鉛筆スケッチ) — **構図・カメラアングル・キャラ配置・画面内空間のみ参考**。鉛筆線・モノクロ・紙質感などのスタイルは絶対に取り込まない。最終出力は本番カットの写実/カラー画像であるべき。\n\n\
          ## 手順\n\
          1. image_gen ツールを1回だけ呼び出す。\n\
-         2. {aspect_ratio} aspect ratio / high quality で生成する。\n\
+         2. **アスペクト比は必ず {aspect_ratio} にする (縦長指定なら縦長で。勝手に 16:9 横長にしない)**。high quality で生成する。\n\
          3. 画面内テキスト、ロゴ、透かし、グリッド、コラージュ、複数パネルは禁止。\n\
          4. 出力先指定や画像変換は不要です。生成画像は $CODEX_HOME/generated_images/<session>/ig_*.png に保存されます。\n\n\
+         ## ★最重要: framing (構図) を厳守する — カットごとに必ず構図を変える\n\
+         Structured Prompt JSON の `framing` は **このカット専用に決められた構図**。絶対に厳守する。\n\
+         - `framing.shot_type` の通りに被写体の画面占有率を決める。\n\
+           extreme_close=目元など極端な寄り / close=顔のクロースアップ / medium=上半身 / full=全身 / wide=全身+環境 / extreme_wide=大引き。\n\
+           **wide 指定なのに顔アップにする、close 指定なのに全身にする、は禁止**。指定通りの寄り引きにする。\n\
+         - `framing.camera_angle` の通りにカメラ位置を取る。\n\
+           front=正面 / side=真横 / three_quarter=斜め45度 / high=俯瞰(上から) / low=煽り(下から) / dutch=傾き。\n\
+           **low 指定なら必ず下から煽る、high 指定なら必ず上から見下ろす**。eye-level に勝手に戻さない。\n\
+         - `framing.camera_motion` (dolly_in/out, pan, tilt, handheld 等) の動きが感じられる構図にする。\n\
+         - 隣り合うカットは shot_type と camera_angle が必ず異なるよう設計済み。**その差を絵に出す**。\n\
+           全カットが「同じ寄りで同じ正面アングル」になるのは絶対 NG。look が似ていても構図は大きく変える。\n\
+         - `framing.focus_detail` `framing.body_position_in_frame` `framing.light_fall` も構図に反映する。\n\n\
          ## 重要: Continuity Contract に従う (もし含まれていれば)\n\
          - JSON に `continuity_contract` がある場合、その preserve/change/forbidden/bridge を厳格に守る。\n\
          - `visual_plan.shot_size` `visual_plan.camera_angle` `visual_plan.micro_location` は機械的に決定済み。**揺らがせない**。\n\
