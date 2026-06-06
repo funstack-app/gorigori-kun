@@ -46,9 +46,11 @@ export type VideoModelDefinition = {
 export const VIDEO_MODELS: VideoModelDefinition[] = [
   {
     id: "kling3_0",
+    // 公式仕様 実測 (CLI 0.1.35, 2026-06-06): aspect[16:9,9:16,1:1] /
+    // duration integer 2-10 / medias(i2v) / mode[pro,std,4k] / sound[on,off].
     label: "Kling 3.0",
     jobSetType: "kling3_0",
-    description: "コスパ最強。3アスペクト対応、duration 任意。",
+    description: "コスパ最強。3アスペクト対応、duration 2〜10秒。",
     aspectRatios: ["16:9", "9:16", "1:1"],
     defaultAspectRatio: "16:9",
     duration: { kind: "integer", default: 5, min: 2, max: 10 },
@@ -58,16 +60,19 @@ export const VIDEO_MODELS: VideoModelDefinition[] = [
     ],
     i2vInputField: "medias",
     inputMode: "both",
+    // 実測代表値: mode=std 2.0cr/秒。default duration=5 → 10cr。
     costEstimate: 10,
   },
   {
     id: "seedance_2_0",
+    // 公式仕様 実測 (CLI 0.1.35, 2026-06-06): aspect 7種 / duration integer 2-15 /
+    // medias(i2v) / genre 7種 / mode[std,fast] / resolution[480p,720p,1080p]。
     label: "Seedance 2.0",
     jobSetType: "seedance_2_0",
     description: "7アスペクト対応、genre/mode/resolution 豊富。最長15秒。",
     aspectRatios: ["auto", "16:9", "9:16", "4:3", "3:4", "1:1", "21:9"],
     defaultAspectRatio: "16:9",
-    // CLI 実測 (2026-06-04): duration=15 まで通る (15秒=67cr)。SHOTLIST も15秒前提。
+    // CLI 実測 (2026-06-06): duration=15 まで通る (15秒=67.5cr)。SHOTLIST も15秒前提。
     duration: { kind: "integer", default: 5, min: 2, max: 15 },
     extraParams: [
       {
@@ -88,17 +93,22 @@ export const VIDEO_MODELS: VideoModelDefinition[] = [
     ],
     i2vInputField: "medias",
     inputMode: "both",
+    // 実測代表値: resolution=720p mode=std 4.5cr/秒。default duration=5 → 22.5cr (表示 22)。
     costEstimate: 22,
   },
   {
     id: "veo3_1",
+    // 公式仕様 実測 (CLI 0.1.35, 2026-06-06): aspect[16:9,9:16] (1:1 なし) /
+    // duration string enum["4","6","8"] default "8" / input_image(i2v, object) /
+    // model[veo-3-1-preview,veo-3-1-fast] / quality[basic,high,ultra]。
     label: "Google Veo 3.1",
     jobSetType: "veo3_1",
-    description: "Google品質。quality 3段階、duration は 8秒固定。",
+    description: "Google品質。quality 3段階、duration は 4/6/8秒。",
     aspectRatios: ["16:9", "9:16"],
     defaultAspectRatio: "16:9",
-    // 実制約 (higgsfield model get veo3_1): 8秒固定 (min 8 / max 8)
-    duration: { kind: "enum", values: [8], default: 8 },
+    // 実測修正 (2026-06-06): API spec は string enum ["4","6","8"] default "8"。
+    // 旧 [8] 固定はバグ。UI/store は number 表現で保持し、CLI へは --duration <秒> で渡す。
+    duration: { kind: "enum", values: [4, 6, 8], default: 8 },
     extraParams: [
       {
         kind: "enum",
@@ -111,6 +121,7 @@ export const VIDEO_MODELS: VideoModelDefinition[] = [
     ],
     i2vInputField: "input_image",
     inputMode: "both",
+    // 実測代表値: fast basic/high 8s=22 (4s=11, 6s=16.5)。
     costEstimate: 22,
   },
 ];
