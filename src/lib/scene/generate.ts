@@ -8,6 +8,12 @@ export type SceneGenerationResult = {
   batchId: string;
   generatedPaths: string[];
   failedCount: number;
+  /**
+   * 失敗した各ワーカーの理由 (NSFW判定・クレジット不足・タイムアウト等)。
+   * higgsfield 経路は IPC 結果に含まれる。codex/image_gen 経路は含まれない
+   * ため空配列になる (その場合の分類は classifyFailures が hasFailure で吸収)。
+   */
+  errors: string[];
 };
 
 export type SceneGenerationOptions = {
@@ -66,17 +72,18 @@ export async function generateFromScene(
   const higgsfieldModels = options.higgsfieldModels ?? [];
 
   if (higgsfieldModels.length >= 2) {
-    return higgsfield.generateCompare({
+    const r = await higgsfield.generateCompare({
       models: higgsfieldModels,
       prompt,
       cwd: options.cwd,
       refImagePaths,
       aspect,
     });
+    return { ...r, errors: r.errors ?? [] };
   }
 
   if (options.higgsfield) {
-    return higgsfield.generateBatch({
+    const r = await higgsfield.generateBatch({
       jobSetType: options.higgsfield.jobSetType,
       displayName: options.higgsfield.displayName,
       prompt,
@@ -85,9 +92,12 @@ export async function generateFromScene(
       refImagePaths,
       aspect,
     });
+    return { ...r, errors: r.errors ?? [] };
   }
 
-  return images.generateBatch({
+  // codex/image_gen 経路: Rust(batch_gen.rs)は errors を serialize しないため
+  // 実行時は undefined になる。?? [] で必ず配列に正規化する。
+  const r = await images.generateBatch({
     prompt,
     count: options.count,
     cwd: options.cwd,
@@ -97,4 +107,5 @@ export async function generateFromScene(
     effort: options.effort,
     aspect,
   });
+  return { ...r, errors: r.errors ?? [] };
 }

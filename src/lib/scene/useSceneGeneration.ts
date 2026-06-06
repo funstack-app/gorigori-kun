@@ -5,6 +5,7 @@ import {
   type SceneGenerationCount,
   type SceneGenerationResult,
 } from "./generate";
+import { classifyFailures } from "./retryClassify";
 import type { SceneState } from "./types";
 import { useAuth } from "../store/auth";
 import { useBatches } from "../store/batches";
@@ -42,6 +43,15 @@ export type UseSceneGenerationReturn = {
 };
 
 const MAX_CONCURRENT_BATCHES = 3;
+// FB#18 (2026-06-06): 一時的失敗を自動リトライする最大試行回数。
+// 1 回目 + 自動リトライ 2 回 = 計 3 回。恒久的失敗 (NSFW/クレジット不足等) は
+// classifyFailures が検出してリトライせず即停止する。
+const MAX_GENERATION_ATTEMPTS = 3;
+
+/** 全件失敗だったか (1 枚も生成できなかった)。 */
+function isTotalFailure(result: SceneGenerationResult): boolean {
+  return result.generatedPaths.length === 0;
+}
 
 function basename(path: string): string {
   return path.split(/[\\/]/).pop() ?? path;
@@ -168,26 +178,7 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
     setGenerating(true);
     setStatus({ kind: "running", message: "生成を開始しています..." });
 
-    const tempId = `local-${Date.now()}-${Math.random()
-      .toString(36)
-      .slice(2, 8)}`;
-    useBatches.getState().startBatch({
-      batchId: tempId,
-      prompt,
-      references: refImagePaths.map((path) => ({
-        path,
-        name: basename(path),
-      })),
-      count: generationCount,
-      provider: selectedHiggsfield ? "higgsfield" : "codex",
-      modelJobSetType: compareMode ? undefined : selectedHiggsfield?.jobSetType,
-      modelDisplayName: compareMode
-        ? undefined
-        : (selectedHiggsfield?.displayName ?? "image_gen"),
-      compareMode,
-      workerModels: compareMode ? selectedHiggsfieldModels : undefined,
-    });
-
+    // ユーザーの生成意図は 1 回だけ DB へ記録する (リトライで重複させない)。
     try {
       const sess = useSessions.getState();
       const dbTurnId = await sess.recordTurn({
@@ -205,35 +196,121 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
         kind: "batch",
       });
       if (dbTurnId) sess.enqueueBatchDbTurnId(dbTurnId);
+    } catch (recordError) {
+      // turn 記録に失敗しても生成自体は続行する (履歴に残らないだけ)。
+      console.error("[useSceneGeneration] recordTurn failed:", recordError);
+    }
 
-      setGenerating(false);
-      const result = await generateFromScene(scene, {
-        count,
-        cwd,
-        model: selectedModel,
-        effort: selectedEffort,
-        promptOverride: prompt,
-        refImagePaths,
-        maskPaths: refImagePaths.map(() => ""),
-        higgsfield: compareMode ? undefined : (selectedHiggsfield ?? undefined),
-        higgsfieldModels: compareMode ? selectedHiggsfieldModels : undefined,
+    // 1 回の生成試行を実行する。startBatch (楽観的カード) → generateFromScene。
+    // 戻り値は SceneGenerationResult。IPC が reject した場合は呼び出し側へ throw する。
+    const runOneAttempt = async (): Promise<{
+      result: SceneGenerationResult;
+      tempId: string;
+    }> => {
+      const tempId = `local-${Date.now()}-${Math.random()
+        .toString(36)
+        .slice(2, 8)}`;
+      useBatches.getState().startBatch({
+        batchId: tempId,
+        prompt,
+        references: refImagePaths.map((path) => ({
+          path,
+          name: basename(path),
+        })),
+        count: generationCount,
+        provider: selectedHiggsfield ? "higgsfield" : "codex",
+        modelJobSetType: compareMode ? undefined : selectedHiggsfield?.jobSetType,
+        modelDisplayName: compareMode
+          ? undefined
+          : (selectedHiggsfield?.displayName ?? "image_gen"),
+        compareMode,
+        workerModels: compareMode ? selectedHiggsfieldModels : undefined,
       });
-      const okCount = result.generatedPaths.length;
-      // STΛCK 報告 (2026-05-17): 0 枚成功を success として表示すると
-      // 「生成中表示が一瞬で消えたのに何も起きていない」現象になる。
-      // 1 枚も生成できなかった場合は明示エラー扱いにし、toast でも
-      // 通知して原因認識を促す。
-      if (okCount === 0) {
-        // STΛCK 報告 (2026-05-17 第2版): 元の文言は「Codex CLI のパス」を
-        // 決め打ちで示していたが、実態は Higgsfield API のアスペクト比違反
-        // 等のモデル個別エラーが多い。原因を断定せずに「選択中の組み合わせ」
-        // を疑うよう促す表現に変更。
-        const message =
+      try {
+        const result = await generateFromScene(scene, {
+          count,
+          cwd,
+          model: selectedModel,
+          effort: selectedEffort,
+          promptOverride: prompt,
+          refImagePaths,
+          maskPaths: refImagePaths.map(() => ""),
+          higgsfield: compareMode ? undefined : (selectedHiggsfield ?? undefined),
+          higgsfieldModels: compareMode ? selectedHiggsfieldModels : undefined,
+        });
+        return { result, tempId };
+      } catch (error) {
+        // この試行の楽観的カードを除去してから throw する (再試行時に残骸を残さない)。
+        useBatches.getState().removeBatch(tempId);
+        throw error;
+      }
+    };
+
+    // 全件失敗時のユーザー向けメッセージ (恒久的失敗の理由があれば併記)。
+    const totalFailureMessage = (permanentReasons: string[]): string => {
+      if (permanentReasons.length > 0) {
+        return (
           `画像生成に失敗しました（${generationCount}件すべて失敗）。\n` +
-          `多くの場合、選んだモデルと対応していないアスペクト比が原因です。\n` +
-          `・アスペクト比を 16:9 / 1:1 / 9:16 に変えて再試行してみてください\n` +
-          `・別のモデルに切り替えても改善する場合があります\n` +
-          `・それでも失敗する場合は、ログインや接続を見直してください`;
+          `理由:\n${permanentReasons.map((r) => `・${r}`).join("\n")}`
+        );
+      }
+      // STΛCK 報告 (2026-05-17 第2版): 原因を断定せず「選択中の組み合わせ」を疑わせる。
+      return (
+        `画像生成に失敗しました（${generationCount}件すべて失敗）。\n` +
+        `自動リトライしても改善しませんでした。\n` +
+        `多くの場合、選んだモデルと対応していないアスペクト比が原因です。\n` +
+        `・アスペクト比を 16:9 / 1:1 / 9:16 に変えて再試行してみてください\n` +
+        `・別のモデルに切り替えても改善する場合があります\n` +
+        `・それでも失敗する場合は、ログインや接続を見直してください`
+      );
+    };
+
+    setGenerating(false);
+
+    let lastResult: SceneGenerationResult | null = null;
+    let lastError: unknown = null;
+
+    for (let attempt = 1; attempt <= MAX_GENERATION_ATTEMPTS; attempt++) {
+      if (attempt === 1) {
+        setStatus({ kind: "running", message: "生成中..." });
+      } else {
+        // 例: 「再試行中 (2/3)...」。ConstructedPromptPanel は running の message を表示する。
+        setStatus({
+          kind: "running",
+          message: `失敗したため再試行中 (${attempt}/${MAX_GENERATION_ATTEMPTS})...`,
+        });
+      }
+
+      try {
+        const { result } = await runOneAttempt();
+        lastResult = result;
+        lastError = null;
+
+        const okCount = result.generatedPaths.length;
+
+        // 1 枚でも生成できた = 部分成功以上。リトライせず結果を返す。
+        if (!isTotalFailure(result)) {
+          setStatus({
+            kind: result.failedCount === 0 ? "success" : "error",
+            message:
+              result.failedCount === 0
+                ? `${okCount}枚を生成しました`
+                : `${okCount}/${generationCount}枚を生成しました（${result.failedCount}件失敗）`,
+          });
+          return result;
+        }
+
+        // 全件失敗。一時的失敗ならリトライ、恒久的失敗 (NSFW等) なら即停止。
+        const decision = classifyFailures(result.errors, true);
+        const canRetryAgain = attempt < MAX_GENERATION_ATTEMPTS;
+
+        if (decision.shouldRetry && canRetryAgain) {
+          // 一時的失敗 → 次のループで再試行する。
+          continue;
+        }
+
+        // 恒久的失敗のみ、またはリトライ上限に達した → エラー確定。
+        const message = totalFailureMessage(decision.permanentReasons);
         setStatus({ kind: "error", message });
         useToasts.getState().push({
           kind: "error",
@@ -241,35 +318,35 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
           ttlMs: 0, // 手動で閉じるまで残す
         });
         return result;
+      } catch (error) {
+        // IPC reject (ネットワーク/プロセス起動失敗等) は一時的失敗とみなしリトライ。
+        lastError = error;
+        console.error(
+          `[useSceneGeneration] generate attempt ${attempt} threw:`,
+          error,
+        );
+        if (attempt < MAX_GENERATION_ATTEMPTS) {
+          continue;
+        }
       }
-      setStatus({
-        kind: result.failedCount === 0 ? "success" : "error",
-        message:
-          result.failedCount === 0
-            ? `${okCount}枚を生成しました`
-            : `${okCount}/${generationCount}枚を生成しました（${result.failedCount}件失敗）`,
-      });
-      return result;
-    } catch (error) {
-      useBatches.getState().removeBatch(tempId);
-      const errorMessage = String(error);
-      setStatus({
-        kind: "error",
-        message: `画像生成に失敗しました: ${errorMessage}`,
-      });
-      // STΛCK 報告 (2026-05-17): 生成ボタン押下後 'status エリアの一瞬の表示
-      // しか見えない' 問題対策。toast でも明示通知して、ユーザーが原因を
-      // 確実に認識できるようにする。エラー詳細は ttl 長めで残す。
+    }
+
+    // ここに来るのは「全試行で throw した」場合のみ。
+    // (全件失敗の result ケースはループ内で return 済み)
+    if (lastError !== null) {
+      const errorMessage = String(lastError);
+      const message = `画像生成に失敗しました: ${errorMessage}`;
+      setStatus({ kind: "error", message });
+      // STΛCK 報告 (2026-05-17): toast でも明示通知して原因認識を促す。
       useToasts.getState().push({
         kind: "error",
-        text: `生成に失敗しました\n${errorMessage}`,
+        text: `生成に失敗しました（自動リトライも失敗）\n${errorMessage}`,
         ttlMs: 12000,
       });
-      console.error("[useSceneGeneration] generate failed:", error);
       return null;
-    } finally {
-      setGenerating(false);
     }
+
+    return lastResult;
   }, [
     effectivePrompt,
     refImagePaths,
