@@ -4,46 +4,61 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ApprovalDialog } from "./components/ApprovalDialog";
 import { AuthGate } from "./components/AuthGate";
 import { FirstRunStorageNotice } from "./components/FirstRunStorageNotice";
-import { SkillWorkspaceRouter } from "./components/SkillWorkspaceRouter";
+import { deleteGalleryImages } from "./components/galleryItemMenu";
 import { ImagePreviewModal } from "./components/ImagePreviewModal";
+import { LibraryAutoRenameButton } from "./components/LibraryAutoRenameButton";
 import { MaskEditorModal } from "./components/MaskEditorModal";
+import { PresetsDrawer } from "./components/PresetsDrawer";
 import { PromptComposer } from "./components/PromptComposer";
 import { SettingsWorkspace } from "./components/SettingsWorkspace";
 import { SkillsWorkspace } from "./components/SkillsWorkspace";
+import { SkillWorkspaceRouter } from "./components/SkillWorkspaceRouter";
 import { Toaster } from "./components/Toaster";
 import { Badge, Button, EmptyState, SegmentedTabs } from "./components/ui";
 import { attachWindowDragDrop } from "./lib/dragDrop";
-import { images as imagesIpc, onImageBatch, onImageGenerated, type AuthAccount } from "./lib/ipc";
+import { type AuthAccount, images as imagesIpc, onImageBatch, onImageGenerated } from "./lib/ipc";
+import { ensureMultiAngleEventListener } from "./lib/multiangle/events";
+import { useAccounts } from "./lib/store/accounts";
+import { useActiveProject } from "./lib/store/activeProject";
 import { useAuth } from "./lib/store/auth";
-import { useBatches, type BatchWorker } from "./lib/store/batches";
-import { useComposer, type FrameAspect, type Reference, type ReferenceRole } from "./lib/store/composer";
+import { type BatchWorker, useBatches } from "./lib/store/batches";
+import { useCloudSupabase } from "./lib/store/cloudSupabase";
+import {
+  type FrameAspect,
+  type Reference,
+  type ReferenceRole,
+  useComposer,
+} from "./lib/store/composer";
 import { useDragHover } from "./lib/store/dragHover";
 import { useImagePreview } from "./lib/store/imagePreview";
-import { useImages, type GalleryItem } from "./lib/store/images";
+import { type GalleryItem, useImages } from "./lib/store/images";
+import { useLibrarySelection } from "./lib/store/librarySelection";
+import { type Project, useProjects } from "./lib/store/projects";
 import { usePromptHistory } from "./lib/store/promptHistory";
 import { useSavedPrompts } from "./lib/store/savedPrompts";
-import { useSessions, type Session } from "./lib/store/sessions";
-import { useWorkspace } from "./lib/store/workspace";
-import { useProjects, type Project } from "./lib/store/projects";
-import { useActiveProject } from "./lib/store/activeProject";
-import { useLibrarySelection } from "./lib/store/librarySelection";
-import { LibraryAutoRenameButton } from "./components/LibraryAutoRenameButton";
-import { deleteGalleryImages } from "./components/galleryItemMenu";
-import { useAccounts } from "./lib/store/accounts";
+import { type Session, useSessions } from "./lib/store/sessions";
 import { useSettings } from "./lib/store/settings";
 import { useThreads } from "./lib/store/threads";
 import { useToasts } from "./lib/store/toasts";
-import { useCloudSupabase } from "./lib/store/cloudSupabase";
-import { PresetsDrawer } from "./components/PresetsDrawer";
 import {
-  useWorkflow,
   type ImageMode,
   type LayerKind,
   type PrimaryMode,
+  useWorkflow,
   type VideoMode,
 } from "./lib/store/workflow";
+import { useWorkspace } from "./lib/store/workspace";
+import { ensureStoryboardEventListener } from "./lib/storyboard/events";
 
-type DrawerKind = "assets" | "references" | "history" | "presets" | "skills" | "export" | "settings" | null;
+type DrawerKind =
+  | "assets"
+  | "references"
+  | "history"
+  | "presets"
+  | "skills"
+  | "export"
+  | "settings"
+  | null;
 type SignedInAccount = AuthAccount;
 type GuidedPurpose =
   | "ad"
@@ -76,7 +91,8 @@ const PURPOSES: Array<{
     id: "product",
     label: "商品カット",
     description: "質感・形状を崩さず見せる",
-    prompt: "商品カットとして、形状、素材感、光の反射、背景との分離が美しく見えるようにしてください。",
+    prompt:
+      "商品カットとして、形状、素材感、光の反射、背景との分離が美しく見えるようにしてください。",
     workflow: { primary: "image", image: "generate" },
   },
   {
@@ -90,14 +106,16 @@ const PURPOSES: Array<{
     id: "story",
     label: "動画カット",
     description: "連続するストーリー素材",
-    prompt: "動画用のストーリーカットとして、同じ世界観と被写体を保ちながら次の使えるカットを作ってください。",
+    prompt:
+      "動画用のストーリーカットとして、同じ世界観と被写体を保ちながら次の使えるカットを作ってください。",
     workflow: { primary: "video", video: "story" },
   },
   {
     id: "multiAngle",
     label: "別角度",
     description: "環境固定でカメラだけ動かす",
-    prompt: "マルチアングル用に、被写体、環境、位置関係、光を固定し、カメラだけを動かした別角度を作ってください。",
+    prompt:
+      "マルチアングル用に、被写体、環境、位置関係、光を固定し、カメラだけを動かした別角度を作ってください。",
     workflow: { primary: "video", video: "multiAngle" },
     comingSoon: true,
   },
@@ -138,9 +156,17 @@ const USE_CASES = [
 
 const KEEP_OPTIONS: Array<{ label: string; role: ReferenceRole; phrase: string }> = [
   { label: "被写体", role: "subject", phrase: "参照画像の被写体/商品を固定してください。" },
-  { label: "雰囲気", role: "look", phrase: "参照画像の光、色、レンズ感、質感を引き継いでください。" },
+  {
+    label: "雰囲気",
+    role: "look",
+    phrase: "参照画像の光、色、レンズ感、質感を引き継いでください。",
+  },
   { label: "背景", role: "background", phrase: "参照画像の背景と空間構造を引き継いでください。" },
-  { label: "ポーズ", role: "pose", phrase: "参照画像のポーズやカメラとの関係を引き継いでください。" },
+  {
+    label: "ポーズ",
+    role: "pose",
+    phrase: "参照画像のポーズやカメラとの関係を引き継いでください。",
+  },
 ];
 
 const IMAGE_EXTS = ["png", "jpg", "jpeg", "webp", "gif", "bmp"];
@@ -268,6 +294,11 @@ function SignedInScaffold() {
     useSavedPrompts.getState().load();
     useImages.getState().attachListeners();
     useImages.getState().startWatcher();
+    // スキル生成イベント listener を起動時に張る (待機中 0/N 固着バグ修正 2026-06-06)。
+    // 各 Workspace の useEffect で張ると listen() の解決前に生成を開始した場合に
+    // cutStarted/cutCompleted を取りこぼす。idempotent singleton なので二重登録はされない。
+    void ensureMultiAngleEventListener();
+    void ensureStoryboardEventListener();
     useAccounts.getState().refresh();
     // v0.6.9: プロジェクトをファイル保存に移行。起動時にファイルから読み出し、
     // 旧 localStorage データがあればファイルへマイグレーション。
@@ -339,9 +370,7 @@ function SignedInScaffold() {
           // 採用プロンプトが分かるよう、batch.prompt を一緒に保存。
           const activeProjectId = useActiveProject.getState().activeProjectId;
           if (activeProjectId && e.path) {
-            const batch = useBatches.getState().batches.find(
-              (b) => b.batchId === e.batchId,
-            );
+            const batch = useBatches.getState().batches.find((b) => b.batchId === e.batchId);
             useProjects.getState().addItem(activeProjectId, {
               imagePath: e.path,
               prompt: batch?.prompt,
@@ -437,8 +466,7 @@ function SignedInScaffold() {
               onChange={(e) => setCreateDraft(e.target.value)}
               onKeyDown={(e) => {
                 const isComposing =
-                  (e.nativeEvent as KeyboardEvent).isComposing ||
-                  e.keyCode === 229;
+                  (e.nativeEvent as KeyboardEvent).isComposing || e.keyCode === 229;
                 if (e.key === "Enter" && !isComposing) {
                   e.preventDefault();
                   void submitCreate();
@@ -486,9 +514,7 @@ function HomeScreen({
       <div className="mx-auto max-w-6xl">
         <div className="mb-8 flex items-end justify-between gap-6">
           <div>
-            <p className="text-[11px] font-black uppercase tracking-[0.22em] text-pink-400">
-              開始
-            </p>
+            <p className="text-[11px] font-black uppercase tracking-[0.22em] text-pink-400">開始</p>
             <h1 className="mt-2 text-4xl font-black tracking-normal text-white">
               何をゴリゴリ作りますか？
             </h1>
@@ -542,7 +568,10 @@ function HomeScreen({
               <Badge>{sessions.length} 件</Badge>
             </div>
             {sessions.length === 0 ? (
-              <EmptyState title="まだ案件がありません" description="目的ボタンか新規案件から始めます。" />
+              <EmptyState
+                title="まだ案件がありません"
+                description="目的ボタンか新規案件から始めます。"
+              />
             ) : (
               <div className="grid gap-3 md:grid-cols-2">
                 {sessions.slice(0, 8).map((session) => (
@@ -563,11 +592,15 @@ function HomeScreen({
             onDrop={async (e) => {
               e.preventDefault();
               const refs = (
-                await Promise.all(Array.from(e.dataTransfer.files ?? []).map(droppedFileToReference))
+                await Promise.all(
+                  Array.from(e.dataTransfer.files ?? []).map(droppedFileToReference),
+                )
               ).filter((ref): ref is Reference => !!ref);
               if (refs.length === 0) return;
               useComposer.getState().addReferences(refs);
-              useComposer.getState().setText("この参照画像をもとに、用途に合わせて制作してください。");
+              useComposer
+                .getState()
+                .setText("この参照画像をもとに、用途に合わせて制作してください。");
               await onCreate("参照画像から開始");
             }}
           >
@@ -706,12 +739,7 @@ function NavIconCreate() {
         strokeLinecap="round"
         strokeLinejoin="round"
       />
-      <path
-        d="M11 3L13 5"
-        stroke="currentColor"
-        strokeWidth="1.4"
-        strokeLinecap="round"
-      />
+      <path d="M11 3L13 5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
     </svg>
   );
 }
@@ -719,15 +747,7 @@ function NavIconLibrary() {
   // 写真スタック: 画像コレクション
   return (
     <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
-      <rect
-        x="2.5"
-        y="4.5"
-        width="9"
-        height="9"
-        rx="1.2"
-        stroke="currentColor"
-        strokeWidth="1.4"
-      />
+      <rect x="2.5" y="4.5" width="9" height="9" rx="1.2" stroke="currentColor" strokeWidth="1.4" />
       <path
         d="M5 2.5h7a1.5 1.5 0 0 1 1.5 1.5v7"
         stroke="currentColor"
@@ -781,7 +801,12 @@ function NavIconSkills() {
         strokeWidth="1.25"
         strokeLinejoin="round"
       />
-      <path d="M13 2.5V4.5M12 3.5H14M2.5 10.5V12.5M1.5 11.5H3.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+      <path
+        d="M13 2.5V4.5M12 3.5H14M2.5 10.5V12.5M1.5 11.5H3.5"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinecap="round"
+      />
     </svg>
   );
 }
@@ -819,7 +844,17 @@ function NavIconChat() {
 function NavIconSettings() {
   // 標準的な歯車アイコン (8歯、中央に円)
   return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
       <circle cx="12" cy="12" r="3" />
       <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
     </svg>
@@ -862,15 +897,15 @@ function DarkGlobalNav({
           : "text-neutral-300 hover:bg-[#242424] hover:text-white"
       }`}
     >
-      <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center">
-        {icon}
-      </span>
+      <span className="flex h-5 w-5 flex-shrink-0 items-center justify-center">{icon}</span>
       {!collapsed && <span className="whitespace-nowrap">{label}</span>}
     </button>
   );
 
   return (
-    <aside className={`flex h-full min-h-0 flex-shrink-0 flex-col border-r border-[#242424] bg-[#151515] px-3 py-4 transition-[width] ${collapsed ? "w-[64px]" : "w-[200px]"}`}>
+    <aside
+      className={`flex h-full min-h-0 flex-shrink-0 flex-col border-r border-[#242424] bg-[#151515] px-3 py-4 transition-[width] ${collapsed ? "w-[64px]" : "w-[200px]"}`}
+    >
       {/*
         ヘッダー: GORI GORI タイプロゴ + 右端にサイドバー開閉アイコン
         (Magnific 公式 UI と同じ並び: ロゴ … 開閉ボタン)
@@ -895,9 +930,7 @@ function DarkGlobalNav({
             右端ボタンが押し出されないようにする。
           */}
           {collapsed ? (
-            <span className="logo-font text-[22px] leading-none text-white">
-              GG
-            </span>
+            <span className="logo-font text-[22px] leading-none text-white">GG</span>
           ) : (
             <span className="logo-font truncate text-[22px] leading-none text-white">
               GORI GORI
@@ -930,14 +963,7 @@ function DarkGlobalNav({
                 stroke="currentColor"
                 strokeWidth="1.4"
               />
-              <line
-                x1="6"
-                y1="3"
-                x2="6"
-                y2="13"
-                stroke="currentColor"
-                strokeWidth="1.4"
-              />
+              <line x1="6" y1="3" x2="6" y2="13" stroke="currentColor" strokeWidth="1.4" />
             </svg>
           </button>
         )}
@@ -967,14 +993,7 @@ function DarkGlobalNav({
               stroke="currentColor"
               strokeWidth="1.4"
             />
-            <line
-              x1="6"
-              y1="3"
-              x2="6"
-              y2="13"
-              stroke="currentColor"
-              strokeWidth="1.4"
-            />
+            <line x1="6" y1="3" x2="6" y2="13" stroke="currentColor" strokeWidth="1.4" />
           </svg>
         </button>
       )}
@@ -1137,7 +1156,10 @@ function StorageIndicator() {
   if (home && shortPath.startsWith(home)) {
     shortPath = "~" + shortPath.slice(home.length);
   }
-  shortPath = shortPath.replace(/~\/Library\/Mobile Documents\/com~apple~CloudDocs/, "~/iCloud Drive");
+  shortPath = shortPath.replace(
+    /~\/Library\/Mobile Documents\/com~apple~CloudDocs/,
+    "~/iCloud Drive",
+  );
 
   return (
     <div className="space-y-1 rounded-lg border border-[#2a2a2a] bg-[#101010] p-2">
@@ -1146,7 +1168,10 @@ function StorageIndicator() {
           <span className="text-[10px] font-bold text-neutral-500">ローカル</span>
           <span className={`text-[11px] font-black ${tone}`}>{display}</span>
         </div>
-        <p className="mt-1 truncate font-mono text-[9px] text-neutral-500" title={stats.storageRoot}>
+        <p
+          className="mt-1 truncate font-mono text-[9px] text-neutral-500"
+          title={stats.storageRoot}
+        >
           {shortPath}
         </p>
         <p className="mt-0.5 text-[9px] text-neutral-600">{stats.fileCount} ファイル</p>
@@ -1156,7 +1181,8 @@ function StorageIndicator() {
           <div className="flex items-baseline justify-between gap-2">
             <span className="text-[10px] font-bold text-neutral-500">☁️ Supabase</span>
             <span className={`text-[11px] font-black ${cloudTone}`}>
-              {formatSidebarBytes(cloudUsage.usedBytes)} / {formatSidebarBytes(cloudUsage.limitBytes)}
+              {formatSidebarBytes(cloudUsage.usedBytes)} /{" "}
+              {formatSidebarBytes(cloudUsage.limitBytes)}
             </span>
           </div>
           {cloudUsage.limitBytes > 0 && cloudUsage.usedBytes / cloudUsage.limitBytes > 0.8 && (
@@ -1247,17 +1273,21 @@ function CreationPanel() {
         <DarkSection title="モード別UI">
           {primaryMode === "image" ? (
             <div className="grid grid-cols-3 gap-1 rounded-xl bg-[#111] p-1">
-              {([
-                ["generate", "生成"],
-                ["edit", "編集"],
-                ["layers", "レイヤー"],
-              ] as Array<[ImageMode, string]>).map(([mode, label]) => (
+              {(
+                [
+                  ["generate", "生成"],
+                  ["edit", "編集"],
+                  ["layers", "レイヤー"],
+                ] as Array<[ImageMode, string]>
+              ).map(([mode, label]) => (
                 <button
                   key={mode}
                   type="button"
                   onClick={() => setImageMode(mode)}
                   className={`h-8 rounded-lg text-[11px] font-black ${
-                    imageMode === mode ? "bg-[#2a2a2a] text-white" : "text-neutral-500 hover:text-white"
+                    imageMode === mode
+                      ? "bg-[#2a2a2a] text-white"
+                      : "text-neutral-500 hover:text-white"
                   }`}
                 >
                   {label}
@@ -1266,16 +1296,20 @@ function CreationPanel() {
             </div>
           ) : (
             <div className="grid grid-cols-2 gap-1 rounded-xl bg-[#111] p-1">
-              {([
-                ["story", "ストーリー"],
-                ["multiAngle", "別角度"],
-              ] as Array<[VideoMode, string]>).map(([mode, label]) => (
+              {(
+                [
+                  ["story", "ストーリー"],
+                  ["multiAngle", "別角度"],
+                ] as Array<[VideoMode, string]>
+              ).map(([mode, label]) => (
                 <button
                   key={mode}
                   type="button"
                   onClick={() => setVideoMode(mode)}
                   className={`h-8 rounded-lg text-[11px] font-black ${
-                    videoMode === mode ? "bg-[#2a2a2a] text-white" : "text-neutral-500 hover:text-white"
+                    videoMode === mode
+                      ? "bg-[#2a2a2a] text-white"
+                      : "text-neutral-500 hover:text-white"
                   }`}
                 >
                   {label}
@@ -1370,7 +1404,8 @@ function DarkSection({ title, children }: { title: string; children: React.React
 }
 
 function purposeLabel(primaryMode: PrimaryMode, imageMode: ImageMode, videoMode: VideoMode) {
-  if (primaryMode === "video") return videoMode === "multiAngle" ? "マルチアングル" : "ストーリーカット";
+  if (primaryMode === "video")
+    return videoMode === "multiAngle" ? "マルチアングル" : "ストーリーカット";
   if (imageMode === "edit") return "画像編集";
   if (imageMode === "layers") return "レイヤー編集";
   return "画像生成";
@@ -1425,8 +1460,7 @@ function BoardHeader({ title, activePage }: { title: string; activePage: DrawerK
   // 制作タブ (activePage === null) のときは、内部の WorkspaceTabs で
   // 「企画 / 生成 / 編集」のいずれかが選ばれている。タイトルもそれに追従する。
   const activeTab = useWorkspace((s) => s.activeTab);
-  const liveTabLabel =
-    activeTab === "plan" ? "企画" : activeTab === "edit" ? "編集" : title;
+  const liveTabLabel = activeTab === "plan" ? "企画" : activeTab === "edit" ? "編集" : title;
   const pageTitle =
     activePage === "assets"
       ? "ライブラリ"
@@ -1436,25 +1470,21 @@ function BoardHeader({ title, activePage }: { title: string; activePage: DrawerK
           ? "プロジェクト"
           : activePage === "presets"
             ? "プリセット"
-          : activePage === "skills"
-            ? "スキル"
-          : activePage === "export"
-              ? "チャット履歴"
-              : activePage === "settings"
-                ? "設定"
-              : liveTabLabel;
+            : activePage === "skills"
+              ? "スキル"
+              : activePage === "export"
+                ? "チャット履歴"
+                : activePage === "settings"
+                  ? "設定"
+                  : liveTabLabel;
   // サブタイトルは UI スマート化のため廃止 (2026-05-14 STΛCK 指示)
   return (
     <div className="border-b border-[#242424] bg-[#121212] px-5 py-3">
       <div className="flex items-center justify-between gap-4">
-        <h2 className="text-lg font-black tracking-normal text-white">
-          {pageTitle}
-        </h2>
+        <h2 className="text-lg font-black tracking-normal text-white">{pageTitle}</h2>
         <div className="flex items-center gap-3">
           <UsageGauges />
-          <Badge tone={running ? "blue" : "neutral"}>
-            {running ? "生成中" : "生成準備OK"}
-          </Badge>
+          <Badge tone={running ? "blue" : "neutral"}>{running ? "生成中" : "生成準備OK"}</Badge>
         </div>
       </div>
     </div>
@@ -1486,7 +1516,10 @@ function UsageGauges() {
     let cancelled = false;
     const fetchCredits = async () => {
       if (cancelled) return;
-      await useAccounts.getState().refreshHiggsfield().catch(() => undefined);
+      await useAccounts
+        .getState()
+        .refreshHiggsfield()
+        .catch(() => undefined);
     };
     void fetchCredits();
     const id = setInterval(fetchCredits, 5 * 60 * 1000);
@@ -1513,7 +1546,6 @@ function UsageGauges() {
     </div>
   );
 }
-
 
 function CreativeBoard() {
   const items = useImages((s) => s.items);
@@ -1638,9 +1670,7 @@ function AssetsWorkspace() {
               onClick={() => setViewMode("grid")}
               title="グリッド表示"
               className={`h-6 px-2 rounded text-[11px] font-medium transition ${
-                viewMode === "grid"
-                  ? "bg-pink-500 text-white"
-                  : "text-neutral-400 hover:text-white"
+                viewMode === "grid" ? "bg-pink-500 text-white" : "text-neutral-400 hover:text-white"
               }`}
             >
               ▦ グリッド
@@ -1650,9 +1680,7 @@ function AssetsWorkspace() {
               onClick={() => setViewMode("list")}
               title="リスト表示"
               className={`h-6 px-2 rounded text-[11px] font-medium transition ${
-                viewMode === "list"
-                  ? "bg-pink-500 text-white"
-                  : "text-neutral-400 hover:text-white"
+                viewMode === "list" ? "bg-pink-500 text-white" : "text-neutral-400 hover:text-white"
               }`}
             >
               ☰ リスト
@@ -1671,9 +1699,7 @@ function AssetsWorkspace() {
                 onChange={(e) => setTileSize(Number(e.target.value))}
                 className="h-1 w-24 cursor-pointer accent-pink-500"
               />
-              <span className="w-8 text-[10px] tabular-nums text-neutral-500">
-                {tileSize}
-              </span>
+              <span className="w-8 text-[10px] tabular-nums text-neutral-500">{tileSize}</span>
             </div>
           )}
         </div>
@@ -1712,7 +1738,10 @@ function AssetsWorkspace() {
       </div>
 
       {items.length === 0 ? (
-        <DarkEmpty title="素材がありません" description="画像を生成またはアップロードするとここに並びます。" />
+        <DarkEmpty
+          title="素材がありません"
+          description="画像を生成またはアップロードするとここに並びます。"
+        />
       ) : viewMode === "grid" ? (
         <div
           className="grid gap-3"
@@ -1755,9 +1784,7 @@ function AssetsWorkspace() {
                     className="aspect-[16/9] w-full object-cover"
                   />
                   <div className="p-2">
-                    <p className="truncate text-[11px] font-bold text-neutral-200">
-                      {item.name}
-                    </p>
+                    <p className="truncate text-[11px] font-bold text-neutral-200">{item.name}</p>
                     <p className="mt-1 text-[10px] text-neutral-500">
                       {selectionMode
                         ? isSelected
@@ -1818,9 +1845,7 @@ function AssetsWorkspace() {
                   className="h-10 w-16 shrink-0 rounded object-cover"
                 />
                 <div className="min-w-0 flex-1">
-                  <p className="truncate text-[12px] font-medium text-neutral-200">
-                    {item.name}
-                  </p>
+                  <p className="truncate text-[12px] font-medium text-neutral-200">{item.name}</p>
                   <p className="truncate text-[10px] text-neutral-500">
                     {selectionMode
                       ? isSelected
@@ -1991,8 +2016,7 @@ function LibraryAddToProjectButton() {
                 onChange={(event) => setDraftName(event.target.value)}
                 onKeyDown={(event) => {
                   const isComposing =
-                    (event.nativeEvent as KeyboardEvent).isComposing ||
-                    event.keyCode === 229;
+                    (event.nativeEvent as KeyboardEvent).isComposing || event.keyCode === 229;
                   if (event.key === "Enter" && !isComposing) {
                     event.preventDefault();
                     handleCreate();
@@ -2025,18 +2049,30 @@ function ReferencesWorkspace() {
   const setReferenceRole = useComposer((s) => s.setReferenceRole);
   return (
     <section className="min-h-0 flex-1 overflow-y-auto bg-[#121212] px-4 py-4">
-      <PageIntro title="固定する要素" description="人物・商品・画風・背景など、次の生成で絶対に引き継ぐ要素を管理します。" />
+      <PageIntro
+        title="固定する要素"
+        description="人物・商品・画風・背景など、次の生成で絶対に引き継ぐ要素を管理します。"
+      />
       {refs.length === 0 ? (
-        <DarkEmpty title="参照がありません" description="素材庫または作品カードから参照に追加してください。" />
+        <DarkEmpty
+          title="参照がありません"
+          description="素材庫または作品カードから参照に追加してください。"
+        />
       ) : (
         <div className="grid grid-cols-[repeat(auto-fill,minmax(260px,1fr))] gap-3">
           {refs.map((ref) => (
             <div key={ref.path} className="rounded-xl border border-[#2a2a2a] bg-[#1a1a1a] p-3">
               <div className="flex gap-3">
-                <img src={convertFileSrc(ref.path)} alt="" className="h-20 w-20 rounded-lg object-cover" />
+                <img
+                  src={convertFileSrc(ref.path)}
+                  alt=""
+                  className="h-20 w-20 rounded-lg object-cover"
+                />
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-sm font-black text-white">{ref.name}</p>
-                  <p className="mt-1 text-[11px] text-neutral-500">現在: {referenceRoleLabel(ref.role)}</p>
+                  <p className="mt-1 text-[11px] text-neutral-500">
+                    現在: {referenceRoleLabel(ref.role)}
+                  </p>
                   <button
                     type="button"
                     onClick={() => remove(ref.path)}
@@ -2089,7 +2125,7 @@ function ProjectsWorkspace() {
   const [openId, setOpenId] = useState<string | null>(null);
   const [draftName, setDraftName] = useState("");
 
-  const opened = openId ? projects.find((p) => p.id === openId) ?? null : null;
+  const opened = openId ? (projects.find((p) => p.id === openId) ?? null) : null;
 
   const handleCreate = () => {
     const name = draftName.trim();
@@ -2242,8 +2278,8 @@ function ProjectDetailPanel({
           <h4 className="text-sm font-black text-white">{project.name}</h4>
           <p className="mt-0.5 text-[10px] text-neutral-500">
             企画ログ {chat.length} 通 ・ 画像 {project.items.length} 件
-            {stockCreditCount > 0 && ` ・ 素材 ${stockCreditCount} 件`}
-            ・ 更新 {relativeTimeJa(project.updatedAt)}
+            {stockCreditCount > 0 && ` ・ 素材 ${stockCreditCount} 件`}・ 更新{" "}
+            {relativeTimeJa(project.updatedAt)}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -2375,7 +2411,9 @@ function ProjectCard({
   return (
     <div
       className={`group rounded-xl border bg-[#181818] p-3 transition ${
-        active ? "border-pink-400 ring-1 ring-pink-400/40" : "border-[#2a2a2a] hover:border-pink-400/60"
+        active
+          ? "border-pink-400 ring-1 ring-pink-400/40"
+          : "border-[#2a2a2a] hover:border-pink-400/60"
       }`}
     >
       <div className="grid grid-cols-2 gap-1">
@@ -2483,10 +2521,7 @@ function ProjectsDrawer() {
   return (
     <div className="space-y-1.5">
       {projects.map((project) => (
-        <div
-          key={project.id}
-          className="rounded-xl border border-neutral-200 bg-white p-2"
-        >
+        <div key={project.id} className="rounded-xl border border-neutral-200 bg-white p-2">
           <p className="truncate text-xs font-bold text-neutral-950">{project.name}</p>
           <p className="mt-0.5 text-[10px] text-neutral-500">
             {project.items.length} 件 · {relativeTimeJa(project.updatedAt)}
@@ -2507,11 +2542,7 @@ function ProjectsDrawer() {
  *
  * 書き出しワークフローは制作画面側で完結する方針のため、納品書き出し UI は撤去。
  */
-function ChatHistoryWorkspace({
-  onOpen,
-}: {
-  onOpen: (id: string) => Promise<void>;
-}) {
+function ChatHistoryWorkspace({ onOpen }: { onOpen: (id: string) => Promise<void> }) {
   const sessions = useSessions((s) => s.sessions);
   const activeSessionId = useSessions((s) => s.activeSessionId);
   const displayedSession = useSessions((s) => s.displayedSession);
@@ -2599,8 +2630,7 @@ function ChatHistoryWorkspace({
                         onChange={(e) => setEditDraft(e.target.value)}
                         onKeyDown={(e) => {
                           const isComposing =
-                            (e.nativeEvent as KeyboardEvent).isComposing ||
-                            e.keyCode === 229;
+                            (e.nativeEvent as KeyboardEvent).isComposing || e.keyCode === 229;
                           if (e.key === "Enter" && !isComposing) {
                             e.preventDefault();
                             void commitEdit();
@@ -2729,7 +2759,9 @@ function BoardWorkBar({
     <div className="sticky top-0 z-10 -mx-1 flex items-center justify-between rounded-2xl border border-[#242424] bg-[#181818]/95 px-3 py-2 shadow-sm backdrop-blur">
       <div>
         <p className="text-sm font-black text-white">最近の生成</p>
-        <p className="text-[11px] text-neutral-500">使う画像を選んで、参照・修正・コピーへ進めます。</p>
+        <p className="text-[11px] text-neutral-500">
+          使う画像を選んで、参照・修正・コピーへ進めます。
+        </p>
       </div>
       <div className="flex flex-wrap items-center justify-end gap-2">
         <Badge>{total} 件表示</Badge>
@@ -2877,9 +2909,7 @@ function BoardEmptyState() {
           <p className="text-[11px] font-black uppercase tracking-[0.18em] text-blue-700">
             参照画像
           </p>
-          <h3 className="mt-2 text-2xl font-black text-neutral-950">
-            画像を入れる
-          </h3>
+          <h3 className="mt-2 text-2xl font-black text-neutral-950">画像を入れる</h3>
           <p className="mt-2 text-sm leading-relaxed text-neutral-600">
             被写体、商品、雰囲気、背景をここから固定します。
           </p>
@@ -2923,8 +2953,8 @@ function PurposeActionCard({ purpose }: { purpose: (typeof PURPOSES)[number] }) 
         purpose.comingSoon
           ? "cursor-not-allowed border-neutral-200 bg-neutral-100 text-neutral-400 opacity-65"
           : active
-          ? "border-neutral-950 bg-neutral-950 text-white"
-          : "border-neutral-200 bg-neutral-50 text-neutral-950 hover:border-blue-300 hover:bg-blue-50"
+            ? "border-neutral-950 bg-neutral-950 text-white"
+            : "border-neutral-200 bg-neutral-50 text-neutral-950 hover:border-blue-300 hover:bg-blue-50"
       }`}
     >
       <span className="flex items-center gap-2 text-base font-black">
@@ -2935,7 +2965,9 @@ function PurposeActionCard({ purpose }: { purpose: (typeof PURPOSES)[number] }) 
           </span>
         )}
       </span>
-      <span className={`mt-1 block text-xs leading-relaxed ${active ? "text-neutral-300" : "text-neutral-500"}`}>
+      <span
+        className={`mt-1 block text-xs leading-relaxed ${active ? "text-neutral-300" : "text-neutral-500"}`}
+      >
         {purpose.description}
       </span>
     </button>
@@ -2977,9 +3009,13 @@ function BatchBoardRow({ batchId }: { batchId: string }) {
       <div className="mb-3 flex items-center justify-between gap-3">
         <div>
           <p className="text-sm font-black text-neutral-950">生成バッチ</p>
-          <p className="mt-0.5 line-clamp-1 text-xs text-neutral-500">{batch.prompt || "生成中..."}</p>
+          <p className="mt-0.5 line-clamp-1 text-xs text-neutral-500">
+            {batch.prompt || "生成中..."}
+          </p>
         </div>
-        <Badge tone="blue">{done}/{batch.count} 完了</Badge>
+        <Badge tone="blue">
+          {done}/{batch.count} 完了
+        </Badge>
       </div>
       <div className="grid gap-3 sm:grid-cols-3 lg:grid-cols-4">
         {batch.workers.map((worker) => (
@@ -3043,7 +3079,11 @@ function BoardImageCard({
         onDoubleClick={() => useImagePreview.getState().open(item.path)}
         className="block aspect-[16/9] w-full bg-[#0f0f0f]"
       >
-        <img src={convertFileSrc(item.path)} alt={item.name} className="h-full w-full object-cover" />
+        <img
+          src={convertFileSrc(item.path)}
+          alt={item.name}
+          className="h-full w-full object-cover"
+        />
       </button>
       <div className={tileSize < 210 ? "p-2" : "p-3"}>
         <div className="mb-2 flex items-center justify-between gap-2">
@@ -3066,15 +3106,27 @@ function BoardImageCard({
           </button>
           <Button
             size="xs"
-            onClick={() => addReference({ path: item.path, name: item.name, role: "subject", source: "gallery" })}
+            onClick={() =>
+              addReference({ path: item.path, name: item.name, role: "subject", source: "gallery" })
+            }
             className="border-[#333] bg-[#222] text-neutral-300 hover:border-pink-400 hover:text-white"
           >
             参照
           </Button>
-          <Button size="xs" className="border-[#333] bg-[#222] text-neutral-300 hover:border-pink-400 hover:text-white" onClick={() => setText("この画像をベースに、さらに完成度を上げてください。")}>
+          <Button
+            size="xs"
+            className="border-[#333] bg-[#222] text-neutral-300 hover:border-pink-400 hover:text-white"
+            onClick={() => setText("この画像をベースに、さらに完成度を上げてください。")}
+          >
             修正へ
           </Button>
-          <Button size="xs" className="border-[#333] bg-[#222] text-neutral-300 hover:border-pink-400 hover:text-white" onClick={copyPath}>コピー</Button>
+          <Button
+            size="xs"
+            className="border-[#333] bg-[#222] text-neutral-300 hover:border-pink-400 hover:text-white"
+            onClick={copyPath}
+          >
+            コピー
+          </Button>
         </div>
       </div>
     </article>
@@ -3116,10 +3168,16 @@ function BoardListItem({
         className="flex-shrink-0 overflow-hidden rounded-lg bg-[#0f0f0f]"
         style={{ width: thumbnailSize, height: Math.round(thumbnailSize * 0.62) }}
       >
-        <img src={convertFileSrc(item.path)} alt={item.name} className="h-full w-full object-cover" />
+        <img
+          src={convertFileSrc(item.path)}
+          alt={item.name}
+          className="h-full w-full object-cover"
+        />
       </button>
       <div className="min-w-0 flex-1">
-        <p className="truncate text-sm font-black text-white" title={item.name}>{item.name}</p>
+        <p className="truncate text-sm font-black text-white" title={item.name}>
+          {item.name}
+        </p>
         <p className="mt-1 truncate text-[11px] text-neutral-500">{item.path}</p>
       </div>
       <div className="grid w-[220px] grid-cols-4 gap-1.5">
@@ -3132,7 +3190,9 @@ function BoardListItem({
         </button>
         <Button
           size="xs"
-          onClick={() => addReference({ path: item.path, name: item.name, role: "subject", source: "gallery" })}
+          onClick={() =>
+            addReference({ path: item.path, name: item.name, role: "subject", source: "gallery" })
+          }
           className="border-[#333] bg-[#222] text-neutral-300 hover:border-pink-400 hover:text-white"
         >
           参照
@@ -3144,7 +3204,11 @@ function BoardListItem({
         >
           修正
         </Button>
-        <Button size="xs" className="border-[#333] bg-[#222] text-neutral-300 hover:border-pink-400 hover:text-white" onClick={copyPath}>
+        <Button
+          size="xs"
+          className="border-[#333] bg-[#222] text-neutral-300 hover:border-pink-400 hover:text-white"
+          onClick={copyPath}
+        >
           コピー
         </Button>
       </div>
@@ -3164,9 +3228,7 @@ function GuidedCommandDock() {
             <p className="text-[11px] font-black uppercase tracking-[0.18em] text-blue-700">
               Command Dock
             </p>
-            <h3 className="mt-0.5 text-sm font-black text-neutral-950">
-              選ぶほど指示が組み上がる
-            </h3>
+            <h3 className="mt-0.5 text-sm font-black text-neutral-950">選ぶほど指示が組み上がる</h3>
           </div>
           <div className="flex items-center gap-2">
             <Badge tone={primaryMode === "video" ? "blue" : "neutral"}>
@@ -3222,8 +3284,8 @@ function GuidedActions() {
                   purpose.comingSoon
                     ? "cursor-not-allowed border-neutral-200 bg-neutral-100 text-neutral-400"
                     : selectedPurpose === purpose.id
-                    ? "border-neutral-950 bg-neutral-950 text-white"
-                    : "border-neutral-200 bg-neutral-50 text-neutral-700 hover:border-blue-300 hover:bg-blue-50"
+                      ? "border-neutral-950 bg-neutral-950 text-white"
+                      : "border-neutral-200 bg-neutral-50 text-neutral-700 hover:border-blue-300 hover:bg-blue-50"
                 }`}
               >
                 {purpose.label}
@@ -3273,9 +3335,15 @@ function GuidedActions() {
             ))}
           </div>
           <div className="mt-2 flex gap-1.5">
-            <Button size="xs" onClick={() => setCount(4)}>4案</Button>
-            <Button size="xs" onClick={() => setCount(9)}>9カット</Button>
-            <Button size="xs" onClick={() => setAspect("9:16" as FrameAspect)}>9:16</Button>
+            <Button size="xs" onClick={() => setCount(4)}>
+              4案
+            </Button>
+            <Button size="xs" onClick={() => setCount(9)}>
+              9カット
+            </Button>
+            <Button size="xs" onClick={() => setAspect("9:16" as FrameAspect)}>
+              9:16
+            </Button>
           </div>
         </div>
       </div>
@@ -3302,11 +3370,15 @@ function InspectorPanel() {
   const selectedItem = useImages((s) => s.items.find((item) => item.path === selectedPath));
   return (
     <aside className="min-h-0 overflow-y-auto border-l border-neutral-200 bg-[#fbfbfc] p-3">
-      <p className="text-[11px] font-black uppercase tracking-[0.18em] text-blue-700">
-        制作設定
-      </p>
+      <p className="text-[11px] font-black uppercase tracking-[0.18em] text-blue-700">制作設定</p>
       <h3 className="mt-0.5 text-base font-black text-neutral-950">
-        {primaryMode === "video" ? "動画カット" : imageMode === "edit" ? "修正" : imageMode === "layers" ? "レイヤー" : "生成"}
+        {primaryMode === "video"
+          ? "動画カット"
+          : imageMode === "edit"
+            ? "修正"
+            : imageMode === "layers"
+              ? "レイヤー"
+              : "生成"}
       </h3>
       <div className="mt-3 space-y-2.5">
         <InfoPanel title="モード">
@@ -3349,8 +3421,13 @@ function InspectorPanel() {
           ) : (
             <div className="space-y-2">
               {references.map((ref) => (
-                <div key={ref.path} className="rounded-xl border border-neutral-200 bg-neutral-50 p-2">
-                  <p className="truncate font-bold text-neutral-950" title={ref.path}>{ref.name}</p>
+                <div
+                  key={ref.path}
+                  className="rounded-xl border border-neutral-200 bg-neutral-50 p-2"
+                >
+                  <p className="truncate font-bold text-neutral-950" title={ref.path}>
+                    {ref.name}
+                  </p>
                   <div className="mt-2 grid grid-cols-2 gap-1">
                     {KEEP_OPTIONS.map((option) => (
                       <button
@@ -3393,7 +3470,9 @@ function InspectorPanel() {
                 onClick={() => {
                   setPrimaryMode("video");
                   setVideoMode("story");
-                  useComposer.getState().setText("同じ被写体と世界観を保って、次のストーリーカットを作ってください。");
+                  useComposer
+                    .getState()
+                    .setText("同じ被写体と世界観を保って、次のストーリーカットを作ってください。");
                 }}
               >
                 次カットを作る
@@ -3403,7 +3482,11 @@ function InspectorPanel() {
                 onClick={() => {
                   setPrimaryMode("video");
                   setVideoMode("multiAngle");
-                  useComposer.getState().setText("位置関係と環境を固定し、カメラだけを動かした別角度を作ってください。");
+                  useComposer
+                    .getState()
+                    .setText(
+                      "位置関係と環境を固定し、カメラだけを動かした別角度を作ってください。",
+                    );
                 }}
               >
                 別角度を作る
@@ -3422,7 +3505,10 @@ function InspectorPanel() {
             </div>
             <div className="space-y-2">
               {layers.map((layer) => (
-                <div key={layer.id} className="rounded-xl border border-neutral-200 bg-neutral-50 p-2">
+                <div
+                  key={layer.id}
+                  className="rounded-xl border border-neutral-200 bg-neutral-50 p-2"
+                >
                   <div className="flex items-center justify-between gap-2">
                     <button
                       type="button"
@@ -3447,11 +3533,37 @@ function InspectorPanel() {
           </InfoPanel>
         )}
         <InfoPanel title="選択画像">
-          <p className="truncate" title={selectedPath}>{selectedItem?.name ?? "未選択"}</p>
+          <p className="truncate" title={selectedPath}>
+            {selectedItem?.name ?? "未選択"}
+          </p>
           <div className="mt-2 grid gap-1.5">
-            <Button size="xs" disabled={!selectedItem} onClick={() => useComposer.getState().setText("この画像をさらに高品質に修正してください。")}>修正へ</Button>
-            <Button size="xs" disabled={!selectedItem} onClick={() => useComposer.getState().setText("この画像を動画用の次カットにしてください。")}>動画化</Button>
-            <Button size="xs" disabled={!selectedItem} onClick={() => useComposer.getState().setText("この画像をレイヤー分けしやすい構成にしてください。")}>レイヤー分け</Button>
+            <Button
+              size="xs"
+              disabled={!selectedItem}
+              onClick={() =>
+                useComposer.getState().setText("この画像をさらに高品質に修正してください。")
+              }
+            >
+              修正へ
+            </Button>
+            <Button
+              size="xs"
+              disabled={!selectedItem}
+              onClick={() =>
+                useComposer.getState().setText("この画像を動画用の次カットにしてください。")
+              }
+            >
+              動画化
+            </Button>
+            <Button
+              size="xs"
+              disabled={!selectedItem}
+              onClick={() =>
+                useComposer.getState().setText("この画像をレイヤー分けしやすい構成にしてください。")
+              }
+            >
+              レイヤー分け
+            </Button>
           </div>
         </InfoPanel>
       </div>
@@ -3501,10 +3613,14 @@ function SideDrawer({
       <div className="flex h-full flex-col">
         <div className="flex items-center justify-between border-b border-neutral-200 px-4 py-3">
           <div>
-            <p className="text-[11px] font-black uppercase tracking-[0.16em] text-blue-700">パネル</p>
+            <p className="text-[11px] font-black uppercase tracking-[0.16em] text-blue-700">
+              パネル
+            </p>
             <h3 className="text-lg font-black text-neutral-950">{drawerTitle(drawer)}</h3>
           </div>
-          <Button size="xs" onClick={onClose}>閉じる</Button>
+          <Button size="xs" onClick={onClose}>
+            閉じる
+          </Button>
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto p-4">
           {drawer === "assets" && <AssetsDrawer />}
@@ -3542,7 +3658,12 @@ function AssetsDrawer() {
   const items = useImages((s) => s.items.slice(0, 80));
   const addReference = useComposer((s) => s.addReference);
   if (items.length === 0) {
-    return <EmptyState title="素材がありません" description="生成またはアップロードするとここに表示されます。" />;
+    return (
+      <EmptyState
+        title="素材がありません"
+        description="生成またはアップロードするとここに表示されます。"
+      />
+    );
   }
   return (
     <div className="grid grid-cols-2 gap-2">
@@ -3550,10 +3671,16 @@ function AssetsDrawer() {
         <button
           key={item.path}
           type="button"
-          onClick={() => addReference({ path: item.path, name: item.name, source: "gallery", role: "subject" })}
+          onClick={() =>
+            addReference({ path: item.path, name: item.name, source: "gallery", role: "subject" })
+          }
           className="overflow-hidden rounded-2xl border border-neutral-200 bg-white text-left hover:border-blue-400"
         >
-          <img src={convertFileSrc(item.path)} alt="" className="aspect-square w-full object-cover" />
+          <img
+            src={convertFileSrc(item.path)}
+            alt=""
+            className="aspect-square w-full object-cover"
+          />
           <p className="truncate px-2 py-1.5 text-[10px] font-bold text-neutral-600">{item.name}</p>
         </button>
       ))}
@@ -3570,13 +3697,22 @@ function ReferencesDrawer() {
   return (
     <div className="space-y-2">
       {refs.map((ref) => (
-        <div key={ref.path} className="flex gap-2 rounded-2xl border border-neutral-200 bg-white p-2">
-          <img src={convertFileSrc(ref.path)} alt="" className="h-14 w-14 rounded-xl object-cover" />
+        <div
+          key={ref.path}
+          className="flex gap-2 rounded-2xl border border-neutral-200 bg-white p-2"
+        >
+          <img
+            src={convertFileSrc(ref.path)}
+            alt=""
+            className="h-14 w-14 rounded-xl object-cover"
+          />
           <div className="min-w-0 flex-1">
             <p className="truncate text-xs font-bold text-neutral-950">{ref.name}</p>
             <p className="mt-1 text-[11px] text-neutral-500">{ref.role ?? "subject"}</p>
           </div>
-          <Button size="xs" tone="danger" onClick={() => remove(ref.path)}>外す</Button>
+          <Button size="xs" tone="danger" onClick={() => remove(ref.path)}>
+            外す
+          </Button>
         </div>
       ))}
     </div>
@@ -3624,7 +3760,9 @@ function ChatHistoryDrawer({ onOpen }: { onOpen: (id: string) => Promise<void> }
           </div>
           <div className="min-w-0 flex-1">
             <p className="truncate text-xs font-bold text-neutral-950">{session.title}</p>
-            <p className="mt-0.5 text-[10px] text-neutral-500">{relativeTimeJa(session.lastUsedAt)}</p>
+            <p className="mt-0.5 text-[10px] text-neutral-500">
+              {relativeTimeJa(session.lastUsedAt)}
+            </p>
           </div>
         </button>
       ))}
@@ -3651,9 +3789,15 @@ function SessionCard({
     >
       <div className="h-14 w-14 flex-shrink-0 overflow-hidden rounded-xl border border-[#333] bg-[#111]">
         {session.lastImagePath ? (
-          <img src={convertFileSrc(session.lastImagePath)} alt="" className="h-full w-full object-cover" />
+          <img
+            src={convertFileSrc(session.lastImagePath)}
+            alt=""
+            className="h-full w-full object-cover"
+          />
         ) : (
-          <span className="flex h-full w-full items-center justify-center text-xs font-black text-neutral-500">GG</span>
+          <span className="flex h-full w-full items-center justify-center text-xs font-black text-neutral-500">
+            GG
+          </span>
         )}
       </div>
       <div className="min-w-0">

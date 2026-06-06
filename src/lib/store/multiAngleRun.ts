@@ -32,7 +32,18 @@ type MultiAngleRunState = {
   clearSelection: () => void;
 
   // ===== run アクション =====
-  beginRun: (runId: string, selectedCutIds: { cutId: string; label: string }[]) => void;
+  /**
+   * 生成 run を開始する。pending スケルトンを作って status=running にする。
+   *
+   * 重要 (待機中 0/N 固着バグ修正 2026-06-06):
+   *   runId は **invoke の前** に呼んで skeleton を先に建てるため null 許容。
+   *   バックエンドの run_id が返ったら setRunId で後付けする。
+   *   こうしないと Rust 側が invoke 直後に spawn して cutStarted/cutCompleted を
+   *   先に emit するため、後から走る beginRun がそれらを pending で上書きしてしまう。
+   */
+  beginRun: (runId: string | null, selectedCutIds: { cutId: string; label: string }[]) => void;
+  /** beginRun(null, ...) の後でバックエンドの run_id を後付けする。 */
+  setRunId: (runId: string) => void;
   applyEvent: (e: MultiAngleEvent) => void;
   /** run 状態だけ初期化 (設定は保持)。 */
   reset: () => void;
@@ -83,20 +94,28 @@ export const useMultiAngleRun = create<MultiAngleRunState>((set) => ({
   clearSelection: () => set({ selectedCutIds: [] }),
 
   beginRun: (runId, selectedCutIds) =>
-    set(() => {
+    set((s) => {
       const cuts: Record<string, CutState> = {};
       const cutOrder: string[] = [];
       for (const { cutId, label } of selectedCutIds) {
-        cuts[cutId] = { cutId, label, status: "pending" };
+        // 既にイベントで進んだカット (running/completed/failed) があれば、その状態を
+        // 維持する。pending で上書きすると先行到着した cutCompleted が消える。
+        const prev = s.cuts[cutId];
+        cuts[cutId] =
+          prev && prev.status !== "pending"
+            ? { ...prev, label }
+            : { cutId, label, status: "pending" };
         cutOrder.push(cutId);
       }
       return {
         status: "running" as const,
-        runId,
+        runId: runId ?? s.runId,
         cuts,
         cutOrder,
       };
     }),
+
+  setRunId: (runId) => set({ runId }),
 
   applyEvent: (e) =>
     set((s) => {
@@ -105,26 +124,46 @@ export const useMultiAngleRun = create<MultiAngleRunState>((set) => ({
           return { status: "running" as const, runId: e.runId };
 
         case "cutStarted": {
-          const prev = s.cuts[e.cutId] ?? { cutId: e.cutId, label: e.label, status: "pending" as const };
+          const prev = s.cuts[e.cutId] ?? {
+            cutId: e.cutId,
+            label: e.label,
+            status: "pending" as const,
+          };
           return {
             cuts: { ...s.cuts, [e.cutId]: { ...prev, label: e.label, status: "running" as const } },
           };
         }
 
         case "cutCompleted": {
-          const prev = s.cuts[e.cutId] ?? { cutId: e.cutId, label: e.label, status: "pending" as const };
+          const prev = s.cuts[e.cutId] ?? {
+            cutId: e.cutId,
+            label: e.label,
+            status: "pending" as const,
+          };
           return {
             cuts: {
               ...s.cuts,
-              [e.cutId]: { ...prev, label: e.label, status: "completed" as const, imagePath: e.imagePath },
+              [e.cutId]: {
+                ...prev,
+                label: e.label,
+                status: "completed" as const,
+                imagePath: e.imagePath,
+              },
             },
           };
         }
 
         case "cutFailed": {
-          const prev = s.cuts[e.cutId] ?? { cutId: e.cutId, label: e.cutId, status: "pending" as const };
+          const prev = s.cuts[e.cutId] ?? {
+            cutId: e.cutId,
+            label: e.cutId,
+            status: "pending" as const,
+          };
           return {
-            cuts: { ...s.cuts, [e.cutId]: { ...prev, status: "failed" as const, reason: e.reason } },
+            cuts: {
+              ...s.cuts,
+              [e.cutId]: { ...prev, status: "failed" as const, reason: e.reason },
+            },
           };
         }
 

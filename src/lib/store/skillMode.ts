@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { resetSkillScopedState } from "./skillReset";
 import { resolveUiMode, useSkillUiMode } from "./skillUiMode";
 
 type SkillModeState = {
@@ -22,8 +23,18 @@ type SkillModeState = {
 function syncUiMode(enabled: boolean, skillId: string | null) {
   const ui = useSkillUiMode.getState();
   if (enabled && skillId) {
+    const prevSkillId = ui.activeSkillId;
     const mode = resolveUiMode(skillId);
     ui.enterSkill(skillId, mode);
+    // スキル切替時の前スキル残留データ対策 (2026-06-06 STΛCK報告):
+    //   別スキルに入ったら、前スキルの企画チャット履歴・生成 run を破棄して
+    //   新スキルを 01 (目標 Phase) の初期状態から始める。
+    //   同じスキルの再開 (prevSkillId === skillId) では破棄しないので進行中の作業は壊れない。
+    //   prevSkillId === null (作品モードからの初回起動) も「別スキルに入った」扱いで
+    //   破棄する。前回別スキルの残留が新スキルに流れ込むのを防ぐため。
+    if (prevSkillId !== skillId) {
+      resetSkillScopedState();
+    }
   } else {
     ui.exitSkill();
   }

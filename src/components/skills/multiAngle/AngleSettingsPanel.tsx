@@ -1,10 +1,9 @@
-import { useState } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
-
-import { useMultiAngleRun } from "../../../lib/store/multiAngleRun";
-import { useToasts } from "../../../lib/store/toasts";
+import { useState } from "react";
 import { getAngleCut, MAX_CUTS } from "../../../lib/multiangle/angles";
 import type { MultiAngleParams } from "../../../lib/multiangle/types";
+import { useMultiAngleRun } from "../../../lib/store/multiAngleRun";
+import { useToasts } from "../../../lib/store/toasts";
 import { AnglePickerModal } from "./AnglePickerModal";
 
 const IMAGE_EXTS = ["png", "jpg", "jpeg", "webp", "gif", "bmp"];
@@ -29,6 +28,7 @@ export function AngleSettingsPanel() {
   const selectedCutIds = useMultiAngleRun((s) => s.selectedCutIds);
   const status = useMultiAngleRun((s) => s.status);
   const beginRun = useMultiAngleRun((s) => s.beginRun);
+  const setRunId = useMultiAngleRun((s) => s.setRunId);
 
   const pushToast = useToasts((s) => s.push);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -82,18 +82,25 @@ export function AngleSettingsPanel() {
       cutPrompts,
     };
 
+    // 先に pending スケルトンを建てて listener を確実に間に合わせる。
+    // バックエンドは invoke 直後に spawn して cutStarted/cutCompleted を emit する。
+    // skeleton を invoke の前に建てておけば、先行到着したイベントも取りこぼさない。
+    beginRun(
+      null,
+      cutPrompts.map((c) => ({ cutId: c.cutId, label: c.label })),
+    );
+
     try {
       const runId = await invoke<string>("multiangle_run", { params });
-      beginRun(
-        runId,
-        cutPrompts.map((c) => ({ cutId: c.cutId, label: c.label })),
-      );
+      setRunId(runId);
       pushToast({
         kind: "success",
         text: `${count} カットの生成を開始しました。`,
         ttlMs: 3000,
       });
     } catch (err) {
+      // 起動失敗時は skeleton を片付けて待機表示を残さない。
+      useMultiAngleRun.getState().reset();
       pushToast({
         kind: "error",
         text: `生成の開始に失敗しました: ${(err as Error)?.message ?? err}`,
@@ -185,9 +192,7 @@ export function AngleSettingsPanel() {
         </button>
         <div className="mt-2 text-center text-[12px] font-bold text-neutral-400">
           選択中:{" "}
-          <span className={count > 0 ? "text-pink-300" : "text-neutral-500"}>
-            {count} カット
-          </span>
+          <span className={count > 0 ? "text-pink-300" : "text-neutral-500"}>{count} カット</span>
           <span className="text-neutral-600"> / 最大 {MAX_CUTS}</span>
         </div>
       </div>
