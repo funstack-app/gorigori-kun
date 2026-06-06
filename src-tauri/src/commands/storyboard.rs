@@ -23,9 +23,7 @@ use crate::events::EVENT_STORYBOARD;
 use crate::state::AppState;
 
 const PROMPT_TIMEOUT_SECS: u64 = 120;
-const EVALUATION_TIMEOUT_SECS: u64 = 120;
 const GENERATION_TIMEOUT_SECS: u64 = 900;
-const MAX_RETRIES_PER_CUT: u32 = 2;
 const STORYBOARD_MODEL: &str = "gpt-5.5";
 const STORYBOARD_EFFORT: &str = "low";
 
@@ -1007,9 +1005,13 @@ async fn run_storyboard_orchestrator(
         let mut all_takes_for_manifest: Vec<ManifestTake> = Vec::new();
         let mut selected: Option<EvaluatedTake> = None;
         let mut last_failure = String::new();
-        let mut global_take_index = 0u32;
 
-        for attempt in 0..=MAX_RETRIES_PER_CUT {
+        // === 2026-06-06 STΛCK 指示: AI 評価ループ + リトライを完全撤去 ===
+        // 旧: for attempt in 0..=MAX_RETRIES_PER_CUT { 生成 → 評価 → しきい値未満なら再生成 }
+        // 新: 指定枚数を1回だけ生成し、全 take をそのまま流す。1枚目を即採用、
+        //     残りは候補として Phase 4 でユーザーが手動切替する。
+        //     「後ろで採点して遅くする」より「先に出してダメなら手動で再生成」が良い UX。
+        {
             // P12: cut_id に対応する絵コンテ画像があれば参考として追加
             let sketch_ref_pathbuf: Option<PathBuf> = params
                 .sketch_references
@@ -1022,13 +1024,10 @@ async fn run_storyboard_orchestrator(
                 previous_cut_image.as_deref(),
                 sketch_ref_pathbuf.as_deref(),
             );
+            // ユーザー指定枚数 (candidates_per_cut) ぶんだけ生成する。
             let take_specs = (0..candidates_per_cut)
-                .map(|idx| {
-                    let take_id = take_label(global_take_index + idx);
-                    (take_id, idx + 1)
-                })
+                .map(|idx| (take_label(idx), idx + 1))
                 .collect::<Vec<_>>();
-            global_take_index += candidates_per_cut;
 
             let generated = generate_cut_takes(
                 &codex_bin,
@@ -1048,32 +1047,8 @@ async fn run_storyboard_orchestrator(
             for item in generated {
                 match item {
                     Ok((take_id, image_path)) => {
-                        // sketch_mode / manual_selection 時は評価をスキップ。
-                        // STΛCK 指示 (2026-05-20):
-                        //  - sketch_mode: 鉛筆絵コンテはキャラ評価に通らない
-                        //  - manual_selection: 評価ループが「気に入った take を勝手に
-                        //    差し替える」UX を生むため、ユーザー手動採用に委ねる
-                        let scores = if params.sketch_mode || params.manual_selection {
-                            ScoreBundle::default()
-                        } else {
-                            match evaluate_one_take(
-                                &codex_bin,
-                                &image_path,
-                                &char_ref_path,
-                                Some(&style_ref_path),
-                                previous_cut_image.as_deref(),
-                                &skill_refs.evaluator_rubric,
-                                params.cwd.as_deref(),
-                            )
-                            .await
-                            {
-                                Ok(scores) => scores,
-                                Err(err) => {
-                                    tracing::warn!(target: "codex.storyboard", "evaluation failed for {} {}: {err}", cut.cut_id, take_id);
-                                    ScoreBundle::default()
-                                }
-                            }
-                        };
+                        // 評価は行わない (撤去済み)。全 take をデフォルトスコアで素通し。
+                        let scores = ScoreBundle::default();
                         let image_path_string = image_path.to_string_lossy().into_owned();
                         let _ = app.emit(
                             EVENT_STORYBOARD,
@@ -1102,17 +1077,8 @@ async fn run_storyboard_orchestrator(
                 }
             }
 
-            // sketch_mode / manual_selection は評価スコアを使わず最初の take を即採用、
-            // 再試行も無し。manual_selection の場合、本来はユーザー選択を待つ仕様
-            // (Phase 2.5 で実装) だが、P2 最小実装としては「全 take を流して
-            // 1 枚目を即採用 + previous_cut_image 更新」で簡易化する。
-            // ユーザーは Phase 4 確認画面で take 切替できる (既存の adoptTake/selectTake)。
-            let picked = if params.sketch_mode || params.manual_selection {
-                select_first_take(&evaluated_takes)
-            } else {
-                select_best_take(&evaluated_takes)
-            };
-            if let Some(best) = picked {
+            // 評価なしで最初の take を即採用。残りは候補として Phase 4 でユーザーが切替。
+            if let Some(best) = select_first_take(&evaluated_takes) {
                 mark_manifest_take_status(&mut all_takes_for_manifest, &best.take_id, "confirmed");
                 let _ = app.emit(
                     EVENT_STORYBOARD,
@@ -1123,25 +1089,14 @@ async fn run_storyboard_orchestrator(
                 );
                 previous_cut_image = Some(best.image_path.clone());
                 selected = Some(best);
-                break;
-            }
-
-            if attempt < MAX_RETRIES_PER_CUT {
-                last_failure = format!(
-                    "{}: 全候補が評価しきい値未満のため再生成します ({}/{})",
-                    cut.cut_id,
-                    attempt + 1,
-                    MAX_RETRIES_PER_CUT
-                );
-                tracing::warn!(target: "codex.storyboard", "{last_failure}");
             }
         }
 
         if selected.is_none() {
             let reason = if last_failure.trim().is_empty() {
-                "all takes below threshold after 2 retries".to_string()
+                "このカットの画像生成に失敗しました".to_string()
             } else {
-                format!("all takes below threshold after 2 retries: {last_failure}")
+                format!("このカットの画像生成に失敗しました: {last_failure}")
             };
             let _ = app.emit(
                 EVENT_STORYBOARD,
@@ -2735,46 +2690,6 @@ fn build_generation_prompt(
     )
 }
 
-async fn evaluate_one_take(
-    codex_bin: &Path,
-    image_path: &Path,
-    char_ref: &Path,
-    style_ref: Option<&Path>,
-    previous_cut: Option<&Path>,
-    evaluator_rubric: &str,
-    cwd: Option<&str>,
-) -> Result<ScoreBundle, String> {
-    let mut image_paths: Vec<&Path> = vec![image_path, char_ref];
-    if let Some(style) = style_ref {
-        if style != char_ref {
-            image_paths.push(style);
-        }
-    }
-    if let Some(previous) = previous_cut {
-        image_paths.push(previous);
-    }
-
-    let prompt = format!(
-        "You are the GORI Storyboard evaluator. Reference this rubric.\n\n\
-         {evaluator_rubric}\n\n\
-         Score the first image (candidate) against the attached references.\n\
-         Attached image order: 1=candidate, 2=character reference, 3=style reference if present, last=previous confirmed cut if present.\n\
-         Return ONLY a JSON object matching this shape:\n\
-         {{\"scores\":{{\"identity\":N,\"outfit\":N,\"prop\":N,\"face\":N,\"hand\":N,\"background\":N}},\"warnings\":[],\"decision\":\"adoptable|warning|reject\",\"reason\":\"...\"}}\n\
-         No prose, no markdown."
-    );
-    let raw = codex_oneshot(
-        codex_bin,
-        &prompt,
-        &image_paths,
-        EVALUATION_TIMEOUT_SECS,
-        cwd,
-    )
-    .await?;
-    let json = extract_json_from_codex_stdout(&raw)?;
-    let scores_value = json.get("scores").cloned().unwrap_or(json);
-    serde_json::from_value(scores_value).map_err(|e| format!("score parse failed: {e}"))
-}
 
 async fn codex_oneshot(
     codex_bin: &Path,
@@ -2903,47 +2818,11 @@ fn extract_first_json_object(input: &str) -> Option<Value> {
     None
 }
 
-fn select_best_take(takes: &[EvaluatedTake]) -> Option<EvaluatedTake> {
-    takes
-        .iter()
-        .filter(|take| !has_reject_score(&take.scores))
-        .max_by(|a, b| {
-            weighted_score(&a.scores)
-                .partial_cmp(&weighted_score(&b.scores))
-                .unwrap_or(Ordering::Equal)
-                .then_with(|| {
-                    a.scores
-                        .background
-                        .partial_cmp(&b.scores.background)
-                        .unwrap_or(Ordering::Equal)
-                })
-        })
-        .cloned()
-}
-
-/// sketch_mode 用: 評価スコアを無視し、最初に生成された take を採用する。
-/// STΛCK 報告 (2026-05-20): 鉛筆絵コンテはキャラ一貫性の評価に通らない
-/// 設計なので、評価ベースの絞り込みは絵コンテと噛み合わない。
+/// 生成された take から採用する1枚を選ぶ。
+/// 2026-06-06 STΛCK 指示で AI 評価ループを撤去したため、常に最初の take を採用する
+/// (残りは候補として Phase 4 でユーザーが手動切替)。
 fn select_first_take(takes: &[EvaluatedTake]) -> Option<EvaluatedTake> {
     takes.first().cloned()
-}
-
-fn has_reject_score(scores: &ScoreBundle) -> bool {
-    scores.identity < 50.0
-        || scores.outfit < 50.0
-        || scores.prop < 50.0
-        || scores.face < 50.0
-        || scores.hand < 50.0
-        || scores.background < 50.0
-}
-
-fn weighted_score(scores: &ScoreBundle) -> f64 {
-    scores.identity * 1.4
-        + scores.outfit * 1.3
-        + scores.face * 1.4
-        + scores.hand * 1.4
-        + scores.prop
-        + scores.background
 }
 
 fn mark_manifest_take_status(takes: &mut [ManifestTake], selected_take_id: &str, status: &str) {
