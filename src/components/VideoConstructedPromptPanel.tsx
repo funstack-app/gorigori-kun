@@ -3,7 +3,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { higgsfield } from "../lib/ipc";
 import { paramsToVideoArgs, useVideoSceneGeneration } from "../lib/scene/useVideoSceneGeneration";
 import { resolveImageMentions } from "../lib/scene/resolveImageMentions";
-import { useComposer } from "../lib/store/composer";
+import { useComposer, type Reference } from "../lib/store/composer";
 import { useVideoGen } from "../lib/store/videoGen";
 import {
   extractDropped,
@@ -11,7 +11,10 @@ import {
   isImageDrop,
 } from "../lib/dragRef";
 import { VIDEO_MODELS, type VideoModelDefinition, type VideoModelParam } from "../lib/videoModels";
-import type { Preset } from "../lib/store/presets";
+import {
+  presetAttachedImagesToReferences,
+  type Preset,
+} from "../lib/store/presets";
 import { PresetPickerPopover } from "./PresetPickerPopover";
 import { SkillPickerPopover } from "./SkillPickerPopover";
 import { PromptTextareaWithMentions } from "./PromptTextareaWithMentions";
@@ -89,14 +92,10 @@ export function VideoConstructedPromptPanel() {
     const current = (isOverriding ? draft : generatedPrompt).trim();
     const next = current ? `${current}, ${preset.prompt}` : preset.prompt;
     onChangeDraft(next);
-    if (preset.attachedImages && preset.attachedImages.length > 0) {
-      const refs = preset.attachedImages.map((img) => ({
-        path: img.path,
-        name: img.path.split(/[\\/]/).pop() || "preset image",
-        source: "gallery" as const,
-        role: img.role as never,
-      }));
-      useComposer.getState().addReferences(refs);
+    // F-#6/#7: プリセットの参照画像を composer.references に自動追加。
+    const refs = presetAttachedImagesToReferences(preset);
+    if (refs.length > 0) {
+      useComposer.getState().addReferences(refs as Reference[]);
     }
   };
 

@@ -321,6 +321,7 @@ export function PlanWorkspace() {
           value={draft}
           attachments={pendingImages}
           onAddFiles={addFiles}
+          onAddImagePaths={addPendingImages}
           onRemoveAttachment={removePendingImage}
           onChange={setDraft}
           onSend={handleSend}
@@ -487,6 +488,7 @@ function ChatInput({
   value,
   attachments,
   onAddFiles,
+  onAddImagePaths,
   onRemoveAttachment,
   onChange,
   onSend,
@@ -495,6 +497,8 @@ function ChatInput({
   value: string;
   attachments: string[];
   onAddFiles: (files: FileList | File[]) => void;
+  /** プリセット由来の参照画像パスを直接添付する (File 変換を経由しない)。 */
+  onAddImagePaths: (paths: string[]) => void;
   onRemoveAttachment: (path: string) => void;
   onChange: (v: string) => void;
   onSend: () => void;
@@ -619,7 +623,12 @@ function ChatInput({
           </button>
         </div>
       </div>
-      {/* F-#8: プリセット呼び出し → draft 末尾追記 */}
+      {/*
+        F-#8: プリセット呼び出し → draft 末尾追記。
+        F-#6/#7: プリセットに参照画像があれば企画チャットの添付にも自動追加。
+        企画タブは composer.references でなく pendingImages (パス配列) で添付を
+        管理しているので、attachedImages の path をそのまま流す。
+      */}
       <PresetPickerPopover
         open={presetOpen}
         onClose={() => setPresetOpen(false)}
@@ -628,6 +637,10 @@ function ChatInput({
           const current = value.trim();
           const next = current ? `${current}\n${preset.prompt}` : preset.prompt;
           onChange(next);
+          const paths = (preset.attachedImages ?? [])
+            .map((img) => img.path)
+            .filter((p) => p.length > 0);
+          if (paths.length > 0) onAddImagePaths(paths);
         }}
       />
     </div>

@@ -101,6 +101,50 @@ export type PresetAttachedImage = {
   role?: string;
 };
 
+/**
+ * composer.ReferenceRole の許容値。presets → composer の境界で
+ * 不正な role 文字列を弾くための検証セット。composer.ts に直接依存すると
+ * 循環の懸念があるため、許容値だけをここに複製して保持する。
+ */
+const VALID_REFERENCE_ROLES = new Set([
+  "subject",
+  "look",
+  "background",
+  "product",
+  "pose",
+  "negative",
+]);
+
+/**
+ * プリセット呼び出し時に composer.references へ流すための record。
+ * presets 側は composer に依存しないので、role は検証済み string | undefined で返す。
+ */
+export type PresetReference = {
+  path: string;
+  name: string;
+  source: "gallery";
+  role?: string;
+};
+
+/**
+ * preset.attachedImages を composer.addReferences に渡せる形へ変換する。
+ * 境界検証: 不正 role は undefined に落とす（型の信頼を内部で担保）。
+ * 呼び出し側 (PlanWorkspace / ConstructedPromptPanel / VideoConstructedPromptPanel)
+ * で同じロジックを書かないよう一本化する。
+ */
+export function presetAttachedImagesToReferences(
+  preset: Preset,
+): PresetReference[] {
+  if (!preset.attachedImages || preset.attachedImages.length === 0) return [];
+  return preset.attachedImages.map((img) => ({
+    path: img.path,
+    name: img.path.split(/[\\/]/).pop() || "preset image",
+    source: "gallery" as const,
+    role:
+      img.role && VALID_REFERENCE_ROLES.has(img.role) ? img.role : undefined,
+  }));
+}
+
 export type Preset = {
   id: string;
   name: string;

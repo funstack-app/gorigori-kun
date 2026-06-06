@@ -3,7 +3,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { useSceneGeneration } from "../lib/scene/useSceneGeneration";
 import { aspectRatioOptions, type SceneOption } from "../lib/scene/catalog";
 import type { SceneAspectRatio } from "../lib/scene/types";
-import { useComposer } from "../lib/store/composer";
+import { useComposer, type Reference } from "../lib/store/composer";
 import {
   extractDropped,
   fileToUploadReference,
@@ -11,7 +11,10 @@ import {
 } from "../lib/dragRef";
 import { useSceneStore } from "../lib/store/scene";
 import { useWorkspace } from "../lib/store/workspace";
-import type { Preset } from "../lib/store/presets";
+import {
+  presetAttachedImagesToReferences,
+  type Preset,
+} from "../lib/store/presets";
 import { HiggsfieldModelSelector } from "./HiggsfieldModelSelector";
 import { OptionPickerModal } from "./scene/OptionPickerModal";
 import { PresetPickerPopover } from "./PresetPickerPopover";
@@ -155,15 +158,11 @@ export function ConstructedPromptPanel() {
     const current = (isOverriding ? draft : generatedPrompt).trim();
     const next = current ? `${current}, ${preset.prompt}` : preset.prompt;
     onChangeDraft(next);
-    if (preset.attachedImages && preset.attachedImages.length > 0) {
-      const refs = preset.attachedImages.map((img) => ({
-        path: img.path,
-        name: img.path.split(/[\\/]/).pop() || "preset image",
-        source: "gallery" as const,
-        // role は string で保存しているので、ReferenceRole の型に合致する場合のみ流す
-        role: img.role as never,
-      }));
-      useComposer.getState().addReferences(refs);
+    // F-#6/#7: プリセットに参照画像があれば composer.references にも自動追加。
+    // role 検証は presetAttachedImagesToReferences 側で済み (不正値は undefined)。
+    const refs = presetAttachedImagesToReferences(preset);
+    if (refs.length > 0) {
+      useComposer.getState().addReferences(refs as Reference[]);
     }
   };
 
