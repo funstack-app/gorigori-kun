@@ -1218,15 +1218,22 @@ pub async fn higgsfield_generate_cost(args: HiggsfieldCostArgs) -> Result<i64, S
     }
 
     let json = parse_json_stdout(&output.stdout)?;
-    let credits = json
-        .get("credits")
-        .and_then(|value| value.as_i64())
-        .or_else(|| json.get("credits_exact").and_then(|value| value.as_i64()))
+    // credits は実測で小数になる (例: pro 5s=12.5, 720p std 5s=22.5, 15s=67.5,
+    // 720p fast 5s=17.5, veo fast 6s=16.5)。`as_i64()` だと小数を取りこぼし、
+    // 丸め済み `credits` フィールドにフォールバックして実コストとズレる。
+    // → credits_exact を最優先で f64 として受け、内部実値を保持する。
+    // 内部実値は f64、UI 表示は四捨五入した整数 (戻り値型 i64) を返す。
+    let credits_exact = json
+        .get("credits_exact")
+        .and_then(|value| value.as_f64())
+        .or_else(|| json.get("credits").and_then(|value| value.as_f64()))
         .ok_or_else(|| {
             let preview = serde_json::to_string(&json).unwrap_or_else(|_| "<invalid json>".into());
             format!("Higgsfield cost JSON から credits を見つけられませんでした: {preview}")
         })?;
-    eprintln!("[higgsfield_cost] OK credits={credits}");
+    // 表示用に四捨五入。内部実値 (credits_exact) はログに残す。
+    let credits = credits_exact.round() as i64;
+    eprintln!("[higgsfield_cost] OK credits_exact={credits_exact} credits_display={credits}");
     Ok(credits)
 }
 
