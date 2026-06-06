@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { PresetCard } from "./PresetCard";
 import { PresetThumbnailFocusModal } from "./PresetThumbnailFocus";
 import { SafeImage } from "./SafeImage";
-import { extractDropped, isImageDrop } from "../lib/dragRef";
+import { extractDropped, fileToUploadReference, isImageDrop } from "../lib/dragRef";
 import {
   focusToImageStyle,
   sortPresets,
@@ -869,13 +869,21 @@ function PresetForm({
         }}
         onDrop={(event) => {
           event.preventDefault();
-          const { refs } = extractDropped(event.dataTransfer);
-          if (refs.length === 0) return;
-          const dropped = refs
-            .map((r) => r.path)
-            .filter((p) => !attachedImages.includes(p));
-          if (dropped.length > 0) {
-            onChangeAttachedImages([...attachedImages, ...dropped]);
+          // 内部 ref はそのまま、外部 OS ファイル/別モニタ画像は writeUpload で
+          // 取り込んでから path を追加する (穴埋め: 従来は refs のみで外部画像を
+          // 取りこぼしていた)。
+          const { refs, files } = extractDropped(event.dataTransfer);
+          const addPaths = (paths: string[]) => {
+            const dropped = paths.filter((p) => !attachedImages.includes(p));
+            if (dropped.length > 0) {
+              onChangeAttachedImages([...attachedImages, ...dropped]);
+            }
+          };
+          if (refs.length > 0) addPaths(refs.map((r) => r.path));
+          if (files.length > 0) {
+            void Promise.all(files.map((f) => fileToUploadReference(f)))
+              .then((uploaded) => addPaths(uploaded.map((r) => r.path)))
+              .catch((err) => console.error("preset drop upload failed", err));
           }
         }}
       >

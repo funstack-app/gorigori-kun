@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 
 import { listenEditMagicProgress } from "../../lib/edit/events";
+import { extractDropped, fileToUploadReference, isImageDrop } from "../../lib/dragRef";
 import { useEditMagic } from "../../lib/store/editMagic";
 import { useEditor } from "./editor/editorStore";
 import { useEditorActions } from "./editor/useEditor";
@@ -104,10 +105,34 @@ export function EditorCanvas() {
     return () => unlisten?.();
   }, []);
 
+  // 外部 OS ファイル / 別モニタからの Tauri ネイティブ D&D は window 全体イベント
+  // として attachWindowDragDrop が受ける。編集タブがアクティブな間だけ、path 取り込み
+  // ハンドラを store に登録して橋渡しする (非 React の attachWindowDragDrop から呼べる)。
+  const setPathIngestor = useEditor((state) => state.setPathIngestor);
+  useEffect(() => {
+    setPathIngestor((path) => {
+      void actionsRef.current.saveDroppedPathAndRunMagic(path);
+    });
+    return () => setPathIngestor(null);
+  }, [setPathIngestor]);
+
   const drop = (event: React.DragEvent<HTMLDivElement>) => {
+    if (!isImageDrop(event.dataTransfer)) return;
     event.preventDefault();
-    const file = Array.from(event.dataTransfer.files).find((item) => item.type.startsWith("image/"));
-    if (file) void actionsRef.current.saveDroppedFileAndRunMagic(file);
+    // アプリ内部の参照ドラッグ (gallery / preset) は path をそのまま取り込む。
+    // 外部 OS ファイルは File 経由で writeUpload してから取り込む。
+    const { refs, files } = extractDropped(event.dataTransfer);
+    const internalPath = refs[0]?.path;
+    if (internalPath) {
+      void actionsRef.current.saveDroppedPathAndRunMagic(internalPath);
+      return;
+    }
+    const file = files[0];
+    if (file) {
+      void fileToUploadReference(file).then((ref) => {
+        void actionsRef.current.saveDroppedPathAndRunMagic(ref.path);
+      });
+    }
   };
 
   const statusText = progress ? progressLabel(progress.kind) : message;

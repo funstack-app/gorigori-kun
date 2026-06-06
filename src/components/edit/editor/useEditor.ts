@@ -164,5 +164,36 @@ export function useEditorActions() {
     }
   };
 
-  return { run, chooseImage, runMagic, handleCanvasClickForTool, saveDroppedFileAndRunMagic };
+  /**
+   * 既にローカル PC 上にある画像 path を編集タブに取り込んで Magic Layer を回す。
+   *
+   * 外部 OS ファイル / 別モニタからの Tauri ネイティブ D&D は path を渡してくる
+   * ので、File を経由せずに直接取り込める (writeUpload 不要)。アプリ内部の参照
+   * ドラッグ (gallery / preset) もここに来る。
+   */
+  const saveDroppedPathAndRunMagic = async (path: string) => {
+    if (!path) return;
+    const shouldClear = (canvas as { getObjects?: () => unknown[] } | null)?.getObjects?.().length;
+    if (shouldClear && !window.confirm("既存レイヤーをクリアして、この画像で Magic Layer を実行しますか?")) {
+      return;
+    }
+    setBusyTool("magic");
+    setError(null);
+    try {
+      setSourceImagePath(path);
+      await runMagic(path, "magic", projectName);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+      setBusyTool(null);
+    }
+  };
+
+  return {
+    run,
+    chooseImage,
+    runMagic,
+    handleCanvasClickForTool,
+    saveDroppedFileAndRunMagic,
+    saveDroppedPathAndRunMagic,
+  };
 }

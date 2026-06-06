@@ -1,3 +1,4 @@
+import { useEditor } from "../components/edit/editor/editorStore";
 import { useComposer, type Reference } from "./store/composer";
 import { usePlanChat } from "./store/planChat";
 import { useToasts } from "./store/toasts";
@@ -52,13 +53,38 @@ export async function attachWindowDragDrop(opts: {
           refs.push({ path: p, name: basename(p), source: "upload" });
         }
         if (refs.length > 0) {
-          if (useWorkspace.getState().activeTab === "plan") {
+          const activeTab = useWorkspace.getState().activeTab;
+          if (activeTab === "plan") {
             usePlanChat.getState().addPendingImages(refs.map((ref) => ref.path));
             useToasts.getState().push({
               kind: "success",
               text: `${refs.length} 枚を企画チャットに添付しました`,
               ttlMs: 3000,
             });
+          } else if (activeTab === "edit") {
+            // 編集タブは composer ではなく Fabric エディタ (useEditor) を使う。
+            // EditorCanvas が登録した path 取り込みハンドラがあればそこへ流す。
+            // Magic Layer は 1 枚ずつなので先頭の 1 枚だけ取り込む。
+            const ingest = useEditor.getState().pathIngestor;
+            if (ingest) {
+              ingest(refs[0].path);
+              useToasts.getState().push({
+                kind: "success",
+                text:
+                  refs.length > 1
+                    ? `${refs.length} 枚のうち先頭 1 枚を編集タブに取り込みました`
+                    : "編集タブに画像を取り込みました",
+                ttlMs: 3000,
+              });
+            } else {
+              // エディタ未マウント (Magic Layer 初期化前など) は composer に退避。
+              useComposer.getState().addReferences(refs);
+              useToasts.getState().push({
+                kind: "info",
+                text: `${refs.length} 枚を参照画像に追加しました`,
+                ttlMs: 3000,
+              });
+            }
           } else {
             useComposer.getState().addReferences(refs);
             useToasts.getState().push({
