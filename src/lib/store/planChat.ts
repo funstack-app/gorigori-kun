@@ -10,6 +10,7 @@ import type { SceneConstruction, StoryboardParams } from "../storyboard/types";
 import { buildWorldContextBlock } from "../agents/systemPrompts";
 import { useActiveProject } from "./activeProject";
 import { useProjects, type ProjectChatMessage } from "./projects";
+import { useReferenceRoles } from "./referenceRoles";
 import { useSettings } from "./settings";
 import { useSkillMode } from "./skillMode";
 import { useToasts } from "./toasts";
@@ -421,16 +422,40 @@ function extractStructuredStoryboard(text: string, messages: PlanMessage[]): { p
   const aspect = source.aspect_ratio ?? source.aspectRatio;
   const tempo = normalizeTempo(source.tempo);
   const attached = latestAttachedImages(messages);
+  // FB#3 (2026-06-06): フォールバックの「1枚目=キャラ/2枚目=スタイル」自動割当を廃し、
+  // ユーザーが referenceRoles で明示指定した役割を尊重する。AI が JSON に明示パスを
+  // 返していればそれを最優先、無ければ役割指定済みの先頭画像を採用する。
+  const roleStore = useReferenceRoles.getState();
+  const charAttached = attached.filter((p) => roleStore.getRole(p) === "character");
+  const styleAttached = attached.filter((p) => roleStore.getRole(p) === "style");
   const characterPath = typeof source.character_reference_path === "string"
     ? source.character_reference_path
     : typeof source.characterReferencePath === "string"
       ? source.characterReferencePath
-      : attached[0] ?? "";
+      : charAttached[0] ?? attached[0] ?? "";
   const stylePath = typeof source.style_reference_path === "string"
     ? source.style_reference_path
     : typeof source.styleReferencePath === "string"
       ? source.styleReferencePath
-      : attached[1];
+      : styleAttached[0];
+  // 複数キャラ参照 (登場キャラ全員) を後方互換フィールドと別に保持する。
+  // 単数 character_reference_path は先頭キャラを指すので、配列にはそれを含む全キャラを入れる。
+  const characterPaths = (() => {
+    const fromJson = optStrArray(
+      pick(source, "character_reference_paths", "characterReferencePaths"),
+    );
+    if (fromJson && fromJson.length > 0) return fromJson;
+    if (charAttached.length > 0) return charAttached;
+    return characterPath ? [characterPath] : [];
+  })();
+  const stylePaths = (() => {
+    const fromJson = optStrArray(
+      pick(source, "style_reference_paths", "styleReferencePaths"),
+    );
+    if (fromJson && fromJson.length > 0) return fromJson;
+    if (styleAttached.length > 0) return styleAttached;
+    return stylePath ? [stylePath] : [];
+  })();
 
   // STΛCK 指示 (2026-05-20): Phase 1 ゴール深掘りでは画像必須にしない。
   // characterPath は Phase 2 絵コンテレビュー後 / Phase 3 生成開始時に
@@ -445,6 +470,10 @@ function extractStructuredStoryboard(text: string, messages: PlanMessage[]): { p
     tempo,
     character_reference_path: characterPath,
     style_reference_path: stylePath || undefined,
+    // FB#3 (2026-06-06): 複数キャラ/スタイル参照。後方互換の単数フィールドは残しつつ、
+    // 配列があれば下流 (本生成) が全参照を画像生成へ渡せる。空配列は付けない。
+    ...(characterPaths.length > 1 ? { character_reference_paths: characterPaths } : {}),
+    ...(stylePaths.length > 1 ? { style_reference_paths: stylePaths } : {}),
     // ストーリー本文と意図も保持 (現在の構成モーダルで表示するため)
     ...(typeof source.story_prompt === "string" ? { story_prompt: source.story_prompt } : {}),
     ...(typeof source.storyPrompt === "string" ? { story_prompt: source.storyPrompt } : {}),
@@ -656,8 +685,27 @@ export const usePlanChat = create<PlanChatState>((set, get) => ({
       ? buildWorldContextBlock(useSettings.getState().settings.worldContext)
       : "";
     const imagesForTurn = attachedImages ?? get().pendingImages;
+    // FB#3 (2026-06-06): 添付画像の役割 (キャラ/スタイル) をユーザーが明示指定して
+    // いれば、それをそのまま AI に伝える。AI の文脈推測に任せず、登場キャラが複数
+    // いるケースで「勝手にスタイル参照になる」事故を防ぐ。役割は referenceRoles
+    // ストア (パス → "character" | "style") が握る。未指定はキャラ既定。
+    const roleStore = useReferenceRoles.getState();
+    const charImages = imagesForTurn.filter((p) => roleStore.getRole(p) === "character");
+    const styleImages = imagesForTurn.filter((p) => roleStore.getRole(p) === "style");
     const imageNote = imagesForTurn.length > 0
-      ? `\n\n[添付画像]\n${imagesForTurn.map((path, index) => `${index + 1}. ${path}`).join("\n")}\nAIは文脈からキャラクター基準画像・スタイル基準画像のどちらかを判定してください。`
+      ? `\n\n[添付画像]\n${imagesForTurn
+          .map((path, index) => {
+            const role = roleStore.getRole(path) === "style" ? "スタイル参照" : "キャラ参照";
+            return `${index + 1}. [${role}] ${path}`;
+          })
+          .join("\n")}\n` +
+        (charImages.length > 0
+          ? `キャラ参照 (登場キャラ/被写体の同一性を保つ対象, ${charImages.length}枚): ${charImages.join(", ")}\n`
+          : "") +
+        (styleImages.length > 0
+          ? `スタイル参照 (絵のタッチ/質感のみ参照し人物同一性には使わない, ${styleImages.length}枚): ${styleImages.join(", ")}\n`
+          : "") +
+        "上記の役割指定に従ってください。キャラ参照は人物の同一性維持に、スタイル参照はタッチ/質感の参照に使い分けてください。役割をAIが勝手に入れ替えないでください。"
       : "";
     const submitText = `${isFirstTurn ? worldContext : ""}${isFirstTurn ? rolePrefix : ""}${trimmed}${imageNote}`;
     // user メッセージは楽観的に「ユーザーが書いたまま」を表示する

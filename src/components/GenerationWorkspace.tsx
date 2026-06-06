@@ -1197,6 +1197,9 @@ function SkillSettingsPanel() {
         storyPrompt,
         characterReferenceImage: storyboardParams.character_reference_path,
         styleReferenceImage: storyboardParams.style_reference_path,
+        // FB#3 (2026-06-06): 複数キャラ/スタイル参照 (後方互換: 単数も維持)。
+        characterReferenceImages: storyboardParams.character_reference_paths,
+        styleReferenceImages: storyboardParams.style_reference_paths,
         aspectRatio: storyboardParams.aspect_ratio,
         durationSeconds: storyboardParams.duration_seconds,
         tempo: storyboardParams.tempo,

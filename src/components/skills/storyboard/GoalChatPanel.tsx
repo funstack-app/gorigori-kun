@@ -151,6 +151,9 @@ export function GoalChatPanel() {
       tempo: params.tempo,
       characterReferencePath: params.character_reference_path || "",
       styleReferencePath: params.style_reference_path,
+      // FB#3 (2026-06-06): 複数キャラ/スタイル参照を goal に運ぶ (後方互換: 単数も維持)。
+      characterReferencePaths: params.character_reference_paths,
+      styleReferencePaths: params.style_reference_paths,
     };
     setGoal(goal);
     setPhase(targetPhase);

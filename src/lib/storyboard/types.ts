@@ -34,6 +34,14 @@ export type StoryboardParams = {
   tempo: StoryboardTempo;
   character_reference_path: string;
   style_reference_path?: string;
+  /**
+   * FB#3 (2026-06-06 STΛCK 指示): 複数キャラ参照 (登場キャラ全員) / 複数スタイル参照。
+   * 後方互換のため単数フィールド (character_reference_path / style_reference_path) は
+   * 残す。配列が存在すればそれを優先し、下流 (本生成) は全参照を画像生成に渡す。
+   * 単数フィールドは配列の先頭要素を指す。
+   */
+  character_reference_paths?: string[];
+  style_reference_paths?: string[];
 };
 
 /**
@@ -105,6 +113,14 @@ export type StoryboardRunParams = {
   storyPrompt: string;
   characterReferenceImage: string;
   styleReferenceImage?: string;
+  /**
+   * FB#3 (2026-06-06): 複数キャラ参照 (登場キャラ全員)。後方互換のため
+   * characterReferenceImage (単数, 先頭キャラ) は残す。Rust 側 storyboard_run が
+   * この配列を受け取り、build_reference_images で全キャラ参照を画像生成に渡す。
+   * (Rust 側の対応は別途。配列が無ければ従来通り単数で動く)
+   */
+  characterReferenceImages?: string[];
+  styleReferenceImages?: string[];
   aspectRatio: StoryboardAspectRatio;
   durationSeconds: number;
   tempo: StoryboardTempo;
@@ -181,6 +197,13 @@ export type StoryboardGoal = {
   tempo: StoryboardTempo;
   characterReferencePath: string;
   styleReferencePath?: string;
+  /**
+   * FB#3 (2026-06-06): 複数キャラ参照 / 複数スタイル参照。
+   * 後方互換のため characterReferencePath (単数, 先頭) は残す。
+   * 本生成時に全参照を Rust 側へ渡す。
+   */
+  characterReferencePaths?: string[];
+  styleReferencePaths?: string[];
 };
 
 /**

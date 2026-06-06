@@ -152,6 +152,9 @@ export function SketchReviewPanel() {
         storyPrompt: goal.summary || "ストーリーカット",
         characterReferenceImage: goal.characterReferencePath,
         styleReferenceImage: goal.styleReferencePath,
+        // FB#3 (2026-06-06): 複数キャラ/スタイル参照 (後方互換: 単数も維持)。
+        characterReferenceImages: goal.characterReferencePaths,
+        styleReferenceImages: goal.styleReferencePaths,
         aspectRatio: goal.aspectRatio,
         durationSeconds: goal.durationSeconds,
         tempo: goal.tempo,
