@@ -282,12 +282,19 @@ function SignedInScaffold() {
         if (result.dbUpdated > 0 || Object.keys(result.pathMap).length > 0) {
           // history.db は Rust が張り替え済み。projects.json は旧→新マップで適用。
           useProjects.getState().relinkItemPaths(result.pathMap);
+        }
+        // 実体が消えたパスは projects.json からも壊れた item を取り除く
+        // (history.db からは Rust が削除済み)。「画像が見つかりません」を残さない。
+        if (result.prunedPaths && result.prunedPaths.length > 0) {
+          useProjects.getState().pruneItemPaths(result.prunedPaths);
+        }
+        if (result.dbUpdated > 0 || result.dbPruned > 0) {
           console.info(
-            "[relink] history.db",
+            "[relink] history.db 再リンク",
             result.dbUpdated,
-            "件 / projects",
-            Object.keys(result.pathMap).length,
-            "件のパスを再リンク (未解決",
+            "件 / 実体消失で削除",
+            result.dbPruned,
+            "件 (未解決",
             result.dbUnresolved,
             "件)",
           );

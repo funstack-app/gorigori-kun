@@ -600,9 +600,15 @@ pub struct RelinkResult {
     pub db_updated: u32,
     /// 候補が見つからずスキップした (= SafeImage フォールバック対象) 件数。
     pub db_unresolved: u32,
+    /// 2026-06-06 STΛCK 指示: 実体がどこにも無く再リンクもできなかった (=既に消えた)
+    /// レコードを history.db から削除した件数。「画像が見つかりません」の壊れた表示を残さない。
+    pub db_pruned: u32,
     /// フロント側 (projects.json) が同じ張り替えを適用するための旧→新マップ。
     /// projects.json は Rust から触らない (フロントの正本) ため、対応表だけ返す。
     pub path_map: HashMap<String, String>,
+    /// 2026-06-06: 削除した (実体消失) パスの一覧。フロントが projects.json から
+    /// 同じパスの壊れた item を取り除くために返す。
+    pub pruned_paths: Vec<String>,
 }
 
 /// 記録パスと実体のズレを再リンクで解消する (非破壊・冪等)。
@@ -639,7 +645,9 @@ pub async fn images_relink_missing(
     let mut result = RelinkResult {
         db_updated: 0,
         db_unresolved: 0,
+        db_pruned: 0,
         path_map: HashMap::new(),
+        pruned_paths: Vec::new(),
     };
 
     // DB pool が無くても (= 初期化前) クラッシュさせない。空の結果を返す。
@@ -667,14 +675,30 @@ pub async fn images_relink_missing(
         if Path::new(&old_path).is_file() {
             continue;
         }
-        // basename で実在場所を探す。
-        let Some(file_name) = Path::new(&old_path).file_name().and_then(|s| s.to_str()) else {
-            result.db_unresolved += 1;
-            continue;
-        };
-        let Some(new_path) = index.get(file_name) else {
-            // 候補なし。SafeImage フォールバックに任せる。
-            result.db_unresolved += 1;
+        // basename で実在場所を探す。実体が無く再リンクもできないレコードは
+        // history.db から削除する (2026-06-06 STΛCK 指示: 「画像が見つかりません/
+        // 生成できませんでした」の壊れた表示を残さない)。candidate ありなら後段で UPDATE。
+        let file_name = Path::new(&old_path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_string());
+        let candidate = file_name.as_deref().and_then(|fname| index.get(fname));
+        let Some(new_path) = candidate else {
+            // 候補なし = 実体がどこにも無い → DB から該当行を削除。
+            match sqlx::query("DELETE FROM images WHERE path = ?1")
+                .bind(&old_path)
+                .execute(&pool)
+                .await
+            {
+                Ok(_) => {
+                    result.db_pruned += 1;
+                    result.pruned_paths.push(old_path.clone());
+                }
+                Err(e) => {
+                    tracing::warn!(target: "codex.images", error = ?e, old_path = %old_path, "images_relink_missing: 実体消失レコードの削除に失敗");
+                    result.db_unresolved += 1;
+                }
+            }
             continue;
         };
         let new_path_str = new_path.to_string_lossy().into_owned();
@@ -712,6 +736,7 @@ pub async fn images_relink_missing(
     tracing::info!(
         target: "codex.images",
         db_updated = result.db_updated,
+        db_pruned = result.db_pruned,
         db_unresolved = result.db_unresolved,
         "images_relink_missing: 完了"
     );

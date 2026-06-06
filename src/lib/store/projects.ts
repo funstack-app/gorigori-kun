@@ -204,6 +204,12 @@ type ProjectsState = {
    */
   relinkItemPaths: (pathMap: Record<string, string>) => void;
 
+  /**
+   * 2026-06-06: 実体が消えた画像パスを持つ item をプロジェクトから取り除く。
+   * 「画像が見つかりません」の壊れた表示を残さないため (relink で削除された分)。
+   */
+  pruneItemPaths: (paths: string[]) => void;
+
   /** 企画チャットログを上書き保存する（差分ではなく毎回スナップショット） */
   setPlanChat: (projectId: string, messages: ProjectChatMessage[]) => void;
 
@@ -401,6 +407,24 @@ export const useProjects = create<ProjectsState>((set, get) => ({
         return it;
       });
       return projectChanged ? { ...p, items, updatedAt: now } : p;
+    });
+    if (!changed) return;
+    persist(next);
+    set({ projects: next });
+  },
+
+  pruneItemPaths: (paths) => {
+    if (!paths || paths.length === 0) return;
+    const dead = new Set(paths);
+    const now = Date.now();
+    let changed = false;
+    const next = get().projects.map((p) => {
+      const items = p.items.filter((it) => !dead.has(it.imagePath));
+      if (items.length !== p.items.length) {
+        changed = true;
+        return { ...p, items, updatedAt: now };
+      }
+      return p;
     });
     if (!changed) return;
     persist(next);

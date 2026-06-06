@@ -172,12 +172,16 @@ export type BatchDeleteResult = {
 
 /** Result of `images_relink_missing` (画像パス再リンク).
  * dbUpdated: history.db で旧→新パスに張り替えた件数。
- * dbUnresolved: 候補が見つからずスキップした件数 (SafeImage フォールバック対象)。
- * pathMap: フロント側 (projects.json) が同じ張り替えを適用するための旧→新マップ。 */
+ * dbPruned: 実体消失で history.db から削除した件数 (壊れた表示を残さない)。
+ * dbUnresolved: 削除に失敗した件数。
+ * pathMap: フロント側 (projects.json) が同じ張り替えを適用するための旧→新マップ。
+ * prunedPaths: 削除した (実体消失) パス一覧。projects.json から壊れた item を取り除くため。 */
 export type RelinkResult = {
   dbUpdated: number;
+  dbPruned: number;
   dbUnresolved: number;
   pathMap: Record<string, string>;
+  prunedPaths: string[];
 };
 
 export const images = {
