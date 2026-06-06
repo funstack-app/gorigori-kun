@@ -154,6 +154,26 @@ struct CutPlan {
     scene_group_id: String,
     description: String,
     duration_seconds: f64,
+    /// 2026-06-06: 企画タブで前出しした演出情報。Some のとき、本生成は裏側の
+    /// build_structured_prompt (毎カット LLM 設計・120秒×カット数) をスキップし、
+    /// この情報からローカルで構造化プロンプトを組み立てて即生成する。
+    /// None のとき従来どおり (後方互換: 旧い企画データや手入力 story_prompt 経由)。
+    prefilled: Option<PrefilledDirection>,
+}
+
+/// 企画タブで前出しされたカットの演出指示 (2026-06-06 STΛCK 指示)。
+/// SceneConstruction.cuts[] の演出フィールドをそのまま運ぶ。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PrefilledDirection {
+    cut_role: Option<String>,
+    shot_type: Option<String>,
+    camera_angle: Option<String>,
+    action_verbs: Vec<String>,
+    camera_motion: Option<String>,
+    must_keep: Vec<String>,
+    must_change: Vec<String>,
+    negative_constraints: Vec<String>,
 }
 
 // =============================================================
@@ -384,6 +404,23 @@ struct SceneConstructionCutSnake {
     duration_seconds: Option<f64>,
     #[serde(default, alias = "sceneGroupId")]
     scene_group_id: Option<String>,
+    // === 演出前出しフィールド (2026-06-06 STΛCK 指示) ===
+    #[serde(default, alias = "cutRole")]
+    cut_role: Option<String>,
+    #[serde(default, alias = "shotType")]
+    shot_type: Option<String>,
+    #[serde(default, alias = "cameraAngle")]
+    camera_angle: Option<String>,
+    #[serde(default, alias = "actionVerbs")]
+    action_verbs: Option<Vec<String>>,
+    #[serde(default, alias = "cameraMotion")]
+    camera_motion: Option<String>,
+    #[serde(default, alias = "mustKeep")]
+    must_keep: Option<Vec<String>>,
+    #[serde(default, alias = "mustChange")]
+    must_change: Option<Vec<String>>,
+    #[serde(default, alias = "negativeConstraints")]
+    negative_constraints: Option<Vec<String>>,
 }
 
 /// P2.5 (2026-05-20): ユーザー採用 take を永続化する。
@@ -695,12 +732,42 @@ async fn run_storyboard_orchestrator(
         .map_err(|e| format!("storyboard 出力先作成失敗: {e}"))?;
 
     let skill_refs = read_skill_refs().await?;
-    let mut cuts = plan_cuts(&codex_bin, &params, &skill_refs)
-        .await
-        .unwrap_or_else(|err| {
-            tracing::warn!(target: "codex.storyboard", "scene planning fallback: {err}");
-            local_cut_plan(&params)
-        });
+
+    // 2026-06-06: 企画タブのルック分析を取り出す (look_analysis / lookAnalysis)。
+    // 全カットの構造化プロンプトに注入する一貫性アンカー。
+    let look_analysis: Option<Value> = params.scene_construction.as_ref().and_then(|sc| {
+        sc.get("look_analysis")
+            .or_else(|| sc.get("lookAnalysis"))
+            .cloned()
+    });
+
+    // 企画タブで scene_construction (カット割り) が来ていれば、plan_cuts (LLM で
+    // カット割りを再生成・120秒) をスキップして企画データをそのまま使う。
+    // 来ていなければ従来どおり plan_cuts → local フォールバック。
+    let mut cuts = if let Some(sc) = params.scene_construction.as_ref() {
+        match plan_from_scene_construction(&params, sc) {
+            Ok(planned) if !planned.is_empty() => {
+                tracing::info!(
+                    target: "codex.storyboard",
+                    "scene_construction からカット割りを使用 (plan_cuts LLM をスキップ)"
+                );
+                planned
+            }
+            _ => plan_cuts(&codex_bin, &params, &skill_refs)
+                .await
+                .unwrap_or_else(|err| {
+                    tracing::warn!(target: "codex.storyboard", "scene planning fallback: {err}");
+                    local_cut_plan(&params)
+                }),
+        }
+    } else {
+        plan_cuts(&codex_bin, &params, &skill_refs)
+            .await
+            .unwrap_or_else(|err| {
+                tracing::warn!(target: "codex.storyboard", "scene planning fallback: {err}");
+                local_cut_plan(&params)
+            })
+    };
     if cuts.is_empty() {
         cuts = local_cut_plan(&params);
     }
@@ -785,21 +852,40 @@ async fn run_storyboard_orchestrator(
             },
         );
 
-        let mut structured_prompt = build_structured_prompt(
-            &codex_bin,
-            &params,
-            &skill_refs,
-            cut,
-            previous_cut_image.as_deref(),
-            cut_index,
-            cuts_count,
-            &previous_shot_types,
-        )
-        .await
-        .unwrap_or_else(|err| {
-            tracing::warn!(target: "codex.storyboard", "structured prompt fallback for {}: {err}", cut.cut_id);
-            local_structured_prompt(&params, cut, previous_cut_image.as_deref(), &previous_shot_types)
-        });
+        // === 2026-06-06 STΛCK 指示: 企画タブで演出を前出ししてあれば、裏側の
+        //     build_structured_prompt (Codex 呼び出し 120秒/カット) を全廃し、
+        //     企画で決まったプロンプトをそのまま組み立てて即生成する。
+        //     prefilled が無い旧データ/手入力時のみ、従来の裏側設計にフォールバック。
+        let mut structured_prompt = if cut.prefilled.is_some() {
+            tracing::info!(
+                target: "codex.storyboard",
+                "{}: prefilled direction を使用 (裏側 LLM 設計をスキップ)",
+                cut.cut_id
+            );
+            prefilled_structured_prompt(
+                &params,
+                cut,
+                previous_cut_image.as_deref(),
+                &previous_shot_types,
+                look_analysis.as_ref(),
+            )
+        } else {
+            build_structured_prompt(
+                &codex_bin,
+                &params,
+                &skill_refs,
+                cut,
+                previous_cut_image.as_deref(),
+                cut_index,
+                cuts_count,
+                &previous_shot_types,
+            )
+            .await
+            .unwrap_or_else(|err| {
+                tracing::warn!(target: "codex.storyboard", "structured prompt fallback for {}: {err}", cut.cut_id);
+                local_structured_prompt(&params, cut, previous_cut_image.as_deref(), &previous_shot_types)
+            })
+        };
 
         // P15 (2026-05-20): Continuity Contract と Murch priority を
         // structured_prompt に差し込む。
@@ -1287,6 +1373,7 @@ async fn plan_cuts(
             scene_group_id,
             description,
             duration_seconds,
+            prefilled: None,
         });
     }
     Ok(planned)
@@ -1326,6 +1413,33 @@ fn plan_from_scene_construction(
                 }
             });
         last_group = scene_group_id.clone();
+        // 演出が1つでも前出しされていれば prefilled として束ねる。
+        // 全部 None なら prefilled=None (従来どおり裏側設計にフォールバック)。
+        let has_direction = cut.cut_role.is_some()
+            || cut.shot_type.is_some()
+            || cut.camera_angle.is_some()
+            || cut.action_verbs.as_ref().is_some_and(|v| !v.is_empty())
+            || cut.camera_motion.is_some()
+            || cut.must_keep.as_ref().is_some_and(|v| !v.is_empty())
+            || cut.must_change.as_ref().is_some_and(|v| !v.is_empty())
+            || cut
+                .negative_constraints
+                .as_ref()
+                .is_some_and(|v| !v.is_empty());
+        let prefilled = if has_direction {
+            Some(PrefilledDirection {
+                cut_role: cut.cut_role.clone(),
+                shot_type: cut.shot_type.clone(),
+                camera_angle: cut.camera_angle.clone(),
+                action_verbs: cut.action_verbs.clone().unwrap_or_default(),
+                camera_motion: cut.camera_motion.clone(),
+                must_keep: cut.must_keep.clone().unwrap_or_default(),
+                must_change: cut.must_change.clone().unwrap_or_default(),
+                negative_constraints: cut.negative_constraints.clone().unwrap_or_default(),
+            })
+        } else {
+            None
+        };
         planned.push(CutPlan {
             cut_id: cut
                 .cut_id
@@ -1334,6 +1448,7 @@ fn plan_from_scene_construction(
             scene_group_id,
             description,
             duration_seconds: cut.duration_seconds.unwrap_or(fallback_duration),
+            prefilled,
         });
     }
     Ok(planned)
@@ -1508,6 +1623,108 @@ fn local_structured_prompt(
         },
         "negative": "different face, outfit drift, missing props, distorted face, broken hands, background discontinuity, text, logo, watermark, collage, split screen"
     })
+}
+
+/// 企画タブで前出しした演出 (prefilled) + ルック分析から、構造化プロンプトを
+/// 「LLM を一切呼ばずに」組み立てる (2026-06-06 STΛCK 指示)。
+///
+/// これが本機能の心臓部: 従来は各カットで build_structured_prompt (Codex 呼び出し
+/// 120秒) を回していたが、企画タブで演出を詰めてあれば、その値をそのまま反映する
+/// だけで済むので **裏側の LLM 設計を全廃** できる (18分 → ほぼ0秒)。
+///
+/// ベースは local_structured_prompt (決定論) とし、prefilled に値があるフィールド
+/// だけ上書きする。空のフィールドは決定論のデフォルトが残る (部分前出しも許容)。
+/// look_analysis があれば identity/style の must_keep に注入して一貫性を底上げする。
+fn prefilled_structured_prompt(
+    params: &StoryboardParams,
+    cut: &CutPlan,
+    previous_cut: Option<&Path>,
+    previous_shot_types: &[String],
+    look: Option<&Value>,
+) -> Value {
+    let mut base = local_structured_prompt(params, cut, previous_cut, previous_shot_types);
+    let Some(p) = cut.prefilled.as_ref() else {
+        return base;
+    };
+
+    // framing: 企画で指定された shot_type / camera_angle で上書き。
+    if let Some(framing) = base.get_mut("framing").and_then(|v| v.as_object_mut()) {
+        if let Some(st) = p.shot_type.as_ref().filter(|s| !s.trim().is_empty()) {
+            framing.insert("shot_type".into(), Value::String(st.clone()));
+        }
+        if let Some(ca) = p.camera_angle.as_ref().filter(|s| !s.trim().is_empty()) {
+            framing.insert("camera_angle".into(), Value::String(ca.clone()));
+        }
+        if let Some(cm) = p.camera_motion.as_ref().filter(|s| !s.trim().is_empty()) {
+            framing.insert("camera_motion".into(), Value::String(cm.clone()));
+        }
+    }
+
+    // narrative: cut_role / must_change を企画値で上書き。action_verbs を current_action に補強。
+    if let Some(narrative) = base.get_mut("narrative").and_then(|v| v.as_object_mut()) {
+        if let Some(role) = p.cut_role.as_ref().filter(|s| !s.trim().is_empty()) {
+            narrative.insert("cut_role".into(), Value::String(role.clone()));
+        }
+        if !p.action_verbs.is_empty() {
+            narrative.insert(
+                "action_verbs".into(),
+                Value::Array(p.action_verbs.iter().cloned().map(Value::String).collect()),
+            );
+        }
+        if !p.must_change.is_empty() {
+            narrative.insert(
+                "must_change".into(),
+                Value::Array(p.must_change.iter().cloned().map(Value::String).collect()),
+            );
+        }
+    }
+
+    // identity.must_keep: 企画の must_keep + ルック分析の identity_anchors を合流。
+    if let Some(identity) = base.get_mut("identity").and_then(|v| v.as_object_mut()) {
+        let mut keep: Vec<Value> = p.must_keep.iter().cloned().map(Value::String).collect();
+        if let Some(anchors) = look
+            .and_then(|l| l.get("identityAnchors").or_else(|| l.get("identity_anchors")))
+            .and_then(|v| v.as_array())
+        {
+            keep.extend(anchors.iter().cloned());
+        }
+        if !keep.is_empty() {
+            identity.insert("must_keep".into(), Value::Array(keep));
+        }
+    }
+
+    // ルック分析を style に注入 (色/質感/ムードを全カット共通の一貫性アンカーに)。
+    if let (Some(style), Some(look)) =
+        (base.get_mut("style").and_then(|v| v.as_object_mut()), look)
+    {
+        if let Some(color) = look
+            .get("colorProfile")
+            .or_else(|| look.get("color_profile"))
+            .and_then(|v| v.as_str())
+        {
+            style.insert("look_color".into(), Value::String(color.to_string()));
+        }
+        if let Some(material) = look.get("material").and_then(|v| v.as_str()) {
+            style.insert("look_material".into(), Value::String(material.to_string()));
+        }
+        if let Some(mood) = look.get("mood").and_then(|v| v.as_str()) {
+            style.insert("look_mood".into(), Value::String(mood.to_string()));
+        }
+    }
+
+    // negative: 企画の negative_constraints をデフォルト negative に追記。
+    if !p.negative_constraints.is_empty() {
+        let extra = p.negative_constraints.join(", ");
+        let merged = match base.get("negative").and_then(|v| v.as_str()) {
+            Some(existing) if !existing.is_empty() => format!("{existing}, {extra}"),
+            _ => extra,
+        };
+        if let Some(obj) = base.as_object_mut() {
+            obj.insert("negative".into(), Value::String(merged));
+        }
+    }
+
+    base
 }
 
 /// Provide a focus_detail hint based on action keywords and cut role.
@@ -2873,6 +3090,7 @@ fn local_cut_plan_with_count(params: &StoryboardParams, count: u32) -> Vec<CutPl
                 scene_group_id: group,
                 description,
                 duration_seconds: per_cut,
+                prefilled: None,
             }
         })
         .collect()

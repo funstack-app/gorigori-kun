@@ -36,12 +36,62 @@ export type StoryboardParams = {
   style_reference_path?: string;
 };
 
+/**
+ * ルック分析 (2026-06-06 STΛCK 指示)。参照画像 (キャラ/IP) を企画段階で1回だけ
+ * 詳細分析し、全カットで使い回す「一貫性の核」。Fashion Photo GPT 級の詳細さで
+ * シルエット・色 (光が当たる部分/影の部分の色変化まで)・素材の質感・各パーツの
+ * 構造・全体のムードを言語化する。これを各カットのプロンプトに注入することで、
+ * 裏側で毎カット LLM 再設計せずとも一貫性が保たれる (NOCTURNE のキービジュアル固定と同思想)。
+ */
+export type LookAnalysis = {
+  /** 被写体/キャラの正体 (例: "レトロな機械式カウンターの奥に座る小柄なヒューマノイド型キャラクター") */
+  subjectIdentity: string;
+  /** シルエット・体型・全体フォルム */
+  silhouette: string;
+  /** 色 (光が当たる部分/影の部分の色変化を含む。例: "ややくすんだ消防服レッド。肩や袖山はオレンジ寄り、影部はレンガ色に沈む") */
+  colorProfile: string;
+  /** 素材・質感 (例: "中厚のコットンツイル。光が強く跳ねる頭部のグロス塗装と対比") */
+  material: string;
+  /** 各パーツの構造 (頭部/顔/手/服の特徴など、一貫させるべき固有ディテール) */
+  keyParts: string[];
+  /** 絶対に維持すべき同一性要素 (identity anchor。これがブレると別人になる) */
+  identityAnchors: string[];
+  /** 全体のムード・世界観 (例: "赤と銅の密室的な世界。制御された熱、孤独な職務") */
+  mood: string;
+  /** 分析元の参照画像パス */
+  sourceImagePath: string;
+};
+
 export type SceneConstruction = {
   total_cuts: number;
+  /**
+   * 2026-06-06: ルック分析を企画段階で詰めて持つ。
+   * これがあれば裏側の build_structured_prompt (毎カット LLM 設計) をスキップできる。
+   */
+  look_analysis?: LookAnalysis;
   cuts: Array<{
     cut_id: string;
     description: string;
     duration_seconds: number;
+    // === 演出を企画段階で前出しする (2026-06-06 STΛCK 指示) ===
+    // これらが埋まっていれば、裏側 build_structured_prompt の LLM 呼び出し
+    // (120秒×カット数) を全廃し、企画で決まったプロンプトをそのまま画像生成へ投げる。
+    /** カットの役割 (establishing/action/detail/reaction/climax/resolution) */
+    cut_role?: string;
+    /** ショットサイズ (extreme_close/close/medium/full/wide/extreme_wide) */
+    shot_type?: string;
+    /** カメラアングル (front/side/three_quarter/high/low/dutch 等) */
+    camera_angle?: string;
+    /** このカットの動き・アクションを表す動詞群 */
+    action_verbs?: string[];
+    /** カメラの動き (static/pan/tilt/dolly/handheld) */
+    camera_motion?: string;
+    /** 維持すべき要素 (前カットから継承) */
+    must_keep?: string[];
+    /** 変化させる要素 (このカットで動かす) */
+    must_change?: string[];
+    /** 避けるべき制約 (identity崩れ・背景の不自然な変化など) */
+    negative_constraints?: string[];
   }>;
 };
 
