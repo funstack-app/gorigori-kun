@@ -1,15 +1,14 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { BaseDirectory } from "@tauri-apps/api/path";
-import { open as openFileDialog, save as saveFileDialog } from "@tauri-apps/plugin-dialog";
-import { exists, writeTextFile } from "@tauri-apps/plugin-fs";
+import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
+import { exists } from "@tauri-apps/plugin-fs";
 
 import { GORI_SKILLS, type GoriSkill } from "../lib/skills/catalog";
 import { useSkillMode } from "../lib/store/skillMode";
 import { useToasts } from "../lib/store/toasts";
 import { useWorkspace } from "../lib/store/workspace";
 import { activateSkill } from "./SkillBadge";
-import { SkillDetailModal } from "./SkillDetailModal";
 import { SkillIcon } from "./SkillIcon";
 
 type SkillImportResult = {
@@ -26,7 +25,6 @@ export function SkillsWorkspace({ onUseSkill }: { onUseSkill?: () => void }) {
   const [present, setPresent] = useState<Record<string, boolean | null>>(() =>
     Object.fromEntries(GORI_SKILLS.map((skill) => [skill.id, null])),
   );
-  const [detailSkill, setDetailSkill] = useState<GoriSkill | null>(null);
   const [refreshTick, setRefreshTick] = useState(0);
 
   // 現在 ON になっているスキル ID を購読し、トグル表示の判定に使う
@@ -111,36 +109,6 @@ export function SkillsWorkspace({ onUseSkill }: { onUseSkill?: () => void }) {
       toast.push({
         kind: "error",
         text: `インポート失敗: ${String(err)}`,
-        ttlMs: 6000,
-      });
-    }
-  };
-
-  /**
-   * 指定スキルの SKILL.md を読んで、ユーザー指定の保存先に書き出す。
-   */
-  const handleExport = async (skill: GoriSkill) => {
-    try {
-      const [content, _id] = await invoke<[string, string]>("skill_export_read", {
-        skillId: skill.id,
-      });
-      const savePath = await saveFileDialog({
-        defaultPath: `${skill.id}-SKILL.md`,
-        filters: [
-          { name: "Skill Markdown", extensions: ["md"] },
-        ],
-      });
-      if (!savePath) return; // キャンセル
-      await writeTextFile(savePath, content);
-      toast.push({
-        kind: "success",
-        text: `スキル「${skill.name}」をエクスポートしました`,
-        ttlMs: 4000,
-      });
-    } catch (err) {
-      toast.push({
-        kind: "error",
-        text: `エクスポート失敗: ${String(err)}`,
         ttlMs: 6000,
       });
     }
@@ -251,24 +219,8 @@ export function SkillsWorkspace({ onUseSkill }: { onUseSkill?: () => void }) {
                         ? "停止する (作品モードへ)"
                         : "使う"}
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => setDetailSkill(skill)}
-                    className="w-full rounded-lg border border-[#343434] bg-[#101010] px-3 py-2 text-xs font-bold text-neutral-300 hover:border-pink-400 hover:text-white"
-                  >
-                    詳細を見る
-                  </button>
-                  {/* SKILL.md がローカルに実在するなら export 可能 */}
-                  {status === true && !isComingSoon && (
-                    <button
-                      type="button"
-                      onClick={() => handleExport(skill)}
-                      className="w-full rounded-lg border border-[#242424] bg-transparent px-3 py-1.5 text-[10px] font-bold text-neutral-400 hover:border-neutral-500 hover:text-neutral-200"
-                      title="このスキルの SKILL.md を外部ファイルに書き出します"
-                    >
-                      エクスポート
-                    </button>
-                  )}
+                  {/* 「詳細を見る」「エクスポート」は STΛCK 指示 (2026-06-06) で撤去。
+                      スキルカードは「使う」ボタンと一言説明だけに簡素化する。 */}
                   <p className="text-[10px] leading-relaxed text-neutral-500">
                     {skill.launchHint}
                   </p>
@@ -278,12 +230,6 @@ export function SkillsWorkspace({ onUseSkill }: { onUseSkill?: () => void }) {
           })}
         </div>
       </div>
-      {detailSkill && (
-        <SkillDetailModal
-          skill={detailSkill}
-          onClose={() => setDetailSkill(null)}
-        />
-      )}
     </section>
   );
 }
