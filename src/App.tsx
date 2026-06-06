@@ -7,6 +7,7 @@ import { FirstRunStorageNotice } from "./components/FirstRunStorageNotice";
 import { deleteGalleryImages } from "./components/galleryItemMenu";
 import { ImagePreviewModal } from "./components/ImagePreviewModal";
 import { LibraryAutoRenameButton } from "./components/LibraryAutoRenameButton";
+import { LibraryBatchSaveButton } from "./components/LibraryBatchSaveButton";
 import { MaskEditorModal } from "./components/MaskEditorModal";
 import { PresetsDrawer } from "./components/PresetsDrawer";
 import { PromptComposer } from "./components/PromptComposer";
@@ -1715,6 +1716,7 @@ function AssetsWorkspace() {
               </button>
               <LibraryAutoRenameButton />
               <LibraryAddToProjectButton />
+              <LibraryBatchSaveButton />
               <LibraryDeleteButton />
               <button
                 type="button"
