@@ -33,6 +33,13 @@ pub struct StoryboardParams {
     pub story_prompt: String,
     pub character_reference_image: String,
     pub style_reference_image: Option<String>,
+    /// FB#3 (2026-06-06): 複数キャラ参照 (登場キャラ全員) / 複数スタイル参照。
+    /// 配列が非空ならそれを優先し、全キャラ参照を画像生成に渡す。
+    /// 空 or 未指定なら単数 character_reference_image にフォールバック (後方互換)。
+    #[serde(default)]
+    pub character_reference_images: Vec<String>,
+    #[serde(default)]
+    pub style_reference_images: Vec<String>,
     pub aspect_ratio: String,
     pub duration_seconds: f64,
     pub tempo: String,
@@ -822,6 +829,22 @@ async fn run_storyboard_orchestrator(
 
     let char_ref_path = PathBuf::from(&params.character_reference_image);
     let style_ref_path = PathBuf::from(&style_ref);
+    // FB#3 (2026-06-06): 複数キャラ参照 (登場キャラ全員) / 複数スタイル参照。
+    // 配列から先頭 (= 単数フィールドと同じ) を除いた残りを「追加参照」として渡す。
+    let extra_char_refs: Vec<PathBuf> = params
+        .character_reference_images
+        .iter()
+        .filter(|s| !s.trim().is_empty())
+        .map(PathBuf::from)
+        .filter(|p| p != &char_ref_path)
+        .collect();
+    let extra_style_refs: Vec<PathBuf> = params
+        .style_reference_images
+        .iter()
+        .filter(|s| !s.trim().is_empty())
+        .map(PathBuf::from)
+        .filter(|p| p != &style_ref_path)
+        .collect();
     let mut previous_cut_image: Option<PathBuf> = None;
     let mut manifest_cuts: Vec<ManifestCut> = Vec::new();
     let mut debug_prompts: Vec<DebugPromptEntry> = Vec::new();
@@ -1020,7 +1043,9 @@ async fn run_storyboard_orchestrator(
                 .map(PathBuf::from);
             let reference_images = build_reference_images(
                 &char_ref_path,
+                &extra_char_refs,
                 &style_ref_path,
+                &extra_style_refs,
                 previous_cut_image.as_deref(),
                 sketch_ref_pathbuf.as_deref(),
             );
@@ -2849,13 +2874,27 @@ fn mark_manifest_take_status(takes: &mut [ManifestTake], selected_take_id: &str,
 
 fn build_reference_images(
     char_ref: &Path,
+    extra_char_refs: &[PathBuf],
     style_ref: &Path,
+    extra_style_refs: &[PathBuf],
     previous_cut: Option<&Path>,
     sketch_ref: Option<&Path>,
 ) -> Vec<PathBuf> {
     let mut refs = vec![char_ref.to_path_buf()];
-    if style_ref != char_ref {
+    // FB#3 (2026-06-06): 追加のキャラ参照 (登場キャラ全員) を char_ref の直後に並べる。
+    // 重複は除く。先頭キャラの直後に置くことで「全員がキャラ基準」と認識させる。
+    for c in extra_char_refs {
+        if !refs.contains(c) {
+            refs.push(c.clone());
+        }
+    }
+    if style_ref != char_ref && !refs.contains(&style_ref.to_path_buf()) {
         refs.push(style_ref.to_path_buf());
+    }
+    for s in extra_style_refs {
+        if !refs.contains(s) {
+            refs.push(s.clone());
+        }
     }
     if let Some(previous) = previous_cut {
         refs.push(previous.to_path_buf());
