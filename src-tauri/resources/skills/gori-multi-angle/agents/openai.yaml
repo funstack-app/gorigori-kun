@@ -1,0 +1,4 @@
+interface:
+  display_name: "GORI Multi-Angle"
+  short_description: "Generate many camera-angle/shot-distance variations of one subject"
+  default_prompt: "Use $gori-multi-angle to generate camera-angle and shot-distance variations of a single subject from one reference image, keeping identity and environment fixed while only the camera moves."
