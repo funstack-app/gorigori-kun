@@ -2887,12 +2887,14 @@ fn compute_cut_count(duration_seconds: f64, tempo: &str) -> u32 {
     (duration_seconds / seconds_per_cut).ceil().max(1.0) as u32
 }
 
+/// ユーザーが UI で選んだ生成枚数 (1〜3) をそのまま尊重する。
+///
+/// 旧実装は `2 => 3` に勝手に繰り上げており、「2枚指定したのに3枚生成される」
+/// バグの原因だった (STΛCK 報告 2026-06-06)。ユーザーの指定枚数 = 実生成枚数に
+/// 一致させる。0 のときだけ最低 1 枚を保証し、上限は 3 にクランプする
+/// (UI が 1〜3 しか出さないので実質クランプは保険)。
 fn normalize_candidates(value: u32) -> u32 {
-    match value {
-        0 => 1,
-        1 => 1,
-        _ => 3,
-    }
+    value.clamp(1, 3)
 }
 
 fn local_scene_group_id(text: &str) -> String {
