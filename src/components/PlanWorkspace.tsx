@@ -13,7 +13,9 @@ import {
   type PlanRediscussDetail,
 } from "../lib/sendToPlan";
 import { extractDropped, isImageDrop } from "../lib/dragRef";
+import { useReferenceRoles } from "../lib/store/referenceRoles";
 import { PresetPickerPopover } from "./PresetPickerPopover";
+import { ReferenceRoleToggle } from "./ReferenceRoleToggle";
 /**
  * 企画ワークスペース。
  *
@@ -71,9 +73,17 @@ export function PlanWorkspace() {
   const [draft, setDraft] = useState("");
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
+  const ensureRoles = useReferenceRoles((s) => s.ensureRoles);
+
   useEffect(() => {
     void attach();
   }, [attach]);
+
+  // FB#3 (2026-06-06): 添付された画像に役割 (キャラ既定) を初期化する。
+  // 役割未指定のパスだけ初期化し、ユーザーが設定済みの役割は保持する (冪等)。
+  useEffect(() => {
+    if (pendingImages.length > 0) ensureRoles(pendingImages);
+  }, [pendingImages, ensureRoles]);
 
   /**
    * (配布前クリーニング 2026-05-15: 一度だけ実行のリカバリーコードは個人情報を含むため削除済み)
@@ -322,7 +332,11 @@ export function PlanWorkspace() {
           attachments={pendingImages}
           onAddFiles={addFiles}
           onAddImagePaths={addPendingImages}
-          onRemoveAttachment={removePendingImage}
+          onRemoveAttachment={(path) => {
+            removePendingImage(path);
+            // FB#3: 添付解除時に役割エントリも掃除する。
+            useReferenceRoles.getState().clearRole(path);
+          }}
           onChange={setDraft}
           onSend={handleSend}
           disabled={sending || starting}
@@ -527,21 +541,32 @@ function ChatInput({
   return (
     <div className="space-y-2">
       {attachments.length > 0 && (
-        <div className="flex flex-wrap gap-2 rounded-lg border border-[#2a2a2a] bg-[#101010] p-2">
-          {attachments.map((path) => (
-            <div key={path} className="flex items-center gap-2 rounded-md border border-[#343434] bg-[#0b0b0b] p-1.5">
-              <img src={convertFileSrc(path)} alt="" className="h-9 w-9 rounded object-cover" />
-              <span className="max-w-[160px] truncate text-[10px] font-bold text-neutral-300">{basename(path)}</span>
-              <button
-                type="button"
-                onClick={() => onRemoveAttachment(path)}
-                className="text-xs font-black text-neutral-500 hover:text-white"
-                aria-label={`${basename(path)} を外す`}
+        <div className="space-y-1.5 rounded-lg border border-[#2a2a2a] bg-[#101010] p-2">
+          <p className="text-[10px] font-bold text-neutral-500">
+            各画像の役割を選べます (キャラ参照 = 同一性を保つ / スタイル参照 = タッチのみ)
+          </p>
+          <div className="flex flex-wrap gap-2">
+            {attachments.map((path) => (
+              <div
+                key={path}
+                className="flex flex-col gap-1.5 rounded-md border border-[#343434] bg-[#0b0b0b] p-1.5"
               >
-                ×
-              </button>
-            </div>
-          ))}
+                <div className="flex items-center gap-2">
+                  <img src={convertFileSrc(path)} alt="" className="h-9 w-9 rounded object-cover" />
+                  <span className="max-w-[140px] truncate text-[10px] font-bold text-neutral-300">{basename(path)}</span>
+                  <button
+                    type="button"
+                    onClick={() => onRemoveAttachment(path)}
+                    className="text-xs font-black text-neutral-500 hover:text-white"
+                    aria-label={`${basename(path)} を外す`}
+                  >
+                    ×
+                  </button>
+                </div>
+                <ReferenceRoleToggle path={path} />
+              </div>
+            ))}
+          </div>
         </div>
       )}
       {/*

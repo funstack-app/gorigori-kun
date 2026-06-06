@@ -5,8 +5,10 @@ import { useStoryboardRun } from "../../../lib/store/storyboardRun";
 import { useSkillMode } from "../../../lib/store/skillMode";
 import { useToasts } from "../../../lib/store/toasts";
 import { useImagePreview } from "../../../lib/store/imagePreview";
+import { useReferenceRoles } from "../../../lib/store/referenceRoles";
 import type { StoryboardGoal } from "../../../lib/storyboard/types";
 import { ReferenceLibraryModal } from "../../ReferenceLibraryModal";
+import { ReferenceRoleToggle } from "../../ReferenceRoleToggle";
 import { CandidatesSelect } from "./CandidatesSelect";
 
 const IMAGE_EXTS = ["png", "jpg", "jpeg", "webp", "gif", "bmp"];
@@ -73,6 +75,13 @@ export function GoalChatPanel() {
     scrollerRef.current?.scrollTo({ top: scrollerRef.current.scrollHeight });
   }, [messages.length]);
 
+  // FB#3 (2026-06-06): 添付画像に役割 (キャラ既定) を初期化する。冪等。
+  useEffect(() => {
+    if (attachedImages.length > 0) {
+      useReferenceRoles.getState().ensureRoles(attachedImages);
+    }
+  }, [attachedImages]);
+
   // AI が直近のメッセージで「いま何を聞こうとしているか」を抽出する簡易版。
   // テキストの末尾に出てくる「？」を含む短い文を probing として抜き出す。
   const probingFromAi = useMemo(() => {
@@ -128,6 +137,8 @@ export function GoalChatPanel() {
 
   function removeAttachment(path: string) {
     setAttachedImages((prev) => prev.filter((p) => p !== path));
+    // FB#3: 添付解除時に役割エントリも掃除する。
+    useReferenceRoles.getState().clearRole(path);
   }
 
   // ストア状態を見て StoryboardGoal を組み立てる共通関数。
@@ -308,36 +319,44 @@ export function GoalChatPanel() {
 
       <div className="flex flex-col gap-2 rounded-md border border-[#242424] bg-[#161616] px-3 py-2">
         {attachedImages.length > 0 && (
-          <ul className="flex flex-wrap gap-2">
-            {attachedImages.map((p) => (
-              <li
-                key={p}
-                className="group relative flex items-center gap-2 rounded-md border border-[#2a2a2a] bg-[#0d0d0d] px-2 py-1"
-              >
-                <img
-                  src={`asset://localhost/${encodeURI(p)}`}
-                  alt={basename(p)}
-                  title="ダブルクリックで拡大"
-                  onDoubleClick={() =>
-                    useImagePreview.getState().open(p, attachedImages)
-                  }
-                  className="h-8 w-8 cursor-zoom-in rounded object-cover hover:opacity-80"
-                />
-                <span className="max-w-[140px] truncate text-[11px] text-zinc-300">
-                  {basename(p)}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => removeAttachment(p)}
-                  className="rounded p-0.5 text-zinc-500 hover:bg-pink-500/10 hover:text-pink-300"
-                  title="添付を解除"
-                  aria-label="添付を解除"
+          <div className="space-y-1.5">
+            <p className="text-[10px] font-medium text-zinc-500">
+              各画像の役割を選べます (キャラ参照 = 同一性を保つ / スタイル参照 = タッチのみ)
+            </p>
+            <ul className="flex flex-wrap gap-2">
+              {attachedImages.map((p) => (
+                <li
+                  key={p}
+                  className="group relative flex flex-col gap-1.5 rounded-md border border-[#2a2a2a] bg-[#0d0d0d] px-2 py-1.5"
                 >
-                  <IconClose />
-                </button>
-              </li>
-            ))}
-          </ul>
+                  <div className="flex items-center gap-2">
+                    <img
+                      src={`asset://localhost/${encodeURI(p)}`}
+                      alt={basename(p)}
+                      title="ダブルクリックで拡大"
+                      onDoubleClick={() =>
+                        useImagePreview.getState().open(p, attachedImages)
+                      }
+                      className="h-8 w-8 cursor-zoom-in rounded object-cover hover:opacity-80"
+                    />
+                    <span className="max-w-[120px] truncate text-[11px] text-zinc-300">
+                      {basename(p)}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => removeAttachment(p)}
+                      className="rounded p-0.5 text-zinc-500 hover:bg-pink-500/10 hover:text-pink-300"
+                      title="添付を解除"
+                      aria-label="添付を解除"
+                    >
+                      <IconClose />
+                    </button>
+                  </div>
+                  <ReferenceRoleToggle path={p} />
+                </li>
+              ))}
+            </ul>
+          </div>
         )}
 
         <textarea
