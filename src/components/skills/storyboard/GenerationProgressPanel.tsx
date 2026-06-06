@@ -36,6 +36,8 @@ export function GenerationProgressPanel() {
   const sceneConstruction = usePlanChat((s) => s.sceneConstruction);
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
+  // STΛCK指示(2026-06-07): カードサイズ。1=大きく/2=既定/3=小さく。
+  const [sizeLevel, setSizeLevel] = useState(2);
 
   // P1 修正 (2026-05-20): ローカル useState で起動済み判定すると、Phase 切替で
   // アンマウントされた瞬間にフラグが false に戻り重複 run が走ってしまうため、
@@ -459,7 +461,24 @@ export function GenerationProgressPanel() {
                 ? "本番カット生成完了"
                 : `本番カット生成中…  ${completed}/${totalForBar || "?"}`}
             </span>
-            <span className="text-zinc-500">{Math.round(allDoneGen ? 100 : progressPercent)}%</span>
+            <div className="flex items-center gap-2">
+              {/* STΛCK指示(2026-06-07): カードサイズスライダー (大⇔小) */}
+              <label className="inline-flex items-center gap-1" title="カードを大きく ⇔ 小さく">
+                <span className="text-[10px] font-bold text-neutral-500">大</span>
+                <input
+                  type="range"
+                  min={1}
+                  max={3}
+                  step={1}
+                  value={sizeLevel}
+                  onChange={(e) => setSizeLevel(Number(e.target.value))}
+                  className="h-1 w-16 cursor-pointer accent-pink-500"
+                  aria-label="カードサイズ"
+                />
+                <span className="text-[10px] font-bold text-neutral-500">小</span>
+              </label>
+              <span className="text-zinc-500">{Math.round(allDoneGen ? 100 : progressPercent)}%</span>
+            </div>
           </div>
           <div className="h-1.5 w-full overflow-hidden rounded-full bg-[#0d0d0d]">
             <div
@@ -483,7 +502,7 @@ export function GenerationProgressPanel() {
                 </h3>
                 <span className="text-[10px] text-zinc-500">{group.items.length} カット</span>
               </div>
-              <ol className={`grid gap-3 ${gridColsForAspect(goal?.aspectRatio ?? "16:9")}`}>
+              <ol className={`grid gap-3 ${gridColsForAspect(goal?.aspectRatio ?? "16:9", sizeLevel)}`}>
                 {group.items.map((o) => {
                   const i = o.displayIndex;
                   const s = o.state;
@@ -632,17 +651,33 @@ function aspectClass(a: string): string {
   }
 }
 
-/** アスペクト比に応じてカードの列数を返す (絵コンテ SketchReviewPanel と同じ並べ方に揃える)。
- *  縦長(9:16)は1枚が小さいので多列、横長(16:9)は少列。本生成カードが巨大だった問題の修正。 */
-function gridColsForAspect(a: string): string {
-  switch (a) {
-    case "9:16":
-      return "grid-cols-2 md:grid-cols-3 xl:grid-cols-4";
-    case "1:1":
-    case "4:5":
-      return "grid-cols-1 md:grid-cols-2 xl:grid-cols-3";
-    case "16:9":
-    default:
-      return "grid-cols-1 md:grid-cols-2";
-  }
+/** アスペクト比 + サイズレベル(1=大きく少列 〜 3=小さく多列)に応じてカードの列数を返す。
+ *  STΛCK指示(2026-06-07): 他タブ同様スライダーでサイズを選べるように。
+ *  level 2 が既定 (絵コンテ SketchReviewPanel と同じ並べ方)。level 1=大きく、level 3=小さく。 */
+function gridColsForAspect(a: string, level: number = 2): string {
+  const table: Record<string, [string, string, string]> = {
+    "9:16": [
+      "grid-cols-1 md:grid-cols-2 xl:grid-cols-3",
+      "grid-cols-2 md:grid-cols-3 xl:grid-cols-4",
+      "grid-cols-3 md:grid-cols-4 xl:grid-cols-6",
+    ],
+    "1:1": [
+      "grid-cols-1 md:grid-cols-1 xl:grid-cols-2",
+      "grid-cols-1 md:grid-cols-2 xl:grid-cols-3",
+      "grid-cols-2 md:grid-cols-3 xl:grid-cols-4",
+    ],
+    "4:5": [
+      "grid-cols-1 md:grid-cols-1 xl:grid-cols-2",
+      "grid-cols-1 md:grid-cols-2 xl:grid-cols-3",
+      "grid-cols-2 md:grid-cols-3 xl:grid-cols-4",
+    ],
+    "16:9": [
+      "grid-cols-1 md:grid-cols-1",
+      "grid-cols-1 md:grid-cols-2",
+      "grid-cols-2 md:grid-cols-3",
+    ],
+  };
+  const cols = table[a] ?? table["16:9"];
+  const idx = Math.min(2, Math.max(0, level - 1));
+  return cols[idx];
 }
