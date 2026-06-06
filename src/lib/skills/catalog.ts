@@ -47,6 +47,9 @@ export const GORI_SKILLS: GoriSkill[] = [
     launchHint: "AI と対話してカット列を量産",
   },
   {
+    // 2026-06-06 開放: β版で専用 Workspace (MultiAngleWorkspace) を実装。
+    // 1枚の被写体参照から、選んだ構図カット(最大30)を並列で一気に生成する。
+    // 構図カタログは src/lib/multiangle/angles.ts、Rust は commands/multiangle.rs。
     id: "gori-multi-angle",
     name: "マルチアングル生成",
     shortName: "Multi-Angle",
@@ -54,9 +57,8 @@ export const GORI_SKILLS: GoriSkill[] = [
     description:
       "環境と被写体を固定し、ショット距離(クローズアップ/ミディアム/ロング)とアングル(俯瞰/煽り/正面)だけ変えて一気にカット量産。",
     path: "~/.codex/skills/gori-multi-angle",
-    availableInApp: false,
-    comingSoon: true,
-    launchHint: "30 カット一気に量産 — 近日公開",
+    availableInApp: true,
+    launchHint: "30 カット一気に量産",
   },
   {
     id: "gori-lp-builder",

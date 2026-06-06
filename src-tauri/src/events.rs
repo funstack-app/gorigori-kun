@@ -22,6 +22,11 @@ pub const EVENT_IMAGE_BATCH: &str = "codex://image-batch";
 /// payload は stdout の1行JSONと同じ形（kind discriminator付き）。
 pub const EVENT_STORYBOARD: &str = "codex://storyboard";
 
+/// `codex://multiangle` — gori-multi-angle スキルの実行進捗。
+/// 1枚の被写体参照から選んだ構図カットを並列生成する進捗イベント。
+/// payload は kind discriminator 付きの camelCase JSON。
+pub const EVENT_MULTIANGLE: &str = "codex://multiangle";
+
 /// `codex://edit-model-progress` — 編集タブ用AIモデルDL進捗。
 pub const EVENT_EDIT_MODEL_PROGRESS: &str = "codex://edit-model-progress";
 

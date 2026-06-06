@@ -1,6 +1,7 @@
 import { useSkillUiMode } from "../lib/store/skillUiMode";
 import { GenerationWorkspace } from "./GenerationWorkspace";
 import { StoryboardWorkspace } from "./skills/storyboard/StoryboardWorkspace";
+import { MultiAngleWorkspace } from "./skills/multiAngle/MultiAngleWorkspace";
 
 /**
  * Skill UI Router
@@ -27,8 +28,7 @@ export function SkillWorkspaceRouter() {
     case "storyboard":
       return <StoryboardWorkspace />;
     case "multiAngle":
-      // β版で MultiAngleWorkspace を実装するまでは default で動かす
-      return <GenerationWorkspace />;
+      return <MultiAngleWorkspace />;
     case "default":
     default:
       return <GenerationWorkspace />;

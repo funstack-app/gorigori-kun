@@ -417,6 +417,8 @@ pub fn run() {
             commands::segment::download_segmentation_model,
             commands::storyboard::storyboard_run,
             commands::storyboard::storyboard_regenerate_cut,
+            commands::multiangle::multiangle_run,
+            commands::multiangle::multiangle_regenerate_cut,
             commands::storyboard::storyboard_persist_adoption,
             commands::storyboard::storyboard_read_adoptions,
             commands::storyboard::storyboard_read_debug_log,

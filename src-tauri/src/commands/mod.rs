@@ -15,6 +15,7 @@ pub mod higgsfield;
 pub mod images;
 pub mod layer_splitter;
 pub mod mcp;
+pub mod multiangle;
 pub mod rpc_bridge;
 pub mod secrets;
 pub mod segment;
