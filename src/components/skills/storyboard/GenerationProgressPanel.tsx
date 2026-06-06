@@ -483,7 +483,7 @@ export function GenerationProgressPanel() {
                 </h3>
                 <span className="text-[10px] text-zinc-500">{group.items.length} カット</span>
               </div>
-              <ol className="grid gap-3 md:grid-cols-1 xl:grid-cols-2">
+              <ol className={`grid gap-3 ${gridColsForAspect(goal?.aspectRatio ?? "16:9")}`}>
                 {group.items.map((o) => {
                   const i = o.displayIndex;
                   const s = o.state;
@@ -629,5 +629,20 @@ function aspectClass(a: string): string {
     case "16:9":
     default:
       return "aspect-video";
+  }
+}
+
+/** アスペクト比に応じてカードの列数を返す (絵コンテ SketchReviewPanel と同じ並べ方に揃える)。
+ *  縦長(9:16)は1枚が小さいので多列、横長(16:9)は少列。本生成カードが巨大だった問題の修正。 */
+function gridColsForAspect(a: string): string {
+  switch (a) {
+    case "9:16":
+      return "grid-cols-2 md:grid-cols-3 xl:grid-cols-4";
+    case "1:1":
+    case "4:5":
+      return "grid-cols-1 md:grid-cols-2 xl:grid-cols-3";
+    case "16:9":
+    default:
+      return "grid-cols-1 md:grid-cols-2";
   }
 }
