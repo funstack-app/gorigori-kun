@@ -1,5 +1,4 @@
 import { useScenePromptOverride } from "../store/scenePrompt";
-import { useSkillUiMode } from "../store/skillUiMode";
 import { useToasts } from "../store/toasts";
 import { useVideoGen } from "../store/videoGen";
 import { useWorkspace } from "../store/workspace";
@@ -10,12 +9,15 @@ import { useWorkspace } from "../store/workspace";
  * STΛCK 指示 (2026-06-06 ベータ): ストーリーモードで確定したカット画像を
  * 動画タブの i2v 元画像にそのまま渡せる導線を作る。
  *
- * ストーリーモード (StoryboardWorkspace) は SkillWorkspaceRouter が
- * activeUiMode === "storyboard" のときに描画している。動画タブは
- * 既存の GenerationWorkspace 側にあるため、動画タブを表示するには
- * (1) スキルモードを抜けて default に戻す
- * (2) activeTab を "video" にする
- * の両方が必要。片方だけだと動画タブに切り替わらない (storyboard UI のまま)。
+ * FB#1 修正 (2026-06-06 夜): 以前は exitSkill() でスキルモードを抜けてから
+ * 動画タブに切り替えていた。しかしこれは StoryboardWorkspace から完全に離脱し、
+ * ストーリーモードの状態 (Phase レール / 確定カット) を画面から失わせていた
+ * (UI が崩れる主因)。
+ *
+ * 現在は StoryboardWorkspace 自身が activeTab === "video" のとき動画タブを
+ * インライン描画する (SkillWorkspaceRouter は storyboard モードのまま)。
+ * よって exitSkill() は呼ばず、activeTab を "video" にするだけで
+ * 「動画タブに切り替わるが、ストーリーモードからは抜けない」を実現する。
  */
 
 export type SendCutToVideoInput = {
@@ -37,8 +39,8 @@ export function sendCutToVideoTab(input: SendCutToVideoInput): void {
     useScenePromptOverride.getState().set(input.prompt.trim());
   }
 
-  // スキルモードを抜けて動画タブを表示できる状態にする。
-  useSkillUiMode.getState().exitSkill();
+  // スキルモードは抜けず、ストーリーモード内の動画タブに切り替えるだけ。
+  // (StoryboardWorkspace が activeTab === "video" を見てインライン描画する)
   useWorkspace.getState().setActiveTab("video");
 
   useToasts.getState().push({
@@ -63,9 +65,7 @@ export type SendCutsBatchInput = {
  *
  * 返り値: クリップボードへコピーしたカット数。
  */
-export async function sendCutsBatchToVideoTab(
-  input: SendCutsBatchInput,
-): Promise<number> {
+export async function sendCutsBatchToVideoTab(input: SendCutsBatchInput): Promise<number> {
   const cuts = input.cuts.filter((c) => c.imagePath);
   if (cuts.length === 0) {
     useToasts.getState().push({
@@ -84,16 +84,14 @@ export async function sendCutsBatchToVideoTab(
   }
 
   // 全カット分の i2v プロンプトをクリップボードへ (手動コピペ用)。
-  const clipboardText = cuts
-    .map((c) => `# ${c.label}\n${c.prompt}`)
-    .join("\n\n");
+  const clipboardText = cuts.map((c) => `# ${c.label}\n${c.prompt}`).join("\n\n");
   try {
     await navigator.clipboard.writeText(clipboardText);
   } catch (err) {
     console.warn("[sendCutsBatchToVideoTab] clipboard write failed:", err);
   }
 
-  useSkillUiMode.getState().exitSkill();
+  // FB#1 修正: スキルモードは抜けず、ストーリーモード内の動画タブへ切り替える。
   useWorkspace.getState().setActiveTab("video");
 
   useToasts.getState().push({

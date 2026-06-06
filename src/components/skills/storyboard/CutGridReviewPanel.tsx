@@ -1,15 +1,11 @@
 import { useMemo } from "react";
-
-import { useStoryboardRun } from "../../../lib/store/storyboardRun";
-import { useActiveProject } from "../../../lib/store/activeProject";
-import { useProjects } from "../../../lib/store/projects";
-import { useImages } from "../../../lib/store/images";
-import { useToasts } from "../../../lib/store/toasts";
 import { sendImageToPlanForRediscuss } from "../../../lib/sendToPlan";
-import {
-  sendCutToVideoTab,
-  sendCutsBatchToVideoTab,
-} from "../../../lib/storyboard/sendCutToVideo";
+import { useActiveProject } from "../../../lib/store/activeProject";
+import { useImages } from "../../../lib/store/images";
+import { useProjects } from "../../../lib/store/projects";
+import { useStoryboardRun } from "../../../lib/store/storyboardRun";
+import { useToasts } from "../../../lib/store/toasts";
+import { sendCutsBatchToVideoTab, sendCutToVideoTab } from "../../../lib/storyboard/sendCutToVideo";
 import type { StoryboardSketchCut } from "../../../lib/storyboard/types";
 
 /**
@@ -79,7 +75,6 @@ export function CutGridReviewPanel() {
   const cuts = useStoryboardRun((s) => s.cuts);
   const adoptTake = useStoryboardRun((s) => s.adoptTake);
   const selectTake = useStoryboardRun((s) => s.selectTake);
-  const regenerateCut = useStoryboardRun((s) => s.regenerateCut);
   const setPhase = useStoryboardRun((s) => s.setPhase);
   const activeProjectId = useActiveProject((s) => s.activeProjectId);
   const projects = useProjects((s) => s.projects);
@@ -225,6 +220,20 @@ export function CutGridReviewPanel() {
     return adopted?.imagePath;
   }
 
+  // FB#2 修正 (2026-06-06 夜): 完成タブの「やり直し」を機能させる。
+  // 旧実装は store.regenerateCut() で takes を空にしていたため、カードが
+  // adopted=undefined になって描画ループで return null → カードごと消えていた
+  // (= ボタンが「反応しない/壊れる」症状)。本生成の単一カット再生成は生成
+  // フェーズ側にあるので、ここでは Phase 3 (生成) に戻して再生成導線へ繋ぐ。
+  function backToGenerationForCut(cutIndex: number) {
+    setPhase("generation");
+    useToasts.getState().push({
+      kind: "info",
+      text: `Cut ${cutIndex + 1} をやり直します。生成画面で再生成してください。`,
+      ttlMs: 4000,
+    });
+  }
+
   // B3: 単一の確定カットを動画タブの i2v 元画像へ送る。
   function sendCutToVideo(cut: (typeof orderedCuts)[number], cutIndex: number) {
     const imagePath = adoptedImageOf(cut);
@@ -356,8 +365,7 @@ export function CutGridReviewPanel() {
       <div className="min-h-0 flex-1 overflow-y-auto rounded-md border border-[#242424] bg-[#101010] p-4">
         <ol className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
           {orderedCuts.map((c, i) => {
-            const adopted =
-              c.takes.find((t) => t.takeId === c.selectedTakeId) ?? c.takes[0];
+            const adopted = c.takes.find((t) => t.takeId === c.selectedTakeId) ?? c.takes[0];
             if (!adopted) return null;
             return (
               <li
@@ -378,7 +386,9 @@ export function CutGridReviewPanel() {
                   </span>
                 </div>
 
-                <div className={`${aspectClass(goal?.aspectRatio ?? "16:9")} overflow-hidden rounded-md bg-[#0d0d0d]`}>
+                <div
+                  className={`${aspectClass(goal?.aspectRatio ?? "16:9")} overflow-hidden rounded-md bg-[#0d0d0d]`}
+                >
                   <img
                     src={`asset://localhost/${encodeURI(adopted.imagePath)}`}
                     alt={`cut-${i + 1}`}
@@ -432,8 +442,9 @@ export function CutGridReviewPanel() {
                   </button>
                   <button
                     type="button"
-                    onClick={() => regenerateCut(c.cutId)}
+                    onClick={() => backToGenerationForCut(i)}
                     className="rounded border border-[#2a2a2a] px-2 py-1 text-[10px] text-zinc-300 hover:border-pink-500/40"
+                    title="このカットを生成画面に戻して再生成する"
                   >
                     やり直し
                   </button>

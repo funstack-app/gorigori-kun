@@ -1,9 +1,9 @@
 import { useMemo, useState } from "react";
 
 import { storyboard } from "../../../lib/ipc";
-import { useStoryboardRun } from "../../../lib/store/storyboardRun";
 import { useImagePreview } from "../../../lib/store/imagePreview";
 import { usePlanChat } from "../../../lib/store/planChat";
+import { useStoryboardRun } from "../../../lib/store/storyboardRun";
 import { useToasts } from "../../../lib/store/toasts";
 import type { StoryboardSketchCut } from "../../../lib/storyboard/types";
 
@@ -28,6 +28,7 @@ export function GenerationProgressPanel() {
   const activeRunId = useStoryboardRun((s) => s.activeRunId);
   const beginRun = useStoryboardRun((s) => s.beginRun);
   const setPhase = useStoryboardRun((s) => s.setPhase);
+  const setStatus = useStoryboardRun((s) => s.setStatus);
   const adoptTake = useStoryboardRun((s) => s.adoptTake);
   // B2: キービジュアル固定参照 (全カット共通の基準画像)
   const keyVisualPath = useStoryboardRun((s) => s.keyVisualPath);
@@ -199,6 +200,44 @@ export function GenerationProgressPanel() {
     }
   }
 
+  // FB#3 修正 (2026-06-06 夜): 「一時停止 / 中断」ボタンを生成画面に追加する。
+  //
+  // 鉄則 (STΛCK 指示): 停止しても UI レイアウト / フェーズは変えない。
+  //   - 旧 GenerationWorkspace の StoryboardRunPanel では「中断」が run.reset() を
+  //     呼んで cuts を全消去 → カードが消えて画面が崩れていた。これが「停止で UI が
+  //     変わる」症状の元。
+  //   - ここでは reset() / setPhase() を一切呼ばず、run の status を "paused" に
+  //     するだけにする。これで生成は止める意思表示をしつつ、既出カード・進捗・
+  //     Phase 3 のレイアウトはそのまま保持される。
+  //   - 再開ボタンで status を "running" に戻せる (バックエンドはイベントを流し
+  //     続けるので、実体としては「UI 上の停止表示」)。
+  function pauseGeneration() {
+    setStatus("paused");
+    useToasts.getState().push({
+      kind: "info",
+      text: "生成を一時停止しました (画面はそのままです)。",
+      ttlMs: 2600,
+    });
+  }
+  function resumeGeneration() {
+    setStatus("running");
+    useToasts.getState().push({
+      kind: "info",
+      text: "生成を再開しました。",
+      ttlMs: 2000,
+    });
+  }
+  function stopGeneration() {
+    // 中断: cuts / phase は保持。status のみ paused にして以降の進行を止める意思表示。
+    // 既に生成済みのカットはそのまま「最終確認へ」進める。
+    setStatus("paused");
+    useToasts.getState().push({
+      kind: "info",
+      text: "生成を中断しました。生成済みのカットはそのまま確認・採用できます。",
+      ttlMs: 3600,
+    });
+  }
+
   // P2 修正 (2026-05-20): manual_selection ではユーザー採用待ちなので自動遷移しない。
   // 「最終確認へ」ボタンでユーザー意思で進む。
 
@@ -256,9 +295,7 @@ export function GenerationProgressPanel() {
   // 取れない場合はストアの選択値、それも無ければ 3 にフォールバック。
   const runParams = useStoryboardRun.getState().params;
   const slotCount: number =
-    runParams?.candidatesPerCut ??
-    useStoryboardRun.getState().generationCandidatesPerCut ??
-    3;
+    runParams?.candidatesPerCut ?? useStoryboardRun.getState().generationCandidatesPerCut ?? 3;
   const progressPercent = totalForBar > 0 ? (completed / totalForBar) * 100 : 0;
   const allDoneGen = status === "completed" || (totalForBar > 0 && completed === totalForBar);
   // 全カット採用済み判定 (manual_selection で Phase 4 進行ボタン制御に使う)
@@ -268,64 +305,96 @@ export function GenerationProgressPanel() {
     <div className="flex h-full flex-col gap-3">
       <header className="flex flex-col gap-3 rounded-md border border-[#242424] bg-[#161616] px-4 py-3">
         <div className="flex items-start justify-between gap-4">
-        <div>
-          <h2 className="text-sm font-semibold text-zinc-200">Phase 3: カット生成中</h2>
-          <p className="mt-1 text-xs text-zinc-500">
-            {starting && "起動中…"}
-            {status === "failed" && "失敗"}
-          </p>
-          {startError && (
-            <p className="mt-1 text-[11px] text-red-400">{startError}</p>
-          )}
-        </div>
-        {/* 参照画像を常時表示 (キャラ一貫性の文脈担保) */}
-        <div className="flex shrink-0 gap-2">
-          <RefThumb label="キャラ" path={goal.characterReferencePath} />
-          {goal.styleReferencePath && (
-            <RefThumb label="スタイル" path={goal.styleReferencePath} />
-          )}
-        </div>
+          <div>
+            <h2 className="text-sm font-semibold text-zinc-200">Phase 3: カット生成中</h2>
+            <p className="mt-1 text-xs text-zinc-500">
+              {starting && "起動中…"}
+              {status === "failed" && "失敗"}
+            </p>
+            {startError && <p className="mt-1 text-[11px] text-red-400">{startError}</p>}
+          </div>
+          {/* 参照画像を常時表示 (キャラ一貫性の文脈担保) */}
+          <div className="flex shrink-0 gap-2">
+            <RefThumb label="キャラ" path={goal.characterReferencePath} />
+            {goal.styleReferencePath && (
+              <RefThumb label="スタイル" path={goal.styleReferencePath} />
+            )}
+          </div>
 
-        {/* P11: 未起動なら「本生成を開始」、起動済みなら「最終確認へ」 */}
-        <div className="flex shrink-0 flex-col gap-2">
-          {!generationStarted ? (
-            <button
-              type="button"
-              onClick={startGeneration}
-              disabled={starting}
-              className={[
-                "rounded-md px-4 py-2 text-sm font-semibold transition",
-                starting
-                  ? "cursor-not-allowed bg-zinc-700 text-zinc-400"
-                  : "bg-pink-500 text-white hover:bg-pink-400",
-              ].join(" ")}
-              title={`本生成 (${useStoryboardRun.getState().generationCandidatesPerCut}案/カット) を開始`}
-            >
-              {starting ? "起動中…" : "本生成を開始 →"}
-            </button>
-          ) : (
-            <button
-              type="button"
-              onClick={() => setPhase("review")}
-              disabled={completed === 0}
-              className={[
-                "rounded-md px-4 py-2 text-sm font-semibold transition",
-                completed > 0
-                  ? "bg-pink-500 text-white hover:bg-pink-400"
-                  : "cursor-not-allowed bg-zinc-700 text-zinc-400",
-              ].join(" ")}
-              title={
-                allAdopted
-                  ? "全カット採用済み"
-                  : completed === 0
-                    ? "カット完了を待ってください"
-                    : "未採用のカットがありますが、確認画面に進めます"
-              }
-            >
-              最終確認へ →
-            </button>
-          )}
-        </div>
+          {/* P11: 未起動なら「本生成を開始」、起動済みなら「最終確認へ」 */}
+          <div className="flex shrink-0 flex-col gap-2">
+            {!generationStarted ? (
+              <button
+                type="button"
+                onClick={startGeneration}
+                disabled={starting}
+                className={[
+                  "rounded-md px-4 py-2 text-sm font-semibold transition",
+                  starting
+                    ? "cursor-not-allowed bg-zinc-700 text-zinc-400"
+                    : "bg-pink-500 text-white hover:bg-pink-400",
+                ].join(" ")}
+                title={`本生成 (${useStoryboardRun.getState().generationCandidatesPerCut}案/カット) を開始`}
+              >
+                {starting ? "起動中…" : "本生成を開始 →"}
+              </button>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  onClick={() => setPhase("review")}
+                  disabled={completed === 0}
+                  className={[
+                    "rounded-md px-4 py-2 text-sm font-semibold transition",
+                    completed > 0
+                      ? "bg-pink-500 text-white hover:bg-pink-400"
+                      : "cursor-not-allowed bg-zinc-700 text-zinc-400",
+                  ].join(" ")}
+                  title={
+                    allAdopted
+                      ? "全カット採用済み"
+                      : completed === 0
+                        ? "カット完了を待ってください"
+                        : "未採用のカットがありますが、確認画面に進めます"
+                  }
+                >
+                  最終確認へ →
+                </button>
+                {/* FB#3: 一時停止 / 再開 / 中断。phase も cuts も変えない (UI 維持)。 */}
+                {!allDoneGen && (
+                  <div className="flex gap-2">
+                    {status === "paused" ? (
+                      <button
+                        type="button"
+                        onClick={resumeGeneration}
+                        className="rounded-md border border-[#2a2a2a] px-3 py-1.5 text-xs text-zinc-300 hover:border-pink-500/40 hover:bg-pink-500/5"
+                        title="生成を再開する (画面は変わりません)"
+                      >
+                        再開
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={pauseGeneration}
+                        className="rounded-md border border-[#2a2a2a] px-3 py-1.5 text-xs text-zinc-300 hover:border-pink-500/40 hover:bg-pink-500/5"
+                        title="生成を一時停止する (画面は変わりません)"
+                      >
+                        一時停止
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={stopGeneration}
+                      className="rounded-md border border-red-400/40 px-3 py-1.5 text-xs text-red-200 hover:bg-red-500/10"
+                      title="生成を中断する (生成済みカットは残ります)"
+                    >
+                      中断
+                    </button>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
         </div>
 
         {/* === B2: キービジュアル固定参照 (生成開始前のみ操作可) === */}
@@ -390,9 +459,7 @@ export function GenerationProgressPanel() {
                 ? "本番カット生成完了"
                 : `本番カット生成中…  ${completed}/${totalForBar || "?"}`}
             </span>
-            <span className="text-zinc-500">
-              {Math.round(allDoneGen ? 100 : progressPercent)}%
-            </span>
+            <span className="text-zinc-500">{Math.round(allDoneGen ? 100 : progressPercent)}%</span>
           </div>
           <div className="h-1.5 w-full overflow-hidden rounded-full bg-[#0d0d0d]">
             <div
@@ -414,108 +481,106 @@ export function GenerationProgressPanel() {
                 <h3 className="text-xs font-bold uppercase tracking-wider text-pink-200">
                   {group.label}
                 </h3>
-                <span className="text-[10px] text-zinc-500">
-                  {group.items.length} カット
-                </span>
+                <span className="text-[10px] text-zinc-500">{group.items.length} カット</span>
               </div>
               <ol className="grid gap-3 md:grid-cols-1 xl:grid-cols-2">
-              {group.items.map((o) => {
-                const i = o.displayIndex;
-            const s = o.state;
-            const statusLabel =
-              s?.status === "confirmed"
-                ? "採用済み"
-                : s?.status === "review"
-                  ? "選択待ち"
-                  : s?.status === "running"
-                    ? "生成中…"
-                    : s?.status === "failed"
-                      ? "失敗"
-                      : "待機中";
-            const statusColor =
-              s?.status === "confirmed"
-                ? "text-emerald-300"
-                : s?.status === "review"
-                  ? "text-amber-300"
-                  : s?.status === "running"
-                    ? "text-pink-200"
-                    : s?.status === "failed"
-                      ? "text-red-400"
-                      : "text-zinc-500";
-            const takes = s?.takes ?? [];
-            const adoptedTakeId = s?.selectedTakeId;
-            return (
-              <li
-                key={o.cutId}
-                className="flex flex-col gap-2 rounded-md border border-[#242424] bg-[#1a1a1a] p-3"
-              >
-                <div className="flex items-center justify-between">
-                  <span className="text-[11px] font-semibold uppercase tracking-wider text-pink-200">
-                    Cut {i + 1} · {o.duration}s
-                  </span>
-                  <span className={`text-[11px] ${statusColor}`}>{statusLabel}</span>
-                </div>
-
-                {/* P10: N take 並列サムネ (ユーザー選択枚数) + ダブルクリックプレビュー */}
-                <div
-                  className="grid gap-2"
-                  style={{ gridTemplateColumns: `repeat(${slotCount}, minmax(0, 1fr))` }}
-                >
-                  {Array.from({ length: slotCount }).map((_, idx) => {
-                    const take = takes[idx];
-                    const isAdopted = take && adoptedTakeId === take.takeId;
-                    const allTakePaths = takes
-                      .map((t) => t.imagePath)
-                      .filter((p): p is string => Boolean(p));
-                    return (
-                      <div
-                        key={idx}
-                        className={[
-                          `group relative flex ${aspectClass(goal?.aspectRatio ?? "16:9")} items-center justify-center overflow-hidden rounded-md border bg-[#0d0d0d]`,
-                          isAdopted
-                            ? "border-pink-500 ring-2 ring-pink-500/40"
-                            : "border-dashed border-[#333]",
-                        ].join(" ")}
-                      >
-                        {take ? (
-                          <>
-                            <img
-                              src={`asset://localhost/${encodeURI(take.imagePath)}`}
-                              alt={`take-${idx + 1}`}
-                              className="h-full w-full cursor-zoom-in object-cover"
-                              onDoubleClick={() =>
-                                useImagePreview.getState().open(take.imagePath, allTakePaths)
-                              }
-                              title="ダブルクリックでプレビュー"
-                            />
-                            {!isAdopted && (
-                              <button
-                                type="button"
-                                onClick={() => adoptTake(o.cutId, take.takeId)}
-                                className="absolute inset-x-0 bottom-0 hidden bg-pink-500/90 py-1 text-[10px] font-semibold text-white group-hover:block"
-                              >
-                                採用
-                              </button>
-                            )}
-                            {isAdopted && (
-                              <div className="absolute inset-x-0 bottom-0 bg-pink-500 py-1 text-center text-[10px] font-bold text-white">
-                                採用中
-                              </div>
-                            )}
-                          </>
-                        ) : (
-                          <Spinner running={s?.status === "running"} />
-                        )}
+                {group.items.map((o) => {
+                  const i = o.displayIndex;
+                  const s = o.state;
+                  const statusLabel =
+                    s?.status === "confirmed"
+                      ? "採用済み"
+                      : s?.status === "review"
+                        ? "選択待ち"
+                        : s?.status === "running"
+                          ? "生成中…"
+                          : s?.status === "failed"
+                            ? "失敗"
+                            : "待機中";
+                  const statusColor =
+                    s?.status === "confirmed"
+                      ? "text-emerald-300"
+                      : s?.status === "review"
+                        ? "text-amber-300"
+                        : s?.status === "running"
+                          ? "text-pink-200"
+                          : s?.status === "failed"
+                            ? "text-red-400"
+                            : "text-zinc-500";
+                  const takes = s?.takes ?? [];
+                  const adoptedTakeId = s?.selectedTakeId;
+                  return (
+                    <li
+                      key={o.cutId}
+                      className="flex flex-col gap-2 rounded-md border border-[#242424] bg-[#1a1a1a] p-3"
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] font-semibold uppercase tracking-wider text-pink-200">
+                          Cut {i + 1} · {o.duration}s
+                        </span>
+                        <span className={`text-[11px] ${statusColor}`}>{statusLabel}</span>
                       </div>
-                    );
-                  })}
-                </div>
 
-                <div className="line-clamp-2 text-xs text-zinc-300">{o.description}</div>
-                {s?.error && <div className="text-[10px] text-red-400">{s.error}</div>}
-              </li>
-            );
-          })}
+                      {/* P10: N take 並列サムネ (ユーザー選択枚数) + ダブルクリックプレビュー */}
+                      <div
+                        className="grid gap-2"
+                        style={{ gridTemplateColumns: `repeat(${slotCount}, minmax(0, 1fr))` }}
+                      >
+                        {Array.from({ length: slotCount }).map((_, idx) => {
+                          const take = takes[idx];
+                          const isAdopted = take && adoptedTakeId === take.takeId;
+                          const allTakePaths = takes
+                            .map((t) => t.imagePath)
+                            .filter((p): p is string => Boolean(p));
+                          return (
+                            <div
+                              key={idx}
+                              className={[
+                                `group relative flex ${aspectClass(goal?.aspectRatio ?? "16:9")} items-center justify-center overflow-hidden rounded-md border bg-[#0d0d0d]`,
+                                isAdopted
+                                  ? "border-pink-500 ring-2 ring-pink-500/40"
+                                  : "border-dashed border-[#333]",
+                              ].join(" ")}
+                            >
+                              {take ? (
+                                <>
+                                  <img
+                                    src={`asset://localhost/${encodeURI(take.imagePath)}`}
+                                    alt={`take-${idx + 1}`}
+                                    className="h-full w-full cursor-zoom-in object-cover"
+                                    onDoubleClick={() =>
+                                      useImagePreview.getState().open(take.imagePath, allTakePaths)
+                                    }
+                                    title="ダブルクリックでプレビュー"
+                                  />
+                                  {!isAdopted && (
+                                    <button
+                                      type="button"
+                                      onClick={() => adoptTake(o.cutId, take.takeId)}
+                                      className="absolute inset-x-0 bottom-0 hidden bg-pink-500/90 py-1 text-[10px] font-semibold text-white group-hover:block"
+                                    >
+                                      採用
+                                    </button>
+                                  )}
+                                  {isAdopted && (
+                                    <div className="absolute inset-x-0 bottom-0 bg-pink-500 py-1 text-center text-[10px] font-bold text-white">
+                                      採用中
+                                    </div>
+                                  )}
+                                </>
+                              ) : (
+                                <Spinner running={s?.status === "running"} />
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      <div className="line-clamp-2 text-xs text-zinc-300">{o.description}</div>
+                      {s?.error && <div className="text-[10px] text-red-400">{s.error}</div>}
+                    </li>
+                  );
+                })}
               </ol>
             </section>
           ))}
