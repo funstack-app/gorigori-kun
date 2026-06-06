@@ -17,10 +17,16 @@ pub struct SkillImportResult {
     pub installed_at: String,
 }
 
-/// `~/.codex/skills` ディレクトリのパスを返す。無ければ作成する。
+/// `<CODEX_HOME>/skills` ディレクトリのパスを返す。無ければ作成する。
+///
+/// FB#19 で GORI は専用 CODEX_HOME を使うようになったため、app-server が読みに
+/// 行く skills も専用 HOME 配下に統一する。これがズレるとインポートしたスキルが
+/// app-server から見えなくなる。
 fn skills_root() -> Result<PathBuf> {
-    let home = dirs::home_dir().ok_or_else(|| anyhow!("$HOME が解決できません"))?;
-    let root = home.join(".codex").join("skills");
+    let home = crate::codex::home::gori_codex_home_path()
+        .or_else(crate::codex::home::legacy_codex_home)
+        .ok_or_else(|| anyhow!("$HOME が解決できません"))?;
+    let root = home.join("skills");
     std::fs::create_dir_all(&root).with_context(|| {
         format!(
             "スキルディレクトリの作成に失敗: {}",

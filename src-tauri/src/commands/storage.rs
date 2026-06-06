@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
 
-use crate::images::watcher::{generated_images_dir, scan_existing, start_watcher};
+use crate::images::watcher::{
+    generated_images_dir, legacy_generated_images_dir, scan_existing, start_watcher,
+};
 use crate::state::AppState;
 
 const SERVICE_DIR: &str = "Library/Application Support/app.codexframefactory";
@@ -133,8 +135,12 @@ pub async fn storage_migrate_from_codex_home(
         Some(settings) => settings,
         None => StorageSettings::load()?,
     };
+    // 「旧保存先から移行」コマンド。対象は旧 ~/.codex/generated_images に残る
+    // 過去画像。FB#19 で generated_images_dir() が GORI 専用 HOME を指すように
+    // なったため、ここは明示的にレガシーディレクトリを参照する (移行漏れ防止)。
+    // コピーのみ・元は消さないので非破壊。
     let legacy =
-        generated_images_dir().ok_or_else(|| "ホームディレクトリの解決に失敗".to_string())?;
+        legacy_generated_images_dir().ok_or_else(|| "ホームディレクトリの解決に失敗".to_string())?;
     if !legacy.exists() {
         return Ok(MigrationResult {
             copied_count: 0,
@@ -203,7 +209,8 @@ pub async fn storage_usage_stats(state: State<'_, AppState>) -> Result<UsageStat
 
 #[tauri::command]
 pub async fn storage_legacy_summary() -> Result<LegacySummary, String> {
-    let Some(legacy) = generated_images_dir() else {
+    // 「旧保存先のサマリー」も移行 UI 用なので旧 ~/.codex/generated_images を参照。
+    let Some(legacy) = legacy_generated_images_dir() else {
         return Ok(LegacySummary {
             exists: false,
             file_count: 0,
@@ -287,8 +294,17 @@ async fn restart_image_watcher(app: &AppHandle, state: &AppState) {
 
 pub fn watcher_dirs(settings: Option<&StorageSettings>) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    if let Some(legacy) = generated_images_dir() {
-        dirs.push(legacy);
+    // 現行の image_gen 出力先 (GORI 専用 CODEX_HOME/generated_images)。
+    if let Some(active) = generated_images_dir() {
+        dirs.push(active);
+    }
+    // FB#19 で CODEX_HOME を切り替える前に生成された過去画像が残る旧
+    // ~/.codex/generated_images も読み取り専用で監視に含める (退行防止・消さない)。
+    // 専用 HOME に統一した結果、active とは別パスなので重複しない限り追加する。
+    if let Some(legacy) = crate::images::watcher::legacy_generated_images_dir() {
+        if !dirs.iter().any(|dir| dir == &legacy) {
+            dirs.push(legacy);
+        }
     }
     if let Some(settings) = settings {
         let storage = PathBuf::from(&settings.storage_root);

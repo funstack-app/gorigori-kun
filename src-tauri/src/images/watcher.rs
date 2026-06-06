@@ -23,8 +23,31 @@ pub struct ImageEvent {
     pub kind: &'static str,
 }
 
+/// `image_gen` ツールが画像を書き出す `$CODEX_HOME/generated_images/`。
+///
+/// FB#19 対応で CODEX_HOME を GORI 専用 HOME に切り替えたため、ここも専用 HOME
+/// 配下に統一する。app-server に渡す CODEX_HOME とこの参照先がズレると、
+/// 生成画像がギャラリーに出てこなくなる (Codex 警告の核心)。
+///
+/// 専用 HOME が解決できない (data_dir 取得失敗) 場合のみ、従来の
+/// `~/.codex/generated_images` にフォールバックする。
 pub fn generated_images_dir() -> Option<PathBuf> {
-    Some(dirs::home_dir()?.join(".codex").join("generated_images"))
+    crate::codex::home::gori_codex_home_path()
+        .or_else(legacy_generated_images_parent)
+        .map(|home| home.join("generated_images"))
+}
+
+/// 旧 ambient `~/.codex` (移行元)。watcher のレガシー画像参照に使う。
+/// **削除・変更しない。読み取り専用。**
+fn legacy_generated_images_parent() -> Option<PathBuf> {
+    crate::codex::home::legacy_codex_home()
+}
+
+/// 旧 `~/.codex/generated_images/`。専用 HOME に切り替える前に生成された
+/// 過去画像がここに残っている可能性があるので、watcher は読み取り専用で
+/// このディレクトリも監視対象に含める (消さない)。
+pub fn legacy_generated_images_dir() -> Option<PathBuf> {
+    legacy_generated_images_parent().map(|home| home.join("generated_images"))
 }
 
 fn is_image(path: &Path) -> bool {

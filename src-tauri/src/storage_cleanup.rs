@@ -1,16 +1,22 @@
 //! ストレージ自動掃除モジュール
 //!
-//! 起動時 + 24時間ごとに、Codex CLI の一時データを自動削除する。
+//! 起動時 + 24時間ごとに、Codex の一時データを自動削除する。
 //!
-//! 削除対象:
-//! - ~/.codex/sessions/  : 3日以上前の .jsonl ファイル
-//! - ~/.codex/logs_2.sqlite-wal : 3日以上前なら削除
+//! 削除対象 (GORI 専用 CODEX_HOME と 旧 ~/.codex の両方):
+//! - <CODEX_HOME>/sessions/  : 3日以上前の .jsonl ファイル
 //! - ~/.codex/generated_images/ : v0.2.7 以前の遺物、全削除
+//!
+//! FB#19 対応で GORI は専用 CODEX_HOME
+//! (~/Library/Application Support/app.codexframefactory/codex-home) を使うように
+//! なった。今後 GORI が吐く sessions はこの専用 HOME 配下に溜まるので、掃除対象に
+//! 専用 HOME の sessions を加える。旧 ~/.codex/sessions も後方互換で掃除する。
 //!
 //! 絶対に触らないもの:
 //! - ~/Pictures/GORI GORI/ (ユーザーの作品データ)
-//! - ~/Library/Application Support/app.codexframefactory/ (プリセット/設定)
-//! - ~/.codex/skills/ (スキル本体)
+//! - ~/Library/Application Support/app.codexframefactory/ (プリセット/設定) ※ codex-home の sessions のみ掃除
+//! - <CODEX_HOME>/generated_images/ (現行の生成画像。**消さない**)
+//! - <CODEX_HOME>/skills/ / ~/.codex/skills/ (スキル本体)
+//! - <CODEX_HOME>/auth.json / config.toml (認証・設定)
 
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -64,33 +70,51 @@ pub fn spawn_background_cleanup() {
 /// 1回分の掃除処理。テストや手動実行から呼べる。
 pub async fn run_cleanup() -> Result<CleanupReport, String> {
     let mut report = CleanupReport::default();
-    let codex_home = match codex_home_dir() {
-        Some(path) => path,
-        None => return Err("$HOME が解決できません".to_string()),
-    };
 
-    // 1. ~/.codex/sessions/ 配下の古い .jsonl
-    let sessions = codex_home.join("sessions");
-    if sessions.exists() {
-        match sweep_old_files(&sessions, RETENTION_DAYS, Some("jsonl")).await {
-            Ok((count, bytes)) => {
-                report.sessions_deleted = count;
-                report.sessions_bytes_freed = bytes;
+    // 掃除対象の sessions ディレクトリ候補:
+    //   1. GORI 専用 CODEX_HOME/sessions (今後 GORI が吐く本体)
+    //   2. 旧 ~/.codex/sessions (後方互換)
+    // 同一パスになるケースは無いが、重複時の二重掃除を避けるため dedup する。
+    let mut session_dirs: Vec<PathBuf> = Vec::new();
+    if let Some(gori_home) = gori_codex_home_dir() {
+        session_dirs.push(gori_home.join("sessions"));
+    }
+    if let Some(legacy_home) = legacy_codex_home_dir() {
+        let legacy_sessions = legacy_home.join("sessions");
+        if !session_dirs.iter().any(|d| d == &legacy_sessions) {
+            session_dirs.push(legacy_sessions);
+        }
+    }
+    if session_dirs.is_empty() {
+        return Err("$HOME が解決できません".to_string());
+    }
+
+    // 1. 各 sessions/ 配下の古い .jsonl
+    for sessions in &session_dirs {
+        if sessions.exists() {
+            match sweep_old_files(sessions, RETENTION_DAYS, Some("jsonl")).await {
+                Ok((count, bytes)) => {
+                    report.sessions_deleted += count;
+                    report.sessions_bytes_freed += bytes;
+                }
+                Err(err) => report.errors.push(format!("sessions: {err}")),
             }
-            Err(err) => report.errors.push(format!("sessions: {err}")),
         }
     }
 
-    // 2. ~/.codex/generated_images/ は v0.2.7 以前の遺物 → 全削除
-    //    現在の保存先は ~/Pictures/GORI GORI/ に移行済み
-    let legacy_images = codex_home.join("generated_images");
-    if legacy_images.exists() {
-        match remove_dir_contents(&legacy_images).await {
-            Ok((count, bytes)) => {
-                report.generated_images_deleted = count;
-                report.generated_images_bytes_freed = bytes;
+    // 2. 旧 ~/.codex/generated_images/ は v0.2.7 以前の遺物 → 全削除。
+    //    **GORI 専用 CODEX_HOME/generated_images は現行の生成画像なので絶対に消さない。**
+    //    ここは明示的に legacy_codex_home_dir() (= ~/.codex) のみを対象にする。
+    if let Some(legacy_home) = legacy_codex_home_dir() {
+        let legacy_images = legacy_home.join("generated_images");
+        if legacy_images.exists() {
+            match remove_dir_contents(&legacy_images).await {
+                Ok((count, bytes)) => {
+                    report.generated_images_deleted = count;
+                    report.generated_images_bytes_freed = bytes;
+                }
+                Err(err) => report.errors.push(format!("generated_images: {err}")),
             }
-            Err(err) => report.errors.push(format!("generated_images: {err}")),
         }
     }
 
@@ -106,8 +130,15 @@ pub async fn run_cleanup() -> Result<CleanupReport, String> {
     Ok(report)
 }
 
-fn codex_home_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|home| home.join(".codex"))
+/// 旧 ambient `~/.codex`。generated_images の遺物削除と sessions 後方互換掃除に使う。
+fn legacy_codex_home_dir() -> Option<PathBuf> {
+    crate::codex::home::legacy_codex_home()
+}
+
+/// GORI 専用 CODEX_HOME。今後 GORI が吐く sessions の掃除に使う。
+/// パス解決のみ (作成・移行はしない)。
+fn gori_codex_home_dir() -> Option<PathBuf> {
+    crate::codex::home::gori_codex_home_path()
 }
 
 /// 指定ディレクトリ配下の、指定日数より古いファイルを削除する。

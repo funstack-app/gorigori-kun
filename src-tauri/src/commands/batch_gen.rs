@@ -102,9 +102,9 @@ pub async fn images_generate_batch(
     let codex_bin = resolve_codex_cli_binary()
         .map_err(|e| format!("Codex CLI の解決に失敗: {e}"))?;
 
-    let codex_home_orig = std::env::var_os("CODEX_HOME")
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|h| h.join(".codex")))
+    // FB#19: app-server と同じ GORI 専用 CODEX_HOME を使う。各 worker は
+    // この HOME から auth/config/skills を一時 HOME に複製して codex exec する。
+    let codex_home_orig = crate::codex::home::resolve_command_codex_home()
         .ok_or_else(|| "CODEX_HOME を解決できません".to_string())?;
 
     let batch_id = format!("batch-{}", short_id());

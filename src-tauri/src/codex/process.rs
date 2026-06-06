@@ -369,6 +369,17 @@ pub async fn spawn_app_server(bin: &Path) -> Result<AppServerProcess> {
         .stderr(Stdio::piped())
         .env("PATH", enriched_path());
 
+    // GORI GORI 専用 CODEX_HOME を app-server に渡す (FB#19 認証 token 競合対策)。
+    // ユーザーの素の Codex CLI が使う ~/.codex から認証を隔離する。
+    // image_gen の出力先 ($CODEX_HOME/generated_images) もこの HOME 配下に移るため、
+    // watcher / ギャラリーの参照先 (generated_images_dir) も同じ HOME に統一済み。
+    // 解決に失敗した場合は env を設定せず、従来どおり ambient ~/.codex に
+    // フォールバックする (起動不能を避ける)。
+    if let Some(home) = crate::codex::home::ensure_gori_codex_home() {
+        cmd.env("CODEX_HOME", &home);
+        tracing::info!(target: "codex.home", path = %home.display(), "app-server CODEX_HOME");
+    }
+
     // Windows での黒い console window 抑制
     no_window_flag(&mut cmd);
 

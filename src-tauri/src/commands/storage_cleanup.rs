@@ -8,19 +8,41 @@ pub async fn storage_cleanup_run() -> Result<CleanupReport, String> {
 }
 
 /// 現在のキャッシュ使用量を取得する (掃除前に表示する用)。
+///
+/// FB#19: run_cleanup と整合させる。sessions/logs は GORI 専用 CODEX_HOME と
+/// 旧 ~/.codex の両方を集計し、generated_images は run_cleanup が削除する
+/// 旧 ~/.codex/generated_images のみを表示する (専用 HOME の生成画像は消さないため
+/// 集計しない)。
 #[tauri::command]
 pub async fn storage_cleanup_inspect() -> Result<CleanupInspection, String> {
     use std::path::PathBuf;
-    use tokio::fs;
 
     let home = dirs::home_dir().ok_or_else(|| "$HOME 解決失敗".to_string())?;
-    let codex_home = home.join(".codex");
 
-    let sessions_bytes = dir_size(&codex_home.join("sessions")).await;
-    let logs_bytes = file_size(&codex_home.join("logs_2.sqlite")).await
-        + file_size(&codex_home.join("logs_2.sqlite-wal")).await
-        + file_size(&codex_home.join("logs_2.sqlite-shm")).await;
-    let generated_bytes = dir_size(&codex_home.join("generated_images")).await;
+    let mut homes: Vec<PathBuf> = Vec::new();
+    if let Some(gori) = crate::codex::home::gori_codex_home_path() {
+        homes.push(gori);
+    }
+    if let Some(legacy) = crate::codex::home::legacy_codex_home() {
+        if !homes.iter().any(|h| h == &legacy) {
+            homes.push(legacy);
+        }
+    }
+
+    let mut sessions_bytes = 0u64;
+    let mut logs_bytes = 0u64;
+    for ch in &homes {
+        sessions_bytes += dir_size(&ch.join("sessions")).await;
+        logs_bytes += file_size(&ch.join("logs_2.sqlite")).await
+            + file_size(&ch.join("logs_2.sqlite-wal")).await
+            + file_size(&ch.join("logs_2.sqlite-shm")).await;
+    }
+
+    // 掃除対象は旧 ~/.codex/generated_images のみ (専用 HOME の生成画像は保持)。
+    let generated_bytes = match crate::codex::home::legacy_codex_home() {
+        Some(legacy) => dir_size(&legacy.join("generated_images")).await,
+        None => 0,
+    };
     let cache_bytes = mac_cache_size(&home).await;
 
     Ok(CleanupInspection {

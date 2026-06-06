@@ -283,7 +283,8 @@ pub async fn images_write_mask(src_path: String, png_bytes: Vec<u8>) -> Result<S
     Ok(dest.to_string_lossy().into_owned())
 }
 
-/// Write a clipboard-pasted PNG into `~/.codex/generated_images/clipboard/`.
+/// Write a clipboard-pasted PNG into `<CODEX_HOME>/generated_images/clipboard/`
+/// (GORI 専用 CODEX_HOME, FB#19)。
 /// The recursive watcher already monitors that tree, so the new file
 /// shows up in the gallery automatically; the returned path is what the
 /// composer uses as a reference.
@@ -308,7 +309,8 @@ pub async fn images_write_clipboard(png_bytes: Vec<u8>) -> Result<String, String
     Ok(dest.to_string_lossy().into_owned())
 }
 
-/// Persist a dropped / picked browser File into `~/.codex/generated_images/uploads/`.
+/// Persist a dropped / picked browser File into
+/// `<CODEX_HOME>/generated_images/uploads/` (GORI 専用 CODEX_HOME, FB#19)。
 /// This is the fallback path for cases where the webview cannot expose the
 /// original filesystem path to the frontend. Keeping the file under the
 /// generated_images tree also makes it visible in the gallery watcher.

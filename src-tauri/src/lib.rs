@@ -269,7 +269,14 @@ pub fn run() {
                 );
             }
 
-            // バンドル同梱スキルを ~/.codex/skills/ に展開する。
+            // FB#19: GORI 専用 CODEX_HOME を用意し、初回起動なら ~/.codex から
+            // auth/config/skills を冪等にコピー移行する。バンドルスキル展開より
+            // 前に呼ぶ — 先に skills/ が作られると移行がスキップされ、ユーザーが
+            // ~/.codex/skills に持つ自作スキルが専用 HOME に来なくなるため。
+            // 既存 ~/.codex は一切変更しない (読み取りのみ)。
+            let _ = crate::codex::home::ensure_gori_codex_home();
+
+            // バンドル同梱スキルを <CODEX_HOME>/skills/ に展開する。
             // (新規ユーザーや mtime 比較で古い場合のみ上書き)
             crate::skill_install::ensure_bundled_skills(&app.handle());
 

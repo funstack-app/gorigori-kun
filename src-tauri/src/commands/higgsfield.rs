@@ -775,9 +775,9 @@ pub async fn higgsfield_generate_batch(
         "Higgsfield CLI が見つかりません。npm install -g @higgsfield/cli を実行してください。"
             .to_string()
     })?;
-    let codex_home = std::env::var_os("CODEX_HOME")
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|h| h.join(".codex")))
+    // FB#19: app-server / watcher と同じ GORI 専用 CODEX_HOME に統一する。
+    // ここがズレると生成画像がギャラリーに出てこなくなる。
+    let codex_home = crate::codex::home::resolve_command_codex_home()
         .ok_or_else(|| "CODEX_HOME を解決できません".to_string())?;
     let batch_id = format!("hf-{}", short_id());
     let out_dir = codex_home.join("generated_images").join(&batch_id);
@@ -930,9 +930,8 @@ pub async fn higgsfield_generate_compare(
         "Higgsfield CLI が見つかりません。npm install -g @higgsfield/cli を実行してください。"
             .to_string()
     })?;
-    let codex_home = std::env::var_os("CODEX_HOME")
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|h| h.join(".codex")))
+    // FB#19: app-server / watcher と同じ GORI 専用 CODEX_HOME に統一する。
+    let codex_home = crate::codex::home::resolve_command_codex_home()
         .ok_or_else(|| "CODEX_HOME を解決できません".to_string())?;
     let batch_id = format!("hfc-{}", short_id());
     let out_dir = codex_home.join("generated_images").join(&batch_id);

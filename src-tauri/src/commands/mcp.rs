@@ -15,7 +15,12 @@ pub struct McpServer {
 }
 
 fn codex_config_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".codex/config.toml"))
+    // FB#19: app-server は GORI 専用 CODEX_HOME の config.toml を読むため、MCP 設定の
+    // 編集先も専用 HOME に合わせる。専用 HOME が解決できなければ旧 ~/.codex に
+    // フォールバック。
+    crate::codex::home::gori_codex_home_path()
+        .or_else(crate::codex::home::legacy_codex_home)
+        .map(|h| h.join("config.toml"))
 }
 
 fn read_config(path: &PathBuf) -> Result<toml::Value, String> {

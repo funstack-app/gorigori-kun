@@ -1,3 +1,4 @@
+pub mod home;
 pub mod process;
 pub mod rpc;
 pub mod server_requests;

@@ -458,12 +458,15 @@ pub async fn storyboard_read_debug_log(run_id: String) -> Result<String, String>
     let settings = StorageSettings::load()?;
     let path = find_storyboard_file(&settings, &leaf, "debug-log.json")
         .or_else(|| {
-            dirs::home_dir()
-                .map(|home| {
-                    home.join(".codex/generated_images")
-                        .join(&leaf)
-                        .join("debug-log.json")
-                })
+            // FB#19: 生成画像と同じく GORI 専用 CODEX_HOME/generated_images を見る。
+            crate::images::watcher::generated_images_dir()
+                .map(|base| base.join(&leaf).join("debug-log.json"))
+                .filter(|path| path.is_file())
+        })
+        .or_else(|| {
+            // 旧 ~/.codex/generated_images に残る過去ランの debug-log も後方互換で見る。
+            crate::images::watcher::legacy_generated_images_dir()
+                .map(|base| base.join(&leaf).join("debug-log.json"))
                 .filter(|path| path.is_file())
         })
         .ok_or_else(|| format!("debug-log.json が見つかりません: {leaf}"))?;
@@ -478,9 +481,9 @@ pub async fn storyboard_run(
     _state: State<'_, AppState>,
     params: StoryboardParams,
 ) -> Result<String, String> {
-    let codex_home_orig = std::env::var_os("CODEX_HOME")
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|h| h.join(".codex")))
+    // FB#19: app-server と同じ GORI 専用 CODEX_HOME を使う。worker は
+    // mirror_codex_home でこの HOME から auth/config/skills を一時 HOME に複製する。
+    let codex_home_orig = crate::codex::home::resolve_command_codex_home()
         .ok_or_else(|| "CODEX_HOME を解決できません".to_string())?;
 
     let skill_dir = codex_home_orig.join("skills").join("gori-storyboard");
@@ -563,9 +566,8 @@ pub async fn storyboard_regenerate_cut(
     _state: State<'_, AppState>,
     params: RegenerateCutParams,
 ) -> Result<String, String> {
-    let codex_home_orig = std::env::var_os("CODEX_HOME")
-        .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|h| h.join(".codex")))
+    // FB#19: app-server と同じ GORI 専用 CODEX_HOME を使う (regenerate も同様)。
+    let codex_home_orig = crate::codex::home::resolve_command_codex_home()
         .ok_or_else(|| "CODEX_HOME を解決できません".to_string())?;
 
     let codex_bin =
@@ -1176,8 +1178,11 @@ fn validate_params(params: &StoryboardParams) -> Result<(), String> {
 }
 
 async fn read_skill_refs() -> Result<SkillRefs, String> {
-    let home = dirs::home_dir().ok_or_else(|| "home dir not found".to_string())?;
-    let skill_dir = home.join(".codex/skills/gori-storyboard");
+    // FB#19: バンドルスキルは GORI 専用 CODEX_HOME/skills に展開されるので、ここも
+    // 専用 HOME を参照する (旧 ~/.codex フォールバックつき)。
+    let home = crate::codex::home::resolve_command_codex_home()
+        .ok_or_else(|| "home dir not found".to_string())?;
+    let skill_dir = home.join("skills/gori-storyboard");
     let refs_dir = skill_dir.join("references");
     Ok(SkillRefs {
         skill_md: tokio::fs::read_to_string(skill_dir.join("SKILL.md"))

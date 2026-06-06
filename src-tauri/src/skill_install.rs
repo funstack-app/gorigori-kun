@@ -29,21 +29,26 @@ const BUNDLED_SKILLS: &[&str] = &["gori-storyboard"];
 
 /// 起動時に呼ぶ。失敗してもエラーを伝播せず、ログだけ出す。
 pub fn ensure_bundled_skills(app: &AppHandle) {
-    let home = match dirs::home_dir() {
+    // FB#19: app-server は GORI 専用 CODEX_HOME を使うため、バンドルスキルも
+    // 専用 HOME 配下の skills/ に展開する。専用 HOME が解決できなければ旧 ~/.codex に
+    // フォールバック (起動を止めない)。
+    let home = match crate::codex::home::gori_codex_home_path()
+        .or_else(|| dirs::home_dir().map(|h| h.join(".codex")))
+    {
         Some(h) => h,
         None => {
-            tracing::warn!(target: "codex.skills", "home_dir が取得できないためスキル展開を skip");
+            tracing::warn!(target: "codex.skills", "CODEX_HOME が取得できないためスキル展開を skip");
             return;
         }
     };
 
-    let dest_root = home.join(".codex/skills");
+    let dest_root = home.join("skills");
     if let Err(e) = std::fs::create_dir_all(&dest_root) {
         tracing::warn!(
             target: "codex.skills",
             error = ?e,
             path = %dest_root.display(),
-            "~/.codex/skills の作成に失敗 (スキル展開を skip)"
+            "CODEX_HOME/skills の作成に失敗 (スキル展開を skip)"
         );
         return;
     }

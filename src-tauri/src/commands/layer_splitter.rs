@@ -106,15 +106,16 @@ fn resolve_splitter_dir() -> Result<PathBuf, String> {
 }
 
 fn default_output_path(input: &Path) -> Result<PathBuf, String> {
-    let home = dirs::home_dir().ok_or_else(|| "ホームディレクトリの解決に失敗".to_string())?;
+    // FB#19: 生成画像と同じ GORI 専用 CODEX_HOME/generated_images 配下に出す
+    // (watcher が見えるディレクトリに統一)。
+    let base = crate::images::watcher::generated_images_dir()
+        .ok_or_else(|| "ホームディレクトリの解決に失敗".to_string())?;
     let stem = input
         .file_stem()
         .and_then(|s| s.to_str())
         .filter(|s| !s.is_empty())
         .unwrap_or("image");
-    Ok(home
-        .join(".codex")
-        .join("generated_images")
+    Ok(base
         .join("_layers")
         .join(format!("{stem}_layered.psd")))
 }
