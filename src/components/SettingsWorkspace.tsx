@@ -381,9 +381,37 @@ function StorageSettingsTab() {
     try {
       const { open: openDialog } = await import("@tauri-apps/plugin-dialog");
       const r = await openDialog({ directory: true, multiple: false });
-      if (typeof r === "string") void applySettings({ ...settings, storageRoot: r });
+      if (typeof r === "string") void applyUnifiedRoot(r);
     } catch (err) {
       push({ kind: "error", text: `フォルダ選択に失敗: ${String(err)}` });
+    }
+  };
+
+  // 2026-06-06 STΛCK 指示: 保存先を1つ選んだら、画像 (storageRoot) も
+  // プロジェクトデータ (projectsDataRoot) も両方そこへ集約する。
+  // 「自分の好きな場所 (外付けSSD/Google Drive) に全部入れたい」を叶える。
+  // 既存ユーザーが別々に設定していた場合も壊さない (両方を同じ root に揃えるだけ)。
+  const applyUnifiedRoot = async (root: string) => {
+    setSaving(true);
+    try {
+      // 1. 画像保存先 (storageRoot) を更新。
+      const next = { ...settings, storageRoot: root };
+      await storage.setSettings(next);
+      // 2. プロジェクトデータも同じ root へ (既存の安全移行ロジックを再利用)。
+      await storage.setProjectsDataRoot(root);
+      const merged = await storage.getSettings();
+      setSettings(merged);
+      // 3. 新しい場所の projects.json から読み直す (移行済みデータを反映)。
+      await useProjects.getState().initialize();
+      push({
+        kind: "success",
+        text: "保存先を更新しました（画像・作品データを集約）",
+        ttlMs: 2800,
+      });
+    } catch (err) {
+      push({ kind: "error", text: `保存先の更新に失敗: ${String(err)}` });
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -503,7 +531,7 @@ function StorageSettingsTab() {
                 key={preset.path}
                 type="button"
                 disabled={saving || isActive}
-                onClick={() => void applySettings({ ...settings, storageRoot: preset.path })}
+                onClick={() => void applyUnifiedRoot(preset.path)}
                 className={`w-full rounded-md border px-3 py-2 text-left text-xs transition ${
                   isActive
                     ? "border-pink-500 bg-pink-500/10 text-pink-100"
