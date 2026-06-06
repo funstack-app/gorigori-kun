@@ -197,6 +197,23 @@ type ProjectsState = {
   setPlanChat: (projectId: string, messages: ProjectChatMessage[]) => void;
 
   /**
+   * FB#17: 企画チャットを別プロジェクトへ移動する。
+   * - source の planChat を target の planChat に **上書きコピー** し、source の planChat はクリアする。
+   * - 同一プロジェクトや、source に planChat が無い場合は false を返して何もしない。
+   * - target / source が見つからない場合も false。
+   * 成功時は true を返す。
+   */
+  movePlanChat: (sourceProjectId: string, targetProjectId: string) => boolean;
+
+  /**
+   * FB#17: 企画チャットを別プロジェクトへ複製する。
+   * - source の planChat を target の planChat に **上書きコピー** する。source はそのまま残す。
+   * - メッセージ id は衝突回避のため振り直す。
+   * - 移動と同じ前提チェックで、不可なら false。
+   */
+  copyPlanChat: (sourceProjectId: string, targetProjectId: string) => boolean;
+
+  /**
    * ストック素材のクレジットを記録する (法務対応 2026-05-21)。
    * 同じ photoId が既にあれば addedAt のみ更新 (重複排除)。
    * プロジェクトが見つからない場合は何もしない。
@@ -365,6 +382,56 @@ export const useProjects = create<ProjectsState>((set, get) => ({
     );
     persist(next);
     set({ projects: next });
+  },
+
+  movePlanChat: (sourceProjectId, targetProjectId) => {
+    if (!sourceProjectId || !targetProjectId || sourceProjectId === targetProjectId) {
+      return false;
+    }
+    const projects = get().projects;
+    const source = projects.find((p) => p.id === sourceProjectId);
+    const target = projects.find((p) => p.id === targetProjectId);
+    if (!source || !target) return false;
+    const chat = source.planChat ?? [];
+    if (chat.length === 0) return false;
+    const now = Date.now();
+    // 新規配列を作って immutability を守る（既存メッセージはそのまま運ぶ）。
+    const moved = chat.map((m) => ({ ...m }));
+    const next = projects.map((p) => {
+      if (p.id === targetProjectId) {
+        return { ...p, planChat: moved, updatedAt: now };
+      }
+      if (p.id === sourceProjectId) {
+        return { ...p, planChat: [], updatedAt: now };
+      }
+      return p;
+    });
+    persist(next);
+    set({ projects: next });
+    return true;
+  },
+
+  copyPlanChat: (sourceProjectId, targetProjectId) => {
+    if (!sourceProjectId || !targetProjectId || sourceProjectId === targetProjectId) {
+      return false;
+    }
+    const projects = get().projects;
+    const source = projects.find((p) => p.id === sourceProjectId);
+    const target = projects.find((p) => p.id === targetProjectId);
+    if (!source || !target) return false;
+    const chat = source.planChat ?? [];
+    if (chat.length === 0) return false;
+    const now = Date.now();
+    // コピー時は id を振り直して、移動元と target で id が衝突しないようにする。
+    const copied = chat.map((m) => ({ ...m, id: generateId() }));
+    const next = projects.map((p) =>
+      p.id === targetProjectId
+        ? { ...p, planChat: copied, updatedAt: now }
+        : p,
+    );
+    persist(next);
+    set({ projects: next });
+    return true;
   },
 
   recordStockCredit: (projectId, credit) => {

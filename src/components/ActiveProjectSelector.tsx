@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { useActiveProject } from "../lib/store/activeProject";
 import { useProjects } from "../lib/store/projects";
+import { useToasts } from "../lib/store/toasts";
 
 /**
  * 「現在作業中のプロジェクト」を選ぶセレクター。
@@ -19,10 +20,15 @@ import { useProjects } from "../lib/store/projects";
 export function ActiveProjectSelector() {
   const projects = useProjects((s) => s.projects);
   const createProject = useProjects((s) => s.createProject);
+  const movePlanChat = useProjects((s) => s.movePlanChat);
+  const copyPlanChat = useProjects((s) => s.copyPlanChat);
   const activeId = useActiveProject((s) => s.activeProjectId);
   const setActive = useActiveProject((s) => s.setActive);
+  const pushToast = useToasts((s) => s.push);
   const [open, setOpen] = useState(false);
   const [draftName, setDraftName] = useState("");
+  // FB#17: 企画チャットを別プロジェクトへ移動/コピーするサブパネルの開閉。
+  const [chatMoveOpen, setChatMoveOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement | null>(null);
 
   // 外側クリックで閉じる
@@ -41,6 +47,15 @@ export function ActiveProjectSelector() {
   }, [open]);
 
   const active = activeId ? projects.find((p) => p.id === activeId) ?? null : null;
+  // FB#17: 移動/コピー元は現在のアクティブプロジェクト。チャットが無ければ操作不可。
+  const activeChatCount = active?.planChat?.length ?? 0;
+  // 移動先候補は自分以外のプロジェクト。
+  const moveTargets = active ? projects.filter((p) => p.id !== active.id) : [];
+
+  // ドロップダウンを閉じたらチャット移動サブパネルも畳む。
+  useEffect(() => {
+    if (!open) setChatMoveOpen(false);
+  }, [open]);
 
   const handleCreate = () => {
     const name = draftName.trim();
@@ -48,6 +63,37 @@ export function ActiveProjectSelector() {
     const created = createProject(name);
     setActive(created.id);
     setDraftName("");
+    setOpen(false);
+  };
+
+  // FB#17: 企画チャットを別プロジェクトへ移動/コピーする。
+  const handleChatTransfer = (
+    targetId: string,
+    mode: "move" | "copy",
+  ) => {
+    if (!active) return;
+    const target = projects.find((p) => p.id === targetId);
+    const ok =
+      mode === "move"
+        ? movePlanChat(active.id, targetId)
+        : copyPlanChat(active.id, targetId);
+    if (!ok) {
+      pushToast({
+        kind: "error",
+        text: "企画チャットを移動できませんでした（移動できるログがありません）",
+        ttlMs: 3000,
+      });
+      return;
+    }
+    pushToast({
+      kind: "success",
+      text:
+        mode === "move"
+          ? `企画チャットを「${target?.name ?? "別プロジェクト"}」へ移動しました`
+          : `企画チャットを「${target?.name ?? "別プロジェクト"}」へコピーしました`,
+      ttlMs: 3000,
+    });
+    setChatMoveOpen(false);
     setOpen(false);
   };
 
@@ -129,6 +175,63 @@ export function ActiveProjectSelector() {
               ))
             )}
           </div>
+          {/*
+            FB#17: 企画チャットのプロジェクト間移動 / コピー。
+            アクティブプロジェクトにチャットログがある時だけ操作可能にする。
+          */}
+          {active && (
+            <div className="border-t border-[#242424] p-2">
+              <button
+                type="button"
+                onClick={() => setChatMoveOpen((prev) => !prev)}
+                disabled={activeChatCount === 0 || moveTargets.length === 0}
+                className="flex w-full items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-[11px] font-bold text-neutral-300 hover:bg-[#1f1f1f] hover:text-white disabled:cursor-not-allowed disabled:text-neutral-600 disabled:hover:bg-transparent"
+                title={
+                  activeChatCount === 0
+                    ? "このプロジェクトには移動できる企画チャットがありません"
+                    : moveTargets.length === 0
+                      ? "移動先になる別プロジェクトがありません"
+                      : "企画チャットを別プロジェクトへ移動 / コピー"
+                }
+              >
+                <span>企画チャットを別プロジェクトへ移動 / コピー</span>
+                <span className="text-[10px] text-neutral-500">
+                  {activeChatCount > 0 ? `${activeChatCount} 通 ▾` : "なし"}
+                </span>
+              </button>
+              {chatMoveOpen && activeChatCount > 0 && moveTargets.length > 0 && (
+                <div className="mt-1 max-h-48 space-y-1 overflow-y-auto rounded-md border border-[#242424] bg-[#101010] p-1">
+                  {moveTargets.map((target) => (
+                    <div
+                      key={target.id}
+                      className="flex items-center gap-1.5 rounded-md px-2 py-1.5"
+                    >
+                      <span className="min-w-0 flex-1 truncate text-[11px] text-neutral-300">
+                        {target.name}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => handleChatTransfer(target.id, "move")}
+                        className="rounded border border-pink-400/50 px-2 py-0.5 text-[10px] font-bold text-pink-200 hover:bg-pink-500/15 hover:text-white"
+                        title={`チャットを「${target.name}」へ移動（このプロジェクトからは消えます）`}
+                      >
+                        移動
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleChatTransfer(target.id, "copy")}
+                        className="rounded border border-[#343434] px-2 py-0.5 text-[10px] font-bold text-neutral-300 hover:border-pink-400 hover:text-white"
+                        title={`チャットを「${target.name}」へコピー（このプロジェクトにも残ります）`}
+                      >
+                        コピー
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
           <div className="border-t border-[#242424] p-2">
             <div className="mb-1 px-1 text-[10px] font-bold uppercase tracking-wide text-neutral-500">
               新しいプロジェクトを作る
