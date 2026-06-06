@@ -16,13 +16,25 @@ import { useStoryboardRun } from "./storyboardRun";
  *  - 生成タイムライン (useImages / useBatches) は分離保持の方針で消さない。
  *    ライブラリの作品は別スキルに切り替えても残す。
  */
-export function resetSkillScopedState(): void {
-  // 企画タブ (storyboard 等の企画フェーズで使う共有チャット)
-  const planChat = usePlanChat.getState();
-  planChat.resetThread();
-  planChat.clearPendingImages();
+/**
+ * @param enteringSkillId これから入るスキルの id。
+ *   ストーリーカット生成 (gori-storyboard) は企画タブの sceneConstruction を
+ *   本生成の入力に使うため、このスキルへ切り替えるときは企画チャットを破棄しない。
+ *   (破棄すると「目標確定→本生成に進んでも生成が始まらない」バグになる。2026-06-07 STΛCK報告)
+ */
+export function resetSkillScopedState(enteringSkillId?: string | null): void {
+  const isStoryboard = enteringSkillId === "gori-storyboard";
 
-  // ストーリーカット生成スキル
+  // 企画タブ (storyboard 等の企画フェーズで使う共有チャット)。
+  // ストーリーカット生成へ入るときは企画チャット (sceneConstruction含む) を保護する。
+  if (!isStoryboard) {
+    const planChat = usePlanChat.getState();
+    planChat.resetThread();
+    planChat.clearPendingImages();
+  }
+
+  // ストーリーカット生成スキルの run/phase。これから storyboard に入る場合でも、
+  // 前回の本生成 run の残骸はクリアしてよい (sceneConstruction は planChat 側で保持)。
   const storyboard = useStoryboardRun.getState();
   storyboard.reset();
   storyboard.resetPhases();

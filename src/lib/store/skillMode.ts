@@ -33,7 +33,7 @@ function syncUiMode(enabled: boolean, skillId: string | null) {
     //   prevSkillId === null (作品モードからの初回起動) も「別スキルに入った」扱いで
     //   破棄する。前回別スキルの残留が新スキルに流れ込むのを防ぐため。
     if (prevSkillId !== skillId) {
-      resetSkillScopedState();
+      resetSkillScopedState(skillId);
     }
   } else {
     ui.exitSkill();
