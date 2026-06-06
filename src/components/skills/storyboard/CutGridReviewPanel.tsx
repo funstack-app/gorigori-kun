@@ -3,8 +3,13 @@ import { useMemo } from "react";
 import { useStoryboardRun } from "../../../lib/store/storyboardRun";
 import { useActiveProject } from "../../../lib/store/activeProject";
 import { useProjects } from "../../../lib/store/projects";
+import { useImages } from "../../../lib/store/images";
 import { useToasts } from "../../../lib/store/toasts";
 import { sendImageToPlanForRediscuss } from "../../../lib/sendToPlan";
+import {
+  sendCutToVideoTab,
+  sendCutsBatchToVideoTab,
+} from "../../../lib/storyboard/sendCutToVideo";
 import type { StoryboardSketchCut } from "../../../lib/storyboard/types";
 
 /**
@@ -79,24 +84,36 @@ export function CutGridReviewPanel() {
   const activeProjectId = useActiveProject((s) => s.activeProjectId);
   const projects = useProjects((s) => s.projects);
   const addItem = useProjects((s) => s.addItem);
+  // B4: 確定フォルダ (確定カット画像) を Finder で開くのに使う。
+  const revealInFinder = useImages((s) => s.revealInFinder);
 
   const orderedCuts = useMemo(() => Array.from(cuts.values()), [cuts]);
   // P13: 絵コンテバージョンから cutId → SketchCut のマップを引いて i2v プロンプトに使う
   const sketchVersions = useStoryboardRun((s) => s.sketchVersions);
   const activeSketchVersionId = useStoryboardRun((s) => s.activeSketchVersionId);
+  // B1' 補完: 本生成開始時に撮った確定絵コンテメタのスナップショット。
+  // reset() で sketchVersions が破棄されてもカメラワーク等を失わない。
+  const generationCutSketchMeta = useStoryboardRun((s) => s.generationCutSketchMeta);
   const sketchByCutId = useMemo(() => {
     const map = new Map<string, StoryboardSketchCut>();
-    const active =
-      sketchVersions.find((v) => v.versionId === activeSketchVersionId) ??
-      sketchVersions[sketchVersions.length - 1] ??
-      null;
-    if (active) {
-      for (const c of active.cuts) {
-        map.set(c.cutId, c);
+    // 優先: 本生成 run スナップショット (今の run に紐づく確定絵コンテ)。
+    for (const [cutId, cut] of Object.entries(generationCutSketchMeta)) {
+      map.set(cutId, cut);
+    }
+    // フォールバック: live sketchVersions (まだ reset 前の経路用)。
+    if (map.size === 0) {
+      const active =
+        sketchVersions.find((v) => v.versionId === activeSketchVersionId) ??
+        sketchVersions[sketchVersions.length - 1] ??
+        null;
+      if (active) {
+        for (const c of active.cuts) {
+          map.set(c.cutId, c);
+        }
       }
     }
     return map;
-  }, [sketchVersions, activeSketchVersionId]);
+  }, [generationCutSketchMeta, sketchVersions, activeSketchVersionId]);
   const confirmedAll = orderedCuts.every((c) => c.status === "confirmed");
   const allTakeImages = useMemo(
     () =>
@@ -202,6 +219,68 @@ export function CutGridReviewPanel() {
     });
   }
 
+  // 採用 take の画像パスを引く (selectedTake → なければ先頭 take)。
+  function adoptedImageOf(cut: (typeof orderedCuts)[number]): string | undefined {
+    const adopted = cut.takes.find((t) => t.takeId === cut.selectedTakeId) ?? cut.takes[0];
+    return adopted?.imagePath;
+  }
+
+  // B3: 単一の確定カットを動画タブの i2v 元画像へ送る。
+  function sendCutToVideo(cut: (typeof orderedCuts)[number], cutIndex: number) {
+    const imagePath = adoptedImageOf(cut);
+    if (!imagePath) {
+      useToasts.getState().push({
+        kind: "error",
+        text: "このカットには採用画像がありません。",
+        ttlMs: 4000,
+      });
+      return;
+    }
+    const sketch = sketchByCutId.get(cut.cutId) ?? null;
+    const prompt = buildI2vPrompt(
+      sketch,
+      { description: sketch?.intent, duration: sketch?.durationSeconds ?? 2.5 },
+      goal?.aspectRatio ?? "16:9",
+      cutIndex,
+    );
+    sendCutToVideoTab({ imagePath, prompt });
+  }
+
+  // B5: 確定カットをまとめて動画タブへ送る (一括動画化)。
+  async function sendAllConfirmedToVideo() {
+    const batch = orderedCuts
+      .map((c, i) => {
+        const imagePath = adoptedImageOf(c);
+        if (!imagePath) return null;
+        const sketch = sketchByCutId.get(c.cutId) ?? null;
+        const prompt = buildI2vPrompt(
+          sketch,
+          { description: sketch?.intent, duration: sketch?.durationSeconds ?? 2.5 },
+          goal?.aspectRatio ?? "16:9",
+          i,
+        );
+        return { imagePath, prompt, label: `Cut ${i + 1}` };
+      })
+      .filter((x): x is { imagePath: string; prompt: string; label: string } => x !== null);
+    await sendCutsBatchToVideoTab({ cuts: batch });
+  }
+
+  // B4: 確定カット画像が入っているフォルダを Finder で開く。
+  // 確定カットは生成時に ~/.codex/... 配下へ書き出されており、その実体パスを
+  // Finder で開いて確定フォルダとして露出する。
+  async function openConfirmedFolder() {
+    const first = orderedCuts.map(adoptedImageOf).find((p): p is string => Boolean(p));
+    if (!first) {
+      useToasts.getState().push({
+        kind: "error",
+        text: "確定カットの画像がまだありません。",
+        ttlMs: 4000,
+      });
+      return;
+    }
+    await revealInFinder(first);
+  }
+
   if (!goal) {
     return (
       <div className="flex h-full items-center justify-center text-zinc-500">
@@ -252,6 +331,24 @@ export function CutGridReviewPanel() {
             title="全カットの Image-to-Video プロンプトをクリップボードへ"
           >
             i2v プロンプト一括コピー
+          </button>
+          {/* B5: 確定カットを一括で動画タブへ送る */}
+          <button
+            type="button"
+            onClick={() => void sendAllConfirmedToVideo()}
+            className="rounded-md border border-pink-500/40 bg-pink-500/10 px-3 py-2 text-xs font-semibold text-pink-100 hover:bg-pink-500/20"
+            title="確定カットを動画タブへ送り、全カット分の i2v プロンプトをコピー"
+          >
+            一括で動画化 →
+          </button>
+          {/* B4: 確定カットのフォルダを開く */}
+          <button
+            type="button"
+            onClick={() => void openConfirmedFolder()}
+            className="rounded-md border border-[#2a2a2a] px-3 py-2 text-xs text-zinc-300 hover:border-pink-500/40 hover:bg-pink-500/5"
+            title="確定カット画像の保存フォルダを開く"
+          >
+            確定フォルダを開く
           </button>
         </div>
       </header>
@@ -324,6 +421,15 @@ export function CutGridReviewPanel() {
                       採用
                     </button>
                   )}
+                  {/* B3: このカットを動画タブの i2v 元画像へ送る */}
+                  <button
+                    type="button"
+                    onClick={() => sendCutToVideo(c, i)}
+                    className="rounded border border-pink-500/40 bg-pink-500/10 px-2 py-1 text-[10px] font-semibold text-pink-100 hover:bg-pink-500/20"
+                    title="このカット画像を動画生成タブの元画像にセットして切り替える"
+                  >
+                    動画タブへ送る
+                  </button>
                   <button
                     type="button"
                     onClick={() => regenerateCut(c.cutId)}
@@ -379,8 +485,20 @@ export function CutGridReviewPanel() {
       </div>
 
       {allTakeImages.length > 0 && (
-        <footer className="rounded-md border border-[#242424] bg-[#161616] px-3 py-2 text-[11px] text-zinc-500">
-          完成セット: {allTakeImages.length} 枚 / {orderedCuts.length} カット
+        <footer className="flex items-center justify-between gap-3 rounded-md border border-[#242424] bg-[#161616] px-3 py-2 text-[11px] text-zinc-500">
+          <span>
+            完成セット: {allTakeImages.length} 枚 / {orderedCuts.length} カット
+            {activeProject && ` · 確定フォルダ: ${activeProject.name}`}
+          </span>
+          {/* B4: 確定フォルダ導線 (footer からも開ける) */}
+          <button
+            type="button"
+            onClick={() => void openConfirmedFolder()}
+            className="shrink-0 rounded border border-[#2a2a2a] px-2 py-1 text-[10px] text-zinc-400 hover:border-pink-500/40 hover:text-pink-200"
+            title="確定カット画像の保存フォルダを開く"
+          >
+            確定フォルダを開く
+          </button>
         </footer>
       )}
     </div>
