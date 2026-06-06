@@ -50,12 +50,24 @@ function stripStoryboardParams(text: string): string {
   return text.replace(/\n?\[STORYBOARD_PARAMS\][\s\S]*$/g, "").trim();
 }
 
+/**
+ * 通常企画の「確定」で送る [FINALIZE_PROMPT] 指示文は、チャット表示上は
+ * ユーザーの吹き出しに丸ごと出すとノイズになる。表示用に短い一文へ置換する。
+ */
+function stripFinalizePrompt(text: string): string {
+  if (text.startsWith("[FINALIZE_PROMPT]")) {
+    return "（ここまでの対話を踏まえてプロンプトを確定）";
+  }
+  return text;
+}
+
 export function PlanWorkspace() {
   const messages = usePlanChat((s) => s.messages);
   const sending = usePlanChat((s) => s.sending);
   const starting = usePlanChat((s) => s.starting);
   const pendingImages = usePlanChat((s) => s.pendingImages);
   const send = usePlanChat((s) => s.send);
+  const finalizePlan = usePlanChat((s) => s.finalizePlan);
   const attach = usePlanChat((s) => s.attach);
   const resetThread = usePlanChat((s) => s.resetThread);
   const addPendingImages = usePlanChat((s) => s.addPendingImages);
@@ -183,6 +195,18 @@ export function PlanWorkspace() {
         "[STORYBOARD_PARAMS] { ... 構造化JSON ... }",
       ].join("\n"),
     );
+  };
+
+  /**
+   * 通常企画タブ (非ストーリーカット) の「確定」ボタン押下時の処理。
+   *
+   * STΛCK 指示 (2026-06-07): 対話を重視したいので、確定を押すまで AI は
+   * プロンプト案を出さない。確定でここまでの履歴を踏まえたプロンプト案を
+   * 初めて生成させる (planChat.finalizePlan が [FINALIZE_PROMPT] を送る)。
+   */
+  const handleFinalizeNormal = async () => {
+    if (sending || starting) return;
+    await finalizePlan();
   };
 
   const adopt = (text: string) => {
@@ -327,6 +351,27 @@ export function PlanWorkspace() {
             </button>
           </div>
         )}
+        {/*
+          通常企画タブ (非ストーリーカット) の確定。
+          STΛCK 指示 (2026-06-07): 対話を重視するため、確定を押すまで AI は
+          プロンプト案を出さない。確定でここまでの対話からプロンプトを生成する。
+        */}
+        {!isStoryboardSkill && messages.length > 0 && (
+          <div className="mb-2 flex items-center justify-between gap-3 rounded-lg border border-pink-400/30 bg-pink-500/5 px-3 py-2">
+            <p className="text-[11px] font-bold leading-relaxed text-pink-100">
+              対話がまとまったら「確定」でプロンプトを生成
+            </p>
+            <button
+              type="button"
+              onClick={handleFinalizeNormal}
+              disabled={sending || starting}
+              className="rounded-lg bg-pink-500 px-4 py-1.5 text-xs font-black text-white shadow hover:bg-pink-400 disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-500"
+              title="ここまでの対話を踏まえて画像生成プロンプトを生成する"
+            >
+              確定
+            </button>
+          </div>
+        )}
         <ChatInput
           value={draft}
           attachments={pendingImages}
@@ -391,7 +436,9 @@ function ChatBubble({
   onAdopt: (text: string) => void;
 }) {
   const isUser = msg.role === "user";
-  const displayText = stripStoryboardParams(msg.text);
+  const displayText = isUser
+    ? stripFinalizePrompt(stripStoryboardParams(msg.text))
+    : stripStoryboardParams(msg.text);
   const segments = !isUser ? splitSegments(displayText) : null;
 
   return (
