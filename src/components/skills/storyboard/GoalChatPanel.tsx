@@ -38,6 +38,7 @@ export function GoalChatPanel() {
   const sending = usePlanChat((s) => s.sending);
   const send = usePlanChat((s) => s.send);
   const ensureThread = usePlanChat((s) => s.ensureThread);
+  const resetThread = usePlanChat((s) => s.resetThread);
   const storyboardParams = usePlanChat((s) => s.storyboardParams);
   const sceneConstruction = usePlanChat((s) => s.sceneConstruction);
   const setSkillEnabled = useSkillMode((s) => s.setEnabled);
@@ -97,7 +98,14 @@ export function GoalChatPanel() {
 
   // 「ゴール確定」可能か = 数ターン回って AI が storyboardParams を提案できる状態か
   // awaitingTarget 中は再クリックを防ぐため無効化する
-  const canFinalize = messages.length >= 4 && !sending && !awaitingTarget;
+  // 2026-06-07 STΛCK指示: 参照画像 (キャラ基準) を必ず1枚以上アップロードしないと
+  // 次に進めない。参照が無いと本生成が "characterReferenceImage must not be empty" で
+  // 失敗し、キャラ一貫性も保てないため。現在の添付 or 過去メッセージの添付を見る。
+  const hasReferenceImage =
+    attachedImages.length > 0 ||
+    messages.some((m) => (m.attachedImages?.length ?? 0) > 0);
+  const canFinalize =
+    messages.length >= 4 && hasReferenceImage && !sending && !awaitingTarget;
 
   async function handleSend() {
     const text = draft.trim();
@@ -211,7 +219,26 @@ export function GoalChatPanel() {
     <div className="flex h-full flex-col gap-3">
       <header className="flex items-start justify-between gap-4 rounded-md border border-[#242424] bg-[#161616] px-4 py-3">
         <div>
-          <h2 className="text-sm font-semibold text-zinc-200">Phase 1: ゴール深掘り</h2>
+          <div className="flex items-center gap-2">
+            <h2 className="text-sm font-semibold text-zinc-200">Phase 1: ゴール深掘り</h2>
+            {messages.length > 0 && (
+              <button
+                type="button"
+                onClick={() => {
+                  if (sending) return;
+                  if (!window.confirm("この目標タブの会話をリセットして最初からやり直しますか？")) return;
+                  resetThread();
+                  setAttachedImages([]);
+                  useStoryboardRun.getState().reset();
+                }}
+                disabled={sending}
+                className="rounded-md border border-[#343434] bg-[#101010] px-2 py-1 text-[10px] font-bold text-neutral-400 hover:border-pink-400 hover:text-white disabled:opacity-40"
+                title="この会話をリセットして最初からやり直す"
+              >
+                ↺ リセット
+              </button>
+            )}
+          </div>
           <p className="mt-1 text-xs text-zinc-500">
             AI が「作りたい映像」を引き出します。思いつきの一言からで OK。
           </p>
@@ -224,6 +251,11 @@ export function GoalChatPanel() {
         </div>
         {/* P7: 2 ルート分岐ボタン */}
         <div className="flex shrink-0 flex-col gap-2">
+          {!hasReferenceImage && messages.length >= 4 && (
+            <p className="max-w-[180px] text-right text-[10px] leading-relaxed text-amber-300/80">
+              キャラの一貫性のため、参照画像を1枚以上アップロードしてください
+            </p>
+          )}
           <button
             type="button"
             onClick={() => handleFinalize("sketch")}
