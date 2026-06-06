@@ -410,10 +410,12 @@ export function GoalChatPanel() {
         </div>
       </div>
 
-      {/* ライブラリピッカー (生成済み画像から添付参照を選ぶ) */}
+      {/* ライブラリピッカー (生成済み画像から添付参照を選ぶ)。
+          FB#3: roleMode でキャラ/スタイルを選んで取り込める。 */}
       <ReferenceLibraryModal
         open={libraryOpen}
         onClose={() => setLibraryOpen(false)}
+        roleMode
         onPick={(path) => {
           setAttachedImages((prev) => {
             const set = new Set(prev);

@@ -3,6 +3,10 @@ import { useEffect, useMemo, useState } from "react";
 
 import { useComposer } from "../lib/store/composer";
 import { useImages } from "../lib/store/images";
+import {
+  useReferenceRoles,
+  type ReferenceRoleKind,
+} from "../lib/store/referenceRoles";
 
 // Why: Zustand selector が毎レンダーで新しい Set を返すと
 //      React が Maximum update depth exceeded で白画面になる。
@@ -17,6 +21,13 @@ type Props = {
    * Storyboard など Composer に追加せず別ストアに渡したいユースケース用。
    */
   onPick?: (path: string, name: string) => void;
+  /**
+   * FB#3 (2026-06-06): 有効にすると、ライブラリから選んだ画像を「キャラ参照」
+   * 「スタイル参照」のどちらとして取り込むかをモーダル上部で選べる。選択した役割は
+   * referenceRoles ストアに記録され、onPick で呼び出し側が添付した画像に反映される。
+   * Storyboard の企画/ゴール画面でキャラ/スタイル参照を直接選ぶ導線に使う。
+   */
+  roleMode?: boolean;
 };
 
 /**
@@ -26,15 +37,18 @@ type Props = {
  *
  * Why: Magnific の「履歴」相当。ローカル PC から探す体験は別経路（追加ボタン）に分離。
  */
-export function ReferenceLibraryModal({ open, onClose, onPick }: Props) {
+export function ReferenceLibraryModal({ open, onClose, onPick, roleMode }: Props) {
   const items = useImages((s) => s.items);
   const addReference = useComposer((s) => s.addReference);
   const references = useComposer((s) => s.references);
+  const setRole = useReferenceRoles((s) => s.setRole);
   const existingPaths = useMemo(
     () => new Set(references.map((r) => r.path)),
     [references],
   );
   const [query, setQuery] = useState<string>("");
+  // FB#3: roleMode のときに選んだ画像をどちらの役割で取り込むか。既定はキャラ。
+  const [pickRole, setPickRole] = useState<ReferenceRoleKind>("character");
 
   useEffect(() => {
     if (!open) return;
@@ -56,6 +70,9 @@ export function ReferenceLibraryModal({ open, onClose, onPick }: Props) {
   if (!open) return null;
 
   const handlePick = (path: string, name: string) => {
+    // FB#3: roleMode のときは取り込み前に役割を記録する。onPick 側 (Storyboard) は
+    // referenceRoles を読むので、添付直後に正しい役割が反映される。
+    if (roleMode) setRole(path, pickRole);
     if (onPick) {
       onPick(path, name);
     } else {
@@ -74,7 +91,36 @@ export function ReferenceLibraryModal({ open, onClose, onPick }: Props) {
         onClick={(event) => event.stopPropagation()}
       >
         <div className="flex items-center justify-between gap-3 border-b border-[#242424] px-4 py-3">
-          <h3 className="text-sm font-black text-white">ライブラリから参照を追加</h3>
+          <div className="flex items-center gap-3">
+            <h3 className="text-sm font-black text-white">
+              {roleMode ? "ライブラリからキャラ/スタイル参照を選ぶ" : "ライブラリから参照を追加"}
+            </h3>
+            {roleMode && (
+              <div className="inline-flex items-center gap-1 rounded-md border border-[#343434] bg-[#0b0b0b] p-0.5">
+                {(["character", "style"] as const).map((kind) => {
+                  const active = pickRole === kind;
+                  return (
+                    <button
+                      key={kind}
+                      type="button"
+                      onClick={() => setPickRole(kind)}
+                      aria-pressed={active}
+                      className={[
+                        "rounded px-2.5 py-1 text-[11px] font-bold transition",
+                        active
+                          ? kind === "character"
+                            ? "bg-pink-500 text-white"
+                            : "bg-indigo-500 text-white"
+                          : "text-neutral-400 hover:text-white",
+                      ].join(" ")}
+                    >
+                      {kind === "character" ? "キャラとして" : "スタイルとして"}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
           <button
             type="button"
             onClick={onClose}
