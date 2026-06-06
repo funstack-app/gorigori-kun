@@ -1,7 +1,9 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
+use sqlx::Row as _;
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_opener::OpenerExt;
 
@@ -430,23 +432,19 @@ pub async fn images_remove_background(
     Ok(dest.to_string_lossy().into_owned())
 }
 
-/// Delete an image file from disk and drop its row from history.db.
+/// Remove a single media file from disk only (no history.db touch).
 ///
-/// F-#12 (Ta4low/没作品削除): ライブラリ/プロジェクトの没作品を右クリックから
-/// 物理削除できるようにする。trash クレートを増やすとビルドリスクが上がるため、
-/// `std::fs::remove_file` で直接消す。誤って巨大削除しないよう、対象は
-/// **拡張子が画像/動画のファイル1件のみ**に限定する。
-///
-/// 失敗を握り潰さない方針 (Rust ルール): ファイルが既に無い場合は成功扱い
-/// (UI からの二重削除や watcher 遅延を吸収)、それ以外の I/O エラーは Err で返す。
-#[tauri::command]
-pub async fn images_delete(app: AppHandle, path: String) -> Result<(), String> {
-    let target = PathBuf::from(&path);
+/// 単一削除・一括削除の両コマンドが共有する物理削除コア。
+/// - 絶対パス必須、ディレクトリは拒否 (構造的に巨大削除を防ぐ)
+/// - 拡張子が画像/動画のものだけ許可 (設定ファイル等の誤削除を防ぐ)
+/// - 既に無いファイルは成功扱い (二重削除や watcher 遅延を吸収)
+fn remove_media_file(path: &str) -> Result<(), String> {
+    let target = PathBuf::from(path);
     if !target.is_absolute() {
         return Err(format!("not an absolute path: {path}"));
     }
 
-    // ディレクトリ削除を構造的に防ぐ。存在しない場合は二重削除とみなし成功扱い。
+    // ディレクトリ削除を構造的に防ぐ。
     if target.is_dir() {
         return Err(format!("refusing to delete a directory: {path}"));
     }
@@ -469,11 +467,16 @@ pub async fn images_delete(app: AppHandle, path: String) -> Result<(), String> {
             .map_err(|e| format!("削除に失敗しました ({path}): {e}"))?;
     }
 
-    // history.db からも該当行を削除。pool が無くてもファイル削除自体は成功扱い。
+    Ok(())
+}
+
+/// Drop a path's row from history.db. Failure is logged, not propagated:
+/// the on-disk delete already succeeded and history.db is a cache.
+async fn drop_history_row(app: &AppHandle, path: &str) {
     if let Some(state) = app.try_state::<AppState>() {
         if let Some(pool) = state.db_pool().await {
             if let Err(e) = sqlx::query("DELETE FROM images WHERE path = ?1")
-                .bind(&path)
+                .bind(path)
                 .execute(&pool)
                 .await
             {
@@ -485,8 +488,234 @@ pub async fn images_delete(app: AppHandle, path: String) -> Result<(), String> {
             }
         }
     }
+}
 
+/// Delete an image file from disk and drop its row from history.db.
+///
+/// F-#12 (Ta4low/没作品削除): ライブラリ/プロジェクトの没作品を右クリックから
+/// 物理削除できるようにする。trash クレートを増やすとビルドリスクが上がるため、
+/// `std::fs::remove_file` で直接消す。誤って巨大削除しないよう、対象は
+/// **拡張子が画像/動画のファイル1件のみ**に限定する。
+///
+/// 失敗を握り潰さない方針 (Rust ルール): ファイルが既に無い場合は成功扱い
+/// (UI からの二重削除や watcher 遅延を吸収)、それ以外の I/O エラーは Err で返す。
+#[tauri::command]
+pub async fn images_delete(app: AppHandle, path: String) -> Result<(), String> {
+    remove_media_file(&path)?;
+    drop_history_row(&app, &path).await;
     Ok(())
+}
+
+/// Result of a batch delete: how many files were removed and which paths
+/// failed (with their error message). One failing path does not abort the
+/// rest — partial success is reported so the UI can update what did delete.
+#[derive(Serialize)]
+pub struct BatchDeleteResult {
+    pub deleted: usize,
+    pub failed: Vec<BatchDeleteFailure>,
+}
+
+#[derive(Serialize)]
+pub struct BatchDeleteFailure {
+    pub path: String,
+    pub error: String,
+}
+
+/// Delete multiple media files at once (複数選択での一括削除).
+///
+/// 各パスごとに物理削除 + history.db 行削除を行う。1 件失敗しても残りは続行し、
+/// 成功件数と失敗内訳を返す。フロントは成功したパスだけ表示から外せばよいよう、
+/// 失敗内訳に path を含める。
+#[tauri::command]
+pub async fn images_delete_many(
+    app: AppHandle,
+    paths: Vec<String>,
+) -> Result<BatchDeleteResult, String> {
+    let mut deleted = 0usize;
+    let mut failed: Vec<BatchDeleteFailure> = Vec::new();
+
+    for path in paths {
+        match remove_media_file(&path) {
+            Ok(()) => {
+                drop_history_row(&app, &path).await;
+                deleted += 1;
+            }
+            Err(error) => failed.push(BatchDeleteFailure { path, error }),
+        }
+    }
+
+    Ok(BatchDeleteResult { deleted, failed })
+}
+
+/// ファイル名 → 実在する絶対パス の対応表を返す再リンク用インデックス。
+///
+/// α版→β版で画像の保存先ディレクトリが変わった (FB#19 で CODEX_HOME を専用
+/// HOME に切り替えた、storage_root が `~/Pictures/GORI GORI` に変わった等) ため、
+/// history.db / projects.json が記録した旧パスの実体が「別ディレクトリに同名で
+/// 存在する」状態になっている。候補ディレクトリを再帰走査して
+/// `basename -> 実在パス` の索引を作り、旧パスの basename で引き直す。
+///
+/// 同名ファイルが複数候補にある場合は **最初に見つけた 1 つ** を採用する
+/// (走査順は watcher_dirs と同じ: 現行 HOME → 旧 ~/.codex → storage_root)。
+fn build_filename_index(dirs: &[PathBuf]) -> HashMap<String, PathBuf> {
+    let mut index: HashMap<String, PathBuf> = HashMap::new();
+    for dir in dirs {
+        index_dir_recursive(dir, &mut index);
+    }
+    index
+}
+
+fn index_dir_recursive(dir: &Path, index: &mut HashMap<String, PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        // symlink はループ防止でスキップ (watcher と同方針)。
+        if file_type.is_symlink() {
+            continue;
+        }
+        let path = entry.path();
+        if file_type.is_dir() {
+            // マスク PNG はギャラリーに出さない隠しディレクトリなので索引対象外。
+            if path.file_name().and_then(|s| s.to_str()) == Some(".masks") {
+                continue;
+            }
+            index_dir_recursive(&path, index);
+        } else if file_type.is_file() {
+            if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
+                // 先勝ち。既に入っている basename は上書きしない (走査順を尊重)。
+                index.entry(name.to_string()).or_insert(path);
+            }
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RelinkResult {
+    /// history.db で旧パス→新パスに張り替えた件数。
+    pub db_updated: u32,
+    /// 候補が見つからずスキップした (= SafeImage フォールバック対象) 件数。
+    pub db_unresolved: u32,
+    /// フロント側 (projects.json) が同じ張り替えを適用するための旧→新マップ。
+    /// projects.json は Rust から触らない (フロントの正本) ため、対応表だけ返す。
+    pub path_map: HashMap<String, String>,
+}
+
+/// 記録パスと実体のズレを再リンクで解消する (非破壊・冪等)。
+///
+/// α版は画像を `~/.codex/generated_images/` に保存していたが、β版 (FB#19 認証分離)
+/// で保存先が専用 CODEX_HOME や `~/Pictures/GORI GORI` に変わった。history.db の
+/// `images.path` と projects.json の `imagePath` が旧パスのままだと、その場所に
+/// 実体が無いので「画像が見えない (黒画像/画像なし)」になる。
+///
+/// この関数は:
+///   1. 候補ディレクトリ (現行 HOME / 旧 ~/.codex / storage_root) を再帰走査し
+///      `basename -> 実在パス` の索引を作る。
+///   2. history.db の各 `images.path` を見て、**実在しないものだけ** basename で
+///      索引を引き、見つかれば DB のパスを張り替える (UPDATE)。
+///   3. フロント (projects.json) が同じ張り替えを適用できるよう、旧→新の
+///      対応表 (`path_map`) を返す。
+///
+/// 非破壊性: ファイルの移動・削除は一切しない。DB 内のパス文字列を更新するのみ。
+/// 冪等性: 既に実在するパスは触らない。再実行しても同じ結果。
+/// 見つからない画像はそのまま (SafeImage がフォールバック表示するのでクラッシュしない)。
+#[tauri::command]
+pub async fn images_relink_missing(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<RelinkResult, String> {
+    // 候補ディレクトリ = watcher と同じ集合 (現行 HOME / 旧 ~/.codex / storage_root)。
+    let settings = state
+        .storage_settings()
+        .await
+        .or_else(|| StorageSettings::load().ok());
+    let dirs = watcher_dirs(settings.as_ref());
+    let index = build_filename_index(&dirs);
+
+    let mut result = RelinkResult {
+        db_updated: 0,
+        db_unresolved: 0,
+        path_map: HashMap::new(),
+    };
+
+    // DB pool が無くても (= 初期化前) クラッシュさせない。空の結果を返す。
+    let Some(pool) = state.db_pool().await else {
+        tracing::warn!(
+            target: "codex.images",
+            "images_relink_missing: db pool 未初期化のため history.db の再リンクをスキップ"
+        );
+        let _ = &app;
+        return Ok(result);
+    };
+
+    // 全 images.path を取得 (重複は DISTINCT で 1 回だけ評価)。
+    let rows = sqlx::query("SELECT DISTINCT path FROM images")
+        .fetch_all(&pool)
+        .await
+        .map_err(|e| format!("images.path の読み出しに失敗: {e}"))?;
+
+    for row in rows {
+        let old_path: String = row.get::<String, _>("path");
+        if old_path.is_empty() {
+            continue;
+        }
+        // 既に実在するパスは触らない (冪等)。
+        if Path::new(&old_path).is_file() {
+            continue;
+        }
+        // basename で実在場所を探す。
+        let Some(file_name) = Path::new(&old_path).file_name().and_then(|s| s.to_str()) else {
+            result.db_unresolved += 1;
+            continue;
+        };
+        let Some(new_path) = index.get(file_name) else {
+            // 候補なし。SafeImage フォールバックに任せる。
+            result.db_unresolved += 1;
+            continue;
+        };
+        let new_path_str = new_path.to_string_lossy().into_owned();
+        if new_path_str == old_path {
+            // basename 一致だが同一パス (理屈上ありえないが防御的に)。
+            continue;
+        }
+
+        let update = sqlx::query("UPDATE images SET path = ?1 WHERE path = ?2")
+            .bind(&new_path_str)
+            .bind(&old_path)
+            .execute(&pool)
+            .await;
+        match update {
+            Ok(_) => {
+                result.db_updated += 1;
+                result.path_map.insert(old_path, new_path_str);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "codex.images",
+                    error = ?e,
+                    old_path = %old_path,
+                    new_path = %new_path_str,
+                    "images_relink_missing: history.db の path 更新に失敗"
+                );
+                result.db_unresolved += 1;
+            }
+        }
+    }
+
+    // app は将来の拡張 (再リンク後の再スキャン emit 等) で使う余地を残すため受け取る。
+    let _ = &app;
+
+    tracing::info!(
+        target: "codex.images",
+        db_updated = result.db_updated,
+        db_unresolved = result.db_unresolved,
+        "images_relink_missing: 完了"
+    );
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -520,5 +749,38 @@ mod tests {
         let name = out_path.file_name().unwrap().to_string_lossy();
         assert!(name.starts_with("hero-mask-"));
         assert!(name.ends_with(".png"));
+    }
+
+    #[test]
+    fn filename_index_finds_files_recursively_and_skips_masks() {
+        let root = tempfile::tempdir().unwrap();
+        // ネストしたサブフォルダに同名ファイルを置く (β版の新ディレクトリ想定)。
+        let nested = root.path().join("batch-123");
+        std::fs::create_dir_all(&nested).unwrap();
+        let img = nested.join("ig_abc.png");
+        std::fs::write(&img, b"x").unwrap();
+        // .masks 配下のファイルは索引対象外。
+        let masks = nested.join(".masks");
+        std::fs::create_dir_all(&masks).unwrap();
+        std::fs::write(masks.join("ig_abc-mask-1.png"), b"y").unwrap();
+
+        let index = build_filename_index(&[root.path().to_path_buf()]);
+        assert_eq!(index.get("ig_abc.png"), Some(&img));
+        assert!(index.get("ig_abc-mask-1.png").is_none());
+    }
+
+    #[test]
+    fn filename_index_first_dir_wins_on_duplicate_name() {
+        let dir_a = tempfile::tempdir().unwrap();
+        let dir_b = tempfile::tempdir().unwrap();
+        let a = dir_a.path().join("dup.png");
+        let b = dir_b.path().join("dup.png");
+        std::fs::write(&a, b"a").unwrap();
+        std::fs::write(&b, b"b").unwrap();
+
+        // dir_a を先に渡すと dir_a 側が勝つ (走査順を尊重)。
+        let index =
+            build_filename_index(&[dir_a.path().to_path_buf(), dir_b.path().to_path_buf()]);
+        assert_eq!(index.get("dup.png"), Some(&a));
     }
 }
