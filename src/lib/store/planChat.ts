@@ -7,8 +7,10 @@ import type {
   ThreadStartResult,
 } from "../codex-types";
 import type { SceneConstruction, StoryboardParams } from "../storyboard/types";
+import { buildWorldContextBlock } from "../agents/systemPrompts";
 import { useActiveProject } from "./activeProject";
 import { useProjects, type ProjectChatMessage } from "./projects";
+import { useSettings } from "./settings";
 import { useSkillMode } from "./skillMode";
 import { useToasts } from "./toasts";
 
@@ -566,11 +568,16 @@ export const usePlanChat = create<PlanChatState>((set, get) => ({
     const isStoryboardSkill =
       skillState.enabled && skillState.selectedSkillId === "gori-storyboard";
     const rolePrefix = isStoryboardSkill ? STORYBOARD_ROLE_PREFIX : ROLE_PREFIX;
+    // FB#16: 設定で登録した世界観 / コンテキストを初回ターンだけ前置きする。
+    // ROLE_PREFIX より前に置き、AI が作品設定を踏まえて役割を理解できるようにする。
+    const worldContext = isFirstTurn
+      ? buildWorldContextBlock(useSettings.getState().settings.worldContext)
+      : "";
     const imagesForTurn = attachedImages ?? get().pendingImages;
     const imageNote = imagesForTurn.length > 0
       ? `\n\n[添付画像]\n${imagesForTurn.map((path, index) => `${index + 1}. ${path}`).join("\n")}\nAIは文脈からキャラクター基準画像・スタイル基準画像のどちらかを判定してください。`
       : "";
-    const submitText = `${isFirstTurn ? rolePrefix : ""}${trimmed}${imageNote}`;
+    const submitText = `${isFirstTurn ? worldContext : ""}${isFirstTurn ? rolePrefix : ""}${trimmed}${imageNote}`;
     // user メッセージは楽観的に「ユーザーが書いたまま」を表示する
     const userMsg: PlanMessage = {
       id: generateId(),

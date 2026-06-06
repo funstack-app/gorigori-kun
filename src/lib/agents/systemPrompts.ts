@@ -25,3 +25,29 @@ export const VIDEO_STORY_AGENT_SYSTEM_PROMPT = [
   "Each cut must include cut number, role, composition, camera work, and duration in seconds.",
   "Return JSON only.",
 ].join("\n");
+
+/**
+ * FB#16: 設定で登録した「作品の世界観 / コンテキスト」を、企画チャットの
+ * 初回ターンに混ぜるための前置きブロックを組み立てる。
+ *
+ * - 空欄・空白のみなら空文字を返す（注入しない）。
+ * - 長文の暴走を防ぐため上限を設けてトリミングする。
+ * - 末尾に改行 2 つを付けて、後続の ROLE_PREFIX と視覚的に分離する。
+ */
+export const WORLD_CONTEXT_MAX_CHARS = 8000;
+
+export function buildWorldContextBlock(raw: string | undefined | null): string {
+  const text = (raw ?? "").trim();
+  if (!text) return "";
+  const clipped =
+    text.length > WORLD_CONTEXT_MAX_CHARS
+      ? `${text.slice(0, WORLD_CONTEXT_MAX_CHARS)}\n…(以下省略)`
+      : text;
+  return [
+    "[作品の世界観・コンテキスト（設定で登録された固定情報。以後の提案はこの設定を踏まえること）]",
+    "",
+    clipped,
+    "",
+    "",
+  ].join("\n");
+}

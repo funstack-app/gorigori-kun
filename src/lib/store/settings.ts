@@ -11,6 +11,12 @@ export type AppSettings = {
   defaultCwd?: string;
   approvalPolicy?: "never" | "on-request" | "everything";
   sandbox?: "read-only" | "workspace-write" | "danger-full-access";
+  /**
+   * FB#16: 作品の世界観・コンテキスト (Markdown 等の自由文)。
+   * 企画チャット (PlanWorkspace) の初回ターンでシステムプロンプトに注入され、
+   * AI が作品設定を踏まえた状態で対話を始められる。空欄なら注入しない。
+   */
+  worldContext?: string;
 };
 
 type SettingsState = {

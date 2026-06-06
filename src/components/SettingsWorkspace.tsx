@@ -64,6 +64,7 @@ export function SettingsWorkspace() {
           {tab === "basic" && (
             <div className="space-y-6">
               <BasicSettings />
+              <WorldContextSettings />
               <UpdateChecker />
             </div>
           )}
@@ -192,6 +193,94 @@ function BasicSettings() {
       <button type="button" onClick={() => void onSave()} className={`${PRIMARY_BUTTON} h-9 px-4 text-xs`}>
         保存
       </button>
+    </Panel>
+  );
+}
+
+/**
+ * FB#16: 作品の世界観 / コンテキスト登録欄。
+ *
+ * ここに登録した自由文 (Markdown 等) は、企画タブ (PlanWorkspace) の
+ * 初回ターンでシステムプロンプトに注入される。AI が作品設定を前提に
+ * 対話を始められるようにするのが狙い。
+ *
+ * - 直接テキスト入力 / .md などのテキストファイル読み込みの両方に対応。
+ * - 保存しないと反映されないので、明示的な「保存」ボタンを置く。
+ */
+function WorldContextSettings() {
+  const { settings, save, load, loaded } = useSettings();
+  const push = useToasts((s) => s.push);
+  const [draft, setDraft] = useState(settings.worldContext ?? "");
+
+  useEffect(() => {
+    if (!loaded) void load();
+  }, [loaded, load]);
+  useEffect(() => setDraft(settings.worldContext ?? ""), [settings.worldContext]);
+
+  const dirty = draft !== (settings.worldContext ?? "");
+
+  const importFile = async () => {
+    try {
+      const { open: openDialog } = await import("@tauri-apps/plugin-dialog");
+      const picked = await openDialog({
+        directory: false,
+        multiple: false,
+        filters: [{ name: "テキスト / Markdown", extensions: ["md", "markdown", "txt"] }],
+      });
+      if (typeof picked !== "string") return;
+      const { readTextFile } = await import("@tauri-apps/plugin-fs");
+      const content = await readTextFile(picked);
+      setDraft(content);
+      push({ kind: "success", text: "ファイルを読み込みました。保存で反映されます。", ttlMs: 2800 });
+    } catch (err) {
+      push({ kind: "error", text: `ファイルの読み込みに失敗しました: ${String(err)}` });
+    }
+  };
+
+  const onSave = async () => {
+    const value = draft.trim();
+    await save({ worldContext: value || undefined });
+    push({
+      kind: "success",
+      text: value ? "世界観 / コンテキストを保存しました" : "世界観 / コンテキストをクリアしました",
+      ttlMs: 2400,
+    });
+  };
+
+  return (
+    <Panel title="世界観 / コンテキスト">
+      <p className="text-xs leading-relaxed text-neutral-400">
+        作品の世界観・キャラ設定・トーンなどをここに書いておくと、企画タブの AI
+        がこの設定を踏まえて会話を始めます。Markdown / テキストファイルの読み込みも可能です。
+      </p>
+      <Field label="作品の世界観・コンテキスト (Markdown 可)">
+        <textarea
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          spellCheck={false}
+          rows={10}
+          placeholder={"# 世界観\n- 舞台: ...\n- 主人公: ...\n- トーン: ...\n\n企画チャットがこの設定を踏まえて提案します。"}
+          className="min-h-[180px] w-full resize-y rounded-md border border-[#343434] bg-[#101010] px-3 py-2 font-mono text-xs leading-relaxed text-neutral-100 outline-none focus:border-pink-500"
+        />
+      </Field>
+      <div className="flex items-center gap-2">
+        <button type="button" onClick={() => void onSave()} className={`${PRIMARY_BUTTON} h-9 px-4 text-xs`}>
+          {dirty ? "保存" : "保存済み"}
+        </button>
+        <button type="button" onClick={() => void importFile()} className={`${MUTED_BUTTON} h-9 px-3 text-xs`}>
+          ファイルから読み込む
+        </button>
+        {draft.length > 0 && (
+          <button
+            type="button"
+            onClick={() => setDraft("")}
+            className={`${MUTED_BUTTON} h-9 px-3 text-xs`}
+            title="入力欄を空にする（保存するとクリアされます）"
+          >
+            クリア
+          </button>
+        )}
+      </div>
     </Panel>
   );
 }
