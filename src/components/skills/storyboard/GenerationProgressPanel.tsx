@@ -5,6 +5,7 @@ import { useStoryboardRun } from "../../../lib/store/storyboardRun";
 import { useImagePreview } from "../../../lib/store/imagePreview";
 import { usePlanChat } from "../../../lib/store/planChat";
 import { useToasts } from "../../../lib/store/toasts";
+import type { StoryboardSketchCut } from "../../../lib/storyboard/types";
 
 /**
  * Phase 3: GenerationProgress
@@ -28,6 +29,9 @@ export function GenerationProgressPanel() {
   const beginRun = useStoryboardRun((s) => s.beginRun);
   const setPhase = useStoryboardRun((s) => s.setPhase);
   const adoptTake = useStoryboardRun((s) => s.adoptTake);
+  // B2: キービジュアル固定参照 (全カット共通の基準画像)
+  const keyVisualPath = useStoryboardRun((s) => s.keyVisualPath);
+  const setKeyVisualPath = useStoryboardRun((s) => s.setKeyVisualPath);
   const sceneConstruction = usePlanChat((s) => s.sceneConstruction);
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
@@ -38,6 +42,30 @@ export function GenerationProgressPanel() {
   const generationRunStartedAt = useStoryboardRun((s) => s.generationRunStartedAt);
   const setGenerationRunStartedAt = useStoryboardRun((s) => s.setGenerationRunStartedAt);
   const generationStarted = generationRunStartedAt !== null;
+
+  // B2: キービジュアルをファイル選択で設定する。
+  async function pickKeyVisual() {
+    try {
+      const { open: openDialog } = await import("@tauri-apps/plugin-dialog");
+      const r = await openDialog({
+        multiple: false,
+        filters: [{ name: "画像", extensions: ["png", "jpg", "jpeg", "webp", "gif", "bmp"] }],
+      });
+      if (!r || typeof r !== "string") return;
+      setKeyVisualPath(r);
+      useToasts.getState().push({
+        kind: "success",
+        text: "キービジュアルを全カットの基準に設定しました。",
+        ttlMs: 2500,
+      });
+    } catch (err) {
+      useToasts.getState().push({
+        kind: "error",
+        text: `画像の選択に失敗しました: ${(err as Error)?.message ?? err}`,
+        ttlMs: 5000,
+      });
+    }
+  }
 
   // P11 (2026-05-20 STΛCK 指示): Phase 3 入場時の自動生成 useEffect を撤廃。
   // 「本生成を開始」ボタンを押すまで何もしない設計に変更。
@@ -57,8 +85,66 @@ export function GenerationProgressPanel() {
     setStarting(true);
     setStartError(null);
     try {
-      // 絵コンテ run の残骸をクリア (sketchVersions / chatMessages / goal は保持される)
+      // === B1 修正 (2026-06-06): 絵コンテ混在の根絶 ===
+      // 本生成で参照する絵コンテは「(a) 確定 (confirmed===true) かつ
+      // (b) 今の goal に紐づくもの」だけに厳格化する。条件を満たさなければ
+      // sketchReferences は空のまま = プロンプトのみで普通に生成する。
+      //
+      // 重要: reset() は sketchVersions を破棄するため (B1' 修正)、参照の捕捉を
+      // reset の「前」に行う。これで「絵コンテを確定 → 本生成」の正規フローは
+      // その回の確定絵コンテを失わず、かつ前のストーリーの絵コンテは残らない。
+      const sketchVersionsBefore = useStoryboardRun.getState().sketchVersions;
+      const activeSketchVersionId = useStoryboardRun.getState().activeSketchVersionId;
+      const candidate =
+        sketchVersionsBefore.find((v) => v.versionId === activeSketchVersionId) ??
+        sketchVersionsBefore[sketchVersionsBefore.length - 1] ??
+        null;
+      // (b) goal バインディング検査: 絵コンテ生成時の goal 要約と現在の goal 要約の
+      //     先頭が一致するときだけ採用する。前ストーリーの確定絵コンテが
+      //     activeSketchVersionId 経由で残っていても、goal が変わっていれば弾く。
+      const currentGoalKey = (goal.summary ?? "").slice(0, 200);
+      const sketchBelongsToCurrentGoal =
+        candidate != null && candidate.fromGoalSummary === currentGoalKey;
+      const activeSketch =
+        candidate?.confirmed === true && sketchBelongsToCurrentGoal ? candidate : null;
+      const sketchReferences: Record<string, string> = {};
+      if (activeSketch) {
+        for (const c of activeSketch.cuts) {
+          // 確定済みかつ実際に done で画像が出ているカットのみ参照する。
+          // 未生成 (sketchImagePath なし) のカットは混ぜない。
+          if (c.sketchImagePath && c.sketchStatus === "done") {
+            sketchReferences[c.cutId] = c.sketchImagePath;
+          }
+        }
+      }
+
+      // === B2: キービジュアル固定参照 (NOCTURNE @img1 移植) ===
+      // キービジュアルが設定されていれば、確定絵コンテ参照を持たない全カットに
+      // 共通の基準画像を固定で渡す。確定絵コンテがあるカットはその絵コンテを優先。
+      const keyVisualPath = useStoryboardRun.getState().keyVisualPath;
+      if (keyVisualPath) {
+        for (const c of sceneConstruction.cuts) {
+          if (!sketchReferences[c.cut_id]) {
+            sketchReferences[c.cut_id] = keyVisualPath;
+          }
+        }
+      }
+
+      // B1' 補完: Phase 4 の i2v プロンプトがカメラワーク等のスケッチメタを
+      // 失わないよう、確定絵コンテのメタを run スナップショットに退避してから
+      // reset する。今の goal/run に紐づくものだけを撮るので次ストーリーに残らない。
+      const cutSketchMeta: Record<string, StoryboardSketchCut> = {};
+      if (activeSketch) {
+        for (const c of activeSketch.cuts) {
+          cutSketchMeta[c.cutId] = c;
+        }
+      }
+
+      // 絵コンテ run の残骸をクリア (chatMessages / goal / keyVisualPath は保持される)。
+      // sketchVersions は B1' 修正で破棄されるので、参照は上で捕捉済み。
       useStoryboardRun.getState().reset();
+      // reset の後にスナップショットを格納 (reset が初期化するため順序が重要)。
+      useStoryboardRun.getState().setGenerationCutSketchMeta(cutSketchMeta);
 
       // P3b: ユーザーが D&D で並べ替えていた場合は sceneConstruction.cuts を
       // その順序にして本番に渡す。
@@ -74,25 +160,6 @@ export function GenerationProgressPanel() {
         }
         return { ...sceneConstruction, cuts: reordered };
       })();
-
-      // P12: 絵コンテ画像を本生成の追加参照として渡す (cutId → 絵コンテ画像パス)
-      // P19b (2026-05-21): confirmed=true の sketchVersion のみ採用。
-      // 確定前の絵コンテ (生成途中含む) は本生成に流れ込まない。
-      const sketchVersions = useStoryboardRun.getState().sketchVersions;
-      const activeSketchVersionId = useStoryboardRun.getState().activeSketchVersionId;
-      const candidate =
-        sketchVersions.find((v) => v.versionId === activeSketchVersionId) ??
-        sketchVersions[sketchVersions.length - 1] ??
-        null;
-      const activeSketch = candidate?.confirmed === true ? candidate : null;
-      const sketchReferences: Record<string, string> = {};
-      if (activeSketch) {
-        for (const c of activeSketch.cuts) {
-          if (c.sketchImagePath) {
-            sketchReferences[c.cutId] = c.sketchImagePath;
-          }
-        }
-      }
 
       const params = {
         storyPrompt: goal.summary || "ストーリーカット",
@@ -257,6 +324,60 @@ export function GenerationProgressPanel() {
           )}
         </div>
         </div>
+
+        {/* === B2: キービジュアル固定参照 (生成開始前のみ操作可) === */}
+        {!generationStarted && (
+          <div className="flex items-center justify-between gap-3 rounded-md border border-[#242424] bg-[#101010] px-3 py-2">
+            <div className="flex items-center gap-3">
+              <div className="h-12 w-16 shrink-0 overflow-hidden rounded-md border border-[#2a2a2a] bg-[#0d0d0d]">
+                {keyVisualPath ? (
+                  <img
+                    src={`asset://localhost/${encodeURI(keyVisualPath)}`}
+                    alt="キービジュアル"
+                    className="h-full w-full cursor-zoom-in object-cover"
+                    title="ダブルクリックで拡大"
+                    onDoubleClick={() =>
+                      useImagePreview.getState().open(keyVisualPath, [keyVisualPath])
+                    }
+                  />
+                ) : (
+                  <div className="flex h-full w-full items-center justify-center text-[9px] text-zinc-600">
+                    未設定
+                  </div>
+                )}
+              </div>
+              <div className="flex flex-col">
+                <span className="text-[11px] font-semibold text-zinc-300">
+                  キービジュアル固定参照
+                </span>
+                <span className="text-[10px] text-zinc-500">
+                  {keyVisualPath
+                    ? "この画像を全カットの基準にして生成します。"
+                    : "全カット共通の基準画像を固定したい場合に設定 (任意)。"}
+                </span>
+              </div>
+            </div>
+            <div className="flex shrink-0 items-center gap-2">
+              <button
+                type="button"
+                onClick={pickKeyVisual}
+                className="rounded-md border border-[#2a2a2a] px-3 py-1.5 text-[11px] text-zinc-300 hover:border-pink-500/40 hover:bg-pink-500/5"
+              >
+                {keyVisualPath ? "差し替え" : "画像を選ぶ"}
+              </button>
+              {keyVisualPath && (
+                <button
+                  type="button"
+                  onClick={() => setKeyVisualPath(null)}
+                  className="rounded-md border border-[#2a2a2a] px-2 py-1.5 text-[11px] text-zinc-500 hover:border-pink-500/40 hover:text-pink-200"
+                  title="キービジュアルを解除"
+                >
+                  解除
+                </button>
+              )}
+            </div>
+          </div>
+        )}
 
         {/* === 本番カット生成 進捗バー === */}
         <div className="flex flex-col gap-1">

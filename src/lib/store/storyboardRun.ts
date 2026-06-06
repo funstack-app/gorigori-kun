@@ -9,6 +9,7 @@ import type {
   StoryboardGoal,
   StoryboardPhase,
   StoryboardRunParams,
+  StoryboardSketchCut,
   StoryboardSketchVersion,
 } from "../storyboard/types";
 import { useActiveProject } from "./activeProject";
@@ -80,6 +81,15 @@ type StoryboardRunState = {
   sketchVersions: StoryboardSketchVersion[];
   /** 現在表示中のスケッチ versionId。null なら最新を使う。 */
   activeSketchVersionId: string | null;
+  /**
+   * B1' 補完 (2026-06-06): reset() で sketchVersions を破棄しても、Phase 4 の
+   * i2v プロンプト生成がカメラワーク等のスケッチメタを失わないよう、本生成開始時に
+   * cutId → SketchCut のスナップショットを撮っておく。これは「今の run に紐づく確定
+   * 絵コンテ」だけを保持し、reset() では破棄して次のストーリーに残さない。
+   */
+  generationCutSketchMeta: Record<string, StoryboardSketchCut>;
+  /** B1': 本生成開始時に確定絵コンテのメタを run スナップショットへ格納する。 */
+  setGenerationCutSketchMeta: (meta: Record<string, StoryboardSketchCut>) => void;
 
   beginRun: (runId: string, params: StoryboardRunParams) => void;
   applyEvent: (e: StoryboardEvent) => void;
@@ -130,6 +140,13 @@ type StoryboardRunState = {
   // cutIds 配列で順序を表現 (重複/欠落はクライアント側でガード)。
   cutDisplayOrder: string[] | null;
   setCutDisplayOrder: (order: string[] | null) => void;
+
+  // ===== B2: キービジュアル固定参照 (NOCTURNE @img1 移植) =====
+  // 全カット共通の基準画像。設定すると本生成時、各カットの参照画像として
+  // 固定で渡される (per-cut の絵コンテ参照が無いカットに適用)。
+  // null = 未設定 (従来どおり)。
+  keyVisualPath: string | null;
+  setKeyVisualPath: (path: string | null) => void;
 
   // ===== P10: 同時生成枚数 (1カットあたりの take 数) =====
   // 絵コンテ生成と本番生成で別々に保持する。
@@ -194,6 +211,7 @@ const phaseEmptyState = {
   sketchRunStartedAt: null as number | null,
   generationRunStartedAt: null as number | null,
   cutDisplayOrder: null as string[] | null,
+  keyVisualPath: null as string | null,
 };
 
 const emptyState = {
@@ -217,6 +235,11 @@ function ensureCut(cuts: Map<string, CutState>, cutId: string): CutState {
 export const useStoryboardRun = create<StoryboardRunState>((set) => ({
   ...emptyState,
   pastRuns: [],
+  // B1' 補完: 本生成開始時に撮る確定絵コンテメタのスナップショット。
+  // runEmptyState/phaseEmptyState には入れない (beginRun の spread で消えるため)。
+  // 破棄は reset() で明示的に行う。
+  generationCutSketchMeta: {} as Record<string, StoryboardSketchCut>,
+  setGenerationCutSketchMeta: (meta) => set({ generationCutSketchMeta: meta }),
   // P10: 同時生成枚数 (デフォルト)
   sketchCandidatesPerCut: 1 as 1 | 2 | 3,
   generationCandidatesPerCut: 3 as 1 | 2 | 3,
@@ -425,13 +448,25 @@ export const useStoryboardRun = create<StoryboardRunState>((set) => ({
       return { ...s, sketchVersions: nextVersions };
     }),
 
-  // run 関連だけリセット。phase/goal/sketchVersions/chatMessages は保持する。
-  // Phase の状態まで完全初期化したい場合は storyboard/resetAll.ts を使う。
+  // run 関連をリセット。phase/goal/chatMessages は保持する。
+  //
+  // B1' 修正 (2026-06-06): 旧実装は sketchVersions / activeSketchVersionId を
+  // 保持していた。そのため「前のストーリーで確定した絵コンテ」が次のストーリーの
+  // 本生成に参照として流れ込む残留バグがあった (古い goal/run に紐づく確定絵コンテが
+  // 残る)。reset 時に絵コンテ版も破棄し、今の goal/run に紐づく確定絵コンテだけが
+  // 使われる状態にする。
+  //
+  // 注意: Phase 2 で確定 → Phase 3 へ進む正規フローでは、本生成側 (startGeneration)
+  // が reset を呼ぶ前に confirmed=true の sketchReferences を捕捉してから reset する。
+  // よって reset で sketchVersions を消しても、その回の確定絵コンテ参照は失われない。
   reset: () =>
     set((s) => ({
       ...runEmptyState,
       cuts: new Map<string, CutState>(),
       sketchCuts: new Map<string, CutState>(),
+      sketchVersions: [],
+      activeSketchVersionId: null,
+      generationCutSketchMeta: {},
       debugLog: [],
       uiDebugLog: [],
       pastRuns: s.pastRuns, // 過去 run のサマリーは保持
@@ -443,6 +478,7 @@ export const useStoryboardRun = create<StoryboardRunState>((set) => ({
   setSketchRunStartedAt: (ts) => set({ sketchRunStartedAt: ts }),
   setGenerationRunStartedAt: (ts) => set({ generationRunStartedAt: ts }),
   setCutDisplayOrder: (order) => set({ cutDisplayOrder: order }),
+  setKeyVisualPath: (path) => set({ keyVisualPath: path }),
   setSketchCandidatesPerCut: (n) => set({ sketchCandidatesPerCut: n }),
   setGenerationCandidatesPerCut: (n) => set({ generationCandidatesPerCut: n }),
 
