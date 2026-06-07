@@ -189,6 +189,9 @@ export function LibraryAutoRenameButton() {
   const renameLocal = useImages((s) => s.renameLocal);
   const pushToast = useToasts((s) => s.push);
   const [running, setRunning] = useState(false);
+  // 連番/規則指定の入力モーダル状態 (Windows対応 — window.prompt の代替)。
+  const [patternMode, setPatternMode] = useState<"serial" | "pattern" | null>(null);
+  const [patternInput, setPatternInput] = useState("");
   // 走行中の進捗カウンタ (toast 用、UI 表示)
   const progressRef = useRef({ done: 0, total: 0 });
 
@@ -299,15 +302,21 @@ export function LibraryAutoRenameButton() {
     }
   };
 
-  const renameByPattern = async (mode: "serial" | "pattern") => {
+  // 連番/規則指定の入力モーダル。Windows WebView では window.prompt が no-op に
+  // なり連番命名が完全に動かなかったため、アプリ内モーダルで入力を受ける
+  // (Windows対応 2026-06-07)。
+  const openPatternModal = (mode: "serial" | "pattern") => {
+    if (running || selected.size === 0) return;
+    setPatternMode(mode);
+    setPatternInput(mode === "serial" ? "gori" : "gori-{n}");
+  };
+
+  const runRename = async (mode: "serial" | "pattern", rawPatternInput: string) => {
     if (running || selected.size === 0) return;
     const selectedPaths = Array.from(selected);
-    const input =
-      mode === "serial"
-        ? window.prompt("連番の先頭文字を入力してください", "gori")
-        : window.prompt("命名規則を入力してください。{n} が連番になります", "gori-{n}");
-    const rawPattern = input?.trim();
+    const rawPattern = rawPatternInput.trim();
     if (!rawPattern) return;
+    setPatternMode(null);
 
     setRunning(true);
     try {
@@ -366,7 +375,7 @@ export function LibraryAutoRenameButton() {
       </button>
       <button
         type="button"
-        onClick={() => void renameByPattern("serial")}
+        onClick={() => openPatternModal("serial")}
         disabled={disabled}
         className={[
           "h-7 rounded-md border px-3 text-[11px] font-bold transition",
@@ -379,7 +388,7 @@ export function LibraryAutoRenameButton() {
       </button>
       <button
         type="button"
-        onClick={() => void renameByPattern("pattern")}
+        onClick={() => openPatternModal("pattern")}
         disabled={disabled}
         className={[
           "h-7 rounded-md border px-3 text-[11px] font-bold transition",
@@ -390,6 +399,70 @@ export function LibraryAutoRenameButton() {
       >
         規則指定
       </button>
+
+      {patternMode && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+          onClick={() => setPatternMode(null)}
+        >
+          <div
+            className="w-[min(92vw,360px)] rounded-xl border border-[#2a2a2a] bg-[#161616] p-4 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <p className="text-sm font-black text-neutral-100">
+              {patternMode === "serial" ? "連番で命名" : "命名規則で命名"}
+            </p>
+            <p className="mt-1 text-[11px] leading-relaxed text-neutral-400">
+              {patternMode === "serial"
+                ? "先頭の文字を入力してください。「入力-001, 入力-002, …」の形で連番が付きます。"
+                : "命名規則を入力してください。{n} の部分が連番 (001, 002, …) に置き換わります。"}
+            </p>
+            <input
+              autoFocus
+              type="text"
+              value={patternInput}
+              onChange={(e) => setPatternInput(e.target.value)}
+              onKeyDown={(e) => {
+                // IME 変換確定の Enter (isComposing) は拾わない。日本語接頭辞の
+                // 変換途中で意図せずリネームが走るのを防ぐ。
+                if (e.key === "Enter" && !e.nativeEvent.isComposing && patternInput.trim())
+                  void runRename(patternMode, patternInput);
+                if (e.key === "Escape") setPatternMode(null);
+              }}
+              placeholder={patternMode === "serial" ? "gori" : "gori-{n}"}
+              className="mt-3 w-full rounded-md border border-[#2a2a2a] bg-[#0b0b0b] px-3 py-2 text-sm text-neutral-100 outline-none focus:border-pink-400"
+            />
+            <div className="mt-2 rounded-md border border-[#2a2a2a] bg-[#0b0b0b] px-3 py-2 text-[10px] text-neutral-500">
+              例:{" "}
+              {patternMode === "serial"
+                ? `${(patternInput.trim() || "gori")}-001.png`
+                : `${(patternInput.trim() || "gori-{n}").replace(/\{n\}/g, "001").replace(/\{index\}/g, "001")}.png`}
+            </div>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setPatternMode(null)}
+                className="h-8 rounded-md border border-[#2a2a2a] px-3 text-xs font-bold text-neutral-300 transition hover:border-neutral-500"
+              >
+                キャンセル
+              </button>
+              <button
+                type="button"
+                disabled={!patternInput.trim()}
+                onClick={() => void runRename(patternMode, patternInput)}
+                className={[
+                  "h-8 rounded-md px-3 text-xs font-black transition",
+                  patternInput.trim()
+                    ? "bg-pink-500 text-white hover:bg-pink-400"
+                    : "cursor-not-allowed bg-neutral-800 text-neutral-600",
+                ].join(" ")}
+              >
+                命名する
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
