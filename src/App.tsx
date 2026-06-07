@@ -11,6 +11,7 @@ import { LibraryBatchSaveButton } from "./components/LibraryBatchSaveButton";
 import { MaskEditorModal } from "./components/MaskEditorModal";
 import { PresetsDrawer } from "./components/PresetsDrawer";
 import { PromptComposer } from "./components/PromptComposer";
+import { SafeImage } from "./components/SafeImage";
 import { SettingsWorkspace } from "./components/SettingsWorkspace";
 import { SkillsWorkspace } from "./components/SkillsWorkspace";
 import { SkillWorkspaceRouter } from "./components/SkillWorkspaceRouter";
@@ -1780,8 +1781,8 @@ function AssetsWorkspace() {
                   }}
                   className="block w-full text-left"
                 >
-                  <img
-                    src={convertFileSrc(item.path)}
+                  <SafeImage
+                    path={item.path}
                     alt=""
                     className="aspect-[16/9] w-full object-cover"
                   />
@@ -1841,8 +1842,8 @@ function AssetsWorkspace() {
                     : "border-[#2a2a2a] hover:border-pink-400",
                 ].join(" ")}
               >
-                <img
-                  src={convertFileSrc(item.path)}
+                <SafeImage
+                  path={item.path}
                   alt=""
                   className="h-10 w-16 shrink-0 rounded object-cover"
                 />
