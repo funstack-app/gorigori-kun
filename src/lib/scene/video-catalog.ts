@@ -27,11 +27,12 @@ export const cameraMovementOptions: SceneOption[] = [
   { value: "オービット", hint: "被写体の周囲を回る", visual: "lens", video: "/scene-videos/camera-orbit.webm" },
 ];
 
+// カメラ自体の移動速度 (被写体の動きの速さ=motionIntensity とは別軸)。
 export const cameraSpeedOptions: SceneOption[] = [
   none,
-  { value: "スロー", hint: "ゆっくり移動", visual: "none" },
-  { value: "標準", hint: "自然な速度", visual: "none" },
-  { value: "高速", hint: "勢いを出す", visual: "none" },
+  { value: "スロー", hint: "カメラがゆっくり移動", visual: "none" },
+  { value: "標準", hint: "カメラが自然な速度で移動", visual: "none" },
+  { value: "高速", hint: "カメラが速く移動して勢いを出す", visual: "none" },
 ];
 
 export const cameraStartPositionOptions: SceneOption[] = [
@@ -129,13 +130,14 @@ export const cutDurationOptions: SceneOption[] = [
 
 // i2v再設計 (2026-05-29): 動きの強度。旧「テンポ」の置換。
 // i2v では動作の速度・強度が品質を左右する (Codexクロスレビューより)。
+// これは「被写体の動き」の強さ。カメラの移動速度=cameraSpeed とは別軸。
 export const motionIntensityOptions: SceneOption[] = [
   none,
-  { value: "ゆっくり", hint: "穏やかでスロー", visual: "none" },
-  { value: "繊細に", hint: "ごくわずかな動き", visual: "none" },
-  { value: "標準", hint: "自然な速さ", visual: "none" },
-  { value: "力強く", hint: "勢いのある動き", visual: "none" },
-  { value: "速め", hint: "素早い動き", visual: "none" },
+  { value: "ゆっくり", hint: "被写体が穏やかにゆっくり動く", visual: "none" },
+  { value: "繊細に", hint: "被写体がごくわずかに動く", visual: "none" },
+  { value: "標準", hint: "被写体が自然な速さで動く", visual: "none" },
+  { value: "力強く", hint: "被写体が勢いよく動く", visual: "none" },
+  { value: "速め", hint: "被写体が素早く動く", visual: "none" },
 ];
 
 // i2v再設計 (2026-05-29): 環境の動き。背景の動きが i2v の品質感を作る。

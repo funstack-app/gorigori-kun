@@ -132,11 +132,11 @@ function MotionSection() {
         modalTitle="被写体の動きを選ぶ"
       />
       <OptionPickerButton
-        label="動きの強度"
+        label="被写体の動きの強さ"
         options={motionIntensityOptions}
         value={motion.intensity}
         onPick={(value) => setMotionField("intensity", value)}
-        modalTitle="動きの強度を選ぶ"
+        modalTitle="被写体の動きの強さを選ぶ"
       />
     </div>
   );
