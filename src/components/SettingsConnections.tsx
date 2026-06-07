@@ -226,7 +226,15 @@ export function SettingsConnections() {
 
   const deleteSecret = async (service: SecretService) => {
     if (!service.keyName) return;
-    if (!window.confirm(`${service.name} の API キーを OS Keychain から削除しますか？`)) return;
+    const message = `${service.name} の API キーを OS Keychain から削除しますか？`;
+    let ok = false;
+    try {
+      const { ask } = await import("@tauri-apps/plugin-dialog");
+      ok = await ask(message, { title: "API キーの削除", kind: "warning" });
+    } catch {
+      ok = window.confirm(message);
+    }
+    if (!ok) return;
     await secrets.delete(service.keyName);
     setMasks((prev) => ({ ...prev, [service.keyName as SecretKey]: "" }));
     accounts.setSecretPresence(service.keyName, false);
@@ -281,7 +289,15 @@ export function SettingsConnections() {
   };
 
   const removeMcp = async (serverName: string) => {
-    if (!window.confirm(`MCP サーバー「${serverName}」を削除しますか？`)) return;
+    const message = `MCP サーバー「${serverName}」を削除しますか？`;
+    let ok = false;
+    try {
+      const { ask } = await import("@tauri-apps/plugin-dialog");
+      ok = await ask(message, { title: "MCP サーバーの削除", kind: "warning" });
+    } catch {
+      ok = window.confirm(message);
+    }
+    if (!ok) return;
     await mcp.delete(serverName);
     await accounts.refreshMcp();
   };

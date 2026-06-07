@@ -148,8 +148,16 @@ export function useEditorActions() {
 
   const saveDroppedFileAndRunMagic = async (file: File) => {
     const shouldClear = (canvas as { getObjects?: () => unknown[] } | null)?.getObjects?.().length;
-    if (shouldClear && !window.confirm("既存レイヤーをクリアして、この画像で Magic Layer を実行しますか?")) {
-      return;
+    if (shouldClear) {
+      const message = "既存レイヤーをクリアして、この画像で Magic Layer を実行しますか?";
+      let ok = false;
+      try {
+        const { ask } = await import("@tauri-apps/plugin-dialog");
+        ok = await ask(message, { title: "レイヤーのクリア", kind: "warning" });
+      } catch {
+        ok = window.confirm(message);
+      }
+      if (!ok) return;
     }
     setBusyTool("magic");
     setError(null);
@@ -174,8 +182,16 @@ export function useEditorActions() {
   const saveDroppedPathAndRunMagic = async (path: string) => {
     if (!path) return;
     const shouldClear = (canvas as { getObjects?: () => unknown[] } | null)?.getObjects?.().length;
-    if (shouldClear && !window.confirm("既存レイヤーをクリアして、この画像で Magic Layer を実行しますか?")) {
-      return;
+    if (shouldClear) {
+      const message = "既存レイヤーをクリアして、この画像で Magic Layer を実行しますか?";
+      let ok = false;
+      try {
+        const { ask } = await import("@tauri-apps/plugin-dialog");
+        ok = await ask(message, { title: "レイヤーのクリア", kind: "warning" });
+      } catch {
+        ok = window.confirm(message);
+      }
+      if (!ok) return;
     }
     setBusyTool("magic");
     setError(null);

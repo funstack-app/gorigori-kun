@@ -227,10 +227,20 @@ export function GoalChatPanel() {
                 type="button"
                 onClick={() => {
                   if (sending) return;
-                  if (!window.confirm("この目標タブの会話をリセットして最初からやり直しますか？")) return;
-                  resetThread();
-                  setAttachedImages([]);
-                  useStoryboardRun.getState().reset();
+                  void (async () => {
+                    const message = "この目標タブの会話をリセットして最初からやり直しますか？";
+                    let ok = false;
+                    try {
+                      const { ask } = await import("@tauri-apps/plugin-dialog");
+                      ok = await ask(message, { title: "会話のリセット", kind: "warning" });
+                    } catch {
+                      ok = window.confirm(message);
+                    }
+                    if (!ok) return;
+                    resetThread();
+                    setAttachedImages([]);
+                    useStoryboardRun.getState().reset();
+                  })();
                 }}
                 disabled={sending}
                 className="rounded-md border border-[#343434] bg-[#101010] px-2 py-1 text-[10px] font-bold text-neutral-400 hover:border-pink-400 hover:text-white disabled:opacity-40"

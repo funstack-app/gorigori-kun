@@ -203,10 +203,18 @@ export function ProductSidebar() {
                     });
                     return;
                   }
-                  if (!window.confirm(`案件「${session.title}」を削除しますか？`)) {
-                    return;
-                  }
-                  void removeSession(session.id);
+                  void (async () => {
+                    const message = `案件「${session.title}」を削除しますか？`;
+                    let ok = false;
+                    try {
+                      const { ask } = await import("@tauri-apps/plugin-dialog");
+                      ok = await ask(message, { title: "案件の削除", kind: "warning" });
+                    } catch {
+                      ok = window.confirm(message);
+                    }
+                    if (!ok) return;
+                    void removeSession(session.id);
+                  })();
                 }}
               />
             ))}

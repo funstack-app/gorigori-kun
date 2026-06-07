@@ -171,8 +171,16 @@ export function PresetsDrawer({ fullPage = false }: { fullPage?: boolean }) {
     setNewCategoryColor(DEFAULT_NEW_CATEGORY_COLOR);
   };
 
-  const handleRemoveCategory = (id: string) => {
-    if (!window.confirm("このカテゴリを削除します。中のプリセットは「未分類」へ移動します。よろしいですか?")) {
+  const handleRemoveCategory = async (id: string) => {
+    const message = "このカテゴリを削除します。中のプリセットは「未分類」へ移動します。よろしいですか?";
+    let ok = false;
+    try {
+      const { ask } = await import("@tauri-apps/plugin-dialog");
+      ok = await ask(message, { title: "カテゴリ削除", kind: "warning" });
+    } catch {
+      ok = window.confirm(message);
+    }
+    if (!ok) {
       return;
     }
     removeCategory(id);
@@ -181,8 +189,16 @@ export function PresetsDrawer({ fullPage = false }: { fullPage?: boolean }) {
     }
   };
 
-  const handleRemovePreset = (id: string) => {
-    if (!window.confirm("このプリセットを削除しますか?")) return;
+  const handleRemovePreset = async (id: string) => {
+    const message = "このプリセットを削除しますか?";
+    let ok = false;
+    try {
+      const { ask } = await import("@tauri-apps/plugin-dialog");
+      ok = await ask(message, { title: "プリセット削除", kind: "warning" });
+    } catch {
+      ok = window.confirm(message);
+    }
+    if (!ok) return;
     removePreset(id);
   };
 

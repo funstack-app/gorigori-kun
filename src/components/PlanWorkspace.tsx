@@ -250,23 +250,35 @@ export function PlanWorkspace() {
               onClick={() => {
                 // ストーリーカットスキルがアクティブな場合は「全リセット」(企画 + 構成 + run + スキルモード)。
                 // 通常モードはチャットだけリセット。
-                if (isStoryboardSkill) {
-                  if (
-                    window.confirm(
+                void (async () => {
+                  const confirmDialog = async (message: string, title: string) => {
+                    try {
+                      const { ask } = await import("@tauri-apps/plugin-dialog");
+                      return await ask(message, { title, kind: "warning" });
+                    } catch {
+                      return window.confirm(message);
+                    }
+                  };
+                  if (isStoryboardSkill) {
+                    const ok = await confirmDialog(
                       "ストーリーカットを最初からやり直しますか？\n(企画チャット・確定済み構成・生成 run が全て消えます。生成済みの画像タイムラインは残ります)",
-                    )
-                  ) {
-                    void import("../lib/storyboard/resetAll").then((m) =>
-                      m.resetStoryboardSession(),
+                      "ストーリーカットのリセット",
                     );
+                    if (ok) {
+                      void import("../lib/storyboard/resetAll").then((m) =>
+                        m.resetStoryboardSession(),
+                      );
+                    }
+                    return;
                   }
-                  return;
-                }
-                if (
-                  window.confirm("企画チャットをリセットしますか？（履歴が消えます）")
-                ) {
-                  resetThread();
-                }
+                  const ok = await confirmDialog(
+                    "企画チャットをリセットしますか？（履歴が消えます）",
+                    "企画のリセット",
+                  );
+                  if (ok) {
+                    resetThread();
+                  }
+                })();
               }}
               className="pointer-events-auto rounded-md border border-[#343434] bg-[#0b0b0b]/90 px-2 py-0.5 text-[10px] font-bold text-neutral-300 backdrop-blur hover:border-pink-400 hover:text-white"
               title={

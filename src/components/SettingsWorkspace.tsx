@@ -475,11 +475,15 @@ function StorageSettingsTab() {
   const runMigration = async () => {
     if (!legacy?.exists) return;
     const sizeMb = (legacy.totalBytes / (1024 * 1024)).toFixed(1);
-    if (
-      !window.confirm(
-        `${legacy.fileCount} ファイル (約${sizeMb}MB) を新しい保存先へコピーします。元ファイルは ~/.codex/ に残ります。よろしいですか？`,
-      )
-    ) {
+    const message = `${legacy.fileCount} ファイル (約${sizeMb}MB) を新しい保存先へコピーします。元ファイルは ~/.codex/ に残ります。よろしいですか？`;
+    let ok = false;
+    try {
+      const { ask } = await import("@tauri-apps/plugin-dialog");
+      ok = await ask(message, { title: "保存先の移行", kind: "warning" });
+    } catch {
+      ok = window.confirm(message);
+    }
+    if (!ok) {
       return;
     }
     setMigrating(true);

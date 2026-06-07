@@ -2234,14 +2234,19 @@ function ProjectsWorkspace() {
               onOpen={() => setOpenId(project.id === openId ? null : project.id)}
               onRename={(name) => renameProject(project.id, name)}
               onRemove={() => {
-                if (
-                  window.confirm(
-                    `プロジェクト「${project.name}」を削除しますか? 中身の画像はライブラリには残ります。`,
-                  )
-                ) {
+                void (async () => {
+                  const message = `プロジェクト「${project.name}」を削除しますか? 中身の画像はライブラリには残ります。`;
+                  let ok = false;
+                  try {
+                    const { ask } = await import("@tauri-apps/plugin-dialog");
+                    ok = await ask(message, { title: "プロジェクトの削除", kind: "warning" });
+                  } catch {
+                    ok = window.confirm(message);
+                  }
+                  if (!ok) return;
                   if (openId === project.id) setOpenId(null);
                   removeProject(project.id);
-                }
+                })();
               }}
             />
           ))}

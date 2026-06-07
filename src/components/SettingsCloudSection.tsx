@@ -51,7 +51,15 @@ export function SettingsCloudSection() {
   };
 
   const doDisconnect = async () => {
-    if (!window.confirm("Supabase 連携を解除します。クラウド上の画像は削除されません。よろしいですか？")) return;
+    const message = "Supabase 連携を解除します。クラウド上の画像は削除されません。よろしいですか？";
+    let ok = false;
+    try {
+      const { ask } = await import("@tauri-apps/plugin-dialog");
+      ok = await ask(message, { title: "連携解除", kind: "warning" });
+    } catch {
+      ok = window.confirm(message);
+    }
+    if (!ok) return;
     setBusy(true);
     try {
       await disconnect();
