@@ -9,9 +9,9 @@ export type SceneGenerationResult = {
   generatedPaths: string[];
   failedCount: number;
   /**
-   * 失敗した各ワーカーの理由 (NSFW判定・クレジット不足・タイムアウト等)。
-   * higgsfield 経路は IPC 結果に含まれる。codex/image_gen 経路は含まれない
-   * ため空配列になる (その場合の分類は classifyFailures が hasFailure で吸収)。
+   * 失敗した各ワーカーの理由 (NSFW判定・クレジット不足・タイムアウト・
+   * image_gen 未呼び出し等)。higgsfield 経路・codex/image_gen 経路の
+   * どちらも理由を載せて返す (codex経路は 2026-06-07 修正で対応)。
    */
   errors: string[];
 };
@@ -95,8 +95,8 @@ export async function generateFromScene(
     return { ...r, errors: r.errors ?? [] };
   }
 
-  // codex/image_gen 経路: Rust(batch_gen.rs)は errors を serialize しないため
-  // 実行時は undefined になる。?? [] で必ず配列に正規化する。
+  // codex/image_gen 経路: Rust(batch_gen.rs)が失敗 worker の理由を errors に
+  // 載せて返す (2026-06-07 修正)。?? [] は念のための正規化 (旧バイナリ互換)。
   const r = await images.generateBatch({
     prompt,
     count: options.count,

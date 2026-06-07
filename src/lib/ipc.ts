@@ -461,6 +461,8 @@ export type ImageBatchEvent =
       batchId: string;
       generatedPaths: string[];
       failedCount: number;
+      // 失敗 worker の理由 (Rust BatchEvent::Completed と鏡映)。codex 経路で付与。
+      errors?: string[];
       provider?: ImageBatchProvider;
       modelJobSetType?: string;
       modelDisplayName?: string;

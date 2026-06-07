@@ -49,6 +49,10 @@ pub struct BatchGenResult {
     pub batch_id: String,
     pub generated_paths: Vec<String>,
     pub failed_count: u32,
+    // 失敗した worker の理由 (NSFW / 認証切れ / タイムアウト / image_gen 未呼び出し等)。
+    // これを返さないと、フロントは理由ゼロ件→「アスペクト比が原因」の固定文言に
+    // 丸めてしまい、真因がユーザーに届かない (2026-06-07 独立診断の根本原因)。
+    pub errors: Vec<String>,
 }
 
 // `rename_all` on the enum only renames variant names, not the
@@ -86,6 +90,7 @@ enum BatchEvent {
         batch_id: String,
         generated_paths: Vec<String>,
         failed_count: u32,
+        errors: Vec<String>,
     },
 }
 
@@ -159,13 +164,18 @@ pub async fn images_generate_batch(
 
     let mut generated_paths = Vec::new();
     let mut failed_count = 0u32;
+    let mut errors: Vec<String> = Vec::new();
     for h in handles {
         match h.await {
-            Ok(Some(p)) => generated_paths.push(p),
-            Ok(None) => failed_count += 1,
+            Ok(Ok(p)) => generated_paths.push(p),
+            Ok(Err(reason)) => {
+                failed_count += 1;
+                errors.push(reason);
+            }
             Err(join_err) => {
                 tracing::warn!(target: "codex.batch", "worker join failed: {join_err}");
                 failed_count += 1;
+                errors.push(format!("内部エラー (worker join 失敗): {join_err}"));
             }
         }
     }
@@ -176,6 +186,7 @@ pub async fn images_generate_batch(
             batch_id: batch_id.clone(),
             generated_paths: generated_paths.clone(),
             failed_count,
+            errors: errors.clone(),
         },
     );
 
@@ -183,6 +194,7 @@ pub async fn images_generate_batch(
         batch_id,
         generated_paths,
         failed_count,
+        errors,
     })
 }
 
@@ -202,7 +214,9 @@ async fn run_one_worker(
     effort: Option<String>,
     aspect: Option<String>,
     total_count: u32,
-) -> Option<String> {
+    // Ok(成功画像パス) / Err(失敗理由)。理由を呼び出し元に伝えることで、
+    // フロントが真因を表示できる (握りつぶし解消)。
+) -> Result<String, String> {
     let _ = app.emit(
         EVENT_IMAGE_BATCH,
         BatchEvent::WorkerStarted {
@@ -227,8 +241,16 @@ async fn run_one_worker(
     )
     .await;
 
-    match &result {
-        Ok(Some(path)) => {
+    // 成功パス / 失敗理由 を正規化する。失敗理由は WorkerFailed イベントと
+    // 戻り値の Err の両方に同じ文言を載せ、フロントがどちらの経路でも真因を拾えるようにする。
+    let normalized: Result<String, String> = match result {
+        Ok(Some(path)) => Ok(path),
+        Ok(None) => Err("image_gen 出力が見つかりませんでした".to_string()),
+        Err(e) => Err(e),
+    };
+
+    match &normalized {
+        Ok(path) => {
             let _ = app.emit(
                 EVENT_IMAGE_BATCH,
                 BatchEvent::WorkerCompleted {
@@ -238,29 +260,19 @@ async fn run_one_worker(
                 },
             );
         }
-        Ok(None) => {
+        Err(reason) => {
             let _ = app.emit(
                 EVENT_IMAGE_BATCH,
                 BatchEvent::WorkerFailed {
                     batch_id: batch_id.clone(),
                     idx,
-                    error: "image_gen 出力が見つかりませんでした".into(),
-                },
-            );
-        }
-        Err(e) => {
-            let _ = app.emit(
-                EVENT_IMAGE_BATCH,
-                BatchEvent::WorkerFailed {
-                    batch_id: batch_id.clone(),
-                    idx,
-                    error: e.clone(),
+                    error: reason.clone(),
                 },
             );
         }
     }
 
-    result.ok().flatten()
+    normalized
 }
 
 #[allow(clippy::too_many_arguments)]
