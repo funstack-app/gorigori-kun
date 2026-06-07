@@ -73,9 +73,17 @@ export function GoalChatPanel() {
     void ensureThread();
   }, [ensureThread]);
 
+  // 最新メッセージに自動追従スクロール (2026-06-07 STΛCK報告)。
+  // 旧実装は messages.length だけを依存にしており、AI 返信のストリーミング中は
+  // 件数が変わらないため本文が下に伸びても追従せず、手動スクロールが必要だった。
+  // 件数 + 最後のメッセージの本文長を依存にして、delta で本文が伸びるたびに追従する。
+  const lastMessage = messages[messages.length - 1];
+  const lastMessageLen = lastMessage?.text.length ?? 0;
   useEffect(() => {
-    scrollerRef.current?.scrollTo({ top: scrollerRef.current.scrollHeight });
-  }, [messages.length]);
+    const el = scrollerRef.current;
+    if (!el) return;
+    el.scrollTo({ top: el.scrollHeight });
+  }, [messages.length, lastMessageLen]);
 
   // FB#3 (2026-06-06): 添付画像に役割 (キャラ既定) を初期化する。冪等。
   useEffect(() => {

@@ -98,11 +98,15 @@ export function PlanWorkspace() {
    * (配布前クリーニング 2026-05-15: 一度だけ実行のリカバリーコードは個人情報を含むため削除済み)
    */
 
+  // 最新メッセージに自動追従スクロール (2026-06-07 STΛCK報告)。
+  // AI 返信のストリーミング中も本文が下に伸びるたびに追従させるため、
+  // 件数 + 最後のメッセージの本文長を依存に入れる (delta で発火)。
+  const lastMessageLen = messages[messages.length - 1]?.text.length ?? 0;
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
-  }, [messages, sending]);
+  }, [messages.length, lastMessageLen, sending]);
 
   /**
    * STΛCK 指示 (2026-05-19, NRC さん要望): 「企画で再検討」アクションで
