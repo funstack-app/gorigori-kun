@@ -191,19 +191,25 @@ export function PresetPickerPopover({ open, onClose, onPick, anchorRect }: Props
 
   if (!open) return null;
 
-  // anchorRect があればそのすぐ下、なければ画面中央
+  // anchorRect があればそのすぐ下、なければ画面中央。
+  // maxHeight で「アンカー下端〜画面下端」に収め、本体が画面外にはみ出して
+  // フッター/末尾が見えなくなるのを防ぐ (2026-06-07 STΛCK報告: 下が見えない)。
   const style: React.CSSProperties = anchorRect
     ? {
         position: "fixed",
         top: anchorRect.bottom + 8,
         left: Math.max(8, anchorRect.left),
+        // アンカー下端〜画面下端に収める。ただしアンカーが画面下部にあって
+        // 残り高さが極小/負になるとリストが潰れるので、最低 240px は確保する。
+        maxHeight: `max(240px, calc(100vh - ${anchorRect.bottom + 8}px - 16px))`,
         zIndex: 60,
       }
     : {
         position: "fixed",
-        top: "20%",
+        top: "10%",
         left: "50%",
         transform: "translateX(-50%)",
+        maxHeight: "80vh",
         zIndex: 60,
       };
 
@@ -215,15 +221,15 @@ export function PresetPickerPopover({ open, onClose, onPick, anchorRect }: Props
     <div
       ref={containerRef}
       style={{ ...style, width: 360 }}
-      className="rounded-xl border border-[#2a2a2a] bg-[#141414] shadow-2xl"
+      className="flex min-h-0 flex-col overflow-hidden rounded-xl border border-[#2a2a2a] bg-[#141414] shadow-2xl"
     >
-      <div className="flex items-center justify-between border-b border-[#242424] px-3 py-2">
+      <div className="flex shrink-0 items-center justify-between border-b border-[#242424] px-3 py-2">
         <h3 className="text-xs font-black text-white">プリセット</h3>
         <span className="text-[10px] font-medium text-neutral-500">
           {activeFilter === null && !query ? `${totalCount} 件` : `${visibleCount} / ${totalCount} 件`}
         </span>
       </div>
-      <div className="space-y-2 border-b border-[#242424] p-3">
+      <div className="shrink-0 space-y-2 border-b border-[#242424] p-3">
         <input
           type="search"
           value={query}
@@ -284,7 +290,7 @@ export function PresetPickerPopover({ open, onClose, onPick, anchorRect }: Props
           )}
         </div>
       </div>
-      <div className="max-h-[55vh] overflow-y-auto p-2">
+      <div className="min-h-0 flex-1 overflow-y-auto p-2">
         {totalCount === 0 ? (
           <p className="px-3 py-6 text-center text-[11px] text-neutral-500">
             まだプリセットがありません。<br />

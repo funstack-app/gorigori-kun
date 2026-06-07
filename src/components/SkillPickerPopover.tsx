@@ -57,18 +57,22 @@ export function SkillPickerPopover({ open, onClose, onPick, anchorRect }: Props)
 
   if (!open) return null;
 
-  // アンカーから位置を計算 (anchorRect.bottom の下に表示)
+  // アンカーから位置を計算 (anchorRect.bottom の下に表示)。
+  // maxHeight でアンカー下端〜画面下端に収め、本体がはみ出して下が見えなく
+  // なるのを防ぐ (2026-06-07 PresetPickerPopover と同じ修正の横展開)。
   const style = anchorRect
     ? {
         position: "fixed" as const,
         top: anchorRect.bottom + 6,
         left: Math.max(8, anchorRect.left),
+        maxHeight: `max(240px, calc(100vh - ${anchorRect.bottom + 6}px - 16px))`,
       }
     : {
         position: "fixed" as const,
-        top: "30%",
+        top: "10%",
         left: "50%",
-        transform: "translate(-50%, -50%)",
+        transform: "translateX(-50%)",
+        maxHeight: "80vh",
       };
 
   const pick = (skill: GoriSkill) => {
@@ -88,15 +92,15 @@ export function SkillPickerPopover({ open, onClose, onPick, anchorRect }: Props)
     <div
       ref={ref}
       style={style}
-      className="z-50 w-[320px] overflow-hidden rounded-xl border border-[#2a2a2a] bg-[#141414] shadow-2xl"
+      className="z-50 flex w-[320px] min-h-0 flex-col overflow-hidden rounded-xl border border-[#2a2a2a] bg-[#141414] shadow-2xl"
     >
-      <div className="border-b border-[#242424] px-3 py-2">
+      <div className="shrink-0 border-b border-[#242424] px-3 py-2">
         <p className="text-xs font-black text-white">スキルを呼び出す</p>
         <p className="mt-0.5 text-[10px] text-neutral-500">
           選ぶとスキルモードがONになり、その場で実行できます
         </p>
       </div>
-      <div className="max-h-[60vh] overflow-y-auto p-2">
+      <div className="min-h-0 flex-1 overflow-y-auto p-2">
         {enabled && selectedSkillId && (
           <button
             type="button"
