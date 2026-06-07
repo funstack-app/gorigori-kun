@@ -1,3 +1,4 @@
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { useMemo, useState } from "react";
 
 import { storyboard } from "../../../lib/ipc";
@@ -406,7 +407,7 @@ export function GenerationProgressPanel() {
               <div className="h-12 w-16 shrink-0 overflow-hidden rounded-md border border-[#2a2a2a] bg-[#0d0d0d]">
                 {keyVisualPath ? (
                   <img
-                    src={`asset://localhost/${encodeURI(keyVisualPath)}`}
+                    src={convertFileSrc(keyVisualPath)}
                     alt="キービジュアル"
                     className="h-full w-full cursor-zoom-in object-cover"
                     title="ダブルクリックで拡大"
@@ -564,7 +565,7 @@ export function GenerationProgressPanel() {
                               {take ? (
                                 <>
                                   <img
-                                    src={`asset://localhost/${encodeURI(take.imagePath)}`}
+                                    src={convertFileSrc(take.imagePath)}
                                     alt={`take-${idx + 1}`}
                                     className="h-full w-full cursor-zoom-in object-cover"
                                     onDoubleClick={() =>
@@ -614,7 +615,7 @@ function RefThumb({ label, path }: { label: string; path: string }) {
     <div className="flex w-20 flex-col items-center gap-1">
       <div className="h-14 w-20 overflow-hidden rounded-md border border-[#242424] bg-[#0d0d0d]">
         <img
-          src={`asset://localhost/${encodeURI(path)}`}
+          src={convertFileSrc(path)}
           alt={label}
           title="ダブルクリックで拡大"
           onDoubleClick={() => useImagePreview.getState().open(path, [path])}

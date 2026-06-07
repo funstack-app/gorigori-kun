@@ -1,3 +1,4 @@
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { usePlanChat } from "../../../lib/store/planChat";
@@ -326,7 +327,7 @@ export function GoalChatPanel() {
                   {m.attachedImages.map((path) => (
                     <li key={path}>
                       <img
-                        src={`asset://localhost/${encodeURI(path)}`}
+                        src={convertFileSrc(path)}
                         alt={basename(path)}
                         title="ダブルクリックで拡大"
                         onDoubleClick={() =>
@@ -363,7 +364,7 @@ export function GoalChatPanel() {
                 >
                   <div className="flex items-center gap-2">
                     <img
-                      src={`asset://localhost/${encodeURI(p)}`}
+                      src={convertFileSrc(p)}
                       alt={basename(p)}
                       title="ダブルクリックで拡大"
                       onDoubleClick={() =>

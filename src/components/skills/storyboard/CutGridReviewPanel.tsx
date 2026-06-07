@@ -1,3 +1,4 @@
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { useMemo } from "react";
 import { sendImageToPlanForRediscuss } from "../../../lib/sendToPlan";
 import { useActiveProject } from "../../../lib/store/activeProject";
@@ -409,7 +410,7 @@ export function CutGridReviewPanel() {
                   className={`${aspectClass(goal?.aspectRatio ?? "16:9")} overflow-hidden rounded-md bg-[#0d0d0d]`}
                 >
                   <img
-                    src={`asset://localhost/${encodeURI(adopted.imagePath)}`}
+                    src={convertFileSrc(adopted.imagePath)}
                     alt={`cut-${i + 1}`}
                     className="h-full w-full object-cover"
                   />
@@ -431,7 +432,7 @@ export function CutGridReviewPanel() {
                         title={`take ${ti + 1}`}
                       >
                         <img
-                          src={`asset://localhost/${encodeURI(t.imagePath)}`}
+                          src={convertFileSrc(t.imagePath)}
                           alt={`take-${ti + 1}`}
                           className="h-full w-full object-cover"
                         />

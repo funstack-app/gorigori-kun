@@ -1,3 +1,4 @@
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { useEffect, useMemo, useState, type DragEvent } from "react";
 import {
   DndContext,
@@ -964,7 +965,7 @@ function SketchImageBox({
     return (
       <div className="w-full">
         <img
-          src={`asset://localhost/${encodeURI(path)}`}
+          src={convertFileSrc(path)}
           alt={`sketch cut ${cut.order}`}
           onDoubleClick={onDoubleClick}
           className={`${aspectClass(aspectRatio)} w-full cursor-zoom-in rounded-md border border-[#2a2a2a] bg-[#fcfbf5] object-cover`}
@@ -1039,7 +1040,7 @@ function ReferenceSlot({
       >
         {path ? (
           <img
-            src={`asset://localhost/${encodeURI(path)}`}
+            src={convertFileSrc(path)}
             alt={label}
             className="h-full w-full object-cover"
           />

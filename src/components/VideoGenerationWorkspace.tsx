@@ -1,3 +1,4 @@
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { type ReactNode } from "react";
 import { VideoSceneBuilder } from "./scene/VideoSceneBuilder";
 import { VideoConstructedPromptPanel } from "./VideoConstructedPromptPanel";
@@ -23,7 +24,7 @@ function I2vSourceBanner() {
     <div className="shrink-0 px-3 pt-3">
       <div className="flex items-center gap-3 rounded-md border border-pink-500/40 bg-pink-500/5 p-2">
         <img
-          src={`asset://localhost/${encodeURI(sourceImagePath)}`}
+          src={convertFileSrc(sourceImagePath)}
           alt="i2v 元画像"
           className="h-12 w-16 shrink-0 cursor-zoom-in rounded object-cover"
           title="ダブルクリックで拡大"
