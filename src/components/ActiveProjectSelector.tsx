@@ -87,7 +87,9 @@ export function ActiveProjectSelector() {
     const name = draftName.trim();
     if (!name) return;
     const created = createProject(name);
-    setActive(created.id);
+    // 新規プロジェクト作成も「別案件を始める」= 切替なので switchActiveProject
+    // 経由にして前案件のシーン構築値をクリアする (#5/R-2 残留対策 2026-06-07)。
+    switchActiveProject(setActive, created.id, activeId);
     setDraftName("");
     setOpen(false);
   };

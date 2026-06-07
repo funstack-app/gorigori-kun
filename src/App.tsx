@@ -40,6 +40,7 @@ import { useLibrarySelection } from "./lib/store/librarySelection";
 import { type Project, useProjects } from "./lib/store/projects";
 import { usePromptHistory } from "./lib/store/promptHistory";
 import { useSavedPrompts } from "./lib/store/savedPrompts";
+import { useSceneStore } from "./lib/store/scene";
 import { type Session, useSessions } from "./lib/store/sessions";
 import { useSettings } from "./lib/store/settings";
 import { useThreads } from "./lib/store/threads";
@@ -422,6 +423,10 @@ function SignedInScaffold() {
     //   - useProjects は zustand store なので、ActiveProjectSelector (プルダウン)
     //     と ProjectsWorkspace (プロジェクトページ) も自動で同期する
     const created = useProjects.getState().createProject(name);
+    // 新規プロジェクト作成も「別案件を始める」切替なので、前案件のシーン構築値を
+    // クリアする (#5/R-2 残留対策 2026-06-07)。override は ActiveProjectSelector の
+    // switchActiveProject と同じく消さない (動画 i2v を巻き込まないため)。
+    useSceneStore.getState().resetScene();
     useActiveProject.getState().setActive(created.id);
     setDrawer(null);
     // 作成完了の視覚フィードバック (画面のどこを見ても変化があるか分かりにくいため)
