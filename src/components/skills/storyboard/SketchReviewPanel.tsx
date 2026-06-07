@@ -22,8 +22,11 @@ import { useToasts } from "../../../lib/store/toasts";
 import { useImagePreview } from "../../../lib/store/imagePreview";
 import { CandidatesSelect } from "./CandidatesSelect";
 import type {
+  StoryboardCameraAngle,
+  StoryboardCameraMotion,
   StoryboardSketchCut,
   StoryboardSketchVersion,
+  StoryboardShotType,
 } from "../../../lib/storyboard/types";
 
 const IMAGE_EXTS = ["png", "jpg", "jpeg", "webp", "gif", "bmp"];
@@ -110,6 +113,14 @@ export function SketchReviewPanel() {
         cameraNote: inferCameraNote(index, sceneConstruction.cuts.length),
         visualLayout: cut.description,
         filmNotes: inferFilmNotes(index, sceneConstruction.cuts.length),
+        // AI が sceneConstruction に出した shot_type/camera_motion/camera_angle を
+        // sketch メタに引き継ぐ。これを埋めないと buildI2vPrompt が全カット
+        // 「medium shot / locked camera」固定になり、動画タブ送り/i2vコピーの
+        // カメラワークがカットごとに変わらなかった (#5/i2v固定 2026-06-07)。
+        // AI が想定外の値を返しても壊れないよう、enum 許可リストでバリデートする。
+        shotType: toShotType(cut.shot_type),
+        cameraMotion: toCameraMotion(cut.camera_motion),
+        cameraAngle: toCameraAngle(cut.camera_angle),
       })),
     };
     pushSketchVersion(version);
@@ -1054,6 +1065,68 @@ function ReferenceSlot({
       </div>
     </div>
   );
+}
+
+// AI が出した自由文字列 (shot_type / camera_motion / camera_angle) を、
+// 既知の enum 値に正規化する。enum に無い値は undefined を返し、
+// buildI2vPrompt 側のデフォルト (medium shot / static) にフォールバックさせる。
+// 正規化は「小文字化 + 空白/ハイフンを _ に寄せる」だけ。これで
+// "Pan Left"→pan_left, "dolly-in"→dolly_in 等の表記揺れは拾えるが、
+// 単語の増減 (例: "medium shot"→medium_shot は enum medium と不一致) は
+// 拾わず default に落ちる。AI プロンプト(planChat.ts)が enum トークンを
+// 厳密指定しているため、実運用ではこれで十分。
+const SHOT_TYPES: readonly StoryboardShotType[] = [
+  "extreme_close",
+  "close",
+  "medium",
+  "full",
+  "wide",
+  "extreme_wide",
+];
+const CAMERA_MOTIONS: readonly StoryboardCameraMotion[] = [
+  "static",
+  "pan_left",
+  "pan_right",
+  "tilt_up",
+  "tilt_down",
+  "dolly_in",
+  "dolly_out",
+  "handheld",
+];
+const CAMERA_ANGLES: readonly StoryboardCameraAngle[] = [
+  "front",
+  "side",
+  "back",
+  "three_quarter",
+  "high",
+  "low",
+  "dutch",
+];
+
+function normalizeEnumKey(raw: string | undefined): string | undefined {
+  const v = raw?.trim().toLowerCase().replace(/[\s-]+/g, "_");
+  return v && v.length > 0 ? v : undefined;
+}
+
+function toShotType(raw: string | undefined): StoryboardShotType | undefined {
+  const v = normalizeEnumKey(raw);
+  return v && (SHOT_TYPES as readonly string[]).includes(v)
+    ? (v as StoryboardShotType)
+    : undefined;
+}
+
+function toCameraMotion(raw: string | undefined): StoryboardCameraMotion | undefined {
+  const v = normalizeEnumKey(raw);
+  return v && (CAMERA_MOTIONS as readonly string[]).includes(v)
+    ? (v as StoryboardCameraMotion)
+    : undefined;
+}
+
+function toCameraAngle(raw: string | undefined): StoryboardCameraAngle | undefined {
+  const v = normalizeEnumKey(raw);
+  return v && (CAMERA_ANGLES as readonly string[]).includes(v)
+    ? (v as StoryboardCameraAngle)
+    : undefined;
 }
 
 function inferCameraNote(index: number, total: number): string {

@@ -23,7 +23,26 @@ function buildI2vPrompt(
   aspectRatio: string,
   cutIndex: number,
 ): string {
-  const shotInfo = sketch?.shotType ?? "medium shot";
+  // enum 値 (medium / close 等) を i2v プロンプト向けの読みやすい英語ショット記述に
+  // 変換する。これを噛ませないと "Camera: medium, ..." のように生の enum 値が出る。
+  const shotInfo = (() => {
+    switch (sketch?.shotType) {
+      case "extreme_close":
+        return "extreme close-up shot";
+      case "close":
+        return "close-up shot";
+      case "medium":
+        return "medium shot";
+      case "full":
+        return "full shot";
+      case "wide":
+        return "wide shot";
+      case "extreme_wide":
+        return "extreme wide shot";
+      default:
+        return "medium shot";
+    }
+  })();
   const camera = sketch?.cameraMotion ?? "static";
   const cameraNote = sketch?.cameraNote ?? "stable camera";
   const intent = sketch?.intent || cut.description || "";
