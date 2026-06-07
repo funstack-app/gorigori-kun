@@ -1,5 +1,7 @@
 import { useMultiAngleRun } from "./multiAngleRun";
 import { usePlanChat } from "./planChat";
+import { useSceneStore } from "./scene";
+import { useScenePromptOverride } from "./scenePrompt";
 import { useStoryboardRun } from "./storyboardRun";
 
 /**
@@ -45,4 +47,12 @@ export function resetSkillScopedState(enteringSkillId?: string | null): void {
   multiAngle.clearSelection();
   multiAngle.setCharacterImage(null);
   multiAngle.setEnvironment("");
+
+  // シーン構築 (画像/動画タブの要素別編集の元データ) と override プロンプトを破棄する。
+  // これらが残ると、別スキルへ切り替えた後も前回の主役/構図/光/カメラ/スタイルや
+  // 手書きプロンプトが要素別編集に混ざる (#5 「ミックスされる/リセットされない」report 2026-06-07)。
+  // 注: storyboard の本生成入力は planChat.sceneConstruction であって useSceneStore ではないため、
+  //     storyboard へ入るときにここを消しても本生成バグは起きない。
+  useSceneStore.getState().resetScene();
+  useScenePromptOverride.getState().clear();
 }

@@ -2,7 +2,21 @@ import { useEffect, useRef, useState } from "react";
 
 import { useActiveProject } from "../lib/store/activeProject";
 import { useProjects } from "../lib/store/projects";
+import { useSceneStore } from "../lib/store/scene";
+import { useScenePromptOverride } from "../lib/store/scenePrompt";
 import { useToasts } from "../lib/store/toasts";
+
+/**
+ * 作業中プロジェクトを切り替えるときに、前プロジェクトのシーン構築値
+ * (要素別編集の元データ) と override プロンプトを破棄する。
+ * これを消さないと、別案件に移っても前案件の構図/光/スタイルが残り、
+ * 要素別編集に混ざる (#5 残留対策 2026-06-07)。
+ */
+function switchActiveProject(setActive: (id: string | null) => void, id: string | null): void {
+  useSceneStore.getState().resetScene();
+  useScenePromptOverride.getState().clear();
+  setActive(id);
+}
 
 /**
  * 「現在作業中のプロジェクト」を選ぶセレクター。
@@ -131,7 +145,7 @@ export function ActiveProjectSelector() {
             <button
               type="button"
               onClick={() => {
-                setActive(null);
+                switchActiveProject(setActive, null);
                 setOpen(false);
               }}
               className={[
@@ -154,7 +168,7 @@ export function ActiveProjectSelector() {
                   key={project.id}
                   type="button"
                   onClick={() => {
-                    setActive(project.id);
+                    switchActiveProject(setActive, project.id);
                     setOpen(false);
                   }}
                   className={[

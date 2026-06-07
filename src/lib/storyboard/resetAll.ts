@@ -1,4 +1,6 @@
 import { usePlanChat } from "../store/planChat";
+import { useSceneStore } from "../store/scene";
+import { useScenePromptOverride } from "../store/scenePrompt";
 import { useSkillMode } from "../store/skillMode";
 import { useStoryboardRun } from "../store/storyboardRun";
 
@@ -27,4 +29,9 @@ export function resetStoryboardSession(): void {
   const run = useStoryboardRun.getState();
   run.reset();
   run.resetPhases();
+
+  // シーン構築 (要素別編集の元データ) と override プロンプトも破棄して、
+  // 次のセッションを完全な別物として始める (#5 残留対策 2026-06-07)。
+  useSceneStore.getState().resetScene();
+  useScenePromptOverride.getState().clear();
 }
