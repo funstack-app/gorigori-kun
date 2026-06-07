@@ -4,6 +4,7 @@ import { useWorkspace } from "../../../lib/store/workspace";
 import { ensureStoryboardEventListener } from "../../../lib/storyboard/events";
 import { ActiveProjectSelector } from "../../ActiveProjectSelector";
 import { EditWorkspace } from "../../EditWorkspace";
+import { Timeline } from "../../GenerationWorkspace";
 import { PlanWorkspace } from "../../PlanWorkspace";
 import { VideoGenerationWorkspace } from "../../VideoGenerationWorkspace";
 import { WorkspaceTabs } from "../../WorkspaceTabs";
@@ -60,7 +61,7 @@ export function StoryboardWorkspace() {
         </div>
         <div className="min-h-0 flex-1 overflow-hidden px-4 py-4">
           {activeTab === "plan" && <PlanWorkspace />}
-          {activeTab === "video" && <VideoGenerationWorkspace />}
+          {activeTab === "video" && <VideoGenerationWorkspace timeline={<Timeline />} />}
           {activeTab === "edit" && <EditWorkspace />}
         </div>
       </section>

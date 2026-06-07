@@ -127,7 +127,9 @@ function LeftPanel({ purpose }: { purpose: "artwork" | "ad" | "videoStory" }) {
   );
 }
 
-function Timeline() {
+// ストーリーモードの動画タブでも同じタイムライン (過去生成物) を出すため export する。
+// StoryboardWorkspace が VideoGenerationWorkspace に timeline prop として渡す (#27 表示消失修正)。
+export function Timeline() {
   const batches = useBatches((s) => s.batches);
   const items = useImages((s) => s.items);
   const timelineSize = useWorkspace((s) => s.timelineSize);
