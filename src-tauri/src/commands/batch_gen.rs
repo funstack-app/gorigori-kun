@@ -15,7 +15,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
@@ -241,13 +241,10 @@ async fn run_one_worker(
     )
     .await;
 
-    // 成功パス / 失敗理由 を正規化する。失敗理由は WorkerFailed イベントと
-    // 戻り値の Err の両方に同じ文言を載せ、フロントがどちらの経路でも真因を拾えるようにする。
-    let normalized: Result<String, String> = match result {
-        Ok(Some(path)) => Ok(path),
-        Ok(None) => Err("image_gen 出力が見つかりませんでした".to_string()),
-        Err(e) => Err(e),
-    };
+    // inner は Result<成功パス, 失敗理由> を返す。失敗理由は WorkerFailed
+    // イベントと戻り値の Err の両方に同じ文言を載せ、フロントがどちらの経路でも
+    // 真因を拾えるようにする。
+    let normalized: Result<String, String> = result;
 
     match &normalized {
         Ok(path) => {
@@ -289,7 +286,9 @@ async fn run_one_worker_inner(
     effort: Option<String>,
     aspect: Option<String>,
     total_count: u32,
-) -> Result<Option<String>, String> {
+    // Ok(成功画像パス) / Err(失敗理由)。画像が無い場合も Err に理由を載せる
+    // (旧 Ok(None) は廃止。画像なし=失敗理由つき Err に統一)。
+) -> Result<String, String> {
     // 1. mktemp -d で per-worker CODEX_HOME を作る
     let tmp = tempfile::Builder::new()
         .prefix(&format!("codex-batch-{idx:02}-"))
@@ -374,6 +373,10 @@ async fn run_one_worker_inner(
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
+    // タイムアウトで future を drop したとき、子プロセス(codex + node)も道連れに
+    // kill する。これが無いとタイムアウトした codex が生き残り、並列+再試行で
+    // 累積して裏で CPU を焼く (2026-06-07 独立レビュー指摘)。
+    cmd.kill_on_drop(true);
     crate::codex::process::no_window_flag(&mut cmd);
 
     let mut child = cmd
@@ -387,23 +390,37 @@ async fn run_one_worker_inner(
         // drop closes stdin so codex can finish reading.
     }
 
-    let output = child
-        .wait_with_output()
-        .await
-        .map_err(|e| format!("codex exec 待機失敗: {e}"))?;
-    if !output.status.success() {
+    // codex exec が image_gen を呼ぶ前に長考して無限に待つのを防ぐタイムアウト。
+    // 参照画像 + 複雑プロンプトでも完遂できる余裕を見て 240 秒。
+    // タイムアウト時は future を drop することで kill_on_drop により子プロセスも
+    // 終了し、明確な理由を返す (握りつぶさない)。
+    const WORKER_TIMEOUT: Duration = Duration::from_secs(240);
+    let output = match tokio::time::timeout(WORKER_TIMEOUT, child.wait_with_output()).await {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => return Err(format!("codex exec 待機失敗: {e}")),
+        Err(_elapsed) => {
+            return Err(format!(
+                "画像生成がタイムアウトしました（{}秒）。プロンプトを短くするか、時間をおいて再試行してください。",
+                WORKER_TIMEOUT.as_secs()
+            ));
+        }
+    };
+
+    // 終了コードが非ゼロでも、画像が生成されていれば成功扱いにする
+    // (codex が最後に NG 自己申告や非ゼロ終了しても ig_*.png が残っていれば
+    //  その画像は有効。先に画像走査してから終了コードを理由に使う)。
+    let exited_ok = output.status.success();
+    let stderr_tail = if exited_ok {
+        String::new()
+    } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        let last = stderr
+        stderr
             .lines()
             .rev()
             .find(|l| !l.trim().is_empty())
-            .unwrap_or("(stderr 出力なし)");
-        return Err(format!(
-            "codex exec が異常終了 (code={:?}): {}",
-            output.status.code(),
-            last
-        ));
-    }
+            .unwrap_or("(stderr 出力なし)")
+            .to_string()
+    };
 
     // 5. tmp_home/generated_images/<session>/ig_*.png を 1 枚拾う
     let mut found: Option<PathBuf> = None;
@@ -444,14 +461,29 @@ async fn run_one_worker_inner(
 
     let src_png = match found {
         Some(p) => p,
-        None => return Ok(None),
+        None => {
+            // 画像が1枚も無い = 失敗。理由を可能な限り具体的にする。
+            // 非ゼロ終了なら stderr 末尾を、ゼロ終了なら image_gen 未呼び出しを示す。
+            if !exited_ok {
+                return Err(format!(
+                    "codex exec が異常終了 (code={:?}): {}",
+                    output.status.code(),
+                    stderr_tail
+                ));
+            }
+            return Err(
+                "画像が生成されませんでした（AIが画像生成ツールを呼び出さなかった可能性があります）。\
+                 プロンプトをより具体的にするか、短くして再試行してください。"
+                    .to_string(),
+            );
+        }
     };
 
     // 6. configured storage root / batch-<id> / ig_<idx>_<short>.png にコピー
     let dest = out_dir.join(format!("ig_b{idx:02}_{}.png", short_id()));
     std::fs::copy(&src_png, &dest).map_err(|e| format!("出力コピー失敗: {e}"))?;
 
-    Ok(Some(dest.to_string_lossy().into_owned()))
+    Ok(dest.to_string_lossy().into_owned())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
