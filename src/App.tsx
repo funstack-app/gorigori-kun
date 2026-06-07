@@ -4,7 +4,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ApprovalDialog } from "./components/ApprovalDialog";
 import { AuthGate } from "./components/AuthGate";
 import { FirstRunStorageNotice } from "./components/FirstRunStorageNotice";
-import { deleteGalleryImages } from "./components/galleryItemMenu";
+import { ContextMenu, type ContextMenuItem } from "./components/ContextMenu";
+import { buildGalleryItemMenu, deleteGalleryImages } from "./components/galleryItemMenu";
+import { RegisterPresetDialog } from "./components/RegisterPresetDialog";
 import { ImagePreviewModal } from "./components/ImagePreviewModal";
 import { LibraryAutoRenameButton } from "./components/LibraryAutoRenameButton";
 import { LibraryBatchSaveButton } from "./components/LibraryBatchSaveButton";
@@ -1649,6 +1651,19 @@ function AssetsWorkspace() {
   const selectAll = useLibrarySelection((s) => s.selectAll);
   const clear = useLibrarySelection((s) => s.clear);
 
+  // 右クリックメニュー (FB#1: f_matsu106 さん。ライブラリで画像を右クリックしても
+  // プリセット登録等が出ず WebView 標準メニューが出ていた。実ライブラリ=この
+  // AssetsWorkspace のタイルに onContextMenu が無かったのが原因。プレビューモーダルと
+  // 同じ buildGalleryItemMenu + ContextMenu をここにも配線する 2026-06-07)。
+  const favorites = useImages((s) => s.favorites);
+  const toggleFavorite = useImages((s) => s.toggleFavorite);
+  const [contextMenu, setContextMenu] = useState<{
+    x: number;
+    y: number;
+    item: GalleryItem;
+  } | null>(null);
+  const [presetTarget, setPresetTarget] = useState<GalleryItem | null>(null);
+
   const allSelected = items.length > 0 && selected.size === items.length;
   return (
     <section className="min-h-0 flex-1 overflow-y-auto bg-[#121212] px-4 py-4">
@@ -1767,6 +1782,10 @@ function AssetsWorkspace() {
                 <button
                   type="button"
                   onDoubleClick={() => useImagePreview.getState().open(item.path)}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    setContextMenu({ x: e.clientX, y: e.clientY, item });
+                  }}
                   onClick={() => {
                     if (selectionMode) {
                       toggle(item.path);
@@ -1823,6 +1842,10 @@ function AssetsWorkspace() {
                 key={item.path}
                 type="button"
                 onDoubleClick={() => useImagePreview.getState().open(item.path)}
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  setContextMenu({ x: e.clientX, y: e.clientY, item });
+                }}
                 onClick={() => {
                   if (selectionMode) {
                     toggle(item.path);
@@ -1864,6 +1887,27 @@ function AssetsWorkspace() {
             );
           })}
         </div>
+      )}
+      {contextMenu && (
+        <ContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          items={
+            buildGalleryItemMenu(contextMenu.item, {
+              favorites,
+              onToggleFavorite: (path) => void toggleFavorite(path),
+              onRegisterPreset: () => setPresetTarget(contextMenu.item),
+            }) satisfies ContextMenuItem[]
+          }
+          onClose={() => setContextMenu(null)}
+        />
+      )}
+      {presetTarget && (
+        <RegisterPresetDialog
+          imagePath={presetTarget.path}
+          defaultName={presetTarget.name}
+          onClose={() => setPresetTarget(null)}
+        />
       )}
     </section>
   );
