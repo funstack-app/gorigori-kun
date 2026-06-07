@@ -3,18 +3,30 @@ import { useEffect, useRef, useState } from "react";
 import { useActiveProject } from "../lib/store/activeProject";
 import { useProjects } from "../lib/store/projects";
 import { useSceneStore } from "../lib/store/scene";
-import { useScenePromptOverride } from "../lib/store/scenePrompt";
 import { useToasts } from "../lib/store/toasts";
 
 /**
- * 作業中プロジェクトを切り替えるときに、前プロジェクトのシーン構築値
- * (要素別編集の元データ) と override プロンプトを破棄する。
- * これを消さないと、別案件に移っても前案件の構図/光/スタイルが残り、
- * 要素別編集に混ざる (#5 残留対策 2026-06-07)。
+ * 作業中プロジェクトを「別の」プロジェクトへ切り替えるときに、前プロジェクトの
+ * シーン構築値 (要素別編集の元データ) を破棄する。これを消さないと、別案件に
+ * 移っても前案件の構図/光/スタイルが残り、要素別編集に混ざる (#5 残留対策 2026-06-07)。
+ *
+ * 注意 (2026-06-07 独立レビュー指摘の修正):
+ *  - 同じプロジェクトを再選択しただけのときは何もしない。未保存のシーン構築を
+ *    無駄に消さないため、現在の activeId と一致したら早期 return する。
+ *  - scenePromptOverride は **消さない**。動画タブの i2v プロンプト
+ *    (sendCutToVideo が scenePromptOverride.set で入れる) を共有しており、
+ *    ここで clear すると動画タブに送ったばかりの i2v プロンプトを巻き込んで
+ *    消してしまう。override は元々アプリ再起動でリセットされる設計なので、
+ *    プロジェクト切替で無理に消さなくても #5 の主症状(シーン構築値の残留)は
+ *    resetScene() だけで解消する。
  */
-function switchActiveProject(setActive: (id: string | null) => void, id: string | null): void {
+function switchActiveProject(
+  setActive: (id: string | null) => void,
+  id: string | null,
+  currentId: string | null,
+): void {
+  if (id === currentId) return; // 同一プロジェクト再選択は無操作
   useSceneStore.getState().resetScene();
-  useScenePromptOverride.getState().clear();
   setActive(id);
 }
 
@@ -145,7 +157,7 @@ export function ActiveProjectSelector() {
             <button
               type="button"
               onClick={() => {
-                switchActiveProject(setActive, null);
+                switchActiveProject(setActive, null, activeId);
                 setOpen(false);
               }}
               className={[
@@ -168,7 +180,7 @@ export function ActiveProjectSelector() {
                   key={project.id}
                   type="button"
                   onClick={() => {
-                    switchActiveProject(setActive, project.id);
+                    switchActiveProject(setActive, project.id, activeId);
                     setOpen(false);
                   }}
                   className={[

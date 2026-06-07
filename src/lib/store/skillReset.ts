@@ -53,6 +53,9 @@ export function resetSkillScopedState(enteringSkillId?: string | null): void {
   // 手書きプロンプトが要素別編集に混ざる (#5 「ミックスされる/リセットされない」report 2026-06-07)。
   // 注: storyboard の本生成入力は planChat.sceneConstruction であって useSceneStore ではないため、
   //     storyboard へ入るときにここを消しても本生成バグは起きない。
+  // override も消す: ここは「別スキルへ切り替える=今のスキル作業を捨てる」文脈なので、
+  //   動画 i2v の override が残っていても一緒に消えてよい。
+  //   (プロジェクト切替=ActiveProjectSelector では override を消さない。区別は意図的。)
   useSceneStore.getState().resetScene();
   useScenePromptOverride.getState().clear();
 }

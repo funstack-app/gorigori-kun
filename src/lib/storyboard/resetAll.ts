@@ -32,6 +32,10 @@ export function resetStoryboardSession(): void {
 
   // シーン構築 (要素別編集の元データ) と override プロンプトも破棄して、
   // 次のセッションを完全な別物として始める (#5 残留対策 2026-06-07)。
+  // ここは「企画を丸ごとやめてスキルモードも抜ける」完全リセット (上で
+  // setEnabled(false)) なので、動画 i2v の override も一緒に消えてよい。
+  // (プロジェクト切替=ActiveProjectSelector では override を消さない。あちらは
+  //  案件を移るだけで動画作業を捨てる意図がないため。区別は意図的。)
   useSceneStore.getState().resetScene();
   useScenePromptOverride.getState().clear();
 }
