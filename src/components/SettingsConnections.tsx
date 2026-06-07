@@ -834,7 +834,7 @@ function HiggsfieldConnectionCard() {
             下記からDL → インストール → GORI GORI を再起動 で繋がります。
           </p>
           <a
-            href="https://github.com/shoutayamazaki0811/gorigori-kun/releases/latest"
+            href="https://github.com/funstack-app/gorigori-kun/releases/latest"
             target="_blank"
             rel="noreferrer"
             className="block rounded-lg bg-pink-500 px-3 py-2 text-center text-xs font-black text-white transition hover:bg-pink-400"

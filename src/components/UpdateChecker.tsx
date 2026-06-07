@@ -15,9 +15,10 @@ type Status =
 
 /**
  * 設定画面に置く「アップデート確認」セクション。
- * Tauri Updater プラグイン経由で
- *   https://github.com/funstack-app/gorigori-releases/releases/latest/download/updater.json
- * を見にいき、新バージョンがあれば DL + 自動再起動。
+ * Tauri Updater プラグイン経由で更新メタファイルを見にいき、新バージョンが
+ * あれば DL + 自動再起動。参照先は tauri.conf.json の updater.endpoints で定義:
+ *   https://github.com/funstack-app/gorigori-kun/releases/latest/download/latest.json
+ * (このコメントは説明用。実際の参照先は必ず tauri.conf.json 側を正とする)
  */
 export function UpdateChecker() {
   const [current, setCurrent] = useState<string>("...");
