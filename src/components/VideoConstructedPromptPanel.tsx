@@ -131,7 +131,14 @@ export function VideoConstructedPromptPanel() {
 
   const onChangeDraft = (next: string) => {
     setDraft(next);
-    setPromptOverride(next === generatedPrompt ? null : next);
+    // 動画タブでの手編集は i2v 文脈。値があるときは出自 "i2v" を維持し、別スキル
+    // 切替の clear から保護する (R-1)。generatedPrompt と同値なら override 解除
+    // (null + 出自は image デフォルトに戻す。「override なしなのに source=i2v」を作らない)。
+    if (next === generatedPrompt) {
+      setPromptOverride(null);
+    } else {
+      setPromptOverride(next, "i2v");
+    }
   };
 
   const onResetOverride = () => {

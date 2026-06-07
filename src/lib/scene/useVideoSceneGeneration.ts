@@ -5,7 +5,7 @@ import { higgsfield, type HiggsfieldCompareModel, type HiggsfieldVideoParams } f
 import { useAuth } from "../store/auth";
 import { useBatches } from "../store/batches";
 import { useComposer } from "../store/composer";
-import { useScenePromptOverride } from "../store/scenePrompt";
+import { useScenePromptOverride, type ScenePromptSource } from "../store/scenePrompt";
 import { useToasts } from "../store/toasts";
 import { useVideoGen } from "../store/videoGen";
 import { useVideoSceneStore } from "../store/videoScene";
@@ -33,7 +33,7 @@ export type UseVideoSceneGenerationReturn = {
   /** 比較対象モデル (compareMode 時のみ 2件以上) */
   compareModels: VideoModelDefinition[];
   promptOverride: string | null;
-  setPromptOverride: (value: string | null) => void;
+  setPromptOverride: (value: string | null, source?: ScenePromptSource) => void;
   effectivePrompt: string;
   status: VideoGenerationStatus;
   hasRunningBatch: boolean;

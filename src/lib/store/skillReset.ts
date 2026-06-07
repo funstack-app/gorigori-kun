@@ -48,14 +48,22 @@ export function resetSkillScopedState(enteringSkillId?: string | null): void {
   multiAngle.setCharacterImage(null);
   multiAngle.setEnvironment("");
 
-  // シーン構築 (画像/動画タブの要素別編集の元データ) と override プロンプトを破棄する。
-  // これらが残ると、別スキルへ切り替えた後も前回の主役/構図/光/カメラ/スタイルや
-  // 手書きプロンプトが要素別編集に混ざる (#5 「ミックスされる/リセットされない」report 2026-06-07)。
+  // シーン構築 (画像/動画タブの要素別編集の元データ) を破棄する。
+  // これが残ると、別スキルへ切り替えた後も前回の主役/構図/光/カメラ/スタイルが
+  // 要素別編集に混ざる (#5 「ミックスされる/リセットされない」report 2026-06-07)。
   // 注: storyboard の本生成入力は planChat.sceneConstruction であって useSceneStore ではないため、
   //     storyboard へ入るときにここを消しても本生成バグは起きない。
-  // override も消す: ここは「別スキルへ切り替える=今のスキル作業を捨てる」文脈なので、
-  //   動画 i2v の override が残っていても一緒に消えてよい。
-  //   (プロジェクト切替=ActiveProjectSelector では override を消さない。区別は意図的。)
   useSceneStore.getState().resetScene();
-  useScenePromptOverride.getState().clear();
+
+  // override プロンプトの破棄は出自で判定する (R-1 修正 2026-06-07 独立レビュー指摘)。
+  // scenePromptOverride は画像生成と動画 i2v が共有する単一 value。出自が "i2v"
+  // (ストーリーカットを動画タブへ送ったときの i2v プロンプト) のときは、別スキルへ
+  // 切り替えても消さない。消すと送ったばかりの i2v プロンプトが失われる。
+  // 出自が "image" (画像のシーン構築/手書き/企画採用) のときだけ #5 のとおり消す。
+  // 旧実装は useVideoGen.sourceImagePath で代用していたが、それは「i2v元画像を
+  // セットしたまま外していないか」であって「今i2v作業中か」ではなく、動画タブを
+  // 離れた後も true のまま残って画像作業中に誤判定した。出自フラグで根治する。
+  if (useScenePromptOverride.getState().source !== "i2v") {
+    useScenePromptOverride.getState().clear();
+  }
 }

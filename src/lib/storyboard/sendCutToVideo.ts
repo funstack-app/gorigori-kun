@@ -35,8 +35,9 @@ export function sendCutToVideoTab(input: SendCutToVideoInput): void {
   video.setSourceImage(input.imagePath);
 
   // プロンプトが渡されていれば override にセット (手動編集可能)。
+  // 出自を "i2v" にして、別スキル切替時の clear から保護する (R-1)。
   if (typeof input.prompt === "string" && input.prompt.trim().length > 0) {
-    useScenePromptOverride.getState().set(input.prompt.trim());
+    useScenePromptOverride.getState().set(input.prompt.trim(), "i2v");
   }
 
   // スキルモードは抜けず、ストーリーモード内の動画タブに切り替えるだけ。
@@ -80,7 +81,8 @@ export async function sendCutsBatchToVideoTab(input: SendCutsBatchInput): Promis
   const video = useVideoGen.getState();
   video.setSourceImage(first.imagePath);
   if (first.prompt.trim().length > 0) {
-    useScenePromptOverride.getState().set(first.prompt.trim());
+    // 出自 "i2v" で別スキル切替時の clear から保護 (R-1)。
+    useScenePromptOverride.getState().set(first.prompt.trim(), "i2v");
   }
 
   // 全カット分の i2v プロンプトをクリップボードへ (手動コピペ用)。
