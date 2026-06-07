@@ -95,7 +95,7 @@ export function UpdateChecker() {
           <button
             type="button"
             onClick={runCheck}
-            className="w-full rounded-lg bg-pink-500 px-3 py-2 text-sm font-black text-white transition hover:bg-pink-400"
+            className="rounded-md bg-pink-500 px-3 py-1.5 text-xs font-bold text-white transition hover:bg-pink-400"
           >
             アップデートを確認
           </button>
