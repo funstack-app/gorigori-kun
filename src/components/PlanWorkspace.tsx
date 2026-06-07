@@ -73,13 +73,10 @@ export function PlanWorkspace() {
   const addPendingImages = usePlanChat((s) => s.addPendingImages);
   const removePendingImage = usePlanChat((s) => s.removePendingImage);
   const storyboardParams = usePlanChat((s) => s.storyboardParams);
-  const sceneConstruction = usePlanChat((s) => s.sceneConstruction);
 
   const setText = useComposer((s) => s.setText);
   const setScenePromptOverride = useScenePromptOverride((s) => s.set);
   const setActiveTab = useWorkspace((s) => s.setActiveTab);
-  const setSkillEnabled = useSkillMode((s) => s.setEnabled);
-  const setSelectedSkillId = useSkillMode((s) => s.setSelectedSkillId);
   const pushToast = useToasts((s) => s.push);
 
   const [draft, setDraft] = useState("");
@@ -209,18 +206,34 @@ export function PlanWorkspace() {
     await finalizePlan();
   };
 
-  const adopt = (text: string) => {
+  // プロンプト採用。kind で画像生成タブ / 動画生成タブに出し分ける。
+  //
+  // 重要 (2026-06-07 STΛCK報告): 採用してもチャット履歴は消さない。
+  //   旧実装は採用時に setSelectedSkillId("gori-storyboard") でスキルモードを
+  //   切り替えており、企画タブが storyboard モードに化けて履歴が見えなくなって
+  //   いた。採用ではスキルモードを触らず、履歴リセットは右上の「リセット」
+  //   ボタン(resetThread)に一本化する。
+  const adopt = (text: string, kind: PromptKind) => {
     const cleanText = stripStoryboardParams(text);
-    setScenePromptOverride(cleanText);
-    setText(cleanText);
-    if (storyboardParams && sceneConstruction) {
-      setSkillEnabled(true);
-      setSelectedSkillId("gori-storyboard");
+    if (kind === "video") {
+      // 動画化プロンプト → 動画生成タブへ。プロンプト入力欄(scenePromptOverride)に
+      // i2v 出自でセットし、タブを video に切り替える。元画像は動画タブでセットする。
+      setScenePromptOverride(cleanText, "i2v");
+      setActiveTab("video");
+      pushToast({
+        kind: "success",
+        text: "動画生成タブにプロンプトを入れました。元になる画像をセットしてください。",
+        ttlMs: 3200,
+      });
+      return;
     }
+    // 画像生成プロンプト → 画像生成タブへ。
+    setScenePromptOverride(cleanText, "image");
+    setText(cleanText);
     setActiveTab("generate");
     pushToast({
       kind: "success",
-      text: storyboardParams ? "動画パラメータを採用し、生成タブへ送信しました。" : "企画から採用しました。生成タブに切り替えました。",
+      text: "画像生成タブに採用しました。",
       ttlMs: 2400,
     });
   };
@@ -344,7 +357,8 @@ export function PlanWorkspace() {
 
       <div className="border-t border-[#242424] bg-[#161616] p-3">
         {/*
-          ストーリーカットスキルがアクティブな時だけ「確定」ボタンを表示。
+          ストーリーカットスキル時の「確定」ボタン (絵コンテ用 JSON を確定して生成タブへ)。
+          通常企画タブの確定は下の !isStoryboardSkill ブロックで別途表示する。
           STΛCK 指示 (2026-05-15): キーワード検知ではなくボタン明示。
           押すまで AI は完成形を勝手に確定しない。
         */}
@@ -408,11 +422,31 @@ export function PlanWorkspace() {
  * GPT-5.5 には ``` で囲んだプロンプト案を出すよう指示しているので、
  * その ``` ブロックを抽出して採用ボタン付きエリアブロックに置き換える。
  */
+// プロンプトの種類。確定後に AI が出す【画像生成プロンプト】/【動画化プロンプト】の
+// 見出しから判定する。image=画像生成タブへ、video=動画生成タブへ採用する。
+type PromptKind = "image" | "video";
+
 type Segment =
   | { kind: "text"; content: string }
-  | { kind: "code"; content: string };
+  | { kind: "code"; content: string; promptKind: PromptKind };
 
 const FENCE_RE = /```[a-zA-Z0-9_-]*\n?([\s\S]*?)```/g;
+
+// コードブロック直前の「見出し行」だけを見て image/video を判定する。
+// 本文の説明文に「i2v の元画像が要る」等が混じっても誤判定しないよう、
+// 末尾の非空行(=直近の見出し)に動画マーカーがあるときだけ video にする。
+function detectPromptKind(precedingText: string): PromptKind {
+  const lastLine =
+    precedingText
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0)
+      .pop() ?? "";
+  if (/【動画化プロンプト】|動画化プロンプト/.test(lastLine)) {
+    return "video";
+  }
+  return "image";
+}
 
 function splitSegments(text: string): Segment[] {
   const segments: Segment[] = [];
@@ -421,12 +455,18 @@ function splitSegments(text: string): Segment[] {
   FENCE_RE.lastIndex = 0;
   let match: RegExpExecArray | null;
   while ((match = FENCE_RE.exec(text)) !== null) {
+    const precedingText = text.slice(cursor, match.index);
     if (match.index > cursor) {
-      segments.push({ kind: "text", content: text.slice(cursor, match.index) });
+      segments.push({ kind: "text", content: precedingText });
     }
     const inner = match[1].replace(/\n+$/g, "").trim();
     if (inner.length > 0) {
-      segments.push({ kind: "code", content: inner });
+      // このコードブロック直前のテキスト（見出し）から画像/動画を判定。
+      segments.push({
+        kind: "code",
+        content: inner,
+        promptKind: detectPromptKind(precedingText),
+      });
     }
     cursor = match.index + match[0].length;
   }
@@ -445,7 +485,7 @@ function ChatBubble({
   onAdopt,
 }: {
   msg: PlanMessage;
-  onAdopt: (text: string) => void;
+  onAdopt: (text: string, kind: PromptKind) => void;
 }) {
   const isUser = msg.role === "user";
   const displayText = isUser
@@ -485,6 +525,7 @@ function ChatBubble({
                   <PromptBlock
                     key={`c-${i}`}
                     prompt={seg.content}
+                    promptKind={seg.promptKind}
                     onAdopt={onAdopt}
                     disabled={msg.streaming}
                   />
@@ -511,15 +552,19 @@ function ChatBubble({
  * プロンプト案 1 つ分のエリアブロック。
  * モノスペースで原文表示 + 「採用」ボタン + コピー用ボタン。
  *
- * 「採用」: composer.text にこの prompt をそのまま流して生成タブへ遷移。
+ * 採用ボタンは promptKind で出し分ける:
+ *  - image: 「✓ 画像で採用」→ 画像生成タブへ
+ *  - video: 「🎬 動画で採用」→ 動画生成タブへ (プロンプト入力済み状態)
  */
 function PromptBlock({
   prompt,
+  promptKind,
   onAdopt,
   disabled,
 }: {
   prompt: string;
-  onAdopt: (prompt: string) => void;
+  promptKind: PromptKind;
+  onAdopt: (prompt: string, kind: PromptKind) => void;
   disabled?: boolean;
 }) {
   const copy = async () => {
@@ -529,8 +574,19 @@ function PromptBlock({
       /* noop */
     }
   };
+  const isVideo = promptKind === "video";
   return (
     <div className="overflow-hidden rounded-lg border border-[#3a3a3a] bg-[#0d0d0d]">
+      <div
+        className={[
+          "flex items-center gap-1.5 border-b px-3 py-1 text-[10px] font-black",
+          isVideo
+            ? "border-purple-500/30 bg-purple-500/10 text-purple-200"
+            : "border-pink-500/30 bg-pink-500/10 text-pink-200",
+        ].join(" ")}
+      >
+        {isVideo ? "🎬 動画化プロンプト (Image to Video)" : "🖼 画像生成プロンプト"}
+      </div>
       <pre className="m-0 max-h-64 overflow-auto whitespace-pre-wrap break-words p-3 font-mono text-[11px] leading-relaxed text-neutral-100">
         {prompt}
       </pre>
@@ -545,12 +601,19 @@ function PromptBlock({
         </button>
         <button
           type="button"
-          onClick={() => onAdopt(prompt)}
+          onClick={() => onAdopt(prompt, promptKind)}
           disabled={disabled}
-          className="rounded-md bg-pink-500 px-3 py-1 text-[11px] font-bold text-white hover:bg-pink-400 disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-500"
-          title="このプロンプトを採用して生成タブへ"
+          className={[
+            "rounded-md px-3 py-1 text-[11px] font-bold text-white disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-500",
+            isVideo ? "bg-purple-500 hover:bg-purple-400" : "bg-pink-500 hover:bg-pink-400",
+          ].join(" ")}
+          title={
+            isVideo
+              ? "このプロンプトで動画生成タブへ（元画像は動画タブでセット）"
+              : "このプロンプトを採用して画像生成タブへ"
+          }
         >
-          ✓ 採用
+          {isVideo ? "🎬 動画で採用" : "✓ 画像で採用"}
         </button>
       </div>
     </div>
