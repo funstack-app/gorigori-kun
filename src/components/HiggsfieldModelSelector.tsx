@@ -41,6 +41,8 @@ const MAX_COMPARE_MODELS = 4;
 export function HiggsfieldModelSelector({ media }: { media: "image" | "video" }) {
   const selectedModels = useHiggsfieldModel((s) => s.selectedModels);
   const setSelectedModels = useHiggsfieldModel((s) => s.setSelectedModels);
+  // Magnific選択をトリガーボタンに反映するため、メイン関数でも購読する(2026-06-08)。
+  const selectedMagnificForTrigger = useMagnificModel((s) => s.selectedModels);
   const pushToast = useToasts((s) => s.push);
   const [models, setModels] = useState<HiggsfieldModelInfo[]>([]);
   const [planType, setPlanType] = useState<string | null>(null);
@@ -155,7 +157,7 @@ export function HiggsfieldModelSelector({ media }: { media: "image" | "video" })
     () => new Set(selectedModels.map((model) => model.jobSetType)),
     [selectedModels],
   );
-  const triggerText = getTriggerText(loadState, selectedModels);
+  const triggerText = getTriggerText(loadState, selectedModels, selectedMagnificForTrigger);
   const helperText = getHelperText(loadState, selectedModels.length);
   const sections = useMemo(() => buildSections(media, models, query), [media, models, query]);
   const totalVisibleModels = sections.reduce((sum, section) => sum + section.items.length, 0);
@@ -661,7 +663,16 @@ function matchesModel(model: HiggsfieldModelInfo, normalizedQuery: string): bool
 // それは「拡張未接続」という正常状態であり、エラーや警告として
 // 「設定で認証してください」と出すのは設計ミス。常に GPT Image 2 を
 // デフォルトとして表示する。
-function getTriggerText(loadState: LoadState, selectedModels: SelectedModel[]): string {
+function getTriggerText(
+  loadState: LoadState,
+  selectedModels: SelectedModel[],
+  selectedMagnific: string[] = [],
+): string {
+  // Magnific選択は最優先で反映(Higgsfield/codexより優先する生成経路と一致)。
+  if (selectedMagnific.length === 1)
+    return `Magnific: ${getMagnificModelName(selectedMagnific[0])}`;
+  if (selectedMagnific.length >= 2)
+    return `Magnific ${selectedMagnific.length} models`;
   if (loadState === "loading" || loadState === "idle") return "モデル一覧を確認中...";
   if (loadState === "error") return CODEX_STANDARD_LABEL;
   // missing / needsAuth は「拡張未接続」というだけで、生成自体は GPT Image 2 で可能
