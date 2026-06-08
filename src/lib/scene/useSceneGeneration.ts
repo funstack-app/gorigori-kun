@@ -101,7 +101,10 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
   const [count, setCount] = useState<SceneGenerationCount>(4);
   const selectedHiggsfieldModels = useHiggsfieldModel((state) => state.selectedModels);
   // Magnific オプショナル拡張 (2026-06-08)。選択中なら codex/higgsfield より優先する。
-  const selectedMagnificModel = useMagnificModel((state) => state.selectedModel);
+  // 配列対応(2026-06-08): 1件=単一生成、2件以上=比較生成。
+  const selectedMagnificModels = useMagnificModel((state) => state.selectedModels);
+  const magnificActive = selectedMagnificModels.length > 0;
+  const magnificCompare = selectedMagnificModels.length >= 2;
   const selectedHiggsfield = useMemo(() => {
     const first = selectedHiggsfieldModels[0];
     if (!first) return null;
@@ -111,7 +114,12 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
     };
   }, [selectedHiggsfieldModels]);
   const compareMode = selectedHiggsfieldModels.length >= 2;
-  const generationCount = compareMode ? selectedHiggsfieldModels.length : count;
+  // Magnific選択時は枚数をモデル数に合わせる(比較生成)。単一なら通常のcount。
+  const generationCount = magnificCompare
+    ? selectedMagnificModels.length
+    : compareMode
+      ? selectedHiggsfieldModels.length
+      : count;
 
   // promptOverride はグローバルストア (useScenePromptOverride) を使う。
   // 企画タブの「採用」ボタンから外部 set できるようにするため、useState から
@@ -189,14 +197,16 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
         prompt,
         model: selectedModel,
         effort: selectedEffort,
-        provider: selectedMagnificModel
+        provider: magnificActive
           ? "magnific"
           : selectedHiggsfield
             ? "higgsfield"
             : "codex",
         modelJobSetType: compareMode ? undefined : selectedHiggsfield?.jobSetType,
-        modelDisplayName: selectedMagnificModel
-          ? selectedMagnificModel
+        modelDisplayName: magnificActive
+          ? magnificCompare
+            ? `${selectedMagnificModels.length} models compared`
+            : selectedMagnificModels[0]
           : compareMode
             ? `${selectedHiggsfieldModels.length} models compared`
             : (selectedHiggsfield?.displayName ?? "image_gen"),
@@ -227,18 +237,20 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
           name: basename(path),
         })),
         count: generationCount,
-        provider: selectedMagnificModel
+        provider: magnificActive
           ? "magnific"
           : selectedHiggsfield
             ? "higgsfield"
             : "codex",
         modelJobSetType: compareMode ? undefined : selectedHiggsfield?.jobSetType,
-        modelDisplayName: selectedMagnificModel
-          ? selectedMagnificModel
+        modelDisplayName: magnificActive
+          ? magnificCompare
+            ? `${selectedMagnificModels.length} models compared`
+            : selectedMagnificModels[0]
           : compareMode
             ? undefined
             : (selectedHiggsfield?.displayName ?? "image_gen"),
-        compareMode,
+        compareMode: compareMode || magnificCompare,
         workerModels: compareMode ? selectedHiggsfieldModels : undefined,
       });
       try {
@@ -251,15 +263,18 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
           refImagePaths,
           maskPaths: refImagePaths.map(() => ""),
           // Magnific が選ばれていたら最優先 (higgsfield/codex は使わない)。
-          magnific: selectedMagnificModel
-            ? { model: selectedMagnificModel }
-            : undefined,
+          // 1件=単一生成、2件以上=比較生成。
+          magnific:
+            magnificActive && !magnificCompare
+              ? { model: selectedMagnificModels[0] }
+              : undefined,
+          magnificModels: magnificCompare ? selectedMagnificModels : undefined,
           higgsfield:
-            selectedMagnificModel || compareMode
+            magnificActive || compareMode
               ? undefined
               : (selectedHiggsfield ?? undefined),
           higgsfieldModels:
-            selectedMagnificModel || !compareMode
+            magnificActive || !compareMode
               ? undefined
               : selectedHiggsfieldModels,
         });
@@ -388,7 +403,9 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
     selectedEffort,
     selectedHiggsfield,
     selectedHiggsfieldModels,
-    selectedMagnificModel,
+    selectedMagnificModels,
+    magnificActive,
+    magnificCompare,
     compareMode,
     generationCount,
   ]);

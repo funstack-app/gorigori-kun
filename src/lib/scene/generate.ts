@@ -33,9 +33,11 @@ export type SceneGenerationOptions = {
     displayName: string;
   }[];
   // Magnific オプショナル拡張 (2026-06-08)。Magnificモデルが選ばれたときだけセットされる。
+  // magnific=単一生成、magnificModels=比較生成(各モデル1枚)。
   magnific?: {
     model: string;
   };
+  magnificModels?: string[];
 };
 
 type SceneReferenceImage = {
@@ -99,7 +101,23 @@ export async function generateFromScene(
     return { ...r, errors: r.errors ?? [] };
   }
 
-  // Magnific オプショナル拡張 (2026-06-08)。Magnificモデルが選ばれたときだけこの経路。
+  // Magnific 比較生成 (2026-06-08)。2モデル以上選択時、各モデルで1枚ずつ生成して並べる。
+  // Higgsfield の generateCompare と同じ思想。コアには一切影響しない。
+  if (options.magnificModels && options.magnificModels.length >= 2) {
+    const results = await Promise.all(
+      options.magnificModels.map((model) =>
+        magnific.generateBatch({ prompt, model, count: 1, aspect, refImagePaths }),
+      ),
+    );
+    return {
+      batchId: `magnific-compare-${Date.now()}`,
+      generatedPaths: results.flatMap((r) => r.generatedPaths),
+      failedCount: results.reduce((sum, r) => sum + r.failedCount, 0),
+      errors: results.flatMap((r) => r.errors ?? []),
+    };
+  }
+
+  // Magnific 単一生成 (2026-06-08)。Magnificモデルが1つ選ばれたときだけこの経路。
   // コア(下の codex/image_gen) には一切影響しない。MCP経由生成→URL DL→保存。
   if (options.magnific) {
     const r = await magnific.generateBatch({

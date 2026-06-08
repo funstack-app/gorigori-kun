@@ -12,7 +12,7 @@ import {
   type ModelLabel,
 } from "../lib/higgsfield/unlimited";
 import { useHiggsfieldModel, type SelectedModel } from "../lib/store/higgsfieldModel";
-import { useMagnificModel } from "../lib/store/magnificModel";
+import { useMagnificModel, MAX_MAGNIFIC_COMPARE } from "../lib/store/magnificModel";
 import { useAccounts } from "../lib/store/accounts";
 import { FEATURED_MAGNIFIC_IMAGE_MODELS, getMagnificModelName } from "../lib/magnific/models";
 import { useSceneStore } from "../lib/store/scene";
@@ -283,10 +283,12 @@ function ModelPickerPopover({
   // Magnific オプショナル拡張 (2026-06-08)。接続済みのときだけタブが出る(degrade)。
   const setSelectedModels = useHiggsfieldModel((s) => s.setSelectedModels);
   const magnificAuthed = useAccounts((s) => s.magnific.authenticated);
-  const selectedMagnific = useMagnificModel((s) => s.selectedModel);
-  const selectMagnific = useMagnificModel((s) => s.selectModel);
+  const selectedMagnificModels = useMagnificModel((s) => s.selectedModels);
+  const toggleMagnific = useMagnificModel((s) => s.toggleModel);
+  const clearMagnific = useMagnificModel((s) => s.clear);
+  const magnificCount = selectedMagnificModels.length;
   const [providerTab, setProviderTab] = useState<ProviderTab>(
-    selectedMagnific ? "magnific" : selectedCount > 0 ? "higgsfield" : "default",
+    magnificCount > 0 ? "magnific" : selectedCount > 0 ? "higgsfield" : "default",
   );
 
   useEffect(() => {
@@ -371,7 +373,7 @@ function ModelPickerPopover({
           onClick={() => {
             setProviderTab("default");
             setSelectedModels([]);
-            selectMagnific(null);
+            clearMagnific();
           }}
           className={`rounded-t-md px-2.5 py-1 text-[11px] font-bold ${providerTab === "default" ? "bg-[#1e1e1e] text-white" : "text-neutral-500 hover:text-white"}`}
         >
@@ -381,7 +383,7 @@ function ModelPickerPopover({
           type="button"
           onClick={() => {
             setProviderTab("higgsfield");
-            selectMagnific(null);
+            clearMagnific();
           }}
           className={`rounded-t-md px-2.5 py-1 text-[11px] font-bold ${providerTab === "higgsfield" ? "bg-pink-500/20 text-pink-100" : "text-neutral-500 hover:text-white"}`}
         >
@@ -407,7 +409,7 @@ function ModelPickerPopover({
               title={CODEX_STANDARD_LABEL}
               description="標準モデル。すぐに生成できます"
               icon="C"
-              selected={selectedCount === 0 && !selectedMagnific}
+              selected={selectedCount === 0 && magnificCount === 0}
               disabled={false}
               onToggle={onPickCodex}
               variant="muted"
@@ -466,31 +468,36 @@ function ModelPickerPopover({
 
         {providerTab === "magnific" && (
           <div className="space-y-1">
-            {FEATURED_MAGNIFIC_IMAGE_MODELS.map((model) => (
-              <ModelRow
-                key={model.id}
-                title={model.name}
-                description=""
-                icon="M"
-                selected={selectedMagnific === model.id}
-                disabled={false}
-                onToggle={() =>
-                  selectMagnific(selectedMagnific === model.id ? null : model.id)
-                }
-              />
-            ))}
+            {FEATURED_MAGNIFIC_IMAGE_MODELS.map((model) => {
+              const isSelected = selectedMagnificModels.includes(model.id);
+              return (
+                <ModelRow
+                  key={model.id}
+                  title={model.name}
+                  description=""
+                  icon="M"
+                  selected={isSelected}
+                  // 上限(4)に達したら未選択モデルは選べない(Higgsfieldと同じ)。
+                  disabled={!isSelected && magnificCount >= MAX_MAGNIFIC_COMPARE}
+                  onToggle={() => toggleMagnific(model.id)}
+                />
+              );
+            })}
           </div>
         )}
       </div>
       <div className="shrink-0 border-t border-[#242424] p-3">
         <div className="mb-2 flex items-center justify-between gap-2 text-[11px]">
           <span className="font-medium text-neutral-300">
-            {selectedMagnific
-              ? `Magnific: ${getMagnificModelName(selectedMagnific)}`
-              : `${selectedCount} 件選択 (最大 ${MAX_COMPARE_MODELS})`}
+            {magnificCount === 1
+              ? `Magnific: ${getMagnificModelName(selectedMagnificModels[0])}`
+              : magnificCount >= 2
+                ? `Magnific: ${magnificCount} 件選択 (最大 ${MAX_MAGNIFIC_COMPARE})`
+                : `${selectedCount} 件選択 (最大 ${MAX_COMPARE_MODELS})`}
           </span>
           <span className="font-semibold text-neutral-500">
-            推定: {selectedMagnific ? "—" : formatCost(cost)}
+            {/* Magnificはクレジット情報をMCPが返さないため推定は出さない(嘘の数字を出さない)。 */}
+            推定: {magnificCount > 0 ? "—" : formatCost(cost)}
           </span>
         </div>
         <button
@@ -498,13 +505,15 @@ function ModelPickerPopover({
           onClick={onClose}
           className="h-8 w-full rounded-md bg-pink-500 px-3 text-xs font-semibold text-white transition hover:bg-pink-600"
         >
-          {selectedMagnific
-            ? "Magnific で生成"
-            : selectedCount >= 2
-              ? `${selectedCount} モデルで比較生成`
-              : selectedCount === 1
-                ? "このモデルで生成"
-                : "選択を確定"}
+          {magnificCount >= 2
+            ? `Magnific ${magnificCount} モデルで比較生成`
+            : magnificCount === 1
+              ? "Magnific で生成"
+              : selectedCount >= 2
+                ? `${selectedCount} モデルで比較生成`
+                : selectedCount === 1
+                  ? "このモデルで生成"
+                  : "選択を確定"}
         </button>
       </div>
     </div>

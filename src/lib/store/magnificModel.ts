@@ -1,23 +1,27 @@
 import { create } from "zustand";
 
 // Magnific オプショナル拡張のモデル選択 (2026-06-08)。
-// 接続先タブで「Magnific」を選び、モデルを1つ選んだ状態を持つ。
-// null = Magnific未選択(=コア or Higgsfield を使う)。比較生成はサポートしない(MVP)。
+// 接続先タブで「Magnific」を選び、モデルを選んだ状態を持つ。
+// selectedModels: [] = Magnific未選択(=コア or Higgsfield)、1件 = 単一生成、2件以上 = 比較生成。
+// Higgsfield の selectedModels(配列) と同じ思想。比較生成は最大4モデル。
 
-const LS_KEY = "magnific.selectedModel";
+const LS_KEY = "magnific.selectedModels";
+export const MAX_MAGNIFIC_COMPARE = 4;
 
-function load(): string | null {
+function load(): string[] {
   try {
-    const v = localStorage.getItem(LS_KEY);
-    return v && v.length > 0 ? v : null;
+    const raw = localStorage.getItem(LS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((v) => typeof v === "string") : [];
   } catch {
-    return null;
+    return [];
   }
 }
 
-function save(model: string | null): void {
+function save(models: string[]): void {
   try {
-    if (model) localStorage.setItem(LS_KEY, model);
+    if (models.length > 0) localStorage.setItem(LS_KEY, JSON.stringify(models));
     else localStorage.removeItem(LS_KEY);
   } catch {
     /* ignore */
@@ -25,15 +29,30 @@ function save(model: string | null): void {
 }
 
 type MagnificModelState = {
-  /** 選択中の Magnific モデルid。null = 未選択(Magnificを使わない)。 */
-  selectedModel: string | null;
-  selectModel: (model: string | null) => void;
+  /** 選択中の Magnific モデルid配列。[] = 未選択。 */
+  selectedModels: string[];
+  /** モデルを選択/解除トグル。最大 MAX_MAGNIFIC_COMPARE まで。Immutable に新規配列を作る。 */
+  toggleModel: (model: string) => void;
+  /** 全選択解除。 */
+  clear: () => void;
 };
 
 export const useMagnificModel = create<MagnificModelState>((set) => ({
-  selectedModel: load(),
-  selectModel: (model) => {
-    save(model);
-    set({ selectedModel: model });
+  selectedModels: load(),
+  toggleModel: (model) =>
+    set((state) => {
+      const exists = state.selectedModels.includes(model);
+      // Immutability: 直接変更せず spread で新規配列を作る。
+      const next = exists
+        ? state.selectedModels.filter((m) => m !== model)
+        : state.selectedModels.length >= MAX_MAGNIFIC_COMPARE
+          ? state.selectedModels // 上限なら追加しない
+          : [...state.selectedModels, model];
+      save(next);
+      return { selectedModels: next };
+    }),
+  clear: () => {
+    save([]);
+    return set({ selectedModels: [] });
   },
 }));
