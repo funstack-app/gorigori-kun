@@ -42,8 +42,14 @@ pub async fn codex_text_query(
     let mut cmd = Command::new(&codex_bin);
     // --full-auto を付ける。付けないと Windows でデフォルトサンドボックスが
     // codex-windows-sandbox-setup.exe を要求して「見つかりません」エラーになる
-    // (画像生成 batch_gen と同じ問題。2026-06-08 Windows修正)。
-    cmd.args(["exec", "--full-auto", "--skip-git-repo-check", "--no-color"])
+    // (画像生成 batch_gen と同じ問題)。--full-auto は workspace-write sandbox を
+    // 選ぶため Windows で死ぬ。サンドボックス無効の bypass で回避(2026-06-09 修正)。
+    cmd.args([
+        "exec",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--skip-git-repo-check",
+        "--no-color",
+    ])
         .env("PATH", enriched_path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

@@ -206,7 +206,12 @@ pub async fn magnific_generate_batch(args: MagnificGenArgs) -> Result<MagnificGe
         let mut cmd = tokio::process::Command::new(&binary);
         cmd.args([
             "exec",
-            "--full-auto",
+            // Windows では --full-auto(=--sandbox workspace-write)が
+            // codex-windows-sandbox-setup.exe を要求して「見つかりません」で死ぬ。
+            // BYO 配布(ユーザー自身の PC・自身のサブスク=外部サンドボックス環境)では
+            // サンドボックス無効の bypass を使う。これで Windows でも生成できる
+            // (2026-06-09 Windows sandbox-setup.exe 不在エラーの修正)。
+            "--dangerously-bypass-approvals-and-sandbox",
             "--skip-git-repo-check",
             "--color",
             "never",

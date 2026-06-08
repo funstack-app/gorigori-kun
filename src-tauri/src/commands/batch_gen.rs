@@ -352,7 +352,13 @@ async fn run_one_worker_inner(
 
     // 4. codex exec を spawn (per-worker CODEX_HOME)
     let mut cmd = Command::new(&codex_bin);
-    cmd.args(["exec", "--full-auto", "--skip-git-repo-check"]);
+    // --full-auto(=workspace-write sandbox)は Windows で codex-windows-sandbox-setup.exe
+    // を要求して死ぬため、サンドボックス無効の bypass を使う(2026-06-09 Windows 修正)。
+    cmd.args([
+        "exec",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--skip-git-repo-check",
+    ]);
     if let Some(c) = cwd.as_deref().filter(|s| !s.is_empty()) {
         cmd.arg("-C").arg(c);
     }

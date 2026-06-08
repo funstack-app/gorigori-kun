@@ -431,3 +431,68 @@ fn spawn_stderr_logger(stderr: tokio::process::ChildStderr, buf: StderrBuffer) {
         }
     });
 }
+
+/// 生成失敗の生エラー文字列を、非エンジニアにも分かるメッセージに整形する。
+///
+/// 画像生成の失敗の多くは GORI 側のバグではなく外部 API(OpenAI gpt-image-2 /
+/// Higgsfield / Magnific)の一時障害や混雑が原因。生エラー(ServerError / HTTP 5xx
+/// / 401 等)をそのまま見せると「アプリが壊れた」と誤解されるため、外部要因と
+/// 分かる一文に変換する。判別できない失敗は元メッセージをそのまま返す。
+pub fn humanize_generation_failure(raw: &str) -> String {
+    let lower = raw.to_lowercase();
+    // OpenAI gpt-image-2 のサーバー側エラー(500系)。一番多い。
+    if lower.contains("servererror")
+        || lower.contains("server error")
+        || lower.contains("http 500")
+        || lower.contains("http 502")
+        || lower.contains("http 503")
+        || lower.contains("internal server error")
+        || lower.contains("bad gateway")
+        || lower.contains("service unavailable")
+    {
+        return "画像生成サーバーが混雑または一時的に不安定です（アプリの不具合ではありません）。少し時間をおいてから再生成してください。".to_string();
+    }
+    // 認証切れ(401)。再ログインで直る。
+    if lower.contains("http 401") || lower.contains("unauthorized") {
+        return "画像生成サービスの認証が切れている可能性があります。設定 → アカウントから再ログインしてください。".to_string();
+    }
+    // レート制限(429)。少し待てば直る。
+    if lower.contains("http 429") || lower.contains("rate limit") || lower.contains("too many requests")
+    {
+        return "短時間に生成しすぎてサーバーから一時的に制限されています。1〜2分おいてから再生成してください。".to_string();
+    }
+    // タイムアウト。
+    if lower.contains("タイムアウト") || lower.contains("timed out") || lower.contains("timeout") {
+        return "画像生成がタイムアウトしました。サーバーが混雑している可能性があります。少し時間をおいて再生成してください。".to_string();
+    }
+    // 判別できない失敗は元のメッセージを残す(原因究明のため)。
+    raw.to_string()
+}
+
+#[cfg(test)]
+mod humanize_tests {
+    use super::humanize_generation_failure;
+
+    #[test]
+    fn server_error_is_humanized() {
+        let raw = "3回試行しても生成できませんでした (shot_001 A): 生成画像が見つかりませんでした: shot_001 A (codex最終出力: NG 画像生成ツールでServerErrorが発生しました)";
+        let msg = humanize_generation_failure(raw);
+        assert!(msg.contains("混雑または一時的に不安定"));
+    }
+
+    #[test]
+    fn http_502_is_humanized() {
+        assert!(humanize_generation_failure("Higgsfield API error (HTTP 502)").contains("混雑または一時的に不安定"));
+    }
+
+    #[test]
+    fn unauthorized_is_humanized() {
+        assert!(humanize_generation_failure("returned HTTP 401").contains("再ログイン"));
+    }
+
+    #[test]
+    fn unknown_error_is_unchanged() {
+        let raw = "なにか未知のエラー xyz";
+        assert_eq!(humanize_generation_failure(raw), raw);
+    }
+}

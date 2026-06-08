@@ -2608,9 +2608,10 @@ async fn generate_one_take(
             }
         }
     }
-    Err(format!(
+    // 外部 API 障害(ServerError/5xx/401 等)なら非エンジニア向けの文言に整形する。
+    Err(crate::codex::process::humanize_generation_failure(&format!(
         "{STORYBOARD_MAX_ATTEMPTS}回試行しても生成できませんでした ({cut_id} {take_id}): {last_err}"
-    ))
+    )))
 }
 
 /// 1テイク生成の1試行。画像が出れば Ok、image_gen 未呼び出し等で画像が無ければ Err。
@@ -2651,10 +2652,11 @@ async fn attempt_one_take(
     let mut cmd = Command::new(codex_bin);
     cmd.args([
         "exec",
-        // Windows では `--sandbox workspace-write` が codex-windows-sandbox-setup.exe を
-        // 要求して「見つかりません」エラーになる。画像生成(batch_gen)と同じ --full-auto に
-        // 揃える (書き込み権限は維持) (2026-06-08 Windows生成不発の修正)。
-        "--full-auto",
+        // Windows では --full-auto(=--sandbox workspace-write)が
+        // codex-windows-sandbox-setup.exe を要求して「見つかりません」で死ぬ。
+        // サンドボックス無効の bypass を使う(2026-06-09 Windows修正。--full-auto
+        // では直らなかった)。BYO 配布はユーザー自身の PC=外部サンドボックス環境。
+        "--dangerously-bypass-approvals-and-sandbox",
         "--skip-git-repo-check",
         "--color",
         "never",
@@ -2825,10 +2827,11 @@ async fn codex_oneshot(
     let mut cmd = Command::new(codex_bin);
     cmd.args([
         "exec",
-        // Windows では `--sandbox workspace-write` が codex-windows-sandbox-setup.exe を
-        // 要求して「見つかりません」エラーになる。画像生成(batch_gen)と同じ --full-auto に
-        // 揃える (書き込み権限は維持) (2026-06-08 Windows生成不発の修正)。
-        "--full-auto",
+        // Windows では --full-auto(=--sandbox workspace-write)が
+        // codex-windows-sandbox-setup.exe を要求して「見つかりません」で死ぬ。
+        // サンドボックス無効の bypass を使う(2026-06-09 Windows修正。--full-auto
+        // では直らなかった)。BYO 配布はユーザー自身の PC=外部サンドボックス環境。
+        "--dangerously-bypass-approvals-and-sandbox",
         "--skip-git-repo-check",
         "--color",
         "never",
