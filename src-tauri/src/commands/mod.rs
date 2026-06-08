@@ -14,6 +14,7 @@ pub mod edit_segment;
 pub mod higgsfield;
 pub mod images;
 pub mod layer_splitter;
+pub mod magnific;
 pub mod mcp;
 pub mod multiangle;
 pub mod rpc_bridge;
