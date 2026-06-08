@@ -1,5 +1,7 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 
+import { storyboard } from "../lib/ipc";
+import { usePlanChat } from "../lib/store/planChat";
 import { useStoryboardRun, type CutState } from "../lib/store/storyboardRun";
 
 const STATUS_CLASS: Record<CutState["status"], string> = {
@@ -29,6 +31,30 @@ export function StoryboardCutCard({ cut }: { cut: CutState }) {
   const selectTake = useStoryboardRun((s) => s.selectTake);
   const regenerateCut = useStoryboardRun((s) => s.regenerateCut);
   const skipCut = useStoryboardRun((s) => s.skipCut);
+  const activeRunId = useStoryboardRun((s) => s.activeRunId);
+  const storyboardParams = usePlanChat((s) => s.storyboardParams);
+
+  // その場で1枚だけ再生成する (2026-06-08 STΛCK指示「1枚生成＋気に入らなければその場で再生成」)。
+  // 旧 regenerateCut() は UI を running 表示に戻すだけでバックエンド未接続だった。
+  // ここで storyboard_regenerate_cut を実呼び出しし、新 take が TakeCompleted で
+  // 既存ストアに追加されるようにする。参照画像/比率は planChat.storyboardParams から取る。
+  const handleRegenerate = () => {
+    regenerateCut(cut.cutId); // UI を「生成中」表示に戻す (既存挙動を維持)
+    if (!activeRunId) return;
+    void storyboard
+      .regenerateCut({
+        runId: activeRunId,
+        cutId: cut.cutId,
+        characterReferenceImage: storyboardParams?.character_reference_path ?? "",
+        styleReferenceImage: storyboardParams?.style_reference_path,
+        additionalRefs: [],
+        aspectRatio: storyboardParams?.aspect_ratio ?? "9:16",
+        cutDescription: cut.description ?? "",
+      })
+      .catch(() => {
+        // 失敗は UI 上 running のまま残るが、握りつぶさず将来トースト化する余地を残す。
+      });
+  };
 
   const selectedIndex = cut.takes.findIndex((t) => t.takeId === cut.selectedTakeId);
   const selected =
@@ -127,7 +153,7 @@ export function StoryboardCutCard({ cut }: { cut: CutState }) {
               </button>
               <button
                 type="button"
-                onClick={() => regenerateCut(cut.cutId)}
+                onClick={handleRegenerate}
                 className="rounded border border-amber-400/50 bg-amber-500/10 px-2 py-1 text-[10px] font-bold text-amber-100 hover:border-amber-400"
               >
                 再生成

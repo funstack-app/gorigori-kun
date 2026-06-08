@@ -241,8 +241,12 @@ export const useStoryboardRun = create<StoryboardRunState>((set) => ({
   generationCutSketchMeta: {} as Record<string, StoryboardSketchCut>,
   setGenerationCutSketchMeta: (meta) => set({ generationCutSketchMeta: meta }),
   // P10: 同時生成枚数 (デフォルト)
+  // 2026-06-08 速度優先(STΛCK指示): デフォルトを 3→1 に変更。
+  // 3枚並列だと「一番遅い1枚」を毎カット待つ(実測 最遅573秒)のが体感の遅さの主因。
+  // 1枚なら各カット約130秒で即完成・即表示され、気に入らなければカードの再生成で
+  // その場で作り直せる(storyboard_regenerate_cut)。複数候補が欲しい人はUIで2/3に上げる。
   sketchCandidatesPerCut: 1 as 1 | 2 | 3,
-  generationCandidatesPerCut: 3 as 1 | 2 | 3,
+  generationCandidatesPerCut: 1 as 1 | 2 | 3,
 
   beginRun: (runId, params) =>
     set((s) => {
