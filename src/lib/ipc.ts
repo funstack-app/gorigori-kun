@@ -365,11 +365,26 @@ export type MagnificStatus = {
   authenticated: boolean;
 };
 
+export type MagnificGenArgs = {
+  prompt: string;
+  model: string;
+  aspect?: string;
+  count?: number;
+  refImagePaths?: string[];
+};
+
 export const magnific = {
   status: () => invoke<MagnificStatus>("magnific_status"),
   /** codex mcp add で MCP登録+OAuthフロー開始。ブラウザでログイン完了する。 */
   login: () => invoke<string>("magnific_login"),
   logout: () => invoke<void>("magnific_logout"),
+  /** Magnific MCP経由で生成しURLをDLして generated_images に保存。コアと同じ結果型。 */
+  generateBatch: (args: MagnificGenArgs) =>
+    invoke<{
+      generatedPaths: string[];
+      failedCount: number;
+      errors: string[];
+    }>("magnific_generate_batch", { args }),
 };
 
 export const higgsfield = {

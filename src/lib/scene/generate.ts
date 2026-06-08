@@ -1,4 +1,4 @@
-import { higgsfield, images } from "../ipc";
+import { higgsfield, images, magnific } from "../ipc";
 import { buildPrompt } from "./buildPrompt";
 import type { SceneState } from "./types";
 
@@ -32,6 +32,10 @@ export type SceneGenerationOptions = {
     jobSetType: string;
     displayName: string;
   }[];
+  // Magnific オプショナル拡張 (2026-06-08)。Magnificモデルが選ばれたときだけセットされる。
+  magnific?: {
+    model: string;
+  };
 };
 
 type SceneReferenceImage = {
@@ -93,6 +97,24 @@ export async function generateFromScene(
       aspect,
     });
     return { ...r, errors: r.errors ?? [] };
+  }
+
+  // Magnific オプショナル拡張 (2026-06-08)。Magnificモデルが選ばれたときだけこの経路。
+  // コア(下の codex/image_gen) には一切影響しない。MCP経由生成→URL DL→保存。
+  if (options.magnific) {
+    const r = await magnific.generateBatch({
+      prompt,
+      model: options.magnific.model,
+      count: options.count,
+      aspect,
+      refImagePaths,
+    });
+    return {
+      batchId: `magnific-${Date.now()}`,
+      generatedPaths: r.generatedPaths,
+      failedCount: r.failedCount,
+      errors: r.errors ?? [],
+    };
   }
 
   // codex/image_gen 経路: Rust(batch_gen.rs)が失敗 worker の理由を errors に

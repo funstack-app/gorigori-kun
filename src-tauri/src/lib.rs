@@ -404,6 +404,7 @@ pub fn run() {
             commands::magnific::magnific_status,
             commands::magnific::magnific_login,
             commands::magnific::magnific_logout,
+            commands::magnific::magnific_generate_batch,
             commands::batch_gen::images_generate_batch,
             commands::sessions::sessions_list,
             commands::sessions::session_create,
