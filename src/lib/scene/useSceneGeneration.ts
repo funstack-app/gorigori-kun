@@ -7,9 +7,11 @@ import {
 } from "./generate";
 import { classifyFailures } from "./retryClassify";
 import type { SceneState } from "./types";
+import { useActiveProject } from "../store/activeProject";
 import { useAuth } from "../store/auth";
 import { useBatches } from "../store/batches";
 import { useComposer } from "../store/composer";
+import { useProjects } from "../store/projects";
 import { useHiggsfieldModel } from "../store/higgsfieldModel";
 import { useMagnificModel } from "../store/magnificModel";
 import { getMagnificModelName } from "../magnific/models";
@@ -52,7 +54,9 @@ const MAX_GENERATION_ATTEMPTS = 3;
 
 /** 全件失敗だったか (1 枚も生成できなかった)。 */
 function isTotalFailure(result: SceneGenerationResult): boolean {
-  return result.generatedPaths.length === 0;
+  // Magnific 比較生成では generatedPaths に「失敗枠の空文字」が混じる
+  // (モデル index 対応を保つため。generate.ts 参照)。空文字は成功に数えない。
+  return result.generatedPaths.filter(Boolean).length === 0;
 }
 
 function basename(path: string): string {
@@ -299,6 +303,24 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
             failedCount: result.failedCount,
             provider: "magnific",
           });
+          // Magnific はフロントで completed を手動発火するだけで、コア/Higgsfield の
+          // ような workerCompleted イベントが流れない。そのため App.tsx の
+          // workerCompleted→activeProject 自動追加(addItem)経路を通らず、
+          // プロジェクト選択中は完了した瞬間にタイムラインのフィルタ
+          // (GenerationWorkspace の projectImagePaths.has(path))で除外されて
+          // カードが消えていた(2026-06-08 実機バグ。ライブラリには残るのに
+          // タイムラインから消える)。ここで手動で activeProject に追加して
+          // 他 provider と挙動を揃える。
+          const activeProjectId = useActiveProject.getState().activeProjectId;
+          if (activeProjectId) {
+            for (const path of result.generatedPaths) {
+              if (!path) continue; // 失敗枠の空文字はスキップ
+              useProjects.getState().addItem(activeProjectId, {
+                imagePath: path,
+                prompt,
+              });
+            }
+          }
         }
         return { result, tempId };
       } catch (error) {
@@ -354,7 +376,9 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
         lastResult = result;
         lastError = null;
 
-        const okCount = result.generatedPaths.length;
+        // Magnific 比較生成は generatedPaths に失敗枠の空文字が混じるため、
+        // 空文字を除いた実数で成功枚数を数える(嘘の枚数を出さない)。
+        const okCount = result.generatedPaths.filter(Boolean).length;
 
         // 1 枚でも生成できた = 部分成功以上。リトライせず結果を返す。
         if (!isTotalFailure(result)) {
