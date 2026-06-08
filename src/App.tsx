@@ -1519,8 +1519,11 @@ function UsageGauges() {
   // 代わりに、連携済みの外部サービスのクレジット数だけをリアルタイムで表示する。
   const hfCredits = useAccounts((s) => s.higgsfield.credits);
   const hfAuthed = useAccounts((s) => s.higgsfield.authenticated);
+  // Magnific オプショナル拡張 (2026-06-08)。接続済みならバッジを出す(degrade)。
+  const magnificAuthed = useAccounts((s) => s.magnific.authenticated);
 
   // Higgsfield credits を取得 (認証済みのときだけ)。起動時 + 5 分ごとに refresh。
+  // Magnific の接続状態も同タイミングで refresh する。
   useEffect(() => {
     let cancelled = false;
     const fetchCredits = async () => {
@@ -1528,6 +1531,10 @@ function UsageGauges() {
       await useAccounts
         .getState()
         .refreshHiggsfield()
+        .catch(() => undefined);
+      await useAccounts
+        .getState()
+        .refreshMagnific()
         .catch(() => undefined);
     };
     void fetchCredits();
@@ -1538,20 +1545,31 @@ function UsageGauges() {
     };
   }, []);
 
-  // Higgsfield 未認証なら何も表示しない (連携後にクレジット数だけ表示)
-  if (!hfAuthed || hfCredits === undefined) {
+  const showHf = hfAuthed && hfCredits !== undefined;
+  // どちらの拡張も未接続なら何も表示しない (コアだけの素の状態)。
+  if (!showHf && !magnificAuthed) {
     return null;
   }
 
   return (
     <div className="flex items-center gap-2">
-      <div
-        className="flex items-center gap-1.5 rounded-md border border-pink-400/40 bg-pink-500/10 px-2.5 py-1 text-[11px] font-bold text-pink-100"
-        title={`HiggsField credits: ${Math.round(hfCredits)}`}
-      >
-        <span className="text-pink-300">⚡ HiggsField</span>
-        <span className="tabular-nums text-white">{Math.round(hfCredits)}</span>
-      </div>
+      {showHf && (
+        <div
+          className="flex items-center gap-1.5 rounded-md border border-pink-400/40 bg-pink-500/10 px-2.5 py-1 text-[11px] font-bold text-pink-100"
+          title={`HiggsField credits: ${Math.round(hfCredits)}`}
+        >
+          <span className="text-pink-300">⚡ HiggsField</span>
+          <span className="tabular-nums text-white">{Math.round(hfCredits)}</span>
+        </div>
+      )}
+      {magnificAuthed && (
+        <div
+          className="flex items-center gap-1.5 rounded-md border border-violet-400/40 bg-violet-500/10 px-2.5 py-1 text-[11px] font-bold text-violet-100"
+          title="Magnific 接続済み"
+        >
+          <span className="text-violet-300">⚡ Magnific</span>
+        </div>
+      )}
     </div>
   );
 }
