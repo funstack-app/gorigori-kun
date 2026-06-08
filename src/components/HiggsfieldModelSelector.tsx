@@ -12,9 +12,15 @@ import {
   type ModelLabel,
 } from "../lib/higgsfield/unlimited";
 import { useHiggsfieldModel, type SelectedModel } from "../lib/store/higgsfieldModel";
+import { useMagnificModel } from "../lib/store/magnificModel";
+import { useAccounts } from "../lib/store/accounts";
+import { FEATURED_MAGNIFIC_IMAGE_MODELS } from "../lib/magnific/models";
 import { useSceneStore } from "../lib/store/scene";
 import { useScenePromptOverride } from "../lib/store/scenePrompt";
 import { useToasts } from "../lib/store/toasts";
+
+// 接続先タブ (2026-06-08)。デフォルト(コア)の下にタブを置き、接続先ごとにモデルを切り替える。
+type ProviderTab = "default" | "higgsfield" | "magnific";
 
 type LoadState = "idle" | "loading" | "ready" | "missing" | "needsAuth" | "error";
 type CostState =
@@ -274,6 +280,15 @@ function ModelPickerPopover({
   const [cost, setCost] = useState<CostState>({ kind: "idle" });
   const selectedCount = selectedModels.length;
 
+  // Magnific オプショナル拡張 (2026-06-08)。接続済みのときだけタブが出る(degrade)。
+  const setSelectedModels = useHiggsfieldModel((s) => s.setSelectedModels);
+  const magnificAuthed = useAccounts((s) => s.magnific.authenticated);
+  const selectedMagnific = useMagnificModel((s) => s.selectedModel);
+  const selectMagnific = useMagnificModel((s) => s.selectModel);
+  const [providerTab, setProviderTab] = useState<ProviderTab>(
+    selectedMagnific ? "magnific" : selectedCount > 0 ? "higgsfield" : "default",
+  );
+
   useEffect(() => {
     let cancelled = false;
     if (selectedModels.length === 0) {
@@ -345,70 +360,127 @@ function ModelPickerPopover({
           className="h-8 w-full rounded-md border border-[#343434] bg-[#101010] px-2 text-xs text-neutral-100 outline-none placeholder:text-neutral-600 focus:border-pink-400"
         />
       </div>
+      {/*
+        接続先タブ (2026-06-08 STΛCK構想)。デフォルト(コア)の下にタブを置き、
+        接続済みの拡張ごとにモデルを切り替える。未接続の拡張はタブが出ない(degrade)。
+        タブ切替時は他providerの選択をクリアして排他にする(コアを壊さない)。
+      */}
+      <div className="flex shrink-0 gap-1 border-b border-[#242424] px-2 pt-2">
+        <button
+          type="button"
+          onClick={() => {
+            setProviderTab("default");
+            setSelectedModels([]);
+            selectMagnific(null);
+          }}
+          className={`rounded-t-md px-2.5 py-1 text-[11px] font-bold ${providerTab === "default" ? "bg-[#1e1e1e] text-white" : "text-neutral-500 hover:text-white"}`}
+        >
+          デフォルト
+        </button>
+        <button
+          type="button"
+          onClick={() => {
+            setProviderTab("higgsfield");
+            selectMagnific(null);
+          }}
+          className={`rounded-t-md px-2.5 py-1 text-[11px] font-bold ${providerTab === "higgsfield" ? "bg-pink-500/20 text-pink-100" : "text-neutral-500 hover:text-white"}`}
+        >
+          HiggsField
+        </button>
+        {magnificAuthed && (
+          <button
+            type="button"
+            onClick={() => {
+              setProviderTab("magnific");
+              setSelectedModels([]);
+            }}
+            className={`rounded-t-md px-2.5 py-1 text-[11px] font-bold ${providerTab === "magnific" ? "bg-violet-500/20 text-violet-100" : "text-neutral-500 hover:text-white"}`}
+          >
+            Magnific
+          </button>
+        )}
+      </div>
       <div className="min-h-0 flex-1 overflow-y-auto p-2">
-        {/*
-          一番上に「接続先で拡張できます」案内を常時表示。
-          STΛCK 指示 (2026-05-17): 内部実装の説明 (image_gen 等) は
-          ユーザー向け表現として不適切なので削除。代わりに
-          「設定から外部連携するとここが変わります」案内を最初に置く。
-        */}
-        <div className="mb-3 rounded-md border border-[#2a2a2a] bg-[#101010] p-2.5 text-[11px] leading-relaxed text-neutral-400">
-          設定の「接続先」から拡張機能を有効にすると、ここにモデルが増えます。
-        </div>
+        {providerTab === "default" && (
+          <div className="mb-3">
+            <ModelRow
+              title={CODEX_STANDARD_LABEL}
+              description="標準モデル。すぐに生成できます"
+              icon="C"
+              selected={selectedCount === 0 && !selectedMagnific}
+              disabled={false}
+              onToggle={onPickCodex}
+              variant="muted"
+            />
+          </div>
+        )}
 
-        <div className="mb-3">
-          <ModelRow
-            title={CODEX_STANDARD_LABEL}
-            description="標準モデル。すぐに生成できます"
-            icon="C"
-            selected={selectedCount === 0}
-            disabled={false}
-            onToggle={onPickCodex}
-            variant="muted"
-          />
-        </div>
+        {providerTab === "higgsfield" &&
+          (sections.length === 0 ? (
+            <p className="rounded-md px-2 py-3 text-center text-[11px] text-neutral-600">
+              設定の「接続先」から HiggsField を接続するとモデルが出ます。
+            </p>
+          ) : (
+            sections.map((section) => (
+              <section key={section.title} className="mb-3 last:mb-0">
+                <div className="mb-1 flex items-center justify-between gap-2 px-1">
+                  <h4 className="text-[10px] font-semibold uppercase tracking-wide text-neutral-500">
+                    {section.title}
+                  </h4>
+                  <span className="text-[10px] font-medium text-neutral-700">
+                    {section.items.length}
+                  </span>
+                </div>
+                {section.items.length > 0 ? (
+                  <div className="space-y-1">
+                    {section.items.map((model) => {
+                      const selected = selectedJobSetTypes.has(model.jobSetType);
+                      const shownName = getDisplayName(model);
+                      return (
+                        <ModelRow
+                          key={model.jobSetType}
+                          title={shownName}
+                          description={MODEL_DESCRIPTIONS[model.jobSetType] ?? ""}
+                          icon={getModelIcon(model)}
+                          label={getModelLabel(planType, model.jobSetType)}
+                          selected={selected}
+                          disabled={!selected && selectedCount >= MAX_COMPARE_MODELS}
+                          onToggle={() =>
+                            onToggleModel({
+                              jobSetType: model.jobSetType,
+                              displayName: shownName,
+                            })
+                          }
+                        />
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <p className="rounded-md px-2 py-3 text-center text-[11px] text-neutral-600">
+                    該当モデルがありません
+                  </p>
+                )}
+              </section>
+            ))
+          ))}
 
-        {sections.map((section) => (
-          <section key={section.title} className="mb-3 last:mb-0">
-            <div className="mb-1 flex items-center justify-between gap-2 px-1">
-              <h4 className="text-[10px] font-semibold uppercase tracking-wide text-neutral-500">
-                {section.title}
-              </h4>
-              <span className="text-[10px] font-medium text-neutral-700">
-                {section.items.length}
-              </span>
-            </div>
-            {section.items.length > 0 ? (
-              <div className="space-y-1">
-                {section.items.map((model) => {
-                  const selected = selectedJobSetTypes.has(model.jobSetType);
-                  const shownName = getDisplayName(model);
-                  return (
-                    <ModelRow
-                      key={model.jobSetType}
-                      title={shownName}
-                      description={MODEL_DESCRIPTIONS[model.jobSetType] ?? ""}
-                      icon={getModelIcon(model)}
-                      label={getModelLabel(planType, model.jobSetType)}
-                      selected={selected}
-                      disabled={!selected && selectedCount >= MAX_COMPARE_MODELS}
-                      onToggle={() =>
-                        onToggleModel({
-                          jobSetType: model.jobSetType,
-                          displayName: shownName,
-                        })
-                      }
-                    />
-                  );
-                })}
-              </div>
-            ) : (
-              <p className="rounded-md px-2 py-3 text-center text-[11px] text-neutral-600">
-                該当モデルがありません
-              </p>
-            )}
-          </section>
-        ))}
+        {providerTab === "magnific" && (
+          <div className="space-y-1">
+            {FEATURED_MAGNIFIC_IMAGE_MODELS.map((model) => (
+              <ModelRow
+                key={model.id}
+                title={model.name}
+                description=""
+                icon="M"
+                selected={selectedMagnific === model.id}
+                disabled={false}
+                onToggle={() =>
+                  selectMagnific(selectedMagnific === model.id ? null : model.id)
+                }
+              />
+            ))}
+          </div>
+        )}
       </div>
       <div className="shrink-0 border-t border-[#242424] p-3">
         <div className="mb-2 flex items-center justify-between gap-2 text-[11px]">

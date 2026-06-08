@@ -11,6 +11,7 @@ import { useAuth } from "../store/auth";
 import { useBatches } from "../store/batches";
 import { useComposer } from "../store/composer";
 import { useHiggsfieldModel } from "../store/higgsfieldModel";
+import { useMagnificModel } from "../store/magnificModel";
 import { useSceneStore } from "../store/scene";
 import { useScenePromptOverride } from "../store/scenePrompt";
 import { useSessions } from "../store/sessions";
@@ -99,6 +100,8 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
   const cwd = useThreads((state) => state.cwd);
   const [count, setCount] = useState<SceneGenerationCount>(4);
   const selectedHiggsfieldModels = useHiggsfieldModel((state) => state.selectedModels);
+  // Magnific オプショナル拡張 (2026-06-08)。選択中なら codex/higgsfield より優先する。
+  const selectedMagnificModel = useMagnificModel((state) => state.selectedModel);
   const selectedHiggsfield = useMemo(() => {
     const first = selectedHiggsfieldModels[0];
     if (!first) return null;
@@ -235,8 +238,18 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
           promptOverride: prompt,
           refImagePaths,
           maskPaths: refImagePaths.map(() => ""),
-          higgsfield: compareMode ? undefined : (selectedHiggsfield ?? undefined),
-          higgsfieldModels: compareMode ? selectedHiggsfieldModels : undefined,
+          // Magnific が選ばれていたら最優先 (higgsfield/codex は使わない)。
+          magnific: selectedMagnificModel
+            ? { model: selectedMagnificModel }
+            : undefined,
+          higgsfield:
+            selectedMagnificModel || compareMode
+              ? undefined
+              : (selectedHiggsfield ?? undefined),
+          higgsfieldModels:
+            selectedMagnificModel || !compareMode
+              ? undefined
+              : selectedHiggsfieldModels,
         });
         return { result, tempId };
       } catch (error) {
