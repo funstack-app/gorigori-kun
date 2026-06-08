@@ -36,6 +36,9 @@ pub struct CleanupReport {
     pub sessions_bytes_freed: u64,
     pub generated_images_deleted: u64,
     pub generated_images_bytes_freed: u64,
+    /// Codex ログ (logs_2.sqlite*) と WebView キャッシュの解放バイト数。
+    /// FB-A4: 掃除前 inspect で表示していたのに run_cleanup が消していなかった分。
+    pub cache_bytes_freed: u64,
     pub errors: Vec<String>,
 }
 
@@ -118,16 +121,65 @@ pub async fn run_cleanup() -> Result<CleanupReport, String> {
         }
     }
 
+    // 3. Codex ログ (logs_2.sqlite*) と WebView キャッシュ。
+    //    FB-A4: これらは掃除前の inspect では合計に表示されていたのに run_cleanup が
+    //    一切消していなかったため、「今すぐ整理する」を押しても合計がほとんど減らず
+    //    「効かない」と見えていた。inspect が表示する一時データはすべて掃除対象にする。
+    //    どちらも再生成される一時データなので削除して問題ない (ログは debug 用、
+    //    WebView キャッシュは次回起動時に WebView が作り直す)。
+    if let Some(home) = dirs::home_dir() {
+        // Codex ログ (専用 CODEX_HOME と 旧 ~/.codex の両方)
+        let mut log_homes: Vec<PathBuf> = Vec::new();
+        if let Some(gori) = gori_codex_home_dir() {
+            log_homes.push(gori);
+        }
+        if let Some(legacy) = legacy_codex_home_dir() {
+            if !log_homes.iter().any(|h| h == &legacy) {
+                log_homes.push(legacy);
+            }
+        }
+        for ch in &log_homes {
+            for name in ["logs_2.sqlite", "logs_2.sqlite-wal", "logs_2.sqlite-shm"] {
+                report.cache_bytes_freed += remove_file_if_exists(&ch.join(name)).await;
+            }
+        }
+
+        // WebView キャッシュ (macOS のみ実体あり。他 OS では候補が存在せず 0)
+        for rel in ["Library/Caches/gori-gori-kun", "Library/WebKit/gori-gori-kun"] {
+            let dir = home.join(rel);
+            if dir.exists() {
+                match remove_dir_contents(&dir).await {
+                    Ok((_, bytes)) => report.cache_bytes_freed += bytes,
+                    Err(err) => report.errors.push(format!("cache: {err}")),
+                }
+            }
+        }
+    }
+
     tracing::info!(
         target: "storage.cleanup",
         sessions = report.sessions_deleted,
         sessions_mb = report.sessions_bytes_freed / 1_000_000,
         generated = report.generated_images_deleted,
         generated_mb = report.generated_images_bytes_freed / 1_000_000,
+        cache_mb = report.cache_bytes_freed / 1_000_000,
         "cleanup completed"
     );
 
     Ok(report)
+}
+
+/// ファイルが存在すれば削除し、解放したバイト数を返す。存在しない/失敗時は 0。
+async fn remove_file_if_exists(path: &std::path::Path) -> u64 {
+    let size = match fs::metadata(path).await {
+        Ok(m) if m.is_file() => m.len(),
+        _ => return 0,
+    };
+    if fs::remove_file(path).await.is_ok() {
+        size
+    } else {
+        0
+    }
 }
 
 /// 旧 ambient `~/.codex`。generated_images の遺物削除と sessions 後方互換掃除に使う。

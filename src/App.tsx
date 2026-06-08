@@ -37,12 +37,15 @@ import { useDragHover } from "./lib/store/dragHover";
 import { useImagePreview } from "./lib/store/imagePreview";
 import { type GalleryItem, useImages } from "./lib/store/images";
 import { useLibrarySelection } from "./lib/store/librarySelection";
+import { useMultiAngleRun } from "./lib/store/multiAngleRun";
+import { usePlanChat } from "./lib/store/planChat";
 import { type Project, useProjects } from "./lib/store/projects";
 import { usePromptHistory } from "./lib/store/promptHistory";
 import { useSavedPrompts } from "./lib/store/savedPrompts";
 import { useSceneStore } from "./lib/store/scene";
 import { type Session, useSessions } from "./lib/store/sessions";
 import { useSettings } from "./lib/store/settings";
+import { useStoryboardRun } from "./lib/store/storyboardRun";
 import { useThreads } from "./lib/store/threads";
 import { useToasts } from "./lib/store/toasts";
 import {
@@ -178,6 +181,27 @@ const IMAGE_EXTS = ["png", "jpg", "jpeg", "webp", "gif", "bmp"];
 
 function basename(p: string) {
   return p.split("/").pop() ?? p;
+}
+
+/**
+ * トーストに出す前に、生のエラー文字列 (Tauri 権限エラー等) を
+ * 人間向けの簡潔なメッセージに変換する。
+ *
+ * 生エラーをそのまま出すと
+ * 「... fs.write_text_file not allowed. Permissions associated with this command: ...」
+ * のような長文がトーストにあふれて読めない。代表的なケースを固定文言にする。
+ */
+function humanizeError(err: unknown): string {
+  const raw = String(err);
+  if (/not allowed|forbidden|permission|scope/i.test(raw)) {
+    return "保存先の権限がありません。設定 → 保存先で保存先を確認してください。";
+  }
+  if (/no such file|not found|enoent/i.test(raw)) {
+    return "ファイルが見つかりませんでした。";
+  }
+  // 上記以外は 1 行に丸めて出す (改行・連続空白を畳んで長すぎる場合は切る)。
+  const compact = raw.replace(/\s+/g, " ").trim();
+  return compact.length > 120 ? `${compact.slice(0, 117)}…` : compact;
 }
 
 async function droppedFileToReference(file: File): Promise<Reference | null> {
@@ -422,11 +446,15 @@ function SignedInScaffold() {
     //   - 参照画像 (シーン構築) 横のプロジェクト名タグがこの新プロジェクト名に切り替わる
     //   - useProjects は zustand store なので、ActiveProjectSelector (プルダウン)
     //     と ProjectsWorkspace (プロジェクトページ) も自動で同期する
+    const prevProjectId = useActiveProject.getState().activeProjectId;
     const created = useProjects.getState().createProject(name);
     // 新規プロジェクト作成も「別案件を始める」切替なので、前案件のシーン構築値を
     // クリアする (#5/R-2 残留対策 2026-06-07)。override は ActiveProjectSelector の
     // switchActiveProject と同じく消さない (動画 i2v を巻き込まないため)。
     useSceneStore.getState().resetScene();
+    // FB#A6 (2026-06-08): 企画チャットもプロジェクトに紐づける。旧プロジェクトへ
+    // 現在の会話を保存してから、新規プロジェクト (planChat 空) をロード = ゼロスタート。
+    usePlanChat.getState().switchToProject(prevProjectId, created.id);
     useActiveProject.getState().setActive(created.id);
     setDrawer(null);
     // 作成完了の視覚フィードバック (画面のどこを見ても変化があるか分かりにくいため)
@@ -1248,7 +1276,7 @@ function CreationPanel() {
         pushToast({ kind: "success", text: `${refs.length} 枚を参照に追加しました`, ttlMs: 2400 });
       }
     } catch (err) {
-      pushToast({ kind: "error", text: `画像選択に失敗: ${String(err)}`, ttlMs: 4000 });
+      pushToast({ kind: "error", text: `画像選択に失敗しました。${humanizeError(err)}`, ttlMs: 4000 });
     }
   };
 
@@ -1465,7 +1493,12 @@ function Rail({
 
 function BoardHeader({ title, activePage }: { title: string; activePage: DrawerKind }) {
   const batches = useBatches((s) => s.batches);
-  const running = batches.some((b) => b.status === "running");
+  // 制作タブ (バッチ生成) だけでなく、スキルモード (絵コンテ / マルチアングルの
+  // カット並列生成) の生成中も右上バッジに反映する。いずれかが running なら「生成中」。
+  const storyboardRunning = useStoryboardRun((s) => s.status === "running");
+  const multiAngleRunning = useMultiAngleRun((s) => s.status === "running");
+  const running =
+    batches.some((b) => b.status === "running") || storyboardRunning || multiAngleRunning;
   // 制作タブ (activePage === null) のときは、内部の WorkspaceTabs で
   // 「企画 / 生成 / 編集」のいずれかが選ばれている。タイトルもそれに追従する。
   const activeTab = useWorkspace((s) => s.activeTab);
@@ -2321,8 +2354,18 @@ function ProjectDetailPanel({
       const csv = useProjects.getState().buildCreditsCsv(project.id);
       const { save } = await import("@tauri-apps/plugin-dialog");
       const safeName = project.name.replace(/[\\/:*?"<>|]/g, "_") || "project";
+      // 保存先のデフォルトを「書類」フォルダにする。fs:scope で許可済みの場所
+      // (書類 / デスクトップ / ダウンロード) に着地させることで、保存ダイアログ
+      // 直後の writeTextFile が権限エラーで失敗しないようにする。
+      let defaultPath = `${safeName}-credits.csv`;
+      try {
+        const { documentDir, join } = await import("@tauri-apps/api/path");
+        defaultPath = await join(await documentDir(), `${safeName}-credits.csv`);
+      } catch {
+        // 書類フォルダの解決に失敗してもファイル名だけで続行する。
+      }
       const dest = await save({
-        defaultPath: `${safeName}-credits.csv`,
+        defaultPath,
         filters: [{ name: "CSV", extensions: ["csv"] }],
       });
       if (!dest) {
@@ -2341,7 +2384,7 @@ function ProjectDetailPanel({
     } catch (err) {
       pushToast({
         kind: "error",
-        text: `クレジット CSV の保存に失敗しました: ${String(err)}`,
+        text: `クレジット CSV の保存に失敗しました。${humanizeError(err)}`,
       });
     }
   };
@@ -2908,7 +2951,7 @@ function BoardEmptyState() {
         push({ kind: "success", text: `${refs.length} 枚を参照に追加しました`, ttlMs: 2400 });
       }
     } catch (err) {
-      push({ kind: "error", text: `画像選択に失敗: ${String(err)}`, ttlMs: 4000 });
+      push({ kind: "error", text: `画像選択に失敗しました。${humanizeError(err)}`, ttlMs: 4000 });
     }
   };
 

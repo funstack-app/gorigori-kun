@@ -28,9 +28,20 @@ export function resetSkillScopedState(enteringSkillId?: string | null): void {
   const isStoryboard = enteringSkillId === "gori-storyboard";
 
   // 企画タブ (storyboard 等の企画フェーズで使う共有チャット)。
-  // ストーリーカット生成へ入るときは企画チャット (sceneConstruction含む) を保護する。
-  if (!isStoryboard) {
-    const planChat = usePlanChat.getState();
+  //
+  // FB#A7 (2026-06-08): スキルモードはゼロスタート。制作モードで企画チャットした
+  // 状態のままスキルモードへ入ると、Phase 1 ゴール深掘りがその会話を引き継いで
+  // しまっていた。スキルへ入るときは企画チャットを破棄して 01 の初期状態から始める。
+  //
+  // ただし sceneConstruction が **既にある** 場合だけは保護する。
+  // これは「目標確定→本生成に進む」中で resetSkillScopedState がもう一度走る経路で、
+  // ここで企画チャット (sceneConstruction を含む) を消すと本生成入力が失われ
+  // 「目標確定→本生成に進んでも生成が始まらない」バグになる (2026-06-07 STΛCK報告)。
+  // フレッシュ起動 (sceneConstruction 未生成) なら storyboard でもゼロスタートする。
+  const planChat = usePlanChat.getState();
+  const hasSceneConstruction = planChat.sceneConstruction !== null;
+  const protectPlanChat = isStoryboard && hasSceneConstruction;
+  if (!protectPlanChat) {
     planChat.resetThread();
     planChat.clearPendingImages();
   }

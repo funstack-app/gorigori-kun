@@ -9,6 +9,7 @@ import {
 } from "../lib/ipc";
 import { useImagePreview } from "../lib/store/imagePreview";
 import { useImages } from "../lib/store/images";
+import { useProjects } from "../lib/store/projects";
 import { useToasts } from "../lib/store/toasts";
 
 /**
@@ -21,14 +22,25 @@ import { useToasts } from "../lib/store/toasts";
  * - ファイル名
  *
  * メタ情報の取得手順:
- *  1. history.recent(120) で最近の turn 一覧を取る
+ *  1. history.recent(2000) で履歴の turn 一覧を取る（直近 120 件だけだと
+ *     少し前の生成のプロンプトが拾えず「履歴に紐付いていません」になるため、
+ *     Rust 側 clamp 上限の 2000 まで広げる）
  *  2. その中から、対象 imagePath を含む turn を逆引き
  *     （turn ごとに getTurn を呼んで images に該当 path があるか確認）
  *  3. 見つかった turn の prompt / model / effort / refImagePaths を表示
+ *  4. turn が見つからなくても、projects.json のいずれかの item.prompt に
+ *     同じ imagePath があればそれをプロンプトとして表示する。
+ *     Storyboard / マルチアングル等、turn を持たず projects.json 側にだけ
+ *     プロンプトを保存する生成方法でもプロンプトをコピーできるようにする。
  *
- * ヒットしなかった場合（古すぎる、ライブラリスキャンで拾った浮き画像 等）は
- * 「メタ情報なし」と表示する。
+ * いずれでもプロンプトが取れなかった場合のみ「履歴に紐付いていません」を出す。
+ *
+ * どの状態でも、プロンプトが取れたら「コピー」ボタンを表示する。
  */
+
+/** 履歴 turn の逆引き上限。Rust 側 turns_recent の clamp(1, 2000) と揃える。 */
+const HISTORY_LOOKUP_LIMIT = 2000;
+
 type Meta = {
   turn: TurnWithImages;
   row: PromptHistoryRow;
@@ -37,22 +49,42 @@ type Meta = {
 export function ImageMetaPanel({ path }: { path: string }) {
   const item = useImages((s) => s.items.find((it) => it.path === path));
   const pushToast = useToasts((s) => s.push);
+  const projects = useProjects((s) => s.projects);
   const [meta, setMeta] = useState<Meta | null>(null);
-  const [status, setStatus] = useState<"loading" | "found" | "not-found" | "error">(
-    "loading",
-  );
+  /**
+   * turn が無くても projects.json から拾えたプロンプト。
+   * status === "prompt-only" のときに表示・コピー対象として使う。
+   */
+  const [fallbackPrompt, setFallbackPrompt] = useState<string | null>(null);
+  const [status, setStatus] = useState<
+    "loading" | "found" | "prompt-only" | "not-found" | "error"
+  >("loading");
   const [renaming, setRenaming] = useState(false);
   const [draftName, setDraftName] = useState("");
   const [savingRename, setSavingRename] = useState(false);
+
+  // projects.json から、この画像パスに一致する item.prompt を探す。
+  // Storyboard / マルチアングル等 turn を持たない生成方法のフォールバック。
+  const promptFromProjects = (): string | null => {
+    for (const project of projects) {
+      for (const it of project.items) {
+        if (it.imagePath === path && it.prompt && it.prompt.trim()) {
+          return it.prompt;
+        }
+      }
+    }
+    return null;
+  };
 
   useEffect(() => {
     let cancelled = false;
     setStatus("loading");
     setMeta(null);
+    setFallbackPrompt(null);
 
     (async () => {
       try {
-        const rows = await history.recent(120);
+        const rows = await history.recent(HISTORY_LOOKUP_LIMIT);
         if (cancelled) return;
         // 直近順に turn を当たって、最初に画像 path を含む turn を採用
         for (const row of rows) {
@@ -69,17 +101,52 @@ export function ImageMetaPanel({ path }: { path: string }) {
             // 単発の getTurn 失敗は無視して次へ
           }
         }
-        if (!cancelled) setStatus("not-found");
+        if (cancelled) return;
+        // turn が見つからなくても projects.json にプロンプトがあれば拾う
+        const fallback = promptFromProjects();
+        if (fallback) {
+          setFallbackPrompt(fallback);
+          setStatus("prompt-only");
+          return;
+        }
+        setStatus("not-found");
       } catch (err) {
         console.error("ImageMetaPanel history fetch failed", err);
-        if (!cancelled) setStatus("error");
+        if (cancelled) return;
+        // 履歴取得に失敗しても projects.json 側でプロンプトが拾えれば出す
+        const fallback = promptFromProjects();
+        if (fallback) {
+          setFallbackPrompt(fallback);
+          setStatus("prompt-only");
+          return;
+        }
+        setStatus("error");
       }
     })();
 
     return () => {
       cancelled = true;
     };
+    // promptFromProjects は projects/path に依存するクロージャ。
+    // projects 変更で再フェッチすると履歴の再走査が走り重いため、path のみ依存にする。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [path]);
+
+  // プロンプトをクリップボードへコピーする共通ハンドラ。
+  const copyPrompt = async (prompt: string) => {
+    const text = prompt.trim();
+    if (!text) {
+      pushToast({ kind: "info", text: "コピーできるプロンプトがありません", ttlMs: 3000 });
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      pushToast({ kind: "success", text: "プロンプトをコピーしました", ttlMs: 2500 });
+    } catch (err) {
+      console.error("prompt copy failed", err);
+      pushToast({ kind: "error", text: "プロンプトのコピーに失敗しました", ttlMs: 4000 });
+    }
+  };
 
   const fileName = item?.name ?? path.split(/[\\/]/).pop() ?? "";
 
@@ -218,12 +285,62 @@ export function ImageMetaPanel({ path }: { path: string }) {
           この画像はライブラリスキャンで取り込まれたか、履歴に紐付いていません。
         </p>
       )}
-      {status === "found" && meta && <MetaRows meta={meta} />}
+      {status === "prompt-only" && fallbackPrompt && (
+        <PromptOnlyRows
+          prompt={fallbackPrompt}
+          onCopy={() => void copyPrompt(fallbackPrompt)}
+        />
+      )}
+      {status === "found" && meta && (
+        <MetaRows meta={meta} onCopy={() => void copyPrompt(meta.row.prompt)} />
+      )}
     </div>
   );
 }
 
-function MetaRows({ meta }: { meta: Meta }) {
+/**
+ * turn が取れず projects.json からプロンプトだけ拾えた場合の表示。
+ * モデルカードは出せないため、プロンプト本文 + コピーボタンのみ。
+ */
+function PromptOnlyRows({
+  prompt,
+  onCopy,
+}: {
+  prompt: string;
+  onCopy: () => void;
+}) {
+  return (
+    <div className="flex min-h-0 flex-1 flex-col gap-3">
+      <div className="flex min-h-0 flex-1 flex-col gap-1.5">
+        <div className="flex shrink-0 items-center justify-between gap-2">
+          <span className="text-[10px] font-bold uppercase tracking-wide text-neutral-500">
+            プロンプト
+          </span>
+          <CopyPromptButton onClick={onCopy} />
+        </div>
+        <pre className="m-0 min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words rounded border border-neutral-800 bg-neutral-950 p-3 font-mono text-[12px] leading-relaxed text-neutral-200">
+          {prompt}
+        </pre>
+      </div>
+    </div>
+  );
+}
+
+/** プロンプト欄ヘッダに置く小さなコピーボタン。 */
+function CopyPromptButton({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="shrink-0 rounded border border-neutral-800 px-2 py-1 text-[10px] font-bold text-neutral-300 hover:border-pink-400 hover:text-pink-300"
+      title="プロンプトをコピー"
+    >
+      コピー
+    </button>
+  );
+}
+
+function MetaRows({ meta, onCopy }: { meta: Meta; onCopy: () => void }) {
   const { turn, row } = meta;
   return (
     /*
@@ -282,9 +399,14 @@ function MetaRows({ meta }: { meta: Meta }) {
 
       {/* プロンプト (残り高さを使って拡張、内部スクロール) */}
       <div className="flex min-h-0 flex-1 flex-col gap-1.5">
-        <span className="shrink-0 text-[10px] font-bold uppercase tracking-wide text-neutral-500">
-          プロンプト
-        </span>
+        <div className="flex shrink-0 items-center justify-between gap-2">
+          <span className="text-[10px] font-bold uppercase tracking-wide text-neutral-500">
+            プロンプト
+          </span>
+          {row.prompt && row.prompt.trim() ? (
+            <CopyPromptButton onClick={onCopy} />
+          ) : null}
+        </div>
         <pre className="m-0 min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words rounded border border-neutral-800 bg-neutral-950 p-3 font-mono text-[12px] leading-relaxed text-neutral-200">
           {row.prompt || "(プロンプトなし)"}
         </pre>

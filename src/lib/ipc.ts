@@ -135,6 +135,7 @@ export type CleanupReport = {
   sessionsBytesFreed: number;
   generatedImagesDeleted: number;
   generatedImagesBytesFreed: number;
+  cacheBytesFreed: number;
   errors: string[];
 };
 

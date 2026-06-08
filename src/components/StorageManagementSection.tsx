@@ -78,8 +78,13 @@ export function StorageManagementSection() {
     try {
       const report = await storageCleanup.run();
       setLastReport(report);
+      // FB-A4: Codex ログ + WebView キャッシュ解放分 (cacheBytesFreed) も合算する。
+      // run_cleanup がこれらも消すようになったので、解放量が実態に合うようにする。
       const freedMb = Math.round(
-        (report.sessionsBytesFreed + report.generatedImagesBytesFreed) / 1_000_000,
+        (report.sessionsBytesFreed +
+          report.generatedImagesBytesFreed +
+          report.cacheBytesFreed) /
+          1_000_000,
       );
       pushToast({
         kind: "success",
@@ -117,7 +122,10 @@ export function StorageManagementSection() {
           </li>
         </ul>
         {workPath && (
-          <p className="mt-2 truncate text-[10px] text-neutral-500">{workPath}</p>
+          <p className="mt-2 truncate text-[10px] text-neutral-500">
+            <span className="text-neutral-400">作業フォルダ: </span>
+            {workPath}
+          </p>
         )}
         <button
           type="button"

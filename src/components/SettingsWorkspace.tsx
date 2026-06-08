@@ -5,6 +5,7 @@ import {
   type HiggsfieldInstallProgress,
   higgsfield,
   type LegacySummary,
+  magnific,
   type StorageSettings,
   storage,
 } from "../lib/ipc";
@@ -724,6 +725,26 @@ function AccountSettings() {
     await higgsfield.logout();
     await accounts.refreshHiggsfield();
   };
+  // A5: Magnific 接続/解除。接続先タブと同じ store (accounts.magnific) を読むため、
+  // アカウントタブと接続先タブで接続状態が必ず一致する。
+  const loginMagnific = async () => {
+    try {
+      await magnific.login();
+      await accounts.refreshMagnific();
+      push({ kind: "success", text: "Magnific に接続しました", ttlMs: 3000 });
+    } catch (err) {
+      push({ kind: "error", text: `Magnific 接続に失敗: ${String(err)}`, ttlMs: 6000 });
+    }
+  };
+  const logoutMagnific = async () => {
+    try {
+      await magnific.logout();
+      await accounts.refreshMagnific();
+      push({ kind: "success", text: "Magnific の接続を解除しました", ttlMs: 3000 });
+    } catch (err) {
+      push({ kind: "error", text: `Magnific 接続解除に失敗: ${String(err)}`, ttlMs: 6000 });
+    }
+  };
   const runDebug = async () => {
     setDebugRunning(true);
     try {
@@ -842,6 +863,44 @@ function AccountSettings() {
               <button
                 type="button"
                 onClick={() => void loginHiggsfield()}
+                className={`${PRIMARY_BUTTON} h-9 px-3 text-xs`}
+              >
+                接続
+              </button>
+            )}
+          </div>
+        </div>
+      </section>
+      {/*
+        A5: Magnific 接続カード。接続先 (拡張機能) タブには既に Magnific カードが
+        あるのに、ここ (アカウント / 接続) には無く、右上バッジが点灯していても
+        不整合だった。Higgsfield カードと同じ UI パターンで追加し、接続状態を
+        accounts.magnific (接続先タブと同一 store) から読むことで表示を一致させる。
+      */}
+      <section className="rounded-lg border border-[#2a2a2a] bg-[#151515] p-4">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-black text-white">Magnific</h3>
+            <p className="mt-1 text-xs text-neutral-500">
+              {accounts.magnific.authenticated ? "接続済み" : "未接続"}
+            </p>
+            <p className="mt-1 text-[11px] text-neutral-500">
+              画像・動画 AI 生成 + 高精細アップスケール（オプショナル拡張）
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {accounts.magnific.authenticated ? (
+              <button
+                type="button"
+                onClick={() => void logoutMagnific()}
+                className={`${MUTED_BUTTON} h-9 px-3 text-xs`}
+              >
+                ログアウト
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={() => void loginMagnific()}
                 className={`${PRIMARY_BUTTON} h-9 px-3 text-xs`}
               >
                 接続
@@ -993,7 +1052,10 @@ function DebugProbe({
 }
 function Panel({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <div className="mx-auto max-w-4xl space-y-4">
+    // A3: 設定パネルの横幅を制作タブ (App.tsx) の max-w-6xl に合わせる。
+    // 設定だけ狭くて不統一だった問題を解消。接続先タブ (SettingsConnections) も
+    // 既に max-w-6xl なので、これで全設定タブの横幅が揃う。
+    <div className="mx-auto max-w-6xl space-y-4">
       <h2 className="text-lg font-black text-white">{title}</h2>
       {children}
     </div>

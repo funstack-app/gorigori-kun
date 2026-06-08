@@ -25,7 +25,9 @@
       "identifier": "fs:scope",
       "allow": [
         { "path": "$HOME/.codex/**" },
-        { "path": "$HOME/Documents/gori-gori-kun/**" }
+        { "path": "$HOME/Documents/**" },
+        { "path": "$HOME/Desktop/**" },
+        { "path": "$HOME/Downloads/**" }
       ]
     }
   ]

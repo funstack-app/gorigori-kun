@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { useActiveProject } from "../lib/store/activeProject";
+import { usePlanChat } from "../lib/store/planChat";
 import { useProjects } from "../lib/store/projects";
 import { useSceneStore } from "../lib/store/scene";
 import { useToasts } from "../lib/store/toasts";
@@ -27,6 +28,10 @@ function switchActiveProject(
 ): void {
   if (id === currentId) return; // 同一プロジェクト再選択は無操作
   useSceneStore.getState().resetScene();
+  // FB#A6 (2026-06-08): 企画チャットをプロジェクトに紐づける。切替前に現在の会話を
+  // 旧プロジェクトへ保存し、切替先プロジェクトの企画チャットをロードする
+  // (新規/未保存なら空 = ゼロスタート)。会話消失を防ぐため setActive より先に呼ぶ。
+  usePlanChat.getState().switchToProject(currentId, id);
   setActive(id);
 }
 

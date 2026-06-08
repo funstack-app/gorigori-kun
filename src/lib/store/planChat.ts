@@ -337,6 +337,23 @@ type PlanChatState = {
   /** 通常企画タブの「確定」: これまでの対話を踏まえてプロンプト案を出させる。 */
   finalizePlan: () => Promise<void>;
   resetThread: () => void;
+  /**
+   * FB#A6 (2026-06-08): 企画チャットをプロジェクトに紐づける表示フィルタ。
+   *
+   * プロジェクト切替時に呼ぶ。手順:
+   *  1. 切替前プロジェクト (prevProjectId) に、現在メモリ上の会話をスナップショット保存
+   *     (切替で「作業中だった会話」を失わないため)。
+   *  2. 切替先プロジェクト (nextProjectId) の planChat をメモリへロードする。
+   *     ログが無い (新規プロジェクト等) なら空にする = ゼロスタート。
+   *
+   * thread は会話内容と一対なので作り直す (threadId をリセットして次回 send で再起動)。
+   * sceneConstruction / storyboardParams も会話に紐づくので切替で破棄する
+   * (別プロジェクトの構成が混ざらないように)。
+   */
+  switchToProject: (
+    prevProjectId: string | null,
+    nextProjectId: string | null,
+  ) => void;
 };
 
 let listenerHandle: undefined | (() => void);
@@ -818,6 +835,44 @@ export const usePlanChat = create<PlanChatState>((set, get) => ({
     set({
       threadId: undefined,
       messages: [],
+      sending: false,
+      streamingItemId: undefined,
+      storyboardParams: null,
+      sceneConstruction: null,
+      pendingImages: [],
+    });
+  },
+
+  switchToProject: (prevProjectId, nextProjectId) => {
+    if (prevProjectId === nextProjectId) return;
+    // 1. 切替前プロジェクトへ現在の会話を保存 (会話消失防止)。
+    //    turn/completed のスナップショット保存と同形式。streaming は保存しない。
+    if (prevProjectId) {
+      const snapshot: ProjectChatMessage[] = get().messages.map((m) => ({
+        id: m.id,
+        role: m.role,
+        text: m.text,
+        attachedImages: m.attachedImages,
+        createdAt: m.createdAt,
+      }));
+      useProjects.getState().setPlanChat(prevProjectId, snapshot);
+    }
+    // 2. 切替先プロジェクトの planChat をメモリへロード。
+    //    ログが無ければ空配列 = ゼロスタート。
+    const loaded: PlanMessage[] = nextProjectId
+      ? (useProjects.getState().projects.find((p) => p.id === nextProjectId)?.planChat ?? []).map((m) => ({
+          id: m.id,
+          role: m.role,
+          text: m.text,
+          attachedImages: m.attachedImages,
+          createdAt: m.createdAt,
+        }))
+      : [];
+    // thread は会話内容と一対なので作り直す (次回 send で再起動)。
+    // 構成 (sceneConstruction/storyboardParams) も会話に紐づくので切替で破棄。
+    set({
+      threadId: undefined,
+      messages: loaded,
       sending: false,
       streamingItemId: undefined,
       storyboardParams: null,
