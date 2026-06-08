@@ -353,7 +353,14 @@ jobs:
           TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           set -e
-          TAG_NUM="${TAG#v}"
+          # TAG は v0.9.5-windows-fix のような形。ビルド成果物のファイル名は
+          # バージョン番号(0.9.5)だけで付くため、TAG_NUM もサフィックスを除いた
+          # 純粋なバージョン番号にする。先頭 v を削り、最初の - 以降(-windows-fix
+          # 等)を落とす。これをしないと latest.json の Windows URL が
+          # GORI.GORI_0.9.5-windows-fix_x64-setup.exe を指して 404 になる
+          # (2026-06-09 自動アップデート 404 の修正)。
+          TAG_NO_V="${TAG#v}"
+          TAG_NUM="${TAG_NO_V%%-*}"
           PUB_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
           gh release view "$TAG" --json assets --jq '.assets[].name' | sort > /tmp/assets.txt
