@@ -246,11 +246,13 @@ function MetaRows({ meta }: { meta: Meta }) {
               Codex 経路の turn.model (例: "gpt-5.5") は Codex の制御モデル名で
               あって、画像生成モデル名ではない。provider に応じて表示を切り替える。
             */}
-            {turn.provider === "higgsfield" && turn.modelDisplayName
-              ? `Higgsfield · ${turn.modelDisplayName}`
-              : turn.provider === "codex" && turn.modelDisplayName
-                ? `Codex · ${turn.modelDisplayName}`
-                : (turn.model ?? "（未記録）")}
+            {turn.provider === "magnific" && turn.modelDisplayName
+              ? `Magnific · ${turn.modelDisplayName}`
+              : turn.provider === "higgsfield" && turn.modelDisplayName
+                ? `Higgsfield · ${turn.modelDisplayName}`
+                : turn.provider === "codex" && turn.modelDisplayName
+                  ? `Codex · ${turn.modelDisplayName}`
+                  : (turn.model ?? "（未記録）")}
             {turn.provider !== "higgsfield" && turn.effort
               ? ` ・ effort: ${turn.effort}`
               : ""}

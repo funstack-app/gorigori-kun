@@ -442,7 +442,7 @@ export const higgsfield = {
 };
 
 /** `codex://image-batch` event payload union (mirrors Rust `BatchEvent`). */
-export type ImageBatchProvider = "codex" | "higgsfield";
+export type ImageBatchProvider = "codex" | "higgsfield" | "magnific";
 
 export type ImageBatchEvent =
   | {

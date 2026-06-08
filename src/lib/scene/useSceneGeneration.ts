@@ -189,11 +189,17 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
         prompt,
         model: selectedModel,
         effort: selectedEffort,
-        provider: selectedHiggsfield ? "higgsfield" : "codex",
+        provider: selectedMagnificModel
+          ? "magnific"
+          : selectedHiggsfield
+            ? "higgsfield"
+            : "codex",
         modelJobSetType: compareMode ? undefined : selectedHiggsfield?.jobSetType,
-        modelDisplayName: compareMode
-          ? `${selectedHiggsfieldModels.length} models compared`
-          : (selectedHiggsfield?.displayName ?? "image_gen"),
+        modelDisplayName: selectedMagnificModel
+          ? selectedMagnificModel
+          : compareMode
+            ? `${selectedHiggsfieldModels.length} models compared`
+            : (selectedHiggsfield?.displayName ?? "image_gen"),
         refImagePaths,
         count: generationCount,
         kind: "batch",
@@ -221,11 +227,17 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
           name: basename(path),
         })),
         count: generationCount,
-        provider: selectedHiggsfield ? "higgsfield" : "codex",
+        provider: selectedMagnificModel
+          ? "magnific"
+          : selectedHiggsfield
+            ? "higgsfield"
+            : "codex",
         modelJobSetType: compareMode ? undefined : selectedHiggsfield?.jobSetType,
-        modelDisplayName: compareMode
-          ? undefined
-          : (selectedHiggsfield?.displayName ?? "image_gen"),
+        modelDisplayName: selectedMagnificModel
+          ? selectedMagnificModel
+          : compareMode
+            ? undefined
+            : (selectedHiggsfield?.displayName ?? "image_gen"),
         compareMode,
         workerModels: compareMode ? selectedHiggsfieldModels : undefined,
       });
