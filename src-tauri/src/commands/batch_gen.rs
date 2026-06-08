@@ -239,26 +239,46 @@ async fn run_one_worker(
         },
     );
 
-    let result = run_one_worker_inner(
-        codex_bin,
-        codex_home_orig,
-        &out_dir,
-        idx,
-        prompt,
-        cwd,
-        ref_paths,
-        mask_paths,
-        model,
-        effort,
-        aspect,
-        total_count,
-    )
-    .await;
+    // マルチアングル/storyboard と同じく、失敗したら最大 MAX_ATTEMPTS 回まで自動で
+    // やり直す。gpt-image-2 の ServerError や image_gen 呼び忘れは一時的なことが多く、
+    // 2 回目以降で成功することがある(2026-06-09 通常生成にもリトライを横展開)。
+    // 注意: WorkerStarted/Completed/Failed イベントは1回だけ発火させたいので、
+    // リトライは inner 呼び出しだけをループする。
+    const MAX_ATTEMPTS: u32 = 3;
+    let mut result: Result<String, String> = Err("未実行".to_string());
+    for attempt in 1..=MAX_ATTEMPTS {
+        result = run_one_worker_inner(
+            codex_bin.clone(),
+            codex_home_orig.clone(),
+            &out_dir,
+            idx,
+            prompt.clone(),
+            cwd.clone(),
+            ref_paths.clone(),
+            mask_paths.clone(),
+            model.clone(),
+            effort.clone(),
+            aspect.clone(),
+            total_count,
+        )
+        .await;
+        if result.is_ok() {
+            break;
+        }
+        if let Err(e) = &result {
+            tracing::warn!(
+                target: "codex.batch_gen",
+                "worker {idx} attempt {attempt}/{MAX_ATTEMPTS} failed: {e}"
+            );
+        }
+    }
 
     // inner は Result<成功パス, 失敗理由> を返す。失敗理由は WorkerFailed
     // イベントと戻り値の Err の両方に同じ文言を載せ、フロントがどちらの経路でも
-    // 真因を拾えるようにする。
-    let normalized: Result<String, String> = result;
+    // 真因を拾えるようにする。外部API障害(ServerError/5xx/401等)なら非エンジニア
+    // 向けの文言に整形する(humanize)。
+    let normalized: Result<String, String> =
+        result.map_err(|e| crate::codex::process::humanize_generation_failure(&e));
 
     match &normalized {
         Ok(path) => {
