@@ -61,6 +61,9 @@ pub async fn segment_image(
         let outputs = guard
             .run(ort::inputs!["input_image" => input_tensor])
             .map_err(|e| format!("run: {e}"))?;
+        if outputs.len() == 0 {
+            return Err("segment output is empty".to_string());
+        }
         let (_shape, mask_data) = outputs[0]
             .try_extract_tensor::<f32>()
             .map_err(|e| format!("extract: {e}"))?;
