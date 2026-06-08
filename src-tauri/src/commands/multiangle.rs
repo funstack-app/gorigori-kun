@@ -408,8 +408,11 @@ async fn generate_one_cut(
     let mut cmd = Command::new(codex_bin);
     cmd.args([
         "exec",
-        "--sandbox",
-        "workspace-write",
+        // Windows では `--sandbox workspace-write` が codex-windows-sandbox-setup.exe を
+        // 要求して「見つかりません」エラーになる。画像生成(batch_gen)と同じ --full-auto に
+        // 揃える。--full-auto はサンドボックスをプラットフォーム互換に自動処理する
+        // (書き込み権限は維持) (2026-06-08 Windows生成不発の修正)。
+        "--full-auto",
         "--skip-git-repo-check",
         "--color",
         "never",
@@ -487,8 +490,11 @@ async fn codex_oneshot(
     let mut cmd = Command::new(codex_bin);
     cmd.args([
         "exec",
-        "--sandbox",
-        "workspace-write",
+        // Windows では `--sandbox workspace-write` が codex-windows-sandbox-setup.exe を
+        // 要求して「見つかりません」エラーになる。画像生成(batch_gen)と同じ --full-auto に
+        // 揃える。--full-auto はサンドボックスをプラットフォーム互換に自動処理する
+        // (書き込み権限は維持) (2026-06-08 Windows生成不発の修正)。
+        "--full-auto",
         "--skip-git-repo-check",
         "--color",
         "never",

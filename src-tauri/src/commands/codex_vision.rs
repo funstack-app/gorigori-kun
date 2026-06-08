@@ -43,6 +43,11 @@ pub async fn codex_describe_image(image_path: String) -> Result<String, String> 
     let mut cmd = Command::new(&codex_bin);
     cmd.args([
         "exec",
+        // --full-auto を付ける。付けないと Windows でデフォルトサンドボックスが
+        // codex-windows-sandbox-setup.exe を要求して落ちる。参照画像→プロンプト
+        // 変換は画像生成の前段で走るため、ここが落ちると生成も巻き添えで失敗する
+        // (2026-06-08 Windows修正)。
+        "--full-auto",
         "--skip-git-repo-check",
         "--color",
         "never",
