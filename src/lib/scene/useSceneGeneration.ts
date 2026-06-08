@@ -195,6 +195,9 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
     setStatus({ kind: "running", message: "生成を開始しています..." });
 
     // ユーザーの生成意図は 1 回だけ DB へ記録する (リトライで重複させない)。
+    // dbTurnId は後段(Magnific等のライブイベントを流さない経路)で生成画像を
+    // history.db に手動 recordImage するためにも使うので、関数スコープで保持する。
+    let batchDbTurnId: string | null = null;
     try {
       const sess = useSessions.getState();
       const dbTurnId = await sess.recordTurn({
@@ -219,7 +222,10 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
         count: generationCount,
         kind: "batch",
       });
-      if (dbTurnId) sess.enqueueBatchDbTurnId(dbTurnId);
+      if (dbTurnId) {
+        batchDbTurnId = dbTurnId;
+        sess.enqueueBatchDbTurnId(dbTurnId);
+      }
     } catch (recordError) {
       // turn 記録に失敗しても生成自体は続行する (履歴に残らないだけ)。
       console.error("[useSceneGeneration] recordTurn failed:", recordError);
@@ -318,6 +324,24 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
               useProjects.getState().addItem(activeProjectId, {
                 imagePath: path,
                 prompt,
+              });
+            }
+          }
+          // Magnific は workerCompleted イベントを流さないため、App.tsx の
+          // workerCompleted→recordImage 経路を通らない。その結果 history.db の
+          // turn に生成画像が紐づかず、「過去の生成」で展開しても「画像はまだ
+          // 記録されていません」になる(2026-06-08 実機バグ)。ここで手動で
+          // recordImage して、コア(Codex)と同じく過去の生成に画像が残るようにする。
+          if (batchDbTurnId) {
+            const sess = useSessions.getState();
+            for (const path of result.generatedPaths) {
+              if (!path) continue; // 失敗枠の空文字はスキップ
+              void sess.recordImage({
+                turnId: batchDbTurnId,
+                path,
+                mtimeMs: Date.now(),
+                size: 0,
+                kind: "created",
               });
             }
           }
