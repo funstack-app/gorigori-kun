@@ -1186,7 +1186,9 @@ function SkillSettingsPanel() {
 
   const latestAssistant = [...messages].reverse().find((msg) => msg.role === "assistant")?.text;
   const storyPrompt = (scenePromptOverride || latestAssistant || "ストーリーカット").replace(/\n?\[STORYBOARD_PARAMS\][\s\S]*$/g, "").trim();
-  const canRun = selectedSkillId === "gori-storyboard" && Boolean(storyboardParams?.character_reference_path && sceneConstruction);
+  // キャラ参照画像は任意 (2026-06-08 参照任意化)。無ければテキストのみで本生成する。
+  // 必須はシーン構成 (企画の確定) だけ。
+  const canRun = selectedSkillId === "gori-storyboard" && Boolean(sceneConstruction);
 
   const runSkill = async () => {
     if (!storyboardParams || !sceneConstruction) {
@@ -1197,7 +1199,8 @@ function SkillSettingsPanel() {
     try {
       const params = {
         storyPrompt,
-        characterReferenceImage: storyboardParams.character_reference_path,
+        // キャラ参照は任意 (2026-06-08)。未設定なら空文字で渡し、Rust側でテキスト生成にフォールバック。
+        characterReferenceImage: storyboardParams.character_reference_path ?? "",
         styleReferenceImage: storyboardParams.style_reference_path,
         // FB#3 (2026-06-06): 複数キャラ/スタイル参照 (後方互換: 単数も維持)。
         characterReferenceImages: storyboardParams.character_reference_paths,

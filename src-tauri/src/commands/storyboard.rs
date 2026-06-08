@@ -632,11 +632,15 @@ pub async fn storyboard_regenerate_cut(
 
     tokio::spawn(async move {
         // 参照画像配列を構築:
-        //  1. character_reference_image (必須)
+        //  1. character_reference_image (任意。無ければテキストのみ生成)
         //  2. style_reference_image (任意)
         //  3. previous_cut_image (任意・前後文脈)
         //  4. additional_refs (ユーザー投入の追加参照、複数可)
-        let mut reference_images: Vec<PathBuf> = vec![PathBuf::from(&params.character_reference_image)];
+        // character も style/prev と同じく「あれば入れる」に統一 (2026-06-08 参照任意化)。
+        let mut reference_images: Vec<PathBuf> = Vec::new();
+        if !params.character_reference_image.trim().is_empty() {
+            reference_images.push(PathBuf::from(&params.character_reference_image));
+        }
         if let Some(style) = params.style_reference_image.as_ref() {
             if !style.trim().is_empty() {
                 reference_images.push(PathBuf::from(style));
@@ -1219,10 +1223,12 @@ fn validate_params(params: &StoryboardParams) -> Result<(), String> {
     if params.story_prompt.trim().is_empty() {
         return Err("storyPrompt must not be empty".into());
     }
-    if params.character_reference_image.trim().is_empty() {
-        return Err("characterReferenceImage must not be empty".into());
-    }
-    if !Path::new(&params.character_reference_image).is_file() {
+    // キャラクター参照画像は任意。無ければテキストのみで生成し、あれば参照する
+    // (2026-06-08 STΛCK 指示: 「参照が無ければテキスト経由、来たら参照」が正しい仕様)。
+    // 指定がある場合だけ実在チェックする (style_reference_image と同じ扱い)。
+    if !params.character_reference_image.trim().is_empty()
+        && !Path::new(&params.character_reference_image).is_file()
+    {
         return Err(format!(
             "キャラクター参照画像が見つかりません: {}",
             params.character_reference_image
@@ -2884,7 +2890,12 @@ fn build_reference_images(
     previous_cut: Option<&Path>,
     sketch_ref: Option<&Path>,
 ) -> Vec<PathBuf> {
-    let mut refs = vec![char_ref.to_path_buf()];
+    // キャラ参照は任意 (2026-06-08 参照任意化)。空パスのときは追加しない。
+    // 無ければ後続の style/previous/sketch だけ、または参照ゼロ(テキスト生成)になる。
+    let mut refs: Vec<PathBuf> = Vec::new();
+    if !char_ref.as_os_str().is_empty() {
+        refs.push(char_ref.to_path_buf());
+    }
     // FB#3 (2026-06-06): 追加のキャラ参照 (登場キャラ全員) を char_ref の直後に並べる。
     // 重複は除く。先頭キャラの直後に置くことで「全員がキャラ基準」と認識させる。
     for c in extra_char_refs {
