@@ -384,9 +384,55 @@ fn build_multiangle_prompt(cut: &CutPromptSpec, aspect_ratio: &str, environment:
     )
 }
 
-/// 1枚生成の最小単位。storyboard の generate_one_take を cut_id ベースに簡略化したもの
-/// (structured_prompt 不要、被写体参照1枚＋構図プロンプト文字列を渡す形)。
+/// image_gen を呼ばずに codex が正常終了したとき(画像が生成されない)に
+/// 何回まで作り直すか。effort=low の GPT-5.5 が「OK」だけ返して image_gen を
+/// 呼び忘れるケースがあり、その救済(2026-06-08 マルチアングル生成失敗の修正)。
+const MULTIANGLE_MAX_ATTEMPTS: u32 = 3;
+
+/// 1枚生成の最小単位(リトライ込み)。
+///
+/// codex(GPT-5.5)が image_gen(gpt-image-2)を呼ばずに正常終了し、画像が
+/// 一枚も生成されないことがある。これは codex の異常終了ではないので status は
+/// success のまま「生成画像が見つかりません」になる。1回で諦めず最大
+/// MULTIANGLE_MAX_ATTEMPTS 回まで作り直す。コア(batch_gen)の自動リトライと同思想。
 async fn generate_one_cut(
+    codex_bin: &Path,
+    codex_home_orig: &Path,
+    prompt: &str,
+    reference_images: &[PathBuf],
+    output_dir: &Path,
+    cut_id: &str,
+    cwd: Option<String>,
+) -> Result<PathBuf, String> {
+    let mut last_err = String::new();
+    for attempt in 1..=MULTIANGLE_MAX_ATTEMPTS {
+        match attempt_one_cut(
+            codex_bin,
+            codex_home_orig,
+            prompt,
+            reference_images,
+            output_dir,
+            cut_id,
+            cwd.clone(),
+        )
+        .await
+        {
+            Ok(path) => return Ok(path),
+            Err(e) => {
+                tracing::warn!(
+                    "multiangle cut {cut_id} attempt {attempt}/{MULTIANGLE_MAX_ATTEMPTS} failed: {e}"
+                );
+                last_err = e;
+            }
+        }
+    }
+    Err(format!(
+        "{MULTIANGLE_MAX_ATTEMPTS}回試行しても生成できませんでした ({cut_id}): {last_err}"
+    ))
+}
+
+/// 1枚生成の1試行。画像が出れば Ok、image_gen 未呼び出し等で画像が無ければ Err。
+async fn attempt_one_cut(
     codex_bin: &Path,
     codex_home_orig: &Path,
     prompt: &str,
@@ -465,8 +511,29 @@ async fn generate_one_cut(
         ));
     }
 
-    let src_png = find_newest_generated_png(&tmp_gen)
-        .ok_or_else(|| format!("生成画像が見つかりませんでした: {cut_id}"))?;
+    let src_png = match find_newest_generated_png(&tmp_gen) {
+        Some(p) => p,
+        None => {
+            // codex は正常終了したのに画像が無い = image_gen を呼ばずに終わった等。
+            // 原因究明のため stdout 末尾を残す(GPT-5.5 が「OK」だけ返したか、NG 理由を
+            // 言ったか、image_gen を試みて失敗したかが分かる)。
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let tail = stdout
+                .lines()
+                .rev()
+                .filter(|l| !l.trim().is_empty())
+                .take(3)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join(" / ");
+            return Err(format!(
+                "生成画像が見つかりませんでした: {cut_id} (codex最終出力: {})",
+                if tail.is_empty() { "(出力なし)" } else { &tail }
+            ));
+        }
+    };
     let dest = output_dir.join(format!("{cut_id}.png"));
     std::fs::copy(&src_png, &dest).map_err(|e| format!("出力コピー失敗: {e}"))?;
     Ok(dest)
