@@ -671,9 +671,14 @@ function ModelTagPill({
   count?: number;
 }) {
   if (!provider) return null;
-  const providerLabel = provider === "higgsfield" ? "Higgsfield" : "Codex";
+  const providerLabel =
+    provider === "magnific"
+      ? "Magnific"
+      : provider === "higgsfield"
+        ? "Higgsfield"
+        : "Codex";
   const label =
-    compareMode && provider === "higgsfield"
+    compareMode && (provider === "higgsfield" || provider === "magnific")
       ? `${providerLabel} · ${count ?? 0} models compared`
       : modelDisplayName
         ? `${providerLabel} · ${modelDisplayName}`
