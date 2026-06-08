@@ -359,6 +359,19 @@ export type HiggsfieldInstallProgress =
   | { kind: "installed"; path: string }
   | { kind: "failed"; message: string };
 
+// Magnific オプショナル拡張 (2026-06-08)。MCP接続のみで有効化。未接続なら全false で degrade。
+export type MagnificStatus = {
+  registered: boolean;
+  authenticated: boolean;
+};
+
+export const magnific = {
+  status: () => invoke<MagnificStatus>("magnific_status"),
+  /** codex mcp add で MCP登録+OAuthフロー開始。ブラウザでログイン完了する。 */
+  login: () => invoke<string>("magnific_login"),
+  logout: () => invoke<void>("magnific_logout"),
+};
+
 export const higgsfield = {
   status: () => invoke<HiggsfieldStatus>("higgsfield_status"),
   debug: () => invoke<HiggsfieldDebugInfo>("higgsfield_debug"),

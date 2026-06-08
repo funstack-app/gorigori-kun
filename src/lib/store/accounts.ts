@@ -3,6 +3,7 @@ import { create } from "zustand";
 import {
   auth,
   higgsfield,
+  magnific,
   mcp,
   secrets,
   type McpServer,
@@ -21,6 +22,11 @@ export type HiggsfieldAccountState = {
   plan?: string;
   credits?: number;
   baseline?: number;
+};
+// Magnific オプショナル拡張 (2026-06-08)。未接続なら registered=false で degrade。
+export type MagnificAccountState = {
+  registered: boolean;
+  authenticated: boolean;
 };
 export type SecretsState = {
   hasOpenAIKey: boolean;
@@ -48,6 +54,7 @@ export type McpServerState = McpServer;
 type AccountsState = {
   codex: CodexAccountState;
   higgsfield: HiggsfieldAccountState;
+  magnific: MagnificAccountState;
   secrets: SecretsState;
   mcp: McpServerState[];
   loading: boolean;
@@ -56,6 +63,7 @@ type AccountsState = {
   refreshSecrets: () => Promise<void>;
   refreshMcp: () => Promise<void>;
   refreshHiggsfield: () => Promise<void>;
+  refreshMagnific: () => Promise<void>;
   loginCodex: () => Promise<void>;
   setCodexPlan: (plan: CodexPlan) => void;
   setSecretPresence: (key: SecretKey, present: boolean) => void;
@@ -127,6 +135,7 @@ function secretsFromKeys(keys: SecretKey[]): SecretsState {
 export const useAccounts = create<AccountsState>((set, get) => ({
   codex: { loggedIn: false, plan: loadCodexPlan() },
   higgsfield: { installed: false, authenticated: false },
+  magnific: { registered: false, authenticated: false },
   secrets: createEmptySecrets(),
   mcp: [],
   loading: false,
@@ -150,6 +159,7 @@ export const useAccounts = create<AccountsState>((set, get) => ({
         }
       })(),
       get().refreshHiggsfield(),
+      get().refreshMagnific(),
       get().refreshSecrets(),
       get().refreshMcp(),
     ]);
@@ -200,6 +210,21 @@ export const useAccounts = create<AccountsState>((set, get) => ({
               : state.higgsfield.baseline,
       },
     }));
+  },
+
+  refreshMagnific: async () => {
+    // Magnific はオプショナル拡張。status が取れなければ未接続として degrade する。
+    try {
+      const status = await magnific.status();
+      set({
+        magnific: {
+          registered: status.registered,
+          authenticated: status.authenticated,
+        },
+      });
+    } catch {
+      set({ magnific: { registered: false, authenticated: false } });
+    }
   },
 
   loginCodex: async () => {
