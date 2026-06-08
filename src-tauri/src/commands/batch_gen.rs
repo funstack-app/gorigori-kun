@@ -15,12 +15,14 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
+use tokio::sync::Semaphore;
 
 use crate::codex::process::{enriched_path, resolve_codex_cli_binary};
 use crate::commands::storage::{project_name_from_cwd, resolve_output_dir, StorageSettings};
@@ -126,6 +128,14 @@ pub async fn images_generate_batch(
         },
     );
 
+    // 同時に走らせる worker 数の上限。gpt-image-2 は同時実行 3 までが安定で、5 で
+    // 時々 429、10 でほぼ確実にレート制限される(2026-06 実測/業界報告)。旧実装は
+    // 上限なしで count 個を一斉起動していたため、4枚でも 30枚でも全並列になり、
+    // レート制限/混雑で一部が ServerError 落ちしていた。3 に絞って 429 を避ける
+    // (2026-06-09 ServerError多発の対策。マルチアングルの MAX_CONCURRENT と同方針)。
+    const MAX_CONCURRENT: usize = 3;
+    let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT));
+
     let mut handles = Vec::with_capacity(args.count as usize);
     for idx in 1..=args.count {
         let app = app.clone();
@@ -141,7 +151,11 @@ pub async fn images_generate_batch(
         let effort = args.effort.clone();
         let aspect = args.aspect.clone();
         let total_count = args.count;
+        let semaphore = semaphore.clone();
         handles.push(tokio::spawn(async move {
+            // permit を取れるまで待つ(同時実行数を MAX_CONCURRENT に抑える)。
+            // permit は worker 終了時に drop されて次の worker が動き出す。
+            let _permit = semaphore.acquire().await;
             run_one_worker(
                 app,
                 codex_bin,
@@ -397,10 +411,11 @@ async fn run_one_worker_inner(
     }
 
     // codex exec が image_gen を呼ぶ前に長考して無限に待つのを防ぐタイムアウト。
-    // 参照画像 + 複雑プロンプトでも完遂できる余裕を見て 240 秒。
-    // タイムアウト時は future を drop することで kill_on_drop により子プロセスも
-    // 終了し、明確な理由を返す (握りつぶさない)。
-    const WORKER_TIMEOUT: Duration = Duration::from_secs(240);
+    // gpt-image-2 は高品質1枚で中央値195秒・p95で280秒かかる(2026-06 実測/業界報告)。
+    // 旧 240 秒は p95 に対して短く、完成間際の遅い生成を打ち切って失敗にしていた
+    // (α版はタイムアウト無限待機だったので成功していた)。マルチアングル/storyboard と
+    // 同じ 900 秒に揃え、混雑時の遅延を吸収する(2026-06-09 ServerError多発の対策)。
+    const WORKER_TIMEOUT: Duration = Duration::from_secs(900);
     let output = match tokio::time::timeout(WORKER_TIMEOUT, child.wait_with_output()).await {
         Ok(Ok(o)) => o,
         Ok(Err(e)) => return Err(format!("codex exec 待機失敗: {e}")),

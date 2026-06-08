@@ -32,8 +32,9 @@ const GENERATION_TIMEOUT_SECS: u64 = 900;
 const MULTIANGLE_MODEL: &str = "gpt-5.5";
 const MULTIANGLE_EFFORT: &str = "low";
 /// 同時実行数の上限。rate limit 保護のため並列度を制限する (30枚を無制限同時起動すると
-/// プラン上限を直撃するため)。
-const MAX_CONCURRENT: usize = 5;
+/// プラン上限を直撃するため)。gpt-image-2 は同時実行 3 までが安定で 5 で時々 429 になる
+/// (2026-06 実測/業界報告)ため、5→3 に下げて ServerError/429 を減らす(2026-06-09)。
+const MAX_CONCURRENT: usize = 3;
 /// 選択上限。フロント側 MAX_CUTS と一致させる。
 const MAX_CUTS: usize = 30;
 
