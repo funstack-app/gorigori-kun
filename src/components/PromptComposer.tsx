@@ -236,13 +236,19 @@ export function PromptComposer({
         aspect: snap.aspect,
       });
       const okCount = result.generatedPaths.length;
+      // 失敗時はバックエンド(batch_gen)が返す真因 errors[] の先頭をトーストに出す。
+      // なぜ: 件数だけだと「なぜ失敗したか(NSFW/タイムアウト/codex起動失敗等)」が
+      // 分からず、ユーザーは原因に対処できない。理由が複数でも最初の1件を代表表示する。
+      const firstReason = result.errors?.find((e) => e && e.trim().length > 0)?.trim();
       pushToast({
         kind: result.failedCount === 0 ? "success" : "warn",
         text:
           result.failedCount === 0
             ? `${okCount} 枚を生成しました`
-            : `${okCount}/${snap.count} 枚を生成 (${result.failedCount} 件失敗)`,
-        ttlMs: 4000,
+            : firstReason
+              ? `${okCount}/${snap.count} 枚を生成 (${result.failedCount} 件失敗) — ${firstReason}`
+              : `${okCount}/${snap.count} 枚を生成 (${result.failedCount} 件失敗)`,
+        ttlMs: result.failedCount === 0 ? 4000 : 7000,
       });
     } catch (err) {
       console.error("generateBatch failed", err);
