@@ -14,7 +14,7 @@ import {
 import { useHiggsfieldModel, type SelectedModel } from "../lib/store/higgsfieldModel";
 import { useMagnificModel } from "../lib/store/magnificModel";
 import { useAccounts } from "../lib/store/accounts";
-import { FEATURED_MAGNIFIC_IMAGE_MODELS } from "../lib/magnific/models";
+import { FEATURED_MAGNIFIC_IMAGE_MODELS, getMagnificModelName } from "../lib/magnific/models";
 import { useSceneStore } from "../lib/store/scene";
 import { useScenePromptOverride } from "../lib/store/scenePrompt";
 import { useToasts } from "../lib/store/toasts";
@@ -485,10 +485,12 @@ function ModelPickerPopover({
       <div className="shrink-0 border-t border-[#242424] p-3">
         <div className="mb-2 flex items-center justify-between gap-2 text-[11px]">
           <span className="font-medium text-neutral-300">
-            {selectedCount} 件選択 (最大 {MAX_COMPARE_MODELS})
+            {selectedMagnific
+              ? `Magnific: ${getMagnificModelName(selectedMagnific)}`
+              : `${selectedCount} 件選択 (最大 ${MAX_COMPARE_MODELS})`}
           </span>
           <span className="font-semibold text-neutral-500">
-            推定: {formatCost(cost)}
+            推定: {selectedMagnific ? "—" : formatCost(cost)}
           </span>
         </div>
         <button
@@ -496,11 +498,13 @@ function ModelPickerPopover({
           onClick={onClose}
           className="h-8 w-full rounded-md bg-pink-500 px-3 text-xs font-semibold text-white transition hover:bg-pink-600"
         >
-          {selectedCount >= 2
-            ? `${selectedCount} モデルで比較生成`
-            : selectedCount === 1
-              ? "このモデルで生成"
-              : "選択を確定"}
+          {selectedMagnific
+            ? "Magnific で生成"
+            : selectedCount >= 2
+              ? `${selectedCount} モデルで比較生成`
+              : selectedCount === 1
+                ? "このモデルで生成"
+                : "選択を確定"}
         </button>
       </div>
     </div>

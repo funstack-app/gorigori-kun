@@ -376,6 +376,7 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
     selectedEffort,
     selectedHiggsfield,
     selectedHiggsfieldModels,
+    selectedMagnificModel,
     compareMode,
     generationCount,
   ]);
