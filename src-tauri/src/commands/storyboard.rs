@@ -2556,7 +2556,66 @@ async fn generate_cut_takes(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// image_gen を呼ばずに codex が正常終了したとき(画像が生成されない)に何回まで
+/// 作り直すか。effort の低い LLM が「OK」だけ返して image_gen を呼び忘れるケースの
+/// 救済(2026-06-08 storyboard 生成失敗の修正。マルチアングルと同思想)。
+const STORYBOARD_MAX_ATTEMPTS: u32 = 3;
+
+/// 1テイク生成(リトライ込み)。
+///
+/// codex が image_gen を呼ばずに正常終了し画像が生成されないことがある(status は
+/// success のまま「生成画像が見つかりません」になる)。1回で諦めず最大
+/// STORYBOARD_MAX_ATTEMPTS 回まで作り直す。
+#[allow(clippy::too_many_arguments)]
 async fn generate_one_take(
+    codex_bin: &Path,
+    codex_home_orig: &Path,
+    structured_prompt: &Value,
+    reference_images: &[PathBuf],
+    output_dir: &Path,
+    cut_id: &str,
+    take_id: &str,
+    candidate_index: u32,
+    candidate_count: u32,
+    cwd: Option<String>,
+    aspect_ratio: &str,
+    sketch_mode: bool,
+) -> Result<(String, PathBuf), String> {
+    let mut last_err = String::new();
+    for attempt in 1..=STORYBOARD_MAX_ATTEMPTS {
+        match attempt_one_take(
+            codex_bin,
+            codex_home_orig,
+            structured_prompt,
+            reference_images,
+            output_dir,
+            cut_id,
+            take_id,
+            candidate_index,
+            candidate_count,
+            cwd.clone(),
+            aspect_ratio,
+            sketch_mode,
+        )
+        .await
+        {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                tracing::warn!(
+                    "storyboard {cut_id} {take_id} attempt {attempt}/{STORYBOARD_MAX_ATTEMPTS} failed: {e}"
+                );
+                last_err = e;
+            }
+        }
+    }
+    Err(format!(
+        "{STORYBOARD_MAX_ATTEMPTS}回試行しても生成できませんでした ({cut_id} {take_id}): {last_err}"
+    ))
+}
+
+/// 1テイク生成の1試行。画像が出れば Ok、image_gen 未呼び出し等で画像が無ければ Err。
+#[allow(clippy::too_many_arguments)]
+async fn attempt_one_take(
     codex_bin: &Path,
     codex_home_orig: &Path,
     structured_prompt: &Value,
@@ -2648,8 +2707,28 @@ async fn generate_one_take(
         ));
     }
 
-    let src_png = find_newest_generated_png(&tmp_gen)
-        .ok_or_else(|| format!("生成画像が見つかりませんでした: {cut_id} {take_id}"))?;
+    let src_png = match find_newest_generated_png(&tmp_gen) {
+        Some(p) => p,
+        None => {
+            // codex は正常終了したのに画像が無い = image_gen を呼ばずに終わった等。
+            // 原因究明のため stdout 末尾を残す(マルチアングルと同じ)。
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let tail = stdout
+                .lines()
+                .rev()
+                .filter(|l| !l.trim().is_empty())
+                .take(3)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join(" / ");
+            return Err(format!(
+                "生成画像が見つかりませんでした: {cut_id} {take_id} (codex最終出力: {})",
+                if tail.is_empty() { "(出力なし)" } else { &tail }
+            ));
+        }
+    };
     let dest = output_dir.join(format!("{cut_id}_take_{take_id}.png"));
     std::fs::copy(&src_png, &dest).map_err(|e| format!("出力コピー失敗: {e}"))?;
     Ok((take_id.to_string(), dest))
