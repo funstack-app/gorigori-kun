@@ -12,6 +12,7 @@ import { useBatches } from "../store/batches";
 import { useComposer } from "../store/composer";
 import { useHiggsfieldModel } from "../store/higgsfieldModel";
 import { useMagnificModel } from "../store/magnificModel";
+import { getMagnificModelName } from "../magnific/models";
 import { useSceneStore } from "../store/scene";
 import { useScenePromptOverride } from "../store/scenePrompt";
 import { useSessions } from "../store/sessions";
@@ -251,7 +252,16 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
             ? undefined
             : (selectedHiggsfield?.displayName ?? "image_gen"),
         compareMode: compareMode || magnificCompare,
-        workerModels: compareMode ? selectedHiggsfieldModels : undefined,
+        // 比較生成時、各画像下にモデル名を出す(Higgsと同じ。STΛCK要望 2026-06-08)。
+        // Magnific比較時は各Magnificモデル名を {jobSetType, displayName} 形に詰める。
+        workerModels: magnificCompare
+          ? selectedMagnificModels.map((id) => ({
+              jobSetType: id,
+              displayName: getMagnificModelName(id),
+            }))
+          : compareMode
+            ? selectedHiggsfieldModels
+            : undefined,
       });
       try {
         const result = await generateFromScene(scene, {
@@ -278,6 +288,18 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
               ? undefined
               : selectedHiggsfieldModels,
         });
+        // Magnific は同期的に結果が返る(コア/Higgsfieldのような生成中イベントが無い)ため、
+        // 完了を手動で applyEvent して生成カードを埋める。これが無いとカードが「生成中」の
+        // まま固まる(2026-06-08 実機バグ: ライブラリには入るが生成画面に出ない)。
+        if (magnificActive) {
+          useBatches.getState().applyEvent({
+            kind: "completed",
+            batchId: tempId,
+            generatedPaths: result.generatedPaths,
+            failedCount: result.failedCount,
+            provider: "magnific",
+          });
+        }
         return { result, tempId };
       } catch (error) {
         // この試行の楽観的カードを除去してから throw する (再試行時に残骸を残さない)。
