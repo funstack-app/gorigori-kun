@@ -36,8 +36,10 @@ const ASPECT_RATIO_HINTS: Record<SceneAspectRatio, string> = {
   "16:9": "動画/YouTube・標準横長",
   "3:2": "写真標準・カメラ初期値",
   "4:3": "クラシック・印刷/プレゼン",
+  "5:4": "ほぼ正方の横・物撮り",
   "1:1": "正方形・Instagram投稿",
   "4:5": "縦長・Instagram投稿",
+  "3:4": "ポートレート・A判縦",
   "2:3": "ポートレート・ポスター",
   "9:16": "Reels/TikTok/Stories",
 };

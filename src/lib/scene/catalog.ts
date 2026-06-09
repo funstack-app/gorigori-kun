@@ -75,15 +75,18 @@ export const compositionOptions: SceneOption[] = [
   { value: "Over-the-shoulder", hint: "肩越し", visual: "frame-shoulder", thumbnail: thumb("composition", "over-the-shoulder", "Over-the-shoulder") },
 ];
 
-// STΛCK 指示 (2026-05-17): GPT Image 2 で生成できる全アスペクト比を網羅。
-// 横長 (シネスコ → TV) → 正方 → 縦長 (Instagram → ポスター → Reels) の自然な並び。
+// STΛCK 指示 (2026-06-09): GPT Image 2 公式対応比率から撮影用途を厚く (5:4 / 3:4 追加)。
+// 横長 (シネスコ → TV → 物撮り) → 正方 → 縦長 (Instagram → ポートレート → Reels) の対称な並び。
+// すべて公式制約 (1:3〜3:1, 両辺16の倍数) 内。詳細は scene/types.ts のコメント参照。
 export const aspectRatioOptions: SceneAspectRatio[] = [
   "21:9",
   "16:9",
   "3:2",
   "4:3",
+  "5:4",
   "1:1",
   "4:5",
+  "3:4",
   "2:3",
   "9:16",
 ];
