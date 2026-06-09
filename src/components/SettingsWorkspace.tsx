@@ -319,6 +319,12 @@ function StorageSettingsTab() {
   const [home, setHome] = useState<string | null>(null);
   const [migrating, setMigrating] = useState(false);
   const [saving, setSaving] = useState(false);
+  // バックアップから復元 UI 用。
+  const [backups, setBackups] = useState<
+    { path: string; at: number; count: number }[]
+  >([]);
+  const [backupsOpen, setBackupsOpen] = useState(false);
+  const [restoring, setRestoring] = useState(false);
 
   // 初回マウント時に現在の設定 / レガシー画像 / ホームディレクトリを取得。
   // home は Rust から正しい絶対パスを取得（パス逆算によるバグを避けるため）。
@@ -473,6 +479,42 @@ function StorageSettingsTab() {
     }
   };
 
+  // バックアップ一覧を開く（取得して展開）。
+  const openBackups = async () => {
+    try {
+      const list = await useProjects.getState().listBackups();
+      setBackups(list);
+      setBackupsOpen(true);
+      if (list.length === 0) {
+        push({
+          kind: "info",
+          text: "まだバックアップがありません（保存のたびに自動で作られます）。",
+          ttlMs: 3500,
+        });
+      }
+    } catch (err) {
+      push({ kind: "error", text: `バックアップ取得に失敗: ${String(err)}` });
+    }
+  };
+
+  // 選んだバックアップで現在のプロジェクトを置き換える（復元）。
+  const restoreBackup = async (backupPath: string) => {
+    setRestoring(true);
+    try {
+      const restored = await useProjects.getState().restoreFromBackup(backupPath);
+      push({
+        kind: "success",
+        text: `バックアップから ${restored} 件のプロジェクトを復元しました。`,
+        ttlMs: 3500,
+      });
+      setBackupsOpen(false);
+    } catch (err) {
+      push({ kind: "error", text: `復元に失敗: ${String(err)}` });
+    } finally {
+      setRestoring(false);
+    }
+  };
+
   const runMigration = async () => {
     if (!legacy?.exists) return;
     const sizeMb = (legacy.totalBytes / (1024 * 1024)).toFixed(1);
@@ -621,6 +663,67 @@ function StorageSettingsTab() {
             </button>
           ) : null}
         </div>
+      </Field>
+
+      {/*
+        バックアップから復元。projects.json は保存のたびに自動で世代バックアップ
+        される（最大10世代）。万一プロジェクトが消えた・おかしくなったときは、
+        ここから過去の状態にワンクリックで戻せる（対話サポート不要で自力復旧）。
+      */}
+      <Field label="プロジェクトのバックアップ（消えたとき・戻したいとき）">
+        <p className="mb-1.5 text-[11px] leading-relaxed text-neutral-400">
+          プロジェクト一覧は保存のたびに自動でバックアップされています。
+          もしプロジェクトが消えた・おかしくなった場合は、ここから過去の状態に戻せます。
+        </p>
+        <button
+          type="button"
+          disabled={restoring}
+          onClick={() => void openBackups()}
+          className={`${MUTED_BUTTON} h-9 px-3 text-xs disabled:opacity-40`}
+        >
+          バックアップから復元…
+        </button>
+
+        {backupsOpen && backups.length > 0 ? (
+          <div className="mt-2 max-h-60 overflow-y-auto rounded-md border border-[#2a2a2a] bg-[#0b0b0b] p-2">
+            <div className="mb-1.5 flex items-center justify-between px-1">
+              <span className="text-[11px] font-bold text-neutral-300">
+                復元する時点を選ぶ（新しい順）
+              </span>
+              <button
+                type="button"
+                onClick={() => setBackupsOpen(false)}
+                className="text-[11px] text-neutral-500 hover:text-neutral-200"
+              >
+                閉じる
+              </button>
+            </div>
+            <ul className="space-y-1">
+              {backups.map((b) => (
+                <li
+                  key={b.path}
+                  className="flex items-center justify-between rounded-md bg-[#141414] px-2.5 py-1.5"
+                >
+                  <span className="text-[12px] text-neutral-200">
+                    {new Date(b.at).toLocaleString("ja-JP")}{" "}
+                    <span className="text-neutral-500">— {b.count} 件</span>
+                  </span>
+                  <button
+                    type="button"
+                    disabled={restoring}
+                    onClick={() => void restoreBackup(b.path)}
+                    className={`${MUTED_BUTTON} h-7 px-2.5 text-[11px] disabled:opacity-40`}
+                  >
+                    {restoring ? "復元中…" : "これで復元"}
+                  </button>
+                </li>
+              ))}
+            </ul>
+            <p className="mt-1.5 px-1 text-[10px] text-neutral-500">
+              復元しても、その直前の状態もバックアップされるので、間違えてもまた戻せます。
+            </p>
+          </div>
+        ) : null}
       </Field>
 
       {legacy?.exists && legacy.fileCount > 0 ? (

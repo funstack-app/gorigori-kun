@@ -394,6 +394,8 @@ pub fn run() {
             commands::storage::storage_home_dir,
             commands::storage::projects_read,
             commands::storage::projects_write,
+            commands::storage::projects_list_backups,
+            commands::storage::projects_read_backup,
             commands::storage::projects_set_data_root,
             commands::stock::stock_search,
             commands::stock::stock_download,

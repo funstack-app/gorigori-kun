@@ -146,17 +146,34 @@ async function readFromFile(): Promise<Project[]> {
 
 /**
  * Tauri 経由でファイルに書き込む。
+ * allowEmpty: 0件での上書きを許可するか (ユーザーが明示的に全削除したときだけ true)。
+ * 書き込みが失敗したら、サイレントに握り潰さずユーザーへトースト通知する
+ * (「保存できていないのに成功したと思う」型のデータ消失を防ぐ。evaluator 指摘)。
  */
-async function writeToFile(projects: Project[]): Promise<void> {
+async function writeToFile(
+  projects: Project[],
+  allowEmpty = false,
+): Promise<void> {
   try {
     const serialized = JSON.stringify(projects);
-    await invoke("projects_write", { content: serialized });
+    await invoke("projects_write", { content: serialized, allowEmpty });
   } catch (err) {
     console.error("[projects] ファイル書き込み失敗:", err);
+    // 保存失敗をユーザーに必ず知らせる (静かに失敗させない)。
+    try {
+      const { useToasts } = await import("./toasts");
+      useToasts.getState().push({
+        kind: "error",
+        text: `プロジェクトの保存に失敗しました。データ保護のため操作が反映されていない可能性があります: ${String(err)}`,
+        ttlMs: 8000,
+      });
+    } catch {
+      // トースト取得すら失敗した場合はログのみ (これ以上できることはない)。
+    }
   }
 }
 
-function persist(projects: Project[]) {
+function persist(projects: Project[], allowEmpty = false) {
   // 旧 localStorage にも引き続き書く (緊急時の救出経路として)
   try {
     const serialized = JSON.stringify(projects);
@@ -168,7 +185,7 @@ function persist(projects: Project[]) {
     console.error("[projects] localStorage 書き込み失敗:", err);
   }
   // 主たる保存先はファイル (非同期)
-  void writeToFile(projects);
+  void writeToFile(projects, allowEmpty);
 }
 
 type ProjectsState = {
@@ -254,6 +271,20 @@ type ProjectsState = {
    * フォールバックする。
    */
   initialize: () => Promise<void>;
+
+  /**
+   * 世代バックアップの一覧を取得する（新しい順）。
+   * 返り値: { path, at(epochミリ秒), count(件数) }[]。
+   * 「バックアップから復元」UI が選択肢を出すために使う。
+   */
+  listBackups: () => Promise<{ path: string; at: number; count: number }[]>;
+
+  /**
+   * 指定バックアップの内容で現在のプロジェクトを置き換える（復元）。
+   * 復元前の現状も projects_write 側で自動バックアップされるので、誤復元しても戻せる。
+   * 成功したら復元後の件数を返す。失敗時は throw。
+   */
+  restoreFromBackup: (backupPath: string) => Promise<number>;
 };
 
 export const useProjects = create<ProjectsState>((set, get) => ({
@@ -279,6 +310,35 @@ export const useProjects = create<ProjectsState>((set, get) => ({
     } catch (err) {
       console.error("[projects] initialize 失敗:", err);
     }
+  },
+
+  listBackups: async () => {
+    try {
+      const { storage } = await import("../ipc");
+      const rows = await storage.listProjectBackups();
+      // [path, epochミリ秒, count]。Rust 側がミリ秒で返すのでそのまま使う。
+      return rows.map(([path, ms, count]) => ({
+        path,
+        at: ms,
+        count,
+      }));
+    } catch (err) {
+      console.error("[projects] listBackups 失敗:", err);
+      return [];
+    }
+  },
+
+  restoreFromBackup: async (backupPath) => {
+    const { storage } = await import("../ipc");
+    const raw = await storage.readProjectBackup(backupPath);
+    const parsed = JSON.parse(raw) as Project[];
+    if (!Array.isArray(parsed)) {
+      throw new Error("バックアップの形式が不正です");
+    }
+    // persist 経由で書き戻すと、復元前の現状も自動バックアップされる（二重に安全）。
+    persist(parsed);
+    set({ projects: parsed });
+    return parsed.length;
   },
 
   createProject: (name, description) => {
@@ -323,7 +383,10 @@ export const useProjects = create<ProjectsState>((set, get) => ({
 
   removeProject: (id) => {
     const next = get().projects.filter((p) => p.id !== id);
-    persist(next);
+    // ユーザーが明示的にプロジェクトを削除した結果 0 件になる場合は、空書き込みを
+    // 許可する (allowEmpty)。そうしないと空上書きガードに弾かれ「消したのに再起動で
+    // 復活する」退行になる (evaluator 指摘)。
+    persist(next, next.length === 0);
     set({ projects: next });
   },
 

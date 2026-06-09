@@ -626,6 +626,15 @@ export const storage = {
    */
   setProjectsDataRoot: (newRoot: string | null) =>
     invoke<void>("projects_set_data_root", { newRoot }),
+  /**
+   * projects.json の世代バックアップ一覧を取得（新しい順）。
+   * 各要素 [絶対パス, epochミリ秒, プロジェクト件数]。「バックアップから復元」UI用。
+   */
+  listProjectBackups: () =>
+    invoke<[string, number, number][]>("projects_list_backups"),
+  /** 指定バックアップの中身（projects.json 文字列）を取得。復元プレビュー/適用用。 */
+  readProjectBackup: (backupPath: string) =>
+    invoke<string>("projects_read_backup", { backupPath }),
 };
 
 // ──────────── Supabase BYO Cloud ────────────
