@@ -4,8 +4,74 @@ import { useMultiAngleRun } from "../../../lib/store/multiAngleRun";
 import { useActiveProject } from "../../../lib/store/activeProject";
 import { useProjects } from "../../../lib/store/projects";
 import { useToasts } from "../../../lib/store/toasts";
+import {
+  useWorkspace,
+  TIMELINE_SIZE_MIN,
+  TIMELINE_SIZE_MAX,
+  type TimelineSize,
+} from "../../../lib/store/workspace";
 import { getAngleCut } from "../../../lib/multiangle/angles";
 import type { CutState, MultiAngleParams } from "../../../lib/multiangle/types";
+
+/**
+ * 選択中アスペクト比 ("3:4" 等) を CSS の aspect-ratio 値 ("3 / 4") に変換する。
+ * 不正値はフォールバックで正方形 (1 / 1)。
+ */
+function aspectRatioCss(ratio: string): string {
+  const [w, h] = ratio.split(":").map((s) => parseInt(s, 10));
+  if (!w || !h) return "1 / 1";
+  return `${w} / ${h}`;
+}
+
+/**
+ * 数値サイズ (timelineSize 2-8) からグリッド列数の Tailwind クラスへ。
+ * GenerationWorkspace.gridColsClass と同じ写像。Tailwind は静的解析のため
+ * grid-cols-N を事前に書き出しておく。小さい size = 列少 = タイル大。
+ */
+const COL_BASE: Record<number, string> = {
+  2: "grid-cols-1 sm:grid-cols-2",
+  3: "grid-cols-2 sm:grid-cols-3",
+  4: "grid-cols-2 sm:grid-cols-3 lg:grid-cols-4",
+  5: "grid-cols-3 sm:grid-cols-4 lg:grid-cols-5",
+  6: "grid-cols-3 sm:grid-cols-5 lg:grid-cols-6",
+  7: "grid-cols-4 sm:grid-cols-6 lg:grid-cols-7",
+  8: "grid-cols-4 sm:grid-cols-6 lg:grid-cols-8",
+};
+
+function gridColsClass(size: TimelineSize): string {
+  return COL_BASE[size] ?? COL_BASE[4];
+}
+
+/**
+ * サイズ調整スライダー (大 ⇔ 小)。通常制作画面の TimelineSizeToggle と同じ
+ * useWorkspace.timelineSize を共用し、挙動・見た目を揃える (STΛCK 指示 2026-06-09)。
+ */
+function AngleSizeSlider() {
+  const timelineSize = useWorkspace((s) => s.timelineSize);
+  const setTimelineSize = useWorkspace((s) => s.setTimelineSize);
+  return (
+    <label
+      className="inline-flex items-center gap-2 rounded-md border border-[#343434] bg-[#101010] px-2 py-1"
+      title="表示を大きく ⇔ 小さく"
+    >
+      <span className="text-[10px] font-bold text-neutral-500">大</span>
+      <input
+        type="range"
+        min={TIMELINE_SIZE_MIN}
+        max={TIMELINE_SIZE_MAX}
+        step={1}
+        value={timelineSize}
+        onChange={(event) => setTimelineSize(Number(event.target.value))}
+        className="h-1 w-24 cursor-pointer accent-pink-500"
+        aria-label="出力タイルのサイズ"
+      />
+      <span className="text-[10px] font-bold text-neutral-500">小</span>
+      <span className="ml-1 w-5 text-center text-[10px] font-black tabular-nums text-neutral-300">
+        {timelineSize}
+      </span>
+    </label>
+  );
+}
 
 /**
  * マルチアングル出力グリッド（右ペイン）
@@ -35,6 +101,10 @@ export function AngleGridPanel({
   const projects = useProjects((s) => s.projects);
   const addItem = useProjects((s) => s.addItem);
   const pushToast = useToasts((s) => s.push);
+  const timelineSize = useWorkspace((s) => s.timelineSize);
+
+  // 選択中アスペクト比を CSS 値に。各タイルのプレビュー枠をこの比率にする。
+  const tileAspectCss = aspectRatioCss(aspectRatio);
 
   const activeProject = projects.find((p) => p.id === activeProjectId) ?? null;
   const orderedCuts = cutOrder
@@ -152,34 +222,45 @@ export function AngleGridPanel({
             <span className="text-neutral-500"> · 保存先: {activeProject.name}</span>
           )}
         </div>
-        <button
-          type="button"
-          onClick={saveAllToProject}
-          disabled={doneCount === 0}
-          className={`rounded-lg px-3 py-1.5 text-[12px] font-bold transition ${
-            doneCount === 0
-              ? "cursor-not-allowed bg-[#242424] text-neutral-600"
-              : "bg-[#101010] text-neutral-200 hover:bg-pink-500/20 hover:text-pink-100"
-          }`}
-        >
-          全部プロジェクトへ保存
-        </button>
+        <div className="flex items-center gap-3">
+          <AngleSizeSlider />
+          <button
+            type="button"
+            onClick={saveAllToProject}
+            disabled={doneCount === 0}
+            className={`rounded-lg px-3 py-1.5 text-[12px] font-bold transition ${
+              doneCount === 0
+                ? "cursor-not-allowed bg-[#242424] text-neutral-600"
+                : "bg-[#101010] text-neutral-200 hover:bg-pink-500/20 hover:text-pink-100"
+            }`}
+          >
+            全部プロジェクトへ保存
+          </button>
+        </div>
       </div>
 
-      {/* グリッド */}
+      {/* 出力タイル: 列数はサイズスライダー連動、各タイルは選択アスペクト比で表示 */}
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+        <div className={`grid gap-3 ${gridColsClass(timelineSize)}`}>
           {orderedCuts.map((cut) => (
             <div
               key={cut.cutId}
               className="flex flex-col overflow-hidden rounded-xl border border-[#2a2a2a] bg-[#141414]"
             >
-              <div className="relative aspect-square w-full bg-[#0d0d0d]">
+              {/*
+                STΛCK 指示 (2026-06-09): グリッド固定 (aspect-square) をやめ、選択中の
+                アスペクト比でプレビュー枠を表示。画像は object-contain で枠内に歪めず収める
+                (実際の生成比率が選択とズレても見切れない)。
+              */}
+              <div
+                className="relative w-full bg-[#0d0d0d]"
+                style={{ aspectRatio: tileAspectCss }}
+              >
                 {cut.status === "completed" && cut.imagePath ? (
                   <img
                     src={convertFileSrc(cut.imagePath)}
                     alt={cut.label}
-                    className="h-full w-full cursor-pointer object-cover"
+                    className="h-full w-full cursor-pointer object-contain"
                     onClick={() =>
                       onPreview?.(cut.imagePath as string, completedPaths)
                     }
