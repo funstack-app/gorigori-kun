@@ -1,4 +1,4 @@
-import { higgsfield, images, magnific } from "../ipc";
+import { higgsfieldMcp, images, magnific } from "../ipc";
 import { buildPrompt } from "./buildPrompt";
 import type { SceneState } from "./types";
 
@@ -6,6 +6,11 @@ import type { SceneState } from "./types";
 // OAuth セッションが競合して HTTP 401 が出る(2026-06-08 実機で確認)。2 に絞ると
 // 競合がほぼ消える。速度より「全部成功して反映される」ことを優先する。
 const MAGNIFIC_COMPARE_CONCURRENCY = 2;
+
+// Higgsfield MCP 比較生成の同時接続上限。Magnific と同じ理由 (codex exec→MCP の
+// OAuth セッション競合) で 2 に絞る。MCP には generateCompare が無いので、各モデルを
+// 1枚ずつ generateBatch して並べる (CLI 版 generateCompare のフロント側再現)。
+const HIGGSFIELD_COMPARE_CONCURRENCY = 2;
 
 export type SceneGenerationCount = number;
 
@@ -82,28 +87,76 @@ export async function generateFromScene(
   const aspect = scene.subjectFraming.aspectRatio;
   const higgsfieldModels = options.higgsfieldModels ?? [];
 
+  // Higgsfield 比較生成 (2026-06-10 段階8: MCP移行)。MCP には generateCompare が無いので、
+  // Magnific 比較と同じく各モデルを 1枚ずつ generateBatch して index 対応を保ったまま並べる。
+  // 失敗枠は空文字 path を入れてカードのモデル名と画像のズレを防ぐ。
   if (higgsfieldModels.length >= 2) {
-    const r = await higgsfield.generateCompare({
-      models: higgsfieldModels,
-      prompt,
-      cwd: options.cwd,
-      refImagePaths,
-      aspect,
-    });
-    return { ...r, errors: r.errors ?? [] };
+    const models = higgsfieldModels;
+    const perModel: { path: string; failed: boolean; error?: string }[] =
+      models.map(() => ({
+        path: "",
+        failed: true,
+        error: "生成が実行されませんでした",
+      }));
+
+    let cursor = 0;
+    const runWorker = async () => {
+      while (true) {
+        const i = cursor++;
+        if (i >= models.length) return;
+        try {
+          const r = await higgsfieldMcp.generateBatch({
+            prompt,
+            model: models[i].jobSetType,
+            count: 1,
+            aspect,
+            refImagePaths,
+          });
+          const path = r.generatedPaths[0];
+          if (path) {
+            perModel[i] = { path, failed: false };
+          } else {
+            perModel[i] = {
+              path: "",
+              failed: true,
+              error: r.errors?.[0] ?? "Higgsfield 生成に失敗しました",
+            };
+          }
+        } catch (e) {
+          perModel[i] = {
+            path: "",
+            failed: true,
+            error: e instanceof Error ? e.message : String(e),
+          };
+        }
+      }
+    };
+
+    const concurrency = Math.min(HIGGSFIELD_COMPARE_CONCURRENCY, models.length);
+    await Promise.all(Array.from({ length: concurrency }, () => runWorker()));
+
+    return {
+      batchId: `higgsfield-compare-${Date.now()}`,
+      generatedPaths: perModel.map((m) => m.path),
+      failedCount: perModel.filter((m) => m.failed).length,
+      errors: perModel.filter((m) => m.error).map((m) => m.error as string),
+    };
   }
 
   if (options.higgsfield) {
-    const r = await higgsfield.generateBatch({
-      jobSetType: options.higgsfield.jobSetType,
-      displayName: options.higgsfield.displayName,
+    const r = await higgsfieldMcp.generateBatch({
       prompt,
+      model: options.higgsfield.jobSetType,
       count: options.count,
-      cwd: options.cwd,
-      refImagePaths,
       aspect,
+      refImagePaths,
     });
-    return { ...r, errors: r.errors ?? [] };
+    return {
+      batchId: `higgsfield-${Date.now()}`,
+      generatedPaths: r.generatedPaths,
+      failedCount: r.failedCount,
+      errors: r.errors ?? [],
+    };
   }
 
   // Magnific 比較生成 (2026-06-08)。2モデル以上選択時、各モデルで1枚ずつ生成して並べる。

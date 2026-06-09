@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import { higgsfield, type HiggsfieldModelInfo } from "../lib/ipc";
+import { higgsfieldMcp, type HiggsfieldModelInfo } from "../lib/ipc";
 import { buildPrompt } from "../lib/scene/buildPrompt";
 import { resolveImageMentions } from "../lib/scene/resolveImageMentions";
 import {
@@ -90,13 +90,14 @@ export function HiggsfieldModelSelector({ media }: { media: "image" | "video" })
           return;
         }
 
-        // モデル一覧 / アカウント情報は当面 CLI 実装を流用する。MCP 側に
-        // list_models / account が実装されたらここを差し替える (段階別作り直し)。
+        // 段階8 (2026-06-10): モデル一覧 / アカウント情報を MCP 実装に差し替え。
+        // listModels は models_explore、account は balance ツール経由 (higgsfield_mcp.rs)。
         const [nextModels, account] = await Promise.all([
-          higgsfield.listModels(media),
-          higgsfield.account().catch((err) => {
-            // ピル表示が出ない問題の原因切り分け。
-            // ここで握りつぶさず実態を Tauri ターミナルに流す。
+          higgsfieldMcp.listModels(media),
+          higgsfieldMcp.account().catch((err) => {
+            // プラン表示(ピル)が出ない問題の原因切り分け。
+            // ここで握りつぶさず実態を Tauri ターミナルに流す。account は任意なので
+            // 失敗しても null で degrade し、モデル一覧の表示は止めない。
             console.error("[HiggsfieldModelSelector] account fetch failed:", err);
             return null;
           }),
@@ -304,8 +305,11 @@ function ModelPickerPopover({
     setCost({ kind: "loading" });
     Promise.all(
       selectedModels.map((model) =>
-        higgsfield.generateCost({
-          jobSetType: model.jobSetType,
+        higgsfieldMcp.generateCost({
+          // 段階8: MCP コスト見積もり。jobSetType→model に対応付ける。
+          // media 未指定なので image 扱い (このセレクタは画像/動画両方で使うが
+          // generateCost の動画パラメータは未使用。動画コストは動画パネル側で計算)。
+          model: model.jobSetType,
           prompt,
           aspect,
         }),

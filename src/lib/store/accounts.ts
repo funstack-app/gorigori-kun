@@ -186,8 +186,9 @@ export const useAccounts = create<AccountsState>((set, get) => ({
   refreshHiggsfield: async () => {
     // Higgsfield はリモートMCP接続のオプショナル拡張 (段階7)。Magnific と同型に、
     // status が取れなければ未接続として degrade する。
-    // plan/credits は Rust 側 account 実装待ちのため当面取得しない (未配線)。
-    // account コマンドが MCP 側に実装されたら、ここで配線して plan/credits を埋める。
+    // 段階8 (2026-06-10): MCP 側 account (balance ツール) が実装されたので、認証済みの
+    // ときだけ credits/plan を配線する。account は任意なので失敗しても degrade し、
+    // 接続状態 (registered/authenticated) は維持する (Magnific と同じ思想)。
     try {
       const status = await higgsfieldMcp.status();
       set((state) => ({
@@ -197,6 +198,21 @@ export const useAccounts = create<AccountsState>((set, get) => ({
           authenticated: status.authenticated,
         },
       }));
+      if (status.authenticated) {
+        try {
+          const account = await higgsfieldMcp.account();
+          set((state) => ({
+            higgsfield: {
+              ...state.higgsfield,
+              credits: account.credits,
+              plan: account.subscriptionPlanType,
+            },
+          }));
+        } catch (err) {
+          // account 取得失敗は接続自体の失敗ではない。credits/plan は埋めずに degrade。
+          console.error("[accounts] higgsfield account fetch failed:", err);
+        }
+      }
     } catch {
       set((state) => ({
         higgsfield: { ...state.higgsfield, registered: false, authenticated: false },

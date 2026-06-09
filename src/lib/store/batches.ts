@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { higgsfield, type ImageBatchEvent, type ImageBatchProvider } from "../ipc";
+import { type ImageBatchEvent, type ImageBatchProvider } from "../ipc";
 
 // ──────────── Types ────────────
 
@@ -116,25 +116,17 @@ export const useBatches = create<BatchesState>((set, _get) => ({
     set((s) => ({ batches: s.batches.filter((b) => b.batchId !== batchId) })),
 
   cancelBatch: async (batchId) => {
+    // 2026-06-10 段階8: Higgsfield は CLI 同梱方式から MCP 接続方式へ移行。MCP 生成は
+    // 同期的に完結し、サーバ側に「実行中バッチ」を持たないため、キャンセルできる対象が無い
+    // (CLI 版の higgsfield_cancel_batch は廃止)。ここでは楽観カードをローカルで cancelled に
+    // するだけにする。実生成 (codex exec) は別プロセスで進むが、結果は破棄されカードには出ない。
     set((s) => ({
       batches: s.batches.map((b) =>
-        b.batchId === batchId && b.status === "running"
-          ? { ...b, status: "cancelling" }
+        b.batchId === batchId && (b.status === "running" || b.status === "cancelling")
+          ? { ...b, status: "cancelled" }
           : b,
       ),
     }));
-    try {
-      await higgsfield.cancelBatch(batchId);
-    } catch (error) {
-      set((s) => ({
-        batches: s.batches.map((b) =>
-          b.batchId === batchId && b.status === "cancelling"
-            ? { ...b, status: "running" }
-            : b,
-        ),
-      }));
-      throw error;
-    }
   },
 
   applyEvent: (e: ImageBatchEvent) => {
