@@ -27,7 +27,11 @@ export function SkillRunActions({ cuts }: { cuts: CutState[] }) {
     .map((cut) => ({ cut, imagePath: selectedImagePath(cut) }))
     .filter((item): item is { cut: CutState; imagePath: string } => Boolean(item.imagePath));
 
-  if (editableCuts.length === 0) return null;
+  // 編集タブは現在「近日公開」(WorkspaceTabs: disabled)。公開までは送り先が無いため、
+  // disabled ガードを迂回して編集タブへ入れてしまう本導線を封鎖する。
+  // 編集タブが正式公開されたら、この行と GenerationWorkspace 側のレンダーガードを外す。
+  const editTabAvailable = false;
+  if (!editTabAvailable || editableCuts.length === 0) return null;
 
   return (
     <div className="rounded-xl border border-pink-400/30 bg-pink-500/10 p-3">
