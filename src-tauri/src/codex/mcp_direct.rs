@@ -159,40 +159,6 @@ pub async fn call_tool(
     unreachable!("loop returns on attempt == 1");
 }
 
-/// `mcpServerStatus/list` で特定 MCP サーバの状態 (登録 + 認証) を取る。
-///
-/// 返り値: Some((authenticated)) = 登録あり / None = 未登録。
-/// authStatus の実値は "oAuth" (camelCase)。`codex mcp list --json` の "o_auth" とは
-/// 表記が違うため、英数字以外を除去して小文字比較する (mcp_shared::is_mcp_oauth_authenticated
-/// と同じ正規化思想)。
-pub async fn server_auth_status(state: &AppState, server: &str) -> Result<Option<bool>, String> {
-    let client = rpc_client(state).await?;
-    let tid = ensure_utility_thread(&client).await?;
-    // detail を絞るオプションはバージョン差があるため使わず、デフォルト (Full) で取る。
-    let result = client
-        .request_raw("mcpServerStatus/list", json!({ "threadId": tid }))
-        .await
-        .map_err(|e| format!("MCP サーバ状態の取得に失敗しました: {e}"))?;
-    let Some(entries) = result.get("data").and_then(|v| v.as_array()) else {
-        return Ok(None);
-    };
-    for entry in entries {
-        if entry.get("name").and_then(|v| v.as_str()) == Some(server) {
-            let auth = entry
-                .get("authStatus")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default();
-            let normalized: String = auth
-                .chars()
-                .filter(|c| c.is_ascii_alphanumeric())
-                .collect::<String>()
-                .to_lowercase();
-            return Ok(Some(normalized.contains("oauth")));
-        }
-    }
-    Ok(None)
-}
-
 /// 稼働中 app-server に config.toml の MCP 設定を再読込させる。
 ///
 /// `codex mcp add/login` (接続) や `codex mcp remove` (切断) は config.toml を書き換えるが、

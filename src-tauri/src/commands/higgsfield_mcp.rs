@@ -1,101 +1,56 @@
-//! Higgsfield リモート HTTP MCP 拡張 (2026-06-10 段階3)。
+//! Higgsfield リモート HTTP MCP 拡張 (2026-06-10 直接呼び出し版)。
 //!
-//! ## なぜ MCP 方式か (CLI 同梱方式からの作り直し)
+//! ## アーキテクチャ (v1.1.0 からの作り直し・LLM 仲介の全廃)
 //!
-//! 従来の higgsfield.rs は Higgsfield CLI バイナリ + 拡張パックを別 DL して同梱する
-//! 方式で、Windows での MODULE_NOT_FOUND / 文字化け / 拡張パック DL 失敗など、配布の
-//! 自己完結性が壊れやすかった。
+//! v1.1.0 までは「`codex exec` で gpt-5.5 に『MCP ツールを呼んで結果だけ返して』と
+//! お願いする」LLM 仲介方式だった。配布後の実ユーザー障害で以下が判明:
+//! - モデル一覧の取得に 30〜180 秒 (LLM 1 ターン分の往復が毎回乗る)
+//! - LLM がツールを呼ばず指示文の例文をそのまま返す事故が確率的に発生
+//!   (「JSON を取得できませんでした (stderr: 例: [...])」)
+//! - 生成も同様に確率的に失敗する (「4件すべて失敗」)
 //!
-//! このモジュールは Magnific (magnific.rs) と同じ「リモート HTTP MCP に `codex mcp` で
-//! 接続するだけ」の方式で Higgsfield を作り直す。CLI バイナリの別 DL は不要で、GORI 専用
-//! CODEX_HOME の config.toml に `https://mcp.higgsfield.ai/mcp` を OAuth 登録するだけで
-//! 有効化される。共通基盤は `crate::codex::mcp_shared`。
+//! 現在は codex app-server の `mcpServer/tool/call` (crate::codex::mcp_direct) で
+//! **LLM を介さず決定論的に** ツールを呼ぶ。実測: models_explore 1.1 秒 / balance
+//! 0.8 秒 / 生成投入 10 秒 → job_status(sync) で完了 URL 取得。
 //!
-//! ## 実機で確定済みの事実 (PoC 実証済み・2026-06-10)
-//! - Higgs MCP は `generate_image` ツールを提供 (params: model, prompt, medias,
-//!   aspect_ratio, count, get_cost)。実生成成功・URL 返却・DL 可能を確認済み。
-//! - `models_explore` でモデルを動的取得できる。
-//! - `auth_status` は Magnific と同一の "o_auth"。
-//! - `codex mcp add higgsfield --url ...` だけで OAuth が自動完了する (Magnific の
-//!   add→login 2 段階と同じ構造で実装し、login も冪等に試みる)。
+//! ## 実機で確定済みの事実 (PoC 2026-06-10、推測ゼロ)
+//! - `generate_image` / `generate_video` の arguments は `{"params": {...}}` ラッパー。
+//!   モデル固有パラメータ (resolution / mode / genre / sound / duration) も params 直下。
+//! - 投入は非同期: 応答 structuredContent.results[].id が job id (status: "pending")。
+//! - `job_status` は **トップレベル直** `{jobId, sync: true}`。sync はサーバ側で最大
+//!   約 25 秒ポーリングして終端状態で返す。完了時 structuredContent.generation
+//!   .results.rawUrl に成果物 URL。
+//! - 参照画像: `media_upload` {filename, content_type} → structuredContent.uploads[0]
+//!   .{upload_url, media_id} → その URL へ HTTP PUT (Content-Type 必須) →
+//!   `media_confirm` {type, media_id} → 生成ツールの medias: [{value: media_id, role}]。
+//!   medias.value は media_id / 過去 job_id / https:// URL のいずれも可。
+//! - `models_explore` {action:"list", type, limit} → structuredContent.items[]
+//!   .{id, name, output_type, medias[].roles, aspect_ratios, parameters}。
+//! - `balance` {} → structuredContent.{credits, subscription_plan_type}。
+//! - get_cost: true で実生成なしのコスト見積もり → structuredContent.cost
+//!   .{credits, credits_exact}。
 //!
-//! ## スコープ (段階3 = 画像生成 + 認証, 段階5 = 動画生成 + 参照画像アップロード)
-//! 段階5 で `generate_video` と参照画像の `media_upload`→PUT→`media_confirm` を追加する。
-//! 既存 higgsfield.rs (CLI 版) は触らず共存。
-//!
-//! ## 段階5 で PoC 実証済みの事実 (推測でなくこれに従う・2026-06-10)
-//! - `generate_video` params: model, prompt, medias, duration, aspect_ratio, count, get_cost
-//!   に加え、モデル固有パラメータ (mode/genre/resolution/sound 等) を **トップレベル** で渡す。
-//! - seedance_2_0: resolution(480p/720p/1080p) / mode(std/fast) /
-//!   genre(auto/action/horror/comedy/noir/drama/epic)。
-//! - kling3_0: sound(on/off)。
-//! - 参照画像は `media_upload` でアップロード URL を発行 → その URL に PUT →
-//!   `media_confirm` で media_id を取得 → `generate_image`/`generate_video` の
-//!   `medias` パラメータに media_id を渡す (codex exec 経由で実証済み)。
+//! 接続 (mcp add + OAuth login) はブラウザを開く必要があるため引き続き codex CLI で行い、
+//! 成功後に `config/mcpServer/reload` で常駐 app-server に設定を再読込させる
+//! (再起動なしで直接呼び出しが有効になる)。
 
 use std::process::Stdio;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use tauri::State;
 
-use crate::codex::mcp_shared::{
-    entry_is_authenticated, extract_first_url, find_mcp_entry, gori_codex_command,
-    run_codex_capture,
-};
-use crate::codex::process::{enriched_path, resolve_codex_cli_binary};
+use crate::codex::mcp_direct::{call_tool, reload_mcp_servers};
+use crate::codex::mcp_shared::{entry_is_authenticated, find_mcp_entry, gori_codex_command, run_codex_capture};
+use crate::state::AppState;
 
-/// `codex exec` の出力テキストから最初の JSON 値 (配列 or オブジェクト) を抽出してパースする。
-///
-/// codex の最終メッセージに「JSON だけを返せ」と指示しても、説明文や ```json フェンス、
-/// 前後の空白が混じりうる。`[` または `{` の最初の出現から括弧の対応を数えて末尾を特定し、
-/// その範囲だけを serde_json でパースする。対応が取れる JSON が無ければ `None`。
-///
-/// 段階6 で models_explore / balance / get_cost の結果を受け取るために使う
-/// (extract_first_url は URL 専用なので、JSON 用に別ヘルパが要る・higgsfield_mcp.rs 内に閉じる)。
-fn extract_first_json(text: &str) -> Option<serde_json::Value> {
-    // 配列 `[` とオブジェクト `{` のうち、先に現れる方を始点にする。
-    let start = text
-        .char_indices()
-        .find(|(_, c)| *c == '[' || *c == '{')
-        .map(|(i, _)| i)?;
-    let open = text.as_bytes()[start];
-    let close = if open == b'[' { b']' } else { b'}' };
-
-    // 文字列リテラル内の括弧・エスケープを無視しながら、対応する閉じ括弧を探す。
-    let bytes = text.as_bytes();
-    let mut depth = 0i32;
-    let mut in_string = false;
-    let mut escaped = false;
-    for (i, &b) in bytes.iter().enumerate().skip(start) {
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if b == b'\\' {
-                escaped = true;
-            } else if b == b'"' {
-                in_string = false;
-            }
-            continue;
-        }
-        match b {
-            b'"' => in_string = true,
-            x if x == open => depth += 1,
-            x if x == close => {
-                depth -= 1;
-                if depth == 0 {
-                    let slice = &text[start..=i];
-                    return serde_json::from_str::<serde_json::Value>(slice).ok();
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
+const HIGGSFIELD_MCP_NAME: &str = "higgsfield";
+const HIGGSFIELD_MCP_URL: &str = "https://mcp.higgsfield.ai/mcp";
 
 /// JSON 値から数値 (クレジット数・コスト) を取り出す。トップレベルが数値ならそれを、
 /// オブジェクトなら credits / cost / value / amount 等の代表キーを順に探す。
-/// f64 で取り、呼び出し側で round して i64 にする (CLI 版 higgsfield_generate_cost と同じ流儀)。
-fn json_to_number(value: &serde_json::Value) -> Option<f64> {
+fn json_to_number(value: &Value) -> Option<f64> {
     if let Some(n) = value.as_f64() {
         return Some(n);
     }
@@ -106,8 +61,8 @@ fn json_to_number(value: &serde_json::Value) -> Option<f64> {
     }
     if let Some(obj) = value.as_object() {
         for key in [
-            "credits",
             "credits_exact",
+            "credits",
             "cost",
             "credit_cost",
             "amount",
@@ -122,8 +77,8 @@ fn json_to_number(value: &serde_json::Value) -> Option<f64> {
     None
 }
 
-/// テキスト全体から最初の数値トークンを拾うフォールバック。JSON 抽出に失敗したときだけ使う
-/// (codex が「12.5」とだけ返す等)。小数・整数の両方に対応。
+/// テキスト全体から最初の数値トークンを拾うフォールバック (balance の text
+/// "Credits: 445.77 | Plan: creator" 等)。小数・整数の両方に対応。
 fn extract_first_number(text: &str) -> Option<f64> {
     let mut buf = String::new();
     for c in text.chars() {
@@ -143,9 +98,6 @@ fn extract_first_number(text: &str) -> Option<f64> {
     }
     None
 }
-
-const HIGGSFIELD_MCP_NAME: &str = "higgsfield";
-const HIGGSFIELD_MCP_URL: &str = "https://mcp.higgsfield.ai/mcp";
 
 /// Higgsfield MCP 拡張の接続状態。未接続なら全 false で UI が degrade する。
 #[derive(Debug, Clone, Serialize)]
@@ -167,6 +119,9 @@ fn higgsfield_mcp_status_unavailable() -> HiggsfieldMcpStatus {
 }
 
 /// Higgsfield MCP 拡張の接続状態を返す。失敗しても起動を止めず、未接続として degrade する。
+///
+/// `codex mcp list --json` はローカル config を読むだけなので app-server に依存せず、
+/// アプリ起動直後 (app-server 未起動) でも接続タブが状態を出せる。
 #[tauri::command]
 pub async fn higgsfield_mcp_status() -> Result<HiggsfieldMcpStatus, String> {
     let mut cmd = match gori_codex_command() {
@@ -212,10 +167,12 @@ const HIGGSFIELD_MCP_LOGIN_TIMEOUT_SECS: u64 = 180;
 ///
 /// 実機確認 (2026-06-10): `codex mcp add higgsfield --url ...` だけで OAuth が自動完了する。
 /// ただし Magnific の add→login 2 段階と同じ構造で実装し、add 後に login も **冪等に**
-/// 試みる (既に認証済みなら login は no-op / 成功する想定。万一 add だけで認証が完了
-/// しない codex バージョンでも login が補完する)。最後に status を再確認して結果を返す。
+/// 試みる。最後に status を再確認して結果を返す。
+///
+/// 成功時は稼働中 app-server に config/mcpServer/reload を発行し、**アプリ再起動なしで**
+/// 直接呼び出し (モデル一覧・生成) が効くようにする。
 #[tauri::command]
-pub async fn higgsfield_mcp_login() -> Result<String, String> {
+pub async fn higgsfield_mcp_login(state: State<'_, AppState>) -> Result<String, String> {
     // ① 登録 (mcp add)。実機ではこの段階で OAuth が自動完了する。既に登録済みだと
     //    codex が非ゼロ終了することがあるが、それはエラーにせず login に進む (冪等性)。
     let add = run_codex_capture(
@@ -249,6 +206,8 @@ pub async fn higgsfield_mcp_login() -> Result<String, String> {
     //    ケースの両方を、実際の auth_status で判定する (推測しない)。
     let status = higgsfield_mcp_status().await?;
     if status.authenticated {
+        // ④ 常駐 app-server に MCP 設定を再読込させる (再起動なしで生成可能に)。
+        reload_mcp_servers(&state).await;
         Ok("Higgsfield の認証が完了しました。".to_string())
     } else if status.registered {
         Err("Higgsfield を登録しましたが、認証が完了していません。ブラウザでのログインを完了してから、もう一度「接続」を押してください。".to_string())
@@ -267,18 +226,16 @@ pub async fn higgsfield_mcp_login() -> Result<String, String> {
     }
 }
 
-/// Higgsfield MCP の登録を解除する (codex mcp remove)。
-///
-/// magnific_logout はタイムアウト無しだったが、こちらは run_codex_capture 経由で
-/// タイムアウトを付ける (remove がローカル config 操作で速いとはいえ、万一ハングしても
-/// UI を固めない)。
+/// Higgsfield MCP の登録を解除する (codex mcp remove)。解除後は app-server にも
+/// 再読込させ、直接呼び出し経路からも消す。
 #[tauri::command]
-pub async fn higgsfield_mcp_logout() -> Result<(), String> {
+pub async fn higgsfield_mcp_logout(state: State<'_, AppState>) -> Result<(), String> {
     let _ = run_codex_capture(
         &["mcp", "remove", HIGGSFIELD_MCP_NAME],
         std::time::Duration::from_secs(30),
     )
     .await?;
+    reload_mcp_servers(&state).await;
     Ok(())
 }
 
@@ -293,7 +250,7 @@ pub struct HiggsfieldMcpGenResult {
 }
 
 /// 画像 / 動画の分岐。フロントの `MediaType` ("image" | "video") と鏡映。
-/// 未指定 (None) は image 扱い (段階3 までの画像生成と後方互換)。
+/// 未指定 (None) は image 扱い (画像生成と後方互換)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum HiggsfieldMcpMediaType {
@@ -320,19 +277,19 @@ pub struct HiggsfieldMcpGenArgs {
     /// 秒数 (例: 5)。generate_video の duration。
     #[serde(default)]
     pub duration: Option<u32>,
-    /// 描画モード (例: seedance std/fast)。トップレベルで渡す。
+    /// 描画モード (例: seedance std/fast)。
     #[serde(default)]
     pub mode: Option<String>,
-    /// 解像度 (例: seedance 480p/720p/1080p)。トップレベルで渡す。
+    /// 解像度 (例: seedance 480p/720p/1080p)。
     #[serde(default)]
     pub resolution: Option<String>,
-    /// 効果音 (例: kling on/off)。トップレベルで渡す。
+    /// 効果音 (例: kling on/off)。
     #[serde(default)]
     pub sound: Option<String>,
     /// ジャンル (例: seedance auto/action/horror/comedy/noir/drama/epic)。
     #[serde(default)]
     pub genre: Option<String>,
-    /// モデルのバリアント (CLI 版の --model に相当する model_variant)。
+    /// モデルのバリアント。
     #[serde(default)]
     pub model_variant: Option<String>,
 }
@@ -343,134 +300,56 @@ impl HiggsfieldMcpGenArgs {
     }
 }
 
-/// 参照画像(ローカルパス)を medias として渡すための共通プロンプト断片を組む。
-///
-/// PoC 実証済み: `media_upload` でアップロード URL を発行 → その URL に PUT →
-/// `media_confirm` で media_id を取得 → `generate_image`/`generate_video` の
-/// `medias` に media_id を渡す、という3段フローを codex に実行させる。参照画像が
-/// 無ければ空文字を返す (medias 指示なし)。
-fn ref_medias_instruction(ref_image_paths: &[String]) -> String {
-    let paths: Vec<&String> = ref_image_paths
-        .iter()
-        .filter(|p| !p.trim().is_empty())
-        .collect();
-    if paths.is_empty() {
-        return String::new();
+/// generate_image / generate_video の arguments (`{"params": {...}}` ラッパー) を組む。
+/// モデル固有パラメータ (duration / mode / resolution / sound / genre / model_variant) も
+/// params 直下に置く (PoC 実証済み。inputSchema は additionalProperties 許容)。
+#[allow(clippy::too_many_arguments)]
+fn build_gen_arguments(
+    model: &str,
+    prompt: &str,
+    aspect: &str,
+    count: u32,
+    duration: Option<u32>,
+    mode: Option<&str>,
+    resolution: Option<&str>,
+    sound: Option<&str>,
+    genre: Option<&str>,
+    model_variant: Option<&str>,
+    medias: &[Value],
+    get_cost: bool,
+) -> Value {
+    let mut p = serde_json::Map::new();
+    p.insert("model".into(), json!(model));
+    p.insert("prompt".into(), json!(prompt));
+    p.insert("aspect_ratio".into(), json!(aspect));
+    p.insert("count".into(), json!(count));
+    if let Some(d) = duration {
+        p.insert("duration".into(), json!(d));
     }
-    let list = paths
-        .iter()
-        .map(|p| p.as_str())
-        .collect::<Vec<_>>()
-        .join("\n  - ");
-    format!(
-        "参照画像(ローカルファイル)を入力として使います。次の手順で media_id を取得し、\
-         生成ツールの `medias` パラメータに渡してください:\n  \
-         1. 各ローカル参照画像について `media_upload` を呼び、アップロード用URLを発行する。\n  \
-         2. 発行されたURLに、対応するローカルファイルの中身を **HTTP PUT** でアップロードする\
-         (curl 等で `--upload-file <ローカルパス> <発行URL>`)。\n  \
-         3. `media_confirm` を呼び、各アップロードの media_id を取得する。\n  \
-         4. 取得した media_id を生成ツールの `medias` パラメータ(配列)に渡す。\n  \
-         対象ローカル参照画像:\n  - {list}\n"
-    )
-}
-
-/// 動画 / 画像で異なる「ツール名・成果物の語」を返す。保存拡張子は結果 URL から
-/// `extension_for` で別途決める (ここでは持たない)。
-struct MediaCopy {
-    /// 呼ぶべき MCP ツール名 (generate_image / generate_video)。
-    tool: &'static str,
-    /// 成果物の語 (画像 / 動画)。プロンプト文面に差し込む。
-    noun: &'static str,
-}
-
-/// 動画モデル固有パラメータを「- key: value」形式のプロンプト断片に組む。
-/// 空 / None のものは出力しない。CLI 版 run_one_higgsfield_job のフラグ集合と対応する。
-fn video_param_lines(args: &HiggsfieldMcpGenArgs) -> String {
-    let mut out = String::new();
-    if let Some(d) = args.duration {
-        out.push_str(&format!("- duration: {d}\n"));
-    }
-    let mut push_opt = |label: &str, v: &Option<String>| {
-        if let Some(s) = v.as_deref().filter(|s| !s.trim().is_empty()) {
-            out.push_str(&format!("- {label}: {s}\n"));
+    let mut push_opt = |key: &str, v: Option<&str>| {
+        if let Some(s) = v.filter(|s| !s.trim().is_empty()) {
+            p.insert(key.into(), json!(s));
         }
     };
-    // モデル固有パラメータは **トップレベル** で渡す (PoC 実証済み)。
-    push_opt("mode", &args.mode);
-    push_opt("resolution", &args.resolution);
-    push_opt("sound", &args.sound);
-    push_opt("genre", &args.genre);
-    // model_variant は model のバリアント指定。model が未指定でもバリアントだけ来うる。
-    if let Some(mv) = args.model_variant.as_deref().filter(|s| !s.trim().is_empty()) {
-        out.push_str(&format!("- model_variant: {mv}\n"));
+    push_opt("mode", mode);
+    push_opt("resolution", resolution);
+    push_opt("sound", sound);
+    push_opt("genre", genre);
+    push_opt("model_variant", model_variant);
+    if !medias.is_empty() {
+        p.insert("medias".into(), Value::Array(medias.to_vec()));
     }
-    out
-}
-
-/// 1枚分の codex exec プロンプトを組む。media_type で generate_image / generate_video を
-/// 分岐し、参照画像があれば media_upload→PUT→media_confirm→medias の手順を必ず入れる。
-/// 動画版にも画像版と同じ【重要・厳守】ガード(新規生成強制 + 参照URL返却禁止)を入れる。
-fn build_gen_prompt(args: &HiggsfieldMcpGenArgs, aspect: &str) -> String {
-    let video = args.is_video();
-    let copy = if video {
-        MediaCopy { tool: "generate_video", noun: "動画" }
-    } else {
-        MediaCopy { tool: "generate_image", noun: "画像" }
-    };
-
-    // モデル指定の有無で文面を変える。未指定なら models_explore で選ばせる。
-    let model_note = match args.model.as_deref().filter(|s| !s.is_empty()) {
-        Some(model) => format!("- model: {model}\n"),
-        None => "- model: models_explore で利用可能なモデルから適切なものを1つ選ぶ\n".to_string(),
-    };
-    // 動画だけ duration / mode / resolution / sound / genre 等を渡す。
-    let video_lines = if video {
-        let lines = video_param_lines(args);
-        if lines.is_empty() {
-            String::new()
-        } else {
-            format!("以下のモデル固有パラメータをトップレベルで渡してください:\n{lines}")
-        }
-    } else {
-        String::new()
-    };
-    let ref_note = ref_medias_instruction(&args.ref_image_paths);
-
-    format!(
-        "higgsfield MCP の {tool} ツールを**必ず実行して**、{noun}を新規に1つ生成してください。\n\
-         {model_note}\
-         - aspect_ratio: {aspect}\n\
-         - count: 1\n\
-         - prompt: {user_prompt}\n\
-         {video_lines}\
-         {ref_note}\
-         モデルが分からなければ models_explore で選んでください。\n\
-         【重要・厳守】\n\
-         - {tool} を実行せずに、既存メディアや参照画像(medias)のURLをそのまま返すことは禁止です。\
-         必ず {tool} を呼び出して、**今回新しく生成された{noun}**の結果URLを返してください。\n\
-         - 参照画像(medias)は {tool} の入力として渡すだけです。参照画像そのもののURLを最終回答にしてはいけません。\n\
-         生成が完了したら、最終メッセージは\
-         **今回新規生成された{noun}のダウンロードURL(http(s)で始まる1個)だけ**を1行で返してください。\
-         説明文や他のテキストは一切含めないこと。",
-        tool = copy.tool,
-        noun = copy.noun,
-        model_note = model_note,
-        aspect = aspect,
-        user_prompt = args.prompt,
-        video_lines = video_lines,
-        ref_note = ref_note,
-    )
+    if get_cost {
+        p.insert("get_cost".into(), json!(true));
+    }
+    json!({ "params": Value::Object(p) })
 }
 
 /// 結果 URL から保存に使う拡張子を決める。URL のクエリを除いたパスの末尾拡張子を
 /// 優先し、無ければ media_type のデフォルト (video=mp4 / image=png) にフォールバックする。
-/// mp4 等の動画拡張子に対応するための関数 (受入基準4)。
 fn extension_for(url: &str, is_video: bool) -> String {
     // クエリ・フラグメントを落としてからパスの拡張子を見る。
-    let path = url
-        .split(['?', '#'])
-        .next()
-        .unwrap_or(url);
+    let path = url.split(['?', '#']).next().unwrap_or(url);
     let ext = path
         .rsplit('/')
         .next()
@@ -483,7 +362,241 @@ fn extension_for(url: &str, is_video: bool) -> String {
     match ext {
         Some(e) if known.contains(&e.as_str()) => e,
         // 拡張子が無い / 未知の場合は media_type で決める。
-        _ => if is_video { "mp4".to_string() } else { "png".to_string() },
+        _ => {
+            if is_video {
+                "mp4".to_string()
+            } else {
+                "png".to_string()
+            }
+        }
+    }
+}
+
+/// ローカルファイルの拡張子から Content-Type を推定する (media_upload 用)。
+fn content_type_for_path(path: &str) -> &'static str {
+    let lower = path.to_ascii_lowercase();
+    if lower.ends_with(".png") {
+        "image/png"
+    } else if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+        "image/jpeg"
+    } else if lower.ends_with(".webp") {
+        "image/webp"
+    } else if lower.ends_with(".gif") {
+        "image/gif"
+    } else if lower.ends_with(".mp4") || lower.ends_with(".m4v") {
+        "video/mp4"
+    } else if lower.ends_with(".mov") {
+        "video/quicktime"
+    } else if lower.ends_with(".webm") {
+        "video/webm"
+    } else {
+        // Higgsfield 側は filename からも推定するので、未知拡張子は octet-stream で送る。
+        "application/octet-stream"
+    }
+}
+
+/// 参照画像 1 枚を media_upload → HTTP PUT → media_confirm で media_id 化する。
+/// (PoC 実証済みフロー。upload_url への PUT は Content-Type ヘッダ必須)
+async fn upload_reference(
+    state: &AppState,
+    http: &reqwest::Client,
+    path: &str,
+) -> Result<String, String> {
+    let filename = std::path::Path::new(path)
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "reference.png".to_string());
+    let content_type = content_type_for_path(path);
+
+    let bytes = tokio::fs::read(path)
+        .await
+        .map_err(|e| format!("参照画像を読み込めませんでした ({path}): {e}"))?;
+
+    // ① アップロード URL + media_id を発行
+    let out = call_tool(
+        state,
+        HIGGSFIELD_MCP_NAME,
+        "media_upload",
+        json!({ "filename": filename, "content_type": content_type }),
+    )
+    .await?;
+    if out.is_error {
+        return Err(format!("参照画像のアップロード準備に失敗しました: {}", out.text));
+    }
+    let upload = out
+        .structured
+        .as_ref()
+        .and_then(|s| s.get("uploads"))
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.first())
+        .cloned()
+        .ok_or_else(|| "media_upload の応答に uploads がありません".to_string())?;
+    let upload_url = upload
+        .get("upload_url")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "media_upload の応答に upload_url がありません".to_string())?
+        .to_string();
+    let media_id = upload
+        .get("media_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "media_upload の応答に media_id がありません".to_string())?
+        .to_string();
+
+    // ② 発行 URL へ PUT (presigned URL は Content-Type が署名に含まれるため必須)
+    let res = http
+        .put(&upload_url)
+        .header(reqwest::header::CONTENT_TYPE, content_type)
+        .body(bytes)
+        .send()
+        .await
+        .map_err(|e| format!("参照画像のアップロードに失敗しました: {e}"))?;
+    if !res.status().is_success() {
+        return Err(format!(
+            "参照画像のアップロードに失敗しました (HTTP {})",
+            res.status()
+        ));
+    }
+
+    // ③ confirm して media_id を有効化
+    let media_kind = if content_type.starts_with("video") {
+        "video"
+    } else {
+        "image"
+    };
+    let out = call_tool(
+        state,
+        HIGGSFIELD_MCP_NAME,
+        "media_confirm",
+        json!({ "type": media_kind, "media_id": media_id }),
+    )
+    .await?;
+    if out.is_error {
+        return Err(format!("参照画像の確定に失敗しました: {}", out.text));
+    }
+    Ok(media_id)
+}
+
+/// 参照画像に付ける role をモデルカタログから引く。models_explore(action:get) の
+/// medias[].roles を見て、"image" があればそれ、無ければ最初の role。取得に失敗したら
+/// "image" (サーバ側に auto-coerce があるため致命にならない)。
+async fn resolve_media_role(state: &AppState, model: &str) -> String {
+    let fallback = "image".to_string();
+    let Ok(out) = call_tool(
+        state,
+        HIGGSFIELD_MCP_NAME,
+        "models_explore",
+        json!({ "action": "get", "model_id": model }),
+    )
+    .await
+    else {
+        return fallback;
+    };
+    let Some(s) = out.structured.as_ref() else {
+        return fallback;
+    };
+    // 応答が item / items[0] / 直下のどれでも拾えるようにする。
+    let item = s
+        .get("item")
+        .or_else(|| s.get("items").and_then(|v| v.get(0)))
+        .unwrap_or(s);
+    let Some(medias) = item.get("medias").and_then(|v| v.as_array()) else {
+        return fallback;
+    };
+    let mut first_role: Option<String> = None;
+    for media in medias {
+        if let Some(roles) = media.get("roles").and_then(|v| v.as_array()) {
+            for role in roles.iter().filter_map(|r| r.as_str()) {
+                if role == "image" {
+                    return "image".to_string();
+                }
+                if first_role.is_none() {
+                    first_role = Some(role.to_string());
+                }
+            }
+        }
+    }
+    first_role.unwrap_or(fallback)
+}
+
+/// 投入応答 structuredContent.results[] から job id を集める。
+fn extract_job_ids(structured: Option<&Value>) -> Vec<String> {
+    structured
+        .and_then(|s| s.get("results"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|r| r.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 1 つの job を完了までポーリングし、成果物 URL を返す。
+///
+/// job_status は sync: true でサーバ側が最大約 25 秒待ってから返すため、クライアント側の
+/// sleep は最小限 (1 秒) で良い。deadline を超えたらタイムアウトエラー。
+async fn poll_higgsfield_job(
+    state: &AppState,
+    job_id: &str,
+    deadline: Instant,
+) -> Result<String, String> {
+    loop {
+        let out = call_tool(
+            state,
+            HIGGSFIELD_MCP_NAME,
+            "job_status",
+            json!({ "jobId": job_id, "sync": true }),
+        )
+        .await?;
+        if out.is_error {
+            return Err(format!("生成状況の取得に失敗しました: {}", out.text));
+        }
+        let gen = out
+            .structured
+            .as_ref()
+            .and_then(|s| s.get("generation"))
+            .cloned()
+            .unwrap_or(Value::Null);
+        let status = gen
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        match status.as_str() {
+            "completed" => {
+                let url = gen
+                    .get("results")
+                    .and_then(|r| r.get("rawUrl").or_else(|| r.get("raw_url")))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                return url.ok_or_else(|| {
+                    "生成は完了しましたが、結果URLを取得できませんでした".to_string()
+                });
+            }
+            "failed" | "cancelled" | "canceled" | "error" | "nsfw" => {
+                let reason = gen
+                    .get("error")
+                    .or_else(|| gen.get("reason"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| {
+                        if out.text.is_empty() {
+                            format!("生成が {status} で終了しました")
+                        } else {
+                            out.text.clone()
+                        }
+                    });
+                return Err(reason);
+            }
+            // pending / processing / queued / 不明ステータスは継続。
+            _ => {
+                if Instant::now() >= deadline {
+                    return Err("生成がタイムアウトしました (混雑している可能性があります。少し時間をおいて再試行してください)".to_string());
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        }
     }
 }
 
@@ -491,23 +604,27 @@ fn extension_for(url: &str, is_video: bool) -> String {
 /// generated_images/higgsfield/ にダウンロードする。コア(batch_gen)は触らず、
 /// Higgsfield モデルが選ばれたときだけこの経路を通る。
 ///
-/// PoC 実証済みの `generate_image` / `generate_video` ツールを codex exec 経由で叩く。
-/// モデル未指定なら codex に `models_explore` でモデルを選ばせる。
-/// 参照画像があれば media_upload→PUT→media_confirm→medias の手順を codex に実行させる。
+/// LLM を介さない直接呼び出し: 参照画像を media_id 化 → generate_image/generate_video を
+/// 1 コールで count 枚投入 → 各 job を並行ポーリング → 完了 URL を DL 保存。
 #[tauri::command]
 pub async fn higgsfield_mcp_generate_batch(
+    state: State<'_, AppState>,
     args: HiggsfieldMcpGenArgs,
 ) -> Result<HiggsfieldMcpGenResult, String> {
-    let binary = resolve_codex_cli_binary()
-        .map_err(|e| format!("codex CLI が見つかりません: {e}"))?;
-    let home = crate::codex::home::gori_codex_home_path();
+    let Some(model) = args.model.as_deref().filter(|s| !s.trim().is_empty()) else {
+        return Err("Higgsfield のモデルが未選択です。モデルを選んでから生成してください。".to_string());
+    };
     let count = args.count.unwrap_or(1).clamp(1, 4);
-    let aspect = args.aspect.as_deref().filter(|s| !s.is_empty()).unwrap_or("1:1");
+    let aspect = args
+        .aspect
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("1:1");
     let is_video = args.is_video();
-
-    let mut generated_paths = Vec::new();
-    let mut errors = Vec::new();
-    let mut failed_count = 0u32;
+    let noun = if is_video { "動画" } else { "画像" };
+    // 生成全体の締め切り。動画は画像より重い (DEV-PLAYBOOK 生成3点セットの 900 秒に揃える)。
+    let deadline = Instant::now()
+        + Duration::from_secs(if is_video { 900 } else { 300 });
 
     let base = crate::images::watcher::generated_images_dir()
         .ok_or_else(|| "generated_images ディレクトリの解決に失敗".to_string())?;
@@ -515,94 +632,92 @@ pub async fn higgsfield_mcp_generate_batch(
     std::fs::create_dir_all(&dir).map_err(|e| format!("higgsfield dir 作成失敗: {e}"))?;
     let http = reqwest::Client::new();
 
-    for i in 0..count {
-        // codex に Higgsfield MCP の generate_image / generate_video を使わせ、結果 URL
-        // だけを返させる。参照画像があれば media_upload→PUT→media_confirm→medias の手順を
-        // 同じプロンプトで指示する。
-        let prompt = build_gen_prompt(&args, aspect);
+    let mut generated_paths = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
 
-        let mut cmd = tokio::process::Command::new(&binary);
-        cmd.args([
-            "exec",
-            // Windows では --full-auto(=--sandbox workspace-write)が
-            // codex-windows-sandbox-setup.exe を要求して「見つかりません」で死ぬ。
-            // BYO 配布(ユーザー自身の PC・自身のサブスク=外部サンドボックス環境)では
-            // サンドボックス無効の bypass を使う。これで Windows でも生成できる。
-            "--dangerously-bypass-approvals-and-sandbox",
-            "--skip-git-repo-check",
-            "--color",
-            "never",
-            "-c",
-            "model=gpt-5.5",
-            "-c",
-            "model_reasoning_effort=low",
-            "-",
-        ]);
-        cmd.env("PATH", enriched_path());
-        if let Some(h) = home.as_ref() {
-            cmd.env("CODEX_HOME", h);
+    // ① 参照画像を media_id 化 (role はモデルカタログから決定)
+    let ref_paths: Vec<&String> = args
+        .ref_image_paths
+        .iter()
+        .filter(|p| !p.trim().is_empty())
+        .collect();
+    let mut medias: Vec<Value> = Vec::new();
+    if !ref_paths.is_empty() {
+        let role = resolve_media_role(&state, model).await;
+        for path in &ref_paths {
+            match upload_reference(&state, &http, path).await {
+                Ok(media_id) => medias.push(json!({ "value": media_id, "role": role })),
+                Err(e) => {
+                    // 参照画像が 1 枚も使えないまま生成すると意図と違う絵になるため、
+                    // アップロード失敗は即エラーで返す (ユーザーが状況を直せる)。
+                    return Ok(HiggsfieldMcpGenResult {
+                        generated_paths,
+                        failed_count: count,
+                        errors: vec![e],
+                    });
+                }
+            }
         }
-        cmd.stdin(std::process::Stdio::piped());
-        cmd.stdout(std::process::Stdio::piped());
-        cmd.stderr(std::process::Stdio::piped());
-        cmd.kill_on_drop(true);
+    }
 
-        use tokio::io::AsyncWriteExt;
-        let mut child = match cmd.spawn() {
-            Ok(c) => c,
+    // ② 1 コールで count 枚投入 (応答 results[].id が job id)
+    let arguments = build_gen_arguments(
+        model,
+        &args.prompt,
+        aspect,
+        count,
+        args.duration,
+        args.mode.as_deref(),
+        args.resolution.as_deref(),
+        args.sound.as_deref(),
+        args.genre.as_deref(),
+        args.model_variant.as_deref(),
+        &medias,
+        false,
+    );
+    let tool = if is_video {
+        "generate_video"
+    } else {
+        "generate_image"
+    };
+    let out = call_tool(&state, HIGGSFIELD_MCP_NAME, tool, arguments).await?;
+    if out.is_error {
+        return Ok(HiggsfieldMcpGenResult {
+            generated_paths,
+            failed_count: count,
+            errors: vec![format!("Higgsfield {noun}生成の投入に失敗しました: {}", out.text)],
+        });
+    }
+    let job_ids = extract_job_ids(out.structured.as_ref());
+    if job_ids.is_empty() {
+        return Ok(HiggsfieldMcpGenResult {
+            generated_paths,
+            failed_count: count,
+            errors: vec![format!(
+                "Higgsfield {noun}生成のジョブIDを取得できませんでした: {}",
+                out.text
+            )],
+        });
+    }
+
+    // ③ 各 job を並行ポーリング (sync: true なのでサーバ側が待つ)
+    let polls = job_ids
+        .iter()
+        .map(|job| poll_higgsfield_job(&state, job, deadline));
+    let poll_results = futures::future::join_all(polls).await;
+
+    // ④ 完了 URL を DL 保存
+    let mut failed_count = 0u32;
+    for (i, result) in poll_results.into_iter().enumerate() {
+        let url = match result {
+            Ok(u) => u,
             Err(e) => {
                 failed_count += 1;
-                errors.push(format!("codex spawn 失敗: {e}"));
+                errors.push(e);
                 continue;
             }
         };
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(prompt.as_bytes()).await;
-        }
-
-        // Higgsfield 生成は MCP 往復 + クラウド生成で時間がかかる。動画は画像より重く、
-        // 参照画像アップロード(media_upload→PUT→media_confirm)も挟むので長めに取る。
-        // 画像 300 秒 / 動画 900 秒 (DEV-PLAYBOOK の生成3点セット = タイムアウト 900 秒に揃える)。
-        let timeout_secs = if is_video { 900 } else { 300 };
-        let output = match tokio::time::timeout(
-            std::time::Duration::from_secs(timeout_secs),
-            child.wait_with_output(),
-        )
-        .await
-        {
-            Ok(Ok(o)) => o,
-            Ok(Err(e)) => {
-                failed_count += 1;
-                errors.push(format!("codex 実行失敗: {e}"));
-                continue;
-            }
-            Err(_) => {
-                failed_count += 1;
-                errors.push(format!(
-                    "Higgsfield 生成が {timeout_secs} 秒でタイムアウトしました"
-                ));
-                continue;
-            }
-        };
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let Some(url) = extract_first_url(&stdout) else {
-            failed_count += 1;
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            errors.push(format!(
-                "Higgsfield 生成結果のURLを取得できませんでした (stderr: {})",
-                stderr.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("")
-            ));
-            continue;
-        };
-
-        // 成果物の語 (画像/動画) をエラー文面に揃える。
-        let noun = if is_video { "動画" } else { "画像" };
-        // URL の拡張子 (無ければ media_type デフォルト) で保存名を決める。mp4 等の
-        // 動画拡張子に対応 (extract_first_url は拡張子を問わず http(s) URL を拾う)。
         let ext = extension_for(&url, is_video);
-
-        // URL を generated_images/higgsfield/ にダウンロード保存。
         match http.get(&url).send().await {
             Ok(res) if res.status().is_success() => match res.bytes().await {
                 Ok(bytes) if !bytes.is_empty() => {
@@ -633,6 +748,8 @@ pub async fn higgsfield_mcp_generate_batch(
             }
         }
     }
+    // 投入できた job 数が count に満たない場合も失敗として数える。
+    failed_count += count.saturating_sub(job_ids.len() as u32);
 
     Ok(HiggsfieldMcpGenResult {
         generated_paths,
@@ -641,106 +758,27 @@ pub async fn higgsfield_mcp_generate_batch(
     })
 }
 
-// ─────────────────────────── 段階6: モデル一覧 / コスト / 残高 ───────────────────────────
-//
-// いずれも `codex exec` 経由で Higgsfield MCP の models_explore / generate_*(get_cost=true) /
-// balance ツールを叩き、出力テキストから JSON を抽出してパースする。生成バッチと同じ
-// `--dangerously-bypass-approvals-and-sandbox` を使い、Windows でもサンドボックス setup を
-// 要求せずに動かす (BYO 配布 = ユーザー自身の PC・サブスク前提)。
+// ─────────────────────────── モデル一覧 / コスト / 残高 ───────────────────────────
 
-/// 段階6 系コマンドが使う codex exec の共通設定。生成バッチ
-/// (higgsfield_mcp_generate_batch) と同じフラグ集合で `codex exec` を組み、stdin に
-/// `prompt` を流し込んでタイムアウト付きで stdout を取る。`Ok((stdout, stderr))` を返す。
-async fn run_codex_exec_prompt(
-    prompt: &str,
-    timeout_secs: u64,
-) -> Result<(String, String), String> {
-    let binary = resolve_codex_cli_binary()
-        .map_err(|e| format!("codex CLI が見つかりません: {e}"))?;
-    let home = crate::codex::home::gori_codex_home_path();
-
-    let mut cmd = tokio::process::Command::new(&binary);
-    cmd.args([
-        "exec",
-        // 生成バッチと同じ理由 (Windows のサンドボックス setup 回避)。BYO 配布前提。
-        "--dangerously-bypass-approvals-and-sandbox",
-        "--skip-git-repo-check",
-        "--color",
-        "never",
-        "-c",
-        "model=gpt-5.5",
-        "-c",
-        "model_reasoning_effort=low",
-        "-",
-    ]);
-    cmd.env("PATH", enriched_path());
-    if let Some(h) = home.as_ref() {
-        cmd.env("CODEX_HOME", h);
-    }
-    cmd.stdin(std::process::Stdio::piped());
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::piped());
-    cmd.kill_on_drop(true);
-
-    use tokio::io::AsyncWriteExt;
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("codex の起動に失敗しました: {e}"))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(prompt.as_bytes()).await;
-    }
-
-    let output = match tokio::time::timeout(
-        std::time::Duration::from_secs(timeout_secs),
-        child.wait_with_output(),
-    )
-    .await
-    {
-        Ok(Ok(o)) => o,
-        Ok(Err(e)) => return Err(format!("codex 実行に失敗しました: {e}")),
-        Err(_) => {
-            return Err(format!(
-                "Higgsfield MCP の応答が {timeout_secs} 秒でタイムアウトしました"
-            ))
-        }
-    };
-
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    Ok((stdout, stderr))
-}
-
-/// stderr から人間が読める最後の非空行を返す (エラー文面の付加情報)。
-fn last_stderr_line(stderr: &str) -> &str {
-    stderr
-        .lines()
-        .rev()
-        .find(|l| !l.trim().is_empty())
-        .unwrap_or("")
-        .trim()
-}
-
-/// モデル一覧の1件。CLI 版 `HiggsfieldModel` (higgsfield.rs) とフロント互換にするため、
-/// シリアライズ名を camelCase の displayName / jobSetType / type に揃える。
-/// フロントの `HiggsfieldModelInfo` ({displayName, jobSetType, type}) と鏡映。
+/// モデル一覧の1件。フロントの `HiggsfieldModelInfo` ({displayName, jobSetType, type}) と鏡映。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HiggsfieldMcpModelInfo {
     #[serde(rename = "displayName", alias = "display_name", alias = "name")]
     pub display_name: String,
     #[serde(rename = "jobSetType", alias = "job_set_type", alias = "id")]
     pub job_set_type: String,
-    /// "image" | "video"。codex が `type` を返さなくても、要求した media で補完する。
+    /// "image" | "video"。
     #[serde(rename = "type", default)]
     pub r#type: String,
 }
 
 /// Higgsfield MCP の `models_explore` で画像 / 動画モデル一覧を動的取得する。
 ///
-/// CLI 版 `higgsfield_list_models` のフロント互換 (戻り値 displayName/jobSetType/type)。
-/// codex exec で models_explore を叩き、各モデルの id(jobSetType)/表示名/type を JSON 配列で
-/// 返させ、`extract_first_json` でパースする。type が欠落していたら要求 media で補完する。
+/// 直接呼び出し (実測 1.1 秒)。structuredContent.items[] の {id, name, output_type} を
+/// フロント互換形 {jobSetType, displayName, type} に写す。
 #[tauri::command]
 pub async fn higgsfield_mcp_list_models(
+    state: State<'_, AppState>,
     media: String,
 ) -> Result<Vec<HiggsfieldMcpModelInfo>, String> {
     let media = match media.as_str() {
@@ -749,41 +787,51 @@ pub async fn higgsfield_mcp_list_models(
         _ => return Err("media は image または video を指定してください。".to_string()),
     };
 
-    let prompt = format!(
-        "higgsfield MCP の `models_explore` ツールを実行し、{media}生成に使えるモデルの一覧を取得してください。\n\
-         取得した各モデルについて、次の3フィールドを持つオブジェクトの **JSON配列だけ** を返してください:\n\
-         - jobSetType: モデルの id (生成時に model として渡す識別子)\n\
-         - displayName: 人間向けの表示名\n\
-         - type: \"{media}\"\n\
-         【重要・厳守】最終メッセージは JSON配列のみ。説明文・コードフェンス・前置きは一切含めないこと。\n\
-         例: [{{\"jobSetType\":\"seedance_2_0\",\"displayName\":\"Seedance 2.0\",\"type\":\"{media}\"}}]"
-    );
+    let out = call_tool(
+        &state,
+        HIGGSFIELD_MCP_NAME,
+        "models_explore",
+        json!({ "action": "list", "type": media, "limit": 100 }),
+    )
+    .await?;
+    if out.is_error {
+        return Err(format!("Higgsfield モデル一覧の取得に失敗しました: {}", out.text));
+    }
+    let items = out
+        .structured
+        .as_ref()
+        .and_then(|s| s.get("items"))
+        .and_then(|v| v.as_array())
+        .cloned()
+        .ok_or_else(|| "Higgsfield モデル一覧の応答に items がありません".to_string())?;
 
-    // models_explore はメタデータ取得なので生成より速い。180 秒で十分。
-    let (stdout, stderr) = run_codex_exec_prompt(&prompt, 180).await?;
-
-    let value = extract_first_json(&stdout).ok_or_else(|| {
-        format!(
-            "Higgsfield モデル一覧の JSON を取得できませんでした (stderr: {})",
-            last_stderr_line(&stderr)
-        )
-    })?;
-
-    let mut models: Vec<HiggsfieldMcpModelInfo> = serde_json::from_value(value).map_err(|e| {
-        format!("Higgsfield モデル一覧の JSON デコードに失敗しました: {e}")
-    })?;
-    // codex が type を埋めなかった場合は、要求された media で補完する (フロント互換)。
-    for m in &mut models {
-        if m.r#type.trim().is_empty() {
-            m.r#type = media.to_string();
-        }
+    let mut models = Vec::with_capacity(items.len());
+    for item in &items {
+        let Some(id) = item.get("id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let name = item
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or(id)
+            .to_string();
+        let kind = item
+            .get("output_type")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(media)
+            .to_string();
+        models.push(HiggsfieldMcpModelInfo {
+            display_name: name,
+            job_set_type: id.to_string(),
+            r#type: kind,
+        });
     }
     Ok(models)
 }
 
 /// コスト見積もりの入力。生成バッチ (HiggsfieldMcpGenArgs) と同じ動画パラメータを受け取り、
-/// get_cost=true で「消費クレジットだけ」を取得する。動画は duration/resolution 等で
-/// コストが変わるため、生成と同じパラメータを渡さないと UI 表示と実コストがずれる。
+/// get_cost=true で「消費クレジットだけ」を取得する。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HiggsfieldMcpCostArgs {
@@ -814,101 +862,61 @@ impl HiggsfieldMcpCostArgs {
     fn is_video(&self) -> bool {
         matches!(self.media_type, Some(HiggsfieldMcpMediaType::Video))
     }
-
-    /// コスト用プロンプトのために、build_gen_prompt と同じ動画パラメータ断片を組む。
-    /// HiggsfieldMcpGenArgs の video_param_lines と同等のフラグ集合を再現する。
-    fn video_param_lines(&self) -> String {
-        let mut out = String::new();
-        if let Some(d) = self.duration {
-            out.push_str(&format!("- duration: {d}\n"));
-        }
-        let mut push_opt = |label: &str, v: &Option<String>| {
-            if let Some(s) = v.as_deref().filter(|s| !s.trim().is_empty()) {
-                out.push_str(&format!("- {label}: {s}\n"));
-            }
-        };
-        push_opt("mode", &self.mode);
-        push_opt("resolution", &self.resolution);
-        push_opt("sound", &self.sound);
-        push_opt("genre", &self.genre);
-        if let Some(mv) = self.model_variant.as_deref().filter(|s| !s.trim().is_empty()) {
-            out.push_str(&format!("- model_variant: {mv}\n"));
-        }
-        out
-    }
 }
 
 /// Higgsfield MCP の `get_cost` でコストだけを見積もる (実生成しない)。
 ///
-/// PoC 実証済み: generate_image / generate_video を `get_cost: true` で呼ぶと、実生成せず
-/// 消費クレジット数だけが返る。CLI 版 `higgsfield_generate_cost` と同じく i64 (四捨五入後の
-/// クレジット数) を返す。動画は duration/resolution 等でコストが変わるため、生成バッチと同じ
-/// 動画パラメータを受け取って渡す。
+/// 直接呼び出し: structuredContent.cost.{credits_exact, credits} を読む。
+/// CLI 版と同じく表示用に四捨五入した i64 を返す。
 #[tauri::command]
-pub async fn higgsfield_mcp_generate_cost(args: HiggsfieldMcpCostArgs) -> Result<i64, String> {
-    let video = args.is_video();
-    let tool = if video { "generate_video" } else { "generate_image" };
+pub async fn higgsfield_mcp_generate_cost(
+    state: State<'_, AppState>,
+    args: HiggsfieldMcpCostArgs,
+) -> Result<i64, String> {
+    let Some(model) = args.model.as_deref().filter(|s| !s.trim().is_empty()) else {
+        return Err("Higgsfield のモデルが未選択です。".to_string());
+    };
     let aspect = args
         .aspect
         .as_deref()
         .filter(|s| !s.is_empty())
         .unwrap_or("1:1");
-
-    let model_note = match args.model.as_deref().filter(|s| !s.is_empty()) {
-        Some(model) => format!("- model: {model}\n"),
-        None => "- model: models_explore で利用可能なモデルから適切なものを1つ選ぶ\n".to_string(),
-    };
-    let video_lines = if video {
-        let lines = args.video_param_lines();
-        if lines.is_empty() {
-            String::new()
-        } else {
-            format!("以下のモデル固有パラメータをトップレベルで渡してください:\n{lines}")
-        }
+    let tool = if args.is_video() {
+        "generate_video"
     } else {
-        String::new()
+        "generate_image"
     };
-
-    let prompt = format!(
-        "higgsfield MCP の `{tool}` ツールを **get_cost: true** で1回だけ呼び、\
-         この生成にかかる消費クレジット数(コスト)を見積もってください。\n\
-         {model_note}\
-         - aspect_ratio: {aspect}\n\
-         - count: 1\n\
-         - get_cost: true\n\
-         - prompt: {user_prompt}\n\
-         {video_lines}\
-         【重要・厳守】get_cost: true なので実際の生成は行われません。\
-         最終メッセージは **消費クレジット数(数値1つ)だけ** を返してください。\
-         単位記号・説明文・通貨記号・他のテキストは一切含めないこと。\
-         例: 12.5",
-        tool = tool,
-        model_note = model_note,
-        aspect = aspect,
-        user_prompt = args.prompt,
-        video_lines = video_lines,
+    let arguments = build_gen_arguments(
+        model,
+        &args.prompt,
+        aspect,
+        1,
+        args.duration,
+        args.mode.as_deref(),
+        args.resolution.as_deref(),
+        args.sound.as_deref(),
+        args.genre.as_deref(),
+        args.model_variant.as_deref(),
+        &[],
+        true,
     );
-
-    // get_cost は実生成しないので速い。300 秒あれば十分。
-    let (stdout, stderr) = run_codex_exec_prompt(&prompt, 300).await?;
-
-    // JSON で返ってきたら credits/cost キーを探し、ダメならテキストから数値を拾う。
-    let credits_exact = extract_first_json(&stdout)
+    let out = call_tool(&state, HIGGSFIELD_MCP_NAME, tool, arguments).await?;
+    if out.is_error {
+        return Err(format!("Higgsfield コスト見積もりに失敗しました: {}", out.text));
+    }
+    // structuredContent.cost.{credits_exact, credits} を最優先、無ければ text の数値。
+    let credits = out
+        .structured
         .as_ref()
+        .and_then(|s| s.get("cost"))
         .and_then(json_to_number)
-        .or_else(|| extract_first_number(&stdout))
-        .ok_or_else(|| {
-            format!(
-                "Higgsfield コスト見積もりの数値を取得できませんでした (stderr: {})",
-                last_stderr_line(&stderr)
-            )
-        })?;
-    // CLI 版と同じく表示用に四捨五入した i64 を返す。
-    Ok(credits_exact.round() as i64)
+        .or_else(|| out.structured.as_ref().and_then(json_to_number))
+        .or_else(|| extract_first_number(&out.text))
+        .ok_or_else(|| "Higgsfield コスト見積もりの数値を取得できませんでした".to_string())?;
+    Ok(credits.round() as i64)
 }
 
-/// クレジット残高 + プラン名。CLI 版 `HiggsfieldAccount` (higgsfield.rs) のフロント互換形に
-/// 揃える ({email?, credits, subscriptionPlanType?})。codex が一部欠落させても degrade する。
+/// クレジット残高 + プラン名。フロント互換形 ({email?, credits, subscriptionPlanType?})。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HiggsfieldMcpAccount {
     /// メールアドレス (取得できなければ None)。
@@ -929,46 +937,43 @@ pub struct HiggsfieldMcpAccount {
 
 /// Higgsfield MCP の `balance` ツールで利用可能クレジット + プラン名を取得する。
 ///
-/// PoC 実証済み: balance は利用可能クレジットと現プランを返す。CLI 版 `higgsfield_account`
-/// のフロント互換形 ({email?, credits, subscriptionPlanType?}) に揃える。codex が一部
-/// フィールドを欠落させても、credits を数値フォールバックで拾えれば残高だけは表示できる。
+/// 直接呼び出し (実測 0.8 秒)。structuredContent.{credits, subscription_plan_type} を読む。
 #[tauri::command]
-pub async fn higgsfield_mcp_account() -> Result<HiggsfieldMcpAccount, String> {
-    let prompt = "higgsfield MCP の `balance` ツールを実行し、現在のアカウントの\
-         利用可能クレジット数とプラン名を取得してください。\n\
-         次のフィールドを持つ **JSONオブジェクトだけ** を返してください:\n\
-         - credits: 利用可能クレジット数 (数値)\n\
-         - subscriptionPlanType: 現在のプラン名 (分かれば。文字列)\n\
-         - email: アカウントのメールアドレス (分かれば。文字列)\n\
-         【重要・厳守】最終メッセージは JSONオブジェクトのみ。説明文・コードフェンス・前置きは\
-         一切含めないこと。例: {\"credits\":5139.25,\"subscriptionPlanType\":\"UNLIMITED\"}";
-
-    // balance はメタデータ取得なので速い。180 秒。
-    let (stdout, stderr) = run_codex_exec_prompt(prompt, 180).await?;
-
-    let value = extract_first_json(&stdout).ok_or_else(|| {
-        format!(
-            "Higgsfield 残高の JSON を取得できませんでした (stderr: {})",
-            last_stderr_line(&stderr)
-        )
-    })?;
+pub async fn higgsfield_mcp_account(
+    state: State<'_, AppState>,
+) -> Result<HiggsfieldMcpAccount, String> {
+    let out = call_tool(&state, HIGGSFIELD_MCP_NAME, "balance", json!({})).await?;
+    if out.is_error {
+        return Err(format!("Higgsfield 残高の取得に失敗しました: {}", out.text));
+    }
+    let Some(structured) = out.structured.as_ref() else {
+        // structuredContent が無いバージョン差に備え、text の数値だけでも拾う。
+        let credits = extract_first_number(&out.text)
+            .ok_or_else(|| "Higgsfield 残高からクレジット数を取得できませんでした".to_string())?;
+        return Ok(HiggsfieldMcpAccount {
+            email: None,
+            credits,
+            subscription_plan_type: None,
+        });
+    };
 
     // まず構造体として直接パースを試み、credits が欠けていたら数値フォールバックで補う。
-    match serde_json::from_value::<HiggsfieldMcpAccount>(value.clone()) {
+    match serde_json::from_value::<HiggsfieldMcpAccount>(structured.clone()) {
         Ok(acc) => Ok(acc),
         Err(_) => {
-            // 構造体パースに失敗しても、credits だけは json_to_number で救う。
-            let credits = json_to_number(&value).ok_or_else(|| {
-                "Higgsfield 残高からクレジット数を取得できませんでした".to_string()
-            })?;
-            let email = value
+            let credits = json_to_number(structured)
+                .or_else(|| extract_first_number(&out.text))
+                .ok_or_else(|| {
+                    "Higgsfield 残高からクレジット数を取得できませんでした".to_string()
+                })?;
+            let email = structured
                 .get("email")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
-            let plan = value
+            let plan = structured
                 .get("subscriptionPlanType")
-                .or_else(|| value.get("subscription_plan_type"))
-                .or_else(|| value.get("plan"))
+                .or_else(|| structured.get("subscription_plan_type"))
+                .or_else(|| structured.get("plan"))
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
             Ok(HiggsfieldMcpAccount {
@@ -977,5 +982,91 @@ pub async fn higgsfield_mcp_account() -> Result<HiggsfieldMcpAccount, String> {
                 subscription_plan_type: plan,
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_gen_arguments_wraps_in_params() {
+        let v = build_gen_arguments(
+            "seedance_2_0",
+            "a corgi",
+            "16:9",
+            2,
+            Some(5),
+            Some("std"),
+            Some("720p"),
+            None,
+            Some("auto"),
+            None,
+            &[json!({"value": "abc", "role": "image"})],
+            false,
+        );
+        let p = v.get("params").expect("params wrapper");
+        assert_eq!(p.get("model").unwrap(), "seedance_2_0");
+        assert_eq!(p.get("count").unwrap(), 2);
+        assert_eq!(p.get("duration").unwrap(), 5);
+        assert_eq!(p.get("resolution").unwrap(), "720p");
+        assert!(p.get("sound").is_none());
+        assert_eq!(p.get("medias").unwrap().as_array().unwrap().len(), 1);
+        assert!(p.get("get_cost").is_none());
+    }
+
+    #[test]
+    fn build_gen_arguments_get_cost() {
+        let v = build_gen_arguments(
+            "nano_banana_2",
+            "a corgi",
+            "1:1",
+            1,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &[],
+            true,
+        );
+        let p = v.get("params").unwrap();
+        assert_eq!(p.get("get_cost").unwrap(), true);
+        assert!(p.get("medias").is_none());
+    }
+
+    #[test]
+    fn extract_job_ids_reads_results() {
+        let s = json!({"results": [
+            {"id": "job-1", "status": "pending"},
+            {"id": "job-2", "status": "pending"},
+            {"status": "pending"}
+        ]});
+        assert_eq!(extract_job_ids(Some(&s)), vec!["job-1", "job-2"]);
+        assert!(extract_job_ids(None).is_empty());
+    }
+
+    #[test]
+    fn extension_for_strips_query_and_falls_back() {
+        assert_eq!(extension_for("https://x/y/a.png?sig=1", false), "png");
+        assert_eq!(extension_for("https://x/y/a.mp4#t", true), "mp4");
+        assert_eq!(extension_for("https://x/y/noext", true), "mp4");
+        assert_eq!(extension_for("https://x/y/noext", false), "png");
+    }
+
+    #[test]
+    fn content_type_for_path_known_kinds() {
+        assert_eq!(content_type_for_path("/a/b.PNG"), "image/png");
+        assert_eq!(content_type_for_path("/a/b.jpeg"), "image/jpeg");
+        assert_eq!(content_type_for_path("/a/b.mov"), "video/quicktime");
+        assert_eq!(content_type_for_path("/a/b.bin"), "application/octet-stream");
+    }
+
+    #[test]
+    fn json_to_number_prefers_exact_credits() {
+        let cost = json!({"credits": 1, "credits_exact": 1.5});
+        assert_eq!(json_to_number(&cost), Some(1.5));
+        assert_eq!(extract_first_number("Credits: 445.77 | Plan: creator"), Some(445.77));
     }
 }
