@@ -19,8 +19,19 @@
 //! - `codex mcp add higgsfield --url ...` だけで OAuth が自動完了する (Magnific の
 //!   add→login 2 段階と同じ構造で実装し、login も冪等に試みる)。
 //!
-//! ## スコープ (段階3 = 画像生成 + 認証のみ)
-//! 動画生成 (generate_video) はまだ実装しない。既存 higgsfield.rs (CLI 版) は触らず共存。
+//! ## スコープ (段階3 = 画像生成 + 認証, 段階5 = 動画生成 + 参照画像アップロード)
+//! 段階5 で `generate_video` と参照画像の `media_upload`→PUT→`media_confirm` を追加する。
+//! 既存 higgsfield.rs (CLI 版) は触らず共存。
+//!
+//! ## 段階5 で PoC 実証済みの事実 (推測でなくこれに従う・2026-06-10)
+//! - `generate_video` params: model, prompt, medias, duration, aspect_ratio, count, get_cost
+//!   に加え、モデル固有パラメータ (mode/genre/resolution/sound 等) を **トップレベル** で渡す。
+//! - seedance_2_0: resolution(480p/720p/1080p) / mode(std/fast) /
+//!   genre(auto/action/horror/comedy/noir/drama/epic)。
+//! - kling3_0: sound(on/off)。
+//! - 参照画像は `media_upload` でアップロード URL を発行 → その URL に PUT →
+//!   `media_confirm` で media_id を取得 → `generate_image`/`generate_video` の
+//!   `medias` パラメータに media_id を渡す (codex exec 経由で実証済み)。
 
 use std::process::Stdio;
 
@@ -180,6 +191,15 @@ pub struct HiggsfieldMcpGenResult {
     pub errors: Vec<String>,
 }
 
+/// 画像 / 動画の分岐。フロントの `MediaType` ("image" | "video") と鏡映。
+/// 未指定 (None) は image 扱い (段階3 までの画像生成と後方互換)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HiggsfieldMcpMediaType {
+    Image,
+    Video,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HiggsfieldMcpGenArgs {
@@ -192,14 +212,187 @@ pub struct HiggsfieldMcpGenArgs {
     pub count: Option<u32>,
     #[serde(default)]
     pub ref_image_paths: Vec<String>,
+    /// "image" | "video"。未指定なら image (後方互換)。
+    #[serde(default)]
+    pub media_type: Option<HiggsfieldMcpMediaType>,
+    // ── 以下は media_type=video のときだけ意味を持つ動画パラメータ ──
+    /// 秒数 (例: 5)。generate_video の duration。
+    #[serde(default)]
+    pub duration: Option<u32>,
+    /// 描画モード (例: seedance std/fast)。トップレベルで渡す。
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// 解像度 (例: seedance 480p/720p/1080p)。トップレベルで渡す。
+    #[serde(default)]
+    pub resolution: Option<String>,
+    /// 効果音 (例: kling on/off)。トップレベルで渡す。
+    #[serde(default)]
+    pub sound: Option<String>,
+    /// ジャンル (例: seedance auto/action/horror/comedy/noir/drama/epic)。
+    #[serde(default)]
+    pub genre: Option<String>,
+    /// モデルのバリアント (CLI 版の --model に相当する model_variant)。
+    #[serde(default)]
+    pub model_variant: Option<String>,
 }
 
-/// Higgsfield MCP 経由で画像を生成し、結果 URL を generated_images/higgsfield/ に
-/// ダウンロードする。コア(batch_gen)は触らず、Higgsfield モデルが選ばれたときだけ
-/// この経路を通る。
+impl HiggsfieldMcpGenArgs {
+    fn is_video(&self) -> bool {
+        matches!(self.media_type, Some(HiggsfieldMcpMediaType::Video))
+    }
+}
+
+/// 参照画像(ローカルパス)を medias として渡すための共通プロンプト断片を組む。
 ///
-/// PoC 実証済みの `generate_image` ツールを codex exec 経由で叩く。モデル未指定なら
-/// codex に `models_explore` でモデルを選ばせる。
+/// PoC 実証済み: `media_upload` でアップロード URL を発行 → その URL に PUT →
+/// `media_confirm` で media_id を取得 → `generate_image`/`generate_video` の
+/// `medias` に media_id を渡す、という3段フローを codex に実行させる。参照画像が
+/// 無ければ空文字を返す (medias 指示なし)。
+fn ref_medias_instruction(ref_image_paths: &[String]) -> String {
+    let paths: Vec<&String> = ref_image_paths
+        .iter()
+        .filter(|p| !p.trim().is_empty())
+        .collect();
+    if paths.is_empty() {
+        return String::new();
+    }
+    let list = paths
+        .iter()
+        .map(|p| p.as_str())
+        .collect::<Vec<_>>()
+        .join("\n  - ");
+    format!(
+        "参照画像(ローカルファイル)を入力として使います。次の手順で media_id を取得し、\
+         生成ツールの `medias` パラメータに渡してください:\n  \
+         1. 各ローカル参照画像について `media_upload` を呼び、アップロード用URLを発行する。\n  \
+         2. 発行されたURLに、対応するローカルファイルの中身を **HTTP PUT** でアップロードする\
+         (curl 等で `--upload-file <ローカルパス> <発行URL>`)。\n  \
+         3. `media_confirm` を呼び、各アップロードの media_id を取得する。\n  \
+         4. 取得した media_id を生成ツールの `medias` パラメータ(配列)に渡す。\n  \
+         対象ローカル参照画像:\n  - {list}\n"
+    )
+}
+
+/// 動画 / 画像で異なる「ツール名・成果物の語」を返す。保存拡張子は結果 URL から
+/// `extension_for` で別途決める (ここでは持たない)。
+struct MediaCopy {
+    /// 呼ぶべき MCP ツール名 (generate_image / generate_video)。
+    tool: &'static str,
+    /// 成果物の語 (画像 / 動画)。プロンプト文面に差し込む。
+    noun: &'static str,
+}
+
+/// 動画モデル固有パラメータを「- key: value」形式のプロンプト断片に組む。
+/// 空 / None のものは出力しない。CLI 版 run_one_higgsfield_job のフラグ集合と対応する。
+fn video_param_lines(args: &HiggsfieldMcpGenArgs) -> String {
+    let mut out = String::new();
+    if let Some(d) = args.duration {
+        out.push_str(&format!("- duration: {d}\n"));
+    }
+    let mut push_opt = |label: &str, v: &Option<String>| {
+        if let Some(s) = v.as_deref().filter(|s| !s.trim().is_empty()) {
+            out.push_str(&format!("- {label}: {s}\n"));
+        }
+    };
+    // モデル固有パラメータは **トップレベル** で渡す (PoC 実証済み)。
+    push_opt("mode", &args.mode);
+    push_opt("resolution", &args.resolution);
+    push_opt("sound", &args.sound);
+    push_opt("genre", &args.genre);
+    // model_variant は model のバリアント指定。model が未指定でもバリアントだけ来うる。
+    if let Some(mv) = args.model_variant.as_deref().filter(|s| !s.trim().is_empty()) {
+        out.push_str(&format!("- model_variant: {mv}\n"));
+    }
+    out
+}
+
+/// 1枚分の codex exec プロンプトを組む。media_type で generate_image / generate_video を
+/// 分岐し、参照画像があれば media_upload→PUT→media_confirm→medias の手順を必ず入れる。
+/// 動画版にも画像版と同じ【重要・厳守】ガード(新規生成強制 + 参照URL返却禁止)を入れる。
+fn build_gen_prompt(args: &HiggsfieldMcpGenArgs, aspect: &str) -> String {
+    let video = args.is_video();
+    let copy = if video {
+        MediaCopy { tool: "generate_video", noun: "動画" }
+    } else {
+        MediaCopy { tool: "generate_image", noun: "画像" }
+    };
+
+    // モデル指定の有無で文面を変える。未指定なら models_explore で選ばせる。
+    let model_note = match args.model.as_deref().filter(|s| !s.is_empty()) {
+        Some(model) => format!("- model: {model}\n"),
+        None => "- model: models_explore で利用可能なモデルから適切なものを1つ選ぶ\n".to_string(),
+    };
+    // 動画だけ duration / mode / resolution / sound / genre 等を渡す。
+    let video_lines = if video {
+        let lines = video_param_lines(args);
+        if lines.is_empty() {
+            String::new()
+        } else {
+            format!("以下のモデル固有パラメータをトップレベルで渡してください:\n{lines}")
+        }
+    } else {
+        String::new()
+    };
+    let ref_note = ref_medias_instruction(&args.ref_image_paths);
+
+    format!(
+        "higgsfield MCP の {tool} ツールを**必ず実行して**、{noun}を新規に1つ生成してください。\n\
+         {model_note}\
+         - aspect_ratio: {aspect}\n\
+         - count: 1\n\
+         - prompt: {user_prompt}\n\
+         {video_lines}\
+         {ref_note}\
+         モデルが分からなければ models_explore で選んでください。\n\
+         【重要・厳守】\n\
+         - {tool} を実行せずに、既存メディアや参照画像(medias)のURLをそのまま返すことは禁止です。\
+         必ず {tool} を呼び出して、**今回新しく生成された{noun}**の結果URLを返してください。\n\
+         - 参照画像(medias)は {tool} の入力として渡すだけです。参照画像そのもののURLを最終回答にしてはいけません。\n\
+         生成が完了したら、最終メッセージは\
+         **今回新規生成された{noun}のダウンロードURL(http(s)で始まる1個)だけ**を1行で返してください。\
+         説明文や他のテキストは一切含めないこと。",
+        tool = copy.tool,
+        noun = copy.noun,
+        model_note = model_note,
+        aspect = aspect,
+        user_prompt = args.prompt,
+        video_lines = video_lines,
+        ref_note = ref_note,
+    )
+}
+
+/// 結果 URL から保存に使う拡張子を決める。URL のクエリを除いたパスの末尾拡張子を
+/// 優先し、無ければ media_type のデフォルト (video=mp4 / image=png) にフォールバックする。
+/// mp4 等の動画拡張子に対応するための関数 (受入基準4)。
+fn extension_for(url: &str, is_video: bool) -> String {
+    // クエリ・フラグメントを落としてからパスの拡張子を見る。
+    let path = url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(url);
+    let ext = path
+        .rsplit('/')
+        .next()
+        .and_then(|name| name.rsplit_once('.').map(|(_, e)| e))
+        .map(|e| e.to_ascii_lowercase());
+    let known = [
+        "mp4", "mov", "webm", "m4v", // 動画
+        "png", "jpg", "jpeg", "webp", "gif", // 画像
+    ];
+    match ext {
+        Some(e) if known.contains(&e.as_str()) => e,
+        // 拡張子が無い / 未知の場合は media_type で決める。
+        _ => if is_video { "mp4".to_string() } else { "png".to_string() },
+    }
+}
+
+/// Higgsfield MCP 経由で画像 **または動画** を生成し、結果 URL を
+/// generated_images/higgsfield/ にダウンロードする。コア(batch_gen)は触らず、
+/// Higgsfield モデルが選ばれたときだけこの経路を通る。
+///
+/// PoC 実証済みの `generate_image` / `generate_video` ツールを codex exec 経由で叩く。
+/// モデル未指定なら codex に `models_explore` でモデルを選ばせる。
+/// 参照画像があれば media_upload→PUT→media_confirm→medias の手順を codex に実行させる。
 #[tauri::command]
 pub async fn higgsfield_mcp_generate_batch(
     args: HiggsfieldMcpGenArgs,
@@ -209,6 +402,7 @@ pub async fn higgsfield_mcp_generate_batch(
     let home = crate::codex::home::gori_codex_home_path();
     let count = args.count.unwrap_or(1).clamp(1, 4);
     let aspect = args.aspect.as_deref().filter(|s| !s.is_empty()).unwrap_or("1:1");
+    let is_video = args.is_video();
 
     let mut generated_paths = Vec::new();
     let mut errors = Vec::new();
@@ -221,40 +415,10 @@ pub async fn higgsfield_mcp_generate_batch(
     let http = reqwest::Client::new();
 
     for i in 0..count {
-        // codex に Higgsfield MCP の generate_image を使わせ、結果 URL だけを返させる。
-        let ref_note = if args.ref_image_paths.is_empty() {
-            String::new()
-        } else {
-            format!(
-                "参照画像(medias)として次を使う: {}\n",
-                args.ref_image_paths.join(", ")
-            )
-        };
-        // モデル指定の有無で文面を変える。未指定なら models_explore で選ばせる。
-        let model_note = match args.model.as_deref().filter(|s| !s.is_empty()) {
-            Some(model) => format!("- model: {model}\n"),
-            None => "- model: models_explore で利用可能なモデルから適切なものを1つ選ぶ\n".to_string(),
-        };
-        let prompt = format!(
-            "higgsfield MCP の generate_image ツールを**必ず実行して**、画像を新規に1枚生成してください。\n\
-             {model_note}\
-             - aspect_ratio: {aspect}\n\
-             - count: 1\n\
-             - prompt: {user_prompt}\n\
-             {ref_note}\
-             モデルが分からなければ models_explore で選んでください。\n\
-             【重要・厳守】\n\
-             - generate_image を実行せずに、既存メディアや参照画像(medias)のURLをそのまま返すことは禁止です。\
-             必ず generate_image を呼び出して、**今回新しく生成された画像**の結果URLを返してください。\n\
-             - 参照画像(medias)は generate_image の入力として渡すだけです。参照画像そのもののURLを最終回答にしてはいけません。\n\
-             生成が完了したら、最終メッセージは\
-             **今回新規生成された画像のダウンロードURL(http(s)で始まる1個)だけ**を1行で返してください。\
-             説明文や他のテキストは一切含めないこと。",
-            model_note = model_note,
-            aspect = aspect,
-            user_prompt = args.prompt,
-            ref_note = ref_note,
-        );
+        // codex に Higgsfield MCP の generate_image / generate_video を使わせ、結果 URL
+        // だけを返させる。参照画像があれば media_upload→PUT→media_confirm→medias の手順を
+        // 同じプロンプトで指示する。
+        let prompt = build_gen_prompt(&args, aspect);
 
         let mut cmd = tokio::process::Command::new(&binary);
         cmd.args([
@@ -295,9 +459,12 @@ pub async fn higgsfield_mcp_generate_batch(
             let _ = stdin.write_all(prompt.as_bytes()).await;
         }
 
-        // Higgsfield 生成は MCP 往復 + クラウド生成で時間がかかる。余裕をみて 300 秒。
+        // Higgsfield 生成は MCP 往復 + クラウド生成で時間がかかる。動画は画像より重く、
+        // 参照画像アップロード(media_upload→PUT→media_confirm)も挟むので長めに取る。
+        // 画像 300 秒 / 動画 900 秒 (DEV-PLAYBOOK の生成3点セット = タイムアウト 900 秒に揃える)。
+        let timeout_secs = if is_video { 900 } else { 300 };
         let output = match tokio::time::timeout(
-            std::time::Duration::from_secs(300),
+            std::time::Duration::from_secs(timeout_secs),
             child.wait_with_output(),
         )
         .await
@@ -310,7 +477,9 @@ pub async fn higgsfield_mcp_generate_batch(
             }
             Err(_) => {
                 failed_count += 1;
-                errors.push("Higgsfield 生成が 300 秒でタイムアウトしました".to_string());
+                errors.push(format!(
+                    "Higgsfield 生成が {timeout_secs} 秒でタイムアウトしました"
+                ));
                 continue;
             }
         };
@@ -326,6 +495,12 @@ pub async fn higgsfield_mcp_generate_batch(
             continue;
         };
 
+        // 成果物の語 (画像/動画) をエラー文面に揃える。
+        let noun = if is_video { "動画" } else { "画像" };
+        // URL の拡張子 (無ければ media_type デフォルト) で保存名を決める。mp4 等の
+        // 動画拡張子に対応 (extract_first_url は拡張子を問わず http(s) URL を拾う)。
+        let ext = extension_for(&url, is_video);
+
         // URL を generated_images/higgsfield/ にダウンロード保存。
         match http.get(&url).send().await {
             Ok(res) if res.status().is_success() => match res.bytes().await {
@@ -334,26 +509,26 @@ pub async fn higgsfield_mcp_generate_batch(
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_millis())
                         .unwrap_or(0);
-                    let dest = dir.join(format!("higgsfield-{ts}-{i}.png"));
+                    let dest = dir.join(format!("higgsfield-{ts}-{i}.{ext}"));
                     if let Err(e) = std::fs::write(&dest, &bytes) {
                         failed_count += 1;
-                        errors.push(format!("画像保存失敗: {e}"));
+                        errors.push(format!("{noun}保存失敗: {e}"));
                     } else {
                         generated_paths.push(dest.to_string_lossy().into_owned());
                     }
                 }
                 _ => {
                     failed_count += 1;
-                    errors.push("Higgsfield 画像データが空でした".to_string());
+                    errors.push(format!("Higgsfield {noun}データが空でした"));
                 }
             },
             Ok(res) => {
                 failed_count += 1;
-                errors.push(format!("Higgsfield 画像取得に失敗 (HTTP {})", res.status()));
+                errors.push(format!("Higgsfield {noun}取得に失敗 (HTTP {})", res.status()));
             }
             Err(e) => {
                 failed_count += 1;
-                errors.push(format!("Higgsfield 画像取得に失敗: {e}"));
+                errors.push(format!("Higgsfield {noun}取得に失敗: {e}"));
             }
         }
     }

@@ -396,12 +396,25 @@ export type HiggsfieldMcpStatus = {
   authenticated: boolean;
 };
 
+// 段階5: 動画パラメータ + mediaType を受け付ける。mediaType="video" のとき
+// generate_video を叩き、duration/mode/resolution/sound/genre/modelVariant を
+// プロンプトのトップレベルパラメータとして渡す。mediaType 未指定/"image" は従来の
+// 画像生成 (後方互換)。動画固有値は HiggsfieldVideoParams のサブセットを再利用。
 export type HiggsfieldMcpGenArgs = {
   prompt: string;
   model?: string;
   aspect?: string;
   count?: number;
   refImagePaths?: string[];
+  /** "image" | "video"。未指定なら image (後方互換)。 */
+  mediaType?: MediaType;
+  // ── 以下は mediaType="video" のときだけ意味を持つ ──
+  duration?: number;
+  mode?: string;
+  resolution?: string;
+  sound?: string;
+  genre?: string;
+  modelVariant?: string;
 };
 
 export const higgsfieldMcp = {
@@ -409,7 +422,9 @@ export const higgsfieldMcp = {
   /** codex mcp add で MCP登録+OAuth(実機ではaddだけで自動完了)。loginも冪等に試みる。 */
   login: () => invoke<string>("higgsfield_mcp_login"),
   logout: () => invoke<void>("higgsfield_mcp_logout"),
-  /** Higgsfield MCP経由で画像生成しURLをDLして generated_images に保存。コアと同じ結果型。 */
+  /** Higgsfield MCP経由で画像/動画生成しURLをDLして generated_images に保存。
+   * mediaType="video" で generate_video、参照画像は media_upload→PUT→media_confirm
+   * で media_id 化して medias に渡す。コアと同じ結果型。 */
   generateBatch: (args: HiggsfieldMcpGenArgs) =>
     invoke<{
       generatedPaths: string[];
