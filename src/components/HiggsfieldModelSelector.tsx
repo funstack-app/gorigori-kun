@@ -11,6 +11,7 @@ import {
   getModelLabel,
   type ModelLabel,
 } from "../lib/higgsfield/unlimited";
+import { staticModelsFor } from "../lib/higgsfield/staticCatalog";
 import { useHiggsfieldModel, type SelectedModel } from "../lib/store/higgsfieldModel";
 import { useMagnificModel, MAX_MAGNIFIC_COMPARE } from "../lib/store/magnificModel";
 import { useAccounts } from "../lib/store/accounts";
@@ -120,11 +121,13 @@ export function HiggsfieldModelSelector({ media }: { media: "image" | "video" })
         return;
       }
 
-      // キャッシュがあれば即表示し、裏で最新を取得して差し替える (stale-while-revalidate)。
+      // キャッシュ (なければ静的カタログ) を即表示し、裏で最新を取得して差し替える
+      // (stale-while-revalidate)。「モデル一覧を確認中...」でピッカーがブロックされる
+      // 時間をゼロにする (2026-06-10 実機FB)。
       const cached = readModelCache(media);
-      if (cached && !cancelled) {
-        setModels(cached.models);
-        setPlanType(cached.planType);
+      if (!cancelled) {
+        setModels(cached ? cached.models : staticModelsFor(media));
+        setPlanType(cached?.planType ?? null);
         setLoadState("ready");
       }
 
@@ -147,16 +150,9 @@ export function HiggsfieldModelSelector({ media }: { media: "image" | "video" })
         writeModelCache(media, { models: nextModels, planType, savedAt: Date.now() });
       } catch (err) {
         if (cancelled) return;
-        // キャッシュを出せている場合は静かに degrade (一覧は使える)。
-        if (cached) {
-          console.error("[HiggsfieldModelSelector] refresh failed (cache shown):", err);
-          return;
-        }
-        setLoadState("error");
-        pushToast({
-          kind: "error",
-          text: `Higgsfield モデル一覧の取得に失敗しました: ${String(err)}`,
-        });
+        // キャッシュ or 静的カタログを既に表示しているので、UI は止めず静かに degrade。
+        // (静的カタログの model id でも生成は通る。サーバ側で検証される)
+        console.error("[HiggsfieldModelSelector] model list refresh failed:", err);
       }
     };
 
@@ -204,7 +200,7 @@ export function HiggsfieldModelSelector({ media }: { media: "image" | "video" })
     () => new Set(selectedModels.map((model) => model.jobSetType)),
     [selectedModels],
   );
-  const triggerText = getTriggerText(loadState, selectedModels, selectedMagnificForTrigger);
+  const triggerText = getTriggerText(selectedModels, selectedMagnificForTrigger);
   const helperText = getHelperText(loadState, selectedModels.length);
   const sections = useMemo(() => buildSections(media, models, query), [media, models, query]);
   const totalVisibleModels = sections.reduce((sum, section) => sum + section.items.length, 0);
@@ -339,6 +335,15 @@ function ModelPickerPopover({
   const [providerTab, setProviderTab] = useState<ProviderTab>(
     magnificCount > 0 ? "magnific" : selectedCount > 0 ? "higgsfield" : "default",
   );
+
+  // Magnific 未接続なのに magnific タブが開いたままだと、タブボタンは消えるのに
+  // 中身 (モデル一覧+選択チェック) だけ残る (2026-06-10 実機FB)。強制的に default へ戻す。
+  useEffect(() => {
+    if (!magnificAuthed && providerTab === "magnific") {
+      setProviderTab("default");
+      if (magnificCount > 0) clearMagnific();
+    }
+  }, [magnificAuthed, providerTab, magnificCount, clearMagnific]);
 
   useEffect(() => {
     let cancelled = false;
@@ -714,7 +719,6 @@ function matchesModel(model: HiggsfieldModelInfo, normalizedQuery: string): bool
 // 「設定で認証してください」と出すのは設計ミス。常に GPT Image 2 を
 // デフォルトとして表示する。
 function getTriggerText(
-  loadState: LoadState,
   selectedModels: SelectedModel[],
   selectedMagnific: string[] = [],
 ): string {
@@ -723,13 +727,12 @@ function getTriggerText(
     return `Magnific: ${getMagnificModelName(selectedMagnific[0])}`;
   if (selectedMagnific.length >= 2)
     return `Magnific ${selectedMagnific.length} models`;
-  if (loadState === "loading" || loadState === "idle") return "モデル一覧を確認中...";
-  if (loadState === "error") return CODEX_STANDARD_LABEL;
-  // missing / needsAuth は「拡張未接続」というだけで、生成自体は GPT Image 2 で可能
-  if (loadState === "missing" || loadState === "needsAuth") return CODEX_STANDARD_LABEL;
-  if (selectedModels.length === 0) return CODEX_STANDARD_LABEL;
+  // 選択済みモデルがあれば読み込み状態に関係なく表示する (確認中で隠さない)。
   if (selectedModels.length === 1) return selectedModels[0].displayName;
-  return `${selectedModels.length} models compared`;
+  if (selectedModels.length >= 2) return `${selectedModels.length} models compared`;
+  // 未選択時は常にデフォルト表示。loading/idle は静的カタログ即表示 (2026-06-10) に
+  // より一瞬で ready になるため、「確認中」でトリガーを占有しない。
+  return CODEX_STANDARD_LABEL;
 }
 
 function getHelperText(loadState: LoadState, _selectedCount: number): string | null {

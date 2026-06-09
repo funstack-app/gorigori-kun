@@ -388,6 +388,12 @@ export const useProjects = create<ProjectsState>((set, get) => ({
     // 復活する」退行になる (evaluator 指摘)。
     persist(next, next.length === 0);
     set({ projects: next });
+    // 削除したプロジェクトがアクティブのままだと、localStorage に死んだ ID が残り、
+    // 再起動後「存在しないプロジェクト選択中」でタイムラインが空に見える (2026-06-10 調査)。
+    void import("./activeProject").then(({ useActiveProject }) => {
+      const active = useActiveProject.getState();
+      if (active.activeProjectId === id) active.setActive(null);
+    });
   },
 
   addItem: (projectId, itemData) => {

@@ -9,6 +9,25 @@ import {
   type McpServer,
   type SecretKey,
 } from "../ipc";
+import { useHiggsfieldModel } from "./higgsfieldModel";
+import { useMagnificModel } from "./magnificModel";
+
+/**
+ * 未認証を観測したらモデル選択を掃除する (2026-06-10 実機FB)。
+ * 接続を解除しても localStorage に選択モデルが残ると、トリガーボタンが
+ * 「Magnific 2 models」のまま固まり、生成も未接続エラーで必ず失敗する。
+ * 接続解除ボタン経由・アプリ外での解除・再起動後の stale 選択の全経路を
+ * refresh 時にここで一括で塞ぐ。
+ */
+function clearHiggsfieldSelectionIfStale() {
+  const s = useHiggsfieldModel.getState();
+  if (s.selectedModels.length > 0) s.setSelectedModels([]);
+}
+
+function clearMagnificSelectionIfStale() {
+  const s = useMagnificModel.getState();
+  if (s.selectedModels.length > 0) s.clear();
+}
 
 export type CodexPlan = "free" | "plus" | "pro" | "team";
 export type CodexAccountState = {
@@ -198,6 +217,7 @@ export const useAccounts = create<AccountsState>((set, get) => ({
           authenticated: status.authenticated,
         },
       }));
+      if (!status.authenticated) clearHiggsfieldSelectionIfStale();
       if (status.authenticated) {
         try {
           const account = await higgsfieldMcp.account();
@@ -217,6 +237,7 @@ export const useAccounts = create<AccountsState>((set, get) => ({
       set((state) => ({
         higgsfield: { ...state.higgsfield, registered: false, authenticated: false },
       }));
+      clearHiggsfieldSelectionIfStale();
     }
   },
 
@@ -230,8 +251,10 @@ export const useAccounts = create<AccountsState>((set, get) => ({
           authenticated: status.authenticated,
         },
       });
+      if (!status.authenticated) clearMagnificSelectionIfStale();
     } catch {
       set({ magnific: { registered: false, authenticated: false } });
+      clearMagnificSelectionIfStale();
     }
   },
 

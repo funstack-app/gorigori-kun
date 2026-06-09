@@ -1,6 +1,7 @@
 import { images as imagesIpc } from "../lib/ipc";
 import { useImagePreview } from "../lib/store/imagePreview";
 import { useImages, type GalleryItem } from "../lib/store/images";
+import { useProjects } from "../lib/store/projects";
 import { useMaskEditor } from "../lib/store/maskEditor";
 import { useThreads } from "../lib/store/threads";
 import { useToasts } from "../lib/store/toasts";
@@ -35,6 +36,9 @@ export async function deleteGalleryImage(
   try {
     await imagesIpc.deleteFile(path);
     useImages.getState().remove(path);
+    // プロジェクトに保存済みの画像を削除した場合、items[].imagePath が実体なしで
+    // 残ると「画像が見つかりません」のゴーストになる (2026-06-10 調査)。同期で掃除する。
+    useProjects.getState().pruneItemPaths([path]);
     useToasts.getState().push({
       kind: "success",
       text: "削除しました",
@@ -75,10 +79,16 @@ export async function deleteGalleryImages(paths: string[]): Promise<number> {
   try {
     const result = await imagesIpc.deleteFiles(paths);
     const failedPaths = new Set(result.failed.map((f) => f.path));
+    const deletedPaths: string[] = [];
     for (const path of paths) {
       // 失敗したパスは実体が残っているので表示からは外さない。
-      if (!failedPaths.has(path)) useImages.getState().remove(path);
+      if (!failedPaths.has(path)) {
+        useImages.getState().remove(path);
+        deletedPaths.push(path);
+      }
     }
+    // プロジェクト保存済みアイテムのゴースト化防止 (単一削除と同じ)。
+    if (deletedPaths.length > 0) useProjects.getState().pruneItemPaths(deletedPaths);
 
     if (result.failed.length > 0) {
       useToasts.getState().push({
