@@ -1,12 +1,10 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { listen } from "@tauri-apps/api/event";
 import {
   auth,
-  higgsfield,
+  higgsfieldMcp,
   magnific,
   mcp,
   secrets,
-  type HiggsfieldInstallProgress,
   type McpServer,
   type SecretKey,
 } from "../lib/ipc";
@@ -753,100 +751,28 @@ function Modal({ title, children, onClose }: { title: string; children: ReactNod
 }
 
 /**
- * Higgsfield ワンタップ接続カード。
- * STΛCK の設計思想: MOST=GPT Image 2 すぐ動く、おまけ=拡張機能はワンタップで追加。
- *
- * 状態:
- *   - CLI 未インストール    → 接続不可、インストール案内
- *   - 未認証                → 「接続する」ボタン (一発で OAuth)
- *   - 認証済み              → 「接続済み」+ プラン/クレジット表示 + 解除ボタン
- *
- * 認証完了後は accounts.refreshHiggsfield() を呼んで生成タブの UI に伝播。
+ * Higgsfield 接続カード (2026-06-10 段階7: MCP方式へ作り直し)。
+ * 旧CLI同梱(拡張パックDL+installed概念)を廃止し、Magnific と同型の
+ * リモートMCP(mcp.higgsfield.ai, OAuth)接続に統一。
+ * 接続ボタン1つで codex mcp add → ブラウザOAuth → 接続済み。
+ * installed/拡張パック導入は無くなり、authenticated だけで接続済み/未接続を切替。
+ * 未接続でもコア(gpt-image-2)には一切影響しない。
  */
 function HiggsfieldConnectionCard() {
   const status = useAccounts((s) => s.higgsfield);
   const refresh = useAccounts((s) => s.refreshHiggsfield);
   const toast = useToasts.getState();
   const [busy, setBusy] = useState(false);
-  // 真のワンタップ化: 接続先タブ内で拡張パックを DL → 配置 → 検出 まで完結させる。
-  // 進捗は Tauri event "higgsfield:install-progress" で受け取り、カード内に出す。
-  const [installing, setInstalling] = useState(false);
-  const [installProgress, setInstallProgress] = useState<string>("");
 
-  const installed = status.installed;
   const authed = status.authenticated;
-  const plan = status.plan;
-  const credits = status.credits;
-
-  // install-progress イベントの購読。react-patterns.md に従い unlisten で必ずクリーンアップ。
-  useEffect(() => {
-    let unlisten: undefined | (() => void);
-    void (async () => {
-      const handle = await listen<HiggsfieldInstallProgress>(
-        "higgsfield:install-progress",
-        (event) => {
-          const p = event.payload;
-          switch (p.kind) {
-            case "started":
-              setInstallProgress("インストール開始…");
-              break;
-            case "downloading":
-              setInstallProgress("拡張パックをダウンロード中…");
-              break;
-            case "downloaded":
-              setInstallProgress(`ダウンロード完了 (${Math.round(p.bytes / 1024 / 1024)} MB)`);
-              break;
-            case "extracting":
-              setInstallProgress("展開中…");
-              break;
-            case "installed":
-              setInstallProgress("配置完了");
-              break;
-            case "failed":
-              setInstallProgress(`失敗: ${p.message}`);
-              break;
-          }
-        },
-      );
-      unlisten = handle;
-    })();
-    return () => {
-      unlisten?.();
-    };
-  }, []);
-
-  const installExtension = async () => {
-    setInstalling(true);
-    setInstallProgress("インストール開始…");
-    try {
-      // higgsfield.installExtension() がアプリ内で DL + 配置し、配置後の status を返す。
-      // 続けて refreshHiggsfield() で store に反映 → installed:true なら再起動なしで「接続する」に進める。
-      await higgsfield.installExtension();
-      await refresh();
-      toast.push({
-        kind: "success",
-        text: "Higgsfield 拡張パックを自動導入しました。続けて「接続する」を押してください",
-        ttlMs: 4000,
-      });
-      setInstallProgress("");
-    } catch (err) {
-      toast.push({
-        kind: "error",
-        text: `自動導入に失敗しました: ${String(err)}`,
-        ttlMs: 6000,
-      });
-    } finally {
-      setInstalling(false);
-    }
-  };
 
   const connect = async () => {
     setBusy(true);
     try {
-      // higgsfield.login は CLI を `auth login` で叩いてブラウザを開く。
+      // higgsfieldMcp.login は codex mcp add → login を叩き、OAuth をブラウザで開く。
       // login コマンドの成功 = OAuth 完了ではないため、refresh 後に実際の
       // authenticated を確認してからトーストを出し分ける（成功を装わない）。
-      await higgsfield.login();
+      await higgsfieldMcp.login();
       await refresh();
       const connected = useAccounts.getState().higgsfield.authenticated;
       if (connected) {
@@ -872,7 +798,7 @@ function HiggsfieldConnectionCard() {
   const disconnect = async () => {
     setBusy(true);
     try {
-      await higgsfield.logout();
+      await higgsfieldMcp.logout();
       await refresh();
       toast.push({ kind: "success", text: "HiggsField の接続を解除しました", ttlMs: 3000 });
     } catch (err) {
@@ -885,12 +811,6 @@ function HiggsfieldConnectionCard() {
       setBusy(false);
     }
   };
-
-  // v0.6.19: Higgsfield 拡張パック方式に切り替え。
-  // 別配布の拡張パック dmg をユーザーがインストールすると、Rust 側の
-  // resolve_higgsfield_binary が
-  //   ~/Library/Application Support/app.codexframefactory/extensions/higgsfield/
-  // を検出して動く設計。未インストール時は CLI 未検出として案内表示。
 
   return (
     <div className="space-y-3 rounded-xl border border-pink-400/30 bg-pink-500/5 p-3">
@@ -911,69 +831,14 @@ function HiggsfieldConnectionCard() {
         </div>
       </div>
 
-      {authed && (
-        <div className="grid grid-cols-2 gap-2 rounded-lg border border-[#2a2a2a] bg-[#101010] px-3 py-2 text-[11px]">
-          <div>
-            <p className="text-neutral-500">プラン</p>
-            <p className="font-bold text-neutral-200">{plan ?? "—"}</p>
-          </div>
-          <div>
-            <p className="text-neutral-500">クレジット</p>
-            <p className="font-bold text-neutral-200">
-              {credits !== undefined ? credits.toLocaleString() : "—"}
-            </p>
-          </div>
-        </div>
-      )}
-
-      {!installed ? (
-        <div className="space-y-2">
-          <p className="rounded-lg border border-yellow-500/30 bg-yellow-500/5 px-2 py-1.5 text-[11px] text-yellow-200">
-            HiggsField 拡張パックがまだ入っていません。
-            <br />
-            下のボタン1つで自動導入できます (アプリ内で DL → 配置 → 検出 まで完結。再起動不要)。
-          </p>
-          {/* アプリ内自動導入ボタン (ワンタップ)。これが第一手段。 */}
-          <button
-            type="button"
-            disabled={installing}
-            onClick={() => void installExtension()}
-            className="block w-full rounded-lg bg-pink-500 px-3 py-2 text-center text-xs font-black text-white transition hover:bg-pink-400 disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            {installing ? "導入中…" : "⬇ ワンタップで自動導入"}
-          </button>
-          {/* 導入の進捗表示 (DL中%など)。install-progress イベントから更新。 */}
-          {installing && installProgress && (
-            <p className="rounded-lg border border-[#2a2a2a] bg-[#101010] px-2 py-1.5 text-[11px] font-semibold text-amber-300">
-              {installProgress}
-            </p>
-          )}
-          {/* フォールバック: 自動導入がうまくいかない場合の手動 DL リンク。 */}
-          <a
-            href="https://github.com/funstack-app/gorigori-kun/releases/latest"
-            target="_blank"
-            rel="noreferrer"
-            className="block rounded-lg border border-[#343434] bg-[#1e1e1e] px-3 py-1.5 text-center text-[11px] font-bold text-neutral-200 hover:border-pink-400 hover:text-white"
-          >
-            うまくいかない場合は手動でダウンロード ↗
-          </a>
-          <a
-            href="https://higgsfield.ai/"
-            target="_blank"
-            rel="noreferrer"
-            className="block rounded-lg border border-[#343434] bg-[#1e1e1e] px-3 py-1.5 text-center text-[11px] font-bold text-neutral-200 hover:border-pink-400 hover:text-white"
-          >
-            HiggsField の使い方を見る ↗
-          </a>
-        </div>
-      ) : !authed ? (
+      {!authed ? (
         <button
           type="button"
           disabled={busy}
           onClick={connect}
           className="h-9 w-full rounded-lg bg-pink-500 px-3 text-xs font-black text-white transition hover:bg-pink-400 disabled:opacity-60"
         >
-          {busy ? "接続中…" : "接続する (ワンタップ)"}
+          {busy ? "接続中…" : "接続する (ブラウザでログイン)"}
         </button>
       ) : (
         <button

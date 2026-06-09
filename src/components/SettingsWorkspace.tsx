@@ -1,9 +1,6 @@
-import { listen } from "@tauri-apps/api/event";
 import { useEffect, useState } from "react";
 import {
-  type HiggsfieldDebugInfo,
-  type HiggsfieldInstallProgress,
-  higgsfield,
+  higgsfieldMcp,
   type LegacySummary,
   magnific,
   type StorageSettings,
@@ -754,79 +751,41 @@ function StorageSettingsTab() {
 function AccountSettings() {
   const accounts = useAccounts();
   const push = useToasts((s) => s.push);
-  // F-#13: Higgsfield 診断ダイアログ。ユーザー環境の実測情報を取得・表示する。
-  const [debugInfo, setDebugInfo] = useState<HiggsfieldDebugInfo | null>(null);
-  const [debugRunning, setDebugRunning] = useState(false);
-  /**
-   * 真のワンタップ化 (2026-05-19): アプリ内ボタン一発で拡張パックを DL → 配置 → 検出 する。
-   * 進捗を Tauri event "higgsfield:install-progress" で受け取り、UI に出す。
-   */
-  const [installing, setInstalling] = useState(false);
-  const [installProgress, setInstallProgress] = useState<string>("");
-  useEffect(() => {
-    let unlisten: undefined | (() => void);
-    void (async () => {
-      const handle = await listen<HiggsfieldInstallProgress>(
-        "higgsfield:install-progress",
-        (event) => {
-          const p = event.payload;
-          switch (p.kind) {
-            case "started":
-              setInstallProgress("インストール開始…");
-              break;
-            case "downloading":
-              setInstallProgress("拡張パックをダウンロード中…");
-              break;
-            case "downloaded":
-              setInstallProgress(`ダウンロード完了 (${Math.round(p.bytes / 1024 / 1024)} MB)`);
-              break;
-            case "extracting":
-              setInstallProgress("展開中…");
-              break;
-            case "installed":
-              setInstallProgress(`配置完了: ${p.path}`);
-              break;
-            case "failed":
-              setInstallProgress(`失敗: ${p.message}`);
-              break;
-          }
-        },
-      );
-      unlisten = handle;
-    })();
-    return () => {
-      unlisten?.();
-    };
-  }, []);
+  // 段階7 (2026-06-10): Higgsfield は MCP接続方式へ移行。installed/拡張パック導入
+  // (installExtension / install-progress 購読) と CLI 診断 (debug) を廃止し、
+  // Magnific と同じ接続/解除のみのシンプル UI にする。
   const refresh = async () => {
     await accounts.refresh();
     push({ kind: "success", text: "接続状態を更新しました", ttlMs: 2000 });
   };
-  const installExtension = async () => {
-    setInstalling(true);
-    setInstallProgress("インストール開始…");
+  // A5: Higgsfield 接続/解除。接続先タブと同じ store (accounts.higgsfield) を読むため、
+  // アカウントタブと接続先タブで接続状態が必ず一致する。MCP方式 (Magnific と同型)。
+  const loginHiggsfield = async () => {
     try {
-      await higgsfield.installExtension();
+      await higgsfieldMcp.login();
       await accounts.refreshHiggsfield();
-      push({
-        kind: "success",
-        text: "Higgsfield 拡張パックを自動インストールしました",
-        ttlMs: 3500,
-      });
-      setInstallProgress("");
+      const connected = useAccounts.getState().higgsfield.authenticated;
+      push(
+        connected
+          ? { kind: "success", text: "Higgsfield に接続しました", ttlMs: 3000 }
+          : {
+              kind: "info",
+              text: "ブラウザで Higgsfield のログインを完了してから、もう一度「接続」を押してください。",
+              ttlMs: 7000,
+            },
+      );
     } catch (err) {
-      push({ kind: "error", text: `自動インストールに失敗: ${String(err)}` });
-    } finally {
-      setInstalling(false);
+      push({ kind: "error", text: `Higgsfield 接続に失敗: ${String(err)}`, ttlMs: 6000 });
     }
   };
-  const loginHiggsfield = async () => {
-    await higgsfield.login();
-    await accounts.refreshHiggsfield();
-  };
   const logoutHiggsfield = async () => {
-    await higgsfield.logout();
-    await accounts.refreshHiggsfield();
+    try {
+      await higgsfieldMcp.logout();
+      await accounts.refreshHiggsfield();
+      push({ kind: "success", text: "Higgsfield の接続を解除しました", ttlMs: 3000 });
+    } catch (err) {
+      push({ kind: "error", text: `Higgsfield 接続解除に失敗: ${String(err)}`, ttlMs: 6000 });
+    }
   };
   // A5: Magnific 接続/解除。接続先タブと同じ store (accounts.magnific) を読むため、
   // アカウントタブと接続先タブで接続状態が必ず一致する。
@@ -846,17 +805,6 @@ function AccountSettings() {
       push({ kind: "success", text: "Magnific の接続を解除しました", ttlMs: 3000 });
     } catch (err) {
       push({ kind: "error", text: `Magnific 接続解除に失敗: ${String(err)}`, ttlMs: 6000 });
-    }
-  };
-  const runDebug = async () => {
-    setDebugRunning(true);
-    try {
-      const info = await higgsfield.debug();
-      setDebugInfo(info);
-    } catch (err) {
-      push({ kind: "error", text: `診断に失敗: ${String(err)}` });
-    } finally {
-      setDebugRunning(false);
     }
   };
   return (
@@ -899,60 +847,26 @@ function AccountSettings() {
           <div>
             <h3 className="text-sm font-black text-white">Higgsfield</h3>
             <p className="mt-1 text-xs text-neutral-500">
-              {!accounts.higgsfield.installed
-                ? "拡張パック未インストール"
-                : accounts.higgsfield.authenticated
-                  ? `接続済み${accounts.higgsfield.plan ? ` · ${accounts.higgsfield.plan}` : ""}`
-                  : "未認証"}
+              {accounts.higgsfield.authenticated
+                ? `接続済み${accounts.higgsfield.plan ? ` · ${accounts.higgsfield.plan}` : ""}`
+                : "未接続"}
             </p>
             {accounts.higgsfield.credits !== undefined && (
               <p className="mt-1 text-xs font-semibold text-pink-200">
                 credits: {Math.round(accounts.higgsfield.credits)}
               </p>
             )}
-            {installing && installProgress && (
-              <p className="mt-1 text-xs font-semibold text-amber-300">{installProgress}</p>
-            )}
+            <p className="mt-1 text-[11px] text-neutral-500">
+              動画・画像 AI 生成（オプショナル拡張・MCP接続）
+            </p>
           </div>
           <div className="flex flex-wrap gap-2">
-            {/*
-              真のワンタップ化 (2026-05-19): 拡張パック未検出時はこのボタン1つで
-              GitHub Release から DL → 配置 → 検出 が完結する。
-              既にインストール済みでも「再インストール」用途で残しておく。
-            */}
-            <button
-              type="button"
-              onClick={() => void installExtension()}
-              disabled={installing}
-              className={`${PRIMARY_BUTTON} h-9 px-3 text-xs disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-500`}
-              title={
-                accounts.higgsfield.installed
-                  ? "拡張パックを最新版に再インストール"
-                  : "Higgsfield 拡張パックを自動でダウンロード・配置します"
-              }
-            >
-              {installing
-                ? "インストール中…"
-                : accounts.higgsfield.installed
-                  ? "再インストール"
-                  : "ワンタップ導入"}
-            </button>
             <button
               type="button"
               onClick={() => void refresh()}
               className={`${MUTED_BUTTON} h-9 px-3 text-xs`}
             >
               テスト接続
-            </button>
-            {/* F-#13: Higgsfield 診断 — 接続できない時に実測情報を吐く */}
-            <button
-              type="button"
-              onClick={() => void runDebug()}
-              disabled={debugRunning}
-              className={`${MUTED_BUTTON} h-9 px-3 text-xs disabled:cursor-not-allowed disabled:opacity-60`}
-              title="Higgsfield CLI のパス・PATH 環境変数・実行結果を表示します。接続できない時のサポート用。"
-            >
-              {debugRunning ? "診断中…" : "診断"}
             </button>
             {accounts.higgsfield.authenticated ? (
               <button
@@ -1012,147 +926,10 @@ function AccountSettings() {
           </div>
         </div>
       </section>
-      {debugInfo && <HiggsfieldDebugDialog info={debugInfo} onClose={() => setDebugInfo(null)} />}
     </Panel>
   );
 }
 
-function HiggsfieldDebugDialog({
-  info,
-  onClose,
-}: {
-  info: HiggsfieldDebugInfo;
-  onClose: () => void;
-}) {
-  const push = useToasts((s) => s.push);
-  const copyAll = async () => {
-    try {
-      await navigator.clipboard.writeText(JSON.stringify(info, null, 2));
-      push({ kind: "success", text: "診断情報をクリップボードにコピーしました", ttlMs: 2500 });
-    } catch (err) {
-      push({ kind: "error", text: `コピーに失敗: ${String(err)}` });
-    }
-  };
-  return (
-    <div
-      className="fixed inset-0 z-[80] flex items-center justify-center bg-black/70 p-4"
-      onClick={onClose}
-    >
-      {/* STΛCK 指示 (2026-05-19): OptionPickerModal と統一サイズ */}
-      <div
-        className="flex max-h-[calc(100vh-2rem)] w-full max-w-5xl min-h-0 flex-col overflow-hidden rounded-xl border border-[#262626] bg-[#0f0f0f] shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between border-b border-[#242424] px-6 py-3">
-          <div>
-            <p className="text-[10px] font-black uppercase tracking-wide text-neutral-500">DEBUG</p>
-            <h3 className="text-sm font-black text-white">Higgsfield 診断結果</h3>
-            <p className="mt-0.5 text-[10px] text-neutral-500">
-              この情報をサポート (Discord 等) にコピペで送ってください
-            </p>
-          </div>
-          <div className="flex gap-2">
-            <button
-              type="button"
-              onClick={() => void copyAll()}
-              className={`${MUTED_BUTTON} h-8 px-3 text-xs`}
-            >
-              全部コピー
-            </button>
-            <button
-              type="button"
-              onClick={onClose}
-              aria-label="閉じる"
-              className="rounded-md border border-[#343434] bg-[#101010] px-3 py-1 text-xs font-bold text-neutral-300 hover:border-pink-400 hover:text-white"
-            >
-              × 閉じる
-            </button>
-          </div>
-        </div>
-        <div className="flex-1 overflow-y-auto p-4">
-          <DebugRow label="OS / Arch" value={`${info.os} / ${info.arch}`} />
-          <DebugRow label="拡張パック存在" value={info.extensionDirExists ? "✓ あり" : "✗ なし"} />
-          <DebugRow label="拡張パックパス" value={info.extensionDir} mono />
-          {info.extensionDirExists && info.extensionDirListing.length > 0 && (
-            <DebugRow
-              label="拡張パック中身"
-              value={info.extensionDirListing.join("\n")}
-              mono
-              multiline
-            />
-          )}
-          <DebugRow label="検出した higgsfield" value={info.resolvedBinary ?? "(未検出)"} mono />
-          <DebugRow label="現在の PATH" value={info.currentPath} mono multiline />
-          <DebugRow label="enriched_path" value={info.enrichedPath} mono multiline />
-          <DebugProbe label="higgsfield --version" probe={info.versionProbe} />
-          <DebugProbe label="higgsfield auth token" probe={info.authTokenProbe} />
-          <DebugProbe label="higgsfield account status --json" probe={info.accountProbe} />
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function DebugRow({
-  label,
-  value,
-  mono,
-  multiline,
-}: {
-  label: string;
-  value: string;
-  mono?: boolean;
-  multiline?: boolean;
-}) {
-  return (
-    <div className="mb-3">
-      <p className="text-[10px] font-bold uppercase tracking-wide text-neutral-500">{label}</p>
-      <p
-        className={[
-          "mt-0.5 break-all rounded bg-[#101010] p-2 text-[11px] text-neutral-200",
-          mono ? "font-mono" : "",
-          multiline ? "whitespace-pre-wrap" : "",
-        ].join(" ")}
-      >
-        {value || "(空)"}
-      </p>
-    </div>
-  );
-}
-
-function DebugProbe({
-  label,
-  probe,
-}: {
-  label: string;
-  probe: HiggsfieldDebugInfo["versionProbe"];
-}) {
-  return (
-    <div className="mb-3">
-      <p className="text-[10px] font-bold uppercase tracking-wide text-neutral-500">
-        {label}{" "}
-        <span className="text-neutral-400">
-          {probe.ran ? `(exit ${probe.exitCode ?? "?"})` : "(未実行)"}
-        </span>
-      </p>
-      {probe.error && (
-        <p className="mt-0.5 rounded bg-rose-950/40 p-2 text-[11px] font-mono text-rose-200">
-          ERROR: {probe.error}
-        </p>
-      )}
-      {probe.stdout && (
-        <p className="mt-0.5 whitespace-pre-wrap break-all rounded bg-[#101010] p-2 text-[11px] font-mono text-neutral-200">
-          stdout: {probe.stdout}
-        </p>
-      )}
-      {probe.stderr && (
-        <p className="mt-0.5 whitespace-pre-wrap break-all rounded bg-amber-950/40 p-2 text-[11px] font-mono text-amber-200">
-          stderr: {probe.stderr}
-        </p>
-      )}
-    </div>
-  );
-}
 function Panel({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     // A3: 設定パネルの横幅を制作タブ (App.tsx) の max-w-6xl に合わせる。
