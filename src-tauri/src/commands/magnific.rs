@@ -7,9 +7,10 @@
 //!   GORI 専用 CODEX_HOME の config.toml に登録するだけで有効化される。
 //! - 接続済みかどうかは `codex mcp list` の magnific 行と config.toml の存在で判定する。
 
-use std::process::Command;
+use std::process::Stdio;
 
 use serde::{Deserialize, Serialize};
+use tokio::process::Command;
 
 use crate::codex::process::{enriched_path, resolve_codex_cli_binary};
 
@@ -28,6 +29,10 @@ pub struct MagnificStatus {
 
 /// GORI 専用 CODEX_HOME を環境に設定した codex Command を作る。
 /// MCP 設定は専用 HOME の config.toml を読むため、必ずこの HOME を渡す。
+///
+/// `tokio::process::Command` を返すので、呼び出し側は `tokio::time::timeout` で
+/// 子プロセスを打ち切れる。`mcp login` の OAuth は完了までブロックしうるため、
+/// 同期 `std::process::Command::output()` だと UI が固まる。
 fn gori_codex_command() -> Result<Command, String> {
     let binary = resolve_codex_cli_binary()
         .map_err(|e| format!("codex CLI が見つかりません: {e}"))?;
@@ -36,13 +41,77 @@ fn gori_codex_command() -> Result<Command, String> {
     if let Some(home) = crate::codex::home::gori_codex_home_path() {
         cmd.env("CODEX_HOME", home);
     }
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
+    // Windows での黒い console window 抑制 (process.rs の no_window_flag と同等)。
+    crate::codex::process::no_window_flag(&mut cmd);
+    cmd.kill_on_drop(true);
     Ok(cmd)
+}
+
+/// 全 false の未接続状態 (degrade 用)。codex 不在・実行失敗・JSON 解析失敗の
+/// いずれでも起動を止めず、Magnific を「持っていない」扱いにする。
+fn magnific_status_unavailable() -> MagnificStatus {
+    MagnificStatus {
+        registered: false,
+        authenticated: false,
+    }
+}
+
+/// `codex mcp list --json` の要素から magnific の認証状態を読み取る。
+///
+/// 実バイナリ検証 (2026-06-09): `--json` は配列を返し、各要素に `name` と
+/// `auth_status` フィールドを持つ。OAuth 認証済み MCP は `auth_status` が
+/// "oauth" 系の値になる (未認証/非対応は "unsupported"、Bearer 系は "Bearer token")。
+/// テキスト出力の `contains("oauth")` は列見出し等を誤検知して永久 false に
+/// なりうるので使わない。JSON 構造が想定と違っても落とさず degrade する。
+fn parse_magnific_status(stdout: &[u8]) -> MagnificStatus {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(stdout) else {
+        return magnific_status_unavailable();
+    };
+
+    // codex のバージョンにより、トップが配列 / { "servers": [...] } / オブジェクト
+    // (name -> entry) のいずれもありうる。手堅く「magnific を表すノード」を探す。
+    let find_entry = |arr: &[serde_json::Value]| -> Option<serde_json::Value> {
+        arr.iter()
+            .find(|item| {
+                item.get("name")
+                    .and_then(|n| n.as_str())
+                    .map(|n| n.eq_ignore_ascii_case(MAGNIFIC_MCP_NAME))
+                    .unwrap_or(false)
+            })
+            .cloned()
+    };
+
+    let entry = if let Some(arr) = value.as_array() {
+        find_entry(arr)
+    } else if let Some(arr) = value.get("servers").and_then(|s| s.as_array()) {
+        find_entry(arr)
+    } else if let Some(obj) = value.as_object() {
+        // name -> entry 形式 (キーが magnific)。値に name が無いことがあるので
+        // キー一致でも拾う。
+        obj.iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(MAGNIFIC_MCP_NAME))
+            .map(|(_, v)| v.clone())
+    } else {
+        None
+    };
+
+    let Some(entry) = entry else {
+        // magnific ノードが無い = 未登録。
+        return magnific_status_unavailable();
+    };
+
+    // ここまで来れば config.toml に magnific が登録されている。
+    let auth_status = entry
+        .get("auth_status")
+        .and_then(|a| a.as_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let authenticated = auth_status.contains("oauth");
+
+    MagnificStatus {
+        registered: true,
+        authenticated,
+    }
 }
 
 /// Magnific 拡張の接続状態を返す。失敗しても起動を止めず、未接続として degrade する。
@@ -51,60 +120,118 @@ pub async fn magnific_status() -> Result<MagnificStatus, String> {
     let mut cmd = match gori_codex_command() {
         Ok(c) => c,
         // codex が無い環境では「未接続」として扱う (コアは別経路なので影響しない)。
-        Err(_) => {
-            return Ok(MagnificStatus {
-                registered: false,
-                authenticated: false,
-            })
-        }
+        Err(_) => return Ok(magnific_status_unavailable()),
     };
-    cmd.args(["mcp", "list"]);
-    let output = match cmd.output() {
-        Ok(o) => o,
-        Err(_) => {
-            return Ok(MagnificStatus {
-                registered: false,
-                authenticated: false,
-            })
-        }
+    cmd.args(["mcp", "list", "--json"]);
+    cmd.stdin(Stdio::null());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(_) => return Ok(magnific_status_unavailable()),
     };
-    let text = String::from_utf8_lossy(&output.stdout);
-    // magnific 行を探す。enabled かつ OAuth なら authenticated。
-    let mut registered = false;
-    let mut authenticated = false;
-    for line in text.lines() {
-        let lower = line.to_lowercase();
-        if lower.contains(MAGNIFIC_MCP_NAME) {
-            registered = true;
-            if lower.contains("enabled") && lower.contains("oauth") {
-                authenticated = true;
-            }
-        }
-    }
-    Ok(MagnificStatus {
-        registered,
-        authenticated,
-    })
+    // `mcp list` はローカル config を読むだけなので速いが、念のため上限を設ける。
+    let output = match tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        child.wait_with_output(),
+    )
+    .await
+    {
+        Ok(Ok(o)) => o,
+        // 実行失敗・タイムアウトとも未接続として degrade。
+        _ => return Ok(magnific_status_unavailable()),
+    };
+
+    Ok(parse_magnific_status(&output.stdout))
 }
 
-/// Magnific MCP を登録し OAuth フローを開始する (codex mcp add)。
-/// 既に登録済みなら codex が冪等に扱う。OAuth はブラウザで完了する。
-#[tauri::command]
-pub async fn magnific_login() -> Result<String, String> {
+/// `codex mcp login` の OAuth がブラウザ完了までブロックしうる上限。
+/// ユーザーがブラウザでログインを終えるまで子プロセスが生きるので、待ち時間を
+/// 長めに取る。これを過ぎたら子を kill して案内メッセージを返す。
+const MAGNIFIC_LOGIN_TIMEOUT_SECS: u64 = 180;
+
+/// codex の単発サブコマンドを spawn し、タイムアウト付きで待つ。
+/// stdin は閉じる (対話入力を待たせない)。Ok((成功フラグ, stdout, stderr)) を返す。
+async fn run_codex_capture(
+    args: &[&str],
+    timeout: std::time::Duration,
+) -> Result<(bool, String, String), String> {
     let mut cmd = gori_codex_command()?;
-    cmd.args(["mcp", "add", MAGNIFIC_MCP_NAME, "--url", MAGNIFIC_MCP_URL]);
-    let output = cmd
-        .output()
-        .map_err(|e| format!("codex mcp add の実行に失敗しました: {e}"))?;
+    cmd.args(args);
+    cmd.stdin(Stdio::null());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let child = cmd
+        .spawn()
+        .map_err(|e| format!("codex {} の実行に失敗しました: {e}", args.join(" ")))?;
+
+    let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => {
+            return Err(format!("codex {} の待機に失敗しました: {e}", args.join(" ")))
+        }
+        Err(_elapsed) => {
+            // kill_on_drop(true) なので child を drop すれば子も殺される。
+            return Err(format!(
+                "Magnific のログインが {} 秒以内に完了しませんでした。ブラウザでのログインを完了してから、もう一度「接続」を押してください。",
+                timeout.as_secs()
+            ));
+        }
+    };
+
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if output.status.success() {
-        Ok(if stdout.is_empty() { stderr } else { stdout })
-    } else {
-        Err(if stderr.is_empty() {
-            format!("Magnific 接続に失敗しました: {}", output.status)
+    Ok((output.status.success(), stdout, stderr))
+}
+
+/// Magnific MCP を登録し OAuth 認証を起動する。
+///
+/// `codex mcp add` は config.toml に登録するだけで OAuth を起こさない (実バイナリ
+/// 検証 2026-06-09)。OAuth ブラウザを開くのは独立コマンド `codex mcp login`。
+/// そこで ① 未登録なら add → ② login の 2 段階で認証する。
+///
+/// `mcp login` は OAuth ブラウザの完了まで子プロセスがブロックしうるので、
+/// 同期 `output()` ではなくタイムアウト付き spawn で待つ (UI が固まらない)。
+#[tauri::command]
+pub async fn magnific_login() -> Result<String, String> {
+    // ① 登録 (mcp add)。既に登録済みだと codex が非ゼロ終了することがあるが、
+    //    それはエラーにせず login に進む (冪等性)。
+    let add = run_codex_capture(
+        &["mcp", "add", MAGNIFIC_MCP_NAME, "--url", MAGNIFIC_MCP_URL],
+        std::time::Duration::from_secs(30),
+    )
+    .await?;
+    if !add.0 {
+        // 「already exists」系は無視して login に進む。それ以外の本当の失敗で
+        // login がまた失敗すれば、下でエラーが返るので二重に止めない。
+        let lower = format!("{} {}", add.1, add.2).to_lowercase();
+        let already_registered =
+            lower.contains("already") || lower.contains("exist") || lower.contains("既に");
+        if !already_registered {
+            tracing::warn!(target: "magnific", "mcp add 非ゼロ終了 (login で再試行): {}", add.2);
+        }
+    }
+
+    // ② OAuth 認証 (mcp login)。ブラウザが開き、ユーザーがログインする。
+    let login = run_codex_capture(
+        &["mcp", "login", MAGNIFIC_MCP_NAME],
+        std::time::Duration::from_secs(MAGNIFIC_LOGIN_TIMEOUT_SECS),
+    )
+    .await?;
+
+    if login.0 {
+        Ok(if login.1.is_empty() {
+            "Magnific の認証が完了しました。".to_string()
         } else {
-            stderr
+            login.1
+        })
+    } else {
+        Err(if login.2.is_empty() {
+            "Magnific の認証に失敗しました。ブラウザでのログインを完了したか確認してください。".to_string()
+        } else {
+            login.2
         })
     }
 }
@@ -114,7 +241,9 @@ pub async fn magnific_login() -> Result<String, String> {
 pub async fn magnific_logout() -> Result<(), String> {
     let mut cmd = gori_codex_command()?;
     cmd.args(["mcp", "remove", MAGNIFIC_MCP_NAME]);
+    cmd.stdin(Stdio::null());
     cmd.output()
+        .await
         .map_err(|e| format!("codex mcp remove の実行に失敗しました: {e}"))?;
     Ok(())
 }
