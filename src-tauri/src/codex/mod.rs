@@ -1,4 +1,5 @@
 pub mod home;
+pub mod mcp_direct;
 pub mod mcp_shared;
 pub mod process;
 pub mod rpc;
