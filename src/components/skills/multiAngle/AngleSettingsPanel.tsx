@@ -4,10 +4,15 @@ import { getAngleCut, MAX_CUTS } from "../../../lib/multiangle/angles";
 import type { MultiAngleParams } from "../../../lib/multiangle/types";
 import { useMultiAngleRun } from "../../../lib/store/multiAngleRun";
 import { useToasts } from "../../../lib/store/toasts";
+import {
+  ASPECT_RATIO_HINTS,
+  ASPECT_RATIO_PICKER_OPTIONS,
+} from "../../../lib/scene/aspectRatioPicker";
+import type { SceneAspectRatio } from "../../../lib/scene/types";
+import { OptionPickerModal } from "../../scene/OptionPickerModal";
 import { AnglePickerModal } from "./AnglePickerModal";
 
 const IMAGE_EXTS = ["png", "jpg", "jpeg", "webp", "gif", "bmp"];
-const ASPECT_RATIOS = ["1:1", "9:16", "16:9", "4:5"] as const;
 
 /**
  * マルチアングル設定パネル（左サイドバー）
@@ -32,6 +37,7 @@ export function AngleSettingsPanel() {
 
   const pushToast = useToasts((s) => s.push);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [aspectPickerOpen, setAspectPickerOpen] = useState(false);
 
   const count = selectedCutIds.length;
   const running = status === "running";
@@ -164,22 +170,26 @@ export function AngleSettingsPanel() {
         <div className="mb-1.5 text-[11px] font-black uppercase tracking-wider text-neutral-500">
           アスペクト比
         </div>
-        <div className="grid grid-cols-4 gap-1.5">
-          {ASPECT_RATIOS.map((r) => (
-            <button
-              key={r}
-              type="button"
-              onClick={() => setAspectRatio(r)}
-              className={`rounded-lg border px-2 py-1.5 text-[11px] font-bold transition ${
-                aspectRatio === r
-                  ? "border-pink-400 bg-pink-500/20 text-pink-100"
-                  : "border-[#2a2a2a] text-neutral-400 hover:border-pink-400/40"
-              }`}
-            >
-              {r}
-            </button>
-          ))}
-        </div>
+        {/*
+          STΛCK 指示 (2026-06-09): 通常制作画面と同じポップアップ方式に統一。
+          固定4ボタンをやめ、GPT Image 2 公式対応の10種を OptionPickerModal で選ぶ。
+        */}
+        <button
+          type="button"
+          onClick={() => setAspectPickerOpen(true)}
+          className="flex w-full items-center justify-between gap-2 rounded-lg border border-[#343434] bg-[#101010] px-3 py-2 text-left text-[13px] font-semibold text-neutral-100 transition hover:border-pink-400 hover:bg-[#151515]"
+          title="アスペクト比を選ぶ"
+        >
+          <span className="flex min-w-0 items-center gap-1.5">
+            <span className="shrink-0 font-bold text-neutral-100">{aspectRatio}</span>
+            <span className="truncate text-[11px] font-medium text-neutral-500">
+              {ASPECT_RATIO_HINTS[aspectRatio as SceneAspectRatio] ?? ""}
+            </span>
+          </span>
+          <span className="shrink-0 text-[11px] text-neutral-500" aria-hidden>
+            ▾
+          </span>
+        </button>
       </div>
 
       <div className="border-t border-[#242424] pt-4">
@@ -211,6 +221,14 @@ export function AngleSettingsPanel() {
       </button>
 
       {pickerOpen && <AnglePickerModal onClose={() => setPickerOpen(false)} />}
+      <OptionPickerModal
+        open={aspectPickerOpen}
+        title="アスペクト比を選ぶ"
+        options={ASPECT_RATIO_PICKER_OPTIONS}
+        selectedValue={aspectRatio}
+        onPick={(value) => setAspectRatio(value)}
+        onClose={() => setAspectPickerOpen(false)}
+      />
     </aside>
   );
 }
