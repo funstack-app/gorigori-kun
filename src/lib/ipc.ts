@@ -388,6 +388,36 @@ export const magnific = {
     }>("magnific_generate_batch", { args }),
 };
 
+// Higgsfield リモートMCP拡張 (2026-06-10 段階3)。CLI同梱方式の作り直し。
+// mcp.higgsfield.ai に codex mcp で接続するだけ。未接続なら全false で degrade。
+// 既存 higgsfield (CLI版) とは別オブジェクトとして共存させる。
+export type HiggsfieldMcpStatus = {
+  registered: boolean;
+  authenticated: boolean;
+};
+
+export type HiggsfieldMcpGenArgs = {
+  prompt: string;
+  model?: string;
+  aspect?: string;
+  count?: number;
+  refImagePaths?: string[];
+};
+
+export const higgsfieldMcp = {
+  status: () => invoke<HiggsfieldMcpStatus>("higgsfield_mcp_status"),
+  /** codex mcp add で MCP登録+OAuth(実機ではaddだけで自動完了)。loginも冪等に試みる。 */
+  login: () => invoke<string>("higgsfield_mcp_login"),
+  logout: () => invoke<void>("higgsfield_mcp_logout"),
+  /** Higgsfield MCP経由で画像生成しURLをDLして generated_images に保存。コアと同じ結果型。 */
+  generateBatch: (args: HiggsfieldMcpGenArgs) =>
+    invoke<{
+      generatedPaths: string[];
+      failedCount: number;
+      errors: string[];
+    }>("higgsfield_mcp_generate_batch", { args }),
+};
+
 export const higgsfield = {
   status: () => invoke<HiggsfieldStatus>("higgsfield_status"),
   debug: () => invoke<HiggsfieldDebugInfo>("higgsfield_debug"),

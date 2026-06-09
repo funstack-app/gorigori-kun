@@ -12,6 +12,7 @@ pub mod edit_ocr;
 pub mod edit_sam2;
 pub mod edit_segment;
 pub mod higgsfield;
+pub mod higgsfield_mcp;
 pub mod images;
 pub mod layer_splitter;
 pub mod magnific;
