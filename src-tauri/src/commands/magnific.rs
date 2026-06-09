@@ -10,8 +10,11 @@
 use std::process::Stdio;
 
 use serde::{Deserialize, Serialize};
-use tokio::process::Command;
 
+use crate::codex::mcp_shared::{
+    entry_is_authenticated, extract_first_url, find_mcp_entry, gori_codex_command,
+    run_codex_capture,
+};
 use crate::codex::process::{enriched_path, resolve_codex_cli_binary};
 
 const MAGNIFIC_MCP_NAME: &str = "magnific";
@@ -25,26 +28,6 @@ pub struct MagnificStatus {
     pub registered: bool,
     /// OAuth 認証済みか (codex mcp list の Auth 列が OAuth かつ enabled)。
     pub authenticated: bool,
-}
-
-/// GORI 専用 CODEX_HOME を環境に設定した codex Command を作る。
-/// MCP 設定は専用 HOME の config.toml を読むため、必ずこの HOME を渡す。
-///
-/// `tokio::process::Command` を返すので、呼び出し側は `tokio::time::timeout` で
-/// 子プロセスを打ち切れる。`mcp login` の OAuth は完了までブロックしうるため、
-/// 同期 `std::process::Command::output()` だと UI が固まる。
-fn gori_codex_command() -> Result<Command, String> {
-    let binary = resolve_codex_cli_binary()
-        .map_err(|e| format!("codex CLI が見つかりません: {e}"))?;
-    let mut cmd = Command::new(binary);
-    cmd.env("PATH", enriched_path());
-    if let Some(home) = crate::codex::home::gori_codex_home_path() {
-        cmd.env("CODEX_HOME", home);
-    }
-    // Windows での黒い console window 抑制 (process.rs の no_window_flag と同等)。
-    crate::codex::process::no_window_flag(&mut cmd);
-    cmd.kill_on_drop(true);
-    Ok(cmd)
 }
 
 /// 全 false の未接続状態 (degrade 用)。codex 不在・実行失敗・JSON 解析失敗の
@@ -64,61 +47,20 @@ fn magnific_status_unavailable() -> MagnificStatus {
 /// テキスト出力の `contains("oauth")` は列見出し等を誤検知して永久 false に
 /// なりうるので使わない。JSON 構造が想定と違っても落とさず degrade する。
 fn parse_magnific_status(stdout: &[u8]) -> MagnificStatus {
-    let Ok(value) = serde_json::from_slice::<serde_json::Value>(stdout) else {
-        return magnific_status_unavailable();
-    };
-
-    // codex のバージョンにより、トップが配列 / { "servers": [...] } / オブジェクト
-    // (name -> entry) のいずれもありうる。手堅く「magnific を表すノード」を探す。
-    let find_entry = |arr: &[serde_json::Value]| -> Option<serde_json::Value> {
-        arr.iter()
-            .find(|item| {
-                item.get("name")
-                    .and_then(|n| n.as_str())
-                    .map(|n| n.eq_ignore_ascii_case(MAGNIFIC_MCP_NAME))
-                    .unwrap_or(false)
-            })
-            .cloned()
-    };
-
-    let entry = if let Some(arr) = value.as_array() {
-        find_entry(arr)
-    } else if let Some(arr) = value.get("servers").and_then(|s| s.as_array()) {
-        find_entry(arr)
-    } else if let Some(obj) = value.as_object() {
-        // name -> entry 形式 (キーが magnific)。値に name が無いことがあるので
-        // キー一致でも拾う。
-        obj.iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case(MAGNIFIC_MCP_NAME))
-            .map(|(_, v)| v.clone())
-    } else {
-        None
-    };
-
-    let Some(entry) = entry else {
-        // magnific ノードが無い = 未登録。
+    // codex のバージョンにより配列 / { "servers": [...] } / name->entry 形式の
+    // いずれもありうるが、find_mcp_entry が 3 形すべてにフォールバックする。
+    let Some(entry) = find_mcp_entry(stdout, MAGNIFIC_MCP_NAME) else {
+        // magnific ノードが無い = 未登録 / JSON 解析失敗 (degrade)。
         return magnific_status_unavailable();
     };
 
     // ここまで来れば config.toml に magnific が登録されている。
-    // codex の実際の auth_status 値は "o_auth"(アンダースコア入り) のことがある
-    // (実機確認 2026-06-10: OAuth認証済みでも "o_auth" が返る)。区切り文字を除去
-    // してから "oauth" を含むか判定し、"o_auth"/"o-auth"/"oauth" を一律で拾う。
-    // 未認証/非対応 "unsupported" や Bearer "bearer_token" には誤反応しない。
-    let auth_status = entry
-        .get("auth_status")
-        .and_then(|a| a.as_str())
-        .unwrap_or("")
-        .to_lowercase();
-    let normalized: String = auth_status
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
-        .collect();
-    let authenticated = normalized.contains("oauth");
-
+    // auth_status は "o_auth"(アンダースコア入り) のことがある (実機確認 2026-06-10)。
+    // entry_is_authenticated が区切り文字を除去して "oauth" 系を一律で拾い、
+    // "unsupported" / "bearer_token" には誤反応しない。
     MagnificStatus {
         registered: true,
-        authenticated,
+        authenticated: entry_is_authenticated(&entry),
     }
 }
 
@@ -158,41 +100,6 @@ pub async fn magnific_status() -> Result<MagnificStatus, String> {
 /// ユーザーがブラウザでログインを終えるまで子プロセスが生きるので、待ち時間を
 /// 長めに取る。これを過ぎたら子を kill して案内メッセージを返す。
 const MAGNIFIC_LOGIN_TIMEOUT_SECS: u64 = 180;
-
-/// codex の単発サブコマンドを spawn し、タイムアウト付きで待つ。
-/// stdin は閉じる (対話入力を待たせない)。Ok((成功フラグ, stdout, stderr)) を返す。
-async fn run_codex_capture(
-    args: &[&str],
-    timeout: std::time::Duration,
-) -> Result<(bool, String, String), String> {
-    let mut cmd = gori_codex_command()?;
-    cmd.args(args);
-    cmd.stdin(Stdio::null());
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
-
-    let child = cmd
-        .spawn()
-        .map_err(|e| format!("codex {} の実行に失敗しました: {e}", args.join(" ")))?;
-
-    let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
-        Ok(Ok(o)) => o,
-        Ok(Err(e)) => {
-            return Err(format!("codex {} の待機に失敗しました: {e}", args.join(" ")))
-        }
-        Err(_elapsed) => {
-            // kill_on_drop(true) なので child を drop すれば子も殺される。
-            return Err(format!(
-                "Magnific のログインが {} 秒以内に完了しませんでした。ブラウザでのログインを完了してから、もう一度「接続」を押してください。",
-                timeout.as_secs()
-            ));
-        }
-    };
-
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    Ok((output.status.success(), stdout, stderr))
-}
 
 /// Magnific MCP を登録し OAuth 認証を起動する。
 ///
@@ -284,18 +191,6 @@ pub struct MagnificGenArgs {
     pub count: Option<u32>,
     #[serde(default)]
     pub ref_image_paths: Vec<String>,
-}
-
-/// stdout から最初の http(s) 画像 URL を抽出する。codex に「最終メッセージは URL のみ」と
-/// 指示するが、念のため行全体を走査して http で始まるトークンを拾う。
-fn extract_first_url(text: &str) -> Option<String> {
-    for token in text.split_whitespace() {
-        let t = token.trim_matches(|c| c == '`' || c == '"' || c == '\'' || c == '<' || c == '>');
-        if t.starts_with("http://") || t.starts_with("https://") {
-            return Some(t.to_string());
-        }
-    }
-    None
 }
 
 /// Magnific MCP 経由で画像を生成し、結果 URL を generated_images/ にダウンロードする。
