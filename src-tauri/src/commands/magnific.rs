@@ -326,13 +326,17 @@ pub async fn magnific_generate_batch(args: MagnificGenArgs) -> Result<MagnificGe
             format!("参照画像(references)として次を使う: {}\n", args.ref_image_paths.join(", "))
         };
         let prompt = format!(
-            "Magnific MCP の images_generate ツールで画像を1枚生成してください。\n\
+            "Magnific MCP の images_generate ツールを**必ず実行して**、画像を新規に1枚生成してください。\n\
              - model: {model}\n\
              - aspectRatio: {aspect}\n\
              - prompt: {user_prompt}\n\
              {ref_note}\
+             【重要・厳守】\n\
+             - images_generate を実行せずに、既存メディアや参照画像(references)のURLをそのまま返すことは禁止です。\
+             必ず images_generate を呼び出して、**今回新しく生成された画像**の結果URLを返してください。\n\
+             - 参照画像(references)は images_generate の入力として渡すだけです。参照画像そのもののURLを最終回答にしてはいけません。\n\
              生成が完了したら creations_wait で完了を待ち、最終メッセージは\
-             **生成された画像のダウンロードURL(http(s)で始まる1個)だけ**を1行で返してください。\
+             **今回新規生成された画像のダウンロードURL(http(s)で始まる1個)だけ**を1行で返してください。\
              説明文や他のテキストは一切含めないこと。",
             model = args.model,
             aspect = aspect,
