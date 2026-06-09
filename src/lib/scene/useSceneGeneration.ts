@@ -298,20 +298,26 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
               ? undefined
               : selectedHiggsfieldModels,
         });
-        // Magnific は同期的に結果が返る(コア/Higgsfieldのような生成中イベントが無い)ため、
-        // 完了を手動で applyEvent して生成カードを埋める。これが無いとカードが「生成中」の
-        // まま固まる(2026-06-08 実機バグ: ライブラリには入るが生成画面に出ない)。
-        if (magnificActive) {
+        // Magnific と Higgsfield(MCP移行後) は同期的に結果が返る(コアのような生成中
+        // イベントが無い)ため、完了を手動で applyEvent して生成カードを埋める。これが無いと
+        // カードが「生成中」のまま固まる(2026-06-08 Magnific実機バグ / 2026-06-10 Higgsfield
+        // MCP移行で CLI のライブイベントが無くなり同型になった)。
+        const syncProvider = magnificActive
+          ? ("magnific" as const)
+          : selectedHiggsfield || compareMode
+            ? ("higgsfield" as const)
+            : null;
+        if (syncProvider) {
           useBatches.getState().applyEvent({
             kind: "completed",
             batchId: tempId,
             generatedPaths: result.generatedPaths,
             failedCount: result.failedCount,
-            provider: "magnific",
+            provider: syncProvider,
           });
-          // Magnific はフロントで completed を手動発火するだけで、コア/Higgsfield の
-          // ような workerCompleted イベントが流れない。そのため App.tsx の
-          // workerCompleted→activeProject 自動追加(addItem)経路を通らず、
+          // 同期 provider(Magnific / MCP移行後の Higgsfield)はフロントで completed を
+          // 手動発火するだけで、コアのような workerCompleted イベントが流れない。
+          // そのため App.tsx の workerCompleted→activeProject 自動追加(addItem)経路を通らず、
           // プロジェクト選択中は完了した瞬間にタイムラインのフィルタ
           // (GenerationWorkspace の projectImagePaths.has(path))で除外されて
           // カードが消えていた(2026-06-08 実機バグ。ライブラリには残るのに
@@ -327,9 +333,9 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
               });
             }
           }
-          // Magnific は workerCompleted イベントを流さないため、App.tsx の
-          // workerCompleted→recordImage 経路を通らない。その結果 history.db の
-          // turn に生成画像が紐づかず、「過去の生成」で展開しても「画像はまだ
+          // 同期 provider(Magnific / MCP移行後の Higgsfield)は workerCompleted イベントを
+          // 流さないため、App.tsx の workerCompleted→recordImage 経路を通らない。その結果
+          // history.db の turn に生成画像が紐づかず、「過去の生成」で展開しても「画像はまだ
           // 記録されていません」になる(2026-06-08 実機バグ)。ここで手動で
           // recordImage して、コア(Codex)と同じく過去の生成に画像が残るようにする。
           if (batchDbTurnId) {

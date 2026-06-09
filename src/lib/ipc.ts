@@ -282,13 +282,6 @@ export const layerSplitter = {
     }),
 };
 
-export type HiggsfieldStatus = {
-  installed: boolean;
-  authenticated: boolean;
-  binaryPath?: string;
-  version?: string;
-};
-
 export type HiggsfieldModelInfo = {
   displayName: string;
   jobSetType: string;
@@ -309,56 +302,6 @@ export type HiggsfieldVideoParams = {
   modelVariant?: string;
   i2vInputField?: "input_image" | "medias" | "input_images";
 };
-
-export type HiggsfieldAccount = {
-  email: string;
-  credits: number;
-  subscriptionPlanType: string;
-};
-
-export type HiggsfieldCompareModel = {
-  jobSetType: string;
-  displayName: string;
-} & HiggsfieldVideoParams;
-
-/**
- * F-#13 (2026-05-19): Higgsfield 接続デバッグ用の実測情報。
- * 推測ベースのバグ修正を切るため、UI に「Higgsfield 診断」ボタンを置いて
- * ユーザーがコピペで送ってくれるための観測コマンド。
- */
-export type HiggsfieldDebugInfo = {
-  os: string;
-  arch: string;
-  currentPath: string;
-  enrichedPath: string;
-  resolvedBinary: string | null;
-  extensionDir: string;
-  extensionDirExists: boolean;
-  extensionDirListing: string[];
-  versionProbe: HiggsfieldProbeResult;
-  authTokenProbe: HiggsfieldProbeResult;
-  accountProbe: HiggsfieldProbeResult;
-};
-
-export type HiggsfieldProbeResult = {
-  ran: boolean;
-  exitCode: number | null;
-  stdout: string;
-  stderr: string;
-  error: string | null;
-};
-
-/**
- * 拡張パック自動インストール進捗イベント (2026-05-19)。
- * Rust `HiggsfieldInstallProgress` と一致。
- */
-export type HiggsfieldInstallProgress =
-  | { kind: "started" }
-  | { kind: "downloading"; url: string }
-  | { kind: "downloaded"; bytes: number }
-  | { kind: "extracting" }
-  | { kind: "installed"; path: string }
-  | { kind: "failed"; message: string };
 
 // Magnific オプショナル拡張 (2026-06-08)。MCP接続のみで有効化。未接続なら全false で degrade。
 export type MagnificStatus = {
@@ -388,59 +331,88 @@ export const magnific = {
     }>("magnific_generate_batch", { args }),
 };
 
-export const higgsfield = {
-  status: () => invoke<HiggsfieldStatus>("higgsfield_status"),
-  debug: () => invoke<HiggsfieldDebugInfo>("higgsfield_debug"),
-  installExtension: () => invoke<HiggsfieldStatus>("higgsfield_install_extension"),
-  login: () => invoke<string>("higgsfield_login"),
-  logout: () => invoke<void>("higgsfield_logout"),
-  listModels: (media: "image" | "video") =>
-    invoke<HiggsfieldModelInfo[]>("higgsfield_list_models", { media }),
-  account: () => invoke<HiggsfieldAccount>("higgsfield_account"),
-  generateBatch: (
-    args: {
-      jobSetType: string;
-      displayName: string;
-      prompt: string;
-      count: number;
-      aspect?: string;
-      refImagePaths?: string[];
-      cwd?: string;
-      mediaType?: MediaType;
-    } & HiggsfieldVideoParams,
-  ) =>
-    invoke<{
-      batchId: string;
-      generatedPaths: string[];
-      failedCount: number;
-      errors: string[];
-    }>("higgsfield_generate_batch", { args }),
-  generateCompare: (
-    args: {
-      prompt: string;
-      models: HiggsfieldCompareModel[];
-      aspect?: string;
-      refImagePaths?: string[];
-      cwd?: string;
-      mediaType?: MediaType;
-    } & HiggsfieldVideoParams,
-  ) =>
-    invoke<{
-      batchId: string;
-      generatedPaths: string[];
-      failedCount: number;
-      errors: string[];
-    }>("higgsfield_generate_compare", { args }),
-  cancelBatch: (batchId: string) => invoke<void>("higgsfield_cancel_batch", { batchId }),
-  generateCost: (
-    args: {
-      jobSetType: string;
-      prompt: string;
-      aspect?: string;
-      duration?: number;
-    } & HiggsfieldVideoParams,
-  ) => invoke<number>("higgsfield_generate_cost", { args }),
+// Higgsfield リモートMCP拡張 (2026-06-10 段階3)。CLI同梱方式の作り直し。
+// mcp.higgsfield.ai に codex mcp で接続するだけ。未接続なら全false で degrade。
+// 既存 higgsfield (CLI版) とは別オブジェクトとして共存させる。
+export type HiggsfieldMcpStatus = {
+  registered: boolean;
+  authenticated: boolean;
 };
+
+// 段階5: 動画パラメータ + mediaType を受け付ける。mediaType="video" のとき
+// generate_video を叩き、duration/mode/resolution/sound/genre/modelVariant を
+// プロンプトのトップレベルパラメータとして渡す。mediaType 未指定/"image" は従来の
+// 画像生成 (後方互換)。動画固有値は HiggsfieldVideoParams のサブセットを再利用。
+export type HiggsfieldMcpGenArgs = {
+  prompt: string;
+  model?: string;
+  aspect?: string;
+  count?: number;
+  refImagePaths?: string[];
+  /** "image" | "video"。未指定なら image (後方互換)。 */
+  mediaType?: MediaType;
+  // ── 以下は mediaType="video" のときだけ意味を持つ ──
+  duration?: number;
+  mode?: string;
+  resolution?: string;
+  sound?: string;
+  genre?: string;
+  modelVariant?: string;
+};
+
+// 段階6: コスト見積もり (get_cost)。生成バッチと同じ動画パラメータを受け取り、
+// get_cost=true で実生成せずに消費クレジット数だけを取得する。CLI 版 generateCost と互換。
+export type HiggsfieldMcpCostArgs = {
+  prompt: string;
+  model?: string;
+  aspect?: string;
+  /** "image" | "video"。未指定なら image (後方互換)。 */
+  mediaType?: MediaType;
+  // ── 以下は mediaType="video" のときだけ意味を持つ ──
+  duration?: number;
+  mode?: string;
+  resolution?: string;
+  sound?: string;
+  genre?: string;
+  modelVariant?: string;
+};
+
+// 段階6: クレジット残高。CLI 版 HiggsfieldAccount のフロント互換形。
+// codex が一部欠落させても degrade するため email/plan は optional。
+export type HiggsfieldMcpAccount = {
+  email?: string;
+  credits: number;
+  subscriptionPlanType?: string;
+};
+
+export const higgsfieldMcp = {
+  status: () => invoke<HiggsfieldMcpStatus>("higgsfield_mcp_status"),
+  /** codex mcp add で MCP登録+OAuth(実機ではaddだけで自動完了)。loginも冪等に試みる。 */
+  login: () => invoke<string>("higgsfield_mcp_login"),
+  logout: () => invoke<void>("higgsfield_mcp_logout"),
+  /** Higgsfield MCP経由で画像/動画生成しURLをDLして generated_images に保存。
+   * mediaType="video" で generate_video、参照画像は media_upload→PUT→media_confirm
+   * で media_id 化して medias に渡す。コアと同じ結果型。 */
+  generateBatch: (args: HiggsfieldMcpGenArgs) =>
+    invoke<{
+      generatedPaths: string[];
+      failedCount: number;
+      errors: string[];
+    }>("higgsfield_mcp_generate_batch", { args }),
+  /** 段階6: models_explore で画像/動画モデルを動的取得。CLI版 listModels と同じ
+   * {displayName, jobSetType, type} 形でフロント互換。 */
+  listModels: (media: "image" | "video") =>
+    invoke<HiggsfieldModelInfo[]>("higgsfield_mcp_list_models", { media }),
+  /** 段階6: get_cost=true で実生成せずに消費クレジット数(四捨五入後の整数)を取得。 */
+  generateCost: (args: HiggsfieldMcpCostArgs) =>
+    invoke<number>("higgsfield_mcp_generate_cost", { args }),
+  /** 段階6: balance ツールで利用可能クレジット+プラン名を取得。 */
+  account: () => invoke<HiggsfieldMcpAccount>("higgsfield_mcp_account"),
+};
+
+// 2026-06-10 段階8: CLI 同梱方式の `higgsfield` オブジェクトは廃止し MCP 版 `higgsfieldMcp`
+// に統合済み。CLI 版 Rust コマンド (higgsfield_status/login/list_models/generate_* 等) と
+// higgsfield.rs も削除した。Higgsfield 連携は全て上の `higgsfieldMcp` を使う。
 
 /** `codex://image-batch` event payload union (mirrors Rust `BatchEvent`). */
 export type ImageBatchProvider = "codex" | "higgsfield" | "magnific";

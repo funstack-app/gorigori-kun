@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import { higgsfield, type HiggsfieldModelInfo } from "../lib/ipc";
+import { higgsfieldMcp, type HiggsfieldModelInfo } from "../lib/ipc";
 import { buildPrompt } from "../lib/scene/buildPrompt";
 import { resolveImageMentions } from "../lib/scene/resolveImageMentions";
 import {
@@ -43,6 +43,9 @@ export function HiggsfieldModelSelector({ media }: { media: "image" | "video" })
   const setSelectedModels = useHiggsfieldModel((s) => s.setSelectedModels);
   // Magnific選択をトリガーボタンに反映するため、メイン関数でも購読する(2026-06-08)。
   const selectedMagnificForTrigger = useMagnificModel((s) => s.selectedModels);
+  // 段階7 (2026-06-10): Higgsfield は MCP接続方式に移行。installed 概念を廃止し、
+  // 接続済み判定は accounts.higgsfield.authenticated (MCP status 由来) を正とする。
+  const higgsfieldAuthed = useAccounts((s) => s.higgsfield.authenticated);
   const pushToast = useToasts((s) => s.push);
   const [models, setModels] = useState<HiggsfieldModelInfo[]>([]);
   const [planType, setPlanType] = useState<string | null>(null);
@@ -78,23 +81,23 @@ export function HiggsfieldModelSelector({ media }: { media: "image" | "video" })
       setModels([]);
       setPlanType(null);
       try {
-        const status = await higgsfield.status();
-        if (cancelled) return;
-
-        if (!status.installed) {
-          setLoadState("missing");
-          return;
-        }
-        if (!status.authenticated) {
+        // 段階7: installed 概念を廃止。接続済み判定は MCP status 由来の
+        // accounts.higgsfield.authenticated を正とする。未認証なら拡張未接続
+        // (= GPT Image 2 デフォルトで動く正常状態) として needsAuth で抜ける。
+        if (!higgsfieldAuthed) {
+          if (cancelled) return;
           setLoadState("needsAuth");
           return;
         }
 
+        // 段階8 (2026-06-10): モデル一覧 / アカウント情報を MCP 実装に差し替え。
+        // listModels は models_explore、account は balance ツール経由 (higgsfield_mcp.rs)。
         const [nextModels, account] = await Promise.all([
-          higgsfield.listModels(media),
-          higgsfield.account().catch((err) => {
-            // ピル表示が出ない問題の原因切り分け。
-            // ここで握りつぶさず実態を Tauri ターミナルに流す。
+          higgsfieldMcp.listModels(media),
+          higgsfieldMcp.account().catch((err) => {
+            // プラン表示(ピル)が出ない問題の原因切り分け。
+            // ここで握りつぶさず実態を Tauri ターミナルに流す。account は任意なので
+            // 失敗しても null で degrade し、モデル一覧の表示は止めない。
             console.error("[HiggsfieldModelSelector] account fetch failed:", err);
             return null;
           }),
@@ -118,7 +121,7 @@ export function HiggsfieldModelSelector({ media }: { media: "image" | "video" })
     return () => {
       cancelled = true;
     };
-  }, [media, pushToast]);
+  }, [media, pushToast, higgsfieldAuthed]);
 
   useEffect(() => {
     if (!open) return;
@@ -302,8 +305,11 @@ function ModelPickerPopover({
     setCost({ kind: "loading" });
     Promise.all(
       selectedModels.map((model) =>
-        higgsfield.generateCost({
-          jobSetType: model.jobSetType,
+        higgsfieldMcp.generateCost({
+          // 段階8: MCP コスト見積もり。jobSetType→model に対応付ける。
+          // media 未指定なので image 扱い (このセレクタは画像/動画両方で使うが
+          // generateCost の動画パラメータは未使用。動画コストは動画パネル側で計算)。
+          model: model.jobSetType,
           prompt,
           aspect,
         }),

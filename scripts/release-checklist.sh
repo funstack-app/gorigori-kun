@@ -45,8 +45,10 @@ else
 fi
 
 # 4. release.yml に必要なjobが揃っているか
+# Higgsfield 拡張パックは MCP 方式へ移行済み (拡張ジョブ廃止)。
+# 配布は本体3ファイル (macos×2 + windows) + latest.json のみ。
 RELEASE_YML=".github/workflows/release.yml"
-REQUIRED_JOBS=("macos:" "windows:" "higgsfield-extension-mac:" "higgsfield-extension-windows:")
+REQUIRED_JOBS=("macos:" "windows:")
 for job in "${REQUIRED_JOBS[@]}"; do
   if grep -q "^  $job" "$RELEASE_YML"; then
     ok "$job が release.yml に存在"

@@ -1,10 +1,8 @@
-use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use notify_debouncer_full::{Debouncer, FileIdMap};
 use tokio::process::Child;
-use tokio::sync::{Mutex, Notify, RwLock};
+use tokio::sync::{Mutex, RwLock};
 
 use crate::codex::RpcClient;
 use crate::commands::storage::StorageSettings;
@@ -13,11 +11,8 @@ use crate::edit::sam2::Sam2Session;
 
 type ImageWatcher = Debouncer<notify::RecommendedWatcher, FileIdMap>;
 
-#[derive(Clone)]
-pub struct HiggsfieldCancellation {
-    pub flag: Arc<AtomicBool>,
-    pub notify: Arc<Notify>,
-}
+// 2026-06-10 段階8: CLI 版 Higgsfield のバッチキャンセル用 HiggsfieldCancellation /
+// higgsfield_cancellations は廃止。MCP 版は同期生成でキャンセル対象を持たないため不要。
 
 #[derive(Clone, Default)]
 pub struct AppState {
@@ -28,7 +23,6 @@ pub struct AppState {
     /// hook after `app_data_dir` is resolvable; commands that need it
     /// `await` `db_pool()` and surface a clear error if init failed.
     pub db: Arc<RwLock<Option<sqlx::SqlitePool>>>,
-    pub higgsfield_cancellations: Arc<Mutex<HashMap<String, HiggsfieldCancellation>>>,
     pub storage_settings: Arc<RwLock<Option<StorageSettings>>>,
     pub edit_runtime: Arc<EditRuntime>,
     pub sam2_session: Arc<RwLock<Option<Sam2Session>>>,

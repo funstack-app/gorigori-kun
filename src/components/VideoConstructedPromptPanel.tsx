@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { higgsfield } from "../lib/ipc";
+import { higgsfieldMcp, type HiggsfieldMcpCostArgs } from "../lib/ipc";
 import { paramsToVideoArgs, useVideoSceneGeneration } from "../lib/scene/useVideoSceneGeneration";
 import { resolveImageMentions } from "../lib/scene/resolveImageMentions";
 import { useComposer, type Reference } from "../lib/store/composer";
@@ -27,6 +27,36 @@ type CostState =
   | { kind: "idle"; value: number | null; source: "api" | "static" | null }
   | { kind: "loading"; value: number | null; source: "api" | "static" | null }
   | { kind: "error"; value: number | null; source: "static" | null };
+
+/**
+ * 動画モデル + 尺 から Higgsfield MCP のコスト見積もり引数を組む (2026-06-10 段階8)。
+ * jobSetType→model に対応付け、mediaType="video" を立て、paramsToVideoArgs のうち
+ * MCP が受け取るフラグ (mode/resolution/sound/genre/modelVariant) だけを展開する。
+ * quality / i2vInputField は MCP が使わないので落とす。動画コストは duration/mode 等で
+ * 変わるため、生成と同じパラメータを渡さないと表示と実コストがずれる。
+ */
+function toMcpCostArgs(
+  model: VideoModelDefinition,
+  prompt: string,
+  aspect: string,
+  duration: number,
+  selectedParams: Record<string, string>,
+): HiggsfieldMcpCostArgs {
+  const { quality: _q, i2vInputField: _i, ...mcpParams } = paramsToVideoArgs(
+    model.extraParams,
+    selectedParams,
+  );
+  void _q;
+  void _i;
+  return {
+    prompt,
+    model: model.jobSetType,
+    aspect,
+    mediaType: "video",
+    duration,
+    ...mcpParams,
+  };
+}
 
 /**
  * 画像版 ConstructedPromptPanel の動画版。
@@ -175,15 +205,9 @@ export function VideoConstructedPromptPanel() {
     }
     setCost({ kind: "loading", value: fallback, source: "static" });
     const timer = window.setTimeout(() => {
-      higgsfield
-        .generateCost({
-          jobSetType: model.jobSetType,
-          prompt,
-          aspect: aspectRatio,
-          duration,
-          // コストは mode/resolution/genre/quality 等でも変わるため全て渡す
-          ...paramsToVideoArgs(model.extraParams, extraParamValues),
-        })
+      higgsfieldMcp
+        // コストは mode/resolution/genre 等でも変わるため全て渡す (MCP 互換に整形)。
+        .generateCost(toMcpCostArgs(model, prompt, aspectRatio, duration, extraParamValues))
         .then((value) => {
           if (!cancelled) setCost({ kind: "idle", value, source: "api" });
         })
@@ -629,13 +653,10 @@ function VideoSettingsModal({
                 : m.duration.default
               : Math.min(m.duration.max, Math.max(m.duration.min, duration));
           try {
-            const credits = await higgsfield.generateCost({
-              jobSetType: m.jobSetType,
-              prompt: "preview",
-              aspect: aspectRatio,
-              duration: d,
-              ...paramsToVideoArgs(m.extraParams, {}),
-            });
+            // 各モデルおすすめ設定 (selected を渡さず空 → param.default) でコスト計算。
+            const credits = await higgsfieldMcp.generateCost(
+              toMcpCostArgs(m, "preview", aspectRatio, d, {}),
+            );
             return [m.id, credits] as const;
           } catch {
             return null;

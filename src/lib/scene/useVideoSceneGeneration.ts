@@ -1,10 +1,12 @@
 import { useCallback, useMemo, useState } from "react";
 import { buildVideoScenePrompt } from "./buildVideoScenePrompt";
 import { resolveImageMentions } from "./resolveImageMentions";
-import { higgsfield, type HiggsfieldCompareModel, type HiggsfieldVideoParams } from "../ipc";
+import { higgsfieldMcp, type HiggsfieldVideoParams } from "../ipc";
+import { useActiveProject } from "../store/activeProject";
 import { useAuth } from "../store/auth";
 import { useBatches } from "../store/batches";
 import { useComposer } from "../store/composer";
+import { useProjects } from "../store/projects";
 import { useScenePromptOverride, type ScenePromptSource } from "../store/scenePrompt";
 import { useToasts } from "../store/toasts";
 import { useVideoGen } from "../store/videoGen";
@@ -46,6 +48,9 @@ export type UseVideoSceneGenerationReturn = {
 };
 
 const MAX_CONCURRENT_BATCHES = 3;
+// Higgsfield MCP 比較生成の同時接続上限 (画像版 generate.ts と同じ理由: codex exec→MCP の
+// OAuth セッション競合を避ける)。MCP には generateCompare が無いので各モデルを 1本ずつ生成する。
+const HIGGSFIELD_COMPARE_CONCURRENCY = 2;
 
 function basename(path: string): string {
   return path.split(/[\\/]/).pop() ?? path;
@@ -80,14 +85,28 @@ export function paramsToVideoArgs(
 }
 
 /**
+ * 1モデル分の Higgsfield MCP 動画生成引数。jobSetType→model、HiggsfieldVideoParams の
+ * うち MCP が受け取るフラグ (duration/mode/resolution/sound/genre/modelVariant) だけを
+ * トップレベルに展開する。quality / i2vInputField は MCP 側が使わないので渡さない
+ * (参照画像は refImagePaths を MCP が media_upload→medias で自動処理する)。
+ */
+type HiggsfieldMcpVideoModel = {
+  jobSetType: string;
+  displayName: string;
+} & Pick<
+  HiggsfieldVideoParams,
+  "duration" | "mode" | "resolution" | "sound" | "genre" | "modelVariant"
+>;
+
+/**
  * 比較生成では各モデルを生成する。尺は共通設定 (commonDuration) を各モデルの
  * 有効範囲に丸めて適用し、モデル固有パラメータ (mode/resolution/genre 等) は
- * 各モデルのおすすめ値 (param.default) を使う。比率は generateCompare 側で共通適用。
+ * 各モデルのおすすめ値 (param.default) を使う。比率は呼び出し側で共通適用。
  */
 function toCompareModel(
   model: VideoModelDefinition,
   commonDuration: number,
-): HiggsfieldCompareModel {
+): HiggsfieldMcpVideoModel {
   // 共通尺をモデルの制約に丸める (enum は最も近い許容値、integer は min/max クランプ)
   const duration =
     model.duration.kind === "enum"
@@ -95,13 +114,19 @@ function toCompareModel(
         ? commonDuration
         : model.duration.default
       : Math.min(model.duration.max, Math.max(model.duration.min, commonDuration));
+  // extraParams は selected を渡さず空 → 各 param.default が使われる。
+  // i2vInputField / quality は MCP が使わないので落とす。
+  const { quality: _quality, i2vInputField: _i2v, ...mcpParams } = paramsToVideoArgs(
+    model.extraParams,
+    {},
+  );
+  void _quality;
+  void _i2v;
   return {
     jobSetType: model.jobSetType,
     displayName: model.label,
     duration,
-    i2vInputField: model.i2vInputField,
-    // extraParams は selected を渡さず空 → 各 param.default が使われる
-    ...paramsToVideoArgs(model.extraParams, {}),
+    ...mcpParams,
   };
 }
 
@@ -120,7 +145,7 @@ function useVideoSceneSnapshot(): VideoSceneState {
 /**
  * 画像版 useSceneGeneration の動画版。
  * useVideoSceneStore の 6 要素からプロンプトを組み立て、
- * higgsfield.generateBatch({ mediaType: "video" }) で動画を生成する。
+ * higgsfieldMcp.generateBatch({ mediaType: "video" }) で動画を生成する。
  *
  * 元画像 (i2v) は useVideoGen.sourceImagePath を最優先で使い、
  * 無ければ useComposer の参照画像 (プロンプト欄上のラック) を i2v 元画像として使う。
@@ -240,27 +265,87 @@ export function useVideoSceneGeneration(): UseVideoSceneGenerationReturn {
     });
 
     try {
-      const result = compareMode
-        ? await higgsfield.generateCompare({
-            prompt,
-            models: compareModels.map((m) => toCompareModel(m, duration)),
-            // 比率・尺は全モデル共通で適用 (各モデルの制約は toCompareModel 側で丸める)
-            aspect: aspectRatio,
-            refImagePaths: effectiveRefPaths,
-            mediaType: "video",
-          })
-        : await higgsfield.generateBatch({
-            jobSetType: model.jobSetType,
-            displayName: model.label,
-            prompt,
-            count,
-            aspect: aspectRatio,
-            refImagePaths: effectiveRefPaths,
-            mediaType: "video",
-            duration,
-            i2vInputField: model.i2vInputField,
-            ...paramsToVideoArgs(model.extraParams, extraParamValues),
-          });
+      // 2026-06-10 段階8: 動画生成も CLI 版 higgsfield から MCP 版 higgsfieldMcp へ移行。
+      // MCP は同期的に結果を返し、generateCompare が無いので比較は各モデルを 1本ずつ
+      // generateBatch して index 対応を保ったまま並べる (画像版 generate.ts と同型)。
+      let result: { generatedPaths: string[]; failedCount: number; errors: string[] };
+
+      if (compareMode) {
+        const models = compareModels.map((m) => toCompareModel(m, duration));
+        const perModel: { path: string; failed: boolean; error?: string }[] =
+          models.map(() => ({ path: "", failed: true, error: "生成が実行されませんでした" }));
+        let cursor = 0;
+        const runWorker = async () => {
+          while (true) {
+            const i = cursor++;
+            if (i >= models.length) return;
+            try {
+              const r = await higgsfieldMcp.generateBatch({
+                prompt,
+                model: models[i].jobSetType,
+                count: 1,
+                aspect: aspectRatio,
+                refImagePaths: effectiveRefPaths,
+                mediaType: "video",
+                duration: models[i].duration,
+                mode: models[i].mode,
+                resolution: models[i].resolution,
+                sound: models[i].sound,
+                genre: models[i].genre,
+                modelVariant: models[i].modelVariant,
+              });
+              const path = r.generatedPaths[0];
+              if (path) {
+                perModel[i] = { path, failed: false };
+              } else {
+                perModel[i] = {
+                  path: "",
+                  failed: true,
+                  error: r.errors?.[0] ?? "動画生成に失敗しました",
+                };
+              }
+            } catch (e) {
+              perModel[i] = {
+                path: "",
+                failed: true,
+                error: e instanceof Error ? e.message : String(e),
+              };
+            }
+          }
+        };
+        const concurrency = Math.min(HIGGSFIELD_COMPARE_CONCURRENCY, models.length);
+        await Promise.all(Array.from({ length: concurrency }, () => runWorker()));
+        result = {
+          generatedPaths: perModel.map((m) => m.path),
+          failedCount: perModel.filter((m) => m.failed).length,
+          errors: perModel.filter((m) => m.error).map((m) => m.error as string),
+        };
+      } else {
+        // 単一モデル。HiggsfieldVideoParams のうち MCP が受け取るフラグだけを展開する
+        // (quality / i2vInputField は MCP 側が使わない。参照画像は refImagePaths を MCP が
+        // media_upload→medias で自動処理する)。
+        const { quality: _q, i2vInputField: _i, ...mcpParams } = paramsToVideoArgs(
+          model.extraParams,
+          extraParamValues,
+        );
+        void _q;
+        void _i;
+        const r = await higgsfieldMcp.generateBatch({
+          prompt,
+          model: model.jobSetType,
+          count,
+          aspect: aspectRatio,
+          refImagePaths: effectiveRefPaths,
+          mediaType: "video",
+          duration,
+          ...mcpParams,
+        });
+        result = {
+          generatedPaths: r.generatedPaths,
+          failedCount: r.failedCount,
+          errors: r.errors ?? [],
+        };
+      }
 
       if (result.failedCount > 0 || result.generatedPaths.length === 0) {
         // モデル側が返した実際の理由 (NSFW判定・制限コンテンツ等) を最優先で表示する。
@@ -273,9 +358,31 @@ export function useVideoSceneGeneration(): UseVideoSceneGenerationReturn {
             : "動画生成に失敗しました。\n" +
               "・モデル・尺・アスペクト比を変えて再試行してください\n" +
               "・i2v の場合は元画像のアスペクト比とモデルの対応を確認してください";
+        // 同期生成では started/completed イベントが流れず楽観カードが残るため、
+        // 全件失敗時は明示的にカードを除去する (画像版で removeBatch している経路と揃える)。
+        useBatches.getState().removeBatch(batchId);
         setStatus({ kind: "error", message });
         useToasts.getState().push({ kind: "error", text: message, ttlMs: 0 });
         return;
+      }
+
+      // 2026-06-10 段階8: MCP は同期的に結果を返し、CLI のようなライブ image-batch
+      // イベント(started/workerCompleted/completed)が流れない。そのため楽観カードを
+      // 手動で completed にし、活動中プロジェクトにも追加する(画像版 useSceneGeneration の
+      // 同期 provider 経路と同型)。これが無いとカードが「生成中」のまま固まる。
+      useBatches.getState().applyEvent({
+        kind: "completed",
+        batchId,
+        generatedPaths: result.generatedPaths,
+        failedCount: result.failedCount,
+        provider: "higgsfield",
+      });
+      const activeProjectId = useActiveProject.getState().activeProjectId;
+      if (activeProjectId) {
+        for (const path of result.generatedPaths) {
+          if (!path) continue; // 失敗枠の空文字はスキップ
+          useProjects.getState().addItem(activeProjectId, { imagePath: path, prompt });
+        }
       }
       setStatus({
         kind: "success",

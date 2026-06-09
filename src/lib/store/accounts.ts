@@ -2,7 +2,7 @@ import { create } from "zustand";
 
 import {
   auth,
-  higgsfield,
+  higgsfieldMcp,
   magnific,
   mcp,
   secrets,
@@ -16,8 +16,11 @@ export type CodexAccountState = {
   email?: string;
   plan: CodexPlan;
 };
+// Higgsfield リモートMCP拡張 (2026-06-10 段階7)。CLI同梱方式から MCP接続方式へ移行。
+// installed (拡張パック導入有無) の概念を廃止し、Magnific と同型の {registered, authenticated}
+// ベースにする。plan/credits は Rust 側 account 実装待ちのため当面 optional (未配線)。
 export type HiggsfieldAccountState = {
-  installed: boolean;
+  registered: boolean;
   authenticated: boolean;
   plan?: string;
   credits?: number;
@@ -134,7 +137,7 @@ function secretsFromKeys(keys: SecretKey[]): SecretsState {
 
 export const useAccounts = create<AccountsState>((set, get) => ({
   codex: { loggedIn: false, plan: loadCodexPlan() },
-  higgsfield: { installed: false, authenticated: false },
+  higgsfield: { registered: false, authenticated: false },
   magnific: { registered: false, authenticated: false },
   secrets: createEmptySecrets(),
   mcp: [],
@@ -181,35 +184,40 @@ export const useAccounts = create<AccountsState>((set, get) => ({
   },
 
   refreshHiggsfield: async () => {
-    const status = await higgsfield.status();
-    if (!status.installed || !status.authenticated) {
-      set({ higgsfield: { installed: status.installed, authenticated: false } });
-      return;
-    }
-    let plan: string | undefined;
-    let credits: number | undefined;
+    // Higgsfield はリモートMCP接続のオプショナル拡張 (段階7)。Magnific と同型に、
+    // status が取れなければ未接続として degrade する。
+    // 段階8 (2026-06-10): MCP 側 account (balance ツール) が実装されたので、認証済みの
+    // ときだけ credits/plan を配線する。account は任意なので失敗しても degrade し、
+    // 接続状態 (registered/authenticated) は維持する (Magnific と同じ思想)。
     try {
-      const account = await higgsfield.account();
-      plan = account.subscriptionPlanType;
-      credits = account.credits;
+      const status = await higgsfieldMcp.status();
+      set((state) => ({
+        higgsfield: {
+          ...state.higgsfield,
+          registered: status.registered,
+          authenticated: status.authenticated,
+        },
+      }));
+      if (status.authenticated) {
+        try {
+          const account = await higgsfieldMcp.account();
+          set((state) => ({
+            higgsfield: {
+              ...state.higgsfield,
+              credits: account.credits,
+              plan: account.subscriptionPlanType,
+            },
+          }));
+        } catch (err) {
+          // account 取得失敗は接続自体の失敗ではない。credits/plan は埋めずに degrade。
+          console.error("[accounts] higgsfield account fetch failed:", err);
+        }
+      }
     } catch {
-      /* status is still useful even if account metadata is unavailable */
+      set((state) => ({
+        higgsfield: { ...state.higgsfield, registered: false, authenticated: false },
+      }));
     }
-    set((state) => ({
-      higgsfield: {
-        installed: true,
-        authenticated: true,
-        plan,
-        credits,
-        baseline:
-          credits === undefined
-            ? state.higgsfield.baseline
-            : state.higgsfield.baseline === undefined ||
-                credits > state.higgsfield.baseline
-              ? credits
-              : state.higgsfield.baseline,
-      },
-    }));
   },
 
   refreshMagnific: async () => {
