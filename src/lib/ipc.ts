@@ -417,6 +417,31 @@ export type HiggsfieldMcpGenArgs = {
   modelVariant?: string;
 };
 
+// 段階6: コスト見積もり (get_cost)。生成バッチと同じ動画パラメータを受け取り、
+// get_cost=true で実生成せずに消費クレジット数だけを取得する。CLI 版 generateCost と互換。
+export type HiggsfieldMcpCostArgs = {
+  prompt: string;
+  model?: string;
+  aspect?: string;
+  /** "image" | "video"。未指定なら image (後方互換)。 */
+  mediaType?: MediaType;
+  // ── 以下は mediaType="video" のときだけ意味を持つ ──
+  duration?: number;
+  mode?: string;
+  resolution?: string;
+  sound?: string;
+  genre?: string;
+  modelVariant?: string;
+};
+
+// 段階6: クレジット残高。CLI 版 HiggsfieldAccount のフロント互換形。
+// codex が一部欠落させても degrade するため email/plan は optional。
+export type HiggsfieldMcpAccount = {
+  email?: string;
+  credits: number;
+  subscriptionPlanType?: string;
+};
+
 export const higgsfieldMcp = {
   status: () => invoke<HiggsfieldMcpStatus>("higgsfield_mcp_status"),
   /** codex mcp add で MCP登録+OAuth(実機ではaddだけで自動完了)。loginも冪等に試みる。 */
@@ -431,6 +456,15 @@ export const higgsfieldMcp = {
       failedCount: number;
       errors: string[];
     }>("higgsfield_mcp_generate_batch", { args }),
+  /** 段階6: models_explore で画像/動画モデルを動的取得。CLI版 listModels と同じ
+   * {displayName, jobSetType, type} 形でフロント互換。 */
+  listModels: (media: "image" | "video") =>
+    invoke<HiggsfieldModelInfo[]>("higgsfield_mcp_list_models", { media }),
+  /** 段階6: get_cost=true で実生成せずに消費クレジット数(四捨五入後の整数)を取得。 */
+  generateCost: (args: HiggsfieldMcpCostArgs) =>
+    invoke<number>("higgsfield_mcp_generate_cost", { args }),
+  /** 段階6: balance ツールで利用可能クレジット+プラン名を取得。 */
+  account: () => invoke<HiggsfieldMcpAccount>("higgsfield_mcp_account"),
 };
 
 export const higgsfield = {
