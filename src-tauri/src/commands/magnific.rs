@@ -101,12 +101,20 @@ fn parse_magnific_status(stdout: &[u8]) -> MagnificStatus {
     };
 
     // ここまで来れば config.toml に magnific が登録されている。
+    // codex の実際の auth_status 値は "o_auth"(アンダースコア入り) のことがある
+    // (実機確認 2026-06-10: OAuth認証済みでも "o_auth" が返る)。区切り文字を除去
+    // してから "oauth" を含むか判定し、"o_auth"/"o-auth"/"oauth" を一律で拾う。
+    // 未認証/非対応 "unsupported" や Bearer "bearer_token" には誤反応しない。
     let auth_status = entry
         .get("auth_status")
         .and_then(|a| a.as_str())
         .unwrap_or("")
         .to_lowercase();
-    let authenticated = auth_status.contains("oauth");
+    let normalized: String = auth_status
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect();
+    let authenticated = normalized.contains("oauth");
 
     MagnificStatus {
         registered: true,

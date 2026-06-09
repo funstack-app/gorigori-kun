@@ -844,13 +844,20 @@ function HiggsfieldConnectionCard() {
     setBusy(true);
     try {
       // higgsfield.login は CLI を `auth login` で叩いてブラウザを開く。
-      // CLI 内部で stdout に device code / URL を吐くので、それを toast で
-      // 軽く知らせて、ユーザーがブラウザでログイン完了したら次の refresh で
-      // authenticated=true になる。
+      // login コマンドの成功 = OAuth 完了ではないため、refresh 後に実際の
+      // authenticated を確認してからトーストを出し分ける（成功を装わない）。
       await higgsfield.login();
-      // 認証完了を確認 (CLI 側がブラウザ完了まで待ってから戻ってくる仕様)
       await refresh();
-      toast.push({ kind: "success", text: "HiggsField に接続しました", ttlMs: 3000 });
+      const connected = useAccounts.getState().higgsfield.authenticated;
+      if (connected) {
+        toast.push({ kind: "success", text: "HiggsField に接続しました", ttlMs: 3000 });
+      } else {
+        toast.push({
+          kind: "info",
+          text: "ブラウザで HiggsField のログインを完了してから、もう一度「接続する」を押してください。",
+          ttlMs: 7000,
+        });
+      }
     } catch (err) {
       toast.push({
         kind: "error",
@@ -999,11 +1006,21 @@ function MagnificConnectionCard() {
   const connect = async () => {
     setBusy(true);
     try {
-      // magnific.login は codex mcp add を叩き、OAuth フローをブラウザで開く。
-      // ユーザーがログイン完了したら refresh で authenticated=true になる。
+      // magnific.login は codex mcp add → login を叩き、OAuth をブラウザで開く。
+      // login コマンドの成功 = OAuth 完了ではないため、refresh 後に実際の
+      // authenticated を確認してからトーストを出し分ける（成功を装わない）。
       await magnific.login();
       await refresh();
-      toast.push({ kind: "success", text: "Magnific に接続しました", ttlMs: 3000 });
+      const connected = useAccounts.getState().magnific.authenticated;
+      if (connected) {
+        toast.push({ kind: "success", text: "Magnific に接続しました", ttlMs: 3000 });
+      } else {
+        toast.push({
+          kind: "info",
+          text: "ブラウザで Magnific のログインを完了してから、もう一度「接続する」を押してください。",
+          ttlMs: 7000,
+        });
+      }
     } catch (err) {
       toast.push({ kind: "error", text: `Magnific 接続に失敗: ${String(err)}`, ttlMs: 6000 });
     } finally {
