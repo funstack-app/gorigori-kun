@@ -317,6 +317,13 @@ export type MagnificGenArgs = {
   refImagePaths?: string[];
 };
 
+/** Magnific のアカウント残高 (account_balance ツール由来、実測1秒前後)。 */
+export type MagnificAccount = {
+  credits: number;
+  plan?: string | null;
+  unlimited: boolean;
+};
+
 export const magnific = {
   status: () => invoke<MagnificStatus>("magnific_status"),
   /** codex mcp add で MCP登録+OAuthフロー開始。ブラウザでログイン完了する。 */
@@ -329,6 +336,8 @@ export const magnific = {
       failedCount: number;
       errors: string[];
     }>("magnific_generate_batch", { args }),
+  /** account_balance で残高+プランを取得 (接続済みのときだけ呼ぶ)。 */
+  account: () => invoke<MagnificAccount>("magnific_account"),
 };
 
 // Higgsfield リモートMCP拡張 (2026-06-10 段階3)。CLI同梱方式の作り直し。

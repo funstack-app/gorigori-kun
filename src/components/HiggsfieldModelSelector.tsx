@@ -38,6 +38,37 @@ const CODEX_STANDARD_LABEL = "GPT Image 2 (デフォルト)";
 const PICKER_WIDTH = 390;
 const MAX_COMPARE_MODELS = 4;
 
+// モデル一覧の localStorage キャッシュ (2026-06-10)。
+// 直接呼び出し化で取得は1-2秒に縮んだが、キャッシュがあれば開いた瞬間に表示し、
+// 裏で最新を取得して差し替える (stale-while-revalidate)。
+const MODEL_CACHE_PREFIX = "gori.higgsfield.models.";
+
+type ModelCache = {
+  models: HiggsfieldModelInfo[];
+  planType: string | null;
+  savedAt: number;
+};
+
+function readModelCache(media: "image" | "video"): ModelCache | null {
+  try {
+    const raw = localStorage.getItem(MODEL_CACHE_PREFIX + media);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as ModelCache;
+    if (!Array.isArray(parsed.models) || parsed.models.length === 0) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function writeModelCache(media: "image" | "video", cache: ModelCache) {
+  try {
+    localStorage.setItem(MODEL_CACHE_PREFIX + media, JSON.stringify(cache));
+  } catch {
+    // localStorage が使えなくてもキャッシュ無しで動くだけ (致命ではない)。
+  }
+}
+
 export function HiggsfieldModelSelector({ media }: { media: "image" | "video" }) {
   const selectedModels = useHiggsfieldModel((s) => s.selectedModels);
   const setSelectedModels = useHiggsfieldModel((s) => s.setSelectedModels);
@@ -80,34 +111,47 @@ export function HiggsfieldModelSelector({ media }: { media: "image" | "video" })
       setOpen(false);
       setModels([]);
       setPlanType(null);
-      try {
-        // 段階7: installed 概念を廃止。接続済み判定は MCP status 由来の
-        // accounts.higgsfield.authenticated を正とする。未認証なら拡張未接続
-        // (= GPT Image 2 デフォルトで動く正常状態) として needsAuth で抜ける。
-        if (!higgsfieldAuthed) {
-          if (cancelled) return;
-          setLoadState("needsAuth");
-          return;
-        }
+      // 段階7: installed 概念を廃止。接続済み判定は MCP status 由来の
+      // accounts.higgsfield.authenticated を正とする。未認証なら拡張未接続
+      // (= GPT Image 2 デフォルトで動く正常状態) として needsAuth で抜ける。
+      if (!higgsfieldAuthed) {
+        if (cancelled) return;
+        setLoadState("needsAuth");
+        return;
+      }
 
-        // 段階8 (2026-06-10): モデル一覧 / アカウント情報を MCP 実装に差し替え。
-        // listModels は models_explore、account は balance ツール経由 (higgsfield_mcp.rs)。
+      // キャッシュがあれば即表示し、裏で最新を取得して差し替える (stale-while-revalidate)。
+      const cached = readModelCache(media);
+      if (cached && !cancelled) {
+        setModels(cached.models);
+        setPlanType(cached.planType);
+        setLoadState("ready");
+      }
+
+      try {
+        // モデル一覧 / アカウント情報は mcpServer/tool/call の直接呼び出し
+        // (models_explore / balance、実測1-2秒。LLM 仲介は 2026-06-10 に全廃)。
         const [nextModels, account] = await Promise.all([
           higgsfieldMcp.listModels(media),
           higgsfieldMcp.account().catch((err) => {
-            // プラン表示(ピル)が出ない問題の原因切り分け。
-            // ここで握りつぶさず実態を Tauri ターミナルに流す。account は任意なので
-            // 失敗しても null で degrade し、モデル一覧の表示は止めない。
+            // account は任意なので失敗しても null で degrade し、一覧表示は止めない。
             console.error("[HiggsfieldModelSelector] account fetch failed:", err);
             return null;
           }),
         ]);
         if (cancelled) return;
+        const planType = account?.subscriptionPlanType ?? null;
         setModels(nextModels);
-        setPlanType(account?.subscriptionPlanType ?? null);
+        setPlanType(planType);
         setLoadState("ready");
+        writeModelCache(media, { models: nextModels, planType, savedAt: Date.now() });
       } catch (err) {
         if (cancelled) return;
+        // キャッシュを出せている場合は静かに degrade (一覧は使える)。
+        if (cached) {
+          console.error("[HiggsfieldModelSelector] refresh failed (cache shown):", err);
+          return;
+        }
         setLoadState("error");
         pushToast({
           kind: "error",

@@ -5,6 +5,7 @@ import {
   magnific,
   mcp,
   secrets,
+  type MagnificAccount,
   type McpServer,
   type SecretKey,
 } from "../lib/ipc";
@@ -865,8 +866,30 @@ function MagnificConnectionCard() {
   const refresh = useAccounts((s) => s.refreshMagnific);
   const toast = useToasts.getState();
   const [busy, setBusy] = useState(false);
+  // account_balance 由来の残高表示 (接続済みのときだけ取得)。取得失敗しても
+  // カード自体は degrade させない (残高ピルが出ないだけ)。
+  const [account, setAccount] = useState<MagnificAccount | null>(null);
 
   const authed = status.authenticated;
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!authed) {
+      setAccount(null);
+      return;
+    }
+    magnific
+      .account()
+      .then((acc) => {
+        if (!cancelled) setAccount(acc);
+      })
+      .catch((err) => {
+        console.error("[MagnificConnectionCard] account fetch failed:", err);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [authed]);
 
   const connect = async () => {
     setBusy(true);
@@ -916,6 +939,13 @@ function MagnificConnectionCard() {
             {authed && (
               <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-black text-emerald-200">
                 接続済み
+              </span>
+            )}
+            {authed && account && (
+              <span className="rounded-full bg-violet-500/15 px-2 py-0.5 text-[10px] font-black text-violet-200">
+                {account.unlimited
+                  ? `${account.plan ?? "Unlimited"} (無制限)`
+                  : `${Math.floor(account.credits).toLocaleString()} クレジット`}
               </span>
             )}
           </div>
