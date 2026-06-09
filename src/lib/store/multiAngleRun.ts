@@ -18,8 +18,14 @@ type MultiAngleRunState = {
   characterImagePath: string | null;
   environmentDescription: string;
   aspectRatio: string;
-  /** ユーザーが選択中の構図 cutId 群 (最大 MAX_CUTS)。 */
+  /** ユーザーが選択中の構図 cutId 群 (最大 MAX_CUTS)。生成前の「どのアングルを出すか」。 */
   selectedCutIds: string[];
+  /**
+   * 出力後に選択中の完成カット cutId 群。生成前の selectedCutIds とは別物で、
+   * 「出てきたカットのうちどれをローカル保存するか」を表す。ライブラリの
+   * librarySelection と同じ役割をマルチアングル専用に持つ。
+   */
+  selectedOutputCutIds: string[];
 
   // ===== 設定アクション =====
   setCharacterImage: (path: string | null) => void;
@@ -30,6 +36,14 @@ type MultiAngleRunState = {
   /** プリセット適用。MAX_CUTS でクランプして置換する。 */
   applyPreset: (cutIds: string[]) => void;
   clearSelection: () => void;
+
+  // ===== 出力カット選択アクション (ローカル保存用) =====
+  /** 出力カットの選択トグル。 */
+  toggleOutputCut: (cutId: string) => void;
+  /** 完成している全カットを選択する。 */
+  selectAllCompletedOutputs: () => void;
+  /** 出力カットの選択をクリアする。 */
+  clearOutputSelection: () => void;
 
   // ===== run アクション =====
   /**
@@ -64,6 +78,7 @@ export const useMultiAngleRun = create<MultiAngleRunState>((set) => ({
   environmentDescription: "",
   aspectRatio: "1:1",
   selectedCutIds: [],
+  selectedOutputCutIds: [],
 
   setCharacterImage: (path) => set({ characterImagePath: path }),
   setEnvironment: (text) => set({ environmentDescription: text }),
@@ -93,6 +108,26 @@ export const useMultiAngleRun = create<MultiAngleRunState>((set) => ({
 
   clearSelection: () => set({ selectedCutIds: [] }),
 
+  toggleOutputCut: (cutId) =>
+    set((s) => {
+      const exists = s.selectedOutputCutIds.includes(cutId);
+      return {
+        selectedOutputCutIds: exists
+          ? s.selectedOutputCutIds.filter((id) => id !== cutId)
+          : [...s.selectedOutputCutIds, cutId],
+      };
+    }),
+
+  selectAllCompletedOutputs: () =>
+    set((s) => ({
+      selectedOutputCutIds: s.cutOrder.filter((id) => {
+        const c = s.cuts[id];
+        return c?.status === "completed" && Boolean(c.imagePath);
+      }),
+    })),
+
+  clearOutputSelection: () => set({ selectedOutputCutIds: [] }),
+
   beginRun: (runId, selectedCutIds) =>
     set((s) => {
       const cuts: Record<string, CutState> = {};
@@ -112,6 +147,10 @@ export const useMultiAngleRun = create<MultiAngleRunState>((set) => ({
         runId: runId ?? s.runId,
         cuts,
         cutOrder,
+        // 新しい生成を始めたら、前 run の出力選択(緑✓)は持ち越さない。
+        // 残すと前カットが選択済み表示で残り、全選択/一括保存の枚数が実態とズレる
+        // (evaluator 指摘 2026-06-09)。新カット群に対して選び直す。
+        selectedOutputCutIds: [],
       };
     }),
 
@@ -175,5 +214,5 @@ export const useMultiAngleRun = create<MultiAngleRunState>((set) => ({
       }
     }),
 
-  reset: () => set({ ...runEmptyState }),
+  reset: () => set({ ...runEmptyState, selectedOutputCutIds: [] }),
 }));

@@ -3,6 +3,8 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { useMultiAngleRun } from "../../../lib/store/multiAngleRun";
 import { useActiveProject } from "../../../lib/store/activeProject";
 import { useProjects } from "../../../lib/store/projects";
+import { useImages } from "../../../lib/store/images";
+import { images as imagesIpc } from "../../../lib/ipc";
 import { useToasts } from "../../../lib/store/toasts";
 import {
   useWorkspace,
@@ -96,10 +98,15 @@ export function AngleGridPanel({
   const environmentDescription = useMultiAngleRun((s) => s.environmentDescription);
   const aspectRatio = useMultiAngleRun((s) => s.aspectRatio);
   const selectedCutIds = useMultiAngleRun((s) => s.selectedCutIds);
+  const selectedOutputCutIds = useMultiAngleRun((s) => s.selectedOutputCutIds);
+  const toggleOutputCut = useMultiAngleRun((s) => s.toggleOutputCut);
+  const selectAllCompletedOutputs = useMultiAngleRun((s) => s.selectAllCompletedOutputs);
+  const clearOutputSelection = useMultiAngleRun((s) => s.clearOutputSelection);
 
   const activeProjectId = useActiveProject((s) => s.activeProjectId);
   const projects = useProjects((s) => s.projects);
   const addItem = useProjects((s) => s.addItem);
+  const downloadAs = useImages((s) => s.downloadAs);
   const pushToast = useToasts((s) => s.push);
   const timelineSize = useWorkspace((s) => s.timelineSize);
 
@@ -167,6 +174,91 @@ export function AngleGridPanel({
     });
   }
 
+  /**
+   * 1 枚をローカルに「名前を付けて保存」。ライブラリの保存と同じ要領 (useImages.downloadAs)。
+   * プロジェクト保存とは別系統で、画像ファイルそのものをローカルに書き出す。
+   */
+  async function saveCutToLocal(cut: CutState) {
+    if (cut.status !== "completed" || !cut.imagePath) return;
+    const ext = cut.imagePath.split(".").pop()?.toLowerCase() || "png";
+    const fileName = `${cut.label}.${ext}`.replace(/[\\/:*?"<>|]/g, "_");
+    const dest = await downloadAs(cut.imagePath, fileName);
+    if (dest) {
+      pushToast({
+        kind: "success",
+        text: `「${cut.label}」をローカルに保存しました。`,
+        ttlMs: 2500,
+      });
+    }
+    // dest が null = キャンセル or 失敗。downloadAs 内でログ済みなので無通知。
+  }
+
+  /**
+   * 選択中の完成カットを「フォルダを選んでローカルに一括保存」。ライブラリの
+   * LibraryBatchSaveButton と同じ要領 (フォルダ選択 → imagesIpc.saveAs で連番コピー)。
+   */
+  async function saveSelectedToLocal() {
+    const targets = selectedOutputCutIds
+      .map((id) => cuts[id])
+      .filter(
+        (c): c is CutState =>
+          Boolean(c) && c.status === "completed" && Boolean(c.imagePath),
+      );
+    if (targets.length === 0) {
+      pushToast({
+        kind: "info",
+        text: "保存する完成カットを選んでください。",
+        ttlMs: 3000,
+      });
+      return;
+    }
+    try {
+      const { open: openDialog } = await import("@tauri-apps/plugin-dialog");
+      const dir = await openDialog({
+        directory: true,
+        multiple: false,
+        title: "保存先フォルダを選択",
+      });
+      if (typeof dir !== "string") return; // キャンセル
+
+      let saved = 0;
+      const used = new Set<string>();
+      for (const cut of targets) {
+        const src = cut.imagePath as string;
+        const ext = src.split(".").pop()?.toLowerCase() || "png";
+        const base = `${cut.label}`.replace(/[\\/:*?"<>|]/g, "_");
+        // 同名ラベル衝突は連番フォールバック (上書き事故防止)
+        let name = `${base}.${ext}`;
+        let n = 2;
+        while (used.has(name)) {
+          name = `${base}_${n}.${ext}`;
+          n += 1;
+        }
+        used.add(name);
+        try {
+          await imagesIpc.saveAs(src, `${dir}/${name}`);
+          saved += 1;
+        } catch (err) {
+          console.warn("multiangle local save failed", { src, error: err });
+        }
+      }
+      pushToast({
+        kind: saved > 0 ? "success" : "error",
+        text:
+          saved > 0
+            ? `${saved} 枚をローカルに保存しました。`
+            : "保存できませんでした。",
+        ttlMs: 3000,
+      });
+    } catch (err) {
+      pushToast({
+        kind: "error",
+        text: `一括保存に失敗しました: ${(err as Error)?.message ?? err}`,
+        ttlMs: 6000,
+      });
+    }
+  }
+
   async function regenerateCut(cut: CutState) {
     if (!runId || !characterImagePath) return;
     const angleCut = getAngleCut(cut.cutId);
@@ -199,6 +291,15 @@ export function AngleGridPanel({
     }
   }
 
+  // 出力選択の派生値。完成済みカットだけが「実際に保存できる選択」。
+  // 再生成で completed→running に戻ったカットが選択に残っても、カウントは
+  // 完成済みのみで数える（ボタンの (N) と実保存枚数を一致させる。evaluator 指摘 2026-06-09）。
+  const selectedCount = selectedOutputCutIds.filter((id) => {
+    const c = cuts[id];
+    return c?.status === "completed" && Boolean(c.imagePath);
+  }).length;
+  const allSelected = doneCount > 0 && selectedCount >= doneCount;
+
   if (status === "idle" || orderedCuts.length === 0) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-2 text-center text-neutral-500">
@@ -222,7 +323,37 @@ export function AngleGridPanel({
             <span className="text-neutral-500"> · 保存先: {activeProject.name}</span>
           )}
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2">
+          {doneCount > 0 && (
+            <>
+              <button
+                type="button"
+                onClick={() =>
+                  allSelected ? clearOutputSelection() : selectAllCompletedOutputs()
+                }
+                title="完成カットを全部選ぶ / 選択を解除"
+                className="rounded-lg border border-[#343434] px-2.5 py-1.5 text-[12px] font-bold text-neutral-300 transition hover:border-emerald-400 hover:text-white"
+              >
+                {allSelected ? "選択解除" : "全選択"}
+              </button>
+              <button
+                type="button"
+                onClick={() => void saveSelectedToLocal()}
+                disabled={selectedCount === 0}
+                title="選択した画像をフォルダを選んでローカルに保存"
+                className={
+                  "rounded-lg px-3 py-1.5 text-[12px] font-bold transition " +
+                  (selectedCount === 0
+                    ? "cursor-not-allowed bg-[#242424] text-neutral-600"
+                    : "bg-emerald-600 text-white hover:bg-emerald-500")
+                }
+              >
+                {selectedCount > 0
+                  ? `💾 ローカルに保存 (${selectedCount})`
+                  : "💾 ローカルに保存"}
+              </button>
+            </>
+          )}
           <AngleSizeSlider />
           <button
             type="button"
@@ -253,9 +384,29 @@ export function AngleGridPanel({
                 (実際の生成比率が選択とズレても見切れない)。
               */}
               <div
-                className="relative w-full bg-[#0d0d0d]"
+                className={
+                  "relative w-full bg-[#0d0d0d] " +
+                  (selectedOutputCutIds.includes(cut.cutId)
+                    ? "ring-2 ring-emerald-400"
+                    : "")
+                }
                 style={{ aspectRatio: tileAspectCss }}
               >
+                {cut.status === "completed" && cut.imagePath && (
+                  <button
+                    type="button"
+                    onClick={() => toggleOutputCut(cut.cutId)}
+                    title="選択 (ローカルに一括保存する対象にする)"
+                    className={
+                      "absolute left-1.5 top-1.5 z-10 flex h-6 w-6 items-center justify-center rounded-md border text-[13px] font-black transition " +
+                      (selectedOutputCutIds.includes(cut.cutId)
+                        ? "border-emerald-400 bg-emerald-500 text-white"
+                        : "border-white/40 bg-black/50 text-transparent hover:text-white/60")
+                    }
+                  >
+                    ✓
+                  </button>
+                )}
                 {cut.status === "completed" && cut.imagePath ? (
                   <img
                     src={convertFileSrc(cut.imagePath)}
@@ -306,9 +457,19 @@ export function AngleGridPanel({
                     type="button"
                     onClick={() => saveCutToProject(cut)}
                     disabled={cut.status !== "completed"}
+                    title="アクティブな案件(プロジェクト)に保存"
                     className="flex-1 rounded-md border border-[#343434] px-1.5 py-1 text-[10px] font-bold text-neutral-400 hover:border-pink-400/60 hover:text-white disabled:opacity-40"
                   >
-                    保存
+                    案件へ
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void saveCutToLocal(cut)}
+                    disabled={cut.status !== "completed"}
+                    title="名前を付けてローカルに保存"
+                    className="flex-1 rounded-md border border-[#343434] px-1.5 py-1 text-[10px] font-bold text-neutral-400 hover:border-emerald-400/60 hover:text-white disabled:opacity-40"
+                  >
+                    ⤓ ローカル
                   </button>
                 </div>
               </div>
