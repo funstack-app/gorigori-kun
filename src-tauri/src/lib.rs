@@ -398,6 +398,7 @@ pub fn run() {
             commands::magnific::magnific_login,
             commands::magnific::magnific_logout,
             commands::magnific::magnific_generate_batch,
+            commands::magnific::magnific_account,
             commands::higgsfield_mcp::higgsfield_mcp_status,
             commands::higgsfield_mcp::higgsfield_mcp_login,
             commands::higgsfield_mcp::higgsfield_mcp_logout,
