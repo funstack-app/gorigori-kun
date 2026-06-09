@@ -254,81 +254,11 @@ jobs:
           args: '--target x86_64-pc-windows-msvc'
 
   # ─────────────────────────────────────────────────────────────
-  # Higgsfield 拡張パック (Mac aarch64 + Mac x64)
-  # v0.6.19 STΛCK 指示:
-  # 別配布の拡張パックで Node.js + higgsfield CLI を提供。
-  # ユーザーは GORI 本体 + この拡張パック の 2 つを /Applications にD&D
-  # するだけで Higgsfield 機能が使えるようになる。
+  # Higgsfield 拡張パックは廃止 (MCP 方式へ移行済み)。
+  # CLI バイナリ + Node 同梱の拡張パック配布は不要になったため、
+  # higgsfield-extension-mac / higgsfield-extension-windows ジョブを削除した。
+  # Higgsfield 連携はリモート HTTP MCP (codex mcp add) 経由で動く。
   # ─────────────────────────────────────────────────────────────
-  higgsfield-extension-mac:
-    runs-on: macos-14
-    strategy:
-      fail-fast: false
-      matrix:
-        arch:
-          - aarch64
-          - x64
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node (build用)
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Build Higgsfield extension (${{ matrix.arch }})
-        run: |
-          chmod +x scripts/build-higgsfield-extension.sh
-          ./scripts/build-higgsfield-extension.sh ${{ matrix.arch }}
-
-      - name: Upload Mac ${{ matrix.arch }} 拡張パック
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ inputs.tag || github.ref_name }}
-          name: 'GORI GORI KUN ${{ inputs.tag || github.ref_name }}'
-          # STΛCK 指示 (2026-05-19): dmg はユーザー手動 DL 用、zip はアプリ内
-          # ワンタップ自動インストール用。両方を併せて配布する。
-          files: |
-            dist/GORI-HiggsField-Extension_mac-${{ matrix.arch }}.dmg
-            dist/GORI-HiggsField-Extension_mac-${{ matrix.arch }}.zip
-          # Codex指摘 (2026-05-19): 本体 jobs と統一して non-draft
-          draft: false
-          prerelease: false
-          fail_on_unmatched_files: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  # ─────────────────────────────────────────────────────────────
-  # Higgsfield 拡張パック (Windows x64)
-  # ─────────────────────────────────────────────────────────────
-  higgsfield-extension-windows:
-    runs-on: windows-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node (build用)
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Build Higgsfield extension (Windows x64)
-        shell: pwsh
-        run: scripts/build-higgsfield-extension-windows.ps1
-
-      - name: Upload Windows 拡張パック
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ inputs.tag || github.ref_name }}
-          name: 'GORI GORI KUN ${{ inputs.tag || github.ref_name }}'
-          files: dist/GORI-HiggsField-Extension_windows.zip
-          # Codex指摘 (2026-05-19): 本体 jobs と統一して non-draft
-          draft: false
-          prerelease: false
-          fail_on_unmatched_files: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # ─────────────────────────────────────────────────────────────
   # Updater manifest 集約 (Codex クロスレビュー 2026-05-19)
