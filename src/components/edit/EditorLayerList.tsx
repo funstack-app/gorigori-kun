@@ -99,13 +99,19 @@ export function EditorLayerList() {
                     event.stopPropagation();
                     toggleVisible(layer.id);
                   }}
-                  className="text-sm"
+                  className="flex h-5 w-5 items-center justify-center text-neutral-400 hover:text-white"
                   title={layer.visible ? "非表示" : "表示"}
                 >
-                  {layer.visible ? "👁" : "—"}
+                  {layer.visible ? <EyeIcon /> : <EyeOffIcon />}
                 </button>
-                <div className="flex h-10 w-10 items-center justify-center overflow-hidden rounded border border-[#343434] bg-[#181818] text-xs">
-                  {layer.thumbnail ? <img src={layer.thumbnail} alt="" className="h-full w-full object-contain" /> : layer.kind === "text" ? "📝" : "🖼"}
+                <div className="flex h-10 w-10 items-center justify-center overflow-hidden rounded border border-[#343434] bg-[#181818] text-neutral-500">
+                  {layer.thumbnail ? (
+                    <img src={layer.thumbnail} alt="" className="h-full w-full object-contain" />
+                  ) : layer.kind === "text" ? (
+                    <LayerTextIcon />
+                  ) : (
+                    <LayerImageIcon />
+                  )}
                 </div>
                 <input
                   value={layer.name}
@@ -130,10 +136,10 @@ export function EditorLayerList() {
                     event.stopPropagation();
                     remove(layer.id);
                   }}
-                  className="text-sm opacity-60 hover:opacity-100"
+                  className="flex h-5 w-5 items-center justify-center text-neutral-400 opacity-60 hover:text-red-300 hover:opacity-100"
                   title="削除"
                 >
-                  🗑
+                  <TrashIcon />
                 </button>
               </div>
             ))}
@@ -141,5 +147,63 @@ export function EditorLayerList() {
         )}
       </div>
     </section>
+  );
+}
+
+/* --- フラットアイコン (絵文字廃止) --- */
+
+const LAYER_SVG = {
+  width: 16,
+  height: 16,
+  viewBox: "0 0 24 24",
+  fill: "none",
+  stroke: "currentColor",
+  strokeWidth: 1.6,
+  strokeLinecap: "round" as const,
+  strokeLinejoin: "round" as const,
+};
+
+function EyeIcon() {
+  return (
+    <svg {...LAYER_SVG} aria-hidden>
+      <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z" />
+      <circle cx="12" cy="12" r="3" />
+    </svg>
+  );
+}
+
+function EyeOffIcon() {
+  return (
+    <svg {...LAYER_SVG} aria-hidden>
+      <path d="M3 3l18 18" />
+      <path d="M10.6 10.6a3 3 0 004.2 4.2" />
+      <path d="M9.3 5.3A9.5 9.5 0 0112 5c6.5 0 10 7 10 7a17 17 0 01-3.2 3.9M6 6.6A17 17 0 002 12s3.5 7 10 7a9.3 9.3 0 003-.5" />
+    </svg>
+  );
+}
+
+function LayerTextIcon() {
+  return (
+    <svg {...LAYER_SVG} width={18} height={18} aria-hidden>
+      <path d="M5 6h14M5 6V4.5h14V6M12 6v13M9 19h6" />
+    </svg>
+  );
+}
+
+function LayerImageIcon() {
+  return (
+    <svg {...LAYER_SVG} width={18} height={18} aria-hidden>
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <circle cx="9" cy="9.5" r="1.6" />
+      <path d="M3 16l5-4 4 3 3-2 6 5" />
+    </svg>
+  );
+}
+
+function TrashIcon() {
+  return (
+    <svg {...LAYER_SVG} aria-hidden>
+      <path d="M4 7h16M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2M6 7l1 13a1 1 0 001 1h8a1 1 0 001-1l1-13M10 11v6M14 11v6" />
+    </svg>
   );
 }

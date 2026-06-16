@@ -149,10 +149,12 @@ export function EditorCanvas() {
       {!sourceImagePath ? (
         <div className="pointer-events-none absolute inset-0 flex items-center justify-center p-8">
           <div className="pointer-events-auto max-w-sm rounded-2xl border border-dashed border-pink-400/50 bg-[#101010]/90 p-6 text-center shadow-2xl">
-            <div className="text-4xl">✨</div>
+            <div className="flex justify-center text-pink-300">
+              <DropLayersIcon />
+            </div>
             <h3 className="mt-3 text-sm font-black text-white">画像をドロップ</h3>
             <p className="mt-2 text-xs font-bold leading-5 text-neutral-400">
-              ドロップすると Magic Layer が自動実行され、背景・前景・テキストに分解されます。
+              ドロップすると自動でレイヤー分解され、背景・前景・テキストに分かれます。
             </p>
             <button
               type="button"
@@ -167,7 +169,7 @@ export function EditorCanvas() {
 
       {activeTool === "clickseg" ? (
         <div className="absolute left-4 top-4 rounded-full border border-amber-300/60 bg-amber-300/15 px-3 py-1 text-xs font-black text-amber-100">
-          🎯 対象をクリック
+          対象をクリック
         </div>
       ) : null}
 
@@ -189,14 +191,34 @@ export function EditorCanvas() {
 
 function progressLabel(kind: string): string {
   const labels: Record<string, string> = {
-    started: "🚀 Magic Layer 開始…",
-    detectingText: "📝 テキスト検出中…",
-    removingText: "🎨 テキスト除去中…",
-    segmenting: "✂️ 人物切り抜き中…",
-    inpaintingBackground: "🖼 背景補完中…",
-    buildingTextLayers: "📋 レイヤー構築中…",
-    completed: "✅ 完了しました",
-    failed: "⚠️ 失敗しました",
+    started: "レイヤー分解を開始…",
+    detectingText: "テキストを検出中…",
+    removingText: "テキストを除去中…",
+    segmenting: "人物を切り抜き中…",
+    inpaintingBackground: "背景を補完中…",
+    buildingTextLayers: "レイヤーを構築中…",
+    completed: "完了しました",
+    failed: "失敗しました",
   };
   return labels[kind] ?? kind;
+}
+
+function DropLayersIcon() {
+  return (
+    <svg
+      width={40}
+      height={40}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.4}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M12 3l9 5-9 5-9-5 9-5z" />
+      <path d="M3 12l9 5 9-5" />
+      <path d="M3 16l9 5 9-5" />
+    </svg>
+  );
 }
