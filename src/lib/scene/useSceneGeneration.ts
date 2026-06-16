@@ -214,7 +214,7 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
         modelDisplayName: magnificActive
           ? magnificCompare
             ? `${selectedMagnificModels.length} models compared`
-            : selectedMagnificModels[0]
+            : getMagnificModelName(selectedMagnificModels[0])
           : compareMode
             ? `${selectedHiggsfieldModels.length} models compared`
             : (selectedHiggsfield?.displayName ?? "image_gen"),
@@ -257,7 +257,7 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
         modelDisplayName: magnificActive
           ? magnificCompare
             ? `${selectedMagnificModels.length} models compared`
-            : selectedMagnificModels[0]
+            : getMagnificModelName(selectedMagnificModels[0])
           : compareMode
             ? undefined
             : (selectedHiggsfield?.displayName ?? "image_gen"),
