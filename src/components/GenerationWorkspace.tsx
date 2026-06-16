@@ -3,6 +3,7 @@ import { SafeImage, SafeVideo } from "./SafeImage";
 import { WorkspaceTabs } from "./WorkspaceTabs";
 import { SceneBuilder, VideoSceneBuilder } from "./scene";
 import { ConstructedPromptPanel } from "./ConstructedPromptPanel";
+import { useSceneGeneration } from "../lib/scene/useSceneGeneration";
 import { AdAgentPanel } from "./agents";
 import { EditWorkspace } from "./EditWorkspace";
 import { PlanWorkspace } from "./PlanWorkspace";
@@ -789,6 +790,7 @@ function BatchBlock({
             key={worker.idx}
             worker={worker}
             startedAt={startedAt}
+            compareMode={compareMode}
             siblings={workers
               .filter(
                 (w): w is Extract<BatchWorker, { status: "completed" }> =>
@@ -864,11 +866,14 @@ function WorkerTile({
   worker,
   siblings,
   startedAt,
+  compareMode,
 }: {
   worker: BatchWorker;
   siblings?: string[];
   /** バッチ開始時刻 (epoch ms)。生成中タイルの経過秒表示に使う。 */
   startedAt?: number;
+  /** 比較モード (各モデル1枚) のバッチか。再生成ボタンの出し分けに使う。 */
+  compareMode?: boolean;
 }) {
   const caption = worker.modelDisplayName;
   const canSendToVideo = worker.mediaType !== "video";
@@ -957,7 +962,13 @@ function WorkerTile({
         ].join(" ")}
       >
         {worker.status === "failed" ? (
-          "失敗"
+          <>
+            <span>失敗</span>
+            {/* DEV-PLAYBOOK §6 B: 失敗ワーカーの再生成。現在の設定 (プロンプト/モデル) で
+                1 枚だけ生成し直す。比較モード (各モデル1枚で index 対応) では枚数を
+                変えられないため再生成ボタンは出さない。 */}
+            {!compareMode && <RegenerateOneButton />}
+          </>
         ) : (
           <>
             {/* スピナー: 動いていることを可視化 (DEV-PLAYBOOK §6 C) */}
@@ -987,6 +998,35 @@ function Spinner() {
       className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-neutral-600 border-t-pink-400"
       aria-hidden
     />
+  );
+}
+
+/**
+ * 失敗ワーカーの再生成ボタン (DEV-PLAYBOOK §6 B)。
+ * 現在のシーン設定 (プロンプト/モデル/参照画像) で 1 枚だけ生成し直す。
+ * 元バッチの完全再現ではなく「今の設定でもう 1 枚」なので、ツールチップで明示する。
+ * 生成キューが満杯 or 生成不可状態のときは無効化する。
+ */
+function RegenerateOneButton() {
+  const { generate, disabled, isQueueFull } = useSceneGeneration();
+  const blocked = disabled || isQueueFull;
+  return (
+    <button
+      type="button"
+      disabled={blocked}
+      onClick={(e) => {
+        e.stopPropagation();
+        void generate({ countOverride: 1 }).catch(console.error);
+      }}
+      className="mt-0.5 rounded border border-red-400/50 bg-red-500/10 px-2 py-0.5 text-[9px] font-bold text-red-200 transition hover:bg-red-500/25 disabled:cursor-not-allowed disabled:opacity-40"
+      title={
+        blocked
+          ? "生成キューが空くまで待ってください"
+          : "今の設定 (プロンプト/モデル) で 1 枚だけ生成し直します"
+      }
+    >
+      再生成
+    </button>
   );
 }
 

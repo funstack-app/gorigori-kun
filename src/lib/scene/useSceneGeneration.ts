@@ -43,7 +43,9 @@ export type UseSceneGenerationReturn = {
   isQueueFull: boolean;
   activeBatchSummary: string | null;
   disabled: boolean;
-  generate: () => Promise<SceneGenerationResult | null>;
+  generate: (
+    opts?: { countOverride?: SceneGenerationCount },
+  ) => Promise<SceneGenerationResult | null>;
 };
 
 const MAX_CONCURRENT_BATCHES = 3;
@@ -162,12 +164,19 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
     return `${completed}/${active.count}`;
   }, [runningBatches]);
 
-  const generate = useCallback(async (): Promise<SceneGenerationResult | null> => {
+  const generate = useCallback(async (
+    opts?: { countOverride?: SceneGenerationCount },
+  ): Promise<SceneGenerationResult | null> => {
     const prompt = effectivePrompt.trim();
     if (!prompt) {
       setStatus({ kind: "error", message: "プロンプトが空です" });
       return null;
     }
+    // DEV-PLAYBOOK §6 B: 失敗ワーカーの「再生成」は countOverride=1 で 1 枚だけ
+    // 投入する。比較モード (各モデル 1 枚で index 対応を保つ) では枚数を変えられない
+    // ため、呼び出し側で単一生成時のみ countOverride を渡す。
+    const effectiveCount: SceneGenerationCount =
+      opts?.countOverride ?? generationCount;
 
     // STΛCK 報告 (2026-05-17 v0.6.7): 認証未完了で生成すると
     // 「アスペクト比エラー」と誤表示されて原因特定に30分かかった。
@@ -219,7 +228,7 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
             ? `${selectedHiggsfieldModels.length} models compared`
             : (selectedHiggsfield?.displayName ?? "image_gen"),
         refImagePaths,
-        count: generationCount,
+        count: effectiveCount,
         kind: "batch",
       });
       if (dbTurnId) {
@@ -247,7 +256,7 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
           path,
           name: basename(path),
         })),
-        count: generationCount,
+        count: effectiveCount,
         provider: magnificActive
           ? "magnific"
           : selectedHiggsfield
@@ -275,7 +284,7 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
       });
       try {
         const result = await generateFromScene(scene, {
-          count,
+          count: effectiveCount,
           cwd,
           model: selectedModel,
           effort: selectedEffort,
@@ -364,7 +373,7 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
     const totalFailureMessage = (permanentReasons: string[]): string => {
       if (permanentReasons.length > 0) {
         return (
-          `画像生成に失敗しました（${generationCount}件すべて失敗）。\n` +
+          `画像生成に失敗しました（${effectiveCount}件すべて失敗）。\n` +
           `理由:\n${permanentReasons.map((r) => `・${r}`).join("\n")}`
         );
       }
@@ -375,7 +384,7 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
       // Rust(batch_gen.rs)が errors を返すようになり permanentReasons に載るので、
       // ここに来る=「理由が本当に取れなかった」ケースのみ。断定すると誤誘導になる。
       return (
-        `画像生成に失敗しました（${generationCount}件すべて失敗）。\n` +
+        `画像生成に失敗しました（${effectiveCount}件すべて失敗）。\n` +
         `自動リトライしても改善しませんでした。原因を特定できませんでした。\n` +
         `次を順に確認してください:\n` +
         `・少し時間をおいて再試行する（一時的な混雑のことがあります）\n` +
@@ -417,7 +426,7 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
             message:
               result.failedCount === 0
                 ? `${okCount}枚を生成しました`
-                : `${okCount}/${generationCount}枚を生成しました（${result.failedCount}件失敗）`,
+                : `${okCount}/${effectiveCount}枚を生成しました（${result.failedCount}件失敗）`,
           });
           return result;
         }
