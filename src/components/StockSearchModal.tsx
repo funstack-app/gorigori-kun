@@ -401,7 +401,7 @@ export function StockSearchModal({ open, onClose, onPick }: Props) {
           選択バーは画像 grid の上に floating (絶対配置) で重ねる。
           こうすると選択時に画像が下にシフトせず、UX 違和感が消える。
         */}
-        <div className="relative min-h-0 flex-1 overflow-hidden">
+        <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
         {selectedCount > 0 && (
           <div className="pointer-events-none absolute left-0 right-0 top-3 z-20 flex justify-center px-4">
             <div className="pointer-events-auto flex flex-wrap items-center gap-3 rounded-full border border-[#262626] bg-[#101010]/95 px-4 py-2 shadow-2xl backdrop-blur">
@@ -430,7 +430,7 @@ export function StockSearchModal({ open, onClose, onPick }: Props) {
           </div>
         )}
 
-        <div className="h-full overflow-y-auto p-4">
+        <div className="min-h-0 flex-1 overflow-y-auto p-4">
           {error && (
             <p className="mb-3 rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs font-semibold text-red-200">
               {error}
