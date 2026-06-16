@@ -521,6 +521,10 @@ function PastBatchRow({
 }) {
   const [detail, setDetail] = useState<TurnWithImages | null>(null);
   const [loading, setLoading] = useState(true);
+  // 最新の detail を ref で保持。effect 内で「初回ロードか/再取得か」を判定するのに
+  // detail を依存配列へ入れずに参照するため (依存に入れると無駄に再取得が走る)。
+  const detailRef = useRef<TurnWithImages | null>(null);
+  detailRef.current = detail;
   // F-#2 追補 (2026-06-16): リネーム世代カウンタを購読する。ライブラリ自動命名で
   // 画像 path が変わると history.db は UPDATE 済みだが、この turn detail は
   // 旧 path をキャッシュしたままになる (row.id は不変なので再取得が走らない)。
@@ -532,12 +536,9 @@ function PastBatchRow({
   // turn_get は行ごとに 1 回だけ叩く (renameNonce 変化時は黒画像解消のため再取得)。
   useEffect(() => {
     let cancelled = false;
-    // 初回は loading 表示。リネーム後の再取得は detail を保持したまま静かに差し替える
-    // (グリッドが一瞬「読み込み中...」に戻るちらつきを防ぐ)。
-    setDetail((prev) => {
-      if (prev === null) setLoading(true);
-      return prev;
-    });
+    // 初回 (detail===null) は loading 表示。リネーム後の再取得は detail を保持した
+    // まま静かに差し替える (グリッドが一瞬「読み込み中...」に戻るちらつきを防ぐ)。
+    if (detailRef.current === null) setLoading(true);
     sessionsApi
       .getTurn(row.id)
       .then((t: TurnWithImages) => {

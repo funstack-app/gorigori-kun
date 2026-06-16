@@ -187,6 +187,9 @@ export function LibraryAutoRenameButton() {
   const selected = useLibrarySelection((s) => s.selected);
   const exitMode = useLibrarySelection((s) => s.exitMode);
   const renameLocal = useImages((s) => s.renameLocal);
+  // 複数枚を逐次リネームするため、ループ後に 1 回だけ nonce を上げる
+  // (各回で上げると PastBatchRow の getTurn 再取得が N×M 回に膨らむ)。
+  const bumpRenameNonce = useImages((s) => s.bumpRenameNonce);
   const pushToast = useToasts((s) => s.push);
   const [running, setRunning] = useState(false);
   // 連番/規則指定の入力モーダル状態 (Windows対応 — window.prompt の代替)。
@@ -277,6 +280,8 @@ export function LibraryAutoRenameButton() {
           });
         }
       }
+      // 全リネーム完了後に 1 回だけ nonce を上げ、PastBatchRow に再取得させる。
+      if (completed > 0) bumpRenameNonce();
 
       if (failed > 0) {
         pushToast({
@@ -337,6 +342,8 @@ export function LibraryAutoRenameButton() {
           console.warn("pattern rename failed", { path, stem, error: err });
         }
       }
+      // 全リネーム完了後に 1 回だけ nonce を上げ、PastBatchRow に再取得させる。
+      if (completed > 0) bumpRenameNonce();
       if (failed > 0) {
         pushToast({
           kind: "warn",

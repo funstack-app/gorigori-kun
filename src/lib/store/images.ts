@@ -82,6 +82,10 @@ type ImagesState = {
    *  PastBatchRow など「row.id では変化を検知できない」表示が、これを購読して
    *  リネーム後に turn 詳細を再取得し、旧パスの黒画像を解消するために使う。 */
   renameNonce: number;
+  /** renameNonce を +1 する。複数枚を逐次 renameLocal する場合は、各回で上げると
+   *  購読側 (PastBatchRow) の getTurn 再取得が N×M 回に膨らむため、ループ後に
+   *  これを 1 回だけ呼ぶ。renameLocal 自体は nonce を上げない (増幅防止)。 */
+  bumpRenameNonce: () => void;
 };
 
 let listenerHandle: undefined | (() => void);
@@ -365,7 +369,10 @@ export const useImages = create<ImagesState>((set, get) => ({
         selection.delete(oldPath);
         selection.add(newPath);
       }
-      return { items, knownPaths, selectedPath, selection, renameNonce: state.renameNonce + 1 };
+      // 注意: ここでは renameNonce を上げない。複数枚を逐次 renameLocal する
+      // (LibraryAutoRenameButton のループ) と N×M 回の getTurn 再取得が走るため、
+      // nonce の increment は呼び出し側がループ後に bumpRenameNonce() で 1 回だけ行う。
+      return { items, knownPaths, selectedPath, selection };
     });
     // F-#2 修正: 全プロジェクトの items[].imagePath も追従して書き換える。
     // Rust 側で history.db は UPDATE 済み (images_rename), projects.json はフロント管理。
@@ -375,6 +382,8 @@ export const useImages = create<ImagesState>((set, get) => ({
       console.warn("[images.renameLocal] projects path 追従に失敗:", err);
     }
   },
+
+  bumpRenameNonce: () => set((state) => ({ renameNonce: state.renameNonce + 1 })),
 }));
 
 async function statFileFallback(
