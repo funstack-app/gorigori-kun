@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { useSceneGeneration } from "../lib/scene/useSceneGeneration";
+import { buildPromptForOverrideCompare } from "../lib/scene/buildPrompt";
 import type { SceneAspectRatio } from "../lib/scene/types";
 import {
   ASPECT_RATIO_HINTS,
@@ -36,6 +37,7 @@ const MAX_COUNT = 30;
  */
 export function ConstructedPromptPanel() {
   const {
+    scene,
     generatedPrompt,
     count,
     setCount,
@@ -135,23 +137,34 @@ export function ConstructedPromptPanel() {
    * 注意: 「手書きで textarea を編集」した時の onChangeDraft でも generatedPrompt
    * は変わらない (=この useEffect は発火しない) ので、手書き編集は壊れない。
    */
-  // 前回の generatedPrompt を保持。マウント直後やタブ切替直後の「初回計算」では
-  // override をクリアしないようにする (企画タブから採用したプロンプトが消えるバグ修正)。
-  const prevGeneratedRef = useRef<string | null>(null);
+  // 前回の「アスペクト比を除いた」プロンプトを保持。マウント直後やタブ切替直後の
+  // 「初回計算」では override をクリアしないようにする (企画タブから採用したプロンプトが
+  // 消えるバグ修正)。
+  //
+  // DEV-PLAYBOOK §6 D / Ta4low さん系FB修正 (2026-06-16):
+  // 旧版は generatedPrompt そのもの (アスペクト比を含む) を比較していたため、
+  // アスペクト比だけ変えても「シーン構築を操作した」と誤判定して手入力プロンプトを
+  // 破棄していた。アスペクト比は画像サイズ指定でありシーン記述ではないので、
+  // buildPromptForOverrideCompare (アスペクト比を除いた版) で「実際にシーン要素が
+  // 変わったか」だけを判定する。generatedPrompt 本文 (生成に渡す文字列) は従来どおり
+  // アスペクト比を含んだままなので、生成側への影響はゼロ。
+  const sceneSignature = buildPromptForOverrideCompare(scene);
+  const prevSceneSigRef = useRef<string | null>(null);
   useEffect(() => {
-    const prev = prevGeneratedRef.current;
-    prevGeneratedRef.current = generatedPrompt;
+    const prev = prevSceneSigRef.current;
+    prevSceneSigRef.current = sceneSignature;
     // 初回 (prev===null): まだシーン構築を操作していない。override は維持する。
-    // 2回目以降で generatedPrompt が「実際に変化」したときだけ = ユーザーが
-    // シーン構築 UI を操作したときだけ override を解除する。
+    // 2回目以降で sceneSignature が「実際に変化」したときだけ = ユーザーが
+    // シーン構築 UI を操作したときだけ override を解除する (アスペクト比変更は除く)。
     if (prev === null) return;
-    if (prev === generatedPrompt) return;
+    if (prev === sceneSignature) return;
     if (promptOverride !== null && promptOverride !== generatedPrompt) {
       setPromptOverride(null);
     }
-    // promptOverride / setPromptOverride を依存に入れない (無限ループ回避)。
+    // promptOverride / generatedPrompt / setPromptOverride を依存に入れない
+    // (無限ループ回避。sceneSignature の変化だけをトリガーにする)。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [generatedPrompt]);
+  }, [sceneSignature]);
 
   const isOverriding = promptOverride !== null;
 

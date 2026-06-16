@@ -76,7 +76,11 @@ function referencePhrase(slots: SceneReferenceSlot[]): string | null {
  * 旧 photographerStyle / filter / freedom は廃止。
  * style.cinematicLook を統合スタイルの保存先として再利用。
  */
-export function buildPrompt(scene: SceneState): string {
+export function buildPrompt(
+  scene: SceneState,
+  options?: { includeAspectRatio?: boolean },
+): string {
+  const includeAspectRatio = options?.includeAspectRatio ?? true;
   const pieces: string[] = [];
 
   const subject = scene.subjectFraming.subject.trim();
@@ -85,8 +89,10 @@ export function buildPrompt(scene: SceneState): string {
   const composition = piece("composition", scene.subjectFraming.composition);
   if (composition) pieces.push(composition);
 
-  const aspect = piece("aspect ratio", scene.subjectFraming.aspectRatio);
-  if (aspect) pieces.push(aspect);
+  if (includeAspectRatio) {
+    const aspect = piece("aspect ratio", scene.subjectFraming.aspectRatio);
+    if (aspect) pieces.push(aspect);
+  }
 
   const environment = piece("environment", scene.subjectFraming.environment);
   if (environment) pieces.push(environment);
@@ -113,4 +119,20 @@ export function buildPrompt(scene: SceneState): string {
   if (references) pieces.push(references);
 
   return pieces.join(", ");
+}
+
+/**
+ * override 解除の誤発火を防ぐための「アスペクト比を除いた」プロンプト。
+ *
+ * ConstructedPromptPanel は generatedPrompt が変化したら「ユーザーがシーン構築 UI を
+ * 操作した」と見なして手入力 (promptOverride) を破棄する。だがアスペクト比は本来
+ * 画像サイズの指定であってシーン記述ではないため、アスペクト比だけ変えたのに
+ * 手入力プロンプトが消える、というユーザー報告 (Ta4low さん系/DEV-PLAYBOOK §6 D) があった。
+ *
+ * generatedPrompt 本文 (生成に渡す文字列) は従来どおりアスペクト比を含めたまま維持し、
+ * 「override を解除すべきシーン操作だったか」の判定だけこの関数の出力で行うことで、
+ * 生成側への影響ゼロでバグを消す。
+ */
+export function buildPromptForOverrideCompare(scene: SceneState): string {
+  return buildPrompt(scene, { includeAspectRatio: false });
 }
