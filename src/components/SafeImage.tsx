@@ -1,5 +1,10 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { type ImgHTMLAttributes, type MouseEvent, useState } from "react";
+import {
+  type ImgHTMLAttributes,
+  type MouseEvent,
+  useEffect,
+  useState,
+} from "react";
 
 /**
  * 画像ファイルの絶対パスを受け取って `convertFileSrc` 経由で描画する。
@@ -26,6 +31,14 @@ export function SafeImage({
   ...rest
 }: SafeImageProps) {
   const [errored, setErrored] = useState(false);
+
+  // F-#2 追補 (2026-06-16): path が変わったら errored をリセットする。
+  // これが無いと、旧パスで一度 onError が発火して errored=true になった後、
+  // path prop が新パスに更新されても黒画像 (フォールバック) のまま固着する。
+  // ライブラリ自動命名後に制作タブ/プロジェクトで画像が黒くなる症状の主因。
+  useEffect(() => {
+    setErrored(false);
+  }, [path]);
 
   if (!path || errored) {
     return (
@@ -95,6 +108,11 @@ export function SafeVideo({
   hoverPlay = false,
 }: SafeVideoProps) {
   const [errored, setErrored] = useState(false);
+
+  // F-#2 追補 (2026-06-16): SafeImage と同じく path 変化で errored をリセット。
+  useEffect(() => {
+    setErrored(false);
+  }, [path]);
 
   if (!path || errored) {
     return (

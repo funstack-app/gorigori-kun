@@ -78,6 +78,10 @@ type ImagesState = {
    *  Rust 側が rename を成功させた直後にフロントから呼ぶ。
    *  watcher の create/delete イベントが追いつかなくても古い path が残らないように手動同期する。 */
   renameLocal: (oldPath: string, newPath: string) => void;
+  /** F-#2: リネームが起きるたびに +1 する世代カウンタ。タイムラインの
+   *  PastBatchRow など「row.id では変化を検知できない」表示が、これを購読して
+   *  リネーム後に turn 詳細を再取得し、旧パスの黒画像を解消するために使う。 */
+  renameNonce: number;
 };
 
 let listenerHandle: undefined | (() => void);
@@ -107,6 +111,7 @@ export const useImages = create<ImagesState>((set, get) => ({
   favorites: new Set(),
   favoritesLoaded: false,
   activeTurns: [],
+  renameNonce: 0,
 
   startWatcher: async () => {
     if (get().watching) return;
@@ -360,7 +365,7 @@ export const useImages = create<ImagesState>((set, get) => ({
         selection.delete(oldPath);
         selection.add(newPath);
       }
-      return { items, knownPaths, selectedPath, selection };
+      return { items, knownPaths, selectedPath, selection, renameNonce: state.renameNonce + 1 };
     });
     // F-#2 修正: 全プロジェクトの items[].imagePath も追従して書き換える。
     // Rust 側で history.db は UPDATE 済み (images_rename), projects.json はフロント管理。

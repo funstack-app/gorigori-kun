@@ -520,13 +520,23 @@ function PastBatchRow({
 }) {
   const [detail, setDetail] = useState<TurnWithImages | null>(null);
   const [loading, setLoading] = useState(true);
+  // F-#2 追補 (2026-06-16): リネーム世代カウンタを購読する。ライブラリ自動命名で
+  // 画像 path が変わると history.db は UPDATE 済みだが、この turn detail は
+  // 旧 path をキャッシュしたままになる (row.id は不変なので再取得が走らない)。
+  // renameNonce が +1 されたら getTurn を叩き直し、detail.images[].path を最新化する。
+  const renameNonce = useImages((s) => s.renameNonce);
 
   // ユーザー指摘: 「折りたたみ式だとサイズスライダーが効いている実感がない」
   // → 各バッチを最初から展開し、画像グリッドが常に見える状態にする。
-  // turn_get は行ごとに 1 回だけ叩く。
+  // turn_get は行ごとに 1 回だけ叩く (renameNonce 変化時は黒画像解消のため再取得)。
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
+    // 初回は loading 表示。リネーム後の再取得は detail を保持したまま静かに差し替える
+    // (グリッドが一瞬「読み込み中...」に戻るちらつきを防ぐ)。
+    setDetail((prev) => {
+      if (prev === null) setLoading(true);
+      return prev;
+    });
     sessionsApi
       .getTurn(row.id)
       .then((t: TurnWithImages) => {
@@ -539,7 +549,7 @@ function PastBatchRow({
     return () => {
       cancelled = true;
     };
-  }, [row.id]);
+  }, [row.id, renameNonce]);
 
   // プロジェクト指定時は images をフィルタ。ヒット 0 件なら行ごと隠す。
   const visibleImages = detail
@@ -778,6 +788,7 @@ function BatchBlock({
             // Bug修正 (2026-05-28): local→real batchId の差し替えでタイルを再マウントさせない。
             key={worker.idx}
             worker={worker}
+            startedAt={startedAt}
             siblings={workers
               .filter(
                 (w): w is Extract<BatchWorker, { status: "completed" }> =>
@@ -823,15 +834,47 @@ function ModelTagPill({
   );
 }
 
+/**
+ * 生成中タイルの経過秒を 1 秒ごとに更新する。
+ * DEV-PLAYBOOK §6 C (2026-06-16): gpt-image-2 は p95 で 280 秒かかるため、
+ * 「生成中」テキストだけだと 20 分止まって見える (ユーザーが固まったと誤解する)。
+ * 経過秒 + スピナーで「動いている」ことを可視化する。
+ * worker が生成中でないときは null を返し、interval も張らない。
+ */
+function useElapsedSeconds(active: boolean, startedAt?: number): number | null {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active || !startedAt) return;
+    setNow(Date.now());
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [active, startedAt]);
+  if (!active || !startedAt) return null;
+  return Math.max(0, Math.floor((now - startedAt) / 1000));
+}
+
+function formatElapsed(sec: number): string {
+  if (sec < 60) return `${sec}秒`;
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return `${m}分${String(s).padStart(2, "0")}秒`;
+}
+
 function WorkerTile({
   worker,
   siblings,
+  startedAt,
 }: {
   worker: BatchWorker;
   siblings?: string[];
+  /** バッチ開始時刻 (epoch ms)。生成中タイルの経過秒表示に使う。 */
+  startedAt?: number;
 }) {
   const caption = worker.modelDisplayName;
   const canSendToVideo = worker.mediaType !== "video";
+  // 生成中 (pending/running) のときだけ経過秒を回す。
+  const isGenerating = worker.status === "pending" || worker.status === "running";
+  const elapsed = useElapsedSeconds(isGenerating, startedAt);
   if (worker.status === "completed") {
     return (
       <div className="min-w-0">
@@ -907,13 +950,26 @@ function WorkerTile({
     <div className="min-w-0">
       <div
         className={[
-          "flex aspect-square items-center justify-center rounded border text-[10px] font-bold",
+          "flex aspect-square flex-col items-center justify-center gap-1.5 rounded border text-[10px] font-bold",
           worker.status === "failed"
             ? "border-red-500/50 bg-red-950/30 text-red-400"
             : "border-[#343434] bg-[#181818] text-neutral-400",
         ].join(" ")}
       >
-        {worker.status === "failed" ? "失敗" : "生成中"}
+        {worker.status === "failed" ? (
+          "失敗"
+        ) : (
+          <>
+            {/* スピナー: 動いていることを可視化 (DEV-PLAYBOOK §6 C) */}
+            <Spinner />
+            <span>生成中</span>
+            {elapsed !== null && (
+              <span className="font-mono text-[9px] font-medium text-neutral-500">
+                {formatElapsed(elapsed)}
+              </span>
+            )}
+          </>
+        )}
       </div>
       {caption && (
         <p className="mt-1 truncate text-[10px] font-bold text-pink-300">
@@ -921,6 +977,16 @@ function WorkerTile({
         </p>
       )}
     </div>
+  );
+}
+
+/** 軽量な CSS スピナー (生成中タイル用)。 */
+function Spinner() {
+  return (
+    <span
+      className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-neutral-600 border-t-pink-400"
+      aria-hidden
+    />
   );
 }
 
