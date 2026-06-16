@@ -64,6 +64,31 @@ pub async fn edit_models_download(app: AppHandle, model_ids: Vec<String>) -> Res
     Ok(())
 }
 
+/// 実行環境情報。編集タブの「高精度モード(SAM3等)が使えるか」をフロントが判定するために使う。
+/// SAM3 は Apple Silicon (MLX) 前提のため、os=macos かつ arch=aarch64 のときだけ提供可能。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditPlatformInfo {
+    /// "macos" | "windows" | "linux" 等 (std::env::consts::OS)
+    pub os: String,
+    /// "aarch64" | "x86_64" 等 (std::env::consts::ARCH)
+    pub arch: String,
+    /// Apple Silicon (macos + aarch64)。SAM3/MLX 系の高精度モードの前提。
+    pub is_apple_silicon: bool,
+}
+
+#[tauri::command]
+pub fn edit_platform_info() -> EditPlatformInfo {
+    let os = std::env::consts::OS.to_string();
+    let arch = std::env::consts::ARCH.to_string();
+    let is_apple_silicon = os == "macos" && arch == "aarch64";
+    EditPlatformInfo {
+        os,
+        arch,
+        is_apple_silicon,
+    }
+}
+
 #[tauri::command]
 pub async fn edit_models_delete(
     state: State<'_, AppState>,

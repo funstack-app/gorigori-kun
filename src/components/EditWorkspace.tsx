@@ -1,9 +1,13 @@
+import { useState } from "react";
+
 import { EditorCanvas } from "./edit/EditorCanvas";
 import { EditorLayerList } from "./edit/EditorLayerList";
 import { EditorPropertyPanel } from "./edit/EditorPropertyPanel";
 import { EditorToolbar } from "./edit/EditorToolbar";
+import { EditModeSelector } from "./edit/EditModeSelector";
 import { useEditor } from "./edit/editor/editorStore";
 import { useEditorActions } from "./edit/editor/useEditor";
+import type { EditModeId } from "../lib/edit/modes";
 
 /**
  * Photoshop/Canva 風の 3 カラム編集ワークスペース。
@@ -13,6 +17,9 @@ export function EditWorkspace() {
   const sourceImagePath = useEditor((state) => state.sourceImagePath);
   const busyTool = useEditor((state) => state.busyTool);
   const { chooseImage } = useEditorActions();
+  // レイヤー分解モード (高速・スタンダード / 低速・高精度)。
+  // 現状は表示と選択まで。高精度(SAM3)の処理接続は段階的に追加する。
+  const [editMode, setEditMode] = useState<EditModeId>("standard");
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-[#2a2a2a] bg-[#181818]">
@@ -42,6 +49,10 @@ export function EditWorkspace() {
           {busyTool ? "処理中…" : "画像を選ぶ"}
         </button>
       </header>
+
+      <div className="shrink-0 border-b border-[#242424] px-4 py-3">
+        <EditModeSelector activeMode={editMode} onSelectMode={setEditMode} />
+      </div>
 
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <EditorToolbar />

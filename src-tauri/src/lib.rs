@@ -342,6 +342,7 @@ pub fn run() {
             commands::edit_models::edit_models_list,
             commands::edit_models::edit_models_download,
             commands::edit_models::edit_models_delete,
+            commands::edit_models::edit_platform_info,
             commands::edit_export::edit_export_psd,
             commands::edit_fonts::edit_fonts_list,
             commands::edit_sam2::edit_sam2_embed,

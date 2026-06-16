@@ -97,10 +97,17 @@ export const editSam2 = {
     invoke<MaskPayload>("edit_sam2_predict", { x, y, positive }),
 };
 
+export type EditPlatformInfo = {
+  os: string;
+  arch: string;
+  isAppleSilicon: boolean;
+};
+
 export const editModels = {
   list: () => invoke<ModelStatus[]>("edit_models_list"),
   download: (modelIds: string[]) => invoke<void>("edit_models_download", { modelIds }),
   delete: (modelId: string) => invoke<void>("edit_models_delete", { modelId }),
+  platformInfo: () => invoke<EditPlatformInfo>("edit_platform_info"),
 };
 
 export const editOcr = {
