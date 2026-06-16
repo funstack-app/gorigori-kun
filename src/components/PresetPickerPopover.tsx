@@ -194,16 +194,38 @@ export function PresetPickerPopover({ open, onClose, onPick, anchorRect }: Props
   // anchorRect があればそのすぐ下、なければ画面中央。
   // maxHeight で「アンカー下端〜画面下端」に収め、本体が画面外にはみ出して
   // フッター/末尾が見えなくなるのを防ぐ (2026-06-07 STΛCK報告: 下が見えない)。
+  //
+  // 企画タブはチャット UI で入力欄が画面下部に固定されるため、アンカー (プリセット
+  // ボタン) が画面最下部に来る。下開き固定だとポップオーバーが画面外に飛び出して
+  // 選べない (2026-06-11 NRC/f_matsu 報告)。下に 240px 入らず上に余裕がある場合は
+  // 上方向に開く。制作/動画タブはボタンが中〜上部なので従来どおり下開きのまま。
+  const MIN_POPOVER_HEIGHT = 240;
+  const spaceBelow = anchorRect
+    ? window.innerHeight - anchorRect.bottom - 8 - 16
+    : 0;
+  const spaceAbove = anchorRect ? anchorRect.top - 8 - 16 : 0;
+  const openUpward =
+    !!anchorRect && spaceBelow < MIN_POPOVER_HEIGHT && spaceAbove > spaceBelow;
+
   const style: React.CSSProperties = anchorRect
-    ? {
-        position: "fixed",
-        top: anchorRect.bottom + 8,
-        left: Math.max(8, anchorRect.left),
-        // アンカー下端〜画面下端に収める。ただしアンカーが画面下部にあって
-        // 残り高さが極小/負になるとリストが潰れるので、最低 240px は確保する。
-        maxHeight: `max(240px, calc(100vh - ${anchorRect.bottom + 8}px - 16px))`,
-        zIndex: 60,
-      }
+    ? openUpward
+      ? {
+          position: "fixed",
+          // アンカー上端を底辺にして上方向に開く。
+          bottom: window.innerHeight - anchorRect.top + 8,
+          left: Math.max(8, anchorRect.left),
+          maxHeight: `max(${MIN_POPOVER_HEIGHT}px, ${spaceAbove}px)`,
+          zIndex: 60,
+        }
+      : {
+          position: "fixed",
+          top: anchorRect.bottom + 8,
+          left: Math.max(8, anchorRect.left),
+          // アンカー下端〜画面下端に収める。ただしアンカーが画面下部にあって
+          // 残り高さが極小/負になるとリストが潰れるので、最低 240px は確保する。
+          maxHeight: `max(${MIN_POPOVER_HEIGHT}px, ${spaceBelow}px)`,
+          zIndex: 60,
+        }
     : {
         position: "fixed",
         top: "10%",
