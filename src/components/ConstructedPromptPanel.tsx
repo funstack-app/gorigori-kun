@@ -379,7 +379,7 @@ export function ConstructedPromptPanel() {
 
         <button
           type="button"
-          onClick={generate}
+          onClick={() => void generate()}
           disabled={disabled}
           className="w-full rounded-md bg-pink-500 px-4 py-2 text-sm font-bold text-white transition hover:bg-pink-600 disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-500"
         >
