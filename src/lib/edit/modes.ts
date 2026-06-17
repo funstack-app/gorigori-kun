@@ -1,4 +1,7 @@
-import type { EditModelCategory, EditPlatformInfo } from "../ipc";
+import type { EditPlatformInfo } from "../ipc";
+import type { EditModelCategory, EditModeId } from "./types";
+
+export type { EditModeId };
 
 /**
  * 編集タブのレイヤー分解モード定義。
@@ -12,8 +15,6 @@ import type { EditModelCategory, EditPlatformInfo } from "../ipc";
  * モデル本体の DL/状態管理は既存の editModels (ModelStatus) を使う。ここは
  * 「モードという束ね方」と「対応条件・必要スペック表示」だけを宣言的に持つ。
  */
-
-export type EditModeId = "standard" | "highQuality";
 
 export type EditMode = {
   id: EditModeId;
@@ -53,7 +54,9 @@ export const EDIT_MODES: EditMode[] = [
     id: "highQuality",
     label: "低速・高精度",
     tagline: "言葉で指定して髪・服など細かく分解 (Apple Silicon 専用)",
-    // SAM3 系。実装は段階的に追加 (現状は枠のみ)。
+    // SAM3 系。処理本体は未接続 (Rust run_magic_layer が HighQuality を未実装エラーで返す)。
+    // UI でも選択不可にし、実装完了まで「準備中」を正直に表示する。選べて緑なのに
+    // 中身がない状態 (=押しても何も起きない壊れUI) を作らないため。
     requiredCategories: [],
     requirements: [
       "Apple Silicon (M1 以降) 専用",
@@ -62,12 +65,15 @@ export const EDIT_MODES: EditMode[] = [
     ],
     approxDownloadMb: 3500,
     availability: (platform) =>
-      platform.isAppleSilicon
-        ? { ok: true }
-        : {
+      !platform.isAppleSilicon
+        ? {
             ok: false,
             reason:
               "高精度モードは Apple Silicon (Mac) 専用です。お使いの環境では高速・スタンダードモードをご利用ください。",
+          }
+        : {
+            ok: false,
+            reason: "高精度モード (SAM3) は現在準備中です。近日提供予定。",
           },
   },
 ];

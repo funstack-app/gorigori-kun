@@ -1,5 +1,7 @@
 import { create } from "zustand";
 
+import type { EditModeId } from "../../../lib/edit/modes";
+
 export type EditorTool =
   | "select"
   | "bgremove"
@@ -42,9 +44,17 @@ type EditorState = {
   message: string | null;
   error: string | null;
   revision: number;
+  /**
+   * レイヤー分解モード (高速・スタンダード / 低速・高精度)。EditModeSelector が
+   * 切り替え、useEditorActions の Magic Layer 実行時に Rust へ渡す。EditWorkspace の
+   * ローカル state ではなく store に置く理由: 実処理を持つ useEditorActions から
+   * 現在の選択を読めるようにするため (旧構成では選択値がどこにも届いていなかった)。
+   */
+  editMode: EditModeId;
   /** EditorCanvas がマウント中だけ set される path 取り込みハンドラ。 */
   pathIngestor: EditorPathIngestor | null;
   setActiveTool: (tool: EditorTool) => void;
+  setEditMode: (mode: EditModeId) => void;
   setSelectedLayerId: (id: string | null) => void;
   setBusyTool: (tool: EditorTool | null) => void;
   setCanvas: (canvas: unknown | null) => void;
@@ -64,8 +74,10 @@ export const useEditor = create<EditorState>((set) => ({
   message: null,
   error: null,
   revision: 0,
+  editMode: "standard",
   pathIngestor: null,
   setActiveTool: (activeTool) => set({ activeTool }),
+  setEditMode: (editMode) => set({ editMode }),
   setSelectedLayerId: (selectedLayerId) => set({ selectedLayerId }),
   setBusyTool: (busyTool) => set({ busyTool }),
   setCanvas: (canvas) => set({ canvas }),

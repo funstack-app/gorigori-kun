@@ -12,6 +12,25 @@ use crate::edit::segment::segment_image;
 use crate::events::EVENT_EDIT_MAGIC_PROGRESS;
 use crate::state::AppState;
 
+/// レイヤー分解モード。フロント lib/edit/types.ts の EditModeId と対応。
+/// - Standard: 既存の軽量 ONNX スタック (OCR→テキスト除去→セグメント→背景inpaint)。全OS。
+/// - HighQuality: SAM3 系の高精度分解 (Apple Silicon 専用)。処理本体は未接続。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditMode {
+    Standard,
+    HighQuality,
+}
+
+impl EditMode {
+    pub fn from_id(id: &str) -> Result<Self, String> {
+        match id {
+            "standard" => Ok(EditMode::Standard),
+            "highQuality" => Ok(EditMode::HighQuality),
+            other => Err(format!("unknown edit mode: {other}")),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct TextLayerSpec {
@@ -61,8 +80,9 @@ pub async fn run_magic_layer(
     state: &AppState,
     input_path: &Path,
     project_name: Option<&str>,
+    mode: EditMode,
 ) -> Result<MagicLayerResult, String> {
-    match run_magic_layer_inner(app, state, input_path, project_name).await {
+    match run_magic_layer_inner(app, state, input_path, project_name, mode).await {
         Ok(result) => Ok(result),
         Err(reason) => {
             let _ = app.emit(
@@ -81,9 +101,19 @@ async fn run_magic_layer_inner(
     state: &AppState,
     input_path: &Path,
     project_name: Option<&str>,
+    mode: EditMode,
 ) -> Result<MagicLayerResult, String> {
     if !input_path.exists() {
         return Err(format!("input image not found: {}", input_path.display()));
+    }
+
+    // 高精度モード (SAM3) は処理本体が未接続。黙って標準モードを走らせると
+    // 「高精度を選んだのに同じ結果」という誤認を招くので、明示的に未実装を返す。
+    if mode == EditMode::HighQuality {
+        return Err(
+            "高精度モード (SAM3) は現在準備中です。高速・スタンダードモードをご利用ください。"
+                .to_string(),
+        );
     }
 
     let _ = app.emit(EVENT_EDIT_MAGIC_PROGRESS, MagicLayerProgress::Started);

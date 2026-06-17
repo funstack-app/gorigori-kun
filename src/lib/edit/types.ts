@@ -25,6 +25,13 @@ export type RegenerateLayerArgs = {
 
 export type EditModelCategory = "ocr" | "inpaint" | "segment" | "samClick";
 
+/**
+ * レイヤー分解モード ID。Rust の edit_magic_run(mode) と一致させること。
+ * ここ (依存の葉ノードである types.ts) に置く理由: ipc.ts と edit/modes.ts の
+ * 両方が参照するため、modes.ts に置くと ipc → modes → ipc の循環依存になる。
+ */
+export type EditModeId = "standard" | "highQuality";
+
 export type ModelStatus = {
   id: string;
   displayName: string;

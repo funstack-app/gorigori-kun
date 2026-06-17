@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
+  EditModeId,
   EditModelProgress,
   FontInfo,
   MagicLayerResult,
@@ -129,10 +130,11 @@ export const editFonts = {
 };
 
 export const editMagic = {
-  run: (inputPath: string, projectName?: string | null) =>
+  run: (inputPath: string, projectName?: string | null, mode: EditModeId = "standard") =>
     invoke<MagicLayerResult>("edit_magic_run", {
       inputPath,
       projectName: projectName ?? null,
+      mode,
     }),
 };
 

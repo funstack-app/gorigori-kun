@@ -113,7 +113,10 @@ export function useEditorActions() {
     magicStore.setError(null);
     magicStore.setProgress({ kind: "started" });
     try {
-      const result = await editMagic.run(path, runProjectName);
+      // 現在選択中のレイヤー分解モードを Rust へ渡す。store 経由で読むのは、
+      // EditWorkspace のローカル state ではなくここから現在値を取れるようにするため。
+      const mode = useEditor.getState().editMode;
+      const result = await editMagic.run(path, runProjectName, mode);
       magicStore.setResult(result);
       await applyMagicLayerToCanvas(canvas, result);
       setSourceImagePath(path);
