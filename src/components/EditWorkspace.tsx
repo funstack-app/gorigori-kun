@@ -3,6 +3,7 @@ import { EditorLayerList } from "./edit/EditorLayerList";
 import { EditorPropertyPanel } from "./edit/EditorPropertyPanel";
 import { EditorToolbar } from "./edit/EditorToolbar";
 import { EditModeSelector } from "./edit/EditModeSelector";
+import { LayerSplitterPanel } from "./edit/LayerSplitterPanel";
 import { useEditor } from "./edit/editor/editorStore";
 import { useEditorActions } from "./edit/editor/useEditor";
 
@@ -53,7 +54,8 @@ export function EditWorkspace() {
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <EditorToolbar />
         <EditorCanvas />
-        <aside className="flex min-h-0 w-[280px] shrink-0 flex-col border-l border-[#2a2a2a] bg-[#151515]">
+        <aside className="flex min-h-0 w-[280px] shrink-0 flex-col gap-2 overflow-y-auto border-l border-[#2a2a2a] bg-[#151515] p-2">
+          <LayerSplitterPanel />
           <EditorLayerList />
           <EditorPropertyPanel />
         </aside>
