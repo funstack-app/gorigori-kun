@@ -164,6 +164,32 @@ pub fn resolve_codex_cli_binary() -> Result<PathBuf> {
         }
     }
 
+    // ①.5 画像生成対応バイナリの明示指定/優先解決。
+    // 真因 (2026-06-18 フォーク診断): npm 安定版 codex 0.140.0 は `codex exec` で
+    // 組み込み image_gen ツールを呼ばない (バイナリに image_generation 機能が無い)。
+    // 一方 Codex.app 同梱の alpha 版には機能がある。PATH 解決(②)が前者を掴むと
+    // 画像が一切生成されない。そこで画像対応版を PATH より優先で探す。
+    // 注意: これは「今 Codex.app に対応版がある」事実への dev 向け回避策であり、
+    // 配布版の本質対応(A-2: 対応 codex の案内 or 同梱)は別途必要。
+    // 環境変数 GORI_CODEX_BIN があれば最優先で尊重する (A-2 への布石)。
+    if let Some(p) = std::env::var_os("GORI_CODEX_BIN") {
+        let cand = PathBuf::from(p);
+        if cand.is_file() {
+            return Ok(cand);
+        }
+    }
+    if cfg!(target_os = "macos") {
+        for cand in [
+            "/Applications/Codex.app/Contents/Resources/codex",
+            "/Applications/Codex.app/Contents/MacOS/codex",
+        ] {
+            let p = PathBuf::from(cand);
+            if p.is_file() {
+                return Ok(p);
+            }
+        }
+    }
+
     // ② PATH 上の codex
     let path = enriched_path();
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
