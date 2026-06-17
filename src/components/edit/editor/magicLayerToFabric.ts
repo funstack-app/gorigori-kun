@@ -11,6 +11,13 @@ export async function applyMagicLayerToCanvas(
   canvas: FabricCanvas,
   result: MagicLayerResult,
 ) {
+  // 高精度モード: 認識した人物パーツ群をレイヤー展開する別経路。
+  // partLayers が入っているときは前景/マスクの単一切り抜きではなくパーツ集合で構成する。
+  if (result.partLayers && result.partLayers.length > 0) {
+    await applyPartLayersToCanvas(canvas, result);
+    return;
+  }
+
   const fabric = await importFabric();
   clearCanvas(canvas);
   canvas.backgroundColor = "#1a1a1a";
@@ -61,6 +68,52 @@ export async function applyMagicLayerToCanvas(
   canvas.renderAll?.();
 }
 
+/**
+ * 高精度モードの結果展開: 元画像を背景に置き、認識した人物パーツ (髪/上衣/パンツ等)
+ * をそれぞれ独立レイヤーとして重ねる。背景は薄く敷いてパーツの位置確認用にする。
+ */
+async function applyPartLayersToCanvas(
+  canvas: FabricCanvas,
+  result: MagicLayerResult,
+) {
+  const fabric = await importFabric();
+  clearCanvas(canvas);
+  canvas.backgroundColor = "#1a1a1a";
+
+  // 元画像を背景として薄く敷く (パーツ抜き後の下地確認 + 位置の手がかり)。
+  if (result.backgroundPath) {
+    const bgImg = await loadFabricImage(fabric, result.backgroundPath);
+    bgImg.set({
+      id: "bg",
+      name: "元画像 (背景)",
+      layerKind: "image",
+      left: 0,
+      top: 0,
+      opacity: 0.25,
+      selectable: true,
+    });
+    canvas.add(bgImg);
+  }
+
+  // 認識パーツを大きい順に積む (大きいパーツを下、小さいパーツを上にして選びやすく)。
+  const ordered = [...result.partLayers].sort((a, b) => b.pixelCount - a.pixelCount);
+  for (const part of ordered) {
+    const img = await loadFabricImage(fabric, part.imagePath);
+    img.set({
+      id: createLayerId(),
+      name: part.label,
+      layerKind: "image",
+      left: 0,
+      top: 0,
+      selectable: true,
+    });
+    canvas.add(img);
+  }
+
+  fitCanvasToImage(canvas, result.width, result.height);
+  canvas.renderAll?.();
+}
+
 export async function applySegmentResultToCanvas(
   canvas: FabricCanvas,
   result: SegmentResult,
@@ -70,6 +123,7 @@ export async function applySegmentResultToCanvas(
     foregroundPath: result.foregroundPath,
     maskPath: result.maskPath,
     textLayers: [],
+    partLayers: [],
     width: result.width,
     height: result.height,
     runDir: "",

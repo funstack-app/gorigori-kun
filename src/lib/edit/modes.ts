@@ -53,27 +53,22 @@ export const EDIT_MODES: EditMode[] = [
   {
     id: "highQuality",
     label: "低速・高精度",
-    tagline: "言葉で指定して髪・服など細かく分解 (Apple Silicon 専用)",
-    // SAM3 系。処理本体は未接続 (Rust run_magic_layer が HighQuality を未実装エラーで返す)。
-    // UI でも選択不可にし、実装完了まで「準備中」を正直に表示する。選べて緑なのに
-    // 中身がない状態 (=押しても何も起きない壊れUI) を作らないため。
-    requiredCategories: [],
+    tagline: "画像から髪・顔・上衣・パンツなど人物パーツを自動認識してレイヤー化",
+    // SCHP human parsing。画像を入れるだけで全部位を1回で認識する (テキスト指定不要)。
+    requiredCategories: ["humanParse"],
     requirements: [
       "Apple Silicon (M1 以降) 専用",
-      "空き容量 4 GB 以上 (モデル約 3.5 GB)",
-      "処理は CPU/GPU 共用で標準モードより低速",
+      "追加 DL: 約 0.07 GB (初回のみ)",
+      "標準モードより低速だが部位を細かく分解",
     ],
-    approxDownloadMb: 3500,
+    approxDownloadMb: 70,
     availability: (platform) =>
-      !platform.isAppleSilicon
-        ? {
+      platform.isAppleSilicon
+        ? { ok: true }
+        : {
             ok: false,
             reason:
               "高精度モードは Apple Silicon (Mac) 専用です。お使いの環境では高速・スタンダードモードをご利用ください。",
-          }
-        : {
-            ok: false,
-            reason: "高精度モード (SAM3) は現在準備中です。近日提供予定。",
           },
   },
 ];

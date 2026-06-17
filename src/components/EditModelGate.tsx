@@ -14,6 +14,7 @@ const CATEGORY_LABELS: Record<EditModelCategory, string> = {
   inpaint: "背景補完",
   segment: "切り抜き",
   samClick: "クリック切り抜き",
+  humanParse: "人物パーツ認識",
 };
 
 function formatMb(bytes: number) {

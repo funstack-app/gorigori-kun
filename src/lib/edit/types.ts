@@ -23,7 +23,12 @@ export type RegenerateLayerArgs = {
   aspect?: string;
 };
 
-export type EditModelCategory = "ocr" | "inpaint" | "segment" | "samClick";
+export type EditModelCategory =
+  | "ocr"
+  | "inpaint"
+  | "segment"
+  | "samClick"
+  | "humanParse";
 
 /**
  * レイヤー分解モード ID。Rust の edit_magic_run(mode) と一致させること。
@@ -108,11 +113,21 @@ export type FontInfo = {
   languageTags: string[];
 };
 
+/** 高精度モードで認識した人物パーツ 1 件 = キャンバス上の 1 レイヤー。 */
+export type PartLayerSpec = {
+  classId: number;
+  label: string;
+  imagePath: string;
+  pixelCount: number;
+};
+
 export type MagicLayerResult = {
   backgroundPath: string;
   foregroundPath: string;
   maskPath: string;
   textLayers: TextLayerSpec[];
+  /** 高精度モードで認識した人物パーツ群。標準モードでは空配列。 */
+  partLayers: PartLayerSpec[];
   width: number;
   height: number;
   runDir: string;
