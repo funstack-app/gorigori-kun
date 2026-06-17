@@ -30,9 +30,14 @@ export function EditModeSelector({ activeMode, onSelectMode }: EditModeSelectorP
   return (
     <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
       {EDIT_MODES.map((mode) => {
+        // platform 解決前は availability を判定できない。standard は常に ok なので
+        // 利用可、それ以外 (環境依存判定が必要なモード) はロード完了まで選択不可にする。
+        // 「ロード中の一瞬だけ選べてしまう」チラつきを防ぐため。
         const availability = platform
           ? mode.availability(platform)
-          : { ok: true as const };
+          : mode.id === "standard"
+            ? { ok: true as const }
+            : { ok: false as const, reason: "対応環境を確認中…" };
         const isActive = activeMode === mode.id;
 
         // このモードが要求するカテゴリのうち、未DLのモデル。
