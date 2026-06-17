@@ -154,7 +154,7 @@ pub async fn human_parse_image(
         }
 
         let label = ATR_LABELS_JA[class_id].to_string();
-        let file_name = format!("part-{class_id:02}-{class_id}.png");
+        let file_name = format!("part-{class_id:02}.png");
         let path = output_dir.join(file_name);
         part.save(&path)
             .map_err(|e| format!("save part {class_id}: {e}"))?;
