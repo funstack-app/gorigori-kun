@@ -162,20 +162,16 @@ async fn run_magic_layer_inner(
     let segment_result = segment_image(runtime, &text_removed_path, &run_dir).await?;
     tracing::info!(target: "codex.edit", "magic_layer: セグメント完了 {}x{}", segment_result.width, segment_result.height);
 
-    tracing::info!(target: "codex.edit", "magic_layer: 背景補完開始");
-    let _ = app.emit(
-        EVENT_EDIT_MAGIC_PROGRESS,
-        MagicLayerProgress::InpaintingBackground,
-    );
+    // 背景レイヤーは「元画像そのもの」を使う (昔の SAM3 run_split と同方式)。
+    // 以前は LaMa で被写体領域を背景補完していたが、それは被写体を消して塗りつぶす
+    // 処理であり、BiRefNet マスクが破綻すると画面が真っ白になる原因だった
+    // (2026-06-18 STΛCK 実機報告)。元画像を最背面に残せばマスクが多少崩れても
+    // 元の絵は必ず見える。前景(切り抜き被写体)はその上に重ねる。
+    // LaMa は「レイヤーを動かした跡を埋める」用途で別途呼ぶ設計に寄せる(段階2)。
     let background_path = run_dir.join("background.png");
-    inpaint_image(
-        runtime,
-        &text_removed_path,
-        &segment_result.mask_path,
-        &background_path,
-    )
-    .await?;
-    tracing::info!(target: "codex.edit", "magic_layer: 背景補完完了");
+    tokio::fs::copy(input_path, &background_path)
+        .await
+        .map_err(|e| format!("copy original as background: {e}"))?;
 
     let _ = app.emit(
         EVENT_EDIT_MAGIC_PROGRESS,
