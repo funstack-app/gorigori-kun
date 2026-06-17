@@ -15,7 +15,7 @@ use crate::state::AppState;
 
 /// レイヤー分解モード。フロント lib/edit/types.ts の EditModeId と対応。
 /// - Standard: 既存の軽量 ONNX スタック (OCR→テキスト除去→セグメント→背景inpaint)。全OS。
-/// - HighQuality: SAM3 系の高精度分解 (Apple Silicon 専用)。処理本体は未接続。
+/// - HighQuality: SCHP human parsing による人物パーツ自動分解 (CPU ONNX、全OS)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditMode {
     Standard,

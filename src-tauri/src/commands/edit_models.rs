@@ -64,8 +64,10 @@ pub async fn edit_models_download(app: AppHandle, model_ids: Vec<String>) -> Res
     Ok(())
 }
 
-/// 実行環境情報。編集タブの「高精度モード(SAM3等)が使えるか」をフロントが判定するために使う。
-/// SAM3 は Apple Silicon (MLX) 前提のため、os=macos かつ arch=aarch64 のときだけ提供可能。
+/// 実行環境情報。編集タブのモード可否表示にフロントが使う汎用情報。
+/// 注: 人物パーツ分解(SCHP)は CPU ONNX 推論で全OS動くため、もはや
+/// Apple Silicon 判定には依存しない。is_apple_silicon は将来の
+/// プラットフォーム別最適化(例: CoreML EP 追加時)に備えた素の環境情報として残す。
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EditPlatformInfo {
@@ -73,7 +75,7 @@ pub struct EditPlatformInfo {
     pub os: String,
     /// "aarch64" | "x86_64" 等 (std::env::consts::ARCH)
     pub arch: String,
-    /// Apple Silicon (macos + aarch64)。SAM3/MLX 系の高精度モードの前提。
+    /// Apple Silicon (macos + aarch64)。現状どのモードの前提でもない素の環境情報。
     pub is_apple_silicon: bool,
 }
 

@@ -8,8 +8,10 @@ export type { EditModeId };
  *
  * 設計思想 (STΛCK 指示 2026-06-17):
  * - 全員に重いモデルを最初から配らない。標準は軽量・全OS、欲しい人だけ追加DL。
- * - 「高速・スタンダード」= 全OS・既定DL済みの軽量スタック。
- * - 「低速・高精度」= 対応環境のみ追加DL (例: SAM3 は Apple Silicon 限定)。
+ * - 「高速・スタンダード」= 全OS・既定DL済みの軽量スタック (OCR/切り抜き/背景補完)。
+ * - 「人物パーツ分解」= SCHP human parsing。画像から髪・服など人物の部位を
+ *   自動認識してレイヤー化する別用途。CPU ONNX 推論なので全OSで動く
+ *   (標準モードより低速)。標準とは「速い/精密」の上下関係ではなく用途が違う。
  * - 必要スペックを明記し「このスペックならこれが使える」を可視化する。
  *
  * モデル本体の DL/状態管理は既存の editModels (ModelStatus) を使う。ここは
@@ -52,24 +54,21 @@ export const EDIT_MODES: EditMode[] = [
   },
   {
     id: "highQuality",
-    label: "低速・高精度",
-    tagline: "画像から髪・顔・上衣・パンツなど人物パーツを自動認識してレイヤー化",
+    label: "人物パーツ分解",
+    tagline: "画像から髪・顔・上衣・パンツなど人物の部位を自動認識してレイヤー化",
     // SCHP human parsing。画像を入れるだけで全部位を1回で認識する (テキスト指定不要)。
+    // CPU ONNX 推論なので全OSで動く。Apple Silicon 限定だった旧版は廃案の SAM3/MLX
+    // 構想の名残で技術的根拠がなかったため撤廃 (2026-06-17 フォーク評価指摘)。
     requiredCategories: ["humanParse"],
     requirements: [
-      "Apple Silicon (M1 以降) 専用",
+      "全OS対応 (人物が写った画像向け)",
       "追加 DL: 約 0.07 GB (初回のみ)",
-      "標準モードより低速だが部位を細かく分解",
+      "標準モードより低速。人物の部位を細かく分解",
     ],
     approxDownloadMb: 70,
-    availability: (platform) =>
-      platform.isAppleSilicon
-        ? { ok: true }
-        : {
-            ok: false,
-            reason:
-              "高精度モードは Apple Silicon (Mac) 専用です。お使いの環境では高速・スタンダードモードをご利用ください。",
-          },
+    // 全OSで動くので環境による不可はなし。人物画像以外では結果が出ない点は
+    // 実行時に Rust 側が日本語エラーで案内する (modes では弾かない)。
+    availability: () => ({ ok: true }),
   },
 ];
 
