@@ -25,7 +25,12 @@ sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio"] }
 zip = "2"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
-ort = { version = "2.0.0-rc.12", features = ["load-dynamic", "copy-dylibs", "download-binaries"] }
+# load-dynamic は使わない。load-dynamic を立てると ort-sys のビルドスクリプトが
+# 早期 return し download-binaries/copy-dylibs が無効化され、実行時に dylib を
+# 探して無限ハングする (2026-06-18 フォーク調査で ort-sys build/main.rs にて確認)。
+# default features (download-binaries/copy-dylibs/api-24) で静的リンクし、
+# onnxruntime を実行ファイルに焼き込む。配布版で dylib 外部依存ゼロ・確実に動く。
+ort = { version = "2.0.0-rc.12", features = ["download-binaries", "copy-dylibs"] }
 ort-sys = { version = "2.0.0-rc.12" }
 
 serde = { version = "1", features = ["derive"] }

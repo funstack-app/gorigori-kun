@@ -33,10 +33,12 @@ impl EditRuntime {
             return Err(format!("model not downloaded: {}", spec.id));
         }
 
+        tracing::info!(target: "codex.edit", "runtime: ONNXセッション生成開始 id={} path={}", spec.id, path.display());
         let session = Session::builder()
             .map_err(|e| format!("session builder: {e}"))?
             .commit_from_file(&path)
             .map_err(|e| format!("session commit: {e}"))?;
+        tracing::info!(target: "codex.edit", "runtime: ONNXセッション生成完了 id={}", spec.id);
         let session = Arc::new(Mutex::new(session));
         self.sessions
             .write()

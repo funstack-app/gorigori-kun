@@ -120,6 +120,7 @@ async fn run_magic_layer_inner(
         return Err(format!("input image not found: {}", input_path.display()));
     }
 
+    tracing::info!(target: "codex.edit", "magic_layer start: mode={:?} input={}", mode, input_path.display());
     let _ = app.emit(EVENT_EDIT_MAGIC_PROGRESS, MagicLayerProgress::Started);
 
     // 高精度モード: 人物パーツ自動認識 (SCHP)。標準パイプラインとは別経路で
@@ -139,8 +140,10 @@ async fn run_magic_layer_inner(
         .await
         .map_err(|e| format!("mkdir: {e}"))?;
 
+    tracing::info!(target: "codex.edit", "magic_layer: OCR開始");
     let _ = app.emit(EVENT_EDIT_MAGIC_PROGRESS, MagicLayerProgress::DetectingText);
     let regions = ocr_image(runtime, input_path).await?;
+    tracing::info!(target: "codex.edit", "magic_layer: OCR完了 regions={}", regions.len());
 
     let _ = app.emit(EVENT_EDIT_MAGIC_PROGRESS, MagicLayerProgress::RemovingText);
     let text_mask_path = run_dir.join("text-mask.png");
@@ -154,9 +157,12 @@ async fn run_magic_layer_inner(
         inpaint_image(runtime, input_path, &text_mask_path, &text_removed_path).await?;
     }
 
+    tracing::info!(target: "codex.edit", "magic_layer: セグメント開始");
     let _ = app.emit(EVENT_EDIT_MAGIC_PROGRESS, MagicLayerProgress::Segmenting);
     let segment_result = segment_image(runtime, &text_removed_path, &run_dir).await?;
+    tracing::info!(target: "codex.edit", "magic_layer: セグメント完了 {}x{}", segment_result.width, segment_result.height);
 
+    tracing::info!(target: "codex.edit", "magic_layer: 背景補完開始");
     let _ = app.emit(
         EVENT_EDIT_MAGIC_PROGRESS,
         MagicLayerProgress::InpaintingBackground,
@@ -169,6 +175,7 @@ async fn run_magic_layer_inner(
         &background_path,
     )
     .await?;
+    tracing::info!(target: "codex.edit", "magic_layer: 背景補完完了");
 
     let _ = app.emit(
         EVENT_EDIT_MAGIC_PROGRESS,

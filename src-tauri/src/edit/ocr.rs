@@ -29,15 +29,20 @@ pub async fn ocr_image(
     runtime: &EditRuntime,
     input_path: &Path,
 ) -> Result<Vec<TextRegion>, String> {
+    tracing::info!(target: "codex.edit", "ocr: 画像デコード開始");
     let img = image::open(input_path).map_err(|e| format!("open: {e}"))?;
+    tracing::info!(target: "codex.edit", "ocr: 画像デコード完了 {}x{}", img.width(), img.height());
 
     let det_spec = find_model("paddleocr-mobile-det")
         .ok_or_else(|| "model spec not found: paddleocr-mobile-det".to_string())?;
+    tracing::info!(target: "codex.edit", "ocr: detセッション取得開始");
     let det_session = runtime.get_session(&det_spec).await?;
+    tracing::info!(target: "codex.edit", "ocr: detection開始 {}x{}", img.width(), img.height());
     let polygons = {
         let mut session = det_session.lock().await;
         run_paddleocr_detection(&mut session, &img)?
     };
+    tracing::info!(target: "codex.edit", "ocr: detection完了 polygons={}", polygons.len());
 
     let rec_spec = find_model("paddleocr-mobile-rec")
         .ok_or_else(|| "model spec not found: paddleocr-mobile-rec".to_string())?;
@@ -68,6 +73,7 @@ pub async fn ocr_image(
         });
     }
 
+    tracing::info!(target: "codex.edit", "ocr: recognition完了 regions={}", regions.len());
     Ok(regions)
 }
 
