@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use image::{GenericImageView, ImageBuffer, Rgba};
 use ort::value::Tensor;
 
-use crate::edit::registry::all_models;
+use crate::edit::registry::{all_models, model_path};
 use crate::edit::runtime::EditRuntime;
 
 /// SCHP ATR-18 の入力サイズ (512x512 固定ストレッチ)。
@@ -62,6 +62,16 @@ pub async fn human_parse_image(
         .into_iter()
         .find(|spec| spec.id == "schp-atr-18")
         .ok_or_else(|| "SCHP model spec not found".to_string())?;
+
+    // モデル未DLなら、生の英語エラー (get_session の "model not downloaded") ではなく
+    // 日本語で案内する。非エンジニア向け配布アプリのため (フォーク評価指摘)。
+    if !model_path(&spec)?.exists() {
+        return Err(
+            "人物パーツ分解モデルが未ダウンロードです。モード選択の「モデルを追加」から取得してください。"
+                .to_string(),
+        );
+    }
+
     let session = runtime.get_session(&spec).await?;
 
     let img = image::open(input_path).map_err(|e| format!("image open: {e}"))?;
@@ -90,7 +100,8 @@ pub async fn human_parse_image(
     }
 
     // 推論 → logits (1, 18, 512, 512)。各ピクセルを argmax してラベルマップを得る。
-    let label_map: Vec<u8> = {
+    // present_bits: 出現したクラスID集合 (後段で class 毎の全画素再走査を消すため)。
+    let (label_map_512, present_bits): (Vec<u8>, u32) = {
         let input_tensor = Tensor::from_array((
             [1usize, 3, INPUT_SIZE as usize, INPUT_SIZE as usize],
             input_data,
@@ -121,25 +132,37 @@ pub async fn human_parse_image(
         .await
         .map_err(|e| format!("output dir: {e}"))?;
 
-    // 元解像度の RGBA。各クラスのマスクを 512 → 元解像度に最近傍で戻し、
-    // 該当ピクセルだけ不透明にした透過 PNG を書き出す。
+    // 512 のラベルマップを元解像度へ最近傍展開する (O(W×H) を 1 回だけ)。
+    // 以前は class 毎に全画素を再走査+座標再計算していて 4K×多クラスで重かった。
+    // 座標計算は u64 経由でオーバーフローを防ぐ (極端な横長画像で x*512 が u32 を超える)。
     let rgba = img.to_rgba8();
+    let mut label_map_full = vec![0u8; (orig_w as usize) * (orig_h as usize)];
+    for y in 0..orig_h {
+        let sy = ((y as u64 * INPUT_SIZE as u64 / orig_h as u64) as u32).min(INPUT_SIZE - 1);
+        for x in 0..orig_w {
+            let sx = ((x as u64 * INPUT_SIZE as u64 / orig_w as u64) as u32).min(INPUT_SIZE - 1);
+            let src = sy as usize * INPUT_SIZE as usize + sx as usize;
+            let dst = y as usize * orig_w as usize + x as usize;
+            label_map_full[dst] = label_map_512[src];
+        }
+    }
+
+    // 元解像度換算で極小 (全体の 0.05% 未満) のパーツは誤検出として間引く。
+    let min_pixels = ((orig_w as u64) * (orig_h as u64)) / 2000;
+
+    // 各クラスのマスクを適用して透過 PNG を書き出す。present_bits に立っている
+    // クラスだけ処理する (出現しないクラスはスキップ、512 全画素の再走査は不要)。
     let mut layers = Vec::new();
     for class_id in 1..NUM_CLASSES {
-        // 512 解像度でこのクラスのピクセル数を数え、存在しなければスキップ。
-        let present = (0..INPUT_PIXELS).any(|idx| label_map[idx] as usize == class_id);
-        if !present {
+        if present_bits & (1u32 << class_id) == 0 {
             continue;
         }
 
         let mut part = ImageBuffer::<Rgba<u8>, Vec<u8>>::new(orig_w, orig_h);
         let mut pixel_count: u64 = 0;
         for (x, y, p) in rgba.enumerate_pixels() {
-            // 元解像度 → 512 へ写像 (最近傍。ストレッチと逆対応)。
-            let sx = (x * INPUT_SIZE / orig_w).min(INPUT_SIZE - 1);
-            let sy = (y * INPUT_SIZE / orig_h).min(INPUT_SIZE - 1);
-            let idx = sy as usize * INPUT_SIZE as usize + sx as usize;
-            if label_map[idx] as usize == class_id {
+            let idx = y as usize * orig_w as usize + x as usize;
+            if label_map_full[idx] as usize == class_id {
                 part.put_pixel(x, y, Rgba([p[0], p[1], p[2], p[3]]));
                 pixel_count += 1;
             } else {
@@ -147,8 +170,6 @@ pub async fn human_parse_image(
             }
         }
 
-        // 元解像度換算で極小 (全体の 0.05% 未満) のパーツは誤検出として間引く。
-        let min_pixels = ((orig_w as u64) * (orig_h as u64)) / 2000;
         if pixel_count < min_pixels {
             continue;
         }
@@ -179,20 +200,26 @@ pub async fn human_parse_image(
     })
 }
 
-/// logits (NUM_CLASSES, H, W) の chw レイアウトを各ピクセル argmax してラベルマップ化。
-fn argmax_label_map(logits: &[f32]) -> Vec<u8> {
+/// logits (NUM_CLASSES, H, W) の chw レイアウトを各ピクセル argmax してラベルマップ化し、
+/// 同時に「出現したクラスID集合」を bitset (u32) で返す (後段の present 再走査を消すため)。
+/// NaN 防御: INT8 量子化で稀に NaN が出ても黙って背景に倒さず、有限値のみで比較する。
+fn argmax_label_map(logits: &[f32]) -> (Vec<u8>, u32) {
     let mut label_map = vec![0u8; INPUT_PIXELS];
+    let mut present_bits: u32 = 0;
     for idx in 0..INPUT_PIXELS {
         let mut best_class = 0usize;
         let mut best_val = f32::NEG_INFINITY;
         for class_id in 0..NUM_CLASSES {
             let v = logits[class_id * INPUT_PIXELS + idx];
-            if v > best_val {
+            // NaN は比較から除外 (v > best_val は NaN で false になり据え置かれるが、
+            // 明示的に有限チェックして意図を残す)。
+            if v.is_finite() && v > best_val {
                 best_val = v;
                 best_class = class_id;
             }
         }
         label_map[idx] = best_class as u8;
+        present_bits |= 1u32 << best_class;
     }
-    label_map
+    (label_map, present_bits)
 }
