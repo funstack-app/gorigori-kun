@@ -1,4 +1,5 @@
 pub mod download;
+pub mod human_parse;
 pub mod inpaint;
 pub mod magic_layer;
 pub mod ocr;

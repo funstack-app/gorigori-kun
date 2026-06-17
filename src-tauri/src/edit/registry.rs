@@ -6,6 +6,8 @@ pub enum ModelCategory {
     Inpaint,
     Segment,
     SamClick,
+    /// 高精度モード用。人物パーツ自動認識 (SCHP human parsing)。
+    HumanParse,
 }
 
 impl ModelCategory {
@@ -15,6 +17,7 @@ impl ModelCategory {
             Self::Inpaint => "inpaint",
             Self::Segment => "segment",
             Self::SamClick => "samClick",
+            Self::HumanParse => "humanParse",
         }
     }
 }
@@ -85,6 +88,19 @@ pub fn all_models() -> Vec<ModelSpec> {
             file_name: "sam2-tiny-decoder.onnx",
             size_bytes: 20_600_000,
             sha256: "PLACEHOLDER_SAM_DEC",
+        },
+        // 高精度モード: 人物パーツ自動認識 (SCHP, ATR 18クラス)。
+        // INT8 静的量子化版を採用 (単一ファイル66MB。FP32版は .onnx.data 外部データ
+        // 付随の2ファイル構成で単一ファイル前提のDL機構と相性が悪いため)。
+        // 入力: pixel_values (1,3,512,512) RGB/255/(x-mean)/std。出力: logits (1,18,512,512)。
+        ModelSpec {
+            id: "schp-atr-18",
+            category: ModelCategory::HumanParse,
+            display_name: "人物パーツ自動認識 (SCHP ATR)",
+            url: "https://huggingface.co/pirocheto/schp-atr-18/resolve/main/onnx/schp-atr-18-int8-static.onnx",
+            file_name: "schp-atr-18-int8-static.onnx",
+            size_bytes: 66_000_000,
+            sha256: "PLACEHOLDER_SCHP_ATR",
         },
     ]
 }

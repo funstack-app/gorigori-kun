@@ -6,6 +6,7 @@ use tauri::{AppHandle, Emitter};
 
 use crate::commands::edit_segment::now_secs;
 use crate::commands::storage::{resolve_output_dir, StorageSettings};
+use crate::edit::human_parse::human_parse_image;
 use crate::edit::inpaint::inpaint_image;
 use crate::edit::ocr::{ocr_image, TextRegion};
 use crate::edit::segment::segment_image;
@@ -50,6 +51,16 @@ pub struct TextLayerSpec {
     pub rotation: f32,
 }
 
+/// 高精度モードで認識した人物パーツ 1 件 = キャンバス上の 1 レイヤー。
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PartLayerSpec {
+    pub class_id: u32,
+    pub label: String,
+    pub image_path: String,
+    pub pixel_count: u64,
+}
+
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct MagicLayerResult {
@@ -57,6 +68,8 @@ pub struct MagicLayerResult {
     pub foreground_path: String,
     pub mask_path: String,
     pub text_layers: Vec<TextLayerSpec>,
+    /// 高精度モードで認識した人物パーツ群。standard モードでは空。
+    pub part_layers: Vec<PartLayerSpec>,
     pub width: u32,
     pub height: u32,
     pub run_dir: String,
@@ -107,16 +120,13 @@ async fn run_magic_layer_inner(
         return Err(format!("input image not found: {}", input_path.display()));
     }
 
-    // 高精度モード (SAM3) は処理本体が未接続。黙って標準モードを走らせると
-    // 「高精度を選んだのに同じ結果」という誤認を招くので、明示的に未実装を返す。
-    if mode == EditMode::HighQuality {
-        return Err(
-            "高精度モード (SAM3) は現在準備中です。高速・スタンダードモードをご利用ください。"
-                .to_string(),
-        );
-    }
-
     let _ = app.emit(EVENT_EDIT_MAGIC_PROGRESS, MagicLayerProgress::Started);
+
+    // 高精度モード: 人物パーツ自動認識 (SCHP)。標準パイプラインとは別経路で
+    // 髪・顔・上衣・パンツ等を一括レイヤー化する。
+    if mode == EditMode::HighQuality {
+        return run_high_quality(app, state, input_path, project_name).await;
+    }
 
     let runtime = state.edit_runtime();
     let settings = match state.storage_settings().await {
@@ -171,6 +181,7 @@ async fn run_magic_layer_inner(
         foreground_path: path_string(&segment_result.foreground_path),
         mask_path: path_string(&segment_result.mask_path),
         text_layers,
+        part_layers: Vec::new(),
         width: segment_result.width,
         height: segment_result.height,
         run_dir: path_string(&run_dir),
@@ -178,6 +189,63 @@ async fn run_magic_layer_inner(
 
     write_json_file(&run_dir.join("manifest.json"), &result).await?;
 
+    let _ = app.emit(EVENT_EDIT_MAGIC_PROGRESS, MagicLayerProgress::Completed);
+    Ok(result)
+}
+
+/// 高精度モード本体: SCHP で人物パーツを認識し、各部位を透過 PNG レイヤーにする。
+/// 標準モードと同じ run_dir 規約・進捗イベントを使い、フロントから見て差し替え可能にする。
+async fn run_high_quality(
+    app: &AppHandle,
+    state: &AppState,
+    input_path: &Path,
+    project_name: Option<&str>,
+) -> Result<MagicLayerResult, String> {
+    let runtime = state.edit_runtime();
+    let settings = match state.storage_settings().await {
+        Some(settings) => settings,
+        None => StorageSettings::load()?,
+    };
+    let leaf = format!("edit-parse-{}", now_secs());
+    let run_dir = resolve_output_dir(&settings, project_name, &leaf);
+    tokio::fs::create_dir_all(&run_dir)
+        .await
+        .map_err(|e| format!("mkdir: {e}"))?;
+
+    // パーツ抽出はセグメント工程として進捗を出す (専用 kind を増やさず既存を流用)。
+    let _ = app.emit(EVENT_EDIT_MAGIC_PROGRESS, MagicLayerProgress::Segmenting);
+    let parse = human_parse_image(runtime, input_path, &run_dir).await?;
+
+    let part_layers: Vec<PartLayerSpec> = parse
+        .layers
+        .iter()
+        .map(|layer| PartLayerSpec {
+            class_id: layer.class_id as u32,
+            label: layer.label.clone(),
+            image_path: path_string(&layer.image_path),
+            pixel_count: layer.pixel_count,
+        })
+        .collect();
+
+    // 元画像を背景として保持 (パーツを消した後に下地が要るケース用)。
+    let background_path = run_dir.join("background_src.png");
+    tokio::fs::copy(input_path, &background_path)
+        .await
+        .map_err(|e| format!("copy background: {e}"))?;
+
+    let result = MagicLayerResult {
+        background_path: path_string(&background_path),
+        // 高精度モードは前景/マスクの単一切り抜き概念を持たない (パーツ集合で表現)。
+        foreground_path: String::new(),
+        mask_path: String::new(),
+        text_layers: Vec::new(),
+        part_layers,
+        width: parse.width,
+        height: parse.height,
+        run_dir: path_string(&run_dir),
+    };
+
+    write_json_file(&run_dir.join("manifest.json"), &result).await?;
     let _ = app.emit(EVENT_EDIT_MAGIC_PROGRESS, MagicLayerProgress::Completed);
     Ok(result)
 }
