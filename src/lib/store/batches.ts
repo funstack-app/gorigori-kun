@@ -10,6 +10,11 @@ export type BatchWorker =
   | {
       idx: number;
       status: "pending" | "running";
+      /** worker が実際に走り出した時刻 (epoch ms)。running のときだけ入る。
+       *  MAX_CONCURRENT=3 で 4 枚目以降は semaphore 待ちで pending のまま
+       *  待機するため、バッチ開始時刻でなく worker 個別の開始時刻で経過秒を
+       *  数えないと、待機中の worker が実際より長く「生成中」に見える。 */
+      runningAt?: number;
       modelJobSetType?: string;
       modelDisplayName?: string;
       mediaType?: MediaType;
@@ -199,9 +204,17 @@ export const useBatches = create<BatchesState>((set, _get) => ({
         const wi = batch.workers.findIndex((w) => w.idx === e.idx);
         if (wi !== -1) {
           const prev = batch.workers[wi];
+          // workerStarted はこの worker が semaphore permit を取って実際に
+          // codex exec を起動した瞬間に来る。ここを経過秒の起点にする
+          // (バッチ開始時刻ではなく worker 個別の開始時刻)。
+          const prevRunningAt =
+            prev.status === "pending" || prev.status === "running"
+              ? prev.runningAt
+              : undefined;
           batch.workers[wi] = {
             idx: e.idx,
             status: "running",
+            runningAt: prevRunningAt ?? Date.now(),
             modelJobSetType: e.modelJobSetType ?? prev.modelJobSetType,
             modelDisplayName: e.modelDisplayName ?? prev.modelDisplayName,
             mediaType: e.mediaType ?? prev.mediaType ?? batch.mediaType ?? "image",

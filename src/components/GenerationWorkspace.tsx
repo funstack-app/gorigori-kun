@@ -790,7 +790,6 @@ function BatchBlock({
             // Bug修正 (2026-05-28): local→real batchId の差し替えでタイルを再マウントさせない。
             key={worker.idx}
             worker={worker}
-            startedAt={startedAt}
             compareMode={compareMode}
             siblings={workers
               .filter(
@@ -866,21 +865,24 @@ function formatElapsed(sec: number): string {
 function WorkerTile({
   worker,
   siblings,
-  startedAt,
   compareMode,
 }: {
   worker: BatchWorker;
   siblings?: string[];
-  /** バッチ開始時刻 (epoch ms)。生成中タイルの経過秒表示に使う。 */
-  startedAt?: number;
   /** 比較モード (各モデル1枚) のバッチか。再生成ボタンの出し分けに使う。 */
   compareMode?: boolean;
 }) {
   const caption = worker.modelDisplayName;
   const canSendToVideo = worker.mediaType !== "video";
-  // 生成中 (pending/running) のときだけ経過秒を回す。
-  const isGenerating = worker.status === "pending" || worker.status === "running";
-  const elapsed = useElapsedSeconds(isGenerating, startedAt);
+  // worker 個別の開始時刻 (semaphore permit を取った瞬間) を優先する。
+  // まだ pending (semaphore 待ち) の worker は runningAt が無いので、
+  // バッチ開始時刻を使わず経過秒を出さない (待機中は「待機中」表示)。
+  const workerStartedAt =
+    worker.status === "running" || worker.status === "pending"
+      ? worker.runningAt
+      : undefined;
+  const isRunning = worker.status === "running" && workerStartedAt != null;
+  const elapsed = useElapsedSeconds(isRunning, workerStartedAt);
   if (worker.status === "completed") {
     return (
       <div className="min-w-0">
@@ -974,8 +976,11 @@ function WorkerTile({
           <>
             {/* スピナー: 動いていることを可視化 (DEV-PLAYBOOK §6 C) */}
             <Spinner />
-            <span>生成中</span>
-            {elapsed !== null && (
+            {/* semaphore 待ち (pending) の worker は「待機中」、実際に走り出した
+                (running) worker は「生成中」+ 経過秒。MAX_CONCURRENT=3 で 4 枚目
+                以降は順番待ちなので、待機中に経過秒を出すと誤解を招く。 */}
+            <span>{isRunning ? "生成中" : "待機中"}</span>
+            {isRunning && elapsed !== null && (
               <span className="font-mono text-[9px] font-medium text-neutral-500">
                 {formatElapsed(elapsed)}
               </span>
