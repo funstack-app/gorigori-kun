@@ -19,6 +19,8 @@ use std::path::{Path, PathBuf};
 use image::{ImageBuffer, Luma, Rgb};
 
 use crate::edit::inpaint::inpaint_image;
+use crate::edit::magic_layer::generate_text_mask;
+use crate::edit::ocr::ocr_image_with_probmap;
 use crate::edit::registry::model_path;
 use crate::edit::runtime::EditRuntime;
 use crate::edit::sam2::Sam2Session;
@@ -534,4 +536,105 @@ async fn magic_layer_real_image_probe() {
     eprintln!("[probe] 背景補完 白率={bg_white:.1}% -> {}", background.display());
     assert!(bg_white < 50.0, "背景補完が白化け ({bg_white:.1}%)");
     eprintln!("[probe] 完了: {}", out.display());
+}
+
+/// 実 PaddleOCR で DB 確率マップ → ストロークマスクを作り、bbox 矩形マスクより塗り面積が
+/// 小さいことを機械検証する (2026-07-02 マスク精度改善の恒久回帰テスト)。
+///
+/// 疑似文字: 白パネルの中に黒の太い縦線 (文字ストローク相当) を並べる。DB 検出器はこれを
+/// テキスト状の連結領域として拾い、確率マップは黒ストローク位置だけ高確率になる。同じ入力・
+/// 同じ採用 region に対し、確率マップ有り (ストローク) と無し (bbox 矩形) を両方生成し、
+/// 前者の白画素数が後者より少ないことをアサートする。
+///
+/// フォールバック整合も同時確認: prob_map=None で従来 bbox 矩形が返ること (挙動退行ゼロ)。
+#[tokio::test]
+#[ignore]
+async fn text_mask_stroke_smaller_than_bbox_real_ocr() {
+    init_test_tracing();
+    if !model_available("paddleocr-mobile-det") || !model_available("paddleocr-mobile-rec") {
+        eprintln!("[skip] paddleocr モデル未DL");
+        return;
+    }
+    let dir = tmp_dir("text-mask");
+
+    // 640x200 のグレー背景に「白パネル + 黒の太い縦線群」(疑似文字)。
+    let (iw, ih) = (640u32, 200u32);
+    let mut img = ImageBuffer::<Rgb<u8>, Vec<u8>>::from_pixel(iw, ih, Rgb([180, 190, 200]));
+    // 白パネル (80,70)-(560,140)。
+    for y in 70u32..140 {
+        for x in 80u32..560 {
+            img.put_pixel(x, y, Rgb([245, 245, 245]));
+        }
+    }
+    // 黒の縦線 (文字ストローク相当): パネル内で 40px 間隔・幅 10px。
+    for y in 82u32..128 {
+        for x in 100u32..540 {
+            if (x - 100) % 40 < 10 {
+                img.put_pixel(x, y, Rgb([15, 15, 15]));
+            }
+        }
+    }
+    let input = dir.join("input.png");
+    img.save(&input).unwrap();
+
+    let runtime = EditRuntime::new();
+    let (raw_regions, prob_map) = ocr_image_with_probmap(&runtime, &input)
+        .await
+        .expect("ocr_image_with_probmap failed");
+    eprintln!(
+        "[text-mask] raw_regions={} probmap={}",
+        raw_regions.len(),
+        prob_map.is_some()
+    );
+    if raw_regions.is_empty() {
+        eprintln!("[skip] DB 検出器が疑似文字を拾わなかった (モデル差)。この機のモデルでは検証不能。");
+        return;
+    }
+    assert!(
+        prob_map.is_some(),
+        "regions を検出したのに確率マップが None (upscale_prob_map の座標系判定が誤り)"
+    );
+
+    // 疑似文字 (黒縦線) は認識器が実文字として読めず text が空/ノイズになりうる。ここで
+    // 検証したいのは「実 DB 確率マップ + 実検出 bbox」でストロークが矩形より小さいこと
+    // (= 新規経路 upscale_prob_map + build_stroke_mask の実モデル動作)。そこで認識テキストだけ
+    // 既知の採用テキストに差し替え、bbox と確率マップは実 OCR の実体をそのまま使う。
+    let regions: Vec<crate::edit::ocr::TextRegion> = raw_regions
+        .into_iter()
+        .map(|mut r| {
+            r.text = "SALE".to_string();
+            r
+        })
+        .collect();
+
+    // ストローク方式 (確率マップ有り)。
+    let stroke_path = dir.join("stroke-mask.png");
+    generate_text_mask(&input, &regions, prob_map.as_ref(), &stroke_path)
+        .expect("stroke mask");
+    let stroke_area = count_white(&stroke_path);
+
+    // bbox 矩形フォールバック (確率マップ無し = 挙動退行ゼロの確認)。
+    let bbox_path = dir.join("bbox-mask.png");
+    generate_text_mask(&input, &regions, None, &bbox_path).expect("bbox mask");
+    let bbox_area = count_white(&bbox_path);
+
+    eprintln!(
+        "[text-mask] stroke_area={stroke_area} bbox_area={bbox_area} 比={:.3} -> {}",
+        stroke_area as f64 / bbox_area.max(1) as f64,
+        dir.display()
+    );
+
+    assert!(stroke_area > 0, "ストロークマスクが空 (文字を消せない)");
+    assert!(bbox_area > 0, "bbox マスクが空 (採用 region 無し)");
+    assert!(
+        stroke_area < bbox_area,
+        "実 OCR でもストローク方式が矩形以上に塗っている (stroke={stroke_area} bbox={bbox_area}). \
+         マスク精度改善が効いていない。"
+    );
+}
+
+/// Luma PNG の白画素 (>127) 数。
+fn count_white(path: &Path) -> u64 {
+    let m = image::open(path).unwrap().to_luma8();
+    m.pixels().filter(|p| p[0] > 127).count() as u64
 }

@@ -8,7 +8,7 @@ use crate::commands::edit_segment::now_secs;
 use crate::commands::storage::{resolve_output_dir, StorageSettings};
 use crate::edit::human_parse::human_parse_image;
 use crate::edit::inpaint::inpaint_image;
-use crate::edit::ocr::{ocr_image, TextRegion};
+use crate::edit::ocr::{ocr_image_with_probmap, TextProbMap, TextRegion};
 use crate::edit::segment::segment_image_with_source;
 use crate::events::EVENT_EDIT_MAGIC_PROGRESS;
 use crate::state::AppState;
@@ -179,12 +179,12 @@ async fn run_magic_layer_inner(
 
     tracing::info!(target: "codex.edit", "magic_layer: OCR開始");
     let _ = app.emit(EVENT_EDIT_MAGIC_PROGRESS, MagicLayerProgress::DetectingText);
-    let regions = ocr_image(runtime, input_path).await?;
-    tracing::info!(target: "codex.edit", "magic_layer: OCR完了 regions={}", regions.len());
+    let (regions, prob_map) = ocr_image_with_probmap(runtime, input_path).await?;
+    tracing::info!(target: "codex.edit", "magic_layer: OCR完了 regions={} probmap={}", regions.len(), prob_map.is_some());
 
     let _ = app.emit(EVENT_EDIT_MAGIC_PROGRESS, MagicLayerProgress::RemovingText);
     let text_mask_path = run_dir.join("text-mask.png");
-    generate_mask_from_regions(input_path, &regions, &text_mask_path)?;
+    generate_text_mask(input_path, &regions, prob_map.as_ref(), &text_mask_path)?;
     let text_removed_path = run_dir.join("text-removed.png");
     if regions.is_empty() {
         tokio::fs::copy(input_path, &text_removed_path)
@@ -514,24 +514,122 @@ pub fn build_text_layers(
         .collect())
 }
 
-pub fn generate_mask_from_regions(
+/// DB 確率マップの閾値。PaddleOCR DB 検出器の標準二値化閾値 (0.3) に合わせる。
+/// polygons_from_heatmap の連結成分抽出も同じ 0.30 を使っており、両者を揃える。
+/// なぜ 0.3: DB の論文/公式実装 (db_thresh) の既定値。これ未満はテキストの縁の裾で、
+/// 塗ると過剰復元 (背景まで inpaint) になり、これ以上に上げると文字本体が欠ける。
+const DB_STROKE_THRESHOLD: f32 = 0.30;
+
+/// ストロークマスクの膨張量 (px)。細線を LaMa が確実に飲み込める最小限に留める。
+/// なぜ 2px: 矩形マスクをやめて縁残りを減らすのが目的なので、膨張は「アンチエイリアスの
+/// 半画素+走査の取りこぼし」を埋める最小値。大きくすると矩形塗りに近づき利点が消える。
+const DB_STROKE_DILATE: i32 = 2;
+
+/// 確率マップが取れないときの bbox 近傍ゲート pad (px)。従来の矩形 pad(4) と同じ。
+const BBOX_GATE_PAD: i32 = 4;
+
+/// text-mask を生成する。確率マップがあれば「ストロークマスク」、無ければ従来の bbox 矩形。
+///
+/// ストロークマスク方式 (2026-07-02 技術調査の定石):
+///   「確率マップ >= 閾値 のピクセル ∩ 採用テキスト領域の bbox 近傍」を白塗り → 数px膨張。
+///   矩形マスクは文字の隙間・行間の背景まで塗ってしまい、LaMa が過剰復元 (背景の再合成) を
+///   起こしたり、縁に元テキストの色が残る。文字ストロークだけを塗れば、追加モデルゼロで
+///   縁残り・過剰復元の両方が改善する。
+///
+/// bbox でゲートする理由: 確率マップには認識でノイズ棄却された領域 (誤検出の裾) も
+/// 弱い確率で残る。採用 region (build_text_layers と同じノイズフィルタを通過したもの) の
+/// bbox 近傍に限定することで、消すべきでない箇所のストロークを塗らない。
+pub fn generate_text_mask(
     input_path: &Path,
     regions: &[TextRegion],
+    prob_map: Option<&TextProbMap>,
     output_path: &Path,
 ) -> Result<(), String> {
     let img = image::open(input_path).map_err(|e| e.to_string())?;
     let (w, h) = img.dimensions();
-    let mut mask = ImageBuffer::<Luma<u8>, Vec<u8>>::from_pixel(w, h, Luma([0u8]));
-    for region in regions {
-        let [x, y, rw, rh] = region.bbox;
-        if rw <= 0 || rh <= 0 || w == 0 || h == 0 {
+    if w == 0 || h == 0 {
+        return Err("empty image for text mask".to_string());
+    }
+
+    // 採用 region だけをゲート対象にする (記号ノイズ・微小領域を除外)。
+    // build_text_layers と同じ判定を使い、「レイヤー化される文字」と「消される文字」を一致させる。
+    let image_area = (w as f64) * (h as f64);
+    let min_text_area = image_area * 0.001;
+    let adopted: Vec<[i32; 4]> = regions
+        .iter()
+        .filter(|region| {
+            let text = region.text.trim();
+            if text.is_empty() || is_symbol_noise(text) {
+                return false;
+            }
+            let [_x, _y, rw, rh] = region.bbox;
+            (rw as f64) * (rh as f64) >= min_text_area
+        })
+        .map(|region| region.bbox)
+        .collect();
+
+    // 確率マップが使えるかを判定。寸法が元画像と一致しなければストローク方式は使わない
+    // (座標系がずれた確率マップで塗ると位置が狂う → 安全側で bbox 矩形にフォールバック)。
+    let usable_prob = prob_map.filter(|pm| pm.width == w && pm.height == h);
+
+    let mask = match usable_prob {
+        Some(pm) => {
+            tracing::info!(target: "codex.edit", "text-mask: ストローク方式 (thr={DB_STROKE_THRESHOLD} dilate={DB_STROKE_DILATE}px) adopted={}", adopted.len());
+            build_stroke_mask(w, h, &adopted, pm)
+        }
+        None => {
+            tracing::info!(target: "codex.edit", "text-mask: bbox矩形フォールバック (確率マップ無し) adopted={}", adopted.len());
+            build_bbox_mask(w, h, &adopted)
+        }
+    };
+
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir mask parent: {e}"))?;
+    }
+    mask.save(output_path)
+        .map_err(|e| format!("save mask: {e}"))
+}
+
+/// ストロークマスク: 採用 bbox 近傍で prob >= 閾値 のピクセルを白塗り → dilate。
+fn build_stroke_mask(
+    w: u32,
+    h: u32,
+    adopted: &[[i32; 4]],
+    prob_map: &TextProbMap,
+) -> ImageBuffer<Luma<u8>, Vec<u8>> {
+    let mut raw = ImageBuffer::<Luma<u8>, Vec<u8>>::from_pixel(w, h, Luma([0u8]));
+    for &[x, y, rw, rh] in adopted {
+        if rw <= 0 || rh <= 0 {
             continue;
         }
-        let pad = 4;
-        let x0 = (x - pad).max(0) as u32;
-        let y0 = (y - pad).max(0) as u32;
-        let x1 = ((x + rw + pad).min(w.saturating_sub(1) as i32)).max(0) as u32;
-        let y1 = ((y + rh + pad).min(h.saturating_sub(1) as i32)).max(0) as u32;
+        // bbox を少しだけ広げた近傍で走査 (文字が bbox からわずかにはみ出す分を拾う)。
+        let x0 = (x - BBOX_GATE_PAD).max(0) as u32;
+        let y0 = (y - BBOX_GATE_PAD).max(0) as u32;
+        let x1 = ((x + rw + BBOX_GATE_PAD).min(w as i32) - 1).max(0) as u32;
+        let y1 = ((y + rh + BBOX_GATE_PAD).min(h as i32) - 1).max(0) as u32;
+        for yy in y0..=y1 {
+            for xx in x0..=x1 {
+                if prob_map.prob_at(xx, yy) >= DB_STROKE_THRESHOLD {
+                    raw.put_pixel(xx, yy, Luma([255u8]));
+                }
+            }
+        }
+    }
+    // 細線を LaMa が確実に飲み込むよう最小限膨張 (アンチエイリアスの裾を埋める)。
+    crate::edit::grab::dilate_mask_pub(&raw, DB_STROKE_DILATE)
+}
+
+/// bbox 矩形マスク (従来方式 / フォールバック)。採用 bbox を pad して白塗り。
+fn build_bbox_mask(w: u32, h: u32, adopted: &[[i32; 4]]) -> ImageBuffer<Luma<u8>, Vec<u8>> {
+    let mut mask = ImageBuffer::<Luma<u8>, Vec<u8>>::from_pixel(w, h, Luma([0u8]));
+    for &[x, y, rw, rh] in adopted {
+        if rw <= 0 || rh <= 0 {
+            continue;
+        }
+        let x0 = (x - BBOX_GATE_PAD).max(0) as u32;
+        let y0 = (y - BBOX_GATE_PAD).max(0) as u32;
+        let x1 = ((x + rw + BBOX_GATE_PAD).min(w.saturating_sub(1) as i32)).max(0) as u32;
+        let y1 = ((y + rh + BBOX_GATE_PAD).min(h.saturating_sub(1) as i32)).max(0) as u32;
         if x0 > x1 || y0 > y1 {
             continue;
         }
@@ -541,11 +639,7 @@ pub fn generate_mask_from_regions(
             }
         }
     }
-    if let Some(parent) = output_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir mask parent: {e}"))?;
-    }
-    mask.save(output_path)
-        .map_err(|e| format!("save mask: {e}"))
+    mask
 }
 
 async fn write_json_file<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
@@ -669,5 +763,99 @@ mod tests {
             layers.iter().map(|l| &l.text).collect::<Vec<_>>()
         );
         assert_eq!(layers[0].text, "SALE");
+    }
+
+    fn white_count(path: &Path) -> u64 {
+        let m = image::open(path).unwrap().to_luma8();
+        m.pixels().filter(|p| p[0] > 127).count() as u64
+    }
+
+    /// ストロークマスクが「矩形マスクより塗り面積が小さい」ことの回帰テスト。
+    ///
+    /// 2026-07-02 の技術調査結論: bbox 矩形をやめて DB 確率マップのストロークを塗れば、
+    /// 文字の隙間・行間の背景を塗らずに済み、縁残り・過剰復元が減る。ここでは「白矩形の中に
+    /// 黒の細線パターン」を疑似文字とし、確率マップは細線位置だけ高確率にする。同じ採用 bbox に
+    /// 対して、ストローク方式の塗り面積 < 矩形方式の塗り面積 を機械検証する。
+    #[test]
+    fn stroke_mask_paints_less_than_bbox_mask() {
+        use crate::edit::ocr::TextProbMap;
+
+        let dir = std::env::temp_dir().join(format!(
+            "gori-stroke-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let (w, h) = (200u32, 120u32);
+        // 背景グレー + bbox 内に「黒の細い縦線パターン」(疑似文字ストローク)。
+        let mut img = ImageBuffer::<Rgb<u8>, Vec<u8>>::from_pixel(w, h, Rgb([200, 200, 200]));
+        // 採用 bbox: (50,40) 100x40。
+        let (bx, by, bw, bh) = (50u32, 40u32, 100u32, 40u32);
+
+        // 確率マップ: 全面 0、bbox 内で 8px ごとに 2px 幅の縦ストロークだけ高確率 (1.0)。
+        let mut prob = vec![0u8; (w * h) as usize];
+        for yy in by..(by + bh) {
+            for xx in bx..(bx + bw) {
+                let local_x = xx - bx;
+                let is_stroke = (local_x % 8) < 2; // 2/8 = 25% だけがストローク
+                if is_stroke {
+                    img.put_pixel(xx, yy, Rgb([10, 10, 10]));
+                    prob[(yy * w + xx) as usize] = 255;
+                }
+            }
+        }
+        let img_path = dir.join("in.png");
+        img.save(&img_path).unwrap();
+
+        let prob_map = TextProbMap {
+            width: w,
+            height: h,
+            data: prob,
+        };
+
+        // 採用される十分な面積 + 意味あるテキスト (100x40 = 4000px = 16.6% >> 0.1%)。
+        let regions = vec![TextRegion {
+            id: "region-0000".to_string(),
+            bbox: [bx as i32, by as i32, bw as i32, bh as i32],
+            polygon: Vec::new(),
+            text: "SALE".to_string(),
+            confidence: 0.9,
+            language: None,
+        }];
+
+        // ストローク方式。
+        let stroke_path = dir.join("stroke-mask.png");
+        generate_text_mask(&img_path, &regions, Some(&prob_map), &stroke_path).unwrap();
+        let stroke_area = white_count(&stroke_path);
+
+        // 矩形フォールバック (prob_map=None)。
+        let bbox_path = dir.join("bbox-mask.png");
+        generate_text_mask(&img_path, &regions, None, &bbox_path).unwrap();
+        let bbox_area = white_count(&bbox_path);
+
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(stroke_area > 0, "ストロークマスクが空 (文字を消せない)");
+        assert!(
+            stroke_area < bbox_area,
+            "ストロークマスク塗り面積 {} が矩形マスク {} 以上. \
+             ストローク方式が矩形より塗らない前提が崩れている.",
+            stroke_area,
+            bbox_area
+        );
+        // 定量: 25% ストローク + 2px 膨張。実測比 ≈0.64。矩形化 (膨張過多で bbox とほぼ同面積)
+        // への退行を捕まえるため、明確な削減 (比 < 0.8) を要求する。
+        let ratio = stroke_area as f64 / bbox_area as f64;
+        assert!(
+            ratio < 0.8,
+            "ストローク削減が弱すぎる (stroke={} bbox={} 比={:.2}). \
+             膨張過多で矩形マスクに退行している可能性.",
+            stroke_area,
+            bbox_area,
+            ratio
+        );
     }
 }

@@ -25,10 +25,49 @@ struct Polygon {
     score: f32,
 }
 
+/// PaddleOCR DB 検出器が内部生成するテキスト確率マップを、**元画像解像度**へ
+/// アップスケールして保持したもの。各バイトは `prob * 255`（0-255）。
+///
+/// なぜ元画像解像度に揃えるか: 呼び出し側 (magic_layer の text-mask 生成) は
+/// 元画像ピクセル座標の bbox でゲートするため、確率マップも同座標系にしておけば
+/// 「bbox 内 ∩ prob >= 閾値」のピクセル判定が O(1) のインデックス参照で済む。
+#[derive(Debug, Clone)]
+pub struct TextProbMap {
+    pub width: u32,
+    pub height: u32,
+    /// row-major, width*height 個。各バイト = clamp(prob,0,1)*255。
+    pub data: Vec<u8>,
+}
+
+impl TextProbMap {
+    /// 元画像ピクセル (x,y) の確率 (0.0-1.0)。範囲外は 0。
+    pub fn prob_at(&self, x: u32, y: u32) -> f32 {
+        if x >= self.width || y >= self.height {
+            return 0.0;
+        }
+        let idx = (y * self.width + x) as usize;
+        self.data.get(idx).copied().unwrap_or(0) as f32 / 255.0
+    }
+}
+
 pub async fn ocr_image(
     runtime: &EditRuntime,
     input_path: &Path,
 ) -> Result<Vec<TextRegion>, String> {
+    let (regions, _prob) = ocr_image_with_probmap(runtime, input_path).await?;
+    Ok(regions)
+}
+
+/// `ocr_image` と同じパイプラインだが、DB 検出器の確率マップ (元画像解像度) も返す。
+///
+/// なぜ別関数か: 既存の `ocr_image` 呼び出し側 (commands/edit_ocr.rs) は確率マップを
+/// 必要としない。シグネチャを壊さず、確率マップを使いたい呼び出し側 (magic_layer の
+/// ストロークマスク生成) だけがこちらを使う。確率マップが取れない経路 (モデル出力形状が
+/// 想定外・検出0件等) では `None` を返し、呼び出し側は従来の bbox 矩形にフォールバックする。
+pub async fn ocr_image_with_probmap(
+    runtime: &EditRuntime,
+    input_path: &Path,
+) -> Result<(Vec<TextRegion>, Option<TextProbMap>), String> {
     tracing::info!(target: "codex.edit", "ocr: 画像デコード開始");
     let img = image::open(input_path).map_err(|e| format!("open: {e}"))?;
     tracing::info!(target: "codex.edit", "ocr: 画像デコード完了 {}x{}", img.width(), img.height());
@@ -38,7 +77,7 @@ pub async fn ocr_image(
     tracing::info!(target: "codex.edit", "ocr: detセッション取得開始");
     let det_session = runtime.get_session(&det_spec).await?;
     tracing::info!(target: "codex.edit", "ocr: detection開始 {}x{}", img.width(), img.height());
-    let polygons = {
+    let (polygons, prob_map) = {
         let mut session = det_session.lock().await;
         run_paddleocr_detection(&mut session, &img)?
     };
@@ -74,13 +113,13 @@ pub async fn ocr_image(
     }
 
     tracing::info!(target: "codex.edit", "ocr: recognition完了 regions={}", regions.len());
-    Ok(regions)
+    Ok((regions, prob_map))
 }
 
 fn run_paddleocr_detection(
     session: &mut ort::session::Session,
     img: &DynamicImage,
-) -> Result<Vec<Polygon>, String> {
+) -> Result<(Vec<Polygon>, Option<TextProbMap>), String> {
     let prepared = prepare_detection_input(img)?;
     let tensor = Tensor::<f32>::from_array((
         [1usize, 3, prepared.height as usize, prepared.width as usize],
@@ -107,7 +146,76 @@ fn run_paddleocr_detection(
         prepared.scale,
         img.dimensions(),
     );
-    Ok(polygons)
+    // 確率マップを捨てずに元画像解像度へアップスケールして保持する。
+    // 縁残り・過剰復元を減らす「ストロークマスク」の材料 (magic_layer が bbox でゲートして使う)。
+    let prob_map = upscale_prob_map(
+        heatmap,
+        map_w,
+        map_h,
+        prepared.width,
+        prepared.height,
+        prepared.scale,
+        img.dimensions(),
+    );
+    Ok((polygons, prob_map))
+}
+
+/// DB 検出器の確率マップ (map_w×map_h、モデル入力座標系) を、元画像 (orig_w×orig_h)
+/// 解像度の `TextProbMap` へ最近傍アップスケールする。
+///
+/// 座標変換は polygons_from_heatmap の `to_orig` と同じ規則:
+///   map 座標 → 入力座標 (×input/map) → 元画像座標 (÷scale)。
+/// 逆に、元画像画素 (ox,oy) に対応する map 画素を求めて確率を引く。
+/// heatmap が空 / 座標系が縮退している場合は None (呼び出し側は bbox 矩形にフォールバック)。
+fn upscale_prob_map(
+    heatmap: &[f32],
+    map_w: usize,
+    map_h: usize,
+    input_w: u32,
+    input_h: u32,
+    scale: f32,
+    (orig_w, orig_h): (u32, u32),
+) -> Option<TextProbMap> {
+    if map_w == 0 || map_h == 0 || heatmap.is_empty() || orig_w == 0 || orig_h == 0 {
+        return None;
+    }
+    if !(scale > 0.0) || input_w == 0 || input_h == 0 {
+        return None;
+    }
+    let plane_len = map_w * map_h;
+    // detection 出力は [1,1,H,W] 等の先頭に batch/channel が付くことがあるので末尾平面を使う
+    // (polygons_from_heatmap と同じ扱い)。
+    let offset = heatmap.len().checked_sub(plane_len)?;
+    let heat = &heatmap[offset..];
+
+    // 元画像 (ox,oy) → 入力座標 (×scale) → map 座標 (÷ input/map)。
+    let sx = input_w as f32 / map_w as f32; // map→input
+    let sy = input_h as f32 / map_h as f32;
+    let mut data = vec![0u8; (orig_w * orig_h) as usize];
+    for oy in 0..orig_h {
+        // input 座標へ: iy = oy * scale。map 座標へ: my = iy / sy。
+        let iy = oy as f32 * scale;
+        let my = (iy / sy).floor() as i64;
+        if my < 0 || my as usize >= map_h {
+            continue;
+        }
+        let row = (my as usize) * map_w;
+        let out_row = (oy * orig_w) as usize;
+        for ox in 0..orig_w {
+            let ix = ox as f32 * scale;
+            let mx = (ix / sx).floor() as i64;
+            if mx < 0 || mx as usize >= map_w {
+                continue;
+            }
+            let prob = heat[row + mx as usize].clamp(0.0, 1.0);
+            data[out_row + ox as usize] = (prob * 255.0).round() as u8;
+        }
+    }
+    Some(TextProbMap {
+        width: orig_w,
+        height: orig_h,
+        data,
+    })
 }
 
 struct PreparedInput {
