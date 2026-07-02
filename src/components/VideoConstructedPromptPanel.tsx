@@ -152,12 +152,28 @@ export function VideoConstructedPromptPanel() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [generatedPrompt, promptOverride]);
 
+  // D-4 と同型の override 消失バグ修正 (ConstructedPromptPanel.tsx L151-167 参照)。
+  // 旧版はガード無しで、generatedPrompt が変化するたびに override を解除していた。
+  // そのため「タブ切替でのアンマウント→再マウント初回」など、ユーザーがシーンを
+  // 操作していないのに effect が走る局面で、手入力の override が消えていた。
+  //
+  // 動画版の generatedPrompt は buildVideoScenePrompt(scene) 由来でアスペクト比を
+  // 含まないため、これがそのまま「シーン構築のシグネチャ」になる。prevSceneSigRef
+  // で「前回と比べて実際にシーンが変化したときだけ」override を解除する。初回
+  // (prev===null) は解除しない。
+  const sceneSignature = generatedPrompt;
+  const prevSceneSigRef = useRef<string | null>(null);
   useEffect(() => {
+    const prev = prevSceneSigRef.current;
+    prevSceneSigRef.current = sceneSignature;
+    if (prev === null) return;
+    if (prev === sceneSignature) return;
     if (promptOverride !== null && promptOverride !== generatedPrompt) {
       setPromptOverride(null);
     }
+    // sceneSignature の変化だけをトリガーにする (無限ループ回避)。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [generatedPrompt]);
+  }, [sceneSignature]);
 
   const onChangeDraft = (next: string) => {
     setDraft(next);

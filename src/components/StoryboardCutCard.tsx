@@ -1,8 +1,34 @@
+import { useEffect, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 
 import { storyboard } from "../lib/ipc";
 import { usePlanChat } from "../lib/store/planChat";
 import { useStoryboardRun, type CutState } from "../lib/store/storyboardRun";
+
+/**
+ * B-6: 生成中カットの経過秒を 1 秒ごとに更新する (通常生成 WorkerTile と同じ流儀)。
+ * 起点は storyboardRun.lastEventAt (直近イベント受信時刻)。生成中でないときは
+ * null を返し interval も張らない。gpt-image-2 は 1 カット数百秒かかるため、
+ * 「生成中…」だけだと固まって見える対策。
+ */
+function useElapsedSeconds(active: boolean, startedAt: number | null): number | null {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active || !startedAt) return;
+    setNow(Date.now());
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [active, startedAt]);
+  if (!active || !startedAt) return null;
+  return Math.max(0, Math.floor((now - startedAt) / 1000));
+}
+
+function formatElapsed(sec: number): string {
+  if (sec < 60) return `${sec}秒`;
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return `${m}分${String(s).padStart(2, "0")}秒`;
+}
 
 const STATUS_CLASS: Record<CutState["status"], string> = {
   pending: "border-[#343434] bg-[#101010] text-neutral-500",
@@ -32,7 +58,11 @@ export function StoryboardCutCard({ cut }: { cut: CutState }) {
   const regenerateCut = useStoryboardRun((s) => s.regenerateCut);
   const skipCut = useStoryboardRun((s) => s.skipCut);
   const activeRunId = useStoryboardRun((s) => s.activeRunId);
+  const lastEventAt = useStoryboardRun((s) => s.lastEventAt);
   const storyboardParams = usePlanChat((s) => s.storyboardParams);
+
+  // B-6: このカットが生成中のとき、直近イベントからの経過秒を表示する。
+  const elapsed = useElapsedSeconds(cut.status === "running", lastEventAt);
 
   // その場で1枚だけ再生成する (2026-06-08 STΛCK指示「1枚生成＋気に入らなければその場で再生成」)。
   // 旧 regenerateCut() は UI を running 表示に戻すだけでバックエンド未接続だった。
@@ -97,7 +127,14 @@ export function StoryboardCutCard({ cut }: { cut: CutState }) {
         <div className="min-w-0 flex-1">
           <div className="flex items-center justify-between gap-2">
             <h4 className="font-mono text-xs font-black text-white">{cut.cutId}</h4>
-            <span className="text-[11px] font-black">{STATUS_LABEL[cut.status]}</span>
+            <span className="text-[11px] font-black">
+              {STATUS_LABEL[cut.status]}
+              {cut.status === "running" && elapsed !== null && (
+                <span className="ml-1 font-mono text-[10px] font-bold tabular-nums text-blue-200/80">
+                  {formatElapsed(elapsed)}
+                </span>
+              )}
+            </span>
           </div>
           <p className="mt-1 text-[11px] text-neutral-300">
             シーン: {cut.description ?? cut.sceneGroupId ?? "未設定"}
