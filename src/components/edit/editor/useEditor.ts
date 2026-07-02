@@ -25,6 +25,7 @@ import {
   removeGrabPreviewOverlay,
   showGrabPreviewOverlay,
 } from "./magicLayerToFabric";
+import { restoreCanvas } from "./history";
 
 const IMAGE_EXTS = ["png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff"];
 
@@ -39,6 +40,8 @@ export function useEditorActions() {
   const setError = useEditor((state) => state.setError);
   const setGrabPreview = useEditor((state) => state.setGrabPreview);
   const bumpRevision = useEditor((state) => state.bumpRevision);
+  const pushHistory = useEditor((state) => state.pushHistory);
+  const resetHistory = useEditor((state) => state.resetHistory);
   const activeProjectId = useActiveProject((state) => state.activeProjectId);
   const projects = useProjects((state) => state.projects);
   const projectName = projects.find((project) => project.id === activeProjectId)?.name ?? null;
@@ -61,6 +64,7 @@ export function useEditorActions() {
     if (tool === "text-add") {
       await addTextLayer(canvas);
       bumpRevision();
+      pushHistory();
       setMessage("テキストレイヤーを追加しました。");
       return;
     }
@@ -108,6 +112,12 @@ export function useEditorActions() {
         setMessage("領域消去結果をレイヤーに追加しました。");
       }
       bumpRevision();
+      // clickseg / grab は「準備 (embed)」だけで canvas を変えないので履歴を積まない。
+      // 実際のマスク追加・掴み確定は handleCanvasClickForTool / confirmGrab 側で積む。
+      // magic / redo-decompose は runMagic 内で resetHistory する (canvas 総入れ替え)。
+      if (tool !== "clickseg" && tool !== "grab" && tool !== "magic" && tool !== "redo-decompose") {
+        pushHistory();
+      }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
@@ -157,6 +167,9 @@ export function useEditorActions() {
           : "分解しました。右の一覧から選んで動かせます。",
       );
       bumpRevision();
+      // Magic Layer / 再分解は canvas を丸ごと作り直す = 新しい編集セッションの起点。
+      // 履歴を今の状態で初期化する (それ以前の状態には戻せない = 画像単位でリセット)。
+      resetHistory();
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : String(caught);
       magicStore.setError(message);
@@ -178,6 +191,7 @@ export function useEditorActions() {
         await addMaskLayerFromBase64(canvas, result.maskBase64);
         setMessage(`マスク生成完了 (${result.width}×${result.height})`);
         bumpRevision();
+        pushHistory();
       } catch (caught) {
         setError(caught instanceof Error ? caught.message : String(caught));
       } finally {
@@ -232,6 +246,8 @@ export function useEditorActions() {
       setGrabPreview(null);
       setMessage("掴みました。ドラッグで移動・拡大縮小・回転できます。続けて別の対象も掴めます。");
       bumpRevision();
+      // AI 操作 (グラブ確定) も 1 手で戻せるよう履歴を積む。
+      pushHistory();
     } catch (caught) {
       // 失敗時は canvas を変えずにエラーだけ出す (アトミック: 中途半端に反映しない)。
       setError(caught instanceof Error ? caught.message : String(caught));
@@ -244,6 +260,44 @@ export function useEditorActions() {
     if (canvas) removeGrabPreviewOverlay(canvas);
     setGrabPreview(null);
     setMessage("掴む範囲の選択をやり直せます。対象をクリックしてください。");
+  };
+
+  /**
+   * Undo / Redo の実行。store から次に復元すべきスナップショットを取り出し、
+   * suppress フラグを立ててから loadFromJSON で復元する。復元中に発火する
+   * canvas イベント (object:added/modified 等) では pushHistory が no-op になり、
+   * 履歴が二重に汚れない。復元後に選択をクリアし revision を上げて UI を同期する。
+   */
+  const performUndo = async () => {
+    const { canvas: liveCanvas, undo, setHistorySuppressed } = useEditor.getState();
+    if (!liveCanvas) return;
+    const snapshot = undo();
+    if (snapshot === null) return;
+    setHistorySuppressed(true);
+    try {
+      await restoreCanvas(liveCanvas, snapshot);
+    } finally {
+      setHistorySuppressed(false);
+    }
+    useEditor.getState().setSelectedLayerId(null);
+    bumpRevision();
+    setMessage("元に戻しました。");
+  };
+
+  const performRedo = async () => {
+    const { canvas: liveCanvas, redo, setHistorySuppressed } = useEditor.getState();
+    if (!liveCanvas) return;
+    const snapshot = redo();
+    if (snapshot === null) return;
+    setHistorySuppressed(true);
+    try {
+      await restoreCanvas(liveCanvas, snapshot);
+    } finally {
+      setHistorySuppressed(false);
+    }
+    useEditor.getState().setSelectedLayerId(null);
+    bumpRevision();
+    setMessage("やり直しました。");
   };
 
   const saveDroppedFileAndRunMagic = async (file: File) => {
@@ -311,6 +365,8 @@ export function useEditorActions() {
     handleCanvasClickForTool,
     confirmGrab,
     cancelGrab,
+    performUndo,
+    performRedo,
     saveDroppedFileAndRunMagic,
     saveDroppedPathAndRunMagic,
   };

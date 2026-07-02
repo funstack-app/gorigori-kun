@@ -19,6 +19,8 @@ const TOOLS: Array<{ id: EditorTool; icon: ReactNode; label: string }> = [
 export function EditorToolbar() {
   const active = useEditor((state) => state.activeTool);
   const busy = useEditor((state) => state.busyTool);
+  const canUndo = useEditor((state) => state.canUndo);
+  const canRedo = useEditor((state) => state.canRedo);
   const actions = useEditorActions();
 
   return (
@@ -46,6 +48,27 @@ export function EditorToolbar() {
           </button>
         );
       })}
+
+      {/* 区切り + Undo/Redo。ツールではなく履歴操作なので下部に分けて置く。 */}
+      <span className="my-1 h-px w-6 bg-[#2a2a2a]" aria-hidden />
+      <button
+        type="button"
+        onClick={() => void actions.performUndo()}
+        title="元に戻す (⌘Z)"
+        disabled={!canUndo}
+        className="flex h-10 w-10 items-center justify-center rounded-md border border-transparent text-neutral-400 transition hover:bg-[#1a1a1a] hover:text-white disabled:cursor-not-allowed disabled:opacity-30"
+      >
+        <UndoIcon />
+      </button>
+      <button
+        type="button"
+        onClick={() => void actions.performRedo()}
+        title="やり直す (⇧⌘Z)"
+        disabled={!canRedo}
+        className="flex h-10 w-10 items-center justify-center rounded-md border border-transparent text-neutral-400 transition hover:bg-[#1a1a1a] hover:text-white disabled:cursor-not-allowed disabled:opacity-30"
+      >
+        <RedoIcon />
+      </button>
     </aside>
   );
 }
@@ -139,6 +162,24 @@ function RefreshIcon() {
   return (
     <svg {...SVG_PROPS} aria-hidden>
       <path d="M21 12a9 9 0 11-3-6.7M21 4v4h-4" />
+    </svg>
+  );
+}
+
+function UndoIcon() {
+  return (
+    <svg {...SVG_PROPS} aria-hidden>
+      <path d="M9 7L4 12l5 5" />
+      <path d="M4 12h11a5 5 0 015 5v1" />
+    </svg>
+  );
+}
+
+function RedoIcon() {
+  return (
+    <svg {...SVG_PROPS} aria-hidden>
+      <path d="M15 7l5 5-5 5" />
+      <path d="M20 12H9a5 5 0 00-5 5v1" />
     </svg>
   );
 }

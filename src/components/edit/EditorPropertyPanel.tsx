@@ -50,34 +50,36 @@ function TextPropertyEditor({ object }: { object: FabricObject }) {
         <textarea
           value={String(object.text ?? "")}
           onChange={(event) => apply({ text: event.target.value })}
+          onBlur={apply.commit}
           rows={4}
           className="w-full resize-none rounded-lg border border-[#343434] bg-[#0b0b0b] px-3 py-2 text-sm text-neutral-100 outline-none focus:border-pink-400"
         />
       </Field>
-      <FontPicker value={String(object.fontFamily ?? "system-ui")} onChange={(fontFamily) => apply({ fontFamily })} />
-      <NumberSlider label="サイズ" value={numberValue(object.fontSize, 32)} min={6} max={180} onChange={(fontSize) => apply({ fontSize })} />
+      <FontPicker value={String(object.fontFamily ?? "system-ui")} onChange={(fontFamily) => { apply({ fontFamily }); apply.commit(); }} />
+      <NumberSlider label="サイズ" value={numberValue(object.fontSize, 32)} min={6} max={180} onChange={(fontSize) => apply({ fontSize })} onCommit={apply.commit} />
       <Field label="色">
         <input
           type="color"
           value={colorValue(object.fill)}
           onChange={(event) => apply({ fill: event.target.value })}
+          onBlur={apply.commit}
           className="h-9 w-full rounded-lg border border-[#343434] bg-[#0b0b0b] px-2"
         />
       </Field>
       <div className="grid grid-cols-3 gap-2">
-        <Toggle label="B" active={object.fontWeight === "bold"} onClick={() => apply({ fontWeight: object.fontWeight === "bold" ? "normal" : "bold" })} />
-        <Toggle label="I" active={object.fontStyle === "italic"} onClick={() => apply({ fontStyle: object.fontStyle === "italic" ? "normal" : "italic" })} />
-        <Toggle label="U" active={object.underline === true} onClick={() => apply({ underline: object.underline !== true })} />
+        <Toggle label="B" active={object.fontWeight === "bold"} onClick={() => { apply({ fontWeight: object.fontWeight === "bold" ? "normal" : "bold" }); apply.commit(); }} />
+        <Toggle label="I" active={object.fontStyle === "italic"} onClick={() => { apply({ fontStyle: object.fontStyle === "italic" ? "normal" : "italic" }); apply.commit(); }} />
+        <Toggle label="U" active={object.underline === true} onClick={() => { apply({ underline: object.underline !== true }); apply.commit(); }} />
       </div>
       <div className="grid grid-cols-3 gap-2">
         {(["left", "center", "right"] as const).map((align) => (
-          <Toggle key={align} label={align === "left" ? "左" : align === "center" ? "中央" : "右"} active={object.textAlign === align} onClick={() => apply({ textAlign: align })} />
+          <Toggle key={align} label={align === "left" ? "左" : align === "center" ? "中央" : "右"} active={object.textAlign === align} onClick={() => { apply({ textAlign: align }); apply.commit(); }} />
         ))}
       </div>
-      <NumberSlider label="文字間隔" value={numberValue(object.charSpacing, 0)} min={-200} max={800} onChange={(charSpacing) => apply({ charSpacing })} />
-      <NumberSlider label="行間" value={numberValue(object.lineHeight, 1.16)} min={0.6} max={3} step={0.05} onChange={(lineHeight) => apply({ lineHeight })} />
-      <NumberSlider label="不透明度" value={numberValue(object.opacity, 1)} min={0} max={1} step={0.01} onChange={(opacity) => apply({ opacity })} />
-      <NumberSlider label="回転" value={numberValue(object.angle, 0)} min={-180} max={180} onChange={(angle) => apply({ angle })} />
+      <NumberSlider label="文字間隔" value={numberValue(object.charSpacing, 0)} min={-200} max={800} onChange={(charSpacing) => apply({ charSpacing })} onCommit={apply.commit} />
+      <NumberSlider label="行間" value={numberValue(object.lineHeight, 1.16)} min={0.6} max={3} step={0.05} onChange={(lineHeight) => apply({ lineHeight })} onCommit={apply.commit} />
+      <NumberSlider label="不透明度" value={numberValue(object.opacity, 1)} min={0} max={1} step={0.01} onChange={(opacity) => apply({ opacity })} onCommit={apply.commit} />
+      <NumberSlider label="回転" value={numberValue(object.angle, 0)} min={-180} max={180} onChange={(angle) => apply({ angle })} onCommit={apply.commit} />
       <AdvancedGeometry object={object} apply={apply} />
     </div>
   );
@@ -89,14 +91,19 @@ function ImagePropertyEditor({ object }: { object: FabricObject }) {
   return (
     <div className="space-y-3">
       {/* まず「触ってすぐ効く」直感操作だけを見せる。生の座標・寸法は詳細に畳む。 */}
-      <NumberSlider label="不透明度" value={numberValue(object.opacity, 1)} min={0} max={1} step={0.01} onChange={(opacity) => apply({ opacity })} />
+      <NumberSlider label="不透明度" value={numberValue(object.opacity, 1)} min={0} max={1} step={0.01} onChange={(opacity) => apply({ opacity })} onCommit={apply.commit} />
       <div className="grid grid-cols-2 gap-2">
-        <Toggle label="水平反転" active={object.flipX === true} onClick={() => apply({ flipX: object.flipX !== true })} />
-        <Toggle label="垂直反転" active={object.flipY === true} onClick={() => apply({ flipY: object.flipY !== true })} />
+        <Toggle label="水平反転" active={object.flipX === true} onClick={() => { apply({ flipX: object.flipX !== true }); apply.commit(); }} />
+        <Toggle label="垂直反転" active={object.flipY === true} onClick={() => { apply({ flipY: object.flipY !== true }); apply.commit(); }} />
       </div>
-      <NumberSlider label="明度" value={numberValue(object.get?.("brightness"), 0)} min={-1} max={1} step={0.05} onChange={(brightness) => void applyImageFilters(object, { brightness })} />
-      <NumberSlider label="コントラスト" value={numberValue(object.get?.("contrast"), 0)} min={-1} max={1} step={0.05} onChange={(contrast) => void applyImageFilters(object, { contrast })} />
-      <NumberSlider label="回転" value={numberValue(object.angle, 0)} min={-180} max={180} onChange={(angle) => apply({ angle })} />
+      {/*
+        明度/コントラストは filters を非同期で貼るため、スライダー確定時に「フィルタ適用が
+        済んでから」履歴を積む必要がある (onPointerUp 直後だと filters がまだ空の可能性)。
+        applyImageFilters に commit を渡し、適用完了後に snapshot させる。
+      */}
+      <NumberSlider label="明度" value={numberValue(object.get?.("brightness"), 0)} min={-1} max={1} step={0.05} onChange={(brightness) => void applyImageFilters(object, { brightness })} onCommit={() => void applyImageFilters(object, {}, apply.commit)} />
+      <NumberSlider label="コントラスト" value={numberValue(object.get?.("contrast"), 0)} min={-1} max={1} step={0.05} onChange={(contrast) => void applyImageFilters(object, { contrast })} onCommit={() => void applyImageFilters(object, {}, apply.commit)} />
+      <NumberSlider label="回転" value={numberValue(object.angle, 0)} min={-180} max={180} onChange={(angle) => apply({ angle })} onCommit={apply.commit} />
       <AdvancedGeometry object={object} apply={apply} withSize />
     </div>
   );
@@ -112,7 +119,7 @@ function AdvancedGeometry({
   withSize = false,
 }: {
   object: FabricObject;
-  apply: (values: Record<string, unknown>) => void;
+  apply: ApplyFn;
   withSize?: boolean;
 }) {
   const [open, setOpen] = useState(false);
@@ -139,13 +146,13 @@ function AdvancedGeometry({
       {open && (
         <div className="mt-2 space-y-2">
           <div className="grid grid-cols-2 gap-2">
-            <NumberInput label="X" value={Math.round(numberValue(object.left, 0))} onChange={(left) => apply({ left })} />
-            <NumberInput label="Y" value={Math.round(numberValue(object.top, 0))} onChange={(top) => apply({ top })} />
+            <NumberInput label="X" value={Math.round(numberValue(object.left, 0))} onChange={(left) => apply({ left })} onCommit={apply.commit} />
+            <NumberInput label="Y" value={Math.round(numberValue(object.top, 0))} onChange={(top) => apply({ top })} onCommit={apply.commit} />
           </div>
           {withSize && (
             <div className="grid grid-cols-2 gap-2">
-              <NumberInput label="幅" value={width} onChange={setWidth} />
-              <NumberInput label="高さ" value={height} onChange={setHeight} />
+              <NumberInput label="幅" value={width} onChange={setWidth} onCommit={apply.commit} />
+              <NumberInput label="高さ" value={height} onChange={setHeight} onCommit={apply.commit} />
             </div>
           )}
         </div>
@@ -154,16 +161,28 @@ function AdvancedGeometry({
   );
 }
 
+/**
+ * プロパティ適用関数。呼ぶたびに object へ set + 再描画するが、履歴はここでは積まない。
+ * スライダー/数値入力を動かすたびに積むと 1 操作で履歴が数十件になるため、履歴は
+ * 確定時 (スライダーの pointerup / 入力の blur / トグル押下) に commit() で積む。
+ * apply には commit を生やして返す。
+ */
 function usePropertyApply(object: FabricObject) {
   const canvas = useEditor((state) => state.canvas) as { requestRenderAll?: () => void } | null;
   const bumpRevision = useEditor((state) => state.bumpRevision);
-  return (values: Record<string, unknown>) => {
+  const pushHistory = useEditor((state) => state.pushHistory);
+  const apply = (values: Record<string, unknown>) => {
     object.set?.(values);
     object.setCoords?.();
     canvas?.requestRenderAll?.();
     bumpRevision();
   };
+  // 確定時に呼ぶ: 現在のキャンバス状態を 1 手として履歴に積む。
+  (apply as ApplyFn).commit = () => pushHistory();
+  return apply as ApplyFn;
 }
+
+type ApplyFn = ((values: Record<string, unknown>) => void) & { commit: () => void };
 
 function Field({ label, children }: FieldProps) {
   return (
@@ -174,13 +193,24 @@ function Field({ label, children }: FieldProps) {
   );
 }
 
-function NumberInput({ label, value, onChange }: { label: string; value: number; onChange: (value: number) => void }) {
+function NumberInput({
+  label,
+  value,
+  onChange,
+  onCommit,
+}: {
+  label: string;
+  value: number;
+  onChange: (value: number) => void;
+  onCommit?: () => void;
+}) {
   return (
     <Field label={label}>
       <input
         type="number"
         value={Number.isFinite(value) ? value : 0}
         onChange={(event) => onChange(Number(event.target.value))}
+        onBlur={onCommit}
         className="w-full rounded-lg border border-[#343434] bg-[#0b0b0b] px-3 py-2 text-sm text-neutral-100 outline-none focus:border-pink-400"
       />
     </Field>
@@ -194,6 +224,7 @@ function NumberSlider({
   max,
   step = 1,
   onChange,
+  onCommit,
 }: {
   label: string;
   value: number;
@@ -201,6 +232,7 @@ function NumberSlider({
   max: number;
   step?: number;
   onChange: (value: number) => void;
+  onCommit?: () => void;
 }) {
   return (
     <Field label={`${label}: ${formatNumber(value)}`}>
@@ -212,6 +244,8 @@ function NumberSlider({
           step={step}
           value={Number.isFinite(value) ? value : min}
           onChange={(event) => onChange(Number(event.target.value))}
+          onPointerUp={onCommit}
+          onKeyUp={onCommit}
           className="accent-pink-500"
         />
         <input
@@ -221,6 +255,7 @@ function NumberSlider({
           step={step}
           value={Number.isFinite(value) ? value : min}
           onChange={(event) => onChange(Number(event.target.value))}
+          onBlur={onCommit}
           className="rounded-lg border border-[#343434] bg-[#0b0b0b] px-2 py-1 text-xs text-neutral-100 outline-none focus:border-pink-400"
         />
       </div>
@@ -242,7 +277,11 @@ function Toggle({ label, active, onClick }: { label: string; active: boolean; on
   );
 }
 
-async function applyImageFilters(object: FabricObject, next: { brightness?: number; contrast?: number }) {
+async function applyImageFilters(
+  object: FabricObject,
+  next: { brightness?: number; contrast?: number },
+  onCommit?: () => void,
+) {
   const currentBrightness = next.brightness ?? numberValue(object.get?.("brightness"), 0);
   const currentContrast = next.contrast ?? numberValue(object.get?.("contrast"), 0);
   object.set?.({ brightness: currentBrightness, contrast: currentContrast });
@@ -258,6 +297,8 @@ async function applyImageFilters(object: FabricObject, next: { brightness?: numb
   } finally {
     useEditor.getState().bumpRevision();
     (useEditor.getState().canvas as { requestRenderAll?: () => void } | null)?.requestRenderAll?.();
+    // filters を貼り終えてから履歴を積む (呼ばれたときのみ = スライダー確定時)。
+    onCommit?.();
   }
 }
 

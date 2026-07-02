@@ -1,3 +1,5 @@
+import { useEffect } from "react";
+
 import { EditorCanvas } from "./edit/EditorCanvas";
 import { EditorLayerList } from "./edit/EditorLayerList";
 import { EditorPropertyPanel } from "./edit/EditorPropertyPanel";
@@ -39,7 +41,36 @@ export function EditWorkspace() {
   const busyTool = useEditor((state) => state.busyTool);
   const editMode = useEditor((state) => state.editMode);
   const setEditMode = useEditor((state) => state.setEditMode);
-  const { chooseImage } = useEditorActions();
+  const { chooseImage, performUndo, performRedo } = useEditorActions();
+
+  // Cmd/Ctrl+Z = 元に戻す / Cmd/Ctrl+Shift+Z = やり直す。
+  // 編集タブ表示中だけ有効 (このコンポーネントがマウントされている間だけ listener を張る)。
+  // input / textarea / contentEditable にフォーカスがあるときは発火しない
+  // (テキスト入力・レイヤー名編集の標準 Undo を奪わないため)。
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey)) return;
+      if (event.key.toLowerCase() !== "z") return;
+      const target = event.target as HTMLElement | null;
+      const tag = target?.tagName;
+      if (
+        tag === "INPUT" ||
+        tag === "TEXTAREA" ||
+        tag === "SELECT" ||
+        target?.isContentEditable
+      ) {
+        return;
+      }
+      event.preventDefault();
+      if (event.shiftKey) {
+        void performRedo();
+      } else {
+        void performUndo();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [performUndo, performRedo]);
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-[#2a2a2a] bg-[#1e1e1e]">

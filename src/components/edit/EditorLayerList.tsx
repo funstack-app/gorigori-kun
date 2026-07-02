@@ -18,6 +18,7 @@ export function EditorLayerList() {
   const revision = useEditor((state) => state.revision);
   const setSelectedLayerId = useEditor((state) => state.setSelectedLayerId);
   const bumpRevision = useEditor((state) => state.bumpRevision);
+  const pushHistory = useEditor((state) => state.pushHistory);
   const [draggingId, setDraggingId] = useState<string | null>(null);
 
   const layers = useMemo(() => layerMetasFromCanvas(canvas), [canvas, revision]);
@@ -34,6 +35,7 @@ export function EditorLayerList() {
     setObjectVisible(object, object.visible === false);
     (canvas as { requestRenderAll?: () => void } | null)?.requestRenderAll?.();
     bumpRevision();
+    pushHistory();
   };
 
   const toggleLock = (id: string) => {
@@ -42,6 +44,7 @@ export function EditorLayerList() {
     setLocked(object, object.get?.("locked") !== true);
     (canvas as { requestRenderAll?: () => void } | null)?.requestRenderAll?.();
     bumpRevision();
+    pushHistory();
   };
 
   const rename = (id: string, name: string) => {
@@ -49,12 +52,14 @@ export function EditorLayerList() {
     if (!object) return;
     setObjectName(object, name);
     bumpRevision();
+    // 履歴はキーストロークごとではなく確定時 (onBlur) に積む (連打で埋めない)。
   };
 
   const remove = (id: string) => {
     removeObjectById(canvas, id);
     if (selectedLayerId === id) setSelectedLayerId(null);
     bumpRevision();
+    pushHistory();
   };
 
   const dropOn = (targetIndex: number) => {
@@ -62,6 +67,7 @@ export function EditorLayerList() {
     reorderObject(canvas, draggingId, targetIndex);
     setDraggingId(null);
     bumpRevision();
+    pushHistory();
   };
 
   return (
@@ -117,6 +123,7 @@ export function EditorLayerList() {
                   value={layer.name}
                   onClick={(event) => event.stopPropagation()}
                   onChange={(event) => rename(layer.id, event.target.value)}
+                  onBlur={() => pushHistory()}
                   className="min-w-0 rounded border border-transparent bg-transparent px-1 py-1 text-xs font-bold text-neutral-100 outline-none focus:border-pink-400 focus:bg-[#181818]"
                 />
                 <button

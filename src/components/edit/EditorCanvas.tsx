@@ -69,7 +69,15 @@ export function EditorCanvas() {
         setSelectedLayerId(null);
         bumpRevision();
       });
-      canvas.on("object:modified", bumpRevision);
+      // object:modified は移動/拡縮/回転が「確定した」ときだけ発火する
+      // (moving/scaling/rotating の連打中は発火しない)。ここでだけ履歴を積む。
+      canvas.on("object:modified", () => {
+        bumpRevision();
+        useEditor.getState().pushHistory();
+      });
+      // 以下は連打イベント。プレビュー再描画のため revision は上げるが、履歴は積まない
+      // (moving 連打で 1 ドラッグが数十スナップショットになるのを防ぐ)。確定は
+      // object:modified が拾う。
       canvas.on("object:moving", bumpRevision);
       canvas.on("object:scaling", bumpRevision);
       canvas.on("object:rotating", bumpRevision);

@@ -1,6 +1,7 @@
 import { create } from "zustand";
 
 import type { EditModeId } from "../../../lib/edit/modes";
+import { EditorHistory, snapshotCanvas } from "./history";
 
 export type EditorTool =
   | "select"
@@ -85,6 +86,19 @@ type EditorState = {
   pathIngestor: EditorPathIngestor | null;
   /** マジックグラブの確定待ちプレビュー (クリックで生成したマスク)。null=プレビューなし。 */
   grabPreview: GrabPreview | null;
+  /**
+   * Undo/Redo の履歴インスタンス。zustand の state に置くが reference 同一のまま
+   * 内部スタックを更新する (履歴は大きくなり得るので immutable コピーはしない)。
+   * ボタンの活性は canUndo/canRedo の boolean フラグで購読する。
+   */
+  history: EditorHistory;
+  canUndo: boolean;
+  canRedo: boolean;
+  /**
+   * 履歴復元 (loadFromJSON) 中に true。復元で発火する canvas イベントで新しい
+   * スナップショットを積まないためのガード。EditorCanvas のイベント購読側が読む。
+   */
+  historySuppressed: boolean;
   setActiveTool: (tool: EditorTool) => void;
   setEditMode: (mode: EditModeId) => void;
   setObjectLayersEnabled: (enabled: boolean) => void;
@@ -98,9 +112,18 @@ type EditorState = {
   bumpRevision: () => void;
   setPathIngestor: (ingestor: EditorPathIngestor | null) => void;
   setGrabPreview: (preview: GrabPreview | null) => void;
+  /** 現在のキャンバス状態を履歴に積む (操作確定時に呼ぶ)。 */
+  pushHistory: () => void;
+  /** 画像を開いた直後に履歴を現在状態で初期化する (画像単位でリセット)。 */
+  resetHistory: () => void;
+  /** 1 手戻す。復元するスナップショットを返す (戻せないときは null)。 */
+  undo: () => unknown | null;
+  /** 1 手やり直す。復元するスナップショットを返す (やり直せないときは null)。 */
+  redo: () => unknown | null;
+  setHistorySuppressed: (suppressed: boolean) => void;
 };
 
-export const useEditor = create<EditorState>((set) => ({
+export const useEditor = create<EditorState>((set, get) => ({
   activeTool: "select",
   selectedLayerId: null,
   busyTool: null,
@@ -114,6 +137,10 @@ export const useEditor = create<EditorState>((set) => ({
   objectCountMode: "auto",
   pathIngestor: null,
   grabPreview: null,
+  history: new EditorHistory(),
+  canUndo: false,
+  canRedo: false,
+  historySuppressed: false,
   setActiveTool: (activeTool) => set({ activeTool }),
   setEditMode: (editMode) => set({ editMode }),
   setObjectLayersEnabled: (objectLayersEnabled) => set({ objectLayersEnabled }),
@@ -127,4 +154,32 @@ export const useEditor = create<EditorState>((set) => ({
   bumpRevision: () => set((state) => ({ revision: state.revision + 1 })),
   setPathIngestor: (pathIngestor) => set({ pathIngestor }),
   setGrabPreview: (grabPreview) => set({ grabPreview }),
+  pushHistory: () => {
+    // 復元中 (loadFromJSON) の発火では積まない。復元は履歴の消費であって新規操作ではない。
+    if (get().historySuppressed) return;
+    const snapshot = snapshotCanvas(get().canvas);
+    if (snapshot === null) return;
+    const history = get().history;
+    history.push(snapshot);
+    set({ canUndo: history.canUndo(), canRedo: history.canRedo() });
+  },
+  resetHistory: () => {
+    const snapshot = snapshotCanvas(get().canvas);
+    const history = get().history;
+    history.reset(snapshot);
+    set({ canUndo: history.canUndo(), canRedo: history.canRedo() });
+  },
+  undo: () => {
+    const history = get().history;
+    const snapshot = history.undo();
+    set({ canUndo: history.canUndo(), canRedo: history.canRedo() });
+    return snapshot;
+  },
+  redo: () => {
+    const history = get().history;
+    const snapshot = history.redo();
+    set({ canUndo: history.canUndo(), canRedo: history.canRedo() });
+    return snapshot;
+  },
+  setHistorySuppressed: (historySuppressed) => set({ historySuppressed }),
 }));
