@@ -51,11 +51,13 @@ pub async fn layer_splitter_run(
         .filter(|prompt| !prompt.is_empty())
         .collect::<Vec<_>>();
 
-    // HuggingFace のオフライン化 + キャッシュを app_data_dir 配下へ隔離する。
-    // なぜ: 実機で `PermissionError: ~/.cache/huggingface/token Operation not permitted` が
-    // 発生した。配布アプリのサンドボックスから `~/.cache` へ書けないため、HF_HOME を専用
-    // ディレクトリに向け、HF_HUB_OFFLINE でトークン/リモートアクセスを一切試みさせない
-    // (モデルは venv セットアップ時に同梱済みの前提)。
+    // HuggingFace のキャッシュを app_data_dir 配下へ隔離しつつ、モデルDLは許可する。
+    // 経緯 (2026-07-02 実機2連発):
+    //   1. `PermissionError: ~/.cache/huggingface/token` → トークンファイルの暗黙読取が原因
+    //   2. HF_HUB_OFFLINE=1 で塞いだら `LocalEntryNotFoundError` → そもそもモデル未DLで、
+    //      オフライン固定だと初回セットアップが不可能になる
+    // 正解: HF_HUB_DISABLE_IMPLICIT_TOKEN=1 でトークン読取だけ止め (公開モデルに不要)、
+    // オンラインは許可して初回に専用 HF_HOME へ落とさせる。
     let hf_home = app
         .path()
         .app_data_dir()
@@ -66,8 +68,7 @@ pub async fn layer_splitter_run(
     let mut command = Command::new(&python);
     command
         .current_dir(&splitter_dir)
-        .env("HF_HUB_OFFLINE", "1")
-        .env("TRANSFORMERS_OFFLINE", "1")
+        .env("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1")
         .env("HF_HOME", &hf_home)
         .arg(&script)
         .arg("split")
