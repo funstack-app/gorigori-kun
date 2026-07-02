@@ -13,9 +13,8 @@ const TABS: Tab[] = [
   { id: "plan", label: "企画" },
   { id: "generate", label: "画像生成" },
   { id: "video", label: "動画生成" },
-  // 編集タブは現在クローズ。STΛCK 指示 (2026-05-17): β ではなく
-  // 「近日公開」表示にしてワクワク感を演出。クリック不可。
-  { id: "edit", label: "編集", comingSoon: true, disabled: true },
+  // 編集タブは正式開放 (STΛCK 決定 2026-07-02、正式版スコープ)。
+  { id: "edit", label: "編集" },
 ];
 
 /** 触れる (=disabled でない) タブだけを順序つきで取り出す。 */
