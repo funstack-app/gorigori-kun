@@ -72,8 +72,8 @@ pub async fn ocr_image_with_probmap(
     let img = image::open(input_path).map_err(|e| format!("open: {e}"))?;
     tracing::info!(target: "codex.edit", "ocr: 画像デコード完了 {}x{}", img.width(), img.height());
 
-    let det_spec = find_model("paddleocr-mobile-det")
-        .ok_or_else(|| "model spec not found: paddleocr-mobile-det".to_string())?;
+    let det_spec = find_model("ppocrv6-small-det")
+        .ok_or_else(|| "model spec not found: ppocrv6-small-det".to_string())?;
     tracing::info!(target: "codex.edit", "ocr: detセッション取得開始");
     let det_session = runtime.get_session(&det_spec).await?;
     tracing::info!(target: "codex.edit", "ocr: detection開始 {}x{}", img.width(), img.height());
@@ -83,8 +83,8 @@ pub async fn ocr_image_with_probmap(
     };
     tracing::info!(target: "codex.edit", "ocr: detection完了 polygons={}", polygons.len());
 
-    let rec_spec = find_model("paddleocr-mobile-rec")
-        .ok_or_else(|| "model spec not found: paddleocr-mobile-rec".to_string())?;
+    let rec_spec = find_model("ppocrv6-small-rec")
+        .ok_or_else(|| "model spec not found: ppocrv6-small-rec".to_string())?;
     let rec_session = runtime.get_session(&rec_spec).await?;
 
     let mut regions = Vec::new();
@@ -240,14 +240,34 @@ fn prepare_detection_input(img: &DynamicImage) -> Result<PreparedInput, String> 
     let resized = img.resize_exact(resized_w, resized_h, image::imageops::FilterType::Lanczos3);
     let rgb = resized.to_rgb8();
     let plane = (padded_w * padded_h) as usize;
+    // PP-OCRv6 det 前処理 (inference.yml PreProcess より):
+    //   img_mode=BGR + NormalizeImage(scale=1/255, mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225])。
+    // PaddleOCR は mean/std をチャンネル位置にそのまま適用する (mean[0]→plane0)。モデルは BGR で
+    // 学習されているため、plane0=B・plane1=G・plane2=R を書き、mean/std を位置対応で当てる。
+    //   plane0(B): (b/255 - 0.485)/0.229
+    //   plane1(G): (g/255 - 0.456)/0.224
+    //   plane2(R): (r/255 - 0.406)/0.225
+    const DET_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
+    const DET_STD: [f32; 3] = [0.229, 0.224, 0.225];
+    // 32の倍数へのパディング領域は「正規化後の黒」(=(0-mean)/std) で埋める。
+    // 生の 0.0 で埋めると正規化前提とズレるため、各 plane を対応する黒値で初期化する。
     let mut data = vec![0f32; plane * 3];
+    for (c, plane_slice) in data.chunks_mut(plane).enumerate() {
+        let black = (0.0 - DET_MEAN[c]) / DET_STD[c];
+        for v in plane_slice.iter_mut() {
+            *v = black;
+        }
+    }
     for y in 0..resized_h {
         for x in 0..resized_w {
             let p = rgb.get_pixel(x, y);
             let idx = (y * padded_w + x) as usize;
-            data[idx] = p[0] as f32 / 255.0;
-            data[plane + idx] = p[1] as f32 / 255.0;
-            data[plane * 2 + idx] = p[2] as f32 / 255.0;
+            let b = p[2] as f32 / 255.0;
+            let g = p[1] as f32 / 255.0;
+            let r = p[0] as f32 / 255.0;
+            data[idx] = (b - DET_MEAN[0]) / DET_STD[0];
+            data[plane + idx] = (g - DET_MEAN[1]) / DET_STD[1];
+            data[plane * 2 + idx] = (r - DET_MEAN[2]) / DET_STD[2];
         }
     }
 
@@ -403,14 +423,18 @@ fn prepare_recognition_input(crop: &DynamicImage) -> Result<(Vec<f32>, u32), Str
     let resized = crop.resize_exact(scaled_w, height, image::imageops::FilterType::Lanczos3);
     let rgb = resized.to_rgb8();
     let plane = (height * padded_w) as usize;
-    let mut data = vec![0f32; plane * 3];
+    // PP-OCRv6 rec 前処理 (inference.yml: img_mode=BGR + RecResizeImg[3,48,320])。
+    // RecResizeImg は (img/255 - 0.5)/0.5 = img/127.5 - 1.0 で正規化する。モデルは BGR 学習
+    // なので plane0=B・plane1=G・plane2=R を書く。右パディング領域は正規化後の黒 (-1.0) で埋める。
+    let mut data = vec![-1.0f32; plane * 3];
+    let norm = |c: u8| c as f32 / 127.5 - 1.0;
     for y in 0..height {
         for x in 0..scaled_w {
             let p = rgb.get_pixel(x, y);
             let idx = (y * padded_w + x) as usize;
-            data[idx] = p[0] as f32 / 255.0;
-            data[plane + idx] = p[1] as f32 / 255.0;
-            data[plane * 2 + idx] = p[2] as f32 / 255.0;
+            data[idx] = norm(p[2]); // B
+            data[plane + idx] = norm(p[1]); // G
+            data[plane * 2 + idx] = norm(p[0]); // R
         }
     }
     Ok((data, padded_w))
@@ -446,7 +470,17 @@ fn decode_ctc(shape: &[i64], logits: &[f32]) -> (String, f32) {
             } else {
                 chars.push('□');
             }
-            conf_sum += softmax_prob(row, idx, max_val);
+            // PP-OCRv6 rec の ONNX 出力は既に softmax 済み確率 (各 step の行和≈1.0)。
+            // よって argmax の値 max_val がそのままそのクラスの確率＝信頼度になる。
+            // ここで再度 softmax をかけると 18710 クラスに薄まって conf≈0 に潰れる (v5→v6 で
+            // 出力が logits→確率へ変わったことへの適合)。row が確率でない稀な系のために
+            // 0..1 の範囲外なら softmax にフォールバックする。
+            let step_conf = if (0.0..=1.0).contains(&max_val) {
+                max_val
+            } else {
+                softmax_prob(row, idx, max_val)
+            };
+            conf_sum += step_conf;
             conf_count += 1;
         }
         prev = idx;
@@ -468,10 +502,31 @@ fn softmax_prob(row: &[f32], idx: usize, max_val: f32) -> f32 {
     ((row[idx] - max_val).exp() / denom).clamp(0.0, 1.0)
 }
 
+/// PP-OCRv6 small rec の CTC 復号用文字集合。
+///
+/// 公式 inference.yml の PostProcess.character_dict (18708 文字) をバイナリへ同梱
+/// (include_str! なので dev / テスト / 配布バイナリで完全に同一。BaseDirectory::Resource の
+/// パス解決に依存せず、配布版でパスが解決できず OCR が黙って壊れる事故を構造的に回避する)。
+///
+/// CTC クラス構成 (rec 出力 shape 末尾 = 18710):
+///   index 0        = blank (復号でスキップ)
+///   index 1..18708 = character_dict[0..18707]  → charset[idx-1]
+///   index 18709    = 末尾 space (PaddleOCR が use_space_char で辞書末尾に付与する ' ')
+/// よって charset = character_dict + [' '] の 18709 要素にすると `charset[idx-1]` が全域で正しい。
+///
+/// 差し替え前 (2026-07-02以前) はここに ~440 文字のハードコード辞書があり、モデル本来の
+/// 18708 文字辞書と索引がズレていた。これが「バスケ→ハスケ」(バ idx1906 / ハ idx1905 が隣接)
+/// 濁点落ちの真因。公式辞書で索引を厳密一致させて解消する。
 fn ocr_charset() -> Vec<char> {
-    // PaddleOCRの辞書はモデルごとに異なるため、α版では代表的な文字だけを内蔵する。
-    // 未対応のクラスは '□' として残し、Phase 4以降でモデル辞書ファイル対応へ拡張する。
-    "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~ ¥。、，．・：；？！ー〜…（）［］「」『』【】abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZぁあぃいぅうぇえぉおかがきぎくぐけげこごさざしじすずせぜそぞただちぢっつづてでとどなにぬねのはばぱひびぴふぶぷへべぺほぼぽまみむめもゃやゅゆょよらりるれろゎわをんァアィイゥウェエォオカガキギクグケゲコゴサザシジスズセゼソゾタダチヂッツヅテデトドナニヌネノハバパヒビピフブプヘベペホボポマミムメモャヤュユョヨラリルレロヮワヲンヴ一二三四五六七八九十百千万年月日時分秒円人大小中上下左右前後会社商品無料限定新発売予約受付価格税込".chars().collect()
+    // 各行ちょうど1文字であることは生成時に検証済み (空行・複数文字行なし)。
+    let dict = include_str!("ppocrv6_dict.txt");
+    let mut chars: Vec<char> = dict
+        .lines()
+        .filter_map(|line| line.chars().next())
+        .collect();
+    // 末尾 space クラス (index 18709) 用。
+    chars.push(' ');
+    chars
 }
 
 fn bbox_from_polygon(points: &[[i32; 2]; 4], (orig_w, orig_h): (u32, u32)) -> [i32; 4] {

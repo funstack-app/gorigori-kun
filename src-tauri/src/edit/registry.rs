@@ -45,24 +45,61 @@ pub struct ModelSpec {
 
 pub fn all_models() -> Vec<ModelSpec> {
     vec![
+        // === 既定 OCR モデル: PP-OCRv6 small (2026-06 公開・PaddlePaddle 公式 ONNX / Apache 2.0) ===
+        //
+        // v5 mobile からの差し替え理由 (2026-07-02):
+        //   実機で「バスケ」→「ハスケ」の濁点落ち誤認識が発生した。真因は認識器の
+        //   CTC 辞書不整合。旧実装は ocr.rs 内に ~440 文字のハードコード辞書を持ち、
+        //   モデル本来の 18708 文字辞書と索引がズレていた (バ idx1906 / ハ idx1905 が
+        //   隣接するため、正しい出力索引が隣の文字へ化ける)。v6 では公式辞書
+        //   (ppocrv6_dict.txt, 18708 文字) を include_str! で同梱し索引を厳密一致させる。
+        //
+        // 入出力仕様 (v5 との差分は ocr.rs の前処理に反映済み):
+        //   det: 入力 [N,3,H,W] BGR + ImageNet mean/std 正規化、出力 [N,1,H,W] 確率マップ
+        //   rec: 入力 [N,3,48,W] BGR + (x/255-0.5)/0.5 正規化、出力 [N,T,18710] (=18708辞書+blank+pad)
+        //
+        // ハッシュは HF LFS oid sha256 (DL 実体の sha256 と一致確認済み)。
         ModelSpec {
-            id: "paddleocr-mobile-det",
+            id: "ppocrv6-small-det",
             category: ModelCategory::Ocr,
-            display_name: "テキスト検出 (PaddleOCR)",
-            url: "https://huggingface.co/ilaylow/PP_OCRv5_mobile_onnx/resolve/main/ppocrv5_det.onnx",
-            file_name: "paddleocr-mobile-det.onnx",
-            size_bytes: 4_830_000,
-            sha256: "1eb7b4f7ab657ebd1c66d5f79bca7497f29768a2e3c15e52daecbba1a8e4a039",
+            display_name: "テキスト検出 (PP-OCRv6)",
+            url: "https://huggingface.co/PaddlePaddle/PP-OCRv6_small_det_onnx/resolve/main/inference.onnx",
+            file_name: "ppocrv6-small-det.onnx",
+            size_bytes: 9_880_512,
+            sha256: "d73e0058b7a8086bbd57f3d10b8bcd4ff95363f67e06e2762b5e814fe9c9410e",
         },
         ModelSpec {
-            id: "paddleocr-mobile-rec",
+            id: "ppocrv6-small-rec",
             category: ModelCategory::Ocr,
-            display_name: "テキスト認識 (PaddleOCR)",
-            url: "https://huggingface.co/ilaylow/PP_OCRv5_mobile_onnx/resolve/main/ppocrv5_rec.onnx",
-            file_name: "paddleocr-mobile-rec.onnx",
-            size_bytes: 16_600_000,
-            sha256: "243a0f06d826761323e9045e9b113ab2c191c3aa50565585e628300b8eda0224",
+            display_name: "テキスト認識 (PP-OCRv6)",
+            url: "https://huggingface.co/PaddlePaddle/PP-OCRv6_small_rec_onnx/resolve/main/inference.onnx",
+            file_name: "ppocrv6-small-rec.onnx",
+            size_bytes: 21_159_378,
+            sha256: "5435fd747c9e0efe15a96d0b378d5bd157e9492ed8fd80edf08f30d02fa24634",
         },
+        // === 旧 OCR モデル: PP-OCRv5 mobile (ロールバック用にコメントとして残置) ===
+        //
+        // 既定 (all_models) からは外した。理由: OCR ゲート (EditModelGate) は category=ocr の
+        // 未DLモデルを一律に DL 対象にするため、v5 を active に残すと v6 と二重DL (+21MB) に
+        // なり、かつ v5 が「未DL＝不足」判定でゲートを塞ぐ。v6 で致命的な回帰が出た場合の
+        // 緊急退避手順は以下:
+        //   1. 下記 spec を all_models に復帰させ、v6 spec を外す (id は変えない)
+        //   2. ocr.rs の det/rec spec id を paddleocr-mobile-* に戻す
+        //   3. ocr.rs の前処理を v5 版へ戻す:
+        //        det: RGB + 0..1 正規化 (mean/std なし)
+        //        rec: RGB + 0..1 正規化 (0.5 センタリングなし)
+        //        辞書: v5 用 ppocrv5_dict.txt (18383行) に差し替え、CTC pad を +2 とする
+        //   なお v5 も正しい公式辞書 (ppocrv5_dict.txt) を使えば濁点落ちは解消する。
+        //   本差し替えの本質は「モデル世代」より「辞書索引の厳密一致」にある。
+        //
+        // ModelSpec { id: "paddleocr-mobile-det", category: Ocr, display_name: "テキスト検出 (PaddleOCR v5)",
+        //   url: "https://huggingface.co/ilaylow/PP_OCRv5_mobile_onnx/resolve/main/ppocrv5_det.onnx",
+        //   file_name: "paddleocr-mobile-det.onnx", size_bytes: 4_830_000,
+        //   sha256: "1eb7b4f7ab657ebd1c66d5f79bca7497f29768a2e3c15e52daecbba1a8e4a039" }
+        // ModelSpec { id: "paddleocr-mobile-rec", category: Ocr, display_name: "テキスト認識 (PaddleOCR v5)",
+        //   url: "https://huggingface.co/ilaylow/PP_OCRv5_mobile_onnx/resolve/main/ppocrv5_rec.onnx",
+        //   file_name: "paddleocr-mobile-rec.onnx", size_bytes: 16_600_000,
+        //   sha256: "243a0f06d826761323e9045e9b113ab2c191c3aa50565585e628300b8eda0224" }
         ModelSpec {
             id: "lama-onnx",
             category: ModelCategory::Inpaint,

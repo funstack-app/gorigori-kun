@@ -551,8 +551,8 @@ async fn magic_layer_real_image_probe() {
 #[ignore]
 async fn text_mask_stroke_smaller_than_bbox_real_ocr() {
     init_test_tracing();
-    if !model_available("paddleocr-mobile-det") || !model_available("paddleocr-mobile-rec") {
-        eprintln!("[skip] paddleocr モデル未DL");
+    if !model_available("ppocrv6-small-det") || !model_available("ppocrv6-small-rec") {
+        eprintln!("[skip] ppocrv6 モデル未DL");
         return;
     }
     let dir = tmp_dir("text-mask");
@@ -637,4 +637,52 @@ async fn text_mask_stroke_smaller_than_bbox_real_ocr() {
 fn count_white(path: &Path) -> u64 {
     let m = image::open(path).unwrap().to_luma8();
     m.pixels().filter(|p| p[0] > 127).count() as u64
+}
+
+/// 実 PP-OCRv6 で任意の実画像を認識し、全 region のテキストを出力する検証プローブ。
+///
+/// 用途: v5→v6 差し替えで「バスケ」→「ハスケ」濁点落ちが解消したことの実画像確認。
+///   GORI_E2E_IMAGE=<入力画像> \
+///   cargo test --lib edit::magic_layer_e2e::ocr_recognize_real_image_probe -- --ignored --nocapture
+///
+/// GORI_OCR_EXPECT を指定すると、認識結果のどれかにその部分文字列が含まれることをアサートする
+/// (例: GORI_OCR_EXPECT=バスケ)。未指定なら認識テキストの出力のみ (破綻検知はしない)。
+#[tokio::test]
+#[ignore]
+async fn ocr_recognize_real_image_probe() {
+    init_test_tracing();
+    let Ok(input) = std::env::var("GORI_E2E_IMAGE") else {
+        eprintln!("[skip] GORI_E2E_IMAGE 未指定");
+        return;
+    };
+    if !model_available("ppocrv6-small-det") || !model_available("ppocrv6-small-rec") {
+        eprintln!("[skip] ppocrv6 モデル未DL");
+        return;
+    }
+    let input = PathBuf::from(input);
+    let runtime = EditRuntime::new();
+    let (regions, _prob) = ocr_image_with_probmap(&runtime, &input)
+        .await
+        .expect("ocr_image_with_probmap failed");
+
+    eprintln!("=== OCR 認識結果 ({} regions) ===", regions.len());
+    let mut joined = String::new();
+    for (i, r) in regions.iter().enumerate() {
+        eprintln!(
+            "  [{i:02}] conf={:.3} lang={:?} bbox={:?} text={:?}",
+            r.confidence, r.language, r.bbox, r.text
+        );
+        joined.push_str(&r.text);
+        joined.push('\n');
+    }
+    eprintln!("=== 全文結合 ===\n{joined}");
+
+    if let Ok(expect) = std::env::var("GORI_OCR_EXPECT") {
+        assert!(
+            joined.contains(&expect),
+            "期待文字列 {:?} が認識結果に含まれない。濁点落ち等の誤認識の疑い。\n認識全文:\n{joined}",
+            expect
+        );
+        eprintln!("=== OK: 期待文字列 {:?} を認識結果に検出 ===", expect);
+    }
 }
