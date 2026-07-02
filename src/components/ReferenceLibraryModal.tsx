@@ -6,6 +6,8 @@ import { useImages } from "../lib/store/images";
 import {
   useReferenceRoles,
   type ReferenceRoleKind,
+  REFERENCE_ROLE_KINDS,
+  REFERENCE_ROLE_META,
 } from "../lib/store/referenceRoles";
 
 // Why: Zustand selector が毎レンダーで新しい Set を返すと
@@ -93,11 +95,12 @@ export function ReferenceLibraryModal({ open, onClose, onPick, roleMode }: Props
         <div className="flex items-center justify-between gap-3 border-b border-[#242424] px-4 py-3">
           <div className="flex items-center gap-3">
             <h3 className="text-sm font-black text-white">
-              {roleMode ? "ライブラリからキャラ/スタイル参照を選ぶ" : "ライブラリから参照を追加"}
+              {roleMode ? "ライブラリから参照を選ぶ" : "ライブラリから参照を追加"}
             </h3>
             {roleMode && (
-              <div className="inline-flex items-center gap-1 rounded-md border border-[#343434] bg-[#0b0b0b] p-0.5">
-                {(["character", "style"] as const).map((kind) => {
+              <div className="inline-flex flex-wrap items-center gap-1 rounded-md border border-[#343434] bg-[#0b0b0b] p-0.5">
+                {REFERENCE_ROLE_KINDS.map((kind) => {
+                  const meta = REFERENCE_ROLE_META[kind];
                   const active = pickRole === kind;
                   return (
                     <button
@@ -105,16 +108,13 @@ export function ReferenceLibraryModal({ open, onClose, onPick, roleMode }: Props
                       type="button"
                       onClick={() => setPickRole(kind)}
                       aria-pressed={active}
+                      title={meta.description}
                       className={[
                         "rounded px-2.5 py-1 text-[11px] font-bold transition",
-                        active
-                          ? kind === "character"
-                            ? "bg-pink-500 text-white"
-                            : "bg-indigo-500 text-white"
-                          : "text-neutral-400 hover:text-white",
+                        active ? meta.activeClass : "text-neutral-400 hover:text-white",
                       ].join(" ")}
                     >
-                      {kind === "character" ? "キャラとして" : "スタイルとして"}
+                      {meta.pickLabel}
                     </button>
                   );
                 })}

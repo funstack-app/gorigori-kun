@@ -1,14 +1,17 @@
 import {
   useReferenceRoles,
   type ReferenceRoleKind,
+  REFERENCE_ROLE_KINDS,
+  REFERENCE_ROLE_META,
 } from "../lib/store/referenceRoles";
 
 /**
- * 添付画像の役割 (キャラ参照 / スタイル参照) を切り替えるトグル。
+ * 添付画像の役割 (キャラ / スタイル / ロケーション / アイテム) を切り替えるトグル。
  *
  * FB#3 (2026-06-06 STΛCK 指示): 登場キャラが複数いるケースで、各添付画像を
- * 「これはキャラ」「これはスタイル」と明示指定できるようにする。AI の文脈推測に
- * 任せず、ユーザーが上から役割を選べる。役割は referenceRoles ストアが握る。
+ * 明示指定できるようにする。AI の文脈推測に任せず、ユーザーが上から役割を選べる。
+ * N-2 (2026-06-16 Ta4low 要望): ロケーション / アイテムの 2 種を追加。全 4 種を
+ * REFERENCE_ROLE_KINDS / REFERENCE_ROLE_META から生成する (種別追加時の記述漏れ防止)。
  */
 export function ReferenceRoleToggle({
   path,
@@ -26,10 +29,12 @@ export function ReferenceRoleToggle({
       ? "px-2 py-0.5 text-[11px]"
       : "px-1.5 py-0.5 text-[9px]";
 
-  const btn = (kind: ReferenceRoleKind, label: string) => {
+  const btn = (kind: ReferenceRoleKind) => {
+    const meta = REFERENCE_ROLE_META[kind];
     const active = role === kind;
     return (
       <button
+        key={kind}
         type="button"
         onClick={(e) => {
           e.stopPropagation();
@@ -39,27 +44,18 @@ export function ReferenceRoleToggle({
         className={[
           base,
           "rounded font-bold transition",
-          active
-            ? kind === "character"
-              ? "bg-pink-500 text-white"
-              : "bg-indigo-500 text-white"
-            : "bg-[#1a1a1a] text-neutral-400 hover:text-white",
+          active ? meta.activeClass : "bg-[#1a1a1a] text-neutral-400 hover:text-white",
         ].join(" ")}
-        title={
-          kind === "character"
-            ? "キャラ参照: 人物/被写体の同一性を保つ対象"
-            : "スタイル参照: 絵のタッチ/質感のみ参照 (同一性には使わない)"
-        }
+        title={meta.description}
       >
-        {label}
+        {meta.label}
       </button>
     );
   };
 
   return (
-    <div className="inline-flex items-center gap-0.5 rounded-md border border-[#343434] bg-[#0b0b0b] p-0.5">
-      {btn("character", "キャラ")}
-      {btn("style", "スタイル")}
+    <div className="inline-flex flex-wrap items-center gap-0.5 rounded-md border border-[#343434] bg-[#0b0b0b] p-0.5">
+      {REFERENCE_ROLE_KINDS.map((kind) => btn(kind))}
     </div>
   );
 }

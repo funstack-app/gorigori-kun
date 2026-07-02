@@ -10,7 +10,11 @@ import type { SceneConstruction, StoryboardParams } from "../storyboard/types";
 import { buildWorldContextBlock } from "../agents/systemPrompts";
 import { useActiveProject } from "./activeProject";
 import { useProjects, type ProjectChatMessage } from "./projects";
-import { useReferenceRoles } from "./referenceRoles";
+import {
+  useReferenceRoles,
+  REFERENCE_ROLE_KINDS,
+  REFERENCE_ROLE_META,
+} from "./referenceRoles";
 import { useSettings } from "./settings";
 import { useSkillMode } from "./skillMode";
 import { useToasts } from "./toasts";
@@ -215,14 +219,18 @@ const STORYBOARD_ROLE_PREFIX = [
   "JSON以外のメッセージでは [STORYBOARD_PARAMS] を絶対に出さない。",
   "添付画像のパスはユーザー入力の [添付画像] 欄を参照する。",
   "",
-  "【参照画像の役割 ★FB#3・2026-06-06★】",
-  "[添付画像] 欄では各画像に [キャラ参照] / [スタイル参照] の役割ラベルが付く。これはユーザーが明示指定したもの。AI が勝手に入れ替えない。",
+  "【参照画像の役割 ★FB#3・2026-06-06 / N-2・2026-06-16★】",
+  "[添付画像] 欄では各画像に [キャラ参照] / [スタイル参照] / [ロケーション参照] / [アイテム参照] の役割ラベルが付く。これはユーザーが明示指定したもの。AI が勝手に入れ替えない。",
   "- キャラ参照: 登場キャラ/被写体の同一性を保つ対象。複数枚 (登場キャラ全員) ありうる。",
   "- スタイル参照: 絵のタッチ/質感のみ参照。人物の同一性には使わない。",
+  "- ロケーション参照: 背景・環境・舞台をこの画像に合わせる。被写体ではなくシーンの場所。",
+  "- アイテム参照: この商品/オブジェクトを画面に登場させ、形状・質感を維持する。",
   "JSON 出力時、キャラ参照が複数あれば character_reference_paths 配列に全キャラのパスを入れる (単数 character_reference_path は先頭キャラ)。",
   "スタイル参照が複数あれば style_reference_paths 配列に全スタイルのパスを入れる。",
-  "  例: \"character_reference_paths\":[\"/a.png\",\"/b.png\"],\"style_reference_paths\":[\"/style.png\"]",
+  "ロケーション参照は location_reference_paths、アイテム参照は item_reference_paths 配列に入れる。",
+  "  例: \"character_reference_paths\":[\"/a.png\",\"/b.png\"],\"style_reference_paths\":[\"/style.png\"],\"location_reference_paths\":[\"/bg.png\"],\"item_reference_paths\":[\"/product.png\"]",
   "ルック分析 (look_analysis) はキャラ参照を対象に行う (スタイル参照はタッチ言語化に使ってよい)。",
+  "ロケーション参照は背景・環境の再現に、アイテム参照は登場させる商品/オブジェクトの形状・質感維持に使う。",
   "",
   "[ここからユーザーのリクエスト]",
   "",
@@ -787,27 +795,26 @@ export const usePlanChat = create<PlanChatState>((set, get) => ({
       ? buildWorldContextBlock(useSettings.getState().settings.worldContext)
       : "";
     const imagesForTurn = attachedImages ?? get().pendingImages;
-    // FB#3 (2026-06-06): 添付画像の役割 (キャラ/スタイル) をユーザーが明示指定して
-    // いれば、それをそのまま AI に伝える。AI の文脈推測に任せず、登場キャラが複数
-    // いるケースで「勝手にスタイル参照になる」事故を防ぐ。役割は referenceRoles
-    // ストア (パス → "character" | "style") が握る。未指定はキャラ既定。
+    // FB#3 (2026-06-06) / N-2 (2026-06-16): 添付画像の役割をユーザーが明示指定して
+    // いれば、そのまま AI に伝える。AI の文脈推測に任せず、登場キャラが複数いる
+    // ケースで「勝手にスタイル参照になる」事故を防ぐ。役割は referenceRoles ストア
+    // (パス → character/style/location/item) が握る。未指定はキャラ既定。
+    // ロール種別・日本語ラベル・趣旨は REFERENCE_ROLE_META を正本にする。
     const roleStore = useReferenceRoles.getState();
-    const charImages = imagesForTurn.filter((p) => roleStore.getRole(p) === "character");
-    const styleImages = imagesForTurn.filter((p) => roleStore.getRole(p) === "style");
     const imageNote = imagesForTurn.length > 0
       ? `\n\n[添付画像]\n${imagesForTurn
           .map((path, index) => {
-            const role = roleStore.getRole(path) === "style" ? "スタイル参照" : "キャラ参照";
-            return `${index + 1}. [${role}] ${path}`;
+            const meta = REFERENCE_ROLE_META[roleStore.getRole(path)];
+            return `${index + 1}. [${meta.promptLabelJa}] ${path}`;
           })
           .join("\n")}\n` +
-        (charImages.length > 0
-          ? `キャラ参照 (登場キャラ/被写体の同一性を保つ対象, ${charImages.length}枚): ${charImages.join(", ")}\n`
-          : "") +
-        (styleImages.length > 0
-          ? `スタイル参照 (絵のタッチ/質感のみ参照し人物同一性には使わない, ${styleImages.length}枚): ${styleImages.join(", ")}\n`
-          : "") +
-        "上記の役割指定に従ってください。キャラ参照は人物の同一性維持に、スタイル参照はタッチ/質感の参照に使い分けてください。役割をAIが勝手に入れ替えないでください。"
+        REFERENCE_ROLE_KINDS.map((kind) => {
+          const paths = imagesForTurn.filter((p) => roleStore.getRole(p) === kind);
+          if (paths.length === 0) return "";
+          const meta = REFERENCE_ROLE_META[kind];
+          return `${meta.promptLabelJa} (${meta.promptNoteJa}, ${paths.length}枚): ${paths.join(", ")}\n`;
+        }).join("") +
+        "上記の役割指定に従ってください。キャラ参照=人物の同一性維持、スタイル参照=タッチ/質感、ロケーション参照=背景・環境をその画像に合わせる、アイテム参照=その商品/オブジェクトを登場させ形状・質感を維持、と使い分けてください。役割をAIが勝手に入れ替えないでください。"
       : "";
     const submitText = `${isFirstTurn ? worldContext : ""}${isFirstTurn ? rolePrefix : ""}${trimmed}${imageNote}`;
     // user メッセージは楽観的に「ユーザーが書いたまま」を表示する
