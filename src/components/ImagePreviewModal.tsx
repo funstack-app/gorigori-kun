@@ -24,6 +24,9 @@ export function ImagePreviewModal() {
   // after the modal opens (rare, but happens when a generated image
   // arrives a tick after we navigate to its preview).
   const item = useImages((s) => s.items.find((it) => it.path === path));
+  // 判定 (採用/ボツ)。path が変わっても購読で追従する。
+  const judgement = useImages((s) => (path ? s.judgements.get(path) : undefined));
+  const setJudgement = useImages((s) => s.setJudgement);
   // Fallback リスト: open(path) だけで開かれた場合も矢印キーで巡回できるように
   // useImages.items 全体 (mtime 降順) を採用する。
   // ライブラリ / タイムライン由来のプレビューはこれで十分カバー、
@@ -337,6 +340,35 @@ export function ImagePreviewModal() {
               次のアクション
             </p>
             <div className="flex flex-col gap-1.5">
+              {/*
+                判定 (採用 / ボツ) を横並びのトグルで置く。押している方が
+                色付きでハイライトされ、もう一度押すと候補に戻る (null)。
+                ImageGallery のフィルタ「採用」「ボツ」と連動する。
+              */}
+              <div className="flex gap-1.5">
+                <JudgementToggle
+                  label="採用"
+                  active={judgement === "adopted"}
+                  activeClass="border-pink-400 bg-pink-500/20 text-pink-100"
+                  onClick={() =>
+                    void setJudgement(
+                      path,
+                      judgement === "adopted" ? null : "adopted",
+                    )
+                  }
+                />
+                <JudgementToggle
+                  label="ボツ"
+                  active={judgement === "rejected"}
+                  activeClass="border-neutral-400 bg-neutral-500/25 text-neutral-100"
+                  onClick={() =>
+                    void setJudgement(
+                      path,
+                      judgement === "rejected" ? null : "rejected",
+                    )
+                  }
+                />
+              </div>
               <ActionRow
                 icon={<ChatIcon />}
                 label="企画で再検討"
@@ -442,6 +474,35 @@ export function ImagePreviewModal() {
         />
       )}
     </div>
+  );
+}
+
+/* ── 判定 (採用/ボツ) トグルボタン ───────────────────── */
+function JudgementToggle({
+  label,
+  active,
+  activeClass,
+  onClick,
+}: {
+  label: string;
+  active: boolean;
+  activeClass: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      aria-pressed={active}
+      onClick={onClick}
+      className={[
+        "flex-1 rounded-md border px-3 py-2 text-sm font-bold transition",
+        active
+          ? activeClass
+          : "border-[#262626] bg-[#141414] text-neutral-400 hover:border-pink-400/40 hover:text-neutral-100",
+      ].join(" ")}
+    >
+      {label}
+    </button>
   );
 }
 

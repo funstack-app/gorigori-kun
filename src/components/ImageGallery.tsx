@@ -1,7 +1,7 @@
 import { useEffect, useMemo } from "react";
 import { useComposer } from "../lib/store/composer";
 import { useImagePreview } from "../lib/store/imagePreview";
-import { useImages } from "../lib/store/images";
+import { matchesFilter, useImages } from "../lib/store/images";
 import { useMaskEditor } from "../lib/store/maskEditor";
 import { useThreads } from "../lib/store/threads";
 import { useToasts } from "../lib/store/toasts";
@@ -29,6 +29,9 @@ export function ImageGallery({
     favorites,
     toggleFavorite,
     loadFavorites,
+    judgements,
+    loadJudgements,
+    setJudgement,
   } = useImages();
   const pushToast = useToasts((s) => s.push);
   const { cwd } = useThreads();
@@ -39,11 +42,25 @@ export function ImageGallery({
     attachListeners();
     startWatcher();
     loadFavorites();
+    loadJudgements();
   }, []);
 
   const visibleItems = useMemo(
-    () => (filter === "favorites" ? items.filter((it) => favorites.has(it.path)) : items),
-    [items, filter, favorites],
+    () =>
+      filter === "all"
+        ? items
+        : items.filter((it) =>
+            matchesFilter(it.path, filter, favorites, judgements),
+          ),
+    [items, filter, favorites, judgements],
+  );
+  const adoptedCount = useMemo(
+    () => items.filter((it) => judgements.get(it.path) === "adopted").length,
+    [items, judgements],
+  );
+  const rejectedCount = useMemo(
+    () => items.filter((it) => judgements.get(it.path) === "rejected").length,
+    [items, judgements],
   );
   const selected = useMemo(
     () => items.find((it) => it.path === selectedPath),
@@ -60,7 +77,7 @@ export function ImageGallery({
         <span className="font-semibold text-neutral-800">
           画像ライブラリ{" "}
           <span className="text-neutral-500">
-            ({filter === "favorites" ? `${visibleItems.length} / ` : ""}
+            ({filter !== "all" ? `${visibleItems.length} / ` : ""}
             {items.length})
           </span>
         </span>
@@ -86,6 +103,26 @@ export function ImageGallery({
             >
               お気に入り <span>{favorites.size}</span>
             </button>
+            <button
+              onClick={() => setFilter("adopted")}
+              className={`flex items-center gap-1 rounded px-2 py-0.5 ${
+                filter === "adopted"
+                  ? "bg-pink-100 text-pink-700"
+                  : "text-neutral-500 hover:text-pink-600"
+              }`}
+            >
+              採用 <span>{adoptedCount}</span>
+            </button>
+            <button
+              onClick={() => setFilter("rejected")}
+              className={`flex items-center gap-1 rounded px-2 py-0.5 ${
+                filter === "rejected"
+                  ? "bg-neutral-200 text-neutral-700"
+                  : "text-neutral-500 hover:text-neutral-800"
+              }`}
+            >
+              ボツ <span>{rejectedCount}</span>
+            </button>
           </div>
           <span
             className="flex items-center gap-1.5 text-neutral-500"
@@ -106,7 +143,11 @@ export function ImageGallery({
           <p className="text-center text-xs text-neutral-500">
             {filter === "favorites"
               ? "お気に入りはまだありません。サムネ右上の保存マークで追加できます。"
-              : "まだ画像がありません。「夕焼けの東京タワーを 1 枚」のように依頼してみてください。"}
+              : filter === "adopted"
+                ? "採用した画像はまだありません。右クリックメニューの「採用にする」で追加できます。"
+                : filter === "rejected"
+                  ? "ボツにした画像はまだありません。右クリックメニューの「ボツにする」で追加できます。"
+                  : "まだ画像がありません。「夕焼けの東京タワーを 1 枚」のように依頼してみてください。"}
           </p>
         </div>
       ) : (
@@ -115,8 +156,10 @@ export function ImageGallery({
           selectedPath={selectedPath}
           selection={selection}
           favorites={favorites}
+          judgements={judgements}
           onSelectClick={selectClick}
           onToggleFavorite={toggleFavorite}
+          onSetJudgement={(path, value) => void setJudgement(path, value)}
         />
       )}
 

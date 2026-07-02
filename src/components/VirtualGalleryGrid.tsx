@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Grid, type CellComponentProps } from "react-window";
 import { SafeImage } from "./SafeImage";
-import { type GalleryItem } from "../lib/store/images";
+import { type GalleryItem, type Judgement } from "../lib/store/images";
 import { useImagePreview } from "../lib/store/imagePreview";
 import { ContextMenu } from "./ContextMenu";
 import { buildGalleryItemMenu } from "./galleryItemMenu";
@@ -16,11 +16,14 @@ type CellProps = {
   selectedPath?: string;
   selection: Set<string>;
   favorites: Set<string>;
+  /** path -> 判定 (adopted / rejected)。無ければ候補 (バッジ無し)。 */
+  judgements: Map<string, Judgement>;
   onSelectClick: (
     path: string,
     mods: { meta?: boolean; shift?: boolean },
   ) => void;
   onToggleFavorite: (path: string) => void;
+  onSetJudgement: (path: string, value: Judgement | null) => void;
 };
 
 /**
@@ -89,6 +92,8 @@ export function VirtualGalleryGrid(props: CellProps) {
             favorites: props.favorites,
             onToggleFavorite: props.onToggleFavorite,
             onRegisterPreset: (path) => setPresetTarget(path),
+            judgement: props.judgements.get(menu.item.path),
+            onSetJudgement: props.onSetJudgement,
           })}
           onClose={() => setMenu(null)}
         />
@@ -115,6 +120,7 @@ function Cell({
   selectedPath,
   selection,
   favorites,
+  judgements,
   onSelectClick,
   onToggleFavorite,
   onContextMenu,
@@ -123,6 +129,7 @@ function Cell({
   const it = items[i];
   if (!it) return <div style={style} />;
   const isFav = favorites.has(it.path);
+  const judgement = judgements.get(it.path);
   const isInMultiSelection = selection.has(it.path);
   const isPrimary = selectedPath === it.path;
   // Visual: blue ring when in multi-selection (more than one selected),
@@ -185,6 +192,15 @@ function Cell({
         {it.savedTo && (
           <span className="pointer-events-none absolute right-7 top-1 rounded bg-lime-600/90 px-1 text-[10px] text-white">
             保存済み
+          </span>
+        )}
+        {judgement && (
+          <span
+            className={`pointer-events-none absolute bottom-1 left-1 rounded px-1 text-[10px] font-bold text-white shadow ${
+              judgement === "adopted" ? "bg-pink-500/90" : "bg-neutral-600/90"
+            }`}
+          >
+            {judgement === "adopted" ? "採用" : "ボツ"}
           </span>
         )}
         <button

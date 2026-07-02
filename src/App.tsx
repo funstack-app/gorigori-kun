@@ -323,6 +323,9 @@ function SignedInScaffold() {
     useSavedPrompts.getState().load();
     useImages.getState().attachListeners();
     useImages.getState().startWatcher();
+    // 判定 (採用/ボツ) を起動時にロードして、ライブラリ (AssetsWorkspace) でも
+    // 右クリックメニューとバッジが正しい現在値を出せるようにする。
+    void useImages.getState().loadJudgements();
     // スキル生成イベント listener を起動時に張る (待機中 0/N 固着バグ修正 2026-06-06)。
     // 各 Workspace の useEffect で張ると listen() の解決前に生成を開始した場合に
     // cutStarted/cutCompleted を取りこぼす。idempotent singleton なので二重登録はされない。
@@ -1713,6 +1716,8 @@ function AssetsWorkspace() {
   // 同じ buildGalleryItemMenu + ContextMenu をここにも配線する 2026-06-07)。
   const favorites = useImages((s) => s.favorites);
   const toggleFavorite = useImages((s) => s.toggleFavorite);
+  const judgements = useImages((s) => s.judgements);
+  const setJudgement = useImages((s) => s.setJudgement);
   const [contextMenu, setContextMenu] = useState<{
     x: number;
     y: number;
@@ -1825,6 +1830,7 @@ function AssetsWorkspace() {
         >
           {items.map((item) => {
             const isSelected = selected.has(item.path);
+            const judgement = judgements.get(item.path);
             return (
               <div
                 key={item.path}
@@ -1884,6 +1890,18 @@ function AssetsWorkspace() {
                     ✓
                   </div>
                 )}
+                {judgement && (
+                  <span
+                    className={[
+                      "pointer-events-none absolute right-2 top-2 rounded px-1.5 py-0.5 text-[10px] font-bold text-white shadow",
+                      judgement === "adopted"
+                        ? "bg-pink-500/90"
+                        : "bg-neutral-600/90",
+                    ].join(" ")}
+                  >
+                    {judgement === "adopted" ? "採用" : "ボツ"}
+                  </span>
+                )}
               </div>
             );
           })}
@@ -1893,6 +1911,7 @@ function AssetsWorkspace() {
         <div className="flex flex-col gap-1">
           {items.map((item) => {
             const isSelected = selected.has(item.path);
+            const judgement = judgements.get(item.path);
             return (
               <button
                 key={item.path}
@@ -1936,6 +1955,18 @@ function AssetsWorkspace() {
                       : "クリックで参照 / ダブルクリックで拡大"}
                   </p>
                 </div>
+                {judgement && (
+                  <span
+                    className={[
+                      "shrink-0 rounded px-1.5 py-0.5 text-[10px] font-bold text-white",
+                      judgement === "adopted"
+                        ? "bg-pink-500/90"
+                        : "bg-neutral-600/90",
+                    ].join(" ")}
+                  >
+                    {judgement === "adopted" ? "採用" : "ボツ"}
+                  </span>
+                )}
                 {selectionMode && isSelected && (
                   <span className="text-[14px] font-black text-pink-400">✓</span>
                 )}
@@ -1953,6 +1984,8 @@ function AssetsWorkspace() {
               favorites,
               onToggleFavorite: (path) => void toggleFavorite(path),
               onRegisterPreset: () => setPresetTarget(contextMenu.item),
+              judgement: judgements.get(contextMenu.item.path),
+              onSetJudgement: (path, value) => void setJudgement(path, value),
             }) satisfies ContextMenuItem[]
           }
           onClose={() => setContextMenu(null)}

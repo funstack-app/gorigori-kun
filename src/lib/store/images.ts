@@ -27,7 +27,10 @@ export type GalleryItem = {
   thumbnailPath?: string;
 };
 
-export type GalleryFilter = "all" | "favorites";
+export type GalleryFilter = "all" | "favorites" | "adopted" | "rejected";
+
+/** 画像の判定ステータス。未設定 (Map に無い) は「候補 (candidate)」扱い。 */
+export type Judgement = "adopted" | "rejected";
 
 type ImagesState = {
   items: GalleryItem[];
@@ -44,6 +47,9 @@ type ImagesState = {
   /** Set of paths that the user has marked as favorite. Persisted. */
   favorites: Set<string>;
   favoritesLoaded: boolean;
+  /** path -> 判定 (adopted / rejected)。Map に無い path は「候補」扱い。Persisted. */
+  judgements: Map<string, Judgement>;
+  judgementsLoaded: boolean;
   // Active turns whose image_gen output we should attribute. Stack so we can
   // bind to the most recently started one without losing earlier turns that
   // haven't reached turn/completed yet.
@@ -61,6 +67,9 @@ type ImagesState = {
   setFilter: (f: GalleryFilter) => void;
   toggleFavorite: (path: string) => Promise<void>;
   loadFavorites: () => Promise<void>;
+  /** 単一画像の判定を設定する。value=null で判定を外す (候補に戻す)。Persisted. */
+  setJudgement: (path: string, value: Judgement | null) => Promise<void>;
+  loadJudgements: () => Promise<void>;
   pushActiveTurn: (turnId: string) => void;
   popActiveTurn: (turnId: string) => void;
   saveToProject: (path: string, projectDir: string) => Promise<void>;
@@ -105,6 +114,33 @@ async function favoritesStore() {
   }
 }
 
+const JUDGEMENTS_STORE_FILE = "judgements.json";
+const JUDGEMENTS_KEY = "map";
+
+async function judgementsStore() {
+  try {
+    const { load: loadStore } = await import("@tauri-apps/plugin-store");
+    return await loadStore(JUDGEMENTS_STORE_FILE, {
+      defaults: {},
+      autoSave: true,
+    });
+  } catch {
+    return null;
+  }
+}
+
+/** judgements Map を永続化する (favorites と同じ plugin-store 機構)。best-effort。 */
+async function persistJudgements(map: Map<string, Judgement>) {
+  const store = await judgementsStore();
+  if (!store) return;
+  try {
+    await store.set(JUDGEMENTS_KEY, Object.fromEntries(map));
+    await store.save();
+  } catch (err) {
+    console.warn("judgements save failed", err);
+  }
+}
+
 export const useImages = create<ImagesState>((set, get) => ({
   items: [],
   knownPaths: new Set(),
@@ -114,6 +150,8 @@ export const useImages = create<ImagesState>((set, get) => ({
   selection: new Set(),
   favorites: new Set(),
   favoritesLoaded: false,
+  judgements: new Map(),
+  judgementsLoaded: false,
   activeTurns: [],
   renameNonce: 0,
 
@@ -161,9 +199,7 @@ export const useImages = create<ImagesState>((set, get) => ({
   selectClick: (path, mods) =>
     set((s) => {
       const visible = s.items
-        .filter((it) =>
-          s.filter === "favorites" ? s.favorites.has(it.path) : true,
-        )
+        .filter((it) => matchesFilter(it.path, s.filter, s.favorites, s.judgements))
         .map((it) => it.path);
       // Cmd / Ctrl: toggle membership without changing the rest.
       if (mods.meta) {
@@ -231,6 +267,35 @@ export const useImages = create<ImagesState>((set, get) => ({
     }
   },
 
+  loadJudgements: async () => {
+    if (get().judgementsLoaded) return;
+    const store = await judgementsStore();
+    if (!store) {
+      set({ judgementsLoaded: true });
+      return;
+    }
+    try {
+      const raw =
+        (await store.get<Record<string, Judgement>>(JUDGEMENTS_KEY)) ?? {};
+      const map = new Map<string, Judgement>();
+      for (const [path, value] of Object.entries(raw)) {
+        if (value === "adopted" || value === "rejected") map.set(path, value);
+      }
+      set({ judgements: map, judgementsLoaded: true });
+    } catch (err) {
+      console.warn("judgements load failed", err);
+      set({ judgementsLoaded: true });
+    }
+  },
+
+  setJudgement: async (path, value) => {
+    const next = new Map(get().judgements);
+    if (value === null) next.delete(path);
+    else next.set(path, value);
+    set({ judgements: next });
+    await persistJudgements(next);
+  },
+
   pushActiveTurn: (turnId) =>
     set((s) =>
       s.activeTurns.includes(turnId)
@@ -250,10 +315,18 @@ export const useImages = create<ImagesState>((set, get) => ({
         // Carry the favorite flag over to the new path
         const favorites = new Set(state.favorites);
         if (favorites.delete(path)) favorites.add(dest);
+        // Carry the judgement over to the new path as well.
+        const judgements = new Map(state.judgements);
+        const j = judgements.get(path);
+        if (j !== undefined) {
+          judgements.delete(path);
+          judgements.set(dest, j);
+        }
         return {
           items,
           knownPaths: new Set(items.map((it) => it.path)),
           favorites,
+          judgements,
           selectedPath:
             state.selectedPath === path ? dest : state.selectedPath,
         };
@@ -268,6 +341,8 @@ export const useImages = create<ImagesState>((set, get) => ({
           /* best effort */
         }
       }
+      // Persist judgements if path changed (best effort)
+      await persistJudgements(get().judgements);
     } catch (err) {
       console.error("save_to_project failed", err);
     }
@@ -342,12 +417,22 @@ export const useImages = create<ImagesState>((set, get) => ({
   },
 
   remove: (path) => {
-    set((state) => ({
-      items: state.items.filter((it) => it.path !== path),
-      knownPaths: new Set(
-        state.items.filter((it) => it.path !== path).map((it) => it.path),
-      ),
-    }));
+    set((state) => {
+      // 判定 Map からも掃除する (削除済み path の孤立エントリ / stale 永続化を防ぐ)。
+      let judgements = state.judgements;
+      if (judgements.has(path)) {
+        judgements = new Map(judgements);
+        judgements.delete(path);
+        void persistJudgements(judgements);
+      }
+      return {
+        items: state.items.filter((it) => it.path !== path),
+        knownPaths: new Set(
+          state.items.filter((it) => it.path !== path).map((it) => it.path),
+        ),
+        judgements,
+      };
+    });
   },
 
   renameLocal: (oldPath, newPath) => {
@@ -369,10 +454,25 @@ export const useImages = create<ImagesState>((set, get) => ({
         selection.delete(oldPath);
         selection.add(newPath);
       }
+      // favorites / judgements も古い path を握っていたら新 path へ付け替える。
+      let favorites = state.favorites;
+      if (favorites.has(oldPath)) {
+        favorites = new Set(favorites);
+        favorites.delete(oldPath);
+        favorites.add(newPath);
+      }
+      let judgements = state.judgements;
+      const j = judgements.get(oldPath);
+      if (j !== undefined) {
+        judgements = new Map(judgements);
+        judgements.delete(oldPath);
+        judgements.set(newPath, j);
+        void persistJudgements(judgements);
+      }
       // 注意: ここでは renameNonce を上げない。複数枚を逐次 renameLocal する
       // (LibraryAutoRenameButton のループ) と N×M 回の getTurn 再取得が走るため、
       // nonce の increment は呼び出し側がループ後に bumpRenameNonce() で 1 回だけ行う。
-      return { items, knownPaths, selectedPath, selection };
+      return { items, knownPaths, selectedPath, selection, favorites, judgements };
     });
     // F-#2 修正: 全プロジェクトの items[].imagePath も追従して書き換える。
     // Rust 側で history.db は UPDATE 済み (images_rename), projects.json はフロント管理。
@@ -385,6 +485,30 @@ export const useImages = create<ImagesState>((set, get) => ({
 
   bumpRenameNonce: () => set((state) => ({ renameNonce: state.renameNonce + 1 })),
 }));
+
+/**
+ * ギャラリーのフィルタ (all / favorites / adopted / rejected) に対して、
+ * 1 枚の画像が表示対象かを判定する。判定 Map に無い path は「候補」扱いなので
+ * adopted / rejected のどちらのフィルタにもヒットしない。
+ * ImageGallery の可視リスト算出と store の selectClick で共有する。
+ */
+export function matchesFilter(
+  path: string,
+  filter: GalleryFilter,
+  favorites: Set<string>,
+  judgements: Map<string, Judgement>,
+): boolean {
+  switch (filter) {
+    case "favorites":
+      return favorites.has(path);
+    case "adopted":
+      return judgements.get(path) === "adopted";
+    case "rejected":
+      return judgements.get(path) === "rejected";
+    default:
+      return true;
+  }
+}
 
 async function statFileFallback(
   path: string,

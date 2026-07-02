@@ -1,6 +1,10 @@
 import { images as imagesIpc } from "../lib/ipc";
 import { useImagePreview } from "../lib/store/imagePreview";
-import { useImages, type GalleryItem } from "../lib/store/images";
+import {
+  useImages,
+  type GalleryItem,
+  type Judgement,
+} from "../lib/store/images";
 import { useProjects } from "../lib/store/projects";
 import { useMaskEditor } from "../lib/store/maskEditor";
 import { useThreads } from "../lib/store/threads";
@@ -132,10 +136,23 @@ export function buildGalleryItemMenu(
     favorites: Set<string>;
     onToggleFavorite: (path: string) => void;
     onRegisterPreset?: (path: string) => void;
+    /**
+     * 判定 (採用/ボツ) の現在値。undefined は「候補」。省略時は
+     * store から直接読む (呼び出し側が judgements を渡さなくても動くフォールバック)。
+     */
+    judgement?: Judgement;
+    onSetJudgement?: (path: string, value: Judgement | null) => void;
   },
 ): ContextMenuItem[] {
   const isFav = ctx.favorites.has(item.path);
   const cwd = useThreads.getState().cwd;
+  // ctx.judgement 省略時は store から現在値を引く (candidate = undefined)。
+  const judgement =
+    ctx.judgement ?? useImages.getState().judgements.get(item.path);
+  const setJudgement =
+    ctx.onSetJudgement ??
+    ((path: string, value: Judgement | null) =>
+      void useImages.getState().setJudgement(path, value));
   const menu: ContextMenuItem[] = [
     /*
      * STΛCK 指示 (2026-05-19, NRC さん要望): 最上位の特別アクションとして
@@ -199,6 +216,28 @@ export function buildGalleryItemMenu(
       label: isFav ? "お気に入りから外す" : "お気に入りに追加",
       icon: "S",
       onClick: () => ctx.onToggleFavorite(item.path),
+    },
+    { kind: "separator" },
+    // judgement 3値: 採用 / ボツ / 判定を外す。現在値はチェック代わりに
+    // 「(採用中)」等のラベルで示す。同じ値を再度押しても no-op にならないよう、
+    // 採用中に「採用にする」を押しても害はない (同値 set)。
+    {
+      label: judgement === "adopted" ? "採用中" : "採用にする",
+      icon: "A",
+      disabled: judgement === "adopted",
+      onClick: () => setJudgement(item.path, "adopted"),
+    },
+    {
+      label: judgement === "rejected" ? "ボツ中" : "ボツにする",
+      icon: "R",
+      disabled: judgement === "rejected",
+      onClick: () => setJudgement(item.path, "rejected"),
+    },
+    {
+      label: "判定を外す",
+      icon: "C",
+      disabled: judgement === undefined,
+      onClick: () => setJudgement(item.path, null),
     },
     { kind: "separator" },
     {
