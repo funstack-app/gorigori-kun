@@ -9,7 +9,7 @@ use crate::commands::storage::{resolve_output_dir, StorageSettings};
 use crate::edit::human_parse::human_parse_image;
 use crate::edit::inpaint::inpaint_image;
 use crate::edit::ocr::{ocr_image, TextRegion};
-use crate::edit::segment::segment_image;
+use crate::edit::segment::segment_image_with_source;
 use crate::events::EVENT_EDIT_MAGIC_PROGRESS;
 use crate::state::AppState;
 
@@ -196,7 +196,11 @@ async fn run_magic_layer_inner(
 
     tracing::info!(target: "codex.edit", "magic_layer: セグメント開始");
     let _ = app.emit(EVENT_EDIT_MAGIC_PROGRESS, MagicLayerProgress::Segmenting);
-    let segment_result = segment_image(runtime, &text_removed_path, &run_dir).await?;
+    // マスク推論は text-removed.png (テキスト消し込み済み) を使い、前景 RGBA の色は
+    // **元画像** から焼く。text-removed は LaMa inpaint で色が破綻しうるため、前景の色に
+    // 使うと foreground.png が白ベタ+反転色になる (2026-07-02 実機バグの真因)。
+    let segment_result =
+        segment_image_with_source(runtime, &text_removed_path, input_path, &run_dir).await?;
     tracing::info!(target: "codex.edit", "magic_layer: セグメント完了 {}x{}", segment_result.width, segment_result.height);
 
     // 物体分解: 人物・テキスト以外の主要物体を SAM2 自動マスクでレイヤー化する。
@@ -325,7 +329,14 @@ async fn run_object_layers(
 
     // SAM2 embed (encoder 1 回)。モデル未DLならここでエラーになり、呼び出し側で
     // 物体分解だけスキップされる (テキスト+人物+背景は続行)。
-    let mut session = Sam2Session::new(state.edit_runtime()).await?;
+    //
+    // ★ 専用セッション (new_dedicated) を使う。クリック切り抜き UI の state.sam2_session と
+    // runtime キャッシュ経由で decoder Arc<Mutex> を共有すると、UI 側が guard を保持したまま
+    // だと物体分解の decoder `.lock().await` が 0% CPU で永久停止する (2026-07-02 実機
+    // デッドロック真因)。専用生成なら Mutex を他コマンドと共有しないので構造的に起きえない。
+    // `state` 引数は署名互換のため保持 (storage_settings 等で今後使う余地)。
+    let _ = state;
+    let mut session = Sam2Session::new_dedicated()?;
     session.embed_image(input_path).await?;
 
     // 既存レイヤー (人物マスク + テキスト bbox) を除外マスクにまとめる。
@@ -444,6 +455,11 @@ pub fn build_text_layers(
     let (width, height) = img.dimensions();
     let rgb = img.to_rgb8();
 
+    // OCR ノイズ下限: bbox 面積が画像の 0.1% 未満は「意味のない微小領域」として捨てる。
+    // 941x1672 の実機で "□" 1個 (19x21=399px=0.025%) がレイヤー化された事故の再発防止。
+    let image_area = (width as f64) * (height as f64);
+    let min_text_area = image_area * 0.001;
+
     Ok(regions
         .iter()
         .enumerate()
@@ -452,7 +468,16 @@ pub fn build_text_layers(
             if text.is_empty() {
                 return None;
             }
+            // 記号のみの短い認識結果 (1-2文字) は OCR ノイズなので捨てる。
+            // "□" や罫線・ドットのような 1-2 文字の非英数字だけの塊はテキストではない。
+            if is_symbol_noise(text) {
+                return None;
+            }
             let [x, y, w, h] = clamp_bbox(region.bbox, width, height)?;
+            // 面積が小さすぎる領域は捨てる (点・ゴミ)。
+            if (w as f64) * (h as f64) < min_text_area {
+                return None;
+            }
             let cx = (x + w / 2).min(width.saturating_sub(1));
             let cy = (y + h / 2).min(height.saturating_sub(1));
             let p = rgb.get_pixel(cx, cy);
@@ -547,11 +572,102 @@ fn clamp_bbox(bbox: [i32; 4], width: u32, height: u32) -> Option<[u32; 4]> {
     Some([x, y, w, h])
 }
 
+/// OCR ノイズ判定: 認識結果が 1-2 文字で、かつ英数字・仮名・漢字を 1 つも含まない
+/// (= 記号・罫線・箱文字だけ) の場合に true。
+///
+/// なぜ: PaddleOCR は写真の模様やエッジを "□" "・" "—" のような記号 1 個として誤認識し、
+/// これが 1 レイヤーになると非エンジニアの画面がゴミレイヤーで埋まる。3 文字以上や、
+/// 意味のある文字 (英数字/日本語) を含むものは残す (誤って本物の短文を消さないため)。
+fn is_symbol_noise(text: &str) -> bool {
+    let count = text.chars().count();
+    if count == 0 || count > 2 {
+        return false;
+    }
+    let has_meaningful = text
+        .chars()
+        .any(|ch| ch.is_alphanumeric() || is_japanese_char(ch));
+    !has_meaningful
+}
+
+fn is_japanese_char(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x3040..=0x30ff | 0x3400..=0x4dbf | 0x4e00..=0x9fff | 0xf900..=0xfaff
+    )
+}
+
 fn contains_japanese(text: &str) -> bool {
-    text.chars().any(|ch| {
-        matches!(
-            ch as u32,
-            0x3040..=0x30ff | 0x3400..=0x4dbf | 0x4e00..=0x9fff | 0xf900..=0xfaff
-        )
-    })
+    text.chars().any(is_japanese_char)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::edit::ocr::TextRegion;
+    use image::{ImageBuffer, Rgb};
+
+    #[test]
+    fn symbol_noise_rejects_single_box_char() {
+        // 実機で漏れた "□" (U+25A1・幾何学記号・1文字) は捨てる。これが本バグの再現。
+        assert!(is_symbol_noise("□"));
+        assert!(is_symbol_noise("—")); // ダッシュ
+        assert!(is_symbol_noise("**")); // 2文字の ASCII 記号も捨てる
+        assert!(is_symbol_noise("◇◆")); // 2文字の幾何学記号
+    }
+
+    #[test]
+    fn symbol_noise_keeps_meaningful_text() {
+        assert!(!is_symbol_noise("A")); // 1文字でも英数字は残す
+        assert!(!is_symbol_noise("あ")); // 1文字でも仮名は残す
+        assert!(!is_symbol_noise("42"));
+        assert!(!is_symbol_noise("SALE")); // 3文字以上は無条件で残す
+        assert!(!is_symbol_noise("こんにちは"));
+    }
+
+    /// build_text_layers が、面積の小さい記号ノイズ ("□" 19x21) を除外し、
+    /// 面積が十分で意味のあるテキストは残すことを、実 API 経由で確認する。
+    #[test]
+    fn build_text_layers_filters_ocr_noise() {
+        // 500x500 の単色画像を一時ファイルに書き出す (build_text_layers は画像を開く)。
+        let dir = std::env::temp_dir().join(format!(
+            "gori-magic-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let img_path = dir.join("in.png");
+        let img: ImageBuffer<Rgb<u8>, Vec<u8>> =
+            ImageBuffer::from_pixel(500, 500, Rgb([200, 200, 200]));
+        img.save(&img_path).unwrap();
+
+        let region = |id: &str, text: &str, bbox: [i32; 4], lang: Option<&str>| TextRegion {
+            id: id.to_string(),
+            bbox,
+            polygon: Vec::new(),
+            text: text.to_string(),
+            confidence: 0.9,
+            language: lang.map(|s| s.to_string()),
+        };
+        let regions = vec![
+            // ノイズ: "□" 1文字 (記号のみで落ちる)。
+            region("region-0000", "□", [141, 157, 19, 21], Some("ja")),
+            // ノイズ: 意味ある文字だが bbox 面積が画像の 0.1% 未満 (10x10=100px=0.04%)。
+            region("region-0001", "A", [10, 10, 10, 10], None),
+            // 採用: 十分な面積 + 意味あるテキスト (100x40=4000px=1.6%)。
+            region("region-0002", "SALE", [50, 50, 100, 40], None),
+        ];
+
+        let layers = build_text_layers(&regions, &img_path).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(
+            layers.len(),
+            1,
+            "ノイズが除外されず残っている: {:?}",
+            layers.iter().map(|l| &l.text).collect::<Vec<_>>()
+        );
+        assert_eq!(layers[0].text, "SALE");
+    }
 }

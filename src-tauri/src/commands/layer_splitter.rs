@@ -51,9 +51,24 @@ pub async fn layer_splitter_run(
         .filter(|prompt| !prompt.is_empty())
         .collect::<Vec<_>>();
 
+    // HuggingFace のオフライン化 + キャッシュを app_data_dir 配下へ隔離する。
+    // なぜ: 実機で `PermissionError: ~/.cache/huggingface/token Operation not permitted` が
+    // 発生した。配布アプリのサンドボックスから `~/.cache` へ書けないため、HF_HOME を専用
+    // ディレクトリに向け、HF_HUB_OFFLINE でトークン/リモートアクセスを一切試みさせない
+    // (モデルは venv セットアップ時に同梱済みの前提)。
+    let hf_home = app
+        .path()
+        .app_data_dir()
+        .map(|dir| dir.join("hf-cache"))
+        .unwrap_or_else(|_| splitter_dir.join("hf-cache"));
+    let _ = std::fs::create_dir_all(&hf_home);
+
     let mut command = Command::new(&python);
     command
         .current_dir(&splitter_dir)
+        .env("HF_HUB_OFFLINE", "1")
+        .env("TRANSFORMERS_OFFLINE", "1")
+        .env("HF_HOME", &hf_home)
         .arg(&script)
         .arg("split")
         .arg(&input)
@@ -72,17 +87,31 @@ pub async fn layer_splitter_run(
         if e.kind() == std::io::ErrorKind::NotFound {
             format!("Python が見つかりません: {}", python.display())
         } else {
-            format!("Layer Splitter の実行に失敗: {e}")
+            format!("レイヤー分解の実行に失敗しました: {e}")
         }
     })?;
 
     if !result.status.success() {
         let stderr = String::from_utf8_lossy(&result.stderr);
         let detail = stderr.trim();
-        return Err(if detail.is_empty() {
-            format!("Layer Splitter が失敗しました: {}", result.status)
+        // Python の traceback 全文はフロントへ返さない (ユーザーには意味不明で、内部パス等が
+        // 漏れる)。全文は tracing::error でログに残し、フロントには最終行 (例外名 + メッセージ)
+        // だけを日本語エラーに包んで返す。
+        tracing::error!(
+            target: "codex.edit.layer_splitter",
+            "layer splitter failed: status={} stderr=\n{}",
+            result.status, detail
+        );
+        let last_line = detail
+            .lines()
+            .rev()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or("")
+            .trim();
+        return Err(if last_line.is_empty() {
+            format!("レイヤー分解の実行に失敗しました: {}", result.status)
         } else {
-            detail.to_string()
+            format!("レイヤー分解の実行に失敗しました: {last_line}")
         });
     }
 

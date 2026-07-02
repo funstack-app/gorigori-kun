@@ -4,6 +4,8 @@ pub mod grab;
 pub mod human_parse;
 pub mod inpaint;
 pub mod magic_layer;
+#[cfg(test)]
+mod magic_layer_e2e;
 pub mod ocr;
 pub mod registry;
 pub mod runtime;

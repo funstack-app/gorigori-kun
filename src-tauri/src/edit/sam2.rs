@@ -53,6 +53,8 @@ pub struct Sam2Session {
 }
 
 impl Sam2Session {
+    /// クリック切り抜き UI 用。encoder/decoder を **runtime キャッシュで共有** する。
+    /// UI は 1 セッションを state.sam2_session に保持して使い回すので共有が適切。
     pub async fn new(runtime: &EditRuntime) -> Result<Self, String> {
         let enc_spec = find_model("sam2-tiny-encoder")
             .ok_or_else(|| "model spec not found: sam2-tiny-encoder".to_string())?;
@@ -61,6 +63,26 @@ impl Sam2Session {
         Ok(Self {
             encoder: runtime.get_session(&enc_spec).await?,
             decoder: runtime.get_session(&dec_spec).await?,
+            cached_image_embedding: None,
+            cached_image_size: None,
+        })
+    }
+
+    /// Magic Layer の物体分解専用。encoder/decoder を **キャッシュ共有せず専用生成** する。
+    ///
+    /// なぜ: 物体分解はグリッド点を数百回 decoder に流す。共有セッションだとクリック切り抜き
+    /// UI (state.sam2_session が同じ decoder Arc<Mutex> を参照) と Mutex を奪い合い、UI 側が
+    /// guard を保持したままだと物体分解の `.lock().await` が 0% CPU で永久停止する
+    /// (2026-07-02 実機デッドロック)。専用セッションは他コマンドと Mutex を共有しないため、
+    /// この経路のデッドロックが構造的に起きえない。
+    pub fn new_dedicated() -> Result<Self, String> {
+        let enc_spec = find_model("sam2-tiny-encoder")
+            .ok_or_else(|| "model spec not found: sam2-tiny-encoder".to_string())?;
+        let dec_spec = find_model("sam2-tiny-decoder")
+            .ok_or_else(|| "model spec not found: sam2-tiny-decoder".to_string())?;
+        Ok(Self {
+            encoder: EditRuntime::build_session_uncached(&enc_spec)?,
+            decoder: EditRuntime::build_session_uncached(&dec_spec)?,
             cached_image_embedding: None,
             cached_image_size: None,
         })
@@ -175,12 +197,23 @@ impl Sam2Session {
         let cx = click_point.0.clamp(0.0, 1.0) * SAM2_SIZE as f32;
         let cy = click_point.1.clamp(0.0, 1.0) * SAM2_SIZE as f32;
 
+        // decoder は直接 lock して同期実行する。クリック切り抜きの predict_mask と同じ経路。
+        //
+        // なぜ spawn_blocking を使わないか (2026-07-02 「採用0件」真因):
+        // 以前は decoder.run を tokio::spawn_blocking + lock_owned でブロッキングプールへ
+        // 逃がしていたが、この経路では全グリッド点で decoder が実行に到達せず即エラー扱いで
+        // 捨てられ、採用0件になっていた (256点/89ms = 1点0.35ms は build_decoder_inputs の
+        // tensor clone だけが走り run() が動いていない兆候)。ONNX モデルと入力構築自体は
+        // 正しい (同じ入力を onnxruntime に流すと masks(1,3,256,256)+iou[0.99,..] を返すことを
+        // 実測確認済み)。物体分解専用セッション (new_dedicated) は他コマンドと Mutex を共有
+        // しないため、run が多少 async ワーカーを塞いでも UI 側デッドロックは起きえない
+        // (共有しないのが new_dedicated の目的)。よって spawn_blocking は不要で、
+        // predict_mask と同じ「直接 lock → run」に揃えるのが安全。
         let mut decoder = self.decoder.lock().await;
         let decoder_inputs = build_decoder_inputs(&decoder, embedding, cx, cy, 1.0)?;
         let outputs = decoder
             .run(decoder_inputs)
             .map_err(|e| format!("decoder run: {e}"))?;
-
         let (mask, score) = mask_output_to_buffer(&outputs, w, h)?;
         drop(outputs);
         drop(decoder);
@@ -251,15 +284,19 @@ fn build_decoder_inputs<'a>(
                 &[1, 1, DEFAULT_MASK_SIZE as i64, DEFAULT_MASK_SIZE as i64],
             );
             let len = tensor_len(&shape)?;
-            let tensor = Tensor::from_array((shape, vec![0.0; len]))
+            // 明示的に f32。Rust の `0.0` リテラルは文脈が無いと f64 になり、SAM2 decoder が
+            // `tensor(double)` を受け取って「expected: tensor(float)」で全点失敗する
+            // (2026-07-02 実機バグ: predict失敗 256点全滅の真因)。
+            let tensor = Tensor::from_array((shape, vec![0.0f32; len]))
                 .map_err(|e| format!("mask_input tensor: {e}"))?;
             inputs.push((name, SessionInputValue::from(tensor)));
         } else if lower == "has_mask_input" || lower == "has_mask_inputs" {
             let shape = tensor_shape_or(input.dtype(), &[1]);
             let len = tensor_len(&shape)?;
-            let mut data = vec![0.0; len];
+            // f32 明示 (mask_input と同じ理由。f64 だと tensor(double) で decoder が拒否する)。
+            let mut data = vec![0.0f32; len];
             if data.is_empty() {
-                data.push(0.0);
+                data.push(0.0f32);
             }
             let tensor = Tensor::from_array((shape, data))
                 .map_err(|e| format!("has_mask_input tensor: {e}"))?;

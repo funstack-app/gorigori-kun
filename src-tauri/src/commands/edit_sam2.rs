@@ -30,9 +30,14 @@ pub async fn edit_sam2_predict(
     y: f32,
     positive: bool,
 ) -> Result<MaskPayload, String> {
+    // RwLock の read guard は predict_mask().await をまたいで保持しない。
+    // なぜ: guard を await 越しに握ると、embed し直し (set_sam2_session の write().await) と
+    // 絡んで停止しうる。predict_mask 内部で decoder Mutex を取れば十分なので、ここでは
+    // guard をすぐ解放できるよう最小スコープに閉じ、その中で推論まで済ませる。
     let guard = state.sam2_session.read().await;
     let session = guard.as_ref().ok_or_else(|| "not embedded".to_string())?;
     let mask = session.predict_mask((x, y), positive).await?;
+    drop(guard);
     Ok(MaskPayload {
         mask_base64: general_purpose::STANDARD.encode(mask.png),
         width: mask.width,

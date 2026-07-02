@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use image::{ImageBuffer, Luma};
 
@@ -35,6 +36,12 @@ const EXISTING_OVERLAP_COVER: f64 = 0.50;
 /// なぜ上限: 過去評価で「17パーツが平らに並ぶと非エンジニアに認知負荷」の指摘があり、
 /// レイヤー数を絞ることを優先する。
 pub const MAX_OBJECTS_HARD_CAP: usize = 12;
+
+/// 物体スキャン全体の時間予算 (秒)。これを超えたら残りグリッド点をスキップし、その時点で
+/// 集まった候補だけで続行する。なぜ: 遅い CPU / 大きい画像で decoder 1 点が重いと 256 点で
+/// 分単位になりうる。無限に待たせず「多少雑でも返す」ことを優先する (2026-07-02 実機で
+/// 物体スキャンが無音停止した件の再発防止として、進捗ログとセットで上限を入れる)。
+const SCAN_TIME_BUDGET: Duration = Duration::from_secs(60);
 /// 既定の採用物体数 (UI トグル「自動」相当)。
 pub const DEFAULT_OBJECT_COUNT: usize = 6;
 
@@ -79,20 +86,74 @@ pub async fn run_auto_object_masks(
 ) -> Result<Vec<ObjectMask>, String> {
     let n = max_objects.min(MAX_OBJECTS_HARD_CAP).max(1);
 
+    let grid_points = (GRID * GRID) as usize;
+    let started = Instant::now();
+    tracing::info!(
+        target: "edit.auto_segment",
+        "run_auto_object_masks 開始: grid={}x{} ({}点) max_objects={}",
+        GRID, GRID, grid_points, n
+    );
+
     let mut candidates: Vec<Candidate> = Vec::new();
     let mut total_pixels: Option<u64> = None;
+    let mut scanned: usize = 0;
+    let mut budget_exceeded = false;
+    let mut per_point_ms_sum: u128 = 0;
+    // predict 失敗を黙殺しない: 総数を数え、最初の数件は理由を warn で出す。
+    // 「採用0件」の真因 (predict が全点でエラーしていた) をログから追えるようにする。
+    let mut predict_error_count: usize = 0;
+    let mut logged_errors: usize = 0;
+    const MAX_LOGGED_ERRORS: usize = 3;
 
-    for gy in 0..GRID {
+    'scan: for gy in 0..GRID {
         for gx in 0..GRID {
+            // 時間予算を超えたら残り点を打ち切り、集まった候補だけで続行する。
+            if started.elapsed() >= SCAN_TIME_BUDGET {
+                budget_exceeded = true;
+                tracing::warn!(
+                    target: "edit.auto_segment",
+                    "時間予算 {}s 超過: {}/{}点でスキャン打ち切り (候補{}件)",
+                    SCAN_TIME_BUDGET.as_secs(), scanned, grid_points, candidates.len()
+                );
+                break 'scan;
+            }
+
             // グリッド点を [EDGE_MARGIN, 1-EDGE_MARGIN] に写像 (端を避ける)。
             let fx = EDGE_MARGIN + (gx as f32 + 0.5) / GRID as f32 * (1.0 - 2.0 * EDGE_MARGIN);
             let fy = EDGE_MARGIN + (gy as f32 + 0.5) / GRID as f32 * (1.0 - 2.0 * EDGE_MARGIN);
 
+            let point_started = Instant::now();
             let raw = match session.predict_raw_mask((fx, fy)).await {
                 Ok(raw) => raw,
                 // 1 点の失敗で全体を止めない (一部の点で decoder が転けても他の点は活きる)。
-                Err(_) => continue,
+                // ただし黙殺せず、総数を数えて最初の数件は理由を出す (2026-07-02「採用0件」の
+                // 真因追跡: 全点 predict エラーが無音で捨てられていた)。
+                Err(reason) => {
+                    predict_error_count += 1;
+                    if logged_errors < MAX_LOGGED_ERRORS {
+                        logged_errors += 1;
+                        tracing::warn!(
+                            target: "edit.auto_segment",
+                            "predict失敗 点({:.3},{:.3}) [{}件目]: {}",
+                            fx, fy, predict_error_count, reason
+                        );
+                    }
+                    scanned += 1;
+                    continue;
+                }
             };
+            per_point_ms_sum += point_started.elapsed().as_millis();
+            scanned += 1;
+
+            // 32 点ごとに進捗ログ (無音停止の検知用)。平均 1 点あたりの decode 実測も出す。
+            if scanned % 32 == 0 {
+                let avg_ms = per_point_ms_sum / scanned as u128;
+                tracing::info!(
+                    target: "edit.auto_segment",
+                    "進捗 {}/{}点 経過{}ms (1点平均{}ms 候補{}件)",
+                    scanned, grid_points, started.elapsed().as_millis(), avg_ms, candidates.len()
+                );
+            }
 
             if raw.score < MIN_SCORE {
                 continue;
@@ -142,6 +203,26 @@ pub async fn run_auto_object_masks(
     // 面積順 (大きい物体を優先) に並べ替えて上位 N 個を採用。
     kept.sort_by(|a, b| b.area.cmp(&a.area));
     kept.truncate(n);
+
+    tracing::info!(
+        target: "edit.auto_segment",
+        "run_auto_object_masks 完了: 採用{}件 (スキャン{}/{}点 predict失敗{}件 総時間{}ms{})",
+        kept.len(),
+        scanned,
+        grid_points,
+        predict_error_count,
+        started.elapsed().as_millis(),
+        if budget_exceeded { " ※時間予算超過で打ち切り" } else { "" }
+    );
+    // 全点が predict エラーだった場合は、採用0件の真因が「フィルタで全部落ちた」ではなく
+    // 「decoder が全点で失敗した」ことを明示する (無音の採用0件を診断可能にする)。
+    if predict_error_count == scanned && scanned > 0 {
+        tracing::error!(
+            target: "edit.auto_segment",
+            "物体分解: 全{}点で predict が失敗した。decoder 入力/セッションを疑う (採用0件の真因)",
+            scanned
+        );
+    }
 
     Ok(kept
         .into_iter()
@@ -254,4 +335,99 @@ pub fn build_exclude_mask(
     }
 
     mask
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    fn filled(w: u32, h: u32, x0: u32, y0: u32, x1: u32, y1: u32) -> ImageBuffer<Luma<u8>, Vec<u8>> {
+        ImageBuffer::from_fn(w, h, |x, y| {
+            if x >= x0 && x < x1 && y >= y0 && y < y1 {
+                Luma([255u8])
+            } else {
+                Luma([0u8])
+            }
+        })
+    }
+
+    #[test]
+    fn count_white_counts_only_white() {
+        let m = filled(10, 10, 0, 0, 5, 10); // 左半分 = 50px
+        assert_eq!(count_white(&m), 50);
+    }
+
+    #[test]
+    fn mask_iou_identical_is_one() {
+        let a = filled(8, 8, 2, 2, 6, 6); // 16px
+        let area = count_white(&a);
+        assert!((mask_iou(&a, &a, area, area) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn mask_iou_disjoint_is_zero() {
+        let a = filled(8, 8, 0, 0, 2, 2);
+        let b = filled(8, 8, 6, 6, 8, 8);
+        let aa = count_white(&a);
+        let bb = count_white(&b);
+        assert_eq!(mask_iou(&a, &b, aa, bb), 0.0);
+    }
+
+    #[test]
+    fn mask_iou_size_mismatch_is_zero() {
+        let a = filled(8, 8, 0, 0, 4, 4);
+        let b = filled(4, 4, 0, 0, 4, 4);
+        assert_eq!(mask_iou(&a, &b, count_white(&a), count_white(&b)), 0.0);
+    }
+
+    #[test]
+    fn covered_by_full_overlap_is_one() {
+        let a = filled(8, 8, 2, 2, 6, 6);
+        let existing = filled(8, 8, 0, 0, 8, 8); // 全面
+        let area = count_white(&a);
+        assert!((covered_by(&a, &existing, area) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn covered_by_empty_area_is_zero() {
+        let a = filled(8, 8, 0, 0, 0, 0); // 空
+        let existing = filled(8, 8, 0, 0, 8, 8);
+        assert_eq!(covered_by(&a, &existing, 0), 0.0);
+    }
+
+    #[test]
+    fn build_exclude_mask_marks_text_boxes() {
+        let mask = build_exclude_mask(20, 20, None, &[[5, 5, 4, 4]]);
+        // box 内は白
+        assert_eq!(mask.get_pixel(5, 5)[0], 255);
+        assert_eq!(mask.get_pixel(8, 8)[0], 255);
+        // box 外は黒
+        assert_eq!(mask.get_pixel(0, 0)[0], 0);
+        assert_eq!(mask.get_pixel(9, 9)[0], 0);
+    }
+
+    #[test]
+    fn scan_time_budget_is_sane() {
+        // 時間予算は正で、実用上の上限内 (無限や過大でない) であることを固定する。
+        assert!(SCAN_TIME_BUDGET.as_secs() > 0);
+        assert!(SCAN_TIME_BUDGET.as_secs() <= 300);
+    }
+
+    /// decoder 相当の共有ハンドル (`Arc<Mutex>`) を、guard を保持し続けない限り
+    /// 順次取得・解放できる (= デッドロックしない) ことを、モデル非依存で確認する。
+    /// predict_raw_mask のロック規律 (lock → 使う → drop) が守られていれば、この形で
+    /// 連続取得しても永久待ちにならない。専用セッション (new_dedicated) は他コマンドと
+    /// Mutex を共有しないので、run が同期実行でも UI 側デッドロックは起きえない。
+    #[tokio::test]
+    async fn sequential_lock_never_deadlocks() {
+        let shared: Arc<Mutex<u32>> = Arc::new(Mutex::new(0));
+        for _ in 0..256 {
+            let mut guard = shared.lock().await;
+            *guard += 1;
+            drop(guard); // predict_raw_mask と同じく guard を明示的に解放する
+        }
+        assert_eq!(*shared.lock().await, 256);
+    }
 }
