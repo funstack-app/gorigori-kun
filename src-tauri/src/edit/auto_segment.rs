@@ -32,6 +32,15 @@ const NMS_IOU: f64 = 0.60;
 /// 既存領域に覆われていたら「二重レイヤー」として除外する (カバー率ベース)。
 const EXISTING_OVERLAP_COVER: f64 = 0.50;
 
+/// 背景棄却: マスクが画像外周 (上下左右の縁1px) を覆う割合の上限 (全周平均)。
+/// これを超えるマスクは背景・空・床の類とみなして物体に採用しない。
+const MAX_BORDER_COVER: f64 = 0.22;
+
+/// 背景棄却: 1辺単独のカバー率上限。背景は「上端の空」「下端の床」のように
+/// 特定の1辺をほぼ全面に覆う (実測: 背景グレー面は上端86%)。見切れ物体でも
+/// 1辺の6割を超えることは稀。
+const MAX_SINGLE_EDGE_COVER: f64 = 0.60;
+
 /// 採用物体数の上限 (安全弁)。UI で「多め」を選んでもこれを超えない。
 /// なぜ上限: 過去評価で「17パーツが平らに並ぶと非エンジニアに認知負荷」の指摘があり、
 /// レイヤー数を絞ることを優先する。
@@ -156,6 +165,7 @@ pub async fn run_auto_object_masks(
             }
 
             if raw.score < MIN_SCORE {
+                tracing::debug!(target: "edit.auto_segment", "score棄却: {:.3}", raw.score);
                 continue;
             }
 
@@ -165,6 +175,7 @@ pub async fn run_auto_object_masks(
             let min_area = (tp as f64 * MIN_AREA_RATIO) as u64;
             let max_area = (tp as f64 * MAX_AREA_RATIO) as u64;
             if area < min_area || area > max_area {
+                tracing::debug!(target: "edit.auto_segment", "面積棄却: area={} ({}..{})", area, min_area, max_area);
                 continue;
             }
 
@@ -172,8 +183,23 @@ pub async fn run_auto_object_masks(
             if let Some(existing) = exclude_mask {
                 let covered = covered_by(&raw.mask, existing, area);
                 if covered >= EXISTING_OVERLAP_COVER {
+                    tracing::debug!(target: "edit.auto_segment", "既存重複棄却: covered={:.2} area={}", covered, area);
                     continue;
                 }
+            }
+
+            // 背景マスクの棄却: 画像の縁を広く覆うマスクは「物体」ではなく背景。
+            // 実測根拠 (2026-07-02 実写プローブ): 背景のグレー面が area 28%・score 0.989 で
+            // 採用され、被写体と同格の「物体レイヤー」になった。物体は通常フレーム縁を
+            // 25%以上は覆わない (見切れでも一辺どまり)。
+            let (border_total, border_edge_max) = border_cover(&raw.mask);
+            if border_total > MAX_BORDER_COVER || border_edge_max > MAX_SINGLE_EDGE_COVER {
+                tracing::debug!(
+                    target: "edit.auto_segment",
+                    "背景棄却: area={} score={:.3} border_total={:.2} edge_max={:.2}",
+                    area, raw.score, border_total, border_edge_max
+                );
+                continue;
             }
 
             candidates.push(Candidate {
@@ -237,6 +263,27 @@ pub async fn run_auto_object_masks(
 /// 白画素(>127)を数える。
 fn count_white(mask: &ImageBuffer<Luma<u8>, Vec<u8>>) -> u64 {
     mask.pixels().filter(|p| p[0] > 127).count() as u64
+}
+
+/// マスクが画像外周 (縁1px) を覆う割合。背景マスクの検出に使う。
+/// 返り値: (全周の平均カバー率, 4辺のうち最大の単独カバー率)
+fn border_cover(mask: &ImageBuffer<Luma<u8>, Vec<u8>>) -> (f64, f64) {
+    let (w, h) = mask.dimensions();
+    if w < 2 || h < 2 {
+        return (0.0, 0.0);
+    }
+    let edge = |pts: &mut dyn Iterator<Item = (u32, u32)>, len: u64| -> (u64, f64) {
+        let covered = pts.filter(|&(x, y)| mask.get_pixel(x, y)[0] > 127).count() as u64;
+        (covered, covered as f64 / len as f64)
+    };
+    let (top_c, top_r) = edge(&mut (0..w).map(|x| (x, 0)), w as u64);
+    let (bot_c, bot_r) = edge(&mut (0..w).map(|x| (x, h - 1)), w as u64);
+    let (lef_c, lef_r) = edge(&mut (1..h - 1).map(|y| (0, y)), (h - 2).max(1) as u64);
+    let (rig_c, rig_r) = edge(&mut (1..h - 1).map(|y| (w - 1, y)), (h - 2).max(1) as u64);
+    let total_len = (2 * w as u64 + 2 * (h as u64).saturating_sub(2)).max(1);
+    let total = (top_c + bot_c + lef_c + rig_c) as f64 / total_len as f64;
+    let edge_max = top_r.max(bot_r).max(lef_r).max(rig_r);
+    (total, edge_max)
 }
 
 /// a のうち existing に覆われている割合 (a_area は a の白画素数)。

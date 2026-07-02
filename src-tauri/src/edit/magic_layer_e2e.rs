@@ -64,6 +64,15 @@ fn synth_image() -> ImageBuffer<Rgb<u8>, Vec<u8>> {
     img
 }
 
+
+/// テストでも tracing を見えるようにする (購読者が無いと debug/info が全て闇に消える)。
+fn init_test_tracing() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("edit.auto_segment=debug,codex.edit=info")
+        .with_test_writer()
+        .try_init();
+}
+
 fn tmp_dir(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "gori-magic-e2e-{tag}-{}",
@@ -173,6 +182,93 @@ async fn lama_scale_experiment() {
     );
 }
 
+/// マスクの白画素数と重心 (x,y ピクセル座標) を返す。
+fn mask_stats(mask: &ImageBuffer<Luma<u8>, Vec<u8>>) -> (u64, f64, f64) {
+    let mut area = 0u64;
+    let mut sx = 0f64;
+    let mut sy = 0f64;
+    for (x, y, p) in mask.enumerate_pixels() {
+        if p[0] > 127 {
+            area += 1;
+            sx += x as f64;
+            sy += y as f64;
+        }
+    }
+    if area == 0 {
+        (0, 0.0, 0.0)
+    } else {
+        (area, sx / area as f64, sy / area as f64)
+    }
+}
+
+/// クリック点がデコーダに効いていることの品質回帰テスト (高速・2点のみ)。
+///
+/// 真因: クリック点を指しても「ほぼ画像全体」の同一マスクしか返らないと、物体分解が
+/// 背景1種類に潰れる。ここでは赤矩形の中心と青円の中心を predict し、
+///   - マスク面積が対象物体の面積の 0.5〜2.0 倍
+///   - マスク重心が対象物体の内側
+/// を機械検証する。緑になれば「点に依存して正しいマスクが返る」ことの証拠。
+#[tokio::test]
+#[ignore]
+async fn sam2_click_point_localizes_object() {
+    init_test_tracing();
+    if !model_available("sam2-tiny-encoder") || !model_available("sam2-tiny-decoder") {
+        eprintln!("[skip] sam2 モデル未DL");
+        return;
+    }
+    let dir = tmp_dir("sam2-click");
+    let img = synth_image();
+    let input = dir.join("input.png");
+    img.save(&input).unwrap();
+
+    let mut session = Sam2Session::new_dedicated().expect("new_dedicated");
+    session.embed_image(&input).await.expect("embed_image");
+
+    // --- 赤矩形 (200,360)-(440,620): 面積 240*260 = 62,400px、中心 (320,490) ---
+    let red_area = 240.0 * 260.0;
+    let raw = session
+        .predict_raw_mask((320.0 / W as f32, 490.0 / H as f32))
+        .await
+        .expect("predict red-center");
+    let (area, cx, cy) = mask_stats(&raw.mask);
+    eprintln!(
+        "赤矩形: score={:.3} area={} (期待 {:.0}±) 重心=({:.0},{:.0})",
+        raw.score, area, red_area, cx, cy
+    );
+    assert!(
+        area as f64 >= red_area * 0.5 && area as f64 <= red_area * 2.0,
+        "赤矩形マスク面積 {} が矩形面積 {:.0} の 0.5〜2.0 倍から外れた (クリック点が効いていない)",
+        area,
+        red_area
+    );
+    assert!(
+        (200.0..440.0).contains(&cx) && (360.0..620.0).contains(&cy),
+        "赤矩形マスク重心 ({:.0},{:.0}) が矩形内 (200..440, 360..620) にない",
+        cx,
+        cy
+    );
+
+    // --- 青円 中心 (140,180) 半径 90: 面積 π*90^2 ≈ 25,447px ---
+    let blue_area = std::f64::consts::PI * 90.0 * 90.0;
+    let raw = session
+        .predict_raw_mask((140.0 / W as f32, 180.0 / H as f32))
+        .await
+        .expect("predict blue-center");
+    let (area, cx, cy) = mask_stats(&raw.mask);
+    eprintln!(
+        "青円: score={:.3} area={} (期待 {:.0}±) 重心=({:.0},{:.0})",
+        raw.score, area, blue_area, cx, cy
+    );
+    assert!(
+        area as f64 >= blue_area * 0.5 && area as f64 <= blue_area * 2.0,
+        "青円マスク面積 {} が円面積 {:.0} の 0.5〜2.0 倍から外れた (クリック点が効いていない)",
+        area,
+        blue_area
+    );
+
+    eprintln!("=== CLICK POINT OK: 赤矩形・青円ともに点依存でローカライズ ===");
+}
+
 /// SAM2 decoder が dtype エラーなしで動くことの回帰テスト。
 ///
 /// 2026-07-02 実機バグ: mask_input/has_mask_input を f64 (`vec![0.0; len]`) で作っていたため
@@ -223,6 +319,7 @@ async fn sam2_decoder_dtype_no_error() {
 #[tokio::test]
 #[ignore]
 async fn magic_layer_full_pipeline_quality() {
+    init_test_tracing();
     // 必須モデルの可用性チェック。
     for id in ["birefnet-general", "sam2-tiny-encoder", "sam2-tiny-decoder"] {
         if !model_available(id) {
@@ -267,15 +364,28 @@ async fn magic_layer_full_pipeline_quality() {
     let mut session = Sam2Session::new_dedicated().expect("new_dedicated");
     session.embed_image(&input).await.expect("embed_image");
 
-    // 人物マスク (BiRefNet 出力) を除外マスクにする。テキスト bbox は無し。
-    let exclude = build_exclude_mask(width, height, Some(&segment_result.mask_path), &[]);
-    let masks = run_auto_object_masks(&session, Some(&exclude), 6)
+    // 合成画像は「人物なし」で、赤矩形・青円がそのまま検出対象の物体。
+    // ところが BiRefNet はこの2つの鮮明な図形を **前景 (人物相当)** として拾う
+    // (foreground opaque≈14.5% = 赤62,400+青25,447 とほぼ一致)。その前景マスクを
+    // exclude に渡すと、SAM2 が正しく当てた赤矩形(covered≈0.99)・青円(covered≈0.99)が
+    // 「人物と二重」として全部 既存重複棄却 され、採用0件になる (2026-07-02 実機 E2E の真因)。
+    //
+    // 実運用では person_mask = 人物のみで、人物と重ならない物体 (背景の小物・乗り物等) は
+    // 残る。合成画像は人物が存在しないので、人物 exclude を渡すこと自体が現実と乖離する
+    // テスト配線バグ。ここでは exclude=None で「物体分解そのもの」を検証する。
+    // (exclude 重複除外ロジックの単体検証は auto_segment.rs の covered_by テストで担保済み。)
+    let masks = run_auto_object_masks(&session, None, 6)
         .await
         .expect("run_auto_object_masks failed");
+    let _ = build_exclude_mask; // 実運用側 (magic_layer.rs) で使用。ここでは未使用。
 
     eprintln!("=== object masks 採用: {} 件 ===", masks.len());
     for (i, m) in masks.iter().enumerate() {
-        eprintln!("  object[{i}] area={} score={:.3}", m.area, m.score);
+        let (_a, cx, cy) = mask_stats(&m.mask);
+        eprintln!(
+            "  object[{i}] area={} score={:.3} 重心=({:.0},{:.0})",
+            m.area, m.score, cx, cy
+        );
     }
 
     // (b) predict 失敗 0 件: 採用が 1 件以上ある = decoder が動いた証拠。
@@ -285,6 +395,22 @@ async fn magic_layer_full_pipeline_quality() {
         !masks.is_empty(),
         "(b)(c) 物体マスクが 0 件. dtype エラーで全点 predict 失敗した可能性 (旧バグ再発). \
          合成画像には赤矩形と青円があるので 1 件以上採れるはず。"
+    );
+
+    // (c') 採用物体の中に「赤矩形」または「青円」が実際に含まれる (点依存の物体分解が
+    //      機能している証拠。whole-scene マスクに潰れていたらここで落ちる)。
+    let red_center = (320.0, 490.0);
+    let blue_center = (140.0, 180.0);
+    let hit_object = |cx: f64, cy: f64| {
+        masks.iter().any(|m| {
+            let (_a, mcx, mcy) = mask_stats(&m.mask);
+            (mcx - cx).abs() < 60.0 && (mcy - cy).abs() < 60.0
+        })
+    };
+    assert!(
+        hit_object(red_center.0, red_center.1) || hit_object(blue_center.0, blue_center.1),
+        "(c') 採用物体の重心が赤矩形(320,490)にも青円(140,180)にも近くない. \
+         物体分解が背景 whole-scene に潰れている疑い。"
     );
 
     // --- 3. union マスクで LaMa 背景 inpaint ---
@@ -322,4 +448,90 @@ async fn magic_layer_full_pipeline_quality() {
     );
 
     eprintln!("=== ALL GREEN: foreground/object/inpaint すべて品質 OK ===");
+}
+
+/// 実写プローブ: 実画像でフルパイプラインを回し、成果物を書き出して目視判定に供する。
+/// 品質のハードアサートはせず (実写の正解は人間が判定)、破綻検知だけアサートする。
+///   GORI_E2E_IMAGE=<入力画像> GORI_E2E_OUT=<出力dir> \
+///   cargo test --lib edit::magic_layer_e2e::magic_layer_real_image_probe -- --ignored --nocapture
+#[tokio::test]
+#[ignore]
+async fn magic_layer_real_image_probe() {
+    init_test_tracing();
+    let Ok(input) = std::env::var("GORI_E2E_IMAGE") else {
+        eprintln!("[skip] GORI_E2E_IMAGE 未指定");
+        return;
+    };
+    let input = PathBuf::from(input);
+    let out = std::env::var("GORI_E2E_OUT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| tmp_dir("real"));
+    std::fs::create_dir_all(&out).unwrap();
+
+    for id in ["birefnet-general", "sam2-tiny-encoder", "sam2-tiny-decoder"] {
+        if !model_available(id) {
+            eprintln!("[skip] {id} 未DL");
+            return;
+        }
+    }
+
+    let runtime = EditRuntime::new();
+    let segment_result = segment_image_with_source(&runtime, &input, &input, &out)
+        .await
+        .expect("segment failed");
+    let (w, h) = (segment_result.width, segment_result.height);
+    let (fg_opaque, fg_white) = white_ratio_of_opaque(&segment_result.foreground_path);
+    eprintln!("[probe] segment {w}x{h} fg_opaque={fg_opaque:.1}% fg_white={fg_white:.1}%");
+    assert!(fg_white < 20.0, "前景が白ベタ破綻 ({fg_white:.1}%)");
+
+    use crate::edit::auto_segment::{build_exclude_mask, run_auto_object_masks};
+    let mut session = Sam2Session::new_dedicated().expect("new_dedicated");
+    session.embed_image(&input).await.expect("embed");
+    let exclude = build_exclude_mask(w, h, Some(&segment_result.mask_path), &[]);
+    let masks = run_auto_object_masks(&session, Some(&exclude), 12)
+        .await
+        .expect("auto masks");
+    eprintln!("[probe] objects={} 件", masks.len());
+
+    let rgba = image::open(&input).unwrap().to_rgba8();
+    let mut union = ImageBuffer::<Luma<u8>, Vec<u8>>::from_pixel(w, h, Luma([0u8]));
+    if let Ok(person) = image::open(&segment_result.mask_path) {
+        let person = person.to_luma8();
+        if person.width() == w && person.height() == h {
+            for (dst, src) in union.pixels_mut().zip(person.pixels()) {
+                if src[0] > 127 {
+                    *dst = Luma([255u8]);
+                }
+            }
+        }
+    }
+    for (i, m) in masks.iter().enumerate() {
+        let p = out.join(format!("object-{i}.png"));
+        let bbox =
+            crate::edit::grab::crop_object_png(&rgba, &m.mask, &p).expect("crop object");
+        eprintln!(
+            "[probe] object[{i}] area={} score={:.3} bbox={:?} -> {}",
+            m.area,
+            m.score,
+            bbox,
+            p.display()
+        );
+        for (dst, src) in union.pixels_mut().zip(m.mask.pixels()) {
+            if src[0] > 127 {
+                *dst = Luma([255u8]);
+            }
+        }
+    }
+    let union_path = out.join("union-mask.png");
+    crate::edit::grab::dilate_mask_pub(&union, 6)
+        .save(&union_path)
+        .unwrap();
+    let background = out.join("background-filled.png");
+    inpaint_image(&runtime, &input, &union_path, &background)
+        .await
+        .expect("inpaint");
+    let bg_white = white_ratio_rgb(&background);
+    eprintln!("[probe] 背景補完 白率={bg_white:.1}% -> {}", background.display());
+    assert!(bg_white < 50.0, "背景補完が白化け ({bg_white:.1}%)");
+    eprintln!("[probe] 完了: {}", out.display());
 }
