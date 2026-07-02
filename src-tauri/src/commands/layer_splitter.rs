@@ -1,8 +1,10 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use tauri::{AppHandle, Manager};
 
 #[tauri::command]
 pub async fn layer_splitter_run(
+    app: AppHandle,
     input_path: String,
     preset: String,
     custom_prompts: Option<Vec<String>>,
@@ -18,14 +20,12 @@ pub async fn layer_splitter_run(
         return Err(format!("未対応のプリセットです: {preset}"));
     }
 
-    let splitter_dir = resolve_splitter_dir()?;
-    let python = splitter_dir.join("venv/bin/python");
-    if !python.is_file() {
-        return Err(format!(
-            "Layer Splitter のセットアップ未完了です。{} で ./setup.sh を実行してください。",
-            splitter_dir.display()
-        ));
-    }
+    let splitter_dir = resolve_splitter_dir(&app)?;
+    let python = resolve_venv_python(&splitter_dir).ok_or_else(|| {
+        "Layer Splitter のセットアップが未完了です（Python 環境が見つかりません）。\
+         設定 > 拡張機能 からセットアップしてください。"
+            .to_string()
+    })?;
 
     let script = splitter_dir.join("splitter.py");
     if !script.is_file() {
@@ -89,20 +89,56 @@ pub async fn layer_splitter_run(
     Ok(output.to_string_lossy().into_owned())
 }
 
-fn resolve_splitter_dir() -> Result<PathBuf, String> {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let candidates = [
-        manifest_dir.join("../../../extensions/layer-splitter"),
-        manifest_dir.join("../../extensions/layer-splitter"),
-    ];
-    candidates
-        .into_iter()
-        .find(|path| path.join("splitter.py").is_file())
-        .map(normalize_path)
-        .ok_or_else(|| {
-            "extensions/layer-splitter が見つかりません。Layer Splitter の配置を確認してください。"
-                .to_string()
-        })
+/// 解決優先順:
+/// 1. GORI_LAYER_SPLITTER_DIR 環境変数（検証・上級者向けの明示 override）
+/// 2. app_data_dir()/extensions/layer-splitter（配布版の正本。将来のセットアップ機能の展開先）
+/// 3. debug ビルド限定: リポジトリ相対（dev 体験の維持。release バイナリには
+///    cfg(debug_assertions) でコンパイルされないため、ビルドマシンのパスが焼き込まれない）
+fn resolve_splitter_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let has_entry = |dir: &Path| dir.join("splitter.py").is_file();
+
+    if let Some(dir) = std::env::var_os("GORI_LAYER_SPLITTER_DIR").map(PathBuf::from) {
+        if has_entry(&dir) {
+            return Ok(normalize_path(dir));
+        }
+    }
+
+    if let Ok(data_dir) = app.path().app_data_dir() {
+        let dir = data_dir.join("extensions").join("layer-splitter");
+        if has_entry(&dir) {
+            return Ok(normalize_path(dir));
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        for candidate in [
+            manifest_dir.join("../../../extensions/layer-splitter"),
+            manifest_dir.join("../../extensions/layer-splitter"),
+        ] {
+            if has_entry(&candidate) {
+                return Ok(normalize_path(candidate));
+            }
+        }
+    }
+
+    Err(
+        "Layer Splitter が未インストールです。設定 > 拡張機能 からセットアップしてください。"
+            .to_string(),
+    )
+}
+
+/// venv の python を OS 差込みで解決（削除済み runner.rs の resolve_python と同型）。
+fn resolve_venv_python(splitter_dir: &Path) -> Option<PathBuf> {
+    let venv = splitter_dir.join("venv");
+    [
+        venv.join("bin").join("python"),
+        venv.join("bin").join("python3"),
+        venv.join("Scripts").join("python.exe"),
+    ]
+    .into_iter()
+    .find(|p| p.is_file())
 }
 
 fn default_output_path(input: &Path) -> Result<PathBuf, String> {

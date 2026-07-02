@@ -1,11 +1,8 @@
 pub mod download;
-pub mod runner;
 
 use serde::{Deserialize, Serialize};
-use std::path::Path;
 
 pub use download::{download_model, is_model_installed};
-pub use runner::run_segmentation;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SegmentationModel {
@@ -82,17 +79,4 @@ pub fn model_status(model: SegmentationModel) -> Result<SegmentationModelStatus,
         cache_path: cache_dir.display().to_string(),
         estimated_size_mb: model.estimated_size_mb(),
     })
-}
-
-pub fn validate_image_path(image_path: &Path) -> Result<(), String> {
-    if !image_path.exists() {
-        return Err(format!("画像が見つかりません: {}", image_path.display()));
-    }
-    if !image_path.is_file() {
-        return Err(format!(
-            "画像ファイルではありません: {}",
-            image_path.display()
-        ));
-    }
-    Ok(())
 }
