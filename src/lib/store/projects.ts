@@ -76,6 +76,15 @@ export type Project = {
   name: string;
   /** 任意の説明 */
   description?: string;
+  /**
+   * プロジェクトの状態 (監査B-2: 下書き→確定フロー)。
+   *   - "draft":  作成直後。まだ「確定」していない下書き。
+   *   - "active": 確定済み。通常のプロジェクト。
+   *   - undefined: 旧データ (この項目が導入される前) は active として扱う (後方互換)。
+   * これにより「作っただけで中身が空のまま放置された箱」を UI 上で見分けられる。
+   * 複雑な状態機械にはしない (draft → active の一方向のみ)。
+   */
+  status?: "draft" | "active";
   items: ProjectItem[];
   /** 企画チャット (PlanWorkspace) のログ。アクティブプロジェクト時に
    *  会話完了ごとに上書き保存される。 */
@@ -192,6 +201,11 @@ type ProjectsState = {
   projects: Project[];
 
   createProject: (name: string, description?: string) => Project;
+  /**
+   * 下書きプロジェクトを「確定」して active にする (監査B-2)。
+   * 既に active / 見つからない場合は何もしない (冪等)。
+   */
+  confirmProject: (id: string) => void;
   renameProject: (id: string, name: string) => void;
   updateProjectDescription: (id: string, description: string | undefined) => void;
   removeProject: (id: string) => void;
@@ -347,6 +361,8 @@ export const useProjects = create<ProjectsState>((set, get) => ({
       id: generateId(),
       name: name.trim() || "無題のプロジェクト",
       description: description?.trim() || undefined,
+      // 作成直後は下書き。確定 (confirmProject) するまで UI に「下書き」バッジが出る。
+      status: "draft",
       items: [],
       createdAt: now,
       updatedAt: now,
@@ -355,6 +371,17 @@ export const useProjects = create<ProjectsState>((set, get) => ({
     persist(next);
     set({ projects: next });
     return project;
+  },
+
+  confirmProject: (id) => {
+    const next = get().projects.map((p) =>
+      // undefined (旧データ = active 扱い) や既に active のものは触らない (冪等)。
+      p.id === id && p.status === "draft"
+        ? { ...p, status: "active" as const, updatedAt: Date.now() }
+        : p,
+    );
+    persist(next);
+    set({ projects: next });
   },
 
   renameProject: (id, name) => {

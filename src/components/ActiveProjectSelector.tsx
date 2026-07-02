@@ -51,6 +51,7 @@ function switchActiveProject(
 export function ActiveProjectSelector() {
   const projects = useProjects((s) => s.projects);
   const createProject = useProjects((s) => s.createProject);
+  const confirmProject = useProjects((s) => s.confirmProject);
   const movePlanChat = useProjects((s) => s.movePlanChat);
   const copyPlanChat = useProjects((s) => s.copyPlanChat);
   const activeId = useActiveProject((s) => s.activeProjectId);
@@ -182,30 +183,54 @@ export function ActiveProjectSelector() {
                 まだプロジェクトがありません
               </p>
             ) : (
-              projects.map((project) => (
-                <button
-                  key={project.id}
-                  type="button"
-                  onClick={() => {
-                    switchActiveProject(setActive, project.id, activeId);
-                    setOpen(false);
-                  }}
-                  className={[
-                    "flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-xs transition",
-                    project.id === activeId
-                      ? "bg-pink-500/10 text-white"
-                      : "text-neutral-300 hover:bg-[#1f1f1f] hover:text-white",
-                  ].join(" ")}
-                >
-                  <span className="min-w-0 flex-1 truncate">{project.name}</span>
-                  <span className="shrink-0 text-[10px] text-neutral-500">
-                    {project.items.length} 件
-                  </span>
-                  {project.id === activeId && (
-                    <span className="text-[10px] text-pink-300">●</span>
-                  )}
-                </button>
-              ))
+              projects.map((project) => {
+                // status undefined (旧データ) は active 扱い。draft のときだけ下書き表示。
+                const isDraft = project.status === "draft";
+                return (
+                  <div
+                    key={project.id}
+                    className={[
+                      "flex w-full items-center gap-2 px-3 py-1.5 text-xs transition",
+                      project.id === activeId
+                        ? "bg-pink-500/10 text-white"
+                        : "text-neutral-300 hover:bg-[#1f1f1f]",
+                    ].join(" ")}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => {
+                        switchActiveProject(setActive, project.id, activeId);
+                        setOpen(false);
+                      }}
+                      className="flex min-w-0 flex-1 items-center gap-1.5 text-left hover:text-white"
+                    >
+                      <span className="min-w-0 flex-1 truncate">{project.name}</span>
+                      {isDraft && (
+                        <span className="shrink-0 rounded bg-amber-500/15 px-1.5 py-0.5 text-[9px] font-bold text-amber-300">
+                          下書き
+                        </span>
+                      )}
+                    </button>
+                    {isDraft ? (
+                      <button
+                        type="button"
+                        onClick={() => confirmProject(project.id)}
+                        className="shrink-0 rounded border border-pink-400/50 px-2 py-0.5 text-[10px] font-bold text-pink-200 hover:bg-pink-500/15 hover:text-white"
+                        title="この下書きを確定して通常のプロジェクトにする"
+                      >
+                        確定
+                      </button>
+                    ) : (
+                      <span className="shrink-0 text-[10px] text-neutral-500">
+                        {project.items.length} 件
+                      </span>
+                    )}
+                    {project.id === activeId && (
+                      <span className="shrink-0 text-[10px] text-pink-300">●</span>
+                    )}
+                  </div>
+                );
+              })
             )}
           </div>
           {/*

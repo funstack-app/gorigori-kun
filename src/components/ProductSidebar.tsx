@@ -204,11 +204,14 @@ export function ProductSidebar() {
                     return;
                   }
                   void (async () => {
-                    const message = `案件「${session.title}」を削除しますか？`;
+                    const message = "このチャット履歴を削除しますか？";
                     let ok = false;
                     try {
                       const { ask } = await import("@tauri-apps/plugin-dialog");
-                      ok = await ask(message, { title: "案件の削除", kind: "warning" });
+                      ok = await ask(message, {
+                        title: "チャット履歴の削除",
+                        kind: "warning",
+                      });
                     } catch {
                       ok = window.confirm(message);
                     }
@@ -334,13 +337,42 @@ function SessionRow({
             <Button size="xs" onClick={onExport} className="flex-1">
               書出
             </Button>
-            <Button size="xs" tone="danger" onClick={onDelete} className="flex-1">
-              削除
-            </Button>
+            <button
+              type="button"
+              onClick={onDelete}
+              title="このチャット履歴を削除"
+              aria-label="このチャット履歴を削除"
+              className="flex h-7 w-8 shrink-0 items-center justify-center rounded-md border border-neutral-200 text-neutral-500 transition hover:border-red-300 hover:bg-red-50 hover:text-red-600"
+            >
+              <TrashIcon />
+            </button>
           </>
         )}
       </div>
     </div>
+  );
+}
+
+/** フラットなゴミ箱アイコン (チャット履歴削除ボタン用)。currentColor で色を継承する。 */
+function TrashIcon() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M3 6h18" />
+      <path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2" />
+      <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+      <path d="M10 11v6" />
+      <path d="M14 11v6" />
+    </svg>
   );
 }
 
