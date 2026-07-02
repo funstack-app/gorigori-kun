@@ -2,6 +2,7 @@ import { useState } from "react";
 
 import { layerSplitter } from "../../lib/ipc";
 import { useEditor } from "./editor/editorStore";
+import { EditErrorBox } from "./EditErrorBox";
 
 type Preset = "portrait" | "illustration" | "general";
 
@@ -15,21 +16,29 @@ const PRESETS: { id: Preset; label: string; hint: string }[] = [
  * SAM3 レイヤースプリッター UI (昔の extensions/layer-splitter を編集タブに復活)。
  * テキストプロンプトを打ち込んで対象を分離する。これが旧レイヤースプリッターの核心UI。
  * バックエンドは layer_splitter_run (SAM3 CLI 経由)。現状 Mac 専用・テスト用途。
+ *
+ * エラー表示の設計 (2026-07-02 Photoshop 風再構成):
+ * SAM3 CLI は失敗時に Python traceback を丸ごと返す。以前はこれを共有ストア
+ * (useEditor.setError) に流していたため、キャンバス下部オーバーレイに traceback 全文が
+ * 描画されてキャンバスが事故画面になっていた。エラーはこのパネル内のローカル state に
+ * 閉じ込め、コンパクトな EditErrorBox (最大4行 + コピー) で表示する。共有ストアの
+ * error は触らない (= キャンバスへ流入させない)。
  */
 export function LayerSplitterPanel() {
   const sourceImagePath = useEditor((s) => s.sourceImagePath);
   const setMessage = useEditor((s) => s.setMessage);
-  const setError = useEditor((s) => s.setError);
 
   const [preset, setPreset] = useState<Preset>("general");
   // 自由入力プロンプト (カンマ/改行区切り)。空ならプリセットのプロンプトを使う。
   const [promptText, setPromptText] = useState("");
   const [running, setRunning] = useState(false);
   const [resultPath, setResultPath] = useState<string | null>(null);
+  // エラーはこのパネル内に閉じ込める (共有ストア error を汚染しない)。
+  const [error, setLocalError] = useState<string | null>(null);
 
   const run = async () => {
     if (!sourceImagePath) {
-      setError("先に画像を選んでください。");
+      setLocalError("先に画像を選んでください。");
       return;
     }
     const custom = promptText
@@ -38,7 +47,7 @@ export function LayerSplitterPanel() {
       .filter((p) => p.length > 0);
 
     setRunning(true);
-    setError(null);
+    setLocalError(null);
     setResultPath(null);
     setMessage(
       custom.length > 0
@@ -54,24 +63,26 @@ export function LayerSplitterPanel() {
       setResultPath(out);
       setMessage(`レイヤー分離が完了しました: ${out}`);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : String(caught));
+      // traceback 全文はローカル error にだけ入れる。message は短く戻す。
+      setLocalError(caught instanceof Error ? caught.message : String(caught));
+      setMessage(null);
     } finally {
       setRunning(false);
     }
   };
 
   return (
-    <div className="flex flex-col gap-2 rounded-xl border border-[#2a2a2a] bg-[#101010] p-3">
+    <div className="flex flex-col gap-2">
       <div className="flex items-center justify-between">
-        <span className="text-xs font-black text-neutral-100">
-          レイヤースプリッター (SAM3)
+        <span className="text-[11px] font-bold text-neutral-400">
+          言葉で対象を指定して分離
         </span>
         <span className="rounded bg-amber-500/20 px-1.5 py-0.5 text-[9px] font-bold text-amber-300">
           Mac専用・テスト
         </span>
       </div>
       <p className="text-[10px] leading-4 text-neutral-500">
-        言葉で対象を指定して分離します(例: 人物, 髪, 服)。空欄ならプリセットを使用。
+        例: 人物, 髪, 服。空欄ならプリセットを使用。
       </p>
 
       <div className="flex flex-wrap gap-1">
@@ -109,6 +120,8 @@ export function LayerSplitterPanel() {
       >
         {running ? "分離中…" : "レイヤーに分離"}
       </button>
+
+      <EditErrorBox message={error} />
 
       {resultPath && (
         <p className="truncate rounded bg-[#0d0d0d] px-2 py-1 text-[9px] text-emerald-400/80">

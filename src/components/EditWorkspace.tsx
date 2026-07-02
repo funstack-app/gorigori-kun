@@ -3,61 +3,105 @@ import { EditorLayerList } from "./edit/EditorLayerList";
 import { EditorPropertyPanel } from "./edit/EditorPropertyPanel";
 import { EditorToolbar } from "./edit/EditorToolbar";
 import { EditModeSelector } from "./edit/EditModeSelector";
+import { EditModeSelectorCompact } from "./edit/EditModeSelectorCompact";
+import { EditPrimaryAction } from "./edit/EditPrimaryAction";
 import { LayerSplitterPanel } from "./edit/LayerSplitterPanel";
+import { CollapsibleSection } from "./edit/CollapsibleSection";
 import { useEditor } from "./edit/editor/editorStore";
 import { useEditorActions } from "./edit/editor/useEditor";
 
+function basename(path: string) {
+  return path.split(/[\\/]/).pop() ?? path;
+}
+
 /**
- * Photoshop/Canva 風の 3 カラム編集ワークスペース。
- * Rust IPC と PSD 用 LayerComposer は変更せず、編集タブ UI のみを Fabric.js ベースへ差し替える。
+ * 編集ワークスペース (2026-07-02 タスク主導へ再設計)。
+ *
+ * 設計方針: 道具を並べるのではなく「今やること」を1つに絞って見せる。
+ * 生の数値プロパティや分解モードのスペック説明を最初に見せない。
+ *
+ * レイアウト:
+ * - 上部: 薄いバー1本 (画像名 / 分解モードの select / 画像を選ぶ)。
+ * - 左端: 縦のツールレール (48px, アイコン + tooltip)。
+ * - 中央: キャンバスが残り全域を占める (主役)。
+ * - 右: 固定 300px パネル。上から
+ *     ① 主導線パネル (EditPrimaryAction): 画像を開いた直後は大ボタン
+ *        「レイヤーに分解する」+ 1行説明。実行中は進捗。分解済みなら自身を畳む。
+ *     ② レイヤー一覧 (主役・可変・高さの大半)。
+ *     ③ プロパティ (レイヤーを選んでいるときだけ表示。生の座標数値は「詳細」に畳む)。
+ *     ④ 上級者向け (既定で閉じる折りたたみ): 分解モードのフル説明 / レイヤースプリッター実験機能。
+ *
+ * Rust IPC と PSD 用 LayerComposer は変更せず、UI 構成のみを整える。
  */
 export function EditWorkspace() {
   const sourceImagePath = useEditor((state) => state.sourceImagePath);
+  const selectedLayerId = useEditor((state) => state.selectedLayerId);
   const busyTool = useEditor((state) => state.busyTool);
   const editMode = useEditor((state) => state.editMode);
   const setEditMode = useEditor((state) => state.setEditMode);
   const { chooseImage } = useEditorActions();
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-[#2a2a2a] bg-[#181818]">
-      {/*
-        β 版バナー (2026-05-15 STΛCK 指示):
-        編集タブは開発中のため、ユーザーに動作不安定の可能性を明示。
-      */}
-      <div className="flex shrink-0 items-center gap-2 border-b border-pink-500/30 bg-pink-500/5 px-4 py-2 text-[11px] font-bold text-pink-200">
-        <span className="rounded bg-pink-500 px-1.5 py-0.5 text-[9px] font-black text-white">β</span>
-        <span>
-          編集タブは開発中の β 版機能です。一部機能が不安定、または未実装の場合があります。
+    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-[#2a2a2a] bg-[#1e1e1e]">
+      {/* 上部バー: 薄い1本 (高さ ~40px)。説明文なし、tooltip へ寄せる。 */}
+      <header className="flex h-10 shrink-0 items-center gap-2 border-b border-[#2a2a2a] bg-[#252525] px-3">
+        <span
+          className="rounded bg-pink-500/80 px-1 py-0.5 text-[9px] font-black text-white"
+          title="編集タブは開発中の β 版機能です。一部が不安定・未実装の場合があります。"
+        >
+          β
         </span>
-      </div>
-      <header className="flex shrink-0 items-center justify-between gap-3 border-b border-[#242424] px-4 py-3">
-        <div className="min-w-0">
-          <h3 className="text-sm font-black text-white">編集タブ</h3>
-          <p className="mt-1 truncate text-xs font-bold text-neutral-500">
-            {sourceImagePath ?? "画像ドロップで Magic Layer を自動実行"}
-          </p>
-        </div>
+        <span
+          className="min-w-0 flex-1 truncate text-xs font-bold text-neutral-300"
+          title={sourceImagePath ?? undefined}
+        >
+          {sourceImagePath ? basename(sourceImagePath) : "画像未選択"}
+        </span>
+        <EditModeSelectorCompact
+          activeMode={editMode}
+          onSelectMode={setEditMode}
+          disabled={busyTool !== null}
+        />
         <button
           type="button"
           onClick={() => void chooseImage()}
           disabled={busyTool !== null}
-          className="rounded-lg bg-pink-500 px-3 py-2 text-xs font-black text-white hover:bg-pink-600 disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-500"
+          className="rounded-md bg-pink-500 px-3 py-1.5 text-[11px] font-black text-white hover:bg-pink-600 disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-500"
         >
           {busyTool ? "処理中…" : "画像を選ぶ"}
         </button>
       </header>
 
-      <div className="shrink-0 border-b border-[#242424] px-4 py-3">
-        <EditModeSelector activeMode={editMode} onSelectMode={setEditMode} />
-      </div>
-
+      {/* 本体: 左レール / キャンバス / 右パネル */}
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <EditorToolbar />
         <EditorCanvas />
-        <aside className="flex min-h-0 w-[280px] shrink-0 flex-col gap-2 overflow-y-auto border-l border-[#2a2a2a] bg-[#151515] p-2">
-          <LayerSplitterPanel />
+        <aside className="flex min-h-0 w-[300px] shrink-0 flex-col overflow-hidden border-l border-[#2a2a2a] bg-[#252525]">
+          {/* ① 主導線: 分解前は大ボタン、実行中は進捗。分解済みは自身を畳む。 */}
+          <EditPrimaryAction />
+          {/* ② レイヤー一覧: 主役。残り高さの大半を占める。 */}
           <EditorLayerList />
-          <EditorPropertyPanel />
+          {/* ③ プロパティ: レイヤーを選んでいるときだけ表示 (未選択時は場所を取らない)。 */}
+          {selectedLayerId ? (
+            <div className="max-h-[40%] shrink-0 overflow-y-auto border-b border-[#2a2a2a]">
+              <EditorPropertyPanel />
+            </div>
+          ) : null}
+          {/* ④ 上級者向け: 既定で閉じる。分解モードのフル説明・実験機能を格納。 */}
+          <div className="shrink-0 overflow-y-auto">
+            <CollapsibleSection title="上級者向け">
+              <div className="space-y-3">
+                <div>
+                  <p className="mb-2 text-[10px] font-bold text-neutral-500">分解のしかた・モデル追加</p>
+                  <EditModeSelector activeMode={editMode} onSelectMode={setEditMode} />
+                </div>
+                <div className="border-t border-[#2a2a2a] pt-3">
+                  <p className="mb-2 text-[10px] font-bold text-neutral-500">レイヤースプリッター (実験機能)</p>
+                  <LayerSplitterPanel />
+                </div>
+              </div>
+            </CollapsibleSection>
+          </div>
         </aside>
       </div>
     </div>

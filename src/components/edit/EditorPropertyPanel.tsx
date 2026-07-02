@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 
 import { FontPicker } from "./FontPicker";
 import { useEditor } from "./editor/editorStore";
@@ -76,16 +76,48 @@ function TextPropertyEditor({ object }: { object: FabricObject }) {
       </div>
       <NumberSlider label="文字間隔" value={numberValue(object.charSpacing, 0)} min={-200} max={800} onChange={(charSpacing) => apply({ charSpacing })} />
       <NumberSlider label="行間" value={numberValue(object.lineHeight, 1.16)} min={0.6} max={3} step={0.05} onChange={(lineHeight) => apply({ lineHeight })} />
-      <CommonGeometry object={object} apply={apply} />
+      <NumberSlider label="不透明度" value={numberValue(object.opacity, 1)} min={0} max={1} step={0.01} onChange={(opacity) => apply({ opacity })} />
+      <NumberSlider label="回転" value={numberValue(object.angle, 0)} min={-180} max={180} onChange={(angle) => apply({ angle })} />
+      <AdvancedGeometry object={object} apply={apply} />
     </div>
   );
 }
 
 function ImagePropertyEditor({ object }: { object: FabricObject }) {
   const apply = usePropertyApply(object);
+
+  return (
+    <div className="space-y-3">
+      {/* まず「触ってすぐ効く」直感操作だけを見せる。生の座標・寸法は詳細に畳む。 */}
+      <NumberSlider label="不透明度" value={numberValue(object.opacity, 1)} min={0} max={1} step={0.01} onChange={(opacity) => apply({ opacity })} />
+      <div className="grid grid-cols-2 gap-2">
+        <Toggle label="水平反転" active={object.flipX === true} onClick={() => apply({ flipX: object.flipX !== true })} />
+        <Toggle label="垂直反転" active={object.flipY === true} onClick={() => apply({ flipY: object.flipY !== true })} />
+      </div>
+      <NumberSlider label="明度" value={numberValue(object.get?.("brightness"), 0)} min={-1} max={1} step={0.05} onChange={(brightness) => void applyImageFilters(object, { brightness })} />
+      <NumberSlider label="コントラスト" value={numberValue(object.get?.("contrast"), 0)} min={-1} max={1} step={0.05} onChange={(contrast) => void applyImageFilters(object, { contrast })} />
+      <NumberSlider label="回転" value={numberValue(object.angle, 0)} min={-180} max={180} onChange={(angle) => apply({ angle })} />
+      <AdvancedGeometry object={object} apply={apply} withSize />
+    </div>
+  );
+}
+
+/**
+ * 生の位置 (X/Y) と寸法 (幅/高さ) の数値入力。非エンジニアには最初は見せない。
+ * 「詳細」を開いたときだけ表示する。開かなくてもドラッグ・ハンドルで直感操作できる前提。
+ */
+function AdvancedGeometry({
+  object,
+  apply,
+  withSize = false,
+}: {
+  object: FabricObject;
+  apply: (values: Record<string, unknown>) => void;
+  withSize?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
   const width = Math.round((object.width ?? 0) * (object.scaleX ?? 1));
   const height = Math.round((object.height ?? 0) * (object.scaleY ?? 1));
-
   const setWidth = (nextWidth: number) => {
     if (!object.width) return;
     apply({ scaleX: nextWidth / object.width });
@@ -94,34 +126,31 @@ function ImagePropertyEditor({ object }: { object: FabricObject }) {
     if (!object.height) return;
     apply({ scaleY: nextHeight / object.height });
   };
-
   return (
-    <div className="space-y-3">
-      <CommonGeometry object={object} apply={apply} />
-      <div className="grid grid-cols-2 gap-2">
-        <NumberInput label="幅" value={width} onChange={setWidth} />
-        <NumberInput label="高さ" value={height} onChange={setHeight} />
-      </div>
-      <div className="grid grid-cols-2 gap-2">
-        <Toggle label="水平反転" active={object.flipX === true} onClick={() => apply({ flipX: object.flipX !== true })} />
-        <Toggle label="垂直反転" active={object.flipY === true} onClick={() => apply({ flipY: object.flipY !== true })} />
-      </div>
-      <NumberSlider label="明度" value={numberValue(object.get?.("brightness"), 0)} min={-1} max={1} step={0.05} onChange={(brightness) => void applyImageFilters(object, { brightness })} />
-      <NumberSlider label="コントラスト" value={numberValue(object.get?.("contrast"), 0)} min={-1} max={1} step={0.05} onChange={(contrast) => void applyImageFilters(object, { contrast })} />
+    <div className="border-t border-[#242424] pt-2">
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        className="flex w-full items-center gap-1 text-[10px] font-bold text-neutral-500 hover:text-neutral-300"
+      >
+        <span className={`transition-transform ${open ? "rotate-90" : ""}`}>›</span>
+        詳細 (位置・大きさの数値)
+      </button>
+      {open && (
+        <div className="mt-2 space-y-2">
+          <div className="grid grid-cols-2 gap-2">
+            <NumberInput label="X" value={Math.round(numberValue(object.left, 0))} onChange={(left) => apply({ left })} />
+            <NumberInput label="Y" value={Math.round(numberValue(object.top, 0))} onChange={(top) => apply({ top })} />
+          </div>
+          {withSize && (
+            <div className="grid grid-cols-2 gap-2">
+              <NumberInput label="幅" value={width} onChange={setWidth} />
+              <NumberInput label="高さ" value={height} onChange={setHeight} />
+            </div>
+          )}
+        </div>
+      )}
     </div>
-  );
-}
-
-function CommonGeometry({ object, apply }: { object: FabricObject; apply: (values: Record<string, unknown>) => void }) {
-  return (
-    <>
-      <NumberSlider label="不透明度" value={numberValue(object.opacity, 1)} min={0} max={1} step={0.01} onChange={(opacity) => apply({ opacity })} />
-      <div className="grid grid-cols-2 gap-2">
-        <NumberInput label="X" value={Math.round(numberValue(object.left, 0))} onChange={(left) => apply({ left })} />
-        <NumberInput label="Y" value={Math.round(numberValue(object.top, 0))} onChange={(top) => apply({ top })} />
-      </div>
-      <NumberSlider label="回転" value={numberValue(object.angle, 0)} min={-180} max={180} onChange={(angle) => apply({ angle })} />
-    </>
   );
 }
 

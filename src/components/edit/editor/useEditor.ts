@@ -146,7 +146,16 @@ export function useEditorActions() {
       magicStore.setResult(result);
       await applyMagicLayerToCanvas(canvas, result);
       setSourceImagePath(path);
-      setMessage(`Magic Layer 完了: テキスト ${result.textLayers.length}件`);
+      // 完了メッセージは「次に何をするか」を言う。切り分けた総数 (プレビュー用マスクは除く)
+      // を数えて、右のレイヤー一覧から選んで動かせることを伝える。
+      const layerCount = (canvas as { getObjects?: () => Array<{ get?: (key: string) => unknown }> })
+        .getObjects?.()
+        .filter((object) => object.get?.("layerKind") !== "mask").length ?? 0;
+      setMessage(
+        layerCount > 0
+          ? `${layerCount}個のレイヤーに分解しました。右の一覧から選んで動かせます。`
+          : "分解しました。右の一覧から選んで動かせます。",
+      );
       bumpRevision();
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : String(caught);

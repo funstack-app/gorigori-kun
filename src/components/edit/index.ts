@@ -8,3 +8,4 @@ export { LayerComposer } from "./LayerComposer";
 export { FontPicker } from "./FontPicker";
 export { TextLayerCard } from "./TextLayerCard";
 export { MagicLayerPanel } from "./MagicLayerPanel";
+export { EditPrimaryAction } from "./EditPrimaryAction";

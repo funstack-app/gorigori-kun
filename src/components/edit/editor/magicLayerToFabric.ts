@@ -55,8 +55,11 @@ export async function applyMagicLayerToCanvas(
         id: createLayerId(),
         name: object.label,
         layerKind: "image",
-        left: ox,
-        top: oy,
+        // 分解直後は必ず元画像の中 (bbox 位置) に重ねて置く。bbox が万一負値・NaN で
+        // 返ってきても画面外 (例: x=-878) に飛ばさないよう 0..画像内にクランプする。
+        // なぜ: レイヤーが最初から画面外にあると、非エンジニアには「消えた」ように見える。
+        left: clampPlacement(ox, result.width),
+        top: clampPlacement(oy, result.height),
         selectable: true,
       });
       canvas.add(objImg);
@@ -69,8 +72,8 @@ export async function applyMagicLayerToCanvas(
       id: text.id ?? `text-${index + 1}`,
       name: text.name ?? `テキスト ${index + 1}`,
       layerKind: "text",
-      left: text.x ?? bbox?.[0] ?? 50,
-      top: text.y ?? bbox?.[1] ?? 50 + index * 52,
+      left: clampPlacement(text.x ?? bbox?.[0] ?? 50, result.width),
+      top: clampPlacement(text.y ?? bbox?.[1] ?? 50 + index * 52, result.height),
       width: bbox?.[2] ?? 240,
       fontSize: text.fontSize ?? text.size ?? 28,
       fill: text.color ?? "#ffffff",
@@ -337,6 +340,20 @@ export async function addTextLayer(canvas: FabricCanvas) {
   canvas.setActiveObject?.(textbox);
   canvas.requestRenderAll?.();
   return textbox;
+}
+
+/**
+ * 分解直後のレイヤー初期座標を画像内 (0..limit) に収める安全弁。
+ * bbox が負値・NaN・画像外を返しても、レイヤーを画面外に飛ばさない。
+ * limit (= 画像幅/高さ) が不明なときは 0 以上にだけ丸める。
+ */
+function clampPlacement(value: number | undefined, limit: number | undefined): number {
+  const n = typeof value === "number" && Number.isFinite(value) ? value : 0;
+  if (n < 0) return 0;
+  if (typeof limit === "number" && Number.isFinite(limit) && limit > 0 && n > limit) {
+    return limit;
+  }
+  return n;
 }
 
 export function fitCanvasToImage(canvas: FabricCanvas, imageWidth: number, imageHeight: number) {

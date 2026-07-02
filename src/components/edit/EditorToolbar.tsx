@@ -22,7 +22,7 @@ export function EditorToolbar() {
   const actions = useEditorActions();
 
   return (
-    <aside className="flex w-[60px] shrink-0 flex-col items-center gap-1 border-r border-[#2a2a2a] bg-[#101010] py-2">
+    <aside className="flex w-12 shrink-0 flex-col items-center gap-1 border-r border-[#2a2a2a] bg-[#1a1a1a] py-2">
       {TOOLS.map((tool) => {
         const isBusy = busy === tool.id;
         return (

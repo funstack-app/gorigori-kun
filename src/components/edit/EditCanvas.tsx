@@ -56,8 +56,10 @@ export function EditCanvas({
               : "border-[#3a3a3a] bg-[#101010]",
           ].join(" ")}
         >
-          <div className="flex h-16 w-16 items-center justify-center rounded-2xl border border-[#343434] bg-[#181818] text-3xl">
-            📁
+          <div className="flex h-16 w-16 items-center justify-center rounded-2xl border border-[#343434] bg-[#181818] text-neutral-400">
+            <svg width={28} height={28} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+              <path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z" />
+            </svg>
           </div>
           <h3 className="mt-5 text-xl font-black text-white">
             画像を選んで編集を始める

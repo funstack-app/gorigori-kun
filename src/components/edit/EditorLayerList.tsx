@@ -125,10 +125,10 @@ export function EditorLayerList() {
                     event.stopPropagation();
                     toggleLock(layer.id);
                   }}
-                  className="text-sm opacity-70 hover:opacity-100"
+                  className="flex h-5 w-5 items-center justify-center text-neutral-400 opacity-70 hover:text-white hover:opacity-100"
                   title={layer.locked ? "ロック解除" : "ロック"}
                 >
-                  {layer.locked ? "🔒" : "🔓"}
+                  {layer.locked ? <LockIcon /> : <LockOpenIcon />}
                 </button>
                 <button
                   type="button"
@@ -204,6 +204,24 @@ function TrashIcon() {
   return (
     <svg {...LAYER_SVG} aria-hidden>
       <path d="M4 7h16M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2M6 7l1 13a1 1 0 001 1h8a1 1 0 001-1l1-13M10 11v6M14 11v6" />
+    </svg>
+  );
+}
+
+function LockIcon() {
+  return (
+    <svg {...LAYER_SVG} width={14} height={14} aria-hidden>
+      <rect x="5" y="11" width="14" height="9" rx="1.5" />
+      <path d="M8 11V8a4 4 0 018 0v3" />
+    </svg>
+  );
+}
+
+function LockOpenIcon() {
+  return (
+    <svg {...LAYER_SVG} width={14} height={14} aria-hidden>
+      <rect x="5" y="11" width="14" height="9" rx="1.5" />
+      <path d="M8 11V8a4 4 0 017.5-2" />
     </svg>
   );
 }

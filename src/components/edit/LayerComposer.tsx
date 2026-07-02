@@ -333,8 +333,9 @@ export function LayerComposer({ background, foreground, textLayers, clickMasks }
         <div className="space-y-2">
           {[...layers].sort((a, b) => b.z - a.z).map((layer) => (
             <div key={layer.id} className={`rounded-lg border p-2 ${selectedLayerId === layer.id ? "border-pink-400 bg-pink-500/10" : "border-[#2a2a2a] bg-[#101010]"}`}>
-              <button type="button" onClick={() => setSelectedLayerId(layer.id)} className="block w-full truncate text-left text-xs font-black text-white">
-                {layer.visible ? "👁" : "—"} {layer.name}
+              <button type="button" onClick={() => setSelectedLayerId(layer.id)} className="flex w-full items-center gap-1.5 truncate text-left text-xs font-black text-white">
+                <ComposerVisibilityIcon visible={layer.visible} />
+                <span className="truncate">{layer.name}</span>
               </button>
               <div className="mt-2 flex gap-1">
                 <button type="button" onClick={() => updateLayer(layer.id, (item) => ({ ...item, visible: !item.visible }))} className="rounded border border-[#343434] px-2 py-1 text-[10px] font-bold text-neutral-300">表示</button>
@@ -365,4 +366,30 @@ function loadImage(src: string) {
     img.onerror = () => reject(new Error(`画像を読み込めません: ${src}`));
     img.src = src;
   });
+}
+
+/** レイヤー表示/非表示のフラットアイコン (絵文字廃止 2026-07-02)。 */
+function ComposerVisibilityIcon({ visible }: { visible: boolean }) {
+  const props = {
+    width: 14,
+    height: 14,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: 1.6,
+    strokeLinecap: "round" as const,
+    strokeLinejoin: "round" as const,
+  };
+  return visible ? (
+    <svg {...props} className="shrink-0 text-neutral-300" aria-hidden>
+      <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z" />
+      <circle cx="12" cy="12" r="3" />
+    </svg>
+  ) : (
+    <svg {...props} className="shrink-0 text-neutral-600" aria-hidden>
+      <path d="M3 3l18 18" />
+      <path d="M10.6 10.6a3 3 0 004.2 4.2" />
+      <path d="M9.3 5.3A9.5 9.5 0 0112 5c6.5 0 10 7 10 7a17 17 0 01-3.2 3.9M6 6.6A17 17 0 002 12s3.5 7 10 7a9.3 9.3 0 003-.5" />
+    </svg>
+  );
 }

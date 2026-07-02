@@ -204,19 +204,61 @@ export function EditorCanvas() {
         </div>
       ) : null}
 
-      {(statusText || error) ? (
+      {/*
+        エラー/ステータスのオーバーレイ。
+        以前は error 文字列をそのまま full-width で描画していたため、ツールが返す
+        Python traceback 全文がキャンバスを覆う事故が起きていた (2026-07-02 修正)。
+        エラーは固定サイズのカード (最大3行 + コピー) に必ず収め、どれだけ長い
+        traceback でもキャンバスへ流れ込まないようにする。ステータス (短文) だけ pill 表示。
+      */}
+      {error ? (
+        <div className="absolute bottom-4 left-1/2 w-[min(24rem,calc(100%-2rem))] -translate-x-1/2">
+          <CanvasErrorCard message={error} onDismiss={() => useEditor.getState().setError(null)} />
+        </div>
+      ) : statusText ? (
         <div className="absolute bottom-4 left-4 right-4 flex justify-center">
-          <div className={`max-w-2xl rounded-full border px-4 py-2 text-xs font-bold shadow-xl ${
-            error
-              ? "border-red-500/50 bg-red-500/15 text-red-100"
-              : "border-[#343434] bg-[#101010]/90 text-neutral-200"
-          }`}
-          >
-            {error ?? statusText}
+          <div className="max-w-2xl truncate rounded-full border border-[#343434] bg-[#101010]/90 px-4 py-2 text-xs font-bold text-neutral-200 shadow-xl">
+            {statusText}
           </div>
         </div>
       ) : null}
     </main>
+  );
+}
+
+/**
+ * キャンバス上のエラーカード。長い traceback でもレイアウトを壊さないよう最大3行に抑え、
+ * 全文はコピーで取り出す。閉じるとオーバーレイが消えてキャンバスが再び主役になる。
+ */
+function CanvasErrorCard({ message, onDismiss }: { message: string; onDismiss: () => void }) {
+  const copy = () => {
+    void navigator.clipboard?.writeText(message).catch(() => undefined);
+  };
+  return (
+    <div className="rounded-lg border border-red-500/50 bg-[#160d0d]/95 px-3 py-2 shadow-2xl">
+      <div className="flex items-start justify-between gap-2">
+        <p className="line-clamp-3 whitespace-pre-wrap break-words text-[11px] font-bold leading-4 text-red-100">
+          {message}
+        </p>
+        <button
+          type="button"
+          onClick={onDismiss}
+          aria-label="閉じる"
+          className="shrink-0 rounded p-0.5 text-red-200/70 hover:text-red-100"
+        >
+          <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" aria-hidden>
+            <path d="M6 6l12 12M18 6L6 18" />
+          </svg>
+        </button>
+      </div>
+      <button
+        type="button"
+        onClick={copy}
+        className="mt-1.5 rounded border border-red-400/40 bg-red-500/10 px-2 py-0.5 text-[10px] font-bold text-red-200 hover:bg-red-500/20"
+      >
+        詳細をコピー
+      </button>
+    </div>
   );
 }
 
