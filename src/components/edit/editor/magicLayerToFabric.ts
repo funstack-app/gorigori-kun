@@ -44,6 +44,25 @@ export async function applyMagicLayerToCanvas(
   });
   canvas.add(fgImg);
 
+  // 主要物体レイヤー: 各物体を bbox 位置の可動レイヤーとして前景の上に積む。
+  // 背景 (result.backgroundPath) は union マスクで穴埋め済みなので、物体を動かしても
+  // 跡地に補完済み背景が見える。
+  if (result.objectLayers && result.objectLayers.length > 0) {
+    for (const object of result.objectLayers) {
+      const objImg = await loadFabricImage(fabric, object.imagePath);
+      const [ox, oy] = object.bbox;
+      objImg.set({
+        id: createLayerId(),
+        name: object.label,
+        layerKind: "image",
+        left: ox,
+        top: oy,
+        selectable: true,
+      });
+      canvas.add(objImg);
+    }
+  }
+
   result.textLayers.forEach((text, index) => {
     const bbox = text.bbox;
     const textbox = new fabric.Textbox(text.text || "テキスト", {
@@ -124,6 +143,7 @@ export async function applySegmentResultToCanvas(
     maskPath: result.maskPath,
     textLayers: [],
     partLayers: [],
+    objectLayers: [],
     width: result.width,
     height: result.height,
     runDir: "",

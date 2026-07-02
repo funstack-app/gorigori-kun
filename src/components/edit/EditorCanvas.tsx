@@ -226,6 +226,7 @@ function progressLabel(kind: string): string {
     detectingText: "テキストを検出中…",
     removingText: "テキストを除去中…",
     segmenting: "人物を切り抜き中…",
+    segmentingObjects: "物体を検出中…",
     inpaintingBackground: "背景を補完中…",
     buildingTextLayers: "レイヤーを構築中…",
     completed: "完了しました",

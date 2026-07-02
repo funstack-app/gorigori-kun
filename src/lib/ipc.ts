@@ -140,12 +140,26 @@ export const editFonts = {
     invoke<FontInfo[]>("edit_fonts_list", { languageHint: languageHint ?? null }),
 };
 
+export type MagicLayerOptions = {
+  mode?: EditModeId;
+  /** 物体分解 (SAM2 自動マスク) の有効/無効。既定 ON。standard モードでのみ効く。 */
+  includeObjects?: boolean;
+  /** 採用する物体数の上限。省略時は Rust 側既定 (6)。1〜12 に丸められる。 */
+  objectCount?: number;
+};
+
 export const editMagic = {
-  run: (inputPath: string, projectName?: string | null, mode: EditModeId = "standard") =>
+  run: (
+    inputPath: string,
+    projectName?: string | null,
+    options: MagicLayerOptions = {},
+  ) =>
     invoke<MagicLayerResult>("edit_magic_run", {
       inputPath,
       projectName: projectName ?? null,
-      mode,
+      mode: options.mode ?? "standard",
+      includeObjects: options.includeObjects ?? true,
+      objectCount: options.objectCount ?? null,
     }),
 };
 

@@ -135,6 +135,19 @@ export type PartLayerSpec = {
   pixelCount: number;
 };
 
+/**
+ * 標準モードで SAM2 自動分解した「人物・テキスト以外の主要物体」1 件 = 1 レイヤー。
+ * grab と同じ形式 (bbox クロップ透過 PNG)。Rust ObjectLayerSpec と一致 (camelCase)。
+ */
+export type ObjectLayerSpec = {
+  /** マスク bbox にクロップした透過 PNG のパス。 */
+  imagePath: string;
+  /** 元画像ピクセル座標での [x, y, width, height]。この位置に置く。 */
+  bbox: [number, number, number, number];
+  /** 表示名 ("物体 1"…)。日本語・絵文字なし。 */
+  label: string;
+};
+
 export type MagicLayerResult = {
   backgroundPath: string;
   foregroundPath: string;
@@ -142,6 +155,8 @@ export type MagicLayerResult = {
   textLayers: TextLayerSpec[];
   /** 高精度モードで認識した人物パーツ群。標準モードでは空配列。 */
   partLayers: PartLayerSpec[];
+  /** 標準モードで SAM2 自動分解した主要物体レイヤー群。物体分解 OFF / 高精度では空配列。 */
+  objectLayers: ObjectLayerSpec[];
   width: number;
   height: number;
   runDir: string;
@@ -152,6 +167,7 @@ export type MagicLayerProgressKind =
   | "detectingText"
   | "removingText"
   | "segmenting"
+  | "segmentingObjects"
   | "inpaintingBackground"
   | "buildingTextLayers"
   | "completed"

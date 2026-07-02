@@ -1,3 +1,4 @@
+pub mod auto_segment;
 pub mod download;
 pub mod grab;
 pub mod human_parse;

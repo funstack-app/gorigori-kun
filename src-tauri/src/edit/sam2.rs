@@ -32,6 +32,18 @@ pub struct Sam2Mask {
     pub height: u32,
 }
 
+/// 自動マスク生成 1 点分の生マスク。PNG に符号化する前の Luma バッファ + 予測スコア。
+/// フィルタ/NMS を Rust 側で回すため、bbox・面積も同時に持つ。
+#[derive(Debug, Clone)]
+pub struct Sam2RawMask {
+    /// 元画像と同寸の 2 値マスク (255=対象)。
+    pub mask: ImageBuffer<Luma<u8>, Vec<u8>>,
+    /// SAM2 decoder が返した best candidate の IoU 予測スコア。
+    pub score: f32,
+    pub width: u32,
+    pub height: u32,
+}
+
 #[derive(Debug)]
 pub struct Sam2Session {
     encoder: OrtSessionHandle,
@@ -137,6 +149,45 @@ impl Sam2Session {
         tracing::info!(target: "edit.sam2", "predict_mask completed in {}ms", started.elapsed().as_millis());
         Ok(Sam2Mask {
             png: mask_png,
+            width: w,
+            height: h,
+        })
+    }
+
+    /// 自動マスク生成用。キャッシュ済み embedding を使い、正クリック点 1 個から
+    /// 元画像同寸の 2 値マスクと IoU 予測スコアを返す (PNG 符号化しない)。
+    ///
+    /// predict_mask との違い: グリッド走査で数百回呼ぶため PNG 符号化を挟まず、
+    /// フィルタ/NMS に必要な Luma バッファと score をそのまま返す。encoder は
+    /// 呼ばない (embed_image を 1 回だけ流用する前提)。
+    pub async fn predict_raw_mask(
+        &self,
+        click_point: (f32, f32),
+    ) -> Result<Sam2RawMask, String> {
+        let embedding = self
+            .cached_image_embedding
+            .as_ref()
+            .ok_or_else(|| "not embedded".to_string())?;
+        let (w, h) = self
+            .cached_image_size
+            .ok_or_else(|| "cached image size not found".to_string())?;
+
+        let cx = click_point.0.clamp(0.0, 1.0) * SAM2_SIZE as f32;
+        let cy = click_point.1.clamp(0.0, 1.0) * SAM2_SIZE as f32;
+
+        let mut decoder = self.decoder.lock().await;
+        let decoder_inputs = build_decoder_inputs(&decoder, embedding, cx, cy, 1.0)?;
+        let outputs = decoder
+            .run(decoder_inputs)
+            .map_err(|e| format!("decoder run: {e}"))?;
+
+        let (mask, score) = mask_output_to_buffer(&outputs, w, h)?;
+        drop(outputs);
+        drop(decoder);
+
+        Ok(Sam2RawMask {
+            mask,
+            score,
             width: w,
             height: h,
         })
@@ -345,6 +396,21 @@ fn mask_output_to_png(
     width: u32,
     height: u32,
 ) -> Result<Vec<u8>, String> {
+    let (resized, _score) = mask_output_to_buffer(outputs, width, height)?;
+    let mut png = Vec::new();
+    image::DynamicImage::ImageLuma8(resized)
+        .write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
+        .map_err(|e| format!("encode mask png: {e}"))?;
+    Ok(png)
+}
+
+/// decoder 出力から元画像同寸の 2 値マスクと best candidate の IoU スコアを取り出す。
+/// mask_output_to_png と predict_raw_mask の共通処理。
+fn mask_output_to_buffer(
+    outputs: &SessionOutputs<'_>,
+    width: u32,
+    height: u32,
+) -> Result<(ImageBuffer<Luma<u8>, Vec<u8>>, f32), String> {
     let masks_value = outputs
         .get("masks")
         .or_else(|| outputs.get("mask"))
@@ -355,6 +421,7 @@ fn mask_output_to_png(
     let shape = shape.iter().copied().collect::<Vec<_>>();
     let (candidate_count, mask_h, mask_w, base_offset) = mask_layout(&shape, masks.len())?;
     let candidate = best_mask_candidate(outputs, candidate_count).min(candidate_count - 1);
+    let score = mask_candidate_score(outputs, candidate);
 
     let mask_2d =
         ImageBuffer::<Luma<u8>, Vec<u8>>::from_fn(mask_w as u32, mask_h as u32, |x, y| {
@@ -369,12 +436,22 @@ fn mask_output_to_png(
         height,
         image::imageops::FilterType::Nearest,
     );
+    Ok((resized, score))
+}
 
-    let mut png = Vec::new();
-    image::DynamicImage::ImageLuma8(resized)
-        .write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
-        .map_err(|e| format!("encode mask png: {e}"))?;
-    Ok(png)
+/// 指定 candidate の IoU 予測スコアを返す。スコア出力が無い decoder では 1.0 を返す
+/// (スコア無し = フィルタで落とさない安全側)。
+fn mask_candidate_score(outputs: &SessionOutputs<'_>, candidate: usize) -> f32 {
+    let Some(value) = outputs
+        .get("iou_predictions")
+        .or_else(|| outputs.get("iou_scores"))
+    else {
+        return 1.0;
+    };
+    let Ok((_shape, scores)) = value.try_extract_tensor::<f32>() else {
+        return 1.0;
+    };
+    scores.get(candidate).copied().unwrap_or(1.0)
 }
 
 fn mask_layout(shape: &[i64], data_len: usize) -> Result<(usize, usize, usize, usize), String> {

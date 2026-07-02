@@ -32,6 +32,25 @@ impl EditMode {
     }
 }
 
+/// 物体分解 (SAM2 自動マスク) のオプション。standard モードでのみ効く。
+/// フロント MagicLayerPanel のトグル/選択と対応。
+#[derive(Debug, Clone, Copy)]
+pub struct ObjectLayerOptions {
+    /// 物体をレイヤーに分解するか。既定 ON。
+    pub enabled: bool,
+    /// 採用する物体数の上限。auto_segment 側で MAX_OBJECTS_HARD_CAP に丸められる。
+    pub count: usize,
+}
+
+impl Default for ObjectLayerOptions {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            count: crate::edit::auto_segment::DEFAULT_OBJECT_COUNT,
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct TextLayerSpec {
@@ -61,6 +80,19 @@ pub struct PartLayerSpec {
     pub pixel_count: u64,
 }
 
+/// 標準モードで SAM2 自動分解した「人物・テキスト以外の主要物体」1 件 = 1 レイヤー。
+/// grab の切り抜き (bbox クロップ透過 PNG) と同じ形式。フロントが bbox 位置に置く。
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ObjectLayerSpec {
+    /// マスク bbox にクロップした透過 PNG のパス。
+    pub image_path: String,
+    /// 元画像ピクセル座標での [x, y, width, height]。
+    pub bbox: [i32; 4],
+    /// フロント表示名。日本語・絵文字なし ("物体 1" 等)。
+    pub label: String,
+}
+
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct MagicLayerResult {
@@ -70,6 +102,8 @@ pub struct MagicLayerResult {
     pub text_layers: Vec<TextLayerSpec>,
     /// 高精度モードで認識した人物パーツ群。standard モードでは空。
     pub part_layers: Vec<PartLayerSpec>,
+    /// 標準モードで SAM2 自動分解した主要物体レイヤー群。物体分解 OFF / highQuality では空。
+    pub object_layers: Vec<ObjectLayerSpec>,
     pub width: u32,
     pub height: u32,
     pub run_dir: String,
@@ -82,6 +116,7 @@ pub enum MagicLayerProgress {
     DetectingText,
     RemovingText,
     Segmenting,
+    SegmentingObjects,
     InpaintingBackground,
     BuildingTextLayers,
     Completed,
@@ -94,8 +129,9 @@ pub async fn run_magic_layer(
     input_path: &Path,
     project_name: Option<&str>,
     mode: EditMode,
+    object_options: ObjectLayerOptions,
 ) -> Result<MagicLayerResult, String> {
-    match run_magic_layer_inner(app, state, input_path, project_name, mode).await {
+    match run_magic_layer_inner(app, state, input_path, project_name, mode, object_options).await {
         Ok(result) => Ok(result),
         Err(reason) => {
             let _ = app.emit(
@@ -115,6 +151,7 @@ async fn run_magic_layer_inner(
     input_path: &Path,
     project_name: Option<&str>,
     mode: EditMode,
+    object_options: ObjectLayerOptions,
 ) -> Result<MagicLayerResult, String> {
     if !input_path.exists() {
         return Err(format!("input image not found: {}", input_path.display()));
@@ -162,16 +199,82 @@ async fn run_magic_layer_inner(
     let segment_result = segment_image(runtime, &text_removed_path, &run_dir).await?;
     tracing::info!(target: "codex.edit", "magic_layer: セグメント完了 {}x{}", segment_result.width, segment_result.height);
 
-    // 背景レイヤーは「元画像そのもの」を使う (昔の SAM3 run_split と同方式)。
-    // 以前は LaMa で被写体領域を背景補完していたが、それは被写体を消して塗りつぶす
-    // 処理であり、BiRefNet マスクが破綻すると画面が真っ白になる原因だった
-    // (2026-06-18 STΛCK 実機報告)。元画像を最背面に残せばマスクが多少崩れても
-    // 元の絵は必ず見える。前景(切り抜き被写体)はその上に重ねる。
-    // LaMa は「レイヤーを動かした跡を埋める」用途で別途呼ぶ設計に寄せる(段階2)。
-    let background_path = run_dir.join("background.png");
-    tokio::fs::copy(input_path, &background_path)
+    // 物体分解: 人物・テキスト以外の主要物体を SAM2 自動マスクでレイヤー化する。
+    // segment_result (人物マスク) と OCR regions (テキスト領域) を「既存レイヤー」として
+    // 除外マスクを作り、それと重なる物体は二重化になるので拾わない。
+    let width = segment_result.width;
+    let height = segment_result.height;
+    let text_boxes: Vec<[i32; 4]> = regions
+        .iter()
+        .filter_map(|region| clamp_bbox(region.bbox, width, height))
+        .map(|[x, y, w, h]| [x as i32, y as i32, w as i32, h as i32])
+        .collect();
+
+    let (object_layers, union_mask) = if object_options.enabled {
+        let _ = app.emit(
+            EVENT_EDIT_MAGIC_PROGRESS,
+            MagicLayerProgress::SegmentingObjects,
+        );
+        // 物体分解は SAM2 モデル未DL等で失敗しうる。ここは「落としても本体は続行」する:
+        // 物体レイヤーだけ空にして、テキスト+人物+背景は必ず返す (体験を止めない)。
+        match run_object_layers(
+            state,
+            input_path,
+            &run_dir,
+            width,
+            height,
+            Some(&segment_result.mask_path),
+            &text_boxes,
+            object_options.count,
+        )
         .await
-        .map_err(|e| format!("copy original as background: {e}"))?;
+        {
+            Ok(pair) => pair,
+            Err(reason) => {
+                tracing::warn!(target: "codex.edit", "magic_layer: 物体分解スキップ ({reason})");
+                (Vec::new(), None)
+            }
+        }
+    } else {
+        (Vec::new(), None)
+    };
+
+    // 背景: 物体を1件以上分解できたときだけ「全物体+人物の union マスクで一括 inpaint した
+    // 背景」を使う (物体/人物レイヤーを動かした跡が透明の穴にならないよう補完済みにする)。
+    // 物体0件 (union_mask=None) や inpaint 失敗時は元画像コピーにフォールバックする。
+    // なぜ物体0件では inpaint しないか: 従来の standard モードは「元画像を背景に残し、
+    // 前景(人物)を上に重ねる」挙動。物体が無いのに人物を inpaint で消すと、この従来挙動から
+    // 退行する。物体を持ち上げたいときだけ跡地補完が必要になる。
+    // なぜフォールバックを残すか: BiRefNet/SAM2 マスクが破綻したときに真っ白背景を
+    // 出さないため (2026-06-18 STΛCK 実機報告の再発防止)。元画像を残せば最悪でも絵は見える。
+    let background_path = run_dir.join("background.png");
+    let mut background_ready = false;
+    let inpaint_mask = if object_layers.is_empty() {
+        None
+    } else {
+        union_mask.as_ref()
+    };
+    if let Some(mask) = inpaint_mask {
+        let _ = app.emit(
+            EVENT_EDIT_MAGIC_PROGRESS,
+            MagicLayerProgress::InpaintingBackground,
+        );
+        let union_mask_path = run_dir.join("object-union-mask.png");
+        // 膨張して縁の被写体残り(幽霊)を飲み込ませてから LaMa へ渡す (grab.rs と同方針)。
+        let dilated = crate::edit::grab::dilate_mask_pub(mask, 6);
+        if dilated.save(&union_mask_path).is_ok()
+            && inpaint_image(runtime, input_path, &union_mask_path, &background_path)
+                .await
+                .is_ok()
+        {
+            background_ready = true;
+        }
+    }
+    if !background_ready {
+        tokio::fs::copy(input_path, &background_path)
+            .await
+            .map_err(|e| format!("copy original as background: {e}"))?;
+    }
 
     let _ = app.emit(
         EVENT_EDIT_MAGIC_PROGRESS,
@@ -185,8 +288,9 @@ async fn run_magic_layer_inner(
         mask_path: path_string(&segment_result.mask_path),
         text_layers,
         part_layers: Vec::new(),
-        width: segment_result.width,
-        height: segment_result.height,
+        object_layers,
+        width,
+        height,
         run_dir: path_string(&run_dir),
     };
 
@@ -194,6 +298,84 @@ async fn run_magic_layer_inner(
 
     let _ = app.emit(EVENT_EDIT_MAGIC_PROGRESS, MagicLayerProgress::Completed);
     Ok(result)
+}
+
+/// 標準モードの物体分解ステップ。SAM2 を embed → 自動マスク生成 → 各物体を透過 PNG に
+/// クロップし、ObjectLayerSpec 群と「人物+全物体の union マスク」(背景 inpaint 用) を返す。
+///
+/// 返り値の union_mask は None にならない (少なくとも人物マスクは入る) が、物体が 0 件でも
+/// 人物マスクだけの union を返す。呼び出し側はこれで背景を補完する。
+///
+/// SAM2 セッションは Magic Layer 専用に一時生成し、状態 (state.sam2_session) は汚さない。
+/// なぜ: クリック切り抜き UI が別に SAM2 セッションを使うため、それを上書きしない。
+#[allow(clippy::too_many_arguments)]
+async fn run_object_layers(
+    state: &AppState,
+    input_path: &Path,
+    run_dir: &Path,
+    width: u32,
+    height: u32,
+    person_mask_path: Option<&Path>,
+    text_boxes: &[[i32; 4]],
+    object_count: usize,
+) -> Result<(Vec<ObjectLayerSpec>, Option<ImageBuffer<Luma<u8>, Vec<u8>>>), String> {
+    use crate::edit::auto_segment::{build_exclude_mask, run_auto_object_masks};
+    use crate::edit::grab::crop_object_png;
+    use crate::edit::sam2::Sam2Session;
+
+    // SAM2 embed (encoder 1 回)。モデル未DLならここでエラーになり、呼び出し側で
+    // 物体分解だけスキップされる (テキスト+人物+背景は続行)。
+    let mut session = Sam2Session::new(state.edit_runtime()).await?;
+    session.embed_image(input_path).await?;
+
+    // 既存レイヤー (人物マスク + テキスト bbox) を除外マスクにまとめる。
+    let exclude = build_exclude_mask(width, height, person_mask_path, text_boxes);
+
+    let masks = run_auto_object_masks(&session, Some(&exclude), object_count).await?;
+
+    // 各物体を bbox クロップ透過 PNG に。union マスクは人物マスクから開始して物体を足す。
+    let rgba = image::open(input_path)
+        .map_err(|e| format!("open input for objects: {e}"))?
+        .to_rgba8();
+
+    let objects_dir = run_dir.join("objects");
+    let mut object_layers = Vec::new();
+    let mut union = ImageBuffer::<Luma<u8>, Vec<u8>>::from_pixel(width, height, Luma([0u8]));
+
+    // 人物マスクを union に取り込む (人物を動かした跡も背景補完対象に含める)。
+    if let Some(path) = person_mask_path {
+        if let Ok(person) = image::open(path) {
+            let person = person.to_luma8();
+            if person.width() == width && person.height() == height {
+                for (dst, src) in union.pixels_mut().zip(person.pixels()) {
+                    if src[0] > 127 {
+                        *dst = Luma([255u8]);
+                    }
+                }
+            }
+        }
+    }
+
+    for (index, object) in masks.iter().enumerate() {
+        // マスクを union に取り込む。
+        if object.mask.width() == width && object.mask.height() == height {
+            for (dst, src) in union.pixels_mut().zip(object.mask.pixels()) {
+                if src[0] > 127 {
+                    *dst = Luma([255u8]);
+                }
+            }
+        }
+        let out_path = objects_dir.join(format!("object-{:02}.png", index + 1));
+        let bbox = crop_object_png(&rgba, &object.mask, &out_path)?;
+        object_layers.push(ObjectLayerSpec {
+            image_path: path_string(&out_path),
+            bbox,
+            // ラベルは日本語・絵文字なし ("物体 1"…)。
+            label: format!("物体 {}", index + 1),
+        });
+    }
+
+    Ok((object_layers, Some(union)))
 }
 
 /// 高精度モード本体: SCHP で人物パーツを認識し、各部位を透過 PNG レイヤーにする。
@@ -243,6 +425,7 @@ async fn run_high_quality(
         mask_path: String::new(),
         text_layers: Vec::new(),
         part_layers,
+        object_layers: Vec::new(),
         width: parse.width,
         height: parse.height,
         run_dir: path_string(&run_dir),

@@ -3,6 +3,8 @@ import { useEffect, useState } from "react";
 import { editModels, type EditPlatformInfo } from "../../lib/ipc";
 import { EDIT_MODES, type EditModeId } from "../../lib/edit/modes";
 import { useEditModels } from "../../lib/store/editModels";
+import type { ObjectCountMode } from "./editor/editorStore";
+import { useEditor } from "./editor/editorStore";
 
 type EditModeSelectorProps = {
   activeMode: EditModeId;
@@ -28,7 +30,8 @@ export function EditModeSelector({ activeMode, onSelectMode }: EditModeSelectorP
   }, [load]);
 
   return (
-    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+    <div className="space-y-2">
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
       {EDIT_MODES.map((mode) => {
         // platform 解決前は availability を判定できない。standard は常に ok なので
         // 利用可、それ以外 (環境依存判定が必要なモード) はロード完了まで選択不可にする。
@@ -120,6 +123,70 @@ export function EditModeSelector({ activeMode, onSelectMode }: EditModeSelectorP
           </button>
         );
       })}
+      </div>
+
+      {/* 物体分解トグル: standard モードのときだけ表示する。高精度モードは人物パーツ分解が
+          主目的で物体分解の対象外のため。 */}
+      {activeMode === "standard" && <ObjectLayerToggle />}
+    </div>
+  );
+}
+
+/**
+ * 物体分解 (SAM2 自動マスク) のオン/オフ + 分解数プリセット。standard モード専用。
+ * 非エンジニア向けに「分解する/しない」+「自動/多め」の最小 UI にする (生の数値は出さない)。
+ */
+function ObjectLayerToggle() {
+  const enabled = useEditor((s) => s.objectLayersEnabled);
+  const setEnabled = useEditor((s) => s.setObjectLayersEnabled);
+  const countMode = useEditor((s) => s.objectCountMode);
+  const setCountMode = useEditor((s) => s.setObjectCountMode);
+
+  const counts: Array<{ id: ObjectCountMode; label: string }> = [
+    { id: "auto", label: "自動" },
+    { id: "more", label: "多め" },
+  ];
+
+  return (
+    <div className="rounded-xl border border-[#2a2a2a] bg-[#101010] p-3">
+      <label className="flex cursor-pointer items-start gap-2">
+        <input
+          type="checkbox"
+          checked={enabled}
+          onChange={(e) => setEnabled(e.target.checked)}
+          className="mt-0.5 h-3.5 w-3.5 accent-pink-500"
+        />
+        <span className="flex flex-col gap-0.5">
+          <span className="text-xs font-black text-neutral-100">物体もレイヤーに分解</span>
+          <span className="text-[10px] leading-4 text-neutral-500">
+            人物・テキスト以外の主要な物体も自動で切り抜いてレイヤーにします
+          </span>
+        </span>
+      </label>
+
+      {enabled && (
+        <div className="mt-2 flex items-center gap-1.5 pl-6">
+          <span className="text-[10px] font-bold text-neutral-500">分解数</span>
+          {counts.map((c) => {
+            const isActive = countMode === c.id;
+            return (
+              <button
+                key={c.id}
+                type="button"
+                onClick={() => setCountMode(c.id)}
+                className={[
+                  "rounded-md px-2.5 py-1 text-[10px] font-black transition",
+                  isActive
+                    ? "bg-pink-500 text-white"
+                    : "bg-[#1a1a1a] text-neutral-400 hover:text-neutral-200",
+                ].join(" ")}
+              >
+                {c.label}
+              </button>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

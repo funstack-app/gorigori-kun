@@ -11,6 +11,7 @@ const PROGRESS_LABELS: Record<string, string> = {
   detectingText: "テキストを検出中…",
   removingText: "テキストを消去中…",
   segmenting: "人物を切り抜き中…",
+  segmentingObjects: "物体を検出中…",
   inpaintingBackground: "背景を補完中…",
   buildingTextLayers: "編集可能レイヤーを構築中…",
   completed: "完了しました",

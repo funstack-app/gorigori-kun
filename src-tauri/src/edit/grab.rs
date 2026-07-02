@@ -101,6 +101,49 @@ pub async fn grab_object(
     })
 }
 
+/// マスク bbox にクロップした透過 PNG を保存し、[x, y, w, h] を返す (背景補完はしない)。
+///
+/// grab_object のクロップ部分だけを切り出した再利用ヘルパ。Magic Layer の物体分解では
+/// 物体ごとに inpaint せず「全物体+人物の union マスクで背景を一括 inpaint」するため、
+/// ここでは切り抜きのみ行う。rgba は元画像の RGBA、mask は元画像同寸の 2 値マスク。
+pub fn crop_object_png(
+    rgba: &ImageBuffer<Rgba<u8>, Vec<u8>>,
+    mask: &ImageBuffer<Luma<u8>, Vec<u8>>,
+    output_path: &Path,
+) -> Result<[i32; 4], String> {
+    let bbox = mask_bbox(mask).ok_or_else(|| "object mask is empty".to_string())?;
+    let [bx, by, bw, bh] = bbox;
+
+    let mut object = ImageBuffer::<Rgba<u8>, Vec<u8>>::new(bw, bh);
+    for oy in 0..bh {
+        for ox in 0..bw {
+            let sx = bx + ox;
+            let sy = by + oy;
+            let alpha = mask.get_pixel(sx, sy)[0];
+            let p = rgba.get_pixel(sx, sy);
+            object.put_pixel(ox, oy, Rgba([p[0], p[1], p[2], alpha]));
+        }
+    }
+
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir object dir: {e}"))?;
+    }
+    object
+        .save(output_path)
+        .map_err(|e| format!("save object png: {e}"))?;
+
+    Ok([bx as i32, by as i32, bw as i32, bh as i32])
+}
+
+/// マスクを radius px 膨張させて返す (公開版。auto_segment の union マスクを LaMa へ
+/// 渡す前に縁の幽霊を飲み込ませるため)。
+pub fn dilate_mask_pub(
+    mask: &ImageBuffer<Luma<u8>, Vec<u8>>,
+    radius: i32,
+) -> ImageBuffer<Luma<u8>, Vec<u8>> {
+    dilate_mask(mask, radius)
+}
+
 /// 白画素 (>127) の存在範囲を [x, y, w, h] で返す。全部黒なら None。
 fn mask_bbox(mask: &ImageBuffer<Luma<u8>, Vec<u8>>) -> Option<[u32; 4]> {
     let (w, h) = mask.dimensions();

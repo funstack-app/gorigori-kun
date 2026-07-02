@@ -25,6 +25,15 @@ export type GrabPreview = {
 
 export type EditorLayerKind = "image" | "text" | "mask";
 
+/** 物体分解数プリセット。"auto"=控えめ、"more"=多め。数値は ipc 呼び出し時に解決する。 */
+export type ObjectCountMode = "auto" | "more";
+
+/** 分解数プリセット → Rust へ渡す物体数上限。more は Rust 側 MAX_OBJECTS_HARD_CAP と同値。 */
+export const OBJECT_COUNT_BY_MODE: Record<ObjectCountMode, number> = {
+  auto: 6,
+  more: 12,
+};
+
 export type EditorLayerMeta = {
   id: string;
   name: string;
@@ -62,12 +71,24 @@ type EditorState = {
    * 現在の選択を読めるようにするため (旧構成では選択値がどこにも届いていなかった)。
    */
   editMode: EditModeId;
+  /**
+   * 物体分解 (SAM2 自動マスク) を有効にするか。standard モードでのみ効く。既定 ON。
+   * OFF にするとテキスト+人物+背景の従来分解だけになる。
+   */
+  objectLayersEnabled: boolean;
+  /**
+   * 分解数プリセット。"auto"=控えめ(6件)、"more"=多め(12件)。
+   * 非エンジニアの認知負荷を避けるため生の数値ではなく2択にする。
+   */
+  objectCountMode: ObjectCountMode;
   /** EditorCanvas がマウント中だけ set される path 取り込みハンドラ。 */
   pathIngestor: EditorPathIngestor | null;
   /** マジックグラブの確定待ちプレビュー (クリックで生成したマスク)。null=プレビューなし。 */
   grabPreview: GrabPreview | null;
   setActiveTool: (tool: EditorTool) => void;
   setEditMode: (mode: EditModeId) => void;
+  setObjectLayersEnabled: (enabled: boolean) => void;
+  setObjectCountMode: (mode: ObjectCountMode) => void;
   setSelectedLayerId: (id: string | null) => void;
   setBusyTool: (tool: EditorTool | null) => void;
   setCanvas: (canvas: unknown | null) => void;
@@ -89,10 +110,14 @@ export const useEditor = create<EditorState>((set) => ({
   error: null,
   revision: 0,
   editMode: "standard",
+  objectLayersEnabled: true,
+  objectCountMode: "auto",
   pathIngestor: null,
   grabPreview: null,
   setActiveTool: (activeTool) => set({ activeTool }),
   setEditMode: (editMode) => set({ editMode }),
+  setObjectLayersEnabled: (objectLayersEnabled) => set({ objectLayersEnabled }),
+  setObjectCountMode: (objectCountMode) => set({ objectCountMode }),
   setSelectedLayerId: (selectedLayerId) => set({ selectedLayerId }),
   setBusyTool: (busyTool) => set({ busyTool }),
   setCanvas: (canvas) => set({ canvas }),

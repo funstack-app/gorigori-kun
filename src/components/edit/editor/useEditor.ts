@@ -13,7 +13,7 @@ import { useActiveProject } from "../../../lib/store/activeProject";
 import { useEditMagic } from "../../../lib/store/editMagic";
 import { useProjects } from "../../../lib/store/projects";
 import type { EditorTool } from "./editorStore";
-import { useEditor } from "./editorStore";
+import { OBJECT_COUNT_BY_MODE, useEditor } from "./editorStore";
 import {
   addImageLayerToCanvas,
   addMaskLayerFromBase64,
@@ -135,10 +135,14 @@ export function useEditorActions() {
     magicStore.setError(null);
     magicStore.setProgress({ kind: "started" });
     try {
-      // 現在選択中のレイヤー分解モードを Rust へ渡す。store 経由で読むのは、
+      // 現在選択中のレイヤー分解モードと物体分解設定を Rust へ渡す。store 経由で読むのは、
       // EditWorkspace のローカル state ではなくここから現在値を取れるようにするため。
-      const mode = useEditor.getState().editMode;
-      const result = await editMagic.run(path, runProjectName, mode);
+      const { editMode, objectLayersEnabled, objectCountMode } = useEditor.getState();
+      const result = await editMagic.run(path, runProjectName, {
+        mode: editMode,
+        includeObjects: objectLayersEnabled,
+        objectCount: OBJECT_COUNT_BY_MODE[objectCountMode],
+      });
       magicStore.setResult(result);
       await applyMagicLayerToCanvas(canvas, result);
       setSourceImagePath(path);
