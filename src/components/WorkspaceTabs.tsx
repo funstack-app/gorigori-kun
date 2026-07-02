@@ -108,7 +108,7 @@ export function WorkspaceTabs() {
               isDisabled
                 ? "cursor-not-allowed text-neutral-700"
                 : isActive
-                  ? "bg-white text-black"
+                  ? "bg-pink-500 text-white"
                   : "text-neutral-500 hover:bg-[#1f1f1f] hover:text-white"
             }`}
           >

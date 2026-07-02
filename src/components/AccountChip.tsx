@@ -41,18 +41,18 @@ export function AccountChip({ account }: { account: Account }) {
     : undefined;
 
   return (
-    <span className="inline-flex h-8 items-center gap-1.5 rounded-md border border-neutral-200 bg-white px-2 text-[11px] shadow-sm">
-      <span className="font-medium text-neutral-700">
+    <span className="inline-flex h-8 items-center gap-1.5 rounded-md border border-[#2a2a2a] bg-[#0f0f0f] px-2 text-[11px] shadow-sm">
+      <span className="font-medium text-neutral-300">
         {account.type === "chatgpt" ? "ChatGPT" : "API キー"}
       </span>
       {account.planType && (
-        <span className="text-neutral-400">· {account.planType}</span>
+        <span className="text-neutral-500">· {account.planType}</span>
       )}
       {display && (
         <button
           type="button"
           onClick={() => setReveal((v) => !v)}
-          className="text-neutral-400 hover:text-neutral-700"
+          className="text-neutral-500 hover:text-neutral-200"
           title={reveal ? "クリックで隠す" : "クリックで全表示"}
           aria-label={reveal ? "メールを隠す" : "メールを全表示"}
         >

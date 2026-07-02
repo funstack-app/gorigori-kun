@@ -73,12 +73,12 @@ export function ContextMenu({ x, y, items, onClose }: Props) {
       role="menu"
       aria-label="画像メニュー"
       style={{ left: pos.x, top: pos.y }}
-      className="fixed z-[60] min-w-[190px] rounded-md border border-neutral-200 bg-white py-1 text-xs text-neutral-700 shadow-xl"
+      className="fixed z-[60] min-w-[190px] rounded-md border border-neutral-700 bg-neutral-900 py-1 text-xs text-neutral-300 shadow-2xl"
       onContextMenu={(e) => e.preventDefault()}
     >
       {items.map((it, i) =>
         it.kind === "separator" ? (
-          <div key={`sep-${i}`} className="my-1 border-t border-neutral-100" />
+          <div key={`sep-${i}`} className="my-1 border-t border-neutral-800" />
         ) : (
           <button
             key={it.label}
@@ -98,14 +98,14 @@ export function ContextMenu({ x, y, items, onClose }: Props) {
             }}
             className={`flex w-full items-center gap-2 px-3 py-1.5 text-left transition ${
               it.disabled
-                ? "cursor-not-allowed text-neutral-300"
+                ? "cursor-not-allowed text-neutral-600"
                 : it.danger
-                  ? "hover:bg-rose-50 hover:text-rose-700"
-                  : "hover:bg-neutral-100 hover:text-neutral-950"
+                  ? "hover:bg-rose-500/15 hover:text-rose-300"
+                  : "hover:bg-neutral-800 hover:text-white"
             }`}
           >
             {it.icon && (
-              <span className="flex h-4 w-4 items-center justify-center rounded border border-neutral-200 bg-neutral-50 text-[9px] font-semibold text-neutral-500">
+              <span className="flex h-4 w-4 items-center justify-center rounded border border-neutral-700 bg-neutral-800 text-[9px] font-semibold text-neutral-400">
                 {it.icon}
               </span>
             )}

@@ -609,7 +609,7 @@ function PromptBlock({
           disabled={disabled}
           className={[
             "rounded-md px-3 py-1 text-[11px] font-bold text-white disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-500",
-            isVideo ? "bg-purple-500 hover:bg-purple-400" : "bg-pink-500 hover:bg-pink-400",
+            "bg-pink-500 hover:bg-pink-400",
           ].join(" ")}
           title={
             isVideo
