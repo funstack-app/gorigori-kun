@@ -27,6 +27,19 @@ export function resetStoryboardSession(): void {
   skill.setSelectedSkillId(null);
 
   const run = useStoryboardRun.getState();
+  // 走行中 run の安全中止 (2026-07-02 W3-4):
+  //  run が方向性チェック (checkpoint) で待機中なら、フロントを wipe する前に
+  //  バックエンドの orchestrator へ cancel を送って oneshot 待機を解く。
+  //  これをやらないと、reset() でストアを空にした後も orchestrator が checkpoint で
+  //  await し続け (waiter リーク)、空ストアへイベントを emit し続ける。
+  //  cancelCheckpoint は checkpointResume(cancel) を fire-and-forget で呼び、
+  //  生成済みカットは保持したまま status を cancelled にする (状態はこの直後の
+  //  reset() で初期化されるので、ここでの目的はバックエンド解放のみ)。
+  //  注意: checkpoint 待機中でない mid-flight run はバックエンドに中止 API が無いため
+  //  (checkpoint 到達時のみ oneshot が登録される)、ここでは解放できない。
+  if (run.checkpointCutId !== null) {
+    run.cancelCheckpoint();
+  }
   run.reset();
   run.resetPhases();
 
