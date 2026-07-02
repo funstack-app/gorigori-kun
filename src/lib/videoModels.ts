@@ -129,3 +129,33 @@ export const VIDEO_MODELS: VideoModelDefinition[] = [
 export function findVideoModel(id: VideoModelId | string): VideoModelDefinition | undefined {
   return VIDEO_MODELS.find((m) => m.id === id);
 }
+
+/**
+ * 全動画モデルが対応する aspect_ratio の和集合 (表示順を保った重複なしリスト)。
+ *
+ * アスペクト比セレクタで「未対応の比率もグレーアウトして見せる」ために使う。
+ * 各モデルの aspectRatios は "公式仕様 実測" (VIDEO_MODELS 定義のコメント参照) が正で、
+ * どの比率がどのモデルで使えるかはこの和集合と model.aspectRatios の差分で決まる。
+ *
+ * 表示順は「代表的な横長 → 縦長 → 特殊」の直感順になるよう、seedance_2_0 (7種) の
+ * 並びを基準に、他モデルにしか無い値があれば末尾へ足す。現状は seedance_2_0 が
+ * 全比率を包含する (auto/16:9/9:16/4:3/3:4/1:1/21:9) ため差分は生じないが、
+ * 将来モデル追加で新比率が来ても取りこぼさない。
+ */
+export const ALL_VIDEO_ASPECT_RATIOS: string[] = (() => {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const model of VIDEO_MODELS) {
+    for (const ratio of model.aspectRatios) {
+      if (seen.has(ratio)) continue;
+      seen.add(ratio);
+      out.push(ratio);
+    }
+  }
+  return out;
+})();
+
+/** モデルがその比率に対応しているか。未対応ならセレクタで disabled 表示する。 */
+export function modelSupportsAspect(model: VideoModelDefinition, ratio: string): boolean {
+  return model.aspectRatios.includes(ratio);
+}

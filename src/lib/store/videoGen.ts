@@ -20,6 +20,12 @@ export type VideoGenState = {
    * - 2〜4件 = 比較モード。選んだモデルそれぞれで1本生成して並べる
    */
   compareModelIds: VideoModelId[];
+  /**
+   * モデル変更で選択中の比率が未対応になり、自動補正した記録。
+   * UI で「モデル変更のため 16:9 に調整しました」の一時通知を出すためだけに使う。
+   * null = 直近で補正なし (通知を出さない)。
+   */
+  lastAspectAdjustment: { from: string; to: string } | null;
 };
 
 type VideoGenStore = VideoGenState & {
@@ -30,6 +36,8 @@ type VideoGenStore = VideoGenState & {
   setAspectRatio: (v: string) => void;
   setCount: (n: number) => void;
   setExtraParam: (name: string, value: string) => void;
+  /** アスペクト補正の通知を消す (トースト/バナーを閉じたとき) */
+  clearAspectAdjustment: () => void;
   /** 比較対象モデルを丸ごと差し替える (UI のチェックボックス選択を反映) */
   setCompareModelIds: (ids: VideoModelId[]) => void;
   /** 比較対象モデルの1件を ON/OFF する */
@@ -62,6 +70,7 @@ function defaultState(): VideoGenState {
     count: 1,
     extraParamValues: defaultExtraParams(DEFAULT_MODEL_ID),
     compareModelIds: [],
+    lastAspectAdjustment: null,
   };
 }
 
@@ -107,21 +116,36 @@ export const useVideoGen = create<VideoGenStore>((set) => ({
   setSourceImage: (sourceImagePath) => set({ sourceImagePath }),
   setModel: (modelId) => {
     const model = findVideoModel(modelId);
-    set((state) => ({
-      modelId,
-      // モデル変更で duration / aspect が非対応になるなら、そのモデルの有効値へ寄せる
-      duration: clampDuration(modelId, model?.duration.default ?? state.duration),
-      aspectRatio: clampAspect(modelId, model?.defaultAspectRatio ?? state.aspectRatio),
-      // 別モデルのパラメータが残らないよう、新モデルのデフォルトで作り直す
-      extraParamValues: defaultExtraParams(modelId),
-    }));
+    set((state) => {
+      // モデル変更で現在の比率が新モデル未対応なら有効値へ寄せ、その旨を記録する。
+      // ユーザーには「なぜ勝手に比率が変わったか」が見えないと不親切なので、UI 側で
+      // lastAspectAdjustment を読んで一時通知を出す。
+      const nextAspect = clampAspect(modelId, state.aspectRatio);
+      const adjusted = nextAspect !== state.aspectRatio;
+      return {
+        modelId,
+        // モデル変更で duration が非対応になるなら、そのモデルの有効値へ寄せる
+        duration: clampDuration(modelId, model?.duration.default ?? state.duration),
+        aspectRatio: nextAspect,
+        // 別モデルのパラメータが残らないよう、新モデルのデフォルトで作り直す
+        extraParamValues: defaultExtraParams(modelId),
+        lastAspectAdjustment: adjusted
+          ? { from: state.aspectRatio, to: nextAspect }
+          : null,
+      };
+    });
   },
   setDuration: (duration) => {
     set((state) => ({ duration: clampDuration(state.modelId, duration) }));
   },
   setAspectRatio: (value) => {
-    set((state) => ({ aspectRatio: clampAspect(state.modelId, value) }));
+    // ユーザーが明示的に比率を選んだら、モデル変更由来の補正通知は用済み。
+    set((state) => ({
+      aspectRatio: clampAspect(state.modelId, value),
+      lastAspectAdjustment: null,
+    }));
   },
+  clearAspectAdjustment: () => set({ lastAspectAdjustment: null }),
   setCount: (count) => set({ count: clampCount(count) }),
   setExtraParam: (name, value) =>
     set((state) => ({ extraParamValues: { ...state.extraParamValues, [name]: value } })),

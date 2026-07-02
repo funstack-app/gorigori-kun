@@ -10,7 +10,13 @@ import {
   fileToUploadReference,
   isImageDrop,
 } from "../lib/dragRef";
-import { VIDEO_MODELS, type VideoModelDefinition, type VideoModelParam } from "../lib/videoModels";
+import {
+  ALL_VIDEO_ASPECT_RATIOS,
+  VIDEO_MODELS,
+  modelSupportsAspect,
+  type VideoModelDefinition,
+  type VideoModelParam,
+} from "../lib/videoModels";
 import {
   presetAttachedImagesToReferences,
   type Preset,
@@ -475,6 +481,12 @@ function DurationControl({
   );
 }
 
+/**
+ * 比率セレクタ。全モデルの比率 (ALL_VIDEO_ASPECT_RATIOS) を並べ、選択中モデルが
+ * 未対応のものはグレーアウト (disabled) して「このモデルは未対応」を明示する。
+ * 旧版は model.aspectRatios だけを出していたため、ユーザーには「なぜこの比率が
+ * 選べないのか」が見えなかった (clampAspect の裏補正が黙って走るだけだった)。
+ */
 function AspectControl({
   model,
   value,
@@ -486,21 +498,34 @@ function AspectControl({
 }) {
   return (
     <div className="space-y-0.5">
-      <label htmlFor="video-aspect-select" className="block h-3.5 text-[10px] font-black leading-[14px] tracking-wide text-neutral-500">
+      <p className="block h-3.5 text-[10px] font-black leading-[14px] tracking-wide text-neutral-500">
         比率
-      </label>
-      <select
-        id="video-aspect-select"
-        value={value}
-        onChange={(event) => onChange(event.currentTarget.value)}
-        className="h-8 w-full rounded-md border border-[#343434] bg-[#101010] px-2 text-xs font-bold text-neutral-100 outline-none transition hover:border-[#444] focus:border-pink-500"
-      >
-        {model.aspectRatios.map((ratio) => (
-          <option key={ratio} value={ratio}>
-            {ratio}
-          </option>
-        ))}
-      </select>
+      </p>
+      <div className="grid grid-cols-4 gap-1">
+        {ALL_VIDEO_ASPECT_RATIOS.map((ratio) => {
+          const supported = modelSupportsAspect(model, ratio);
+          const selected = supported && value === ratio;
+          return (
+            <button
+              key={ratio}
+              type="button"
+              disabled={!supported}
+              onClick={() => onChange(ratio)}
+              title={supported ? ratio : `${model.label} はこの比率に未対応`}
+              className={[
+                "h-8 rounded-md border px-1 text-[10px] font-black transition",
+                selected
+                  ? "border-pink-400 bg-pink-500/10 text-white"
+                  : supported
+                    ? "border-[#2a2a2a] bg-[#101010] text-neutral-400 hover:border-neutral-500"
+                    : "cursor-not-allowed border-[#1e1e1e] bg-[#0b0b0b] text-neutral-700",
+              ].join(" ")}
+            >
+              {ratio}
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -643,6 +668,10 @@ function VideoSettingsModal({
   onToggleCompareModel: (id: VideoModelDefinition["id"]) => void;
 }) {
   const compareMode = compareModelIds.length >= 2;
+  // モデル変更でアスペクト比が自動補正されたときの通知 (store 由来)。
+  // モーダルを閉じたら通知を消す (次に開いたとき古い通知が残らないように)。
+  const aspectAdjustment = useVideoGen((s) => s.lastAspectAdjustment);
+  const clearAspectAdjustment = useVideoGen((s) => s.clearAspectAdjustment);
   useEffect(() => {
     if (!open) return;
     const onKey = (event: KeyboardEvent) => {
@@ -651,6 +680,9 @@ function VideoSettingsModal({
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [open, onClose]);
+  useEffect(() => {
+    if (!open) clearAspectAdjustment();
+  }, [open, clearAspectAdjustment]);
 
   // 比較リストの各モデルのコストを実 API で計算する (静的 costEstimate ではなく)。
   // 比較生成は「共通 duration を各モデルに丸める + 各モデルおすすめ設定」で走るため、
@@ -790,10 +822,20 @@ function VideoSettingsModal({
             </p>
           </div>
 
-          {/* 尺 + 比率: 比較モードでも共通設定として効かせる */}
-          <div className="grid grid-cols-2 items-end gap-1.5">
-            <DurationControl model={model} value={duration} onChange={onDurationChange} />
+          {/* 尺 + 比率: 比較モードでも共通設定として効かせる。
+              比率は全モデルぶんを並べて未対応をグレーアウトするため、尺とは別行にして
+              横幅をフルに使う。 */}
+          <div className="space-y-1.5">
+            <div className="grid grid-cols-1 gap-1.5">
+              <DurationControl model={model} value={duration} onChange={onDurationChange} />
+            </div>
             <AspectControl model={model} value={aspectRatio} onChange={onAspectRatioChange} />
+            {aspectAdjustment && (
+              <p className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[10px] font-bold leading-snug text-amber-300">
+                モデル変更のため {aspectAdjustment.to} に調整しました（{aspectAdjustment.from} は{" "}
+                {model.label} 未対応）
+              </p>
+            )}
           </div>
 
           {/* モデル別パラメータ(mode/resolution/genre等)は単一モード時のみ
