@@ -83,6 +83,9 @@ export function PromptComposer({
     count,
     aspect,
     setText,
+    clearText,
+    restoreLastText,
+    lastSentText,
     setCount,
     setAspect,
     addReferences,
@@ -182,6 +185,10 @@ export function PromptComposer({
       );
     }
     if (!trimmed && effectiveReferences.length === 0) return;
+    // 送信本文を「前回のコマンド」として退避する。入力欄はクリアしない方針
+    // (reset() は references だけ落とす) だが、ユーザーがクリア/微修正した後でも
+    // 「前回を復元」で1クリック復帰できるようにする。
+    if (trimmed) useComposer.getState().recordSent(trimmed);
     const finalPrompt = buildGoriPrompt(trimmed, {
       primaryMode: workflow.primaryMode,
       videoMode: workflow.videoMode,
@@ -625,6 +632,41 @@ export function PromptComposer({
             ariaLabel="画像を添付"
             dark={dark}
           />
+          {/*
+            Command Dock W3-1: 制作コマンドを「チャット」から「コマンド」体験へ。
+            - クリア: 送信後もプロンプトは残る方針 (reset() は references だけ落とす)
+              ので、意図的に消したいときの明示ボタン。誤爆で全消しにならないよう
+              入力が空のときは無効化する。
+            - 前回を復元: 直近送信した制作コマンドを1クリックで入力欄へ戻す。
+          */}
+          <ActionButton
+            onClick={() => {
+              if (text.length === 0) return;
+              clearText();
+            }}
+            icon=""
+            label="クリア"
+            title="入力欄を空にする (参照画像は残る)"
+            ariaLabel="制作コマンドをクリア"
+            disabled={text.length === 0}
+            dark={dark}
+          />
+          <ActionButton
+            onClick={() => {
+              const ok = restoreLastText();
+              pushToast(
+                ok
+                  ? { kind: "success", text: "前回のコマンドを戻しました", ttlMs: 2200 }
+                  : { kind: "info", text: "戻せる前回のコマンドがありません", ttlMs: 2600 },
+              );
+            }}
+            icon=""
+            label="前回を復元"
+            title="直近に送信した制作コマンドを入力欄へ戻す"
+            ariaLabel="前回の制作コマンドを復元"
+            disabled={!lastSentText}
+            dark={dark}
+          />
           {dark ? (
             <details className="relative">
               <summary className="inline-flex h-8 cursor-pointer list-none items-center rounded-md border border-[#343434] bg-[#1e1e1e] px-2.5 text-xs font-medium text-neutral-300 transition hover:border-neutral-500 hover:text-white">
@@ -777,6 +819,7 @@ function ActionButton({
   ariaLabel,
   tone,
   dark,
+  disabled,
 }: {
   icon: string;
   label: string;
@@ -785,6 +828,7 @@ function ActionButton({
   ariaLabel: string;
   tone?: "amber";
   dark?: boolean;
+  disabled?: boolean;
 }) {
   const hover =
     tone === "amber"
@@ -794,9 +838,10 @@ function ActionButton({
     <button
       type="button"
       onClick={onClick}
+      disabled={disabled}
       title={title}
       aria-label={ariaLabel}
-      className={`inline-flex items-center gap-1 rounded-md border px-2.5 py-1.5 text-xs font-medium transition ${
+      className={`inline-flex items-center gap-1 rounded-md border px-2.5 py-1.5 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-40 ${
         dark
           ? "border-[#343434] bg-[#1e1e1e] text-neutral-300 hover:border-neutral-500 hover:text-white"
           : `border-neutral-300 bg-white text-neutral-700 ${hover}`

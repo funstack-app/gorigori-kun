@@ -97,10 +97,26 @@ export type Reference = {
 
 type ComposerState = {
   text: string;
+  /**
+   * 直近に送信した制作コマンド本文。送信後もプロンプトは入力欄に残す方針
+   * (reset() は references だけ落とす) だが、ユーザーが「クリア」で消したり
+   * 微修正した後でも「前回のコマンド」を1クリックで戻せるよう、送信時点の
+   * 本文をここに退避しておく。null は「まだ一度も送信していない」。
+   */
+  lastSentText: string | null;
   references: Reference[];
   count: number;
   aspect: FrameAspect;
   setText: (t: string) => void;
+  /** 入力欄を空にする (references はそのまま)。「クリア」ボタン用。 */
+  clearText: () => void;
+  /**
+   * 直近に送信した制作コマンド本文を入力欄へ戻す。lastSentText が無ければ no-op。
+   * 戻せたら true を返す (呼び出し側がトーストを出し分けるため)。
+   */
+  restoreLastText: () => boolean;
+  /** 送信した本文を lastSentText に記録する。submit() から呼ぶ。 */
+  recordSent: (t: string) => void;
   setCount: (n: number) => void;
   setAspect: (aspect: FrameAspect) => void;
   addReference: (ref: Reference) => void;
@@ -123,6 +139,7 @@ type ComposerState = {
 
 export const useComposer = create<ComposerState>((set, get) => ({
   text: "",
+  lastSentText: null,
   references: [],
   // Start from the last value the user picked instead of always
   // resetting to 1 — they were tired of re-entering "4" every session.
@@ -130,6 +147,18 @@ export const useComposer = create<ComposerState>((set, get) => ({
   aspect: readPersistedAspect(),
 
   setText: (text) => set({ text }),
+  clearText: () => set({ text: "" }),
+  restoreLastText: () => {
+    const last = get().lastSentText;
+    if (last == null || last.length === 0) return false;
+    set({ text: last });
+    return true;
+  },
+  recordSent: (t) => {
+    const trimmed = t.trim();
+    if (trimmed.length === 0) return;
+    set({ lastSentText: trimmed });
+  },
   setCount: (count) => {
     const clamped = Math.min(24, Math.max(1, count));
     persistCount(clamped);

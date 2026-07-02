@@ -1,4 +1,9 @@
-import { images as imagesIpc } from "../lib/ipc";
+import {
+  images as imagesIpc,
+  history,
+  sessions as sessionsApi,
+} from "../lib/ipc";
+import { useComposer } from "../lib/store/composer";
 import { useImagePreview } from "../lib/store/imagePreview";
 import {
   useImages,
@@ -12,6 +17,65 @@ import { useThreads } from "../lib/store/threads";
 import { useToasts } from "../lib/store/toasts";
 import { sendImageToPlanForRediscuss } from "../lib/sendToPlan";
 import type { ContextMenuItem } from "./ContextMenu";
+
+/** 履歴 turn の逆引き上限。ImageMetaPanel と揃える (Rust 側 clamp(1, 2000))。 */
+const HISTORY_LOOKUP_LIMIT = 2000;
+
+/**
+ * ある画像 path の「生成時プロンプト」を解決する。ImageMetaPanel と同じ手順:
+ *  1. history.recent で直近 turn を逆引きし、対象 path を含む turn の prompt を採用
+ *  2. turn が無ければ projects.json の item.prompt をフォールバックに使う
+ * どちらでも取れなければ null。
+ */
+async function resolvePromptForImage(path: string): Promise<string | null> {
+  try {
+    const rows = await history.recent(HISTORY_LOOKUP_LIMIT);
+    for (const row of rows) {
+      try {
+        const turn = await sessionsApi.getTurn(row.id);
+        if (turn.images.some((img) => img.path === path)) {
+          const p = row.prompt?.trim();
+          if (p) return p;
+        }
+      } catch {
+        // 単発の getTurn 失敗は無視して次へ
+      }
+    }
+  } catch {
+    // 履歴取得失敗時も projects.json フォールバックへ進む
+  }
+  for (const project of useProjects.getState().projects) {
+    for (const it of project.items) {
+      if (it.imagePath === path && it.prompt && it.prompt.trim()) {
+        return it.prompt.trim();
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * W3-1 (Command Dock): 画像カードの生成時プロンプトを制作コマンド入力欄へ
+ * 読み込む。履歴/projects.json から解決できたら composer.setText で流し込み、
+ * 取れなければトーストで通知する。
+ */
+async function loadPromptIntoComposer(path: string): Promise<void> {
+  const prompt = await resolvePromptForImage(path);
+  if (!prompt) {
+    useToasts.getState().push({
+      kind: "info",
+      text: "この画像のプロンプトが見つかりませんでした",
+      ttlMs: 3200,
+    });
+    return;
+  }
+  useComposer.getState().setText(prompt);
+  useToasts.getState().push({
+    kind: "success",
+    text: "制作コマンドに読み込みました",
+    ttlMs: 2400,
+  });
+}
 
 /**
  * F-#12 (没作品削除): ライブラリ/プロジェクトの没作品を物理削除する共通処理。
@@ -164,6 +228,13 @@ export function buildGalleryItemMenu(
       label: "企画で再検討",
       icon: "T",
       onClick: () => void sendImageToPlanForRediscuss(item.path),
+    },
+    {
+      // W3-1 (Command Dock): この画像の生成時プロンプトを制作コマンド入力欄へ
+      // 読み込み、同じ設定で微修正・再実行できるようにする。
+      label: "このプロンプトを制作コマンドに読込",
+      icon: "L",
+      onClick: () => void loadPromptIntoComposer(item.path),
     },
     { kind: "separator" },
     {
