@@ -7,6 +7,7 @@ import {
 } from "../lib/store/images";
 import { useProjects } from "../lib/store/projects";
 import { useMaskEditor } from "../lib/store/maskEditor";
+import { useSnsExport } from "../lib/store/snsExport";
 import { useThreads } from "../lib/store/threads";
 import { useToasts } from "../lib/store/toasts";
 import { sendImageToPlanForRediscuss } from "../lib/sendToPlan";
@@ -182,6 +183,13 @@ export function buildGalleryItemMenu(
       onClick: () => {
         void useImages.getState().removeBackground(item.path);
       },
+    },
+    {
+      // W2-2: SNS 用リサイズ書き出し。単一画像を対象に、各 SNS 推奨サイズへ
+      // 一括リサイズするモーダルを開く。useMaskEditor と同じく store 経由で開く。
+      label: "SNS用に書き出し…",
+      icon: "E",
+      onClick: () => useSnsExport.getState().open([item.path]),
     },
   ];
   if (ctx.onRegisterPreset) {

@@ -12,6 +12,7 @@ import { LibraryAutoRenameButton } from "./components/LibraryAutoRenameButton";
 import { LibraryBatchSaveButton } from "./components/LibraryBatchSaveButton";
 import { MaskEditorModal } from "./components/MaskEditorModal";
 import { PresetsDrawer } from "./components/PresetsDrawer";
+import { SnsExportModal } from "./components/SnsExportModal";
 import { PromptComposer } from "./components/PromptComposer";
 import { SafeImage } from "./components/SafeImage";
 import { SettingsWorkspace } from "./components/SettingsWorkspace";
@@ -45,6 +46,7 @@ import { useSavedPrompts } from "./lib/store/savedPrompts";
 import { useSceneStore } from "./lib/store/scene";
 import { type Session, useSessions } from "./lib/store/sessions";
 import { useSettings } from "./lib/store/settings";
+import { useSnsExport } from "./lib/store/snsExport";
 import { useStoryboardRun } from "./lib/store/storyboardRun";
 import { useThreads } from "./lib/store/threads";
 import { useToasts } from "./lib/store/toasts";
@@ -235,10 +237,23 @@ function App() {
       <ApprovalDialog />
       <ImagePreviewModal />
       <MaskEditorModal />
+      <SnsExportModalMount />
       <Toaster />
       <FirstRunStorageNotice />
     </main>
   );
+}
+
+/**
+ * W2-2: SNS リサイズ書き出しモーダルの常設マウント。
+ * useSnsExport store の paths が設定されたときだけ描画する
+ * (MaskEditorModal / ImagePreviewModal と同じく store 駆動の単一マウント)。
+ */
+function SnsExportModalMount() {
+  const paths = useSnsExport((s) => s.paths);
+  const close = useSnsExport((s) => s.close);
+  if (!paths) return null;
+  return <SnsExportModal paths={paths} onClose={close} />;
 }
 
 function SignedInScaffold() {

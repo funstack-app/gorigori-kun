@@ -3,6 +3,7 @@ import { useComposer } from "../lib/store/composer";
 import { useImagePreview } from "../lib/store/imagePreview";
 import { matchesFilter, useImages } from "../lib/store/images";
 import { useMaskEditor } from "../lib/store/maskEditor";
+import { useSnsExport } from "../lib/store/snsExport";
 import { useThreads } from "../lib/store/threads";
 import { useToasts } from "../lib/store/toasts";
 import { VirtualGalleryGrid } from "./VirtualGalleryGrid";
@@ -207,6 +208,10 @@ export function ImageGallery({
             }
             clearSelection();
           }}
+          onExportAll={() => {
+            // W2-2: 選択中の全画像を SNS リサイズ書き出しモーダルへ渡す。
+            useSnsExport.getState().open(Array.from(selection));
+          }}
         />
       )}
 
@@ -279,6 +284,7 @@ function SelectionActionBar({
   onAttachAll,
   onSaveAll,
   onFavoriteAll,
+  onExportAll,
 }: {
   selection: Set<string>;
   items: { path: string; savedTo?: string }[];
@@ -287,6 +293,7 @@ function SelectionActionBar({
   onAttachAll: () => void;
   onSaveAll: () => void;
   onFavoriteAll: () => void;
+  onExportAll: () => void;
 }) {
   const unsavedCount = items.filter(
     (it) => selection.has(it.path) && !it.savedTo,
@@ -318,6 +325,13 @@ function SelectionActionBar({
           className="rounded-md border border-neutral-300 bg-white px-2 py-1 hover:border-rose-500 hover:text-rose-600"
         >
           一括お気に入り
+        </button>
+        <button
+          onClick={onExportAll}
+          className="rounded-md border border-neutral-300 bg-white px-2 py-1 hover:border-pink-500 hover:text-pink-600"
+          title="選択中の画像を各 SNS サイズへ一括リサイズ書き出し"
+        >
+          SNS書き出し
         </button>
         {cwd && unsavedCount > 0 && (
           <button

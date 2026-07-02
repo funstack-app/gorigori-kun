@@ -4,6 +4,7 @@ import { useImagePreview } from "../lib/store/imagePreview";
 import { useImages } from "../lib/store/images";
 import { useMaskEditor } from "../lib/store/maskEditor";
 import { useProjects } from "../lib/store/projects";
+import { useSnsExport } from "../lib/store/snsExport";
 import { useToasts } from "../lib/store/toasts";
 import { sendImageToPlanForRediscuss } from "../lib/sendToPlan";
 import { setDragRef } from "../lib/dragRef";
@@ -394,6 +395,12 @@ export function ImagePreviewModal() {
                 hint="プロンプト+画像をテンプレ化"
                 onClick={() => setPresetTarget(path)}
               />
+              <ActionRow
+                icon={<SnsExportIcon />}
+                label="SNS用に書き出し"
+                hint="各 SNS の推奨サイズへリサイズ"
+                onClick={() => useSnsExport.getState().open([path])}
+              />
               <SaveToProjectAction path={path} />
               <ActionRow
                 icon={<DownloadIcon />}
@@ -733,6 +740,17 @@ function BookmarkIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" />
+    </svg>
+  );
+}
+
+function SnsExportIcon() {
+  // 共有/書き出しを示すアイコン (箱から矢印が出る)
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+      <polyline points="16 6 12 2 8 6" />
+      <line x1="12" y1="2" x2="12" y2="15" />
     </svg>
   );
 }
