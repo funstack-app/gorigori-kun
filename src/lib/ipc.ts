@@ -194,6 +194,29 @@ export type RelinkResult = {
   prunedPaths: string[];
 };
 
+/** `images_export_resized` に渡すリサイズターゲット 1 件。
+ * mode: "cover"=中央クロップ / "contain"=余白パディング。 */
+export type ResizeTarget = {
+  name: string;
+  width: number;
+  height: number;
+  mode: "cover" | "contain";
+};
+
+/** `images_export_resized` の書き出し結果 1 件。 */
+export type ResizeOutput = {
+  source: string;
+  target: string;
+  output: string;
+};
+
+/** `images_export_resized` (SNSリサイズ書き出し) の集計結果。
+ * 1 件失敗しても残りは続行し、失敗内訳を返す。 */
+export type ResizeResult = {
+  outputs: ResizeOutput[];
+  failed: { path: string; error: string }[];
+};
+
 export const images = {
   startWatcher: () => invoke<StartWatchResult>("images_start_watcher"),
   saveToProject: (src: string, projectDir: string, newName?: string) =>
@@ -246,6 +269,11 @@ export const images = {
       fileName,
       bytes: Array.from(bytes),
     }),
+  /** 生成済み画像を SNS 各サイズへ一括リサイズ書き出しする (W2-2)。
+   * paths × targets の直積で PNG を output_dir に書き出す。1 件失敗しても
+   * 残りは続行し、成功一覧と失敗内訳を返す。 */
+  exportResized: (paths: string[], targets: ResizeTarget[], outputDir: string) =>
+    invoke<ResizeResult>("images_export_resized", { paths, targets, outputDir }),
   /** Spawn N parallel `codex exec` workers (each with its own
    * isolated CODEX_HOME) and copy each output PNG into a fresh
    * `~/.codex/generated_images/batch-<id>/` subdir so the watcher
@@ -853,4 +881,25 @@ export const mcp = {
   list: () => invoke<McpServer[]>("mcp_list"),
   upsert: (server: McpServer) => invoke<void>("mcp_upsert", { server }),
   delete: (name: string) => invoke<void>("mcp_delete", { name }),
+};
+
+// ──────────── Skill import / export ────────────
+export type SkillImportResult = {
+  id: string;
+  name: string;
+  installedAt: string;
+  /** zip 一括インポートで展開されたファイル数 (単一 .md では 1)。 */
+  fileCount: number;
+};
+
+export const skills = {
+  /** 単一 SKILL.md をインポートする。 */
+  importMarkdown: (sourcePath: string) =>
+    invoke<SkillImportResult>("skill_import", { sourcePath }),
+  /** .gori-skill.zip を一括インポートする (references/agents 込み)。 */
+  importZip: (sourcePath: string) =>
+    invoke<SkillImportResult>("skill_import_zip", { sourcePath }),
+  /** 既存スキルを .gori-skill.zip として書き出す。展開されたファイル数を返す。 */
+  exportZip: (skillId: string, destZipPath: string) =>
+    invoke<number>("skill_export_zip", { skillId, destZipPath }),
 };

@@ -329,6 +329,8 @@ pub fn run() {
             commands::codex_status,
             commands::codex_diagnostics,
             commands::skills::skill_import,
+            commands::skills::skill_import_zip,
+            commands::skills::skill_export_zip,
             commands::skills::skill_export_read,
             commands::skills::skill_list_installed,
             commands::cloud_supabase::supabase_test_connection,
@@ -371,6 +373,7 @@ pub fn run() {
             commands::images::images_relink_missing,
             commands::images::images_write_clipboard,
             commands::images::images_write_upload,
+            commands::images::images_export_resized,
             commands::layer_splitter::layer_splitter_run,
             // 2026-06-10 段階8: CLI 同梱方式の higgsfield_* コマンドは削除。Higgsfield 連携は
             // 下の higgsfield_mcp_* (MCP 接続方式) に一本化した (higgsfield.rs も削除済み)。

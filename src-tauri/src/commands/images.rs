@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sqlx::Row as _;
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_opener::OpenerExt;
@@ -515,7 +515,7 @@ pub struct BatchDeleteResult {
     pub failed: Vec<BatchDeleteFailure>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 pub struct BatchDeleteFailure {
     pub path: String,
     pub error: String,
@@ -743,6 +743,187 @@ pub async fn images_relink_missing(
     Ok(result)
 }
 
+/// SNS 各サイズへの書き出しターゲット 1 件。
+///
+/// `mode`:
+/// - "cover"   → アスペクト比を保ったまま**枠を覆うように拡大縮小してから中央クロップ**する
+///              (被写体が欠ける代わりに枠いっぱいに埋まる。Instagram 等の SNS 標準)。
+/// - "contain" → アスペクト比を保ったまま**枠に収まるように縮小して余白パディング**する
+///              (画像全体が見える代わりに帯が入る。ロゴ/図版向け)。
+#[derive(Debug, Clone, Deserialize)]
+pub struct ResizeTarget {
+    /// 出力ファイル名サフィックスに使う識別子 (例: "instagram_square")。
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
+    /// "cover" | "contain"。未知値は cover にフォールバックする。
+    pub mode: String,
+}
+
+/// リサイズ書き出しの結果 1 件。
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResizeOutput {
+    /// 入力画像の絶対パス。
+    pub source: String,
+    /// ターゲット名 (`ResizeTarget.name`)。
+    pub target: String,
+    /// 出力した PNG の絶対パス。
+    pub output: String,
+}
+
+/// リサイズ書き出しバッチの集計結果。1 件失敗しても残りは続行する。
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResizeResult {
+    pub outputs: Vec<ResizeOutput>,
+    pub failed: Vec<BatchDeleteFailure>,
+}
+
+/// `contain` パディングに使う背景色 (透過)。PNG なので alpha=0 で余白が透明になる。
+const CONTAIN_PAD_RGBA: [u8; 4] = [0, 0, 0, 0];
+
+/// 1 枚を 1 ターゲットへリサイズし、PNG として `output_dir` に書き出す。
+///
+/// cover:   src を「短辺が枠に一致する倍率」で拡大縮小 (resize は枠を覆うまで拡大) し、
+///          はみ出した分を中央クロップして width×height ちょうどにする。
+/// contain: src を「長辺が枠に収まる倍率」で縮小 (resize は枠内に収める) し、
+///          残った余白を透過で中央パディングして width×height ちょうどにする。
+fn resize_one(
+    img: &image::DynamicImage,
+    target: &ResizeTarget,
+    output_dir: &Path,
+    src_stem: &str,
+) -> Result<PathBuf, String> {
+    use image::imageops::FilterType;
+
+    if target.width == 0 || target.height == 0 {
+        return Err(format!(
+            "invalid target size {}x{} for '{}'",
+            target.width, target.height, target.name
+        ));
+    }
+
+    let tw = target.width;
+    let th = target.height;
+    let mode = target.mode.trim().to_ascii_lowercase();
+
+    // 出力は常に RGBA8 の width×height キャンバス。
+    let mut canvas: image::RgbaImage = image::ImageBuffer::from_pixel(tw, th, image::Rgba([0, 0, 0, 255]));
+
+    if mode == "contain" {
+        // 枠内に収まるよう縮小 (アスペクト維持)。resize は「枠を超えない」最大サイズにする。
+        let scaled = img.resize(tw, th, FilterType::Lanczos3).to_rgba8();
+        let (sw, sh) = scaled.dimensions();
+        // 透過背景で埋め直してから中央に貼る。
+        canvas = image::ImageBuffer::from_pixel(tw, th, image::Rgba(CONTAIN_PAD_RGBA));
+        let ox = ((tw - sw) / 2) as i64;
+        let oy = ((th - sh) / 2) as i64;
+        image::imageops::overlay(&mut canvas, &scaled, ox, oy);
+    } else {
+        // cover (既定): 枠を覆うよう拡大縮小 (アスペクト維持)。resize_to_fill が
+        // 「枠を覆う倍率でリサイズ → 中央クロップ」を一括で行う。
+        let filled = img.resize_to_fill(tw, th, FilterType::Lanczos3).to_rgba8();
+        // resize_to_fill は既に tw×th ちょうどを返すが、防御的に overlay で貼る。
+        image::imageops::overlay(&mut canvas, &filled, 0, 0);
+    }
+
+    let file_name = format!("{src_stem}_{}.png", sanitize_target_name(&target.name));
+    let dest = pick_unique(output_dir, &file_name)
+        .ok_or_else(|| "could not find a free destination filename".to_string())?;
+    canvas
+        .save_with_format(&dest, image::ImageFormat::Png)
+        .map_err(|e| format!("png encode failed: {e}"))?;
+    Ok(dest)
+}
+
+/// ターゲット名をファイル名に使える文字だけに正規化する。
+fn sanitize_target_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for ch in name.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.trim_matches('_').is_empty() {
+        "target".to_string()
+    } else {
+        out
+    }
+}
+
+/// 生成済み画像を SNS 各サイズへ一括リサイズ書き出しする (W2-2 / 監査B-1)。
+///
+/// 各 (画像 × ターゲット) の直積で PNG を `output_dir` に書き出す。出力名は
+/// `{元名}_{target名}.png` (衝突時は ` (n)` を付与)。1 件失敗しても残りは続行し、
+/// 成功一覧と失敗内訳を返す (一括削除・一括保存と同じ部分成功モデル)。
+///
+/// cover/contain のアルゴリズムは `resize_one` を参照。出力は常に PNG (RGBA8)。
+#[tauri::command]
+pub async fn images_export_resized(
+    paths: Vec<String>,
+    targets: Vec<ResizeTarget>,
+    output_dir: String,
+) -> Result<ResizeResult, String> {
+    if paths.is_empty() {
+        return Err("書き出す画像が選択されていません".to_string());
+    }
+    if targets.is_empty() {
+        return Err("書き出しサイズが選択されていません".to_string());
+    }
+
+    let out_dir = PathBuf::from(&output_dir);
+    if !out_dir.is_dir() {
+        std::fs::create_dir_all(&out_dir).map_err(|e| format!("出力フォルダ作成に失敗: {e}"))?;
+    }
+
+    let mut outputs: Vec<ResizeOutput> = Vec::new();
+    let mut failed: Vec<BatchDeleteFailure> = Vec::new();
+
+    for src in &paths {
+        let src_path = PathBuf::from(src);
+        if !src_path.is_file() {
+            failed.push(BatchDeleteFailure {
+                path: src.clone(),
+                error: "ファイルが見つかりません".to_string(),
+            });
+            continue;
+        }
+        let img = match image::open(&src_path) {
+            Ok(i) => i,
+            Err(e) => {
+                failed.push(BatchDeleteFailure {
+                    path: src.clone(),
+                    error: format!("画像を読み込めません: {e}"),
+                });
+                continue;
+            }
+        };
+        let src_stem = src_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("image");
+
+        for target in &targets {
+            match resize_one(&img, target, &out_dir, src_stem) {
+                Ok(dest) => outputs.push(ResizeOutput {
+                    source: src.clone(),
+                    target: target.name.clone(),
+                    output: dest.to_string_lossy().into_owned(),
+                }),
+                Err(error) => failed.push(BatchDeleteFailure {
+                    path: format!("{src} → {}", target.name),
+                    error,
+                }),
+            }
+        }
+    }
+
+    Ok(ResizeResult { outputs, failed })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -807,5 +988,57 @@ mod tests {
         let index =
             build_filename_index(&[dir_a.path().to_path_buf(), dir_b.path().to_path_buf()]);
         assert_eq!(index.get("dup.png"), Some(&a));
+    }
+
+    /// cover / contain とも出力は必ずターゲット寸法ちょうどの PNG になる。
+    #[test]
+    fn resize_one_emits_exact_target_dimensions() {
+        use image::GenericImageView as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        // 横長 200x100 のソース。
+        let src: image::RgbaImage =
+            image::ImageBuffer::from_pixel(200, 100, image::Rgba([120, 30, 90, 255]));
+        let img = image::DynamicImage::ImageRgba8(src);
+
+        for mode in ["cover", "contain"] {
+            let target = ResizeTarget {
+                name: format!("t_{mode}"),
+                width: 108,
+                height: 192, // 縦長枠 (ソースと逆アスペクト → クロップ/パディングが確実に効く)
+                mode: mode.to_string(),
+            };
+            let dest = resize_one(&img, &target, dir.path(), "hero").unwrap();
+            let out = image::open(&dest).unwrap();
+            assert_eq!(out.dimensions(), (108, 192), "mode={mode}");
+            assert!(dest
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("hero_t_"));
+        }
+    }
+
+    /// 不正な (0 幅) ターゲットは Err で弾く。
+    #[test]
+    fn resize_one_rejects_zero_dimension() {
+        let dir = tempfile::tempdir().unwrap();
+        let src: image::RgbaImage =
+            image::ImageBuffer::from_pixel(50, 50, image::Rgba([0, 0, 0, 255]));
+        let img = image::DynamicImage::ImageRgba8(src);
+        let target = ResizeTarget {
+            name: "bad".to_string(),
+            width: 0,
+            height: 100,
+            mode: "cover".to_string(),
+        };
+        assert!(resize_one(&img, &target, dir.path(), "x").is_err());
+    }
+
+    #[test]
+    fn sanitize_target_name_replaces_unsafe_chars() {
+        assert_eq!(sanitize_target_name("Instagram 正方形"), "Instagram____");
+        assert_eq!(sanitize_target_name("x-post_1600"), "x-post_1600");
+        assert_eq!(sanitize_target_name("///"), "target");
     }
 }

@@ -1,21 +1,15 @@
 import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import { BaseDirectory } from "@tauri-apps/api/path";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { exists } from "@tauri-apps/plugin-fs";
 
+import { skills as skillsIpc } from "../lib/ipc";
 import { GORI_SKILLS, type GoriSkill } from "../lib/skills/catalog";
 import { useSkillMode } from "../lib/store/skillMode";
 import { useToasts } from "../lib/store/toasts";
 import { useWorkspace } from "../lib/store/workspace";
 import { activateSkill } from "./SkillBadge";
 import { SkillIcon } from "./SkillIcon";
-
-type SkillImportResult = {
-  id: string;
-  name: string;
-  installedAt: string;
-};
 
 function relativeSkillPath(skill: GoriSkill) {
   return skill.path.replace(/^~\//, "");
@@ -90,17 +84,24 @@ export function SkillsWorkspace({ onUseSkill }: { onUseSkill?: () => void }) {
         multiple: false,
         directory: false,
         filters: [
-          { name: "Skill Markdown", extensions: ["md", "markdown"] },
+          {
+            name: "Skill (Markdown / zip)",
+            extensions: ["md", "markdown", "zip"],
+          },
         ],
       });
       if (!selected) return; // キャンセル
       const path = Array.isArray(selected) ? selected[0] : selected;
-      const result = await invoke<SkillImportResult>("skill_import", {
-        sourcePath: path,
-      });
+      // 拡張子で単一 Markdown / zip 一括インポートを呼び分ける。
+      const isZip = path.toLowerCase().endsWith(".zip");
+      const result = isZip
+        ? await skillsIpc.importZip(path)
+        : await skillsIpc.importMarkdown(path);
       toast.push({
         kind: "success",
-        text: `スキル「${result.name}」をインポートしました`,
+        text: isZip
+          ? `スキル「${result.name}」をインポートしました (${result.fileCount} ファイル)`
+          : `スキル「${result.name}」をインポートしました`,
         ttlMs: 4000,
       });
       // 再読み込み (実在チェックを更新)
