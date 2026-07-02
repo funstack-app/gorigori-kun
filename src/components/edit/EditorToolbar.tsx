@@ -8,6 +8,7 @@ const TOOLS: Array<{ id: EditorTool; icon: ReactNode; label: string }> = [
   { id: "select", icon: <CursorIcon />, label: "選択" },
   { id: "bgremove", icon: <ScissorsIcon />, label: "人物切り抜き" },
   { id: "clickseg", icon: <TargetIcon />, label: "クリック切り抜き" },
+  { id: "grab", icon: <GrabIcon />, label: "マジックグラブ (掴んで動かす)" },
   { id: "text-add", icon: <TextIcon />, label: "テキスト追加" },
   { id: "text-detect", icon: <ScanTextIcon />, label: "テキスト検出" },
   { id: "inpaint", icon: <EraserIcon />, label: "領域消去" },
@@ -94,6 +95,15 @@ function TextIcon() {
   return (
     <svg {...SVG_PROPS} aria-hidden>
       <path d="M5 6h14M5 6V4.5h14V6M12 6v13M9 19h6" />
+    </svg>
+  );
+}
+
+function GrabIcon() {
+  return (
+    <svg {...SVG_PROPS} aria-hidden>
+      <path d="M7 11V6.5a1.5 1.5 0 013 0V11M10 11V5.5a1.5 1.5 0 013 0V11M13 11V6.5a1.5 1.5 0 013 0V12" />
+      <path d="M16 9.5a1.5 1.5 0 013 0V14a6 6 0 01-6 6h-1.5a5 5 0 01-3.6-1.5L4 14.7a1.6 1.6 0 012.3-2.2L8 14" />
     </svg>
   );
 }

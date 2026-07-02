@@ -71,6 +71,20 @@ export type MaskPayload = {
   height: number;
 };
 
+/**
+ * マジックグラブ (Canva Magic Grab 相当) の結果。Rust edit_grab_object と一致 (camelCase)。
+ * - objectPng: マスク bbox にクロップした掴めるオブジェクトの透過 PNG。
+ * - bbox: 元画像ピクセル座標の [x, y, width, height]。この位置に objectPng を置く。
+ * - filledBackground: 掴んだ跡地を LaMa で補完した背景画像。背景レイヤーをこれに差し替える。
+ */
+export type GrabResult = {
+  objectPng: string;
+  bbox: [number, number, number, number];
+  filledBackground: string;
+  width: number;
+  height: number;
+};
+
 export type TextRegion = {
   id: string;
   bbox: [number, number, number, number];

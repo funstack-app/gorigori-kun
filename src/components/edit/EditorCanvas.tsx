@@ -20,6 +20,8 @@ export function EditorCanvas() {
   const setSelectedLayerId = useEditor((state) => state.setSelectedLayerId);
   const bumpRevision = useEditor((state) => state.bumpRevision);
   const progress = useEditMagic((state) => state.progress);
+  const grabPreview = useEditor((state) => state.grabPreview);
+  const busyTool = useEditor((state) => state.busyTool);
   const actions = useEditorActions();
   const actionsRef = useRef(actions);
   actionsRef.current = actions;
@@ -72,7 +74,8 @@ export function EditorCanvas() {
       canvas.on("object:scaling", bumpRevision);
       canvas.on("object:rotating", bumpRevision);
       canvas.on("mouse:down", (event: any) => {
-        if (useEditor.getState().activeTool !== "clickseg") return;
+        const tool = useEditor.getState().activeTool;
+        if (tool !== "clickseg" && tool !== "grab") return;
         const pointer = canvas.getPointer(event.e);
         const objects = canvas.getObjects?.() ?? [];
         const imageWidth = Math.max(...objects.map((object: any) => object.left + (object.width ?? 0)), canvas.getWidth?.() ?? 1);
@@ -170,6 +173,34 @@ export function EditorCanvas() {
       {activeTool === "clickseg" ? (
         <div className="absolute left-4 top-4 rounded-full border border-amber-300/60 bg-amber-300/15 px-3 py-1 text-xs font-black text-amber-100">
           対象をクリック
+        </div>
+      ) : null}
+
+      {activeTool === "grab" && !grabPreview ? (
+        <div className="absolute left-4 top-4 rounded-full border border-pink-400/60 bg-pink-500/15 px-3 py-1 text-xs font-black text-pink-100">
+          掴みたい対象をクリック
+        </div>
+      ) : null}
+
+      {activeTool === "grab" && grabPreview ? (
+        <div className="absolute left-1/2 top-4 flex -translate-x-1/2 items-center gap-2 rounded-full border border-pink-400/60 bg-[#101010]/95 px-3 py-1.5 shadow-xl">
+          <span className="text-xs font-bold text-neutral-200">この範囲を掴みますか?</span>
+          <button
+            type="button"
+            onClick={() => void actions.confirmGrab()}
+            disabled={busyTool === "grab"}
+            className="rounded-full bg-pink-500 px-3 py-1 text-xs font-black text-white hover:bg-pink-600 disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-500"
+          >
+            {busyTool === "grab" ? "処理中…" : "掴む"}
+          </button>
+          <button
+            type="button"
+            onClick={() => actions.cancelGrab()}
+            disabled={busyTool === "grab"}
+            className="rounded-full border border-[#343434] px-3 py-1 text-xs font-bold text-neutral-300 hover:bg-[#1a1a1a] disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            やり直す
+          </button>
         </div>
       ) : null}
 

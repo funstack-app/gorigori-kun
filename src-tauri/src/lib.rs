@@ -351,6 +351,7 @@ pub fn run() {
             commands::edit_sam2::edit_sam2_predict,
             commands::edit_ocr::edit_ocr_detect,
             commands::edit_inpaint::edit_inpaint_run,
+            commands::edit_grab::edit_grab_object,
             commands::edit_magic::edit_magic_run,
             commands::edit_segment::edit_segment_run,
             commands::storage_cleanup::storage_cleanup_run,

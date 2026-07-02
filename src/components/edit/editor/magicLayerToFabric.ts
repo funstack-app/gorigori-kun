@@ -1,6 +1,6 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 
-import type { MagicLayerResult, SegmentResult, TextRegion } from "../../../lib/edit/types";
+import type { GrabResult, MagicLayerResult, SegmentResult, TextRegion } from "../../../lib/edit/types";
 import { createLayerId } from "./layerHelpers";
 
 type FabricModule = Record<string, any>;
@@ -129,6 +129,108 @@ export async function applySegmentResultToCanvas(
     runDir: "",
   };
   await applyMagicLayerToCanvas(canvas, magicLike);
+}
+
+/**
+ * マジックグラブの結果をキャンバスへアトミックに反映する。
+ *
+ * 1. 背景レイヤー (id="bg") があれば、その画像を穴埋め済み背景 (filledBackground) に差し替える。
+ *    背景レイヤーが無い (Magic Layer 未実行で素の画像を1枚置いただけ等) 場合は、最背面へ
+ *    filledBackground を新規追加する。
+ * 2. 掴んだオブジェクト (objectPng) を bbox 位置に新規レイヤーとして最前面に追加し、選択状態にする。
+ *    → そのまま move / scale / rotate できる。
+ *
+ * アトミック性: 背景差し替えとオブジェクト追加のどちらかが失敗したら例外を投げ、呼び出し側
+ * (useEditorActions) が「掴む前の状態」に戻す。ここでは throw することで中途半端な適用を防ぐ。
+ */
+export async function applyGrabResultToCanvas(
+  canvas: FabricCanvas,
+  result: GrabResult,
+): Promise<void> {
+  const fabric = await importFabric();
+
+  // 1. 穴埋め背景を読み込む (これが失敗したら何も変えずに throw)。
+  const filledBg = await loadFabricImage(fabric, result.filledBackground);
+  // 2. 掴むオブジェクトを読み込む (これも先に読んでおき、両方成功してから canvas を変更する)。
+  const objectImg = await loadFabricImage(fabric, result.objectPng);
+
+  // ここから下は例外を投げない同期的な差し込みのみ。両画像のロードが済んでいるので
+  // 途中で失敗して片方だけ反映される事態を避けられる。
+  const objects: FabricObject[] = canvas.getObjects?.() ?? [];
+  const bgLayer = objects.find((object: FabricObject) => object.get?.("id") === "bg");
+
+  if (bgLayer && typeof bgLayer.setSrc === "function") {
+    // 既存背景レイヤーの位置/変換を維持したまま画像だけ差し替える。
+    const setSrc = bgLayer.setSrc(convertFileSrc(result.filledBackground), {
+      crossOrigin: "anonymous",
+    });
+    if (typeof setSrc?.then === "function") {
+      await setSrc;
+    }
+  } else {
+    // 背景レイヤーが無い構成: 穴埋め背景を最背面に敷く。
+    filledBg.set({
+      id: "bg",
+      name: "背景",
+      layerKind: "image",
+      left: 0,
+      top: 0,
+      selectable: true,
+    });
+    canvas.add(filledBg);
+    if (typeof canvas.sendObjectToBack === "function") {
+      canvas.sendObjectToBack(filledBg);
+    } else if (typeof canvas.sendToBack === "function") {
+      canvas.sendToBack(filledBg);
+    }
+  }
+
+  const [bx, by] = result.bbox;
+  objectImg.set({
+    id: createLayerId(),
+    name: "掴んだオブジェクト",
+    layerKind: "image",
+    left: bx,
+    top: by,
+    selectable: true,
+  });
+  canvas.add(objectImg);
+  canvas.setActiveObject?.(objectImg);
+  canvas.requestRenderAll?.();
+}
+
+const GRAB_PREVIEW_ID = "grab-preview";
+
+/**
+ * マジックグラブ確定前のプレビューマスクをキャンバスに重ねる (非選択・半透明ピンク寄せ)。
+ * 既存プレビューがあれば置き換える。掴む/やり直す時に removeGrabPreviewOverlay で消す。
+ */
+export async function showGrabPreviewOverlay(canvas: FabricCanvas, maskBase64: string) {
+  removeGrabPreviewOverlay(canvas);
+  const fabric = await importFabric();
+  const image = await loadFabricImageFromUrl(fabric, `data:image/png;base64,${maskBase64}`);
+  image.set({
+    id: GRAB_PREVIEW_ID,
+    name: "掴む範囲プレビュー",
+    layerKind: "mask",
+    left: 0,
+    top: 0,
+    opacity: 0.45,
+    selectable: false,
+    evented: false,
+  });
+  canvas.add(image);
+  canvas.requestRenderAll?.();
+}
+
+/** グラブプレビューのオーバーレイを取り除く。 */
+export function removeGrabPreviewOverlay(canvas: FabricCanvas) {
+  const objects: FabricObject[] = canvas.getObjects?.() ?? [];
+  const existing = objects.find((object: FabricObject) => object.get?.("id") === GRAB_PREVIEW_ID);
+  if (existing) {
+    canvas.remove?.(existing);
+    canvas.requestRenderAll?.();
+  }
 }
 
 export async function addImageLayerToCanvas(

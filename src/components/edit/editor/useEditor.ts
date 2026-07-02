@@ -1,6 +1,14 @@
 import { open } from "@tauri-apps/plugin-dialog";
 
-import { editInpaint, editMagic, editOcr, editSam2, editSegment, images } from "../../../lib/ipc";
+import {
+  editGrab,
+  editInpaint,
+  editMagic,
+  editOcr,
+  editSam2,
+  editSegment,
+  images,
+} from "../../../lib/ipc";
 import { useActiveProject } from "../../../lib/store/activeProject";
 import { useEditMagic } from "../../../lib/store/editMagic";
 import { useProjects } from "../../../lib/store/projects";
@@ -11,8 +19,11 @@ import {
   addMaskLayerFromBase64,
   addTextLayer,
   addTextRegionsToCanvas,
+  applyGrabResultToCanvas,
   applyMagicLayerToCanvas,
   applySegmentResultToCanvas,
+  removeGrabPreviewOverlay,
+  showGrabPreviewOverlay,
 } from "./magicLayerToFabric";
 
 const IMAGE_EXTS = ["png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff"];
@@ -26,12 +37,18 @@ export function useEditorActions() {
   const setSourceImagePath = useEditor((state) => state.setSourceImagePath);
   const setMessage = useEditor((state) => state.setMessage);
   const setError = useEditor((state) => state.setError);
+  const setGrabPreview = useEditor((state) => state.setGrabPreview);
   const bumpRevision = useEditor((state) => state.bumpRevision);
   const activeProjectId = useActiveProject((state) => state.activeProjectId);
   const projects = useProjects((state) => state.projects);
   const projectName = projects.find((project) => project.id === activeProjectId)?.name ?? null;
 
   const run = async (tool: EditorTool) => {
+    // 別ツールへ切り替えるとき、掴む確定待ちのプレビューは破棄する (残像防止)。
+    if (tool !== "grab" && useEditor.getState().grabPreview) {
+      if (canvas) removeGrabPreviewOverlay(canvas);
+      setGrabPreview(null);
+    }
     setActiveTool(tool);
     if (tool === "select") {
       setMessage("選択ツールに切り替えました。");
@@ -71,6 +88,11 @@ export function useEditorActions() {
         setMessage("SAM2 を準備中…キャンバス上の対象をクリックしてください。");
         await editSam2.embed(sourceImagePath);
         setMessage("準備完了。切り抜きたい対象をキャンバス上でクリックしてください。");
+      } else if (tool === "grab") {
+        setGrabPreview(null);
+        setMessage("マジックグラブを準備中…掴みたい対象をクリックしてください。");
+        await editSam2.embed(sourceImagePath);
+        setMessage("準備完了。掴みたい対象をキャンバス上でクリックしてください。");
       } else if (tool === "inpaint") {
         const maskPath = await open({
           multiple: false,
@@ -133,20 +155,82 @@ export function useEditorActions() {
   };
 
   const handleCanvasClickForTool = async (x: number, y: number) => {
-    if (activeTool !== "clickseg" || !sourceImagePath || !canvas) return;
-    setBusyTool("clickseg");
+    if (!sourceImagePath || !canvas) return;
+    if (activeTool === "clickseg") {
+      setBusyTool("clickseg");
+      setError(null);
+      setMessage("クリック切り抜きマスクを生成中…");
+      try {
+        const result = await editSam2.predict(x, y, true);
+        await addMaskLayerFromBase64(canvas, result.maskBase64);
+        setMessage(`マスク生成完了 (${result.width}×${result.height})`);
+        bumpRevision();
+      } catch (caught) {
+        setError(caught instanceof Error ? caught.message : String(caught));
+      } finally {
+        setBusyTool(null);
+      }
+      return;
+    }
+    if (activeTool === "grab") {
+      setBusyTool("grab");
+      setError(null);
+      setMessage("掴む範囲を判定中…");
+      try {
+        const result = await editSam2.predict(x, y, true);
+        // 確定前はプレビューとして保持し、キャンバスに範囲を重ねて見せる。
+        // 実際の切り抜き+背景補完は confirmGrab で行う。
+        setGrabPreview({
+          maskBase64: result.maskBase64,
+          width: result.width,
+          height: result.height,
+        });
+        await showGrabPreviewOverlay(canvas, result.maskBase64);
+        setMessage("この範囲でよければ「掴む」を押してください。別の場所をクリックでやり直せます。");
+      } catch (caught) {
+        setError(caught instanceof Error ? caught.message : String(caught));
+      } finally {
+        setBusyTool(null);
+      }
+    }
+  };
+
+  /**
+   * マジックグラブを確定する。プレビューのマスクを保存 → Rust で切り抜き+背景補完 →
+   * キャンバスへアトミック反映 (背景差し替え + オブジェクトレイヤー追加)。
+   *
+   * アトミック性: applyGrabResultToCanvas は両画像のロードが済んでから canvas を触るため、
+   * ロード失敗時は canvas を変更せず throw する。ここで catch してエラー表示に留め、
+   * 掴む前の状態を保つ。連続グラブ: 反映後もプレビューだけ消して活性ツールは grab のまま
+   * にするので、続けて別の対象をクリックできる (SAM2 embed は再利用)。
+   */
+  const confirmGrab = async () => {
+    const preview = useEditor.getState().grabPreview;
+    if (!preview || !sourceImagePath || !canvas) return;
+    setBusyTool("grab");
     setError(null);
-    setMessage("クリック切り抜きマスクを生成中…");
+    setMessage("掴んでいます…背景を補完中…");
     try {
-      const result = await editSam2.predict(x, y, true);
-      await addMaskLayerFromBase64(canvas, result.maskBase64);
-      setMessage(`マスク生成完了 (${result.width}×${result.height})`);
+      const maskPath = await images.writeMask(sourceImagePath, base64ToBytes(preview.maskBase64));
+      const result = await editGrab.run(sourceImagePath, maskPath, projectName);
+      // プレビューオーバーレイは反映直前に外す (背景差し替えより先に消して残像を防ぐ)。
+      removeGrabPreviewOverlay(canvas);
+      await applyGrabResultToCanvas(canvas, result);
+      setGrabPreview(null);
+      setMessage("掴みました。ドラッグで移動・拡大縮小・回転できます。続けて別の対象も掴めます。");
       bumpRevision();
     } catch (caught) {
+      // 失敗時は canvas を変えずにエラーだけ出す (アトミック: 中途半端に反映しない)。
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
       setBusyTool(null);
     }
+  };
+
+  const cancelGrab = () => {
+    if (canvas) removeGrabPreviewOverlay(canvas);
+    setGrabPreview(null);
+    setMessage("掴む範囲の選択をやり直せます。対象をクリックしてください。");
   };
 
   const saveDroppedFileAndRunMagic = async (file: File) => {
@@ -212,7 +296,18 @@ export function useEditorActions() {
     chooseImage,
     runMagic,
     handleCanvasClickForTool,
+    confirmGrab,
+    cancelGrab,
     saveDroppedFileAndRunMagic,
     saveDroppedPathAndRunMagic,
   };
+}
+
+function base64ToBytes(base64: string): Uint8Array {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
 }

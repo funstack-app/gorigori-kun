@@ -5,6 +5,7 @@ pub mod codex_text;
 pub mod codex_vision;
 pub mod edit_export;
 pub mod edit_fonts;
+pub mod edit_grab;
 pub mod edit_inpaint;
 pub mod edit_magic;
 pub mod edit_models;

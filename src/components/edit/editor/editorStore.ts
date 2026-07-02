@@ -6,11 +6,22 @@ export type EditorTool =
   | "select"
   | "bgremove"
   | "clickseg"
+  | "grab"
   | "text-add"
   | "text-detect"
   | "inpaint"
   | "magic"
   | "redo-decompose";
+
+/**
+ * マジックグラブのクリックプレビュー状態。SAM2 predict で得たマスクを確定前に一時保持する。
+ * base64 は元画像と同寸のマスク PNG。確定 (confirm) 時に writeMask → edit_grab へ渡す。
+ */
+export type GrabPreview = {
+  maskBase64: string;
+  width: number;
+  height: number;
+};
 
 export type EditorLayerKind = "image" | "text" | "mask";
 
@@ -53,6 +64,8 @@ type EditorState = {
   editMode: EditModeId;
   /** EditorCanvas がマウント中だけ set される path 取り込みハンドラ。 */
   pathIngestor: EditorPathIngestor | null;
+  /** マジックグラブの確定待ちプレビュー (クリックで生成したマスク)。null=プレビューなし。 */
+  grabPreview: GrabPreview | null;
   setActiveTool: (tool: EditorTool) => void;
   setEditMode: (mode: EditModeId) => void;
   setSelectedLayerId: (id: string | null) => void;
@@ -63,6 +76,7 @@ type EditorState = {
   setError: (error: string | null) => void;
   bumpRevision: () => void;
   setPathIngestor: (ingestor: EditorPathIngestor | null) => void;
+  setGrabPreview: (preview: GrabPreview | null) => void;
 };
 
 export const useEditor = create<EditorState>((set) => ({
@@ -76,6 +90,7 @@ export const useEditor = create<EditorState>((set) => ({
   revision: 0,
   editMode: "standard",
   pathIngestor: null,
+  grabPreview: null,
   setActiveTool: (activeTool) => set({ activeTool }),
   setEditMode: (editMode) => set({ editMode }),
   setSelectedLayerId: (selectedLayerId) => set({ selectedLayerId }),
@@ -86,4 +101,5 @@ export const useEditor = create<EditorState>((set) => ({
   setError: (error) => set({ error }),
   bumpRevision: () => set((state) => ({ revision: state.revision + 1 })),
   setPathIngestor: (pathIngestor) => set({ pathIngestor }),
+  setGrabPreview: (grabPreview) => set({ grabPreview }),
 }));

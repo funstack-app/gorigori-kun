@@ -7,14 +7,14 @@ import { useEditMagic } from "../../lib/store/editMagic";
 import { EditModelGate } from "../EditModelGate";
 
 const PROGRESS_LABELS: Record<string, string> = {
-  started: "🚀 開始しました…",
-  detectingText: "📝 テキストを検出中…",
-  removingText: "🎨 テキストを消去中…",
-  segmenting: "✂️ 人物を切り抜き中…",
-  inpaintingBackground: "🖼 背景を補完中…",
-  buildingTextLayers: "📋 編集可能レイヤーを構築中…",
-  completed: "✅ 完了しました",
-  failed: "⚠️ 失敗しました",
+  started: "開始しました…",
+  detectingText: "テキストを検出中…",
+  removingText: "テキストを消去中…",
+  segmenting: "人物を切り抜き中…",
+  inpaintingBackground: "背景を補完中…",
+  buildingTextLayers: "編集可能レイヤーを構築中…",
+  completed: "完了しました",
+  failed: "失敗しました",
 };
 
 type MagicLayerPanelProps = {
@@ -68,7 +68,7 @@ export function MagicLayerPanel({ inputPath, projectName }: MagicLayerPanelProps
         <div className="flex items-start justify-between gap-3">
           <div>
             <h3 className="text-sm font-black text-neutral-100">
-              ✨ Magic Layer
+              Magic Layer
             </h3>
             <p className="mt-1 text-[11px] text-neutral-500">
               テキスト検出 → 消去 → 切り抜き → 背景補完 を1クリックで自動実行
@@ -80,7 +80,7 @@ export function MagicLayerPanel({ inputPath, projectName }: MagicLayerPanelProps
             disabled={!inputPath || running}
             className="rounded-lg bg-pink-500 px-4 py-2 text-sm font-black text-white shadow hover:bg-pink-600 disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-500"
           >
-            {running ? "実行中…" : "✨ Magic Layer 実行"}
+            {running ? "実行中…" : "Magic Layer 実行"}
           </button>
         </div>
 
@@ -104,7 +104,7 @@ export function MagicLayerPanel({ inputPath, projectName }: MagicLayerPanelProps
         {result && (
           <div className="space-y-2 rounded-lg border border-pink-400/40 bg-pink-500/5 p-3">
             <p className="text-xs font-bold text-pink-100">
-              ✅ 分解完了 ({result.textLayers.length}件のテキスト検出)
+              分解完了 ({result.textLayers.length}件のテキスト検出)
             </p>
             <div className="grid grid-cols-3 gap-2 text-[10px] text-neutral-300">
               <div>

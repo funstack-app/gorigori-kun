@@ -97,7 +97,7 @@ export function ClickSegmentTool() {
               disabled={!inputPath || busy !== null}
               className="w-full rounded-lg bg-amber-300 px-3 py-2 text-sm font-black text-black hover:bg-amber-200 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {busy === "embed" ? "準備中…" : "🎯 クリック切り抜きを準備"}
+              {busy === "embed" ? "準備中…" : "クリック切り抜きを準備"}
             </button>
           ) : null}
 
@@ -134,7 +134,7 @@ export function ClickSegmentTool() {
               disabled={busy !== null}
               className="w-full rounded-lg bg-pink-500 px-3 py-2 text-sm font-black text-white hover:bg-pink-600 disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-500"
             >
-              {busy === "confirm" ? "設定中…" : "✅ この範囲をマスクに使う"}
+              {busy === "confirm" ? "設定中…" : "この範囲をマスクに使う"}
             </button>
           ) : null}
 

@@ -4,6 +4,7 @@ import type {
   EditModeId,
   EditModelProgress,
   FontInfo,
+  GrabResult,
   MagicLayerResult,
   MaskPayload,
   ModelStatus,
@@ -118,6 +119,16 @@ export const editOcr = {
 export const editInpaint = {
   run: (inputPath: string, maskPath: string, projectName?: string | null) =>
     invoke<string>("edit_inpaint_run", {
+      inputPath,
+      maskPath,
+      projectName: projectName ?? null,
+    }),
+};
+
+export const editGrab = {
+  /** マスク + 元画像から掴めるオブジェクト透過PNG + bbox + 穴埋め背景を得る (マジックグラブ)。 */
+  run: (inputPath: string, maskPath: string, projectName?: string | null) =>
+    invoke<GrabResult>("edit_grab_object", {
       inputPath,
       maskPath,
       projectName: projectName ?? null,
