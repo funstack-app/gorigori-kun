@@ -21,11 +21,11 @@ const GRID: u32 = 16;
 const EDGE_MARGIN: f32 = 0.06;
 
 /// 面積下限: 画像全体の 0.5%。これ未満は「小さすぎてレイヤーにする価値がない断片」として捨てる。
-const MIN_AREA_RATIO: f64 = 0.005;
+const MIN_AREA_RATIO: f64 = 0.01;
 /// 面積上限: 画像全体の 90%。これ超は「背景丸ごと」を拾っている扱いで捨てる (物体ではない)。
 const MAX_AREA_RATIO: f64 = 0.90;
 /// 予測スコア下限。SAM2 の IoU 予測がこれ未満のマスクは信頼できないので捨てる。
-const MIN_SCORE: f32 = 0.80;
+const MIN_SCORE: f32 = 0.85;
 /// NMS の IoU 閾値。これを超えて重なる 2 マスクは同一物体とみなし、高スコア側だけ残す。
 const NMS_IOU: f64 = 0.60;
 /// 既存レイヤー (人物/テキスト) との重複判定閾値。物体マスクの面積のうちこの割合以上が
@@ -130,6 +130,21 @@ pub async fn run_auto_object_masks(
             // グリッド点を [EDGE_MARGIN, 1-EDGE_MARGIN] に写像 (端を避ける)。
             let fx = EDGE_MARGIN + (gx as f32 + 0.5) / GRID as f32 * (1.0 - 2.0 * EDGE_MARGIN);
             let fy = EDGE_MARGIN + (gy as f32 + 0.5) / GRID as f32 * (1.0 - 2.0 * EDGE_MARGIN);
+
+            // 人物・テキストの上のグリッド点は predict 自体をスキップする。
+            // なぜ: そこから出るマスクは既存レイヤーの二重化かノイズ断片にしかならず、
+            // 1点300ms級 (実測・大判画像) の decoder 実行が丸ごと無駄になる。
+            // 実測 (2026-07-02 サムネ実写): 被写体+テキストが画面の大半を占める画像で
+            // 時間予算61秒打ち切り+ゴミ物体4件が発生した。
+            if let Some(existing) = exclude_mask {
+                let (ew, eh) = existing.dimensions();
+                let px = ((fx * ew as f32) as u32).min(ew.saturating_sub(1));
+                let py = ((fy * eh as f32) as u32).min(eh.saturating_sub(1));
+                if existing.get_pixel(px, py)[0] > 127 {
+                    scanned += 1;
+                    continue;
+                }
+            }
 
             let point_started = Instant::now();
             let raw = match session.predict_raw_mask((fx, fy)).await {
