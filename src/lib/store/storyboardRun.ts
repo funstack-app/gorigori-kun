@@ -32,7 +32,15 @@ export type CutState = {
   takeCount?: number;
 };
 
-type StoryboardRunStatus = "idle" | "running" | "paused" | "completed" | "failed";
+type StoryboardRunStatus =
+  | "idle"
+  | "running"
+  | "paused"
+  | "completed"
+  | "failed"
+  // A-2: 方向性チェック (checkpoint) でユーザーが「中止」を選んだ状態。
+  // failed とは区別する (エラーではなくユーザー意思。生成済みカットは保持)。
+  | "cancelled";
 
 /**
  * 完了した過去 run のスナップショット。新しい run を始めても消さず保持する。
@@ -67,6 +75,13 @@ type StoryboardRunState = {
   lastError: string | null;
   params: StoryboardRunParams | null;
   debugLog: StoryboardEvent[];
+  /**
+   * B-6: 直近の storyboard イベントを受信した時刻 (epoch ms)。
+   * 生成中カットの経過秒表示に使う (通常生成 batches.runningAt と同じ流儀)。
+   * イベントが来るたびに更新し、UI は now - lastEventAt で「最後の進捗から
+   * 何秒経ったか」を出せる。null = まだイベント未受信。
+   */
+  lastEventAt: number | null;
   /** 完了した過去 run のサマリー一覧。新しい run を始めても消えない。 */
   pastRuns: PastRunSummary[];
 
@@ -95,6 +110,17 @@ type StoryboardRunState = {
   applyEvent: (e: StoryboardEvent) => void;
   setStatus: (status: StoryboardRunStatus) => void;
   dismissCheckpoint: () => void;
+  /**
+   * A-2: 方向性チェックで「このまま続ける」。Rust 側の停止ループへ continue を
+   * 送り、ローカル状態を running に戻す。Rust が実際に await 停止しているので、
+   * これを呼ぶまで残りカットは生成されない。
+   */
+  continueCheckpoint: () => void;
+  /**
+   * A-2: 方向性チェックで「中止」。Rust 側の停止ループへ cancel を送り、ローカル
+   * 状態を cancelled にする。生成済みカットは保持される。
+   */
+  cancelCheckpoint: () => void;
   /** run 関連だけリセット (phase/goal/sketchVersions/chatMessages は保持) */
   reset: () => void;
   /** Phase ワークフロー (phase/goal/sketchVersions/chatMessages) もリセット */
@@ -200,6 +226,7 @@ const runEmptyState = {
   lastError: null,
   params: null,
   debugLog: [],
+  lastEventAt: null,
 };
 
 const phaseEmptyState = {
@@ -289,6 +316,8 @@ export const useStoryboardRun = create<StoryboardRunState>((set) => ({
   applyEvent: (e) => {
     set((s) => {
       const debugLog = [...s.debugLog, e];
+      // B-6: イベント受信時刻を記録し、生成中カットの経過秒表示に使う。
+      const lastEventAt = Date.now();
       // P19a: 現在の run の sketch_mode に応じて、どちらの Map を更新するか決める。
       // params が null の場合は started イベントを待っているので cuts (本生成) 側を仮で使う。
       const isSketch = s.params?.sketchMode === true;
@@ -298,8 +327,8 @@ export const useStoryboardRun = create<StoryboardRunState>((set) => ({
       // 共通の patch ヘルパー: どちらの Map に書き込んだかを反映する
       const applyMap = <T extends object>(patch: T) =>
         isSketch
-          ? ({ ...s, sketchCuts: targetMap, debugLog, ...patch } as typeof s)
-          : ({ ...s, cuts: targetMap, debugLog, ...patch } as typeof s);
+          ? ({ ...s, sketchCuts: targetMap, debugLog, lastEventAt, ...patch } as typeof s)
+          : ({ ...s, cuts: targetMap, debugLog, lastEventAt, ...patch } as typeof s);
 
       if (e.kind === "started") {
         return {
@@ -309,6 +338,7 @@ export const useStoryboardRun = create<StoryboardRunState>((set) => ({
           sceneGroups: e.sceneGroups,
           status: "running",
           debugLog,
+          lastEventAt,
         };
       }
 
@@ -384,15 +414,54 @@ export const useStoryboardRun = create<StoryboardRunState>((set) => ({
           status: "completed",
           manifestPath: e.manifestPath,
           debugLog,
+          lastEventAt,
         };
       }
 
-      return { ...s, debugLog };
+      return { ...s, debugLog, lastEventAt };
     });
   },
 
   setStatus: (status) => set({ status }),
   dismissCheckpoint: () => set({ checkpointCutId: null, status: "running" }),
+
+  // A-2: 「このまま続ける」。Rust の停止ループへ continue を送り running に戻す。
+  // checkpointResume は fire-and-forget (失敗しても UI 状態は先に戻す)。
+  continueCheckpoint: () =>
+    set((s) => {
+      if (s.activeRunId) {
+        void storyboard.checkpointResume(s.activeRunId, "continue").catch((err) => {
+          console.warn("[storyboardRun] checkpointResume(continue) failed:", err);
+        });
+      }
+      return {
+        checkpointCutId: null,
+        status: "running" as const,
+        uiDebugLog: [
+          ...s.uiDebugLog,
+          { ts: Date.now(), level: "info" as const, message: "checkpoint: continue" },
+        ].slice(-500),
+      };
+    }),
+
+  // A-2: 「中止」。Rust の停止ループへ cancel を送り cancelled にする。
+  // 生成済みカットは Map に残るので、そのまま確認/採用できる。
+  cancelCheckpoint: () =>
+    set((s) => {
+      if (s.activeRunId) {
+        void storyboard.checkpointResume(s.activeRunId, "cancel").catch((err) => {
+          console.warn("[storyboardRun] checkpointResume(cancel) failed:", err);
+        });
+      }
+      return {
+        checkpointCutId: null,
+        status: "cancelled" as const,
+        uiDebugLog: [
+          ...s.uiDebugLog,
+          { ts: Date.now(), level: "info" as const, message: "checkpoint: cancel" },
+        ].slice(-500),
+      };
+    }),
 
   // ===== Phase 操作 =====
   setPhase: (phase) =>

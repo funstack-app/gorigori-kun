@@ -1108,13 +1108,21 @@ function StoryboardRunPanel() {
       {run.checkpointCutId && (
         <StoryboardCheckpointDialog
           cuts={checkpointCuts}
-          onContinue={run.dismissCheckpoint}
+          onContinue={run.continueCheckpoint}
+          onCancel={() => {
+            run.cancelCheckpoint();
+            pushToast({ kind: "info", text: "生成を中止しました。ここまでのカットは残ります。", ttlMs: 2800 });
+          }}
           onReset={() => {
+            // 停止中の Rust ループへ cancel を送ってから local を初期化する
+            // (cancel を送らないと Rust ループが await 停止したまま残る)。
+            run.cancelCheckpoint();
             run.reset();
             pushToast({ kind: "info", text: "方向性チェックをリセットしました。", ttlMs: 2400 });
           }}
           onRegenerateCut={() => {
-            run.dismissCheckpoint();
+            // 一旦続行して停止ループを解除する (Cut3 再生成は既存のカード再生成に接続予定)。
+            run.continueCheckpoint();
             pushToast({ kind: "info", text: "Cut3再生成は次フェーズで手動再実行に接続します。", ttlMs: 3200 });
           }}
         />
@@ -1271,6 +1279,7 @@ function statusLabel(status: ReturnType<typeof useStoryboardRun.getState>["statu
   if (status === "paused") return "一時停止";
   if (status === "completed") return "完了";
   if (status === "failed") return "失敗";
+  if (status === "cancelled") return "中止";
   return "待機中";
 }
 

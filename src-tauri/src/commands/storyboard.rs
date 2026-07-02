@@ -20,7 +20,7 @@ use tokio::time::timeout;
 use crate::codex::process::{enriched_path, resolve_codex_cli_binary};
 use crate::commands::storage::{project_name_from_cwd, resolve_output_dir, StorageSettings};
 use crate::events::EVENT_STORYBOARD;
-use crate::state::AppState;
+use crate::state::{AppState, CheckpointAction};
 
 const PROMPT_TIMEOUT_SECS: u64 = 120;
 const GENERATION_TIMEOUT_SECS: u64 = 900;
@@ -520,7 +520,7 @@ pub async fn storyboard_read_debug_log(run_id: String) -> Result<String, String>
 #[tauri::command]
 pub async fn storyboard_run(
     app: AppHandle,
-    _state: State<'_, AppState>,
+    state: State<'_, AppState>,
     params: StoryboardParams,
 ) -> Result<String, String> {
     // FB#19: app-server と同じ GORI 専用 CODEX_HOME を使う。worker は
@@ -540,17 +540,25 @@ pub async fn storyboard_run(
         resolve_codex_cli_binary().map_err(|e| format!("Codex CLI の解決に失敗: {e}"))?;
     let run_id = format!("{}-{}", timestamp_id(), short_id());
     let task_run_id = run_id.clone();
+    // AppState は Arc ベースなので clone は共有ハンドル。checkpoint シグナルを
+    // spawn した orchestrator と `storyboard_checkpoint_resume` の両方から触る。
+    let task_state = state.inner_clone();
 
     tokio::spawn(async move {
-        if let Err(err) = run_storyboard_orchestrator(
+        // checkpoint シグナルがリークしないよう、orchestrator の成否に関わらず
+        // 終了時に必ず clear する。early return / panic 相当のエラーでも
+        // この後の clear_checkpoint が走る。
+        let result = run_storyboard_orchestrator(
             app.clone(),
+            task_state.clone(),
             codex_bin,
             codex_home_orig,
-            task_run_id,
+            task_run_id.clone(),
             params,
         )
-        .await
-        {
+        .await;
+        task_state.clear_checkpoint(&task_run_id).await;
+        if let Err(err) = result {
             tracing::warn!(target: "codex.storyboard", "storyboard orchestrator failed: {err}");
             let _ = app.emit(
                 EVENT_STORYBOARD,
@@ -563,6 +571,25 @@ pub async fn storyboard_run(
     });
 
     Ok(run_id)
+}
+
+/// storyboard の方向性チェック (checkpoint) から生成ループを再開/中断する (A-2)。
+/// フロントの StoryboardCheckpointDialog の「このまま続ける」/「中止」から呼ぶ。
+/// - action="continue": 残りカットの生成を続行する
+/// - action="cancel": 生成を安全に中断する (生成済みカットは保持される)
+/// 対象 run が checkpoint で待機していない場合 (既に再開済み等) は false を返す。
+#[tauri::command]
+pub async fn storyboard_checkpoint_resume(
+    state: State<'_, AppState>,
+    run_id: String,
+    action: String,
+) -> Result<bool, String> {
+    let parsed = match action.as_str() {
+        "continue" => CheckpointAction::Continue,
+        "cancel" => CheckpointAction::Cancel,
+        other => return Err(format!("未知の checkpoint アクション: {other}")),
+    };
+    Ok(state.resume_checkpoint(&run_id, parsed).await)
 }
 
 /// 単一カット再生成 (P4 STΛCK 指示 2026-05-20)。
@@ -722,6 +749,7 @@ pub async fn storyboard_regenerate_cut(
 
 async fn run_storyboard_orchestrator(
     app: AppHandle,
+    state: AppState,
     codex_bin: PathBuf,
     codex_home_orig: PathBuf,
     run_id: String,
@@ -1146,7 +1174,16 @@ async fn run_storyboard_orchestrator(
             takes: all_takes_for_manifest,
         });
 
-        if cut_index == 2 {
+        // A-2 (2026-06 監査): 3カット目 (cut_index==2) 到達で「方向性チェック」を挟む。
+        // 従来は emit するだけでループを止められず、残りカットを全部生成し続けていた
+        // (フロントの paused は見せかけ)。ここで実際に await 停止し、フロントの
+        // storyboard_checkpoint_resume が来るまで次カットに進まない。
+        // 残りカットが無い (このカットが最後) 場合は止める意味が無いのでスキップ。
+        let has_remaining = cut_index + 1 < cuts_count;
+        if cut_index == 2 && has_remaining {
+            // 先に受信端を登録してから emit する (フロントが即 resume を返しても
+            // sender が登録済みで取りこぼさない)。
+            let resume_rx = state.register_checkpoint(&run_id).await;
             let _ = app.emit(
                 EVENT_STORYBOARD,
                 StoryboardEvent::CutCheckpoint {
@@ -1154,6 +1191,28 @@ async fn run_storyboard_orchestrator(
                     reason: "midRun review at cut 3".into(),
                 },
             );
+            // ユーザー判断待ちは無期限 (タイムアウト無し)。resume/cancel が来るか、
+            // run 終了/アプリ終了で sender が drop される (Err) まで待つ。
+            let action = match resume_rx.await {
+                Ok(action) => action,
+                // sender が drop された = run クリーンアップ (アプリ終了等)。
+                // 安全側に倒して中断扱いにする (生成済みカットは保持)。
+                Err(_) => CheckpointAction::Cancel,
+            };
+            match action {
+                CheckpointAction::Continue => {
+                    // 続行: 何もせず次カットへ。
+                }
+                CheckpointAction::Cancel => {
+                    // 中断: 生成済みカットを保持したままループを抜ける。
+                    // aborted にはしない (Completed を出さず、部分成果を残す)。
+                    tracing::info!(
+                        target: "codex.storyboard",
+                        "storyboard run {run_id} cancelled at checkpoint (cut {cut_index})"
+                    );
+                    break;
+                }
+            }
         }
     }
 

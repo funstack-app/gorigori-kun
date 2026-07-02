@@ -422,6 +422,7 @@ pub fn run() {
             commands::segment::is_segmentation_model_ready,
             commands::segment::download_segmentation_model,
             commands::storyboard::storyboard_run,
+            commands::storyboard::storyboard_checkpoint_resume,
             commands::storyboard::storyboard_regenerate_cut,
             commands::multiangle::multiangle_run,
             commands::multiangle::multiangle_regenerate_cut,

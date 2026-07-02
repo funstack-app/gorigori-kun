@@ -1,8 +1,9 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use notify_debouncer_full::{Debouncer, FileIdMap};
 use tokio::process::Child;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{oneshot, Mutex, RwLock};
 
 use crate::codex::RpcClient;
 use crate::commands::storage::StorageSettings;
@@ -13,6 +14,23 @@ type ImageWatcher = Debouncer<notify::RecommendedWatcher, FileIdMap>;
 
 // 2026-06-10 段階8: CLI 版 Higgsfield のバッチキャンセル用 HiggsfieldCancellation /
 // higgsfield_cancellations は廃止。MCP 版は同期生成でキャンセル対象を持たないため不要。
+
+/// storyboard checkpoint (方向性チェック) でユーザーが選ぶ継続アクション。
+/// A-2 (2026-06 監査): 従来 checkpoint は emit するだけで生成ループを止められず、
+/// フロントの `paused` は見せかけだった。実際に Rust ループを await 停止し、
+/// フロントからのこのアクションで再開/中断する。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CheckpointAction {
+    /// 残りカットの生成を続行する。
+    Continue,
+    /// 生成を安全に中断する（生成済みカットは保持）。
+    Cancel,
+}
+
+/// run_id → checkpoint 再開シグナルの送信端。
+/// orchestrator が checkpoint 到達時に oneshot を作って登録し、Receiver を await する。
+/// `storyboard_checkpoint_resume` が受信端へアクションを送って再開させる。
+type CheckpointSenders = Arc<Mutex<HashMap<String, oneshot::Sender<CheckpointAction>>>>;
 
 #[derive(Clone, Default)]
 pub struct AppState {
@@ -26,6 +44,8 @@ pub struct AppState {
     pub storage_settings: Arc<RwLock<Option<StorageSettings>>>,
     pub edit_runtime: Arc<EditRuntime>,
     pub sam2_session: Arc<RwLock<Option<Sam2Session>>>,
+    /// storyboard checkpoint の再開シグナル置き場 (run_id → oneshot sender)。
+    checkpoint_senders: CheckpointSenders,
 }
 
 #[derive(Default)]
@@ -89,5 +109,38 @@ impl AppState {
 
     pub fn inner_clone(&self) -> Self {
         self.clone()
+    }
+
+    // ===== storyboard checkpoint 再開シグナル =====
+
+    /// checkpoint に到達した run の再開シグナルを登録し、受信端を返す。
+    /// orchestrator はこの Receiver を await して継続アクションを待つ。
+    /// 同じ run_id の古い sender が残っていれば置き換えて drop する（前の
+    /// 受信端はその時点で Err になり cleanup 扱いになる）。
+    pub async fn register_checkpoint(&self, run_id: &str) -> oneshot::Receiver<CheckpointAction> {
+        let (tx, rx) = oneshot::channel();
+        self.checkpoint_senders
+            .lock()
+            .await
+            .insert(run_id.to_string(), tx);
+        rx
+    }
+
+    /// run の checkpoint 再開シグナルを取り除いてアクションを送る。
+    /// フロントの `storyboard_checkpoint_resume` から呼ぶ。
+    /// 送信できたら true、対象 run が待機していなければ false を返す。
+    pub async fn resume_checkpoint(&self, run_id: &str, action: CheckpointAction) -> bool {
+        let sender = self.checkpoint_senders.lock().await.remove(run_id);
+        match sender {
+            Some(tx) => tx.send(action).is_ok(),
+            None => false,
+        }
+    }
+
+    /// run 終了時（正常/失敗/アプリ終了）に、待機中の checkpoint sender を破棄する。
+    /// sender を drop すると orchestrator 側の Receiver が Err になり、await が
+    /// 解けてループがリークせず終了する。二重呼び出しは無害。
+    pub async fn clear_checkpoint(&self, run_id: &str) {
+        self.checkpoint_senders.lock().await.remove(run_id);
     }
 }

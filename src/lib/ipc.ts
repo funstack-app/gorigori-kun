@@ -522,6 +522,13 @@ export type RegenerateCutParams = {
 
 export const storyboard = {
   run: (params: StoryboardRunParams) => invoke<string>("storyboard_run", { params }),
+  /**
+   * A-2: 方向性チェック (checkpoint) で停止中の生成ループを再開/中断する。
+   * action="continue" で残りカット続行、"cancel" で安全中断 (生成済みは保持)。
+   * 戻り値 true = 停止中の run にシグナルを届けた / false = 既に再開済み等で対象なし。
+   */
+  checkpointResume: (runId: string, action: "continue" | "cancel") =>
+    invoke<boolean>("storyboard_checkpoint_resume", { runId, action }),
   /** 単一カットを追加参照画像で再生成 (新 take として TakeCompleted が来る)。 */
   regenerateCut: (params: RegenerateCutParams) =>
     invoke<string>("storyboard_regenerate_cut", { params }),
