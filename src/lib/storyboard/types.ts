@@ -25,7 +25,22 @@ export type StoryboardEvent =
   | { kind: "cutFailed"; cutId: string; reason: string }
   | { kind: "completed"; runId: string; manifestPath: string };
 
-export type StoryboardAspectRatio = "9:16" | "1:1" | "16:9" | "4:5";
+// GPT Image 2 公式対応の10種に揃える (scene/types.ts SceneAspectRatio と同一集合)。
+// 旧 4種 (9:16/1:1/16:9/4:5) 固定だと、AI が 21:9 等を [STORYBOARD_PARAMS] に
+// 返したとき isAspectRatio が false になり extractStructuredStoryboard が null を返し、
+// 「ゴールを確定」ボタンが無反応になる (2026-06-16 Ta4low 報告 N-1)。scene/video 側は
+// 全10種を受け入れるため、storyboard 層もここで揃える。
+export type StoryboardAspectRatio =
+  | "21:9"
+  | "16:9"
+  | "3:2"
+  | "4:3"
+  | "5:4"
+  | "1:1"
+  | "4:5"
+  | "3:4"
+  | "2:3"
+  | "9:16";
 export type StoryboardTempo = "fast" | "standard" | "slow";
 
 export type StoryboardParams = {

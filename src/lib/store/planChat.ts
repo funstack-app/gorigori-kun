@@ -99,7 +99,7 @@ const STORYBOARD_ROLE_PREFIX = [
   "  - 主役は誰か（一人 or 複数）、舞台・場所・全体の雰囲気",
   "  - 感情の動き（短尺なら一番心が動く瞬間、長めなら最初・中盤・最後の変化）",
   "  - 尺（何秒くらいか）",
-  "  - アスペクト比（9:16 縦長Reels / 1:1 Instagram / 16:9 YouTube / 4:5）",
+  "  - アスペクト比（21:9 シネスコ / 16:9 YouTube / 3:2 写真 / 4:3 クラシック / 5:4 物撮り / 1:1 Instagram / 4:5 縦Instagram / 3:4 ポートレート / 2:3 ポスター / 9:16 縦長Reels）",
   "  - テンポ（速め: TikTok風 / 標準: 一般YouTube / ゆっくり: 映画風）",
   "  - 映像のタッチ（実写風 / イラスト / アニメ / 3DCG / 油絵タッチ / 水彩 など）",
   "     ユーザーが「実写」「イラスト」等と答えたら toneKeywords に必ず反映する。",
@@ -374,8 +374,26 @@ function extractTextDelta(params: any): string | undefined {
   return undefined;
 }
 
+// StoryboardAspectRatio (types.ts) と同一集合。GPT Image 2 公式対応10種。
+// scene/catalog.ts aspectRatioOptions と並びを揃える (増減時は3箇所同期)。
+const STORYBOARD_ASPECT_RATIOS: readonly StoryboardParams["aspect_ratio"][] = [
+  "21:9",
+  "16:9",
+  "3:2",
+  "4:3",
+  "5:4",
+  "1:1",
+  "4:5",
+  "3:4",
+  "2:3",
+  "9:16",
+];
+
 function isAspectRatio(value: unknown): value is StoryboardParams["aspect_ratio"] {
-  return value === "9:16" || value === "1:1" || value === "16:9" || value === "4:5";
+  return (
+    typeof value === "string" &&
+    (STORYBOARD_ASPECT_RATIOS as readonly string[]).includes(value)
+  );
 }
 
 function normalizeTempo(value: unknown): StoryboardParams["tempo"] | null {
