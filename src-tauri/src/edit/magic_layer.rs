@@ -57,6 +57,13 @@ pub struct TextLayerSpec {
     pub id: String,
     pub name: String,
     pub text: String,
+    /// 元画素そのままのテキスト素材 (bbox クロップ透過 PNG)。ある場合、フロントは
+    /// 既定でこれを画像レイヤーとして置き、「テキストとして編集」で textbox 化する。
+    /// なぜ: 再描画テキストは元のタイポグラフィ・質感を再現できない (2026-07-03 STΛCK
+    /// 指摘「元の白い画像のままはいけないのか」)。見た目は原本、打ち替えは変換で両取り。
+    pub image_path: Option<String>,
+    /// image_path の元画像ピクセル座標 [x, y, width, height]。
+    pub image_bbox: Option<[i32; 4]>,
     pub bbox: [i32; 4],
     pub font_family: String,
     pub font_size: f32,
@@ -371,7 +378,7 @@ async fn run_magic_layer_inner(
         EVENT_EDIT_MAGIC_PROGRESS,
         MagicLayerProgress::BuildingTextLayers,
     );
-    let text_layers = build_text_layers(&regions, input_path, prob_map.as_ref())?;
+    let text_layers = build_text_layers(&regions, input_path, prob_map.as_ref(), Some(&run_dir))?;
 
     let result = MagicLayerResult {
         background_path: path_string(&background_path),
@@ -657,10 +664,13 @@ pub fn build_text_layers(
     regions: &[TextRegion],
     input_path: &Path,
     prob_map: Option<&TextProbMap>,
+    // Some なら各 region の「元画素そのまま」素材 PNG をここへ書き出し image_path に載せる。
+    crop_dir: Option<&Path>,
 ) -> Result<Vec<TextLayerSpec>, String> {
     let img = image::open(input_path).map_err(|e| format!("open image for text layers: {e}"))?;
     let (width, height) = img.dimensions();
     let rgb = img.to_rgb8();
+    let rgba = crop_dir.map(|_| img.to_rgba8());
 
     // OCR ノイズ下限: bbox 面積が画像の 0.1% 未満は「意味のない微小領域」として捨てる。
     // 941x1672 の実機で "□" 1個 (19x21=399px=0.025%) がレイヤー化された事故の再発防止。
@@ -686,6 +696,21 @@ pub fn build_text_layers(
                 return None;
             }
             let color = text_color(&rgb, [x, y, w, h], prob_map);
+            // 元画素素材の切り出し (失敗しても textbox 情報だけで続行)。
+            let mut image_path = None;
+            let mut image_bbox = None;
+            if let (Some(dir), Some(rgba)) = (crop_dir, rgba.as_ref()) {
+                let out = dir.join(format!("text-{:02}.png", index + 1));
+                match crop_text_region_png(rgba, region, prob_map, &out) {
+                    Ok(bbox) => {
+                        image_path = Some(out.to_string_lossy().into_owned());
+                        image_bbox = Some(bbox);
+                    }
+                    Err(reason) => {
+                        tracing::warn!(target: "codex.edit", "text素材切り出し失敗 ({reason})");
+                    }
+                }
+            }
             let is_ja = region
                 .language
                 .as_deref()
@@ -699,6 +724,8 @@ pub fn build_text_layers(
                 },
                 name: format!("テキスト {}", index + 1),
                 text: text.to_string(),
+                image_path,
+                image_bbox,
                 bbox: [x as i32, y as i32, w as i32, h as i32],
                 font_family: if is_ja {
                     "Hiragino Sans".to_string()
@@ -717,6 +744,27 @@ pub fn build_text_layers(
             })
         })
         .collect())
+}
+
+/// テキスト region の「元画素そのまま」素材を切り出す (bbox クロップ透過 PNG)。
+/// 文字ストローク (確率マップ + 文字高比例膨張) を alpha にして元のタイポグラフィ・
+/// グローを保持する。ストロークが取れないときは bbox 矩形 (背景込み) へフォールバック。
+fn crop_text_region_png(
+    rgba: &image::RgbaImage,
+    region: &TextRegion,
+    prob_map: Option<&TextProbMap>,
+    output_path: &Path,
+) -> Result<[i32; 4], String> {
+    let (w, h) = rgba.dimensions();
+    let usable = prob_map.filter(|pm| pm.width == w && pm.height == h);
+    if let Some(pm) = usable {
+        let mask = build_stroke_mask(w, h, &[region.bbox], pm);
+        if mask.pixels().any(|p| p[0] > 127) {
+            return crate::edit::grab::crop_object_png(rgba, &mask, output_path);
+        }
+    }
+    let mask = build_bbox_mask(w, h, &[region.bbox]);
+    crate::edit::grab::crop_object_png(rgba, &mask, output_path)
 }
 
 /// テキスト色の抽出。文字ストローク画素 (DB 確率マップ >= 閾値) の RGB 中央値を使う。
@@ -1081,7 +1129,7 @@ mod tests {
             region("region-0002", "SALE", [50, 50, 100, 40], None),
         ];
 
-        let layers = build_text_layers(&regions, &img_path, None).unwrap();
+        let layers = build_text_layers(&regions, &img_path, None, None).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
 
         assert_eq!(

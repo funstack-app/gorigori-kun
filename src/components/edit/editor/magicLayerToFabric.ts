@@ -66,25 +66,7 @@ export async function applyMagicLayerToCanvas(
     }
   }
 
-  result.textLayers.forEach((text, index) => {
-    const bbox = text.bbox;
-    const textbox = new fabric.Textbox(text.text || "テキスト", {
-      id: text.id ?? `text-${index + 1}`,
-      name: text.name ?? `テキスト ${index + 1}`,
-      layerKind: "text",
-      left: clampPlacement(text.x ?? bbox?.[0] ?? 50, result.width),
-      top: clampPlacement(text.y ?? bbox?.[1] ?? 50 + index * 52, result.height),
-      width: bbox?.[2] ?? 240,
-      fontSize: text.fontSize ?? text.size ?? 28,
-      fill: text.color ?? "#ffffff",
-      fontFamily: text.fontFamily ?? text.font ?? "Hiragino Sans",
-      fontWeight: text.fontWeight ?? "normal",
-      textAlign: text.align ?? "left",
-      opacity: text.opacity ?? 1,
-      angle: text.rotation ?? 0,
-    });
-    canvas.add(textbox);
-  });
+  await addTextLayersToCanvas(canvas, fabric, result.textLayers, result.width, result.height);
 
   fitCanvasToImage(canvas, result.width, result.height);
   canvas.renderAll?.();
@@ -312,6 +294,114 @@ export async function showSourceImagePreview(
 }
 
 /**
+ * テキストレイヤー群をキャンバスへ置く。
+ * 既定は「元画素そのまま」の画像レイヤー (白い文字の見た目を100%維持)。認識済みの
+ * 文字情報は textSpec としてレイヤーに保持し、プロパティパネルの「テキストとして編集」で
+ * いつでも打ち替え可能な textbox に変換できる (2026-07-03 STΛCK「白い文字のまま」)。
+ * 素材が無い region だけ従来どおり textbox で置く。
+ */
+async function addTextLayersToCanvas(
+  canvas: FabricCanvas,
+  fabric: FabricModule,
+  textLayers: WordsSegmentResult["textLayers"],
+  width: number,
+  height: number,
+): Promise<number> {
+  let added = 0;
+  for (const [index, text] of textLayers.entries()) {
+    if (text.imagePath && text.imageBbox) {
+      const image = await loadFabricImage(fabric, text.imagePath);
+      const [x, y] = text.imageBbox;
+      image.set({
+        id: text.id ?? `text-${index + 1}`,
+        name: text.name ?? `テキスト ${index + 1}`,
+        layerKind: "image",
+        left: clampPlacement(x, width),
+        top: clampPlacement(y, height),
+        selectable: true,
+        // 打ち替え変換用に認識結果を保持する (JSON化しても残るプレーン値)。
+        textSpec: {
+          text: text.text,
+          fontFamily: text.fontFamily,
+          fontSize: text.fontSize,
+          fontWeight: text.fontWeight,
+          color: text.color,
+          align: text.align,
+          width: text.bbox?.[2] ?? 240,
+        },
+      });
+      canvas.add(image);
+      added += 1;
+      continue;
+    }
+    const bbox = text.bbox;
+    const textbox = new fabric.Textbox(text.text || "テキスト", {
+      id: text.id ?? `text-${index + 1}`,
+      name: text.name ?? `テキスト ${index + 1}`,
+      layerKind: "text",
+      left: clampPlacement(text.x ?? bbox?.[0] ?? 50, width),
+      top: clampPlacement(text.y ?? bbox?.[1] ?? 50 + index * 52, height),
+      width: bbox?.[2] ?? 240,
+      fontSize: text.fontSize ?? 28,
+      fill: text.color ?? "#ffffff",
+      fontFamily: text.fontFamily ?? "Hiragino Sans",
+      fontWeight: text.fontWeight ?? "normal",
+      textAlign: text.align ?? "left",
+      opacity: text.opacity ?? 1,
+      angle: text.rotation ?? 0,
+    });
+    canvas.add(textbox);
+    added += 1;
+  }
+  return added;
+}
+
+/**
+ * 「元画素そのまま」のテキスト画像レイヤーを、打ち替え可能な textbox へ変換する。
+ * textSpec を持つ画像レイヤーだけが対象。成功で true。
+ */
+export async function convertTextImageToTextbox(
+  canvas: FabricCanvas,
+  object: FabricObject,
+): Promise<boolean> {
+  const spec = object.get?.("textSpec") as
+    | {
+        text?: string;
+        fontFamily?: string;
+        fontSize?: number;
+        fontWeight?: string;
+        color?: string;
+        align?: string;
+        width?: number;
+      }
+    | undefined;
+  if (!spec) return false;
+  const fabric = await importFabric();
+  const left = object.left ?? 0;
+  const top = object.top ?? 0;
+  const name = (object.get?.("name") as string) ?? "テキスト";
+  const id = (object.get?.("id") as string) ?? createLayerId();
+  canvas.remove(object);
+  const textbox = new fabric.Textbox(spec.text || "テキスト", {
+    id,
+    name,
+    layerKind: "text",
+    left,
+    top,
+    width: spec.width ?? 240,
+    fontSize: spec.fontSize ?? 28,
+    fill: spec.color ?? "#ffffff",
+    fontFamily: spec.fontFamily ?? "Hiragino Sans",
+    fontWeight: spec.fontWeight ?? "normal",
+    textAlign: spec.align ?? "left",
+  });
+  canvas.add(textbox);
+  canvas.setActiveObject?.(textbox);
+  canvas.requestRenderAll?.();
+  return true;
+}
+
+/**
  * ことばで分離 (full モード) の結果でキャンバスを構成し直す。
  * Magic Layer と同じ層構造: 補完済み背景 → 物体レイヤー (語がレイヤー名) →
  * 編集可能テキストレイヤー。追加したレイヤー数 (背景含む) を返す。
@@ -354,27 +444,7 @@ export async function applyWordsResultToCanvas(
     added += 1;
   }
 
-  // 編集可能テキスト (Magic Layer と同じ構成。サイズ・位置・スケール・色を後から変更できる)。
-  result.textLayers.forEach((text, index) => {
-    const bbox = text.bbox;
-    const textbox = new fabric.Textbox(text.text || "テキスト", {
-      id: text.id ?? `text-${index + 1}`,
-      name: text.name ?? `テキスト ${index + 1}`,
-      layerKind: "text",
-      left: clampPlacement(text.x ?? bbox?.[0] ?? 50, result.width),
-      top: clampPlacement(text.y ?? bbox?.[1] ?? 50 + index * 52, result.height),
-      width: bbox?.[2] ?? 240,
-      fontSize: text.fontSize ?? 28,
-      fill: text.color ?? "#ffffff",
-      fontFamily: text.fontFamily ?? "Hiragino Sans",
-      fontWeight: text.fontWeight ?? "normal",
-      textAlign: text.align ?? "left",
-      opacity: text.opacity ?? 1,
-      angle: text.rotation ?? 0,
-    });
-    canvas.add(textbox);
-    added += 1;
-  });
+  added += await addTextLayersToCanvas(canvas, fabric, result.textLayers, result.width, result.height);
 
   fitCanvasToImage(canvas, result.width, result.height);
   canvas.renderAll?.();

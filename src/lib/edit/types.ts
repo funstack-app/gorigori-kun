@@ -123,6 +123,10 @@ export type InpaintRequest = {
 };
 
 export type TextLayerSpec = {
+  /** 元画素そのままのテキスト素材 (透過PNG)。ある場合は既定でこれを画像レイヤーにする。 */
+  imagePath?: string | null;
+  /** imagePath の元画像ピクセル座標 [x, y, width, height]。 */
+  imageBbox?: [number, number, number, number] | null;
   id?: string;
   name?: string;
   text: string;

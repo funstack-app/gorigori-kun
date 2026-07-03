@@ -3,6 +3,7 @@ import { useMemo, useState } from "react";
 import { FontPicker } from "./FontPicker";
 import { useEditor } from "./editor/editorStore";
 import { getObjectById, objectKind } from "./editor/layerHelpers";
+import { convertTextImageToTextbox } from "./editor/magicLayerToFabric";
 
 type FabricObject = any;
 
@@ -87,9 +88,32 @@ function TextPropertyEditor({ object }: { object: FabricObject }) {
 
 function ImagePropertyEditor({ object }: { object: FabricObject }) {
   const apply = usePropertyApply(object);
+  const canvas = useEditor((state) => state.canvas);
+  const bumpRevision = useEditor((state) => state.bumpRevision);
+  const pushHistory = useEditor((state) => state.pushHistory);
+  // 「元画素そのまま」のテキストレイヤーは、打ち替えたいときだけ textbox へ変換できる。
+  const hasTextSpec = Boolean(object.get?.("textSpec"));
 
   return (
     <div className="space-y-3">
+      {hasTextSpec ? (
+        <button
+          type="button"
+          onClick={() => {
+            if (!canvas) return;
+            void convertTextImageToTextbox(canvas, object).then((converted) => {
+              if (converted) {
+                bumpRevision();
+                pushHistory();
+              }
+            });
+          }}
+          className="w-full rounded-md border border-pink-500/50 bg-pink-500/10 px-3 py-2 text-[11px] font-black text-pink-200 transition hover:bg-pink-500/20"
+          title="見た目は元画像のまま。文字を打ち替えたいときだけ編集可能なテキストに変換します"
+        >
+          テキストとして編集 (打ち替え可能に変換)
+        </button>
+      ) : null}
       {/* まず「触ってすぐ効く」直感操作だけを見せる。生の座標・寸法は詳細に畳む。 */}
       <NumberSlider label="不透明度" value={numberValue(object.opacity, 1)} min={0} max={1} step={0.01} onChange={(opacity) => apply({ opacity })} onCommit={apply.commit} />
       <div className="grid grid-cols-2 gap-2">

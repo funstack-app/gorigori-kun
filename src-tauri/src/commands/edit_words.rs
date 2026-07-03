@@ -273,7 +273,8 @@ async fn run_words_segment(
                         .await
                         .map_err(|e| format!("copy text-removed (fallback): {e}"))?;
                 }
-                text_layers_out = build_text_layers(&overlay_regions, input, prob_map.as_ref())?;
+                text_layers_out =
+                    build_text_layers(&overlay_regions, input, prob_map.as_ref(), Some(&run_dir))?;
             }
             Err(reason) => {
                 // OCR 不能 (モデル未DL等) でも物体分解は成立させる。文字はそのまま背景に残る。
