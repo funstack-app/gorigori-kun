@@ -15,7 +15,7 @@ const CATEGORY_LABELS: Record<EditModelCategory, string> = {
   segment: "切り抜き",
   samClick: "クリック切り抜き",
   humanParse: "人物パーツ認識",
-  textSegment: "ことばで分離 (SAM3)",
+  textSegment: "ことばで分離",
 };
 
 function formatMb(bytes: number) {

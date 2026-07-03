@@ -4,17 +4,14 @@ import type { EditorTool } from "./editor/editorStore";
 import { useEditor } from "./editor/editorStore";
 import { useEditorActions } from "./editor/useEditor";
 
+// 基本の画像編集に必要なものだけを常設する (2026-07-03 STΛCK指摘「メニューが多すぎる」)。
+// 旧方式の分解・人物切り抜き・マジックグラブ・テキスト検出は右パネルの「上級者向け」へ。
 const TOOLS: Array<{ id: EditorTool; icon: ReactNode; label: string }> = [
   { id: "select", icon: <CursorIcon />, label: "選択" },
-  { id: "bgremove", icon: <ScissorsIcon />, label: "人物切り抜き" },
-  { id: "clickseg", icon: <TargetIcon />, label: "クリック切り抜き" },
-  { id: "grab", icon: <GrabIcon />, label: "マジックグラブ (掴んで動かす)" },
+  { id: "words", icon: <WordsIcon />, label: "ことばで分離" },
   { id: "text-add", icon: <TextIcon />, label: "テキスト追加" },
-  { id: "text-detect", icon: <ScanTextIcon />, label: "テキスト検出" },
+  { id: "clickseg", icon: <TargetIcon />, label: "クリック切り抜き" },
   { id: "inpaint", icon: <EraserIcon />, label: "領域消去" },
-  { id: "magic", icon: <LayersIcon />, label: "自動レイヤー分解" },
-  { id: "words", icon: <WordsIcon />, label: "ことばで分離 (SAM3)" },
-  { id: "redo-decompose", icon: <RefreshIcon />, label: "再分解" },
 ];
 
 export function EditorToolbar() {
@@ -95,15 +92,6 @@ function CursorIcon() {
   );
 }
 
-function ScissorsIcon() {
-  return (
-    <svg {...SVG_PROPS} aria-hidden>
-      <circle cx="6" cy="6" r="2.4" />
-      <circle cx="6" cy="18" r="2.4" />
-      <path d="M8 7.5L20 18M8 16.5L20 6" />
-    </svg>
-  );
-}
 
 function TargetIcon() {
   return (
@@ -123,23 +111,7 @@ function TextIcon() {
   );
 }
 
-function GrabIcon() {
-  return (
-    <svg {...SVG_PROPS} aria-hidden>
-      <path d="M7 11V6.5a1.5 1.5 0 013 0V11M10 11V5.5a1.5 1.5 0 013 0V11M13 11V6.5a1.5 1.5 0 013 0V12" />
-      <path d="M16 9.5a1.5 1.5 0 013 0V14a6 6 0 01-6 6h-1.5a5 5 0 01-3.6-1.5L4 14.7a1.6 1.6 0 012.3-2.2L8 14" />
-    </svg>
-  );
-}
 
-function ScanTextIcon() {
-  return (
-    <svg {...SVG_PROPS} aria-hidden>
-      <path d="M4 7V5a1 1 0 011-1h2M20 7V5a1 1 0 00-1-1h-2M4 17v2a1 1 0 001 1h2M20 17v2a1 1 0 01-1 1h-2" />
-      <path d="M8 10h8M8 13h5" />
-    </svg>
-  );
-}
 
 function EraserIcon() {
   return (
@@ -150,14 +122,6 @@ function EraserIcon() {
   );
 }
 
-function LayersIcon() {
-  return (
-    <svg {...SVG_PROPS} aria-hidden>
-      <path d="M12 3l9 5-9 5-9-5 9-5z" />
-      <path d="M3 13l9 5 9-5" />
-    </svg>
-  );
-}
 
 function WordsIcon() {
   return (
@@ -168,13 +132,6 @@ function WordsIcon() {
   );
 }
 
-function RefreshIcon() {
-  return (
-    <svg {...SVG_PROPS} aria-hidden>
-      <path d="M21 12a9 9 0 11-3-6.7M21 4v4h-4" />
-    </svg>
-  );
-}
 
 function UndoIcon() {
   return (

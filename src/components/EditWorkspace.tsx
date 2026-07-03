@@ -5,7 +5,6 @@ import { EditorLayerList } from "./edit/EditorLayerList";
 import { EditorPropertyPanel } from "./edit/EditorPropertyPanel";
 import { EditorToolbar } from "./edit/EditorToolbar";
 import { EditModeSelector } from "./edit/EditModeSelector";
-import { EditModeSelectorCompact } from "./edit/EditModeSelectorCompact";
 import { EditPrimaryAction } from "./edit/EditPrimaryAction";
 import { WordsToolPanel } from "./edit/WordsToolPanel";
 import { LayerSplitterPanel } from "./edit/LayerSplitterPanel";
@@ -90,11 +89,6 @@ export function EditWorkspace() {
         >
           {sourceImagePath ? basename(sourceImagePath) : "画像未選択"}
         </span>
-        <EditModeSelectorCompact
-          activeMode={editMode}
-          onSelectMode={setEditMode}
-          disabled={busyTool !== null}
-        />
         <button
           type="button"
           onClick={() => void chooseImage()}
@@ -127,6 +121,10 @@ export function EditWorkspace() {
             <CollapsibleSection title="上級者向け">
               <div className="space-y-3">
                 <div>
+                  <p className="mb-2 text-[10px] font-bold text-neutral-500">その他のツール</p>
+                  <AdvancedToolButtons />
+                </div>
+                <div className="border-t border-[#2a2a2a] pt-3">
                   <p className="mb-2 text-[10px] font-bold text-neutral-500">分解のしかた・モデル追加</p>
                   <EditModeSelector activeMode={editMode} onSelectMode={setEditMode} />
                 </div>
@@ -139,6 +137,34 @@ export function EditWorkspace() {
           </div>
         </aside>
       </div>
+    </div>
+  );
+}
+
+/** 常設レールから外した旧ツール群 (使う人だけ上級者向けから)。 */
+function AdvancedToolButtons() {
+  const busyTool = useEditor((state) => state.busyTool);
+  const actions = useEditorActions();
+  const tools: Array<{ id: Parameters<typeof actions.run>[0]; label: string }> = [
+    { id: "magic", label: "自動レイヤー分解 (旧方式)" },
+    { id: "redo-decompose", label: "再分解" },
+    { id: "bgremove", label: "人物切り抜き" },
+    { id: "grab", label: "マジックグラブ" },
+    { id: "text-detect", label: "テキスト検出" },
+  ];
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {tools.map((tool) => (
+        <button
+          key={tool.id}
+          type="button"
+          onClick={() => void actions.run(tool.id)}
+          disabled={busyTool !== null}
+          className="rounded-md border border-[#343434] bg-[#161616] px-2.5 py-1.5 text-[10px] font-bold text-neutral-300 transition hover:border-pink-400 hover:text-white disabled:opacity-40"
+        >
+          {tool.label}
+        </button>
+      ))}
     </div>
   );
 }

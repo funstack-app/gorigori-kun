@@ -39,9 +39,7 @@ export function WordsToolPanel() {
     <div className="shrink-0 border-b border-[#2a2a2a] bg-[#212121] p-3">
       <div className="mb-2 flex items-center justify-between">
         <h3 className="text-xs font-black text-white">ことばで分離</h3>
-        <span className="rounded bg-pink-500/20 px-1.5 py-0.5 text-[9px] font-black text-pink-200">
-          SAM3
-        </span>
+
       </div>
       <EditModelGate required={["textSegment"]}>
         <p className="mb-2 text-[10px] leading-relaxed text-neutral-500">
@@ -91,7 +89,7 @@ export function WordsToolPanel() {
           onClick={() => void runWordsAuto()}
           disabled={busy || !sourceImagePath}
           className="mt-2 w-full rounded-md border border-pink-500/50 bg-pink-500/10 px-3 py-1.5 text-[11px] font-black text-pink-200 transition hover:bg-pink-500/20 disabled:cursor-not-allowed disabled:opacity-40"
-          title="AI (Codex) が画像に写っているものを全部見つけて、まとめてレイヤーに切り出します"
+          title="AIが画像に写っているものを全部見つけて、まとめてレイヤーに切り出します"
         >
           {busy ? "処理中…" : "✦ AIにおまかせで全部切り出す"}
         </button>

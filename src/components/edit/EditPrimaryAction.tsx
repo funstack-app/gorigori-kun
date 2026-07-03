@@ -1,12 +1,10 @@
-import { useMemo, useState } from "react";
+import { useMemo } from "react";
 
-import { EDIT_MODES } from "../../lib/edit/modes";
 import { useEditMagic } from "../../lib/store/editMagic";
 import { useEditor } from "./editor/editorStore";
 import { useEditorActions } from "./editor/useEditor";
 import { layerMetasFromCanvas } from "./editor/layerHelpers";
 import { SOURCE_PREVIEW_ID } from "./editor/magicLayerToFabric";
-import { EditModeSelector } from "./EditModeSelector";
 
 /**
  * 編集タブの「主導線」パネル (タスク主導への再設計 2026-07-02)。
@@ -28,13 +26,9 @@ export function EditPrimaryAction() {
   const revision = useEditor((state) => state.revision);
   const sourceImagePath = useEditor((state) => state.sourceImagePath);
   const busyTool = useEditor((state) => state.busyTool);
-  const editMode = useEditor((state) => state.editMode);
-  const setEditMode = useEditor((state) => state.setEditMode);
   const magicProgress = useEditMagic((state) => state.progress);
   const magicRunning = useEditMagic((state) => state.running);
-  const { runMagic } = useEditorActions();
-
-  const [showSettings, setShowSettings] = useState(false);
+  const { runWordsAuto } = useEditorActions();
 
   // 「切り分けられる本体レイヤー」が既にあるか。プレビュー用のマスクは数に入れない。
   const decomposableLayerCount = useMemo(
@@ -45,7 +39,8 @@ export function EditPrimaryAction() {
     [canvas, revision],
   );
 
-  const running = magicRunning || busyTool === "magic" || busyTool === "redo-decompose";
+  const running =
+    magicRunning || busyTool === "magic" || busyTool === "redo-decompose" || busyTool === "words";
 
   // 実行中は場所を保ったまま進捗を出す。
   if (running) {
@@ -70,37 +65,18 @@ export function EditPrimaryAction() {
   // 画像がまだ無ければ何も出さない (キャンバス側のドロップ案内が主導線)。
   if (!sourceImagePath) return null;
 
-  const activeModeLabel = EDIT_MODES.find((mode) => mode.id === editMode)?.label ?? "";
-
   return (
     <div className="shrink-0 border-b border-[#2a2a2a] bg-[#101010] p-4">
       <button
         type="button"
-        onClick={() => void runMagic(sourceImagePath, "magic")}
+        onClick={() => void runWordsAuto()}
         className="w-full rounded-xl bg-pink-500 px-4 py-3 text-sm font-black text-white shadow-lg shadow-pink-500/20 transition hover:bg-pink-600"
       >
         レイヤーに分解する
       </button>
       <p className="mt-2 text-center text-[11px] font-bold leading-4 text-neutral-400">
-        人物・文字・物体を自動で切り分けます
+        人物・小物・背景・文字に自動で切り分けます
       </p>
-
-      <div className="mt-2 flex items-center justify-center gap-2 text-[10px] text-neutral-500">
-        <span className="font-bold">分解のしかた: {activeModeLabel}</span>
-        <button
-          type="button"
-          onClick={() => setShowSettings((value) => !value)}
-          className="font-bold text-neutral-400 underline decoration-dotted underline-offset-2 hover:text-pink-300"
-        >
-          {showSettings ? "設定を閉じる" : "設定"}
-        </button>
-      </div>
-
-      {showSettings && (
-        <div className="mt-3 rounded-lg border border-[#2a2a2a] bg-[#151515] p-2">
-          <EditModeSelector activeMode={editMode} onSelectMode={setEditMode} />
-        </div>
-      )}
     </div>
   );
 }
