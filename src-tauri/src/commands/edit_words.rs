@@ -288,6 +288,12 @@ async fn run_words_segment(
                 None => Vec::new(),
             }
         };
+        // 文字ブロックのグルーピング: SAM3 の text 検出は文節・単語レベルに割れることが
+        // ある (実測: ポスターのタイトルが 創造/は/暴走/だ の別インスタンスに)。近接する
+        // インスタンス (間隔がそのインスタンスの短辺30%以内、8..120pxに適応) を1ブロックへ
+        // 結合し、タイトル・キャプション単位のレイヤーにする。
+        let text_instances = merge_text_instances(text_instances, width, height);
+
         // 印字保護の条件: 物体にほぼ載っている (containment>0.6) かつ物体より十分小さい
         // (面積1/4以下)。ジャージの番号・商品ロゴは保護し、人物に重なる大型タイトルは
         // 保護せずテキストレイヤー化する (2026-07-03: 全面マスク吸収で文字0件になった対策)。
@@ -496,6 +502,104 @@ async fn run_words_segment(
         width,
         height,
     })
+}
+
+/// 近接する text インスタンスを1ブロックへ結合する。
+/// 各インスタンスのマスクを「自分の短辺30% (8..120px)」だけ膨張して重ねた到達性で
+/// クラスタリングし、同クラスタのマスクを union、score は最大値を採る。
+fn merge_text_instances(
+    instances: Vec<crate::edit::sam3_text::Sam3Detection>,
+    width: u32,
+    height: u32,
+) -> Vec<crate::edit::sam3_text::Sam3Detection> {
+    use crate::edit::sam3_text::Sam3Detection;
+    if instances.len() <= 1 {
+        return instances;
+    }
+    // 各インスタンスの膨張マスクを作る。
+    let dilated: Vec<image::ImageBuffer<image::Luma<u8>, Vec<u8>>> = instances
+        .iter()
+        .map(|det| {
+            let bbox = mask_bbox_of(&det.mask);
+            let radius = ((bbox[2].min(bbox[3]) as f64 * 0.3) as i32).clamp(8, 120);
+            crate::edit::grab::dilate_mask_pub(&det.mask, radius)
+        })
+        .collect();
+    // 膨張マスク同士が重なる = 同ブロック (union-find)。
+    let n = instances.len();
+    let mut parent: Vec<usize> = (0..n).collect();
+    fn find(parent: &mut Vec<usize>, i: usize) -> usize {
+        if parent[i] != i {
+            let root = find(parent, parent[i]);
+            parent[i] = root;
+        }
+        parent[i]
+    }
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let overlap = dilated[i]
+                .pixels()
+                .zip(dilated[j].pixels())
+                .any(|(a, b)| a[0] > 127 && b[0] > 127);
+            if overlap {
+                let (ri, rj) = (find(&mut parent, i), find(&mut parent, j));
+                if ri != rj {
+                    parent[ri] = rj;
+                }
+            }
+        }
+    }
+    // クラスタごとに union マスク + 最大 score。
+    let mut merged: std::collections::HashMap<usize, Sam3Detection> = std::collections::HashMap::new();
+    for (i, det) in instances.into_iter().enumerate() {
+        let root = find(&mut parent, i);
+        match merged.get_mut(&root) {
+            Some(block) => {
+                block.score = block.score.max(det.score);
+                for (dst, src) in block.mask.pixels_mut().zip(det.mask.pixels()) {
+                    if src[0] > dst[0] {
+                        *dst = *src;
+                    }
+                }
+            }
+            None => {
+                let mut mask =
+                    image::ImageBuffer::<image::Luma<u8>, Vec<u8>>::from_pixel(width, height, image::Luma([0u8]));
+                for (dst, src) in mask.pixels_mut().zip(det.mask.pixels()) {
+                    *dst = *src;
+                }
+                merged.insert(root, Sam3Detection { score: det.score, mask });
+            }
+        }
+    }
+    let mut blocks: Vec<Sam3Detection> = merged.into_values().collect();
+    // 読み順に近い並び (上→下、左→右) でブロックを整列。
+    blocks.sort_by_key(|det| {
+        let b = mask_bbox_of(&det.mask);
+        (b[1], b[0])
+    });
+    tracing::info!(target: "codex.edit", "words: text {n}インスタンス → {}ブロックへ結合", blocks.len());
+    blocks
+}
+
+/// マスクの白画素 bbox [x, y, w, h] (空なら 0,0,1,1)。
+fn mask_bbox_of(mask: &image::ImageBuffer<image::Luma<u8>, Vec<u8>>) -> [u32; 4] {
+    let (w, h) = mask.dimensions();
+    let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0u32, 0u32);
+    let mut found = false;
+    for (x, y, p) in mask.enumerate_pixels() {
+        if p[0] > 127 {
+            found = true;
+            x0 = x0.min(x);
+            y0 = y0.min(y);
+            x1 = x1.max(x);
+            y1 = y1.max(y);
+        }
+    }
+    if !found {
+        return [0, 0, 1, 1];
+    }
+    [x0, y0, x1 - x0 + 1, y1 - y0 + 1]
 }
 
 /// マスクの白画素数 (>127)。

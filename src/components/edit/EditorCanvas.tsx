@@ -5,7 +5,7 @@ import { extractDropped, fileToUploadReference, isImageDrop } from "../../lib/dr
 import { useEditMagic } from "../../lib/store/editMagic";
 import { useEditor } from "./editor/editorStore";
 import { useEditorActions } from "./editor/useEditor";
-import { fitCanvasToImage } from "./editor/magicLayerToFabric";
+import { convertTextImageToTextbox, fitCanvasToImage } from "./editor/magicLayerToFabric";
 import { objectId } from "./editor/layerHelpers";
 
 export function EditorCanvas() {
@@ -81,6 +81,23 @@ export function EditorCanvas() {
       canvas.on("object:moving", bumpRevision);
       canvas.on("object:scaling", bumpRevision);
       canvas.on("object:rotating", bumpRevision);
+      // 文字レイヤー (元画素そのまま) はダブルクリックで打ち替え可能なテキストへ変換する。
+      // 世界標準の「文字はダブルクリックで編集」に合わせる (2026-07-03 STΛCK指摘
+      // 「文字が画像になってるけどテキスト情報にならんかな」)。
+      canvas.on("mouse:dblclick", (event: any) => {
+        const target = event?.target;
+        if (!target?.get?.("textSpec")) return;
+        void convertTextImageToTextbox(canvas, target).then((converted) => {
+          if (!converted) return;
+          bumpRevision();
+          useEditor.getState().pushHistory();
+          useEditor
+            .getState()
+            .setMessage(
+              "編集できるテキストに変換しました。もう一度クリックで打ち替え、右のプロパティでフォント・色を変更できます。認識できなかった文字は打ち直してください。",
+            );
+        });
+      });
       canvas.on("mouse:down", (event: any) => {
         const tool = useEditor.getState().activeTool;
         if (tool !== "clickseg" && tool !== "grab") return;

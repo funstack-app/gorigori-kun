@@ -212,7 +212,7 @@ export function useEditorActions() {
         pushHistory();
         setMessage(
           full
-            ? `${result.layers.length}個の物体と文字${result.textLayers.length}件を切り出しました。背景は補完済みです。`
+            ? `${result.layers.length}個の物体と文字${result.textLayers.length}件を切り出しました。文字はダブルクリックで打ち替えできます。`
             : `${added}個のレイヤーを切り出しました。右の一覧から選んで動かせます。`,
         );
       } else {
@@ -266,7 +266,7 @@ export function useEditorActions() {
         pushHistory();
         setMessage(
           full
-            ? `${result.layers.length}個の物体と文字${result.textLayers.length}件を切り出しました。足りないものは「ことば」で追加できます。`
+            ? `${result.layers.length}個の物体と文字${result.textLayers.length}件を切り出しました。文字はダブルクリックで打ち替え、足りないものは「ことば」で追加できます。`
             : `${added}個のレイヤーを切り出しました。足りないものは「ことば」を入力して追加できます。`,
         );
       } else {
