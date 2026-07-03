@@ -70,7 +70,14 @@ pub async fn inpaint_image(
 
     // work に修復結果を積み上げる。後続クラスタのクロップは修復済み画素を文脈として見る
     // (隣接クラスタの境界に矛盾した模様が出にくい)。
+    //
+    // クラスタ単位の失敗は全体を止めない: LaMa の FFC ノードが環境依存で稀に失敗する
+    // (実機 2026-07-03: 'GetElementType is not implemented'。テストでは未再現)。
+    // 失敗したクラスタは元画素のまま残し (=その箇所だけ消えない)、他クラスタと
+    // パイプライン全体は続行する。全クラスタ失敗時のみ Err を返す。
     let mut work = img.to_rgb8();
+    let mut failed = 0usize;
+    let mut last_error = String::new();
     for bbox in &clusters {
         let crop = context_crop(*bbox, orig_w, orig_h);
         let scale = crop[2].max(crop[3]) as f64 / LAMA_SIZE as f64;
@@ -78,7 +85,7 @@ pub async fn inpaint_image(
         // 縮小修復は消し跡がぼやけ、文字状のノイズが出やすい (実測 2026-07-03)。
         // 太い塊 (人物跡地等) はタイル内が全面マスクになり文脈を失うので従来のクロップ縮小。
         let thin_band = bbox[2].min(bbox[3]) <= THIN_BAND_MAX;
-        if scale > 1.05 && thin_band && orig_w.min(orig_h) >= LAMA_SIZE {
+        let result = if scale > 1.05 && thin_band && orig_w.min(orig_h) >= LAMA_SIZE {
             let tiles = native_tiles(*bbox, orig_w, orig_h);
             tracing::info!(
                 target: "codex.edit",
@@ -86,11 +93,15 @@ pub async fn inpaint_image(
                 bbox,
                 tiles.len()
             );
+            let mut tile_result = Ok(());
             for tile in tiles {
-                inpaint_crop(&session, &mut work, &mask, tile).await?;
+                if let Err(e) = inpaint_crop(&session, &mut work, &mask, tile).await {
+                    tile_result = Err(e);
+                    break;
+                }
             }
+            tile_result
         } else {
-            inpaint_crop(&session, &mut work, &mask, crop).await?;
             tracing::info!(
                 target: "codex.edit",
                 "inpaint: cluster bbox={:?} crop={:?} (縮小率 {:.2}x)",
@@ -98,7 +109,22 @@ pub async fn inpaint_image(
                 crop,
                 scale
             );
+            inpaint_crop(&session, &mut work, &mask, crop).await
+        };
+        if let Err(reason) = result {
+            failed += 1;
+            tracing::warn!(
+                target: "codex.edit",
+                "inpaint: cluster bbox={bbox:?} の修復に失敗、元画素のまま続行 ({reason})"
+            );
+            last_error = reason;
         }
+    }
+    if failed == clusters.len() {
+        return Err(format!(
+            "inpaint: 全{}クラスタの修復に失敗 (最後のエラー: {last_error})",
+            clusters.len()
+        ));
     }
 
     if let Some(parent) = output_path.parent() {

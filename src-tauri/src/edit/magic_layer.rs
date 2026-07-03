@@ -190,8 +190,14 @@ async fn run_magic_layer_inner(
         tokio::fs::copy(input_path, &text_removed_path)
             .await
             .map_err(|e| format!("copy text-removed: {e}"))?;
-    } else {
-        inpaint_image(runtime, input_path, &text_mask_path, &text_removed_path).await?;
+    } else if let Err(reason) =
+        inpaint_image(runtime, input_path, &text_mask_path, &text_removed_path).await
+    {
+        // 消去に失敗しても分解全体は止めない (文字が残るだけ)。原画像で続行する。
+        tracing::warn!(target: "codex.edit", "magic_layer: テキスト消去に失敗、原画像で続行 ({reason})");
+        tokio::fs::copy(input_path, &text_removed_path)
+            .await
+            .map_err(|e| format!("copy text-removed (fallback): {e}"))?;
     }
 
     tracing::info!(target: "codex.edit", "magic_layer: セグメント開始");
@@ -246,8 +252,13 @@ async fn run_magic_layer_inner(
             tokio::fs::copy(input_path, &text_removed_path)
                 .await
                 .map_err(|e| format!("copy text-removed (protected): {e}"))?;
-        } else {
-            inpaint_image(runtime, input_path, &text_mask_path, &text_removed_path).await?;
+        } else if let Err(reason) =
+            inpaint_image(runtime, input_path, &text_mask_path, &text_removed_path).await
+        {
+            tracing::warn!(target: "codex.edit", "magic_layer: 保護後テキスト消去に失敗、原画像で続行 ({reason})");
+            tokio::fs::copy(input_path, &text_removed_path)
+                .await
+                .map_err(|e| format!("copy text-removed (protected fallback): {e}"))?;
         }
     }
 
