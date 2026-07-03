@@ -4,6 +4,7 @@ import { FontPicker } from "./FontPicker";
 import { useEditor } from "./editor/editorStore";
 import { getObjectById, objectKind } from "./editor/layerHelpers";
 import { convertTextImageToTextbox, getCanvasBaseSize } from "./editor/magicLayerToFabric";
+import { useEditorActions } from "./editor/useEditor";
 
 type FabricObject = any;
 
@@ -121,6 +122,7 @@ function ImagePropertyEditor({ object }: { object: FabricObject }) {
           テキストとして編集 (打ち替え可能に変換)
         </button>
       ) : null}
+      {object.get?.("sourcePath") ? <RestyleSection /> : null}
       {/* 図形 (rect/circle/line/path) は塗り・線の色をここで変えられる。 */}
       {isShapeObject(object) ? (
         <div className="space-y-2">
@@ -528,6 +530,45 @@ function AlignOrderSection({ object }: { object: FabricObject }) {
           {alignButton("最後", () => reorder("back"))}
         </div>
       </Field>
+    </div>
+  );
+}
+
+/**
+ * 同じ雰囲気のままAIで差し替える (分解で切り出したレイヤー限定)。
+ * 例: 文字レイヤーを選んで「文字を『未来は今日だ』に」→ 書体・質感を保った差し替え。
+ */
+function RestyleSection() {
+  const [instruction, setInstruction] = useState("");
+  const busyTool = useEditor((state) => state.busyTool);
+  const { restyleSelectedLayer } = useEditorActions();
+  const busy = busyTool !== null;
+  const run = () => {
+    const trimmed = instruction.trim();
+    if (!trimmed || busy) return;
+    void restyleSelectedLayer(
+      `マスクの白い領域だけを編集する: ${trimmed}。周囲と同じ書体・色・質感・光・雰囲気を完全に維持し、白い領域の外は1ピクセルも変更しない。`,
+    );
+  };
+  return (
+    <div className="space-y-1.5 rounded-lg border border-pink-500/30 bg-pink-500/5 p-2">
+      <p className="text-[10px] font-black text-pink-200">✦ 同じ雰囲気でAI差し替え</p>
+      <textarea
+        value={instruction}
+        onChange={(event) => setInstruction(event.target.value)}
+        rows={2}
+        placeholder="例: 文字を「未来は今日だ。」に差し替える"
+        disabled={busy}
+        className="w-full resize-none rounded-md border border-[#343434] bg-[#0b0b0b] px-2 py-1.5 text-xs text-neutral-100 outline-none placeholder:text-neutral-600 focus:border-pink-400 disabled:opacity-50"
+      />
+      <button
+        type="button"
+        onClick={run}
+        disabled={busy || instruction.trim().length === 0}
+        className="w-full rounded-md bg-pink-500 px-3 py-1.5 text-[11px] font-black text-white hover:bg-pink-600 disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-500"
+      >
+        {busy ? "AIが描き直し中…" : "差し替える"}
+      </button>
     </div>
   );
 }

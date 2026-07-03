@@ -319,6 +319,8 @@ async function addTextLayersToCanvas(
         left: clampPlacement(x, width),
         top: clampPlacement(y, height),
         selectable: true,
+        sourcePath: text.imagePath,
+        sourceBbox: text.imageBbox,
         // 打ち替え変換用に認識結果を保持する (JSON化しても残るプレーン値)。
         textSpec: {
           text: text.text,
@@ -439,6 +441,9 @@ export async function applyWordsResultToCanvas(
       left: clampPlacement(x, result.width),
       top: clampPlacement(y, result.height),
       selectable: true,
+      // AI再生成 (同じ雰囲気で差し替え) 用に切り出し元の情報を保持する。
+      sourcePath: layer.imagePath,
+      sourceBbox: layer.bbox,
     });
     canvas.add(image);
     added += 1;
@@ -473,6 +478,8 @@ export async function addWordLayersToCanvas(
       left: clampPlacement(x, result.width),
       top: clampPlacement(y, result.height),
       selectable: true,
+      sourcePath: layer.imagePath,
+      sourceBbox: layer.bbox,
     });
     canvas.add(image);
     last = image;
@@ -574,6 +581,37 @@ export function fitCanvasToImage(canvas: FabricCanvas, imageWidth: number, image
   const x = (width - imageWidth * safeZoom) / 2;
   const y = (height - imageHeight * safeZoom) / 2;
   canvas.setViewportTransform?.([safeZoom, 0, 0, safeZoom, x, y]);
+}
+
+/**
+ * AI再生成の結果 (dataURL) で既存レイヤーを同位置に置き換える。
+ * textSpec 等の引き継ぎプロパティは extraProps で渡す。
+ */
+export async function replaceLayerWithDataUrl(
+  canvas: FabricCanvas,
+  target: FabricObject,
+  dataUrl: string,
+  extraProps: Record<string, unknown> = {},
+): Promise<FabricObject> {
+  const fabric = await importFabric();
+  const left = target.left ?? 0;
+  const top = target.top ?? 0;
+  const name = (target.get?.("name") as string) ?? "レイヤー";
+  canvas.remove(target);
+  const image = await loadFabricImageFromUrl(fabric, dataUrl);
+  image.set({
+    id: createLayerId(),
+    name,
+    layerKind: "image",
+    left,
+    top,
+    selectable: true,
+    ...extraProps,
+  });
+  canvas.add(image);
+  canvas.setActiveObject?.(image);
+  canvas.requestRenderAll?.();
+  return image;
 }
 
 /** キャンバスに記録した元画像寸法 (無ければ null)。 */

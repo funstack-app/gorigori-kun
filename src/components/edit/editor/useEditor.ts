@@ -26,6 +26,7 @@ import {
   applyWordsResultToCanvas,
   addShapeToCanvas,
   exportCanvasPngBase64,
+  replaceLayerWithDataUrl,
   showSourceImagePreview,
   SOURCE_PREVIEW_ID,
   applyGrabResultToCanvas,
@@ -319,6 +320,69 @@ export function useEditorActions() {
     }
   };
 
+  /**
+   * 同じ雰囲気のまま文字 (レイヤー) を AI で差し替える。
+   * 選択レイヤーの領域だけをマスクして Codex にインペイント編集させ (他は1pxも触らせない)、
+   * 生成結果と元画像の差分領域を透過パッチとして同位置のレイヤーに差し替える。
+   */
+  const restyleSelectedLayer = async (instruction: string) => {
+    if (!canvas || !sourceImagePath) {
+      setError("画像を開いてから実行してください。");
+      return;
+    }
+    const selectedId = useEditor.getState().selectedLayerId;
+    const objects =
+      (canvas as { getObjects?: () => Array<Record<string, any>> }).getObjects?.() ?? [];
+    const target = objects.find((object) => object.get?.("id") === selectedId);
+    const sourcePath = target?.get?.("sourcePath") as string | undefined;
+    const sourceBbox = target?.get?.("sourceBbox") as
+      | [number, number, number, number]
+      | undefined;
+    if (!target || !sourcePath || !sourceBbox) {
+      setError("AI差し替えに対応したレイヤー (分解で切り出したもの) を選択してください。");
+      return;
+    }
+
+    setBusyTool("words");
+    setError(null);
+    setMessage("AIが同じ雰囲気で描き直しています… (30秒〜2分)");
+    try {
+      // 1) 選択レイヤーの領域マスク (フルサイズ座標) を作る。
+      const maskDataUrl = await buildFullSizeMaskFromCrop(sourcePath, sourceBbox, canvas);
+      const maskBytes = dataUrlToBytes(maskDataUrl);
+      const maskPath = await images.writeUpload(`restyle-mask-${Date.now()}.png`, maskBytes);
+
+      // 2) Codex にインペイント編集させる (白い領域だけ変更)。
+      const result = await images.generateBatch({
+        prompt: instruction,
+        count: 1,
+        refImagePaths: [sourceImagePath],
+        maskPaths: [maskPath],
+      });
+      const generatedPath = result.generatedPaths[0];
+      if (!generatedPath || result.failedCount > 0) {
+        throw new Error(result.errors[0] ?? "AI差し替えに失敗しました。");
+      }
+
+      // 3) 元画像との差分を透過パッチ化して、同位置のレイヤーに差し替える。
+      const patch = await buildDiffPatch(sourceImagePath, generatedPath, sourceBbox);
+      const textSpec = target.get?.("textSpec");
+      await replaceLayerWithDataUrl(canvas, target, patch.dataUrl, {
+        left: patch.left,
+        top: patch.top,
+        sourceBbox: [patch.left, patch.top, patch.width, patch.height],
+        ...(textSpec ? { textSpec } : {}),
+      });
+      bumpRevision();
+      pushHistory();
+      setMessage("同じ雰囲気で差し替えました。気に入らなければ ⌘Z で戻せます。");
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setBusyTool(null);
+    }
+  };
+
   const chooseImage = async () => {
     const selected = await open({
       multiple: false,
@@ -573,6 +637,7 @@ export function useEditorActions() {
     runWordsAuto,
     addShape,
     exportPng,
+    restyleSelectedLayer,
     chooseImage,
     runMagic,
     handleCanvasClickForTool,
@@ -592,4 +657,112 @@ function base64ToBytes(base64: string): Uint8Array {
     bytes[i] = binary.charCodeAt(i);
   }
   return bytes;
+}
+
+/** クロップPNG (bbox位置) をフルサイズの白黒マスク dataURL にする。 */
+async function buildFullSizeMaskFromCrop(
+  cropPath: string,
+  bbox: [number, number, number, number],
+  canvas: unknown,
+): Promise<string> {
+  const { convertFileSrc } = await import("@tauri-apps/api/core");
+  const { getCanvasBaseSize } = await import("./magicLayerToFabric");
+  const base = getCanvasBaseSize(canvas as never);
+  if (!base) throw new Error("元画像の寸法が取得できません。");
+  const img = await loadHtmlImage(convertFileSrc(cropPath));
+  const work = document.createElement("canvas");
+  work.width = base.width;
+  work.height = base.height;
+  const ctx = work.getContext("2d");
+  if (!ctx) throw new Error("canvas context を取得できません。");
+  ctx.fillStyle = "#000";
+  ctx.fillRect(0, 0, work.width, work.height);
+  ctx.drawImage(img, bbox[0], bbox[1]);
+  const data = ctx.getImageData(0, 0, work.width, work.height);
+  const px = data.data;
+  for (let i = 0; i < px.length; i += 4) {
+    const v = px[i + 3] > 16 ? 255 : 0;
+    px[i] = v;
+    px[i + 1] = v;
+    px[i + 2] = v;
+    px[i + 3] = 255;
+  }
+  ctx.putImageData(data, 0, 0);
+  return work.toDataURL("image/png");
+}
+
+/** 元画像と生成結果の差分領域を透過パッチにする (bbox+余白の範囲だけ見る)。 */
+async function buildDiffPatch(
+  sourcePath: string,
+  generatedPath: string,
+  bbox: [number, number, number, number],
+): Promise<{ dataUrl: string; left: number; top: number; width: number; height: number }> {
+  const { convertFileSrc } = await import("@tauri-apps/api/core");
+  const [src, gen] = await Promise.all([
+    loadHtmlImage(convertFileSrc(sourcePath)),
+    loadHtmlImage(convertFileSrc(generatedPath)),
+  ]);
+  const pad = 24;
+  const left = Math.max(0, Math.round(bbox[0]) - pad);
+  const top = Math.max(0, Math.round(bbox[1]) - pad);
+  const width = Math.min(src.naturalWidth - left, Math.round(bbox[2]) + pad * 2);
+  const height = Math.min(src.naturalHeight - top, Math.round(bbox[3]) + pad * 2);
+  // 生成結果は元画像と同解像度とは限らないためスケールを合わせて読む。
+  const scaleX = gen.naturalWidth / src.naturalWidth;
+  const scaleY = gen.naturalHeight / src.naturalHeight;
+
+  const draw = (img: HTMLImageElement, sx: number, sy: number, sw: number, sh: number) => {
+    const c = document.createElement("canvas");
+    c.width = width;
+    c.height = height;
+    const ctx = c.getContext("2d");
+    if (!ctx) throw new Error("canvas context を取得できません。");
+    ctx.drawImage(img, sx, sy, sw, sh, 0, 0, width, height);
+    return { canvas: c, ctx };
+  };
+  const srcDraw = draw(src, left, top, width, height);
+  const genDraw = draw(gen, left * scaleX, top * scaleY, width * scaleX, height * scaleY);
+
+  const srcData = srcDraw.ctx.getImageData(0, 0, width, height);
+  const genData = genDraw.ctx.getImageData(0, 0, width, height);
+  const out = genDraw.ctx.createImageData(width, height);
+  for (let i = 0; i < out.data.length; i += 4) {
+    const diff =
+      Math.abs(srcData.data[i] - genData.data[i]) +
+      Math.abs(srcData.data[i + 1] - genData.data[i + 1]) +
+      Math.abs(srcData.data[i + 2] - genData.data[i + 2]);
+    out.data[i] = genData.data[i];
+    out.data[i + 1] = genData.data[i + 1];
+    out.data[i + 2] = genData.data[i + 2];
+    out.data[i + 3] = diff > 36 ? 255 : 0;
+  }
+  const result = document.createElement("canvas");
+  result.width = width;
+  result.height = height;
+  const rctx = result.getContext("2d");
+  if (!rctx) throw new Error("canvas context を取得できません。");
+  rctx.putImageData(out, 0, 0);
+  return { dataUrl: result.toDataURL("image/png"), left, top, width, height };
+}
+
+/** dataURL の base64 本体をバイト列へ。 */
+function dataUrlToBytes(dataUrl: string): Uint8Array {
+  const comma = dataUrl.indexOf(",");
+  const base64 = comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl;
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+function loadHtmlImage(src: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error(`画像を読み込めません: ${src}`));
+    img.src = src;
+  });
 }
