@@ -127,11 +127,105 @@ pub async fn inpaint_image(
         ));
     }
 
+    // 仕上げ: 消し跡の残渣再修復 (2026-07-03)。LaMa は暗い背景上の文字帯に、明るい
+    // グリフ状の模様を幻覚する癖がある (fp32/int8・縮小/ネイティブの全条件で実測)。
+    // 修復画素のうち周辺の無傷背景から輝度が大きく外れたものを残渣として検出し、
+    // その画素だけ1回再修復する。2回目は幻覚の種 (文字のグロー等) がもう存在しない
+    // ため、周辺のきれいな背景から埋まる。対象は細長い帯クラスタのみ (物体跡地の
+    // 正当なハイライト補完を巻き込まない)。
+    let mut residue =
+        ImageBuffer::<Luma<u8>, Vec<u8>>::from_pixel(orig_w, orig_h, Luma([0u8]));
+    let mut residue_area = 0u64;
+    for bbox in &clusters {
+        if bbox[2].min(bbox[3]) > THIN_BAND_MAX {
+            continue;
+        }
+        residue_area += mark_residue(&work, &mask, *bbox, orig_w, orig_h, &mut residue);
+    }
+    if residue_area > 0 {
+        let residue = crate::edit::grab::dilate_mask_pub(&residue, 4);
+        tracing::info!(
+            target: "codex.edit",
+            "inpaint: 残渣{}pxを検出、再修復パスを実行",
+            residue_area
+        );
+        for bbox in mask_cluster_bboxes(&residue) {
+            let crop = context_crop(bbox, orig_w, orig_h);
+            if let Err(reason) = inpaint_crop(&session, &mut work, &residue, crop).await {
+                tracing::warn!(target: "codex.edit", "inpaint: 残渣再修復に失敗、そのまま続行 ({reason})");
+            }
+        }
+    }
+
     if let Some(parent) = output_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {e}"))?;
     }
     work.save(output_path).map_err(|e| format!("save: {e}"))?;
     Ok(())
+}
+
+/// 残渣検出: クラスタの文脈クロップ内で、無傷背景の輝度分布 (p5/p95) から大きく外れた
+/// 修復画素を residue へ白でマークする。マークした画素数を返す。
+///
+/// なぜ p5/p95 基準か: 平均±閾値だと光筋等のグラデーションで誤検出する。無傷画素の
+/// 5〜95 パーセンタイル帯 + マージンを「背景としてありえる輝度」とみなし、そこから
+/// 外れた修復画素 (暗い壁の上の白い幻覚 = p95 超え) だけを残渣と判定する。
+const RESIDUE_MARGIN: i32 = 40;
+
+fn mark_residue(
+    work: &ImageBuffer<Rgb<u8>, Vec<u8>>,
+    mask: &ImageBuffer<Luma<u8>, Vec<u8>>,
+    bbox: [u32; 4],
+    orig_w: u32,
+    orig_h: u32,
+    residue: &mut ImageBuffer<Luma<u8>, Vec<u8>>,
+) -> u64 {
+    let [cx, cy, cw, ch] = context_crop(bbox, orig_w, orig_h);
+    let luma = |p: &Rgb<u8>| -> i32 {
+        (299 * p[0] as i32 + 587 * p[1] as i32 + 114 * p[2] as i32) / 1000
+    };
+
+    // 無傷画素の輝度ヒストグラムから p5/p95 を取る。
+    let mut hist = [0u64; 256];
+    let mut total = 0u64;
+    for yy in cy..cy + ch {
+        for xx in cx..cx + cw {
+            if mask.get_pixel(xx, yy)[0] <= 127 {
+                hist[luma(work.get_pixel(xx, yy)) as usize] += 1;
+                total += 1;
+            }
+        }
+    }
+    if total < 1000 {
+        return 0; // 文脈が少なすぎて分布が信用できない。
+    }
+    let percentile = |q: f64| -> i32 {
+        let target = (total as f64 * q) as u64;
+        let mut acc = 0u64;
+        for (v, &count) in hist.iter().enumerate() {
+            acc += count;
+            if acc >= target {
+                return v as i32;
+            }
+        }
+        255
+    };
+    let low = percentile(0.05) - RESIDUE_MARGIN;
+    let high = percentile(0.95) + RESIDUE_MARGIN;
+
+    let mut marked = 0u64;
+    for yy in cy..cy + ch {
+        for xx in cx..cx + cw {
+            if mask.get_pixel(xx, yy)[0] > 127 {
+                let v = luma(work.get_pixel(xx, yy));
+                if v < low || v > high {
+                    residue.put_pixel(xx, yy, Luma([255u8]));
+                    marked += 1;
+                }
+            }
+        }
+    }
+    marked
 }
 
 /// クロップ領域を 512x512 で LaMa 修復し、クロップ内のマスク画素だけ work へ書き戻す。
@@ -245,6 +339,160 @@ async fn inpaint_crop(
         }
     }
     Ok(())
+}
+
+/// テキスト消去の正規経路: マスクを決定論補間で埋めて保存する (LaMa 不使用)。
+/// 入出力はファイルパス (magic_layer / edit_words のテキスト消去から呼ぶ)。
+pub fn remove_text_by_interpolation(
+    input_path: &Path,
+    mask_path: &Path,
+    output_path: &Path,
+) -> Result<(), String> {
+    let mut img = image::open(input_path)
+        .map_err(|e| format!("open: {e}"))?
+        .to_rgb8();
+    let mask = image::open(mask_path)
+        .map_err(|e| format!("mask open: {e}"))?
+        .to_luma8();
+    if mask.dimensions() != img.dimensions() {
+        return Err("text mask size mismatch".to_string());
+    }
+    fill_masked_interpolate(&mut img, &mask);
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {e}"))?;
+    }
+    img.save(output_path).map_err(|e| format!("save: {e}"))
+}
+
+/// テキスト帯用の決定論フィル: マスク画素を上下左右の最近傍無傷画素から距離加重で
+/// 補間し、マスク内だけ平滑化する。LaMa を使わない。
+///
+/// なぜ (2026-07-03 実測): LaMa は文字帯の穴に明るいグリフ状の模様を幻覚する癖があり、
+/// マスク方式 (ストローク/矩形)・解像度 (縮小/ネイティブ)・残渣再修復のどの組でも
+/// 完全には消えなかった。文字は細い帯なので、上下の無傷背景からの補間で十分自然に
+/// 埋まり、決定論なので毎回同じ結果になる (STΛCK指摘「テキストは別ロジックに」)。
+pub fn fill_masked_interpolate(
+    img: &mut ImageBuffer<Rgb<u8>, Vec<u8>>,
+    mask: &ImageBuffer<Luma<u8>, Vec<u8>>,
+) {
+    let (w, h) = img.dimensions();
+    if mask.dimensions() != (w, h) || w == 0 || h == 0 {
+        return;
+    }
+    let masked = |x: u32, y: u32| mask.get_pixel(x, y)[0] > 127;
+
+    // 各方向の最近傍無傷画素 (距離と色) を2パスずつで前計算する。
+    type Ref = Option<(u32, [f64; 3])>;
+    let mut up: Vec<Ref> = vec![None; (w * h) as usize];
+    let mut down: Vec<Ref> = vec![None; (w * h) as usize];
+    let mut left: Vec<Ref> = vec![None; (w * h) as usize];
+    let mut right: Vec<Ref> = vec![None; (w * h) as usize];
+    let idx = |x: u32, y: u32| (y * w + x) as usize;
+    let color = |img: &ImageBuffer<Rgb<u8>, Vec<u8>>, x: u32, y: u32| -> [f64; 3] {
+        let p = img.get_pixel(x, y);
+        [p[0] as f64, p[1] as f64, p[2] as f64]
+    };
+
+    for x in 0..w {
+        let mut last: Option<(u32, [f64; 3])> = None;
+        for y in 0..h {
+            if masked(x, y) {
+                up[idx(x, y)] = last.map(|(ly, c)| (y - ly, c));
+            } else {
+                last = Some((y, color(img, x, y)));
+            }
+        }
+        let mut last: Option<(u32, [f64; 3])> = None;
+        for y in (0..h).rev() {
+            if masked(x, y) {
+                down[idx(x, y)] = last.map(|(ly, c)| (ly - y, c));
+            } else {
+                last = Some((y, color(img, x, y)));
+            }
+        }
+    }
+    for y in 0..h {
+        let mut last: Option<(u32, [f64; 3])> = None;
+        for x in 0..w {
+            if masked(x, y) {
+                left[idx(x, y)] = last.map(|(lx, c)| (x - lx, c));
+            } else {
+                last = Some((x, color(img, x, y)));
+            }
+        }
+        let mut last: Option<(u32, [f64; 3])> = None;
+        for x in (0..w).rev() {
+            if masked(x, y) {
+                right[idx(x, y)] = last.map(|(lx, c)| (lx - x, c));
+            } else {
+                last = Some((x, color(img, x, y)));
+            }
+        }
+    }
+
+    // 距離加重 (1/d) で4方向を合成。
+    for y in 0..h {
+        for x in 0..w {
+            if !masked(x, y) {
+                continue;
+            }
+            let mut acc = [0f64; 3];
+            let mut weight = 0f64;
+            for r in [&up, &down, &left, &right] {
+                if let Some((d, c)) = r[idx(x, y)] {
+                    let wgt = 1.0 / (d.max(1) as f64);
+                    for ch in 0..3 {
+                        acc[ch] += c[ch] * wgt;
+                    }
+                    weight += wgt;
+                }
+            }
+            if weight > 0.0 {
+                img.put_pixel(
+                    x,
+                    y,
+                    Rgb([
+                        (acc[0] / weight).round().clamp(0.0, 255.0) as u8,
+                        (acc[1] / weight).round().clamp(0.0, 255.0) as u8,
+                        (acc[2] / weight).round().clamp(0.0, 255.0) as u8,
+                    ]),
+                );
+            }
+        }
+    }
+
+    // マスク内だけ 3x3 平均を2回かけ、列方向の筋を均す。
+    for _ in 0..2 {
+        let snapshot = img.clone();
+        for y in 0..h {
+            for x in 0..w {
+                if !masked(x, y) {
+                    continue;
+                }
+                let mut acc = [0u32; 3];
+                let mut n = 0u32;
+                for dy in -1i32..=1 {
+                    for dx in -1i32..=1 {
+                        let nx = x as i32 + dx;
+                        let ny = y as i32 + dy;
+                        if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 {
+                            continue;
+                        }
+                        let p = snapshot.get_pixel(nx as u32, ny as u32);
+                        acc[0] += p[0] as u32;
+                        acc[1] += p[1] as u32;
+                        acc[2] += p[2] as u32;
+                        n += 1;
+                    }
+                }
+                img.put_pixel(
+                    x,
+                    y,
+                    Rgb([(acc[0] / n) as u8, (acc[1] / n) as u8, (acc[2] / n) as u8]),
+                );
+            }
+        }
+    }
 }
 
 /// マスクをクラスタ (近接断片をまとめた連結成分) に分け、各クラスタの bbox を返す。

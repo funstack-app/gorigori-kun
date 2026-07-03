@@ -13,7 +13,7 @@ use crate::commands::edit_segment::now_secs;
 use crate::commands::storage::{resolve_output_dir, StorageSettings};
 use crate::edit::inpaint::inpaint_image;
 use crate::edit::magic_layer::{
-    build_text_layers, generate_text_mask, split_overlay_regions, TextLayerSpec,
+    build_text_layers, generate_text_erase_mask, split_overlay_regions, TextLayerSpec,
 };
 use crate::edit::ocr::ocr_image_with_probmap;
 use crate::edit::sam3_text::{Sam3TextSession, DEFAULT_SCORE_THRESHOLD};
@@ -258,14 +258,16 @@ async fn run_words_segment(
                     tracing::info!(target: "codex.edit", "words: 物体上テキスト{protected}件を保護");
                 }
                 let text_mask_path = run_dir.join("text-mask.png");
-                generate_text_mask(input, &overlay_regions, prob_map.as_ref(), &text_mask_path)?;
+                generate_text_erase_mask(input, &overlay_regions, &text_mask_path)?;
                 if overlay_regions.is_empty() {
                     tokio::fs::copy(input, &text_removed_path)
                         .await
                         .map_err(|e| format!("copy text-removed: {e}"))?;
-                } else if let Err(reason) =
-                    inpaint_image(runtime, input, &text_mask_path, &text_removed_path).await
-                {
+                } else if let Err(reason) = crate::edit::inpaint::remove_text_by_interpolation(
+                    input,
+                    &text_mask_path,
+                    &text_removed_path,
+                ) {
                     tracing::warn!(target: "codex.edit", "words: テキスト消去失敗、原画像で続行 ({reason})");
                     tokio::fs::copy(input, &text_removed_path)
                         .await

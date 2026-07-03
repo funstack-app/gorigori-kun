@@ -184,15 +184,17 @@ async fn run_magic_layer_inner(
 
     let _ = app.emit(EVENT_EDIT_MAGIC_PROGRESS, MagicLayerProgress::RemovingText);
     let text_mask_path = run_dir.join("text-mask.png");
-    generate_text_mask(input_path, &regions, prob_map.as_ref(), &text_mask_path)?;
+    generate_text_erase_mask(input_path, &regions, &text_mask_path)?;
     let text_removed_path = run_dir.join("text-removed.png");
     if regions.is_empty() {
         tokio::fs::copy(input_path, &text_removed_path)
             .await
             .map_err(|e| format!("copy text-removed: {e}"))?;
-    } else if let Err(reason) =
-        inpaint_image(runtime, input_path, &text_mask_path, &text_removed_path).await
-    {
+    } else if let Err(reason) = crate::edit::inpaint::remove_text_by_interpolation(
+        input_path,
+        &text_mask_path,
+        &text_removed_path,
+    ) {
         // 消去に失敗しても分解全体は止めない (文字が残るだけ)。原画像で続行する。
         tracing::warn!(target: "codex.edit", "magic_layer: テキスト消去に失敗、原画像で続行 ({reason})");
         tokio::fs::copy(input_path, &text_removed_path)
@@ -247,14 +249,16 @@ async fn run_magic_layer_inner(
         );
         // text-removed / text-mask をオーバーレイ文字だけで作り直す。初回の全文字消去は
         // セグメント入力専用とし、成果物側は保護済み版で上書きする。
-        generate_text_mask(input_path, &regions, prob_map.as_ref(), &text_mask_path)?;
+        generate_text_erase_mask(input_path, &regions, &text_mask_path)?;
         if regions.is_empty() {
             tokio::fs::copy(input_path, &text_removed_path)
                 .await
                 .map_err(|e| format!("copy text-removed (protected): {e}"))?;
-        } else if let Err(reason) =
-            inpaint_image(runtime, input_path, &text_mask_path, &text_removed_path).await
-        {
+        } else if let Err(reason) = crate::edit::inpaint::remove_text_by_interpolation(
+            input_path,
+            &text_mask_path,
+            &text_removed_path,
+        ) {
             tracing::warn!(target: "codex.edit", "magic_layer: 保護後テキスト消去に失敗、原画像で続行 ({reason})");
             tokio::fs::copy(input_path, &text_removed_path)
                 .await
@@ -784,6 +788,59 @@ const DB_STROKE_DILATE_RATIO: f64 = 0.25;
 
 /// 確率マップが取れないときの bbox 近傍ゲート pad (px)。従来の矩形 pad(4) と同じ。
 const BBOX_GATE_PAD: i32 = 4;
+
+/// テキスト消去用マスク: 採用 region の bbox 矩形を文字高比例で膨張した「面」マスク。
+///
+/// なぜ矩形全面か (2026-07-03): 消去が決定論補間フィル (inpaint.rs
+/// remove_text_by_interpolation) になり、LaMa の過剰復元を避けるためにストロークへ
+/// 絞る理由が消えた。逆にストロークだと太いグリフ・グロー・装飾の取りこぼしが
+/// 白い断片として残る (実測: 太字タイトルで断片が多数残った)。bbox 全面 + 文字高比例の
+/// 膨張 (グロー吸収) で完全に覆う。
+pub fn generate_text_erase_mask(
+    input_path: &Path,
+    regions: &[TextRegion],
+    output_path: &Path,
+) -> Result<(), String> {
+    let img = image::open(input_path).map_err(|e| e.to_string())?;
+    let (w, h) = img.dimensions();
+    if w == 0 || h == 0 {
+        return Err("empty image for text erase mask".to_string());
+    }
+    let image_area = (w as f64) * (h as f64);
+    let min_text_area = image_area * 0.001;
+    let adopted: Vec<[i32; 4]> = regions
+        .iter()
+        .filter(|region| {
+            let text = region.text.trim();
+            if text.is_empty() || is_symbol_noise(text) {
+                return false;
+            }
+            let [_x, _y, rw, rh] = region.bbox;
+            (rw as f64) * (rh as f64) >= min_text_area
+        })
+        .map(|region| region.bbox)
+        .collect();
+
+    let raw = build_bbox_mask(w, h, &adopted);
+    // 文字高中央値の 1/4 (6..16px) 膨張でグロー・影の裾まで飲み込む。
+    let mut heights: Vec<i32> = adopted
+        .iter()
+        .map(|[_, _, _, rh]| *rh)
+        .filter(|rh| *rh > 0)
+        .collect();
+    heights.sort_unstable();
+    let dilate = heights
+        .get(heights.len() / 2)
+        .map(|&median_h| (median_h / 4).clamp(6, 16))
+        .unwrap_or(6);
+    let mask = crate::edit::grab::dilate_mask_pub(&raw, dilate);
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir mask parent: {e}"))?;
+    }
+    tracing::info!(target: "codex.edit", "text-erase-mask: bbox全面方式 adopted={} dilate={dilate}px", adopted.len());
+    mask.save(output_path)
+        .map_err(|e| format!("save erase mask: {e}"))
+}
 
 /// text-mask を生成する。確率マップがあれば「ストロークマスク」、無ければ従来の bbox 矩形。
 ///

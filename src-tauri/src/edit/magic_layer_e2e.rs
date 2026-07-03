@@ -747,22 +747,14 @@ async fn text_remove_real_image_probe() {
         .expect("ocr failed");
     eprintln!("[probe] regions={} probmap={}", regions.len(), prob_map.is_some());
     let mask_path = out.join("text-mask.png");
-    // GORI_TEXT_MASK=bbox で矩形マスク方式を強制 (ストローク方式とのA/B比較用)。
-    let use_prob = std::env::var("GORI_TEXT_MASK")
-        .map(|v| v != "bbox")
-        .unwrap_or(true);
-    generate_text_mask(
-        &input,
-        &regions,
-        if use_prob { prob_map.as_ref() } else { None },
-        &mask_path,
-    )
-    .expect("mask failed");
+    let _ = prob_map; // 消去は本番同様 bbox 全面マスク (prob_map はレイヤー色抽出専用)。
+    crate::edit::magic_layer::generate_text_erase_mask(&input, &regions, &mask_path)
+        .expect("erase mask failed");
     let removed = out.join("text-removed.png");
-    inpaint_image(&runtime, &input, &mask_path, &removed)
-        .await
-        .expect("inpaint failed");
-    eprintln!("[probe] テキスト消去完了 -> {}", removed.display());
+    // 本番経路と同じ決定論補間フィル (LaMa 不使用) で消す。
+    crate::edit::inpaint::remove_text_by_interpolation(&input, &mask_path, &removed)
+        .expect("interpolation fill failed");
+    eprintln!("[probe] テキスト消去完了 (補間フィル) -> {}", removed.display());
 }
 
 /// 実 PP-OCRv6 で任意の実画像を認識し、全 region のテキストを出力する検証プローブ。
