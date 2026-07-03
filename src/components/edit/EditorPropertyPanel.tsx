@@ -3,7 +3,7 @@ import { useMemo, useState } from "react";
 import { FontPicker } from "./FontPicker";
 import { useEditor } from "./editor/editorStore";
 import { getObjectById, objectKind } from "./editor/layerHelpers";
-import { convertTextImageToTextbox } from "./editor/magicLayerToFabric";
+import { convertTextImageToTextbox, getCanvasBaseSize } from "./editor/magicLayerToFabric";
 
 type FabricObject = any;
 
@@ -79,6 +79,13 @@ function TextPropertyEditor({ object }: { object: FabricObject }) {
       </div>
       <NumberSlider label="文字間隔" value={numberValue(object.charSpacing, 0)} min={-200} max={800} onChange={(charSpacing) => apply({ charSpacing })} onCommit={apply.commit} />
       <NumberSlider label="行間" value={numberValue(object.lineHeight, 1.16)} min={0.6} max={3} step={0.05} onChange={(lineHeight) => apply({ lineHeight })} onCommit={apply.commit} />
+      <div className="grid grid-cols-2 gap-2">
+        <ColorField label="縁取りの色" value={colorToHex(object.stroke, "#000000")} onChange={(stroke) => { apply({ stroke, paintFirst: "stroke" }); apply.commit(); }} />
+        <div />
+      </div>
+      <NumberSlider label="縁取りの太さ" value={numberValue(object.strokeWidth, 0)} min={0} max={20} onChange={(strokeWidth) => apply({ strokeWidth, paintFirst: "stroke" })} onCommit={apply.commit} />
+      <ShadowControls object={object} apply={apply} />
+      <AlignOrderSection object={object} />
       <NumberSlider label="不透明度" value={numberValue(object.opacity, 1)} min={0} max={1} step={0.01} onChange={(opacity) => apply({ opacity })} onCommit={apply.commit} />
       <NumberSlider label="回転" value={numberValue(object.angle, 0)} min={-180} max={180} onChange={(angle) => apply({ angle })} onCommit={apply.commit} />
       <AdvancedGeometry object={object} apply={apply} />
@@ -114,6 +121,16 @@ function ImagePropertyEditor({ object }: { object: FabricObject }) {
           テキストとして編集 (打ち替え可能に変換)
         </button>
       ) : null}
+      {/* 図形 (rect/circle/line/path) は塗り・線の色をここで変えられる。 */}
+      {isShapeObject(object) ? (
+        <div className="space-y-2">
+          <div className="grid grid-cols-2 gap-2">
+            <ColorField label="塗り" value={colorToHex(object.fill, "#ff4d8d")} onChange={(fill) => { apply({ fill }); apply.commit(); }} />
+            <ColorField label="線色" value={colorToHex(object.stroke, "#ff4d8d")} onChange={(stroke) => { apply({ stroke }); apply.commit(); }} />
+          </div>
+          <NumberSlider label="線の太さ" value={numberValue(object.strokeWidth, 0)} min={0} max={30} onChange={(strokeWidth) => apply({ strokeWidth })} onCommit={apply.commit} />
+        </div>
+      ) : null}
       {/* まず「触ってすぐ効く」直感操作だけを見せる。生の座標・寸法は詳細に畳む。 */}
       <NumberSlider label="不透明度" value={numberValue(object.opacity, 1)} min={0} max={1} step={0.01} onChange={(opacity) => apply({ opacity })} onCommit={apply.commit} />
       <div className="grid grid-cols-2 gap-2">
@@ -128,6 +145,7 @@ function ImagePropertyEditor({ object }: { object: FabricObject }) {
       <NumberSlider label="明度" value={numberValue(object.get?.("brightness"), 0)} min={-1} max={1} step={0.05} onChange={(brightness) => void applyImageFilters(object, { brightness })} onCommit={() => void applyImageFilters(object, {}, apply.commit)} />
       <NumberSlider label="コントラスト" value={numberValue(object.get?.("contrast"), 0)} min={-1} max={1} step={0.05} onChange={(contrast) => void applyImageFilters(object, { contrast })} onCommit={() => void applyImageFilters(object, {}, apply.commit)} />
       <NumberSlider label="回転" value={numberValue(object.angle, 0)} min={-180} max={180} onChange={(angle) => apply({ angle })} onCommit={apply.commit} />
+      <AlignOrderSection object={object} />
       <AdvancedGeometry object={object} apply={apply} withSize />
     </div>
   );
@@ -337,4 +355,179 @@ function colorValue(value: unknown): string {
 
 function formatNumber(value: number): string {
   return Number.isInteger(value) ? String(value) : value.toFixed(2);
+}
+
+/** 図形 (fabric の基本シェイプ) かどうか。画像レイヤーとは色プロパティの出し分けに使う。 */
+function isShapeObject(object: FabricObject): boolean {
+  return ["rect", "circle", "triangle", "line", "polyline", "polygon", "path"].includes(
+    String(object.type ?? "").toLowerCase(),
+  );
+}
+
+/** fabric の色値を color input 用の #rrggbb に寄せる (それ以外はフォールバック)。 */
+function colorToHex(value: unknown, fallback: string): string {
+  if (typeof value === "string" && /^#[0-9a-fA-F]{6}$/.test(value)) return value;
+  if (typeof value === "string" && /^#[0-9a-fA-F]{3}$/.test(value)) {
+    return `#${value[1]}${value[1]}${value[2]}${value[2]}${value[3]}${value[3]}`;
+  }
+  return fallback;
+}
+
+function ColorField({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <Field label={label}>
+      <input
+        type="color"
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        className="h-9 w-full cursor-pointer rounded-lg border border-[#343434] bg-[#0b0b0b]"
+      />
+    </Field>
+  );
+}
+
+/**
+ * テキストの影。fabric は Shadow インスタンスを要求するため、変更時に fabric を
+ * 動的 import して組み立てる (ぼかし 0 で影なし)。
+ */
+function ShadowControls({ object, apply }: { object: FabricObject; apply: ApplyFn }) {
+  const shadow = (object.shadow ?? null) as
+    | { color?: string; blur?: number; offsetX?: number; offsetY?: number }
+    | null;
+  const setShadow = async (partial: { color?: string; blur?: number; offset?: number }) => {
+    const nextBlur = partial.blur ?? shadow?.blur ?? 0;
+    const nextColor = partial.color ?? shadow?.color ?? "#000000";
+    const nextOffset = partial.offset ?? Math.round(shadow?.offsetX ?? 4);
+    if (nextBlur <= 0 && nextOffset <= 0) {
+      apply({ shadow: null });
+      return;
+    }
+    const fabric = (await import("fabric")) as unknown as {
+      Shadow: new (options: Record<string, unknown>) => unknown;
+    };
+    apply({
+      shadow: new fabric.Shadow({
+        color: nextColor,
+        blur: nextBlur,
+        offsetX: nextOffset,
+        offsetY: nextOffset,
+      }),
+    });
+  };
+  return (
+    <div className="space-y-2">
+      <div className="grid grid-cols-2 gap-2">
+        <ColorField
+          label="影の色"
+          value={colorToHex(shadow?.color, "#000000")}
+          onChange={(color) => {
+            void setShadow({ color }).then(apply.commit);
+          }}
+        />
+        <div />
+      </div>
+      <NumberSlider
+        label="影のぼかし"
+        value={numberValue(shadow?.blur, 0)}
+        min={0}
+        max={40}
+        onChange={(blur) => void setShadow({ blur })}
+        onCommit={apply.commit}
+      />
+      <NumberSlider
+        label="影の距離"
+        value={numberValue(shadow?.offsetX, 0)}
+        min={0}
+        max={30}
+        onChange={(offset) => void setShadow({ offset })}
+        onCommit={apply.commit}
+      />
+    </div>
+  );
+}
+
+/** 整列 (元画像基準) と重ね順。画像・テキスト・図形の共通操作。 */
+function AlignOrderSection({ object }: { object: FabricObject }) {
+  const canvas = useEditor((state) => state.canvas) as {
+    getWidth?: () => number;
+    getHeight?: () => number;
+    requestRenderAll?: () => void;
+    bringObjectToFront?: (object: unknown) => void;
+    bringObjectForward?: (object: unknown) => void;
+    sendObjectBackwards?: (object: unknown) => void;
+    sendObjectToBack?: (object: unknown) => void;
+    bringToFront?: (object: unknown) => void;
+    bringForward?: (object: unknown) => void;
+    sendBackwards?: (object: unknown) => void;
+    sendToBack?: (object: unknown) => void;
+  } | null;
+  const bumpRevision = useEditor((state) => state.bumpRevision);
+  const pushHistory = useEditor((state) => state.pushHistory);
+  if (!canvas) return null;
+
+  const base = getCanvasBaseSize(canvas);
+  const baseWidth = base?.width ?? canvas.getWidth?.() ?? 0;
+  const baseHeight = base?.height ?? canvas.getHeight?.() ?? 0;
+  const scaledWidth = () => (Number(object.width) || 0) * (Number(object.scaleX) || 1);
+  const scaledHeight = () => (Number(object.height) || 0) * (Number(object.scaleY) || 1);
+  const place = (values: Record<string, unknown>) => {
+    object.set?.(values);
+    object.setCoords?.();
+    canvas.requestRenderAll?.();
+    bumpRevision();
+    pushHistory();
+  };
+  const reorder = (which: "front" | "forward" | "backward" | "back") => {
+    const call = (v6?: (o: unknown) => void, legacy?: (o: unknown) => void) => {
+      if (v6) v6.call(canvas, object);
+      else legacy?.call(canvas, object);
+    };
+    if (which === "front") call(canvas.bringObjectToFront, canvas.bringToFront);
+    if (which === "forward") call(canvas.bringObjectForward, canvas.bringForward);
+    if (which === "backward") call(canvas.sendObjectBackwards, canvas.sendBackwards);
+    if (which === "back") call(canvas.sendObjectToBack, canvas.sendToBack);
+    canvas.requestRenderAll?.();
+    bumpRevision();
+    pushHistory();
+  };
+  const alignButton = (label: string, onClick: () => void) => (
+    <button
+      key={label}
+      type="button"
+      onClick={onClick}
+      className="rounded-md border border-[#343434] bg-[#161616] px-1 py-1.5 text-[10px] font-bold text-neutral-300 transition hover:border-pink-400 hover:text-white"
+    >
+      {label}
+    </button>
+  );
+  return (
+    <div className="space-y-2 border-t border-[#242424] pt-2">
+      <Field label="整列 (画像基準)">
+        <div className="grid grid-cols-6 gap-1">
+          {alignButton("左", () => place({ left: 0 }))}
+          {alignButton("中", () => place({ left: (baseWidth - scaledWidth()) / 2 }))}
+          {alignButton("右", () => place({ left: baseWidth - scaledWidth() }))}
+          {alignButton("上", () => place({ top: 0 }))}
+          {alignButton("央", () => place({ top: (baseHeight - scaledHeight()) / 2 }))}
+          {alignButton("下", () => place({ top: baseHeight - scaledHeight() }))}
+        </div>
+      </Field>
+      <Field label="重ね順">
+        <div className="grid grid-cols-4 gap-1">
+          {alignButton("最前", () => reorder("front"))}
+          {alignButton("前へ", () => reorder("forward"))}
+          {alignButton("後へ", () => reorder("backward"))}
+          {alignButton("最後", () => reorder("back"))}
+        </div>
+      </Field>
+    </div>
+  );
 }

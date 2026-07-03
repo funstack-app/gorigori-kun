@@ -45,6 +45,24 @@ pub enum PsdLayerSpec {
 /// Photoshop で再編集可能なレイヤー構造ではなく、全レイヤーを 1 枚に合成した
 /// flattened RGB PSD として保存する。LayerComposer 側の PNG/JPG と同じ見た目を
 /// PSD 拡張子で受け渡すための最小実装。
+/// キャンバスの統合PNGを保存する。data_base64 はフロントの canvas.toDataURL 由来
+/// (data: プレフィックスなしの base64 本体)。
+#[tauri::command]
+pub async fn edit_export_png(path: String, data_base64: String) -> Result<(), String> {
+    use base64::{engine::general_purpose, Engine as _};
+    if path.trim().is_empty() {
+        return Err("保存先パスが空です".to_string());
+    }
+    let bytes = general_purpose::STANDARD
+        .decode(data_base64.trim())
+        .map_err(|e| format!("base64 decode: {e}"))?;
+    if bytes.is_empty() {
+        return Err("書き出しデータが空です".to_string());
+    }
+    std::fs::write(&path, &bytes).map_err(|e| format!("write png: {e}"))?;
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn edit_export_psd(
     state: State<'_, AppState>,

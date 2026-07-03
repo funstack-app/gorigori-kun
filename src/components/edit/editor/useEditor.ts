@@ -8,6 +8,7 @@ import {
   editSam2,
   editSegment,
   editWords,
+  editExport,
   codexVision,
   images,
 } from "../../../lib/ipc";
@@ -23,6 +24,8 @@ import {
   addTextRegionsToCanvas,
   addWordLayersToCanvas,
   applyWordsResultToCanvas,
+  addShapeToCanvas,
+  exportCanvasPngBase64,
   showSourceImagePreview,
   SOURCE_PREVIEW_ID,
   applyGrabResultToCanvas,
@@ -66,6 +69,26 @@ export function useEditorActions() {
     }
     if (!canvas) {
       setError("キャンバスを初期化中です。");
+      return;
+    }
+    if (tool === "shape") {
+      setMessage("右のパネルから図形を選んで追加してください。");
+      return;
+    }
+    if (tool === "image-add") {
+      if (!canvas) {
+        setError("キャンバスを初期化中です。");
+        return;
+      }
+      const selected = await open({
+        multiple: false,
+        filters: [{ name: "画像", extensions: IMAGE_EXTS }],
+      });
+      if (typeof selected !== "string") return;
+      await addImageLayerToCanvas(canvas, selected, selected.split(/[\\/]/).pop() ?? "画像");
+      bumpRevision();
+      pushHistory();
+      setMessage("画像をレイヤーとして追加しました。");
       return;
     }
     if (tool === "words") {
@@ -253,6 +276,46 @@ export function useEditorActions() {
       setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
       setBusyTool(null);
+    }
+  };
+
+  /** 図形をキャンバス中央に追加する (ShapeToolPanel から)。 */
+  const addShape = async (kind: "rect" | "circle" | "line" | "arrow", color: string) => {
+    if (!canvas) {
+      setError("キャンバスを初期化中です。");
+      return;
+    }
+    await addShapeToCanvas(canvas, kind, color);
+    bumpRevision();
+    pushHistory();
+    setMessage("図形を追加しました。ドラッグ・四隅で調整できます。");
+  };
+
+  /** キャンバスを統合PNGとして書き出す (保存先はユーザーが選ぶ)。 */
+  const exportPng = async () => {
+    if (!canvas) {
+      setError("キャンバスを初期化中です。");
+      return;
+    }
+    const base64 = exportCanvasPngBase64(canvas);
+    if (!base64) {
+      setError("書き出しデータの生成に失敗しました。");
+      return;
+    }
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    const target = await save({
+      defaultPath: "gori-export.png",
+      filters: [{ name: "PNG", extensions: ["png"] }],
+    });
+    if (typeof target !== "string") {
+      setMessage("書き出しをキャンセルしました。");
+      return;
+    }
+    try {
+      await editExport.png(target, base64);
+      setMessage(`書き出しました: ${target}`);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
     }
   };
 
@@ -508,6 +571,8 @@ export function useEditorActions() {
     run,
     runWords,
     runWordsAuto,
+    addShape,
+    exportPng,
     chooseImage,
     runMagic,
     handleCanvasClickForTool,

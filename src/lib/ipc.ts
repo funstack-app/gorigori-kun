@@ -345,6 +345,9 @@ export const images = {
 export const editExport = {
   psd: (composition: PsdComposition, outputPath: string) =>
     invoke<string>("edit_export_psd", { composition, outputPath }),
+  /** キャンバスの統合PNG保存 (dataBase64 は data: プレフィックスなし)。 */
+  png: (path: string, dataBase64: string) =>
+    invoke<void>("edit_export_png", { path, dataBase64 }),
 };
 
 export const layerSplitter = {

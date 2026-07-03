@@ -561,6 +561,11 @@ function clampPlacement(value: number | undefined, limit: number | undefined): n
 }
 
 export function fitCanvasToImage(canvas: FabricCanvas, imageWidth: number, imageHeight: number) {
+  // PNG書き出し・整列の基準になる「元画像の寸法」をキャンバスに記録する。
+  (canvas as { __ggBaseSize?: { width: number; height: number } }).__ggBaseSize = {
+    width: imageWidth,
+    height: imageHeight,
+  };
   const width = canvas.getWidth?.() ?? 1;
   const height = canvas.getHeight?.() ?? 1;
   if (!imageWidth || !imageHeight || !width || !height) return;
@@ -569,6 +574,96 @@ export function fitCanvasToImage(canvas: FabricCanvas, imageWidth: number, image
   const x = (width - imageWidth * safeZoom) / 2;
   const y = (height - imageHeight * safeZoom) / 2;
   canvas.setViewportTransform?.([safeZoom, 0, 0, safeZoom, x, y]);
+}
+
+/** キャンバスに記録した元画像寸法 (無ければ null)。 */
+export function getCanvasBaseSize(
+  canvas: FabricCanvas,
+): { width: number; height: number } | null {
+  const size = (canvas as { __ggBaseSize?: { width: number; height: number } }).__ggBaseSize;
+  return size && size.width > 0 && size.height > 0 ? size : null;
+}
+
+/** ビューポート中心のシーン座標 (図形・画像の初期配置用)。 */
+function sceneCenter(canvas: FabricCanvas): { x: number; y: number } {
+  const vpt: number[] = (canvas as { viewportTransform?: number[] }).viewportTransform ?? [
+    1, 0, 0, 1, 0, 0,
+  ];
+  const w = canvas.getWidth?.() ?? 800;
+  const h = canvas.getHeight?.() ?? 600;
+  const zoom = vpt[0] || 1;
+  return { x: (w / 2 - vpt[4]) / zoom, y: (h / 2 - vpt[5]) / zoom };
+}
+
+export type ShapeKind = "rect" | "circle" | "line" | "arrow";
+
+/** 図形をビューポート中心に追加する (基本の画像編集: 座布団・帯・線・矢印)。 */
+export async function addShapeToCanvas(
+  canvas: FabricCanvas,
+  kind: ShapeKind,
+  color: string,
+): Promise<void> {
+  const fabric = await importFabric();
+  const center = sceneCenter(canvas);
+  let object: FabricObject;
+  let name = "図形";
+  if (kind === "rect") {
+    object = new fabric.Rect({ width: 260, height: 150, fill: color });
+    name = "四角";
+  } else if (kind === "circle") {
+    object = new fabric.Circle({ radius: 90, fill: color });
+    name = "丸";
+  } else if (kind === "line") {
+    object = new fabric.Line([0, 0, 260, 0], { stroke: color, strokeWidth: 6 });
+    name = "線";
+  } else {
+    object = new fabric.Path("M 0 0 L 200 0 M 200 0 L 164 -22 M 200 0 L 164 22", {
+      stroke: color,
+      strokeWidth: 8,
+      fill: "",
+      strokeLineCap: "round",
+    });
+    name = "矢印";
+  }
+  object.set({
+    id: createLayerId(),
+    name,
+    layerKind: "image",
+    left: center.x - ((object.width ?? 100) * (object.scaleX ?? 1)) / 2,
+    top: center.y - ((object.height ?? 100) * (object.scaleY ?? 1)) / 2,
+    selectable: true,
+  });
+  canvas.add(object);
+  canvas.setActiveObject?.(object);
+  canvas.requestRenderAll?.();
+}
+
+/** キャンバスを元画像解像度の統合PNG (dataURL の base64 本体) に書き出す。 */
+export function exportCanvasPngBase64(canvas: FabricCanvas): string | null {
+  const base = getCanvasBaseSize(canvas);
+  const vpt: number[] | undefined = (canvas as { viewportTransform?: number[] })
+    .viewportTransform;
+  const saved = vpt ? [...vpt] : null;
+  try {
+    canvas.discardActiveObject?.();
+    canvas.setViewportTransform?.([1, 0, 0, 1, 0, 0]);
+    const dataUrl: string | undefined = (canvas as {
+      toDataURL?: (options?: Record<string, unknown>) => string;
+    }).toDataURL?.({
+      format: "png",
+      left: 0,
+      top: 0,
+      width: base?.width ?? canvas.getWidth?.() ?? 0,
+      height: base?.height ?? canvas.getHeight?.() ?? 0,
+      multiplier: 1,
+    });
+    if (!dataUrl) return null;
+    const comma = dataUrl.indexOf(",");
+    return comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl;
+  } finally {
+    if (saved) canvas.setViewportTransform?.(saved);
+    canvas.requestRenderAll?.();
+  }
 }
 
 async function importFabric(): Promise<FabricModule> {

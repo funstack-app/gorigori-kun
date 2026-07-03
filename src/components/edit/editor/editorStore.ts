@@ -13,7 +13,9 @@ export type EditorTool =
   | "inpaint"
   | "magic"
   | "redo-decompose"
-  | "words";
+  | "words"
+  | "image-add"
+  | "shape";
 
 /**
  * マジックグラブのクリックプレビュー状態。SAM2 predict で得たマスクを確定前に一時保持する。

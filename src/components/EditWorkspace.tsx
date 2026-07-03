@@ -7,6 +7,7 @@ import { EditorToolbar } from "./edit/EditorToolbar";
 import { EditModeSelector } from "./edit/EditModeSelector";
 import { EditPrimaryAction } from "./edit/EditPrimaryAction";
 import { WordsToolPanel } from "./edit/WordsToolPanel";
+import { ShapeToolPanel } from "./edit/ShapeToolPanel";
 import { LayerSplitterPanel } from "./edit/LayerSplitterPanel";
 import { CollapsibleSection } from "./edit/CollapsibleSection";
 import { useEditor } from "./edit/editor/editorStore";
@@ -42,7 +43,7 @@ export function EditWorkspace() {
   const busyTool = useEditor((state) => state.busyTool);
   const editMode = useEditor((state) => state.editMode);
   const setEditMode = useEditor((state) => state.setEditMode);
-  const { chooseImage, performUndo, performRedo } = useEditorActions();
+  const { chooseImage, performUndo, performRedo, exportPng } = useEditorActions();
 
   // Cmd/Ctrl+Z = 元に戻す / Cmd/Ctrl+Shift+Z = やり直す。
   // 編集タブ表示中だけ有効 (このコンポーネントがマウントされている間だけ listener を張る)。
@@ -91,6 +92,14 @@ export function EditWorkspace() {
         </span>
         <button
           type="button"
+          onClick={() => void exportPng()}
+          disabled={busyTool !== null || !sourceImagePath}
+          className="rounded-md border border-[#3a3a3a] bg-[#1a1a1a] px-3 py-1.5 text-[11px] font-black text-neutral-200 hover:border-pink-400 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          書き出し
+        </button>
+        <button
+          type="button"
           onClick={() => void chooseImage()}
           disabled={busyTool !== null}
           className="rounded-md bg-pink-500 px-3 py-1.5 text-[11px] font-black text-white hover:bg-pink-600 disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-500"
@@ -108,6 +117,7 @@ export function EditWorkspace() {
           <EditPrimaryAction />
           {/* ①' ことばで分離: 左レールで選んだときだけ入力パネルを出す。 */}
           {activeTool === "words" ? <WordsToolPanel /> : null}
+          {activeTool === "shape" ? <ShapeToolPanel /> : null}
           {/* ② レイヤー一覧: 主役。残り高さの大半を占める。 */}
           <EditorLayerList />
           {/* ③ プロパティ: レイヤーを選んでいるときだけ表示 (未選択時は場所を取らない)。 */}

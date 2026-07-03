@@ -9,6 +9,8 @@ import { useEditorActions } from "./editor/useEditor";
 const TOOLS: Array<{ id: EditorTool; icon: ReactNode; label: string }> = [
   { id: "select", icon: <CursorIcon />, label: "選択" },
   { id: "words", icon: <WordsIcon />, label: "ことばで分離" },
+  { id: "image-add", icon: <ImageIcon />, label: "画像を重ねる" },
+  { id: "shape", icon: <ShapeIcon />, label: "図形" },
   { id: "text-add", icon: <TextIcon />, label: "テキスト追加" },
   { id: "clickseg", icon: <TargetIcon />, label: "クリック切り抜き" },
   { id: "inpaint", icon: <EraserIcon />, label: "領域消去" },
@@ -122,6 +124,25 @@ function EraserIcon() {
   );
 }
 
+
+function ImageIcon() {
+  return (
+    <svg {...SVG_PROPS} aria-hidden>
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <circle cx="9" cy="10" r="1.6" />
+      <path d="M3 17l5-5 4 4 3-3 6 6" />
+    </svg>
+  );
+}
+
+function ShapeIcon() {
+  return (
+    <svg {...SVG_PROPS} aria-hidden>
+      <rect x="3" y="9" width="11" height="11" rx="1.5" />
+      <circle cx="16.5" cy="7.5" r="4.5" />
+    </svg>
+  );
+}
 
 function WordsIcon() {
   return (
