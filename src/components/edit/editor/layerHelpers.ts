@@ -137,9 +137,39 @@ export function createLayerId(): string {
 }
 
 function objectToThumbnail(object: FabricLikeObject): string | null {
-  try {
-    return object.toDataURL?.({ format: "png", multiplier: 0.18 }) ?? null;
-  } catch {
-    return null;
+  // サムネイルは「見た目が変わる操作」(拡縮・回転・内容/色変更・表示切替) のときだけ
+  // 作り直し、移動 (left/top) では再利用する。
+  // なぜ: object:moving のたびに全レイヤーへ toDataURL (PNG エンコード) が走ると、
+  // フルサイズ画像レイヤー数×毎フレームの負荷でドラッグが激重になる
+  // (2026-07-03 STΛCK報告「素材うごかしたらいきなり動き遅くなる」の真因)。
+  const carrier = object as FabricLikeObject & {
+    __ggThumbCache?: { key: string; dataUrl: string | null };
+    scaleX?: number;
+    scaleY?: number;
+    angle?: number;
+    width?: number;
+    height?: number;
+  };
+  const key = [
+    carrier.scaleX ?? 1,
+    carrier.scaleY ?? 1,
+    carrier.angle ?? 0,
+    carrier.width ?? 0,
+    carrier.height ?? 0,
+    object.visible !== false,
+    object.get?.("text") ?? "",
+    object.get?.("fill") ?? "",
+    object.get?.("fontFamily") ?? "",
+  ].join("|");
+  if (carrier.__ggThumbCache && carrier.__ggThumbCache.key === key) {
+    return carrier.__ggThumbCache.dataUrl;
   }
+  let dataUrl: string | null = null;
+  try {
+    dataUrl = object.toDataURL?.({ format: "png", multiplier: 0.18 }) ?? null;
+  } catch {
+    dataUrl = null;
+  }
+  carrier.__ggThumbCache = { key, dataUrl };
+  return dataUrl;
 }

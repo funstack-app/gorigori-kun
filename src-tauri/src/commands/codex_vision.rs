@@ -46,6 +46,8 @@ pub async fn codex_list_image_objects(image_path: String) -> Result<Vec<ImageObj
         "- en は SAM3 が認識しやすい簡潔な英語名詞 (例: basketball, robot, sneakers)。",
         "- ja はレイヤー名に使う短い日本語 (例: バスケットボール)。",
         "- 背景そのもの (floor, wall, sky, ground, background) は含めない。",
+        "- 人物・キャラクターが身につけている服・装備・体のパーツは列挙しない (人物ごと1つにまとめる)。",
+        "- 物体の一部分 (取っ手・タイヤ・ボタン等) も列挙しない。独立して動かせる単位だけ。",
         "- 画像上のオーバーレイ文字・ロゴのうち、物体に印字されたものは含めない。",
         "- 出力は JSON 配列のみ。説明・前置き・Markdown コードフェンス不要。",
         "形式: [{\"en\":\"basketball\",\"ja\":\"バスケットボール\"}]",

@@ -187,19 +187,41 @@ async fn run_words_segment(
         }
     }
 
-    // 2) クロスワード重複排除: 同じ物体を複数の語 (例: ball と basketball) が拾うと
-    //    レイヤーが二重になる。確信度の高い順に採用し、採用済みとマスク IoU が
-    //    大きく重なる検出は捨てる。
+    // 2) クロスワード重複排除 + 部品マージ:
+    //    - 重複: 同じ物体を複数の語 (ball と basketball) が拾ったら確信度の高い方だけ。
+    //    - 部品: マスクが別のマスクにほぼ包含される検出 (例: ロボットの中のユニフォーム) は
+    //      「その物体の一部」なのでレイヤー化しない。人物は服・装備ごと1レイヤーにまとめる
+    //      (2026-07-03 STΛCK指摘「人物は人物、小物は小物でグループしてほしい」)。
+    //      包含判定は面積の大きい方を親として残す (スコア順でなく構造優先)。
     const CROSS_WORD_NMS_IOU: f64 = 0.70;
-    pending.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    const PART_CONTAINMENT: f64 = 0.80;
+    // 面積降順で走査: 親 (大きい物体) から確定させ、部品を後から弾く。
+    pending.sort_by(|a, b| {
+        mask_area(&b.mask)
+            .cmp(&mask_area(&a.mask))
+            .then(b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal))
+    });
     let mut kept: Vec<Pending> = Vec::new();
     for candidate in pending {
         let dup = kept
             .iter()
             .any(|k| mask_iou(&candidate.mask, &k.mask) > CROSS_WORD_NMS_IOU);
-        if !dup {
-            kept.push(candidate);
+        if dup {
+            continue;
         }
+        let contained = kept
+            .iter()
+            .any(|k| containment(&candidate.mask, &k.mask) > PART_CONTAINMENT);
+        if contained {
+            tracing::info!(
+                target: "codex.edit",
+                "words: 部品マージ (word='{}' score={:.2} は既存レイヤーに包含)",
+                words[candidate.word_index].prompt,
+                candidate.score
+            );
+            continue;
+        }
+        kept.push(candidate);
     }
 
     // full モード: 背景補完 + 編集可能テキストレイヤー化 (Magic Layer 相当の仕上げ)。
@@ -329,6 +351,36 @@ async fn run_words_segment(
         width,
         height,
     })
+}
+
+/// マスクの白画素数 (>127)。
+fn mask_area(m: &image::ImageBuffer<image::Luma<u8>, Vec<u8>>) -> u64 {
+    m.pixels().filter(|p| p[0] > 127).count() as u64
+}
+
+/// a のうち b に覆われている割合 (a の部品度)。a が空か寸法不一致は 0。
+fn containment(
+    a: &image::ImageBuffer<image::Luma<u8>, Vec<u8>>,
+    b: &image::ImageBuffer<image::Luma<u8>, Vec<u8>>,
+) -> f64 {
+    if a.dimensions() != b.dimensions() {
+        return 0.0;
+    }
+    let mut inter = 0u64;
+    let mut area_a = 0u64;
+    for (pa, pb) in a.pixels().zip(b.pixels()) {
+        if pa[0] > 127 {
+            area_a += 1;
+            if pb[0] > 127 {
+                inter += 1;
+            }
+        }
+    }
+    if area_a == 0 {
+        0.0
+    } else {
+        inter as f64 / area_a as f64
+    }
 }
 
 /// 2つのソフトマスク (>127 が対象) の IoU。寸法不一致は 0。
