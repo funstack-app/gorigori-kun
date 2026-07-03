@@ -652,6 +652,71 @@ fn count_white(path: &Path) -> u64 {
     m.pixels().filter(|p| p[0] > 127).count() as u64
 }
 
+/// ことばで分離 (SAM3) の実画像プローブ。Python スパイク (2026-07-03) との
+/// パリティ確認: basketball が確信度 0.9+ で1件検出されれば Rust 移植は正しい。
+///
+///   GORI_E2E_IMAGE=<入力画像> GORI_E2E_OUT=<出力dir> [GORI_E2E_WORDS=word1,word2] \
+///   cargo test --lib edit::magic_layer_e2e::words_segment_real_image_probe -- --ignored --nocapture
+#[tokio::test]
+#[ignore]
+async fn words_segment_real_image_probe() {
+    init_test_tracing();
+    let Ok(input) = std::env::var("GORI_E2E_IMAGE") else {
+        eprintln!("[skip] GORI_E2E_IMAGE 未指定");
+        return;
+    };
+    for id in [
+        "sam3-vision-int8",
+        "sam3-text-int8",
+        "sam3-decoder-int8",
+        "sam3-tokenizer",
+    ] {
+        if !model_available(id) {
+            eprintln!("[skip] {id} 未DL");
+            return;
+        }
+    }
+    let input = PathBuf::from(input);
+    let out = std::env::var("GORI_E2E_OUT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| tmp_dir("words"));
+    std::fs::create_dir_all(&out).unwrap();
+    let words: Vec<String> = std::env::var("GORI_E2E_WORDS")
+        .unwrap_or_else(|_| "basketball,robot".to_string())
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .collect();
+
+    let runtime = EditRuntime::new();
+    let mut session = crate::edit::sam3_text::Sam3TextSession::new(&runtime)
+        .await
+        .expect("sam3 session");
+    let t0 = std::time::Instant::now();
+    session.embed_image(&input).await.expect("embed");
+    eprintln!("[probe] embed {}ms", t0.elapsed().as_millis());
+
+    let rgba = image::open(&input).unwrap().to_rgba8();
+    for word in &words {
+        let t0 = std::time::Instant::now();
+        let detections = session
+            .predict_word(word, crate::edit::sam3_text::DEFAULT_SCORE_THRESHOLD)
+            .await
+            .expect("predict");
+        eprintln!(
+            "[probe] '{word}' → {}件 {:?} ({}ms)",
+            detections.len(),
+            detections.iter().map(|d| (d.score * 1000.0).round() / 1000.0).collect::<Vec<_>>(),
+            t0.elapsed().as_millis()
+        );
+        for (i, det) in detections.iter().enumerate() {
+            let p = out.join(format!("word-{word}-{i}.png"));
+            let bbox = crate::edit::grab::crop_object_png(&rgba, &det.mask, &p).expect("crop");
+            eprintln!("[probe]   [{i}] score={:.3} bbox={:?} -> {}", det.score, bbox, p.display());
+        }
+    }
+    eprintln!("[probe] 完了: {}", out.display());
+}
+
 /// 実画像でテキスト消去 (OCR→ストロークマスク→LaMa局所修復) の品質を目視確認するプローブ。
 ///
 ///   GORI_E2E_IMAGE=<入力画像> GORI_E2E_OUT=<出力dir> \

@@ -8,6 +8,8 @@ pub enum ModelCategory {
     SamClick,
     /// 高精度モード用。人物パーツ自動認識 (SCHP human parsing)。
     HumanParse,
+    /// ことばで分離 (SAM3 テキストプロンプト・セグメンテーション)。
+    TextSegment,
 }
 
 impl ModelCategory {
@@ -18,6 +20,7 @@ impl ModelCategory {
             Self::Segment => "segment",
             Self::SamClick => "samClick",
             Self::HumanParse => "humanParse",
+            Self::TextSegment => "textSegment",
         }
     }
 }
@@ -135,6 +138,53 @@ pub fn all_models() -> Vec<ModelSpec> {
             file_name: "sam2-tiny-decoder.onnx",
             size_bytes: 20_600_000,
             sha256: "63198f1f1e273d8f2f4a9d1baf926e53a01d78dc50e0674640e1513dc00d9927",
+        },
+        // === ことばで分離: SAM3 テキストプロンプト・セグメンテーション (int8 量子化) ===
+        //
+        // Meta SAM3 (2025-11公開) のコミュニティ ONNX export (danilobukvic/sam3-text-onnx)。
+        // 「basketball」「train」等の言葉で概念単位の instance segmentation ができる。
+        // 実測 (2026-07-03 Apple Silicon CPU): vision 7.7s/画像 + 1語 2s、basketball 0.983 /
+        // robot 0.974 の確信度でピクセル精度マスク。int8 は fp32 と 0.001 以内のスコア一致
+        // (配布元の検証記録)。ライセンスは SAM 3 License (再配布時にライセンス同梱が条件。
+        // layer-splitter プロジェクトで配布可と検証済み: ~/layer-splitter/DISTRIBUTION_AND_COST.md)。
+        //
+        // ハッシュは HF paths-info の LFS oid と実DLの sha256 の両方で照合済み (2026-07-03)。
+        // tokenizer.json は非LFSのため実DL実体の sha256 をピン留め。
+        ModelSpec {
+            id: "sam3-vision-int8",
+            category: ModelCategory::TextSegment,
+            display_name: "ことばで分離 vision (SAM3)",
+            url: "https://huggingface.co/danilobukvic/sam3-text-onnx/resolve/main/vision_encoder_int8.onnx",
+            file_name: "sam3-vision-int8.onnx",
+            size_bytes: 496_047_770,
+            sha256: "1a688329a8be3ae32d5f0bbf20657faac5a38e257fa30e8f5469a7e513a0b51c",
+        },
+        ModelSpec {
+            id: "sam3-text-int8",
+            category: ModelCategory::TextSegment,
+            display_name: "ことばで分離 text (SAM3)",
+            url: "https://huggingface.co/danilobukvic/sam3-text-onnx/resolve/main/text_encoder_int8.onnx",
+            file_name: "sam3-text-int8.onnx",
+            size_bytes: 357_021_801,
+            sha256: "c0baf8a4165ecc4039bee9389903723e74a68d617d685a4f1dbfc21c58bb4121",
+        },
+        ModelSpec {
+            id: "sam3-decoder-int8",
+            category: ModelCategory::TextSegment,
+            display_name: "ことばで分離 decoder (SAM3)",
+            url: "https://huggingface.co/danilobukvic/sam3-text-onnx/resolve/main/decoder_int8.onnx",
+            file_name: "sam3-decoder-int8.onnx",
+            size_bytes: 26_804_694,
+            sha256: "d721e7b643bb3ee2c48a59d520401c035c702cfbb13cb7f50fa103f0beb27af8",
+        },
+        ModelSpec {
+            id: "sam3-tokenizer",
+            category: ModelCategory::TextSegment,
+            display_name: "ことばで分離 tokenizer (SAM3)",
+            url: "https://huggingface.co/danilobukvic/sam3-text-onnx/resolve/main/tokenizer.json",
+            file_name: "sam3-tokenizer.json",
+            size_bytes: 3_642_073,
+            sha256: "6d9109cc838977f3ca94a379eec36aecc7c807e1785cd729660ca2fc0171fb35",
         },
         // 高精度モード: 人物パーツ自動認識 (SCHP, ATR 18クラス)。
         // INT8 静的量子化版を採用 (単一ファイル66MB。FP32版は .onnx.data 外部データ

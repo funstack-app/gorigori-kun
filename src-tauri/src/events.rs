@@ -32,3 +32,6 @@ pub const EVENT_EDIT_MODEL_PROGRESS: &str = "codex://edit-model-progress";
 
 /// `codex://edit-magic-progress` — Magic Layer 統合パイプライン進捗。
 pub const EVENT_EDIT_MAGIC_PROGRESS: &str = "codex://edit-magic-progress";
+
+/// ことばで分離 (SAM3) の進捗イベント。
+pub const EVENT_EDIT_WORDS_PROGRESS: &str = "codex://edit-words-progress";

@@ -353,6 +353,7 @@ pub fn run() {
             commands::edit_inpaint::edit_inpaint_run,
             commands::edit_grab::edit_grab_object,
             commands::edit_magic::edit_magic_run,
+            commands::edit_words::edit_words_segment,
             commands::edit_segment::edit_segment_run,
             commands::storage_cleanup::storage_cleanup_run,
             commands::storage_cleanup::storage_cleanup_inspect,

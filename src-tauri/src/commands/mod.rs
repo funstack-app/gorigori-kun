@@ -11,6 +11,7 @@ pub mod edit_magic;
 pub mod edit_models;
 pub mod edit_ocr;
 pub mod edit_sam2;
+pub mod edit_words;
 pub mod edit_segment;
 pub mod higgsfield_mcp;
 pub mod images;

@@ -9,6 +9,7 @@ use crate::codex::RpcClient;
 use crate::commands::storage::StorageSettings;
 use crate::edit::runtime::EditRuntime;
 use crate::edit::sam2::Sam2Session;
+use crate::edit::sam3_text::Sam3TextSession;
 
 type ImageWatcher = Debouncer<notify::RecommendedWatcher, FileIdMap>;
 
@@ -44,6 +45,9 @@ pub struct AppState {
     pub storage_settings: Arc<RwLock<Option<StorageSettings>>>,
     pub edit_runtime: Arc<EditRuntime>,
     pub sam2_session: Arc<RwLock<Option<Sam2Session>>>,
+    /// ことばで分離 (SAM3) のセッション。embed キャッシュを持つため
+    /// コマンド呼び出しをまたいで保持する (同じ画像への語の追加が数秒で返る)。
+    pub sam3_text_session: Arc<RwLock<Option<Sam3TextSession>>>,
     /// storyboard checkpoint の再開シグナル置き場 (run_id → oneshot sender)。
     checkpoint_senders: CheckpointSenders,
 }
@@ -105,6 +109,10 @@ impl AppState {
 
     pub async fn clear_sam2_session(&self) {
         *self.sam2_session.write().await = None;
+    }
+
+    pub async fn clear_sam3_text_session(&self) {
+        *self.sam3_text_session.write().await = None;
     }
 
     pub fn inner_clone(&self) -> Self {

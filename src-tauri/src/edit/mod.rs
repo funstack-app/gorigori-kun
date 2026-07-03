@@ -10,5 +10,6 @@ pub mod ocr;
 pub mod registry;
 pub mod runtime;
 pub mod sam2;
+pub mod sam3_text;
 pub mod segment;
 pub mod subject_split;
