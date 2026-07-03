@@ -280,24 +280,42 @@ fn count_white(mask: &ImageBuffer<Luma<u8>, Vec<u8>>) -> u64 {
     mask.pixels().filter(|p| p[0] > 127).count() as u64
 }
 
-/// マスクが画像外周 (縁1px) を覆う割合。背景マスクの検出に使う。
+/// マスクが画像外周バンドを覆う割合。背景マスクの検出に使う。
+///
+/// 縁1pxの線ではなく帯 (バンド) で判定する。なぜ: SAM2 の背景マスクは縁の数px手前で
+/// 途切れることがあり、1px線判定をすり抜ける (実測 2026-07-03 実写プローブ: 全幅の床帯
+/// bbox[0,636,1672,301] が下端4px手前 y=937 で停止し、縁1px判定を通過して「物体1」に
+/// 採用された)。バンド幅は短辺の1.5% (4..16px にクランプ) で、この種のギャップを飲み込む。
+///
 /// 返り値: (全周の平均カバー率, 4辺のうち最大の単独カバー率)
 fn border_cover(mask: &ImageBuffer<Luma<u8>, Vec<u8>>) -> (f64, f64) {
     let (w, h) = mask.dimensions();
     if w < 2 || h < 2 {
         return (0.0, 0.0);
     }
-    let edge = |pts: &mut dyn Iterator<Item = (u32, u32)>, len: u64| -> (u64, f64) {
-        let covered = pts.filter(|&(x, y)| mask.get_pixel(x, y)[0] > 127).count() as u64;
-        (covered, covered as f64 / len as f64)
+    let band = ((w.min(h) as u64 * 3 / 200) as u32).clamp(4, 16).min(h).min(w);
+    // 横バンド (上/下): x 位置ごとに「バンド内のどこかの行が白か」。
+    let row_cover = |y0: u32, y1: u32| -> u64 {
+        (0..w)
+            .filter(|&x| (y0..y1).any(|y| mask.get_pixel(x, y)[0] > 127))
+            .count() as u64
     };
-    let (top_c, top_r) = edge(&mut (0..w).map(|x| (x, 0)), w as u64);
-    let (bot_c, bot_r) = edge(&mut (0..w).map(|x| (x, h - 1)), w as u64);
-    let (lef_c, lef_r) = edge(&mut (1..h - 1).map(|y| (0, y)), (h - 2).max(1) as u64);
-    let (rig_c, rig_r) = edge(&mut (1..h - 1).map(|y| (w - 1, y)), (h - 2).max(1) as u64);
-    let total_len = (2 * w as u64 + 2 * (h as u64).saturating_sub(2)).max(1);
+    // 縦バンド (左/右): y 位置ごとに「バンド内のどこかの列が白か」。
+    let col_cover = |x0: u32, x1: u32| -> u64 {
+        (0..h)
+            .filter(|&y| (x0..x1).any(|x| mask.get_pixel(x, y)[0] > 127))
+            .count() as u64
+    };
+    let top_c = row_cover(0, band);
+    let bot_c = row_cover(h - band, h);
+    let lef_c = col_cover(0, band);
+    let rig_c = col_cover(w - band, w);
+    let total_len = (2 * (w as u64 + h as u64)).max(1);
     let total = (top_c + bot_c + lef_c + rig_c) as f64 / total_len as f64;
-    let edge_max = top_r.max(bot_r).max(lef_r).max(rig_r);
+    let edge_max = (top_c as f64 / w as f64)
+        .max(bot_c as f64 / w as f64)
+        .max(lef_c as f64 / h as f64)
+        .max(rig_c as f64 / h as f64);
     (total, edge_max)
 }
 
@@ -468,6 +486,29 @@ mod tests {
         // box 外は黒
         assert_eq!(mask.get_pixel(0, 0)[0], 0);
         assert_eq!(mask.get_pixel(9, 9)[0], 0);
+    }
+
+    #[test]
+    fn border_cover_catches_floor_strip_with_gap() {
+        // 実写プローブ再現 (2026-07-03): 全幅の床帯マスクが下端の数px手前で止まり、
+        // 縁1px判定をすり抜けた。バンド判定なら下辺カバー率がほぼ1.0になり棄却できる。
+        // 800x450 → band = 450*3/200 = 6。ギャップ4px < band。
+        let (w, h) = (800u32, 450u32);
+        let m = filled(w, h, 0, 300, w, h - 4);
+        let (_total, edge_max) = border_cover(&m);
+        assert!(
+            edge_max > MAX_SINGLE_EDGE_COVER,
+            "全幅床帯が背景棄却されない (edge_max={edge_max})"
+        );
+    }
+
+    #[test]
+    fn border_cover_ignores_center_object() {
+        // 中央の物体はバンドに触れないので棄却されない。
+        let m = filled(800, 450, 300, 150, 500, 350);
+        let (total, edge_max) = border_cover(&m);
+        assert!(total < 0.01, "total={total}");
+        assert!(edge_max < 0.01, "edge_max={edge_max}");
     }
 
     #[test]
