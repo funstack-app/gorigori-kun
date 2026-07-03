@@ -11,3 +11,4 @@ pub mod registry;
 pub mod runtime;
 pub mod sam2;
 pub mod segment;
+pub mod subject_split;

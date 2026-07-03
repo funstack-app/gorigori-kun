@@ -203,6 +203,23 @@ async fn run_magic_layer_inner(
         segment_image_with_source(runtime, &text_removed_path, input_path, &run_dir).await?;
     tracing::info!(target: "codex.edit", "magic_layer: セグメント完了 {}x{}", segment_result.width, segment_result.height);
 
+    // 被写体マスクの離れ小島 (ボール等の独立物体) を検出する。BiRefNet は複数の独立被写体を
+    // 1枚の salient マスクに融合するため (実測 2026-07-03: ロボ+ボールが1前景)、最大成分だけを
+    // 被写体に残し、離れ小島は後段で物体レイヤーへ変換する。
+    // 注意: SAM2 の除外マスク・背景 union には分離前のフルマスク (mask.png) をそのまま使う
+    // (小島の二重検出防止 + 小島跡地の背景補完のため)。mask.png / foreground.png の
+    // 書き換えは union 構築後に行う。
+    let subject_split = image::open(&segment_result.mask_path)
+        .ok()
+        .map(|m| crate::edit::subject_split::split_subject_mask(&m.to_luma8()));
+    let satellite_count = subject_split
+        .as_ref()
+        .map(|s| s.satellites.len())
+        .unwrap_or(0);
+    if satellite_count > 0 {
+        tracing::info!(target: "codex.edit", "magic_layer: 被写体マスクに離れ小島{}件を検出", satellite_count);
+    }
+
     // 物体分解: 人物・テキスト以外の主要物体を SAM2 自動マスクでレイヤー化する。
     // segment_result (人物マスク) と OCR regions (テキスト領域) を「既存レイヤー」として
     // 除外マスクを作り、それと重なる物体は二重化になるので拾わない。
@@ -214,7 +231,7 @@ async fn run_magic_layer_inner(
         .map(|[x, y, w, h]| [x as i32, y as i32, w as i32, h as i32])
         .collect();
 
-    let (object_layers, union_mask) = if object_options.enabled {
+    let (mut object_layers, union_mask) = if object_options.enabled {
         let _ = app.emit(
             EVENT_EDIT_MAGIC_PROGRESS,
             MagicLayerProgress::SegmentingObjects,
@@ -253,7 +270,9 @@ async fn run_magic_layer_inner(
     // 出さないため (2026-06-18 STΛCK 実機報告の再発防止)。元画像を残せば最悪でも絵は見える。
     let background_path = run_dir.join("background.png");
     let mut background_ready = false;
-    let inpaint_mask = if object_layers.is_empty() {
+    // 離れ小島 (satellite) も独立レイヤーになるため、跡地補完の要否判定に含める
+    // (union には人物フルマスク由来で小島も既に入っている)。
+    let inpaint_mask = if object_layers.is_empty() && satellite_count == 0 {
         None
     } else {
         union_mask.as_ref()
@@ -278,6 +297,26 @@ async fn run_magic_layer_inner(
         tokio::fs::copy(input_path, &background_path)
             .await
             .map_err(|e| format!("copy original as background: {e}"))?;
+    }
+
+    // 離れ小島を独立した物体レイヤーへ変換し、mask.png / foreground.png を最大成分
+    // (=主要被写体) だけに書き替える。失敗時は分離せず従来挙動 (融合したまま) で続行する。
+    if let Some(split) = subject_split.as_ref() {
+        if !split.satellites.is_empty() {
+            match apply_subject_split(split, input_path, &segment_result, object_layers.len()) {
+                Ok(mut satellites) => {
+                    tracing::info!(
+                        target: "codex.edit",
+                        "magic_layer: 離れ小島{}件を物体レイヤーへ分離",
+                        satellites.len()
+                    );
+                    object_layers.append(&mut satellites);
+                }
+                Err(reason) => {
+                    tracing::warn!(target: "codex.edit", "magic_layer: 被写体分離スキップ ({reason})");
+                }
+            }
+        }
     }
 
     let _ = app.emit(
@@ -387,6 +426,73 @@ async fn run_object_layers(
     }
 
     Ok((object_layers, Some(union)))
+}
+
+/// 被写体マスクの離れ小島を物体レイヤー (bbox クロップ透過 PNG) に変換し、
+/// mask.png / foreground.png を最大成分 (=主要被写体) だけに書き替える。
+///
+/// 順序: 先に小島クロップを書き出し、最後にマスク/前景を差し替える。途中失敗時は
+/// Err を返して呼び出し側が分離を丸ごと見送る (前景から小島だけ消えてどのレイヤーにも
+/// 属さない「欠落」状態を作らないため)。
+fn apply_subject_split(
+    split: &crate::edit::subject_split::SubjectSplit,
+    input_path: &Path,
+    segment_result: &crate::edit::segment::SegmentResult,
+    existing_object_count: usize,
+) -> Result<Vec<ObjectLayerSpec>, String> {
+    let rgba = image::open(input_path)
+        .map_err(|e| format!("open input for satellites: {e}"))?
+        .to_rgba8();
+    if rgba.dimensions() != split.subject_mask.dimensions() {
+        return Err(format!(
+            "size mismatch: input={:?} mask={:?}",
+            rgba.dimensions(),
+            split.subject_mask.dimensions()
+        ));
+    }
+    let objects_dir = segment_result
+        .mask_path
+        .parent()
+        .ok_or_else(|| "mask path has no parent".to_string())?
+        .join("objects");
+
+    let mut layers = Vec::new();
+    for (i, satellite) in split.satellites.iter().enumerate() {
+        let index = existing_object_count + i + 1;
+        let out_path = objects_dir.join(format!("object-{index:02}.png"));
+        let bbox = crate::edit::grab::crop_object_png(&rgba, satellite, &out_path)?;
+        layers.push(ObjectLayerSpec {
+            image_path: path_string(&out_path),
+            bbox,
+            // ラベルは日本語・絵文字なし。SAM2 物体の連番の続きを使う。
+            label: format!("物体 {index}"),
+        });
+    }
+
+    // 前景 RGBA の alpha を被写体成分に絞る (小島の画素を前景から除く)。
+    // 色は元のまま、alpha だけ min を取る (前景の bake 済みソフトエッジを壊さない)。
+    let mut foreground = image::open(&segment_result.foreground_path)
+        .map_err(|e| format!("open foreground: {e}"))?
+        .to_rgba8();
+    if foreground.dimensions() != split.subject_mask.dimensions() {
+        return Err(format!(
+            "foreground size mismatch: fg={:?} mask={:?}",
+            foreground.dimensions(),
+            split.subject_mask.dimensions()
+        ));
+    }
+    for (px, m) in foreground.pixels_mut().zip(split.subject_mask.pixels()) {
+        px[3] = px[3].min(m[0]);
+    }
+    foreground
+        .save(&segment_result.foreground_path)
+        .map_err(|e| format!("save subject foreground: {e}"))?;
+    split
+        .subject_mask
+        .save(&segment_result.mask_path)
+        .map_err(|e| format!("save subject mask: {e}"))?;
+
+    Ok(layers)
 }
 
 /// 高精度モード本体: SCHP で人物パーツを認識し、各部位を透過 PNG レイヤーにする。

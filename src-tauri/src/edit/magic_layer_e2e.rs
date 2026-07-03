@@ -496,6 +496,19 @@ async fn magic_layer_real_image_probe() {
     eprintln!("[probe] objects={} 件", masks.len());
 
     let rgba = image::open(&input).unwrap().to_rgba8();
+
+    // 被写体マスクの離れ小島分離 (magic_layer 本体 apply_subject_split と同経路の実地検証)。
+    // 実写でロボ+ボール等が1マスクに融合したとき、小島が独立クロップになることを確認する。
+    let split = crate::edit::subject_split::split_subject_mask(
+        &image::open(&segment_result.mask_path).unwrap().to_luma8(),
+    );
+    eprintln!("[probe] 被写体の離れ小島={}件", split.satellites.len());
+    for (i, satellite) in split.satellites.iter().enumerate() {
+        let p = out.join(format!("satellite-{i}.png"));
+        let bbox = crate::edit::grab::crop_object_png(&rgba, satellite, &p).expect("crop satellite");
+        eprintln!("[probe] satellite[{i}] bbox={:?} -> {}", bbox, p.display());
+    }
+
     let mut union = ImageBuffer::<Luma<u8>, Vec<u8>>::from_pixel(w, h, Luma([0u8]));
     if let Ok(person) = image::open(&segment_result.mask_path) {
         let person = person.to_luma8();
