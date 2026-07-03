@@ -751,10 +751,11 @@ async fn text_remove_real_image_probe() {
     crate::edit::magic_layer::generate_text_erase_mask(&input, &regions, &mask_path)
         .expect("erase mask failed");
     let removed = out.join("text-removed.png");
-    // 本番経路と同じ決定論補間フィル (LaMa 不使用) で消す。
-    crate::edit::inpaint::remove_text_by_interpolation(&input, &mask_path, &removed)
-        .expect("interpolation fill failed");
-    eprintln!("[probe] テキスト消去完了 (補間フィル) -> {}", removed.display());
+    // 本番経路と同じ適応型消去 (滑らか文脈=補間 / 複雑文脈=LaMa)。
+    inpaint_image(&runtime, &input, &mask_path, &removed)
+        .await
+        .expect("adaptive erase failed");
+    eprintln!("[probe] テキスト消去完了 (適応型) -> {}", removed.display());
 }
 
 /// 実 PP-OCRv6 で任意の実画像を認識し、全 region のテキストを出力する検証プローブ。

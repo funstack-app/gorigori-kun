@@ -23,6 +23,12 @@ const THIN_BAND_MAX: u32 = 300;
 /// ネイティブタイルの重なり文脈 (px)。隣接タイルはこの幅ずつ重ねて継ぎ目を馴染ませる。
 const TILE_MARGIN: u32 = 64;
 
+/// 「滑らかな文脈」とみなす無傷画素の輝度標準偏差の上限。これ未満のクラスタは
+/// LaMa でなく決定論補間フィルで埋める。
+/// 実測根拠 (2026-07-03): 体育館の壁 (補間が自然/LaMaは幻覚) std=16.7、
+/// ネオン街 (LaMaが自然/補間は滲む) std=63.0。中間の30で切る。
+const SMOOTH_CONTEXT_STD: f64 = 30.0;
+
 /// 画像をマスク領域だけ LaMa で修復して保存する。
 ///
 /// 方式 (2026-07-03 全面改修): マスクのクラスタごとに周辺文脈を含む正方形クロップを取り、
@@ -77,14 +83,44 @@ pub async fn inpaint_image(
     // パイプライン全体は続行する。全クラスタ失敗時のみ Err を返す。
     let mut work = img.to_rgb8();
     let mut failed = 0usize;
+    let mut lama_attempted = 0usize;
     let mut last_error = String::new();
+    // 滑らか文脈クラスタは補間フィルへ回す (LaMa はここで幻覚を出す)。
+    let mut smooth_mask: Option<ImageBuffer<Luma<u8>, Vec<u8>>> = None;
+    let mut lama_thin_clusters: Vec<[u32; 4]> = Vec::new();
     for bbox in &clusters {
+        // 塗り方の自動使い分け: 文脈が滑らか → 決定論補間 / 複雑 → LaMa。
+        let context_std = context_luma_std(&work, &mask, *bbox, orig_w, orig_h);
+        if context_std < SMOOTH_CONTEXT_STD {
+            tracing::info!(
+                target: "codex.edit",
+                "inpaint: cluster bbox={:?} 滑らか文脈 (std={:.1}) → 補間フィル",
+                bbox,
+                context_std
+            );
+            let sm = smooth_mask.get_or_insert_with(|| {
+                ImageBuffer::from_pixel(orig_w, orig_h, Luma([0u8]))
+            });
+            let [bx, by, bw, bh] = *bbox;
+            for y in by..(by + bh).min(orig_h) {
+                for x in bx..(bx + bw).min(orig_w) {
+                    if mask.get_pixel(x, y)[0] > 127 {
+                        sm.put_pixel(x, y, Luma([255u8]));
+                    }
+                }
+            }
+            continue;
+        }
+        lama_attempted += 1;
         let crop = context_crop(*bbox, orig_w, orig_h);
         let scale = crop[2].max(crop[3]) as f64 / LAMA_SIZE as f64;
         // 細長い帯 (テキスト行等) は縮小せず 512 ネイティブタイルの列で修復する。
         // 縮小修復は消し跡がぼやけ、文字状のノイズが出やすい (実測 2026-07-03)。
         // 太い塊 (人物跡地等) はタイル内が全面マスクになり文脈を失うので従来のクロップ縮小。
         let thin_band = bbox[2].min(bbox[3]) <= THIN_BAND_MAX;
+        if thin_band {
+            lama_thin_clusters.push(*bbox);
+        }
         let result = if scale > 1.05 && thin_band && orig_w.min(orig_h) >= LAMA_SIZE {
             let tiles = native_tiles(*bbox, orig_w, orig_h);
             tracing::info!(
@@ -120,11 +156,15 @@ pub async fn inpaint_image(
             last_error = reason;
         }
     }
-    if failed == clusters.len() {
+    if lama_attempted > 0 && failed == lama_attempted && smooth_mask.is_none() {
         return Err(format!(
-            "inpaint: 全{}クラスタの修復に失敗 (最後のエラー: {last_error})",
-            clusters.len()
+            "inpaint: 全{failed}クラスタの修復に失敗 (最後のエラー: {last_error})"
         ));
+    }
+
+    // 滑らか文脈クラスタをまとめて補間フィル (決定論・瞬時・幻覚ゼロ)。
+    if let Some(sm) = smooth_mask.as_ref() {
+        fill_masked_interpolate(&mut work, sm);
     }
 
     // 仕上げ: 消し跡の残渣再修復 (2026-07-03)。LaMa は暗い背景上の文字帯に、明るい
@@ -136,10 +176,7 @@ pub async fn inpaint_image(
     let mut residue =
         ImageBuffer::<Luma<u8>, Vec<u8>>::from_pixel(orig_w, orig_h, Luma([0u8]));
     let mut residue_area = 0u64;
-    for bbox in &clusters {
-        if bbox[2].min(bbox[3]) > THIN_BAND_MAX {
-            continue;
-        }
+    for bbox in &lama_thin_clusters {
         residue_area += mark_residue(&work, &mask, *bbox, orig_w, orig_h, &mut residue);
     }
     if residue_area > 0 {
@@ -171,6 +208,37 @@ pub async fn inpaint_image(
 /// 5〜95 パーセンタイル帯 + マージンを「背景としてありえる輝度」とみなし、そこから
 /// 外れた修復画素 (暗い壁の上の白い幻覚 = p95 超え) だけを残渣と判定する。
 const RESIDUE_MARGIN: i32 = 40;
+
+/// クラスタの文脈クロップ内の無傷画素の輝度標準偏差 (塗り方選択用)。
+fn context_luma_std(
+    work: &ImageBuffer<Rgb<u8>, Vec<u8>>,
+    mask: &ImageBuffer<Luma<u8>, Vec<u8>>,
+    bbox: [u32; 4],
+    orig_w: u32,
+    orig_h: u32,
+) -> f64 {
+    let [cx, cy, cw, ch] = context_crop(bbox, orig_w, orig_h);
+    let mut sum = 0f64;
+    let mut sq = 0f64;
+    let mut n = 0f64;
+    for yy in cy..cy + ch {
+        for xx in cx..cx + cw {
+            if mask.get_pixel(xx, yy)[0] <= 127 {
+                let p = work.get_pixel(xx, yy);
+                let l = (299 * p[0] as u32 + 587 * p[1] as u32 + 114 * p[2] as u32) as f64 / 1000.0;
+                sum += l;
+                sq += l * l;
+                n += 1.0;
+            }
+        }
+    }
+    if n < 100.0 {
+        // 文脈が無いに等しい → 複雑扱い (LaMa に任せる)。
+        return f64::MAX;
+    }
+    let mean = sum / n;
+    (sq / n - mean * mean).max(0.0).sqrt()
+}
 
 fn mark_residue(
     work: &ImageBuffer<Rgb<u8>, Vec<u8>>,

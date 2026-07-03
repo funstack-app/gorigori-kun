@@ -197,11 +197,9 @@ async fn run_magic_layer_inner(
         tokio::fs::copy(input_path, &text_removed_path)
             .await
             .map_err(|e| format!("copy text-removed: {e}"))?;
-    } else if let Err(reason) = crate::edit::inpaint::remove_text_by_interpolation(
-        input_path,
-        &text_mask_path,
-        &text_removed_path,
-    ) {
+    } else if let Err(reason) =
+        inpaint_image(runtime, input_path, &text_mask_path, &text_removed_path).await
+    {
         // 消去に失敗しても分解全体は止めない (文字が残るだけ)。原画像で続行する。
         tracing::warn!(target: "codex.edit", "magic_layer: テキスト消去に失敗、原画像で続行 ({reason})");
         tokio::fs::copy(input_path, &text_removed_path)
@@ -261,11 +259,9 @@ async fn run_magic_layer_inner(
             tokio::fs::copy(input_path, &text_removed_path)
                 .await
                 .map_err(|e| format!("copy text-removed (protected): {e}"))?;
-        } else if let Err(reason) = crate::edit::inpaint::remove_text_by_interpolation(
-            input_path,
-            &text_mask_path,
-            &text_removed_path,
-        ) {
+        } else if let Err(reason) =
+            inpaint_image(runtime, input_path, &text_mask_path, &text_removed_path).await
+        {
             tracing::warn!(target: "codex.edit", "magic_layer: 保護後テキスト消去に失敗、原画像で続行 ({reason})");
             tokio::fs::copy(input_path, &text_removed_path)
                 .await
@@ -780,7 +776,7 @@ fn crop_text_region_png(
 /// (実測 2026-07-03: 白文字「バスケを嫌いになった日」が #0a1116 と抽出され、
 /// 再描画時に見えない文字になった)。ストローク画素だけの中央値なら背景・縁の
 /// アンチエイリアスに引きずられない。確率マップが無い/画素不足のときは従来の中心1点。
-fn text_color(
+pub(crate) fn text_color(
     rgb: &image::RgbImage,
     bbox: [u32; 4],
     prob_map: Option<&TextProbMap>,

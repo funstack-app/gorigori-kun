@@ -12,9 +12,7 @@ use tauri::{AppHandle, Emitter, State};
 use crate::commands::edit_segment::now_secs;
 use crate::commands::storage::{resolve_output_dir, StorageSettings};
 use crate::edit::inpaint::inpaint_image;
-use crate::edit::magic_layer::{
-    build_text_layers, generate_text_erase_mask, split_overlay_regions, TextLayerSpec,
-};
+use crate::edit::magic_layer::TextLayerSpec;
 use crate::edit::ocr::ocr_image_with_probmap;
 use crate::edit::sam3_text::{Sam3TextSession, DEFAULT_SCORE_THRESHOLD};
 use crate::events::EVENT_EDIT_WORDS_PROGRESS;
@@ -247,41 +245,146 @@ async fn run_words_segment(
             }
         }
 
-        // テキスト: OCR → 物体上の印字を保護 → オーバーレイのみ消去+レイヤー化。
+        // テキスト: SAM3 の「text」概念検出で、デザイン文字を視覚ブロック単位で掴む。
+        // OCR は文字内容の認識 (打ち替え変換用の注釈) にだけ使う。
+        //
+        // なぜ (2026-07-03 実測): OCR基準だと密度の高いポスターのタイトルが13断片に割れて
+        // バラバラのレイヤーになり、消去も断片単位で消し残りが出た。SAM3 はスタイル文字・
+        // グロー込みの「見た目のかたまり」で掴むため、レイヤーも消去もブロック単位で揃う。
         let _ = app.emit(EVENT_EDIT_WORDS_PROGRESS, WordsProgress::DetectingText);
         let text_removed_path = run_dir.join("text-removed.png");
-        match ocr_image_with_probmap(runtime, input).await {
-            Ok((regions, prob_map)) => {
-                let (overlay_regions, protected) =
-                    split_overlay_regions(&regions, Some(&union), width, height);
-                if protected > 0 {
-                    tracing::info!(target: "codex.edit", "words: 物体上テキスト{protected}件を保護");
-                }
-                let text_mask_path = run_dir.join("text-mask.png");
-                generate_text_erase_mask(input, &overlay_regions, &text_mask_path)?;
-                if overlay_regions.is_empty() {
-                    tokio::fs::copy(input, &text_removed_path)
-                        .await
-                        .map_err(|e| format!("copy text-removed: {e}"))?;
-                } else if let Err(reason) = crate::edit::inpaint::remove_text_by_interpolation(
-                    input,
-                    &text_mask_path,
-                    &text_removed_path,
-                ) {
-                    tracing::warn!(target: "codex.edit", "words: テキスト消去失敗、原画像で続行 ({reason})");
-                    tokio::fs::copy(input, &text_removed_path)
-                        .await
-                        .map_err(|e| format!("copy text-removed (fallback): {e}"))?;
-                }
-                text_layers_out =
-                    build_text_layers(&overlay_regions, input, prob_map.as_ref(), Some(&run_dir))?;
+
+        // 1) SAM3 text インスタンス検出。物体に載っている印字・ロゴは保護 (レイヤー化しない)。
+        let text_instances: Vec<crate::edit::sam3_text::Sam3Detection> = {
+            let guard = state.sam3_text_session.read().await;
+            match guard.as_ref() {
+                Some(session) => match session.predict_word("text", 0.55).await {
+                    Ok(detections) => detections,
+                    Err(reason) => {
+                        tracing::warn!(target: "codex.edit", "words: text検出スキップ ({reason})");
+                        Vec::new()
+                    }
+                },
+                None => Vec::new(),
             }
+        };
+        let text_instances: Vec<_> = text_instances
+            .into_iter()
+            .filter(|det| containment(&det.mask, &union) <= 0.6)
+            .collect();
+
+        // 2) OCR (内容注釈用。失敗しても分解は続行)。
+        let (ocr_regions, prob_map) = match ocr_image_with_probmap(runtime, input).await {
+            Ok(pair) => pair,
             Err(reason) => {
-                // OCR 不能 (モデル未DL等) でも物体分解は成立させる。文字はそのまま背景に残る。
                 tracing::warn!(target: "codex.edit", "words: OCRスキップ ({reason})");
+                (Vec::new(), None)
+            }
+        };
+        let rgb_for_color = image::DynamicImage::ImageRgba8(rgba.clone()).to_rgb8();
+
+        // 3) インスタンスごとに「元画素そのまま」レイヤー + 消去マスクを作る。
+        let mut erase_mask = image::ImageBuffer::<image::Luma<u8>, Vec<u8>>::from_pixel(
+            width,
+            height,
+            image::Luma([0u8]),
+        );
+        for (i, det) in text_instances.iter().enumerate() {
+            let out_path = run_dir.join(format!("text-{:02}.png", i + 1));
+            let bbox = match crate::edit::grab::crop_object_png(&rgba, &det.mask, &out_path) {
+                Ok(bbox) => bbox,
+                Err(reason) => {
+                    tracing::warn!(target: "codex.edit", "words: text素材切り出し失敗 ({reason})");
+                    continue;
+                }
+            };
+
+            // このブロックに載っている OCR region を上→下、左→右の順で連結して内容にする。
+            let mut linked: Vec<&crate::edit::ocr::TextRegion> = ocr_regions
+                .iter()
+                .filter(|region| {
+                    let [x, y, w0, h0] = region.bbox;
+                    let cx = (x + w0 / 2).clamp(0, width as i32 - 1) as u32;
+                    let cy = (y + h0 / 2).clamp(0, height as i32 - 1) as u32;
+                    det.mask.get_pixel(cx, cy)[0] > 127
+                })
+                .collect();
+            linked.sort_by_key(|region| (region.bbox[1], region.bbox[0]));
+            let joined = linked
+                .iter()
+                .map(|region| region.text.trim())
+                .filter(|text| !text.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            let first_bbox = linked.first().map(|region| region.bbox).unwrap_or(bbox);
+            let color_bbox = [
+                first_bbox[0].max(0) as u32,
+                first_bbox[1].max(0) as u32,
+                first_bbox[2].max(1) as u32,
+                first_bbox[3].max(1) as u32,
+            ];
+            let color = crate::edit::magic_layer::text_color(
+                &rgb_for_color,
+                color_bbox,
+                prob_map.as_ref(),
+            );
+            let font_size = linked
+                .first()
+                .map(|region| (region.bbox[3] as f32 * 0.8).clamp(8.0, 240.0))
+                .unwrap_or(((bbox[3] as f32) * 0.5).clamp(8.0, 240.0));
+            let is_ja = joined
+                .chars()
+                .any(|c| matches!(c, '\u{3040}'..='\u{30FF}' | '\u{4E00}'..='\u{9FFF}'));
+
+            text_layers_out.push(TextLayerSpec {
+                id: format!("text-{:04}", i),
+                name: format!("テキスト {}", i + 1),
+                text: joined,
+                image_path: Some(out_path.to_string_lossy().into_owned()),
+                image_bbox: Some(bbox),
+                bbox,
+                font_family: if is_ja {
+                    "Hiragino Sans".to_string()
+                } else {
+                    "Helvetica".to_string()
+                },
+                font_size,
+                font_weight: "normal".to_string(),
+                color,
+                align: "left".to_string(),
+                x: bbox[0],
+                y: bbox[1],
+                opacity: 1.0,
+                visible: true,
+                rotation: 0.0,
+            });
+
+            for (dst, src) in erase_mask.pixels_mut().zip(det.mask.pixels()) {
+                if src[0] > 127 {
+                    *dst = image::Luma([255u8]);
+                }
+            }
+        }
+
+        // 4) 消去 (塗り方は inpaint_image が文脈で自動選択: 滑らか=補間 / 複雑=LaMa)。
+        if text_layers_out.is_empty() {
+            tokio::fs::copy(input, &text_removed_path)
+                .await
+                .map_err(|e| format!("copy text-removed: {e}"))?;
+        } else {
+            let text_mask_path = run_dir.join("text-mask.png");
+            let dilated = crate::edit::grab::dilate_mask_pub(&erase_mask, 4);
+            let mask_saved = dilated.save(&text_mask_path).is_ok();
+            if !mask_saved
+                || inpaint_image(runtime, input, &text_mask_path, &text_removed_path)
+                    .await
+                    .is_err()
+            {
+                tracing::warn!(target: "codex.edit", "words: テキスト消去失敗、原画像で続行");
                 tokio::fs::copy(input, &text_removed_path)
                     .await
-                    .map_err(|e| format!("copy text-removed (no-ocr): {e}"))?;
+                    .map_err(|e| format!("copy text-removed (fallback): {e}"))?;
             }
         }
 
