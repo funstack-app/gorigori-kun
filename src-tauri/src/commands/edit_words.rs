@@ -132,40 +132,77 @@ async fn run_words_segment(
         .to_rgba8();
     let (width, height) = rgba.dimensions();
 
-    let mut layers: Vec<WordLayerSpec> = Vec::new();
-    let guard = state.sam3_text_session.read().await;
-    let session = guard
-        .as_ref()
-        .ok_or_else(|| "sam3 session missing".to_string())?;
-    for word in &words {
-        let label_base = word
-            .label
-            .clone()
-            .unwrap_or_else(|| word.prompt.clone());
-        let _ = app.emit(
-            EVENT_EDIT_WORDS_PROGRESS,
-            WordsProgress::Word {
-                label: label_base.clone(),
-            },
-        );
-        let detections = session.predict_word(&word.prompt, threshold).await?;
-        for (i, det) in detections.iter().enumerate() {
-            let file_stem = sanitize_file_stem(&word.prompt);
-            let out_path = run_dir.join(format!("word-{file_stem}-{:02}.png", i + 1));
-            let bbox = crate::edit::grab::crop_object_png(&rgba, &det.mask, &out_path)?;
-            let label = if detections.len() > 1 {
-                format!("{label_base} {}", i + 1)
-            } else {
-                label_base.clone()
-            };
-            layers.push(WordLayerSpec {
-                image_path: out_path.to_string_lossy().into_owned(),
-                bbox,
-                label,
-                prompt: word.prompt.clone(),
-                score: det.score,
-            });
+    // 1) 全語の検出をまず収集する (クロップはクロスワード重複排除の後)。
+    struct Pending {
+        word_index: usize,
+        score: f32,
+        mask: image::ImageBuffer<image::Luma<u8>, Vec<u8>>,
+    }
+    let mut pending: Vec<Pending> = Vec::new();
+    {
+        let guard = state.sam3_text_session.read().await;
+        let session = guard
+            .as_ref()
+            .ok_or_else(|| "sam3 session missing".to_string())?;
+        for (word_index, word) in words.iter().enumerate() {
+            let label_base = word.label.clone().unwrap_or_else(|| word.prompt.clone());
+            let _ = app.emit(
+                EVENT_EDIT_WORDS_PROGRESS,
+                WordsProgress::Word { label: label_base },
+            );
+            let detections = session.predict_word(&word.prompt, threshold).await?;
+            for det in detections {
+                pending.push(Pending {
+                    word_index,
+                    score: det.score,
+                    mask: det.mask,
+                });
+            }
         }
+    }
+
+    // 2) クロスワード重複排除: 同じ物体を複数の語 (例: ball と basketball) が拾うと
+    //    レイヤーが二重になる。確信度の高い順に採用し、採用済みとマスク IoU が
+    //    大きく重なる検出は捨てる。
+    const CROSS_WORD_NMS_IOU: f64 = 0.70;
+    pending.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    let mut kept: Vec<Pending> = Vec::new();
+    for candidate in pending {
+        let dup = kept
+            .iter()
+            .any(|k| mask_iou(&candidate.mask, &k.mask) > CROSS_WORD_NMS_IOU);
+        if !dup {
+            kept.push(candidate);
+        }
+    }
+
+    // 3) 採用分をクロップしてレイヤー化。同一語の複数インスタンスは連番を振る。
+    let mut per_word_count: Vec<usize> = vec![0; words.len()];
+    for k in &kept {
+        per_word_count[k.word_index] += 1;
+    }
+    let mut per_word_seen: Vec<usize> = vec![0; words.len()];
+    let mut layers: Vec<WordLayerSpec> = Vec::new();
+    for k in &kept {
+        let word = &words[k.word_index];
+        let label_base = word.label.clone().unwrap_or_else(|| word.prompt.clone());
+        per_word_seen[k.word_index] += 1;
+        let seq = per_word_seen[k.word_index];
+        let file_stem = sanitize_file_stem(&word.prompt);
+        let out_path = run_dir.join(format!("word-{file_stem}-{seq:02}.png"));
+        let bbox = crate::edit::grab::crop_object_png(&rgba, &k.mask, &out_path)?;
+        let label = if per_word_count[k.word_index] > 1 {
+            format!("{label_base} {seq}")
+        } else {
+            label_base
+        };
+        layers.push(WordLayerSpec {
+            image_path: out_path.to_string_lossy().into_owned(),
+            bbox,
+            label,
+            prompt: word.prompt.clone(),
+            score: k.score,
+        });
     }
 
     tracing::info!(
@@ -181,6 +218,33 @@ async fn run_words_segment(
         width,
         height,
     })
+}
+
+/// 2つのソフトマスク (>127 が対象) の IoU。寸法不一致は 0。
+fn mask_iou(
+    a: &image::ImageBuffer<image::Luma<u8>, Vec<u8>>,
+    b: &image::ImageBuffer<image::Luma<u8>, Vec<u8>>,
+) -> f64 {
+    if a.dimensions() != b.dimensions() {
+        return 0.0;
+    }
+    let mut inter = 0u64;
+    let mut union = 0u64;
+    for (pa, pb) in a.pixels().zip(b.pixels()) {
+        let wa = pa[0] > 127;
+        let wb = pb[0] > 127;
+        if wa && wb {
+            inter += 1;
+        }
+        if wa || wb {
+            union += 1;
+        }
+    }
+    if union == 0 {
+        0.0
+    } else {
+        inter as f64 / union as f64
+    }
 }
 
 /// プロンプトをファイル名に使える形へ (ASCII英数字以外は '_')。

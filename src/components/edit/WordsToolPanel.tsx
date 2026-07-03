@@ -16,7 +16,7 @@ export function WordsToolPanel() {
   const [input, setInput] = useState("");
   const busyTool = useEditor((state) => state.busyTool);
   const sourceImagePath = useEditor((state) => state.sourceImagePath);
-  const { runWords } = useEditorActions();
+  const { runWords, runWordsAuto } = useEditorActions();
   const busy = busyTool === "words";
 
   const submit = () => {
@@ -86,6 +86,15 @@ export function WordsToolPanel() {
             </button>
           ))}
         </div>
+        <button
+          type="button"
+          onClick={() => void runWordsAuto()}
+          disabled={busy || !sourceImagePath}
+          className="mt-2 w-full rounded-md border border-pink-500/50 bg-pink-500/10 px-3 py-1.5 text-[11px] font-black text-pink-200 transition hover:bg-pink-500/20 disabled:cursor-not-allowed disabled:opacity-40"
+          title="AI (Codex) が画像に写っているものを全部見つけて、まとめてレイヤーに切り出します"
+        >
+          {busy ? "処理中…" : "✦ AIにおまかせで全部切り出す"}
+        </button>
         {!sourceImagePath ? (
           <p className="mt-2 text-[10px] text-neutral-600">
             先に画像をドロップ、または「画像を選ぶ」で開いてください。

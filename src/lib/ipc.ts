@@ -909,6 +909,9 @@ export const translate = {
 
 export const codexVision = {
   describeImage: (imagePath: string) => invoke<string>("codex_describe_image", { imagePath }),
+  /** ことばで分離の自動モード: 画像内の独立した物体を英語プロンプト+日本語名で列挙する。 */
+  listObjects: (imagePath: string) =>
+    invoke<Array<{ en: string; ja: string }>>("codex_list_image_objects", { imagePath }),
 };
 
 // ──────────── Codex MCP servers (~/.codex/config.toml) ────────────

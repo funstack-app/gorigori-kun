@@ -341,6 +341,7 @@ pub fn run() {
             commands::cloud_supabase::supabase_sync_now,
             commands::codex_text::codex_text_query,
             commands::codex_vision::codex_describe_image,
+            commands::codex_vision::codex_list_image_objects,
             commands::edit_models::edit_models_list,
             commands::edit_models::edit_models_download,
             commands::edit_models::edit_models_delete,

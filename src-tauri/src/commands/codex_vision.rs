@@ -14,6 +14,49 @@ const VISION_EFFORT: &str = "low";
 
 #[tauri::command]
 pub async fn codex_describe_image(image_path: String) -> Result<String, String> {
+    let prompt = [
+        "添付画像を解析し、この画像をAI画像生成で再現するための英語プロンプトを1行で書いてください。",
+        "被写体、構図、レンズ感、照明、色調、質感、背景を具体的に含めること。",
+        "説明、箇条書き、前置き、引用符、Markdown は不要。プロンプト本文だけを返してください。",
+    ]
+    .join("\n");
+    let stdout = run_codex_vision(&image_path, &prompt).await?;
+    let description = clean_codex_output(&stdout);
+    if description.is_empty() {
+        return Err("Codex Vision の応答が空でした".to_string());
+    }
+    Ok(description)
+}
+
+/// ことばで分離の自動モード用: 画像に写っている独立した被写体・物体を列挙する。
+/// 返り値は SAM3 プロンプト (英語) + レイヤー名 (日本語) のペア。
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct ImageObjectWord {
+    pub en: String,
+    pub ja: String,
+}
+
+#[tauri::command]
+pub async fn codex_list_image_objects(image_path: String) -> Result<Vec<ImageObjectWord>, String> {
+    let prompt = [
+        "添付画像に写っている「独立した被写体・物体」を列挙してください。",
+        "用途: 各物体をセグメンテーションAI (SAM3) のテキストプロンプトで切り出してレイヤー化する。",
+        "ルール:",
+        "- 最大10個。画像の主要な物体から順に。",
+        "- en は SAM3 が認識しやすい簡潔な英語名詞 (例: basketball, robot, sneakers)。",
+        "- ja はレイヤー名に使う短い日本語 (例: バスケットボール)。",
+        "- 背景そのもの (floor, wall, sky, ground, background) は含めない。",
+        "- 画像上のオーバーレイ文字・ロゴのうち、物体に印字されたものは含めない。",
+        "- 出力は JSON 配列のみ。説明・前置き・Markdown コードフェンス不要。",
+        "形式: [{\"en\":\"basketball\",\"ja\":\"バスケットボール\"}]",
+    ]
+    .join("\n");
+    let stdout = run_codex_vision(&image_path, &prompt).await?;
+    parse_object_words(&stdout)
+}
+
+/// Codex CLI (`codex exec -i <image>`) で画像付きプロンプトを実行し stdout を返す共通経路。
+async fn run_codex_vision(image_path: &str, prompt: &str) -> Result<String, String> {
     let image_path = image_path.trim();
     if image_path.is_empty() {
         return Err("image_path must not be empty".to_string());
@@ -25,12 +68,6 @@ pub async fn codex_describe_image(image_path: String) -> Result<String, String> 
 
     let codex_bin =
         resolve_codex_cli_binary().map_err(|e| format!("Codex CLI の解決に失敗: {e}"))?;
-    let prompt = [
-        "添付画像を解析し、この画像をAI画像生成で再現するための英語プロンプトを1行で書いてください。",
-        "被写体、構図、レンズ感、照明、色調、質感、背景を具体的に含めること。",
-        "説明、箇条書き、前置き、引用符、Markdown は不要。プロンプト本文だけを返してください。",
-    ]
-    .join("\n");
 
     // Codex CLI の正規フラグ:
     //   --skip-git-repo-check : リポジトリ外でも実行可
@@ -98,11 +135,48 @@ pub async fn codex_describe_image(image_path: String) -> Result<String, String> 
         ));
     }
 
-    let description = clean_codex_output(&stdout);
-    if description.is_empty() {
-        return Err("Codex Vision の応答が空でした".to_string());
+    Ok(stdout)
+}
+
+/// Codex の応答から JSON 配列部分を取り出して ImageObjectWord 群へ解釈する。
+/// Codex はフォーマット指示をしても前置きやコードフェンスを混ぜることがあるため、
+/// 最初の '[' 〜 最後の ']' を JSON として読む。
+fn parse_object_words(raw: &str) -> Result<Vec<ImageObjectWord>, String> {
+    let start = raw
+        .find('[')
+        .ok_or_else(|| format!("物体リストのJSONが見つかりません: {raw}"))?;
+    let end = raw
+        .rfind(']')
+        .ok_or_else(|| format!("物体リストのJSONが閉じていません: {raw}"))?;
+    if end <= start {
+        return Err("物体リストのJSONが壊れています".to_string());
     }
-    Ok(description)
+    let words: Vec<ImageObjectWord> = serde_json::from_str(&raw[start..=end])
+        .map_err(|e| format!("物体リストの解釈に失敗: {e}"))?;
+
+    // 正規化: 空要素を捨て、en の小文字一致で重複排除、最大10件。
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for mut w in words {
+        w.en = w.en.trim().to_string();
+        w.ja = w.ja.trim().to_string();
+        if w.en.is_empty() {
+            continue;
+        }
+        if w.ja.is_empty() {
+            w.ja = w.en.clone();
+        }
+        if seen.insert(w.en.to_lowercase()) {
+            out.push(w);
+        }
+        if out.len() >= 10 {
+            break;
+        }
+    }
+    if out.is_empty() {
+        return Err("物体が1つも見つかりませんでした".to_string());
+    }
+    Ok(out)
 }
 
 fn clean_codex_output(value: &str) -> String {

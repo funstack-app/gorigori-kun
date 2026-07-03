@@ -8,6 +8,7 @@ import {
   editSam2,
   editSegment,
   editWords,
+  codexVision,
   images,
 } from "../../../lib/ipc";
 import { useActiveProject } from "../../../lib/store/activeProject";
@@ -173,6 +174,47 @@ export function useEditorActions() {
             ? "見つかりませんでした。辞書にない日本語は精度が下がります。英語 (例: dog) でも試してください。"
             : "見つかりませんでした。別のことばで試してください。",
         );
+      }
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setBusyTool(null);
+    }
+  };
+
+  /**
+   * ことばで分離の自動モード: Codex (ユーザーのChatGPT) に画像内の物体を全列挙させ、
+   * その全キーワードを SAM3 に投げてレイヤー分割する。
+   */
+  const runWordsAuto = async () => {
+    if (!canvas) {
+      setError("キャンバスを初期化中です。");
+      return;
+    }
+    if (!sourceImagePath) {
+      setError("先に画像をドロップ、または画像を選んでください。");
+      return;
+    }
+    setBusyTool("words");
+    setError(null);
+    setMessage("AIが画像を読み取り中… (写っているものを数え上げています)");
+    try {
+      const objects = await codexVision.listObjects(sourceImagePath);
+      setMessage(
+        `${objects.length}個のものを見つけました (${objects.map((o) => o.ja).join("、")})。切り出し中…`,
+      );
+      const result = await editWords.segment(
+        sourceImagePath,
+        objects.map((o) => ({ prompt: o.en, label: o.ja })),
+        projectName,
+      );
+      const added = await addWordLayersToCanvas(canvas, result);
+      if (added > 0) {
+        bumpRevision();
+        pushHistory();
+        setMessage(`${added}個のレイヤーを切り出しました。足りないものは「ことば」を入力して追加できます。`);
+      } else {
+        setMessage("切り出せるものが見つかりませんでした。「ことば」を直接入力して試してください。");
       }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
@@ -417,6 +459,7 @@ export function useEditorActions() {
   return {
     run,
     runWords,
+    runWordsAuto,
     chooseImage,
     runMagic,
     handleCanvasClickForTool,
