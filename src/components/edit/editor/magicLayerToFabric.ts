@@ -312,6 +312,76 @@ export async function showSourceImagePreview(
 }
 
 /**
+ * ことばで分離 (full モード) の結果でキャンバスを構成し直す。
+ * Magic Layer と同じ層構造: 補完済み背景 → 物体レイヤー (語がレイヤー名) →
+ * 編集可能テキストレイヤー。追加したレイヤー数 (背景含む) を返す。
+ */
+export async function applyWordsResultToCanvas(
+  canvas: FabricCanvas,
+  result: WordsSegmentResult,
+): Promise<number> {
+  const fabric = await importFabric();
+  clearCanvas(canvas);
+  canvas.backgroundColor = "#1a1a1a";
+  let added = 0;
+
+  if (result.backgroundPath) {
+    const bgImg = await loadFabricImage(fabric, result.backgroundPath);
+    bgImg.set({
+      id: "bg",
+      name: "背景",
+      layerKind: "image",
+      left: 0,
+      top: 0,
+      selectable: true,
+    });
+    canvas.add(bgImg);
+    added += 1;
+  }
+
+  for (const layer of result.layers) {
+    const image = await loadFabricImage(fabric, layer.imagePath);
+    const [x, y] = layer.bbox;
+    image.set({
+      id: createLayerId(),
+      name: layer.label,
+      layerKind: "image",
+      left: clampPlacement(x, result.width),
+      top: clampPlacement(y, result.height),
+      selectable: true,
+    });
+    canvas.add(image);
+    added += 1;
+  }
+
+  // 編集可能テキスト (Magic Layer と同じ構成。サイズ・位置・スケール・色を後から変更できる)。
+  result.textLayers.forEach((text, index) => {
+    const bbox = text.bbox;
+    const textbox = new fabric.Textbox(text.text || "テキスト", {
+      id: text.id ?? `text-${index + 1}`,
+      name: text.name ?? `テキスト ${index + 1}`,
+      layerKind: "text",
+      left: clampPlacement(text.x ?? bbox?.[0] ?? 50, result.width),
+      top: clampPlacement(text.y ?? bbox?.[1] ?? 50 + index * 52, result.height),
+      width: bbox?.[2] ?? 240,
+      fontSize: text.fontSize ?? 28,
+      fill: text.color ?? "#ffffff",
+      fontFamily: text.fontFamily ?? "Hiragino Sans",
+      fontWeight: text.fontWeight ?? "normal",
+      textAlign: text.align ?? "left",
+      opacity: text.opacity ?? 1,
+      angle: text.rotation ?? 0,
+    });
+    canvas.add(textbox);
+    added += 1;
+  });
+
+  fitCanvasToImage(canvas, result.width, result.height);
+  canvas.renderAll?.();
+  return added;
+}
+
+/**
  * ことばで分離 (SAM3) の検出レイヤーを bbox 位置の可動レイヤーとしてキャンバスへ積む。
  * Magic Layer の objectLayers と同じ流儀 (bbox クランプ + label がレイヤー名)。
  * 追加したレイヤー数を返す。

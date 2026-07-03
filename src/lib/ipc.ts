@@ -170,13 +170,14 @@ export const editWords = {
     inputPath: string,
     words: Array<{ prompt: string; label?: string }>,
     projectName?: string | null,
-    scoreThreshold?: number,
+    options: { scoreThreshold?: number; mode?: "full" | "layersOnly" } = {},
   ) =>
     invoke<WordsSegmentResult>("edit_words_segment", {
       inputPath,
       words,
       projectName: projectName ?? null,
-      scoreThreshold: scoreThreshold ?? null,
+      scoreThreshold: options.scoreThreshold ?? null,
+      mode: options.mode ?? null,
     }),
 };
 

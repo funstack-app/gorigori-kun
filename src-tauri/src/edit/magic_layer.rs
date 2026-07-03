@@ -481,7 +481,7 @@ const SUBJECT_TEXT_COVER: f64 = 0.60;
 /// OCR region を「オーバーレイ文字 (残す=レイヤー化+消去対象)」と「被写体上の文字
 /// (保護=触らない)」に分ける。返り値は (オーバーレイ region 群, 保護した件数)。
 /// マスクが無い/寸法不一致のときは全件オーバーレイ扱い (従来挙動)。
-fn split_overlay_regions(
+pub(crate) fn split_overlay_regions(
     regions: &[TextRegion],
     subject_mask: Option<&ImageBuffer<Luma<u8>, Vec<u8>>>,
     width: u32,

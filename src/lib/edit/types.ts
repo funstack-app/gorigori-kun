@@ -43,6 +43,10 @@ export type WordLayerSpec = {
 /** ことばで分離の実行結果。Rust WordsSegmentResult と一致。 */
 export type WordsSegmentResult = {
   layers: WordLayerSpec[];
+  /** full モードのみ: 切り出し跡地を補完しオーバーレイ文字を消した背景画像。 */
+  backgroundPath?: string | null;
+  /** full モードのみ: 編集可能テキストレイヤー群 (Magic Layer と同形式)。 */
+  textLayers: TextLayerSpec[];
   runDir: string;
   width: number;
   height: number;

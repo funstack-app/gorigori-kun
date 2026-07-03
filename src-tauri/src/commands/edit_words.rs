@@ -11,6 +11,11 @@ use tauri::{AppHandle, Emitter, State};
 
 use crate::commands::edit_segment::now_secs;
 use crate::commands::storage::{resolve_output_dir, StorageSettings};
+use crate::edit::inpaint::inpaint_image;
+use crate::edit::magic_layer::{
+    build_text_layers, generate_text_mask, split_overlay_regions, TextLayerSpec,
+};
+use crate::edit::ocr::ocr_image_with_probmap;
 use crate::edit::sam3_text::{Sam3TextSession, DEFAULT_SCORE_THRESHOLD};
 use crate::events::EVENT_EDIT_WORDS_PROGRESS;
 use crate::state::AppState;
@@ -45,6 +50,10 @@ pub struct WordLayerSpec {
 #[serde(rename_all = "camelCase")]
 pub struct WordsSegmentResult {
     pub layers: Vec<WordLayerSpec>,
+    /// full モードのみ: 切り出し跡地を補完し、オーバーレイ文字を消した背景画像。
+    pub background_path: Option<String>,
+    /// full モードのみ: OCR で検出した編集可能テキストレイヤー群 (Magic Layer と同形式)。
+    pub text_layers: Vec<TextLayerSpec>,
     pub run_dir: String,
     pub width: u32,
     pub height: u32,
@@ -57,6 +66,10 @@ pub enum WordsProgress {
     Embedding,
     /// 1語の推論中。
     Word { label: String },
+    /// full モード: 文字の検出・消去中。
+    DetectingText,
+    /// full モード: 切り出し跡地の背景補完中。
+    FillingBackground,
     Completed,
     Failed { reason: String },
 }
@@ -70,8 +83,20 @@ pub async fn edit_words_segment(
     project_name: Option<String>,
     // 確信度の下限。省略時 DEFAULT_SCORE_THRESHOLD (0.60)。
     score_threshold: Option<f32>,
+    // "full" = 背景補完+テキストレイヤー化まで行う初回分解 / 省略・"layersOnly" = レイヤー追記のみ。
+    mode: Option<String>,
 ) -> Result<WordsSegmentResult, String> {
-    match run_words_segment(&app, &state, &input_path, words, project_name, score_threshold).await
+    let full = mode.as_deref() == Some("full");
+    match run_words_segment(
+        &app,
+        &state,
+        &input_path,
+        words,
+        project_name,
+        score_threshold,
+        full,
+    )
+    .await
     {
         Ok(result) => {
             let _ = app.emit(EVENT_EDIT_WORDS_PROGRESS, WordsProgress::Completed);
@@ -96,6 +121,7 @@ async fn run_words_segment(
     words: Vec<WordInput>,
     project_name: Option<String>,
     score_threshold: Option<f32>,
+    full: bool,
 ) -> Result<WordsSegmentResult, String> {
     let input = Path::new(input_path);
     if !input.exists() {
@@ -176,6 +202,89 @@ async fn run_words_segment(
         }
     }
 
+    // full モード: 背景補完 + 編集可能テキストレイヤー化 (Magic Layer 相当の仕上げ)。
+    // - 切り出した物体の union 跡地を LaMa で補完した「背景」を作る
+    //   (元画像を下に敷いたままだと、レイヤーを動かしたとき下に同じ絵が残る)
+    // - オーバーレイ文字は編集可能テキストレイヤーへ変換し背景から消す。
+    //   切り出した物体の上に載っている文字 (印字・ロゴ) は物体の柄として保護する
+    let mut background_path_out: Option<String> = None;
+    let mut text_layers_out: Vec<TextLayerSpec> = Vec::new();
+    if full {
+        let runtime = state.edit_runtime();
+
+        // 物体 union マスク (テキスト保護の「被写体」判定と跡地補完の両方に使う)。
+        let mut union =
+            image::ImageBuffer::<image::Luma<u8>, Vec<u8>>::from_pixel(width, height, image::Luma([0u8]));
+        for k in &kept {
+            if k.mask.dimensions() == (width, height) {
+                for (dst, src) in union.pixels_mut().zip(k.mask.pixels()) {
+                    if src[0] > 127 {
+                        *dst = image::Luma([255u8]);
+                    }
+                }
+            }
+        }
+
+        // テキスト: OCR → 物体上の印字を保護 → オーバーレイのみ消去+レイヤー化。
+        let _ = app.emit(EVENT_EDIT_WORDS_PROGRESS, WordsProgress::DetectingText);
+        let text_removed_path = run_dir.join("text-removed.png");
+        match ocr_image_with_probmap(runtime, input).await {
+            Ok((regions, prob_map)) => {
+                let (overlay_regions, protected) =
+                    split_overlay_regions(&regions, Some(&union), width, height);
+                if protected > 0 {
+                    tracing::info!(target: "codex.edit", "words: 物体上テキスト{protected}件を保護");
+                }
+                let text_mask_path = run_dir.join("text-mask.png");
+                generate_text_mask(input, &overlay_regions, prob_map.as_ref(), &text_mask_path)?;
+                if overlay_regions.is_empty() {
+                    tokio::fs::copy(input, &text_removed_path)
+                        .await
+                        .map_err(|e| format!("copy text-removed: {e}"))?;
+                } else if let Err(reason) =
+                    inpaint_image(runtime, input, &text_mask_path, &text_removed_path).await
+                {
+                    tracing::warn!(target: "codex.edit", "words: テキスト消去失敗、原画像で続行 ({reason})");
+                    tokio::fs::copy(input, &text_removed_path)
+                        .await
+                        .map_err(|e| format!("copy text-removed (fallback): {e}"))?;
+                }
+                text_layers_out = build_text_layers(&overlay_regions, input, prob_map.as_ref())?;
+            }
+            Err(reason) => {
+                // OCR 不能 (モデル未DL等) でも物体分解は成立させる。文字はそのまま背景に残る。
+                tracing::warn!(target: "codex.edit", "words: OCRスキップ ({reason})");
+                tokio::fs::copy(input, &text_removed_path)
+                    .await
+                    .map_err(|e| format!("copy text-removed (no-ocr): {e}"))?;
+            }
+        }
+
+        // 背景: 物体 union の跡地を補完する (テキスト消去済み画像がベース)。
+        let _ = app.emit(EVENT_EDIT_WORDS_PROGRESS, WordsProgress::FillingBackground);
+        let background_path = run_dir.join("background.png");
+        let union_area = union.pixels().filter(|p| p[0] > 127).count();
+        if union_area > 0 {
+            let union_path = run_dir.join("object-union-mask.png");
+            let dilated = crate::edit::grab::dilate_mask_pub(&union, 6);
+            let filled = dilated.save(&union_path).is_ok()
+                && inpaint_image(runtime, &text_removed_path, &union_path, &background_path)
+                    .await
+                    .is_ok();
+            if !filled {
+                tracing::warn!(target: "codex.edit", "words: 背景補完失敗、テキスト消去済み画像で続行");
+                tokio::fs::copy(&text_removed_path, &background_path)
+                    .await
+                    .map_err(|e| format!("copy background (fallback): {e}"))?;
+            }
+        } else {
+            tokio::fs::copy(&text_removed_path, &background_path)
+                .await
+                .map_err(|e| format!("copy background: {e}"))?;
+        }
+        background_path_out = Some(background_path.to_string_lossy().into_owned());
+    }
+
     // 3) 採用分をクロップしてレイヤー化。同一語の複数インスタンスは連番を振る。
     let mut per_word_count: Vec<usize> = vec![0; words.len()];
     for k in &kept {
@@ -214,6 +323,8 @@ async fn run_words_segment(
     );
     Ok(WordsSegmentResult {
         layers,
+        background_path: background_path_out,
+        text_layers: text_layers_out,
         run_dir: run_dir.to_string_lossy().into_owned(),
         width,
         height,

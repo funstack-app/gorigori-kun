@@ -22,7 +22,9 @@ import {
   addTextLayer,
   addTextRegionsToCanvas,
   addWordLayersToCanvas,
+  applyWordsResultToCanvas,
   showSourceImagePreview,
+  SOURCE_PREVIEW_ID,
   applyGrabResultToCanvas,
   applyMagicLayerToCanvas,
   applySegmentResultToCanvas,
@@ -134,6 +136,17 @@ export function useEditorActions() {
     }
   };
 
+  /** キャンバスに分解済みレイヤーがあるか (元画像プレビューとマスクは数えない)。 */
+  const hasDecomposedLayers = () => {
+    const objects =
+      (canvas as { getObjects?: () => Array<{ get?: (key: string) => unknown }> } | null)
+        ?.getObjects?.() ?? [];
+    return objects.some(
+      (object) =>
+        object.get?.("id") !== SOURCE_PREVIEW_ID && object.get?.("layerKind") !== "mask",
+    );
+  };
+
   /**
    * ことばで分離 (SAM3) を実行する。raw はカンマ/空白区切りの入力
    * (日本語は wordPresets 辞書で英語プロンプトへ解決)。
@@ -159,16 +172,26 @@ export function useEditorActions() {
     setError(null);
     setMessage("ことばで分離を実行中… (初回はAIの読み込みに数十秒かかります)");
     try {
+      // 初回分解はフルセット (背景補完+テキストレイヤー化)、以降の語の追加はレイヤー追記。
+      const full = !hasDecomposedLayers();
       const result = await editWords.segment(
         sourceImagePath,
         resolved.map((w) => ({ prompt: w.prompt, label: w.label })),
         projectName,
+        { mode: full ? "full" : "layersOnly" },
       );
-      const added = await addWordLayersToCanvas(canvas, result);
+      const added = full
+        ? await applyWordsResultToCanvas(canvas, result)
+        : await addWordLayersToCanvas(canvas, result);
+      if (full) resetHistory();
       if (added > 0) {
         bumpRevision();
         pushHistory();
-        setMessage(`${added}個のレイヤーを切り出しました。右の一覧から選んで動かせます。`);
+        setMessage(
+          full
+            ? `${result.layers.length}個の物体と文字${result.textLayers.length}件を切り出しました。背景は補完済みです。`
+            : `${added}個のレイヤーを切り出しました。右の一覧から選んで動かせます。`,
+        );
       } else {
         setMessage(
           untranslated.length > 0
@@ -204,16 +227,25 @@ export function useEditorActions() {
       setMessage(
         `${objects.length}個のものを見つけました (${objects.map((o) => o.ja).join("、")})。切り出し中…`,
       );
+      const full = !hasDecomposedLayers();
       const result = await editWords.segment(
         sourceImagePath,
         objects.map((o) => ({ prompt: o.en, label: o.ja })),
         projectName,
+        { mode: full ? "full" : "layersOnly" },
       );
-      const added = await addWordLayersToCanvas(canvas, result);
+      const added = full
+        ? await applyWordsResultToCanvas(canvas, result)
+        : await addWordLayersToCanvas(canvas, result);
+      if (full) resetHistory();
       if (added > 0) {
         bumpRevision();
         pushHistory();
-        setMessage(`${added}個のレイヤーを切り出しました。足りないものは「ことば」を入力して追加できます。`);
+        setMessage(
+          full
+            ? `${result.layers.length}個の物体と文字${result.textLayers.length}件を切り出しました。足りないものは「ことば」で追加できます。`
+            : `${added}個のレイヤーを切り出しました。足りないものは「ことば」を入力して追加できます。`,
+        );
       } else {
         setMessage("切り出せるものが見つかりませんでした。「ことば」を直接入力して試してください。");
       }
