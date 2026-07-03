@@ -22,6 +22,7 @@ import {
   addTextLayer,
   addTextRegionsToCanvas,
   addWordLayersToCanvas,
+  showSourceImagePreview,
   applyGrabResultToCanvas,
   applyMagicLayerToCanvas,
   applySegmentResultToCanvas,
@@ -230,7 +231,20 @@ export function useEditorActions() {
     });
     if (typeof selected !== "string") return;
     setSourceImagePath(selected);
-    await runMagic(selected, "magic", projectName);
+    await openImageForEditing(selected);
+  };
+
+  /**
+   * 画像を開いた直後の待機状態を作る (勝手に分解を始めない)。
+   * なぜ: 分解方法が「自動レイヤー分解」と「ことばで分離」の2系統になったため、
+   * どちらでいくかはユーザーが選ぶ (2026-07-03 STΛCK指摘)。
+   */
+  const openImageForEditing = async (path: string) => {
+    if (!canvas) return;
+    await showSourceImagePreview(canvas, path);
+    resetHistory();
+    bumpRevision();
+    setMessage("画像を開きました。右の「レイヤーに分解する」か、左レールの「ことばで分離」を選んでください。");
   };
 
   const runMagic = async (path: string, tool: EditorTool = "magic", runProjectName = projectName) => {
@@ -401,7 +415,7 @@ export function useEditorActions() {
   const saveDroppedFileAndRunMagic = async (file: File) => {
     const shouldClear = (canvas as { getObjects?: () => unknown[] } | null)?.getObjects?.().length;
     if (shouldClear) {
-      const message = "既存レイヤーをクリアして、この画像で Magic Layer を実行しますか?";
+      const message = "既存レイヤーをクリアして、この画像を開きますか?";
       let ok = false;
       try {
         const { ask } = await import("@tauri-apps/plugin-dialog");
@@ -417,9 +431,10 @@ export function useEditorActions() {
       const bytes = new Uint8Array(await file.arrayBuffer());
       const path = await images.writeUpload(file.name || `drop-${Date.now()}.png`, bytes);
       setSourceImagePath(path);
-      await runMagic(path, "magic", projectName);
+      await openImageForEditing(path);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
       setBusyTool(null);
     }
   };
@@ -435,7 +450,7 @@ export function useEditorActions() {
     if (!path) return;
     const shouldClear = (canvas as { getObjects?: () => unknown[] } | null)?.getObjects?.().length;
     if (shouldClear) {
-      const message = "既存レイヤーをクリアして、この画像で Magic Layer を実行しますか?";
+      const message = "既存レイヤーをクリアして、この画像を開きますか?";
       let ok = false;
       try {
         const { ask } = await import("@tauri-apps/plugin-dialog");
@@ -449,9 +464,10 @@ export function useEditorActions() {
     setError(null);
     try {
       setSourceImagePath(path);
-      await runMagic(path, "magic", projectName);
+      await openImageForEditing(path);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
       setBusyTool(null);
     }
   };

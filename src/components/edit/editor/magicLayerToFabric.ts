@@ -279,6 +279,38 @@ export async function addImageLayerToCanvas(
   return image;
 }
 
+/** 分解前の元画像プレビューレイヤーの固定 id。分解ボタンの表示判定で除外するために使う。 */
+export const SOURCE_PREVIEW_ID = "source-preview";
+
+/**
+ * 画像を開いた直後の「分解前プレビュー」をキャンバスに表示する。
+ *
+ * 2026-07-03 まで画像を開くと即 Magic Layer が走っていたが、「ことばで分離」の
+ * 追加で分解方法が複数になったため、開いたら待機してユーザーに選ばせる。
+ * このプレビューはレイヤーではない (選択不可・分解ボタンの数勘定から除外)。
+ */
+export async function showSourceImagePreview(
+  canvas: FabricCanvas,
+  imagePath: string,
+): Promise<void> {
+  const fabric = await importFabric();
+  clearCanvas(canvas);
+  canvas.backgroundColor = "#1a1a1a";
+  const image = await loadFabricImage(fabric, imagePath);
+  image.set({
+    id: SOURCE_PREVIEW_ID,
+    name: "元画像",
+    layerKind: "image",
+    left: 0,
+    top: 0,
+    selectable: false,
+    evented: false,
+  });
+  canvas.add(image);
+  fitCanvasToImage(canvas, image.width ?? 0, image.height ?? 0);
+  canvas.requestRenderAll?.();
+}
+
 /**
  * ことばで分離 (SAM3) の検出レイヤーを bbox 位置の可動レイヤーとしてキャンバスへ積む。
  * Magic Layer の objectLayers と同じ流儀 (bbox クランプ + label がレイヤー名)。

@@ -5,6 +5,7 @@ import { useEditMagic } from "../../lib/store/editMagic";
 import { useEditor } from "./editor/editorStore";
 import { useEditorActions } from "./editor/useEditor";
 import { layerMetasFromCanvas } from "./editor/layerHelpers";
+import { SOURCE_PREVIEW_ID } from "./editor/magicLayerToFabric";
 import { EditModeSelector } from "./EditModeSelector";
 
 /**
@@ -37,7 +38,10 @@ export function EditPrimaryAction() {
 
   // 「切り分けられる本体レイヤー」が既にあるか。プレビュー用のマスクは数に入れない。
   const decomposableLayerCount = useMemo(
-    () => layerMetasFromCanvas(canvas).filter((layer) => layer.kind !== "mask").length,
+    () =>
+      layerMetasFromCanvas(canvas).filter(
+        (layer) => layer.kind !== "mask" && layer.id !== SOURCE_PREVIEW_ID,
+      ).length,
     [canvas, revision],
   );
 
