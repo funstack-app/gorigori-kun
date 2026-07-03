@@ -7,6 +7,7 @@ import { EditorToolbar } from "./edit/EditorToolbar";
 import { EditModeSelector } from "./edit/EditModeSelector";
 import { EditModeSelectorCompact } from "./edit/EditModeSelectorCompact";
 import { EditPrimaryAction } from "./edit/EditPrimaryAction";
+import { WordsToolPanel } from "./edit/WordsToolPanel";
 import { LayerSplitterPanel } from "./edit/LayerSplitterPanel";
 import { CollapsibleSection } from "./edit/CollapsibleSection";
 import { useEditor } from "./edit/editor/editorStore";
@@ -37,6 +38,7 @@ function basename(path: string) {
  */
 export function EditWorkspace() {
   const sourceImagePath = useEditor((state) => state.sourceImagePath);
+  const activeTool = useEditor((state) => state.activeTool);
   const selectedLayerId = useEditor((state) => state.selectedLayerId);
   const busyTool = useEditor((state) => state.busyTool);
   const editMode = useEditor((state) => state.editMode);
@@ -110,6 +112,8 @@ export function EditWorkspace() {
         <aside className="flex min-h-0 w-[300px] shrink-0 flex-col overflow-hidden border-l border-[#2a2a2a] bg-[#252525]">
           {/* ① 主導線: 分解前は大ボタン、実行中は進捗。分解済みは自身を畳む。 */}
           <EditPrimaryAction />
+          {/* ①' ことばで分離: 左レールで選んだときだけ入力パネルを出す。 */}
+          {activeTool === "words" ? <WordsToolPanel /> : null}
           {/* ② レイヤー一覧: 主役。残り高さの大半を占める。 */}
           <EditorLayerList />
           {/* ③ プロパティ: レイヤーを選んでいるときだけ表示 (未選択時は場所を取らない)。 */}

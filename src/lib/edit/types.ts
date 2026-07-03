@@ -28,7 +28,25 @@ export type EditModelCategory =
   | "inpaint"
   | "segment"
   | "samClick"
-  | "humanParse";
+  | "humanParse"
+  | "textSegment";
+
+/** ことばで分離 (SAM3): 検出インスタンス1件 = レイヤー候補1件。Rust WordLayerSpec と一致。 */
+export type WordLayerSpec = {
+  imagePath: string;
+  bbox: [number, number, number, number];
+  label: string;
+  prompt: string;
+  score: number;
+};
+
+/** ことばで分離の実行結果。Rust WordsSegmentResult と一致。 */
+export type WordsSegmentResult = {
+  layers: WordLayerSpec[];
+  runDir: string;
+  width: number;
+  height: number;
+};
 
 /**
  * レイヤー分解モード ID。Rust の edit_magic_run(mode) と一致させること。

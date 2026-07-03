@@ -11,6 +11,7 @@ import type {
   PsdComposition,
   SegmentResult,
   TextRegion,
+  WordsSegmentResult,
 } from "./edit/types";
 import type { StoryboardEvent, StoryboardRunParams } from "./storyboard/types";
 
@@ -160,6 +161,22 @@ export const editMagic = {
       mode: options.mode ?? "standard",
       includeObjects: options.includeObjects ?? true,
       objectCount: options.objectCount ?? null,
+    }),
+};
+
+/** ことばで分離 (SAM3 テキストプロンプト・セグメンテーション)。 */
+export const editWords = {
+  segment: (
+    inputPath: string,
+    words: Array<{ prompt: string; label?: string }>,
+    projectName?: string | null,
+    scoreThreshold?: number,
+  ) =>
+    invoke<WordsSegmentResult>("edit_words_segment", {
+      inputPath,
+      words,
+      projectName: projectName ?? null,
+      scoreThreshold: scoreThreshold ?? null,
     }),
 };
 

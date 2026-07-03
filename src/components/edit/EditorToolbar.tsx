@@ -13,6 +13,7 @@ const TOOLS: Array<{ id: EditorTool; icon: ReactNode; label: string }> = [
   { id: "text-detect", icon: <ScanTextIcon />, label: "テキスト検出" },
   { id: "inpaint", icon: <EraserIcon />, label: "領域消去" },
   { id: "magic", icon: <LayersIcon />, label: "自動レイヤー分解" },
+  { id: "words", icon: <WordsIcon />, label: "ことばで分離 (SAM3)" },
   { id: "redo-decompose", icon: <RefreshIcon />, label: "再分解" },
 ];
 
@@ -154,6 +155,15 @@ function LayersIcon() {
     <svg {...SVG_PROPS} aria-hidden>
       <path d="M12 3l9 5-9 5-9-5 9-5z" />
       <path d="M3 13l9 5 9-5" />
+    </svg>
+  );
+}
+
+function WordsIcon() {
+  return (
+    <svg {...SVG_PROPS} aria-hidden>
+      <path d="M4 5h16v11H9l-4 4V5z" />
+      <path d="M8 9h8M8 12h5" />
     </svg>
   );
 }

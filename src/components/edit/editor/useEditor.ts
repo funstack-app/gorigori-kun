@@ -7,6 +7,7 @@ import {
   editOcr,
   editSam2,
   editSegment,
+  editWords,
   images,
 } from "../../../lib/ipc";
 import { useActiveProject } from "../../../lib/store/activeProject";
@@ -19,6 +20,7 @@ import {
   addMaskLayerFromBase64,
   addTextLayer,
   addTextRegionsToCanvas,
+  addWordLayersToCanvas,
   applyGrabResultToCanvas,
   applyMagicLayerToCanvas,
   applySegmentResultToCanvas,
@@ -26,6 +28,7 @@ import {
   showGrabPreviewOverlay,
 } from "./magicLayerToFabric";
 import { restoreCanvas } from "./history";
+import { resolveWord, splitWordsInput } from "../../../lib/edit/wordPresets";
 
 const IMAGE_EXTS = ["png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff"];
 
@@ -59,6 +62,10 @@ export function useEditorActions() {
     }
     if (!canvas) {
       setError("キャンバスを初期化中です。");
+      return;
+    }
+    if (tool === "words") {
+      setMessage("右のパネルで切り出したい「ことば」を入力してください (例: 人物、ボール)。");
       return;
     }
     if (tool === "text-add") {
@@ -117,6 +124,55 @@ export function useEditorActions() {
       // magic / redo-decompose は runMagic 内で resetHistory する (canvas 総入れ替え)。
       if (tool !== "clickseg" && tool !== "grab" && tool !== "magic" && tool !== "redo-decompose") {
         pushHistory();
+      }
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setBusyTool(null);
+    }
+  };
+
+  /**
+   * ことばで分離 (SAM3) を実行する。raw はカンマ/空白区切りの入力
+   * (日本語は wordPresets 辞書で英語プロンプトへ解決)。
+   */
+  const runWords = async (raw: string) => {
+    if (!canvas) {
+      setError("キャンバスを初期化中です。");
+      return;
+    }
+    if (!sourceImagePath) {
+      setError("先に画像をドロップ、または画像を選んでください。");
+      return;
+    }
+    const inputs = splitWordsInput(raw);
+    if (inputs.length === 0) {
+      setError("切り出したい「ことば」を入力してください。");
+      return;
+    }
+    const resolved = inputs.map(resolveWord);
+    const untranslated = resolved.filter((w) => !w.translated);
+
+    setBusyTool("words");
+    setError(null);
+    setMessage("ことばで分離を実行中… (初回はAIの読み込みに数十秒かかります)");
+    try {
+      const result = await editWords.segment(
+        sourceImagePath,
+        resolved.map((w) => ({ prompt: w.prompt, label: w.label })),
+        projectName,
+      );
+      const added = await addWordLayersToCanvas(canvas, result);
+      if (added > 0) {
+        bumpRevision();
+        pushHistory();
+        setMessage(`${added}個のレイヤーを切り出しました。右の一覧から選んで動かせます。`);
+      } else {
+        setMessage(
+          untranslated.length > 0
+            ? "見つかりませんでした。辞書にない日本語は精度が下がります。英語 (例: dog) でも試してください。"
+            : "見つかりませんでした。別のことばで試してください。",
+        );
       }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
@@ -360,6 +416,7 @@ export function useEditorActions() {
 
   return {
     run,
+    runWords,
     chooseImage,
     runMagic,
     handleCanvasClickForTool,

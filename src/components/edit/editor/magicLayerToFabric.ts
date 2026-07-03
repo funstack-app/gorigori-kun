@@ -1,6 +1,6 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 
-import type { GrabResult, MagicLayerResult, SegmentResult, TextRegion } from "../../../lib/edit/types";
+import type { GrabResult, MagicLayerResult, SegmentResult, TextRegion, WordsSegmentResult } from "../../../lib/edit/types";
 import { createLayerId } from "./layerHelpers";
 
 type FabricModule = Record<string, any>;
@@ -277,6 +277,38 @@ export async function addImageLayerToCanvas(
   canvas.setActiveObject?.(image);
   canvas.requestRenderAll?.();
   return image;
+}
+
+/**
+ * ことばで分離 (SAM3) の検出レイヤーを bbox 位置の可動レイヤーとしてキャンバスへ積む。
+ * Magic Layer の objectLayers と同じ流儀 (bbox クランプ + label がレイヤー名)。
+ * 追加したレイヤー数を返す。
+ */
+export async function addWordLayersToCanvas(
+  canvas: FabricCanvas,
+  result: WordsSegmentResult,
+): Promise<number> {
+  const fabric = await importFabric();
+  let added = 0;
+  let last: FabricObject | null = null;
+  for (const layer of result.layers) {
+    const image = await loadFabricImage(fabric, layer.imagePath);
+    const [x, y] = layer.bbox;
+    image.set({
+      id: createLayerId(),
+      name: layer.label,
+      layerKind: "image",
+      left: clampPlacement(x, result.width),
+      top: clampPlacement(y, result.height),
+      selectable: true,
+    });
+    canvas.add(image);
+    last = image;
+    added += 1;
+  }
+  if (last) canvas.setActiveObject?.(last);
+  canvas.requestRenderAll?.();
+  return added;
 }
 
 export async function addMaskLayerFromBase64(
