@@ -209,9 +209,12 @@ async fn run_magic_layer_inner(
     // 注意: SAM2 の除外マスク・背景 union には分離前のフルマスク (mask.png) をそのまま使う
     // (小島の二重検出防止 + 小島跡地の背景補完のため)。mask.png / foreground.png の
     // 書き換えは union 構築後に行う。
-    let subject_split = image::open(&segment_result.mask_path)
+    let full_mask = image::open(&segment_result.mask_path)
         .ok()
-        .map(|m| crate::edit::subject_split::split_subject_mask(&m.to_luma8()));
+        .map(|m| m.to_luma8());
+    let subject_split = full_mask
+        .as_ref()
+        .map(crate::edit::subject_split::split_subject_mask);
     let satellite_count = subject_split
         .as_ref()
         .map(|s| s.satellites.len())
@@ -220,11 +223,37 @@ async fn run_magic_layer_inner(
         tracing::info!(target: "codex.edit", "magic_layer: 被写体マスクに離れ小島{}件を検出", satellite_count);
     }
 
+    let width = segment_result.width;
+    let height = segment_result.height;
+
+    // 被写体上テキストの保護: 服の印字・商品ロゴ等「被写体マスクの上に載っている文字」は
+    // 被写体の柄であってオーバーレイ文字ではない (実測 2026-07-03: ジャージの FUNSTACK/4 が
+    // テキストレイヤー化+消去対象になり被写体が壊れた)。マスクカバー率で分け、以降の
+    // テキストレイヤー化・消去はオーバーレイ文字だけを対象にする。
+    let (regions, protected_count) =
+        split_overlay_regions(&regions, full_mask.as_ref(), width, height);
+    if protected_count > 0 {
+        tracing::info!(
+            target: "codex.edit",
+            "magic_layer: 被写体上テキスト{}件を保護 (オーバーレイ{}件)",
+            protected_count,
+            regions.len()
+        );
+        // text-removed / text-mask をオーバーレイ文字だけで作り直す。初回の全文字消去は
+        // セグメント入力専用とし、成果物側は保護済み版で上書きする。
+        generate_text_mask(input_path, &regions, prob_map.as_ref(), &text_mask_path)?;
+        if regions.is_empty() {
+            tokio::fs::copy(input_path, &text_removed_path)
+                .await
+                .map_err(|e| format!("copy text-removed (protected): {e}"))?;
+        } else {
+            inpaint_image(runtime, input_path, &text_mask_path, &text_removed_path).await?;
+        }
+    }
+
     // 物体分解: 人物・テキスト以外の主要物体を SAM2 自動マスクでレイヤー化する。
     // segment_result (人物マスク) と OCR regions (テキスト領域) を「既存レイヤー」として
     // 除外マスクを作り、それと重なる物体は二重化になるので拾わない。
-    let width = segment_result.width;
-    let height = segment_result.height;
     let text_boxes: Vec<[i32; 4]> = regions
         .iter()
         .filter_map(|region| clamp_bbox(region.bbox, width, height))
@@ -285,8 +314,10 @@ async fn run_magic_layer_inner(
         let union_mask_path = run_dir.join("object-union-mask.png");
         // 膨張して縁の被写体残り(幽霊)を飲み込ませてから LaMa へ渡す (grab.rs と同方針)。
         let dilated = crate::edit::grab::dilate_mask_pub(mask, 6);
+        // inpaint 元は text-removed (オーバーレイ文字消去済み)。元画像を使うと背景レイヤーに
+        // 文字が焼き残り、テキストレイヤーを動かしたとき二重表示になる (実測 2026-07-03)。
         if dilated.save(&union_mask_path).is_ok()
-            && inpaint_image(runtime, input_path, &union_mask_path, &background_path)
+            && inpaint_image(runtime, &text_removed_path, &union_mask_path, &background_path)
                 .await
                 .is_ok()
         {
@@ -294,9 +325,11 @@ async fn run_magic_layer_inner(
         }
     }
     if !background_ready {
-        tokio::fs::copy(input_path, &background_path)
+        // フォールバックも text-removed を使う (背景レイヤーへ文字を焼き残さない)。
+        // 被写体が背景に残るのは従来挙動どおり (前景レイヤーが上に重なり見た目は不変)。
+        tokio::fs::copy(&text_removed_path, &background_path)
             .await
-            .map_err(|e| format!("copy original as background: {e}"))?;
+            .map_err(|e| format!("copy text-removed as background: {e}"))?;
     }
 
     // 離れ小島を独立した物体レイヤーへ変換し、mask.png / foreground.png を最大成分
@@ -323,7 +356,7 @@ async fn run_magic_layer_inner(
         EVENT_EDIT_MAGIC_PROGRESS,
         MagicLayerProgress::BuildingTextLayers,
     );
-    let text_layers = build_text_layers(&regions, input_path)?;
+    let text_layers = build_text_layers(&regions, input_path, prob_map.as_ref())?;
 
     let result = MagicLayerResult {
         background_path: path_string(&background_path),
@@ -426,6 +459,58 @@ async fn run_object_layers(
     }
 
     Ok((object_layers, Some(union)))
+}
+
+/// 被写体上テキスト判定のカバー率閾値。region bbox の画素のうちこの割合以上が
+/// 被写体マスク (>127) に覆われていたら「被写体の上の文字 (服の印字等)」とみなす。
+/// なぜ 0.6: ジャージ印字は ~1.0、背景上のオーバーレイ文字は ~0。境界 (文字が被写体の
+/// 縁にわずかに掛かる) を誤保護しない程度に高く、印字を確実に拾う程度に低く。
+const SUBJECT_TEXT_COVER: f64 = 0.60;
+
+/// OCR region を「オーバーレイ文字 (残す=レイヤー化+消去対象)」と「被写体上の文字
+/// (保護=触らない)」に分ける。返り値は (オーバーレイ region 群, 保護した件数)。
+/// マスクが無い/寸法不一致のときは全件オーバーレイ扱い (従来挙動)。
+fn split_overlay_regions(
+    regions: &[TextRegion],
+    subject_mask: Option<&ImageBuffer<Luma<u8>, Vec<u8>>>,
+    width: u32,
+    height: u32,
+) -> (Vec<TextRegion>, usize) {
+    let Some(mask) = subject_mask else {
+        return (regions.to_vec(), 0);
+    };
+    if mask.dimensions() != (width, height) {
+        return (regions.to_vec(), 0);
+    }
+    let mut overlay = Vec::new();
+    let mut protected = 0usize;
+    for region in regions {
+        let Some([x, y, w, h]) = clamp_bbox(region.bbox, width, height) else {
+            continue;
+        };
+        let total = (w as u64 * h as u64).max(1);
+        let mut covered = 0u64;
+        for yy in y..y + h {
+            for xx in x..x + w {
+                if mask.get_pixel(xx, yy)[0] > 127 {
+                    covered += 1;
+                }
+            }
+        }
+        if covered as f64 / total as f64 >= SUBJECT_TEXT_COVER {
+            protected += 1;
+            tracing::info!(
+                target: "codex.edit",
+                "被写体上テキストを保護: {:?} bbox={:?} cover={:.2}",
+                region.text,
+                region.bbox,
+                covered as f64 / total as f64
+            );
+        } else {
+            overlay.push(region.clone());
+        }
+    }
+    (overlay, protected)
 }
 
 /// 被写体マスクの離れ小島を物体レイヤー (bbox クロップ透過 PNG) に変換し、
@@ -556,6 +641,7 @@ async fn run_high_quality(
 pub fn build_text_layers(
     regions: &[TextRegion],
     input_path: &Path,
+    prob_map: Option<&TextProbMap>,
 ) -> Result<Vec<TextLayerSpec>, String> {
     let img = image::open(input_path).map_err(|e| format!("open image for text layers: {e}"))?;
     let (width, height) = img.dimensions();
@@ -584,9 +670,7 @@ pub fn build_text_layers(
             if (w as f64) * (h as f64) < min_text_area {
                 return None;
             }
-            let cx = (x + w / 2).min(width.saturating_sub(1));
-            let cy = (y + h / 2).min(height.saturating_sub(1));
-            let p = rgb.get_pixel(cx, cy);
+            let color = text_color(&rgb, [x, y, w, h], prob_map);
             let is_ja = region
                 .language
                 .as_deref()
@@ -608,7 +692,7 @@ pub fn build_text_layers(
                 },
                 font_size: ((h as f32) * 0.8).clamp(8.0, 240.0),
                 font_weight: "normal".to_string(),
-                color: format!("#{:02x}{:02x}{:02x}", p[0], p[1], p[2]),
+                color,
                 align: "left".to_string(),
                 x: x as i32,
                 y: y as i32,
@@ -620,16 +704,72 @@ pub fn build_text_layers(
         .collect())
 }
 
+/// テキスト色の抽出。文字ストローク画素 (DB 確率マップ >= 閾値) の RGB 中央値を使う。
+///
+/// なぜ中央値: 従来の「bbox 中心1点サンプル」はグリフの隙間の背景色を拾う
+/// (実測 2026-07-03: 白文字「バスケを嫌いになった日」が #0a1116 と抽出され、
+/// 再描画時に見えない文字になった)。ストローク画素だけの中央値なら背景・縁の
+/// アンチエイリアスに引きずられない。確率マップが無い/画素不足のときは従来の中心1点。
+fn text_color(
+    rgb: &image::RgbImage,
+    bbox: [u32; 4],
+    prob_map: Option<&TextProbMap>,
+) -> String {
+    let [x, y, w, h] = bbox;
+    let (iw, ih) = rgb.dimensions();
+    if let Some(pm) = prob_map {
+        if pm.width == iw && pm.height == ih {
+            let mut rs: Vec<u8> = Vec::new();
+            let mut gs: Vec<u8> = Vec::new();
+            let mut bs: Vec<u8> = Vec::new();
+            for yy in y..(y + h).min(ih) {
+                for xx in x..(x + w).min(iw) {
+                    if pm.prob_at(xx, yy) >= DB_STROKE_THRESHOLD {
+                        let p = rgb.get_pixel(xx, yy);
+                        rs.push(p[0]);
+                        gs.push(p[1]);
+                        bs.push(p[2]);
+                    }
+                }
+            }
+            // 画素が少なすぎる (bbox とマップの位置ズレ等) ときは信用しない。
+            if rs.len() >= 16 {
+                let median = |v: &mut Vec<u8>| {
+                    v.sort_unstable();
+                    v[v.len() / 2]
+                };
+                return format!(
+                    "#{:02x}{:02x}{:02x}",
+                    median(&mut rs),
+                    median(&mut gs),
+                    median(&mut bs)
+                );
+            }
+        }
+    }
+    let cx = (x + w / 2).min(iw.saturating_sub(1));
+    let cy = (y + h / 2).min(ih.saturating_sub(1));
+    let p = rgb.get_pixel(cx, cy);
+    format!("#{:02x}{:02x}{:02x}", p[0], p[1], p[2])
+}
+
 /// DB 確率マップの閾値。PaddleOCR DB 検出器の標準二値化閾値 (0.3) に合わせる。
 /// polygons_from_heatmap の連結成分抽出も同じ 0.30 を使っており、両者を揃える。
 /// なぜ 0.3: DB の論文/公式実装 (db_thresh) の既定値。これ未満はテキストの縁の裾で、
 /// 塗ると過剰復元 (背景まで inpaint) になり、これ以上に上げると文字本体が欠ける。
 const DB_STROKE_THRESHOLD: f32 = 0.30;
 
-/// ストロークマスクの膨張量 (px)。細線を LaMa が確実に飲み込める最小限に留める。
-/// なぜ 2px: 矩形マスクをやめて縁残りを減らすのが目的なので、膨張は「アンチエイリアスの
-/// 半画素+走査の取りこぼし」を埋める最小値。大きくすると矩形塗りに近づき利点が消える。
-const DB_STROKE_DILATE: i32 = 2;
+/// ストロークマスク膨張量の下限/上限 (px) と文字高比。実際の膨張量は
+/// 「採用 region 高さの中央値 × RATIO」を [MIN, MAX] にクランプして使う。
+///
+/// なぜ文字高比例か (2026-07-03 実測): 消去後は inpaint.rs がマスク画素だけを合成する方式に
+/// なったため、マスクの隙間に残る元画素 (文字のグロー・影・アンチエイリアスの裾) はそのまま
+/// 残る。固定2pxではタイトル文字 (高42px) のグローが残って読めるゴーストになった。
+/// 膨張12px (=42px文字で高さの3割弱) で読解不能になることを実画像で確認済み。
+/// 文字装飾の太さはフォントサイズに比例するため、比例則 0.25 で小さい文字の塗り過ぎを防ぐ。
+const DB_STROKE_DILATE_MIN: i32 = 4;
+const DB_STROKE_DILATE_MAX: i32 = 12;
+const DB_STROKE_DILATE_RATIO: f64 = 0.25;
 
 /// 確率マップが取れないときの bbox 近傍ゲート pad (px)。従来の矩形 pad(4) と同じ。
 const BBOX_GATE_PAD: i32 = 4;
@@ -680,7 +820,7 @@ pub fn generate_text_mask(
 
     let mask = match usable_prob {
         Some(pm) => {
-            tracing::info!(target: "codex.edit", "text-mask: ストローク方式 (thr={DB_STROKE_THRESHOLD} dilate={DB_STROKE_DILATE}px) adopted={}", adopted.len());
+            tracing::info!(target: "codex.edit", "text-mask: ストローク方式 (thr={DB_STROKE_THRESHOLD}) adopted={}", adopted.len());
             build_stroke_mask(w, h, &adopted, pm)
         }
         None => {
@@ -721,8 +861,22 @@ fn build_stroke_mask(
             }
         }
     }
-    // 細線を LaMa が確実に飲み込むよう最小限膨張 (アンチエイリアスの裾を埋める)。
-    crate::edit::grab::dilate_mask_pub(&raw, DB_STROKE_DILATE)
+    // 文字高 (採用 region 高さの中央値) に比例した膨張で、グロー・影・AAの裾ごと飲み込む。
+    let mut heights: Vec<i32> = adopted
+        .iter()
+        .map(|[_, _, _, rh]| *rh)
+        .filter(|rh| *rh > 0)
+        .collect();
+    heights.sort_unstable();
+    let dilate = heights
+        .get(heights.len() / 2)
+        .map(|&median_h| {
+            ((median_h as f64 * DB_STROKE_DILATE_RATIO) as i32)
+                .clamp(DB_STROKE_DILATE_MIN, DB_STROKE_DILATE_MAX)
+        })
+        .unwrap_or(DB_STROKE_DILATE_MIN);
+    tracing::info!(target: "codex.edit", "text-mask: stroke dilate={dilate}px");
+    crate::edit::grab::dilate_mask_pub(&raw, dilate)
 }
 
 /// bbox 矩形マスク (従来方式 / フォールバック)。採用 bbox を pad して白塗り。
@@ -859,7 +1013,7 @@ mod tests {
             region("region-0002", "SALE", [50, 50, 100, 40], None),
         ];
 
-        let layers = build_text_layers(&regions, &img_path).unwrap();
+        let layers = build_text_layers(&regions, &img_path, None).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
 
         assert_eq!(
@@ -941,27 +1095,104 @@ mod tests {
         let bbox_path = dir.join("bbox-mask.png");
         generate_text_mask(&img_path, &regions, None, &bbox_path).unwrap();
         let bbox_area = white_count(&bbox_path);
+        let stroke_mask = image::open(&stroke_path).unwrap().to_luma8();
 
         let _ = std::fs::remove_dir_all(&dir);
 
         assert!(stroke_area > 0, "ストロークマスクが空 (文字を消せない)");
-        assert!(
-            stroke_area < bbox_area,
-            "ストロークマスク塗り面積 {} が矩形マスク {} 以上. \
-             ストローク方式が矩形より塗らない前提が崩れている.",
-            stroke_area,
-            bbox_area
-        );
-        // 定量: 25% ストローク + 2px 膨張。実測比 ≈0.64。矩形化 (膨張過多で bbox とほぼ同面積)
-        // への退行を捕まえるため、明確な削減 (比 < 0.8) を要求する。
-        let ratio = stroke_area as f64 / bbox_area as f64;
-        assert!(
-            ratio < 0.8,
-            "ストローク削減が弱すぎる (stroke={} bbox={} 比={:.2}). \
-             膨張過多で矩形マスクに退行している可能性.",
-            stroke_area,
-            bbox_area,
-            ratio
-        );
+        assert!(bbox_area > 0, "bbox マスクが空 (採用 region 無し)");
+
+        // 新仕様 (2026-07-03 inpaint 合成方式化に伴い改訂):
+        // 「矩形より塗らない」ではなく、(1) 全ストローク画素を完全被覆する (取り逃がした
+        // グロー/裾は合成後もそのまま残るため)、(2) bbox の近傍 (pad + 膨張上限) に収まる、
+        // の2点を不変条件とする。
+        let bound = (BBOX_GATE_PAD + DB_STROKE_DILATE_MAX) as u32;
+        for yy in 0..h {
+            for xx in 0..w {
+                let painted = stroke_mask.get_pixel(xx, yy)[0] > 127;
+                let is_stroke =
+                    xx >= bx && xx < bx + bw && yy >= by && yy < by + bh && (xx - bx) % 8 < 2;
+                if is_stroke {
+                    assert!(painted, "ストローク画素 ({xx},{yy}) が未被覆 (消し残しになる)");
+                }
+                let in_bound = xx + bound >= bx
+                    && xx < bx + bw + bound
+                    && yy + bound >= by
+                    && yy < by + bh + bound;
+                if painted {
+                    assert!(in_bound, "bbox 近傍外 ({xx},{yy}) を塗っている (塗り過ぎ)");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn split_overlay_regions_protects_text_on_subject() {
+        // 被写体マスク: 右側の矩形 (100..180, 40..160)。
+        let mask = ImageBuffer::<Luma<u8>, Vec<u8>>::from_fn(200, 200, |x, y| {
+            if (100..180).contains(&x) && (40..160).contains(&y) {
+                Luma([255u8])
+            } else {
+                Luma([0u8])
+            }
+        });
+        let make = |id: &str, bbox: [i32; 4]| TextRegion {
+            id: id.to_string(),
+            bbox,
+            polygon: Vec::new(),
+            text: "SALE".to_string(),
+            confidence: 0.9,
+            language: None,
+        };
+        let regions = vec![
+            make("on-subject", [110, 60, 50, 20]), // 被写体上 (カバー率1.0) → 保護
+            make("overlay", [10, 10, 60, 20]),     // 背景上 (カバー率0) → オーバーレイ
+        ];
+
+        let (overlay, protected) = split_overlay_regions(&regions, Some(&mask), 200, 200);
+        assert_eq!(protected, 1, "被写体上テキストが保護されない");
+        assert_eq!(overlay.len(), 1);
+        assert_eq!(overlay[0].id, "overlay");
+
+        // マスク無しなら全件オーバーレイ (従来挙動)。
+        let (overlay, protected) = split_overlay_regions(&regions, None, 200, 200);
+        assert_eq!(protected, 0);
+        assert_eq!(overlay.len(), 2);
+    }
+
+    #[test]
+    fn text_color_uses_stroke_median_not_center_gap() {
+        use crate::edit::ocr::TextProbMap;
+        // 暗い背景 + bbox 内の縦ストロークだけ白。bbox 中心はストロークの隙間 (暗い) に置き、
+        // 旧実装 (中心1点) なら暗色、新実装 (ストローク中央値) なら白になる配置。
+        let (w, h) = (100u32, 50u32);
+        let mut rgb = image::RgbImage::from_pixel(w, h, image::Rgb([10, 12, 20]));
+        let mut prob = vec![0u8; (w * h) as usize];
+        let bbox = [10u32, 10, 80, 30];
+        for y in 10..40u32 {
+            for x in 10..90u32 {
+                if (x - 10) % 10 < 3 {
+                    // 中心 x=50 は (50-10)%10=0 <3 … 中心を隙間にするため x=50 帯は避ける
+                    if !(48..=52).contains(&x) {
+                        rgb.put_pixel(x, y, image::Rgb([250, 250, 245]));
+                        prob[(y * w + x) as usize] = 255;
+                    }
+                }
+            }
+        }
+        let pm = TextProbMap {
+            width: w,
+            height: h,
+            data: prob,
+        };
+        let color = text_color(&rgb, bbox, Some(&pm));
+        // 白系 (#f8f8f5 前後) が返る。
+        let r = u8::from_str_radix(&color[1..3], 16).unwrap();
+        assert!(r > 200, "ストローク色が反映されていない: {color}");
+
+        // 確率マップ無しは従来の中心1点 (暗色) フォールバック。
+        let fallback = text_color(&rgb, bbox, None);
+        let r = u8::from_str_radix(&fallback[1..3], 16).unwrap();
+        assert!(r < 100, "フォールバックが中心1点でない: {fallback}");
     }
 }

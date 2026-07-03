@@ -639,17 +639,65 @@ async fn text_mask_stroke_smaller_than_bbox_real_ocr() {
 
     assert!(stroke_area > 0, "ストロークマスクが空 (文字を消せない)");
     assert!(bbox_area > 0, "bbox マスクが空 (採用 region 無し)");
-    assert!(
-        stroke_area < bbox_area,
-        "実 OCR でもストローク方式が矩形以上に塗っている (stroke={stroke_area} bbox={bbox_area}). \
-         マスク精度改善が効いていない。"
-    );
+    // 2026-07-03 仕様改訂: inpaint がマスク合成方式になり、ストロークマスクは
+    // 「矩形より塗らない」ことより「グロー/裾ごと完全被覆する」ことを優先する
+    // (膨張が文字高比例)。ここでは実モデル経路の健全性 (空でない・両方式が生成できる)
+    // を確認する。被覆と近傍制約の厳密検証は unit テスト側
+    // (stroke_mask_paints_less_than_bbox_mask) が持つ。
 }
 
 /// Luma PNG の白画素 (>127) 数。
 fn count_white(path: &Path) -> u64 {
     let m = image::open(path).unwrap().to_luma8();
     m.pixels().filter(|p| p[0] > 127).count() as u64
+}
+
+/// 実画像でテキスト消去 (OCR→ストロークマスク→LaMa局所修復) の品質を目視確認するプローブ。
+///
+///   GORI_E2E_IMAGE=<入力画像> GORI_E2E_OUT=<出力dir> \
+///   cargo test --lib edit::magic_layer_e2e::text_remove_real_image_probe -- --ignored --nocapture
+#[tokio::test]
+#[ignore]
+async fn text_remove_real_image_probe() {
+    init_test_tracing();
+    let Ok(input) = std::env::var("GORI_E2E_IMAGE") else {
+        eprintln!("[skip] GORI_E2E_IMAGE 未指定");
+        return;
+    };
+    for id in ["ppocrv6-small-det", "ppocrv6-small-rec", "lama-onnx"] {
+        if !model_available(id) {
+            eprintln!("[skip] {id} 未DL");
+            return;
+        }
+    }
+    let input = PathBuf::from(input);
+    let out = std::env::var("GORI_E2E_OUT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| tmp_dir("text-remove"));
+    std::fs::create_dir_all(&out).unwrap();
+
+    let runtime = EditRuntime::new();
+    let (regions, prob_map) = ocr_image_with_probmap(&runtime, &input)
+        .await
+        .expect("ocr failed");
+    eprintln!("[probe] regions={} probmap={}", regions.len(), prob_map.is_some());
+    let mask_path = out.join("text-mask.png");
+    // GORI_TEXT_MASK=bbox で矩形マスク方式を強制 (ストローク方式とのA/B比較用)。
+    let use_prob = std::env::var("GORI_TEXT_MASK")
+        .map(|v| v != "bbox")
+        .unwrap_or(true);
+    generate_text_mask(
+        &input,
+        &regions,
+        if use_prob { prob_map.as_ref() } else { None },
+        &mask_path,
+    )
+    .expect("mask failed");
+    let removed = out.join("text-removed.png");
+    inpaint_image(&runtime, &input, &mask_path, &removed)
+        .await
+        .expect("inpaint failed");
+    eprintln!("[probe] テキスト消去完了 -> {}", removed.display());
 }
 
 /// 実 PP-OCRv6 で任意の実画像を認識し、全 region のテキストを出力する検証プローブ。
