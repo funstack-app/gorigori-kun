@@ -193,6 +193,26 @@ async fn run_words_segment(
     //      包含判定は面積の大きい方を親として残す (スコア順でなく構造優先)。
     const CROSS_WORD_NMS_IOU: f64 = 0.70;
     const PART_CONTAINMENT: f64 = 0.80;
+    // 全面級マスクは「物体」ではない (2026-07-03 実測: ポスターで neon sign がほぼ全面の
+    // マスクを返し、面積優先の包含マージが cyborg 0.88 含む全レイヤーを吸収して物体1個に
+    // 潰れた)。auto_segment の MAX_AREA_RATIO と同じ思想で棄却する。
+    let total_px = (width as u64) * (height as u64);
+    let max_object_area = (total_px as f64 * 0.65) as u64;
+    pending.retain(|candidate| {
+        let area = mask_area(&candidate.mask);
+        if area > max_object_area {
+            tracing::info!(
+                target: "codex.edit",
+                "words: 全面級マスク棄却 (word='{}' score={:.2} area={:.0}%)",
+                words[candidate.word_index].prompt,
+                candidate.score,
+                area as f64 / total_px as f64 * 100.0
+            );
+            false
+        } else {
+            true
+        }
+    });
     // 面積降順で走査: 親 (大きい物体) から確定させ、部品を後から弾く。
     pending.sort_by(|a, b| {
         mask_area(&b.mask)
@@ -268,9 +288,22 @@ async fn run_words_segment(
                 None => Vec::new(),
             }
         };
+        // 印字保護の条件: 物体にほぼ載っている (containment>0.6) かつ物体より十分小さい
+        // (面積1/4以下)。ジャージの番号・商品ロゴは保護し、人物に重なる大型タイトルは
+        // 保護せずテキストレイヤー化する (2026-07-03: 全面マスク吸収で文字0件になった対策)。
         let text_instances: Vec<_> = text_instances
             .into_iter()
-            .filter(|det| containment(&det.mask, &union) <= 0.6)
+            .filter(|det| {
+                let text_area = mask_area(&det.mask);
+                let printed = kept.iter().any(|k| {
+                    containment(&det.mask, &k.mask) > 0.6
+                        && text_area * 4 <= mask_area(&k.mask)
+                });
+                if printed {
+                    tracing::info!(target: "codex.edit", "words: 物体上の印字として保護 (score={:.2})", det.score);
+                }
+                !printed
+            })
             .collect();
 
         // 2) OCR (内容注釈用。失敗しても分解は続行)。
@@ -392,7 +425,13 @@ async fn run_words_segment(
         let _ = app.emit(EVENT_EDIT_WORDS_PROGRESS, WordsProgress::FillingBackground);
         let background_path = run_dir.join("background.png");
         let union_area = union.pixels().filter(|p| p[0] > 127).count();
-        if union_area > 0 {
+        // 穴が画面の大半を占めるときは補完しない (文脈が無く滲んだ幻覚背景になるだけ)。
+        if union_area as u64 > total_px * 4 / 5 {
+            tracing::warn!(target: "codex.edit", "words: 跡地が画面の8割超のため背景補完をスキップ");
+            tokio::fs::copy(&text_removed_path, &background_path)
+                .await
+                .map_err(|e| format!("copy background (too-large union): {e}"))?;
+        } else if union_area > 0 {
             let union_path = run_dir.join("object-union-mask.png");
             let dilated = crate::edit::grab::dilate_mask_pub(&union, 6);
             let filled = dilated.save(&union_path).is_ok()
