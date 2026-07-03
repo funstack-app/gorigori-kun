@@ -756,14 +756,21 @@ fn crop_text_region_png(
     output_path: &Path,
 ) -> Result<[i32; 4], String> {
     let (w, h) = rgba.dimensions();
+    // 検出 bbox は文字にタイトで、濁点・アセンダ・ディセンダ・グローがはみ出して
+    // 切れる (2026-07-03 実測「上下が少しけずれてる」)。文字高比例で外周を広げた
+    // ゲートでストロークを拾う。
+    let [bx, by, bw, bh] = region.bbox;
+    let pad_v = (bh / 3).max(6);
+    let pad_h = (bh / 4).max(4);
+    let gate = [bx - pad_h, by - pad_v, bw + 2 * pad_h, bh + 2 * pad_v];
     let usable = prob_map.filter(|pm| pm.width == w && pm.height == h);
     if let Some(pm) = usable {
-        let mask = build_stroke_mask(w, h, &[region.bbox], pm);
+        let mask = build_stroke_mask(w, h, &[gate], pm);
         if mask.pixels().any(|p| p[0] > 127) {
             return crate::edit::grab::crop_object_png(rgba, &mask, output_path);
         }
     }
-    let mask = build_bbox_mask(w, h, &[region.bbox]);
+    let mask = build_bbox_mask(w, h, &[gate]);
     crate::edit::grab::crop_object_png(rgba, &mask, output_path)
 }
 
