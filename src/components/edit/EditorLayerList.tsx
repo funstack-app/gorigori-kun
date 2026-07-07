@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 
+import { groupLayersByGenre, type LayerGenre } from "../../lib/edit/genre";
 import { useEditor } from "./editor/editorStore";
 import {
   getObjectById,
@@ -22,6 +23,14 @@ export function EditorLayerList() {
   const [draggingId, setDraggingId] = useState<string | null>(null);
 
   const layers = useMemo(() => layerMetasFromCanvas(canvas), [canvas, revision]);
+  // 大ジャンル (人/テキスト/背景/小物) の見出し付きツリー。空ジャンルの見出しは出さない。
+  const groups = useMemo(() => groupLayersByGenre(layers), [layers]);
+  // 並び替え (dropOn) は「一覧全体の上からの位置」基準なので、ツリー表示でも
+  // 各レイヤーのフラット index を引けるようにしておく。
+  const flatIndexById = useMemo(
+    () => new Map(layers.map((layer, index) => [layer.id, index])),
+    [layers],
+  );
 
   const select = (id: string) => {
     setSelectedLayerId(id);
@@ -84,14 +93,26 @@ export function EditorLayerList() {
             レイヤーなし
           </div>
         ) : (
-          <div className="space-y-2">
-            {layers.map((layer, index) => (
+          <div className="space-y-3">
+            {groups.map((group) => (
+              <div key={group.genre}>
+                <div className="mb-1.5 flex items-center gap-2 px-1">
+                  <GenreDot genre={group.genre} />
+                  <span className="text-[10px] font-black tracking-wider text-neutral-400">
+                    {group.label}
+                  </span>
+                  <span className="text-[10px] font-bold text-neutral-600">
+                    {group.layers.length}
+                  </span>
+                </div>
+                <div className="space-y-2">
+                  {group.layers.map((layer) => (
               <div
                 key={layer.id}
                 draggable
                 onDragStart={() => setDraggingId(layer.id)}
                 onDragOver={(event) => event.preventDefault()}
-                onDrop={() => dropOn(index)}
+                onDrop={() => dropOn(flatIndexById.get(layer.id) ?? 0)}
                 onClick={() => select(layer.id)}
                 className={`group grid cursor-pointer grid-cols-[26px_42px_minmax(0,1fr)_26px_26px] items-center gap-2 rounded-lg border bg-[#101010] p-2 transition ${
                   selectedLayerId === layer.id
@@ -149,12 +170,28 @@ export function EditorLayerList() {
                   <TrashIcon />
                 </button>
               </div>
+                  ))}
+                </div>
+              </div>
             ))}
           </div>
         )}
       </div>
     </section>
   );
+}
+
+/** ジャンル見出しの色ドット (人=ピンク / テキスト=シアン / 小物=アンバー / 背景=グレー)。 */
+function GenreDot({ genre }: { genre: LayerGenre }) {
+  const color =
+    genre === "person"
+      ? "bg-pink-400"
+      : genre === "text"
+        ? "bg-cyan-400"
+        : genre === "prop"
+          ? "bg-amber-400"
+          : "bg-neutral-500";
+  return <span className={`inline-block h-1.5 w-1.5 rounded-full ${color}`} aria-hidden />;
 }
 
 /* --- フラットアイコン (絵文字廃止) --- */
