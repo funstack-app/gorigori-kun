@@ -36,6 +36,7 @@ import {
   showGrabPreviewOverlay,
 } from "./magicLayerToFabric";
 import { restoreCanvas } from "./history";
+import { normalizeGenre, type LayerGenre } from "../../../lib/edit/genre";
 import { resolveWord, splitWordsInput } from "../../../lib/edit/wordPresets";
 
 const IMAGE_EXTS = ["png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff"];
@@ -251,6 +252,11 @@ export function useEditorActions() {
       setMessage(
         `${objects.length}個のものを見つけました (${objects.map((o) => o.ja).join("、")})。切り出し中…`,
       );
+      // Codex vision の category (実画像を見た大ジャンル判定) を SAM3 プロンプト単位で
+      // キャンバス反映まで運ぶ。壊れた/欠落した category は決定論分類器へフォールバック。
+      const genreByPrompt: Record<string, LayerGenre> = Object.fromEntries(
+        objects.map((o) => [o.en, normalizeGenre(o.category, o.en, o.ja)]),
+      );
       const full = !hasDecomposedLayers();
       const result = await editWords.segment(
         sourceImagePath,
@@ -259,8 +265,8 @@ export function useEditorActions() {
         { mode: full ? "full" : "layersOnly" },
       );
       const added = full
-        ? await applyWordsResultToCanvas(canvas, result)
-        : await addWordLayersToCanvas(canvas, result);
+        ? await applyWordsResultToCanvas(canvas, result, genreByPrompt)
+        : await addWordLayersToCanvas(canvas, result, genreByPrompt);
       if (full) resetHistory();
       if (added > 0) {
         bumpRevision();

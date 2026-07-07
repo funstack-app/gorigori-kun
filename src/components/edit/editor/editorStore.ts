@@ -1,5 +1,6 @@
 import { create } from "zustand";
 
+import type { LayerGenre } from "../../../lib/edit/genre";
 import type { EditModeId } from "../../../lib/edit/modes";
 import { EditorHistory, snapshotCanvas } from "./history";
 
@@ -42,6 +43,8 @@ export type EditorLayerMeta = {
   id: string;
   name: string;
   kind: EditorLayerKind;
+  /** 大ジャンル (人/テキスト/背景/小物)。レイヤー一覧のツリー見出しに使う。 */
+  genre: LayerGenre;
   visible: boolean;
   locked: boolean;
   thumbnail: string | null;

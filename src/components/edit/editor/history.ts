@@ -28,6 +28,15 @@ export const HISTORY_PROPERTIES = [
   "id",
   "name",
   "layerKind",
+  // 大ジャンル (人/テキスト/背景/小物)。undo/redo でツリー見出しが崩れないよう保存する。
+  "genre",
+  // テキスト打ち替え変換 (textSpec) と AI差し替え (sourcePath/sourceBbox) のメタデータ。
+  // 2026-07-07 修理: magicLayerToFabric は「JSON化しても残るプレーン値」として付与して
+  // いたが、ここに列挙されておらず undo/redo で静かに消えていた (打ち替え・AI差し替えが
+  // 1回の undo で不能になる潜在バグ)。
+  "textSpec",
+  "sourcePath",
+  "sourceBbox",
   "locked",
   "selectable",
   "evented",

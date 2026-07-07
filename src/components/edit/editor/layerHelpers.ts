@@ -1,3 +1,4 @@
+import { isLayerGenre, type LayerGenre } from "../../../lib/edit/genre";
 import type { EditorLayerKind, EditorLayerMeta } from "./editorStore";
 
 type FabricLikeObject = {
@@ -43,6 +44,23 @@ export function objectKind(object: FabricLikeObject): EditorLayerKind {
   return "image";
 }
 
+/**
+ * レイヤーの大ジャンルを決める。優先順:
+ * 1. レイヤー生成時に焼いた明示 genre (magicLayerToFabric が付与)
+ * 2. 構造フォールバック — textbox/textSpec 持ち = text、id "bg" = background、残り = prop
+ *
+ * なぜフォールバックがあるか: genre 付与前に保存された履歴スナップショットや
+ * 旧セッション由来のレイヤーでも、ツリー表示が壊れず必ずどこかの見出しに入る。
+ */
+export function objectGenre(object: FabricLikeObject): LayerGenre {
+  const explicit = object.get?.("genre");
+  if (isLayerGenre(explicit)) return explicit;
+  if (objectKind(object) === "text") return "text";
+  if (object.get?.("textSpec")) return "text"; // 元画素そのままのテキスト素材レイヤー
+  if (object.get?.("id") === "bg") return "background";
+  return "prop";
+}
+
 export function isLocked(object: FabricLikeObject): boolean {
   return object.get?.("locked") === true;
 }
@@ -65,6 +83,7 @@ export function layerMetasFromCanvas(canvas: unknown | null): EditorLayerMeta[] 
       id: objectId(object),
       name: objectName(object),
       kind: objectKind(object),
+      genre: objectGenre(object),
       visible: object.visible !== false,
       locked: isLocked(object),
       thumbnail: objectToThumbnail(object),

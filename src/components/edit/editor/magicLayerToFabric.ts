@@ -1,5 +1,6 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 
+import { classifyWord, type LayerGenre } from "../../../lib/edit/genre";
 import type { GrabResult, MagicLayerResult, SegmentResult, TextRegion, WordsSegmentResult } from "../../../lib/edit/types";
 import { createLayerId } from "./layerHelpers";
 
@@ -27,6 +28,7 @@ export async function applyMagicLayerToCanvas(
     id: "bg",
     name: "背景",
     layerKind: "image",
+    genre: "background",
     left: 0,
     top: 0,
     selectable: true,
@@ -38,6 +40,9 @@ export async function applyMagicLayerToCanvas(
     id: "fg",
     name: "前景",
     layerKind: "image",
+    // 前景 = BiRefNet の被写体切り抜き。編集タブの用途では人物が主対象なので
+    // 「人」見出しに置く (gap-audit G2「人=まず1レイヤー」への布石)。
+    genre: "person",
     left: 0,
     top: 0,
     selectable: true,
@@ -55,6 +60,7 @@ export async function applyMagicLayerToCanvas(
         id: createLayerId(),
         name: object.label,
         layerKind: "image",
+        genre: classifyWord(object.label, object.label),
         // 分解直後は必ず元画像の中 (bbox 位置) に重ねて置く。bbox が万一負値・NaN で
         // 返ってきても画面外 (例: x=-878) に飛ばさないよう 0..画像内にクランプする。
         // なぜ: レイヤーが最初から画面外にあると、非エンジニアには「消えた」ように見える。
@@ -91,6 +97,7 @@ async function applyPartLayersToCanvas(
       id: "bg",
       name: "元画像 (背景)",
       layerKind: "image",
+      genre: "background",
       left: 0,
       top: 0,
       opacity: 0.25,
@@ -107,6 +114,8 @@ async function applyPartLayersToCanvas(
       id: createLayerId(),
       name: part.label,
       layerKind: "image",
+      // SCHP は人物パーツ (髪/上衣/パンツ…) の分解なので全パーツ「人」見出し。
+      genre: "person",
       left: 0,
       top: 0,
       selectable: true,
@@ -178,6 +187,7 @@ export async function applyGrabResultToCanvas(
       id: "bg",
       name: "背景",
       layerKind: "image",
+      genre: "background",
       left: 0,
       top: 0,
       selectable: true,
@@ -195,6 +205,8 @@ export async function applyGrabResultToCanvas(
     id: createLayerId(),
     name: "掴んだオブジェクト",
     layerKind: "image",
+    genre: "prop", // クリックで掴んだ対象は正体不明なので小物に置く (名前変更で人にも移せる将来余地)
+
     left: bx,
     top: by,
     selectable: true,
@@ -250,6 +262,7 @@ export async function addImageLayerToCanvas(
     id: createLayerId(),
     name,
     layerKind: "image",
+    genre: "prop",
     left: 80,
     top: 80,
     selectable: true,
@@ -283,6 +296,7 @@ export async function showSourceImagePreview(
     id: SOURCE_PREVIEW_ID,
     name: "元画像",
     layerKind: "image",
+    genre: "background",
     left: 0,
     top: 0,
     selectable: false,
@@ -316,6 +330,7 @@ async function addTextLayersToCanvas(
         id: text.id ?? `text-${index + 1}`,
         name: text.name ?? `テキスト ${index + 1}`,
         layerKind: "image",
+        genre: "text",
         left: clampPlacement(x, width),
         top: clampPlacement(y, height),
         selectable: true,
@@ -341,6 +356,7 @@ async function addTextLayersToCanvas(
       id: text.id ?? `text-${index + 1}`,
       name: text.name ?? `テキスト ${index + 1}`,
       layerKind: "text",
+      genre: "text",
       left: clampPlacement(text.x ?? bbox?.[0] ?? 50, width),
       top: clampPlacement(text.y ?? bbox?.[1] ?? 50 + index * 52, height),
       width: bbox?.[2] ?? 240,
@@ -388,6 +404,7 @@ export async function convertTextImageToTextbox(
     id,
     name,
     layerKind: "text",
+    genre: "text",
     left,
     top,
     width: spec.width ?? 240,
@@ -407,10 +424,14 @@ export async function convertTextImageToTextbox(
  * ことばで分離 (full モード) の結果でキャンバスを構成し直す。
  * Magic Layer と同じ層構造: 補完済み背景 → 物体レイヤー (語がレイヤー名) →
  * 編集可能テキストレイヤー。追加したレイヤー数 (背景含む) を返す。
+ *
+ * genreByPrompt: SAM3 プロンプト (en) → 大ジャンル。Codex vision の category 判定を
+ * ここまで運ぶ経路 (runWordsAuto)。無い語は決定論分類器 (classifyWord) で決める。
  */
 export async function applyWordsResultToCanvas(
   canvas: FabricCanvas,
   result: WordsSegmentResult,
+  genreByPrompt?: Record<string, LayerGenre>,
 ): Promise<number> {
   const fabric = await importFabric();
   clearCanvas(canvas);
@@ -423,6 +444,7 @@ export async function applyWordsResultToCanvas(
       id: "bg",
       name: "背景",
       layerKind: "image",
+      genre: "background",
       left: 0,
       top: 0,
       selectable: true,
@@ -438,6 +460,7 @@ export async function applyWordsResultToCanvas(
       id: createLayerId(),
       name: layer.label,
       layerKind: "image",
+      genre: genreByPrompt?.[layer.prompt] ?? classifyWord(layer.prompt, layer.label),
       left: clampPlacement(x, result.width),
       top: clampPlacement(y, result.height),
       selectable: true,
@@ -464,6 +487,7 @@ export async function applyWordsResultToCanvas(
 export async function addWordLayersToCanvas(
   canvas: FabricCanvas,
   result: WordsSegmentResult,
+  genreByPrompt?: Record<string, LayerGenre>,
 ): Promise<number> {
   const fabric = await importFabric();
   let added = 0;
@@ -475,6 +499,7 @@ export async function addWordLayersToCanvas(
       id: createLayerId(),
       name: layer.label,
       layerKind: "image",
+      genre: genreByPrompt?.[layer.prompt] ?? classifyWord(layer.prompt, layer.label),
       left: clampPlacement(x, result.width),
       top: clampPlacement(y, result.height),
       selectable: true,
@@ -501,6 +526,7 @@ export async function addMaskLayerFromBase64(
     id: createLayerId(),
     name,
     layerKind: "mask",
+    genre: "prop",
     left: 0,
     top: 0,
     opacity: 0.55,
@@ -519,6 +545,7 @@ export async function addTextRegionsToCanvas(canvas: FabricCanvas, regions: Text
       id: region.id || createLayerId(),
       name: `検出テキスト ${index + 1}`,
       layerKind: "text",
+      genre: "text",
       left: region.bbox[0],
       top: region.bbox[1],
       width: Math.max(120, region.bbox[2]),
@@ -539,6 +566,7 @@ export async function addTextLayer(canvas: FabricCanvas) {
     id: createLayerId(),
     name: "テキスト",
     layerKind: "text",
+    genre: "text",
     left: center.left - 120,
     top: center.top - 24,
     width: 240,
@@ -597,12 +625,15 @@ export async function replaceLayerWithDataUrl(
   const left = target.left ?? 0;
   const top = target.top ?? 0;
   const name = (target.get?.("name") as string) ?? "レイヤー";
+  // 差し替えでもジャンルは変わらない (テキストのAI差し替え結果は text のまま)。
+  const genre = target.get?.("genre");
   canvas.remove(target);
   const image = await loadFabricImageFromUrl(fabric, dataUrl);
   image.set({
     id: createLayerId(),
     name,
     layerKind: "image",
+    ...(genre ? { genre } : {}),
     left,
     top,
     selectable: true,
@@ -667,6 +698,7 @@ export async function addShapeToCanvas(
     id: createLayerId(),
     name,
     layerKind: "image",
+    genre: "prop",
     left: center.x - ((object.width ?? 100) * (object.scaleX ?? 1)) / 2,
     top: center.y - ((object.height ?? 100) * (object.scaleY ?? 1)) / 2,
     selectable: true,
