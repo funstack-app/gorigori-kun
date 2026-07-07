@@ -29,12 +29,19 @@ pub async fn codex_describe_image(image_path: String) -> Result<String, String> 
 }
 
 /// ことばで分離の自動モード用: 画像に写っている独立した被写体・物体を列挙する。
-/// 返り値は SAM3 プロンプト (英語) + レイヤー名 (日本語) のペア。
+/// 返り値は SAM3 プロンプト (英語) + レイヤー名 (日本語) + 大ジャンル。
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct ImageObjectWord {
     pub en: String,
     pub ja: String,
+    /// 大ジャンル (person/text/background/prop)。編集タブのレイヤーツリー見出しに使う。
+    /// Codex が省略/壊れた値を返したら None (フロントの決定論分類器がフォールバック)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
 }
+
+/// category として受け入れる大ジャンル4値。これ以外は None に落とす (未信頼入力の検証)。
+const VALID_CATEGORIES: [&str; 4] = ["person", "text", "background", "prop"];
 
 #[tauri::command]
 pub async fn codex_list_image_objects(image_path: String) -> Result<Vec<ImageObjectWord>, String> {
@@ -51,8 +58,10 @@ pub async fn codex_list_image_objects(image_path: String) -> Result<Vec<ImageObj
         "  robot/cyborg 等の種族名は頭部だけにマッチしやすいので使わない。",
         "- 物体の一部分 (取っ手・タイヤ・ボタン等) も列挙しない。独立して動かせる単位だけ。",
         "- 画像上のオーバーレイ文字・ロゴのうち、物体に印字されたものは含めない。",
+        "- category は各物体の大ジャンル。次の4値のみ: person (人・人型の被写体) /",
+        "  text (独立したロゴ・タイトル等の文字要素) / background (背景そのもの) / prop (その他の小物)。",
         "- 出力は JSON 配列のみ。説明・前置き・Markdown コードフェンス不要。",
-        "形式: [{\"en\":\"basketball\",\"ja\":\"バスケットボール\"}]",
+        "形式: [{\"en\":\"basketball\",\"ja\":\"バスケットボール\",\"category\":\"prop\"}]",
     ]
     .join("\n");
     let stdout = run_codex_vision(&image_path, &prompt).await?;
@@ -159,11 +168,16 @@ fn parse_object_words(raw: &str) -> Result<Vec<ImageObjectWord>, String> {
         .map_err(|e| format!("物体リストの解釈に失敗: {e}"))?;
 
     // 正規化: 空要素を捨て、en の小文字一致で重複排除、最大10件。
+    // category は4値以外 (壊れた値・大文字・空) を None に落とす (小文字化のみ吸収)。
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
     for mut w in words {
         w.en = w.en.trim().to_string();
         w.ja = w.ja.trim().to_string();
+        w.category = w.category.and_then(|c| {
+            let c = c.trim().to_lowercase();
+            VALID_CATEGORIES.contains(&c.as_str()).then_some(c)
+        });
         if w.en.is_empty() {
             continue;
         }
@@ -181,6 +195,60 @@ fn parse_object_words(raw: &str) -> Result<Vec<ImageObjectWord>, String> {
         return Err("物体が1つも見つかりませんでした".to_string());
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_object_words;
+
+    #[test]
+    fn parses_category_and_normalizes_invalid_values() {
+        let raw = r#"前置きテキスト
+[
+  {"en": "person in black coat", "ja": "人物", "category": "person"},
+  {"en": "basketball", "ja": "バスケットボール", "category": "PROP"},
+  {"en": "logo", "ja": "ロゴ", "category": "banner"},
+  {"en": "sneakers", "ja": "スニーカー"}
+]
+後置きテキスト"#;
+        let words = parse_object_words(raw).expect("パースできる");
+        assert_eq!(words.len(), 4);
+        // 正常値はそのまま。
+        assert_eq!(words[0].category.as_deref(), Some("person"));
+        // 大文字は小文字化して受理 (フォーマット揺れの吸収)。
+        assert_eq!(words[1].category.as_deref(), Some("prop"));
+        // 4値以外は None に落とす (フロントの決定論分類器がフォールバックする契約)。
+        assert_eq!(words[2].category, None);
+        // 欠落も None (旧応答互換)。
+        assert_eq!(words[3].category, None);
+    }
+
+    #[test]
+    fn keeps_working_without_category_field_legacy_response() {
+        let raw = r#"[{"en":"basketball","ja":"バスケットボール"},{"en":"robot","ja":"ロボット"}]"#;
+        let words = parse_object_words(raw).expect("category 無しの旧形式もパースできる");
+        assert_eq!(words.len(), 2);
+        assert!(words.iter().all(|w| w.category.is_none()));
+    }
+
+    #[test]
+    fn rejects_broken_json_instead_of_guessing() {
+        // JSON が閉じない・配列が無い応答は推測で埋めずエラーで返す (silent failure 禁止)。
+        assert!(parse_object_words("物体は見つかりませんでした").is_err());
+        assert!(parse_object_words(r#"[{"en":"a","ja":"あ""#).is_err());
+    }
+
+    #[test]
+    fn dedupes_and_caps_at_ten_entries() {
+        let mut entries = Vec::new();
+        for i in 0..12 {
+            entries.push(format!(r#"{{"en":"item {i}","ja":"物 {i}","category":"prop"}}"#));
+        }
+        entries.push(r#"{"en":"item 0","ja":"重複","category":"prop"}"#.to_string());
+        let raw = format!("[{}]", entries.join(","));
+        let words = parse_object_words(&raw).expect("パースできる");
+        assert_eq!(words.len(), 10, "重複排除+最大10件の上限");
+    }
 }
 
 fn clean_codex_output(value: &str) -> String {
