@@ -1,4 +1,4 @@
-import { isLayerGenre, type LayerGenre } from "../../../lib/edit/genre";
+import { GENRE_LABELS, isLayerGenre, type LayerGenre } from "../../../lib/edit/genre";
 import type { EditorLayerKind, EditorLayerMeta } from "./editorStore";
 
 type FabricLikeObject = {
@@ -146,6 +146,110 @@ export function reorderObject(canvas: unknown | null, objectIdValue: string, top
     fabricCanvas._objects.splice(0, fabricCanvas._objects.length, ...next);
   }
   fabricCanvas.requestRenderAll?.();
+}
+
+/**
+ * 「人 = 1レイヤー」の集約サマリ (gap-audit G2)。
+ *
+ * SCHP で人物が髪/上衣/パンツ… と複数パーツに割れても、編集タブでは「人」を1つの
+ * まとまりとして選択・移動・表示できるようにする。この関数は fabric に触らない純ロジックで、
+ * genre === "person" のレイヤーメタ列から「まとめ操作の対象 id 列」「まとめ表示状態」
+ * 「畳んだときのサマリ名」を決定論で導く (回帰テストの駆動源)。
+ *
+ * まとめ表示状態:
+ * - "all": 全パーツ表示 → まとめトグルで全非表示にできる
+ * - "none": 全パーツ非表示 → まとめトグルで全表示に戻せる
+ * - "mixed": 一部だけ表示 → まとめトグルは「全部表示」に寄せる (揃える方向を安全側に固定)
+ */
+export type PersonGroupState = "all" | "none" | "mixed";
+
+export type PersonGroupSummary = {
+  ids: string[];
+  count: number;
+  visibleState: PersonGroupState;
+  /** 全パーツがロック済みなら true (まとめロックのトグル方向判定に使う)。 */
+  allLocked: boolean;
+  /** 畳んだときに1行で見せる名前 (例: 「人 (3パーツ)」)。単一パーツなら括弧なし。 */
+  collapsedLabel: string;
+};
+
+export function personGroupSummary(layers: readonly EditorLayerMeta[]): PersonGroupSummary | null {
+  const persons = layers.filter((layer) => layer.genre === "person");
+  if (persons.length === 0) return null;
+  const visibleCount = persons.filter((layer) => layer.visible).length;
+  const visibleState: PersonGroupState =
+    visibleCount === persons.length ? "all" : visibleCount === 0 ? "none" : "mixed";
+  const allLocked = persons.every((layer) => layer.locked);
+  const collapsedLabel =
+    persons.length === 1 ? GENRE_LABELS.person : `${GENRE_LABELS.person} (${persons.length}パーツ)`;
+  return {
+    ids: persons.map((layer) => layer.id),
+    count: persons.length,
+    visibleState,
+    allLocked,
+    collapsedLabel,
+  };
+}
+
+/**
+ * 複数レイヤーを1つのまとまりとして選択する (fabric ActiveSelection)。
+ * ロック済み・非表示のパーツは選択対象から外す (動かせないものを掴んで見た目だけ選択される
+ * 事故を避ける)。選択対象が1件なら単純な単一選択にフォールバックする。
+ * 戻り値: 実際に選択されたレイヤー数 (0 のときは選択できるパーツが無かった)。
+ */
+export async function selectLayersByIds(
+  canvas: unknown | null,
+  ids: readonly string[],
+): Promise<number> {
+  const fabricCanvas = canvas as
+    | (FabricLikeCanvas & { add?: (object: FabricLikeObject) => void })
+    | null;
+  if (!fabricCanvas) return 0;
+  const selectable = ids
+    .map((id) => getObjectById(canvas, id))
+    .filter((object): object is FabricLikeObject => {
+      if (!object) return false;
+      if (isLocked(object)) return false;
+      if (object.visible === false) return false;
+      return true;
+    });
+  fabricCanvas.discardActiveObject?.();
+  if (selectable.length === 0) {
+    fabricCanvas.requestRenderAll?.();
+    return 0;
+  }
+  if (selectable.length === 1) {
+    fabricCanvas.setActiveObject?.(selectable[0]);
+    fabricCanvas.requestRenderAll?.();
+    return 1;
+  }
+  const fabric = (await import("fabric")) as Record<string, unknown>;
+  const ActiveSelection = fabric.ActiveSelection as
+    | (new (objects: FabricLikeObject[], options: Record<string, unknown>) => FabricLikeObject)
+    | undefined;
+  if (ActiveSelection) {
+    const selection = new ActiveSelection(selectable, { canvas: fabricCanvas });
+    fabricCanvas.setActiveObject?.(selection);
+  } else {
+    // ActiveSelection が無い fabric ビルドでは最前面パーツの単一選択に劣化 (機能を止めない)。
+    fabricCanvas.setActiveObject?.(selectable[selectable.length - 1]);
+  }
+  fabricCanvas.requestRenderAll?.();
+  return selectable.length;
+}
+
+/** 複数レイヤーの表示/非表示をまとめて切り替える (人グループのまとめ表示トグル用)。 */
+export function setLayersVisibleByIds(
+  canvas: unknown | null,
+  ids: readonly string[],
+  visible: boolean,
+): void {
+  const fabricCanvas = canvas as FabricLikeCanvas | null;
+  for (const id of ids) {
+    const object = getObjectById(canvas, id);
+    if (object) setObjectVisible(object, visible);
+  }
+  fabricCanvas?.requestRenderAll?.();
 }
 
 export function createLayerId(): string {

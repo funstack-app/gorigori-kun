@@ -1,13 +1,16 @@
 import { useMemo, useState } from "react";
 
 import { groupLayersByGenre, type LayerGenre } from "../../lib/edit/genre";
-import { useEditor } from "./editor/editorStore";
+import { useEditor, type EditorLayerMeta } from "./editor/editorStore";
 import {
   getObjectById,
   layerMetasFromCanvas,
+  personGroupSummary,
   removeObjectById,
   reorderObject,
+  selectLayersByIds,
   selectObjectById,
+  setLayersVisibleByIds,
   setLocked,
   setObjectName,
   setObjectVisible,
@@ -21,10 +24,14 @@ export function EditorLayerList() {
   const bumpRevision = useEditor((state) => state.bumpRevision);
   const pushHistory = useEditor((state) => state.pushHistory);
   const [draggingId, setDraggingId] = useState<string | null>(null);
+  // 「人」グループを畳んで1つのまとまり (人=1レイヤー) として見せるか。既定は畳む。
+  const [personCollapsed, setPersonCollapsed] = useState(true);
 
   const layers = useMemo(() => layerMetasFromCanvas(canvas), [canvas, revision]);
   // 大ジャンル (人/テキスト/背景/小物) の見出し付きツリー。空ジャンルの見出しは出さない。
   const groups = useMemo(() => groupLayersByGenre(layers), [layers]);
+  // 人=1レイヤー (gap-audit G2): 人ジャンルのパーツ群をまとめ操作するためのサマリ。
+  const personGroup = useMemo(() => personGroupSummary(layers), [layers]);
   // 並び替え (dropOn) は「一覧全体の上からの位置」基準なので、ツリー表示でも
   // 各レイヤーのフラット index を引けるようにしておく。
   const flatIndexById = useMemo(
@@ -79,6 +86,26 @@ export function EditorLayerList() {
     pushHistory();
   };
 
+  // ── 人=1レイヤー: まとめ操作 (gap-audit G2) ──────────────────
+  // 人ジャンルのパーツ群を1つのまとまりとして選択・表示切替する。
+
+  const selectPersonGroup = async () => {
+    if (!personGroup) return;
+    const selected = await selectLayersByIds(canvas, personGroup.ids);
+    // ActiveSelection は単一 id と対応しないので、選択ハイライトは代表 (先頭) に寄せる。
+    setSelectedLayerId(selected > 0 ? personGroup.ids[0] : null);
+    bumpRevision();
+  };
+
+  const togglePersonVisible = () => {
+    if (!personGroup) return;
+    // mixed / all は「全非表示」へ、none は「全表示」へ揃える (安全側に方向固定)。
+    const nextVisible = personGroup.visibleState === "none";
+    setLayersVisibleByIds(canvas, personGroup.ids, nextVisible);
+    bumpRevision();
+    pushHistory();
+  };
+
   return (
     <section className="min-h-0 flex-1 overflow-hidden border-b border-[#2a2a2a]">
       <div className="flex items-center justify-between border-b border-[#2a2a2a] px-3 py-2">
@@ -94,90 +121,213 @@ export function EditorLayerList() {
           </div>
         ) : (
           <div className="space-y-3">
-            {groups.map((group) => (
-              <div key={group.genre}>
-                <div className="mb-1.5 flex items-center gap-2 px-1">
-                  <GenreDot genre={group.genre} />
-                  <span className="text-[10px] font-black tracking-wider text-neutral-400">
-                    {group.label}
-                  </span>
-                  <span className="text-[10px] font-bold text-neutral-600">
-                    {group.layers.length}
-                  </span>
-                </div>
-                <div className="space-y-2">
-                  {group.layers.map((layer) => (
-              <div
-                key={layer.id}
-                draggable
-                onDragStart={() => setDraggingId(layer.id)}
-                onDragOver={(event) => event.preventDefault()}
-                onDrop={() => dropOn(flatIndexById.get(layer.id) ?? 0)}
-                onClick={() => select(layer.id)}
-                className={`group grid cursor-pointer grid-cols-[26px_42px_minmax(0,1fr)_26px_26px] items-center gap-2 rounded-lg border bg-[#101010] p-2 transition ${
-                  selectedLayerId === layer.id
-                    ? "border-pink-500 shadow-[0_0_0_1px_rgba(236,72,153,.35)]"
-                    : "border-[#303030] hover:border-pink-400/70"
-                }`}
-              >
-                <button
-                  type="button"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    toggleVisible(layer.id);
-                  }}
-                  className="flex h-5 w-5 items-center justify-center text-neutral-400 hover:text-white"
-                  title={layer.visible ? "非表示" : "表示"}
-                >
-                  {layer.visible ? <EyeIcon /> : <EyeOffIcon />}
-                </button>
-                <div className="flex h-10 w-10 items-center justify-center overflow-hidden rounded border border-[#343434] bg-[#181818] text-neutral-500">
-                  {layer.thumbnail ? (
-                    <img src={layer.thumbnail} alt="" className="h-full w-full object-contain" />
-                  ) : layer.kind === "text" ? (
-                    <LayerTextIcon />
+            {groups.map((group) => {
+              // 「人」ジャンルだけは、パーツ群を1つのまとまり (人=1レイヤー) として
+              // 畳める見出しにする。畳むと1行サマリ、開くと個別パーツ (gap-audit G2)。
+              const isPerson = group.genre === "person" && personGroup !== null;
+              const collapsed = isPerson && personCollapsed;
+              return (
+                <div key={group.genre}>
+                  <div className="mb-1.5 flex items-center gap-2 px-1">
+                    {isPerson ? (
+                      <button
+                        type="button"
+                        onClick={() => setPersonCollapsed((value) => !value)}
+                        className="flex items-center gap-1 text-neutral-500 hover:text-neutral-300"
+                        title={collapsed ? "人パーツを展開" : "人を1つにまとめる"}
+                        aria-expanded={!collapsed}
+                      >
+                        <ChevronIcon open={!collapsed} />
+                        <GenreDot genre={group.genre} />
+                      </button>
+                    ) : (
+                      <GenreDot genre={group.genre} />
+                    )}
+                    <span className="text-[10px] font-black tracking-wider text-neutral-400">
+                      {group.label}
+                    </span>
+                    <span className="text-[10px] font-bold text-neutral-600">
+                      {group.layers.length}
+                    </span>
+                    {isPerson && personGroup && (
+                      <div className="ml-auto flex items-center gap-1">
+                        <button
+                          type="button"
+                          onClick={() => void selectPersonGroup()}
+                          className="rounded border border-[#343434] bg-[#101010] px-1.5 py-0.5 text-[9px] font-black text-neutral-300 hover:border-pink-400/70 hover:text-white"
+                          title="人ぜんぶをまとめて選択 (一緒に動かせる)"
+                        >
+                          まとめて選択
+                        </button>
+                        <button
+                          type="button"
+                          onClick={togglePersonVisible}
+                          className="flex h-5 w-5 items-center justify-center text-neutral-400 hover:text-white"
+                          title={
+                            personGroup.visibleState === "none"
+                              ? "人をまとめて表示"
+                              : "人をまとめて非表示"
+                          }
+                        >
+                          {personGroup.visibleState === "none" ? <EyeOffIcon /> : <EyeIcon />}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                  {collapsed && personGroup ? (
+                    <button
+                      type="button"
+                      onClick={() => void selectPersonGroup()}
+                      className="grid w-full cursor-pointer grid-cols-[42px_minmax(0,1fr)_16px] items-center gap-2 rounded-lg border border-[#303030] bg-[#101010] p-2 text-left transition hover:border-pink-400/70"
+                      title="クリックで人ぜんぶを選択。左の三角で個別パーツを展開"
+                    >
+                      <div className="flex h-10 w-10 items-center justify-center overflow-hidden rounded border border-[#343434] bg-[#181818] text-neutral-500">
+                        {group.layers[0]?.thumbnail ? (
+                          <img
+                            src={group.layers[0].thumbnail ?? undefined}
+                            alt=""
+                            className="h-full w-full object-contain"
+                          />
+                        ) : (
+                          <LayerImageIcon />
+                        )}
+                      </div>
+                      <span className="min-w-0 truncate text-xs font-bold text-neutral-100">
+                        {personGroup.collapsedLabel}
+                      </span>
+                      <ChevronIcon open={false} />
+                    </button>
                   ) : (
-                    <LayerImageIcon />
+                    <div className="space-y-2">
+                      {group.layers.map((layer) => (
+                        <LayerRow
+                          key={layer.id}
+                          layer={layer}
+                          selected={selectedLayerId === layer.id}
+                          onDragStart={() => setDraggingId(layer.id)}
+                          onDrop={() => dropOn(flatIndexById.get(layer.id) ?? 0)}
+                          onSelect={() => select(layer.id)}
+                          onToggleVisible={() => toggleVisible(layer.id)}
+                          onToggleLock={() => toggleLock(layer.id)}
+                          onRename={(name) => rename(layer.id, name)}
+                          onRenameCommit={() => pushHistory()}
+                          onRemove={() => remove(layer.id)}
+                        />
+                      ))}
+                    </div>
                   )}
                 </div>
-                <input
-                  value={layer.name}
-                  onClick={(event) => event.stopPropagation()}
-                  onChange={(event) => rename(layer.id, event.target.value)}
-                  onBlur={() => pushHistory()}
-                  className="min-w-0 rounded border border-transparent bg-transparent px-1 py-1 text-xs font-bold text-neutral-100 outline-none focus:border-pink-400 focus:bg-[#181818]"
-                />
-                <button
-                  type="button"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    toggleLock(layer.id);
-                  }}
-                  className="flex h-5 w-5 items-center justify-center text-neutral-400 opacity-70 hover:text-white hover:opacity-100"
-                  title={layer.locked ? "ロック解除" : "ロック"}
-                >
-                  {layer.locked ? <LockIcon /> : <LockOpenIcon />}
-                </button>
-                <button
-                  type="button"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    remove(layer.id);
-                  }}
-                  className="flex h-5 w-5 items-center justify-center text-neutral-400 opacity-60 hover:text-red-300 hover:opacity-100"
-                  title="削除"
-                >
-                  <TrashIcon />
-                </button>
-              </div>
-                  ))}
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
     </section>
+  );
+}
+
+/** レイヤー1行 (表示切替 / サムネ / リネーム / ロック / 削除)。ジャンルを問わず共通。 */
+function LayerRow({
+  layer,
+  selected,
+  onDragStart,
+  onDrop,
+  onSelect,
+  onToggleVisible,
+  onToggleLock,
+  onRename,
+  onRenameCommit,
+  onRemove,
+}: {
+  layer: EditorLayerMeta;
+  selected: boolean;
+  onDragStart: () => void;
+  onDrop: () => void;
+  onSelect: () => void;
+  onToggleVisible: () => void;
+  onToggleLock: () => void;
+  onRename: (name: string) => void;
+  onRenameCommit: () => void;
+  onRemove: () => void;
+}) {
+  return (
+    <div
+      draggable
+      onDragStart={onDragStart}
+      onDragOver={(event) => event.preventDefault()}
+      onDrop={onDrop}
+      onClick={onSelect}
+      className={`group grid cursor-pointer grid-cols-[26px_42px_minmax(0,1fr)_26px_26px] items-center gap-2 rounded-lg border bg-[#101010] p-2 transition ${
+        selected
+          ? "border-pink-500 shadow-[0_0_0_1px_rgba(236,72,153,.35)]"
+          : "border-[#303030] hover:border-pink-400/70"
+      }`}
+    >
+      <button
+        type="button"
+        onClick={(event) => {
+          event.stopPropagation();
+          onToggleVisible();
+        }}
+        className="flex h-5 w-5 items-center justify-center text-neutral-400 hover:text-white"
+        title={layer.visible ? "非表示" : "表示"}
+      >
+        {layer.visible ? <EyeIcon /> : <EyeOffIcon />}
+      </button>
+      <div className="flex h-10 w-10 items-center justify-center overflow-hidden rounded border border-[#343434] bg-[#181818] text-neutral-500">
+        {layer.thumbnail ? (
+          <img src={layer.thumbnail} alt="" className="h-full w-full object-contain" />
+        ) : layer.kind === "text" ? (
+          <LayerTextIcon />
+        ) : (
+          <LayerImageIcon />
+        )}
+      </div>
+      <input
+        value={layer.name}
+        onClick={(event) => event.stopPropagation()}
+        onChange={(event) => onRename(event.target.value)}
+        onBlur={onRenameCommit}
+        className="min-w-0 rounded border border-transparent bg-transparent px-1 py-1 text-xs font-bold text-neutral-100 outline-none focus:border-pink-400 focus:bg-[#181818]"
+      />
+      <button
+        type="button"
+        onClick={(event) => {
+          event.stopPropagation();
+          onToggleLock();
+        }}
+        className="flex h-5 w-5 items-center justify-center text-neutral-400 opacity-70 hover:text-white hover:opacity-100"
+        title={layer.locked ? "ロック解除" : "ロック"}
+      >
+        {layer.locked ? <LockIcon /> : <LockOpenIcon />}
+      </button>
+      <button
+        type="button"
+        onClick={(event) => {
+          event.stopPropagation();
+          onRemove();
+        }}
+        className="flex h-5 w-5 items-center justify-center text-neutral-400 opacity-60 hover:text-red-300 hover:opacity-100"
+        title="削除"
+      >
+        <TrashIcon />
+      </button>
+    </div>
+  );
+}
+
+/** 折りたたみ三角 (open=展開中で下向き, 閉=右向き)。 */
+function ChevronIcon({ open }: { open: boolean }) {
+  return (
+    <svg
+      {...LAYER_SVG}
+      width={12}
+      height={12}
+      className={`transition-transform ${open ? "rotate-90" : ""}`}
+      aria-hidden
+    >
+      <path d="M9 6l6 6-6 6" />
+    </svg>
   );
 }
 
