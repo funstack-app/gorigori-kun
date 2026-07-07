@@ -4,11 +4,9 @@ import { EditorCanvas } from "./edit/EditorCanvas";
 import { EditorLayerList } from "./edit/EditorLayerList";
 import { EditorPropertyPanel } from "./edit/EditorPropertyPanel";
 import { EditorToolbar } from "./edit/EditorToolbar";
-import { EditModeSelector } from "./edit/EditModeSelector";
 import { EditPrimaryAction } from "./edit/EditPrimaryAction";
 import { WordsToolPanel } from "./edit/WordsToolPanel";
 import { ShapeToolPanel } from "./edit/ShapeToolPanel";
-import { LayerSplitterPanel } from "./edit/LayerSplitterPanel";
 import { useEditor } from "./edit/editor/editorStore";
 import { useEditorActions } from "./edit/editor/useEditor";
 
@@ -31,7 +29,8 @@ function basename(path: string) {
  *        「レイヤーに分解する」+ 1行説明。実行中は進捗。分解済みなら自身を畳む。
  *     ② レイヤー一覧 (主役・可変・高さの大半)。
  *     ③ プロパティ (レイヤーを選んでいるときだけ表示。生の座標数値は「詳細」に畳む)。
- *     ④ 追加ツール (区分を廃止して常時表示に統一): その他ツール / 分解モード / レイヤースプリッター。
+ *   右パネルはツールを持たない (2026-07-08 STΛCK「左=ツール / 右=プロパティ」)。
+ *   その他ツールは左レール、分解モード設定は EditPrimaryAction の「設定」へ移設。
  *
  * Rust IPC と PSD 用 LayerComposer は変更せず、UI 構成のみを整える。
  */
@@ -40,8 +39,6 @@ export function EditWorkspace() {
   const activeTool = useEditor((state) => state.activeTool);
   const selectedLayerId = useEditor((state) => state.selectedLayerId);
   const busyTool = useEditor((state) => state.busyTool);
-  const editMode = useEditor((state) => state.editMode);
-  const setEditMode = useEditor((state) => state.setEditMode);
   const { chooseImage, performUndo, performRedo, exportPng } = useEditorActions();
 
   // Cmd/Ctrl+Z = 元に戻す / Cmd/Ctrl+Shift+Z = やり直す。
@@ -119,57 +116,16 @@ export function EditWorkspace() {
           {activeTool === "shape" ? <ShapeToolPanel /> : null}
           {/* ② レイヤー一覧: 主役。残り高さの大半を占める。 */}
           <EditorLayerList />
-          {/* ③ プロパティ: レイヤーを選んでいるときだけ表示 (未選択時は場所を取らない)。 */}
+          {/* ③ プロパティ: レイヤーを選んでいるときだけ表示。右パネルはこれで終わり
+              — その他ツールは左レールへ、分解モード設定は分解ボタンの「設定」へ移設済み
+              (2026-07-08 STΛCK指摘「左=ツール / 右=プロパティ」)。 */}
           {selectedLayerId ? (
-            <div className="max-h-[40%] shrink-0 overflow-y-auto border-b border-[#2a2a2a]">
+            <div className="min-h-0 flex-1 shrink-0 overflow-y-auto border-t border-[#2a2a2a]">
               <EditorPropertyPanel />
             </div>
           ) : null}
-          {/* ④ 追加ツール: 区分（上級者向け）を廃止し、統一パネルとして常時表示する。 */}
-          <div className="shrink-0 space-y-3 overflow-y-auto border-t border-[#2a2a2a] p-3">
-            <div>
-              <p className="mb-2 text-[10px] font-bold text-neutral-500">その他のツール</p>
-              <AdvancedToolButtons />
-            </div>
-            <div className="border-t border-[#2a2a2a] pt-3">
-              <p className="mb-2 text-[10px] font-bold text-neutral-500">分解のしかた・モデル追加</p>
-              <EditModeSelector activeMode={editMode} onSelectMode={setEditMode} />
-            </div>
-            <div className="border-t border-[#2a2a2a] pt-3">
-              <p className="mb-2 text-[10px] font-bold text-neutral-500">レイヤースプリッター (実験機能)</p>
-              <LayerSplitterPanel />
-            </div>
-          </div>
         </aside>
       </div>
-    </div>
-  );
-}
-
-/** 常設レールから外した旧ツール群 (使う人だけ上級者向けから)。 */
-function AdvancedToolButtons() {
-  const busyTool = useEditor((state) => state.busyTool);
-  const actions = useEditorActions();
-  const tools: Array<{ id: Parameters<typeof actions.run>[0]; label: string }> = [
-    { id: "magic", label: "自動レイヤー分解 (旧方式)" },
-    { id: "redo-decompose", label: "再分解" },
-    { id: "bgremove", label: "人物切り抜き" },
-    { id: "grab", label: "マジックグラブ" },
-    { id: "text-detect", label: "テキスト検出" },
-  ];
-  return (
-    <div className="flex flex-wrap gap-1.5">
-      {tools.map((tool) => (
-        <button
-          key={tool.id}
-          type="button"
-          onClick={() => void actions.run(tool.id)}
-          disabled={busyTool !== null}
-          className="rounded-md border border-[#343434] bg-[#161616] px-2.5 py-1.5 text-[10px] font-bold text-neutral-300 transition hover:border-pink-400 hover:text-white disabled:opacity-40"
-        >
-          {tool.label}
-        </button>
-      ))}
     </div>
   );
 }

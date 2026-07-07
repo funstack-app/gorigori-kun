@@ -5,7 +5,6 @@ import { useEditor } from "./editor/editorStore";
 import { useEditorActions } from "./editor/useEditor";
 
 // 基本の画像編集に必要なものだけを常設する (2026-07-03 STΛCK指摘「メニューが多すぎる」)。
-// 旧方式の分解・人物切り抜き・マジックグラブ・テキスト検出は右パネルの「上級者向け」へ。
 const TOOLS: Array<{ id: EditorTool; icon: ReactNode; label: string }> = [
   { id: "select", icon: <CursorIcon />, label: "選択" },
   { id: "words", icon: <WordsIcon />, label: "ことばで分離" },
@@ -14,6 +13,16 @@ const TOOLS: Array<{ id: EditorTool; icon: ReactNode; label: string }> = [
   { id: "text-add", icon: <TextIcon />, label: "テキスト追加" },
   { id: "clickseg", icon: <TargetIcon />, label: "クリック切り抜き" },
   { id: "inpaint", icon: <EraserIcon />, label: "領域消去" },
+];
+
+// 「その他ツール」= 実行系（状態は持たず run で発火）。右パネルから左レールへ移設
+// (2026-07-08 STΛCK指摘「左=ツール / 右=プロパティ」)。ホバーで名前が出る。
+const EXTRA_TOOLS: Array<{ id: EditorTool; icon: ReactNode; label: string }> = [
+  { id: "magic", icon: <DecomposeIcon />, label: "自動レイヤー分解 (旧方式)" },
+  { id: "redo-decompose", icon: <RedoDecomposeIcon />, label: "再分解" },
+  { id: "bgremove", icon: <PersonCutIcon />, label: "人物切り抜き" },
+  { id: "grab", icon: <GrabIcon />, label: "マジックグラブ" },
+  { id: "text-detect", icon: <TextDetectIcon />, label: "テキスト検出" },
 ];
 
 export function EditorToolbar() {
@@ -39,6 +48,28 @@ export function EditorToolbar() {
                 ? "border-pink-500 bg-pink-500/20 text-pink-100"
                 : "border-transparent text-neutral-400"
             }`}
+          >
+            {isBusy ? (
+              <span className="h-4 w-4 animate-spin rounded-full border-2 border-pink-200 border-t-transparent" />
+            ) : (
+              tool.icon
+            )}
+          </button>
+        );
+      })}
+
+      {/* 区切り + その他ツール（実行系。状態は持たず run で発火）。 */}
+      <span className="my-1 h-px w-6 bg-[#2a2a2a]" aria-hidden />
+      {EXTRA_TOOLS.map((tool) => {
+        const isBusy = busy === tool.id;
+        return (
+          <button
+            key={tool.id}
+            type="button"
+            onClick={() => void actions.run(tool.id)}
+            title={tool.label}
+            disabled={busy !== null && !isBusy}
+            className="flex h-10 w-10 items-center justify-center rounded-md border border-transparent text-neutral-400 transition hover:bg-[#1a1a1a] hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
           >
             {isBusy ? (
               <span className="h-4 w-4 animate-spin rounded-full border-2 border-pink-200 border-t-transparent" />
@@ -168,6 +199,57 @@ function RedoIcon() {
     <svg {...SVG_PROPS} aria-hidden>
       <path d="M15 7l5 5-5 5" />
       <path d="M20 12H9a5 5 0 00-5 5v1" />
+    </svg>
+  );
+}
+
+/* --- その他ツール用アイコン --- */
+
+function DecomposeIcon() {
+  // 重なった板 = レイヤー分解
+  return (
+    <svg {...SVG_PROPS} aria-hidden>
+      <path d="M12 3l9 5-9 5-9-5 9-5z" />
+      <path d="M3 13l9 5 9-5" />
+    </svg>
+  );
+}
+
+function RedoDecomposeIcon() {
+  // 円環矢印 = 再分解
+  return (
+    <svg {...SVG_PROPS} aria-hidden>
+      <path d="M21 12a9 9 0 11-3-6.7" />
+      <path d="M21 4v5h-5" />
+    </svg>
+  );
+}
+
+function PersonCutIcon() {
+  // 人物シルエット = 人物切り抜き
+  return (
+    <svg {...SVG_PROPS} aria-hidden>
+      <circle cx="12" cy="8" r="3.2" />
+      <path d="M5.5 20a6.5 6.5 0 0113 0" />
+    </svg>
+  );
+}
+
+function GrabIcon() {
+  // 破線の選択枠 = マジックグラブ
+  return (
+    <svg {...SVG_PROPS} aria-hidden strokeDasharray="3 2.5">
+      <rect x="4" y="4" width="16" height="16" rx="2" />
+    </svg>
+  );
+}
+
+function TextDetectIcon() {
+  // 枠付きのT = テキスト検出
+  return (
+    <svg {...SVG_PROPS} aria-hidden>
+      <rect x="3.5" y="5" width="17" height="14" rx="2" strokeDasharray="3 2.5" />
+      <path d="M9 9h6M12 9v6" />
     </svg>
   );
 }

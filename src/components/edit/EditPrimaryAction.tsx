@@ -1,10 +1,11 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 
 import { useEditMagic } from "../../lib/store/editMagic";
 import { useEditor } from "./editor/editorStore";
 import { useEditorActions } from "./editor/useEditor";
 import { layerMetasFromCanvas } from "./editor/layerHelpers";
 import { SOURCE_PREVIEW_ID } from "./editor/magicLayerToFabric";
+import { EditModeSelector } from "./EditModeSelector";
 
 /**
  * 編集タブの「主導線」パネル (タスク主導への再設計 2026-07-02)。
@@ -29,6 +30,9 @@ export function EditPrimaryAction() {
   const magicProgress = useEditMagic((state) => state.progress);
   const magicRunning = useEditMagic((state) => state.running);
   const { runWordsAuto } = useEditorActions();
+  const editMode = useEditor((state) => state.editMode);
+  const setEditMode = useEditor((state) => state.setEditMode);
+  const [showSettings, setShowSettings] = useState(false);
 
   // 「切り分けられる本体レイヤー」が既にあるか。プレビュー用のマスクは数に入れない。
   const decomposableLayerCount = useMemo(
@@ -77,6 +81,18 @@ export function EditPrimaryAction() {
       <p className="mt-2 text-center text-[11px] font-bold leading-4 text-neutral-400">
         人物・小物・背景・文字に自動で切り分けます
       </p>
+      <button
+        type="button"
+        onClick={() => setShowSettings((v) => !v)}
+        className="mx-auto mt-2 block text-[11px] font-bold text-neutral-500 underline decoration-dotted hover:text-pink-200"
+      >
+        {showSettings ? "設定を閉じる" : "設定（分解のしかた・モデル追加）"}
+      </button>
+      {showSettings ? (
+        <div className="mt-3 border-t border-[#2a2a2a] pt-3">
+          <EditModeSelector activeMode={editMode} onSelectMode={setEditMode} />
+        </div>
+      ) : null}
     </div>
   );
 }
