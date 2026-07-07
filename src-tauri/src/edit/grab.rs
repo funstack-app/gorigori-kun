@@ -5,6 +5,12 @@ use image::{GenericImageView, ImageBuffer, Luma, Rgba};
 use crate::edit::inpaint::inpaint_image;
 use crate::edit::runtime::EditRuntime;
 
+/// 切り抜き時のエッジ精緻化の既定強度。argmax 由来の二値マスクは縁が数 px 甘いので
+/// 1px 締めて背景色のにじみを消し、1px フェザーで階段状の輪郭をアンチエイリアスする。
+/// 小さめに固定＝主体をほぼ削らずジャギーだけ抑える安全側。
+const EDGE_ERODE_PX: i32 = 1;
+const EDGE_FEATHER_PX: i32 = 1;
+
 /// マジックグラブ 1 回分の結果。
 /// - object_png: マスク領域だけを切り抜いた透過 PNG。bbox のサイズにクロップ済み。
 /// - bbox: 元画像ピクセル座標での [x, y, width, height]。フロントがこの位置に置く。
@@ -62,13 +68,15 @@ pub async fn grab_object(
     let [bx, by, bw, bh] = bbox;
 
     // オブジェクト透過PNG: bbox にクロップし、マスクの alpha を焼く。
+    // 焼く前にエッジ精緻化（縁を1px締めてハロー除去 + 境界を1pxフェザーでアンチエイリアス）。
+    let refined = refine_mask_edge(&mask, EDGE_ERODE_PX, EDGE_FEATHER_PX);
     let rgba = img.to_rgba8();
     let mut object = ImageBuffer::<Rgba<u8>, Vec<u8>>::new(bw, bh);
     for oy in 0..bh {
         for ox in 0..bw {
             let sx = bx + ox;
             let sy = by + oy;
-            let alpha = mask.get_pixel(sx, sy)[0];
+            let alpha = refined.get_pixel(sx, sy)[0];
             let p = rgba.get_pixel(sx, sy);
             object.put_pixel(ox, oy, Rgba([p[0], p[1], p[2], alpha]));
         }
@@ -114,12 +122,14 @@ pub fn crop_object_png(
     let bbox = mask_bbox(mask).ok_or_else(|| "object mask is empty".to_string())?;
     let [bx, by, bw, bh] = bbox;
 
+    // 焼く前にエッジ精緻化（grab_object と同じ処理でジャギー/ハローを抑える）。
+    let refined = refine_mask_edge(mask, EDGE_ERODE_PX, EDGE_FEATHER_PX);
     let mut object = ImageBuffer::<Rgba<u8>, Vec<u8>>::new(bw, bh);
     for oy in 0..bh {
         for ox in 0..bw {
             let sx = bx + ox;
             let sy = by + oy;
-            let alpha = mask.get_pixel(sx, sy)[0];
+            let alpha = refined.get_pixel(sx, sy)[0];
             let p = rgba.get_pixel(sx, sy);
             object.put_pixel(ox, oy, Rgba([p[0], p[1], p[2], alpha]));
         }
@@ -202,4 +212,125 @@ fn dilate_mask(
         }
     }
     out
+}
+
+/// マスクを radius px 収縮させて返す (dilate の逆)。二値マスクの縁を削り、
+/// 切り抜き時に背景色がにじむハローを除去するために使う。
+fn erode_mask(
+    mask: &ImageBuffer<Luma<u8>, Vec<u8>>,
+    radius: i32,
+) -> ImageBuffer<Luma<u8>, Vec<u8>> {
+    let (w, h) = mask.dimensions();
+    if radius <= 0 {
+        return mask.clone();
+    }
+    let mut out = ImageBuffer::<Luma<u8>, Vec<u8>>::from_pixel(w, h, Luma([255u8]));
+    for y in 0..h as i32 {
+        for x in 0..w as i32 {
+            // 前景でない画素の周辺 radius を 0 に塗る = 前景側が radius 削れる。
+            if mask.get_pixel(x as u32, y as u32)[0] > 127 {
+                continue;
+            }
+            let x0 = (x - radius).max(0);
+            let y0 = (y - radius).max(0);
+            let x1 = (x + radius).min(w as i32 - 1);
+            let y1 = (y + radius).min(h as i32 - 1);
+            for yy in y0..=y1 {
+                for xx in x0..=x1 {
+                    out.put_pixel(xx as u32, yy as u32, Luma([0u8]));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// 二値マスクの境界だけにアンチエイリアス（中間アルファ）を与える精緻化。
+///
+/// - `erode_px`: まず縁を削る。argmax 由来の二値マスクは背景側へ数 px はみ出しがちで、
+///   そのまま焼くと縁に背景色がにじむ（ハロー）。削って締める。
+/// - `feather_px`: 収縮後マスクに (2*feather_px+1) 四方の箱平均を掛けて 0/255 の階段を
+///   中間値へならす。完全内部(全近傍255)と完全外部(全近傍0)は値が変わらず、境界帯だけ滑らかになる。
+///   → 主体の中身は削れず、ギザギザした輪郭だけがアンチエイリアスされる。
+///
+/// 両方 0 のときは入力をそのまま返す（既存挙動を壊さない安全既定）。決定論・純関数。
+pub fn refine_mask_edge(
+    mask: &ImageBuffer<Luma<u8>, Vec<u8>>,
+    erode_px: i32,
+    feather_px: i32,
+) -> ImageBuffer<Luma<u8>, Vec<u8>> {
+    let eroded = if erode_px > 0 {
+        erode_mask(mask, erode_px)
+    } else {
+        mask.clone()
+    };
+    if feather_px <= 0 {
+        return eroded;
+    }
+    let (w, h) = eroded.dimensions();
+    let r = feather_px;
+    let mut out = ImageBuffer::<Luma<u8>, Vec<u8>>::from_pixel(w, h, Luma([0u8]));
+    for y in 0..h as i32 {
+        for x in 0..w as i32 {
+            let x0 = (x - r).max(0);
+            let y0 = (y - r).max(0);
+            let x1 = (x + r).min(w as i32 - 1);
+            let y1 = (y + r).min(h as i32 - 1);
+            let mut sum: u32 = 0;
+            let mut count: u32 = 0;
+            for yy in y0..=y1 {
+                for xx in x0..=x1 {
+                    sum += eroded.get_pixel(xx as u32, yy as u32)[0] as u32;
+                    count += 1;
+                }
+            }
+            out.put_pixel(x as u32, y as u32, Luma([(sum / count) as u8]));
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 中央に白い正方形を持つ二値マスクを作る。
+    fn square_mask(size: u32, inset: u32) -> ImageBuffer<Luma<u8>, Vec<u8>> {
+        let mut m = ImageBuffer::<Luma<u8>, Vec<u8>>::from_pixel(size, size, Luma([0u8]));
+        for y in inset..(size - inset) {
+            for x in inset..(size - inset) {
+                m.put_pixel(x, y, Luma([255u8]));
+            }
+        }
+        m
+    }
+
+    #[test]
+    fn refine_is_noop_when_both_zero() {
+        let m = square_mask(20, 5);
+        let out = refine_mask_edge(&m, 0, 0);
+        assert_eq!(m, out, "erode/feather ともに0なら入力そのまま");
+    }
+
+    #[test]
+    fn feather_introduces_midtones_only_on_border() {
+        let m = square_mask(20, 5); // 白領域 [5,15)
+        let out = refine_mask_edge(&m, 0, 1);
+        // 完全内部（境界から2px以上内側）は255のまま
+        assert_eq!(out.get_pixel(10, 10)[0], 255, "内部は不変");
+        // 完全外部（境界から2px以上外側）は0のまま
+        assert_eq!(out.get_pixel(0, 0)[0], 0, "外部は不変");
+        // 境界画素には中間値が出る（0でも255でもない）
+        let edge = out.get_pixel(5, 10)[0];
+        assert!(edge > 0 && edge < 255, "境界に中間アルファ (実際: {edge})");
+    }
+
+    #[test]
+    fn erode_shrinks_foreground() {
+        let m = square_mask(20, 5); // 白領域 [5,15)
+        let eroded = erode_mask(&m, 1);
+        // 縁 (5,10) は削れて0、内部 (7,10) は残って255
+        assert_eq!(eroded.get_pixel(5, 10)[0], 0, "縁は収縮で消える");
+        assert_eq!(eroded.get_pixel(7, 10)[0], 255, "内部は残る");
+    }
 }
