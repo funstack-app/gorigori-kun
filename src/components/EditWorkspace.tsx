@@ -9,7 +9,6 @@ import { EditPrimaryAction } from "./edit/EditPrimaryAction";
 import { WordsToolPanel } from "./edit/WordsToolPanel";
 import { ShapeToolPanel } from "./edit/ShapeToolPanel";
 import { LayerSplitterPanel } from "./edit/LayerSplitterPanel";
-import { CollapsibleSection } from "./edit/CollapsibleSection";
 import { useEditor } from "./edit/editor/editorStore";
 import { useEditorActions } from "./edit/editor/useEditor";
 
@@ -32,7 +31,7 @@ function basename(path: string) {
  *        「レイヤーに分解する」+ 1行説明。実行中は進捗。分解済みなら自身を畳む。
  *     ② レイヤー一覧 (主役・可変・高さの大半)。
  *     ③ プロパティ (レイヤーを選んでいるときだけ表示。生の座標数値は「詳細」に畳む)。
- *     ④ 上級者向け (既定で閉じる折りたたみ): 分解モードのフル説明 / レイヤースプリッター実験機能。
+ *     ④ 追加ツール (区分を廃止して常時表示に統一): その他ツール / 分解モード / レイヤースプリッター。
  *
  * Rust IPC と PSD 用 LayerComposer は変更せず、UI 構成のみを整える。
  */
@@ -112,7 +111,7 @@ export function EditWorkspace() {
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <EditorToolbar />
         <EditorCanvas />
-        <aside className="flex min-h-0 w-[300px] shrink-0 flex-col overflow-hidden border-l border-[#2a2a2a] bg-[#252525]">
+        <aside className="flex min-h-0 w-[320px] shrink-0 flex-col overflow-x-hidden overflow-y-hidden border-l border-[#2a2a2a] bg-[#252525] [&_*]:max-w-full [&_*]:min-w-0">
           {/* ① 主導線: 分解前は大ボタン、実行中は進捗。分解済みは自身を畳む。 */}
           <EditPrimaryAction />
           {/* ①' ことばで分離: 左レールで選んだときだけ入力パネルを出す。 */}
@@ -126,24 +125,20 @@ export function EditWorkspace() {
               <EditorPropertyPanel />
             </div>
           ) : null}
-          {/* ④ 上級者向け: 既定で閉じる。分解モードのフル説明・実験機能を格納。 */}
-          <div className="shrink-0 overflow-y-auto">
-            <CollapsibleSection title="上級者向け">
-              <div className="space-y-3">
-                <div>
-                  <p className="mb-2 text-[10px] font-bold text-neutral-500">その他のツール</p>
-                  <AdvancedToolButtons />
-                </div>
-                <div className="border-t border-[#2a2a2a] pt-3">
-                  <p className="mb-2 text-[10px] font-bold text-neutral-500">分解のしかた・モデル追加</p>
-                  <EditModeSelector activeMode={editMode} onSelectMode={setEditMode} />
-                </div>
-                <div className="border-t border-[#2a2a2a] pt-3">
-                  <p className="mb-2 text-[10px] font-bold text-neutral-500">レイヤースプリッター (実験機能)</p>
-                  <LayerSplitterPanel />
-                </div>
-              </div>
-            </CollapsibleSection>
+          {/* ④ 追加ツール: 区分（上級者向け）を廃止し、統一パネルとして常時表示する。 */}
+          <div className="shrink-0 space-y-3 overflow-y-auto border-t border-[#2a2a2a] p-3">
+            <div>
+              <p className="mb-2 text-[10px] font-bold text-neutral-500">その他のツール</p>
+              <AdvancedToolButtons />
+            </div>
+            <div className="border-t border-[#2a2a2a] pt-3">
+              <p className="mb-2 text-[10px] font-bold text-neutral-500">分解のしかた・モデル追加</p>
+              <EditModeSelector activeMode={editMode} onSelectMode={setEditMode} />
+            </div>
+            <div className="border-t border-[#2a2a2a] pt-3">
+              <p className="mb-2 text-[10px] font-bold text-neutral-500">レイヤースプリッター (実験機能)</p>
+              <LayerSplitterPanel />
+            </div>
           </div>
         </aside>
       </div>
