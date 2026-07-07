@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 
 import { FontPicker } from "./FontPicker";
+import { guessSerif, type FontMatchHint } from "../../lib/edit/fontMatch";
 import { useEditor } from "./editor/editorStore";
 import { getObjectById, objectKind } from "./editor/layerHelpers";
 import { convertTextImageToTextbox, getCanvasBaseSize } from "./editor/magicLayerToFabric";
@@ -44,8 +45,22 @@ export function EditorPropertyPanel() {
   );
 }
 
+/** テキスト内容から言語を推定する（日本語文字を含めば ja、なければ en）。決定論。 */
+function guessLanguage(text: unknown): string | null {
+  if (typeof text !== "string" || text.trim() === "") return null;
+  // ひらがな・カタカナ・CJK統合漢字のいずれかを含めば日本語とみなす
+  return /[぀-ヿ㐀-鿿]/.test(text) ? "ja" : "en";
+}
+
 function TextPropertyEditor({ object }: { object: FabricObject }) {
   const apply = usePropertyApply(object);
+  const matchHint: FontMatchHint = {
+    language: guessLanguage(object.text) ?? object.languageHint ?? null,
+    bold: object.fontWeight === "bold",
+    serif: object.fontFamily
+      ? guessSerif({ family: String(object.fontFamily), displayName: String(object.fontFamily) })
+      : null,
+  };
   return (
     <div className="space-y-3">
       <Field label="文字">
@@ -57,7 +72,7 @@ function TextPropertyEditor({ object }: { object: FabricObject }) {
           className="w-full resize-none rounded-lg border border-[#343434] bg-[#0b0b0b] px-3 py-2 text-sm text-neutral-100 outline-none focus:border-pink-400"
         />
       </Field>
-      <FontPicker value={String(object.fontFamily ?? "system-ui")} onChange={(fontFamily) => { apply({ fontFamily }); apply.commit(); }} />
+      <FontPicker value={String(object.fontFamily ?? "system-ui")} matchHint={matchHint} languageHint={matchHint.language} onChange={(fontFamily) => { apply({ fontFamily }); apply.commit(); }} />
       <NumberSlider label="サイズ" value={numberValue(object.fontSize, 32)} min={6} max={180} onChange={(fontSize) => apply({ fontSize })} onCommit={apply.commit} />
       <Field label="色">
         <input
