@@ -244,12 +244,13 @@ impl Sam3TextSession {
                 self.orig_h,
                 image::imageops::FilterType::Triangle,
             );
-            // 閾値未満はゼロ化 (crop_object_png が alpha にそのまま使うため)。
+            // Triangle 拡大後の連続マスクを、境界を残したソフトアルファに整える。
+            // 旧実装は「128未満を0にするだけ」で 128 でスパッと切れる硬い階段が残り、
+            // 切り口がジャギーになっていた。閾値付近を 0..255 へ線形リマップして
+            // 境界だけをなだらかにする（内部=255・外部=0 は不変、輪郭だけアンチエイリアス）。
             let mut mask = full;
             for px in mask.pixels_mut() {
-                if px[0] <= 127 {
-                    *px = Luma([0u8]);
-                }
+                *px = Luma([soft_edge_alpha(px[0])]);
             }
             if mask.pixels().all(|p| p[0] == 0) {
                 continue;
@@ -311,6 +312,16 @@ fn sigmoid(v: f32) -> f32 {
     1.0 / (1.0 + (-v).exp())
 }
 
+/// 連続マスク値 (0..255) を、閾値付近だけをなだらかにしたソフトアルファへ変換する。
+/// `LO` 以下は 0（確実な外側）、`HI` 以上は 255（確実な内側）、その間だけ線形に補間する。
+/// 硬い 128 ハードカットが生むジャギーを避けつつ、内部・外部は完全な不透明/透明を保つ。
+fn soft_edge_alpha(v: u8) -> u8 {
+    const LO: f32 = 100.0;
+    const HI: f32 = 160.0;
+    let t = (((v as f32) - LO) / (HI - LO)).clamp(0.0, 1.0);
+    (t * 255.0).round() as u8
+}
+
 /// embed キャッシュのキー: パス + ファイルサイズ + mtime 秒。
 fn embed_cache_key(path: &Path) -> Result<String, String> {
     let meta = std::fs::metadata(path).map_err(|e| format!("metadata: {e}"))?;
@@ -341,5 +352,19 @@ mod tests {
         assert_eq!(v.len(), (INPUT_SIZE * INPUT_SIZE * 3) as usize);
         // 黒画像 → (0/255 - 0.5)/0.5 = -1.0
         assert!((v[0] + 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn soft_edge_alpha_keeps_inside_outside_and_ramps_border() {
+        // 確実な外側 (LO以下) は 0、確実な内側 (HI以上) は 255
+        assert_eq!(soft_edge_alpha(0), 0);
+        assert_eq!(soft_edge_alpha(100), 0);
+        assert_eq!(soft_edge_alpha(160), 255);
+        assert_eq!(soft_edge_alpha(255), 255);
+        // 境界帯 (100 < v < 160) は中間値が出る（0でも255でもない = アンチエイリアス）
+        let mid = soft_edge_alpha(130);
+        assert!(mid > 0 && mid < 255, "境界に中間アルファ (実際: {mid})");
+        // 単調増加（旧ハードカットのような不連続がない）
+        assert!(soft_edge_alpha(120) < soft_edge_alpha(140));
     }
 }
