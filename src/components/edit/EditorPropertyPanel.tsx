@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 
 import { FontPicker } from "./FontPicker";
 import { guessSerif, type FontMatchHint } from "../../lib/edit/fontMatch";
+import { backgroundActions, isBackgroundLayer } from "../../lib/edit/backgroundEdit";
 import { useEditor } from "./editor/editorStore";
 import { getObjectById, objectKind } from "./editor/layerHelpers";
 import { convertTextImageToTextbox, getCanvasBaseSize } from "./editor/magicLayerToFabric";
@@ -117,8 +118,28 @@ function ImagePropertyEditor({ object }: { object: FabricObject }) {
   // 「元画素そのまま」のテキストレイヤーは、打ち替えたいときだけ textbox へ変換できる。
   const hasTextSpec = Boolean(object.get?.("textSpec"));
 
+  const isBackground = isBackgroundLayer(object);
+  const bgActions = isBackground ? backgroundActions(object) : [];
+  const canAiRegenerate = bgActions.some((a) => a.kind === "ai-regenerate");
+
   return (
     <div className="space-y-3">
+      {isBackground ? (
+        <div className="space-y-2 rounded-lg border border-sky-500/30 bg-sky-500/5 px-2 py-2">
+          <span className="block text-[10px] font-bold text-sky-200">背景の編集</span>
+          <NumberSlider label="ぼかし" value={numberValue(object.get?.("blur"), 0)} min={0} max={1} step={0.02} onChange={(blur) => void applyImageFilters(object, { blur })} onCommit={() => void applyImageFilters(object, {}, apply.commit)} />
+          <NumberSlider label="明るさ" value={numberValue(object.get?.("brightness"), 0)} min={-1} max={1} step={0.05} onChange={(brightness) => void applyImageFilters(object, { brightness })} onCommit={() => void applyImageFilters(object, {}, apply.commit)} />
+          {canAiRegenerate ? (
+            <p className="text-[10px] leading-relaxed text-neutral-400">
+              背景を作り直したいときは、下の「同じ雰囲気でAI差し替え」から再生成できます。
+            </p>
+          ) : (
+            <p className="text-[10px] leading-relaxed text-neutral-500">
+              この背景は元画像を持たないため、AI再生成は使えません（ぼかし・明るさで調整してください）。
+            </p>
+          )}
+        </div>
+      ) : null}
       {hasTextSpec ? (
         <button
           type="button"
@@ -338,12 +359,13 @@ function Toggle({ label, active, onClick }: { label: string; active: boolean; on
 
 async function applyImageFilters(
   object: FabricObject,
-  next: { brightness?: number; contrast?: number },
+  next: { brightness?: number; contrast?: number; blur?: number },
   onCommit?: () => void,
 ) {
   const currentBrightness = next.brightness ?? numberValue(object.get?.("brightness"), 0);
   const currentContrast = next.contrast ?? numberValue(object.get?.("contrast"), 0);
-  object.set?.({ brightness: currentBrightness, contrast: currentContrast });
+  const currentBlur = next.blur ?? numberValue(object.get?.("blur"), 0);
+  object.set?.({ brightness: currentBrightness, contrast: currentContrast, blur: currentBlur });
   try {
     // @ts-ignore fabric is installed at runtime via package dependency
     const fabric = await import("fabric") as any;
@@ -351,6 +373,7 @@ async function applyImageFilters(
     const nextFilters = [];
     if (filters.Brightness && currentBrightness !== 0) nextFilters.push(new filters.Brightness({ brightness: currentBrightness }));
     if (filters.Contrast && currentContrast !== 0) nextFilters.push(new filters.Contrast({ contrast: currentContrast }));
+    if (filters.Blur && currentBlur !== 0) nextFilters.push(new filters.Blur({ blur: currentBlur }));
     object.filters = nextFilters;
     object.applyFilters?.();
   } finally {

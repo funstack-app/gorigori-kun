@@ -1,7 +1,7 @@
 import { GENRE_LABELS, isLayerGenre, type LayerGenre } from "../../../lib/edit/genre";
 import type { EditorLayerKind, EditorLayerMeta } from "./editorStore";
 
-type FabricLikeObject = {
+export type FabricLikeObject = {
   type?: string;
   visible?: boolean;
   selectable?: boolean;
