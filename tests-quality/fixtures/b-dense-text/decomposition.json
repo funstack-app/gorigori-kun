@@ -1,0 +1,12 @@
+{
+  "fixture": "b-dense-text",
+  "dodCase": "B近似: 密集文字 (文字ブロック20+) の画像",
+  "source": "tests-ui/screenshots/08-settings.png (リポジトリ内固定素材: 日本語ラベル密集の設定画面)",
+  "kind": "recorded-contract",
+  "note": "文字が支配的な画像では、テキストレイヤーが全件 text ジャンルに入り、物体0件でも背景+テキストの2ジャンル構造が成立することを固定する。",
+  "image": { "file": "image.png" },
+  "objects": [],
+  "textLayerCount": 20,
+  "hasBackground": true,
+  "expectedGenreCounts": { "person": 0, "text": 20, "prop": 0, "background": 1 }
+}

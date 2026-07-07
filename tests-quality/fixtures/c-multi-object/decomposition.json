@@ -1,0 +1,30 @@
+{
+  "fixture": "c-multi-object",
+  "dodCase": "C近似: 小物複数点 (各小物が個別レイヤーになる型)",
+  "source": "tests-ui/screenshots/05-gallery.png (リポジトリ内固定素材: 画像カードが並ぶギャラリー画面)",
+  "kind": "recorded-contract",
+  "note": "小物が複数あるとき全件が prop ジャンルへ入ること、および人型ロボット/キャラクターの境界 (Codex category が無ければ prop に倒す) を固定する。",
+  "image": { "file": "image.png" },
+  "objects": [
+    {
+      "en": "photo card",
+      "ja": "写真カード",
+      "category": "prop",
+      "expectedGenre": "prop"
+    },
+    {
+      "en": "heart icon",
+      "ja": "ハートアイコン",
+      "category": "prop",
+      "expectedGenre": "prop"
+    },
+    {
+      "en": "robot figure",
+      "ja": "ロボット",
+      "expectedGenre": "prop"
+    }
+  ],
+  "textLayerCount": 8,
+  "hasBackground": true,
+  "expectedGenreCounts": { "person": 0, "text": 8, "prop": 3, "background": 1 }
+}

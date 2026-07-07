@@ -1,0 +1,19 @@
+{
+  "fixture": "e-japanese-text",
+  "dodCase": "E近似: 日本語テキスト+ロゴ混在の画面",
+  "source": "tests-ui/screenshots/01-login-chatgpt.png (リポジトリ内固定素材: 日本語UI+ロゴのログイン画面)",
+  "kind": "recorded-contract",
+  "note": "ロゴは text ジャンル (文字・ロゴ) に分類する契約。OCRテキストとロゴ物体が同じ text 見出しに揃うことを固定する。",
+  "image": { "file": "image.png" },
+  "objects": [
+    {
+      "en": "logo",
+      "ja": "ロゴ",
+      "category": "text",
+      "expectedGenre": "text"
+    }
+  ],
+  "textLayerCount": 6,
+  "hasBackground": true,
+  "expectedGenreCounts": { "person": 0, "text": 7, "prop": 0, "background": 1 }
+}

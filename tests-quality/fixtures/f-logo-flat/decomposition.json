@@ -1,0 +1,25 @@
+{
+  "fixture": "f-logo-flat",
+  "dodCase": "F近似: ロゴ+フラット/グラデ背景 (全面級ゲートの境界型)",
+  "source": "docs/logo.png (リポジトリ内固定素材: アプリロゴ)",
+  "kind": "recorded-contract",
+  "note": "category 無しの 'logo' を決定論分類器が text へ導けること、物体1件のみでも背景+テキストの2ジャンル構造が成立することを固定する。",
+  "image": {
+    "file": "image.png"
+  },
+  "objects": [
+    {
+      "en": "logo",
+      "ja": "ロゴ",
+      "expectedGenre": "text"
+    }
+  ],
+  "textLayerCount": 0,
+  "hasBackground": true,
+  "expectedGenreCounts": {
+    "person": 0,
+    "text": 1,
+    "prop": 0,
+    "background": 1
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "fixture": "a-person-plain",
+  "dodCase": "A/D近似: 人物1体+無地背景 (gap-audit §4 テスト画像セット)",
+  "source": "public/angle-samples/fs_eye_front.png (リポジトリ内固定素材: デッサン人形フルショット)",
+  "kind": "recorded-contract",
+  "note": "実モデル (Codex vision + SAM3 + OCR) の実行結果ではなく、この画像型に対して分解パイプラインが返すべき出力の契約。実モデルE2E (cargo の ignored probe) で実測が取れたら実測値に置き換える。",
+  "image": { "file": "image.png" },
+  "objects": [
+    {
+      "en": "person",
+      "ja": "人物",
+      "category": "person",
+      "expectedGenre": "person"
+    }
+  ],
+  "textLayerCount": 0,
+  "hasBackground": true,
+  "expectedGenreCounts": { "person": 1, "text": 0, "prop": 0, "background": 1 }
+}

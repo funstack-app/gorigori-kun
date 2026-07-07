@@ -1,0 +1,18 @@
+{
+  "fixture": "d-person-lowangle",
+  "dodCase": "D近似: 人物単体 (アングル違い)。人=1レイヤーの既定構造",
+  "source": "public/angle-samples/fs_low_front.png (リポジトリ内固定素材: デッサン人形ローアングル)",
+  "kind": "recorded-contract",
+  "note": "category 無し (Codex が category を返さない旧応答) でも決定論分類器が en/ja から person を導けることを固定する。",
+  "image": { "file": "image.png" },
+  "objects": [
+    {
+      "en": "person in standing pose",
+      "ja": "人物",
+      "expectedGenre": "person"
+    }
+  ],
+  "textLayerCount": 0,
+  "hasBackground": true,
+  "expectedGenreCounts": { "person": 1, "text": 0, "prop": 0, "background": 1 }
+}

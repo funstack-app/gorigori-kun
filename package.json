@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
+    "test:quality": "playwright test --config playwright.quality.config.ts",
     "tauri": "tauri"
   },
   "dependencies": {
