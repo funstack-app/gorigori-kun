@@ -330,12 +330,31 @@ async fn run_words_segment(
         );
         for (i, det) in text_instances.iter().enumerate() {
             let out_path = run_dir.join(format!("text-{:02}.png", i + 1));
-            let bbox = match crate::edit::grab::crop_object_png(&rgba, &det.mask, &out_path) {
-                Ok(bbox) => bbox,
-                Err(reason) => {
-                    tracing::warn!(target: "codex.edit", "words: text素材切り出し失敗 ({reason})");
-                    continue;
-                }
+            // 色距離マット優先: SAM3 の int8 マスクは文字の細部で粗く、そのまま alpha に
+            // すると縁の背景が白い斑点として焼き込まれる (2026-07-09 実機報告)。フラット
+            // 配色なら元画像の色から滑らかな alpha を作り、SAM3 マスクは ROI (守備範囲)
+            // としてだけ使う。色が割れない画像では従来の crop_object_png へフォールバック。
+            let mb = mask_bbox_of(&det.mask);
+            let gate = [
+                mb[0] as i32 - 4,
+                mb[1] as i32 - 4,
+                mb[2] as i32 + 8,
+                mb[3] as i32 + 8,
+            ];
+            let tbox = [mb[0] as i32, mb[1] as i32, mb[2] as i32, mb[3] as i32];
+            let matte = crate::edit::magic_layer::crop_with_color_matte(
+                &rgba, &det.mask, gate, tbox, &out_path,
+            )
+            .unwrap_or_default();
+            let bbox = match matte {
+                Some(bbox) => bbox,
+                None => match crate::edit::grab::crop_object_png(&rgba, &det.mask, &out_path) {
+                    Ok(bbox) => bbox,
+                    Err(reason) => {
+                        tracing::warn!(target: "codex.edit", "words: text素材切り出し失敗 ({reason})");
+                        continue;
+                    }
+                },
             };
 
             // このブロックに載っている OCR region を上→下、左→右の順で連結して内容にする。

@@ -804,7 +804,7 @@ fn crop_text_region_png(
 /// 適用条件 (満たさなければ None = 従来方式へ):
 /// - 文字色と背景色が十分離れている (距離 60 未満は写真/グラデ背景とみなし不適用)
 /// - マット結果に不透明画素が存在する
-fn crop_with_color_matte(
+pub(crate) fn crop_with_color_matte(
     rgba: &image::RgbaImage,
     roi: &ImageBuffer<Luma<u8>, Vec<u8>>,
     gate: [i32; 4],
