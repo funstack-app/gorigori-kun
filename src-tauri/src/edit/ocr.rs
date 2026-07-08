@@ -89,11 +89,38 @@ pub async fn ocr_image_with_probmap(
 
     let mut regions = Vec::new();
     let mut session = rec_session.lock().await;
-    for (i, poly) in polygons.iter().enumerate() {
+    for poly in polygons.iter() {
         let bbox = bbox_from_polygon(&poly.points, img.dimensions());
         if bbox[2] <= 0 || bbox[3] <= 0 {
             continue;
         }
+        // 行頭/行末アイコン分離: 元画像インクの広い谷で「アイコン疑いの端の塊」候補を取り、
+        // 疑い側だけ先に認識してみる。非文字なら残り (rest) だけを region にする。
+        // 文字だったら分割を捨てて従来どおり bbox 全体を 1 region にする (文字を粉砕しない)。
+        // 複数パーツのアイコン (実測: 眼鏡=レンズ2個) は 1 回では剥がれないので、
+        // 非文字と判定される限り繰り返す (上限 3 回。認識コストの暴走防止)。
+        let mut effective = (bbox, poly.points.to_vec());
+        for _ in 0..3 {
+            let Some(cand) = icon_split_candidate(&img, effective.0) else {
+                break;
+            };
+            let crop = crop_axis_aligned(&img, cand.suspect)?;
+            let (s_text, s_conf) = run_paddleocr_recognition(&mut session, &crop)?;
+            if should_keep_text_region(&s_text, s_conf) {
+                break;
+            }
+            tracing::info!(
+                target: "codex.edit",
+                "ocr: 端の非文字塊 (アイコン疑い) を切り離し text={:?} bbox={:?} -> rest={:?}",
+                s_text, effective.0, cand.rest
+            );
+            let [x, y, w, h] = cand.rest;
+            effective = (
+                cand.rest,
+                vec![[x, y], [x + w, y], [x + w, y + h], [x, y + h]],
+            );
+        }
+        let (bbox, polygon) = effective;
         let crop = crop_axis_aligned(&img, bbox)?;
         let (text, rec_conf) = run_paddleocr_recognition(&mut session, &crop)?;
         // 非文字の塊 (眼鏡アイコン等) や化けを弾く。DB検出器は文字でない塊も region に
@@ -115,9 +142,9 @@ pub async fn ocr_image_with_probmap(
         };
         let language = detect_language_from_text(&text);
         regions.push(TextRegion {
-            id: format!("region-{i:04}"),
+            id: format!("region-{:04}", regions.len()),
             bbox,
-            polygon: poly.points.to_vec(),
+            polygon,
             text,
             confidence,
             language,
@@ -388,22 +415,26 @@ fn polygons_from_heatmap(
         // 成分 bbox (map 座標) を行方向の谷で分割する。単一行なら 1 件返る (退行しない)。
         let comp_bbox = [min_x, min_y, max_x - min_x + 1, max_y - min_y + 1];
         for row in split_component_rows(comp_bbox, &pixels) {
-            let [r_min_x, r_min_y, r_w, r_h] = row;
-            let r_max_x = r_min_x + r_w.saturating_sub(1);
-            let r_max_y = r_min_y + r_h.saturating_sub(1);
-            let left = (r_min_x as f32 - pad).max(0.0);
-            let top = (r_min_y as f32 - pad).max(0.0);
-            let right = (r_max_x as f32 + 1.0 + pad).min(map_w as f32);
-            let bottom = (r_max_y as f32 + 1.0 + pad).min(map_h as f32);
-            let points = [
-                to_orig(left, top),
-                to_orig(right, top),
-                to_orig(right, bottom),
-                to_orig(left, bottom),
-            ];
-            let bbox = bbox_from_polygon(&points, (orig_w, orig_h));
-            if bbox[2] >= 4 && bbox[3] >= 4 {
-                polys.push(Polygon { points, score });
+            // 各行を、さらに列方向の「広い谷」で横分割する (行頭アイコンと文字塊の分離)。
+            // 語間・字間の狭いスペースでは切らない (split_row_into_cols の gap_min_width)。
+            for seg in split_row_into_cols(row, &pixels) {
+                let [r_min_x, r_min_y, r_w, r_h] = seg;
+                let r_max_x = r_min_x + r_w.saturating_sub(1);
+                let r_max_y = r_min_y + r_h.saturating_sub(1);
+                let left = (r_min_x as f32 - pad).max(0.0);
+                let top = (r_min_y as f32 - pad).max(0.0);
+                let right = (r_max_x as f32 + 1.0 + pad).min(map_w as f32);
+                let bottom = (r_max_y as f32 + 1.0 + pad).min(map_h as f32);
+                let points = [
+                    to_orig(left, top),
+                    to_orig(right, top),
+                    to_orig(right, bottom),
+                    to_orig(left, bottom),
+                ];
+                let bbox = bbox_from_polygon(&points, (orig_w, orig_h));
+                if bbox[2] >= 4 && bbox[3] >= 4 {
+                    polys.push(Polygon { points, score });
+                }
             }
         }
     }
@@ -705,6 +736,230 @@ fn split_component_rows(bbox_map: [usize; 4], pixels: &[(usize, usize)]) -> Vec<
     }
 }
 
+/// 1 行 bbox (map 座標) と、その行に属する画素の map 座標を受け取り、**列の垂直投影**
+/// (各 x のインク画素数) の「広い谷」で左右に分割した bbox の列を返す。
+///
+/// なぜ必要か: DB 検出器は、行頭の**アイコン**と隣接する文字列を 1 つの水平連結成分に
+/// まとめることがある (実測: パリミキ眼鏡アイコンが "OO PARIS MIK" として PARIS と同一
+/// region に混入。conf=0.933 と高信頼なので認識後フィルタでは弾けない)。列投影の広い谷で
+/// アイコンを別 region に切り離すと、切り離された "OO" 側は記号のみ region になり
+/// [`should_keep_text_region`] が除外する。
+///
+/// 過分割の防止 (最重要): 単語間の狭いスペース ("PARIS_MIKI" の語間) では切らない。
+/// 谷の幅が**行高の一定割合以上**の「広いギャップ」のときだけ分割する。日本語の字間・
+/// 英単語の語間は行高より狭いので保持され、アイコンと文字塊の間 (視覚的に明確に空く) だけ
+/// 切れる。谷が無い / 広いギャップが無ければ入力 bbox をそのまま1件返す (退行しない)。
+fn split_row_into_cols(row_bbox: [usize; 4], pixels: &[(usize, usize)]) -> Vec<[usize; 4]> {
+    let [min_x, min_y, w, h] = row_bbox;
+    if pixels.is_empty() || h == 0 || w == 0 {
+        return vec![row_bbox];
+    }
+    // この行に属する画素だけを列インクとして数える (y は行帯内に限定)。
+    let mut col_ink = vec![0usize; w];
+    for &(x, y) in pixels {
+        if y >= min_y && y < min_y + h && x >= min_x && x < min_x + w {
+            col_ink[x - min_x] += 1;
+        }
+    }
+    // 広いギャップの下限幅: 行高の 60%。これ以上連続してインクの薄い列が続いたら
+    // 「アイコンと文字塊の間」等の意味的な区切りとみなす。語間・字間 (行高より狭い) は
+    // これを超えないので保持される。行が極端に低い場合の下限として最低 4px を保証。
+    let gap_min_width = (h * 60 / 100).max(4);
+    let inked_bands = bands_from_ink_profile(&col_ink, gap_min_width);
+    if inked_bands.len() <= 1 {
+        // 分割する広い谷が無い = 単一の文字塊。退行しない。
+        return vec![row_bbox];
+    }
+    inked_bands
+        .into_iter()
+        .map(|(s, e)| [min_x + s, min_y, e - s, h])
+        .collect()
+}
+
+/// インク量プロファイル (列ごとの前景画素数) を「広い谷」で帯に分割する共通コア。
+///
+/// 列の薄さ判定はピークの 12% 未満をインクなし相当とする (行分離と同じ相対しきい値の思想)。
+/// `gap_min_width` 以上続く谷だけを「分割する谷」として扱い、狭い谷 (語間・字間) では
+/// 帯を切らない。返り値は (start, end 排他) の帯列。全列が谷なら空を返す。
+fn bands_from_ink_profile(ink: &[usize], gap_min_width: usize) -> Vec<(usize, usize)> {
+    let peak = ink.iter().copied().max().unwrap_or(0);
+    let ceiling = peak * 12 / 100;
+    let mut bands: Vec<(usize, usize)> = Vec::new();
+    let mut band_start: Option<usize> = None;
+    let mut gap_run = 0usize;
+    for (i, &v) in ink.iter().enumerate() {
+        if v > ceiling {
+            if band_start.is_none() {
+                band_start = Some(i);
+            }
+            gap_run = 0;
+        } else {
+            gap_run += 1;
+            // 広いギャップに達したら、直前の帯を確定する。
+            if gap_run >= gap_min_width {
+                if let Some(start) = band_start.take() {
+                    // 帯の終端は、ギャップが始まる直前。
+                    let end = i + 1 - gap_run;
+                    if end > start {
+                        bands.push((start, end));
+                    }
+                }
+            }
+        }
+    }
+    if let Some(start) = band_start {
+        bands.push((start, ink.len()));
+    }
+    bands
+}
+
+/// 行頭/行末アイコン分離の候補。`suspect` (アイコンかもしれない端の塊) を先に認識して
+/// 非文字なら `rest` だけを region にする。文字なら分割せず元 bbox 全体を使う。
+struct IconSplitCandidate {
+    /// アイコン疑いの端の塊 (元画像座標 bbox)。
+    suspect: [i32; 4],
+    /// 残りの文字塊 (元画像座標 bbox)。谷で分かれた帯をすべてマージしたもの。
+    rest: [i32; 4],
+}
+
+/// 検出 bbox (元画像座標) から、**元画像のインク** (二値化した前景) の列投影を使って
+/// 「行頭/行末のアイコン疑い塊 + 残りの文字塊」の分離候補を返す。
+///
+/// なぜ確率マップでなく元画像を見るか: DB 検出器の確率マップは太字ロゴ等で region 全体が
+/// ベタ塗りになる (実測: パリミキ広告の "OO PARIS MIKI" 行は全 481 列がインク充填で谷ゼロ)。
+/// マップ上の谷では行頭アイコンと文字塊を切り離せないが、元画像には白い隙間が実在する。
+///
+/// なぜ「全部の谷で切る」のではなく「端の1塊だけ候補にする」のか: 幅だけを基準に全谷で
+/// 切ると、字間の広いロゴが粉砕される (実測: "PARIS MIKI" が PAR/LS/M/K に割れて文字を
+/// 失った)。ここでは幾何情報だけで確定せず、**候補を返して認識結果に判定させる**。
+/// suspect が文字だったら呼び出し側は分割を捨てて従来どおり全体を 1 region にするので、
+/// 文字列が粉砕される経路は存在しない。
+///
+/// 二値化は Otsu。前景/背景の極性は bbox 縁 1px の多数派クラスを背景とみなして決める
+/// (白地に紺文字でも、紺地に白文字でも動く)。谷は幅が行高の 60% 以上の「広いギャップ」のみ。
+/// 端の塊は「残り全体より狭い」ときだけアイコン疑いにする (文の後半を suspect にしない)。
+fn icon_split_candidate(img: &DynamicImage, bbox: [i32; 4]) -> Option<IconSplitCandidate> {
+    let [bx, by, bw, bh] = bbox;
+    if bw < 8 || bh < 4 {
+        return None;
+    }
+    let (w, h) = (bw as usize, bh as usize);
+    // bbox 内の輝度を取り出す (元画像から直接読む。crop の再確保はしない)。
+    let mut luma = vec![0u8; w * h];
+    for dy in 0..h {
+        for dx in 0..w {
+            let px = img.get_pixel((bx + dx as i32) as u32, (by + dy as i32) as u32);
+            let [r, g, b, _] = px.0;
+            luma[dy * w + dx] =
+                ((r as u32 * 299 + g as u32 * 587 + b as u32 * 114) / 1000) as u8;
+        }
+    }
+    let threshold = otsu_threshold(&luma);
+    // 縁 1px の多数派を「背景」とみなす。dark 側が縁の多数派なら ink = bright 側。
+    let mut border_dark = 0usize;
+    let mut border_total = 0usize;
+    for dx in 0..w {
+        for dy in [0, h - 1] {
+            border_total += 1;
+            if luma[dy * w + dx] < threshold {
+                border_dark += 1;
+            }
+        }
+    }
+    for dy in 0..h {
+        for dx in [0, w - 1] {
+            border_total += 1;
+            if luma[dy * w + dx] < threshold {
+                border_dark += 1;
+            }
+        }
+    }
+    let ink_is_dark = border_dark * 2 < border_total;
+    let mut col_ink = vec![0usize; w];
+    for dy in 0..h {
+        for dx in 0..w {
+            let dark = luma[dy * w + dx] < threshold;
+            if dark == ink_is_dark {
+                col_ink[dx] += 1;
+            }
+        }
+    }
+    let gap_min_width = (h * 60 / 100).max(4);
+    let bands = bands_from_ink_profile(&col_ink, gap_min_width);
+    if bands.len() < 2 {
+        return None;
+    }
+    // 帯 (local x 区間) を元画像座標 bbox へ。文字の縁を欠かさないよう左右 2px 広げる。
+    let pad = 2i32;
+    let to_bbox = |s: usize, e: usize| -> [i32; 4] {
+        let left = (bx + s as i32 - pad).max(bx);
+        let right = (bx + e as i32 + pad).min(bx + bw);
+        [left, by, right - left, bh]
+    };
+    let first = bands[0];
+    let last = bands[bands.len() - 1];
+    // 行頭側を優先。suspect は「残り全体より狭い」こと (文の大半を suspect にしない)。
+    let lead_w = first.1 - first.0;
+    let lead_rest_w = last.1 - bands[1].0;
+    if lead_w < lead_rest_w {
+        return Some(IconSplitCandidate {
+            suspect: to_bbox(first.0, first.1),
+            rest: to_bbox(bands[1].0, last.1),
+        });
+    }
+    // 行末側 (テキストの後ろにアイコンが付く型)。
+    let tail_w = last.1 - last.0;
+    let tail_rest_w = bands[bands.len() - 2].1 - first.0;
+    if tail_w < tail_rest_w {
+        return Some(IconSplitCandidate {
+            suspect: to_bbox(last.0, last.1),
+            rest: to_bbox(first.0, bands[bands.len() - 2].1),
+        });
+    }
+    None
+}
+
+/// グレースケールヒストグラムから Otsu の判別分析で二値化しきい値を求める。
+/// 全画素が同輝度など分離不能な場合は 128 を返す。
+fn otsu_threshold(luma: &[u8]) -> u8 {
+    let mut hist = [0u64; 256];
+    for &v in luma {
+        hist[v as usize] += 1;
+    }
+    let total = luma.len() as u64;
+    if total == 0 {
+        return 128;
+    }
+    let sum_all: u64 = hist
+        .iter()
+        .enumerate()
+        .map(|(v, &c)| v as u64 * c)
+        .sum();
+    let mut best_t = 128u8;
+    let mut best_var = -1.0f64;
+    let mut w0 = 0u64;
+    let mut sum0 = 0u64;
+    for t in 0..256usize {
+        w0 += hist[t];
+        if w0 == 0 {
+            continue;
+        }
+        let w1 = total - w0;
+        if w1 == 0 {
+            break;
+        }
+        sum0 += t as u64 * hist[t];
+        let m0 = sum0 as f64 / w0 as f64;
+        let m1 = (sum_all - sum0) as f64 / w1 as f64;
+        let var = w0 as f64 * w1 as f64 * (m0 - m1) * (m0 - m1);
+        if var > best_var {
+            best_var = var;
+            best_t = (t + 1).min(255) as u8;
+        }
+    }
+    best_t
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -769,6 +1024,171 @@ mod tests {
             2,
             "行間にノイズが薄く残っても、行内ピークに対して十分薄ければ谷として2行に分離されるべき"
         );
+    }
+
+    /// 行頭アイコンと文字塊が「広い水平ギャップ」で離れていれば、横に2分割される。
+    ///
+    /// これが「OO PARIS MIK」の眼鏡アイコン "OO" を PARIS から切り離す核心。
+    /// 切り離された "OO" 側は記号のみ region になり should_keep_text_region が弾く。
+    #[test]
+    fn split_row_into_cols_separates_icon_from_text() {
+        // 行 bbox: x=0, y=0, w=40, h=10。
+        // アイコン塊: x=0..8 (幅8)。広いギャップ: x=8..20 (幅12 >= h*0.6=6)。文字塊: x=20..40。
+        let row_bbox = [0usize, 0, 40, 10];
+        let mut pixels = Vec::new();
+        for y in 0..10 {
+            for x in 0..8 {
+                pixels.push((x, y));
+            }
+            for x in 20..40 {
+                pixels.push((x, y));
+            }
+        }
+        let segs = split_row_into_cols(row_bbox, &pixels);
+        assert_eq!(segs.len(), 2, "アイコンと文字塊は広いギャップで2分割されるべき");
+        // 左=アイコン塊、右=文字塊。
+        assert_eq!(segs[0][0], 0, "左セグは x=0 から");
+        assert!(segs[1][0] >= 20, "右セグは文字塊 (x>=20) から始まる");
+    }
+
+    /// 語間・字間の「狭いスペース」では横分割しない (退行防止)。
+    ///
+    /// "PARIS MIKI" の語間 (行高より狭い) で切ると単語がバラバラになる。
+    /// gap_min_width = 行高の60% 未満のギャップは保持する。
+    #[test]
+    fn split_row_into_cols_keeps_words_with_narrow_gap() {
+        // 行 bbox: x=0, y=0, w=30, h=10。gap_min_width = max(6, 4) = 6。
+        // 塊A: x=0..12。狭いギャップ: x=12..15 (幅3 < 6)。塊B: x=15..30。
+        let row_bbox = [0usize, 0, 30, 10];
+        let mut pixels = Vec::new();
+        for y in 0..10 {
+            for x in 0..12 {
+                pixels.push((x, y));
+            }
+            for x in 15..30 {
+                pixels.push((x, y));
+            }
+        }
+        let segs = split_row_into_cols(row_bbox, &pixels);
+        assert_eq!(segs.len(), 1, "狭いギャップ (語間) では分割せず1件のままにすべき");
+        assert_eq!(segs[0], row_bbox);
+    }
+
+    /// 「アイコン塊 + 広い白ギャップ + 文字塊」の合成画像から、行頭側を suspect、
+    /// 残りを rest とする分離候補が返る。確率マップがベタ塗りでも効く経路の核心。
+    #[test]
+    fn icon_split_candidate_detects_leading_icon() {
+        // 200x40 の白画像。インク: x=10..40 (アイコン相当) と x=70..190 (文字相当)。
+        // ギャップ x=40..70 は幅 30 >= 行高24*0.6=14 なので候補になる。
+        let mut img = image::RgbImage::from_pixel(200, 40, image::Rgb([255, 255, 255]));
+        for y in 10..30 {
+            for x in 10..40 {
+                img.put_pixel(x, y, image::Rgb([20, 30, 80]));
+            }
+            for x in 70..190 {
+                img.put_pixel(x, y, image::Rgb([20, 30, 80]));
+            }
+        }
+        let img = DynamicImage::ImageRgb8(img);
+        let cand = icon_split_candidate(&img, [5, 8, 190, 24]).expect("候補が返るべき");
+        assert!(
+            cand.suspect[0] <= 10 && cand.suspect[0] + cand.suspect[2] >= 35,
+            "suspect が行頭アイコンを覆う: {:?}",
+            cand.suspect
+        );
+        assert!(
+            cand.rest[0] <= 70 && cand.rest[0] + cand.rest[2] >= 185,
+            "rest が文字塊を覆う: {:?}",
+            cand.rest
+        );
+    }
+
+    /// 行末側にアイコンが付く型 (文字塊 + ギャップ + 小塊) では行末側が suspect になる。
+    #[test]
+    fn icon_split_candidate_detects_trailing_icon() {
+        let mut img = image::RgbImage::from_pixel(200, 40, image::Rgb([255, 255, 255]));
+        for y in 10..30 {
+            for x in 10..130 {
+                img.put_pixel(x, y, image::Rgb([20, 30, 80]));
+            }
+            for x in 160..190 {
+                img.put_pixel(x, y, image::Rgb([20, 30, 80]));
+            }
+        }
+        let img = DynamicImage::ImageRgb8(img);
+        let cand = icon_split_candidate(&img, [5, 8, 190, 24]).expect("候補が返るべき");
+        assert!(
+            cand.suspect[0] >= 130,
+            "suspect が行末の小塊: {:?}",
+            cand.suspect
+        );
+        assert!(
+            cand.rest[0] <= 10 && cand.rest[0] + cand.rest[2] >= 125,
+            "rest が前方の文字塊: {:?}",
+            cand.rest
+        );
+    }
+
+    /// 紺地に白インク (極性反転) でも、縁の多数派判定で ink=白 と解釈して候補を返せる。
+    #[test]
+    fn icon_split_candidate_handles_inverted_polarity() {
+        let mut img = image::RgbImage::from_pixel(200, 40, image::Rgb([20, 30, 80]));
+        for y in 10..30 {
+            for x in 10..40 {
+                img.put_pixel(x, y, image::Rgb([255, 255, 255]));
+            }
+            for x in 70..190 {
+                img.put_pixel(x, y, image::Rgb([255, 255, 255]));
+            }
+        }
+        let img = DynamicImage::ImageRgb8(img);
+        assert!(
+            icon_split_candidate(&img, [5, 8, 190, 24]).is_some(),
+            "紺地白文字でも候補が返るべき"
+        );
+    }
+
+    /// 狭いギャップ (語間相当) や谷なしでは候補を出さない。極小 bbox もパニックしない。
+    #[test]
+    fn icon_split_candidate_ignores_narrow_gap_and_solid() {
+        // ギャップ x=40..48 は幅 8 < 行高24*0.6=14 なので候補なし。
+        let mut img = image::RgbImage::from_pixel(200, 40, image::Rgb([255, 255, 255]));
+        for y in 10..30 {
+            for x in 10..40 {
+                img.put_pixel(x, y, image::Rgb([20, 30, 80]));
+            }
+            for x in 48..190 {
+                img.put_pixel(x, y, image::Rgb([20, 30, 80]));
+            }
+        }
+        let img = DynamicImage::ImageRgb8(img);
+        assert!(icon_split_candidate(&img, [5, 8, 190, 24]).is_none());
+        assert!(icon_split_candidate(&img, [0, 0, 6, 3]).is_none());
+    }
+
+    /// Otsu しきい値は二峰性ヒストグラムを暗部と明部の間で切る。
+    #[test]
+    fn otsu_threshold_separates_bimodal() {
+        let mut luma = vec![30u8; 100];
+        luma.extend(vec![220u8; 100]);
+        let t = otsu_threshold(&luma);
+        assert!(t > 30 && t <= 220, "しきい値が二峰の間にあるべき: {t}");
+        assert_eq!(otsu_threshold(&[]), 128, "空入力はフォールバック値");
+    }
+
+    /// 画素が空 / 単一塊なら入力 bbox をそのまま返す (フォールバック、パニックしない)。
+    #[test]
+    fn split_row_into_cols_empty_and_single_fallback() {
+        let row_bbox = [3usize, 3, 20, 8];
+        assert_eq!(split_row_into_cols(row_bbox, &[]), vec![row_bbox]);
+        // 単一の連続塊 (ギャップなし) は分割しない。
+        let mut pixels = Vec::new();
+        for y in 3..11 {
+            for x in 3..23 {
+                pixels.push((x, y));
+            }
+        }
+        assert_eq!(split_row_into_cols(row_bbox, &pixels), vec![row_bbox]);
     }
 
     /// 谷が無い単一行の塊は、分割せず入力 bbox をそのまま1件返す (退行しない)。
