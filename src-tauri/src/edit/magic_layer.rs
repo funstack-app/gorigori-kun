@@ -775,11 +775,204 @@ fn crop_text_region_png(
     if let Some(pm) = usable {
         let mask = build_stroke_mask(w, h, &[gate], pm);
         if mask.pixels().any(|p| p[0] > 127) {
+            // 色距離マット: 確率マップは検出用の粗いデータ (低解像度→最近傍拡大 + 膨張) で、
+            // そのまま alpha にすると (1)文字の周りの背景がモヤとして焼き込まれる
+            // (2)エッジがギザギザ (3)グリフの穴 (「器」の口) が背景ごと塗り潰される
+            // (2026-07-09 実機報告)。フラット配色なら元画像の色から元解像度の
+            // アンチエイリアス付き alpha を作れる。色が割れない画像 (写真背景等) では
+            // None が返り、従来のストロークマスク方式へフォールバックする。
+            if let Some(bbox) =
+                crop_with_color_matte(rgba, &mask, gate, region.bbox, output_path)?
+            {
+                return Ok(bbox);
+            }
             return crate::edit::grab::crop_object_png(rgba, &mask, output_path);
         }
     }
     let mask = build_bbox_mask(w, h, &[gate]);
     crate::edit::grab::crop_object_png(rgba, &mask, output_path)
+}
+
+/// 文字色と背景色の「色の物差し」に各画素を射影して連続 alpha を作る色距離マット。
+///
+/// 仕組み: 文字ストローク画素の中央値 = 文字色、ゲート縁 1px の中央値 = 背景色とし、
+/// 各画素 p の alpha を ((p-bg)・(text-bg)) / |text-bg|^2 (0..1 clamp) で計算する。
+/// 背景色の画素は 0 (透明)、文字色は 1、アンチエイリアスの中間色は中間値になり、
+/// 元解像度の滑らかなエッジが得られる。確率マップ由来の ROI (ストロークマスク) 内に
+/// 限定することで、ゲート内に入り込んだ隣接要素を拾わない (従来と同じ守備範囲)。
+///
+/// 適用条件 (満たさなければ None = 従来方式へ):
+/// - 文字色と背景色が十分離れている (距離 60 未満は写真/グラデ背景とみなし不適用)
+/// - マット結果に不透明画素が存在する
+fn crop_with_color_matte(
+    rgba: &image::RgbaImage,
+    roi: &ImageBuffer<Luma<u8>, Vec<u8>>,
+    gate: [i32; 4],
+    text_bbox: [i32; 4],
+    output_path: &Path,
+) -> Result<Option<[i32; 4]>, String> {
+    let (w, h) = rgba.dimensions();
+    let clamp_box = |[x, y, bw, bh]: [i32; 4]| -> Option<(u32, u32, u32, u32)> {
+        let x0 = x.max(0) as u32;
+        let y0 = y.max(0) as u32;
+        let x1 = ((x + bw).min(w as i32)).max(0) as u32;
+        let y1 = ((y + bh).min(h as i32)).max(0) as u32;
+        (x1 > x0 && y1 > y0).then_some((x0, y0, x1, y1))
+    };
+    let Some((gx0, gy0, gx1, gy1)) = clamp_box(gate) else {
+        return Ok(None);
+    };
+    // 文字色: bbox 内を Otsu で明暗2クラスに割り、ゲート縁の多数派クラスの「反対側」を
+    // インク (文字) とみなして RGB 中央値を取る (icon_split_candidate と同じ極性判定)。
+    //
+    // なぜ確率マップのストローク画素を使わないか (2026-07-09 実測): 太字ロゴ行では
+    // 確率マップが行全体のベタ塗りになり、ストローク画素の過半が白背景 → 文字色の
+    // 中央値が背景色に汚染され、separation 不足で常にフォールバックしてしまった。
+    let Some((tx0, ty0, tx1, ty1)) = clamp_box(text_bbox) else {
+        return Ok(None);
+    };
+    let luma_of = |p: &image::Rgba<u8>| -> u8 {
+        ((p[0] as u32 * 299 + p[1] as u32 * 587 + p[2] as u32 * 114) / 1000) as u8
+    };
+    let mut bbox_luma = Vec::with_capacity(((tx1 - tx0) * (ty1 - ty0)) as usize);
+    for yy in ty0..ty1 {
+        for xx in tx0..tx1 {
+            bbox_luma.push(luma_of(rgba.get_pixel(xx, yy)));
+        }
+    }
+    let threshold = crate::edit::ocr::otsu_threshold(&bbox_luma);
+    let mut border_dark = 0usize;
+    let mut border_total = 0usize;
+    for xx in gx0..gx1 {
+        for yy in [gy0, gy1 - 1] {
+            border_total += 1;
+            if luma_of(rgba.get_pixel(xx, yy)) < threshold {
+                border_dark += 1;
+            }
+        }
+    }
+    for yy in gy0..gy1 {
+        for xx in [gx0, gx1 - 1] {
+            border_total += 1;
+            if luma_of(rgba.get_pixel(xx, yy)) < threshold {
+                border_dark += 1;
+            }
+        }
+    }
+    if border_total == 0 {
+        return Ok(None);
+    }
+    let ink_is_dark = border_dark * 2 < border_total;
+    let mut rs = Vec::new();
+    let mut gs = Vec::new();
+    let mut bs = Vec::new();
+    for yy in ty0..ty1 {
+        for xx in tx0..tx1 {
+            let p = rgba.get_pixel(xx, yy);
+            if (luma_of(p) < threshold) == ink_is_dark {
+                rs.push(p[0]);
+                gs.push(p[1]);
+                bs.push(p[2]);
+            }
+        }
+    }
+    if rs.len() < 16 {
+        return Ok(None);
+    }
+    let median = |v: &mut Vec<u8>| -> f32 {
+        v.sort_unstable();
+        v[v.len() / 2] as f32
+    };
+    let text_rgb = [median(&mut rs), median(&mut gs), median(&mut bs)];
+    // 背景色: ゲート縁 1px の RGB 中央値 (icon_split_candidate の極性判定と同じ発想)。
+    let mut brs = Vec::new();
+    let mut bgs = Vec::new();
+    let mut bbs = Vec::new();
+    for xx in gx0..gx1 {
+        for yy in [gy0, gy1 - 1] {
+            let p = rgba.get_pixel(xx, yy);
+            brs.push(p[0]);
+            bgs.push(p[1]);
+            bbs.push(p[2]);
+        }
+    }
+    for yy in gy0..gy1 {
+        for xx in [gx0, gx1 - 1] {
+            let p = rgba.get_pixel(xx, yy);
+            brs.push(p[0]);
+            bgs.push(p[1]);
+            bbs.push(p[2]);
+        }
+    }
+    if brs.is_empty() {
+        return Ok(None);
+    }
+    let bg_rgb = [median(&mut brs), median(&mut bgs), median(&mut bbs)];
+    let axis = [
+        text_rgb[0] - bg_rgb[0],
+        text_rgb[1] - bg_rgb[1],
+        text_rgb[2] - bg_rgb[2],
+    ];
+    let axis_len_sq = axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2];
+    // 文字色と背景色の距離が近すぎる = フラット配色の前提が崩れている (写真/グラデ背景)。
+    if axis_len_sq.sqrt() < 60.0 {
+        return Ok(None);
+    }
+    // ゲート内・ROI 内の画素だけ alpha を計算し、レイヤーの実サイズ (alpha>0 の範囲) を求める。
+    let gw = (gx1 - gx0) as usize;
+    let gh = (gy1 - gy0) as usize;
+    let mut alpha = vec![0u8; gw * gh];
+    let (mut min_x, mut min_y, mut max_x, mut max_y) = (u32::MAX, u32::MAX, 0u32, 0u32);
+    for yy in gy0..gy1 {
+        for xx in gx0..gx1 {
+            if roi.get_pixel(xx, yy)[0] <= 127 {
+                continue;
+            }
+            let p = rgba.get_pixel(xx, yy);
+            let d = [
+                p[0] as f32 - bg_rgb[0],
+                p[1] as f32 - bg_rgb[1],
+                p[2] as f32 - bg_rgb[2],
+            ];
+            let t = ((d[0] * axis[0] + d[1] * axis[1] + d[2] * axis[2]) / axis_len_sq)
+                .clamp(0.0, 1.0);
+            let a = (t * 255.0).round() as u8;
+            if a > 0 {
+                alpha[(yy - gy0) as usize * gw + (xx - gx0) as usize] = a;
+                min_x = min_x.min(xx);
+                min_y = min_y.min(yy);
+                max_x = max_x.max(xx);
+                max_y = max_y.max(yy);
+            }
+        }
+    }
+    if min_x > max_x || min_y > max_y {
+        return Ok(None);
+    }
+    let out_w = max_x - min_x + 1;
+    let out_h = max_y - min_y + 1;
+    let mut object = ImageBuffer::<image::Rgba<u8>, Vec<u8>>::new(out_w, out_h);
+    for oy in 0..out_h {
+        for ox in 0..out_w {
+            let sx = min_x + ox;
+            let sy = min_y + oy;
+            let a = alpha[(sy - gy0) as usize * gw + (sx - gx0) as usize];
+            let p = rgba.get_pixel(sx, sy);
+            object.put_pixel(ox, oy, image::Rgba([p[0], p[1], p[2], a]));
+        }
+    }
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir text crop dir: {e}"))?;
+    }
+    object
+        .save(output_path)
+        .map_err(|e| format!("save text crop: {e}"))?;
+    Ok(Some([
+        min_x as i32,
+        min_y as i32,
+        out_w as i32,
+        out_h as i32,
+    ]))
 }
 
 /// テキスト色の抽出。文字ストローク画素 (DB 確率マップ >= 閾値) の RGB 中央値を使う。
@@ -1309,6 +1502,76 @@ mod tests {
     use super::*;
     use crate::edit::ocr::TextRegion;
     use image::{ImageBuffer, Rgb};
+
+    /// 色距離マット: 背景色の画素 (モヤ・グリフの穴) は透明、文字色は不透明、
+    /// アンチエイリアスの中間色は中間 alpha になる (2026-07-09 実機の荒切り抜き対応)。
+    #[test]
+    fn color_matte_clears_halo_and_counter_holes() {
+        // 60x30 の白背景に紺 (20,40,120) の「文字塊」x=10..50, y=8..22。
+        // 中に白い穴 (x=25..35, y=12..18)。エッジに中間色の AA 画素列 x=50 (bg と text の中間)。
+        let mut rgba = image::RgbaImage::from_pixel(60, 30, image::Rgba([255, 255, 255, 255]));
+        for y in 8..22 {
+            for x in 10..50 {
+                rgba.put_pixel(x, y, image::Rgba([20, 40, 120, 255]));
+            }
+            rgba.put_pixel(50, y, image::Rgba([137, 147, 187, 255])); // ほぼ中間の AA
+        }
+        for y in 12..18 {
+            for x in 25..35 {
+                rgba.put_pixel(x, y, image::Rgba([255, 255, 255, 255])); // グリフの穴
+            }
+        }
+        // ROI: 文字塊より広め (従来の膨張ストロークマスク相当) = 背景も含む。
+        let mut roi = ImageBuffer::<Luma<u8>, Vec<u8>>::from_pixel(60, 30, Luma([0u8]));
+        for y in 4..26 {
+            for x in 6..56 {
+                roi.put_pixel(x, y, Luma([255u8]));
+            }
+        }
+        // 確率マップ: 文字塊コアだけ prob=1 (文字色サンプル用)。
+        let mut pm_data = vec![0u8; 60 * 30];
+        for y in 8..22 {
+            for x in 10..25 {
+                pm_data[y * 60 + x] = 255;
+            }
+        }
+        let pm = TextProbMap { width: 60, height: 30, data: pm_data };
+        let dir = std::env::temp_dir().join("gori-matte-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("matte.png");
+        let bbox = crop_with_color_matte(
+            &rgba,
+            &roi,
+            [6, 4, 50, 22],
+            [10, 8, 40, 14],
+            &out,
+        )
+        .unwrap()
+        .expect("フラット配色ではマットが適用されるべき");
+        let crop = image::open(&out).unwrap().to_rgba8();
+        let at = |ix: i32, iy: i32| crop.get_pixel((ix - bbox[0]) as u32, (iy - bbox[1]) as u32).0[3];
+        assert_eq!(at(15, 10), 255, "文字コアは不透明");
+        assert_eq!(at(30, 15), 0, "グリフの穴 (背景色) は透明になるべき (白い塊の再発防止)");
+        let aa = at(50, 10);
+        assert!((80..=180).contains(&aa), "AA画素は中間alphaになるべき: {aa}");
+        // 返る bbox が文字にタイト = ROI 内の背景 (モヤ) が切り出しに含まれない。
+        assert!(bbox[0] >= 10 && bbox[1] >= 8, "背景モヤを含まないタイトな切り出しになるべき: {bbox:?}");
+        assert!(bbox[0] + bbox[2] <= 51 && bbox[1] + bbox[3] <= 22, "背景側へ広がらない: {bbox:?}");
+    }
+
+    /// 文字色と背景色が近い (写真/グラデ背景相当) ときはマットを適用せず None を返す。
+    #[test]
+    fn color_matte_falls_back_on_low_separation() {
+        let rgba = image::RgbaImage::from_pixel(40, 20, image::Rgba([120, 120, 120, 255]));
+        let roi = ImageBuffer::<Luma<u8>, Vec<u8>>::from_pixel(40, 20, Luma([255u8]));
+        let pm = TextProbMap { width: 40, height: 20, data: vec![255u8; 40 * 20] };
+        let dir = std::env::temp_dir().join("gori-matte-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let out = dir.join("matte-fallback.png");
+        let got = crop_with_color_matte(&rgba, &roi, [0, 0, 40, 20], [5, 5, 30, 10], &out)
+            .unwrap();
+        assert!(got.is_none(), "色が割れない画像では従来方式へフォールバックすべき");
+    }
 
     /// 消去マスクは region ごとに「自分の高さ×0.4」で拡張される (2026-07-08 ゴースト実測対応)。
     ///

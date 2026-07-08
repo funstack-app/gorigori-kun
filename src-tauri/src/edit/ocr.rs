@@ -935,7 +935,7 @@ fn icon_split_candidate(img: &DynamicImage, bbox: [i32; 4]) -> Option<IconSplitC
 
 /// グレースケールヒストグラムから Otsu の判別分析で二値化しきい値を求める。
 /// 全画素が同輝度など分離不能な場合は 128 を返す。
-fn otsu_threshold(luma: &[u8]) -> u8 {
+pub(crate) fn otsu_threshold(luma: &[u8]) -> u8 {
     let mut hist = [0u64; 256];
     for &v in luma {
         hist[v as usize] += 1;

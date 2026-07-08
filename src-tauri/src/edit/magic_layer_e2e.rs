@@ -848,6 +848,44 @@ async fn ocr_icon_text_mix_fixture_probe() {
     eprintln!("=== OK: アイコン混入なし + 文章粉砕なし ({} regions) ===", regions.len());
 }
 
+/// 文字レイヤー切り出しの実画像プローブ (色距離マット検証用)。
+///
+///   GORI_E2E_IMAGE=<画像> GORI_E2E_OUT=<出力先> \
+///   cargo test --lib edit::magic_layer_e2e::text_crop_real_image_probe -- --ignored --nocapture
+#[tokio::test]
+#[ignore]
+async fn text_crop_real_image_probe() {
+    init_test_tracing();
+    if !model_available("ppocrv6-small-det") || !model_available("ppocrv6-small-rec") {
+        eprintln!("[skip] ppocrv6 モデル未DL");
+        return;
+    }
+    let input = std::env::var("GORI_E2E_IMAGE").map(PathBuf::from).unwrap_or_else(|_| {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../tests-quality/fixtures/g-icon-text-mix/image.png")
+    });
+    let out = std::env::var("GORI_E2E_OUT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| tmp_dir("text-crop"));
+    std::fs::create_dir_all(&out).unwrap();
+    let runtime = EditRuntime::new();
+    let (regions, prob_map) = ocr_image_with_probmap(&runtime, &input)
+        .await
+        .expect("ocr failed");
+    let layers =
+        crate::edit::magic_layer::build_text_layers(&regions, &input, prob_map.as_ref(), Some(&out))
+            .expect("build_text_layers failed");
+    for l in &layers {
+        eprintln!(
+            "[probe] {} text={:?} crop={:?}",
+            l.id,
+            l.text,
+            l.image_path.as_deref().unwrap_or("(none)")
+        );
+    }
+    assert!(!layers.is_empty());
+}
+
 /// OCR ティア A/B プローブ: PP-OCRv6 small (現行) vs medium を同一画像で比較する。
 ///
 /// 背景: 2026-07-08 実測で small は白地の大きな装飾文字ですら誤認識した
