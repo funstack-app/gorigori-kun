@@ -1053,6 +1053,14 @@ const DB_STROKE_DILATE_RATIO: f64 = 0.25;
 /// 確率マップが取れないときの bbox 近傍ゲート pad (px)。従来の矩形 pad(4) と同じ。
 const BBOX_GATE_PAD: i32 = 4;
 
+/// テキスト消去マスクの per-region 拡張率 (region 高さに対する比)。
+///
+/// 2026-07-08 実測 (migan-ab/preproc): 高さ105px の太字グリフは縁・アンチエイリアスの
+/// 裾が bbox の外へ約40px はみ出し、それを覆って初めて残渣ゼロ (40/105≒0.38)。
+/// 32px では極薄の縁が残った。安全側に 0.40 とする。
+/// 未検証: 写真・グラデ背景で拡張しすぎが背景文脈を消す可能性 (白ベタ背景でのみ実測)。
+const ERASE_DILATE_RATIO: f64 = 0.40;
+
 /// テキスト消去用マスク: 採用 region の bbox 矩形を文字高比例で膨張した「面」マスク。
 ///
 /// なぜ矩形全面か (2026-07-03): 消去が決定論補間フィル (inpaint.rs
@@ -1085,23 +1093,33 @@ pub fn generate_text_erase_mask(
         .map(|region| region.bbox)
         .collect();
 
-    let raw = build_bbox_mask(w, h, &adopted);
-    // 文字高中央値の 1/4 (6..16px) 膨張でグロー・影の裾まで飲み込む。
-    let mut heights: Vec<i32> = adopted
+    // 各 region を「自分の高さ × ERASE_DILATE_RATIO」で個別に拡張してから合成する。
+    //
+    // なぜ per-region 比例か (2026-07-08 実測、_work/gori-layer-tech-scan/migan-ab/preproc/):
+    // 消去後のゴーストの正体は「LaMa の復元ミス」ではなく、マスクが覆いきれず穴の外に
+    // 残った本物の文字縁だった (穴内側の残渣は全条件 0.00%)。高さ105px の太字は約40px
+    // (=高さの0.38倍) の拡張で残渣ゼロになる一方、旧実装は「全 region の中央値÷4 を
+    // 6..16px にクランプ」だったため、(1) 上限16px が大文字で常に不足し、(2) 大小の
+    // 文字が混在すると中央値が小さい側へ引かれて大文字がさらに不足した。
+    // 絶対値の上限は置かない: 比例則そのものが上限として機能し、固定上限が今回の
+    // 不足の真因だった (境界値ハードコード禁止)。下限 6px は極小文字の縁取り用に維持。
+    let expanded: Vec<[i32; 4]> = adopted
         .iter()
-        .map(|[_, _, _, rh]| *rh)
-        .filter(|rh| *rh > 0)
+        .map(|&[x, y, rw, rh]| {
+            let d = ((rh as f64 * ERASE_DILATE_RATIO).round() as i32).max(6);
+            [x - d, y - d, rw + 2 * d, rh + 2 * d]
+        })
         .collect();
-    heights.sort_unstable();
-    let dilate = heights
-        .get(heights.len() / 2)
-        .map(|&median_h| (median_h / 4).clamp(6, 16))
-        .unwrap_or(6);
-    let mask = crate::edit::grab::dilate_mask_pub(&raw, dilate);
+    let mask = build_bbox_mask(w, h, &expanded);
     if let Some(parent) = output_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("mkdir mask parent: {e}"))?;
     }
-    tracing::info!(target: "codex.edit", "text-erase-mask: bbox全面方式 adopted={} dilate={dilate}px", adopted.len());
+    tracing::info!(
+        target: "codex.edit",
+        "text-erase-mask: bbox全面方式 adopted={} dilate=per-region({}%)",
+        adopted.len(),
+        (ERASE_DILATE_RATIO * 100.0) as i32
+    );
     mask.save(output_path)
         .map_err(|e| format!("save erase mask: {e}"))
 }
@@ -1291,6 +1309,44 @@ mod tests {
     use super::*;
     use crate::edit::ocr::TextRegion;
     use image::{ImageBuffer, Rgb};
+
+    /// 消去マスクは region ごとに「自分の高さ×0.4」で拡張される (2026-07-08 ゴースト実測対応)。
+    ///
+    /// 旧実装 (中央値÷4 を 6..16px クランプ) への退行を検知する: 高さ105px の region は
+    /// 上限16px では覆えなかった縁 (bbox外 ~40px) までマスクが届くこと、小さい region が
+    /// 大きい region に引きずられて塗り過ぎないことの両方を固定する。
+    #[test]
+    fn erase_mask_expands_per_region_height() {
+        let dir = std::env::temp_dir().join("gori-erase-mask-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let input = dir.join("input.png");
+        ImageBuffer::<Rgb<u8>, Vec<u8>>::from_pixel(1200, 1200, Rgb([255, 255, 255]))
+            .save(&input)
+            .unwrap();
+        let region = |id: &str, bbox: [i32; 4]| TextRegion {
+            id: id.to_string(),
+            bbox,
+            polygon: vec![],
+            text: "テスト文字列".to_string(),
+            confidence: 0.9,
+            language: Some("ja".to_string()),
+        };
+        // 大文字 (高さ105px、レンタル相当) と小文字 (高さ24px) の混在。
+        let regions = vec![
+            region("region-0000", [90, 514, 684, 105]),
+            region("region-0001", [85, 990, 1026, 24]),
+        ];
+        let mask_path = dir.join("mask.png");
+        generate_text_erase_mask(&input, &regions, &mask_path).unwrap();
+        let mask = image::open(&mask_path).unwrap().to_luma8();
+        let white = |x: u32, y: u32| mask.get_pixel(x, y).0[0] == 255;
+        // 大文字: 期待拡張 = 105*0.4 = 42px。旧実装の上限16pxでは届かない位置 (bbox上端-30px) が白い。
+        assert!(white(400, (514 - 30) as u32), "大文字の縁30px上がマスクされるべき (旧16px上限の退行)");
+        assert!(!white(400, (514 - 42 - 4 - 8) as u32), "拡張は高さの40%+padで頭打ち (無限に広げない)");
+        // 小文字: 期待拡張 = max(24*0.4=10, 6) = 10px。40px も上に広がっていない (塗り過ぎ防止)。
+        assert!(white(500, (990 - 8) as u32), "小文字も自分の高さ比で拡張される");
+        assert!(!white(500, (990 - 40) as u32), "小文字が大文字の拡張量に引きずられない");
+    }
 
     #[test]
     fn symbol_noise_rejects_single_box_char() {
