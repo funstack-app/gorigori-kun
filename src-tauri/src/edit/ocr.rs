@@ -671,11 +671,21 @@ fn split_component_rows(bbox_map: [usize; 4], pixels: &[(usize, usize)]) -> Vec<
             row_ink[y - min_y] += 1;
         }
     }
-    // row_ink>0 の連続区間を1行として切り出す (0 の谷が行間)。
+    // 行間の谷を「絶対0」で判定すると、実バナーで行間に薄く乗るノイズ (下線・囲み枠・
+    // にじみ・JPEG ノイズが縦に貫通) で谷が埋まり、複数行が1行に潰れる。
+    // 谷は行内ピークに対する相対的な薄さで判定する: ピークの一定割合未満なら行間とみなす。
+    // (本家 PaddleOCR の水平投影による行分離を軽量化した相対しきい値法)
+    let peak_ink = row_ink.iter().copied().max().unwrap_or(0);
+    // 谷しきい値: ピークの 15%。行内の密なインク (ピーク近辺) と、行間の薄いノイズを分ける。
+    // ピークが小さい (数画素の細い塊) 場合は 1 未満に丸まり、実質「絶対0」判定に戻る
+    // (退行しない = 単一行の細い塊を過分割しない)。
+    let valley_ceiling = peak_ink * 15 / 100;
+    let is_inked = |v: usize| v > valley_ceiling;
+    // row 帯を切り出す (谷=valley_ceiling 以下の連続が行間)。
     let mut rows: Vec<[usize; 4]> = Vec::new();
     let mut band_start: Option<usize> = None;
     for local_y in 0..h {
-        let inked = row_ink[local_y] > 0;
+        let inked = is_inked(row_ink[local_y]);
         match (inked, band_start) {
             (true, None) => band_start = Some(local_y),
             (false, Some(start)) => {
@@ -724,6 +734,41 @@ mod tests {
         assert_eq!(rows[0][3], 3);
         assert_eq!(rows[1][1], 6);
         assert_eq!(rows[1][3], 3);
+    }
+
+    /// 行間の谷にノイズ画素が薄く残っていても、2行に分離される。
+    ///
+    /// なぜ必要か: 実バナーは行間が完全にインク0になることは稀 (下線・囲み枠・にじみ・
+    /// JPEG ノイズが縦に貫通する)。谷を「絶対0」で判定すると、行間にノイズ1画素が
+    /// 乗るだけで谷が埋まり「レンタル / 補聴器」が1行に潰れる。谷は行内ピークに対する
+    /// 相対的な薄さで判定する必要がある。
+    #[test]
+    fn split_component_rows_separates_bands_with_noisy_valley() {
+        // 成分 bbox: x=10, y=0, w=20, h=10。
+        // 行A: y=0..3 (幅20の密なインク=各行20画素)、行B: y=6..9 (同)。
+        // 行間 y=3..6 は「完全な0」ではなく、各 y に 1 画素だけノイズが乗る。
+        let bbox_map = [10usize, 0, 20, 10];
+        let mut pixels = Vec::new();
+        for y in 0..3 {
+            for x in 10..30 {
+                pixels.push((x, y));
+            }
+        }
+        // 行間の谷: 各 y に 1 画素だけノイズ (絶対0ではないが、行内ピーク20に対し薄い)。
+        for y in 3..6 {
+            pixels.push((10, y));
+        }
+        for y in 6..9 {
+            for x in 10..30 {
+                pixels.push((x, y));
+            }
+        }
+        let rows = split_component_rows(bbox_map, &pixels);
+        assert_eq!(
+            rows.len(),
+            2,
+            "行間にノイズが薄く残っても、行内ピークに対して十分薄ければ谷として2行に分離されるべき"
+        );
     }
 
     /// 谷が無い単一行の塊は、分割せず入力 bbox をそのまま1件返す (退行しない)。
