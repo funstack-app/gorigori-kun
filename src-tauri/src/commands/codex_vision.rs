@@ -8,7 +8,10 @@ use tokio::time::timeout;
 
 use crate::codex::process::{enriched_path, resolve_codex_cli_binary};
 
-const CODEX_VISION_TIMEOUT_SECS: u64 = 120;
+// 120秒では実運用でタイムアウトした (2026-07-09 STΛCK報告)。gpt-5.5 は effort=low でも
+// 混雑・初回認証リフレッシュ・大きい画像で応答が伸びる。この呼び出しは非同期の前段処理で
+// 遅い成功は速い失敗に勝るため 300 秒にする。
+const CODEX_VISION_TIMEOUT_SECS: u64 = 300;
 const VISION_MODEL: &str = "gpt-5.5";
 const VISION_EFFORT: &str = "low";
 

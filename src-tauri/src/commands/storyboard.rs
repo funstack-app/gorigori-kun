@@ -22,7 +22,9 @@ use crate::commands::storage::{project_name_from_cwd, resolve_output_dir, Storag
 use crate::events::EVENT_STORYBOARD;
 use crate::state::{AppState, CheckpointAction};
 
-const PROMPT_TIMEOUT_SECS: u64 = 120;
+// 120秒では実運用でタイムアウトした (2026-07-09 STΛCK報告、codex_vision と同型)。
+// プロンプト生成は絵コンテ生成の前段で、ここが落ちると生成全体が巻き添えになるため 300 秒にする。
+const PROMPT_TIMEOUT_SECS: u64 = 300;
 const GENERATION_TIMEOUT_SECS: u64 = 900;
 const STORYBOARD_MODEL: &str = "gpt-5.5";
 const STORYBOARD_EFFORT: &str = "low";
