@@ -238,6 +238,117 @@ export async function selectLayersByIds(
   return selectable.length;
 }
 
+/**
+ * 現在のキャンバス選択状態を、グループUIの出し分けに使う3値で返す。
+ * - "multi": 2つ以上のレイヤーを選択中 → 「グループ化」ボタンを出す
+ * - "group": グループを1つ選択中 → 「グループ解除」ボタンを出す (id で解除対象を渡す)
+ * - "none": それ以外 (未選択・単一の非グループ) → どちらのボタンも出さない
+ */
+export type GroupSelectionState =
+  | { kind: "multi"; count: number }
+  | { kind: "group"; id: string }
+  | { kind: "none" };
+
+export function groupSelectionState(canvas: unknown | null): GroupSelectionState {
+  const fabricCanvas = canvas as
+    | (FabricLikeCanvas & { getActiveObject?: () => FabricLikeObject | null })
+    | null;
+  const active = fabricCanvas?.getActiveObject?.() as
+    | (FabricLikeObject & { type?: string; getObjects?: () => FabricLikeObject[] })
+    | null;
+  if (!active) return { kind: "none" };
+  // 単一グループを選択中 (type=group)。
+  if (active.type === "group") {
+    return { kind: "group", id: objectId(active) };
+  }
+  // ActiveSelection (複数選択) は getObjects で中身が2件以上取れる。
+  const members = active.getObjects?.() ?? [];
+  if (members.length >= 2) {
+    return { kind: "multi", count: members.length };
+  }
+  return { kind: "none" };
+}
+
+/**
+ * 現在の選択 (fabric ActiveSelection) を1つの Group に束ねる (Canva「グループ化」相当・差4)。
+ * 分離した複数レイヤーを選んで束ね直し、一体で移動・拡縮できるようにする。
+ *
+ * 手順 (fabric v6): ActiveSelection から対象を取り出し → キャンバスから外し →
+ * new Group(objects) を作ってキャンバスへ追加 → その Group を選択状態にする。
+ * 対象が2件未満なら何もしない (グループ化は複数選択が前提)。
+ * 戻り値: 作成した Group の id (成功時) / null (対象不足・fabric 非対応)。
+ */
+export async function groupSelectedLayers(canvas: unknown | null): Promise<string | null> {
+  const fabricCanvas = canvas as
+    | (FabricLikeCanvas & {
+        getActiveObject?: () => FabricLikeObject | null;
+        add?: (object: FabricLikeObject) => void;
+        remove?: (...objects: FabricLikeObject[]) => void;
+      })
+    | null;
+  if (!fabricCanvas) return null;
+  const active = fabricCanvas.getActiveObject?.() as
+    | (FabricLikeObject & { getObjects?: () => FabricLikeObject[] })
+    | null;
+  // ActiveSelection のときだけ getObjects で中身が取れる。単一選択・未選択は対象外。
+  const members = active?.getObjects?.() ?? [];
+  if (members.length < 2) return null;
+
+  const fabric = (await import("fabric")) as Record<string, unknown>;
+  const Group = fabric.Group as
+    | (new (objects: FabricLikeObject[], options?: Record<string, unknown>) => FabricLikeObject)
+    | undefined;
+  if (!Group) return null;
+
+  // 選択を解いてから元オブジェクトをキャンバスから外す (ActiveSelection の変換座標を確定させる)。
+  fabricCanvas.discardActiveObject?.();
+  fabricCanvas.remove?.(...members);
+  const group = new Group(members, {}) as FabricLikeObject;
+  const id = objectId(group);
+  group.set?.({ name: "グループ", layerKind: "image", genre: "prop" });
+  fabricCanvas.add?.(group);
+  fabricCanvas.setActiveObject?.(group);
+  fabricCanvas.requestRenderAll?.();
+  return id;
+}
+
+/**
+ * Group を解除して中身を個別レイヤーへ戻す (Canva「グループ解除」相当・差4)。
+ * 指定 id のオブジェクトが Group でなければ何もしない (誤操作で単一レイヤーを壊さない)。
+ * 戻り値: 解除して戻した子レイヤー数 (0 = 対象が Group でない / fabric 非対応)。
+ */
+export async function ungroupLayer(canvas: unknown | null, id: string): Promise<number> {
+  const fabricCanvas = canvas as
+    | (FabricLikeCanvas & {
+        add?: (object: FabricLikeObject) => void;
+        remove?: (...objects: FabricLikeObject[]) => void;
+      })
+    | null;
+  if (!fabricCanvas) return 0;
+  const target = getObjectById(canvas, id) as
+    | (FabricLikeObject & {
+        type?: string;
+        removeAll?: () => FabricLikeObject[];
+        getObjects?: () => FabricLikeObject[];
+      })
+    | null;
+  // Group 以外 (画像・テキスト単体) は解除対象外。removeAll を持つのは Group/ActiveSelection のみ。
+  if (!target || target.type !== "group" || typeof target.removeAll !== "function") {
+    return 0;
+  }
+  // removeAll は子を Group から外して「絶対座標を保ったまま」返す (fabric v6 の仕様)。
+  const children = target.removeAll();
+  fabricCanvas.remove?.(target);
+  for (const child of children) {
+    // 子に id が無ければ付与し、キャンバスへ戻す。
+    objectId(child);
+    fabricCanvas.add?.(child);
+  }
+  fabricCanvas.discardActiveObject?.();
+  fabricCanvas.requestRenderAll?.();
+  return children.length;
+}
+
 /** 複数レイヤーの表示/非表示をまとめて切り替える (人グループのまとめ表示トグル用)。 */
 export function setLayersVisibleByIds(
   canvas: unknown | null,
