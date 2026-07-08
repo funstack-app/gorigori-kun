@@ -1,17 +1,13 @@
-use keyring::Entry;
-
-use crate::secrets::{SERVICE_NAME, SUPABASE_ANON_KEY, SUPABASE_BUCKET, SUPABASE_PROJECT_URL};
+use crate::secrets::{
+    self, SUPABASE_ANON_KEY, SUPABASE_BUCKET, SUPABASE_PROJECT_URL,
+};
 
 #[tauri::command]
 pub fn secret_set(key: String, value: String) -> Result<(), String> {
     eprintln!("[secret_set] key={} value_len={}", key, value.len());
-    let entry = Entry::new(SERVICE_NAME, &key).map_err(|e| {
-        eprintln!("[secret_set] Entry::new failed: {e}");
-        e.to_string()
-    })?;
-    entry.set_password(&value).map_err(|e| {
-        eprintln!("[secret_set] set_password failed: {e}");
-        e.to_string()
+    secrets::store_set(&key, &value).map_err(|e| {
+        eprintln!("[secret_set] store_set failed: {e}");
+        e
     })?;
     eprintln!("[secret_set] OK key={}", key);
     Ok(())
@@ -19,21 +15,12 @@ pub fn secret_set(key: String, value: String) -> Result<(), String> {
 
 #[tauri::command]
 pub fn secret_get(key: String) -> Result<Option<String>, String> {
-    let entry = Entry::new(SERVICE_NAME, &key).map_err(|e| e.to_string())?;
-    match entry.get_password() {
-        Ok(v) => Ok(Some(v)),
-        Err(keyring::Error::NoEntry) => Ok(None),
-        Err(e) => Err(e.to_string()),
-    }
+    secrets::store_get(&key)
 }
 
 #[tauri::command]
 pub fn secret_delete(key: String) -> Result<(), String> {
-    let entry = Entry::new(SERVICE_NAME, &key).map_err(|e| e.to_string())?;
-    match entry.delete_credential() {
-        Ok(_) | Err(keyring::Error::NoEntry) => Ok(()),
-        Err(e) => Err(e.to_string()),
-    }
+    secrets::store_delete(&key)
 }
 
 #[tauri::command]
@@ -67,20 +54,13 @@ pub fn secret_list() -> Result<Vec<String>, String> {
     ];
     let mut found = Vec::new();
     for key in known {
-        match Entry::new(SERVICE_NAME, key) {
-            Ok(entry) => match entry.get_password() {
-                Ok(_) => {
-                    found.push(key.to_string());
-                }
-                Err(keyring::Error::NoEntry) => {
-                    // 未保存、これは正常
-                }
-                Err(e) => {
-                    eprintln!("[secret_list] get_password({}) error: {}", key, e);
-                }
-            },
+        match secrets::store_get(key) {
+            Ok(Some(_)) => found.push(key.to_string()),
+            Ok(None) => {
+                // 未保存、これは正常
+            }
             Err(e) => {
-                eprintln!("[secret_list] Entry::new({}) error: {}", key, e);
+                eprintln!("[secret_list] store_get({}) error: {}", key, e);
             }
         }
     }

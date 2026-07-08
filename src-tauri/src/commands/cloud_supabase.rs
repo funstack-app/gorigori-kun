@@ -1,10 +1,9 @@
-use keyring::Entry;
 use tauri::State;
 
 use crate::cloud::supabase_client::{CloudUsage, SupabaseClient, SupabaseConfig};
 use crate::cloud::sync_worker::{sync_storage_root, SyncResult};
 use crate::commands::storage::StorageSettings;
-use crate::secrets::{SERVICE_NAME, SUPABASE_ANON_KEY};
+use crate::secrets::{self, SUPABASE_ANON_KEY};
 use crate::state::AppState;
 
 #[tauri::command]
@@ -20,10 +19,7 @@ pub async fn supabase_save_config(
     config: SupabaseConfig,
 ) -> Result<(), String> {
     validate_config(&config)?;
-    Entry::new(SERVICE_NAME, SUPABASE_ANON_KEY)
-        .map_err(|e| e.to_string())?
-        .set_password(config.anon_key.trim())
-        .map_err(|e| e.to_string())?;
+    secrets::store_set(SUPABASE_ANON_KEY, config.anon_key.trim())?;
 
     let mut settings = StorageSettings::load()?;
     settings.cloud_supabase_enabled = true;
@@ -42,11 +38,7 @@ pub async fn supabase_get_config() -> Result<Option<SupabaseConfig>, String> {
 
 #[tauri::command]
 pub async fn supabase_disconnect(state: State<'_, AppState>) -> Result<(), String> {
-    let entry = Entry::new(SERVICE_NAME, SUPABASE_ANON_KEY).map_err(|e| e.to_string())?;
-    match entry.delete_credential() {
-        Ok(_) | Err(keyring::Error::NoEntry) => {}
-        Err(e) => return Err(e.to_string()),
-    }
+    secrets::store_delete(SUPABASE_ANON_KEY)?;
 
     let mut settings = StorageSettings::load()?;
     settings.cloud_supabase_enabled = false;
@@ -79,13 +71,8 @@ fn load_saved_config() -> Result<Option<SupabaseConfig>, String> {
     if !settings.cloud_supabase_enabled {
         return Ok(None);
     }
-    let anon_key = match Entry::new(SERVICE_NAME, SUPABASE_ANON_KEY)
-        .map_err(|e| e.to_string())?
-        .get_password()
-    {
-        Ok(value) => value,
-        Err(keyring::Error::NoEntry) => return Ok(None),
-        Err(e) => return Err(e.to_string()),
+    let Some(anon_key) = secrets::store_get(SUPABASE_ANON_KEY)? else {
+        return Ok(None);
     };
     let Some(project_url) = settings.supabase_project_url else {
         return Ok(None);
