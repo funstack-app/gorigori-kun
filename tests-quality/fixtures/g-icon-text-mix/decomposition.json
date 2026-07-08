@@ -1,0 +1,31 @@
+{
+  "fixture": "g-icon-text-mix",
+  "dodCase": "G: 行頭アイコン+文字混在ロゴ (アイコンがOCR regionへ混入する型)",
+  "source": "パリミキ補聴器バナー (実案件素材: 眼鏡アイコンが 'OO PARIS MIK' として PARIS と同一 region に混入した実測ケース)",
+  "kind": "recorded-contract",
+  "note": "OCR 側の回帰正本は src-tauri magic_layer_e2e の ocr_icon_text_mix_fixture_probe (実モデルで『アイコン混入なし + 文章粉砕なし』を固定する)。本契約はアイコン類が text でなく prop へ入るジャンル構造を固定する。textLayerCount=9 は実 PP-OCRv6 の認識実測値。",
+  "image": { "file": "image.png" },
+  "objects": [
+    {
+      "en": "glasses icon",
+      "ja": "眼鏡アイコン",
+      "category": "prop",
+      "expectedGenre": "prop"
+    },
+    {
+      "en": "ear icon",
+      "ja": "耳アイコン",
+      "category": "prop",
+      "expectedGenre": "prop"
+    },
+    {
+      "en": "hearing aid",
+      "ja": "補聴器",
+      "category": "prop",
+      "expectedGenre": "prop"
+    }
+  ],
+  "textLayerCount": 9,
+  "hasBackground": true,
+  "expectedGenreCounts": { "person": 0, "text": 9, "prop": 3, "background": 1 }
+}

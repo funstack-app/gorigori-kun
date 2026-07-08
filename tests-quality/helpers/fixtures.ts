@@ -2,7 +2,7 @@
  * 品質回帰ハーネスの fixture ローダ。
  *
  * fixture 構造 (tests-quality/fixtures/<name>/):
- * - image.png          … リポジトリ内の既存素材から選定した固定画像 (6枚)。
+ * - image.png          … リポジトリ内の既存素材から選定した固定画像 (7枚)。
  *                        将来の実モデルE2E (SAM3/OCR/LaMa) の入力として使う固定資産。
  * - decomposition.json … その画像型に対する分解出力の契約 (recorded-contract)。
  *                        ジャンル分類・レイヤーツリー構造の回帰はこの契約を駆動源にする。
@@ -48,8 +48,8 @@ export const FIXTURES_DIR = path.join(
   "fixtures",
 );
 
-/** gap-audit §4 で確定したテスト画像セットの枚数。fixture の増減は契約変更 = 明示コミットで行う。 */
-export const EXPECTED_FIXTURE_COUNT = 6;
+/** gap-audit §4 の6枚 + g (行頭アイコン混在、2026-07-08追加)。fixture の増減は契約変更 = 明示コミットで行う。 */
+export const EXPECTED_FIXTURE_COUNT = 7;
 
 export function listFixtureNames(): string[] {
   return fs

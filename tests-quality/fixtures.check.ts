@@ -21,11 +21,11 @@ import {
 
 const GENRES: LayerGenreName[] = ["person", "text", "background", "prop"];
 
-test("fixture セットは6枚固定 (gap-audit §4 の契約)", () => {
+test("fixture セットは7枚固定 (gap-audit §4 + g の契約)", () => {
   const names = listFixtureNames();
   expect(names).toHaveLength(EXPECTED_FIXTURE_COUNT);
-  // 名前は a- 〜 f- の DoD ケース接頭辞を持つ (増減・入れ替えは契約変更として顕在化させる)。
-  for (const prefix of ["a-", "b-", "c-", "d-", "e-", "f-"]) {
+  // 名前は a- 〜 g- の DoD ケース接頭辞を持つ (増減・入れ替えは契約変更として顕在化させる)。
+  for (const prefix of ["a-", "b-", "c-", "d-", "e-", "f-", "g-"]) {
     expect(names.some((name) => name.startsWith(prefix)), `${prefix}* fixture が存在する`).toBe(
       true,
     );
