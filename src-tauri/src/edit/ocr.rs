@@ -68,14 +68,30 @@ pub async fn ocr_image_with_probmap(
     runtime: &EditRuntime,
     input_path: &Path,
 ) -> Result<(Vec<TextRegion>, Option<TextProbMap>), String> {
+    let det_spec = find_model("ppocrv6-small-det")
+        .ok_or_else(|| "model spec not found: ppocrv6-small-det".to_string())?;
+    let rec_spec = find_model("ppocrv6-small-rec")
+        .ok_or_else(|| "model spec not found: ppocrv6-small-rec".to_string())?;
+    ocr_image_with_probmap_with_models(runtime, input_path, &det_spec, &rec_spec).await
+}
+
+/// det/rec モデルを差し替え可能な実体。既定は [`ocr_image_with_probmap`] が small を渡す。
+///
+/// なぜ分離するか: OCR ティア (small/medium) の A/B 実測をテストから行うため
+/// (magic_layer_e2e の ab probe が medium spec を渡す)。前処理・辞書は PP-OCRv6
+/// ファミリー共通の想定なので、モデルファイルの差し替えだけで同一パイプラインが走る。
+pub(crate) async fn ocr_image_with_probmap_with_models(
+    runtime: &EditRuntime,
+    input_path: &Path,
+    det_spec: &crate::edit::registry::ModelSpec,
+    rec_spec: &crate::edit::registry::ModelSpec,
+) -> Result<(Vec<TextRegion>, Option<TextProbMap>), String> {
     tracing::info!(target: "codex.edit", "ocr: 画像デコード開始");
     let img = image::open(input_path).map_err(|e| format!("open: {e}"))?;
     tracing::info!(target: "codex.edit", "ocr: 画像デコード完了 {}x{}", img.width(), img.height());
 
-    let det_spec = find_model("ppocrv6-small-det")
-        .ok_or_else(|| "model spec not found: ppocrv6-small-det".to_string())?;
     tracing::info!(target: "codex.edit", "ocr: detセッション取得開始");
-    let det_session = runtime.get_session(&det_spec).await?;
+    let det_session = runtime.get_session(det_spec).await?;
     tracing::info!(target: "codex.edit", "ocr: detection開始 {}x{}", img.width(), img.height());
     let (polygons, prob_map) = {
         let mut session = det_session.lock().await;
@@ -83,9 +99,7 @@ pub async fn ocr_image_with_probmap(
     };
     tracing::info!(target: "codex.edit", "ocr: detection完了 polygons={}", polygons.len());
 
-    let rec_spec = find_model("ppocrv6-small-rec")
-        .ok_or_else(|| "model spec not found: ppocrv6-small-rec".to_string())?;
-    let rec_session = runtime.get_session(&rec_spec).await?;
+    let rec_session = runtime.get_session(rec_spec).await?;
 
     let mut regions = Vec::new();
     let mut session = rec_session.lock().await;

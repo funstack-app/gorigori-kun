@@ -847,3 +847,85 @@ async fn ocr_icon_text_mix_fixture_probe() {
     );
     eprintln!("=== OK: アイコン混入なし + 文章粉砕なし ({} regions) ===", regions.len());
 }
+
+/// OCR ティア A/B プローブ: PP-OCRv6 small (現行) vs medium を同一画像で比較する。
+///
+/// 背景: 2026-07-08 実測で small は白地の大きな装飾文字ですら誤認識した
+/// (レンタル→Uンタ conf=0.374 / 補聴器→通腮器 conf=0.538 / 借りる→昔りる)。
+/// 技術偵察 (_work/gori-layer-tech-scan/a-japanese-ocr.md) の首位候補 medium
+/// (公表値: 日本語90.5 / Artistic 71.2) が実画像でどれだけ差を出すかを見る。
+///
+/// 前提: medium の ONNX を models ディレクトリへ配置済みであること (未配置なら skip):
+///   ppocrv6-medium-det.onnx / ppocrv6-medium-rec.onnx
+///   (https://huggingface.co/PaddlePaddle/PP-OCRv6_medium_{det,rec}_onnx)
+///
+///   GORI_E2E_IMAGE=<画像> cargo test --lib edit::magic_layer_e2e::ocr_medium_vs_small_ab_probe -- --ignored --nocapture
+///   (GORI_E2E_IMAGE 未指定なら g-icon-text-mix fixture を使う)
+#[tokio::test]
+#[ignore]
+async fn ocr_medium_vs_small_ab_probe() {
+    use crate::edit::ocr::ocr_image_with_probmap_with_models;
+    use crate::edit::registry::{find_model, ModelCategory, ModelSpec};
+
+    init_test_tracing();
+    if !model_available("ppocrv6-small-det") || !model_available("ppocrv6-small-rec") {
+        eprintln!("[skip] small モデル未DL");
+        return;
+    }
+    // medium はまだ registry 非掲載 (採用判断前の実験用) なので spec をここで定義する。
+    // sha256 は 2026-07-08 の実DLファイルから shasum -a 256 で採取した実測値。
+    let det_medium = ModelSpec {
+        id: "ppocrv6-medium-det",
+        category: ModelCategory::Ocr,
+        display_name: "テキスト検出 (PP-OCRv6 medium/実験)",
+        url: "https://huggingface.co/PaddlePaddle/PP-OCRv6_medium_det_onnx/resolve/main/inference.onnx",
+        file_name: "ppocrv6-medium-det.onnx",
+        size_bytes: 62_032_837,
+        sha256: "eb13b44b25bb36f89528b68720af8a61d9cf381176107f465db1757b65d086e1",
+    };
+    let rec_medium = ModelSpec {
+        id: "ppocrv6-medium-rec",
+        category: ModelCategory::Ocr,
+        display_name: "テキスト認識 (PP-OCRv6 medium/実験)",
+        url: "https://huggingface.co/PaddlePaddle/PP-OCRv6_medium_rec_onnx/resolve/main/inference.onnx",
+        file_name: "ppocrv6-medium-rec.onnx",
+        size_bytes: 76_554_979,
+        sha256: "9c09abf0957f7968c7586464b7397b84ad2387a0497a351af40e9acc71b673ba",
+    };
+    if model_path(&det_medium).map(|p| !p.exists()).unwrap_or(true)
+        || model_path(&rec_medium).map(|p| !p.exists()).unwrap_or(true)
+    {
+        eprintln!("[skip] medium モデル未配置 (ppocrv6-medium-{{det,rec}}.onnx)");
+        return;
+    }
+    let input = std::env::var("GORI_E2E_IMAGE").map(PathBuf::from).unwrap_or_else(|_| {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../tests-quality/fixtures/g-icon-text-mix/image.png")
+    });
+
+    let runtime = EditRuntime::new();
+    let det_small = find_model("ppocrv6-small-det").unwrap();
+    let rec_small = find_model("ppocrv6-small-rec").unwrap();
+
+    let t0 = std::time::Instant::now();
+    let (small_regions, _) =
+        ocr_image_with_probmap_with_models(&runtime, &input, &det_small, &rec_small)
+            .await
+            .expect("small pipeline failed");
+    let small_elapsed = t0.elapsed();
+    let t1 = std::time::Instant::now();
+    let (medium_regions, _) =
+        ocr_image_with_probmap_with_models(&runtime, &input, &det_medium, &rec_medium)
+            .await
+            .expect("medium pipeline failed");
+    let medium_elapsed = t1.elapsed();
+
+    eprintln!("=== A/B: small ({} regions, {:.2}s) ===", small_regions.len(), small_elapsed.as_secs_f32());
+    for r in &small_regions {
+        eprintln!("  conf={:.3} bbox={:?} text={:?}", r.confidence, r.bbox, r.text);
+    }
+    eprintln!("=== A/B: medium ({} regions, {:.2}s) ===", medium_regions.len(), medium_elapsed.as_secs_f32());
+    for r in &medium_regions {
+        eprintln!("  conf={:.3} bbox={:?} text={:?}", r.confidence, r.bbox, r.text);
+    }
+}
