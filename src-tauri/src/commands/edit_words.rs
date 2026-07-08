@@ -375,6 +375,12 @@ async fn run_words_segment(
             let is_ja = joined
                 .chars()
                 .any(|c| matches!(c, '\u{3040}'..='\u{30FF}' | '\u{4E00}'..='\u{9FFF}'));
+            // 明朝/ゴシックを元画像から推定（Canva的な見た目保持復元・第3弾）。
+            let serif = crate::edit::magic_layer::estimate_serif(
+                color_bbox,
+                prob_map.as_ref(),
+                (width, height),
+            );
 
             text_layers_out.push(TextLayerSpec {
                 id: format!("text-{:04}", i),
@@ -383,13 +389,11 @@ async fn run_words_segment(
                 image_path: Some(out_path.to_string_lossy().into_owned()),
                 image_bbox: Some(bbox),
                 bbox,
-                font_family: if is_ja {
-                    "Hiragino Sans".to_string()
-                } else {
-                    "Helvetica".to_string()
-                },
+                // 初期書体は言語＋serif推定で選ぶ（明朝なら明朝系）。
+                font_family: crate::edit::magic_layer::pick_initial_font_family(is_ja, serif),
                 font_size,
                 font_weight: "normal".to_string(),
+                serif,
                 color,
                 align: "left".to_string(),
                 x: bbox[0],

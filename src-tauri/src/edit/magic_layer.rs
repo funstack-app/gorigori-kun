@@ -68,6 +68,9 @@ pub struct TextLayerSpec {
     pub font_family: String,
     pub font_size: f32,
     pub font_weight: String,
+    /// 元画像から推定した明朝/セリフ系(true) or ゴシック/サンセリフ系(false)。
+    /// 不明は None。フロントの書体近似 hint.serif に渡す（Canva的な見た目保持復元・第3弾）。
+    pub serif: Option<bool>,
     pub color: String,
     pub align: String,
     pub x: i32,
@@ -712,6 +715,8 @@ pub fn build_text_layers(
                 .as_deref()
                 .map(|lang| lang.starts_with("ja"))
                 .unwrap_or_else(|| contains_japanese(text));
+            // 明朝/ゴシックの別を元画像から推定し、初期書体とフィールドの両方に使う。
+            let serif = estimate_serif([x, y, w, h], prob_map, (width, height));
             Some(TextLayerSpec {
                 id: if region.id.trim().is_empty() {
                     format!("text-{index:04}")
@@ -723,11 +728,8 @@ pub fn build_text_layers(
                 image_path,
                 image_bbox,
                 bbox: [x as i32, y as i32, w as i32, h as i32],
-                font_family: if is_ja {
-                    "Hiragino Sans".to_string()
-                } else {
-                    "Helvetica".to_string()
-                },
+                // 初期書体は言語＋serif推定で選ぶ（明朝なら明朝系）。
+                font_family: pick_initial_font_family(is_ja, serif),
                 // サイズは元画像の「文字行の帯の高さ」から推定（Canva的な見た目保持復元・第2弾）。
                 // 取れなければ従来の bbox 比例式（h×0.8）へフォールバック。
                 font_size: estimate_font_size([x, y, w, h], prob_map, (width, height), is_ja)
@@ -737,6 +739,9 @@ pub fn build_text_layers(
                 font_weight: estimate_font_weight([x, y, w, h], prob_map, (width, height))
                     .unwrap_or("normal")
                     .to_string(),
+                // 明朝/ゴシックの別を元画像のストローク・コントラストから推定
+                // （Canva的な見た目保持復元・第3弾）。取れなければ None=不明。
+                serif,
                 color,
                 align: "left".to_string(),
                 x: x as i32,
@@ -927,6 +932,104 @@ pub(crate) fn estimate_font_size(
     let line_px = best_run as f32;
     let size = if is_ja { line_px } else { line_px * 0.72 };
     Some(size.clamp(8.0, 240.0))
+}
+
+/// 分解直後の初期書体を、言語(日/英)と serif 推定から選ぶ。
+/// serif=Some(true)（明朝/セリフ）なら明朝系、それ以外はゴシック/サンセリフ系。
+/// 完全同定は狙わず「元が明朝なら明朝、ゴシックならゴシック」で見た目を寄せる初期値
+/// （Canva的な見た目保持復元・第3弾）。ユーザーは後で書体を差し替えられる。
+pub(crate) fn pick_initial_font_family(is_ja: bool, serif: Option<bool>) -> String {
+    match (is_ja, serif) {
+        (true, Some(true)) => "Hiragino Mincho ProN".to_string(),
+        (true, _) => "Hiragino Sans".to_string(),
+        (false, Some(true)) => "Times New Roman".to_string(),
+        (false, _) => "Helvetica".to_string(),
+    }
+}
+
+/// 書体が明朝/セリフ系か（true）ゴシック/サンセリフ系か（false）を、
+/// ストローク確率マップの「縦横のストローク太さの差」から推定する。
+///
+/// 原理: 明朝・セリフ体は縦線が太く横線が細い（コントラストが大きい）。
+/// ゴシック・サンセリフ体は縦横がほぼ同じ太さ（コントラストが小さい）。
+/// 各行の連続インク run（横方向の塗り幅＝横ストローク太さの目安）と、
+/// 各列の連続インク run（縦ストローク太さの目安）の中央値を比べ、比で判定する。
+///
+/// 完全同定は狙わず serif/sans の2値（fontMatch.ts の hint.serif に渡す初期値）。
+/// prob_map 無し/位置ズレ/サンプル不足のときは None（呼び出し側で不明=null 扱い）。
+pub(crate) fn estimate_serif(
+    bbox: [u32; 4],
+    prob_map: Option<&TextProbMap>,
+    image_dims: (u32, u32),
+) -> Option<bool> {
+    let [x, y, w, h] = bbox;
+    let (iw, ih) = image_dims;
+    let pm = prob_map?;
+    if pm.width != iw || pm.height != ih || w == 0 || h == 0 {
+        return None;
+    }
+    let x_end = (x + w).min(iw);
+    let y_end = (y + h).min(ih);
+    if x_end <= x || y_end <= y {
+        return None;
+    }
+    let ink = |xx: u32, yy: u32| pm.prob_at(xx, yy) >= DB_STROKE_THRESHOLD;
+
+    // 水平方向: 各行の連続インク run 長を集める（横ストロークや字面の塗り幅）。
+    let mut h_runs: Vec<u32> = Vec::new();
+    for yy in y..y_end {
+        let mut run = 0u32;
+        for xx in x..x_end {
+            if ink(xx, yy) {
+                run += 1;
+            } else if run > 0 {
+                h_runs.push(run);
+                run = 0;
+            }
+        }
+        if run > 0 {
+            h_runs.push(run);
+        }
+    }
+    // 垂直方向: 各列の連続インク run 長を集める（縦ストロークの太さ）。
+    let mut v_runs: Vec<u32> = Vec::new();
+    for xx in x..x_end {
+        let mut run = 0u32;
+        for yy in y..y_end {
+            if ink(xx, yy) {
+                run += 1;
+            } else if run > 0 {
+                v_runs.push(run);
+                run = 0;
+            }
+        }
+        if run > 0 {
+            v_runs.push(run);
+        }
+    }
+    // サンプルが少なすぎるとき（極小文字・位置ズレ）は信用しない。
+    if h_runs.len() < 8 || v_runs.len() < 8 {
+        return None;
+    }
+    // ストローク太さの目安は run の中央値。短い run（線の端・アンチエイリアス）に
+    // 引きずられないよう、平均でなく中央値を使う。
+    let median = |v: &mut Vec<u32>| -> f32 {
+        v.sort_unstable();
+        v[v.len() / 2] as f32
+    };
+    let hw = median(&mut h_runs).max(1.0); // 横ストローク太さ ≒ 縦線の幅（行を横断すると縦線を横切る）
+    let vw = median(&mut v_runs).max(1.0); // 縦ストローク太さ ≒ 横線の幅（列を縦断すると横線を横切る）
+    // コントラスト比: 縦線の太さ / 横線の太さ。明朝は縦太・横細でこの比が大きい。
+    // 実画像で明朝は概ね 1.6+、ゴシックは 1.3 未満に収まる経験値。
+    // 境界（1.3〜1.6）は不明として null に倒す（誤って明朝を強制しない安全側）。
+    let contrast = hw / vw;
+    if contrast >= 1.6 {
+        Some(true) // serif / 明朝
+    } else if contrast < 1.3 {
+        Some(false) // sans / ゴシック
+    } else {
+        None
+    }
 }
 
 /// DB 確率マップの閾値。PaddleOCR DB 検出器の標準二値化閾値 (0.3) に合わせる。
@@ -1302,6 +1405,94 @@ mod tests {
         let pm = probmap_with_ink_rows(40, 60, 20, 40);
         assert_eq!(
             estimate_font_size([0, 0, 40, 60], Some(&pm), (80, 80), true),
+            None
+        );
+    }
+
+    /// 縦線 vstroke px・横線 hstroke px の十字「＋」を格子状に敷いた prob_map を作る。
+    /// 明朝(縦太・横細)/ゴシック(均一)のストローク・コントラストを模す。
+    fn probmap_cross_grid(
+        w: u32,
+        h: u32,
+        v_stroke: u32,
+        h_stroke: u32,
+        cell: u32,
+    ) -> TextProbMap {
+        let (wu, hu) = (w as usize, h as usize);
+        let mut data = vec![0u8; wu * hu];
+        // 各セルの中央に縦線(幅v_stroke)と横線(高h_stroke)の十字を置く。
+        let mut cx = cell / 2;
+        while cx < w {
+            let mut cy = cell / 2;
+            while cy < h {
+                // 縦線: x∈[cx, cx+v_stroke), y全域(セル内)
+                for dx in 0..v_stroke {
+                    let xx = cx + dx;
+                    if xx >= w {
+                        break;
+                    }
+                    for yy in cy.saturating_sub(cell / 2)..(cy + cell / 2).min(h) {
+                        data[(yy as usize) * wu + (xx as usize)] = 255;
+                    }
+                }
+                // 横線: y∈[cy, cy+h_stroke), x全域(セル内)
+                for dy in 0..h_stroke {
+                    let yy = cy + dy;
+                    if yy >= h {
+                        break;
+                    }
+                    for xx in cx.saturating_sub(cell / 2)..(cx + cell / 2).min(w) {
+                        data[(yy as usize) * wu + (xx as usize)] = 255;
+                    }
+                }
+                cy += cell;
+            }
+            cx += cell;
+        }
+        TextProbMap { width: w, height: h, data }
+    }
+
+    #[test]
+    fn serif_true_when_vertical_stroke_thick() {
+        // 縦線6px・横線2px（高コントラスト）→ 明朝/セリフ = true
+        let pm = probmap_cross_grid(80, 80, 6, 2, 16);
+        assert_eq!(
+            estimate_serif([0, 0, 80, 80], Some(&pm), (80, 80)),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn serif_false_when_strokes_uniform() {
+        // 縦横とも3px（均一）→ ゴシック/サンセリフ = false
+        let pm = probmap_cross_grid(80, 80, 3, 3, 16);
+        assert_eq!(
+            estimate_serif([0, 0, 80, 80], Some(&pm), (80, 80)),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn serif_none_without_probmap() {
+        assert_eq!(estimate_serif([0, 0, 80, 80], None, (80, 80)), None);
+    }
+
+    #[test]
+    fn initial_font_family_reflects_serif() {
+        // 明朝推定 → 明朝系、ゴシック/不明 → ゴシック系。言語で和欧を切り替える。
+        assert_eq!(pick_initial_font_family(true, Some(true)), "Hiragino Mincho ProN");
+        assert_eq!(pick_initial_font_family(true, Some(false)), "Hiragino Sans");
+        assert_eq!(pick_initial_font_family(true, None), "Hiragino Sans");
+        assert_eq!(pick_initial_font_family(false, Some(true)), "Times New Roman");
+        assert_eq!(pick_initial_font_family(false, Some(false)), "Helvetica");
+        assert_eq!(pick_initial_font_family(false, None), "Helvetica");
+    }
+
+    #[test]
+    fn serif_none_on_dimension_mismatch() {
+        let pm = probmap_cross_grid(80, 80, 6, 2, 16);
+        assert_eq!(
+            estimate_serif([0, 0, 80, 80], Some(&pm), (160, 160)),
             None
         );
     }

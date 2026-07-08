@@ -143,6 +143,8 @@ export type TextLayerSpec = {
   fontFamily?: string;
   fontSize?: number;
   fontWeight?: "normal" | "bold";
+  /** 元画像から推定した明朝/セリフ系(true) or ゴシック/サンセリフ系(false)。不明はnull。 */
+  serif?: boolean | null;
   align?: "left" | "center" | "right";
 };
 
