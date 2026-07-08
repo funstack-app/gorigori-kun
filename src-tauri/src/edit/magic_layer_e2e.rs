@@ -805,3 +805,45 @@ async fn ocr_recognize_real_image_probe() {
         eprintln!("=== OK: 期待文字列 {:?} を認識結果に検出 ===", expect);
     }
 }
+
+/// 行頭アイコン混在 fixture (g-icon-text-mix) の OCR 回帰プローブ。
+///
+/// 固定するもの (2026-07-08 実測に基づく契約):
+/// 1. **アイコン混入なし**: 眼鏡アイコンが "OO" として PARIS の region に混入しない
+///    (icon_split_candidate による端の非文字塊切り離し。修正前の実測は "OO PARIS MIK")。
+/// 2. **文章粉砕なし**: 幅基準の全谷分割で起きた退行 ("PARIS MIKI"→PAR/LS/M/K、
+///    「〜お取扱いしております」の「し」欠落) が再発しない。
+///
+///   cargo test --lib edit::magic_layer_e2e::ocr_icon_text_mix_fixture_probe -- --ignored --nocapture
+#[tokio::test]
+#[ignore]
+async fn ocr_icon_text_mix_fixture_probe() {
+    init_test_tracing();
+    if !model_available("ppocrv6-small-det") || !model_available("ppocrv6-small-rec") {
+        eprintln!("[skip] ppocrv6 モデル未DL");
+        return;
+    }
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../tests-quality/fixtures/g-icon-text-mix/image.png");
+    assert!(fixture.exists(), "fixture が存在する: {}", fixture.display());
+    let runtime = EditRuntime::new();
+    let (regions, _prob) = ocr_image_with_probmap(&runtime, &fixture)
+        .await
+        .expect("ocr_image_with_probmap failed");
+    let joined: Vec<&str> = regions.iter().map(|r| r.text.as_str()).collect();
+    // 1. アイコン混入なし: どの region にも眼鏡アイコン由来の "OO" が残らない。
+    assert!(
+        !joined.iter().any(|t| t.contains("OO")),
+        "眼鏡アイコン 'OO' が region に混入している: {joined:?}"
+    );
+    // 2. 文章粉砕なし: ロゴ文字列と日本語文が連結のまま残る。
+    assert!(
+        joined.iter().any(|t| t.contains("PARIS MIK")),
+        "'PARIS MIK…' が連結の region として残るべき (粉砕の退行): {joined:?}"
+    );
+    assert!(
+        joined.iter().any(|t| t.contains("お取扱いしております")),
+        "日本語文が『し』を失わず連結で残るべき (粉砕の退行): {joined:?}"
+    );
+    eprintln!("=== OK: アイコン混入なし + 文章粉砕なし ({} regions) ===", regions.len());
+}
