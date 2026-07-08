@@ -2,8 +2,10 @@ import { useMemo, useState } from "react";
 
 import { groupLayersByGenre, type LayerGenre } from "../../lib/edit/genre";
 import { useEditor, type EditorLayerMeta } from "./editor/editorStore";
+import { useEditorActions } from "./editor/useEditor";
 import {
   getObjectById,
+  groupSelectionState,
   layerMetasFromCanvas,
   personGroupSummary,
   removeObjectById,
@@ -27,7 +29,11 @@ export function EditorLayerList() {
   // 「人」グループを畳んで1つのまとまり (人=1レイヤー) として見せるか。既定は畳む。
   const [personCollapsed, setPersonCollapsed] = useState(true);
 
+  const { groupSelection, ungroupSelection } = useEditorActions();
+
   const layers = useMemo(() => layerMetasFromCanvas(canvas), [canvas, revision]);
+  // グループ操作バーの出し分け。選択が変わる (= revision が動く) たびに再計算する。
+  const groupState = useMemo(() => groupSelectionState(canvas), [canvas, revision]);
   // 大ジャンル (人/テキスト/背景/小物) の見出し付きツリー。空ジャンルの見出しは出さない。
   const groups = useMemo(() => groupLayersByGenre(layers), [layers]);
   // 人=1レイヤー (gap-audit G2): 人ジャンルのパーツ群をまとめ操作するためのサマリ。
@@ -114,6 +120,30 @@ export function EditorLayerList() {
           {layers.length}
         </span>
       </div>
+      {/* グループ操作バー (Canva「グループ化/解除」相当・差4)。選択状態で出し分ける。 */}
+      {groupState.kind !== "none" && (
+        <div className="border-b border-[#2a2a2a] px-3 py-1.5">
+          {groupState.kind === "multi" ? (
+            <button
+              type="button"
+              onClick={() => void groupSelection()}
+              className="w-full rounded border border-[#3a3a3a] bg-[#161616] px-2 py-1 text-[11px] font-bold text-neutral-200 hover:border-[#4a4a4a] hover:text-white"
+              title={`選択中の${groupState.count}レイヤーを1つにまとめる`}
+            >
+              🔗 {groupState.count}個をグループ化
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => void ungroupSelection(groupState.id)}
+              className="w-full rounded border border-[#3a3a3a] bg-[#161616] px-2 py-1 text-[11px] font-bold text-neutral-200 hover:border-[#4a4a4a] hover:text-white"
+              title="グループを解除して個別レイヤーに戻す"
+            >
+              ⛓️‍💥 グループを解除
+            </button>
+          )}
+        </div>
+      )}
       <div className="h-full overflow-y-auto p-2 pb-12">
         {layers.length === 0 ? (
           <div className="rounded-lg border border-dashed border-[#343434] bg-[#101010] px-3 py-8 text-center text-xs font-bold text-neutral-600">

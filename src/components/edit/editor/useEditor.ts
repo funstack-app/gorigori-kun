@@ -36,6 +36,7 @@ import {
   showGrabPreviewOverlay,
 } from "./magicLayerToFabric";
 import { restoreCanvas } from "./history";
+import { groupSelectedLayers, ungroupLayer } from "./layerHelpers";
 import { normalizeGenre, type LayerGenre } from "../../../lib/edit/genre";
 import { resolveWord, splitWordsInput } from "../../../lib/edit/wordPresets";
 
@@ -296,6 +297,38 @@ export function useEditorActions() {
     bumpRevision();
     pushHistory();
     setMessage("図形を追加しました。ドラッグ・四隅で調整できます。");
+  };
+
+  /** 選択中の複数レイヤーを1グループに束ねる (Canva「グループ化」相当・差4)。 */
+  const groupSelection = async () => {
+    if (!canvas) {
+      setError("キャンバスを初期化中です。");
+      return;
+    }
+    const id = await groupSelectedLayers(canvas);
+    if (!id) {
+      setMessage("グループ化するには2つ以上のレイヤーを選んでください。");
+      return;
+    }
+    bumpRevision();
+    pushHistory();
+    setMessage("レイヤーをグループ化しました。まとめて移動・拡縮できます。");
+  };
+
+  /** 指定 id のグループを解除して中身を個別レイヤーへ戻す (Canva「グループ解除」相当・差4)。 */
+  const ungroupSelection = async (id: string) => {
+    if (!canvas) {
+      setError("キャンバスを初期化中です。");
+      return;
+    }
+    const count = await ungroupLayer(canvas, id);
+    if (count === 0) {
+      setMessage("グループを選んでから解除してください。");
+      return;
+    }
+    bumpRevision();
+    pushHistory();
+    setMessage(`グループを解除しました (${count}レイヤー)。`);
   };
 
   /** キャンバスを統合PNGとして書き出す (保存先はユーザーが選ぶ)。 */
@@ -642,6 +675,8 @@ export function useEditorActions() {
     runWords,
     runWordsAuto,
     addShape,
+    groupSelection,
+    ungroupSelection,
     exportPng,
     restyleSelectedLayer,
     chooseImage,
