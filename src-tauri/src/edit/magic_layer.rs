@@ -729,7 +729,11 @@ pub fn build_text_layers(
                     "Helvetica".to_string()
                 },
                 font_size: ((h as f32) * 0.8).clamp(8.0, 240.0),
-                font_weight: "normal".to_string(),
+                // 太さは元画像のインク密度から推定（Canva的な見た目保持復元）。
+                // 取れなければ従来どおり normal。
+                font_weight: estimate_font_weight([x, y, w, h], prob_map, (width, height))
+                    .unwrap_or("normal")
+                    .to_string(),
                 color,
                 align: "left".to_string(),
                 x: x as i32,
@@ -817,6 +821,47 @@ pub(crate) fn text_color(
     let cy = (y + h / 2).min(ih.saturating_sub(1));
     let p = rgb.get_pixel(cx, cy);
     format!("#{:02x}{:02x}{:02x}", p[0], p[1], p[2])
+}
+
+/// 文字の太さ (Bold/Regular) を、ストローク確率マップの「インク密度」から推定する。
+///
+/// 原理: 太い書体ほど bbox に占めるインク画素の割合が高い。行の余白を含む bbox 全体でなく
+/// 「文字が実在する行の帯」に対する密度で見るため、prob_at がしきい値以上の画素だけを数える。
+/// 密度 = インク画素数 / bbox 面積。日本語の見出し級 Bold は密度が高く出る。
+/// 完全同定は狙わず「normal / bold」の2値に落とす（Canva的な"見た目を保った復元"の初期値）。
+///
+/// prob_map が無い/位置ズレのときは None（呼び出し側で既定 normal にフォールバック）。
+pub(crate) fn estimate_font_weight(
+    bbox: [u32; 4],
+    prob_map: Option<&TextProbMap>,
+    image_dims: (u32, u32),
+) -> Option<&'static str> {
+    let [x, y, w, h] = bbox;
+    let (iw, ih) = image_dims;
+    let pm = prob_map?;
+    if pm.width != iw || pm.height != ih || w == 0 || h == 0 {
+        return None;
+    }
+    let mut ink: u64 = 0;
+    for yy in y..(y + h).min(ih) {
+        for xx in x..(x + w).min(iw) {
+            if pm.prob_at(xx, yy) >= DB_STROKE_THRESHOLD {
+                ink += 1;
+            }
+        }
+    }
+    let area = (w as u64) * (h as u64);
+    if area == 0 {
+        return None;
+    }
+    let density = ink as f32 / area as f32;
+    // インクが極端に少ない（bbox とマップの位置ズレ疑い）ときは信用しない。
+    if ink < 32 {
+        return None;
+    }
+    // しきい値 0.24: 日本語の見出し Bold と本文 Regular の密度を実画像で分けた経験値。
+    // 完全一致は狙わず 2 値。境界付近は normal 側に倒す（太字化しすぎない安全側）。
+    Some(if density >= 0.24 { "bold" } else { "normal" })
 }
 
 /// DB 確率マップの閾値。PaddleOCR DB 検出器の標準二値化閾値 (0.3) に合わせる。
@@ -1086,6 +1131,53 @@ mod tests {
         assert!(is_symbol_noise("—")); // ダッシュ
         assert!(is_symbol_noise("**")); // 2文字の ASCII 記号も捨てる
         assert!(is_symbol_noise("◇◆")); // 2文字の幾何学記号
+    }
+
+    /// 指定密度でインクを敷いた確率マップを作る（bbox 全域が対象の単純ケース）。
+    fn probmap_with_density(w: u32, h: u32, density: f32) -> TextProbMap {
+        let total = (w * h) as usize;
+        let ink = ((total as f32) * density).round() as usize;
+        let mut data = vec![0u8; total];
+        for d in data.iter_mut().take(ink) {
+            *d = 255; // prob=1.0 → しきい値超え = インク
+        }
+        TextProbMap { width: w, height: h, data }
+    }
+
+    #[test]
+    fn font_weight_bold_when_dense() {
+        // 密度 0.5（太い見出し相当）→ bold
+        let pm = probmap_with_density(40, 40, 0.5);
+        assert_eq!(
+            estimate_font_weight([0, 0, 40, 40], Some(&pm), (40, 40)),
+            Some("bold")
+        );
+    }
+
+    #[test]
+    fn font_weight_normal_when_sparse() {
+        // 密度 0.12（細い本文相当）→ normal
+        let pm = probmap_with_density(40, 40, 0.12);
+        assert_eq!(
+            estimate_font_weight([0, 0, 40, 40], Some(&pm), (40, 40)),
+            Some("normal")
+        );
+    }
+
+    #[test]
+    fn font_weight_none_without_probmap() {
+        // prob_map 無し → None（呼び出し側で normal フォールバック）
+        assert_eq!(estimate_font_weight([0, 0, 40, 40], None, (40, 40)), None);
+    }
+
+    #[test]
+    fn font_weight_none_on_dimension_mismatch() {
+        // マップと画像サイズがズレる → 信用せず None
+        let pm = probmap_with_density(40, 40, 0.5);
+        assert_eq!(
+            estimate_font_weight([0, 0, 40, 40], Some(&pm), (80, 80)),
+            None
+        );
     }
 
     #[test]
