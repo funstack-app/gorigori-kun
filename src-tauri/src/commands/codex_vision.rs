@@ -113,6 +113,13 @@ async fn run_codex_vision(image_path: &str, prompt: &str) -> Result<String, Stri
     .stdin(Stdio::piped())
     .stdout(Stdio::piped())
     .stderr(Stdio::piped());
+    // GORI 専用 CODEX_HOME を渡す (app-server と認証を揃える)。
+    // これが無いと codex exec は既定の ~/.codex を見に行き、アプリ内で再ログインした
+    // 新トークンを使えず「refresh token was revoked」で落ちる (企画タブは app-server 経由
+    // で CODEX_HOME 済みなので動くのに、編集タブだけ落ちる乖離の真因)。
+    if let Some(home) = crate::codex::home::ensure_gori_codex_home() {
+        cmd.env("CODEX_HOME", &home);
+    }
     crate::codex::process::no_window_flag(&mut cmd);
     cmd.kill_on_drop(true);
 

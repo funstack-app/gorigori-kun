@@ -54,6 +54,11 @@ pub async fn codex_text_query(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // GORI 専用 CODEX_HOME を渡す (app-server と認証を揃える。無いと ~/.codex を見て
+    // 再ログイン済みの新トークンを使えず revoked で落ちる)。
+    if let Some(home) = crate::codex::home::ensure_gori_codex_home() {
+        cmd.env("CODEX_HOME", &home);
+    }
     crate::codex::process::no_window_flag(&mut cmd);
     cmd.kill_on_drop(true);
 
