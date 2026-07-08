@@ -13,3 +13,4 @@ pub mod sam2;
 pub mod sam3_text;
 pub mod segment;
 pub mod subject_split;
+pub mod understanding;

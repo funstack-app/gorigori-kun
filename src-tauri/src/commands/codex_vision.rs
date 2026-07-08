@@ -71,6 +71,32 @@ pub async fn codex_list_image_objects(image_path: String) -> Result<Vec<ImageObj
     parse_object_words(&stdout)
 }
 
+/// 理解層 (工程0): 画像をグラフィックデザインとして分解した構造化 JSON を返す。
+///
+/// 生出力をそのまま返し、解析・検証は `edit::understanding::parse_design_understanding`
+/// が行う (未信頼入力の検証を1箇所に集約するため)。プロンプトの実測検証:
+/// _work/gori-layer-tech-scan/understanding-ab/codex-vision/report.md (読解全問正解)。
+pub async fn codex_analyze_design(
+    image_path: &str,
+    img_w: u32,
+    img_h: u32,
+) -> Result<String, String> {
+    let prompt = format!(
+        "あなたはグラフィックデザインの分解エンジンです。添付画像 (幅{img_w}px × 高さ{img_h}px) を解析し、以下のJSONだけを出力してください (説明文・コードフェンス不要)。\n\
+        {{\n\
+          \"text_blocks\": [{{\"text\": \"正確な文字内容\", \"bbox\": [x, y, 幅, 高さ], \"color\": \"#rrggbb\", \"group\": \"視覚グループ名\"}}],\n\
+          \"graphics\": [{{\"name\": \"短い日本語レイヤー名\", \"kind\": \"icon|photo|shape\", \"bbox\": [x, y, 幅, 高さ]}}]\n\
+        }}\n\
+        規則:\n\
+        - text_blocks は視覚的な行・ブロック単位。文字は1文字も創作しない (読めなければその要素を出さない)\n\
+        - 文字が主体のロゴ (ワードマーク) は text_blocks に入れる。絵的なアイコン・写真・図形は graphics に入れる\n\
+        - 同じ視覚的まとまりに属する text_blocks には同じ group 名を付ける\n\
+        - bbox は画像左上原点のピクセル座標で、必ず [左上x, 左上y, 幅, 高さ] の4要素\n\
+        - color は文字の塗り色の近似16進"
+    );
+    run_codex_vision(image_path, &prompt).await
+}
+
 /// Codex CLI (`codex exec -i <image>`) で画像付きプロンプトを実行し stdout を返す共通経路。
 async fn run_codex_vision(image_path: &str, prompt: &str) -> Result<String, String> {
     let image_path = image_path.trim();

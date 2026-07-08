@@ -249,6 +249,9 @@ async fn run_words_segment(
     //   切り出した物体の上に載っている文字 (印字・ロゴ) は物体の柄として保護する
     let mut background_path_out: Option<String> = None;
     let mut text_layers_out: Vec<TextLayerSpec> = Vec::new();
+    // 理解層の graphics (名前+位置)。SAM3 物体レイヤーの命名を位置照合で矯正する
+    // (実測 2026-07-09: SAM3 が英語プロンプトを取り違え、badge の名で本体を掴んだ)。
+    let mut design_graphics: Vec<crate::edit::understanding::DesignGraphic> = Vec::new();
     if full {
         let runtime = state.edit_runtime();
 
@@ -322,13 +325,127 @@ async fn run_words_segment(
         };
         let rgb_for_color = image::DynamicImage::ImageRgba8(rgba.clone()).to_rgb8();
 
-        // 3) インスタンスごとに「元画素そのまま」レイヤー + 消去マスクを作る。
+        // 理解層 (工程0): Codex vision が内容・位置・色・グループを確定できたら、
+        // 文字は「最初から編集可能テキスト」(工程1・Canva方式) として生成する。
+        // ピクセル切り抜きをやめるので縁の劣化・変換時の見た目崩れが構造的に消える。
+        // Codex 不可/出力破損時は None → 従来の SAM3 切り抜き + OCR 注釈へフォールバック。
+        let understanding = match crate::commands::codex_vision::codex_analyze_design(
+            &input.to_string_lossy(),
+            width,
+            height,
+        )
+        .await
+        {
+            Ok(raw) => {
+                match crate::edit::understanding::parse_design_understanding(&raw, width, height)
+                {
+                    Ok(u) if !u.text_blocks.is_empty() => {
+                        tracing::info!(
+                            target: "codex.edit",
+                            "understanding: text_blocks={} graphics={}",
+                            u.text_blocks.len(),
+                            u.graphics.len()
+                        );
+                        design_graphics = u.graphics.clone();
+                        Some(u)
+                    }
+                    Ok(_) => {
+                        tracing::warn!(target: "codex.edit", "understanding: text_blocks空、ローカルへフォールバック");
+                        None
+                    }
+                    Err(reason) => {
+                        tracing::warn!(target: "codex.edit", "understanding: 解析失敗、ローカルへフォールバック ({reason})");
+                        None
+                    }
+                }
+            }
+            Err(reason) => {
+                tracing::warn!(target: "codex.edit", "understanding: Codex不可、ローカルへフォールバック ({reason})");
+                None
+            }
+        };
+
+        // 3) 消去マスク + 文字レイヤーを作る。
         let mut erase_mask = image::ImageBuffer::<image::Luma<u8>, Vec<u8>>::from_pixel(
             width,
             height,
             image::Luma([0u8]),
         );
+        if let Some(u) = &understanding {
+            // 工程1: 理解層の text_blocks を本物のテキストレイヤーにする (切り抜きなし)。
+            // 消去は SAM3 text マスク (グロー込みの見た目のかたまり) と、block bbox の
+            // フォント比例拡張 (magic_layer の ERASE と同じ 0.4h 規則) の union。
+            for det in &text_instances {
+                for (dst, src) in erase_mask.pixels_mut().zip(det.mask.pixels()) {
+                    if src[0] > 127 {
+                        *dst = image::Luma([255u8]);
+                    }
+                }
+            }
+            for (i, block) in u.text_blocks.iter().enumerate() {
+                let [bx, by, bw, bh] = block.bbox;
+                let d = ((bh as f64 * 0.40).round() as i32).max(6);
+                for yy in (by - d).max(0)..(by + bh + d).min(height as i32) {
+                    for xx in (bx - d).max(0)..(bx + bw + d).min(width as i32) {
+                        erase_mask.put_pixel(xx as u32, yy as u32, image::Luma([255u8]));
+                    }
+                }
+                let bbox_u = [
+                    bx.max(0) as u32,
+                    by.max(0) as u32,
+                    bw.max(1) as u32,
+                    bh.max(1) as u32,
+                ];
+                let is_ja = block.text.chars().any(|c| {
+                    matches!(c, '\u{3040}'..='\u{30FF}' | '\u{4E00}'..='\u{9FFF}')
+                });
+                let serif = crate::edit::magic_layer::estimate_serif(
+                    bbox_u,
+                    prob_map.as_ref(),
+                    (width, height),
+                );
+                let font_size = crate::edit::magic_layer::estimate_font_size(
+                    bbox_u,
+                    prob_map.as_ref(),
+                    (width, height),
+                    is_ja,
+                )
+                .unwrap_or_else(|| ((bh as f32) * 0.8).clamp(8.0, 240.0));
+                let font_weight = crate::edit::magic_layer::estimate_font_weight(
+                    bbox_u,
+                    prob_map.as_ref(),
+                    (width, height),
+                )
+                .unwrap_or("normal")
+                .to_string();
+                let color = block.color.clone().unwrap_or_else(|| {
+                    crate::edit::magic_layer::text_color(&rgb_for_color, bbox_u, prob_map.as_ref())
+                });
+                text_layers_out.push(TextLayerSpec {
+                    id: format!("text-{i:04}"),
+                    name: format!("テキスト {}", i + 1),
+                    text: block.text.clone(),
+                    image_path: None,
+                    image_bbox: None,
+                    bbox: block.bbox,
+                    font_family: crate::edit::magic_layer::pick_initial_font_family(is_ja, serif),
+                    font_size,
+                    font_weight,
+                    serif,
+                    color,
+                    align: "left".to_string(),
+                    x: bx,
+                    y: by,
+                    opacity: 1.0,
+                    visible: true,
+                    rotation: 0.0,
+                });
+            }
+        }
         for (i, det) in text_instances.iter().enumerate() {
+            if understanding.is_some() {
+                break; // 工程1で生成済み。従来のピクセル切り抜きは作らない。
+            }
             let out_path = run_dir.join(format!("text-{:02}.png", i + 1));
             // 色距離マット優先: SAM3 の int8 マスクは文字の細部で粗く、そのまま alpha に
             // すると縁の背景が白い斑点として焼き込まれる (2026-07-09 実機報告)。フラット
@@ -496,11 +613,30 @@ async fn run_words_segment(
         let file_stem = sanitize_file_stem(&word.prompt);
         let out_path = run_dir.join(format!("word-{file_stem}-{seq:02}.png"));
         let bbox = crate::edit::grab::crop_object_png(&rgba, &k.mask, &out_path)?;
-        let label = if per_word_count[k.word_index] > 1 {
+        let mut label = if per_word_count[k.word_index] > 1 {
             format!("{label_base} {seq}")
         } else {
             label_base
         };
+        // 理解層の graphics と位置照合し、実際に切り出された物体の名前へ矯正する。
+        // SAM3 は語→物体の対応を取り違えることがある (小型モデルの言語理解の限界)。
+        // 名前は「語が何を狙ったか」でなく「実際に何が切れたか」で付ける。
+        let matched = design_graphics
+            .iter()
+            .filter_map(|g| {
+                let iou = crate::edit::understanding::rect_iou(bbox, g.bbox);
+                (iou >= 0.4).then_some((iou, g.name.as_deref()?))
+            })
+            .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        if let Some((iou, name)) = matched {
+            if name != label {
+                tracing::info!(
+                    target: "codex.edit",
+                    "words: レイヤー名を位置照合で矯正 '{label}' -> '{name}' (IoU={iou:.2})"
+                );
+                label = name.to_string();
+            }
+        }
         layers.push(WordLayerSpec {
             image_path: out_path.to_string_lossy().into_owned(),
             bbox,
