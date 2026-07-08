@@ -1,3 +1,7 @@
+// 実装途中の部品（編集タブ等で今後使う関数・構造体）に対する
+// 未使用警告を抑制する。リリース前に一度外して棚卸しすること。
+#![allow(dead_code, unused_imports)]
+
 mod cloud;
 mod codex;
 mod commands;
