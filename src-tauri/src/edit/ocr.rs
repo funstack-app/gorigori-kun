@@ -96,6 +96,18 @@ pub async fn ocr_image_with_probmap(
         }
         let crop = crop_axis_aligned(&img, bbox)?;
         let (text, rec_conf) = run_paddleocr_recognition(&mut session, &crop)?;
+        // 非文字の塊 (眼鏡アイコン等) や化けを弾く。DB検出器は文字でない塊も region に
+        // 拾い、認識にかけると低信頼の記号列が返る (Canva差2「アイコン混入」/差3「文字化け」)。
+        // 消し過ぎない保守設計: 正しい文字を落とすより化けを見逃す方向へ倒す (弾いた分は
+        // ログに残す。ユーザーは残った化け region を手で消せるが、消えた region は戻せない)。
+        if !should_keep_text_region(&text, rec_conf) {
+            tracing::info!(
+                target: "codex.edit",
+                "ocr: 非文字/低信頼 region を除外 text={:?} rec_conf={:.3}",
+                text, rec_conf
+            );
+            continue;
+        }
         let confidence = if rec_conf > 0.0 {
             (rec_conf * poly.score).clamp(0.0, 1.0)
         } else {
@@ -591,6 +603,47 @@ fn detect_language_from_text(text: &str) -> Option<String> {
     }
 }
 
+/// DB 検出器が拾った region を「文字レイヤーとして残すか」を判定する純粋関数。
+/// 非文字の塊 (眼鏡アイコン等) や信頼度の低い化けを弾く (Canva差2/差3)。
+///
+/// 保守設計 (消し過ぎ防止): 正しい文字を落とすより化けを見逃す方向へ倒す。
+/// 閾値は低めに置き、「明らかに文字でない/明らかに壊れている」ものだけを弾く。
+///
+/// 判定 (いずれかに該当したら除外 = false を返す):
+///   1. 認識テキストが実質空 (trim 後に文字ゼロ)
+///   2. 有意な文字 (文字/数字) が1つも無い — 記号・罫線・□ だけの塊 (非文字アイコンの典型)
+///   3. 認識信頼度が下限 (REC_CONF_FLOOR) 未満 — CTC が自信を持てなかった化け候補
+///      ただし信頼度が高い (>= REC_CONF_TRUST) 場合は、たとえ記号主体でも残す
+///      (「!」「?」「+」等の正当な記号テキストを誤除去しないため)
+fn should_keep_text_region(text: &str, rec_conf: f32) -> bool {
+    // 化け候補とみなす下限。これ未満は非文字/誤認識として弾く。
+    // PP-OCRv6 の実測では正しい日本語行は 0.6-0.99、非文字塊は 0.0-0.2 に出やすい。
+    // 誤除去を避けるため保守的に 0.35 (この間のグレーゾーンは残す = 見逃し側へ倒す)。
+    const REC_CONF_FLOOR: f32 = 0.35;
+    // これ以上の信頼度なら記号主体でも文字として信頼する (正当な記号テキストの保護)。
+    const REC_CONF_TRUST: f32 = 0.80;
+
+    let trimmed = text.trim();
+    // 1. 実質空は除外。
+    if trimmed.chars().all(|c| c.is_whitespace()) {
+        return false;
+    }
+    // 有意な文字 (letter or number) の有無。□ (復号不能マーカー) や記号は含めない。
+    let has_meaningful_char = trimmed
+        .chars()
+        .any(|c| c.is_alphanumeric() && c != '□');
+    // 3. 信頼度が下限未満なら、有意な文字があっても弾く (化け候補)。
+    if rec_conf < REC_CONF_FLOOR {
+        return false;
+    }
+    // 2. 有意な文字が無い (記号・罫線・□ だけ) 場合、信頼度が高くなければ弾く。
+    //    非文字アイコンの塊は記号列 + 低〜中信頼で出るため。
+    if !has_meaningful_char && rec_conf < REC_CONF_TRUST {
+        return false;
+    }
+    true
+}
+
 /// 連結成分1件の bbox (map 座標系) と、その成分に属する画素ごとの map 座標を受け取り、
 /// **行の水平投影 (各 y のインク画素数)** の谷で上下に分割した「行 bbox」の列を返す。
 ///
@@ -740,5 +793,48 @@ mod tests {
         // 座標が素通し (input=map/scale=1) で元画像範囲に収まる。
         assert!(b0[0] >= 0 && b0[1] >= 0);
         assert!(b1[0] + b1[2] <= map_w as i32 && b1[1] + b1[3] <= map_h as i32);
+    }
+
+    /// 正しい文字 (有意な文字あり・十分な信頼度) は残す。
+    #[test]
+    fn should_keep_text_region_keeps_valid_text() {
+        assert!(should_keep_text_region("補聴器", 0.92));
+        assert!(should_keep_text_region("レンタル", 0.75));
+        assert!(should_keep_text_region("PARIS MIKI", 0.88));
+        // 下限ギリギリ上 (0.35 以上) は残す (見逃し側へ倒す保守設計)。
+        assert!(should_keep_text_region("定", 0.36));
+    }
+
+    /// 実質空の region は弾く。
+    #[test]
+    fn should_keep_text_region_rejects_empty() {
+        assert!(!should_keep_text_region("", 0.99));
+        assert!(!should_keep_text_region("   ", 0.99));
+    }
+
+    /// 信頼度が下限未満の化け候補は、有意な文字があっても弾く (差3: 文字化け)。
+    #[test]
+    fn should_keep_text_region_rejects_low_confidence_garble() {
+        // 「補」→「哈」のような低信頼の化けは弾く。
+        assert!(!should_keep_text_region("哈", 0.20));
+        assert!(!should_keep_text_region("abc", 0.10));
+        // 境界: 0.35 未満は弾く。
+        assert!(!should_keep_text_region("文字", 0.34));
+    }
+
+    /// 記号だけ (非文字アイコンの塊) は、信頼度が高くなければ弾く (差2: アイコン混入)。
+    #[test]
+    fn should_keep_text_region_rejects_symbol_only_icon() {
+        // 眼鏡アイコンが記号列 + 中信頼で出るケースを弾く。
+        assert!(!should_keep_text_region("◇◇", 0.50));
+        assert!(!should_keep_text_region("□□□", 0.60));
+        assert!(!should_keep_text_region("―", 0.45));
+    }
+
+    /// 正当な記号テキスト (「!」等) は、信頼度が十分高ければ記号だけでも残す (誤除去防止)。
+    #[test]
+    fn should_keep_text_region_keeps_high_confidence_symbols() {
+        assert!(should_keep_text_region("!", 0.85));
+        assert!(should_keep_text_region("+", 0.90));
     }
 }
