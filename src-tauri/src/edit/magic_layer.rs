@@ -728,7 +728,10 @@ pub fn build_text_layers(
                 } else {
                     "Helvetica".to_string()
                 },
-                font_size: ((h as f32) * 0.8).clamp(8.0, 240.0),
+                // サイズは元画像の「文字行の帯の高さ」から推定（Canva的な見た目保持復元・第2弾）。
+                // 取れなければ従来の bbox 比例式（h×0.8）へフォールバック。
+                font_size: estimate_font_size([x, y, w, h], prob_map, (width, height), is_ja)
+                    .unwrap_or_else(|| ((h as f32) * 0.8).clamp(8.0, 240.0)),
                 // 太さは元画像のインク密度から推定（Canva的な見た目保持復元）。
                 // 取れなければ従来どおり normal。
                 font_weight: estimate_font_weight([x, y, w, h], prob_map, (width, height))
@@ -862,6 +865,68 @@ pub(crate) fn estimate_font_weight(
     // しきい値 0.24: 日本語の見出し Bold と本文 Regular の密度を実画像で分けた経験値。
     // 完全一致は狙わず 2 値。境界付近は normal 側に倒す（太字化しすぎない安全側）。
     Some(if density >= 0.24 { "bold" } else { "normal" })
+}
+
+/// 文字サイズ (px) を、ストローク確率マップの「インクが実在する行の帯」から推定する。
+///
+/// なぜ固定式 (bbox高さ×0.8) では足りないか (Canva 的な見た目保持復元の第2弾):
+/// 検出 bbox は行の上下余白・行間を含むので、bbox 高さと実際の文字サイズはズレる。
+/// とくに (a) 複数行テキストは bbox が全行を囲むため 1 行あたりでは過大、
+/// (b) 英字はディセンダ/アセンダで縦に伸び、日本語はほぼ全高を使うので比率が違う。
+///
+/// 原理: bbox 内の各行 (y) について「インク画素がしきい値本数以上ある行」を文字行とみなす。
+/// 連続する文字行の帯のうち最も高いものを 1 行の高さ (line_px) とし、そこから font_size を出す。
+/// 日本語は line_px ≒ 仮想ボディ、英字は大文字高が line_px の約 0.7 なので係数で寄せる。
+///
+/// prob_map 無し/位置ズレ/文字行が取れないときは None（呼び出し側で従来の bbox 比例式へ）。
+pub(crate) fn estimate_font_size(
+    bbox: [u32; 4],
+    prob_map: Option<&TextProbMap>,
+    image_dims: (u32, u32),
+    is_ja: bool,
+) -> Option<f32> {
+    let [x, y, w, h] = bbox;
+    let (iw, ih) = image_dims;
+    let pm = prob_map?;
+    if pm.width != iw || pm.height != ih || w == 0 || h == 0 {
+        return None;
+    }
+    let x_end = (x + w).min(iw);
+    let y_end = (y + h).min(ih);
+    if x_end <= x || y_end <= y {
+        return None;
+    }
+    // 「文字行」判定のしきい値: その行の幅の 8% 以上にインクがあれば文字行とみなす。
+    // 罫線・点1個のノイズ行を除外しつつ、細い本文の行は拾える経験値。
+    let row_ink_gate = (((x_end - x) as f32) * 0.08).ceil() as u32;
+    // 各行のインク画素数から、連続する文字行の帯（run）の最大高さを求める。
+    let mut best_run: u32 = 0;
+    let mut cur_run: u32 = 0;
+    let mut ink_rows: u32 = 0;
+    for yy in y..y_end {
+        let mut row_ink: u32 = 0;
+        for xx in x..x_end {
+            if pm.prob_at(xx, yy) >= DB_STROKE_THRESHOLD {
+                row_ink += 1;
+            }
+        }
+        if row_ink >= row_ink_gate {
+            cur_run += 1;
+            ink_rows += 1;
+            best_run = best_run.max(cur_run);
+        } else {
+            cur_run = 0;
+        }
+    }
+    // 文字行がほとんど取れない（位置ズレ・空白 bbox 疑い）ときは信用しない。
+    if best_run < 4 || ink_rows < 4 {
+        return None;
+    }
+    // 1 行の帯の高さ = 仮想ボディに近い。日本語はほぼ全高が字面なので係数 1.0、
+    // 英字は大文字高が帯高の約 0.7（ディセンダ分を含んで帯が高く出る）なので寄せる。
+    let line_px = best_run as f32;
+    let size = if is_ja { line_px } else { line_px * 0.72 };
+    Some(size.clamp(8.0, 240.0))
 }
 
 /// DB 確率マップの閾値。PaddleOCR DB 検出器の標準二値化閾値 (0.3) に合わせる。
@@ -1176,6 +1241,67 @@ mod tests {
         let pm = probmap_with_density(40, 40, 0.5);
         assert_eq!(
             estimate_font_weight([0, 0, 40, 40], Some(&pm), (80, 80)),
+            None
+        );
+    }
+
+    /// 指定した行範囲 [row_start, row_end) だけを全幅インクで埋めた prob_map を作る。
+    /// 「文字行の帯」を模してフォントサイズ推定をテストするためのヘルパ。
+    fn probmap_with_ink_rows(w: u32, h: u32, row_start: u32, row_end: u32) -> TextProbMap {
+        let (wu, hu) = (w as usize, h as usize);
+        let mut data = vec![0u8; wu * hu];
+        for yy in row_start..row_end.min(h) {
+            for xx in 0..w {
+                data[(yy as usize) * wu + (xx as usize)] = 255; // prob=1.0 → しきい値超え = インク
+            }
+        }
+        TextProbMap { width: w, height: h, data }
+    }
+
+    #[test]
+    fn font_size_ja_uses_ink_band_height() {
+        // bbox 高さ 60 だが、実際の文字インクは中央の 20 行 (y20..40) だけ。
+        // 固定式なら 60×0.8=48 になるところ、帯高 20 → 日本語係数 1.0 で 20 に寄る。
+        let pm = probmap_with_ink_rows(40, 60, 20, 40);
+        let size = estimate_font_size([0, 0, 40, 60], Some(&pm), (40, 60), true).unwrap();
+        assert!(
+            (size - 20.0).abs() < 2.0,
+            "帯高からサイズが取れていない: {size} (期待 ≒20)"
+        );
+        // 牙: 固定式 (48) を返していないこと。帯を無視したら FAIL する。
+        assert!(size < 40.0, "bbox高さの固定式に退行している: {size}");
+    }
+
+    #[test]
+    fn font_size_en_smaller_than_ja_for_same_band() {
+        // 同じ帯高でも英字は大文字高係数 0.72 で日本語より小さくなる。
+        let pm = probmap_with_ink_rows(40, 60, 10, 40); // 帯高 30
+        let ja = estimate_font_size([0, 0, 40, 60], Some(&pm), (40, 60), true).unwrap();
+        let en = estimate_font_size([0, 0, 40, 60], Some(&pm), (40, 60), false).unwrap();
+        assert!(en < ja, "英字係数が効いていない: en={en} ja={ja}");
+    }
+
+    #[test]
+    fn font_size_none_without_ink_band() {
+        // インク行がまったく無い（余白だけの bbox）→ None（呼び出し側で従来式へ）。
+        let pm = probmap_with_ink_rows(40, 60, 0, 0);
+        assert_eq!(
+            estimate_font_size([0, 0, 40, 60], Some(&pm), (40, 60), true),
+            None
+        );
+    }
+
+    #[test]
+    fn font_size_none_without_probmap() {
+        // prob_map 無し → None（呼び出し側で bbox 比例式にフォールバック）
+        assert_eq!(estimate_font_size([0, 0, 40, 60], None, (40, 60), true), None);
+    }
+
+    #[test]
+    fn font_size_none_on_dimension_mismatch() {
+        let pm = probmap_with_ink_rows(40, 60, 20, 40);
+        assert_eq!(
+            estimate_font_size([0, 0, 40, 60], Some(&pm), (80, 80), true),
             None
         );
     }
