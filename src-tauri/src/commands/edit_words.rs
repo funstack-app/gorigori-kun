@@ -371,81 +371,7 @@ async fn run_words_segment(
             height,
             image::Luma([0u8]),
         );
-        if let Some(u) = &understanding {
-            // 工程1: 理解層の text_blocks を本物のテキストレイヤーにする (切り抜きなし)。
-            // 消去は SAM3 text マスク (グロー込みの見た目のかたまり) と、block bbox の
-            // フォント比例拡張 (magic_layer の ERASE と同じ 0.4h 規則) の union。
-            for det in &text_instances {
-                for (dst, src) in erase_mask.pixels_mut().zip(det.mask.pixels()) {
-                    if src[0] > 127 {
-                        *dst = image::Luma([255u8]);
-                    }
-                }
-            }
-            for (i, block) in u.text_blocks.iter().enumerate() {
-                let [bx, by, bw, bh] = block.bbox;
-                let d = ((bh as f64 * 0.40).round() as i32).max(6);
-                for yy in (by - d).max(0)..(by + bh + d).min(height as i32) {
-                    for xx in (bx - d).max(0)..(bx + bw + d).min(width as i32) {
-                        erase_mask.put_pixel(xx as u32, yy as u32, image::Luma([255u8]));
-                    }
-                }
-                let bbox_u = [
-                    bx.max(0) as u32,
-                    by.max(0) as u32,
-                    bw.max(1) as u32,
-                    bh.max(1) as u32,
-                ];
-                let is_ja = block.text.chars().any(|c| {
-                    matches!(c, '\u{3040}'..='\u{30FF}' | '\u{4E00}'..='\u{9FFF}')
-                });
-                let serif = crate::edit::magic_layer::estimate_serif(
-                    bbox_u,
-                    prob_map.as_ref(),
-                    (width, height),
-                );
-                let font_size = crate::edit::magic_layer::estimate_font_size(
-                    bbox_u,
-                    prob_map.as_ref(),
-                    (width, height),
-                    is_ja,
-                )
-                .unwrap_or_else(|| ((bh as f32) * 0.8).clamp(8.0, 240.0));
-                let font_weight = crate::edit::magic_layer::estimate_font_weight(
-                    bbox_u,
-                    prob_map.as_ref(),
-                    (width, height),
-                )
-                .unwrap_or("normal")
-                .to_string();
-                let color = block.color.clone().unwrap_or_else(|| {
-                    crate::edit::magic_layer::text_color(&rgb_for_color, bbox_u, prob_map.as_ref())
-                });
-                text_layers_out.push(TextLayerSpec {
-                    id: format!("text-{i:04}"),
-                    name: format!("テキスト {}", i + 1),
-                    text: block.text.clone(),
-                    image_path: None,
-                    image_bbox: None,
-                    bbox: block.bbox,
-                    font_family: crate::edit::magic_layer::pick_initial_font_family(is_ja, serif),
-                    font_size,
-                    font_weight,
-                    serif,
-                    color,
-                    align: "left".to_string(),
-                    x: bx,
-                    y: by,
-                    opacity: 1.0,
-                    visible: true,
-                    rotation: 0.0,
-                });
-            }
-        }
         for (i, det) in text_instances.iter().enumerate() {
-            if understanding.is_some() {
-                break; // 工程1で生成済み。従来のピクセル切り抜きは作らない。
-            }
             let out_path = run_dir.join(format!("text-{:02}.png", i + 1));
             // 色距離マット優先: SAM3 の int8 マスクは文字の細部で粗く、そのまま alpha に
             // すると縁の背景が白い斑点として焼き込まれる (2026-07-09 実機報告)。フラット
@@ -491,6 +417,37 @@ async fn run_words_segment(
                 .filter(|text| !text.is_empty())
                 .collect::<Vec<_>>()
                 .join("\n");
+            // 理解層の読みで内容を矯正する。見た目は元画素のまま (デザインのタイポグラフィを
+            // 壊さない、2026-07-09 STΛCK判断)、ダブルクリック変換時の文字だけ正確になる
+            // (ローカルOCRの誤読「通腮器」→ Codex の「補聴器」)。このブロックに中心が載る
+            // text_blocks を上→下、左→右で連結。無ければローカルOCRの読みを使う。
+            let joined = match &understanding {
+                Some(u) => {
+                    let mut blocks: Vec<_> = u
+                        .text_blocks
+                        .iter()
+                        .filter(|b| {
+                            let cx = b.bbox[0] + b.bbox[2] / 2;
+                            let cy = b.bbox[1] + b.bbox[3] / 2;
+                            cx >= bbox[0]
+                                && cx < bbox[0] + bbox[2]
+                                && cy >= bbox[1]
+                                && cy < bbox[1] + bbox[3]
+                        })
+                        .collect();
+                    if blocks.is_empty() {
+                        joined
+                    } else {
+                        blocks.sort_by_key(|b| (b.bbox[1], b.bbox[0]));
+                        blocks
+                            .iter()
+                            .map(|b| b.text.as_str())
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    }
+                }
+                None => joined,
+            };
 
             let first_bbox = linked.first().map(|region| region.bbox).unwrap_or(bbox);
             let color_bbox = [
