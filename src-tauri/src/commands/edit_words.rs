@@ -503,6 +503,110 @@ async fn run_words_segment(
             }
         }
 
+        // 3.5) 主従逆転 (2026-07-09 スライド実測): SAM3 が取りこぼした text_blocks を
+        // Codex の座標から直接レイヤー化する。実測 (page-02): Codex は 15 blocks を把握
+        // したのに SAM3 は 2 件しか掴めず、レイヤー化 6/24 で本文が背景に埋もれた。
+        // 理解層の要素リストを正とし、SAM3 は「見つけられた分だけ」の従へ降格する。
+        // 切り出しはフラット配色に強い色距離マット (bbox 矩形を ROI に使う)。
+        // マットが適用できないブロック (写真背景等) はレイヤー化せず背景に残す (安全側)。
+        if let Some(u) = &understanding {
+            let covered = |b: &[i32; 4]| -> bool {
+                let cx = b[0] + b[2] / 2;
+                let cy = b[1] + b[3] / 2;
+                text_layers_out.iter().any(|l| {
+                    cx >= l.bbox[0]
+                        && cx < l.bbox[0] + l.bbox[2]
+                        && cy >= l.bbox[1]
+                        && cy < l.bbox[1] + l.bbox[3]
+                })
+            };
+            let missing: Vec<_> = u.text_blocks.iter().filter(|b| !covered(&b.bbox)).collect();
+            let mut added = 0usize;
+            for (j, block) in missing.iter().enumerate() {
+                let [bx, by, bw, bh] = block.bbox;
+                let pad = ((bh / 4).max(4)) as i32;
+                let gate = [bx - pad, by - pad, bw + 2 * pad, bh + 2 * pad];
+                // ROI: gate 矩形 (SAM3 マスクの代わり)。マットが背景色画素を透明化する。
+                let mut roi = image::ImageBuffer::<image::Luma<u8>, Vec<u8>>::from_pixel(
+                    width,
+                    height,
+                    image::Luma([0u8]),
+                );
+                for yy in (gate[1]).max(0)..(gate[1] + gate[3]).min(height as i32) {
+                    for xx in (gate[0]).max(0)..(gate[0] + gate[2]).min(width as i32) {
+                        roi.put_pixel(xx as u32, yy as u32, image::Luma([255u8]));
+                    }
+                }
+                let idx = text_layers_out.len();
+                let out_path = run_dir.join(format!("text-u{:02}.png", j + 1));
+                let Ok(Some(crop_bbox)) = crate::edit::magic_layer::crop_with_color_matte(
+                    &rgba, &roi, gate, block.bbox, &out_path,
+                ) else {
+                    tracing::info!(
+                        target: "codex.edit",
+                        "words: 理解層ブロックのマット不成立、背景に残す text={:?}",
+                        block.text
+                    );
+                    continue;
+                };
+                // 消去 (跡地を背景で埋める対象に含める)。
+                let d = ((bh as f64 * 0.40).round() as i32).max(6);
+                for yy in (by - d).max(0)..(by + bh + d).min(height as i32) {
+                    for xx in (bx - d).max(0)..(bx + bw + d).min(width as i32) {
+                        erase_mask.put_pixel(xx as u32, yy as u32, image::Luma([255u8]));
+                    }
+                }
+                let bbox_u = [
+                    bx.max(0) as u32,
+                    by.max(0) as u32,
+                    bw.max(1) as u32,
+                    bh.max(1) as u32,
+                ];
+                let is_ja = block.text.chars().any(|c| {
+                    matches!(c, '\u{3040}'..='\u{30FF}' | '\u{4E00}'..='\u{9FFF}')
+                });
+                let serif = crate::edit::magic_layer::estimate_serif(
+                    bbox_u,
+                    prob_map.as_ref(),
+                    (width, height),
+                );
+                text_layers_out.push(TextLayerSpec {
+                    id: format!("text-{idx:04}"),
+                    name: format!("テキスト {}", idx + 1),
+                    text: block.text.clone(),
+                    image_path: Some(out_path.to_string_lossy().into_owned()),
+                    image_bbox: Some(crop_bbox),
+                    bbox: crop_bbox,
+                    font_family: crate::edit::magic_layer::pick_initial_font_family(is_ja, serif),
+                    font_size: ((bh as f32) * 0.8).clamp(8.0, 240.0),
+                    font_weight: "normal".to_string(),
+                    serif,
+                    color: block.color.clone().unwrap_or_else(|| {
+                        crate::edit::magic_layer::text_color(
+                            &rgb_for_color,
+                            bbox_u,
+                            prob_map.as_ref(),
+                        )
+                    }),
+                    align: "left".to_string(),
+                    x: crop_bbox[0],
+                    y: crop_bbox[1],
+                    opacity: 1.0,
+                    visible: true,
+                    rotation: 0.0,
+                });
+                added += 1;
+            }
+            if !missing.is_empty() {
+                tracing::info!(
+                    target: "codex.edit",
+                    "words: 理解層の取りこぼし補完 {}/{}件をレイヤー化 (SAM3漏れ)",
+                    added,
+                    missing.len()
+                );
+            }
+        }
+
         // 4) 消去 (塗り方は inpaint_image が文脈で自動選択: 滑らか=補間 / 複雑=LaMa)。
         if text_layers_out.is_empty() {
             tokio::fs::copy(input, &text_removed_path)
