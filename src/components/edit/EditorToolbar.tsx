@@ -18,7 +18,8 @@ const TOOLS: Array<{ id: EditorTool; icon: ReactNode; label: string }> = [
 // 「その他ツール」= 実行系（状態は持たず run で発火）。右パネルから左レールへ移設
 // (2026-07-08 STΛCK指摘「左=ツール / 右=プロパティ」)。ホバーで名前が出る。
 const EXTRA_TOOLS: Array<{ id: EditorTool; icon: ReactNode; label: string }> = [
-  { id: "magic", icon: <DecomposeIcon />, label: "自動レイヤー分解 (旧方式)" },
+  // "magic" (旧方式の自動分解) はレールから撤去 (2026-07-09 STΛCK指摘「分解メニューが
+  // 多くて選べない」)。分解の入り口はキャンバス中央の「レイヤーに分解する」1つに統一。
   { id: "redo-decompose", icon: <RedoDecomposeIcon />, label: "再分解" },
   { id: "bgremove", icon: <PersonCutIcon />, label: "人物切り抜き" },
   { id: "grab", icon: <GrabIcon />, label: "マジックグラブ" },
@@ -205,15 +206,6 @@ function RedoIcon() {
 
 /* --- その他ツール用アイコン --- */
 
-function DecomposeIcon() {
-  // 重なった板 = レイヤー分解
-  return (
-    <svg {...SVG_PROPS} aria-hidden>
-      <path d="M12 3l9 5-9 5-9-5 9-5z" />
-      <path d="M3 13l9 5 9-5" />
-    </svg>
-  );
-}
 
 function RedoDecomposeIcon() {
   // 円環矢印 = 再分解
