@@ -91,7 +91,7 @@ pub async fn codex_analyze_design(
         - text_blocks は視覚的な行・ブロック単位。文字は1文字も創作しない (読めなければその要素を出さない)\n\
         - 文字が主体のロゴ (ワードマーク) は text_blocks に入れる。絵的なアイコン・写真・図形は graphics に入れる\n\
         - 同じ視覚的まとまりに属する text_blocks には同じ group 名を付ける\n\
-        - bbox は画像左上原点のピクセル座標で、必ず [左上x, 左上y, 幅, 高さ] の4要素\n\
+        - bbox は必ず [左上x, 左上y, 幅, 高さ] の4要素。**座標系は 0〜1000 の正規化スケール** (画像の左上=[0,0]、右下=[1000,1000]。ピクセル値ではない)\n\
         - color は文字の塗り色の近似16進"
     );
     run_codex_vision(image_path, &prompt).await

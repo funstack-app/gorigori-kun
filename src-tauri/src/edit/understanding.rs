@@ -123,12 +123,20 @@ pub fn parse_design_understanding(
 /// 判定規則 (決定論): xywh 解釈で bbox が画像内に収まるならそれを採用 (要求した書式を
 /// 優先)。収まらないが x1y1x2y2 解釈 (x2>x1, y2>y1, 画像内) が成立するならそちら。
 /// どちらも成立しなければ xywh でクランプし、退化 (幅/高さ<2px) は None。
+// 入力の座標系はプロンプトで **0〜1000 の正規化スケール** を要求している
+// (2026-07-09 実測: 4000px 原寸ではモデルが内部縮小した物差しでピクセル座標を返し、
+// 全要素が左上へ潰れて補完 10/14 失敗・消去が誤位置に走った。正規化要求で解像度
+// 非依存にする)。まず 0..1000 とみなして画像サイズへスケールし、値が 1000 を
+// 明確に超える場合のみピクセル座標として扱う (旧応答・指示無視への後方互換)。
 fn normalize_bbox(raw: &[f64], img_w: u32, img_h: u32) -> Option<[i32; 4]> {
     if raw.len() != 4 || raw.iter().any(|v| !v.is_finite()) {
         return None;
     }
     let (iw, ih) = (img_w as f64, img_h as f64);
-    let [a, b, c, d] = [raw[0], raw[1], raw[2], raw[3]];
+    let scale = raw.iter().all(|v| *v <= 1000.0 + 8.0);
+    let (sx, sy) = if scale { (iw / 1000.0, ih / 1000.0) } else { (1.0, 1.0) };
+    let raw = [raw[0] * sx, raw[1] * sy, raw[2] * sx, raw[3] * sy];
+    let [a, b, c, d] = raw;
     // 少しの座標誤差は許す (実測: 右上バッジで x2=1204 等、数px の食み出し)。
     let margin = 8.0;
     let xywh_fits =
@@ -184,30 +192,30 @@ mod tests {
     fn parse_normalizes_mixed_bbox_formats() {
         // 実測の揺れを再現: text は xywh、graphics は x1y1x2y2。
         let raw = r##"前置き {"text_blocks":[
-            {"text":"レンタル","bbox":[61,478,753,170],"color":"#003F6F","group":"main"},
+            {"text":"レンタル","bbox":[51,398,628,142],"color":"#003F6F","group":"main"},
             {"text":"","bbox":[0,0,10,10]},
             {"text":"unreadable","bbox":[0,0,10,10]}
         ],"graphics":[
-            {"name":"耳アイコン","kind":"icon","bbox":[985,43,1118,174]},
+            {"name":"耳アイコン","kind":"icon","bbox":[821,36,932,145]},
             {"name":"壊れ","bbox":[1,2,3]}
         ]} 後置き"##;
         let u = parse_design_understanding(raw, 1200, 1200).unwrap();
         assert_eq!(u.text_blocks.len(), 1, "空/unreadable は捨てる");
-        assert_eq!(u.text_blocks[0].bbox, [61, 478, 753, 170], "xywh はそのまま");
+        assert_eq!(u.text_blocks[0].bbox, [61, 477, 753, 170], "0-1000正規化→1200pxへスケール");
         assert_eq!(u.text_blocks[0].color.as_deref(), Some("#003F6F"));
         assert_eq!(u.graphics.len(), 1, "bbox破損は捨てる");
-        // [985,43,1118,174]: xywh だと x+w=2103 が画像外 → x1y1x2y2 解釈で幅133,高さ131。
-        assert_eq!(u.graphics[0].bbox, [985, 43, 133, 131], "x1y1x2y2 を正規化");
+        // [821,36,932,145] (0-1000): xywh だと x+w=1753 が範囲外 → x1y1x2y2 解釈 → 1200pxスケール。
+        assert_eq!(u.graphics[0].bbox, [985, 43, 133, 130], "x1y1x2y2 解釈 + スケール");
     }
 
     #[test]
     fn parse_rejects_garbage_and_clamps() {
         assert!(parse_design_understanding("JSONなし", 100, 100).is_err());
-        let raw = r#"{"text_blocks":[{"text":"はみ出し","bbox":[-20,-20,80,80]}],"graphics":[]}"#;
+        let raw = r#"{"text_blocks":[{"text":"はみ出し","bbox":[-200,-200,800,800]}],"graphics":[]}"#;
         let u = parse_design_understanding(raw, 100, 100).unwrap();
-        assert_eq!(u.text_blocks[0].bbox, [0, 0, 60, 60], "画像内へクランプ");
+        assert_eq!(u.text_blocks[0].bbox, [0, 0, 60, 60], "0-1000→100pxスケール後にクランプ");
         // 不正な色は None に落とす。
-        let raw2 = r#"{"text_blocks":[{"text":"色壊れ","bbox":[0,0,10,10],"color":"blue"}],"graphics":[]}"#;
+        let raw2 = r#"{"text_blocks":[{"text":"色壊れ","bbox":[0,0,100,100],"color":"blue"}],"graphics":[]}"#;
         let u2 = parse_design_understanding(raw2, 100, 100).unwrap();
         assert!(u2.text_blocks[0].color.is_none());
     }
