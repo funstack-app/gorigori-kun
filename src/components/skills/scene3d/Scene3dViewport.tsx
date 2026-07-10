@@ -494,7 +494,14 @@ function ViewportControls() {
   const dragging = useScene3d((s) => s.draggingEntityId != null);
   const playing = useScene3d((s) => s.playing);
   const cameraView = useScene3d((s) => s.cameraView);
-  return <OrbitControls enabled={!dragging && !playing && !cameraView} makeDefault />;
+  return (
+    <OrbitControls
+      enabled={!dragging && !playing && !cameraView}
+      makeDefault
+      minDistance={0.8}
+      maxDistance={45}
+    />
+  );
 }
 
 export function Scene3dViewport() {
@@ -512,9 +519,8 @@ export function Scene3dViewport() {
       gl={{ preserveDrawingBuffer: true }}
       onPointerMissed={() => selectEntity(null)}
     >
-      {/* グレースタジオ(クレイ模型風)。奥はフォグで自然に消す */}
+      {/* グレースタジオ(クレイ模型風)。霧は視認性を殺すため使わない */}
       <color attach="background" args={["#75777b"]} />
-      <fog attach="fog" args={["#75777b", 45, 130]} />
       <ambientLight intensity={0.85} />
       <directionalLight position={[5, 8, 5]} intensity={1.1} castShadow />
       {/* 書き出し中は補助表示を消す(モーションガイドに写り込ませない) */}
@@ -527,7 +533,8 @@ export function Scene3dViewport() {
           sectionThickness={1.5}
           cellColor="#5b5d61"
           sectionColor="#3c3e42"
-          fadeDistance={50}
+          fadeDistance={120}
+          fadeStrength={0.6}
           position={[0, 0.001, 0]}
         />
       )}
