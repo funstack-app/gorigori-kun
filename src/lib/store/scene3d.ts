@@ -421,7 +421,11 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
     const { project, selectedShotId } = get();
     if (project.shots.length <= 1) return; // 最低1カットは残す
     const shots = renumberShots(project.shots.filter((s) => s.id !== id));
-    const next = { ...project, shots };
+    // 使い手がいなくなったカメラ(レーン)は一緒に片付ける
+    const cameras = project.cameras.filter((c) =>
+      shots.some((sh) => sh.cameraId === c.id),
+    );
+    const next = { ...project, shots, cameras };
     const nextSelected = selectedShotId === id ? shots[0].id : selectedShotId;
     set({
       project: next,

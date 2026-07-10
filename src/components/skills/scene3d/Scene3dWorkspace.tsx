@@ -401,7 +401,7 @@ function ShelfPanel() {
                 {e.label}
               </button>
               <button
-                className="hidden text-neutral-500 hover:text-red-400 group-hover:block"
+                className="text-neutral-600 hover:text-red-400"
                 onClick={() => removeEntity(e.id)}
                 title="削除"
               >
@@ -444,7 +444,7 @@ function ShelfPanel() {
                 </button>
                 {usingShots.length === 0 && cameras.length > 1 && (
                   <button
-                    className="absolute right-1 top-1.5 hidden text-[10px] text-neutral-500 hover:text-red-400 group-hover/cam:block"
+                    className="absolute right-1 top-1.5 text-[10px] text-neutral-600 hover:text-red-400"
                     onClick={() => removeCamera(cam.id)}
                     title="このカメラを削除"
                   >
@@ -1781,7 +1781,7 @@ export function Scene3dWorkspace() {
   const rightW = Math.max(150, Math.round((rowW * rightPct) / 100));
 
   return (
-    <section className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#121212]">
+    <section className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#121212] [&_input[type=range]]:accent-neutral-400">
       <div className="border-b border-[#242424] bg-[#121212] px-4 py-3">
         <div className="flex items-center gap-3">
           <WorkspaceTabs />
