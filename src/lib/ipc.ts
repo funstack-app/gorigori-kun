@@ -959,3 +959,15 @@ export const skills = {
   exportZip: (skillId: string, destZipPath: string) =>
     invoke<number>("skill_export_zip", { skillId, destZipPath }),
 };
+
+/** scene3d: モーションガイド動画の書き出し(フレーム単位のPNG → ffmpeg MP4)。 */
+export const scene3d = {
+  /** 書き出しセッションを開始し、専用一時ディレクトリを返す。 */
+  exportBegin: () => invoke<string>("scene3d_export_begin"),
+  /** 1フレーム分の PNG バイト列を書き込む。 */
+  writeFrame: (exportDir: string, index: number, pngBytes: Uint8Array) =>
+    invoke<void>("scene3d_write_frame", { exportDir, index, pngBytes }),
+  /** PNG連番を MP4 化。戻り値: [mp4パス, 開始フレームPNGパス]。 */
+  encode: (exportDir: string, fps: number) =>
+    invoke<[string, string]>("scene3d_encode", { exportDir, fps }),
+};

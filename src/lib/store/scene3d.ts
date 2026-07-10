@@ -56,6 +56,13 @@ function presetPlacement(
   }
 }
 
+export type Scene3dExportStatus =
+  | { phase: "idle" }
+  | { phase: "rendering"; done: number; total: number }
+  | { phase: "encoding" }
+  | { phase: "done"; mp4Path: string | null; firstFramePath: string | null; framesDir: string }
+  | { phase: "error"; message: string };
+
 type Scene3dState = {
   project: SceneProject;
   selectedEntityId: string | null;
@@ -67,6 +74,12 @@ type Scene3dState = {
   currentFrame: number;
   /** 床ドラッグ中のエンティティID(OrbitControls無効化に使う) */
   draggingEntityId: string | null;
+  /**
+   * 書き出し要求ノンス。increment すると Viewport 内の ExportDriver が
+   * 書き出しを開始する(UIボタン → Canvas内コンポーネントへの橋渡し)
+   */
+  exportRequest: number;
+  exportStatus: Scene3dExportStatus;
 
   addEntity: (kind: SceneEntityKind) => void;
   removeEntity: (id: string) => void;
@@ -86,6 +99,10 @@ type Scene3dState = {
   setCameraView: (on: boolean) => void;
   setCurrentFrame: (frame: number) => void;
   resetProject: () => void;
+
+  /** 書き出しを要求する(実行は Viewport 内 ExportDriver) */
+  requestExport: () => void;
+  setExportStatus: (status: Scene3dExportStatus) => void;
 };
 
 export const useScene3d = create<Scene3dState>((set, get) => ({
@@ -95,6 +112,8 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
   cameraView: false,
   currentFrame: 0,
   draggingEntityId: null,
+  exportRequest: 0,
+  exportStatus: { phase: "idle" },
 
   addEntity: (kind) => {
     const { project } = get();
@@ -206,5 +225,14 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
       playing: false,
       cameraView: false,
       currentFrame: 0,
+      exportStatus: { phase: "idle" },
     }),
+
+  requestExport: () => {
+    const { exportStatus } = get();
+    const busy = exportStatus.phase === "rendering" || exportStatus.phase === "encoding";
+    if (busy) return;
+    set({ playing: false, exportRequest: get().exportRequest + 1 });
+  },
+  setExportStatus: (exportStatus) => set({ exportStatus }),
 }));

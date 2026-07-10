@@ -190,7 +190,75 @@ function DirectorPanel() {
           onChange={(e) => setDurationSeconds(Number(e.target.value))}
         />
       </label>
+
+      <ExportSection />
     </aside>
+  );
+}
+
+function ExportSection() {
+  const status = useScene3d((s) => s.exportStatus);
+  const requestExport = useScene3d((s) => s.requestExport);
+  const busy = status.phase === "rendering" || status.phase === "encoding";
+
+  const revealInFinder = async (path: string) => {
+    const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
+    await revealItemInDir(path);
+  };
+
+  return (
+    <div className="mt-auto flex flex-col gap-2 border-t border-[#242424] pt-3">
+      <p className="text-xs font-semibold text-neutral-400">生成する</p>
+      <button
+        className="rounded bg-gradient-to-r from-pink-600 to-rose-500 px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
+        disabled={busy}
+        onClick={requestExport}
+      >
+        {busy ? "書き出し中…" : "📼 モーションガイドを書き出す"}
+      </button>
+
+      {status.phase === "rendering" && (
+        <p className="text-[11px] text-neutral-400">
+          フレーム描画中 {status.done}/{status.total}
+        </p>
+      )}
+      {status.phase === "encoding" && (
+        <p className="text-[11px] text-neutral-400">MP4に変換中…</p>
+      )}
+      {status.phase === "done" && (
+        <div className="flex flex-col gap-1 text-[11px] text-neutral-400">
+          {status.mp4Path ? (
+            <>
+              <p className="text-emerald-400">✓ motion-guide.mp4 完成</p>
+              <button
+                className="rounded border border-[#2e2e2e] px-2 py-1 text-left text-neutral-300 hover:border-neutral-500"
+                onClick={() => void revealInFinder(status.mp4Path!)}
+              >
+                📂 Finderで表示
+              </button>
+            </>
+          ) : (
+            <>
+              <p className="text-amber-400">
+                PNG連番まで書き出しました(ffmpeg未検出のためMP4変換はスキップ)
+              </p>
+              <button
+                className="rounded border border-[#2e2e2e] px-2 py-1 text-left text-neutral-300 hover:border-neutral-500"
+                onClick={() => void revealInFinder(status.framesDir)}
+              >
+                📂 フォルダを表示
+              </button>
+            </>
+          )}
+        </div>
+      )}
+      {status.phase === "error" && (
+        <p className="text-[11px] text-red-400">書き出し失敗: {status.message}</p>
+      )}
+      <p className="text-[11px] leading-4 text-neutral-500">
+        書き出した動画は動画生成AIの「参照動画」として、開始フレームPNGは「開始画像」として使います
+      </p>
+    </div>
   );
 }
 

@@ -27,6 +27,7 @@ pub mod skills;
 pub mod stock;
 pub mod storage;
 pub mod storage_cleanup;
+pub mod scene3d;
 pub mod storyboard;
 pub mod translate;
 

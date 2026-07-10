@@ -7,15 +7,17 @@
  *   (プレビューと書き出しが同じ評価器を通る = 決定性の担保)
  */
 
-import { useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { Grid, Line, OrbitControls } from "@react-three/drei";
 import type { ThreeEvent } from "@react-three/fiber";
+import { PerspectiveCamera, Vector2 } from "three";
 import type { PerspectiveCamera as ThreePerspectiveCamera, Ray } from "three";
 
+import { scene3d as scene3dIpc } from "../../../lib/ipc";
 import { evaluateCamera, resolveLookAt } from "../../../lib/scene3d/evaluateScene";
 import { SCENE_FPS } from "../../../lib/scene3d/types";
-import type { SceneEntity, Vec3 } from "../../../lib/scene3d/types";
+import type { SceneAspectRatio, SceneEntity, Vec3 } from "../../../lib/scene3d/types";
 import { useScene3d } from "../../../lib/store/scene3d";
 
 /** ポインタのレイと床面(y=0)の交点。交差しない場合は null */
@@ -98,6 +100,103 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
   );
 }
 
+const EXPORT_RESOLUTION: Record<SceneAspectRatio, [number, number]> = {
+  "16:9": [1280, 720],
+  "9:16": [720, 1280],
+  "1:1": [960, 960],
+};
+
+/**
+ * モーションガイド書き出し。exportRequest が増えたら、
+ * evaluateCamera で1フレームずつ描画 → PNG → Rust(ffmpeg) へ渡す。
+ * 補助表示(軌道線・グリッド)は exporting 中に非表示化してから開始する。
+ */
+function ExportDriver() {
+  const { gl, scene } = useThree();
+  const exportRequest = useScene3d((s) => s.exportRequest);
+
+  useEffect(() => {
+    if (exportRequest === 0) return;
+    let cancelled = false;
+
+    (async () => {
+      const st = useScene3d.getState();
+      const project = st.project;
+      const total = project.durationFrames;
+      st.setExportStatus({ phase: "rendering", done: 0, total });
+
+      // React が補助表示の非表示を反映するのを待つ(2フレーム)
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+
+      const [w, h] = EXPORT_RESOLUTION[project.aspectRatio];
+      const prevSize = new Vector2();
+      gl.getSize(prevSize);
+      const prevRatio = gl.getPixelRatio();
+
+      const cam = new PerspectiveCamera(50, w / h, 0.1, 200);
+
+      try {
+        const exportDir = await scene3dIpc.exportBegin();
+        gl.setPixelRatio(1);
+        gl.setSize(w, h, false);
+
+        for (let f = 0; f < total; f++) {
+          if (cancelled) return;
+          const pose = evaluateCamera(project, f);
+          cam.position.set(pose.position[0], pose.position[1], pose.position[2]);
+          cam.lookAt(pose.lookAt[0], pose.lookAt[1], pose.lookAt[2]);
+          cam.fov = pose.fovDeg;
+          cam.updateProjectionMatrix();
+          gl.render(scene, cam);
+
+          const blob = await new Promise<Blob | null>((resolve) =>
+            gl.domElement.toBlob(resolve, "image/png"),
+          );
+          if (!blob) throw new Error("フレームのPNG変換に失敗しました");
+          const bytes = new Uint8Array(await blob.arrayBuffer());
+          await scene3dIpc.writeFrame(exportDir, f, bytes);
+          useScene3d.getState().setExportStatus({ phase: "rendering", done: f + 1, total });
+        }
+
+        useScene3d.getState().setExportStatus({ phase: "encoding" });
+        try {
+          const [mp4Path, firstFramePath] = await scene3dIpc.encode(exportDir, project.fps);
+          useScene3d.getState().setExportStatus({
+            phase: "done",
+            mp4Path,
+            firstFramePath,
+            framesDir: exportDir,
+          });
+        } catch (e) {
+          const msg = String(e);
+          if (msg.includes("ffmpeg-not-found")) {
+            // PNG連番までは成功。ffmpeg 未導入だけを伝える
+            useScene3d.getState().setExportStatus({
+              phase: "done",
+              mp4Path: null,
+              firstFramePath: null,
+              framesDir: exportDir,
+            });
+          } else {
+            throw e;
+          }
+        }
+      } catch (e) {
+        useScene3d.getState().setExportStatus({ phase: "error", message: String(e) });
+      } finally {
+        gl.setPixelRatio(prevRatio);
+        gl.setSize(prevSize.x, prevSize.y, false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [exportRequest, gl, scene]);
+
+  return null;
+}
+
 /** カメラ軌道の可視化。evaluateCamera を12分割サンプリングして線にする */
 function CameraPathLine() {
   const project = useScene3d((s) => s.project);
@@ -176,23 +275,38 @@ function ViewportControls() {
 export function Scene3dViewport() {
   const entities = useScene3d((s) => s.project.entities);
   const selectEntity = useScene3d((s) => s.selectEntity);
+  const exporting = useScene3d(
+    (s) => s.exportStatus.phase === "rendering" || s.exportStatus.phase === "encoding",
+  );
 
   return (
     <Canvas
       shadows
       camera={{ position: [4, 3, 6], fov: 50 }}
+      // toBlob でフレームを回収するため描画バッファを保持する
+      gl={{ preserveDrawingBuffer: true }}
       style={{ background: "#0a0a0a" }}
       onPointerMissed={() => selectEntity(null)}
     >
       <ambientLight intensity={0.6} />
       <directionalLight position={[5, 8, 5]} intensity={1.2} castShadow />
-      <Grid
-        args={[30, 30]}
-        cellColor="#1f2937"
-        sectionColor="#334155"
-        fadeDistance={25}
-        position={[0, 0, 0]}
-      />
+      {/* 書き出し中は補助表示を消す(モーションガイドに写り込ませない) */}
+      {!exporting && (
+        <Grid
+          args={[30, 30]}
+          cellColor="#1f2937"
+          sectionColor="#334155"
+          fadeDistance={25}
+          position={[0, 0, 0]}
+        />
+      )}
+      {/* 書き出し時の床: 輪郭が分かる無地の床(Seedanceの空間手がかり) */}
+      {exporting && (
+        <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.002, 0]}>
+          <planeGeometry args={[60, 60]} />
+          <meshStandardMaterial color="#3f3f46" />
+        </mesh>
+      )}
       {/* 影受けの床 */}
       <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.001, 0]} receiveShadow>
         <planeGeometry args={[60, 60]} />
@@ -201,9 +315,10 @@ export function Scene3dViewport() {
       {entities.map((e) => (
         <EntityMesh key={e.id} entity={e} />
       ))}
-      <CameraPathLine />
+      {!exporting && <CameraPathLine />}
       <CameraRig />
       <ViewportControls />
+      <ExportDriver />
     </Canvas>
   );
 }
