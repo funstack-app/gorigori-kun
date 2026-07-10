@@ -672,6 +672,7 @@ function DirectorPanel() {
   const setShotDurationFrames = useScene3d((s) => s.setShotDurationFrames);
   const setAspectRatio = useScene3d((s) => s.setAspectRatio);
   const moveCameraEndpoint = useScene3d((s) => s.moveCameraEndpoint);
+  const setCameraLookAtPos = useScene3d((s) => s.setCameraLookAtPos);
   const [presetOpen, setPresetOpen] = useState(false);
 
   const assignShotCamera = useScene3d((s) => s.assignShotCamera);
@@ -734,7 +735,7 @@ function DirectorPanel() {
           value={camera.targetEntityId ?? ""}
           onChange={(e) => setCameraTarget(e.target.value || null)}
         >
-          <option value="">(なし — 中央を見る)</option>
+          <option value="">(追わない — 固定の注視点)</option>
           {project.entities.map((en) => (
             <option key={en.id} value={en.id}>
               {en.label}
@@ -742,6 +743,44 @@ function DirectorPanel() {
           ))}
         </select>
       </label>
+
+      {camera.targetEntityId == null && (
+        <div className="flex flex-col gap-1.5 rounded-lg border border-[#2a2a2a] bg-[#101010] p-2.5">
+          <p className="text-[10px] font-bold tracking-wide text-neutral-500">
+            注視点(カメラが見る場所。被写体とは連動しない)
+          </p>
+          <AxisSlider
+            label="横"
+            value={(camera.lookAtPos ?? [0, 1, 0])[0]}
+            min={-15}
+            max={15}
+            onChange={(v) => {
+              const la = camera.lookAtPos ?? [0, 1, 0];
+              setCameraLookAtPos([v, la[1], la[2]]);
+            }}
+          />
+          <AxisSlider
+            label="高さ"
+            value={(camera.lookAtPos ?? [0, 1, 0])[1]}
+            min={0}
+            max={12}
+            onChange={(v) => {
+              const la = camera.lookAtPos ?? [0, 1, 0];
+              setCameraLookAtPos([la[0], v, la[2]]);
+            }}
+          />
+          <AxisSlider
+            label="奥"
+            value={(camera.lookAtPos ?? [0, 1, 0])[2]}
+            min={-15}
+            max={15}
+            onChange={(v) => {
+              const la = camera.lookAtPos ?? [0, 1, 0];
+              setCameraLookAtPos([la[0], la[1], v]);
+            }}
+          />
+        </div>
+      )}
 
       <div className="flex flex-col gap-1.5 rounded-lg border border-[#2a2a2a] bg-[#101010] p-2.5">
         <p className="text-[10px] font-bold tracking-wide text-neutral-500">

@@ -136,6 +136,7 @@ type Scene3dState = {
   /** 以下のカメラ操作は selectedShotId のショットが使うカメラに効く */
   setCameraPreset: (preset: CameraPresetId) => void;
   setCameraTarget: (entityId: string | null) => void;
+  setCameraLookAtPos: (position: Vec3) => void;
   setLens: (lensMm: number) => void;
   setOrbitDegrees: (degrees: number) => void;
   moveCameraEndpoint: (which: "start" | "end", position: Vec3) => void;
@@ -505,7 +506,21 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
   },
 
   setCameraTarget: (entityId) => {
-    set({ project: updateSelectedCameraMove(get(), (m) => ({ ...m, targetEntityId: entityId })) });
+    const { project } = get();
+    const shot = getSelectedShot(get());
+    // 「追わない」へ切替時: 今見ている点を固定注視点として引き継ぐ(向きが跳ねない)
+    const currentLookAt = resolveLookAt(project, shot);
+    set({
+      project: updateSelectedCameraMove(get(), (m) => ({
+        ...m,
+        targetEntityId: entityId,
+        lookAtPos: entityId == null ? currentLookAt : m.lookAtPos,
+      })),
+    });
+  },
+
+  setCameraLookAtPos: (position: Vec3) => {
+    set({ project: updateSelectedCameraMove(get(), (m) => ({ ...m, lookAtPos: position })) });
   },
 
   setLens: (lensMm) => {

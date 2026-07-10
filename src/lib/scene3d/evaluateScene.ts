@@ -77,10 +77,11 @@ export function getShotMove(project: SceneProject, shot: SceneShot): CameraMove 
   return cam ? cam.move : createDefaultCameraMove();
 }
 
-/** 注視点: 対象エンティティの胸元(人型)/中心。対象なしなら原点付近 */
+/** 注視点: 被写体指定なら追従、なしなら固定の注視点(被写体と連動しない) */
 export function resolveLookAt(project: SceneProject, shot: SceneShot): Vec3 {
-  const target = findEntity(project, getShotMove(project, shot).targetEntityId);
-  if (!target) return [0, 1, 0];
+  const move = getShotMove(project, shot);
+  const target = findEntity(project, move.targetEntityId);
+  if (!target) return move.lookAtPos ?? [0, 1, 0];
   const headHeight = target.kind === "mannequin" ? 1.3 * target.scale : 0.5 * target.scale;
   return [target.position[0], target.position[1] + headHeight, target.position[2]];
 }

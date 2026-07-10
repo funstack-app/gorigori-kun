@@ -553,7 +553,7 @@ function CameraIndicator({ camera, selected }: { camera: SceneCamera; selected: 
         <sphereGeometry args={[0.035, 10, 8]} />
         <meshBasicMaterial color={tally} />
       </mesh>
-      {selected && (
+      {highlight && (
         <>
           <Line points={[zero, c1]} color="#f9a8d4" lineWidth={1} transparent opacity={0.7} />
           <Line points={[zero, c2]} color="#f9a8d4" lineWidth={1} transparent opacity={0.7} />

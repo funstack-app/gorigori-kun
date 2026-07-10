@@ -60,8 +60,10 @@ export type CameraEasing = "linear" | "easeInOut";
 
 export type CameraMove = {
   preset: CameraPresetId;
-  /** 注視対象のエンティティID。null なら原点を見る */
+  /** 注視対象のエンティティID。null なら lookAtPos(固定の注視点)を見る=被写体を追わない */
   targetEntityId: string | null;
+  /** 被写体を追わないときの固定注視点 */
+  lookAtPos?: Vec3;
   startPos: Vec3;
   /** orbit 以外で使用。orbit は orbitDegrees から終了位置を導出する */
   endPos: Vec3;
