@@ -12,20 +12,6 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import {
-  DndContext,
-  PointerSensor,
-  closestCenter,
-  useSensor,
-  useSensors,
-} from "@dnd-kit/core";
-import type { DragEndEvent } from "@dnd-kit/core";
-import {
-  SortableContext,
-  horizontalListSortingStrategy,
-  useSortable,
-} from "@dnd-kit/sortable";
-import { CSS } from "@dnd-kit/utilities";
 import type { ReactNode } from "react";
 
 import { ActiveProjectSelector } from "../../ActiveProjectSelector";
@@ -64,10 +50,6 @@ const PRESET_ORDER: CameraPresetId[] = [
   "crane",
   "handheld",
 ];
-
-/** タイムラインの縮尺(1秒 = 28px) */
-const PX_PER_SEC = 28;
-const pxPerFrame = PX_PER_SEC / SCENE_FPS;
 
 const ASPECT_VALUES: Record<SceneAspectRatio, number> = {
   "16:9": 16 / 9,
@@ -862,21 +844,84 @@ function ExportSection() {
 
 /* ---------------------------------- タイムライン ---------------------------------- */
 
-/** タイムライン上の1クリップ。幅=秒数、右端ドラッグで尺変更、本体ドラッグで並び替え */
-function ShotClip({ shot, index }: { shot: SceneShot; index: number }) {
+/** レーンの高さ(px)。カメラ1台=1レーン */
+const LANE_H = 50;
+
+type ShotSegment = {
+  shot: SceneShot;
+  index: number;
+  startFrame: number;
+};
+
+/**
+ * レーン上の1クリップ(絶対配置: 左端=開始時刻、幅=尺)。
+ * - クリック: 選択 / 右端ドラッグ: 尺変更
+ * - 本体ドラッグ: 横=並び替え(時間順) / 縦=別カメラのレーンへ移動(カメラ切替)
+ */
+function LaneClip({
+  seg,
+  laneIndex,
+  segs,
+  ppf,
+}: {
+  seg: ShotSegment;
+  laneIndex: number;
+  segs: ShotSegment[];
+  ppf: number;
+}) {
+  const project = useScene3d((s) => s.project);
   const selectedShotId = useScene3d((s) => s.selectedShotId);
   const selectShot = useScene3d((s) => s.selectShot);
   const removeShot = useScene3d((s) => s.removeShot);
+  const reorderShots = useScene3d((s) => s.reorderShots);
+  const assignShotCamera = useScene3d((s) => s.assignShotCamera);
   const setShotDurationFrames = useScene3d((s) => s.setShotDurationFrames);
-  const shotCount = useScene3d((s) => s.project.shots.length);
 
+  const { shot, index, startFrame } = seg;
   const selected = selectedShotId === shot.id;
-  const widthPx = Math.max(56, shot.durationFrames * pxPerFrame);
+  const move = getShotMove(project, shot);
+  const clipColor = cameraColor(project, shot.cameraId);
+  const leftPx = startFrame * ppf;
+  const widthPx = Math.max(6, shot.durationFrames * ppf); // 幅=時間を厳密一致(最小6pxは掴み代)
 
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
-    useSortable({ id: shot.id });
-
+  const [drag, setDrag] = useState<{ dx: number; dy: number } | null>(null);
+  const dragStart = useRef<{ x: number; y: number } | null>(null);
   const resizeState = useRef<{ startX: number; startFrames: number } | null>(null);
+
+  const onBodyDown = (e: React.PointerEvent) => {
+    e.stopPropagation();
+    selectShot(shot.id);
+    dragStart.current = { x: e.clientX, y: e.clientY };
+    (e.currentTarget as Element).setPointerCapture(e.pointerId);
+  };
+  const onBodyMove = (e: React.PointerEvent) => {
+    if (!dragStart.current) return;
+    setDrag({ dx: e.clientX - dragStart.current.x, dy: e.clientY - dragStart.current.y });
+  };
+  const onBodyUp = (e: React.PointerEvent) => {
+    const start = dragStart.current;
+    dragStart.current = null;
+    (e.currentTarget as Element).releasePointerCapture(e.pointerId);
+    if (!start || !drag) return;
+    const { dx, dy } = drag;
+    setDrag(null);
+    if (Math.abs(dx) < 5 && Math.abs(dy) < 5) return; // クリック扱い
+
+    // 縦: レーン移動 = カメラ切替
+    const laneDelta = Math.round(dy / LANE_H);
+    const targetLane = Math.max(0, Math.min(project.cameras.length - 1, laneIndex + laneDelta));
+    if (targetLane !== laneIndex) {
+      assignShotCamera(shot.id, project.cameras[targetLane].id);
+    }
+    // 横: 並び替え(移動後の中心が入る位置のカットと入替)
+    const center = leftPx + dx + widthPx / 2;
+    const targetSeg = segs.find(
+      (sg) => center >= sg.startFrame * ppf && center < (sg.startFrame + sg.shot.durationFrames) * ppf,
+    );
+    if (targetSeg && targetSeg.shot.id !== shot.id) {
+      reorderShots(shot.id, targetSeg.shot.id);
+    }
+  };
 
   const onResizeDown = (e: React.PointerEvent) => {
     e.stopPropagation();
@@ -887,72 +932,54 @@ function ShotClip({ shot, index }: { shot: SceneShot; index: number }) {
   const onResizeMove = (e: React.PointerEvent) => {
     if (!resizeState.current) return;
     const dx = e.clientX - resizeState.current.startX;
-    setShotDurationFrames(shot.id, resizeState.current.startFrames + dx / pxPerFrame);
+    setShotDurationFrames(shot.id, resizeState.current.startFrames + dx / ppf);
   };
   const onResizeUp = (e: React.PointerEvent) => {
     resizeState.current = null;
     (e.target as Element).releasePointerCapture(e.pointerId);
   };
 
-  const project = useScene3d((s) => s.project);
-  const move = getShotMove(project, shot);
-  const clipColor = cameraColor(project, shot.cameraId);
-  const camLabel = (project.cameras.find((c) => c.id === shot.cameraId) ?? project.cameras[0]).label;
-
   return (
     <div
-      ref={setNodeRef}
       style={{
+        left: leftPx,
         width: widthPx,
-        transform: CSS.Transform.toString(transform),
-        transition,
-        opacity: isDragging ? 0.6 : 1,
+        transform: drag ? `translate(${drag.dx}px, ${drag.dy}px)` : undefined,
+        zIndex: drag ? 30 : selected ? 10 : 1,
+        borderColor: selected ? clipColor : "#2a2a2a",
       }}
-      className={`group relative flex h-16 shrink-0 cursor-grab select-none flex-col overflow-hidden rounded-md border ${
-        selected
-          ? "border-pink-400 ring-1 ring-pink-400/40"
-          : "border-[#2a2a2a] hover:border-pink-400/50"
-      } bg-[#161616]`}
-      onClick={() => selectShot(shot.id)}
-      {...attributes}
-      {...listeners}
+      className={`group absolute top-0.5 flex h-[46px] cursor-grab select-none flex-col overflow-hidden rounded-md border bg-[#161616] ${
+        selected ? "ring-1" : "hover:brightness-125"
+      }`}
+      onPointerDown={onBodyDown}
+      onPointerMove={onBodyMove}
+      onPointerUp={onBodyUp}
     >
-      {/* 上段: 動きの種類の色帯 */}
-      <div
-        className="flex h-5 shrink-0 items-center gap-1 px-1.5"
-        style={{ backgroundColor: `${clipColor}33`, borderBottom: `2px solid ${clipColor}` }}
-      >
-        <span style={{ color: clipColor }} className="shrink-0 [&_svg]:h-3 [&_svg]:w-6">
-          <PresetGlyph preset={move.preset} />
-        </span>
-        <span className="min-w-0 flex-1 truncate text-[9px]" style={{ color: clipColor }}>
-          {camLabel} · {CAMERA_PRESET_LABELS[move.preset]}
-        </span>
-      </div>
-      {/* 下段: ラベルと尺 */}
+      {/* 色帯(カメラ識別色) */}
+      <div className="h-1 w-full shrink-0" style={{ backgroundColor: clipColor }} />
       <div className="flex min-h-0 flex-1 flex-col justify-center px-1.5">
-        <p className={`truncate text-xs font-medium ${selected ? "text-pink-200" : "text-neutral-200"}`}>
-          {index + 1}. {shot.label}
+        <p className={`truncate text-[11px] font-medium ${selected ? "text-white" : "text-neutral-300"}`}>
+          {index + 1}. {(shot.durationFrames / SCENE_FPS).toFixed(1)}s
         </p>
-        <p className="text-[10px] tabular-nums text-neutral-500">
-          {(shot.durationFrames / SCENE_FPS).toFixed(1)}s
+        <p className="truncate text-[9px]" style={{ color: clipColor }}>
+          {CAMERA_PRESET_LABELS[move.preset]}
         </p>
       </div>
-      {shotCount > 1 && (
+      {segs.length > 1 && (
         <button
-          className="absolute right-1 top-6 hidden text-[10px] text-neutral-500 hover:text-red-400 group-hover:block"
+          className="absolute right-0.5 top-1 hidden text-[10px] text-neutral-500 hover:text-red-400 group-hover:block"
+          onPointerDown={(e) => e.stopPropagation()}
           onClick={(e) => {
             e.stopPropagation();
             removeShot(shot.id);
           }}
-          title="リップル削除(消すと後ろが詰まる)"
+          title="リップル削除"
         >
           ✕
         </button>
       )}
-      {/* 右端の尺変更ハンドル */}
       <div
-        className="absolute -right-0.5 top-0 h-full w-2 cursor-ew-resize rounded-r-md bg-pink-400/0 hover:bg-pink-400/60"
+        className="absolute -right-0.5 top-0 h-full w-2 cursor-ew-resize bg-pink-400/0 hover:bg-pink-400/60"
         onPointerDown={onResizeDown}
         onPointerMove={onResizeMove}
         onPointerUp={onResizeUp}
@@ -961,18 +988,11 @@ function ShotClip({ shot, index }: { shot: SceneShot; index: number }) {
   );
 }
 
-/** CapCut風タイムライン: 再生ヘッド + ルーラースクラブ + クリップ列 + カット追加。上端ドラッグで高さ調整 */
+/**
+ * マルチカム・タイムライン: カメラごとのレーンが同じ時間軸に積み重なる。
+ * クリップを上下ドラッグでカメラ切替、左右ドラッグで並び替え、右端で尺変更
+ */
 function ShotTimeline() {
-  const [bodyH, setBodyH] = useState(() => {
-    const saved = Number(localStorage.getItem("scene3d.timeline.h"));
-    return Number.isFinite(saved) && saved >= 64 && saved <= 320 ? saved : 96;
-  });
-  const resizeState = useRef<{ startY: number; startH: number } | null>(null);
-  const updateBodyH = (h: number) => {
-    const clamped = Math.max(64, Math.min(320, Math.round(h)));
-    setBodyH(clamped);
-    localStorage.setItem("scene3d.timeline.h", String(clamped));
-  };
   const project = useScene3d((s) => s.project);
   const playing = useScene3d((s) => s.playing);
   const cameraView = useScene3d((s) => s.cameraView);
@@ -984,33 +1004,48 @@ function ShotTimeline() {
   const setCurrentFrame = useScene3d((s) => s.setCurrentFrame);
   const setPlaying = useScene3d((s) => s.setPlaying);
   const addShot = useScene3d((s) => s.addShot);
+  const addCamera = useScene3d((s) => s.addCamera);
   const removeShot = useScene3d((s) => s.removeShot);
   const selectedShotId = useScene3d((s) => s.selectedShotId);
   const shotCount = useScene3d((s) => s.project.shots.length);
   const splitShotAtPlayhead = useScene3d((s) => s.splitShotAtPlayhead);
-  const reorderShots = useScene3d((s) => s.reorderShots);
+  const zoom = useScene3d((s) => s.timelineZoom);
+  const setTimelineZoom = useScene3d((s) => s.setTimelineZoom);
+  const selectCameraOfShot = useScene3d((s) => s.selectCameraOfShot);
 
+  const ppf = zoom / SCENE_FPS;
   const totalFrames = totalDurationFrames(project);
   const totalSec = totalFrames / SCENE_FPS;
-  const playheadX = Math.min(currentFrame, totalFrames - 1) * pxPerFrame;
+  const playheadX = Math.min(currentFrame, totalFrames - 1) * ppf;
   const scrubbing = useRef(false);
 
-  const sensors = useSensors(
-    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
-  );
-
-  const onDragEnd = (event: DragEndEvent) => {
-    const { active, over } = event;
-    if (over && active.id !== over.id) {
-      reorderShots(String(active.id), String(over.id));
-    }
+  const [bodyH, setBodyH] = useState(() => {
+    const saved = Number(localStorage.getItem("scene3d.timeline.h"));
+    return Number.isFinite(saved) && saved >= 64 && saved <= 360 ? saved : 150;
+  });
+  const heightState = useRef<{ startY: number; startH: number } | null>(null);
+  const updateBodyH = (h: number) => {
+    const clamped = Math.max(64, Math.min(360, Math.round(h)));
+    setBodyH(clamped);
+    localStorage.setItem("scene3d.timeline.h", String(clamped));
   };
+
+  // 通し位置つきセグメント
+  const segs: ShotSegment[] = [];
+  {
+    let acc = 0;
+    project.shots.forEach((shot, index) => {
+      segs.push({ shot, index, startFrame: acc });
+      acc += shot.durationFrames;
+    });
+  }
+  const contentW = Math.max(totalFrames * ppf + 120, 400);
 
   const scrubTo = (e: React.PointerEvent<HTMLDivElement>) => {
     const rect = e.currentTarget.getBoundingClientRect();
-    const x = e.clientX - rect.left + e.currentTarget.scrollLeft;
+    const x = e.clientX - rect.left;
     setPlaying(false);
-    setCurrentFrame(Math.max(0, Math.min(totalFrames - 1, x / pxPerFrame)));
+    setCurrentFrame(Math.max(0, Math.min(totalFrames - 1, x / ppf)));
   };
 
   return (
@@ -1019,24 +1054,28 @@ function ShotTimeline() {
       <div
         className="group flex h-1.5 w-full cursor-row-resize items-center justify-center hover:bg-pink-400/25"
         onPointerDown={(e) => {
-          resizeState.current = { startY: e.clientY, startH: bodyH };
+          heightState.current = { startY: e.clientY, startH: bodyH };
           (e.target as Element).setPointerCapture(e.pointerId);
         }}
         onPointerMove={(e) => {
-          if (!resizeState.current) return;
-          updateBodyH(resizeState.current.startH - (e.clientY - resizeState.current.startY));
+          if (!heightState.current) return;
+          updateBodyH(heightState.current.startH - (e.clientY - heightState.current.startY));
         }}
         onPointerUp={(e) => {
-          resizeState.current = null;
+          heightState.current = null;
           (e.target as Element).releasePointerCapture(e.pointerId);
         }}
       >
         <div className="h-0.5 w-10 rounded bg-[#3a3a3a] group-hover:bg-pink-300" />
       </div>
+
+      {/* トランスポート行 */}
       <div className="flex min-w-0 items-center gap-3 overflow-hidden px-4 pt-1">
         <button
           className={`flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-[13px] font-semibold ${
-            playing ? "bg-red-500/20 text-red-300" : "bg-sky-500/20 text-pink-300"
+            playing
+              ? "border-red-400/50 bg-red-500/10 text-red-300"
+              : "border-[#343434] bg-[#101010] text-neutral-200 hover:border-pink-400"
           }`}
           onClick={togglePlay}
           title="スペースキーでも再生/停止(停止で再生開始位置に戻る)"
@@ -1045,13 +1084,13 @@ function ShotTimeline() {
           {playing ? "停止" : "再生"}
         </button>
         <button
-          className={`flex items-center gap-1.5 rounded-lg border px-3 py-1 text-sm ${
+          className={`flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-[13px] font-semibold ${
             cameraView
               ? "border-amber-500 bg-amber-500/15 text-amber-300"
               : "border-[#2a2a2a] text-neutral-400"
           }`}
           onClick={() => setCameraView(!cameraView)}
-          title="撮影カメラの画で確認"
+          title="撮影カメラの画で確認(全画面)"
         >
           <CameraViewIcon />
           カメラの画
@@ -1071,7 +1110,7 @@ function ShotTimeline() {
         <button
           className="flex items-center gap-1.5 rounded-lg border border-[#2a2a2a] px-3 py-1.5 text-[13px] font-semibold text-neutral-400 hover:border-pink-400/60 hover:text-neutral-200"
           onClick={splitShotAtPlayhead}
-          title="再生ヘッド位置でカットを2分割(カメラの動きも引き継いで割れる)"
+          title="再生ヘッド位置でカットを2分割"
         >
           <Icon className="h-4 w-4">
             <circle cx="6" cy="7" r="2.5" />
@@ -1084,7 +1123,7 @@ function ShotTimeline() {
           className="flex items-center gap-1.5 rounded-lg border border-[#2a2a2a] px-3 py-1.5 text-[13px] font-semibold text-neutral-400 hover:border-pink-400/60 hover:text-neutral-200 disabled:opacity-40"
           disabled={shotCount <= 1}
           onClick={() => removeShot(selectedShotId)}
-          title="選択カットをリップル削除(後ろのカットが自動で詰まる)"
+          title="選択カットをリップル削除"
         >
           <Icon className="h-4 w-4">
             <path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13M14 12l-4 5M10 12l4 5" />
@@ -1102,9 +1141,19 @@ function ShotTimeline() {
           </Icon>
           複製
         </button>
-        <span className="min-w-0 flex-1 truncate text-[10px] text-neutral-600">
-          Space: 再生/停止 · ←→: コマ送り(Shiftで1秒) · Home: 先頭 · ⌘Z: 取り消し
-        </span>
+        {/* ズームスライダー */}
+        <label className="ml-2 flex shrink-0 items-center gap-1.5 text-[10px] text-neutral-500">
+          ズーム
+          <input
+            type="range"
+            min={8}
+            max={120}
+            step={2}
+            value={zoom}
+            onChange={(e) => setTimelineZoom(Number(e.target.value))}
+            className="w-24"
+          />
+        </label>
         <span className="ml-auto shrink-0 text-xs tabular-nums text-neutral-400">
           {(currentFrame / SCENE_FPS).toFixed(1)}s / 合計 {totalSec.toFixed(1)}s
           {totalSec > SEEDANCE_MAX_SECONDS && (
@@ -1113,68 +1162,101 @@ function ShotTimeline() {
         </span>
       </div>
 
-      <div style={{ height: bodyH }} className="overflow-x-auto overflow-y-auto px-4 pb-3 pt-1">
-        <div className="relative w-max min-w-full">
-          {/* 1秒ごとの縦グリッド線(時間の目盛りをクリップ帯まで通す) */}
-          <div
-            className="pointer-events-none absolute inset-0"
-            style={{
-              backgroundImage: `repeating-linear-gradient(to right, #26262a 0 1px, transparent 1px ${PX_PER_SEC}px)`,
-            }}
-          />
-          {/* ルーラー(クリック/ドラッグでスクラブ) */}
-          <div
-            className="relative mb-1 h-4 cursor-col-resize"
-            onPointerDown={(e) => {
-              scrubbing.current = true;
-              (e.target as Element).setPointerCapture(e.pointerId);
-              scrubTo(e);
-            }}
-            onPointerMove={(e) => {
-              if (scrubbing.current) scrubTo(e);
-            }}
-            onPointerUp={() => {
-              scrubbing.current = false;
-            }}
-          >
-            {Array.from({ length: Math.ceil(totalSec) + 1 }, (_, i) => (
-              <span
-                key={i}
-                className="absolute top-0 border-l border-[#3a3a3a] pl-0.5 text-[9px] text-neutral-500"
-                style={{ left: i * PX_PER_SEC }}
-              >
-                {i}s
-              </span>
-            ))}
-          </div>
-
-          {/* クリップ列 */}
-          <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
-            <SortableContext
-              items={project.shots.map((s) => s.id)}
-              strategy={horizontalListSortingStrategy}
+      {/* レーン領域: 左=カメラ名の欄 / 右=時間軸スクロール */}
+      <div style={{ height: bodyH }} className="flex min-w-0 overflow-y-auto px-4 pb-2 pt-1">
+        {/* レーン名の欄(スクロールしない) */}
+        <div className="mr-1 flex w-20 shrink-0 flex-col">
+          <div className="h-5 shrink-0" />
+          {project.cameras.map((cam) => (
+            <button
+              key={cam.id}
+              style={{ height: LANE_H }}
+              className="flex items-center gap-1.5 truncate rounded-l px-1.5 text-left text-[10px] text-neutral-400 hover:bg-[#101010]"
+              onClick={() => {
+                const first = project.shots.find((sh) => sh.cameraId === cam.id);
+                if (first) selectCameraOfShot(first.id);
+              }}
+              title={cam.label}
             >
-              <div className="flex items-center gap-1">
-                {project.shots.map((shot, i) => (
-                  <ShotClip key={shot.id} shot={shot} index={i} />
-                ))}
-                <button
-                  className="flex h-14 w-14 shrink-0 items-center justify-center rounded-md border border-dashed border-[#3a3a3a] text-lg text-neutral-500 hover:border-pink-400/60 hover:text-pink-300"
-                  onClick={addShot}
-                  title="カットを追加(選択中カットの複製から)"
-                >
-                  +
-                </button>
-              </div>
-            </SortableContext>
-          </DndContext>
-
-          {/* 再生ヘッド */}
-          <div
-            className="pointer-events-none absolute top-0 h-full w-px bg-rose-400"
-            style={{ left: playheadX }}
+              <span
+                className="inline-block h-2 w-2 shrink-0 rounded-full"
+                style={{ backgroundColor: cameraColor(project, cam.id) }}
+              />
+              <span className="truncate">{cam.label}</span>
+            </button>
+          ))}
+          <button
+            className="mt-1 rounded border border-dashed border-[#3a3a3a] px-1 py-1 text-[10px] text-neutral-500 hover:border-pink-400/60 hover:text-pink-300"
+            onClick={addCamera}
+            title="カメラを追加(レーンが増える)"
           >
-            <div className="absolute -left-1 -top-0.5 h-2 w-2 rotate-45 bg-rose-400" />
+            + カメラ
+          </button>
+        </div>
+
+        {/* 時間軸スクロール領域 */}
+        <div className="min-w-0 flex-1 overflow-x-auto">
+          <div className="relative" style={{ width: contentW }}>
+            {/* 1秒ごとの縦グリッド線 */}
+            <div
+              className="pointer-events-none absolute inset-0"
+              style={{
+                backgroundImage: `repeating-linear-gradient(to right, #26262a 0 1px, transparent 1px ${zoom}px)`,
+              }}
+            />
+            {/* ルーラー(クリック/ドラッグでスクラブ) */}
+            <div
+              className="relative h-5 cursor-col-resize"
+              onPointerDown={(e) => {
+                scrubbing.current = true;
+                (e.target as Element).setPointerCapture(e.pointerId);
+                scrubTo(e);
+              }}
+              onPointerMove={(e) => {
+                if (scrubbing.current) scrubTo(e);
+              }}
+              onPointerUp={() => {
+                scrubbing.current = false;
+              }}
+            >
+              {Array.from({ length: Math.ceil(totalSec) + 2 }, (_, i) => (
+                <span
+                  key={i}
+                  className="absolute top-0 border-l border-[#3a3a3a] pl-0.5 text-[9px] text-neutral-500"
+                  style={{ left: i * zoom }}
+                >
+                  {i}s
+                </span>
+              ))}
+            </div>
+
+            {/* カメラレーン(同じ時間軸に積層) */}
+            {project.cameras.map((cam, laneIndex) => (
+              <div
+                key={cam.id}
+                style={{ height: LANE_H }}
+                className="relative border-b border-[#1d1d1d]"
+              >
+                {/* レーンの帯(カメラ色のうっすら背景) */}
+                <div
+                  className="pointer-events-none absolute inset-0"
+                  style={{ backgroundColor: `${cameraColor(project, cam.id)}0d` }}
+                />
+                {segs
+                  .filter((sg) => sg.shot.cameraId === cam.id)
+                  .map((sg) => (
+                    <LaneClip key={sg.shot.id} seg={sg} laneIndex={laneIndex} segs={segs} ppf={ppf} />
+                  ))}
+              </div>
+            ))}
+
+            {/* 再生ヘッド(全レーン貫通) */}
+            <div
+              className="pointer-events-none absolute top-0 h-full w-px bg-rose-400"
+              style={{ left: playheadX }}
+            >
+              <div className="absolute -left-1 -top-0.5 h-2 w-2 rotate-45 bg-rose-400" />
+            </div>
           </div>
         </div>
       </div>

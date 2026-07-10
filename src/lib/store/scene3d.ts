@@ -98,6 +98,8 @@ type Scene3dState = {
   draggingEntityId: string | null;
   /** 再生を開始した位置(停止時にここへ戻る) */
   playStartFrame: number;
+  /** タイムラインの縮尺(1秒あたりのpx) */
+  timelineZoom: number;
   /**
    * 書き出し要求ノンス。increment すると Viewport 内の ExportDriver が
    * 書き出しを開始する(UIボタン → Canvas内コンポーネントへの橋渡し)
@@ -151,6 +153,7 @@ type Scene3dState = {
   applyPaneOp: (op: PaneOp) => void;
   setCurrentFrame: (frame: number) => void;
   setAspectRatio: (ratio: SceneAspectRatio) => void;
+  setTimelineZoom: (pxPerSec: number) => void;
   resetProject: () => void;
 
   /** 書き出しを要求する(実行は Viewport 内 ExportDriver) */
@@ -217,6 +220,10 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
   currentFrame: 0,
   draggingEntityId: null,
   playStartFrame: 0,
+  timelineZoom: (() => {
+    const saved = Number(localStorage.getItem("scene3d.timeline.zoom"));
+    return Number.isFinite(saved) && saved >= 8 && saved <= 120 ? saved : 28;
+  })(),
   exportRequest: 0,
   exportStatus: { phase: "idle" },
 
@@ -564,6 +571,11 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
   setAspectRatio: (aspectRatio) => {
     const { project } = get();
     set({ project: { ...project, aspectRatio } });
+  },
+  setTimelineZoom: (pxPerSec) => {
+    const clamped = Math.max(8, Math.min(120, Math.round(pxPerSec)));
+    localStorage.setItem("scene3d.timeline.zoom", String(clamped));
+    set({ timelineZoom: clamped });
   },
   resetProject: () =>
     set({
