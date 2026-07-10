@@ -383,8 +383,8 @@ export function Scene3dViewport() {
     >
       {/* グレースタジオ(クレイ模型風)。奥はフォグで自然に消す */}
       <color attach="background" args={["#75777b"]} />
-      <fog attach="fog" args={["#75777b", 18, 45]} />
-      <ambientLight intensity={0.75} />
+      <fog attach="fog" args={["#75777b", 45, 130]} />
+      <ambientLight intensity={0.85} />
       <directionalLight position={[5, 8, 5]} intensity={1.1} castShadow />
       {/* 書き出し中は補助表示を消す(モーションガイドに写り込ませない) */}
       {!exporting && (

@@ -374,3 +374,62 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
   },
   setExportStatus: (exportStatus) => set({ exportStatus }),
 }));
+
+/* ---------------------------------- Undo / Redo ---------------------------------- */
+// 履歴はUI反応不要のためストア外のモジュール変数で持つ(project の参照変化だけ監視)。
+// 連続操作(床ドラッグ・尺リサイズ等)は400ms窓で1つの履歴に吸収する
+
+let undoPast: SceneProject[] = [];
+let undoFuture: SceneProject[] = [];
+let lastChangeAt = 0;
+let applyingHistory = false;
+
+useScene3d.subscribe((state, prevState) => {
+  if (applyingHistory) return;
+  if (state.project === prevState.project) return;
+  const now = Date.now();
+  if (now - lastChangeAt >= 400) {
+    undoPast.push(prevState.project);
+    if (undoPast.length > 100) undoPast.shift();
+    undoFuture = [];
+  }
+  lastChangeAt = now;
+});
+
+export function undoScene3d(): void {
+  const prev = undoPast.pop();
+  if (!prev) return;
+  applyingHistory = true;
+  const current = useScene3d.getState().project;
+  undoFuture.push(current);
+  restoreProject(prev);
+  applyingHistory = false;
+}
+
+export function redoScene3d(): void {
+  const next = undoFuture.pop();
+  if (!next) return;
+  applyingHistory = true;
+  undoPast.push(useScene3d.getState().project);
+  restoreProject(next);
+  applyingHistory = false;
+}
+
+/** 履歴復元時に、選択・再生ヘッドが消えたID/範囲を指さないよう整合させる */
+function restoreProject(project: SceneProject): void {
+  const st = useScene3d.getState();
+  const selectedShotId = project.shots.some((s) => s.id === st.selectedShotId)
+    ? st.selectedShotId
+    : project.shots[0].id;
+  const selectedEntityId =
+    st.selectedEntityId && project.entities.some((e) => e.id === st.selectedEntityId)
+      ? st.selectedEntityId
+      : null;
+  useScene3d.setState({
+    project,
+    selectedShotId,
+    selectedEntityId,
+    playing: false,
+    currentFrame: Math.min(st.currentFrame, totalDurationFrames(project) - 1),
+  });
+}

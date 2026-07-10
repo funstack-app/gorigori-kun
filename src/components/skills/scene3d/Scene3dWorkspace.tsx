@@ -43,7 +43,12 @@ import type {
   SceneEntityKind,
   SceneShot,
 } from "../../../lib/scene3d/types";
-import { getSelectedShot, useScene3d } from "../../../lib/store/scene3d";
+import {
+  getSelectedShot,
+  redoScene3d,
+  undoScene3d,
+  useScene3d,
+} from "../../../lib/store/scene3d";
 import { Scene3dViewport } from "./Scene3dViewport";
 
 const PRESET_ORDER: CameraPresetId[] = [
@@ -711,7 +716,7 @@ function ShotTimeline() {
           カメラの画
         </button>
         <span className="hidden text-[10px] text-neutral-600 lg:block">
-          Space: 再生/停止 · ←→: コマ送り(Shiftで1秒) · Home: 先頭へ
+          Space: 再生/停止 · ←→: コマ送り(Shiftで1秒) · Home: 先頭 · ⌘Z: 取り消し
         </span>
         <span className="ml-auto text-xs tabular-nums text-neutral-400">
           {(currentFrame / SCENE_FPS).toFixed(1)}s / 合計 {totalSec.toFixed(1)}s
@@ -800,7 +805,11 @@ function useKeyboardShortcuts() {
       const st = useScene3d.getState();
       const total = totalDurationFrames(st.project);
 
-      if (e.code === "Space") {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z") {
+        e.preventDefault();
+        if (e.shiftKey) redoScene3d();
+        else undoScene3d();
+      } else if (e.code === "Space") {
         e.preventDefault();
         st.togglePlay();
       } else if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
