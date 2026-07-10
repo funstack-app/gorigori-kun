@@ -20,7 +20,12 @@ import type {
   SceneShot,
   Vec3,
 } from "../scene3d/types";
-import { resolveLookAt, totalDurationFrames } from "../scene3d/evaluateScene";
+import {
+  evaluateShotCamera,
+  locateShot,
+  resolveLookAt,
+  totalDurationFrames,
+} from "../scene3d/evaluateScene";
 
 let entitySeq = 1;
 let shotSeq = 1;
@@ -114,6 +119,8 @@ type Scene3dState = {
   removeShot: (id: string) => void;
   reorderShots: (activeId: string, overId: string) => void;
   setShotDurationFrames: (id: string, frames: number) => void;
+  /** 再生ヘッド位置でカットを2分割(ハサミ)。カメラは分割点の姿勢を引き継ぐ */
+  splitShotAtPlayhead: () => void;
 
   /** 以下のカメラ操作は selectedShotId のショットに効く */
   setCameraPreset: (preset: CameraPresetId) => void;
@@ -329,6 +336,56 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
     const [moved] = shots.splice(from, 1);
     shots.splice(to, 0, moved);
     set({ project: { ...project, shots } });
+  },
+
+  splitShotAtPlayhead: () => {
+    const { project, currentFrame } = get();
+    const MIN = SCENE_FPS / 2; // 両側最低0.5秒
+    const frame = Math.floor(currentFrame);
+    const { shot, localFrame, shotIndex } = locateShot(project, frame);
+    if (localFrame < MIN || shot.durationFrames - localFrame < MIN) return;
+
+    const pose = evaluateShotCamera(project, shot, localFrame);
+    const rawT = localFrame / Math.max(1, shot.durationFrames - 1);
+    const te = shot.camera.easing === "easeInOut" ? rawT * rawT * (3 - 2 * rawT) : rawT;
+
+    const cam = shot.camera;
+    let firstCam = { ...cam };
+    let secondCam = { ...cam, startPos: pose.position };
+    if (cam.preset === "orbit") {
+      firstCam = { ...firstCam, orbitDegrees: Math.round(cam.orbitDegrees * te) };
+      secondCam = { ...secondCam, orbitDegrees: Math.round(cam.orbitDegrees * (1 - te)) };
+    } else if (cam.midPos) {
+      // 2次ベジェを de Casteljau で正確に2分割
+      const lerpV = (a: Vec3, b: Vec3, t: number): Vec3 => [
+        a[0] + (b[0] - a[0]) * t,
+        a[1] + (b[1] - a[1]) * t,
+        a[2] + (b[2] - a[2]) * t,
+      ];
+      const m1 = lerpV(cam.startPos, cam.midPos, te);
+      const m2 = lerpV(cam.midPos, cam.endPos, te);
+      firstCam = { ...firstCam, midPos: m1, endPos: pose.position };
+      secondCam = { ...secondCam, midPos: m2 };
+    } else {
+      firstCam = { ...firstCam, endPos: pose.position };
+    }
+
+    const secondId = `shot-${Date.now()}-${shotSeq++}`;
+    const first: SceneShot = { ...shot, durationFrames: localFrame, camera: firstCam };
+    const second: SceneShot = {
+      ...shot,
+      id: secondId,
+      durationFrames: shot.durationFrames - localFrame,
+      camera: secondCam,
+    };
+    const shots = [...project.shots];
+    shots.splice(shotIndex, 1, first, second);
+    // ラベルを通し番号で振り直す(カット1, カット2, ...)
+    const renumbered = shots.map((sh, i) => ({ ...sh, label: `カット${i + 1}` }));
+    set({
+      project: { ...project, shots: renumbered },
+      selectedShotId: secondId,
+    });
   },
 
   setShotDurationFrames: (id, frames) => {

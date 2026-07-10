@@ -64,6 +64,18 @@ const PRESET_ORDER: CameraPresetId[] = [
   "handheld",
 ];
 
+/** クリップの色分け(動きの種類が一目で分かる) */
+const PRESET_CLIP_COLORS: Record<CameraPresetId, string> = {
+  fixed: "#64748b",
+  pushIn: "#8b5cf6",
+  pullOut: "#a78bfa",
+  track: "#0ea5e9",
+  pan: "#38bdf8",
+  orbit: "#ec4899",
+  crane: "#f59e0b",
+  handheld: "#22c55e",
+};
+
 /** タイムラインの縮尺(1秒 = 28px) */
 const PX_PER_SEC = 28;
 const pxPerFrame = PX_PER_SEC / SCENE_FPS;
@@ -832,6 +844,8 @@ function ShotClip({ shot, index }: { shot: SceneShot; index: number }) {
     (e.target as Element).releasePointerCapture(e.pointerId);
   };
 
+  const clipColor = PRESET_CLIP_COLORS[shot.camera.preset];
+
   return (
     <div
       ref={setNodeRef}
@@ -841,29 +855,44 @@ function ShotClip({ shot, index }: { shot: SceneShot; index: number }) {
         transition,
         opacity: isDragging ? 0.6 : 1,
       }}
-      className={`group relative flex h-14 shrink-0 cursor-grab select-none flex-col justify-center rounded-md border px-2 ${
+      className={`group relative flex h-16 shrink-0 cursor-grab select-none flex-col overflow-hidden rounded-md border ${
         selected
-          ? "border-pink-400 bg-pink-500/10"
-          : "border-[#2a2a2a] bg-[#161616] hover:border-pink-400/50"
-      }`}
+          ? "border-pink-400 ring-1 ring-pink-400/40"
+          : "border-[#2a2a2a] hover:border-pink-400/50"
+      } bg-[#161616]`}
       onClick={() => selectShot(shot.id)}
       {...attributes}
       {...listeners}
     >
-      <p className={`truncate text-xs font-medium ${selected ? "text-pink-200" : "text-neutral-200"}`}>
-        {index + 1}. {shot.label}
-      </p>
-      <p className="truncate text-[10px] text-neutral-400">
-        {CAMERA_PRESET_LABELS[shot.camera.preset]} · {(shot.durationFrames / SCENE_FPS).toFixed(1)}s
-      </p>
+      {/* 上段: 動きの種類の色帯 */}
+      <div
+        className="flex h-5 shrink-0 items-center gap-1 px-1.5"
+        style={{ backgroundColor: `${clipColor}33`, borderBottom: `2px solid ${clipColor}` }}
+      >
+        <span style={{ color: clipColor }} className="shrink-0 [&_svg]:h-3 [&_svg]:w-6">
+          <PresetGlyph preset={shot.camera.preset} />
+        </span>
+        <span className="min-w-0 flex-1 truncate text-[9px]" style={{ color: clipColor }}>
+          {CAMERA_PRESET_LABELS[shot.camera.preset]}
+        </span>
+      </div>
+      {/* 下段: ラベルと尺 */}
+      <div className="flex min-h-0 flex-1 flex-col justify-center px-1.5">
+        <p className={`truncate text-xs font-medium ${selected ? "text-pink-200" : "text-neutral-200"}`}>
+          {index + 1}. {shot.label}
+        </p>
+        <p className="text-[10px] tabular-nums text-neutral-500">
+          {(shot.durationFrames / SCENE_FPS).toFixed(1)}s
+        </p>
+      </div>
       {shotCount > 1 && (
         <button
-          className="absolute right-1 top-0.5 hidden text-[10px] text-neutral-500 hover:text-red-400 group-hover:block"
+          className="absolute right-1 top-6 hidden text-[10px] text-neutral-500 hover:text-red-400 group-hover:block"
           onClick={(e) => {
             e.stopPropagation();
             removeShot(shot.id);
           }}
-          title="このカットを削除"
+          title="リップル削除(消すと後ろが詰まる)"
         >
           ✕
         </button>
@@ -902,6 +931,10 @@ function ShotTimeline() {
   const setCurrentFrame = useScene3d((s) => s.setCurrentFrame);
   const setPlaying = useScene3d((s) => s.setPlaying);
   const addShot = useScene3d((s) => s.addShot);
+  const removeShot = useScene3d((s) => s.removeShot);
+  const selectedShotId = useScene3d((s) => s.selectedShotId);
+  const shotCount = useScene3d((s) => s.project.shots.length);
+  const splitShotAtPlayhead = useScene3d((s) => s.splitShotAtPlayhead);
   const reorderShots = useScene3d((s) => s.reorderShots);
 
   const totalFrames = totalDurationFrames(project);
@@ -979,7 +1012,42 @@ function ShotTimeline() {
           onClick={toggleSplitView}
           title="編集ビューとカメラの画を並べて表示"
         >
-          分割
+          2画面
+        </button>
+        <span className="mx-1 h-5 w-px shrink-0 bg-[#2a2a2a]" />
+        <button
+          className="flex items-center gap-1.5 rounded-lg border border-[#2a2a2a] px-3 py-1.5 text-[13px] font-semibold text-neutral-400 hover:border-pink-400/60 hover:text-neutral-200"
+          onClick={splitShotAtPlayhead}
+          title="再生ヘッド位置でカットを2分割(カメラの動きも引き継いで割れる)"
+        >
+          <Icon className="h-4 w-4">
+            <circle cx="6" cy="7" r="2.5" />
+            <circle cx="6" cy="17" r="2.5" />
+            <path d="M8.2 8.5L20 19M8.2 15.5L20 5" />
+          </Icon>
+          カット
+        </button>
+        <button
+          className="flex items-center gap-1.5 rounded-lg border border-[#2a2a2a] px-3 py-1.5 text-[13px] font-semibold text-neutral-400 hover:border-pink-400/60 hover:text-neutral-200 disabled:opacity-40"
+          disabled={shotCount <= 1}
+          onClick={() => removeShot(selectedShotId)}
+          title="選択カットをリップル削除(後ろのカットが自動で詰まる)"
+        >
+          <Icon className="h-4 w-4">
+            <path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13M14 12l-4 5M10 12l4 5" />
+          </Icon>
+          リップル削除
+        </button>
+        <button
+          className="flex items-center gap-1.5 rounded-lg border border-[#2a2a2a] px-3 py-1.5 text-[13px] font-semibold text-neutral-400 hover:border-pink-400/60 hover:text-neutral-200"
+          onClick={addShot}
+          title="選択カットを複製して後ろに追加"
+        >
+          <Icon className="h-4 w-4">
+            <rect x="8" y="8" width="12" height="12" rx="2" />
+            <path d="M16 4H6a2 2 0 0 0-2 2v10" />
+          </Icon>
+          複製
         </button>
         <span className="min-w-0 flex-1 truncate text-[10px] text-neutral-600">
           Space: 再生/停止 · ←→: コマ送り(Shiftで1秒) · Home: 先頭 · ⌘Z: 取り消し
