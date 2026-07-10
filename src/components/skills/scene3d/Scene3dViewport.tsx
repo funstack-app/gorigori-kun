@@ -527,8 +527,8 @@ export function Scene3dViewport() {
       {!exporting && (
         <Grid
           args={[40, 40]}
-          cellSize={1}
-          sectionSize={5}
+          cellSize={0.5}
+          sectionSize={2.5}
           cellThickness={0.7}
           sectionThickness={1.5}
           cellColor="#5b5d61"
