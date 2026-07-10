@@ -375,8 +375,11 @@ function PresetPickerPopup({ onClose }: { onClose: () => void }) {
 
 function ShelfPanel() {
   const entities = useScene3d((s) => s.project.entities);
+  const shots = useScene3d((s) => s.project.shots);
   const selectedId = useScene3d((s) => s.selectedEntityId);
+  const selectedShotId = useScene3d((s) => s.selectedShotId);
   const selectEntity = useScene3d((s) => s.selectEntity);
+  const selectShot = useScene3d((s) => s.selectShot);
   const removeEntity = useScene3d((s) => s.removeEntity);
   const [pickerOpen, setPickerOpen] = useState(false);
 
@@ -414,6 +417,29 @@ function ShelfPanel() {
                 title="削除"
               >
                 ✕
+              </button>
+            </li>
+          ))}
+        </ul>
+
+        <p className="mb-2 mt-4 text-[11px] font-bold tracking-wide text-neutral-500">カメラ</p>
+        <ul className="flex flex-col gap-1">
+          {shots.map((shot) => (
+            <li key={shot.id}>
+              <button
+                className={`flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm ${
+                  selectedShotId === shot.id
+                    ? "bg-pink-500/15 text-pink-300"
+                    : "text-neutral-300 hover:bg-[#101010]"
+                }`}
+                onClick={() => selectShot(shot.id)}
+                title="クリックでこのカットを選択(カメラの軌跡・右パネルが切り替わる)"
+              >
+                <CameraViewIcon />
+                <span className="min-w-0 flex-1 truncate">{shot.label}のカメラ</span>
+                <span className="shrink-0 text-[10px] text-neutral-500">
+                  {CAMERA_PRESET_LABELS[shot.camera.preset]}
+                </span>
               </button>
             </li>
           ))}
