@@ -110,6 +110,7 @@ type Scene3dState = {
   addEntity: (kind: SceneEntityKind) => void;
   removeEntity: (id: string) => void;
   selectEntity: (id: string | null) => void;
+  clearSelection: () => void;
   moveEntity: (id: string, position: Vec3) => void;
   rotateEntity: (id: string, rotationY: number) => void;
   scaleEntity: (id: string, scale: number) => void;
@@ -264,6 +265,8 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
   },
 
   selectEntity: (id) => set({ selectedEntityId: id, cameraSelected: false }),
+  /** 何もない場所のクリック/Esc: 物体もカメラも選択解除(自由視点の状態) */
+  clearSelection: () => set({ selectedEntityId: null, cameraSelected: false }),
 
   moveEntity: (id, position) => {
     const { project } = get();

@@ -1449,6 +1449,8 @@ function useKeyboardShortcuts() {
         e.preventDefault();
         st.setPlaying(false);
         st.setCurrentFrame(0);
+      } else if (e.key === "Escape") {
+        st.clearSelection();
       }
     };
     window.addEventListener("keydown", onKey);

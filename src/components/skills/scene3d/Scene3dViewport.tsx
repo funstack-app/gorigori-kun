@@ -858,7 +858,7 @@ export function Scene3dViewport({
   primary?: boolean;
 }) {
   const entities = useScene3d((s) => s.project.entities);
-  const selectEntity = useScene3d((s) => s.selectEntity);
+  const clearSelection = useScene3d((s) => s.clearSelection);
   const exporting = useScene3d(
     (s) => s.exportStatus.phase === "rendering" || s.exportStatus.phase === "encoding",
   );
@@ -871,7 +871,7 @@ export function Scene3dViewport({
       // toBlob でフレームを回収するため描画バッファを保持する
       gl={{ preserveDrawingBuffer: true }}
       style={isCameraPane ? { pointerEvents: "none" } : undefined}
-      onPointerMissed={() => selectEntity(null)}
+      onPointerMissed={() => clearSelection()}
     >
       {/* グレースタジオ(クレイ模型風)。霧は視認性を殺すため使わない */}
       <color attach="background" args={["#75777b"]} />
@@ -892,8 +892,13 @@ export function Scene3dViewport({
           position={[0, 0.001, 0]}
         />
       )}
-      {/* グレーの床(編集時・書き出し時共通。Seedanceの空間手がかりにもなる) */}
-      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.001, 0]} receiveShadow>
+      {/* グレーの床(編集時・書き出し時共通)。クリック判定からは除外(空クリック=選択解除) */}
+      <mesh
+        rotation={[-Math.PI / 2, 0, 0]}
+        position={[0, -0.001, 0]}
+        receiveShadow
+        raycast={() => null}
+      >
         <planeGeometry args={[60, 60]} />
         <meshStandardMaterial color="#818387" />
       </mesh>
