@@ -1365,24 +1365,33 @@ function useKeyboardShortcuts() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
-      if (
-        target.tagName === "INPUT" ||
-        target.tagName === "SELECT" ||
-        target.tagName === "TEXTAREA" ||
-        target.isContentEditable
-      ) {
-        return;
-      }
+      const tag = target.tagName;
+      const inputType = tag === "INPUT" ? (target as HTMLInputElement).type : "";
+      // 文字入力中(テキスト/数値/選択)だけはキーを奪わない
+      const isTextEntry =
+        tag === "TEXTAREA" ||
+        tag === "SELECT" ||
+        target.isContentEditable ||
+        (tag === "INPUT" && inputType !== "range");
       const st = useScene3d.getState();
       const total = totalDurationFrames(st.project);
+
+      // Space はスライダー/ボタンに焦点があっても再生トグルとして効かせる
+      if (e.code === "Space") {
+        if (isTextEntry) return;
+        e.preventDefault(); // ボタンのクリック誤発火・スクロールを防ぐ
+        st.togglePlay();
+        return;
+      }
+      // それ以外のキーは、フォーム部品に焦点がある間は既定動作(スライダーの矢印等)を優先
+      if (isTextEntry || inputType === "range" || tag === "BUTTON") {
+        return;
+      }
 
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z") {
         e.preventDefault();
         if (e.shiftKey) redoScene3d();
         else undoScene3d();
-      } else if (e.code === "Space") {
-        e.preventDefault();
-        st.togglePlay();
       } else if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
         e.preventDefault();
         const step = (e.shiftKey ? SCENE_FPS : 1) * (e.key === "ArrowLeft" ? -1 : 1);
