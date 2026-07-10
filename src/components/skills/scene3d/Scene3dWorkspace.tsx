@@ -471,35 +471,6 @@ function ShelfPanel() {
 
 /* ---------------------------------- 右パネル(監督) ---------------------------------- */
 
-/** 数値入力(位置・寸法用の小さな共通部品) */
-function NumField({
-  label,
-  value,
-  step = 0.1,
-  onChange,
-}: {
-  label: string;
-  value: number;
-  step?: number;
-  onChange: (v: number) => void;
-}) {
-  return (
-    <label className="flex items-center gap-1.5 text-xs text-neutral-400">
-      <span className="w-8 shrink-0">{label}</span>
-      <input
-        type="number"
-        step={step}
-        value={Number(value.toFixed(2))}
-        onChange={(e) => {
-          const v = Number(e.target.value);
-          if (Number.isFinite(v)) onChange(v);
-        }}
-        className="w-full rounded border border-[#2a2a2a] bg-[#0d0d0d] px-2 py-1 text-xs text-neutral-200 focus:border-pink-400/60 focus:outline-none"
-      />
-    </label>
-  );
-}
-
 /** 軸スライダー(値表示つき) */
 function AxisSlider({
   label,
@@ -542,63 +513,23 @@ function AxisSlider({
   );
 }
 
-/** 選択中オブジェクトのプロパティ(選択物の種類でフィールドが変わる) */
-function SelectedObjectSection() {
+/** オブジェクト詳細ポップアップ(位置・大きさ・寸法・階数) */
+function ObjectDetailPopup({ entityId, onClose }: { entityId: string; onClose: () => void }) {
   const project = useScene3d((s) => s.project);
-  const selectedEntityId = useScene3d((s) => s.selectedEntityId);
   const moveEntity = useScene3d((s) => s.moveEntity);
-  const rotateEntity = useScene3d((s) => s.rotateEntity);
   const scaleEntity = useScene3d((s) => s.scaleEntity);
   const setEntityFloors = useScene3d((s) => s.setEntityFloors);
   const setEntityParam = useScene3d((s) => s.setEntityParam);
 
-  const setEntityMotion = useScene3d((s) => s.setEntityMotion);
-  const entity = project.entities.find((e) => e.id === selectedEntityId);
+  const entity = project.entities.find((e) => e.id === entityId);
   if (!entity) return null;
-
-  const degrees = ((Math.round((entity.rotationY * 180) / Math.PI) % 360) + 360) % 360;
   const kind = entity.kind;
   const p = entity.params ?? {};
-  const motionType = entity.motion?.type ?? null;
-  const motionBtn = (active: boolean) =>
-    `rounded-lg border px-2 py-1.5 text-xs ${
-      active
-        ? "border-lime-400 bg-lime-400/10 text-lime-300"
-        : "border-[#2a2a2a] bg-[#101010] text-neutral-300 hover:border-lime-400/50"
-    }`;
 
   return (
-    <div className="flex flex-col gap-2.5 rounded-lg border border-[#2a2a2a] bg-[#101010] p-3">
-      <p className="flex items-center gap-2 text-[11px] font-bold tracking-wide text-amber-400/90">
-        <EntityKindIcon kind={kind} />
-        {entity.label}
-      </p>
-
-      {/* 動かす(人物のみ): 歩く/走ると行き先の旗が出る */}
-      {kind === "mannequin" && (
-        <div className="flex flex-col gap-1.5">
-          <p className="text-[10px] font-bold tracking-wide text-neutral-500">動かす</p>
-          <div className="grid grid-cols-3 gap-1.5">
-            <button className={motionBtn(motionType === null)} onClick={() => setEntityMotion(entity.id, null)}>
-              立ち
-            </button>
-            <button className={motionBtn(motionType === "walk")} onClick={() => setEntityMotion(entity.id, "walk")}>
-              歩く
-            </button>
-            <button className={motionBtn(motionType === "run")} onClick={() => setEntityMotion(entity.id, "run")}>
-              走る
-            </button>
-          </div>
-          {motionType && (
-            <p className="text-[10px] leading-4 text-neutral-500">
-              旗をドラッグで行き先を変更。再生すると歩き出し、到着で立ち止まります
-            </p>
-          )}
-        </div>
-      )}
-
-      {/* 位置(床面のX/Z)。スライダーで軸ごとの平行移動 */}
-      <div className="flex flex-col gap-1.5">
+    <Popup title={`${entity.label} の詳細`} onClose={onClose}>
+      <div className="flex flex-col gap-2.5">
+        <p className="text-[10px] font-bold tracking-wide text-neutral-500">位置</p>
         <AxisSlider
           label="横"
           value={entity.position[0]}
@@ -613,7 +544,87 @@ function SelectedObjectSection() {
           max={15}
           onChange={(v) => moveEntity(entity.id, [entity.position[0], entity.position[1], v])}
         />
+
+        <p className="mt-1 text-[10px] font-bold tracking-wide text-neutral-500">大きさ</p>
+        <AxisSlider
+          label="倍率"
+          value={entity.scale}
+          min={0.3}
+          max={4}
+          onChange={(v) => scaleEntity(entity.id, v)}
+        />
+
+        {kind === "wall" && (
+          <>
+            <p className="mt-1 text-[10px] font-bold tracking-wide text-neutral-500">寸法</p>
+            <AxisSlider label="横幅" value={p.width ?? 3} min={0.5} max={20} onChange={(v) => setEntityParam(entity.id, "width", v)} />
+            <AxisSlider label="高さ" value={p.height ?? 2.6} min={0.5} max={12} onChange={(v) => setEntityParam(entity.id, "height", v)} />
+          </>
+        )}
+        {kind === "box" && (
+          <>
+            <p className="mt-1 text-[10px] font-bold tracking-wide text-neutral-500">寸法</p>
+            <AxisSlider label="横幅" value={p.width ?? 0.8} min={0.1} max={10} onChange={(v) => setEntityParam(entity.id, "width", v)} />
+            <AxisSlider label="高さ" value={p.height ?? 0.8} min={0.1} max={10} onChange={(v) => setEntityParam(entity.id, "height", v)} />
+            <AxisSlider label="奥行" value={p.depth ?? 0.8} min={0.1} max={10} onChange={(v) => setEntityParam(entity.id, "depth", v)} />
+          </>
+        )}
+        {kind === "building" && (
+          <>
+            <p className="mt-1 text-[10px] font-bold tracking-wide text-neutral-500">建物</p>
+            <AxisSlider label="階数" value={p.floors ?? 3} min={1} max={12} step={1} onChange={(v) => setEntityFloors(entity.id, v)} />
+          </>
+        )}
       </div>
+    </Popup>
+  );
+}
+
+/** 選択中オブジェクト(シンプル表示。細かい調整は詳細ポップアップへ) */
+function SelectedObjectSection() {
+  const project = useScene3d((s) => s.project);
+  const selectedEntityId = useScene3d((s) => s.selectedEntityId);
+  const rotateEntity = useScene3d((s) => s.rotateEntity);
+  const setEntityMotion = useScene3d((s) => s.setEntityMotion);
+  const [detailOpen, setDetailOpen] = useState(false);
+
+  const entity = project.entities.find((e) => e.id === selectedEntityId);
+  if (!entity) return null;
+
+  const degrees = ((Math.round((entity.rotationY * 180) / Math.PI) % 360) + 360) % 360;
+  const motionType = entity.motion?.type ?? null;
+  const motionBtn = (active: boolean) =>
+    `rounded-lg border px-2 py-1.5 text-xs ${
+      active
+        ? "border-lime-400 bg-lime-400/10 text-lime-300"
+        : "border-[#2a2a2a] bg-[#101010] text-neutral-300 hover:border-lime-400/50"
+    }`;
+
+  return (
+    <div className="flex flex-col gap-2.5 rounded-lg border border-[#2a2a2a] bg-[#101010] p-3">
+      <p className="flex items-center gap-2 text-[11px] font-bold tracking-wide text-amber-400/90">
+        <EntityKindIcon kind={entity.kind} />
+        {entity.label}
+      </p>
+
+      {entity.kind === "mannequin" && (
+        <div className="grid grid-cols-3 gap-1.5">
+          <button className={motionBtn(motionType === null)} onClick={() => setEntityMotion(entity.id, null)}>
+            立ち
+          </button>
+          <button className={motionBtn(motionType === "walk")} onClick={() => setEntityMotion(entity.id, "walk")}>
+            歩く
+          </button>
+          <button className={motionBtn(motionType === "run")} onClick={() => setEntityMotion(entity.id, "run")}>
+            走る
+          </button>
+        </div>
+      )}
+      {entity.kind === "mannequin" && motionType && (
+        <p className="text-[10px] leading-4 text-neutral-500">
+          旗をドラッグで行き先を変更。再生で歩き出します
+        </p>
+      )}
 
       <label className="flex flex-col gap-1 text-xs text-neutral-400">
         向き: {degrees}°
@@ -627,70 +638,57 @@ function SelectedObjectSection() {
         />
       </label>
 
-      {/* 種類別フィールド */}
-      {(kind === "mannequin" || kind === "sphere" || kind === "column" || kind === "stairs") && (
-        <label className="flex flex-col gap-1 text-xs text-neutral-400">
-          大きさ: {entity.scale.toFixed(1)}x
-          <input
-            type="range"
-            min={0.3}
-            max={4}
-            step={0.1}
-            value={entity.scale}
-            onChange={(e) => scaleEntity(entity.id, Number(e.target.value))}
-          />
-        </label>
-      )}
-
-      {kind === "wall" && (
-        <div className="grid grid-cols-2 gap-1.5">
-          <NumField
-            label="横幅"
-            value={p.width ?? 3}
-            onChange={(v) => setEntityParam(entity.id, "width", v)}
-          />
-          <NumField
-            label="高さ"
-            value={p.height ?? 2.6}
-            onChange={(v) => setEntityParam(entity.id, "height", v)}
-          />
-        </div>
-      )}
-
-      {kind === "box" && (
-        <div className="grid grid-cols-3 gap-1.5">
-          <NumField
-            label="横幅"
-            value={p.width ?? 0.8}
-            onChange={(v) => setEntityParam(entity.id, "width", v)}
-          />
-          <NumField
-            label="高さ"
-            value={p.height ?? 0.8}
-            onChange={(v) => setEntityParam(entity.id, "height", v)}
-          />
-          <NumField
-            label="奥行"
-            value={p.depth ?? 0.8}
-            onChange={(v) => setEntityParam(entity.id, "depth", v)}
-          />
-        </div>
-      )}
-
-      {kind === "building" && (
-        <label className="flex flex-col gap-1 text-xs text-neutral-400">
-          階数: {p.floors ?? 3}階
-          <input
-            type="range"
-            min={1}
-            max={12}
-            step={1}
-            value={p.floors ?? 3}
-            onChange={(e) => setEntityFloors(entity.id, Number(e.target.value))}
-          />
-        </label>
-      )}
+      <button
+        className="rounded-lg border border-[#2a2a2a] px-2 py-1.5 text-xs text-neutral-400 hover:border-pink-400/60 hover:text-neutral-200"
+        onClick={() => setDetailOpen(true)}
+      >
+        詳細を調整…(位置・大きさ・寸法)
+      </button>
+      {detailOpen && <ObjectDetailPopup entityId={entity.id} onClose={() => setDetailOpen(false)} />}
     </div>
+  );
+}
+
+/** カメラ位置の調整ポップアップ(開始・終了・注視点) */
+function CameraPositionPopup({ onClose }: { onClose: () => void }) {
+  const project = useScene3d((s) => s.project);
+  const selectedShotId = useScene3d((s) => s.selectedShotId);
+  const moveCameraEndpoint = useScene3d((s) => s.moveCameraEndpoint);
+  const setCameraLookAtPos = useScene3d((s) => s.setCameraLookAtPos);
+
+  const shot = getSelectedShot({ project, selectedShotId });
+  const camera = getShotMove(project, shot);
+  const la = camera.lookAtPos ?? [0, 1, 0];
+
+  return (
+    <Popup title="カメラ位置を調整" onClose={onClose}>
+      <div className="flex flex-col gap-2.5">
+        <p className="text-[10px] font-bold tracking-wide text-neutral-500">開始位置(カメラ本体)</p>
+        <AxisSlider label="横" value={camera.startPos[0]} min={-15} max={15} onChange={(v) => moveCameraEndpoint("start", [v, camera.startPos[1], camera.startPos[2]])} />
+        <AxisSlider label="高さ" value={camera.startPos[1]} min={0.1} max={12} onChange={(v) => moveCameraEndpoint("start", [camera.startPos[0], v, camera.startPos[2]])} />
+        <AxisSlider label="奥" value={camera.startPos[2]} min={-15} max={15} onChange={(v) => moveCameraEndpoint("start", [camera.startPos[0], camera.startPos[1], v])} />
+
+        {camera.preset !== "fixed" && camera.preset !== "orbit" && (
+          <>
+            <p className="mt-1 text-[10px] font-bold tracking-wide text-neutral-500">終了位置(赤点)</p>
+            <AxisSlider label="横" value={camera.endPos[0]} min={-15} max={15} onChange={(v) => moveCameraEndpoint("end", [v, camera.endPos[1], camera.endPos[2]])} />
+            <AxisSlider label="高さ" value={camera.endPos[1]} min={0.1} max={12} onChange={(v) => moveCameraEndpoint("end", [camera.endPos[0], v, camera.endPos[2]])} />
+            <AxisSlider label="奥" value={camera.endPos[2]} min={-15} max={15} onChange={(v) => moveCameraEndpoint("end", [camera.endPos[0], camera.endPos[1], v])} />
+          </>
+        )}
+
+        {camera.targetEntityId == null && (
+          <>
+            <p className="mt-1 text-[10px] font-bold tracking-wide text-neutral-500">
+              注視点(カメラが見る場所。被写体とは連動しない)
+            </p>
+            <AxisSlider label="横" value={la[0]} min={-15} max={15} onChange={(v) => setCameraLookAtPos([v, la[1], la[2]])} />
+            <AxisSlider label="高さ" value={la[1]} min={0} max={12} onChange={(v) => setCameraLookAtPos([la[0], v, la[2]])} />
+            <AxisSlider label="奥" value={la[2]} min={-15} max={15} onChange={(v) => setCameraLookAtPos([la[0], la[1], v])} />
+          </>
+        )}
+      </div>
+    </Popup>
   );
 }
 
@@ -702,9 +700,8 @@ function DirectorPanel() {
   const setOrbitDegrees = useScene3d((s) => s.setOrbitDegrees);
   const setShotDurationFrames = useScene3d((s) => s.setShotDurationFrames);
   const setAspectRatio = useScene3d((s) => s.setAspectRatio);
-  const moveCameraEndpoint = useScene3d((s) => s.moveCameraEndpoint);
-  const setCameraLookAtPos = useScene3d((s) => s.setCameraLookAtPos);
   const [presetOpen, setPresetOpen] = useState(false);
+  const [camPosOpen, setCamPosOpen] = useState(false);
 
   const assignShotCamera = useScene3d((s) => s.assignShotCamera);
   const shot = getSelectedShot({ project, selectedShotId });
@@ -775,98 +772,13 @@ function DirectorPanel() {
         </select>
       </label>
 
-      {camera.targetEntityId == null && (
-        <div className="flex flex-col gap-1.5 rounded-lg border border-[#2a2a2a] bg-[#101010] p-2.5">
-          <p className="text-[10px] font-bold tracking-wide text-neutral-500">
-            注視点(カメラが見る場所。被写体とは連動しない)
-          </p>
-          <AxisSlider
-            label="横"
-            value={(camera.lookAtPos ?? [0, 1, 0])[0]}
-            min={-15}
-            max={15}
-            onChange={(v) => {
-              const la = camera.lookAtPos ?? [0, 1, 0];
-              setCameraLookAtPos([v, la[1], la[2]]);
-            }}
-          />
-          <AxisSlider
-            label="高さ"
-            value={(camera.lookAtPos ?? [0, 1, 0])[1]}
-            min={0}
-            max={12}
-            onChange={(v) => {
-              const la = camera.lookAtPos ?? [0, 1, 0];
-              setCameraLookAtPos([la[0], v, la[2]]);
-            }}
-          />
-          <AxisSlider
-            label="奥"
-            value={(camera.lookAtPos ?? [0, 1, 0])[2]}
-            min={-15}
-            max={15}
-            onChange={(v) => {
-              const la = camera.lookAtPos ?? [0, 1, 0];
-              setCameraLookAtPos([la[0], la[1], v]);
-            }}
-          />
-        </div>
-      )}
-
-      <div className="flex flex-col gap-1.5 rounded-lg border border-[#2a2a2a] bg-[#101010] p-2.5">
-        <p className="text-[10px] font-bold tracking-wide text-neutral-500">
-          カメラ開始位置(緑のカメラ)
-        </p>
-        <AxisSlider
-          label="横"
-          value={camera.startPos[0]}
-          min={-15}
-          max={15}
-          onChange={(v) => moveCameraEndpoint("start", [v, camera.startPos[1], camera.startPos[2]])}
-        />
-        <AxisSlider
-          label="高さ"
-          value={camera.startPos[1]}
-          min={0.1}
-          max={12}
-          onChange={(v) => moveCameraEndpoint("start", [camera.startPos[0], v, camera.startPos[2]])}
-        />
-        <AxisSlider
-          label="奥"
-          value={camera.startPos[2]}
-          min={-15}
-          max={15}
-          onChange={(v) => moveCameraEndpoint("start", [camera.startPos[0], camera.startPos[1], v])}
-        />
-        {camera.preset !== "fixed" && camera.preset !== "orbit" && (
-          <>
-            <p className="mt-1 text-[10px] font-bold tracking-wide text-neutral-500">
-              カメラ終了位置(赤点)
-            </p>
-            <AxisSlider
-              label="横"
-              value={camera.endPos[0]}
-              min={-15}
-              max={15}
-              onChange={(v) => moveCameraEndpoint("end", [v, camera.endPos[1], camera.endPos[2]])}
-            />
-            <AxisSlider
-              label="高さ"
-              value={camera.endPos[1]}
-              min={0.1}
-              max={12}
-              onChange={(v) => moveCameraEndpoint("end", [camera.endPos[0], v, camera.endPos[2]])}
-            />
-            <AxisSlider
-              label="奥"
-              value={camera.endPos[2]}
-              min={-15}
-              max={15}
-              onChange={(v) => moveCameraEndpoint("end", [camera.endPos[0], camera.endPos[1], v])}
-            />
-          </>
-        )}
-      </div>
+      <button
+        className="rounded-lg border border-[#2a2a2a] px-2 py-1.5 text-xs text-neutral-400 hover:border-pink-400/60 hover:text-neutral-200"
+        onClick={() => setCamPosOpen(true)}
+      >
+        カメラ位置を調整…(開始・終了・注視点)
+      </button>
+      {camPosOpen && <CameraPositionPopup onClose={() => setCamPosOpen(false)} />}
 
       <div className="flex flex-col gap-1 text-xs text-neutral-400">
         レンズ

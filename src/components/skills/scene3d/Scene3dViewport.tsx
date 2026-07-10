@@ -81,93 +81,109 @@ function Mannequin({
   selected: boolean;
   rig: React.MutableRefObject<MannequinRig>;
 }) {
-  const jointColor = selected ? "#e8b34a" : "#b9bbbf";
-  const mat = <meshStandardMaterial color={color} roughness={0.65} />;
-  const jointMat = <meshStandardMaterial color={jointColor} roughness={0.65} />;
+  const accent = selected ? "#e8b34a" : "#c6c8cc";
+  const mat = <meshStandardMaterial color={color} roughness={0.6} />;
+  const accentMat = <meshStandardMaterial color={accent} roughness={0.6} />;
 
   return (
     <group ref={(el) => (rig.current.body = el)}>
-      {/* 頭・首 */}
-      <mesh position={[0, 1.585, 0]} castShadow>
-        <sphereGeometry args={[0.115, 24, 18]} />
+      {/* 頭(やや縦長) + 首 */}
+      <mesh position={[0, 1.58, 0]} scale={[0.92, 1.08, 0.98]} castShadow>
+        <sphereGeometry args={[0.105, 24, 18]} />
         {mat}
       </mesh>
-      <mesh position={[0, 1.585, 0.1]} castShadow>
-        {/* 鼻(正面マーカー兼) */}
-        <coneGeometry args={[0.025, 0.06, 10]} />
-        {jointMat}
+      <mesh position={[0, 1.575, 0.095]} castShadow>
+        {/* 鼻(正面の手がかり) */}
+        <coneGeometry args={[0.02, 0.05, 10]} />
+        {accentMat}
       </mesh>
-      <mesh position={[0, 1.46, 0]} castShadow>
-        <cylinderGeometry args={[0.045, 0.05, 0.08, 12]} />
+      <mesh position={[0, 1.465, 0]} castShadow>
+        <cylinderGeometry args={[0.04, 0.05, 0.09, 12]} />
         {mat}
       </mesh>
-      {/* 胸(肩に向かってやや広がる) */}
-      <mesh position={[0, 1.25, 0]} castShadow>
-        <capsuleGeometry args={[0.155, 0.22, 8, 16]} />
+
+      {/* 胸郭: 肩幅があり前後は薄い */}
+      <mesh position={[0, 1.27, 0]} scale={[1.25, 1, 0.62]} castShadow>
+        <capsuleGeometry args={[0.16, 0.2, 8, 16]} />
         {mat}
       </mesh>
-      {/* 腹〜腰 */}
-      <mesh position={[0, 1.02, 0]} castShadow>
-        <sphereGeometry args={[0.13, 20, 14]} />
-        {jointMat}
-      </mesh>
-      <mesh position={[0, 0.92, 0]} castShadow>
-        <capsuleGeometry args={[0.135, 0.08, 8, 16]} />
+      {/* ウエスト(絞り) */}
+      <mesh position={[0, 1.06, 0]} scale={[1, 1, 0.7]} castShadow>
+        <cylinderGeometry args={[0.115, 0.13, 0.14, 16]} />
         {mat}
       </mesh>
-      {/* 腕(左右対称): 肩を支点に振る */}
+      {/* 骨盤 */}
+      <mesh position={[0, 0.93, 0]} scale={[1.15, 0.85, 0.75]} castShadow>
+        <sphereGeometry args={[0.15, 20, 14]} />
+        {mat}
+      </mesh>
+
+      {/* 腕(左右対称): 肩を支点に振る。上腕→前腕は先細り */}
       {[-1, 1].map((side, i) => (
         <group
           key={side}
-          position={[side * 0.215, 1.36, 0]}
-          rotation={[0, 0, side * -0.12]}
+          position={[side * 0.21, 1.4, 0]}
+          rotation={[0, 0, side * -0.08]}
           ref={(el) => (rig.current.arms[i] = el)}
         >
+          {/* 肩(体色に馴染ませる) */}
           <mesh castShadow>
-            <sphereGeometry args={[0.06, 16, 12]} />
-            {jointMat}
-          </mesh>
-          <mesh position={[0, -0.16, 0]} castShadow>
-            <capsuleGeometry args={[0.048, 0.2, 6, 12]} />
+            <sphereGeometry args={[0.055, 16, 12]} />
             {mat}
           </mesh>
-          <mesh position={[0, -0.31, 0]} castShadow>
-            <sphereGeometry args={[0.045, 14, 10]} />
-            {jointMat}
+          {/* 上腕(先細り) */}
+          <mesh position={[0, -0.15, 0]} castShadow>
+            <cylinderGeometry args={[0.038, 0.048, 0.28, 12]} />
+            {mat}
           </mesh>
-          <group position={[0, -0.31, 0]} rotation={[-0.08, 0, 0]}>
-            <mesh position={[0, -0.15, 0]} castShadow>
-              <capsuleGeometry args={[0.04, 0.18, 6, 12]} />
+          {/* 前腕(肘からさらに先細り、わずかに前へ) */}
+          <group position={[0, -0.3, 0]} rotation={[-0.12, 0, 0]}>
+            <mesh castShadow>
+              <sphereGeometry args={[0.038, 12, 10]} />
               {mat}
             </mesh>
-            <mesh position={[0, -0.29, 0.01]} castShadow>
-              <sphereGeometry args={[0.05, 14, 10]} />
+            <mesh position={[0, -0.13, 0]} castShadow>
+              <cylinderGeometry args={[0.028, 0.037, 0.24, 12]} />
+              {mat}
+            </mesh>
+            {/* 手(平たい楕円) */}
+            <mesh position={[0, -0.28, 0.01]} scale={[0.7, 1.15, 1]} castShadow>
+              <sphereGeometry args={[0.045, 12, 10]} />
               {mat}
             </mesh>
           </group>
         </group>
       ))}
-      {/* 脚(左右対称): 股関節を支点に振る */}
+
+      {/* 脚(左右対称): 股関節を支点に振る。腿→すねは先細り */}
       {[-1, 1].map((side, i) => (
         <group
           key={side}
-          position={[side * 0.09, 0.84, 0]}
+          position={[side * 0.095, 0.86, 0]}
           ref={(el) => (rig.current.legs[i] = el)}
         >
-          <mesh position={[0, -0.2, 0]} castShadow>
-            <capsuleGeometry args={[0.068, 0.26, 6, 12]} />
+          {/* 腿 */}
+          <mesh position={[0, -0.19, 0]} castShadow>
+            <cylinderGeometry args={[0.055, 0.075, 0.38, 14]} />
             {mat}
           </mesh>
+          {/* 膝 */}
           <mesh position={[0, -0.4, 0]} castShadow>
-            <sphereGeometry args={[0.06, 14, 10]} />
-            {jointMat}
-          </mesh>
-          <mesh position={[0, -0.6, 0]} castShadow>
-            <capsuleGeometry args={[0.052, 0.24, 6, 12]} />
+            <sphereGeometry args={[0.052, 14, 10]} />
             {mat}
           </mesh>
-          <mesh position={[0, -0.795, 0.05]} castShadow>
-            <boxGeometry args={[0.09, 0.06, 0.24]} />
+          {/* すね(足首へ絞る) */}
+          <mesh position={[0, -0.6, 0]} castShadow>
+            <cylinderGeometry args={[0.032, 0.05, 0.38, 14]} />
+            {mat}
+          </mesh>
+          {/* 足(かかと〜つま先。つま先が+Z=正面) */}
+          <mesh position={[0, -0.815, 0.04]} castShadow>
+            <boxGeometry args={[0.085, 0.05, 0.23]} />
+            {mat}
+          </mesh>
+          <mesh position={[0, -0.825, 0.15]} scale={[1, 0.55, 1]} castShadow>
+            <sphereGeometry args={[0.042, 10, 8]} />
             {mat}
           </mesh>
         </group>
