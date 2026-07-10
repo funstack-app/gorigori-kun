@@ -318,7 +318,7 @@ function ShelfPanel() {
   const [pickerOpen, setPickerOpen] = useState(false);
 
   return (
-    <aside className="flex w-56 shrink-0 flex-col gap-4 border-r border-[#242424] bg-[#141414] px-4 py-4">
+    <aside className="flex w-full flex-col gap-4 border-r border-[#242424] bg-[#141414] px-4 py-4">
       <button
         className="rounded-lg border border-[#2a2a2a] bg-[#101010] px-3 py-2 text-sm text-neutral-200 hover:border-amber-500/60"
         onClick={() => setPickerOpen(true)}
@@ -384,7 +384,7 @@ function DirectorPanel() {
   const camera = shot.camera;
 
   return (
-    <aside className="flex w-72 shrink-0 flex-col gap-5 overflow-y-auto border-l border-[#242424] bg-[#141414] px-4 py-4">
+    <aside className="flex w-full flex-col gap-5 overflow-y-auto border-l border-[#242424] bg-[#141414] px-4 py-4">
       <div>
         <p className="mb-2 text-[11px] font-bold tracking-wide text-neutral-500">{shot.label} のカメラ</p>
         <button
@@ -874,10 +874,54 @@ function ViewportWithFrame() {
   );
 }
 
+/* ---------------------------------- パネル幅の調整 ---------------------------------- */
+
+function usePanelWidth(key: string, initial: number, min: number, max: number) {
+  const [width, setWidth] = useState(() => {
+    const saved = Number(localStorage.getItem(key));
+    return Number.isFinite(saved) && saved >= min && saved <= max ? saved : initial;
+  });
+  const update = (w: number) => {
+    const clamped = Math.max(min, Math.min(max, Math.round(w)));
+    setWidth(clamped);
+    localStorage.setItem(key, String(clamped));
+  };
+  return [width, update] as const;
+}
+
+/** パネル境界のドラッグハンドル(左右の幅調整) */
+function PanelResizer({
+  onDelta,
+}: {
+  onDelta: (dx: number) => void;
+}) {
+  const state = useRef<{ startX: number } | null>(null);
+  return (
+    <div
+      className="relative z-10 -mx-0.5 w-1 shrink-0 cursor-col-resize bg-transparent transition hover:bg-pink-400/40"
+      onPointerDown={(e) => {
+        state.current = { startX: e.clientX };
+        (e.target as Element).setPointerCapture(e.pointerId);
+      }}
+      onPointerMove={(e) => {
+        if (!state.current) return;
+        onDelta(e.clientX - state.current.startX);
+        state.current = { startX: e.clientX };
+      }}
+      onPointerUp={(e) => {
+        state.current = null;
+        (e.target as Element).releasePointerCapture(e.pointerId);
+      }}
+    />
+  );
+}
+
 /* ---------------------------------- ルート ---------------------------------- */
 
 export function Scene3dWorkspace() {
   useKeyboardShortcuts();
+  const [leftW, setLeftW] = usePanelWidth("scene3d.panel.left", 224, 160, 420);
+  const [rightW, setRightW] = usePanelWidth("scene3d.panel.right", 288, 220, 480);
 
   return (
     <section className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#121212]">
@@ -889,12 +933,18 @@ export function Scene3dWorkspace() {
       </div>
 
       <div className="flex min-h-0 flex-1 overflow-hidden">
-        <ShelfPanel />
+        <div style={{ width: leftW }} className="flex shrink-0">
+          <ShelfPanel />
+        </div>
+        <PanelResizer onDelta={(dx) => setLeftW(leftW + dx)} />
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           <ViewportWithFrame />
           <ShotTimeline />
         </div>
-        <DirectorPanel />
+        <PanelResizer onDelta={(dx) => setRightW(rightW - dx)} />
+        <div style={{ width: rightW }} className="flex shrink-0">
+          <DirectorPanel />
+        </div>
       </div>
     </section>
   );
