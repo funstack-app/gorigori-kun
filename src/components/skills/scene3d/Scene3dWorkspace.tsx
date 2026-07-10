@@ -803,7 +803,7 @@ function ShotTimeline() {
 
   return (
     <div className="flex flex-col border-t border-[#242424] bg-[#141414]">
-      <div className="flex items-center gap-3 px-4 pt-2">
+      <div className="flex min-w-0 items-center gap-3 overflow-hidden px-4 pt-2">
         <button
           className={`flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-[13px] font-semibold ${
             playing ? "bg-red-500/20 text-red-300" : "bg-sky-500/20 text-pink-300"
@@ -837,10 +837,10 @@ function ShotTimeline() {
         >
           分割
         </button>
-        <span className="hidden text-[10px] text-neutral-600 lg:block">
+        <span className="min-w-0 flex-1 truncate text-[10px] text-neutral-600">
           Space: 再生/停止 · ←→: コマ送り(Shiftで1秒) · Home: 先頭 · ⌘Z: 取り消し
         </span>
-        <span className="ml-auto text-xs tabular-nums text-neutral-400">
+        <span className="ml-auto shrink-0 text-xs tabular-nums text-neutral-400">
           {(currentFrame / SCENE_FPS).toFixed(1)}s / 合計 {totalSec.toFixed(1)}s
           {totalSec > SEEDANCE_MAX_SECONDS && (
             <span className="ml-1 text-amber-400">(上限{SEEDANCE_MAX_SECONDS}s超)</span>
@@ -1047,7 +1047,7 @@ function ViewportWithFrame() {
   if (!splitView) {
     const showFrame = cameraView || playing;
     return (
-      <div className="relative flex min-h-0 flex-1 overflow-hidden">
+      <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
         <EditorPane showOverlays={!showFrame} />
         {showFrame && <FrameOverlay />}
       </div>
@@ -1056,7 +1056,7 @@ function ViewportWithFrame() {
 
   // 分割表示: 左=編集ビュー(自由視点) / 右=撮影カメラの画(書き出しと同じ)
   return (
-    <div ref={containerRef} className="relative flex min-h-0 flex-1 overflow-hidden">
+    <div ref={containerRef} className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
       <div style={{ width: `${ratio}%` }} className="relative flex min-w-0">
         <EditorPane showOverlays />
       </div>
@@ -1161,7 +1161,7 @@ export function Scene3dWorkspace() {
       <div className="flex min-h-0 flex-1 overflow-hidden">
         {leftOpen ? (
           <>
-            <div style={{ width: leftW }} className="relative flex shrink-0">
+            <div style={{ width: leftW, minWidth: 140 }} className="relative flex overflow-hidden">
               <ShelfPanel />
               <button
                 className="absolute -right-0 top-2 z-10 rounded-l-md px-1 py-1 text-[10px] text-neutral-500 hover:text-pink-300"
@@ -1183,7 +1183,7 @@ export function Scene3dWorkspace() {
         {rightOpen ? (
           <>
             <PanelResizer onDelta={(dx) => setRightW(rightW - dx)} />
-            <div style={{ width: rightW }} className="relative flex shrink-0">
+            <div style={{ width: rightW, minWidth: 200 }} className="relative flex overflow-hidden">
               <button
                 className="absolute left-0 top-2 z-10 rounded-r-md px-1 py-1 text-[10px] text-neutral-500 hover:text-pink-300"
                 onClick={toggleRight}
