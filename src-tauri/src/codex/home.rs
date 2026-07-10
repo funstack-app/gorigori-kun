@@ -38,7 +38,12 @@ const CODEX_HOME_LEAF: &str = "codex-home";
 
 /// 初回コピー移行でコピーするファイル/ディレクトリ。
 /// `generated_images` (肥大化・不要) と `sessions` (会話履歴・巨大) は **含めない**。
-const MIGRATE_FILES: &[&str] = &["auth.json", "config.toml"];
+// auth.json は絶対にコピーしない（2026-07-10 改訂）: OAuth はリフレッシュトークン
+// ローテーション（使うたびに旧トークンが即失効）のため、同じ auth.json のコピーが
+// 2箇所にあると先にリフレッシュした側が勝ち、もう片方（素の Codex CLI 等）の
+// ログインが 401 token_revoked で死ぬ。スイスイ君・generate.sh でも同型事故を実測。
+// 認証は必ずアプリ内ログインで独立グラントを新規発行する（1ツール=1ログイン原則）。
+const MIGRATE_FILES: &[&str] = &["config.toml"];
 const MIGRATE_DIRS: &[&str] = &["skills"];
 
 /// 旧 (ambient) `~/.codex` を返す。移行元・レガシー画像参照に使う。
