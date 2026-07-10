@@ -771,6 +771,8 @@ function ShotTimeline() {
   const currentFrame = useScene3d((s) => s.currentFrame);
   const togglePlay = useScene3d((s) => s.togglePlay);
   const setCameraView = useScene3d((s) => s.setCameraView);
+  const splitView = useScene3d((s) => s.splitView);
+  const toggleSplitView = useScene3d((s) => s.toggleSplitView);
   const setCurrentFrame = useScene3d((s) => s.setCurrentFrame);
   const setPlaying = useScene3d((s) => s.setPlaying);
   const addShot = useScene3d((s) => s.addShot);
@@ -823,6 +825,17 @@ function ShotTimeline() {
         >
           <CameraViewIcon />
           カメラの画
+        </button>
+        <button
+          className={`rounded-lg border px-3 py-1.5 text-[13px] font-semibold ${
+            splitView
+              ? "border-pink-400 bg-pink-500/10 text-pink-300"
+              : "border-[#2a2a2a] text-neutral-400"
+          }`}
+          onClick={toggleSplitView}
+          title="編集ビューとカメラの画を並べて表示"
+        >
+          分割
         </button>
         <span className="hidden text-[10px] text-neutral-600 lg:block">
           Space: 再生/停止 · ←→: コマ送り(Shiftで1秒) · Home: 先頭 · ⌘Z: 取り消し
@@ -945,15 +958,14 @@ function useKeyboardShortcuts() {
  * カメラの画/再生中に、書き出しアスペクト比のフレームをレターボックスで示す。
  * ビューポートを計測し、フレーム外を暗く落として内外を明確にする
  */
-function ViewportWithFrame() {
-  const cameraView = useScene3d((s) => s.cameraView);
-  const playing = useScene3d((s) => s.playing);
+/** アスペクト比フレームのレターボックス(自身のコンテナを計測) */
+function FrameOverlay() {
   const aspectRatio = useScene3d((s) => s.project.aspectRatio);
-  const containerRef = useRef<HTMLDivElement>(null);
+  const ref = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState<{ w: number; h: number }>({ w: 0, h: 0 });
 
   useEffect(() => {
-    const el = containerRef.current;
+    const el = ref.current;
     if (!el) return;
     const ro = new ResizeObserver((entries) => {
       const rect = entries[0].contentRect;
@@ -963,7 +975,6 @@ function ViewportWithFrame() {
     return () => ro.disconnect();
   }, []);
 
-  const showFrame = cameraView || playing;
   const ar = ASPECT_VALUES[aspectRatio];
   // contain フィット(はみ出さない最大サイズ)
   let frameW = size.h * ar;
@@ -973,40 +984,90 @@ function ViewportWithFrame() {
     frameH = size.w / ar;
   }
 
-  const viewBtn =
-    "rounded-md border border-[#2a2a2a] bg-[#141414]/85 px-2 py-1 text-[11px] text-neutral-300 backdrop-blur-none hover:border-pink-400/60 hover:text-white";
-
   return (
-    <div ref={containerRef} className="relative min-h-0 flex-1 overflow-hidden">
-      <Scene3dViewport />
-      {/* 視点プリセット(覚えることを増やさない視点移動) */}
-      {!showFrame && (
-        <div className="absolute left-3 top-3 flex gap-1">
-          <button className={viewBtn} onClick={() => requestViewPreset("iso")}>斜め</button>
-          <button className={viewBtn} onClick={() => requestViewPreset("front")}>正面</button>
-          <button className={viewBtn} onClick={() => requestViewPreset("side")}>横</button>
-          <button className={viewBtn} onClick={() => requestViewPreset("top")}>俯瞰</button>
-          <button className={viewBtn} onClick={() => requestViewPreset("fit")}>全体</button>
+    <div ref={ref} className="pointer-events-none absolute inset-0 flex items-center justify-center overflow-hidden">
+      {size.w > 0 && (
+        <div
+          className="relative border border-white/60 shadow-[0_0_0_9999px_rgba(0,0,0,0.65)]"
+          style={{ width: frameW, height: frameH }}
+        >
+          <span className="absolute left-1.5 top-1 text-[10px] font-medium text-white/70">
+            {aspectRatio}
+          </span>
         </div>
       )}
-      {/* 操作ヒント(常時1行だけ) */}
-      {!showFrame && (
+    </div>
+  );
+}
+
+const VIEW_BTN =
+  "rounded-md border border-[#2a2a2a] bg-[#141414]/85 px-2 py-1 text-[11px] text-neutral-300 hover:border-pink-400/60 hover:text-white";
+
+/** 編集ビュー1枚 + オーバーレイ(視点ボタン/ヒント/必要時フレーム) */
+function EditorPane({ showOverlays }: { showOverlays: boolean }) {
+  return (
+    <div className="relative h-full min-w-0 flex-1 overflow-hidden">
+      <Scene3dViewport />
+      {showOverlays && (
+        <div className="absolute left-3 top-3 flex gap-1">
+          <button className={VIEW_BTN} onClick={() => requestViewPreset("iso")}>斜め</button>
+          <button className={VIEW_BTN} onClick={() => requestViewPreset("front")}>正面</button>
+          <button className={VIEW_BTN} onClick={() => requestViewPreset("side")}>横</button>
+          <button className={VIEW_BTN} onClick={() => requestViewPreset("top")}>俯瞰</button>
+          <button className={VIEW_BTN} onClick={() => requestViewPreset("fit")}>全体</button>
+        </div>
+      )}
+      {showOverlays && (
         <p className="pointer-events-none absolute bottom-2 left-3 text-[10px] text-white/45">
           左ドラッグ: 回る · ホイール: 寄る · 右ドラッグ: ずらす · ダブルクリック: そこを注視
         </p>
       )}
-      {showFrame && size.w > 0 && (
-        <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-          <div
-            className="relative border border-white/60 shadow-[0_0_0_9999px_rgba(0,0,0,0.65)]"
-            style={{ width: frameW, height: frameH }}
-          >
-            <span className="absolute left-1.5 top-1 text-[10px] font-medium text-white/70">
-              {aspectRatio}
-            </span>
-          </div>
-        </div>
-      )}
+    </div>
+  );
+}
+
+function ViewportWithFrame() {
+  const cameraView = useScene3d((s) => s.cameraView);
+  const playing = useScene3d((s) => s.playing);
+  const splitView = useScene3d((s) => s.splitView);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [ratio, setRatio] = useState(() => {
+    const saved = Number(localStorage.getItem("scene3d.split.ratio"));
+    return Number.isFinite(saved) && saved >= 25 && saved <= 75 ? saved : 50;
+  });
+
+  const updateRatio = (dxPx: number) => {
+    const w = containerRef.current?.clientWidth ?? 0;
+    if (w <= 0) return;
+    const next = Math.max(25, Math.min(75, ratio + (dxPx / w) * 100));
+    setRatio(next);
+    localStorage.setItem("scene3d.split.ratio", String(Math.round(next)));
+  };
+
+  if (!splitView) {
+    const showFrame = cameraView || playing;
+    return (
+      <div className="relative flex min-h-0 flex-1 overflow-hidden">
+        <EditorPane showOverlays={!showFrame} />
+        {showFrame && <FrameOverlay />}
+      </div>
+    );
+  }
+
+  // 分割表示: 左=編集ビュー(自由視点) / 右=撮影カメラの画(書き出しと同じ)
+  return (
+    <div ref={containerRef} className="relative flex min-h-0 flex-1 overflow-hidden">
+      <div style={{ width: `${ratio}%` }} className="relative flex min-w-0">
+        <EditorPane showOverlays />
+      </div>
+      <PanelResizer onDelta={updateRatio} />
+      <div className="relative min-w-0 flex-1 overflow-hidden border-l border-[#242424]">
+        <Scene3dViewport mode="camera" />
+        <FrameOverlay />
+        <span className="pointer-events-none absolute right-2 top-2 rounded bg-black/50 px-1.5 py-0.5 text-[10px] text-white/70">
+          カメラの画(書き出しと同じ)
+        </span>
+      </div>
     </div>
   );
 }

@@ -424,18 +424,22 @@ function CameraPathLine() {
  * 再生・カメラビューの駆動。再生中はフレームを進め、
  * evaluateCamera の姿勢をビューカメラへ反映する
  */
-function CameraRig() {
+function CameraRig({ mode }: { mode: "editor" | "camera" }) {
   const invalidateRef = useRef(0);
   const { camera } = useThree();
 
   useFrame((_, delta) => {
     const st = useScene3d.getState();
-    if (st.playing) {
+    // フレームを進めるのは editor ペインだけ(分割時の二重進行を防ぐ)
+    if (mode === "editor" && st.playing) {
       const total = totalDurationFrames(st.project);
       const next = st.currentFrame + delta * SCENE_FPS;
       st.setCurrentFrame(next >= total ? 0 : next);
     }
-    if (st.playing || st.cameraView) {
+    // camera ペインは常に撮影カメラ。editor ペインは分割中は自由視点のまま
+    const drivePose =
+      mode === "camera" || ((st.playing || st.cameraView) && !st.splitView);
+    if (drivePose) {
       const pose = evaluateCamera(st.project, Math.floor(st.currentFrame));
       camera.position.set(pose.position[0], pose.position[1], pose.position[2]);
       camera.lookAt(pose.lookAt[0], pose.lookAt[1], pose.lookAt[2]);
@@ -494,9 +498,10 @@ function ViewportControls() {
   const dragging = useScene3d((s) => s.draggingEntityId != null);
   const playing = useScene3d((s) => s.playing);
   const cameraView = useScene3d((s) => s.cameraView);
+  const splitView = useScene3d((s) => s.splitView);
   return (
     <OrbitControls
-      enabled={!dragging && !playing && !cameraView}
+      enabled={!dragging && (splitView || (!playing && !cameraView))}
       makeDefault
       minDistance={0.8}
       maxDistance={45}
@@ -504,12 +509,13 @@ function ViewportControls() {
   );
 }
 
-export function Scene3dViewport() {
+export function Scene3dViewport({ mode = "editor" }: { mode?: "editor" | "camera" }) {
   const entities = useScene3d((s) => s.project.entities);
   const selectEntity = useScene3d((s) => s.selectEntity);
   const exporting = useScene3d(
     (s) => s.exportStatus.phase === "rendering" || s.exportStatus.phase === "encoding",
   );
+  const isCameraPane = mode === "camera";
 
   return (
     <Canvas
@@ -517,14 +523,15 @@ export function Scene3dViewport() {
       camera={{ position: [4, 3, 6], fov: 50 }}
       // toBlob でフレームを回収するため描画バッファを保持する
       gl={{ preserveDrawingBuffer: true }}
+      style={isCameraPane ? { pointerEvents: "none" } : undefined}
       onPointerMissed={() => selectEntity(null)}
     >
       {/* グレースタジオ(クレイ模型風)。霧は視認性を殺すため使わない */}
       <color attach="background" args={["#75777b"]} />
       <ambientLight intensity={0.85} />
       <directionalLight position={[5, 8, 5]} intensity={1.1} castShadow />
-      {/* 書き出し中は補助表示を消す(モーションガイドに写り込ませない) */}
-      {!exporting && (
+      {/* 書き出し中とカメラペインでは補助表示を消す(書き出される画と一致させる) */}
+      {!exporting && !isCameraPane && (
         <Grid
           args={[40, 40]}
           cellSize={0.5}
@@ -546,11 +553,12 @@ export function Scene3dViewport() {
       {entities.map((e) => (
         <EntityMesh key={e.id} entity={e} />
       ))}
-      {!exporting && <CameraPathLine />}
-      <CameraRig />
-      <ViewportControls />
-      <ViewPresetController />
-      {!exporting && (
+      {!exporting && !isCameraPane && <CameraPathLine />}
+      <CameraRig mode={mode} />
+      {!isCameraPane && <ViewportControls />}
+      {!isCameraPane && <ViewPresetController />}
+      {!isCameraPane && <ExportDriver />}
+      {!exporting && !isCameraPane && (
         <GizmoHelper alignment="bottom-right" margin={[64, 64]}>
           <GizmoViewport
             axisColors={["#e88b8b", "#8bc78b", "#8ba7e8"]}
@@ -558,7 +566,6 @@ export function Scene3dViewport() {
           />
         </GizmoHelper>
       )}
-      <ExportDriver />
     </Canvas>
   );
 }
