@@ -1055,10 +1055,38 @@ function PanelResizer({
 
 /* ---------------------------------- ルート ---------------------------------- */
 
+/** 畳んだパネルの細レール(クリックで再展開) */
+function CollapsedRail({ side, onOpen }: { side: "left" | "right"; onOpen: () => void }) {
+  return (
+    <button
+      className={`flex w-6 shrink-0 items-center justify-center bg-[#141414] text-neutral-500 hover:text-pink-300 ${
+        side === "left" ? "border-r" : "border-l"
+      } border-[#242424]`}
+      onClick={onOpen}
+      title={side === "left" ? "素材パネルを開く" : "監督パネルを開く"}
+    >
+      <span className="text-[10px]">{side === "left" ? "»" : "«"}</span>
+    </button>
+  );
+}
+
+function usePanelOpen(key: string) {
+  const [open, setOpen] = useState(() => localStorage.getItem(key) !== "0");
+  const toggle = () => {
+    setOpen((v) => {
+      localStorage.setItem(key, v ? "0" : "1");
+      return !v;
+    });
+  };
+  return [open, toggle] as const;
+}
+
 export function Scene3dWorkspace() {
   useKeyboardShortcuts();
   const [leftW, setLeftW] = usePanelWidth("scene3d.panel.left", 224, 160, 420);
   const [rightW, setRightW] = usePanelWidth("scene3d.panel.right", 288, 220, 480);
+  const [leftOpen, toggleLeft] = usePanelOpen("scene3d.panel.left.open");
+  const [rightOpen, toggleRight] = usePanelOpen("scene3d.panel.right.open");
 
   return (
     <section className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#121212]">
@@ -1070,18 +1098,44 @@ export function Scene3dWorkspace() {
       </div>
 
       <div className="flex min-h-0 flex-1 overflow-hidden">
-        <div style={{ width: leftW }} className="flex shrink-0">
-          <ShelfPanel />
-        </div>
-        <PanelResizer onDelta={(dx) => setLeftW(leftW + dx)} />
+        {leftOpen ? (
+          <>
+            <div style={{ width: leftW }} className="relative flex shrink-0">
+              <ShelfPanel />
+              <button
+                className="absolute -right-0 top-2 z-10 rounded-l-md px-1 py-1 text-[10px] text-neutral-500 hover:text-pink-300"
+                onClick={toggleLeft}
+                title="パネルを畳む"
+              >
+                «
+              </button>
+            </div>
+            <PanelResizer onDelta={(dx) => setLeftW(leftW + dx)} />
+          </>
+        ) : (
+          <CollapsedRail side="left" onOpen={toggleLeft} />
+        )}
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           <ViewportWithFrame />
           <ShotTimeline />
         </div>
-        <PanelResizer onDelta={(dx) => setRightW(rightW - dx)} />
-        <div style={{ width: rightW }} className="flex shrink-0">
-          <DirectorPanel />
-        </div>
+        {rightOpen ? (
+          <>
+            <PanelResizer onDelta={(dx) => setRightW(rightW - dx)} />
+            <div style={{ width: rightW }} className="relative flex shrink-0">
+              <button
+                className="absolute left-0 top-2 z-10 rounded-r-md px-1 py-1 text-[10px] text-neutral-500 hover:text-pink-300"
+                onClick={toggleRight}
+                title="パネルを畳む"
+              >
+                »
+              </button>
+              <DirectorPanel />
+            </div>
+          </>
+        ) : (
+          <CollapsedRail side="right" onOpen={toggleRight} />
+        )}
       </div>
     </section>
   );
