@@ -31,6 +31,105 @@ function rayToFloor(ray: Ray): Vec3 | null {
   return [snap(x), 0, snap(z)];
 }
 
+/**
+ * デッサン人形風マネキン(身長約1.7m、プリミティブ構成)。
+ * Phase 1 でリグ付きGLB(歩行等のモーション対応)に差し替える。
+ * 前提: +Z が正面(足先・鼻の向きで分かるようにする)
+ */
+function Mannequin({ color, selected }: { color: string; selected: boolean }) {
+  const jointColor = selected ? "#e8b34a" : "#b9bbbf";
+  const mat = <meshStandardMaterial color={color} roughness={0.65} />;
+  const jointMat = <meshStandardMaterial color={jointColor} roughness={0.65} />;
+
+  return (
+    <group>
+      {/* 頭・首 */}
+      <mesh position={[0, 1.585, 0]} castShadow>
+        <sphereGeometry args={[0.115, 24, 18]} />
+        {mat}
+      </mesh>
+      <mesh position={[0, 1.585, 0.1]} castShadow>
+        {/* 鼻(正面マーカー兼) */}
+        <coneGeometry args={[0.025, 0.06, 10]} />
+        {jointMat}
+      </mesh>
+      <mesh position={[0, 1.46, 0]} castShadow>
+        <cylinderGeometry args={[0.045, 0.05, 0.08, 12]} />
+        {mat}
+      </mesh>
+      {/* 胸(肩に向かってやや広がる) */}
+      <mesh position={[0, 1.25, 0]} castShadow>
+        <capsuleGeometry args={[0.155, 0.22, 8, 16]} />
+        {mat}
+      </mesh>
+      {/* 腹〜腰 */}
+      <mesh position={[0, 1.02, 0]} castShadow>
+        <sphereGeometry args={[0.13, 20, 14]} />
+        {jointMat}
+      </mesh>
+      <mesh position={[0, 0.92, 0]} castShadow>
+        <capsuleGeometry args={[0.135, 0.08, 8, 16]} />
+        {mat}
+      </mesh>
+      {/* 腕(左右対称): 上腕→肘→前腕→手。自然に少し開いた立ち姿 */}
+      {[-1, 1].map((side) => (
+        <group key={side} position={[side * 0.215, 1.36, 0]} rotation={[0, 0, side * -0.12]}>
+          {/* 肩球 */}
+          <mesh castShadow>
+            <sphereGeometry args={[0.06, 16, 12]} />
+            {jointMat}
+          </mesh>
+          {/* 上腕 */}
+          <mesh position={[0, -0.16, 0]} castShadow>
+            <capsuleGeometry args={[0.048, 0.2, 6, 12]} />
+            {mat}
+          </mesh>
+          {/* 肘 */}
+          <mesh position={[0, -0.31, 0]} castShadow>
+            <sphereGeometry args={[0.045, 14, 10]} />
+            {jointMat}
+          </mesh>
+          {/* 前腕(わずかに前へ) */}
+          <group position={[0, -0.31, 0]} rotation={[-0.08, 0, 0]}>
+            <mesh position={[0, -0.15, 0]} castShadow>
+              <capsuleGeometry args={[0.04, 0.18, 6, 12]} />
+              {mat}
+            </mesh>
+            {/* 手 */}
+            <mesh position={[0, -0.29, 0.01]} castShadow>
+              <sphereGeometry args={[0.05, 14, 10]} />
+              {mat}
+            </mesh>
+          </group>
+        </group>
+      ))}
+      {/* 脚(左右対称): 腿→膝→すね→足 */}
+      {[-1, 1].map((side) => (
+        <group key={side} position={[side * 0.09, 0.84, 0]}>
+          <mesh position={[0, -0.2, 0]} castShadow>
+            <capsuleGeometry args={[0.068, 0.26, 6, 12]} />
+            {mat}
+          </mesh>
+          {/* 膝 */}
+          <mesh position={[0, -0.4, 0]} castShadow>
+            <sphereGeometry args={[0.06, 14, 10]} />
+            {jointMat}
+          </mesh>
+          <mesh position={[0, -0.6, 0]} castShadow>
+            <capsuleGeometry args={[0.052, 0.24, 6, 12]} />
+            {mat}
+          </mesh>
+          {/* 足(つま先が+Z=正面) */}
+          <mesh position={[0, -0.795, 0.05]} castShadow>
+            <boxGeometry args={[0.09, 0.06, 0.24]} />
+            {mat}
+          </mesh>
+        </group>
+      ))}
+    </group>
+  );
+}
+
 function EntityMesh({ entity }: { entity: SceneEntity }) {
   const selectEntity = useScene3d((s) => s.selectEntity);
   const moveEntity = useScene3d((s) => s.moveEntity);
@@ -66,24 +165,7 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
     >
-      {entity.kind === "mannequin" && (
-        <>
-          {/* 胴体 + 頭の簡易マネキン(身長約1.65m)。Phase 1 でリグ付きGLBに差し替える */}
-          <mesh position={[0, 0.8, 0]} castShadow>
-            <capsuleGeometry args={[0.22, 0.85, 8, 16]} />
-            <meshStandardMaterial color={color} />
-          </mesh>
-          <mesh position={[0, 1.5, 0]} castShadow>
-            <sphereGeometry args={[0.14, 24, 16]} />
-            <meshStandardMaterial color={color} />
-          </mesh>
-          {/* 向きが分かる鼻先マーカー */}
-          <mesh position={[0, 1.5, 0.14]}>
-            <coneGeometry args={[0.04, 0.1, 8]} />
-            <meshStandardMaterial color={selected ? "#fbbf24" : "#a1a1aa"} />
-          </mesh>
-        </>
-      )}
+      {entity.kind === "mannequin" && <Mannequin color={color} selected={selected} />}
       {entity.kind === "sphere" && (
         <mesh position={[0, 0.5, 0]} castShadow>
           <sphereGeometry args={[0.5, 32, 24]} />
