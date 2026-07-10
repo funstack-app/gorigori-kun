@@ -500,6 +500,41 @@ function NumField({
   );
 }
 
+/** 軸スライダー(値表示つき) */
+function AxisSlider({
+  label,
+  value,
+  min,
+  max,
+  step = 0.1,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  step?: number;
+  onChange: (v: number) => void;
+}) {
+  return (
+    <label className="flex items-center gap-2 text-xs text-neutral-400">
+      <span className="w-6 shrink-0">{label}</span>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+        className="min-w-0 flex-1"
+      />
+      <span className="w-10 shrink-0 text-right tabular-nums text-neutral-500">
+        {value.toFixed(1)}
+      </span>
+    </label>
+  );
+}
+
 /** 選択中オブジェクトのプロパティ(選択物の種類でフィールドが変わる) */
 function SelectedObjectSection() {
   const project = useScene3d((s) => s.project);
@@ -524,16 +559,20 @@ function SelectedObjectSection() {
         {entity.label}
       </p>
 
-      {/* 位置(床面のX/Z。Shift+ドラッグで軸固定移動も可) */}
-      <div className="grid grid-cols-2 gap-1.5">
-        <NumField
+      {/* 位置(床面のX/Z)。スライダーで軸ごとの平行移動 */}
+      <div className="flex flex-col gap-1.5">
+        <AxisSlider
           label="横"
           value={entity.position[0]}
+          min={-15}
+          max={15}
           onChange={(v) => moveEntity(entity.id, [v, entity.position[1], entity.position[2]])}
         />
-        <NumField
+        <AxisSlider
           label="奥"
           value={entity.position[2]}
+          min={-15}
+          max={15}
           onChange={(v) => moveEntity(entity.id, [entity.position[0], entity.position[1], v])}
         />
       </div>
@@ -625,6 +664,7 @@ function DirectorPanel() {
   const setOrbitDegrees = useScene3d((s) => s.setOrbitDegrees);
   const setShotDurationFrames = useScene3d((s) => s.setShotDurationFrames);
   const setAspectRatio = useScene3d((s) => s.setAspectRatio);
+  const moveCameraEndpoint = useScene3d((s) => s.moveCameraEndpoint);
   const [presetOpen, setPresetOpen] = useState(false);
 
   const assignShotCamera = useScene3d((s) => s.assignShotCamera);
@@ -695,6 +735,61 @@ function DirectorPanel() {
           ))}
         </select>
       </label>
+
+      <div className="flex flex-col gap-1.5 rounded-lg border border-[#2a2a2a] bg-[#101010] p-2.5">
+        <p className="text-[10px] font-bold tracking-wide text-neutral-500">
+          カメラ開始位置(緑のカメラ)
+        </p>
+        <AxisSlider
+          label="横"
+          value={camera.startPos[0]}
+          min={-15}
+          max={15}
+          onChange={(v) => moveCameraEndpoint("start", [v, camera.startPos[1], camera.startPos[2]])}
+        />
+        <AxisSlider
+          label="高さ"
+          value={camera.startPos[1]}
+          min={0.1}
+          max={12}
+          onChange={(v) => moveCameraEndpoint("start", [camera.startPos[0], v, camera.startPos[2]])}
+        />
+        <AxisSlider
+          label="奥"
+          value={camera.startPos[2]}
+          min={-15}
+          max={15}
+          onChange={(v) => moveCameraEndpoint("start", [camera.startPos[0], camera.startPos[1], v])}
+        />
+        {camera.preset !== "fixed" && camera.preset !== "orbit" && (
+          <>
+            <p className="mt-1 text-[10px] font-bold tracking-wide text-neutral-500">
+              カメラ終了位置(赤点)
+            </p>
+            <AxisSlider
+              label="横"
+              value={camera.endPos[0]}
+              min={-15}
+              max={15}
+              onChange={(v) => moveCameraEndpoint("end", [v, camera.endPos[1], camera.endPos[2]])}
+            />
+            <AxisSlider
+              label="高さ"
+              value={camera.endPos[1]}
+              min={0.1}
+              max={12}
+              onChange={(v) => moveCameraEndpoint("end", [camera.endPos[0], v, camera.endPos[2]])}
+            />
+            <AxisSlider
+              label="奥"
+              value={camera.endPos[2]}
+              min={-15}
+              max={15}
+              onChange={(v) => moveCameraEndpoint("end", [camera.endPos[0], camera.endPos[1], v])}
+            />
+          </>
+        )}
+      </div>
 
       <div className="flex flex-col gap-1 text-xs text-neutral-400">
         レンズ
@@ -877,7 +972,7 @@ function LaneClip({
   const assignShotCamera = useScene3d((s) => s.assignShotCamera);
   const setShotDurationFrames = useScene3d((s) => s.setShotDurationFrames);
 
-  const { shot, index, startFrame } = seg;
+  const { shot, startFrame } = seg;
   const selected = selectedShotId === shot.id;
   const move = getShotMove(project, shot);
   const clipColor = cameraColor(project, shot.cameraId);
@@ -959,7 +1054,7 @@ function LaneClip({
       <div className="h-1 w-full shrink-0" style={{ backgroundColor: clipColor }} />
       <div className="flex min-h-0 flex-1 flex-col justify-center px-1.5">
         <p className={`truncate text-[11px] font-medium ${selected ? "text-white" : "text-neutral-300"}`}>
-          {index + 1}. {(shot.durationFrames / SCENE_FPS).toFixed(1)}s
+          {(shot.durationFrames / SCENE_FPS).toFixed(1)}s
         </p>
         <p className="truncate text-[9px]" style={{ color: clipColor }}>
           {CAMERA_PRESET_LABELS[move.preset]}
