@@ -552,12 +552,20 @@ function SelectedObjectSection() {
   const setEntityFloors = useScene3d((s) => s.setEntityFloors);
   const setEntityParam = useScene3d((s) => s.setEntityParam);
 
+  const setEntityMotion = useScene3d((s) => s.setEntityMotion);
   const entity = project.entities.find((e) => e.id === selectedEntityId);
   if (!entity) return null;
 
   const degrees = ((Math.round((entity.rotationY * 180) / Math.PI) % 360) + 360) % 360;
   const kind = entity.kind;
   const p = entity.params ?? {};
+  const motionType = entity.motion?.type ?? null;
+  const motionBtn = (active: boolean) =>
+    `rounded-lg border px-2 py-1.5 text-xs ${
+      active
+        ? "border-lime-400 bg-lime-400/10 text-lime-300"
+        : "border-[#2a2a2a] bg-[#101010] text-neutral-300 hover:border-lime-400/50"
+    }`;
 
   return (
     <div className="flex flex-col gap-2.5 rounded-lg border border-[#2a2a2a] bg-[#101010] p-3">
@@ -565,6 +573,29 @@ function SelectedObjectSection() {
         <EntityKindIcon kind={kind} />
         {entity.label}
       </p>
+
+      {/* 動かす(人物のみ): 歩く/走ると行き先の旗が出る */}
+      {kind === "mannequin" && (
+        <div className="flex flex-col gap-1.5">
+          <p className="text-[10px] font-bold tracking-wide text-neutral-500">動かす</p>
+          <div className="grid grid-cols-3 gap-1.5">
+            <button className={motionBtn(motionType === null)} onClick={() => setEntityMotion(entity.id, null)}>
+              立ち
+            </button>
+            <button className={motionBtn(motionType === "walk")} onClick={() => setEntityMotion(entity.id, "walk")}>
+              歩く
+            </button>
+            <button className={motionBtn(motionType === "run")} onClick={() => setEntityMotion(entity.id, "run")}>
+              走る
+            </button>
+          </div>
+          {motionType && (
+            <p className="text-[10px] leading-4 text-neutral-500">
+              旗をドラッグで行き先を変更。再生すると歩き出し、到着で立ち止まります
+            </p>
+          )}
+        </div>
+      )}
 
       {/* 位置(床面のX/Z)。スライダーで軸ごとの平行移動 */}
       <div className="flex flex-col gap-1.5">

@@ -77,13 +77,83 @@ export function getShotMove(project: SceneProject, shot: SceneShot): CameraMove 
   return cam ? cam.move : createDefaultCameraMove();
 }
 
-/** 注視点: 被写体指定なら追従、なしなら固定の注視点(被写体と連動しない) */
-export function resolveLookAt(project: SceneProject, shot: SceneShot): Vec3 {
+/** 注視点: 被写体指定なら追従(歩行中はその実位置)、なしなら固定の注視点 */
+export function resolveLookAt(
+  project: SceneProject,
+  shot: SceneShot,
+  globalFrame = 0,
+): Vec3 {
   const move = getShotMove(project, shot);
   const target = findEntity(project, move.targetEntityId);
   if (!target) return move.lookAtPos ?? [0, 1, 0];
+  const pose = evaluateEntityPose(project, target, globalFrame);
   const headHeight = target.kind === "mannequin" ? 1.3 * target.scale : 0.5 * target.scale;
-  return [target.position[0], target.position[1] + headHeight, target.position[2]];
+  return [pose.position[0], pose.position[1] + headHeight, pose.position[2]];
+}
+
+/** 歩行パラメータ(決定論。速度m/s / 1サイクルの歩幅m) */
+const GAIT = {
+  walk: { speed: 1.4, cycle: 1.32 },
+  run: { speed: 3.4, cycle: 2.2 },
+} as const;
+
+export type EntityPose = {
+  position: Vec3;
+  rotationY: number;
+  /** 歩行サイクル: moving中は phase が 0..1 で循環 */
+  gait: { moving: boolean; phase: number; run: boolean };
+};
+
+/**
+ * 人物の位置・向き・歩行位相の決定性評価。
+ * モーションはタイムライン全体で再生され、経路を歩き切ったら到着点で立ち止まる
+ */
+export function evaluateEntityPose(
+  project: SceneProject,
+  entity: SceneEntity,
+  globalFrame: number,
+): EntityPose {
+  const idle: EntityPose = {
+    position: entity.position,
+    rotationY: entity.rotationY,
+    gait: { moving: false, phase: 0, run: false },
+  };
+  const motion = entity.motion;
+  if (!motion || motion.path.length === 0 || entity.kind !== "mannequin") return idle;
+
+  const g = GAIT[motion.type];
+  const dist = (Math.max(0, globalFrame) / project.fps) * g.speed;
+  const points: Vec3[] = [entity.position, ...motion.path];
+
+  // 折れ線に沿って dist だけ進んだ位置
+  let remaining = dist;
+  for (let i = 0; i < points.length - 1; i++) {
+    const a = points[i];
+    const b = points[i + 1];
+    const dx = b[0] - a[0];
+    const dz = b[2] - a[2];
+    const segLen = Math.hypot(dx, dz);
+    if (segLen < 1e-6) continue;
+    const rotY = Math.atan2(dx, dz); // +Zが正面
+    if (remaining <= segLen) {
+      const t = remaining / segLen;
+      return {
+        position: [a[0] + dx * t, entity.position[1], a[2] + dz * t],
+        rotationY: rotY,
+        gait: { moving: true, phase: (dist % g.cycle) / g.cycle, run: motion.type === "run" },
+      };
+    }
+    remaining -= segLen;
+  }
+  // 到着: 最終点で最後の向きのまま立ち止まる
+  const last = points[points.length - 1];
+  const prev = points[points.length - 2] ?? entity.position;
+  const rotY = Math.atan2(last[0] - prev[0], last[2] - prev[2]);
+  return {
+    position: [last[0], entity.position[1], last[2]],
+    rotationY: Number.isFinite(rotY) ? rotY : entity.rotationY,
+    gait: { moving: false, phase: 0, run: false },
+  };
 }
 
 /** フルサイズ(縦24mm)換算の焦点距離 → 垂直画角(度) */
@@ -124,6 +194,7 @@ export function evaluateShotCamera(
   project: SceneProject,
   shot: SceneShot,
   localFrame: number,
+  globalFrame?: number,
 ): CameraPose {
   const camera = getShotMove(project, shot);
   const lastFrame = Math.max(1, shot.durationFrames - 1);
@@ -132,7 +203,7 @@ export function evaluateShotCamera(
   // moveWindow: カメラの動きのうち使う区間へマップ(分割カットの続き再生)
   const [w0, w1] = shot.moveWindow ?? [0, 1];
   const t = w0 + (w1 - w0) * eased;
-  const lookAt = resolveLookAt(project, shot);
+  const lookAt = resolveLookAt(project, shot, globalFrame ?? localFrame);
 
   let position: Vec3;
   switch (camera.preset) {
@@ -176,5 +247,5 @@ export function evaluateShotCamera(
 /** カメラ姿勢の評価(決定性の中核)。通しフレームで指定する */
 export function evaluateCamera(project: SceneProject, globalFrame: number): CameraPose {
   const { shot, localFrame } = locateShot(project, globalFrame);
-  return evaluateShotCamera(project, shot, localFrame);
+  return evaluateShotCamera(project, shot, localFrame, globalFrame);
 }

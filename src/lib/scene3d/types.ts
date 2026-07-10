@@ -15,6 +15,14 @@ export const SCENE_FPS = 24 as const;
 
 export type Vec3 = [number, number, number];
 
+/** 人物のモーション(タイムライン全体で再生。決定論プロシージャル歩行) */
+export type EntityMotionType = "walk" | "run";
+export type EntityMotion = {
+  type: EntityMotionType;
+  /** 経由点(開始位置は entity.position)。最後の点が到着点。到着後は立ち止まる */
+  path: Vec3[];
+};
+
 export type SceneEntityKind =
   | "mannequin"
   | "sphere"
@@ -33,6 +41,8 @@ export type SceneEntity = {
   /** 床上回転(ラジアン)。Y軸回転のみ */
   rotationY: number;
   scale: number;
+  /** 人物のモーション(mannequinのみ)。null/未指定=立ち */
+  motion?: EntityMotion | null;
   /** プロシージャル形状のパラメータ。kindごとに解釈(未指定はkind既定値) */
   params?: {
     /** building: 階数 */

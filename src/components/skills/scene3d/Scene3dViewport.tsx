@@ -17,6 +17,7 @@ import type { Group, PerspectiveCamera as ThreePerspectiveCamera, Ray } from "th
 import { scene3d as scene3dIpc } from "../../../lib/ipc";
 import {
   evaluateCamera,
+  evaluateEntityPose,
   evaluateShotCamera,
   getShotMove,
   resolveLookAt,
@@ -26,6 +27,16 @@ import { SCENE_FPS } from "../../../lib/scene3d/types";
 import { cameraColor } from "../../../lib/scene3d/types";
 import type { SceneAspectRatio, SceneCamera, SceneEntity, Vec3 } from "../../../lib/scene3d/types";
 import { getSelectedShot, useScene3d } from "../../../lib/store/scene3d";
+
+/**
+ * フレーム適用レジストリ: アニメーションする要素が「このフレームの姿勢にせよ」
+ * という関数を登録する。プレビュー(useFrame)と書き出し(ExportDriver)の両方が
+ * 同じ適用関数を呼ぶため、見たままが書き出される(決定性)
+ */
+const frameAppliers = new Set<(frame: number) => void>();
+function applySceneFrame(frame: number): void {
+  frameAppliers.forEach((fn) => fn(frame));
+}
 
 /** ポインタのレイと水平面(y=height)の交点。交差しない場合は null */
 function rayToPlaneY(ray: Ray, y: number): Vec3 | null {
@@ -51,17 +62,31 @@ function rayToFloor(ray: Ray): Vec3 | null {
 }
 
 /**
- * デッサン人形風マネキン(身長約1.7m、プリミティブ構成)。
- * Phase 1 でリグ付きGLB(歩行等のモーション対応)に差し替える。
- * 前提: +Z が正面(足先・鼻の向きで分かるようにする)
+ * デッサン人形風マネキン(身長約1.7m、プリミティブ構成のリグ)。
+ * 腕脚・胴のグループ参照を親(EntityMesh)へ渡し、歩行アニメーションで振る。
+ * 前提: +Z が正面
  */
-function Mannequin({ color, selected }: { color: string; selected: boolean }) {
+export type MannequinRig = {
+  body: Group | null;
+  arms: (Group | null)[];
+  legs: (Group | null)[];
+};
+
+function Mannequin({
+  color,
+  selected,
+  rig,
+}: {
+  color: string;
+  selected: boolean;
+  rig: React.MutableRefObject<MannequinRig>;
+}) {
   const jointColor = selected ? "#e8b34a" : "#b9bbbf";
   const mat = <meshStandardMaterial color={color} roughness={0.65} />;
   const jointMat = <meshStandardMaterial color={jointColor} roughness={0.65} />;
 
   return (
-    <group>
+    <group ref={(el) => (rig.current.body = el)}>
       {/* 頭・首 */}
       <mesh position={[0, 1.585, 0]} castShadow>
         <sphereGeometry args={[0.115, 24, 18]} />
@@ -90,31 +115,31 @@ function Mannequin({ color, selected }: { color: string; selected: boolean }) {
         <capsuleGeometry args={[0.135, 0.08, 8, 16]} />
         {mat}
       </mesh>
-      {/* 腕(左右対称): 上腕→肘→前腕→手。自然に少し開いた立ち姿 */}
-      {[-1, 1].map((side) => (
-        <group key={side} position={[side * 0.215, 1.36, 0]} rotation={[0, 0, side * -0.12]}>
-          {/* 肩球 */}
+      {/* 腕(左右対称): 肩を支点に振る */}
+      {[-1, 1].map((side, i) => (
+        <group
+          key={side}
+          position={[side * 0.215, 1.36, 0]}
+          rotation={[0, 0, side * -0.12]}
+          ref={(el) => (rig.current.arms[i] = el)}
+        >
           <mesh castShadow>
             <sphereGeometry args={[0.06, 16, 12]} />
             {jointMat}
           </mesh>
-          {/* 上腕 */}
           <mesh position={[0, -0.16, 0]} castShadow>
             <capsuleGeometry args={[0.048, 0.2, 6, 12]} />
             {mat}
           </mesh>
-          {/* 肘 */}
           <mesh position={[0, -0.31, 0]} castShadow>
             <sphereGeometry args={[0.045, 14, 10]} />
             {jointMat}
           </mesh>
-          {/* 前腕(わずかに前へ) */}
           <group position={[0, -0.31, 0]} rotation={[-0.08, 0, 0]}>
             <mesh position={[0, -0.15, 0]} castShadow>
               <capsuleGeometry args={[0.04, 0.18, 6, 12]} />
               {mat}
             </mesh>
-            {/* 手 */}
             <mesh position={[0, -0.29, 0.01]} castShadow>
               <sphereGeometry args={[0.05, 14, 10]} />
               {mat}
@@ -122,14 +147,17 @@ function Mannequin({ color, selected }: { color: string; selected: boolean }) {
           </group>
         </group>
       ))}
-      {/* 脚(左右対称): 腿→膝→すね→足 */}
-      {[-1, 1].map((side) => (
-        <group key={side} position={[side * 0.09, 0.84, 0]}>
+      {/* 脚(左右対称): 股関節を支点に振る */}
+      {[-1, 1].map((side, i) => (
+        <group
+          key={side}
+          position={[side * 0.09, 0.84, 0]}
+          ref={(el) => (rig.current.legs[i] = el)}
+        >
           <mesh position={[0, -0.2, 0]} castShadow>
             <capsuleGeometry args={[0.068, 0.26, 6, 12]} />
             {mat}
           </mesh>
-          {/* 膝 */}
           <mesh position={[0, -0.4, 0]} castShadow>
             <sphereGeometry args={[0.06, 14, 10]} />
             {jointMat}
@@ -138,7 +166,6 @@ function Mannequin({ color, selected }: { color: string; selected: boolean }) {
             <capsuleGeometry args={[0.052, 0.24, 6, 12]} />
             {mat}
           </mesh>
-          {/* 足(つま先が+Z=正面) */}
           <mesh position={[0, -0.795, 0.05]} castShadow>
             <boxGeometry args={[0.09, 0.06, 0.24]} />
             {mat}
@@ -224,6 +251,8 @@ function Building({ color, floors }: { color: string; floors: number }) {
 
 function EntityMesh({ entity }: { entity: SceneEntity }) {
   const controls = useThree((state) => state.controls);
+  const rootRef = useRef<Group>(null);
+  const rig = useRef<MannequinRig>({ body: null, arms: [null, null], legs: [null, null] });
   const selectEntity = useScene3d((s) => s.selectEntity);
   const moveEntity = useScene3d((s) => s.moveEntity);
   const setDragging = useScene3d((s) => s.setDragging);
@@ -265,6 +294,39 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
     (e.target as Element).releasePointerCapture(e.pointerId);
   };
 
+  // 歩行アニメーション: フレーム適用関数を登録(プレビューと書き出しの共通経路)
+  useEffect(() => {
+    const apply = (frame: number) => {
+      const root = rootRef.current;
+      if (!root) return;
+      const st = useScene3d.getState();
+      const ent = st.project.entities.find((e2) => e2.id === entity.id);
+      if (!ent) return;
+      const pose = evaluateEntityPose(st.project, ent, frame);
+      root.position.set(pose.position[0], pose.position[1], pose.position[2]);
+      root.rotation.y = pose.rotationY;
+
+      const r = rig.current;
+      if (!r.body) return;
+      const { moving, phase, run } = pose.gait;
+      const sw = moving ? Math.sin(phase * Math.PI * 2) : 0;
+      const legAmp = run ? 0.95 : 0.55;
+      const armAmp = run ? 0.85 : 0.45;
+      if (r.legs[0]) r.legs[0].rotation.x = sw * legAmp;
+      if (r.legs[1]) r.legs[1].rotation.x = -sw * legAmp;
+      if (r.arms[0]) r.arms[0].rotation.x = -sw * armAmp;
+      if (r.arms[1]) r.arms[1].rotation.x = sw * armAmp;
+      // 弾み(接地ごと)と前傾
+      r.body.position.y = moving ? Math.abs(Math.sin(phase * Math.PI * 2)) * (run ? 0.06 : 0.03) : 0;
+      r.body.rotation.x = run ? 0.18 : moving ? 0.06 : 0;
+    };
+    frameAppliers.add(apply);
+    apply(useScene3d.getState().currentFrame);
+    return () => {
+      frameAppliers.delete(apply);
+    };
+  }, [entity.id]);
+
   const onDoubleClick = (e: ThreeEvent<MouseEvent>) => {
     e.stopPropagation();
     // 注視: オービットの中心を対象へ移す(Blenderの視点迷子を構造的に消す)
@@ -277,6 +339,7 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
 
   return (
     <group
+      ref={rootRef}
       position={entity.position}
       rotation={[0, entity.rotationY, 0]}
       scale={entity.scale}
@@ -285,7 +348,7 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
       onPointerUp={onPointerUp}
       onDoubleClick={onDoubleClick}
     >
-      {entity.kind === "mannequin" && <Mannequin color={color} selected={selected} />}
+      {entity.kind === "mannequin" && <Mannequin color={color} selected={selected} rig={rig} />}
       {entity.kind === "sphere" && (
         <mesh position={[0, 0.5, 0]} castShadow>
           <sphereGeometry args={[0.5, 32, 24]} />
@@ -358,6 +421,7 @@ function ExportDriver() {
 
         for (let f = 0; f < total; f++) {
           if (cancelled) return;
+          applySceneFrame(f); // 人物モーションをこのフレームの姿勢に
           const pose = evaluateCamera(project, f);
           cam.position.set(pose.position[0], pose.position[1], pose.position[2]);
           cam.lookAt(pose.lookAt[0], pose.lookAt[1], pose.lookAt[2]);
@@ -734,6 +798,75 @@ function CameraMidMarker() {
 }
 
 /**
+ * 選択中の人物のモーション経路(点線)と行き先マーカー(旗)。
+ * 旗を床ドラッグすると行き先が変わる
+ */
+function MotionOverlay() {
+  const project = useScene3d((s) => s.project);
+  const selectedEntityId = useScene3d((s) => s.selectedEntityId);
+  const moveMotionTarget = useScene3d((s) => s.moveMotionTarget);
+  const setDragging = useScene3d((s) => s.setDragging);
+  const draggingSelf = useScene3d((s) => s.draggingEntityId === "__motion-target");
+
+  const entity = project.entities.find((e) => e.id === selectedEntityId);
+  if (!entity || entity.kind !== "mannequin" || !entity.motion || entity.motion.path.length === 0) {
+    return null;
+  }
+  const dest = entity.motion.path[entity.motion.path.length - 1];
+  const pathPoints: Vec3[] = [
+    [entity.position[0], 0.03, entity.position[2]],
+    ...entity.motion.path.map((p): Vec3 => [p[0], 0.03, p[2]]),
+  ];
+  const color = entity.motion.type === "run" ? "#fb923c" : "#a3e635";
+
+  const onPointerDown = (e: ThreeEvent<PointerEvent>) => {
+    e.stopPropagation();
+    setDragging("__motion-target");
+    (e.target as Element).setPointerCapture(e.pointerId);
+  };
+  const onPointerMove = (e: ThreeEvent<PointerEvent>) => {
+    if (!draggingSelf) return;
+    const p = rayToFloor(e.ray);
+    if (p) moveMotionTarget(entity.id, p);
+  };
+  const onPointerUp = (e: ThreeEvent<PointerEvent>) => {
+    if (!draggingSelf) return;
+    setDragging(null);
+    (e.target as Element).releasePointerCapture(e.pointerId);
+  };
+
+  return (
+    <>
+      <Line points={pathPoints} color={color} lineWidth={2} dashed dashSize={0.18} gapSize={0.12} />
+      {/* 行き先の旗(ドラッグで移動) */}
+      <group
+        position={[dest[0], 0, dest[2]]}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+      >
+        <mesh visible={false} position={[0, 0.4, 0]}>
+          <sphereGeometry args={[0.4, 8, 6]} />
+          <meshBasicMaterial />
+        </mesh>
+        <mesh position={[0, 0.45, 0]}>
+          <cylinderGeometry args={[0.015, 0.015, 0.9, 8]} />
+          <meshBasicMaterial color={color} />
+        </mesh>
+        <mesh position={[0.11, 0.78, 0]}>
+          <boxGeometry args={[0.22, 0.14, 0.01]} />
+          <meshBasicMaterial color={color} />
+        </mesh>
+        <mesh position={[0, 0.01, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+          <ringGeometry args={[0.12, 0.18, 24]} />
+          <meshBasicMaterial color={color} transparent opacity={0.8} />
+        </mesh>
+      </group>
+    </>
+  );
+}
+
+/**
  * 再生・カメラビューの駆動。再生中はフレームを進め、
  * evaluateCamera の姿勢をビューカメラへ反映する
  */
@@ -743,6 +876,8 @@ function CameraRig({ mode, primary }: { mode: "editor" | "camera"; primary: bool
 
   useFrame((_, delta) => {
     const st = useScene3d.getState();
+    // 人物モーション等をこのフレームの姿勢に(primaryのみ。二重適用防止)
+    if (primary) applySceneFrame(st.currentFrame);
     // フレームを進めるのは primary ペインだけ(複数ペインでの二重進行を防ぐ)
     if (primary && st.playing) {
       const total = totalDurationFrames(st.project);
@@ -909,6 +1044,7 @@ export function Scene3dViewport({
       {!exporting && !isCameraPane && <AllCameraIndicators />}
       {!exporting && !isCameraPane && <CameraEndMarker />}
       {!exporting && !isCameraPane && <CameraMidMarker />}
+      {!exporting && !isCameraPane && <MotionOverlay />}
       <CameraRig mode={mode} primary={primary} />
       {!isCameraPane && <ViewportControls />}
       {!isCameraPane && <ViewPresetController />}

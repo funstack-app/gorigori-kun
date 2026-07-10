@@ -26,6 +26,7 @@ import {
   resolveLookAt,
   totalDurationFrames,
 } from "../scene3d/evaluateScene";
+import type { EntityMotionType } from "../scene3d/types";
 
 let entitySeq = 1;
 let shotSeq = 1;
@@ -116,6 +117,10 @@ type Scene3dState = {
   scaleEntity: (id: string, scale: number) => void;
   setEntityFloors: (id: string, floors: number) => void;
   setEntityParam: (id: string, key: "width" | "height" | "depth", value: number) => void;
+  /** 人物のモーション設定(walk/run)。null=立ち止まる。開始時は前方2.5mが行き先 */
+  setEntityMotion: (id: string, type: EntityMotionType | null) => void;
+  /** モーションの行き先(最終経由点)を動かす */
+  moveMotionTarget: (id: string, position: Vec3) => void;
   setDragging: (id: string | null) => void;
 
   /** カット操作(CapCut風タイムライン) */
@@ -327,6 +332,46 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
         entities: project.entities.map((e) =>
           e.id === id ? { ...e, params: { ...e.params, [key]: clamped } } : e,
         ),
+      },
+    });
+  },
+
+  setEntityMotion: (id, type) => {
+    const { project } = get();
+    set({
+      project: {
+        ...project,
+        entities: project.entities.map((e) => {
+          if (e.id !== id) return e;
+          if (type == null) return { ...e, motion: null };
+          // 既存の経路は維持しつつ種類だけ変更。無ければ向いている方向へ2.5m
+          const path =
+            e.motion?.path && e.motion.path.length > 0
+              ? e.motion.path
+              : ([
+                  [
+                    e.position[0] + Math.sin(e.rotationY) * 2.5,
+                    e.position[1],
+                    e.position[2] + Math.cos(e.rotationY) * 2.5,
+                  ],
+                ] as Vec3[]);
+          return { ...e, motion: { type, path } };
+        }),
+      },
+    });
+  },
+
+  moveMotionTarget: (id, position) => {
+    const { project } = get();
+    set({
+      project: {
+        ...project,
+        entities: project.entities.map((e) => {
+          if (e.id !== id || !e.motion) return e;
+          const path = [...e.motion.path];
+          path[path.length - 1] = position;
+          return { ...e, motion: { ...e.motion, path } };
+        }),
       },
     });
   },
