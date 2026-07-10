@@ -1,6 +1,7 @@
 export type GoriSkillId =
   | "gori-storyboard"
   | "gori-multi-angle"
+  | "gori-scene-3d"
   | "gori-lp-builder"
   | "gori-cutout-ocr"
   | "gori-bg-swap"
@@ -59,6 +60,20 @@ export const GORI_SKILLS: GoriSkill[] = [
     path: "~/.codex/skills/gori-multi-angle",
     availableInApp: true,
     launchHint: "30 カット一気に量産",
+  },
+  {
+    // 2026-07-10 追加 (Phase 0 スパイク): 3D空間に人物・小物を置き、カメラの動きを
+    // プリセット+ドラッグだけで演出 → Seedance 2.0 向けモーションガイド動画を書き出す。
+    // 専用 Workspace は Scene3dWorkspace (SkillWorkspaceRouter "scene3d")。
+    id: "gori-scene-3d",
+    name: "3Dシーン演出",
+    shortName: "Scene 3D",
+    icon: "🎥",
+    description:
+      "3D空間に人物・小物を置いてカメラワークをドラッグで演出。動画AIに渡すモーションガイドを書き出す。",
+    path: "~/.codex/skills/gori-scene-3d",
+    availableInApp: true,
+    launchHint: "Blender不要のカメラ演出",
   },
   {
     id: "gori-lp-builder",

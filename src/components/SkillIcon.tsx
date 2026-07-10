@@ -48,6 +48,14 @@ const ICONS: Record<GoriSkillId, (props: IconProps) => ReactElement> = {
       <path d="M12 3v3M21 12h-3M12 21v-3M3 12h3M5 5l2 2M19 5l-2 2M19 19l-2-2M5 19l2-2" />
     </Box>
   ),
+  // 3Dシーン演出: 映画カメラ + 軌道の弧
+  "gori-scene-3d": ({ className }) => (
+    <Box className={className}>
+      <rect x="4" y="9" width="10" height="8" rx="2" />
+      <path d="M14 12l6-3v8l-6-3" />
+      <path d="M3 5c4-2.5 12-2.5 16 0" />
+    </Box>
+  ),
   // モバイル LP: 縦長矩形
   "gori-lp-builder": ({ className }) => (
     <Box className={className}>

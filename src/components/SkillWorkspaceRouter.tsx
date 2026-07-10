@@ -1,7 +1,16 @@
+import { lazy, Suspense } from "react";
+
 import { useSkillUiMode } from "../lib/store/skillUiMode";
 import { GenerationWorkspace } from "./GenerationWorkspace";
 import { StoryboardWorkspace } from "./skills/storyboard/StoryboardWorkspace";
 import { MultiAngleWorkspace } from "./skills/multiAngle/MultiAngleWorkspace";
+
+// three.js を含むためメインバンドルから分離(スキルに入った時だけロード)
+const Scene3dWorkspace = lazy(() =>
+  import("./skills/scene3d/Scene3dWorkspace").then((m) => ({
+    default: m.Scene3dWorkspace,
+  })),
+);
 
 /**
  * Skill UI Router
@@ -29,6 +38,18 @@ export function SkillWorkspaceRouter() {
       return <StoryboardWorkspace />;
     case "multiAngle":
       return <MultiAngleWorkspace />;
+    case "scene3d":
+      return (
+        <Suspense
+          fallback={
+            <section className="flex min-h-0 flex-1 items-center justify-center bg-[#121212] text-sm text-neutral-500">
+              3Dシーンを準備中…
+            </section>
+          }
+        >
+          <Scene3dWorkspace />
+        </Suspense>
+      );
     case "default":
     default:
       return <GenerationWorkspace />;
