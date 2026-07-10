@@ -17,18 +17,30 @@ if (!libDir) {
   process.exit(2);
 }
 
-const { createDefaultProject } = require(path.resolve(libDir, "types.js"));
-const { evaluateCamera } = require(path.resolve(libDir, "evaluateScene.js"));
+const { createDefaultProject, createDefaultShot } = require(path.resolve(libDir, "types.js"));
+const { evaluateCamera, totalDurationFrames, locateShot } = require(
+  path.resolve(libDir, "evaluateScene.js"),
+);
 
 function snapshot(project) {
   const frames = [];
-  for (let f = 0; f < project.durationFrames; f++) {
+  const total = totalDurationFrames(project);
+  for (let f = 0; f < total; f++) {
     frames.push(evaluateCamera(project, f));
   }
   return JSON.stringify(frames);
 }
 
-const project = createDefaultProject();
+// 2カット構成で検証(ショット境界の通しフレーム変換も検査対象に含める)
+function buildProject() {
+  const project = createDefaultProject();
+  const shot2 = createDefaultShot("shot-2", "カット2");
+  shot2.camera = { ...shot2.camera, preset: "pushIn", startPos: [0, 1.4, 5], endPos: [0, 1.3, 1.8] };
+  return { ...project, shots: [...project.shots, shot2] };
+}
+
+const project = buildProject();
+const total = totalDurationFrames(project);
 const run1 = snapshot(project);
 const run2 = snapshot(project);
 
@@ -39,16 +51,25 @@ if (run1 !== run2) {
 
 // カメラが実際に動いていること(全フレーム同一なら評価器が死んでいる)
 const first = JSON.stringify(evaluateCamera(project, 0));
-const last = JSON.stringify(evaluateCamera(project, project.durationFrames - 1));
+const last = JSON.stringify(evaluateCamera(project, total - 1));
 if (first === last) {
-  console.error("NG: orbit プリセットなのに開始と終了のカメラ姿勢が同一(評価器が機能していない)");
+  console.error("NG: 開始と終了のカメラ姿勢が同一(評価器が機能していない)");
+  process.exit(1);
+}
+
+// ショット境界: 通しフレームが2カット目に正しく着地するか
+const boundary = locateShot(project, project.shots[0].durationFrames);
+if (boundary.shotIndex !== 1 || boundary.localFrame !== 0) {
+  console.error(
+    `NG: ショット境界の変換が不正 (shotIndex=${boundary.shotIndex}, localFrame=${boundary.localFrame})`,
+  );
   process.exit(1);
 }
 
 if (process.argv.includes("--self-test")) {
   // 検査の牙: わざと入力を変えて差分が検出されることを実証する
-  const broken = createDefaultProject();
-  broken.camera.orbitDegrees = broken.camera.orbitDegrees + 1;
+  const broken = buildProject();
+  broken.shots[0].camera.orbitDegrees += 1;
   if (snapshot(broken) === run1) {
     console.error("NG: self-test 失敗(入力を変えても出力が同じ=比較が機能していない)");
     process.exit(1);
@@ -57,5 +78,5 @@ if (process.argv.includes("--self-test")) {
 }
 
 console.log(
-  `OK: ${project.durationFrames}フレーム x 2回評価が完全一致 / frame0とframe${project.durationFrames - 1}は異なる姿勢`,
+  `OK: 2カット${total}フレーム x 2回評価が完全一致 / ショット境界の変換も正常`,
 );

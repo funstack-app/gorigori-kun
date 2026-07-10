@@ -15,10 +15,15 @@ import { PerspectiveCamera, Vector2 } from "three";
 import type { PerspectiveCamera as ThreePerspectiveCamera, Ray } from "three";
 
 import { scene3d as scene3dIpc } from "../../../lib/ipc";
-import { evaluateCamera, resolveLookAt } from "../../../lib/scene3d/evaluateScene";
+import {
+  evaluateCamera,
+  evaluateShotCamera,
+  resolveLookAt,
+  totalDurationFrames,
+} from "../../../lib/scene3d/evaluateScene";
 import { SCENE_FPS } from "../../../lib/scene3d/types";
 import type { SceneAspectRatio, SceneEntity, Vec3 } from "../../../lib/scene3d/types";
-import { useScene3d } from "../../../lib/store/scene3d";
+import { getSelectedShot, useScene3d } from "../../../lib/store/scene3d";
 
 /** ポインタのレイと床面(y=0)の交点。交差しない場合は null */
 function rayToFloor(ray: Ray): Vec3 | null {
@@ -204,7 +209,7 @@ function ExportDriver() {
     (async () => {
       const st = useScene3d.getState();
       const project = st.project;
-      const total = project.durationFrames;
+      const total = totalDurationFrames(project);
       st.setExportStatus({ phase: "rendering", done: 0, total });
 
       // React が補助表示の非表示を反映するのを待つ(2フレーム)
@@ -279,21 +284,27 @@ function ExportDriver() {
   return null;
 }
 
-/** カメラ軌道の可視化。evaluateCamera を12分割サンプリングして線にする */
+/** 選択中カットのカメラ軌道の可視化。evaluateShotCamera のサンプリングで線にする */
 function CameraPathLine() {
   const project = useScene3d((s) => s.project);
+  const selectedShotId = useScene3d((s) => s.selectedShotId);
+
+  const shot = useMemo(
+    () => getSelectedShot({ project, selectedShotId }),
+    [project, selectedShotId],
+  );
 
   const points = useMemo(() => {
     const pts: Vec3[] = [];
     const samples = 24;
     for (let i = 0; i <= samples; i++) {
-      const frame = Math.round(((project.durationFrames - 1) * i) / samples);
-      pts.push(evaluateCamera(project, frame).position);
+      const frame = Math.round(((shot.durationFrames - 1) * i) / samples);
+      pts.push(evaluateShotCamera(project, shot, frame).position);
     }
     return pts;
-  }, [project]);
+  }, [project, shot]);
 
-  const lookAt = useMemo(() => resolveLookAt(project), [project]);
+  const lookAt = useMemo(() => resolveLookAt(project, shot), [project, shot]);
   const start = points[0];
   const end = points[points.length - 1];
 
@@ -329,8 +340,9 @@ function CameraRig() {
   useFrame((_, delta) => {
     const st = useScene3d.getState();
     if (st.playing) {
+      const total = totalDurationFrames(st.project);
       const next = st.currentFrame + delta * SCENE_FPS;
-      st.setCurrentFrame(next >= st.project.durationFrames ? 0 : next);
+      st.setCurrentFrame(next >= total ? 0 : next);
     }
     if (st.playing || st.cameraView) {
       const pose = evaluateCamera(st.project, Math.floor(st.currentFrame));

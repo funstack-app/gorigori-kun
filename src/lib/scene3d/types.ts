@@ -56,14 +56,29 @@ export type CameraMove = {
 
 export type SceneAspectRatio = "16:9" | "9:16" | "1:1";
 
-export type SceneProject = {
-  schemaVersion: 1;
-  fps: typeof SCENE_FPS;
+/**
+ * ショット = 1カット。カメラの動き + 尺 を1つの箱として持つ。
+ * shots を並べた順がそのままカット割になり、書き出しでは
+ * 全ショットが連結された1本のモーションガイド動画になる
+ */
+export type SceneShot = {
+  id: string;
+  label: string;
   durationFrames: number;
-  aspectRatio: SceneAspectRatio;
-  entities: SceneEntity[];
   camera: CameraMove;
 };
+
+export type SceneProject = {
+  schemaVersion: 2;
+  fps: typeof SCENE_FPS;
+  aspectRatio: SceneAspectRatio;
+  entities: SceneEntity[];
+  /** カット割。最低1本 */
+  shots: SceneShot[];
+};
+
+/** Seedance 1回の生成上限(秒)。合計がこれを超えたら章分割が必要 */
+export const SEEDANCE_MAX_SECONDS = 15;
 
 /** 1フレーム分のカメラ姿勢(評価結果) */
 export type CameraPose = {
@@ -86,11 +101,27 @@ export const CAMERA_PRESET_LABELS: Record<CameraPresetId, string> = {
   handheld: "ハンドヘルド",
 };
 
+export function createDefaultShot(id: string, label: string): SceneShot {
+  return {
+    id,
+    label,
+    durationFrames: SCENE_FPS * 4, // 4秒
+    camera: {
+      preset: "orbit",
+      targetEntityId: "actor-1",
+      startPos: [0, 1.4, 4],
+      endPos: [0, 1.4, 4],
+      orbitDegrees: 120,
+      lensMm: 35,
+      easing: "easeInOut",
+    },
+  };
+}
+
 export function createDefaultProject(): SceneProject {
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     fps: SCENE_FPS,
-    durationFrames: SCENE_FPS * 6, // 6秒
     aspectRatio: "16:9",
     entities: [
       {
@@ -102,14 +133,6 @@ export function createDefaultProject(): SceneProject {
         scale: 1,
       },
     ],
-    camera: {
-      preset: "orbit",
-      targetEntityId: "actor-1",
-      startPos: [0, 1.4, 4],
-      endPos: [0, 1.4, 4],
-      orbitDegrees: 120,
-      lensMm: 35,
-      easing: "easeInOut",
-    },
+    shots: [createDefaultShot("shot-1", "カット1")],
   };
 }

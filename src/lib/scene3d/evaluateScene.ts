@@ -1,15 +1,19 @@
 /**
  * scene3d 決定性評価器
  *
- * evaluateCamera(project, frame) が唯一のカメラ姿勢の真実。
+ * evaluateCamera(project, globalFrame) が唯一のカメラ姿勢の真実。
  * R3Fプレビューも PNG連番書き出しも必ずここを通す。
  * three.js に依存しない(数値計算のみ)ことで、単体での決定性検証を可能にする。
+ *
+ * ショット構造: 通しフレーム(globalFrame)を「どのショットの何フレーム目か」に
+ * 変換してからカメラを評価する。ショット境界はハードカット(カット割)
  */
 
 import type {
   CameraPose,
   SceneEntity,
   SceneProject,
+  SceneShot,
   Vec3,
 } from "./types";
 
@@ -30,10 +34,31 @@ function easeInOut(t: number): number {
   return t * t * (3 - 2 * t);
 }
 
-/** フレーム番号 → 正規化時間(0..1)。durationFrames=1 でも0除算しない */
-export function frameToT(project: SceneProject, frame: number): number {
-  const last = Math.max(1, project.durationFrames - 1);
-  return clamp01(frame / last);
+/** 全ショット合計の尺(フレーム) */
+export function totalDurationFrames(project: SceneProject): number {
+  return project.shots.reduce((sum, s) => sum + s.durationFrames, 0);
+}
+
+/** 通しフレーム → 該当ショットとショット内フレーム */
+export function locateShot(
+  project: SceneProject,
+  globalFrame: number,
+): { shot: SceneShot; localFrame: number; shotIndex: number } {
+  let remaining = Math.max(0, globalFrame);
+  for (let i = 0; i < project.shots.length; i++) {
+    const shot = project.shots[i];
+    if (remaining < shot.durationFrames) {
+      return { shot, localFrame: remaining, shotIndex: i };
+    }
+    remaining -= shot.durationFrames;
+  }
+  // 末尾を超えたら最終ショットの最終フレーム
+  const last = project.shots[project.shots.length - 1];
+  return {
+    shot: last,
+    localFrame: Math.max(0, last.durationFrames - 1),
+    shotIndex: project.shots.length - 1,
+  };
 }
 
 export function findEntity(
@@ -45,8 +70,8 @@ export function findEntity(
 }
 
 /** 注視点: 対象エンティティの胸元(人型)/中心。対象なしなら原点付近 */
-export function resolveLookAt(project: SceneProject): Vec3 {
-  const target = findEntity(project, project.camera.targetEntityId);
+export function resolveLookAt(project: SceneProject, shot: SceneShot): Vec3 {
+  const target = findEntity(project, shot.camera.targetEntityId);
   if (!target) return [0, 1, 0];
   const headHeight = target.kind === "mannequin" ? 1.3 * target.scale : 0.5 * target.scale;
   return [target.position[0], target.position[1] + headHeight, target.position[2]];
@@ -85,12 +110,17 @@ function rotateAroundY(point: Vec3, center: Vec3, degrees: number): Vec3 {
   ];
 }
 
-/** カメラ姿勢の評価(決定性の中核) */
-export function evaluateCamera(project: SceneProject, frame: number): CameraPose {
-  const { camera } = project;
-  const rawT = frameToT(project, frame);
+/** ショット内フレームでのカメラ姿勢評価 */
+export function evaluateShotCamera(
+  project: SceneProject,
+  shot: SceneShot,
+  localFrame: number,
+): CameraPose {
+  const { camera } = shot;
+  const lastFrame = Math.max(1, shot.durationFrames - 1);
+  const rawT = clamp01(localFrame / lastFrame);
   const t = camera.easing === "easeInOut" ? easeInOut(rawT) : rawT;
-  const lookAt = resolveLookAt(project);
+  const lookAt = resolveLookAt(project, shot);
 
   let position: Vec3;
   switch (camera.preset) {
@@ -102,7 +132,7 @@ export function evaluateCamera(project: SceneProject, frame: number): CameraPose
       break;
     case "handheld": {
       const base = lerpVec3(camera.startPos, camera.endPos, t);
-      const off = handheldOffset(frame, project.fps);
+      const off = handheldOffset(localFrame, project.fps);
       position = [base[0] + off[0], base[1] + off[1], base[2] + off[2]];
       break;
     }
@@ -118,4 +148,10 @@ export function evaluateCamera(project: SceneProject, frame: number): CameraPose
     lookAt,
     fovDeg: lensToFovDeg(camera.lensMm),
   };
+}
+
+/** カメラ姿勢の評価(決定性の中核)。通しフレームで指定する */
+export function evaluateCamera(project: SceneProject, globalFrame: number): CameraPose {
+  const { shot, localFrame } = locateShot(project, globalFrame);
+  return evaluateShotCamera(project, shot, localFrame);
 }

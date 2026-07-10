@@ -3,21 +3,26 @@
  *
  * SceneProject(正本データ)と編集UI状態(選択・再生・ドラッグ)を分離して保持する。
  * カメラ姿勢の計算はここでは行わない(evaluateScene.ts が唯一の真実)。
+ *
+ * ショット構造: project.shots がカット割。selectedShotId のショットに対して
+ * カメラ操作(プリセット/レンズ/尺)が効く。CapCut風タイムラインの正本
  */
 
 import { create } from "zustand";
 
-import { createDefaultProject, SCENE_FPS } from "../scene3d/types";
+import { createDefaultProject, createDefaultShot, SCENE_FPS } from "../scene3d/types";
 import type {
   CameraPresetId,
   SceneEntity,
   SceneEntityKind,
   SceneProject,
+  SceneShot,
   Vec3,
 } from "../scene3d/types";
-import { resolveLookAt } from "../scene3d/evaluateScene";
+import { resolveLookAt, totalDurationFrames } from "../scene3d/evaluateScene";
 
 let entitySeq = 1;
+let shotSeq = 1;
 
 const ENTITY_LABELS: Record<SceneEntityKind, string> = {
   mannequin: "人物",
@@ -66,11 +71,12 @@ export type Scene3dExportStatus =
 type Scene3dState = {
   project: SceneProject;
   selectedEntityId: string | null;
+  selectedShotId: string;
   /** 再生中フラグ。再生中は evaluateCamera がビューを乗っ取る */
   playing: boolean;
   /** カメラビュー(撮影カメラの画で確認)トグル */
   cameraView: boolean;
-  /** 現在フレーム(再生・スクラブ共用。表示は floor する) */
+  /** 現在の通しフレーム(再生・スクラブ共用。表示は floor する) */
   currentFrame: number;
   /** 床ドラッグ中のエンティティID(OrbitControls無効化に使う) */
   draggingEntityId: string | null;
@@ -88,11 +94,18 @@ type Scene3dState = {
   rotateEntity: (id: string, rotationY: number) => void;
   setDragging: (id: string | null) => void;
 
+  /** カット操作(CapCut風タイムライン) */
+  selectShot: (id: string) => void;
+  addShot: () => void;
+  removeShot: (id: string) => void;
+  reorderShots: (activeId: string, overId: string) => void;
+  setShotDurationFrames: (id: string, frames: number) => void;
+
+  /** 以下のカメラ操作は selectedShotId のショットに効く */
   setCameraPreset: (preset: CameraPresetId) => void;
   setCameraTarget: (entityId: string | null) => void;
   setLens: (lensMm: number) => void;
   setOrbitDegrees: (degrees: number) => void;
-  setDurationSeconds: (seconds: number) => void;
   moveCameraEndpoint: (which: "start" | "end", position: Vec3) => void;
 
   setPlaying: (playing: boolean) => void;
@@ -105,9 +118,38 @@ type Scene3dState = {
   setExportStatus: (status: Scene3dExportStatus) => void;
 };
 
+/** 選択中ショットを取得(消えていたら先頭にフォールバック) */
+export function getSelectedShot(state: Pick<Scene3dState, "project" | "selectedShotId">): SceneShot {
+  return (
+    state.project.shots.find((s) => s.id === state.selectedShotId) ?? state.project.shots[0]
+  );
+}
+
+/** ショットの開始位置(通しフレーム) */
+export function shotStartFrame(project: SceneProject, shotId: string): number {
+  let acc = 0;
+  for (const s of project.shots) {
+    if (s.id === shotId) return acc;
+    acc += s.durationFrames;
+  }
+  return 0;
+}
+
+function updateShot(
+  project: SceneProject,
+  shotId: string,
+  patch: (shot: SceneShot) => SceneShot,
+): SceneProject {
+  return {
+    ...project,
+    shots: project.shots.map((s) => (s.id === shotId ? patch(s) : s)),
+  };
+}
+
 export const useScene3d = create<Scene3dState>((set, get) => ({
   project: createDefaultProject(),
   selectedEntityId: "actor-1",
+  selectedShotId: "shot-1",
   playing: false,
   cameraView: false,
   currentFrame: 0,
@@ -137,12 +179,14 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
   removeEntity: (id) => {
     const { project, selectedEntityId } = get();
     const entities = project.entities.filter((e) => e.id !== id);
-    const camera =
-      project.camera.targetEntityId === id
-        ? { ...project.camera, targetEntityId: entities[0]?.id ?? null }
-        : project.camera;
+    // 各ショットの注視対象からも外す
+    const shots = project.shots.map((s) =>
+      s.camera.targetEntityId === id
+        ? { ...s, camera: { ...s.camera, targetEntityId: entities[0]?.id ?? null } }
+        : s,
+    );
     set({
-      project: { ...project, entities, camera },
+      project: { ...project, entities, shots },
       selectedEntityId: selectedEntityId === id ? null : selectedEntityId,
     });
   },
@@ -175,44 +219,114 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
 
   setDragging: (id) => set({ draggingEntityId: id }),
 
+  selectShot: (id) => {
+    const { project } = get();
+    if (!project.shots.some((s) => s.id === id)) return;
+    // 選んだカットの頭に再生ヘッドを移動(どこを編集しているか分かるように)
+    set({ selectedShotId: id, currentFrame: shotStartFrame(project, id) });
+  },
+
+  addShot: () => {
+    const { project } = get();
+    const id = `shot-${Date.now()}-${shotSeq++}`;
+    const selected = getSelectedShot(get());
+    // 選択中カットの複製から始める(続きのカットを作る操作が最短になる)
+    const shot: SceneShot = {
+      ...createDefaultShot(id, `カット${project.shots.length + 1}`),
+      durationFrames: selected.durationFrames,
+      camera: { ...selected.camera },
+    };
+    const next = { ...project, shots: [...project.shots, shot] };
+    set({ project: next, selectedShotId: id, currentFrame: shotStartFrame(next, id) });
+  },
+
+  removeShot: (id) => {
+    const { project, selectedShotId } = get();
+    if (project.shots.length <= 1) return; // 最低1カットは残す
+    const shots = project.shots.filter((s) => s.id !== id);
+    const next = { ...project, shots };
+    const nextSelected = selectedShotId === id ? shots[0].id : selectedShotId;
+    set({
+      project: next,
+      selectedShotId: nextSelected,
+      currentFrame: Math.min(get().currentFrame, totalDurationFrames(next) - 1),
+    });
+  },
+
+  reorderShots: (activeId, overId) => {
+    const { project } = get();
+    const from = project.shots.findIndex((s) => s.id === activeId);
+    const to = project.shots.findIndex((s) => s.id === overId);
+    if (from < 0 || to < 0 || from === to) return;
+    const shots = [...project.shots];
+    const [moved] = shots.splice(from, 1);
+    shots.splice(to, 0, moved);
+    set({ project: { ...project, shots } });
+  },
+
+  setShotDurationFrames: (id, frames) => {
+    const { project } = get();
+    const clamped = Math.max(SCENE_FPS, Math.min(15 * SCENE_FPS, Math.round(frames)));
+    set({ project: updateShot(project, id, (s) => ({ ...s, durationFrames: clamped })) });
+  },
+
   setCameraPreset: (preset) => {
     const { project } = get();
-    const target = resolveLookAt(project);
+    const shot = getSelectedShot(get());
+    const target = resolveLookAt(project, shot);
     const placement = presetPlacement(preset, target);
     set({
-      project: { ...project, camera: { ...project.camera, preset, ...placement } },
-      currentFrame: 0,
+      project: updateShot(project, shot.id, (s) => ({
+        ...s,
+        camera: { ...s.camera, preset, ...placement },
+      })),
+      currentFrame: shotStartFrame(project, shot.id),
     });
   },
 
   setCameraTarget: (entityId) => {
     const { project } = get();
-    set({ project: { ...project, camera: { ...project.camera, targetEntityId: entityId } } });
+    const shot = getSelectedShot(get());
+    set({
+      project: updateShot(project, shot.id, (s) => ({
+        ...s,
+        camera: { ...s.camera, targetEntityId: entityId },
+      })),
+    });
   },
 
   setLens: (lensMm) => {
     const { project } = get();
-    set({ project: { ...project, camera: { ...project.camera, lensMm } } });
+    const shot = getSelectedShot(get());
+    set({
+      project: updateShot(project, shot.id, (s) => ({
+        ...s,
+        camera: { ...s.camera, lensMm },
+      })),
+    });
   },
 
   setOrbitDegrees: (orbitDegrees) => {
     const { project } = get();
-    set({ project: { ...project, camera: { ...project.camera, orbitDegrees } } });
-  },
-
-  setDurationSeconds: (seconds) => {
-    const { project } = get();
-    const clamped = Math.min(15, Math.max(2, Math.round(seconds)));
+    const shot = getSelectedShot(get());
     set({
-      project: { ...project, durationFrames: clamped * SCENE_FPS },
-      currentFrame: 0,
+      project: updateShot(project, shot.id, (s) => ({
+        ...s,
+        camera: { ...s.camera, orbitDegrees },
+      })),
     });
   },
 
   moveCameraEndpoint: (which, position) => {
     const { project } = get();
+    const shot = getSelectedShot(get());
     const key = which === "start" ? "startPos" : "endPos";
-    set({ project: { ...project, camera: { ...project.camera, [key]: position } } });
+    set({
+      project: updateShot(project, shot.id, (s) => ({
+        ...s,
+        camera: { ...s.camera, [key]: position },
+      })),
+    });
   },
 
   setPlaying: (playing) => set({ playing }),
@@ -222,6 +336,7 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
     set({
       project: createDefaultProject(),
       selectedEntityId: "actor-1",
+      selectedShotId: "shot-1",
       playing: false,
       cameraView: false,
       currentFrame: 0,
