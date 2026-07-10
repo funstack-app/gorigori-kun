@@ -767,8 +767,8 @@ function CameraRig({ mode, primary }: { mode: "editor" | "camera"; primary: bool
   return null;
 }
 
-/** 視点プリセット(正面/横/俯瞰/斜め/全体)。UIボタン(Workspace側)から呼ばれる */
-export type ViewPresetType = "front" | "side" | "top" | "iso" | "fit";
+/** 視点プリセット(正面/横/俯瞰/斜め/全体/リセット)。UIボタン(Workspace側)から呼ばれる */
+export type ViewPresetType = "front" | "side" | "top" | "iso" | "fit" | "reset";
 let viewPresetListener: ((t: ViewPresetType) => void) | null = null;
 export function requestViewPreset(t: ViewPresetType): void {
   viewPresetListener?.(t);
@@ -779,9 +779,35 @@ function ViewPresetController() {
   useEffect(() => {
     viewPresetListener = (t) => {
       const c = controls as unknown as { target: Vector3; update: () => void } | null;
-      const target = c?.target ?? new Vector3(0, 1, 0);
+
+      // リセット: 選択に関係なく原点の初期構図へ
+      if (t === "reset") {
+        camera.position.set(4, 3, 6);
+        c?.target.set(0, 1, 0);
+        camera.lookAt(0, 1, 0);
+        c?.update();
+        return;
+      }
+
+      // 基準点 = 選択中の被写体(物体 or カメラ)。未選択ならシーン中央
+      const st = useScene3d.getState();
+      const target = new Vector3(0, 1, 0);
+      const selEntity = st.project.entities.find((e) => e.id === st.selectedEntityId);
+      if (selEntity) {
+        const h =
+          selEntity.kind === "mannequin" ? 1.1 : selEntity.kind === "building" ? 3 : 0.6;
+        target.set(
+          selEntity.position[0],
+          selEntity.position[1] + h * selEntity.scale,
+          selEntity.position[2],
+        );
+      } else if (st.cameraSelected) {
+        const shot = getSelectedShot(st);
+        const move = getShotMove(st.project, shot);
+        target.set(move.startPos[0], move.startPos[1], move.startPos[2]);
+      }
+
       const dist = t === "fit" ? 9 : Math.max(3, camera.position.distanceTo(target));
-      if (t === "fit") target.set(0, 1, 0);
       switch (t) {
         case "front":
           camera.position.set(target.x, target.y + dist * 0.12, target.z + dist);
@@ -797,6 +823,8 @@ function ViewPresetController() {
           camera.position.set(target.x + dist * 0.6, target.y + dist * 0.45, target.z + dist * 0.66);
           break;
       }
+      // 選択物を回転の中心にする(以降のオービットも選択物基準)
+      c?.target.copy(target);
       camera.lookAt(target);
       c?.update();
     };

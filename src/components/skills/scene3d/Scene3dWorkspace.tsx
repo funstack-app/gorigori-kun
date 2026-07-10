@@ -1519,6 +1519,10 @@ function EditorPane({ showOverlays, primary = false }: { showOverlays: boolean; 
           <button className={VIEW_BTN} onClick={() => requestViewPreset("side")}>横</button>
           <button className={VIEW_BTN} onClick={() => requestViewPreset("top")}>俯瞰</button>
           <button className={VIEW_BTN} onClick={() => requestViewPreset("fit")}>全体</button>
+          <span className="mx-0.5 w-px bg-[#2a2a2a]" />
+          <button className={VIEW_BTN} onClick={() => requestViewPreset("reset")} title="選択に関係なく初期構図に戻る">
+            リセット
+          </button>
         </div>
       )}
       {showOverlays && (
