@@ -137,11 +137,11 @@ function Mannequin({ color, selected }: { color: string; selected: boolean }) {
 
 /* ------------------------- プロシージャル建築(軽量パラメトリック形状) ------------------------- */
 
-/** 壁: 3m幅 x 2.6m高。scale と rotationY で長さ・向きを作る */
-function Wall({ color }: { color: string }) {
+/** 壁: 既定3m幅 x 2.6m高。横幅/高さは params で可変 */
+function Wall({ color, width = 3, height = 2.6 }: { color: string; width?: number; height?: number }) {
   return (
-    <mesh position={[0, 1.3, 0]} castShadow receiveShadow>
-      <boxGeometry args={[3, 2.6, 0.15]} />
+    <mesh position={[0, height / 2, 0]} castShadow receiveShadow>
+      <boxGeometry args={[width, height, 0.15]} />
       <meshStandardMaterial color={color} roughness={0.85} />
     </mesh>
   );
@@ -218,16 +218,32 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
 
   const color = selected ? "#f59e0b" : "#d4d4d8";
 
+  const dragStart = useRef<Vec3 | null>(null);
+
   const onPointerDown = (e: ThreeEvent<PointerEvent>) => {
     e.stopPropagation();
     selectEntity(entity.id);
     setDragging(entity.id);
+    dragStart.current = [...entity.position] as Vec3;
     (e.target as Element).setPointerCapture(e.pointerId);
   };
   const onPointerMove = (e: ThreeEvent<PointerEvent>) => {
     if (!draggingSelf) return;
     const p = rayToFloor(e.ray);
-    if (p) moveEntity(entity.id, p);
+    if (!p) return;
+    // Shift: ドラッグ開始位置からの支配軸(X/Z)に沿って平行移動
+    if (e.nativeEvent.shiftKey && dragStart.current) {
+      const [sx, , sz] = dragStart.current;
+      const dx = Math.abs(p[0] - sx);
+      const dz = Math.abs(p[2] - sz);
+      if (dx >= dz) {
+        moveEntity(entity.id, [p[0], 0, sz]);
+      } else {
+        moveEntity(entity.id, [sx, 0, p[2]]);
+      }
+      return;
+    }
+    moveEntity(entity.id, p);
   };
   const onPointerUp = (e: ThreeEvent<PointerEvent>) => {
     if (!draggingSelf) return;
@@ -263,12 +279,20 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
         </mesh>
       )}
       {entity.kind === "box" && (
-        <mesh position={[0, 0.4, 0]} castShadow>
-          <boxGeometry args={[0.8, 0.8, 0.8]} />
+        <mesh position={[0, (entity.params?.height ?? 0.8) / 2, 0]} castShadow>
+          <boxGeometry
+            args={[
+              entity.params?.width ?? 0.8,
+              entity.params?.height ?? 0.8,
+              entity.params?.depth ?? 0.8,
+            ]}
+          />
           <meshStandardMaterial color={color} />
         </mesh>
       )}
-      {entity.kind === "wall" && <Wall color={color} />}
+      {entity.kind === "wall" && (
+        <Wall color={color} width={entity.params?.width} height={entity.params?.height} />
+      )}
       {entity.kind === "column" && <Column color={color} />}
       {entity.kind === "stairs" && <Stairs color={color} />}
       {entity.kind === "building" && (

@@ -427,56 +427,144 @@ function ShelfPanel() {
 
 /* ---------------------------------- 右パネル(監督) ---------------------------------- */
 
-/** 選択中オブジェクトの調整(選択時のみ表示。全部を見せない原則) */
+/** 数値入力(位置・寸法用の小さな共通部品) */
+function NumField({
+  label,
+  value,
+  step = 0.1,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  step?: number;
+  onChange: (v: number) => void;
+}) {
+  return (
+    <label className="flex items-center gap-1.5 text-xs text-neutral-400">
+      <span className="w-8 shrink-0">{label}</span>
+      <input
+        type="number"
+        step={step}
+        value={Number(value.toFixed(2))}
+        onChange={(e) => {
+          const v = Number(e.target.value);
+          if (Number.isFinite(v)) onChange(v);
+        }}
+        className="w-full rounded border border-[#2a2a2a] bg-[#0d0d0d] px-2 py-1 text-xs text-neutral-200 focus:border-pink-400/60 focus:outline-none"
+      />
+    </label>
+  );
+}
+
+/** 選択中オブジェクトのプロパティ(選択物の種類でフィールドが変わる) */
 function SelectedObjectSection() {
   const project = useScene3d((s) => s.project);
   const selectedEntityId = useScene3d((s) => s.selectedEntityId);
+  const moveEntity = useScene3d((s) => s.moveEntity);
   const rotateEntity = useScene3d((s) => s.rotateEntity);
   const scaleEntity = useScene3d((s) => s.scaleEntity);
   const setEntityFloors = useScene3d((s) => s.setEntityFloors);
+  const setEntityParam = useScene3d((s) => s.setEntityParam);
 
   const entity = project.entities.find((e) => e.id === selectedEntityId);
   if (!entity) return null;
 
-  const degrees = Math.round(((entity.rotationY * 180) / Math.PI) % 360);
+  const degrees = ((Math.round((entity.rotationY * 180) / Math.PI) % 360) + 360) % 360;
+  const kind = entity.kind;
+  const p = entity.params ?? {};
 
   return (
-    <div className="rounded-lg border border-[#2a2a2a] bg-[#101010] p-3">
-      <p className="mb-2 flex items-center gap-2 text-[11px] font-bold tracking-wide text-amber-400/90">
-        <EntityKindIcon kind={entity.kind} />
+    <div className="flex flex-col gap-2.5 rounded-lg border border-[#2a2a2a] bg-[#101010] p-3">
+      <p className="flex items-center gap-2 text-[11px] font-bold tracking-wide text-amber-400/90">
+        <EntityKindIcon kind={kind} />
         {entity.label}
       </p>
-      <label className="mb-2 flex flex-col gap-1 text-xs text-neutral-400">
-        向き: {((degrees % 360) + 360) % 360}°
+
+      {/* 位置(床面のX/Z。Shift+ドラッグで軸固定移動も可) */}
+      <div className="grid grid-cols-2 gap-1.5">
+        <NumField
+          label="横"
+          value={entity.position[0]}
+          onChange={(v) => moveEntity(entity.id, [v, entity.position[1], entity.position[2]])}
+        />
+        <NumField
+          label="奥"
+          value={entity.position[2]}
+          onChange={(v) => moveEntity(entity.id, [entity.position[0], entity.position[1], v])}
+        />
+      </div>
+
+      <label className="flex flex-col gap-1 text-xs text-neutral-400">
+        向き: {degrees}°
         <input
           type="range"
           min={0}
           max={360}
           step={15}
-          value={((degrees % 360) + 360) % 360}
+          value={degrees}
           onChange={(e) => rotateEntity(entity.id, (Number(e.target.value) * Math.PI) / 180)}
         />
       </label>
-      <label className="flex flex-col gap-1 text-xs text-neutral-400">
-        大きさ: {entity.scale.toFixed(1)}x
-        <input
-          type="range"
-          min={0.3}
-          max={4}
-          step={0.1}
-          value={entity.scale}
-          onChange={(e) => scaleEntity(entity.id, Number(e.target.value))}
-        />
-      </label>
-      {entity.kind === "building" && (
-        <label className="mt-2 flex flex-col gap-1 text-xs text-neutral-400">
-          階数: {entity.params?.floors ?? 3}階
+
+      {/* 種類別フィールド */}
+      {(kind === "mannequin" || kind === "sphere" || kind === "column" || kind === "stairs") && (
+        <label className="flex flex-col gap-1 text-xs text-neutral-400">
+          大きさ: {entity.scale.toFixed(1)}x
+          <input
+            type="range"
+            min={0.3}
+            max={4}
+            step={0.1}
+            value={entity.scale}
+            onChange={(e) => scaleEntity(entity.id, Number(e.target.value))}
+          />
+        </label>
+      )}
+
+      {kind === "wall" && (
+        <div className="grid grid-cols-2 gap-1.5">
+          <NumField
+            label="横幅"
+            value={p.width ?? 3}
+            onChange={(v) => setEntityParam(entity.id, "width", v)}
+          />
+          <NumField
+            label="高さ"
+            value={p.height ?? 2.6}
+            onChange={(v) => setEntityParam(entity.id, "height", v)}
+          />
+        </div>
+      )}
+
+      {kind === "box" && (
+        <div className="grid grid-cols-3 gap-1.5">
+          <NumField
+            label="横幅"
+            value={p.width ?? 0.8}
+            onChange={(v) => setEntityParam(entity.id, "width", v)}
+          />
+          <NumField
+            label="高さ"
+            value={p.height ?? 0.8}
+            onChange={(v) => setEntityParam(entity.id, "height", v)}
+          />
+          <NumField
+            label="奥行"
+            value={p.depth ?? 0.8}
+            onChange={(v) => setEntityParam(entity.id, "depth", v)}
+          />
+        </div>
+      )}
+
+      {kind === "building" && (
+        <label className="flex flex-col gap-1 text-xs text-neutral-400">
+          階数: {p.floors ?? 3}階
           <input
             type="range"
             min={1}
             max={12}
             step={1}
-            value={entity.params?.floors ?? 3}
+            value={p.floors ?? 3}
             onChange={(e) => setEntityFloors(entity.id, Number(e.target.value))}
           />
         </label>
@@ -1021,7 +1109,7 @@ function EditorPane({ showOverlays, primary = false }: { showOverlays: boolean; 
       )}
       {showOverlays && (
         <p className="pointer-events-none absolute bottom-2 left-3 text-[10px] text-white/45">
-          左ドラッグ: 回る · ホイール: 寄る · 右ドラッグ: ずらす · ダブルクリック: そこを注視
+          左ドラッグ: 回る · ホイール: 寄る · 右ドラッグ: ずらす · ダブルクリック: 注視 · Shift+物ドラッグ: 軸に沿って移動
         </p>
       )}
     </div>

@@ -33,9 +33,16 @@ export type SceneEntity = {
   /** 床上回転(ラジアン)。Y軸回転のみ */
   rotationY: number;
   scale: number;
-  /** プロシージャル形状のパラメータ(建物の階数等)。kindごとに解釈 */
+  /** プロシージャル形状のパラメータ。kindごとに解釈(未指定はkind既定値) */
   params?: {
+    /** building: 階数 */
     floors?: number;
+    /** wall/box: 横幅(m) */
+    width?: number;
+    /** wall/box: 高さ(m) */
+    height?: number;
+    /** box: 奥行(m) */
+    depth?: number;
   };
 };
 

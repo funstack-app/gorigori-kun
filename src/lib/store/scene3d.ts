@@ -105,6 +105,7 @@ type Scene3dState = {
   rotateEntity: (id: string, rotationY: number) => void;
   scaleEntity: (id: string, scale: number) => void;
   setEntityFloors: (id: string, floors: number) => void;
+  setEntityParam: (id: string, key: "width" | "height" | "depth", value: number) => void;
   setDragging: (id: string | null) => void;
 
   /** カット操作(CapCut風タイムライン) */
@@ -263,6 +264,19 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
         ...project,
         entities: project.entities.map((e) =>
           e.id === id ? { ...e, params: { ...e.params, floors: clamped } } : e,
+        ),
+      },
+    });
+  },
+
+  setEntityParam: (id, key, value) => {
+    const { project } = get();
+    const clamped = Math.max(0.1, Math.min(30, value));
+    set({
+      project: {
+        ...project,
+        entities: project.entities.map((e) =>
+          e.id === id ? { ...e, params: { ...e.params, [key]: clamped } } : e,
         ),
       },
     });
