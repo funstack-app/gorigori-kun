@@ -81,8 +81,10 @@ type Scene3dState = {
   playing: boolean;
   /** カメラビュー(撮影カメラの画で確認)トグル */
   cameraView: boolean;
-  /** 分割表示(左=編集ビュー / 右=撮影カメラの画) */
+  /** ペインが2枚以上あるか(編集ビューへのカメラ乗っ取りを止める判定に使う) */
   splitView: boolean;
+  /** ペイン分割レイアウト(Blender風ツリー) */
+  paneLayout: PaneNode;
   /** 現在の通しフレーム(再生・スクラブ共用。表示は floor する) */
   currentFrame: number;
   /** 床ドラッグ中のエンティティID(OrbitControls無効化に使う) */
@@ -127,6 +129,7 @@ type Scene3dState = {
   togglePlay: () => void;
   setCameraView: (on: boolean) => void;
   toggleSplitView: () => void;
+  applyPaneOp: (op: PaneOp) => void;
   setCurrentFrame: (frame: number) => void;
   setAspectRatio: (ratio: SceneAspectRatio) => void;
   resetProject: () => void;
@@ -170,7 +173,8 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
   selectedShotId: "shot-1",
   playing: false,
   cameraView: false,
-  splitView: localStorage.getItem("scene3d.splitView") === "1",
+  splitView: countLeaves(loadPaneLayout()) > 1,
+  paneLayout: loadPaneLayout(),
   currentFrame: 0,
   draggingEntityId: null,
   playStartFrame: 0,
@@ -388,9 +392,38 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
   },
   setCameraView: (cameraView) => set({ cameraView }),
   toggleSplitView: () => {
-    const next = !get().splitView;
-    localStorage.setItem("scene3d.splitView", next ? "1" : "0");
-    set({ splitView: next, cameraView: false });
+    // プリセット切替: 1枚 → 編集+カメラの2枚 / 2枚以上 → 編集1枚に戻す
+    const { paneLayout } = get();
+    const next: PaneNode =
+      countLeaves(paneLayout) === 1
+        ? splitLeafNode(paneLayout, firstLeafId(paneLayout), "row")
+        : defaultPaneLayout();
+    localStorage.setItem(PANE_LAYOUT_KEY, JSON.stringify(next));
+    set({ paneLayout: next, splitView: countLeaves(next) > 1, cameraView: false });
+  },
+
+  applyPaneOp: (op) => {
+    const { paneLayout } = get();
+    let next: PaneNode | null = paneLayout;
+    switch (op.type) {
+      case "split":
+        next = splitLeafNode(paneLayout, op.id, op.dir);
+        break;
+      case "close":
+        next = closeLeafNode(paneLayout, op.id) ?? defaultPaneLayout();
+        break;
+      case "ratio":
+        next = setNodeRatio(paneLayout, op.id, op.ratio);
+        break;
+      case "toggleView":
+        next = toggleLeafView(paneLayout, op.id);
+        break;
+      case "reset":
+        next = defaultPaneLayout();
+        break;
+    }
+    localStorage.setItem(PANE_LAYOUT_KEY, JSON.stringify(next));
+    set({ paneLayout: next, splitView: countLeaves(next) > 1 });
   },
   setCurrentFrame: (frame) => set({ currentFrame: frame }),
   setAspectRatio: (aspectRatio) => {
@@ -416,6 +449,84 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
   },
   setExportStatus: (exportStatus) => set({ exportStatus }),
 }));
+
+
+/* ---------------------------------- ペイン分割レイアウト(Blender風) ---------------------------------- */
+
+export type PaneView = "editor" | "camera";
+export type PaneNode =
+  | { kind: "leaf"; id: string; view: PaneView }
+  | { kind: "split"; id: string; dir: "row" | "col"; ratio: number; a: PaneNode; b: PaneNode };
+
+const PANE_LAYOUT_KEY = "scene3d.paneLayout.v1";
+let paneSeq = 1;
+
+function defaultPaneLayout(): PaneNode {
+  return { kind: "leaf", id: "pane-root", view: "editor" };
+}
+
+function loadPaneLayout(): PaneNode {
+  try {
+    const raw = localStorage.getItem(PANE_LAYOUT_KEY);
+    if (!raw) return defaultPaneLayout();
+    return JSON.parse(raw) as PaneNode;
+  } catch {
+    return defaultPaneLayout();
+  }
+}
+
+export function countLeaves(node: PaneNode): number {
+  return node.kind === "leaf" ? 1 : countLeaves(node.a) + countLeaves(node.b);
+}
+
+export function firstLeafId(node: PaneNode): string {
+  return node.kind === "leaf" ? node.id : firstLeafId(node.a);
+}
+
+function splitLeafNode(node: PaneNode, id: string, dir: "row" | "col"): PaneNode {
+  if (node.kind === "leaf") {
+    if (node.id !== id) return node;
+    // 分割: 元ペインを a に、新ペイン(カメラの画)を b に
+    return {
+      kind: "split",
+      id: `split-${Date.now()}-${paneSeq++}`,
+      dir,
+      ratio: 0.5,
+      a: node,
+      b: { kind: "leaf", id: `pane-${Date.now()}-${paneSeq++}`, view: "camera" },
+    };
+  }
+  return { ...node, a: splitLeafNode(node.a, id, dir), b: splitLeafNode(node.b, id, dir) };
+}
+
+function closeLeafNode(node: PaneNode, id: string): PaneNode | null {
+  if (node.kind === "leaf") return node.id === id ? null : node;
+  const a = closeLeafNode(node.a, id);
+  const b = closeLeafNode(node.b, id);
+  if (a && b) return { ...node, a, b };
+  return a ?? b; // 片方が消えたら残りが繰り上がる(Blenderの統合と同じ)
+}
+
+function setNodeRatio(node: PaneNode, id: string, ratio: number): PaneNode {
+  if (node.kind === "leaf") return node;
+  if (node.id === id) return { ...node, ratio: Math.max(0.15, Math.min(0.85, ratio)) };
+  return { ...node, a: setNodeRatio(node.a, id, ratio), b: setNodeRatio(node.b, id, ratio) };
+}
+
+function toggleLeafView(node: PaneNode, id: string): PaneNode {
+  if (node.kind === "leaf") {
+    if (node.id !== id) return node;
+    return { ...node, view: node.view === "editor" ? "camera" : "editor" };
+  }
+  return { ...node, a: toggleLeafView(node.a, id), b: toggleLeafView(node.b, id) };
+}
+
+export type PaneOp =
+  | { type: "split"; id: string; dir: "row" | "col" }
+  | { type: "close"; id: string }
+  | { type: "ratio"; id: string; ratio: number }
+  | { type: "toggleView"; id: string }
+  | { type: "reset" };
 
 /* ---------------------------------- Undo / Redo ---------------------------------- */
 // 履歴はUI反応不要のためストア外のモジュール変数で持つ(project の参照変化だけ監視)。

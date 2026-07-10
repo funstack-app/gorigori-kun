@@ -44,11 +44,13 @@ import type {
   SceneShot,
 } from "../../../lib/scene3d/types";
 import {
+  firstLeafId,
   getSelectedShot,
   redoScene3d,
   undoScene3d,
   useScene3d,
 } from "../../../lib/store/scene3d";
+import type { PaneNode } from "../../../lib/store/scene3d";
 import { requestViewPreset, Scene3dViewport } from "./Scene3dViewport";
 
 const PRESET_ORDER: CameraPresetId[] = [
@@ -1004,10 +1006,10 @@ const VIEW_BTN =
   "rounded-md border border-[#2a2a2a] bg-[#141414]/85 px-2 py-1 text-[11px] text-neutral-300 hover:border-pink-400/60 hover:text-white";
 
 /** 編集ビュー1枚 + オーバーレイ(視点ボタン/ヒント/必要時フレーム) */
-function EditorPane({ showOverlays }: { showOverlays: boolean }) {
+function EditorPane({ showOverlays, primary = false }: { showOverlays: boolean; primary?: boolean }) {
   return (
     <div className="relative h-full min-w-0 flex-1 overflow-hidden">
-      <Scene3dViewport />
+      <Scene3dViewport primary={primary} />
       {showOverlays && (
         <div className="absolute left-3 top-3 flex gap-1">
           <button className={VIEW_BTN} onClick={() => requestViewPreset("iso")}>斜め</button>
@@ -1026,48 +1028,186 @@ function EditorPane({ showOverlays }: { showOverlays: boolean }) {
   );
 }
 
-function ViewportWithFrame() {
-  const cameraView = useScene3d((s) => s.cameraView);
-  const playing = useScene3d((s) => s.playing);
-  const splitView = useScene3d((s) => s.splitView);
+/** ペインヘッダの小アイコン群(分割/切替/閉じる) — Blender風レイアウトの操作点 */
+function PaneHeaderButtons({
+  paneId,
+  canClose,
+}: {
+  paneId: string;
+  canClose: boolean;
+}) {
+  const applyPaneOp = useScene3d((s) => s.applyPaneOp);
+  const btn =
+    "flex h-6 w-6 items-center justify-center rounded text-neutral-300 hover:bg-white/10 hover:text-white";
+  return (
+    <div className="absolute right-2 top-2 z-10 flex gap-0.5 rounded-md bg-black/45 p-0.5 opacity-45 transition hover:opacity-100">
+      <button
+        className={btn}
+        title="左右に分割"
+        onClick={() => applyPaneOp({ type: "split", id: paneId, dir: "row" })}
+      >
+        <Icon className="h-3.5 w-3.5">
+          <rect x="3" y="5" width="18" height="14" rx="1.5" />
+          <path d="M12 5v14" />
+        </Icon>
+      </button>
+      <button
+        className={btn}
+        title="上下に分割"
+        onClick={() => applyPaneOp({ type: "split", id: paneId, dir: "col" })}
+      >
+        <Icon className="h-3.5 w-3.5">
+          <rect x="3" y="5" width="18" height="14" rx="1.5" />
+          <path d="M3 12h18" />
+        </Icon>
+      </button>
+      <button
+        className={btn}
+        title="編集ビュー ⇄ カメラの画"
+        onClick={() => applyPaneOp({ type: "toggleView", id: paneId })}
+      >
+        <Icon className="h-3.5 w-3.5">
+          <path d="M7 8h10M14 5l3 3-3 3M17 16H7M10 13l-3 3 3 3" />
+        </Icon>
+      </button>
+      {canClose && (
+        <button
+          className={btn}
+          title="このペインを閉じる"
+          onClick={() => applyPaneOp({ type: "close", id: paneId })}
+        >
+          <Icon className="h-3.5 w-3.5">
+            <path d="M6 6l12 12M18 6L6 18" />
+          </Icon>
+        </button>
+      )}
+    </div>
+  );
+}
+
+/** 分割境界(方向対応)。ドラッグで比率変更 */
+function PaneDivider({
+  dir,
+  onDelta,
+}: {
+  dir: "row" | "col";
+  onDelta: (dpx: number) => void;
+}) {
+  const state = useRef<{ start: number } | null>(null);
+  const isRow = dir === "row";
+  return (
+    <div
+      className={`group z-10 flex shrink-0 items-center justify-center bg-[#181818] transition hover:bg-pink-400/30 ${
+        isRow ? "w-2 cursor-col-resize" : "h-2 cursor-row-resize"
+      }`}
+      onPointerDown={(e) => {
+        state.current = { start: isRow ? e.clientX : e.clientY };
+        (e.target as Element).setPointerCapture(e.pointerId);
+      }}
+      onPointerMove={(e) => {
+        if (!state.current) return;
+        const cur = isRow ? e.clientX : e.clientY;
+        onDelta(cur - state.current.start);
+        state.current = { start: cur };
+      }}
+      onPointerUp={(e) => {
+        state.current = null;
+        (e.target as Element).releasePointerCapture(e.pointerId);
+      }}
+    >
+      <div
+        className={`rounded bg-[#3a3a3a] group-hover:bg-pink-300 ${
+          isRow ? "h-10 w-0.5" : "h-0.5 w-10"
+        }`}
+      />
+    </div>
+  );
+}
+
+/** ペインツリーの再帰レンダラ */
+function PaneTreeView({
+  node,
+  primaryId,
+  leafCount,
+}: {
+  node: PaneNode;
+  primaryId: string;
+  leafCount: number;
+}) {
+  const applyPaneOp = useScene3d((s) => s.applyPaneOp);
   const containerRef = useRef<HTMLDivElement>(null);
-  const [ratio, setRatio] = useState(() => {
-    const saved = Number(localStorage.getItem("scene3d.split.ratio"));
-    return Number.isFinite(saved) && saved >= 25 && saved <= 75 ? saved : 50;
-  });
 
-  const updateRatio = (dxPx: number) => {
-    const w = containerRef.current?.clientWidth ?? 0;
-    if (w <= 0) return;
-    const next = Math.max(25, Math.min(75, ratio + (dxPx / w) * 100));
-    setRatio(next);
-    localStorage.setItem("scene3d.split.ratio", String(Math.round(next)));
-  };
-
-  if (!splitView) {
-    const showFrame = cameraView || playing;
+  if (node.kind === "leaf") {
     return (
       <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
-        <EditorPane showOverlays={!showFrame} />
-        {showFrame && <FrameOverlay />}
+        {node.view === "editor" ? (
+          <EditorPane showOverlays primary={node.id === primaryId} />
+        ) : (
+          <div className="relative min-h-0 min-w-0 flex-1 overflow-hidden border border-[#242424]">
+            <Scene3dViewport mode="camera" primary={node.id === primaryId} />
+            <FrameOverlay />
+            <span className="pointer-events-none absolute left-2 top-2 rounded bg-black/50 px-1.5 py-0.5 text-[10px] text-white/70">
+              カメラの画
+            </span>
+          </div>
+        )}
+        <PaneHeaderButtons paneId={node.id} canClose={leafCount > 1} />
       </div>
     );
   }
 
-  // 分割表示: 左=編集ビュー(自由視点) / 右=撮影カメラの画(書き出しと同じ)
+  const isRow = node.dir === "row";
+  const onDelta = (dpx: number) => {
+    const el = containerRef.current;
+    if (!el) return;
+    const size = isRow ? el.clientWidth : el.clientHeight;
+    if (size <= 0) return;
+    applyPaneOp({ type: "ratio", id: node.id, ratio: node.ratio + dpx / size });
+  };
+
   return (
-    <div ref={containerRef} className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
-      <div style={{ width: `${ratio}%` }} className="relative flex min-w-0">
-        <EditorPane showOverlays />
+    <div
+      ref={containerRef}
+      className={`flex min-h-0 min-w-0 flex-1 ${isRow ? "flex-row" : "flex-col"}`}
+    >
+      <div
+        style={{ flexBasis: `${node.ratio * 100}%` }}
+        className="flex min-h-0 min-w-0 overflow-hidden"
+      >
+        <PaneTreeView node={node.a} primaryId={primaryId} leafCount={leafCount} />
       </div>
-      <PanelResizer onDelta={updateRatio} />
-      <div className="relative min-w-0 flex-1 overflow-hidden border-l border-[#242424]">
-        <Scene3dViewport mode="camera" />
-        <FrameOverlay />
-        <span className="pointer-events-none absolute right-2 top-2 rounded bg-black/50 px-1.5 py-0.5 text-[10px] text-white/70">
-          カメラの画(書き出しと同じ)
-        </span>
+      <PaneDivider dir={node.dir} onDelta={onDelta} />
+      <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
+        <PaneTreeView node={node.b} primaryId={primaryId} leafCount={leafCount} />
       </div>
+    </div>
+  );
+}
+
+function ViewportWithFrame() {
+  const cameraView = useScene3d((s) => s.cameraView);
+  const playing = useScene3d((s) => s.playing);
+  const paneLayout = useScene3d((s) => s.paneLayout);
+  const splitView = useScene3d((s) => s.splitView);
+
+  // 単一ペイン時: 従来どおり(カメラの画トグルで全画面レターボックス)
+  if (!splitView && paneLayout.kind === "leaf") {
+    const showFrame = cameraView || playing;
+    return (
+      <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
+        <EditorPane showOverlays={!showFrame} primary />
+        {showFrame && <FrameOverlay />}
+        <PaneHeaderButtons paneId={paneLayout.id} canClose={false} />
+      </div>
+    );
+  }
+
+  // 複数ペイン: Blender風ツリー
+  const primaryId = firstLeafId(paneLayout);
+  const leafCount = splitView ? 2 : 1; // canClose 判定用(正確な数は不要)
+  return (
+    <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
+      <PaneTreeView node={paneLayout} primaryId={primaryId} leafCount={leafCount} />
     </div>
   );
 }

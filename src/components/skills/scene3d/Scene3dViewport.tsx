@@ -12,7 +12,7 @@ import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { GizmoHelper, GizmoViewport, Grid, Line, OrbitControls } from "@react-three/drei";
 import type { ThreeEvent } from "@react-three/fiber";
 import { PerspectiveCamera, Vector2, Vector3 } from "three";
-import type { PerspectiveCamera as ThreePerspectiveCamera, Ray } from "three";
+import type { Group, PerspectiveCamera as ThreePerspectiveCamera, Ray } from "three";
 
 import { scene3d as scene3dIpc } from "../../../lib/ipc";
 import {
@@ -396,17 +396,12 @@ function CameraPathLine() {
   }, [project, shot]);
 
   const lookAt = useMemo(() => resolveLookAt(project, shot), [project, shot]);
-  const start = points[0];
   const end = points[points.length - 1];
 
   return (
     <>
       <Line points={points} color="#ec4899" lineWidth={2} dashed={false} />
-      {/* 開始点(緑)・終了点(赤)のマーカー */}
-      <mesh position={start}>
-        <sphereGeometry args={[0.08, 16, 12]} />
-        <meshBasicMaterial color="#4ade80" />
-      </mesh>
+      {/* 終了点(赤)=カメラが止まる場所。始点はカメラマークが示す */}
       <mesh position={end}>
         <sphereGeometry args={[0.08, 16, 12]} />
         <meshBasicMaterial color="#f87171" />
@@ -421,17 +416,70 @@ function CameraPathLine() {
 }
 
 /**
+ * カメラ本体の可視化(編集ビュー専用)。
+ * 選択カットの「始点」にカメラの形 + 視野の四角錐を置く。
+ * 始点=カメラマーク / 赤点=カメラが止まる場所、という約束(STΛCK指示)
+ */
+function CameraIndicator() {
+  const project = useScene3d((s) => s.project);
+  const selectedShotId = useScene3d((s) => s.selectedShotId);
+  const groupRef = useRef<Group>(null);
+
+  // 始点=カメラマーク(このカットの撮影開始位置)。終点は赤点(カメラが止まる場所)
+  const shot = getSelectedShot({ project, selectedShotId });
+  const pose = evaluateShotCamera(project, shot, 0);
+  const ar = project.aspectRatio === "9:16" ? 9 / 16 : project.aspectRatio === "1:1" ? 1 : 16 / 9;
+
+  useEffect(() => {
+    const g = groupRef.current;
+    if (!g) return;
+    g.position.set(pose.position[0], pose.position[1], pose.position[2]);
+    g.lookAt(pose.lookAt[0], pose.lookAt[1], pose.lookAt[2]);
+  });
+
+  // 視野の四角錐(距離1.1mの位置に画角どおりの枠)
+  const d = 1.1;
+  const h = 2 * Math.tan(((pose.fovDeg / 2) * Math.PI) / 180) * d;
+  const w = h * ar;
+  const c1: Vec3 = [-w / 2, h / 2, d];
+  const c2: Vec3 = [w / 2, h / 2, d];
+  const c3: Vec3 = [w / 2, -h / 2, d];
+  const c4: Vec3 = [-w / 2, -h / 2, d];
+  const zero: Vec3 = [0, 0, 0];
+
+  return (
+    <group ref={groupRef}>
+      {/* カメラボディ + レンズ */}
+      <mesh position={[0, 0, -0.12]}>
+        <boxGeometry args={[0.24, 0.18, 0.24]} />
+        <meshStandardMaterial color="#2c2e33" roughness={0.5} />
+      </mesh>
+      <mesh position={[0, 0, 0.04]} rotation={[Math.PI / 2, 0, 0]}>
+        <cylinderGeometry args={[0.07, 0.09, 0.12, 16]} />
+        <meshStandardMaterial color="#1c1e22" roughness={0.35} />
+      </mesh>
+      {/* 視野の四角錐 */}
+      <Line points={[zero, c1]} color="#f9a8d4" lineWidth={1} transparent opacity={0.7} />
+      <Line points={[zero, c2]} color="#f9a8d4" lineWidth={1} transparent opacity={0.7} />
+      <Line points={[zero, c3]} color="#f9a8d4" lineWidth={1} transparent opacity={0.7} />
+      <Line points={[zero, c4]} color="#f9a8d4" lineWidth={1} transparent opacity={0.7} />
+      <Line points={[c1, c2, c3, c4, c1]} color="#f9a8d4" lineWidth={1.5} />
+    </group>
+  );
+}
+
+/**
  * 再生・カメラビューの駆動。再生中はフレームを進め、
  * evaluateCamera の姿勢をビューカメラへ反映する
  */
-function CameraRig({ mode }: { mode: "editor" | "camera" }) {
+function CameraRig({ mode, primary }: { mode: "editor" | "camera"; primary: boolean }) {
   const invalidateRef = useRef(0);
   const { camera } = useThree();
 
   useFrame((_, delta) => {
     const st = useScene3d.getState();
-    // フレームを進めるのは editor ペインだけ(分割時の二重進行を防ぐ)
-    if (mode === "editor" && st.playing) {
+    // フレームを進めるのは primary ペインだけ(複数ペインでの二重進行を防ぐ)
+    if (primary && st.playing) {
       const total = totalDurationFrames(st.project);
       const next = st.currentFrame + delta * SCENE_FPS;
       st.setCurrentFrame(next >= total ? 0 : next);
@@ -509,7 +557,13 @@ function ViewportControls() {
   );
 }
 
-export function Scene3dViewport({ mode = "editor" }: { mode?: "editor" | "camera" }) {
+export function Scene3dViewport({
+  mode = "editor",
+  primary = false,
+}: {
+  mode?: "editor" | "camera";
+  primary?: boolean;
+}) {
   const entities = useScene3d((s) => s.project.entities);
   const selectEntity = useScene3d((s) => s.selectEntity);
   const exporting = useScene3d(
@@ -554,10 +608,11 @@ export function Scene3dViewport({ mode = "editor" }: { mode?: "editor" | "camera
         <EntityMesh key={e.id} entity={e} />
       ))}
       {!exporting && !isCameraPane && <CameraPathLine />}
-      <CameraRig mode={mode} />
+      {!exporting && !isCameraPane && <CameraIndicator />}
+      <CameraRig mode={mode} primary={primary} />
       {!isCameraPane && <ViewportControls />}
       {!isCameraPane && <ViewPresetController />}
-      {!isCameraPane && <ExportDriver />}
+      {primary && <ExportDriver />}
       {!exporting && !isCameraPane && (
         <GizmoHelper alignment="bottom-right" margin={[64, 64]}>
           <GizmoViewport
