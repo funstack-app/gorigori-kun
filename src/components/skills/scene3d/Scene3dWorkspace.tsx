@@ -1250,9 +1250,9 @@ function ShotTimeline() {
               </div>
             ))}
 
-            {/* 再生ヘッド(全レーン貫通) */}
+            {/* 再生ヘッド(全レーン貫通。クリップより手前に表示) */}
             <div
-              className="pointer-events-none absolute top-0 h-full w-px bg-rose-400"
+              className="pointer-events-none absolute top-0 z-40 h-full w-px bg-rose-400"
               style={{ left: playheadX }}
             >
               <div className="absolute -left-1 -top-0.5 h-2 w-2 rotate-45 bg-rose-400" />
