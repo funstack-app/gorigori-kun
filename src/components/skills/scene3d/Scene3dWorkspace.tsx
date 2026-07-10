@@ -1096,7 +1096,7 @@ function PanelResizer({
   const state = useRef<{ startX: number } | null>(null);
   return (
     <div
-      className="relative z-10 -mx-0.5 w-1 shrink-0 cursor-col-resize bg-transparent transition hover:bg-pink-400/40"
+      className="group relative z-10 flex w-2 shrink-0 cursor-col-resize items-center justify-center bg-[#181818] transition hover:bg-pink-400/30"
       onPointerDown={(e) => {
         state.current = { startX: e.clientX };
         (e.target as Element).setPointerCapture(e.pointerId);
@@ -1110,7 +1110,9 @@ function PanelResizer({
         state.current = null;
         (e.target as Element).releasePointerCapture(e.pointerId);
       }}
-    />
+    >
+      <div className="h-10 w-0.5 rounded bg-[#3a3a3a] group-hover:bg-pink-300" />
+    </div>
   );
 }
 
