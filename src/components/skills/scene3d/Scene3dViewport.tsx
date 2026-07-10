@@ -9,9 +9,9 @@
 
 import { useEffect, useMemo, useRef } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
-import { Grid, Line, OrbitControls } from "@react-three/drei";
+import { GizmoHelper, GizmoViewport, Grid, Line, OrbitControls } from "@react-three/drei";
 import type { ThreeEvent } from "@react-three/fiber";
-import { PerspectiveCamera, Vector2 } from "three";
+import { PerspectiveCamera, Vector2, Vector3 } from "three";
 import type { PerspectiveCamera as ThreePerspectiveCamera, Ray } from "three";
 
 import { scene3d as scene3dIpc } from "../../../lib/ipc";
@@ -135,7 +135,81 @@ function Mannequin({ color, selected }: { color: string; selected: boolean }) {
   );
 }
 
+/* ------------------------- プロシージャル建築(軽量パラメトリック形状) ------------------------- */
+
+/** 壁: 3m幅 x 2.6m高。scale と rotationY で長さ・向きを作る */
+function Wall({ color }: { color: string }) {
+  return (
+    <mesh position={[0, 1.3, 0]} castShadow receiveShadow>
+      <boxGeometry args={[3, 2.6, 0.15]} />
+      <meshStandardMaterial color={color} roughness={0.85} />
+    </mesh>
+  );
+}
+
+function Column({ color }: { color: string }) {
+  return (
+    <mesh position={[0, 1.5, 0]} castShadow>
+      <cylinderGeometry args={[0.22, 0.26, 3, 16]} />
+      <meshStandardMaterial color={color} roughness={0.85} />
+    </mesh>
+  );
+}
+
+/** 階段: 8段(1段 0.18m高 x 0.28m奥行 x 1.2m幅)。+Z に向かって上る */
+function Stairs({ color }: { color: string }) {
+  const steps = 8;
+  return (
+    <group>
+      {Array.from({ length: steps }, (_, i) => (
+        <mesh key={i} position={[0, i * 0.18 + 0.09, i * 0.28]} castShadow receiveShadow>
+          <boxGeometry args={[1.2, 0.18, 0.28]} />
+          <meshStandardMaterial color={color} roughness={0.85} />
+        </mesh>
+      ))}
+    </group>
+  );
+}
+
+/** ビル: 階数パラメータから躯体+窓を生成(1階=3m)。窓は前後面に列挙 */
+function Building({ color, floors }: { color: string; floors: number }) {
+  const w = 5;
+  const d = 4;
+  const floorH = 3;
+  const h = floors * floorH;
+  const winCols = 4;
+  const windows: { x: number; y: number; z: number }[] = [];
+  for (let f = 0; f < floors; f++) {
+    for (let c = 0; c < winCols; c++) {
+      const x = (c - (winCols - 1) / 2) * (w / winCols);
+      const y = f * floorH + floorH * 0.55;
+      windows.push({ x, y, z: d / 2 + 0.02 });
+      windows.push({ x, y, z: -d / 2 - 0.02 });
+    }
+  }
+  return (
+    <group>
+      <mesh position={[0, h / 2, 0]} castShadow receiveShadow>
+        <boxGeometry args={[w, h, d]} />
+        <meshStandardMaterial color={color} roughness={0.9} />
+      </mesh>
+      {/* 屋上の立ち上がり(シルエットの手がかり) */}
+      <mesh position={[0, h + 0.15, 0]} castShadow>
+        <boxGeometry args={[w * 0.98, 0.3, d * 0.98]} />
+        <meshStandardMaterial color={color} roughness={0.9} />
+      </mesh>
+      {windows.map((win, i) => (
+        <mesh key={i} position={[win.x, win.y, win.z]}>
+          <boxGeometry args={[0.7, 1.1, 0.02]} />
+          <meshStandardMaterial color="#3a3c40" roughness={0.4} />
+        </mesh>
+      ))}
+    </group>
+  );
+}
+
 function EntityMesh({ entity }: { entity: SceneEntity }) {
+  const controls = useThree((state) => state.controls);
   const selectEntity = useScene3d((s) => s.selectEntity);
   const moveEntity = useScene3d((s) => s.moveEntity);
   const setDragging = useScene3d((s) => s.setDragging);
@@ -161,6 +235,16 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
     (e.target as Element).releasePointerCapture(e.pointerId);
   };
 
+  const onDoubleClick = (e: ThreeEvent<MouseEvent>) => {
+    e.stopPropagation();
+    // 注視: オービットの中心を対象へ移す(Blenderの視点迷子を構造的に消す)
+    const c = controls as unknown as { target: Vector3; update: () => void } | null;
+    if (!c) return;
+    const h = entity.kind === "mannequin" ? 1.1 : entity.kind === "building" ? 3 : 0.6;
+    c.target.set(entity.position[0], entity.position[1] + h * entity.scale, entity.position[2]);
+    c.update();
+  };
+
   return (
     <group
       position={entity.position}
@@ -169,6 +253,7 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
+      onDoubleClick={onDoubleClick}
     >
       {entity.kind === "mannequin" && <Mannequin color={color} selected={selected} />}
       {entity.kind === "sphere" && (
@@ -182,6 +267,12 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
           <boxGeometry args={[0.8, 0.8, 0.8]} />
           <meshStandardMaterial color={color} />
         </mesh>
+      )}
+      {entity.kind === "wall" && <Wall color={color} />}
+      {entity.kind === "column" && <Column color={color} />}
+      {entity.kind === "stairs" && <Stairs color={color} />}
+      {entity.kind === "building" && (
+        <Building color={color} floors={entity.params?.floors ?? 3} />
       )}
     </group>
   );
@@ -359,6 +450,46 @@ function CameraRig() {
   return null;
 }
 
+/** 視点プリセット(正面/横/俯瞰/斜め/全体)。UIボタン(Workspace側)から呼ばれる */
+export type ViewPresetType = "front" | "side" | "top" | "iso" | "fit";
+let viewPresetListener: ((t: ViewPresetType) => void) | null = null;
+export function requestViewPreset(t: ViewPresetType): void {
+  viewPresetListener?.(t);
+}
+
+function ViewPresetController() {
+  const { camera, controls } = useThree();
+  useEffect(() => {
+    viewPresetListener = (t) => {
+      const c = controls as unknown as { target: Vector3; update: () => void } | null;
+      const target = c?.target ?? new Vector3(0, 1, 0);
+      const dist = t === "fit" ? 9 : Math.max(3, camera.position.distanceTo(target));
+      if (t === "fit") target.set(0, 1, 0);
+      switch (t) {
+        case "front":
+          camera.position.set(target.x, target.y + dist * 0.12, target.z + dist);
+          break;
+        case "side":
+          camera.position.set(target.x + dist, target.y + dist * 0.12, target.z);
+          break;
+        case "top":
+          camera.position.set(target.x, target.y + dist, target.z + 0.01);
+          break;
+        case "iso":
+        case "fit":
+          camera.position.set(target.x + dist * 0.6, target.y + dist * 0.45, target.z + dist * 0.66);
+          break;
+      }
+      camera.lookAt(target);
+      c?.update();
+    };
+    return () => {
+      viewPresetListener = null;
+    };
+  }, [camera, controls]);
+  return null;
+}
+
 function ViewportControls() {
   const dragging = useScene3d((s) => s.draggingEntityId != null);
   const playing = useScene3d((s) => s.playing);
@@ -389,10 +520,14 @@ export function Scene3dViewport() {
       {/* 書き出し中は補助表示を消す(モーションガイドに写り込ませない) */}
       {!exporting && (
         <Grid
-          args={[30, 30]}
-          cellColor="#94969a"
-          sectionColor="#a8aaae"
-          fadeDistance={25}
+          args={[40, 40]}
+          cellSize={1}
+          sectionSize={5}
+          cellThickness={0.7}
+          sectionThickness={1.5}
+          cellColor="#5b5d61"
+          sectionColor="#3c3e42"
+          fadeDistance={50}
           position={[0, 0.001, 0]}
         />
       )}
@@ -407,6 +542,15 @@ export function Scene3dViewport() {
       {!exporting && <CameraPathLine />}
       <CameraRig />
       <ViewportControls />
+      <ViewPresetController />
+      {!exporting && (
+        <GizmoHelper alignment="bottom-right" margin={[64, 64]}>
+          <GizmoViewport
+            axisColors={["#e88b8b", "#8bc78b", "#8ba7e8"]}
+            labelColor="#ffffff"
+          />
+        </GizmoHelper>
+      )}
       <ExportDriver />
     </Canvas>
   );

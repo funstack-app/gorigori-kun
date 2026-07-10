@@ -49,7 +49,7 @@ import {
   undoScene3d,
   useScene3d,
 } from "../../../lib/store/scene3d";
-import { Scene3dViewport } from "./Scene3dViewport";
+import { requestViewPreset, Scene3dViewport } from "./Scene3dViewport";
 
 const PRESET_ORDER: CameraPresetId[] = [
   "fixed",
@@ -125,6 +125,47 @@ const BoxIcon = ({ className }: { className?: string }) => (
     <path d="M12 12l8-4.5M12 12L4 7.5M12 12v9" />
   </Icon>
 );
+const WallIcon = ({ className }: { className?: string }) => (
+  <Icon className={className}>
+    <rect x="3" y="8" width="18" height="10" />
+    <path d="M3 13h18M9 8v5M15 13v5" />
+  </Icon>
+);
+const ColumnIcon = ({ className }: { className?: string }) => (
+  <Icon className={className}>
+    <path d="M8 4h8M8 20h8M10 4v16M14 4v16" />
+  </Icon>
+);
+const StairsIcon = ({ className }: { className?: string }) => (
+  <Icon className={className}>
+    <path d="M4 20h4v-4h4v-4h4V8h4" />
+  </Icon>
+);
+const BuildingIcon = ({ className }: { className?: string }) => (
+  <Icon className={className}>
+    <rect x="7" y="4" width="10" height="17" />
+    <path d="M10 8h1M13 8h1M10 12h1M13 12h1M10 16h1M13 16h1" />
+  </Icon>
+);
+
+function EntityKindIcon({ kind, className }: { kind: SceneEntityKind; className?: string }) {
+  switch (kind) {
+    case "mannequin":
+      return <PersonIcon className={className} />;
+    case "sphere":
+      return <SphereIcon className={className} />;
+    case "box":
+      return <BoxIcon className={className} />;
+    case "wall":
+      return <WallIcon className={className} />;
+    case "column":
+      return <ColumnIcon className={className} />;
+    case "stairs":
+      return <StairsIcon className={className} />;
+    case "building":
+      return <BuildingIcon className={className} />;
+  }
+}
 
 /** カメラプリセットの動きを表すミニ図(被写体=点、矢印=カメラの動き) */
 function PresetGlyph({ preset }: { preset: CameraPresetId }) {
@@ -231,24 +272,39 @@ function ObjectPickerPopup({ onClose }: { onClose: () => void }) {
   };
   const card =
     "flex flex-col items-center gap-2 rounded-md border border-[#2a2a2a] bg-[#161616] p-4 text-neutral-300 hover:border-amber-500/60 hover:text-amber-300";
+  const items: { kind: SceneEntityKind; label: string }[] = [
+    { kind: "mannequin", label: "人物" },
+    { kind: "sphere", label: "球" },
+    { kind: "box", label: "箱" },
+  ];
+  const arch: { kind: SceneEntityKind; label: string }[] = [
+    { kind: "wall", label: "壁" },
+    { kind: "column", label: "柱" },
+    { kind: "stairs", label: "階段" },
+    { kind: "building", label: "ビル" },
+  ];
   return (
     <Popup title="シーンに置く" onClose={onClose}>
+      <p className="mb-2 text-[11px] font-bold tracking-wide text-neutral-500">基本</p>
       <div className="grid grid-cols-3 gap-2">
-        <button className={card} onClick={() => pick("mannequin")}>
-          <PersonIcon className="h-10 w-10" />
-          <span className="text-xs">人物</span>
-        </button>
-        <button className={card} onClick={() => pick("sphere")}>
-          <SphereIcon className="h-10 w-10" />
-          <span className="text-xs">球</span>
-        </button>
-        <button className={card} onClick={() => pick("box")}>
-          <BoxIcon className="h-10 w-10" />
-          <span className="text-xs">箱</span>
-        </button>
+        {items.map((it) => (
+          <button key={it.kind} className={card} onClick={() => pick(it.kind)}>
+            <EntityKindIcon kind={it.kind} className="h-10 w-10" />
+            <span className="text-xs">{it.label}</span>
+          </button>
+        ))}
+      </div>
+      <p className="mb-2 mt-4 text-[11px] font-bold tracking-wide text-neutral-500">建築</p>
+      <div className="grid grid-cols-4 gap-2">
+        {arch.map((it) => (
+          <button key={it.kind} className={card} onClick={() => pick(it.kind)}>
+            <EntityKindIcon kind={it.kind} className="h-10 w-10" />
+            <span className="text-xs">{it.label}</span>
+          </button>
+        ))}
       </div>
       <p className="mt-3 text-[11px] leading-4 text-neutral-500">
-        置いたあとはビューポート上でドラッグして好きな場所へ動かせます
+        置いたあとはビューポート上でドラッグして好きな場所へ動かせます。ビルは選択すると階数を変えられます
       </p>
     </Popup>
   );
@@ -347,13 +403,7 @@ function ShelfPanel() {
                 className="flex flex-1 items-center gap-2 text-left"
                 onClick={() => selectEntity(e.id)}
               >
-                {e.kind === "mannequin" ? (
-                  <PersonIcon />
-                ) : e.kind === "sphere" ? (
-                  <SphereIcon />
-                ) : (
-                  <BoxIcon />
-                )}
+                <EntityKindIcon kind={e.kind} />
                 {e.label}
               </button>
               <button
@@ -375,6 +425,64 @@ function ShelfPanel() {
 
 /* ---------------------------------- 右パネル(監督) ---------------------------------- */
 
+/** 選択中オブジェクトの調整(選択時のみ表示。全部を見せない原則) */
+function SelectedObjectSection() {
+  const project = useScene3d((s) => s.project);
+  const selectedEntityId = useScene3d((s) => s.selectedEntityId);
+  const rotateEntity = useScene3d((s) => s.rotateEntity);
+  const scaleEntity = useScene3d((s) => s.scaleEntity);
+  const setEntityFloors = useScene3d((s) => s.setEntityFloors);
+
+  const entity = project.entities.find((e) => e.id === selectedEntityId);
+  if (!entity) return null;
+
+  const degrees = Math.round(((entity.rotationY * 180) / Math.PI) % 360);
+
+  return (
+    <div className="rounded-lg border border-[#2a2a2a] bg-[#101010] p-3">
+      <p className="mb-2 flex items-center gap-2 text-[11px] font-bold tracking-wide text-amber-400/90">
+        <EntityKindIcon kind={entity.kind} />
+        {entity.label}
+      </p>
+      <label className="mb-2 flex flex-col gap-1 text-xs text-neutral-400">
+        向き: {((degrees % 360) + 360) % 360}°
+        <input
+          type="range"
+          min={0}
+          max={360}
+          step={15}
+          value={((degrees % 360) + 360) % 360}
+          onChange={(e) => rotateEntity(entity.id, (Number(e.target.value) * Math.PI) / 180)}
+        />
+      </label>
+      <label className="flex flex-col gap-1 text-xs text-neutral-400">
+        大きさ: {entity.scale.toFixed(1)}x
+        <input
+          type="range"
+          min={0.3}
+          max={4}
+          step={0.1}
+          value={entity.scale}
+          onChange={(e) => scaleEntity(entity.id, Number(e.target.value))}
+        />
+      </label>
+      {entity.kind === "building" && (
+        <label className="mt-2 flex flex-col gap-1 text-xs text-neutral-400">
+          階数: {entity.params?.floors ?? 3}階
+          <input
+            type="range"
+            min={1}
+            max={12}
+            step={1}
+            value={entity.params?.floors ?? 3}
+            onChange={(e) => setEntityFloors(entity.id, Number(e.target.value))}
+          />
+        </label>
+      )}
+    </div>
+  );
+}
+
 function DirectorPanel() {
   const project = useScene3d((s) => s.project);
   const selectedShotId = useScene3d((s) => s.selectedShotId);
@@ -390,6 +498,7 @@ function DirectorPanel() {
 
   return (
     <aside className="flex w-full flex-col gap-5 overflow-y-auto border-l border-[#242424] bg-[#141414] px-4 py-4">
+      <SelectedObjectSection />
       <div>
         <p className="mb-2 text-[11px] font-bold tracking-wide text-neutral-500">{shot.label} のカメラ</p>
         <button
@@ -864,9 +973,28 @@ function ViewportWithFrame() {
     frameH = size.w / ar;
   }
 
+  const viewBtn =
+    "rounded-md border border-[#2a2a2a] bg-[#141414]/85 px-2 py-1 text-[11px] text-neutral-300 backdrop-blur-none hover:border-pink-400/60 hover:text-white";
+
   return (
     <div ref={containerRef} className="relative min-h-0 flex-1 overflow-hidden">
       <Scene3dViewport />
+      {/* 視点プリセット(覚えることを増やさない視点移動) */}
+      {!showFrame && (
+        <div className="absolute left-3 top-3 flex gap-1">
+          <button className={viewBtn} onClick={() => requestViewPreset("iso")}>斜め</button>
+          <button className={viewBtn} onClick={() => requestViewPreset("front")}>正面</button>
+          <button className={viewBtn} onClick={() => requestViewPreset("side")}>横</button>
+          <button className={viewBtn} onClick={() => requestViewPreset("top")}>俯瞰</button>
+          <button className={viewBtn} onClick={() => requestViewPreset("fit")}>全体</button>
+        </div>
+      )}
+      {/* 操作ヒント(常時1行だけ) */}
+      {!showFrame && (
+        <p className="pointer-events-none absolute bottom-2 left-3 text-[10px] text-white/45">
+          左ドラッグ: 回る · ホイール: 寄る · 右ドラッグ: ずらす · ダブルクリック: そこを注視
+        </p>
+      )}
       {showFrame && size.w > 0 && (
         <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
           <div

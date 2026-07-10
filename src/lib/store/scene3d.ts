@@ -29,6 +29,10 @@ const ENTITY_LABELS: Record<SceneEntityKind, string> = {
   mannequin: "人物",
   sphere: "球",
   box: "箱",
+  wall: "壁",
+  column: "柱",
+  stairs: "階段",
+  building: "ビル",
 };
 
 /**
@@ -95,6 +99,8 @@ type Scene3dState = {
   selectEntity: (id: string | null) => void;
   moveEntity: (id: string, position: Vec3) => void;
   rotateEntity: (id: string, rotationY: number) => void;
+  scaleEntity: (id: string, scale: number) => void;
+  setEntityFloors: (id: string, floors: number) => void;
   setDragging: (id: string | null) => void;
 
   /** カット操作(CapCut風タイムライン) */
@@ -179,6 +185,7 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
       position: [((count - 1) % 4) * 1.2 - 1.2, 0, Math.floor((count - 1) / 4) * 1.2],
       rotationY: 0,
       scale: 1,
+      ...(kind === "building" ? { params: { floors: 3 } } : {}),
     };
     set({
       project: { ...project, entities: [...project.entities, entity] },
@@ -222,6 +229,32 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
         ...project,
         entities: project.entities.map((e) =>
           e.id === id ? { ...e, rotationY } : e,
+        ),
+      },
+    });
+  },
+
+  scaleEntity: (id, scale) => {
+    const { project } = get();
+    const clamped = Math.max(0.3, Math.min(4, scale));
+    set({
+      project: {
+        ...project,
+        entities: project.entities.map((e) =>
+          e.id === id ? { ...e, scale: clamped } : e,
+        ),
+      },
+    });
+  },
+
+  setEntityFloors: (id, floors) => {
+    const { project } = get();
+    const clamped = Math.max(1, Math.min(12, Math.round(floors)));
+    set({
+      project: {
+        ...project,
+        entities: project.entities.map((e) =>
+          e.id === id ? { ...e, params: { ...e.params, floors: clamped } } : e,
         ),
       },
     });

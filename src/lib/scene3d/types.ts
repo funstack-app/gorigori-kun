@@ -15,7 +15,14 @@ export const SCENE_FPS = 24 as const;
 
 export type Vec3 = [number, number, number];
 
-export type SceneEntityKind = "mannequin" | "sphere" | "box";
+export type SceneEntityKind =
+  | "mannequin"
+  | "sphere"
+  | "box"
+  | "wall"
+  | "column"
+  | "stairs"
+  | "building";
 
 export type SceneEntity = {
   id: string;
@@ -23,9 +30,13 @@ export type SceneEntity = {
   label: string;
   /** 床面上の配置位置(yは接地オフセット込みの原点) */
   position: Vec3;
-  /** 床上回転(ラジアン)。スパイク段階ではY軸回転のみ */
+  /** 床上回転(ラジアン)。Y軸回転のみ */
   rotationY: number;
   scale: number;
+  /** プロシージャル形状のパラメータ(建物の階数等)。kindごとに解釈 */
+  params?: {
+    floors?: number;
+  };
 };
 
 export type CameraPresetId =
