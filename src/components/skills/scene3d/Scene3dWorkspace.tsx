@@ -134,6 +134,60 @@ const BuildingIcon = ({ className }: { className?: string }) => (
   </Icon>
 );
 
+const TableIcon = ({ className }: { className?: string }) => (
+  <Icon className={className}>
+    <path d="M3 9h18M5 9v9M19 9v9" />
+  </Icon>
+);
+const ChairIcon = ({ className }: { className?: string }) => (
+  <Icon className={className}>
+    <path d="M7 4v9h10M7 13l-1 7M17 13v7M17 13V9" />
+  </Icon>
+);
+const SofaIcon = ({ className }: { className?: string }) => (
+  <Icon className={className}>
+    <path d="M4 12V8a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v4" />
+    <rect x="2" y="12" width="20" height="6" rx="2" />
+    <path d="M5 18v2M19 18v2" />
+  </Icon>
+);
+const BedIcon = ({ className }: { className?: string }) => (
+  <Icon className={className}>
+    <path d="M3 7v13M3 15h18v5M3 12h18v-2a2 2 0 0 0-2-2H9" />
+    <circle cx="6.5" cy="9" r="1.5" />
+  </Icon>
+);
+const ShelfIcon = ({ className }: { className?: string }) => (
+  <Icon className={className}>
+    <rect x="5" y="3" width="14" height="18" />
+    <path d="M5 9h14M5 15h14" />
+  </Icon>
+);
+const PedestalIcon = ({ className }: { className?: string }) => (
+  <Icon className={className}>
+    <path d="M8 4h8M9 4l1 16h4l1-16M7 20h10" />
+  </Icon>
+);
+const CarIcon = ({ className }: { className?: string }) => (
+  <Icon className={className}>
+    <path d="M4 15l1.5-5A2 2 0 0 1 7.4 8.5h9.2a2 2 0 0 1 1.9 1.5L20 15" />
+    <rect x="3" y="14" width="18" height="4" rx="1.5" />
+    <circle cx="7.5" cy="18.5" r="1.6" />
+    <circle cx="16.5" cy="18.5" r="1.6" />
+  </Icon>
+);
+const TreeIcon = ({ className }: { className?: string }) => (
+  <Icon className={className}>
+    <circle cx="12" cy="9" r="5" />
+    <path d="M12 14v7M9 21h6" />
+  </Icon>
+);
+const StreetlightIcon = ({ className }: { className?: string }) => (
+  <Icon className={className}>
+    <path d="M9 21h6M12 21V5M12 5h5l-1.5 3h-3" />
+  </Icon>
+);
+
 function EntityKindIcon({ kind, className }: { kind: SceneEntityKind; className?: string }) {
   switch (kind) {
     case "mannequin":
@@ -150,6 +204,24 @@ function EntityKindIcon({ kind, className }: { kind: SceneEntityKind; className?
       return <StairsIcon className={className} />;
     case "building":
       return <BuildingIcon className={className} />;
+    case "table":
+      return <TableIcon className={className} />;
+    case "chair":
+      return <ChairIcon className={className} />;
+    case "sofa":
+      return <SofaIcon className={className} />;
+    case "bed":
+      return <BedIcon className={className} />;
+    case "shelf":
+      return <ShelfIcon className={className} />;
+    case "pedestal":
+      return <PedestalIcon className={className} />;
+    case "car":
+      return <CarIcon className={className} />;
+    case "tree":
+      return <TreeIcon className={className} />;
+    case "streetlight":
+      return <StreetlightIcon className={className} />;
   }
 }
 
@@ -269,6 +341,19 @@ function ObjectPickerPopup({ onClose }: { onClose: () => void }) {
     { kind: "stairs", label: "階段" },
     { kind: "building", label: "ビル" },
   ];
+  const furniture: { kind: SceneEntityKind; label: string }[] = [
+    { kind: "table", label: "机" },
+    { kind: "chair", label: "椅子" },
+    { kind: "sofa", label: "ソファ" },
+    { kind: "bed", label: "ベッド" },
+    { kind: "shelf", label: "棚" },
+    { kind: "pedestal", label: "台座" },
+  ];
+  const outdoor: { kind: SceneEntityKind; label: string }[] = [
+    { kind: "car", label: "車" },
+    { kind: "tree", label: "木" },
+    { kind: "streetlight", label: "街灯" },
+  ];
   return (
     <Popup title="シーンに置く" onClose={onClose}>
       <p className="mb-2 text-[11px] font-bold tracking-wide text-neutral-500">基本</p>
@@ -283,6 +368,24 @@ function ObjectPickerPopup({ onClose }: { onClose: () => void }) {
       <p className="mb-2 mt-4 text-[11px] font-bold tracking-wide text-neutral-500">建築</p>
       <div className="grid grid-cols-4 gap-2">
         {arch.map((it) => (
+          <button key={it.kind} className={card} onClick={() => pick(it.kind)}>
+            <EntityKindIcon kind={it.kind} className="h-10 w-10" />
+            <span className="text-xs">{it.label}</span>
+          </button>
+        ))}
+      </div>
+      <p className="mb-2 mt-4 text-[11px] font-bold tracking-wide text-neutral-500">家具</p>
+      <div className="grid grid-cols-4 gap-2">
+        {furniture.map((it) => (
+          <button key={it.kind} className={card} onClick={() => pick(it.kind)}>
+            <EntityKindIcon kind={it.kind} className="h-10 w-10" />
+            <span className="text-xs">{it.label}</span>
+          </button>
+        ))}
+      </div>
+      <p className="mb-2 mt-4 text-[11px] font-bold tracking-wide text-neutral-500">屋外</p>
+      <div className="grid grid-cols-4 gap-2">
+        {outdoor.map((it) => (
           <button key={it.kind} className={card} onClick={() => pick(it.kind)}>
             <EntityKindIcon kind={it.kind} className="h-10 w-10" />
             <span className="text-xs">{it.label}</span>
@@ -800,6 +903,18 @@ function DirectorPanel() {
   const setAspectRatio = useScene3d((s) => s.setAspectRatio);
   const [presetOpen, setPresetOpen] = useState(false);
   const [camPosOpen, setCamPosOpen] = useState(false);
+  const selectedEntityId = useScene3d((s2) => s2.selectedEntityId);
+  const hasEntity = project.entities.some((e) => e.id === selectedEntityId);
+  const [objH, setObjH] = useState(() => {
+    const saved = Number(localStorage.getItem("scene3d.panel.objH"));
+    return Number.isFinite(saved) && saved >= 120 && saved <= 500 ? saved : 240;
+  });
+  const objHState = useRef<{ startY: number; startH: number } | null>(null);
+  const updateObjH = (h: number) => {
+    const clamped = Math.max(120, Math.min(500, Math.round(h)));
+    setObjH(clamped);
+    localStorage.setItem("scene3d.panel.objH", String(clamped));
+  };
 
   const assignShotCamera = useScene3d((s) => s.assignShotCamera);
   const shot = getSelectedShot({ project, selectedShotId });
@@ -808,9 +923,42 @@ function DirectorPanel() {
   const usedCount = project.shots.filter((sh) => sh.cameraId === shot.cameraId).length;
 
   return (
-    <aside className="flex w-full flex-col gap-5 overflow-y-auto border-l border-[#242424] bg-[#141414] px-4 py-4">
-      <SelectedObjectSection />
+    <aside className="flex w-full flex-col overflow-hidden border-l border-[#242424] bg-[#141414]">
+      {/* 上段: 選択オブジェクト(高さは境界ドラッグで調整) */}
+      {hasEntity && (
+        <>
+          <div style={{ height: objH }} className="shrink-0 overflow-y-auto px-4 pt-4">
+            <p className="mb-2 text-[10px] font-bold uppercase tracking-widest text-neutral-600">
+              オブジェクト
+            </p>
+            <SelectedObjectSection />
+          </div>
+          <div
+            className="group flex h-2 w-full shrink-0 cursor-row-resize items-center justify-center border-y border-[#242424] bg-[#181818] hover:bg-pink-400/20"
+            onPointerDown={(e) => {
+              objHState.current = { startY: e.clientY, startH: objH };
+              (e.target as Element).setPointerCapture(e.pointerId);
+            }}
+            onPointerMove={(e) => {
+              if (!objHState.current) return;
+              updateObjH(objHState.current.startH + (e.clientY - objHState.current.startY));
+            }}
+            onPointerUp={(e) => {
+              objHState.current = null;
+              (e.target as Element).releasePointerCapture(e.pointerId);
+            }}
+          >
+            <div className="h-0.5 w-8 rounded bg-[#3a3a3a] group-hover:bg-pink-300" />
+          </div>
+        </>
+      )}
+
+      {/* 下段: カット/カメラ/書き出し */}
+      <div className="flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto px-4 py-4">
       <div>
+        <p className="mb-2 text-[10px] font-bold uppercase tracking-widest text-neutral-600">
+          カット
+        </p>
         <p className="mb-2 flex items-center gap-1.5 text-[11px] font-bold tracking-wide text-neutral-500">
           <span
             className="inline-block h-2 w-2 rounded-full"
@@ -943,6 +1091,7 @@ function DirectorPanel() {
       </div>
 
       <ExportSection />
+      </div>
       {presetOpen && <PresetPickerPopup onClose={() => setPresetOpen(false)} />}
     </aside>
   );

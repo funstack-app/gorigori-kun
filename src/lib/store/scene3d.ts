@@ -39,6 +39,15 @@ const ENTITY_LABELS: Record<SceneEntityKind, string> = {
   column: "柱",
   stairs: "階段",
   building: "ビル",
+  table: "机",
+  chair: "椅子",
+  sofa: "ソファ",
+  bed: "ベッド",
+  shelf: "棚",
+  pedestal: "台座",
+  car: "車",
+  tree: "木",
+  streetlight: "街灯",
 };
 
 /**

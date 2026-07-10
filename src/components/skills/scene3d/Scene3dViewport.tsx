@@ -267,6 +267,179 @@ function Building({ color, floors }: { color: string; floors: number }) {
   );
 }
 
+/* ------------------------- 家具・屋外(リファレンス用の軽量ブロック) ------------------------- */
+
+function Table({ color }: { color: string }) {
+  return (
+    <group>
+      <mesh position={[0, 0.72, 0]} castShadow receiveShadow>
+        <boxGeometry args={[1.4, 0.05, 0.8]} />
+        <meshStandardMaterial color={color} roughness={0.8} />
+      </mesh>
+      {[[-0.62, -0.32], [0.62, -0.32], [-0.62, 0.32], [0.62, 0.32]].map(([x, z], i) => (
+        <mesh key={i} position={[x, 0.35, z]} castShadow>
+          <boxGeometry args={[0.06, 0.7, 0.06]} />
+          <meshStandardMaterial color={color} roughness={0.8} />
+        </mesh>
+      ))}
+    </group>
+  );
+}
+
+function Chair({ color }: { color: string }) {
+  return (
+    <group>
+      <mesh position={[0, 0.44, 0]} castShadow>
+        <boxGeometry args={[0.45, 0.05, 0.45]} />
+        <meshStandardMaterial color={color} roughness={0.8} />
+      </mesh>
+      <mesh position={[0, 0.75, -0.2]} castShadow>
+        <boxGeometry args={[0.45, 0.6, 0.05]} />
+        <meshStandardMaterial color={color} roughness={0.8} />
+      </mesh>
+      {[[-0.19, -0.19], [0.19, -0.19], [-0.19, 0.19], [0.19, 0.19]].map(([x, z], i) => (
+        <mesh key={i} position={[x, 0.21, z]} castShadow>
+          <boxGeometry args={[0.05, 0.42, 0.05]} />
+          <meshStandardMaterial color={color} roughness={0.8} />
+        </mesh>
+      ))}
+    </group>
+  );
+}
+
+function Sofa({ color }: { color: string }) {
+  return (
+    <group>
+      <mesh position={[0, 0.28, 0]} castShadow receiveShadow>
+        <boxGeometry args={[1.8, 0.45, 0.85]} />
+        <meshStandardMaterial color={color} roughness={0.9} />
+      </mesh>
+      <mesh position={[0, 0.62, -0.32]} castShadow>
+        <boxGeometry args={[1.8, 0.5, 0.22]} />
+        <meshStandardMaterial color={color} roughness={0.9} />
+      </mesh>
+      {[-1, 1].map((side) => (
+        <mesh key={side} position={[side * 0.82, 0.52, 0.05]} castShadow>
+          <boxGeometry args={[0.18, 0.3, 0.75]} />
+          <meshStandardMaterial color={color} roughness={0.9} />
+        </mesh>
+      ))}
+    </group>
+  );
+}
+
+function Bed({ color }: { color: string }) {
+  return (
+    <group>
+      <mesh position={[0, 0.25, 0]} castShadow receiveShadow>
+        <boxGeometry args={[1.1, 0.4, 2.0]} />
+        <meshStandardMaterial color={color} roughness={0.9} />
+      </mesh>
+      <mesh position={[0, 0.5, -0.75]} scale={[1, 0.4, 1]} castShadow>
+        <sphereGeometry args={[0.22, 12, 10]} />
+        <meshStandardMaterial color="#d8dade" roughness={0.9} />
+      </mesh>
+      <mesh position={[0, 0.62, -0.98]} castShadow>
+        <boxGeometry args={[1.1, 0.55, 0.06]} />
+        <meshStandardMaterial color={color} roughness={0.9} />
+      </mesh>
+    </group>
+  );
+}
+
+function Shelf({ color }: { color: string }) {
+  return (
+    <group>
+      {[-1, 1].map((side) => (
+        <mesh key={side} position={[side * 0.44, 0.9, 0]} castShadow>
+          <boxGeometry args={[0.04, 1.8, 0.35]} />
+          <meshStandardMaterial color={color} roughness={0.85} />
+        </mesh>
+      ))}
+      {[0.3, 0.85, 1.4, 1.78].map((y, i) => (
+        <mesh key={i} position={[0, y, 0]} castShadow>
+          <boxGeometry args={[0.9, 0.035, 0.35]} />
+          <meshStandardMaterial color={color} roughness={0.85} />
+        </mesh>
+      ))}
+    </group>
+  );
+}
+
+/** 台座(商品を置く円柱) */
+function Pedestal({ color }: { color: string }) {
+  return (
+    <mesh position={[0, 0.5, 0]} castShadow receiveShadow>
+      <cylinderGeometry args={[0.32, 0.36, 1.0, 24]} />
+      <meshStandardMaterial color={color} roughness={0.7} />
+    </mesh>
+  );
+}
+
+/** 車(ブロックアウト。+Zが前) */
+function Car({ color }: { color: string }) {
+  return (
+    <group>
+      <mesh position={[0, 0.55, 0]} castShadow receiveShadow>
+        <boxGeometry args={[1.8, 0.5, 4.2]} />
+        <meshStandardMaterial color={color} roughness={0.6} />
+      </mesh>
+      <mesh position={[0, 0.98, -0.3]} castShadow>
+        <boxGeometry args={[1.6, 0.45, 2.0]} />
+        <meshStandardMaterial color={color} roughness={0.6} />
+      </mesh>
+      {[[-0.85, 1.35], [0.85, 1.35], [-0.85, -1.35], [0.85, -1.35]].map(([x, z], i) => (
+        <mesh key={i} position={[x, 0.32, z]} rotation={[0, 0, Math.PI / 2]} castShadow>
+          <cylinderGeometry args={[0.32, 0.32, 0.2, 18]} />
+          <meshStandardMaterial color="#2a2c30" roughness={0.8} />
+        </mesh>
+      ))}
+    </group>
+  );
+}
+
+function Tree({ color }: { color: string }) {
+  return (
+    <group>
+      <mesh position={[0, 0.9, 0]} castShadow>
+        <cylinderGeometry args={[0.1, 0.16, 1.8, 10]} />
+        <meshStandardMaterial color="#6b5a48" roughness={0.9} />
+      </mesh>
+      <mesh position={[0, 2.2, 0]} castShadow>
+        <sphereGeometry args={[0.85, 14, 12]} />
+        <meshStandardMaterial color={color} roughness={0.95} />
+      </mesh>
+      <mesh position={[0.4, 1.7, 0.2]} castShadow>
+        <sphereGeometry args={[0.5, 12, 10]} />
+        <meshStandardMaterial color={color} roughness={0.95} />
+      </mesh>
+      <mesh position={[-0.42, 1.85, -0.15]} castShadow>
+        <sphereGeometry args={[0.55, 12, 10]} />
+        <meshStandardMaterial color={color} roughness={0.95} />
+      </mesh>
+    </group>
+  );
+}
+
+function Streetlight({ color }: { color: string }) {
+  return (
+    <group>
+      <mesh position={[0, 2.2, 0]} castShadow>
+        <cylinderGeometry args={[0.05, 0.07, 4.4, 10]} />
+        <meshStandardMaterial color={color} roughness={0.7} />
+      </mesh>
+      <mesh position={[0, 4.4, 0.4]} rotation={[Math.PI / 2.4, 0, 0]} castShadow>
+        <cylinderGeometry args={[0.04, 0.04, 0.9, 8]} />
+        <meshStandardMaterial color={color} roughness={0.7} />
+      </mesh>
+      <mesh position={[0, 4.55, 0.78]} castShadow>
+        <boxGeometry args={[0.22, 0.1, 0.45]} />
+        <meshStandardMaterial color="#f4f0d8" emissive="#f4f0d8" emissiveIntensity={0.5} />
+      </mesh>
+    </group>
+  );
+}
+
 function EntityMesh({ entity }: { entity: SceneEntity }) {
   const controls = useThree((state) => state.controls);
   const rootRef = useRef<Group>(null);
@@ -421,6 +594,15 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
       {entity.kind === "building" && (
         <Building color={color} floors={entity.params?.floors ?? 3} />
       )}
+      {entity.kind === "table" && <Table color={color} />}
+      {entity.kind === "chair" && <Chair color={color} />}
+      {entity.kind === "sofa" && <Sofa color={color} />}
+      {entity.kind === "bed" && <Bed color={color} />}
+      {entity.kind === "shelf" && <Shelf color={color} />}
+      {entity.kind === "pedestal" && <Pedestal color={color} />}
+      {entity.kind === "car" && <Car color={color} />}
+      {entity.kind === "tree" && <Tree color={selected ? color : "#7a8d6a"} />}
+      {entity.kind === "streetlight" && <Streetlight color={color} />}
     </group>
   );
 }

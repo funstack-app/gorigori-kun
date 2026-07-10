@@ -36,7 +36,16 @@ export type SceneEntityKind =
   | "wall"
   | "column"
   | "stairs"
-  | "building";
+  | "building"
+  | "table"
+  | "chair"
+  | "sofa"
+  | "bed"
+  | "shelf"
+  | "pedestal"
+  | "car"
+  | "tree"
+  | "streetlight";
 
 export type SceneEntity = {
   id: string;
