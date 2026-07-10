@@ -528,9 +528,16 @@ function AxisSlider({
         onChange={(e) => onChange(Number(e.target.value))}
         className="min-w-0 flex-1"
       />
-      <span className="w-10 shrink-0 text-right tabular-nums text-neutral-500">
-        {value.toFixed(1)}
-      </span>
+      <input
+        type="number"
+        step={step}
+        value={Number(value.toFixed(1))}
+        onChange={(e) => {
+          const v = Number(e.target.value);
+          if (Number.isFinite(v)) onChange(Math.max(min, Math.min(max, v)));
+        }}
+        className="w-14 shrink-0 rounded border border-[#2a2a2a] bg-[#0d0d0d] px-1 py-0.5 text-right text-xs tabular-nums text-neutral-300 focus:border-pink-400/60 focus:outline-none"
+      />
     </label>
   );
 }
