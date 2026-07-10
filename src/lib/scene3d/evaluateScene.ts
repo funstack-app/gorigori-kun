@@ -137,10 +137,21 @@ export function evaluateShotCamera(
       break;
     }
     // pushIn / pullOut / track / pan / crane は「開始→終了の補間」で表現が共通。
-    // 違いはUI側がプリセット選択時に endPos をどう初期化するかで作る
-    default:
-      position = lerpVec3(camera.startPos, camera.endPos, t);
+    // midPos があれば2次ベジェで通り道を曲げる(軌道の自由調整)
+    default: {
+      const mid = camera.midPos;
+      if (mid) {
+        const u = 1 - t;
+        position = [
+          u * u * camera.startPos[0] + 2 * u * t * mid[0] + t * t * camera.endPos[0],
+          u * u * camera.startPos[1] + 2 * u * t * mid[1] + t * t * camera.endPos[1],
+          u * u * camera.startPos[2] + 2 * u * t * mid[2] + t * t * camera.endPos[2],
+        ];
+      } else {
+        position = lerpVec3(camera.startPos, camera.endPos, t);
+      }
       break;
+    }
   }
 
   return {

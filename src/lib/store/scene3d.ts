@@ -121,6 +121,8 @@ type Scene3dState = {
   setLens: (lensMm: number) => void;
   setOrbitDegrees: (degrees: number) => void;
   moveCameraEndpoint: (which: "start" | "end", position: Vec3) => void;
+  /** 軌道の中間点を動かして通り道を曲げる(nullで直線に戻す) */
+  moveCameraMid: (position: Vec3 | null) => void;
 
   setPlaying: (playing: boolean) => void;
   /**
@@ -343,7 +345,7 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
     set({
       project: updateShot(project, shot.id, (s) => ({
         ...s,
-        camera: { ...s.camera, preset, ...placement },
+        camera: { ...s.camera, preset, ...placement, midPos: null },
       })),
       currentFrame: shotStartFrame(project, shot.id),
     });
@@ -394,6 +396,17 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
     });
   },
 
+  moveCameraMid: (position) => {
+    const { project } = get();
+    const shot = getSelectedShot(get());
+    set({
+      project: updateShot(project, shot.id, (s) => ({
+        ...s,
+        camera: { ...s.camera, midPos: position },
+      })),
+    });
+  },
+
   setPlaying: (playing) => set({ playing }),
   togglePlay: () => {
     const { playing, currentFrame, playStartFrame } = get();
@@ -424,13 +437,14 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
         next = splitLeafNode(paneLayout, op.id, op.dir);
         break;
       case "close":
-        next = closeLeafNode(paneLayout, op.id) ?? defaultPaneLayout();
+        next = ensureEditorLeaf(closeLeafNode(paneLayout, op.id) ?? defaultPaneLayout(), "");
         break;
       case "ratio":
         next = setNodeRatio(paneLayout, op.id, op.ratio);
         break;
       case "toggleView":
-        next = toggleLeafView(paneLayout, op.id);
+        // 編集ビューゼロを許さない(視点操作不能になるため)。カメラ⇄編集の入替として振る舞う
+        next = ensureEditorLeaf(toggleLeafView(paneLayout, op.id), op.id);
         break;
       case "reset":
         next = defaultPaneLayout();
@@ -533,6 +547,29 @@ function toggleLeafView(node: PaneNode, id: string): PaneNode {
     return { ...node, view: node.view === "editor" ? "camera" : "editor" };
   }
   return { ...node, a: toggleLeafView(node.a, id), b: toggleLeafView(node.b, id) };
+}
+
+function hasEditorLeaf(node: PaneNode): boolean {
+  return node.kind === "leaf" ? node.view === "editor" : hasEditorLeaf(node.a) || hasEditorLeaf(node.b);
+}
+
+/** 編集ビューが1枚も無くなる操作なら、他の先頭ペインを編集に切替えて保証する */
+function ensureEditorLeaf(node: PaneNode, excludeId: string): PaneNode {
+  if (hasEditorLeaf(node)) return node;
+  let converted = false;
+  const convertFirst = (n: PaneNode): PaneNode => {
+    if (converted) return n;
+    if (n.kind === "leaf") {
+      if (n.id === excludeId) return n;
+      converted = true;
+      return { ...n, view: "editor" };
+    }
+    return { ...n, a: convertFirst(n.a), b: convertFirst(n.b) };
+  };
+  const result = convertFirst(node);
+  // 1枚構成で excludeId しかない場合はそのペイン自体を編集に戻す
+  if (!converted && result.kind === "leaf") return { ...result, view: "editor" };
+  return result;
 }
 
 export type PaneOp =

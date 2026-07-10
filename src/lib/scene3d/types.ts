@@ -67,6 +67,8 @@ export type CameraMove = {
   endPos: Vec3;
   /** orbit 専用: 対象を中心に回り込む角度(度)。正=時計回り */
   orbitDegrees: number;
+  /** 軌道の中間点(直線プリセットを曲げる)。null/未指定なら直線 */
+  midPos?: Vec3 | null;
   /** フルサイズ換算の焦点距離(mm)。fovに変換される */
   lensMm: number;
   easing: CameraEasing;

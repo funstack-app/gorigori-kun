@@ -853,8 +853,18 @@ function ShotClip({ shot, index }: { shot: SceneShot; index: number }) {
   );
 }
 
-/** CapCut風タイムライン: 再生ヘッド + ルーラースクラブ + クリップ列 + カット追加 */
+/** CapCut風タイムライン: 再生ヘッド + ルーラースクラブ + クリップ列 + カット追加。上端ドラッグで高さ調整 */
 function ShotTimeline() {
+  const [bodyH, setBodyH] = useState(() => {
+    const saved = Number(localStorage.getItem("scene3d.timeline.h"));
+    return Number.isFinite(saved) && saved >= 64 && saved <= 320 ? saved : 96;
+  });
+  const resizeState = useRef<{ startY: number; startH: number } | null>(null);
+  const updateBodyH = (h: number) => {
+    const clamped = Math.max(64, Math.min(320, Math.round(h)));
+    setBodyH(clamped);
+    localStorage.setItem("scene3d.timeline.h", String(clamped));
+  };
   const project = useScene3d((s) => s.project);
   const playing = useScene3d((s) => s.playing);
   const cameraView = useScene3d((s) => s.cameraView);
@@ -893,7 +903,25 @@ function ShotTimeline() {
 
   return (
     <div className="flex flex-col border-t border-[#242424] bg-[#141414]">
-      <div className="flex min-w-0 items-center gap-3 overflow-hidden px-4 pt-2">
+      {/* 高さ調整ハンドル(上端) */}
+      <div
+        className="group flex h-1.5 w-full cursor-row-resize items-center justify-center hover:bg-pink-400/25"
+        onPointerDown={(e) => {
+          resizeState.current = { startY: e.clientY, startH: bodyH };
+          (e.target as Element).setPointerCapture(e.pointerId);
+        }}
+        onPointerMove={(e) => {
+          if (!resizeState.current) return;
+          updateBodyH(resizeState.current.startH - (e.clientY - resizeState.current.startY));
+        }}
+        onPointerUp={(e) => {
+          resizeState.current = null;
+          (e.target as Element).releasePointerCapture(e.pointerId);
+        }}
+      >
+        <div className="h-0.5 w-10 rounded bg-[#3a3a3a] group-hover:bg-pink-300" />
+      </div>
+      <div className="flex min-w-0 items-center gap-3 overflow-hidden px-4 pt-1">
         <button
           className={`flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-[13px] font-semibold ${
             playing ? "bg-red-500/20 text-red-300" : "bg-sky-500/20 text-pink-300"
@@ -938,7 +966,7 @@ function ShotTimeline() {
         </span>
       </div>
 
-      <div className="overflow-x-auto px-4 pb-3 pt-1">
+      <div style={{ height: bodyH }} className="overflow-x-auto overflow-y-auto px-4 pb-3 pt-1">
         <div className="relative w-max min-w-full">
           {/* ルーラー(クリック/ドラッグでスクラブ) */}
           <div
@@ -1308,7 +1336,9 @@ function usePanelWidth(key: string, initial: number, min: number, max: number) {
     return Number.isFinite(saved) && saved >= min && saved <= max ? saved : initial;
   });
   const update = (w: number) => {
-    const clamped = Math.max(min, Math.min(max, Math.round(w)));
+    // ウィンドウ幅の1/3を超えては広げられない(ビューポート圧迫防止)
+    const hardMax = Math.min(max, Math.floor(window.innerWidth / 3));
+    const clamped = Math.max(min, Math.min(hardMax, Math.round(w)));
     setWidth(clamped);
     localStorage.setItem(key, String(clamped));
   };

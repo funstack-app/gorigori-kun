@@ -25,6 +25,18 @@ import { SCENE_FPS } from "../../../lib/scene3d/types";
 import type { SceneAspectRatio, SceneEntity, Vec3 } from "../../../lib/scene3d/types";
 import { getSelectedShot, useScene3d } from "../../../lib/store/scene3d";
 
+/** ポインタのレイと水平面(y=height)の交点。交差しない場合は null */
+function rayToPlaneY(ray: Ray, y: number): Vec3 | null {
+  if (Math.abs(ray.direction.y) < 1e-6) return null;
+  const t = (y - ray.origin.y) / ray.direction.y;
+  if (t < 0) return null;
+  return [
+    ray.origin.x + ray.direction.x * t,
+    y,
+    ray.origin.z + ray.direction.z * t,
+  ];
+}
+
 /** ポインタのレイと床面(y=0)の交点。交差しない場合は null */
 function rayToFloor(ray: Ray): Vec3 | null {
   if (Math.abs(ray.direction.y) < 1e-6) return null;
@@ -420,16 +432,11 @@ function CameraPathLine() {
   }, [project, shot]);
 
   const lookAt = useMemo(() => resolveLookAt(project, shot), [project, shot]);
-  const end = points[points.length - 1];
 
   return (
     <>
       <Line points={points} color="#ec4899" lineWidth={2} dashed={false} />
-      {/* 終了点(赤)=カメラが止まる場所。始点はカメラマークが示す */}
-      <mesh position={end}>
-        <sphereGeometry args={[0.08, 16, 12]} />
-        <meshBasicMaterial color="#f87171" />
-      </mesh>
+      {/* 終了点は CameraEndMarker(ドラッグ可能)が担う */}
       {/* 注視点マーカー */}
       <mesh position={lookAt}>
         <sphereGeometry args={[0.04, 12, 8]} />
@@ -447,11 +454,43 @@ function CameraPathLine() {
 function CameraIndicator() {
   const project = useScene3d((s) => s.project);
   const selectedShotId = useScene3d((s) => s.selectedShotId);
+  const moveCameraEndpoint = useScene3d((s) => s.moveCameraEndpoint);
+  const setDragging = useScene3d((s) => s.setDragging);
+  const draggingSelf = useScene3d((s) => s.draggingEntityId === "__camera-start");
   const groupRef = useRef<Group>(null);
+  const lastClientY = useRef(0);
 
   // 始点=カメラマーク(このカットの撮影開始位置)。終点は赤点(カメラが止まる場所)
   const shot = getSelectedShot({ project, selectedShotId });
   const pose = evaluateShotCamera(project, shot, 0);
+
+  const onPointerDown = (e: ThreeEvent<PointerEvent>) => {
+    e.stopPropagation();
+    setDragging("__camera-start");
+    lastClientY.current = e.nativeEvent.clientY;
+    (e.target as Element).setPointerCapture(e.pointerId);
+  };
+  const onPointerMove = (e: ThreeEvent<PointerEvent>) => {
+    if (!draggingSelf) return;
+    const start = shot.camera.startPos;
+    if (e.nativeEvent.shiftKey) {
+      // Shift+上下ドラッグ = 高さ調整
+      const dy = e.nativeEvent.clientY - lastClientY.current;
+      lastClientY.current = e.nativeEvent.clientY;
+      const nextY = Math.max(0.1, Math.min(20, start[1] - dy * 0.02));
+      moveCameraEndpoint("start", [start[0], nextY, start[2]]);
+      return;
+    }
+    lastClientY.current = e.nativeEvent.clientY;
+    // 通常ドラッグ = 現在の高さを保ったまま水平移動
+    const p = rayToPlaneY(e.ray, start[1]);
+    if (p) moveCameraEndpoint("start", [Math.round(p[0] * 10) / 10, start[1], Math.round(p[2] * 10) / 10]);
+  };
+  const onPointerUp = (e: ThreeEvent<PointerEvent>) => {
+    if (!draggingSelf) return;
+    setDragging(null);
+    (e.target as Element).releasePointerCapture(e.pointerId);
+  };
   const ar = project.aspectRatio === "9:16" ? 9 / 16 : project.aspectRatio === "1:1" ? 1 : 16 / 9;
 
   useEffect(() => {
@@ -472,7 +511,17 @@ function CameraIndicator() {
   const zero: Vec3 = [0, 0, 0];
 
   return (
-    <group ref={groupRef}>
+    <group
+      ref={groupRef}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+    >
+      {/* つかみやすい不可視の当たり判定 */}
+      <mesh visible={false}>
+        <sphereGeometry args={[0.32, 8, 6]} />
+        <meshBasicMaterial />
+      </mesh>
       {/* カメラボディ + レンズ */}
       <mesh position={[0, 0, -0.12]}>
         <boxGeometry args={[0.24, 0.18, 0.24]} />
@@ -488,6 +537,156 @@ function CameraIndicator() {
       <Line points={[zero, c3]} color="#f9a8d4" lineWidth={1} transparent opacity={0.7} />
       <Line points={[zero, c4]} color="#f9a8d4" lineWidth={1} transparent opacity={0.7} />
       <Line points={[c1, c2, c3, c4, c1]} color="#f9a8d4" lineWidth={1.5} />
+    </group>
+  );
+}
+
+/**
+ * 終点マーカー(赤)。ドラッグでカメラの止まる位置を動かす。
+ * オービット中は赤点を回すと回り込み角度(15°刻み)が変わる
+ */
+function CameraEndMarker() {
+  const project = useScene3d((s) => s.project);
+  const selectedShotId = useScene3d((s) => s.selectedShotId);
+  const moveCameraEndpoint = useScene3d((s) => s.moveCameraEndpoint);
+  const setOrbitDegrees = useScene3d((s) => s.setOrbitDegrees);
+  const setDragging = useScene3d((s) => s.setDragging);
+  const draggingSelf = useScene3d((s) => s.draggingEntityId === "__camera-end");
+  const lastClientY = useRef(0);
+
+  const shot = getSelectedShot({ project, selectedShotId });
+  if (shot.camera.preset === "fixed") return null; // 固定は終点なし
+
+  const end = evaluateShotCamera(project, shot, Math.max(0, shot.durationFrames - 1)).position;
+  const isOrbit = shot.camera.preset === "orbit";
+
+  const onPointerDown = (e: ThreeEvent<PointerEvent>) => {
+    e.stopPropagation();
+    setDragging("__camera-end");
+    lastClientY.current = e.nativeEvent.clientY;
+    (e.target as Element).setPointerCapture(e.pointerId);
+  };
+  const onPointerMove = (e: ThreeEvent<PointerEvent>) => {
+    if (!draggingSelf) return;
+    if (isOrbit) {
+      // 注視点まわりの角度に変換(15°刻み)
+      const c = resolveLookAt(project, shot);
+      const p = rayToPlaneY(e.ray, c[1]) ?? rayToFloor(e.ray);
+      if (!p) return;
+      const st = shot.camera.startPos;
+      const a0 = Math.atan2(st[2] - c[2], st[0] - c[0]);
+      const a1 = Math.atan2(p[2] - c[2], p[0] - c[0]);
+      let deg = ((a1 - a0) * 180) / Math.PI;
+      while (deg > 180) deg -= 360;
+      while (deg < -180) deg += 360;
+      setOrbitDegrees(Math.round(deg / 15) * 15);
+      return;
+    }
+    const endPos = shot.camera.endPos;
+    if (e.nativeEvent.shiftKey) {
+      const dy = e.nativeEvent.clientY - lastClientY.current;
+      lastClientY.current = e.nativeEvent.clientY;
+      const nextY = Math.max(0.1, Math.min(20, endPos[1] - dy * 0.02));
+      moveCameraEndpoint("end", [endPos[0], nextY, endPos[2]]);
+      return;
+    }
+    lastClientY.current = e.nativeEvent.clientY;
+    const p = rayToPlaneY(e.ray, endPos[1]);
+    if (p) moveCameraEndpoint("end", [Math.round(p[0] * 10) / 10, endPos[1], Math.round(p[2] * 10) / 10]);
+  };
+  const onPointerUp = (e: ThreeEvent<PointerEvent>) => {
+    if (!draggingSelf) return;
+    setDragging(null);
+    (e.target as Element).releasePointerCapture(e.pointerId);
+  };
+
+  return (
+    <group
+      position={end}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+    >
+      <mesh visible={false}>
+        <sphereGeometry args={[0.3, 8, 6]} />
+        <meshBasicMaterial />
+      </mesh>
+      <mesh>
+        <sphereGeometry args={[0.11, 16, 12]} />
+        <meshBasicMaterial color="#f87171" />
+      </mesh>
+    </group>
+  );
+}
+
+/**
+ * 軌道の中間ハンドル(黄)。ドラッグで通り道を自由に曲げる(2次ベジェ)。
+ * 対象: 開始→終了の補間系プリセット(プッシュイン/プルアウト/トラック/パン/クレーン)
+ */
+function CameraMidMarker() {
+  const project = useScene3d((s) => s.project);
+  const selectedShotId = useScene3d((s) => s.selectedShotId);
+  const moveCameraMid = useScene3d((s) => s.moveCameraMid);
+  const setDragging = useScene3d((s) => s.setDragging);
+  const draggingSelf = useScene3d((s) => s.draggingEntityId === "__camera-mid");
+  const lastClientY = useRef(0);
+
+  const shot = getSelectedShot({ project, selectedShotId });
+  const preset = shot.camera.preset;
+  if (preset === "fixed" || preset === "orbit" || preset === "handheld") return null;
+
+  // 中間点: 未設定なら軌道の中点(=直線の真ん中)
+  const mid: Vec3 =
+    shot.camera.midPos ??
+    ([
+      (shot.camera.startPos[0] + shot.camera.endPos[0]) / 2,
+      (shot.camera.startPos[1] + shot.camera.endPos[1]) / 2,
+      (shot.camera.startPos[2] + shot.camera.endPos[2]) / 2,
+    ] as Vec3);
+
+  const onPointerDown = (e: ThreeEvent<PointerEvent>) => {
+    e.stopPropagation();
+    setDragging("__camera-mid");
+    lastClientY.current = e.nativeEvent.clientY;
+    (e.target as Element).setPointerCapture(e.pointerId);
+  };
+  const onPointerMove = (e: ThreeEvent<PointerEvent>) => {
+    if (!draggingSelf) return;
+    if (e.nativeEvent.shiftKey) {
+      const dy = e.nativeEvent.clientY - lastClientY.current;
+      lastClientY.current = e.nativeEvent.clientY;
+      moveCameraMid([mid[0], Math.max(0.1, Math.min(20, mid[1] - dy * 0.02)), mid[2]]);
+      return;
+    }
+    lastClientY.current = e.nativeEvent.clientY;
+    const p = rayToPlaneY(e.ray, mid[1]);
+    if (p) moveCameraMid([Math.round(p[0] * 10) / 10, mid[1], Math.round(p[2] * 10) / 10]);
+  };
+  const onPointerUp = (e: ThreeEvent<PointerEvent>) => {
+    if (!draggingSelf) return;
+    setDragging(null);
+    (e.target as Element).releasePointerCapture(e.pointerId);
+  };
+
+  return (
+    <group
+      position={mid}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      onDoubleClick={(e) => {
+        e.stopPropagation();
+        moveCameraMid(null); // ダブルクリックで直線に戻す
+      }}
+    >
+      <mesh visible={false}>
+        <sphereGeometry args={[0.28, 8, 6]} />
+        <meshBasicMaterial />
+      </mesh>
+      <mesh>
+        <sphereGeometry args={[0.09, 16, 12]} />
+        <meshBasicMaterial color="#fbbf24" />
+      </mesh>
     </group>
   );
 }
@@ -633,6 +832,8 @@ export function Scene3dViewport({
       ))}
       {!exporting && !isCameraPane && <CameraPathLine />}
       {!exporting && !isCameraPane && <CameraIndicator />}
+      {!exporting && !isCameraPane && <CameraEndMarker />}
+      {!exporting && !isCameraPane && <CameraMidMarker />}
       <CameraRig mode={mode} primary={primary} />
       {!isCameraPane && <ViewportControls />}
       {!isCameraPane && <ViewPresetController />}
