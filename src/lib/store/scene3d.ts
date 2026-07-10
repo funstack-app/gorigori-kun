@@ -513,7 +513,7 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
         next = ensureEditorLeaf(closeLeafNode(paneLayout, op.id) ?? defaultPaneLayout(), "");
         break;
       case "ratio":
-        next = setNodeRatio(paneLayout, op.id, op.ratio);
+        next = setNodeRatio(paneLayout, op.id, op.delta);
         break;
       case "toggleView":
         // 編集ビューゼロを許さない(視点操作不能になるため)。カメラ⇄編集の入替として振る舞う
@@ -608,10 +608,13 @@ function closeLeafNode(node: PaneNode, id: string): PaneNode | null {
   return a ?? b; // 片方が消えたら残りが繰り上がる(Blenderの統合と同じ)
 }
 
-function setNodeRatio(node: PaneNode, id: string, ratio: number): PaneNode {
+function setNodeRatio(node: PaneNode, id: string, delta: number): PaneNode {
   if (node.kind === "leaf") return node;
-  if (node.id === id) return { ...node, ratio: Math.max(0.15, Math.min(0.85, ratio)) };
-  return { ...node, a: setNodeRatio(node.a, id, ratio), b: setNodeRatio(node.b, id, ratio) };
+  if (node.id === id) {
+    // デルタ加算: ストア内の最新値基準なのでドラッグ中の取りこぼしが起きない
+    return { ...node, ratio: Math.max(0.15, Math.min(0.85, node.ratio + delta)) };
+  }
+  return { ...node, a: setNodeRatio(node.a, id, delta), b: setNodeRatio(node.b, id, delta) };
 }
 
 function toggleLeafView(node: PaneNode, id: string): PaneNode {
@@ -648,7 +651,7 @@ function ensureEditorLeaf(node: PaneNode, excludeId: string): PaneNode {
 export type PaneOp =
   | { type: "split"; id: string; dir: "row" | "col" }
   | { type: "close"; id: string }
-  | { type: "ratio"; id: string; ratio: number }
+  | { type: "ratio"; id: string; delta: number }
   | { type: "toggleView"; id: string }
   | { type: "reset" };
 

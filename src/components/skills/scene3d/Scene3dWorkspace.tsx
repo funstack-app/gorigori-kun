@@ -1372,7 +1372,7 @@ function PaneTreeView({
     if (!el) return;
     const size = isRow ? el.clientWidth : el.clientHeight;
     if (size <= 0) return;
-    applyPaneOp({ type: "ratio", id: node.id, ratio: node.ratio + dpx / size });
+    applyPaneOp({ type: "ratio", id: node.id, delta: dpx / size });
   };
 
   return (
@@ -1429,12 +1429,14 @@ function usePanelWidth(key: string, initial: number, min: number, max: number) {
     const saved = Number(localStorage.getItem(key));
     return Number.isFinite(saved) && saved >= min && saved <= max ? saved : initial;
   });
-  const update = (w: number) => {
-    // ウィンドウ幅の1/3を超えては広げられない(ビューポート圧迫防止)
-    const hardMax = Math.min(max, Math.floor(window.innerWidth / 3));
-    const clamped = Math.max(min, Math.min(hardMax, Math.round(w)));
-    setWidth(clamped);
-    localStorage.setItem(key, String(clamped));
+  // 関数型更新: ドラッグ中に複数イベントが再レンダー前に来ても最新値基準で計算する
+  const update = (delta: number) => {
+    setWidth((prev) => {
+      const hardMax = Math.min(max, Math.floor(window.innerWidth / 3));
+      const clamped = Math.max(min, Math.min(hardMax, Math.round(prev + delta)));
+      localStorage.setItem(key, String(clamped));
+      return clamped;
+    });
   };
   return [width, update] as const;
 }
@@ -1525,7 +1527,7 @@ export function Scene3dWorkspace() {
                 «
               </button>
             </div>
-            <PanelResizer onDelta={(dx) => setLeftW(leftW + dx)} />
+            <PanelResizer onDelta={(dx) => setLeftW(dx)} />
           </>
         ) : (
           <CollapsedRail side="left" onOpen={toggleLeft} />
@@ -1536,7 +1538,7 @@ export function Scene3dWorkspace() {
         </div>
         {rightOpen ? (
           <>
-            <PanelResizer onDelta={(dx) => setRightW(rightW - dx)} />
+            <PanelResizer onDelta={(dx) => setRightW(-dx)} />
             <div style={{ width: rightW, minWidth: 200 }} className="relative flex overflow-hidden">
               <button
                 className="absolute left-0 top-2 z-10 rounded-r-md px-1 py-1 text-[10px] text-neutral-500 hover:text-pink-300"
