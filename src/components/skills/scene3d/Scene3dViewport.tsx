@@ -22,7 +22,7 @@ import {
   totalDurationFrames,
 } from "../../../lib/scene3d/evaluateScene";
 import { SCENE_FPS } from "../../../lib/scene3d/types";
-import type { SceneAspectRatio, SceneEntity, Vec3 } from "../../../lib/scene3d/types";
+import type { SceneAspectRatio, SceneEntity, SceneShot, Vec3 } from "../../../lib/scene3d/types";
 import { getSelectedShot, useScene3d } from "../../../lib/store/scene3d";
 
 /** ポインタのレイと水平面(y=height)の交点。交差しない場合は null */
@@ -446,32 +446,56 @@ function CameraPathLine() {
   );
 }
 
+/** クリップと同じ色分け(タイムラインとシーンでカメラを対応づける) */
+const CAMERA_TALLY_COLORS: Record<string, string> = {
+  fixed: "#64748b",
+  pushIn: "#8b5cf6",
+  pullOut: "#a78bfa",
+  track: "#0ea5e9",
+  pan: "#38bdf8",
+  orbit: "#ec4899",
+  crane: "#f59e0b",
+  handheld: "#22c55e",
+};
+
 /**
- * カメラ本体の可視化(編集ビュー専用)。
- * 選択カットの「始点」にカメラの形 + 視野の四角錐を置く。
- * 始点=カメラマーク / 赤点=カメラが止まる場所、という約束(STΛCK指示)
+ * カメラ本体の可視化(編集ビュー専用)。全カットのカメラを常時シーンに立たせる
+ * (マルチカム: スタジオに複数カメラが置いてあり、カット割=カメラの切替)。
+ * 始点=カメラマーク / 赤点=カメラが止まる場所。クリックでそのカットを選択。
+ * 選択中カメラは黄色(選択物体の統一ハイライト)+視野の四角錐を表示
  */
-function CameraIndicator() {
+function CameraIndicator({ shot, selected }: { shot: SceneShot; selected: boolean }) {
   const project = useScene3d((s) => s.project);
-  const selectedShotId = useScene3d((s) => s.selectedShotId);
   const moveCameraEndpoint = useScene3d((s) => s.moveCameraEndpoint);
+  const selectCameraOfShot = useScene3d((s) => s.selectCameraOfShot);
+  const cameraSelected = useScene3d((s) => s.cameraSelected);
   const setDragging = useScene3d((s) => s.setDragging);
   const draggingSelf = useScene3d((s) => s.draggingEntityId === "__camera-start");
   const groupRef = useRef<Group>(null);
   const lastClientY = useRef(0);
 
-  // 始点=カメラマーク(このカットの撮影開始位置)。終点は赤点(カメラが止まる場所)
-  const shot = getSelectedShot({ project, selectedShotId });
   const pose = evaluateShotCamera(project, shot, 0);
+  const ar = project.aspectRatio === "9:16" ? 9 / 16 : project.aspectRatio === "1:1" ? 1 : 16 / 9;
+  const highlight = selected && cameraSelected;
+  const bodyColor = highlight ? "#f59e0b" : selected ? "#4a4c52" : "#33353a";
+  const tally = CAMERA_TALLY_COLORS[shot.camera.preset] ?? "#ec4899";
+
+  useEffect(() => {
+    const g = groupRef.current;
+    if (!g) return;
+    g.position.set(pose.position[0], pose.position[1], pose.position[2]);
+    g.lookAt(pose.lookAt[0], pose.lookAt[1], pose.lookAt[2]);
+  });
 
   const onPointerDown = (e: ThreeEvent<PointerEvent>) => {
     e.stopPropagation();
+    selectCameraOfShot(shot.id);
     setDragging("__camera-start");
     lastClientY.current = e.nativeEvent.clientY;
     (e.target as Element).setPointerCapture(e.pointerId);
   };
   const onPointerMove = (e: ThreeEvent<PointerEvent>) => {
-    if (!draggingSelf) return;
+    if (!draggingSelf || !selected) return;
     const start = shot.camera.startPos;
     if (e.nativeEvent.shiftKey) {
       // Shift+上下ドラッグ = 高さ調整
@@ -482,7 +506,6 @@ function CameraIndicator() {
       return;
     }
     lastClientY.current = e.nativeEvent.clientY;
-    // 通常ドラッグ = 現在の高さを保ったまま水平移動
     const p = rayToPlaneY(e.ray, start[1]);
     if (p) moveCameraEndpoint("start", [Math.round(p[0] * 10) / 10, start[1], Math.round(p[2] * 10) / 10]);
   };
@@ -491,17 +514,9 @@ function CameraIndicator() {
     setDragging(null);
     (e.target as Element).releasePointerCapture(e.pointerId);
   };
-  const ar = project.aspectRatio === "9:16" ? 9 / 16 : project.aspectRatio === "1:1" ? 1 : 16 / 9;
 
-  useEffect(() => {
-    const g = groupRef.current;
-    if (!g) return;
-    g.position.set(pose.position[0], pose.position[1], pose.position[2]);
-    g.lookAt(pose.lookAt[0], pose.lookAt[1], pose.lookAt[2]);
-  });
-
-  // 視野の四角錐(距離1.1mの位置に画角どおりの枠)
-  const d = 1.1;
+  // 視野の四角錐(選択中のみ。距離0.7mに画角どおりの枠)
+  const d = 0.7;
   const h = 2 * Math.tan(((pose.fovDeg / 2) * Math.PI) / 180) * d;
   const w = h * ar;
   const c1: Vec3 = [-w / 2, h / 2, d];
@@ -513,31 +528,53 @@ function CameraIndicator() {
   return (
     <group
       ref={groupRef}
+      scale={0.55}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
     >
       {/* つかみやすい不可視の当たり判定 */}
       <mesh visible={false}>
-        <sphereGeometry args={[0.32, 8, 6]} />
+        <sphereGeometry args={[0.45, 8, 6]} />
         <meshBasicMaterial />
       </mesh>
       {/* カメラボディ + レンズ */}
       <mesh position={[0, 0, -0.12]}>
         <boxGeometry args={[0.24, 0.18, 0.24]} />
-        <meshStandardMaterial color="#2c2e33" roughness={0.5} />
+        <meshStandardMaterial color={bodyColor} roughness={0.5} />
       </mesh>
       <mesh position={[0, 0, 0.04]} rotation={[Math.PI / 2, 0, 0]}>
         <cylinderGeometry args={[0.07, 0.09, 0.12, 16]} />
-        <meshStandardMaterial color="#1c1e22" roughness={0.35} />
+        <meshStandardMaterial color={highlight ? "#b45309" : "#1c1e22"} roughness={0.35} />
       </mesh>
-      {/* 視野の四角錐 */}
-      <Line points={[zero, c1]} color="#f9a8d4" lineWidth={1} transparent opacity={0.7} />
-      <Line points={[zero, c2]} color="#f9a8d4" lineWidth={1} transparent opacity={0.7} />
-      <Line points={[zero, c3]} color="#f9a8d4" lineWidth={1} transparent opacity={0.7} />
-      <Line points={[zero, c4]} color="#f9a8d4" lineWidth={1} transparent opacity={0.7} />
-      <Line points={[c1, c2, c3, c4, c1]} color="#f9a8d4" lineWidth={1.5} />
+      {/* タリーランプ(クリップと同じ色。どのカットのカメラか対応づけ) */}
+      <mesh position={[0, 0.13, -0.12]}>
+        <sphereGeometry args={[0.035, 10, 8]} />
+        <meshBasicMaterial color={tally} />
+      </mesh>
+      {selected && (
+        <>
+          <Line points={[zero, c1]} color="#f9a8d4" lineWidth={1} transparent opacity={0.7} />
+          <Line points={[zero, c2]} color="#f9a8d4" lineWidth={1} transparent opacity={0.7} />
+          <Line points={[zero, c3]} color="#f9a8d4" lineWidth={1} transparent opacity={0.7} />
+          <Line points={[zero, c4]} color="#f9a8d4" lineWidth={1} transparent opacity={0.7} />
+          <Line points={[c1, c2, c3, c4, c1]} color="#f9a8d4" lineWidth={1.5} />
+        </>
+      )}
     </group>
+  );
+}
+
+/** 全カットのカメラを購読して描画(マルチカム表示) */
+function AllCameraIndicators() {
+  const shots = useScene3d((s) => s.project.shots);
+  const selectedShotId = useScene3d((s) => s.selectedShotId);
+  return (
+    <>
+      {shots.map((shot) => (
+        <CameraIndicator key={shot.id} shot={shot} selected={shot.id === selectedShotId} />
+      ))}
+    </>
   );
 }
 
@@ -831,7 +868,7 @@ export function Scene3dViewport({
         <EntityMesh key={e.id} entity={e} />
       ))}
       {!exporting && !isCameraPane && <CameraPathLine />}
-      {!exporting && !isCameraPane && <CameraIndicator />}
+      {!exporting && !isCameraPane && <AllCameraIndicators />}
       {!exporting && !isCameraPane && <CameraEndMarker />}
       {!exporting && !isCameraPane && <CameraMidMarker />}
       <CameraRig mode={mode} primary={primary} />

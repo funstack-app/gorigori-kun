@@ -82,6 +82,8 @@ type Scene3dState = {
   project: SceneProject;
   selectedEntityId: string | null;
   selectedShotId: string;
+  /** カメラが選択対象になっているか(選択物体の黄色ハイライトをカメラに向ける) */
+  cameraSelected: boolean;
   /** 再生中フラグ。再生中は evaluateCamera がビューを乗っ取る */
   playing: boolean;
   /** カメラビュー(撮影カメラの画で確認)トグル */
@@ -115,6 +117,8 @@ type Scene3dState = {
 
   /** カット操作(CapCut風タイムライン) */
   selectShot: (id: string) => void;
+  /** カメラをクリック選択(カットの選択 + カメラのハイライト) */
+  selectCameraOfShot: (shotId: string) => void;
   addShot: () => void;
   removeShot: (id: string) => void;
   reorderShots: (activeId: string, overId: string) => void;
@@ -181,6 +185,7 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
   project: createDefaultProject(),
   selectedEntityId: "actor-1",
   selectedShotId: "shot-1",
+  cameraSelected: false,
   playing: false,
   cameraView: false,
   splitView: countLeaves(loadPaneLayout()) > 1,
@@ -226,7 +231,7 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
     });
   },
 
-  selectEntity: (id) => set({ selectedEntityId: id }),
+  selectEntity: (id) => set({ selectedEntityId: id, cameraSelected: false }),
 
   moveEntity: (id, position) => {
     const { project } = get();
@@ -298,6 +303,17 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
     if (!project.shots.some((s) => s.id === id)) return;
     // 選んだカットの頭に再生ヘッドを移動(どこを編集しているか分かるように)
     set({ selectedShotId: id, currentFrame: shotStartFrame(project, id) });
+  },
+
+  selectCameraOfShot: (shotId) => {
+    const { project } = get();
+    if (!project.shots.some((s) => s.id === shotId)) return;
+    set({
+      selectedShotId: shotId,
+      currentFrame: shotStartFrame(project, shotId),
+      cameraSelected: true,
+      selectedEntityId: null,
+    });
   },
 
   addShot: () => {

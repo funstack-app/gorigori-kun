@@ -391,7 +391,7 @@ function ShelfPanel() {
   const selectedId = useScene3d((s) => s.selectedEntityId);
   const selectedShotId = useScene3d((s) => s.selectedShotId);
   const selectEntity = useScene3d((s) => s.selectEntity);
-  const selectShot = useScene3d((s) => s.selectShot);
+  const selectCameraOfShot = useScene3d((s) => s.selectCameraOfShot);
   const removeEntity = useScene3d((s) => s.removeEntity);
   const [pickerOpen, setPickerOpen] = useState(false);
 
@@ -444,8 +444,8 @@ function ShelfPanel() {
                     ? "bg-pink-500/15 text-pink-300"
                     : "text-neutral-300 hover:bg-[#101010]"
                 }`}
-                onClick={() => selectShot(shot.id)}
-                title="クリックでこのカットを選択(カメラの軌跡・右パネルが切り替わる)"
+                onClick={() => selectCameraOfShot(shot.id)}
+                title="クリックでこのカットのカメラを選択(軌跡・右パネルが切り替わる)"
               >
                 <CameraViewIcon />
                 <span className="min-w-0 flex-1 truncate">{shot.label}のカメラ</span>
