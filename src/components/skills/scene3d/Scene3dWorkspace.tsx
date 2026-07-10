@@ -4,14 +4,14 @@
  * 「置く・動かす・撮る・繋ぐ・生成する」だけを見せる。
  * キーフレーム・XYZ数値・ボーンは出さない(初心者がBlenderで挫折する要素を排除)。
  *
- * カット割は CapCut 風タイムライン(STΛCK指示 2026-07-10):
- *   クリップ幅=秒数 / 右端ドラッグで尺変更 / ドラッグで並び替え /
- *   クリック選択 → 右パネルがそのカットの編集になる
- *
- * SkillWorkspaceRouter が activeUiMode === "scene3d" のとき本コンポーネントを描画。
+ * UI原則(STΛCK指示 2026-07-10):
+ *   - 絵文字を使わない(他スキルと同じフラットラインSVG)
+ *   - 全部を見せない。選択肢はポップアップで視覚的に出す
+ *   - スペースキー再生(停止で再生開始位置へ戻る) / 矢印キーでコマ送り
+ *   - カメラの画では指定アスペクト比のフレーム内外をレターボックスで明示
  */
 
-import { useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   DndContext,
   PointerSensor,
@@ -26,6 +26,7 @@ import {
   useSortable,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
+import type { ReactNode } from "react";
 
 import { ActiveProjectSelector } from "../../ActiveProjectSelector";
 import { WorkspaceTabs } from "../../WorkspaceTabs";
@@ -36,7 +37,12 @@ import {
   SCENE_FPS,
   SEEDANCE_MAX_SECONDS,
 } from "../../../lib/scene3d/types";
-import type { CameraPresetId, SceneShot } from "../../../lib/scene3d/types";
+import type {
+  CameraPresetId,
+  SceneAspectRatio,
+  SceneEntityKind,
+  SceneShot,
+} from "../../../lib/scene3d/types";
 import { getSelectedShot, useScene3d } from "../../../lib/store/scene3d";
 import { Scene3dViewport } from "./Scene3dViewport";
 
@@ -55,41 +61,270 @@ const PRESET_ORDER: CameraPresetId[] = [
 const PX_PER_SEC = 28;
 const pxPerFrame = PX_PER_SEC / SCENE_FPS;
 
-function ShelfPanel() {
+const ASPECT_VALUES: Record<SceneAspectRatio, number> = {
+  "16:9": 16 / 9,
+  "9:16": 9 / 16,
+  "1:1": 1,
+};
+
+/* ---------------------------------- 小さなSVGアイコン ---------------------------------- */
+
+function Icon({ children, className }: { children: ReactNode; className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.5}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className ?? "h-4 w-4"}
+      aria-hidden
+    >
+      {children}
+    </svg>
+  );
+}
+
+const PlayIcon = () => (
+  <Icon>
+    <path d="M8 5l11 7-11 7V5z" />
+  </Icon>
+);
+const StopIcon = () => (
+  <Icon>
+    <rect x="6" y="6" width="12" height="12" rx="1.5" />
+  </Icon>
+);
+const CameraViewIcon = () => (
+  <Icon>
+    <rect x="3" y="7" width="12" height="10" rx="2" />
+    <path d="M15 10l6-3v10l-6-3" />
+  </Icon>
+);
+const PersonIcon = ({ className }: { className?: string }) => (
+  <Icon className={className}>
+    <circle cx="12" cy="6" r="3" />
+    <path d="M6 21v-2a6 6 0 0 1 12 0v2" />
+  </Icon>
+);
+const SphereIcon = ({ className }: { className?: string }) => (
+  <Icon className={className}>
+    <circle cx="12" cy="12" r="8" />
+    <path d="M4 12c2.5 2 13.5 2 16 0" />
+  </Icon>
+);
+const BoxIcon = ({ className }: { className?: string }) => (
+  <Icon className={className}>
+    <path d="M12 3l8 4.5v9L12 21l-8-4.5v-9L12 3z" />
+    <path d="M12 12l8-4.5M12 12L4 7.5M12 12v9" />
+  </Icon>
+);
+
+/** カメラプリセットの動きを表すミニ図(被写体=点、矢印=カメラの動き) */
+function PresetGlyph({ preset }: { preset: CameraPresetId }) {
+  const cls = "h-8 w-12";
+  switch (preset) {
+    case "fixed":
+      return (
+        <Icon className={cls}>
+          <circle cx="12" cy="10" r="2" />
+          <rect x="9" y="16" width="6" height="4" rx="1" />
+        </Icon>
+      );
+    case "pushIn":
+      return (
+        <Icon className={cls}>
+          <circle cx="12" cy="7" r="2" />
+          <path d="M12 20v-8M9.5 14.5L12 12l2.5 2.5" />
+        </Icon>
+      );
+    case "pullOut":
+      return (
+        <Icon className={cls}>
+          <circle cx="12" cy="7" r="2" />
+          <path d="M12 12v8M9.5 17.5L12 20l2.5-2.5" />
+        </Icon>
+      );
+    case "track":
+      return (
+        <Icon className={cls}>
+          <circle cx="12" cy="8" r="2" />
+          <path d="M4 17h16M17 14.5L19.5 17 17 19.5" />
+        </Icon>
+      );
+    case "pan":
+      return (
+        <Icon className={cls}>
+          <rect x="9" y="14" width="6" height="5" rx="1" />
+          <path d="M7 9a9 5 0 0 1 10 0M14.5 8L17 9l-1 2.5" />
+        </Icon>
+      );
+    case "orbit":
+      return (
+        <Icon className={cls}>
+          <circle cx="12" cy="12" r="2" />
+          <path d="M4.5 14a8 5 0 1 1 6 3.5M8 19.5L10.5 17.5 12.5 20" />
+        </Icon>
+      );
+    case "crane":
+      return (
+        <Icon className={cls}>
+          <circle cx="9" cy="17" r="2" />
+          <path d="M6 20L18 7M15.5 7.5L18 7l-.5 2.5" />
+        </Icon>
+      );
+    case "handheld":
+      return (
+        <Icon className={cls}>
+          <path d="M4 14c2-2 4 2 6 0s4 2 6 0 4 2 4 0" />
+          <rect x="9" y="6" width="6" height="4" rx="1" />
+        </Icon>
+      );
+  }
+}
+
+/* ---------------------------------- 汎用ポップアップ ---------------------------------- */
+
+function Popup({
+  title,
+  onClose,
+  children,
+}: {
+  title: string;
+  onClose: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+      onClick={onClose}
+    >
+      <div
+        className="max-h-[80vh] w-[420px] overflow-y-auto rounded-lg border border-[#2e2e2e] bg-[#191919] p-4 shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="mb-3 flex items-center justify-between">
+          <p className="text-sm font-semibold text-neutral-200">{title}</p>
+          <button className="text-neutral-500 hover:text-neutral-200" onClick={onClose}>
+            ✕
+          </button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+/* ---------------------------------- 置く(ポップアップ) ---------------------------------- */
+
+function ObjectPickerPopup({ onClose }: { onClose: () => void }) {
   const addEntity = useScene3d((s) => s.addEntity);
+  const pick = (kind: SceneEntityKind) => {
+    addEntity(kind);
+    onClose();
+  };
+  const card =
+    "flex flex-col items-center gap-2 rounded-md border border-[#2e2e2e] bg-[#1f1f1f] p-4 text-neutral-300 hover:border-amber-500/60 hover:text-amber-300";
+  return (
+    <Popup title="シーンに置く" onClose={onClose}>
+      <div className="grid grid-cols-3 gap-2">
+        <button className={card} onClick={() => pick("mannequin")}>
+          <PersonIcon className="h-10 w-10" />
+          <span className="text-xs">人物</span>
+        </button>
+        <button className={card} onClick={() => pick("sphere")}>
+          <SphereIcon className="h-10 w-10" />
+          <span className="text-xs">球</span>
+        </button>
+        <button className={card} onClick={() => pick("box")}>
+          <BoxIcon className="h-10 w-10" />
+          <span className="text-xs">箱</span>
+        </button>
+      </div>
+      <p className="mt-3 text-[11px] leading-4 text-neutral-500">
+        置いたあとはビューポート上でドラッグして好きな場所へ動かせます
+      </p>
+    </Popup>
+  );
+}
+
+/* ---------------------------------- カメラの動き(ポップアップ) ---------------------------------- */
+
+function PresetPickerPopup({ onClose }: { onClose: () => void }) {
+  const project = useScene3d((s) => s.project);
+  const selectedShotId = useScene3d((s) => s.selectedShotId);
+  const setCameraPreset = useScene3d((s) => s.setCameraPreset);
+  const current = getSelectedShot({ project, selectedShotId }).camera.preset;
+
+  const pick = (preset: CameraPresetId) => {
+    setCameraPreset(preset);
+    onClose();
+  };
+
+  const DESCRIPTIONS: Record<CameraPresetId, string> = {
+    fixed: "動かさず据え置き",
+    pushIn: "被写体へ近づく",
+    pullOut: "被写体から離れる",
+    track: "横に並走する",
+    pan: "位置は固定で流す",
+    orbit: "周囲を回り込む",
+    crane: "上昇しながら見下ろす",
+    handheld: "手持ち風の揺れ",
+  };
+
+  return (
+    <Popup title="カメラの動きを選ぶ" onClose={onClose}>
+      <div className="grid grid-cols-2 gap-2">
+        {PRESET_ORDER.map((preset) => (
+          <button
+            key={preset}
+            className={`flex items-center gap-3 rounded-md border p-3 text-left ${
+              current === preset
+                ? "border-sky-500 bg-sky-500/15"
+                : "border-[#2e2e2e] bg-[#1f1f1f] hover:border-sky-500/50"
+            }`}
+            onClick={() => pick(preset)}
+          >
+            <span className={current === preset ? "text-sky-300" : "text-neutral-400"}>
+              <PresetGlyph preset={preset} />
+            </span>
+            <span>
+              <span
+                className={`block text-xs font-medium ${
+                  current === preset ? "text-sky-200" : "text-neutral-200"
+                }`}
+              >
+                {CAMERA_PRESET_LABELS[preset]}
+              </span>
+              <span className="block text-[10px] text-neutral-500">
+                {DESCRIPTIONS[preset]}
+              </span>
+            </span>
+          </button>
+        ))}
+      </div>
+    </Popup>
+  );
+}
+
+/* ---------------------------------- 左パネル ---------------------------------- */
+
+function ShelfPanel() {
   const entities = useScene3d((s) => s.project.entities);
   const selectedId = useScene3d((s) => s.selectedEntityId);
   const selectEntity = useScene3d((s) => s.selectEntity);
   const removeEntity = useScene3d((s) => s.removeEntity);
+  const [pickerOpen, setPickerOpen] = useState(false);
 
   return (
-    <aside className="flex w-52 shrink-0 flex-col gap-3 border-r border-[#242424] bg-[#151515] p-3">
-      <div>
-        <p className="mb-2 text-xs font-semibold text-neutral-400">置く</p>
-        <div className="flex flex-col gap-1.5">
-          <button
-            className="rounded border border-[#2e2e2e] bg-[#1d1d1d] px-3 py-2 text-left text-sm text-neutral-200 hover:border-amber-500/60"
-            onClick={() => addEntity("mannequin")}
-          >
-            🧍 人物を置く
-          </button>
-          <button
-            className="rounded border border-[#2e2e2e] bg-[#1d1d1d] px-3 py-2 text-left text-sm text-neutral-200 hover:border-amber-500/60"
-            onClick={() => addEntity("sphere")}
-          >
-            ⚪ 球を置く
-          </button>
-          <button
-            className="rounded border border-[#2e2e2e] bg-[#1d1d1d] px-3 py-2 text-left text-sm text-neutral-200 hover:border-amber-500/60"
-            onClick={() => addEntity("box")}
-          >
-            📦 箱を置く
-          </button>
-        </div>
-        <p className="mt-2 text-[11px] leading-4 text-neutral-500">
-          置いたものはビューポート上でドラッグして動かせます
-        </p>
-      </div>
+    <aside className="flex w-48 shrink-0 flex-col gap-3 border-r border-[#242424] bg-[#151515] p-3">
+      <button
+        className="rounded border border-[#2e2e2e] bg-[#1d1d1d] px-3 py-2 text-sm text-neutral-200 hover:border-amber-500/60"
+        onClick={() => setPickerOpen(true)}
+      >
+        + シーンに置く
+      </button>
 
       <div className="min-h-0 flex-1 overflow-y-auto">
         <p className="mb-2 text-xs font-semibold text-neutral-400">シーン内</p>
@@ -103,7 +338,17 @@ function ShelfPanel() {
                   : "text-neutral-300 hover:bg-[#1d1d1d]"
               }`}
             >
-              <button className="flex-1 text-left" onClick={() => selectEntity(e.id)}>
+              <button
+                className="flex flex-1 items-center gap-2 text-left"
+                onClick={() => selectEntity(e.id)}
+              >
+                {e.kind === "mannequin" ? (
+                  <PersonIcon />
+                ) : e.kind === "sphere" ? (
+                  <SphereIcon />
+                ) : (
+                  <BoxIcon />
+                )}
                 {e.label}
               </button>
               <button
@@ -117,18 +362,23 @@ function ShelfPanel() {
           ))}
         </ul>
       </div>
+
+      {pickerOpen && <ObjectPickerPopup onClose={() => setPickerOpen(false)} />}
     </aside>
   );
 }
 
+/* ---------------------------------- 右パネル(監督) ---------------------------------- */
+
 function DirectorPanel() {
   const project = useScene3d((s) => s.project);
   const selectedShotId = useScene3d((s) => s.selectedShotId);
-  const setCameraPreset = useScene3d((s) => s.setCameraPreset);
   const setCameraTarget = useScene3d((s) => s.setCameraTarget);
   const setLens = useScene3d((s) => s.setLens);
   const setOrbitDegrees = useScene3d((s) => s.setOrbitDegrees);
   const setShotDurationFrames = useScene3d((s) => s.setShotDurationFrames);
+  const setAspectRatio = useScene3d((s) => s.setAspectRatio);
+  const [presetOpen, setPresetOpen] = useState(false);
 
   const shot = getSelectedShot({ project, selectedShotId });
   const camera = shot.camera;
@@ -136,26 +386,23 @@ function DirectorPanel() {
   return (
     <aside className="flex w-60 shrink-0 flex-col gap-4 overflow-y-auto border-l border-[#242424] bg-[#151515] p-3">
       <div>
-        <p className="mb-2 text-xs font-semibold text-neutral-400">
-          撮る — {shot.label} のカメラ
-        </p>
-        <div className="grid grid-cols-2 gap-1.5">
-          {PRESET_ORDER.map((preset) => (
-            <button
-              key={preset}
-              className={`rounded border px-2 py-1.5 text-xs ${
-                camera.preset === preset
-                  ? "border-sky-500 bg-sky-500/15 text-sky-300"
-                  : "border-[#2e2e2e] bg-[#1d1d1d] text-neutral-300 hover:border-sky-500/50"
-              }`}
-              onClick={() => setCameraPreset(preset)}
-            >
-              {CAMERA_PRESET_LABELS[preset]}
-            </button>
-          ))}
-        </div>
+        <p className="mb-2 text-xs font-semibold text-neutral-400">{shot.label} のカメラ</p>
+        <button
+          className="flex w-full items-center gap-3 rounded-md border border-[#2e2e2e] bg-[#1d1d1d] p-2.5 text-left hover:border-sky-500/60"
+          onClick={() => setPresetOpen(true)}
+        >
+          <span className="text-sky-300">
+            <PresetGlyph preset={camera.preset} />
+          </span>
+          <span>
+            <span className="block text-sm text-neutral-200">
+              {CAMERA_PRESET_LABELS[camera.preset]}
+            </span>
+            <span className="block text-[10px] text-neutral-500">クリックで動きを変更</span>
+          </span>
+        </button>
         <p className="mt-2 text-[11px] leading-4 text-neutral-500">
-          緑=開始位置 / 赤=終了位置 / 水色の線=カメラの通り道(選択中カット)
+          緑=開始 / 赤=終了 / 水色の線=カメラの通り道
         </p>
       </div>
 
@@ -175,7 +422,7 @@ function DirectorPanel() {
         </select>
       </label>
 
-      <label className="flex flex-col gap-1 text-xs text-neutral-400">
+      <div className="flex flex-col gap-1 text-xs text-neutral-400">
         レンズ
         <div className="grid grid-cols-3 gap-1">
           {LENS_PRESETS_MM.map((mm) => (
@@ -192,7 +439,7 @@ function DirectorPanel() {
             </button>
           ))}
         </div>
-      </label>
+      </div>
 
       {camera.preset === "orbit" && (
         <label className="flex flex-col gap-1 text-xs text-neutral-400">
@@ -220,7 +467,27 @@ function DirectorPanel() {
         />
       </label>
 
+      <div className="flex flex-col gap-1 text-xs text-neutral-400">
+        フレーム(書き出しの画角)
+        <div className="grid grid-cols-3 gap-1">
+          {(Object.keys(ASPECT_VALUES) as SceneAspectRatio[]).map((ratio) => (
+            <button
+              key={ratio}
+              className={`rounded border px-1.5 py-1 text-xs ${
+                project.aspectRatio === ratio
+                  ? "border-sky-500 bg-sky-500/15 text-sky-300"
+                  : "border-[#2e2e2e] bg-[#1d1d1d] text-neutral-300"
+              }`}
+              onClick={() => setAspectRatio(ratio)}
+            >
+              {ratio}
+            </button>
+          ))}
+        </div>
+      </div>
+
       <ExportSection />
+      {presetOpen && <PresetPickerPopup onClose={() => setPresetOpen(false)} />}
     </aside>
   );
 }
@@ -244,7 +511,7 @@ function ExportSection() {
       <p className="text-xs font-semibold text-neutral-400">生成する</p>
       {overLimit && (
         <p className="text-[11px] leading-4 text-amber-400">
-          ⚠ 合計{totalSec.toFixed(1)}秒。Seedanceの1回上限は{SEEDANCE_MAX_SECONDS}秒のため、
+          合計{totalSec.toFixed(1)}秒。Seedanceの1回上限は{SEEDANCE_MAX_SECONDS}秒のため、
           このままだと章分割(複数回生成)が必要です
         </p>
       )}
@@ -253,7 +520,7 @@ function ExportSection() {
         disabled={busy}
         onClick={requestExport}
       >
-        {busy ? "書き出し中…" : "📼 モーションガイドを書き出す"}
+        {busy ? "書き出し中…" : "モーションガイドを書き出す"}
       </button>
 
       {status.phase === "rendering" && (
@@ -268,12 +535,12 @@ function ExportSection() {
         <div className="flex flex-col gap-1 text-[11px] text-neutral-400">
           {status.mp4Path ? (
             <>
-              <p className="text-emerald-400">✓ motion-guide.mp4 完成(全カット連結)</p>
+              <p className="text-emerald-400">motion-guide.mp4 完成(全カット連結)</p>
               <button
                 className="rounded border border-[#2e2e2e] px-2 py-1 text-left text-neutral-300 hover:border-neutral-500"
                 onClick={() => void revealInFinder(status.mp4Path!)}
               >
-                📂 Finderで表示
+                Finderで表示
               </button>
             </>
           ) : (
@@ -285,7 +552,7 @@ function ExportSection() {
                 className="rounded border border-[#2e2e2e] px-2 py-1 text-left text-neutral-300 hover:border-neutral-500"
                 onClick={() => void revealInFinder(status.framesDir)}
               >
-                📂 フォルダを表示
+                フォルダを表示
               </button>
             </>
           )}
@@ -300,6 +567,8 @@ function ExportSection() {
     </div>
   );
 }
+
+/* ---------------------------------- タイムライン ---------------------------------- */
 
 /** タイムライン上の1クリップ。幅=秒数、右端ドラッグで尺変更、本体ドラッグで並び替え */
 function ShotClip({ shot, index }: { shot: SceneShot; index: number }) {
@@ -386,9 +655,10 @@ function ShotTimeline() {
   const playing = useScene3d((s) => s.playing);
   const cameraView = useScene3d((s) => s.cameraView);
   const currentFrame = useScene3d((s) => s.currentFrame);
-  const setPlaying = useScene3d((s) => s.setPlaying);
+  const togglePlay = useScene3d((s) => s.togglePlay);
   const setCameraView = useScene3d((s) => s.setCameraView);
   const setCurrentFrame = useScene3d((s) => s.setCurrentFrame);
+  const setPlaying = useScene3d((s) => s.setPlaying);
   const addShot = useScene3d((s) => s.addShot);
   const reorderShots = useScene3d((s) => s.reorderShots);
 
@@ -411,6 +681,7 @@ function ShotTimeline() {
   const scrubTo = (e: React.PointerEvent<HTMLDivElement>) => {
     const rect = e.currentTarget.getBoundingClientRect();
     const x = e.clientX - rect.left + e.currentTarget.scrollLeft;
+    setPlaying(false);
     setCurrentFrame(Math.max(0, Math.min(totalFrames - 1, x / pxPerFrame)));
   };
 
@@ -418,15 +689,17 @@ function ShotTimeline() {
     <div className="flex flex-col border-t border-[#242424] bg-[#151515]">
       <div className="flex items-center gap-3 px-4 pt-2">
         <button
-          className={`rounded px-3 py-1 text-sm font-medium ${
+          className={`flex items-center gap-1.5 rounded px-3 py-1 text-sm font-medium ${
             playing ? "bg-red-500/20 text-red-300" : "bg-sky-500/20 text-sky-300"
           }`}
-          onClick={() => setPlaying(!playing)}
+          onClick={togglePlay}
+          title="スペースキーでも再生/停止(停止で再生開始位置に戻る)"
         >
-          {playing ? "■ 停止" : "▶ 再生"}
+          {playing ? <StopIcon /> : <PlayIcon />}
+          {playing ? "停止" : "再生"}
         </button>
         <button
-          className={`rounded border px-3 py-1 text-sm ${
+          className={`flex items-center gap-1.5 rounded border px-3 py-1 text-sm ${
             cameraView
               ? "border-amber-500 bg-amber-500/15 text-amber-300"
               : "border-[#2e2e2e] text-neutral-400"
@@ -434,8 +707,12 @@ function ShotTimeline() {
           onClick={() => setCameraView(!cameraView)}
           title="撮影カメラの画で確認"
         >
-          🎥 カメラの画
+          <CameraViewIcon />
+          カメラの画
         </button>
+        <span className="hidden text-[10px] text-neutral-600 lg:block">
+          Space: 再生/停止 · ←→: コマ送り(Shiftで1秒) · Home: 先頭へ
+        </span>
         <span className="ml-auto text-xs tabular-nums text-neutral-400">
           {(currentFrame / SCENE_FPS).toFixed(1)}s / 合計 {totalSec.toFixed(1)}s
           {totalSec > SEEDANCE_MAX_SECONDS && (
@@ -487,7 +764,7 @@ function ShotTimeline() {
                   onClick={addShot}
                   title="カットを追加(選択中カットの複製から)"
                 >
-                  ＋
+                  +
                 </button>
               </div>
             </SortableContext>
@@ -506,7 +783,102 @@ function ShotTimeline() {
   );
 }
 
+/* ---------------------------------- キーボード操作 ---------------------------------- */
+
+function useKeyboardShortcuts() {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement;
+      if (
+        target.tagName === "INPUT" ||
+        target.tagName === "SELECT" ||
+        target.tagName === "TEXTAREA" ||
+        target.isContentEditable
+      ) {
+        return;
+      }
+      const st = useScene3d.getState();
+      const total = totalDurationFrames(st.project);
+
+      if (e.code === "Space") {
+        e.preventDefault();
+        st.togglePlay();
+      } else if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+        e.preventDefault();
+        const step = (e.shiftKey ? SCENE_FPS : 1) * (e.key === "ArrowLeft" ? -1 : 1);
+        st.setPlaying(false);
+        st.setCurrentFrame(
+          Math.max(0, Math.min(total - 1, Math.round(st.currentFrame) + step)),
+        );
+      } else if (e.key === "Home") {
+        e.preventDefault();
+        st.setPlaying(false);
+        st.setCurrentFrame(0);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+}
+
+/* ---------------------------------- フレーム枠(アスペクト比) ---------------------------------- */
+
+/**
+ * カメラの画/再生中に、書き出しアスペクト比のフレームをレターボックスで示す。
+ * ビューポートを計測し、フレーム外を暗く落として内外を明確にする
+ */
+function ViewportWithFrame() {
+  const cameraView = useScene3d((s) => s.cameraView);
+  const playing = useScene3d((s) => s.playing);
+  const aspectRatio = useScene3d((s) => s.project.aspectRatio);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [size, setSize] = useState<{ w: number; h: number }>({ w: 0, h: 0 });
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver((entries) => {
+      const rect = entries[0].contentRect;
+      setSize({ w: rect.width, h: rect.height });
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const showFrame = cameraView || playing;
+  const ar = ASPECT_VALUES[aspectRatio];
+  // contain フィット(はみ出さない最大サイズ)
+  let frameW = size.h * ar;
+  let frameH = size.h;
+  if (frameW > size.w) {
+    frameW = size.w;
+    frameH = size.w / ar;
+  }
+
+  return (
+    <div ref={containerRef} className="relative min-h-0 flex-1 overflow-hidden">
+      <Scene3dViewport />
+      {showFrame && size.w > 0 && (
+        <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+          <div
+            className="relative border border-white/60 shadow-[0_0_0_9999px_rgba(0,0,0,0.65)]"
+            style={{ width: frameW, height: frameH }}
+          >
+            <span className="absolute left-1.5 top-1 text-[10px] font-medium text-white/70">
+              {aspectRatio}
+            </span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ---------------------------------- ルート ---------------------------------- */
+
 export function Scene3dWorkspace() {
+  useKeyboardShortcuts();
+
   return (
     <section className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#121212]">
       <div className="border-b border-[#242424] bg-[#121212] px-4 py-3">
@@ -519,9 +891,7 @@ export function Scene3dWorkspace() {
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <ShelfPanel />
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-          <div className="min-h-0 flex-1">
-            <Scene3dViewport />
-          </div>
+          <ViewportWithFrame />
           <ShotTimeline />
         </div>
         <DirectorPanel />

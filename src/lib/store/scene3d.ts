@@ -13,6 +13,7 @@ import { create } from "zustand";
 import { createDefaultProject, createDefaultShot, SCENE_FPS } from "../scene3d/types";
 import type {
   CameraPresetId,
+  SceneAspectRatio,
   SceneEntity,
   SceneEntityKind,
   SceneProject,
@@ -80,6 +81,8 @@ type Scene3dState = {
   currentFrame: number;
   /** 床ドラッグ中のエンティティID(OrbitControls無効化に使う) */
   draggingEntityId: string | null;
+  /** 再生を開始した位置(停止時にここへ戻る) */
+  playStartFrame: number;
   /**
    * 書き出し要求ノンス。increment すると Viewport 内の ExportDriver が
    * 書き出しを開始する(UIボタン → Canvas内コンポーネントへの橋渡し)
@@ -109,8 +112,14 @@ type Scene3dState = {
   moveCameraEndpoint: (which: "start" | "end", position: Vec3) => void;
 
   setPlaying: (playing: boolean) => void;
+  /**
+   * 再生/停止トグル。再生開始時の位置を覚え、停止時にそこへ戻る
+   * (編集ソフトの標準挙動。スペースキーと再生ボタンの共通経路)
+   */
+  togglePlay: () => void;
   setCameraView: (on: boolean) => void;
   setCurrentFrame: (frame: number) => void;
+  setAspectRatio: (ratio: SceneAspectRatio) => void;
   resetProject: () => void;
 
   /** 書き出しを要求する(実行は Viewport 内 ExportDriver) */
@@ -154,6 +163,7 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
   cameraView: false,
   currentFrame: 0,
   draggingEntityId: null,
+  playStartFrame: 0,
   exportRequest: 0,
   exportStatus: { phase: "idle" },
 
@@ -330,8 +340,21 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
   },
 
   setPlaying: (playing) => set({ playing }),
+  togglePlay: () => {
+    const { playing, currentFrame, playStartFrame } = get();
+    if (playing) {
+      // 停止: 再生を始めた位置に戻る
+      set({ playing: false, currentFrame: playStartFrame });
+    } else {
+      set({ playing: true, playStartFrame: currentFrame });
+    }
+  },
   setCameraView: (cameraView) => set({ cameraView }),
   setCurrentFrame: (frame) => set({ currentFrame: frame }),
+  setAspectRatio: (aspectRatio) => {
+    const { project } = get();
+    set({ project: { ...project, aspectRatio } });
+  },
   resetProject: () =>
     set({
       project: createDefaultProject(),
