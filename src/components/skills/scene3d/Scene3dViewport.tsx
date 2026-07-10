@@ -310,7 +310,7 @@ function CameraPathLine() {
 
   return (
     <>
-      <Line points={points} color="#38bdf8" lineWidth={2} dashed={false} />
+      <Line points={points} color="#ec4899" lineWidth={2} dashed={false} />
       {/* 開始点(緑)・終了点(赤)のマーカー */}
       <mesh position={start}>
         <sphereGeometry args={[0.08, 16, 12]} />
@@ -323,7 +323,7 @@ function CameraPathLine() {
       {/* 注視点マーカー */}
       <mesh position={lookAt}>
         <sphereGeometry args={[0.04, 12, 8]} />
-        <meshBasicMaterial color="#38bdf8" />
+        <meshBasicMaterial color="#ec4899" />
       </mesh>
     </>
   );

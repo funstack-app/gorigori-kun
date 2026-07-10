@@ -201,7 +201,7 @@ function Popup({
       onClick={onClose}
     >
       <div
-        className="max-h-[80vh] w-[420px] overflow-y-auto rounded-lg border border-[#2e2e2e] bg-[#191919] p-4 shadow-2xl"
+        className="max-h-[80vh] w-[440px] overflow-y-auto rounded-xl border border-[#2a2a2a] bg-[#141414] p-5 shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="mb-3 flex items-center justify-between">
@@ -225,7 +225,7 @@ function ObjectPickerPopup({ onClose }: { onClose: () => void }) {
     onClose();
   };
   const card =
-    "flex flex-col items-center gap-2 rounded-md border border-[#2e2e2e] bg-[#1f1f1f] p-4 text-neutral-300 hover:border-amber-500/60 hover:text-amber-300";
+    "flex flex-col items-center gap-2 rounded-md border border-[#2a2a2a] bg-[#161616] p-4 text-neutral-300 hover:border-amber-500/60 hover:text-amber-300";
   return (
     <Popup title="シーンに置く" onClose={onClose}>
       <div className="grid grid-cols-3 gap-2">
@@ -281,18 +281,18 @@ function PresetPickerPopup({ onClose }: { onClose: () => void }) {
             key={preset}
             className={`flex items-center gap-3 rounded-md border p-3 text-left ${
               current === preset
-                ? "border-sky-500 bg-sky-500/15"
-                : "border-[#2e2e2e] bg-[#1f1f1f] hover:border-sky-500/50"
+                ? "border-pink-400 bg-pink-500/10"
+                : "border-[#2a2a2a] bg-[#161616] hover:border-pink-400/60"
             }`}
             onClick={() => pick(preset)}
           >
-            <span className={current === preset ? "text-sky-300" : "text-neutral-400"}>
+            <span className={current === preset ? "text-pink-300" : "text-neutral-400"}>
               <PresetGlyph preset={preset} />
             </span>
             <span>
               <span
                 className={`block text-xs font-medium ${
-                  current === preset ? "text-sky-200" : "text-neutral-200"
+                  current === preset ? "text-pink-200" : "text-neutral-200"
                 }`}
               >
                 {CAMERA_PRESET_LABELS[preset]}
@@ -318,16 +318,16 @@ function ShelfPanel() {
   const [pickerOpen, setPickerOpen] = useState(false);
 
   return (
-    <aside className="flex w-48 shrink-0 flex-col gap-3 border-r border-[#242424] bg-[#151515] p-3">
+    <aside className="flex w-56 shrink-0 flex-col gap-4 border-r border-[#242424] bg-[#141414] px-4 py-4">
       <button
-        className="rounded border border-[#2e2e2e] bg-[#1d1d1d] px-3 py-2 text-sm text-neutral-200 hover:border-amber-500/60"
+        className="rounded-lg border border-[#2a2a2a] bg-[#101010] px-3 py-2 text-sm text-neutral-200 hover:border-amber-500/60"
         onClick={() => setPickerOpen(true)}
       >
         + シーンに置く
       </button>
 
       <div className="min-h-0 flex-1 overflow-y-auto">
-        <p className="mb-2 text-xs font-semibold text-neutral-400">シーン内</p>
+        <p className="mb-2 text-[11px] font-bold tracking-wide text-neutral-500">シーン内</p>
         <ul className="flex flex-col gap-1">
           {entities.map((e) => (
             <li
@@ -335,7 +335,7 @@ function ShelfPanel() {
               className={`group flex items-center justify-between rounded px-2 py-1.5 text-sm ${
                 selectedId === e.id
                   ? "bg-amber-500/15 text-amber-300"
-                  : "text-neutral-300 hover:bg-[#1d1d1d]"
+                  : "text-neutral-300 hover:bg-[#101010]"
               }`}
             >
               <button
@@ -384,14 +384,14 @@ function DirectorPanel() {
   const camera = shot.camera;
 
   return (
-    <aside className="flex w-60 shrink-0 flex-col gap-4 overflow-y-auto border-l border-[#242424] bg-[#151515] p-3">
+    <aside className="flex w-72 shrink-0 flex-col gap-5 overflow-y-auto border-l border-[#242424] bg-[#141414] px-4 py-4">
       <div>
-        <p className="mb-2 text-xs font-semibold text-neutral-400">{shot.label} のカメラ</p>
+        <p className="mb-2 text-[11px] font-bold tracking-wide text-neutral-500">{shot.label} のカメラ</p>
         <button
-          className="flex w-full items-center gap-3 rounded-md border border-[#2e2e2e] bg-[#1d1d1d] p-2.5 text-left hover:border-sky-500/60"
+          className="flex w-full items-center gap-3 rounded-md border border-[#2a2a2a] bg-[#101010] p-2.5 text-left hover:border-pink-400/60"
           onClick={() => setPresetOpen(true)}
         >
-          <span className="text-sky-300">
+          <span className="text-pink-300">
             <PresetGlyph preset={camera.preset} />
           </span>
           <span>
@@ -409,7 +409,7 @@ function DirectorPanel() {
       <label className="flex flex-col gap-1 text-xs text-neutral-400">
         被写体
         <select
-          className="rounded border border-[#2e2e2e] bg-[#1d1d1d] px-2 py-1.5 text-sm text-neutral-200"
+          className="rounded-lg border border-[#2a2a2a] bg-[#101010] px-2 py-1.5 text-sm text-neutral-200"
           value={camera.targetEntityId ?? ""}
           onChange={(e) => setCameraTarget(e.target.value || null)}
         >
@@ -428,10 +428,10 @@ function DirectorPanel() {
           {LENS_PRESETS_MM.map((mm) => (
             <button
               key={mm}
-              className={`rounded border px-1.5 py-1 text-xs ${
+              className={`rounded-lg border px-1.5 py-1 text-xs ${
                 camera.lensMm === mm
-                  ? "border-sky-500 bg-sky-500/15 text-sky-300"
-                  : "border-[#2e2e2e] bg-[#1d1d1d] text-neutral-300"
+                  ? "border-pink-400 bg-pink-500/10 text-pink-300"
+                  : "border-[#2a2a2a] bg-[#101010] text-neutral-300"
               }`}
               onClick={() => setLens(mm)}
             >
@@ -473,10 +473,10 @@ function DirectorPanel() {
           {(Object.keys(ASPECT_VALUES) as SceneAspectRatio[]).map((ratio) => (
             <button
               key={ratio}
-              className={`rounded border px-1.5 py-1 text-xs ${
+              className={`rounded-lg border px-1.5 py-1 text-xs ${
                 project.aspectRatio === ratio
-                  ? "border-sky-500 bg-sky-500/15 text-sky-300"
-                  : "border-[#2e2e2e] bg-[#1d1d1d] text-neutral-300"
+                  ? "border-pink-400 bg-pink-500/10 text-pink-300"
+                  : "border-[#2a2a2a] bg-[#101010] text-neutral-300"
               }`}
               onClick={() => setAspectRatio(ratio)}
             >
@@ -508,7 +508,7 @@ function ExportSection() {
 
   return (
     <div className="mt-auto flex flex-col gap-2 border-t border-[#242424] pt-3">
-      <p className="text-xs font-semibold text-neutral-400">生成する</p>
+      <p className="text-[11px] font-bold tracking-wide text-neutral-500">生成する</p>
       {overLimit && (
         <p className="text-[11px] leading-4 text-amber-400">
           合計{totalSec.toFixed(1)}秒。Seedanceの1回上限は{SEEDANCE_MAX_SECONDS}秒のため、
@@ -516,7 +516,7 @@ function ExportSection() {
         </p>
       )}
       <button
-        className="rounded bg-gradient-to-r from-pink-600 to-rose-500 px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
+        className="rounded-xl bg-pink-500 px-3 py-2.5 text-[13px] font-bold text-white transition hover:bg-pink-400 disabled:opacity-50"
         disabled={busy}
         onClick={requestExport}
       >
@@ -537,7 +537,7 @@ function ExportSection() {
             <>
               <p className="text-emerald-400">motion-guide.mp4 完成(全カット連結)</p>
               <button
-                className="rounded border border-[#2e2e2e] px-2 py-1 text-left text-neutral-300 hover:border-neutral-500"
+                className="rounded-lg border border-[#2a2a2a] px-2 py-1 text-left text-neutral-300 hover:border-neutral-500"
                 onClick={() => void revealInFinder(status.mp4Path!)}
               >
                 Finderで表示
@@ -549,7 +549,7 @@ function ExportSection() {
                 PNG連番まで書き出しました(ffmpeg未検出のためMP4変換はスキップ)
               </p>
               <button
-                className="rounded border border-[#2e2e2e] px-2 py-1 text-left text-neutral-300 hover:border-neutral-500"
+                className="rounded-lg border border-[#2a2a2a] px-2 py-1 text-left text-neutral-300 hover:border-neutral-500"
                 onClick={() => void revealInFinder(status.framesDir)}
               >
                 フォルダを表示
@@ -613,14 +613,14 @@ function ShotClip({ shot, index }: { shot: SceneShot; index: number }) {
       }}
       className={`group relative flex h-14 shrink-0 cursor-grab select-none flex-col justify-center rounded-md border px-2 ${
         selected
-          ? "border-sky-400 bg-sky-500/20"
-          : "border-[#2e2e2e] bg-[#1f1f1f] hover:border-sky-500/40"
+          ? "border-pink-400 bg-pink-500/10"
+          : "border-[#2a2a2a] bg-[#161616] hover:border-pink-400/50"
       }`}
       onClick={() => selectShot(shot.id)}
       {...attributes}
       {...listeners}
     >
-      <p className={`truncate text-xs font-medium ${selected ? "text-sky-200" : "text-neutral-200"}`}>
+      <p className={`truncate text-xs font-medium ${selected ? "text-pink-200" : "text-neutral-200"}`}>
         {index + 1}. {shot.label}
       </p>
       <p className="truncate text-[10px] text-neutral-400">
@@ -640,7 +640,7 @@ function ShotClip({ shot, index }: { shot: SceneShot; index: number }) {
       )}
       {/* 右端の尺変更ハンドル */}
       <div
-        className="absolute -right-0.5 top-0 h-full w-2 cursor-ew-resize rounded-r-md bg-sky-400/0 hover:bg-sky-400/50"
+        className="absolute -right-0.5 top-0 h-full w-2 cursor-ew-resize rounded-r-md bg-pink-400/0 hover:bg-pink-400/60"
         onPointerDown={onResizeDown}
         onPointerMove={onResizeMove}
         onPointerUp={onResizeUp}
@@ -686,11 +686,11 @@ function ShotTimeline() {
   };
 
   return (
-    <div className="flex flex-col border-t border-[#242424] bg-[#151515]">
+    <div className="flex flex-col border-t border-[#242424] bg-[#141414]">
       <div className="flex items-center gap-3 px-4 pt-2">
         <button
-          className={`flex items-center gap-1.5 rounded px-3 py-1 text-sm font-medium ${
-            playing ? "bg-red-500/20 text-red-300" : "bg-sky-500/20 text-sky-300"
+          className={`flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-[13px] font-semibold ${
+            playing ? "bg-red-500/20 text-red-300" : "bg-sky-500/20 text-pink-300"
           }`}
           onClick={togglePlay}
           title="スペースキーでも再生/停止(停止で再生開始位置に戻る)"
@@ -699,10 +699,10 @@ function ShotTimeline() {
           {playing ? "停止" : "再生"}
         </button>
         <button
-          className={`flex items-center gap-1.5 rounded border px-3 py-1 text-sm ${
+          className={`flex items-center gap-1.5 rounded-lg border px-3 py-1 text-sm ${
             cameraView
               ? "border-amber-500 bg-amber-500/15 text-amber-300"
-              : "border-[#2e2e2e] text-neutral-400"
+              : "border-[#2a2a2a] text-neutral-400"
           }`}
           onClick={() => setCameraView(!cameraView)}
           title="撮影カメラの画で確認"
@@ -760,7 +760,7 @@ function ShotTimeline() {
                   <ShotClip key={shot.id} shot={shot} index={i} />
                 ))}
                 <button
-                  className="flex h-14 w-14 shrink-0 items-center justify-center rounded-md border border-dashed border-[#3a3a3a] text-lg text-neutral-500 hover:border-sky-500/60 hover:text-sky-400"
+                  className="flex h-14 w-14 shrink-0 items-center justify-center rounded-md border border-dashed border-[#3a3a3a] text-lg text-neutral-500 hover:border-pink-400/60 hover:text-pink-300"
                   onClick={addShot}
                   title="カットを追加(選択中カットの複製から)"
                 >
