@@ -31,12 +31,29 @@ function snapshot(project) {
   return JSON.stringify(frames);
 }
 
-// 2カット構成で検証(ショット境界の通しフレーム変換も検査対象に含める)
+// 2カメラ2カット構成で検証(ショット境界の通しフレーム変換も検査対象に含める)
 function buildProject() {
   const project = createDefaultProject();
-  const shot2 = createDefaultShot("shot-2", "カット2");
-  shot2.camera = { ...shot2.camera, preset: "pushIn", startPos: [0, 1.4, 5], endPos: [0, 1.3, 1.8] };
-  return { ...project, shots: [...project.shots, shot2] };
+  const camera2 = {
+    id: "camera-2",
+    label: "カメラ2",
+    move: {
+      preset: "pushIn",
+      targetEntityId: "actor-1",
+      startPos: [0, 1.4, 5],
+      endPos: [0, 1.3, 1.8],
+      orbitDegrees: 0,
+      lensMm: 35,
+      easing: "easeInOut",
+      midPos: null,
+    },
+  };
+  const shot2 = createDefaultShot("shot-2", "カット2", "camera-2");
+  return {
+    ...project,
+    cameras: [...project.cameras, camera2],
+    shots: [...project.shots, shot2],
+  };
 }
 
 const project = buildProject();
@@ -69,7 +86,7 @@ if (boundary.shotIndex !== 1 || boundary.localFrame !== 0) {
 if (process.argv.includes("--self-test")) {
   // 検査の牙: わざと入力を変えて差分が検出されることを実証する
   const broken = buildProject();
-  broken.shots[0].camera.orbitDegrees += 1;
+  broken.cameras[0].move.orbitDegrees += 1;
   if (snapshot(broken) === run1) {
     console.error("NG: self-test 失敗(入力を変えても出力が同じ=比較が機能していない)");
     process.exit(1);

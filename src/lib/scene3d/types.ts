@@ -77,25 +77,58 @@ export type CameraMove = {
 export type SceneAspectRatio = "16:9" | "9:16" | "1:1";
 
 /**
- * ショット = 1カット。カメラの動き + 尺 を1つの箱として持つ。
+ * カメラ = シーンに置かれた独立した機材(マルチカム)。
+ * 複数のカットから同じカメラを使い回せる
+ */
+export type SceneCamera = {
+  id: string;
+  label: string;
+  move: CameraMove;
+};
+
+/**
+ * ショット = 1カット。「どのカメラで何秒撮るか」の箱。
  * shots を並べた順がそのままカット割になり、書き出しでは
- * 全ショットが連結された1本のモーションガイド動画になる
+ * 全ショットが連結された1本のモーションガイド動画になる。
+ * カメラの動きはカットの尺の中で再生される(同じカメラを別カットで使うと同じ動きを再演)
  */
 export type SceneShot = {
   id: string;
   label: string;
   durationFrames: number;
-  camera: CameraMove;
+  cameraId: string;
+  /**
+   * カメラの動きのうち使う区間(0-1の窓)。未指定は[0,1](全区間)。
+   * ハサミ分割はこの窓を割ることで、動きの続きを正確に引き継ぐ
+   */
+  moveWindow?: [number, number];
 };
 
 export type SceneProject = {
-  schemaVersion: 2;
+  schemaVersion: 3;
   fps: typeof SCENE_FPS;
   aspectRatio: SceneAspectRatio;
   entities: SceneEntity[];
+  /** シーンのカメラ台数分(マルチカム)。最低1台 */
+  cameras: SceneCamera[];
   /** カット割。最低1本 */
   shots: SceneShot[];
 };
+
+/** カメラ識別色(タイムラインのクリップ・3Dのタリーランプ共通) */
+export const CAMERA_ID_COLORS = [
+  "#ec4899", // カメラ1: ピンク
+  "#38bdf8", // カメラ2: 空色
+  "#22c55e", // カメラ3: 緑
+  "#f59e0b", // カメラ4: 琥珀
+  "#a78bfa", // カメラ5: 紫
+  "#f87171", // カメラ6: 赤
+] as const;
+
+export function cameraColor(project: SceneProject, cameraId: string): string {
+  const idx = project.cameras.findIndex((c) => c.id === cameraId);
+  return CAMERA_ID_COLORS[Math.max(0, idx) % CAMERA_ID_COLORS.length];
+}
 
 /** Seedance 1回の生成上限(秒)。合計がこれを超えたら章分割が必要 */
 export const SEEDANCE_MAX_SECONDS = 15;
@@ -121,26 +154,31 @@ export const CAMERA_PRESET_LABELS: Record<CameraPresetId, string> = {
   handheld: "ハンドヘルド",
 };
 
-export function createDefaultShot(id: string, label: string): SceneShot {
+export function createDefaultCameraMove(): CameraMove {
+  return {
+    preset: "orbit",
+    targetEntityId: "actor-1",
+    startPos: [0, 1.4, 4],
+    endPos: [0, 1.4, 4],
+    orbitDegrees: 120,
+    lensMm: 35,
+    easing: "easeInOut",
+    midPos: null,
+  };
+}
+
+export function createDefaultShot(id: string, label: string, cameraId: string): SceneShot {
   return {
     id,
     label,
     durationFrames: SCENE_FPS * 4, // 4秒
-    camera: {
-      preset: "orbit",
-      targetEntityId: "actor-1",
-      startPos: [0, 1.4, 4],
-      endPos: [0, 1.4, 4],
-      orbitDegrees: 120,
-      lensMm: 35,
-      easing: "easeInOut",
-    },
+    cameraId,
   };
 }
 
 export function createDefaultProject(): SceneProject {
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     fps: SCENE_FPS,
     aspectRatio: "16:9",
     entities: [
@@ -153,6 +191,7 @@ export function createDefaultProject(): SceneProject {
         scale: 1,
       },
     ],
-    shots: [createDefaultShot("shot-1", "カット1")],
+    cameras: [{ id: "camera-1", label: "カメラ1", move: createDefaultCameraMove() }],
+    shots: [createDefaultShot("shot-1", "カット1", "camera-1")],
   };
 }

@@ -9,7 +9,9 @@
  * 変換してからカメラを評価する。ショット境界はハードカット(カット割)
  */
 
+import { createDefaultCameraMove } from "./types";
 import type {
+  CameraMove,
   CameraPose,
   SceneEntity,
   SceneProject,
@@ -69,9 +71,15 @@ export function findEntity(
   return project.entities.find((e) => e.id === id);
 }
 
+/** ショットが使うカメラの動きを引く(参照切れは既定カメラでフォールバック) */
+export function getShotMove(project: SceneProject, shot: SceneShot): CameraMove {
+  const cam = project.cameras.find((c) => c.id === shot.cameraId) ?? project.cameras[0];
+  return cam ? cam.move : createDefaultCameraMove();
+}
+
 /** 注視点: 対象エンティティの胸元(人型)/中心。対象なしなら原点付近 */
 export function resolveLookAt(project: SceneProject, shot: SceneShot): Vec3 {
-  const target = findEntity(project, shot.camera.targetEntityId);
+  const target = findEntity(project, getShotMove(project, shot).targetEntityId);
   if (!target) return [0, 1, 0];
   const headHeight = target.kind === "mannequin" ? 1.3 * target.scale : 0.5 * target.scale;
   return [target.position[0], target.position[1] + headHeight, target.position[2]];
@@ -116,10 +124,13 @@ export function evaluateShotCamera(
   shot: SceneShot,
   localFrame: number,
 ): CameraPose {
-  const { camera } = shot;
+  const camera = getShotMove(project, shot);
   const lastFrame = Math.max(1, shot.durationFrames - 1);
   const rawT = clamp01(localFrame / lastFrame);
-  const t = camera.easing === "easeInOut" ? easeInOut(rawT) : rawT;
+  const eased = camera.easing === "easeInOut" ? easeInOut(rawT) : rawT;
+  // moveWindow: カメラの動きのうち使う区間へマップ(分割カットの続き再生)
+  const [w0, w1] = shot.moveWindow ?? [0, 1];
+  const t = w0 + (w1 - w0) * eased;
   const lookAt = resolveLookAt(project, shot);
 
   let position: Vec3;

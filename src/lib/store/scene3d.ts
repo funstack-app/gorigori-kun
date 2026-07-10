@@ -21,7 +21,7 @@ import type {
   Vec3,
 } from "../scene3d/types";
 import {
-  evaluateShotCamera,
+  getShotMove,
   locateShot,
   resolveLookAt,
   totalDurationFrames,
@@ -126,7 +126,12 @@ type Scene3dState = {
   /** 再生ヘッド位置でカットを2分割(ハサミ)。カメラは分割点の姿勢を引き継ぐ */
   splitShotAtPlayhead: () => void;
 
-  /** 以下のカメラ操作は selectedShotId のショットに効く */
+  /** カメラ機材の管理(マルチカム) */
+  addCamera: () => void;
+  removeCamera: (cameraId: string) => void;
+  assignShotCamera: (shotId: string, cameraId: string) => void;
+
+  /** 以下のカメラ操作は selectedShotId のショットが使うカメラに効く */
   setCameraPreset: (preset: CameraPresetId) => void;
   setCameraTarget: (entityId: string | null) => void;
   setLens: (lensMm: number) => void;
@@ -181,6 +186,25 @@ function updateShot(
   };
 }
 
+/** 選択カットが使っているカメラの動きを更新する */
+function updateSelectedCameraMove(
+  state: Pick<Scene3dState, "project" | "selectedShotId">,
+  patch: (move: import("../scene3d/types").CameraMove) => import("../scene3d/types").CameraMove,
+): SceneProject {
+  const shot = getSelectedShot(state);
+  return {
+    ...state.project,
+    cameras: state.project.cameras.map((c) =>
+      c.id === shot.cameraId ? { ...c, move: patch(c.move) } : c,
+    ),
+  };
+}
+
+/** カット名を並び順で振り直す(カット1, カット2, ...) */
+function renumberShots(shots: SceneShot[]): SceneShot[] {
+  return shots.map((sh, i) => ({ ...sh, label: `カット${i + 1}` }));
+}
+
 export const useScene3d = create<Scene3dState>((set, get) => ({
   project: createDefaultProject(),
   selectedEntityId: "actor-1",
@@ -219,14 +243,14 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
   removeEntity: (id) => {
     const { project, selectedEntityId } = get();
     const entities = project.entities.filter((e) => e.id !== id);
-    // 各ショットの注視対象からも外す
-    const shots = project.shots.map((s) =>
-      s.camera.targetEntityId === id
-        ? { ...s, camera: { ...s.camera, targetEntityId: entities[0]?.id ?? null } }
-        : s,
+    // 各カメラの注視対象からも外す
+    const cameras = project.cameras.map((c) =>
+      c.move.targetEntityId === id
+        ? { ...c, move: { ...c.move, targetEntityId: entities[0]?.id ?? null } }
+        : c,
     );
     set({
-      project: { ...project, entities, shots },
+      project: { ...project, entities, cameras },
       selectedEntityId: selectedEntityId === id ? null : selectedEntityId,
     });
   },
@@ -320,20 +344,76 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
     const { project } = get();
     const id = `shot-${Date.now()}-${shotSeq++}`;
     const selected = getSelectedShot(get());
-    // 選択中カットの複製から始める(続きのカットを作る操作が最短になる)
+    // 選択中カットの複製(同じカメラを使い回す=マルチカム)
     const shot: SceneShot = {
-      ...createDefaultShot(id, `カット${project.shots.length + 1}`),
-      durationFrames: selected.durationFrames,
-      camera: { ...selected.camera },
+      ...selected,
+      id,
+      moveWindow: selected.moveWindow ? [...selected.moveWindow] : undefined,
     };
-    const next = { ...project, shots: [...project.shots, shot] };
+    const next = { ...project, shots: renumberShots([...project.shots, shot]) };
     set({ project: next, selectedShotId: id, currentFrame: shotStartFrame(next, id) });
+  },
+
+  addCamera: () => {
+    const { project } = get();
+    const selectedMove = getShotMove(project, getSelectedShot(get()));
+    const camId = `camera-${Date.now()}-${shotSeq++}`;
+    const camera = {
+      id: camId,
+      label: `カメラ${project.cameras.length + 1}`,
+      // 現在のカメラの複製から始める(少し横にずらす)
+      move: {
+        ...selectedMove,
+        startPos: [selectedMove.startPos[0] + 1.5, selectedMove.startPos[1], selectedMove.startPos[2]] as Vec3,
+        endPos: [selectedMove.endPos[0] + 1.5, selectedMove.endPos[1], selectedMove.endPos[2]] as Vec3,
+        midPos: null,
+      },
+    };
+    // 新カメラを使う新カットも末尾に追加(カメラを足す=マルチカットを作る)
+    const shotId = `shot-${Date.now()}-${shotSeq++}`;
+    const shot: SceneShot = createDefaultShot(shotId, "", camId);
+    const next = {
+      ...project,
+      cameras: [...project.cameras, camera],
+      shots: renumberShots([...project.shots, shot]),
+    };
+    set({
+      project: next,
+      selectedShotId: shotId,
+      cameraSelected: true,
+      selectedEntityId: null,
+      currentFrame: shotStartFrame(next, shotId),
+    });
+  },
+
+  removeCamera: (cameraId) => {
+    const { project } = get();
+    if (project.cameras.length <= 1) return;
+    if (project.shots.some((sh) => sh.cameraId === cameraId)) return; // 使用中は消せない
+    set({
+      project: {
+        ...project,
+        cameras: project.cameras.filter((c) => c.id !== cameraId),
+      },
+    });
+  },
+
+  assignShotCamera: (shotId, cameraId) => {
+    const { project } = get();
+    if (!project.cameras.some((c) => c.id === cameraId)) return;
+    set({
+      project: updateShot(project, shotId, (sh) => ({
+        ...sh,
+        cameraId,
+        moveWindow: undefined,
+      })),
+    });
   },
 
   removeShot: (id) => {
     const { project, selectedShotId } = get();
     if (project.shots.length <= 1) return; // 最低1カットは残す
-    const shots = project.shots.filter((s) => s.id !== id);
+    const shots = renumberShots(project.shots.filter((s) => s.id !== id));
     const next = { ...project, shots };
     const nextSelected = selectedShotId === id ? shots[0].id : selectedShotId;
     set({
@@ -351,7 +431,7 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
     const shots = [...project.shots];
     const [moved] = shots.splice(from, 1);
     shots.splice(to, 0, moved);
-    set({ project: { ...project, shots } });
+    set({ project: { ...project, shots: renumberShots(shots) } });
   },
 
   splitShotAtPlayhead: () => {
@@ -361,45 +441,25 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
     const { shot, localFrame, shotIndex } = locateShot(project, frame);
     if (localFrame < MIN || shot.durationFrames - localFrame < MIN) return;
 
-    const pose = evaluateShotCamera(project, shot, localFrame);
+    // 分割点の「動きの進み具合」を窓にマップ(位置の連続性が正確に保たれる)
+    const move = getShotMove(project, shot);
     const rawT = localFrame / Math.max(1, shot.durationFrames - 1);
-    const te = shot.camera.easing === "easeInOut" ? rawT * rawT * (3 - 2 * rawT) : rawT;
-
-    const cam = shot.camera;
-    let firstCam = { ...cam };
-    let secondCam = { ...cam, startPos: pose.position };
-    if (cam.preset === "orbit") {
-      firstCam = { ...firstCam, orbitDegrees: Math.round(cam.orbitDegrees * te) };
-      secondCam = { ...secondCam, orbitDegrees: Math.round(cam.orbitDegrees * (1 - te)) };
-    } else if (cam.midPos) {
-      // 2次ベジェを de Casteljau で正確に2分割
-      const lerpV = (a: Vec3, b: Vec3, t: number): Vec3 => [
-        a[0] + (b[0] - a[0]) * t,
-        a[1] + (b[1] - a[1]) * t,
-        a[2] + (b[2] - a[2]) * t,
-      ];
-      const m1 = lerpV(cam.startPos, cam.midPos, te);
-      const m2 = lerpV(cam.midPos, cam.endPos, te);
-      firstCam = { ...firstCam, midPos: m1, endPos: pose.position };
-      secondCam = { ...secondCam, midPos: m2 };
-    } else {
-      firstCam = { ...firstCam, endPos: pose.position };
-    }
+    const te = move.easing === "easeInOut" ? rawT * rawT * (3 - 2 * rawT) : rawT;
+    const [w0, w1] = shot.moveWindow ?? [0, 1];
+    const tSplit = w0 + (w1 - w0) * te;
 
     const secondId = `shot-${Date.now()}-${shotSeq++}`;
-    const first: SceneShot = { ...shot, durationFrames: localFrame, camera: firstCam };
+    const first: SceneShot = { ...shot, durationFrames: localFrame, moveWindow: [w0, tSplit] };
     const second: SceneShot = {
       ...shot,
       id: secondId,
       durationFrames: shot.durationFrames - localFrame,
-      camera: secondCam,
+      moveWindow: [tSplit, w1],
     };
     const shots = [...project.shots];
     shots.splice(shotIndex, 1, first, second);
-    // ラベルを通し番号で振り直す(カット1, カット2, ...)
-    const renumbered = shots.map((sh, i) => ({ ...sh, label: `カット${i + 1}` }));
     set({
-      project: { ...project, shots: renumbered },
+      project: { ...project, shots: renumberShots(shots) },
       selectedShotId: secondId,
     });
   },
@@ -415,69 +475,43 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
     const shot = getSelectedShot(get());
     const target = resolveLookAt(project, shot);
     const placement = presetPlacement(preset, target);
+    // 動きが変わったら、このカメラを使う全カットの窓をリセット
+    const next = updateSelectedCameraMove(get(), (m) => ({
+      ...m,
+      preset,
+      ...placement,
+      midPos: null,
+    }));
     set({
-      project: updateShot(project, shot.id, (s) => ({
-        ...s,
-        camera: { ...s.camera, preset, ...placement, midPos: null },
-      })),
+      project: {
+        ...next,
+        shots: next.shots.map((sh) =>
+          sh.cameraId === shot.cameraId ? { ...sh, moveWindow: undefined } : sh,
+        ),
+      },
       currentFrame: shotStartFrame(project, shot.id),
     });
   },
 
   setCameraTarget: (entityId) => {
-    const { project } = get();
-    const shot = getSelectedShot(get());
-    set({
-      project: updateShot(project, shot.id, (s) => ({
-        ...s,
-        camera: { ...s.camera, targetEntityId: entityId },
-      })),
-    });
+    set({ project: updateSelectedCameraMove(get(), (m) => ({ ...m, targetEntityId: entityId })) });
   },
 
   setLens: (lensMm) => {
-    const { project } = get();
-    const shot = getSelectedShot(get());
-    set({
-      project: updateShot(project, shot.id, (s) => ({
-        ...s,
-        camera: { ...s.camera, lensMm },
-      })),
-    });
+    set({ project: updateSelectedCameraMove(get(), (m) => ({ ...m, lensMm })) });
   },
 
   setOrbitDegrees: (orbitDegrees) => {
-    const { project } = get();
-    const shot = getSelectedShot(get());
-    set({
-      project: updateShot(project, shot.id, (s) => ({
-        ...s,
-        camera: { ...s.camera, orbitDegrees },
-      })),
-    });
+    set({ project: updateSelectedCameraMove(get(), (m) => ({ ...m, orbitDegrees })) });
   },
 
   moveCameraEndpoint: (which, position) => {
-    const { project } = get();
-    const shot = getSelectedShot(get());
     const key = which === "start" ? "startPos" : "endPos";
-    set({
-      project: updateShot(project, shot.id, (s) => ({
-        ...s,
-        camera: { ...s.camera, [key]: position },
-      })),
-    });
+    set({ project: updateSelectedCameraMove(get(), (m) => ({ ...m, [key]: position })) });
   },
 
   moveCameraMid: (position) => {
-    const { project } = get();
-    const shot = getSelectedShot(get());
-    set({
-      project: updateShot(project, shot.id, (s) => ({
-        ...s,
-        camera: { ...s.camera, midPos: position },
-      })),
-    });
+    set({ project: updateSelectedCameraMove(get(), (m) => ({ ...m, midPos: position })) });
   },
 
   setPlaying: (playing) => set({ playing }),

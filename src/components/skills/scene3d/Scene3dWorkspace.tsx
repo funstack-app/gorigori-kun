@@ -30,9 +30,10 @@ import type { ReactNode } from "react";
 
 import { ActiveProjectSelector } from "../../ActiveProjectSelector";
 import { WorkspaceTabs } from "../../WorkspaceTabs";
-import { totalDurationFrames } from "../../../lib/scene3d/evaluateScene";
+import { getShotMove, totalDurationFrames } from "../../../lib/scene3d/evaluateScene";
 import {
   CAMERA_PRESET_LABELS,
+  cameraColor,
   LENS_PRESETS_MM,
   SCENE_FPS,
   SEEDANCE_MAX_SECONDS,
@@ -63,18 +64,6 @@ const PRESET_ORDER: CameraPresetId[] = [
   "crane",
   "handheld",
 ];
-
-/** クリップの色分け(動きの種類が一目で分かる) */
-const PRESET_CLIP_COLORS: Record<CameraPresetId, string> = {
-  fixed: "#64748b",
-  pushIn: "#8b5cf6",
-  pullOut: "#a78bfa",
-  track: "#0ea5e9",
-  pan: "#38bdf8",
-  orbit: "#ec4899",
-  crane: "#f59e0b",
-  handheld: "#22c55e",
-};
 
 /** タイムラインの縮尺(1秒 = 28px) */
 const PX_PER_SEC = 28;
@@ -330,7 +319,7 @@ function PresetPickerPopup({ onClose }: { onClose: () => void }) {
   const project = useScene3d((s) => s.project);
   const selectedShotId = useScene3d((s) => s.selectedShotId);
   const setCameraPreset = useScene3d((s) => s.setCameraPreset);
-  const current = getSelectedShot({ project, selectedShotId }).camera.preset;
+  const current = getShotMove(project, getSelectedShot({ project, selectedShotId })).preset;
 
   const pick = (preset: CameraPresetId) => {
     setCameraPreset(preset);
@@ -386,13 +375,19 @@ function PresetPickerPopup({ onClose }: { onClose: () => void }) {
 /* ---------------------------------- 左パネル ---------------------------------- */
 
 function ShelfPanel() {
+  const project = useScene3d((s) => s.project);
   const entities = useScene3d((s) => s.project.entities);
   const shots = useScene3d((s) => s.project.shots);
+  const cameras = useScene3d((s) => s.project.cameras);
   const selectedId = useScene3d((s) => s.selectedEntityId);
   const selectedShotId = useScene3d((s) => s.selectedShotId);
   const selectEntity = useScene3d((s) => s.selectEntity);
   const selectCameraOfShot = useScene3d((s) => s.selectCameraOfShot);
+  const assignShotCamera = useScene3d((s) => s.assignShotCamera);
+  const addCamera = useScene3d((s) => s.addCamera);
+  const removeCamera = useScene3d((s) => s.removeCamera);
   const removeEntity = useScene3d((s) => s.removeEntity);
+  const selectedCameraId = getSelectedShot({ project, selectedShotId }).cameraId;
   const [pickerOpen, setPickerOpen] = useState(false);
 
   return (
@@ -436,26 +431,55 @@ function ShelfPanel() {
 
         <p className="mb-2 mt-4 text-[11px] font-bold tracking-wide text-neutral-500">カメラ</p>
         <ul className="flex flex-col gap-1">
-          {shots.map((shot) => (
-            <li key={shot.id}>
-              <button
-                className={`flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm ${
-                  selectedShotId === shot.id
-                    ? "bg-pink-500/15 text-pink-300"
-                    : "text-neutral-300 hover:bg-[#101010]"
-                }`}
-                onClick={() => selectCameraOfShot(shot.id)}
-                title="クリックでこのカットのカメラを選択(軌跡・右パネルが切り替わる)"
-              >
-                <CameraViewIcon />
-                <span className="min-w-0 flex-1 truncate">{shot.label}のカメラ</span>
-                <span className="shrink-0 text-[10px] text-neutral-500">
-                  {CAMERA_PRESET_LABELS[shot.camera.preset]}
-                </span>
-              </button>
-            </li>
-          ))}
+          {cameras.map((cam) => {
+            const usingShots = shots.filter((sh) => sh.cameraId === cam.id);
+            const isActive = selectedCameraId === cam.id;
+            return (
+              <li key={cam.id} className="group/cam relative">
+                <button
+                  className={`flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm ${
+                    isActive ? "bg-amber-500/15 text-amber-300" : "text-neutral-300 hover:bg-[#101010]"
+                  }`}
+                  onClick={() => {
+                    const first = usingShots[0];
+                    if (first) selectCameraOfShot(first.id);
+                    else assignShotCamera(selectedShotId, cam.id);
+                  }}
+                  title={
+                    usingShots.length > 0
+                      ? "クリックでこのカメラを使うカットを選択"
+                      : "クリックで選択中カットにこのカメラを割当"
+                  }
+                >
+                  <span
+                    className="inline-block h-2 w-2 shrink-0 rounded-full"
+                    style={{ backgroundColor: cameraColor(project, cam.id) }}
+                  />
+                  <span className="min-w-0 flex-1 truncate">{cam.label}</span>
+                  <span className="shrink-0 text-[10px] text-neutral-500">
+                    {usingShots.length > 0 ? `${usingShots.length}カット` : "未使用"}
+                  </span>
+                </button>
+                {usingShots.length === 0 && cameras.length > 1 && (
+                  <button
+                    className="absolute right-1 top-1.5 hidden text-[10px] text-neutral-500 hover:text-red-400 group-hover/cam:block"
+                    onClick={() => removeCamera(cam.id)}
+                    title="このカメラを削除"
+                  >
+                    ✕
+                  </button>
+                )}
+              </li>
+            );
+          })}
         </ul>
+        <button
+          className="mt-1.5 w-full rounded-lg border border-dashed border-[#3a3a3a] px-2 py-1.5 text-xs text-neutral-500 hover:border-pink-400/60 hover:text-pink-300"
+          onClick={addCamera}
+          title="カメラを追加して、そのカメラを使う新しいカットを末尾に作る"
+        >
+          + カメラを追加(マルチカム)
+        </button>
       </div>
 
       {pickerOpen && <ObjectPickerPopup onClose={() => setPickerOpen(false)} />}
@@ -621,14 +645,40 @@ function DirectorPanel() {
   const setAspectRatio = useScene3d((s) => s.setAspectRatio);
   const [presetOpen, setPresetOpen] = useState(false);
 
+  const assignShotCamera = useScene3d((s) => s.assignShotCamera);
   const shot = getSelectedShot({ project, selectedShotId });
-  const camera = shot.camera;
+  const camera = getShotMove(project, shot);
+  const usingCamera = project.cameras.find((c) => c.id === shot.cameraId) ?? project.cameras[0];
+  const usedCount = project.shots.filter((sh) => sh.cameraId === shot.cameraId).length;
 
   return (
     <aside className="flex w-full flex-col gap-5 overflow-y-auto border-l border-[#242424] bg-[#141414] px-4 py-4">
       <SelectedObjectSection />
       <div>
-        <p className="mb-2 text-[11px] font-bold tracking-wide text-neutral-500">{shot.label} のカメラ</p>
+        <p className="mb-2 flex items-center gap-1.5 text-[11px] font-bold tracking-wide text-neutral-500">
+          <span
+            className="inline-block h-2 w-2 rounded-full"
+            style={{ backgroundColor: cameraColor(project, shot.cameraId) }}
+          />
+          {shot.label} — {usingCamera.label}
+          {usedCount > 1 && (
+            <span className="font-normal text-neutral-600">({usedCount}カットで使用)</span>
+          )}
+        </p>
+        <label className="mb-2 flex flex-col gap-1 text-xs text-neutral-400">
+          このカットで使うカメラ
+          <select
+            className="rounded-lg border border-[#2a2a2a] bg-[#101010] px-2 py-1.5 text-sm text-neutral-200"
+            value={shot.cameraId}
+            onChange={(e) => assignShotCamera(shot.id, e.target.value)}
+          >
+            {project.cameras.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.label}
+              </option>
+            ))}
+          </select>
+        </label>
         <button
           className="flex w-full items-center gap-3 rounded-md border border-[#2a2a2a] bg-[#101010] p-2.5 text-left hover:border-pink-400/60"
           onClick={() => setPresetOpen(true)}
@@ -844,7 +894,10 @@ function ShotClip({ shot, index }: { shot: SceneShot; index: number }) {
     (e.target as Element).releasePointerCapture(e.pointerId);
   };
 
-  const clipColor = PRESET_CLIP_COLORS[shot.camera.preset];
+  const project = useScene3d((s) => s.project);
+  const move = getShotMove(project, shot);
+  const clipColor = cameraColor(project, shot.cameraId);
+  const camLabel = (project.cameras.find((c) => c.id === shot.cameraId) ?? project.cameras[0]).label;
 
   return (
     <div
@@ -870,10 +923,10 @@ function ShotClip({ shot, index }: { shot: SceneShot; index: number }) {
         style={{ backgroundColor: `${clipColor}33`, borderBottom: `2px solid ${clipColor}` }}
       >
         <span style={{ color: clipColor }} className="shrink-0 [&_svg]:h-3 [&_svg]:w-6">
-          <PresetGlyph preset={shot.camera.preset} />
+          <PresetGlyph preset={move.preset} />
         </span>
         <span className="min-w-0 flex-1 truncate text-[9px]" style={{ color: clipColor }}>
-          {CAMERA_PRESET_LABELS[shot.camera.preset]}
+          {camLabel} · {CAMERA_PRESET_LABELS[move.preset]}
         </span>
       </div>
       {/* 下段: ラベルと尺 */}
@@ -1062,6 +1115,13 @@ function ShotTimeline() {
 
       <div style={{ height: bodyH }} className="overflow-x-auto overflow-y-auto px-4 pb-3 pt-1">
         <div className="relative w-max min-w-full">
+          {/* 1秒ごとの縦グリッド線(時間の目盛りをクリップ帯まで通す) */}
+          <div
+            className="pointer-events-none absolute inset-0"
+            style={{
+              backgroundImage: `repeating-linear-gradient(to right, #26262a 0 1px, transparent 1px ${PX_PER_SEC}px)`,
+            }}
+          />
           {/* ルーラー(クリック/ドラッグでスクラブ) */}
           <div
             className="relative mb-1 h-4 cursor-col-resize"
@@ -1424,21 +1484,38 @@ function ViewportWithFrame() {
 
 /* ---------------------------------- パネル幅の調整 ---------------------------------- */
 
-function usePanelWidth(key: string, initial: number, min: number, max: number) {
-  const [width, setWidth] = useState(() => {
+/**
+ * パネル幅は「画面比率(%)」で持つ(配布先の画面サイズ差に自動追従)。
+ * 左右合計は55%が上限で、片方を広げても他方が画面外に押し出されない
+ */
+function usePanelPct(key: string, initial: number, min: number, max: number) {
+  const [pct, setPct] = useState(() => {
     const saved = Number(localStorage.getItem(key));
     return Number.isFinite(saved) && saved >= min && saved <= max ? saved : initial;
   });
-  // 関数型更新: ドラッグ中に複数イベントが再レンダー前に来ても最新値基準で計算する
-  const update = (delta: number) => {
-    setWidth((prev) => {
-      const hardMax = Math.min(max, Math.floor(window.innerWidth / 3));
-      const clamped = Math.max(min, Math.min(hardMax, Math.round(prev + delta)));
-      localStorage.setItem(key, String(clamped));
+  const update = (deltaPct: number, otherPct: number) => {
+    setPct((prev) => {
+      const pairMax = 55 - otherPct; // 左右合計55%まで
+      const clamped = Math.max(min, Math.min(Math.min(max, pairMax), prev + deltaPct));
+      localStorage.setItem(key, String(Math.round(clamped * 10) / 10));
       return clamped;
     });
   };
-  return [width, update] as const;
+  return [pct, update] as const;
+}
+
+/** ワークスペース行の実幅を計測(%→px変換の基準) */
+function useRowWidth() {
+  const ref = useRef<HTMLDivElement>(null);
+  const [width, setWidth] = useState(0);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const ro = new ResizeObserver((entries) => setWidth(entries[0].contentRect.width));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  return [ref, width] as const;
 }
 
 /** パネル境界のドラッグハンドル(左右の幅調整) */
@@ -1500,10 +1577,15 @@ function usePanelOpen(key: string) {
 
 export function Scene3dWorkspace() {
   useKeyboardShortcuts();
-  const [leftW, setLeftW] = usePanelWidth("scene3d.panel.left", 224, 160, 420);
-  const [rightW, setRightW] = usePanelWidth("scene3d.panel.right", 288, 220, 480);
+  const [rowRef, rowW] = useRowWidth();
+  const [leftPct, setLeftPct] = usePanelPct("scene3d.panel.leftPct", 16, 8, 30);
+  const [rightPct, setRightPct] = usePanelPct("scene3d.panel.rightPct", 22, 12, 35);
   const [leftOpen, toggleLeft] = usePanelOpen("scene3d.panel.left.open");
   const [rightOpen, toggleRight] = usePanelOpen("scene3d.panel.right.open");
+
+  // %→px(最低幅120pxは保証しつつ、画面が狭ければ%どおり縮む)
+  const leftW = Math.max(120, Math.round((rowW * leftPct) / 100));
+  const rightW = Math.max(150, Math.round((rowW * rightPct) / 100));
 
   return (
     <section className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#121212]">
@@ -1514,7 +1596,7 @@ export function Scene3dWorkspace() {
         </div>
       </div>
 
-      <div className="flex min-h-0 flex-1 overflow-hidden">
+      <div ref={rowRef} className="flex min-h-0 flex-1 overflow-hidden">
         {leftOpen ? (
           <>
             <div style={{ width: leftW, minWidth: 140 }} className="relative flex overflow-hidden">
@@ -1527,7 +1609,7 @@ export function Scene3dWorkspace() {
                 «
               </button>
             </div>
-            <PanelResizer onDelta={(dx) => setLeftW(dx)} />
+            <PanelResizer onDelta={(dx) => setLeftPct(rowW > 0 ? (dx / rowW) * 100 : 0, rightPct)} />
           </>
         ) : (
           <CollapsedRail side="left" onOpen={toggleLeft} />
@@ -1538,7 +1620,7 @@ export function Scene3dWorkspace() {
         </div>
         {rightOpen ? (
           <>
-            <PanelResizer onDelta={(dx) => setRightW(-dx)} />
+            <PanelResizer onDelta={(dx) => setRightPct(rowW > 0 ? (-dx / rowW) * 100 : 0, leftPct)} />
             <div style={{ width: rightW, minWidth: 200 }} className="relative flex overflow-hidden">
               <button
                 className="absolute left-0 top-2 z-10 rounded-r-md px-1 py-1 text-[10px] text-neutral-500 hover:text-pink-300"

@@ -18,11 +18,13 @@ import { scene3d as scene3dIpc } from "../../../lib/ipc";
 import {
   evaluateCamera,
   evaluateShotCamera,
+  getShotMove,
   resolveLookAt,
   totalDurationFrames,
 } from "../../../lib/scene3d/evaluateScene";
 import { SCENE_FPS } from "../../../lib/scene3d/types";
-import type { SceneAspectRatio, SceneEntity, SceneShot, Vec3 } from "../../../lib/scene3d/types";
+import { cameraColor } from "../../../lib/scene3d/types";
+import type { SceneAspectRatio, SceneCamera, SceneEntity, Vec3 } from "../../../lib/scene3d/types";
 import { getSelectedShot, useScene3d } from "../../../lib/store/scene3d";
 
 /** ポインタのレイと水平面(y=height)の交点。交差しない場合は null */
@@ -446,39 +448,32 @@ function CameraPathLine() {
   );
 }
 
-/** クリップと同じ色分け(タイムラインとシーンでカメラを対応づける) */
-const CAMERA_TALLY_COLORS: Record<string, string> = {
-  fixed: "#64748b",
-  pushIn: "#8b5cf6",
-  pullOut: "#a78bfa",
-  track: "#0ea5e9",
-  pan: "#38bdf8",
-  orbit: "#ec4899",
-  crane: "#f59e0b",
-  handheld: "#22c55e",
-};
-
 /**
- * カメラ本体の可視化(編集ビュー専用)。全カットのカメラを常時シーンに立たせる
- * (マルチカム: スタジオに複数カメラが置いてあり、カット割=カメラの切替)。
- * 始点=カメラマーク / 赤点=カメラが止まる場所。クリックでそのカットを選択。
- * 選択中カメラは黄色(選択物体の統一ハイライト)+視野の四角錐を表示
+ * カメラ本体の可視化(編集ビュー専用)。シーンの全カメラを常時立たせる(マルチカム)。
+ * 選択カット使用中のカメラは黄色 + 視野の四角錐。クリックでそのカメラを使うカットを選択
  */
-function CameraIndicator({ shot, selected }: { shot: SceneShot; selected: boolean }) {
+function CameraIndicator({ camera, selected }: { camera: SceneCamera; selected: boolean }) {
   const project = useScene3d((s) => s.project);
   const moveCameraEndpoint = useScene3d((s) => s.moveCameraEndpoint);
   const selectCameraOfShot = useScene3d((s) => s.selectCameraOfShot);
+  const assignShotCamera = useScene3d((s) => s.assignShotCamera);
+  const selectedShotId = useScene3d((s) => s.selectedShotId);
   const cameraSelected = useScene3d((s) => s.cameraSelected);
   const setDragging = useScene3d((s) => s.setDragging);
   const draggingSelf = useScene3d((s) => s.draggingEntityId === "__camera-start");
   const groupRef = useRef<Group>(null);
   const lastClientY = useRef(0);
 
-  const pose = evaluateShotCamera(project, shot, 0);
+  // このカメラの初期姿勢(動きの先頭)をプレビュー用ショットで評価
+  const pose = evaluateShotCamera(
+    project,
+    { id: "__preview", label: "", durationFrames: 2, cameraId: camera.id },
+    0,
+  );
   const ar = project.aspectRatio === "9:16" ? 9 / 16 : project.aspectRatio === "1:1" ? 1 : 16 / 9;
   const highlight = selected && cameraSelected;
   const bodyColor = highlight ? "#f59e0b" : selected ? "#4a4c52" : "#33353a";
-  const tally = CAMERA_TALLY_COLORS[shot.camera.preset] ?? "#ec4899";
+  const tally = cameraColor(project, camera.id);
 
   useEffect(() => {
     const g = groupRef.current;
@@ -489,14 +484,20 @@ function CameraIndicator({ shot, selected }: { shot: SceneShot; selected: boolea
 
   const onPointerDown = (e: ThreeEvent<PointerEvent>) => {
     e.stopPropagation();
-    selectCameraOfShot(shot.id);
+    // このカメラを使う最初のカットを選択。どのカットも使っていなければ現在カットに割当
+    const usingShot = project.shots.find((sh) => sh.cameraId === camera.id);
+    if (usingShot) {
+      selectCameraOfShot(usingShot.id);
+    } else {
+      assignShotCamera(selectedShotId, camera.id);
+    }
     setDragging("__camera-start");
     lastClientY.current = e.nativeEvent.clientY;
     (e.target as Element).setPointerCapture(e.pointerId);
   };
   const onPointerMove = (e: ThreeEvent<PointerEvent>) => {
     if (!draggingSelf || !selected) return;
-    const start = shot.camera.startPos;
+    const start = camera.move.startPos;
     if (e.nativeEvent.shiftKey) {
       // Shift+上下ドラッグ = 高さ調整
       const dy = e.nativeEvent.clientY - lastClientY.current;
@@ -547,7 +548,7 @@ function CameraIndicator({ shot, selected }: { shot: SceneShot; selected: boolea
         <cylinderGeometry args={[0.07, 0.09, 0.12, 16]} />
         <meshStandardMaterial color={highlight ? "#b45309" : "#1c1e22"} roughness={0.35} />
       </mesh>
-      {/* タリーランプ(クリップと同じ色。どのカットのカメラか対応づけ) */}
+      {/* タリーランプ(カメラ識別色。タイムラインのクリップと同じ色) */}
       <mesh position={[0, 0.13, -0.12]}>
         <sphereGeometry args={[0.035, 10, 8]} />
         <meshBasicMaterial color={tally} />
@@ -565,14 +566,16 @@ function CameraIndicator({ shot, selected }: { shot: SceneShot; selected: boolea
   );
 }
 
-/** 全カットのカメラを購読して描画(マルチカム表示) */
+/** 全カットのカメラを購読して描画(マルチカム表示) *//** 全カットのカメラを購読して描画(マルチカム表示) */
 function AllCameraIndicators() {
-  const shots = useScene3d((s) => s.project.shots);
+  const cameras = useScene3d((s) => s.project.cameras);
+  const project = useScene3d((s) => s.project);
   const selectedShotId = useScene3d((s) => s.selectedShotId);
+  const selectedCameraId = getSelectedShot({ project, selectedShotId }).cameraId;
   return (
     <>
-      {shots.map((shot) => (
-        <CameraIndicator key={shot.id} shot={shot} selected={shot.id === selectedShotId} />
+      {cameras.map((cam) => (
+        <CameraIndicator key={cam.id} camera={cam} selected={cam.id === selectedCameraId} />
       ))}
     </>
   );
@@ -592,10 +595,11 @@ function CameraEndMarker() {
   const lastClientY = useRef(0);
 
   const shot = getSelectedShot({ project, selectedShotId });
-  if (shot.camera.preset === "fixed") return null; // 固定は終点なし
+  const move = getShotMove(project, shot);
+  if (move.preset === "fixed") return null; // 固定は終点なし
 
   const end = evaluateShotCamera(project, shot, Math.max(0, shot.durationFrames - 1)).position;
-  const isOrbit = shot.camera.preset === "orbit";
+  const isOrbit = move.preset === "orbit";
 
   const onPointerDown = (e: ThreeEvent<PointerEvent>) => {
     e.stopPropagation();
@@ -610,7 +614,7 @@ function CameraEndMarker() {
       const c = resolveLookAt(project, shot);
       const p = rayToPlaneY(e.ray, c[1]) ?? rayToFloor(e.ray);
       if (!p) return;
-      const st = shot.camera.startPos;
+      const st = move.startPos;
       const a0 = Math.atan2(st[2] - c[2], st[0] - c[0]);
       const a1 = Math.atan2(p[2] - c[2], p[0] - c[0]);
       let deg = ((a1 - a0) * 180) / Math.PI;
@@ -619,7 +623,7 @@ function CameraEndMarker() {
       setOrbitDegrees(Math.round(deg / 15) * 15);
       return;
     }
-    const endPos = shot.camera.endPos;
+    const endPos = move.endPos;
     if (e.nativeEvent.shiftKey) {
       const dy = e.nativeEvent.clientY - lastClientY.current;
       lastClientY.current = e.nativeEvent.clientY;
@@ -669,16 +673,17 @@ function CameraMidMarker() {
   const lastClientY = useRef(0);
 
   const shot = getSelectedShot({ project, selectedShotId });
-  const preset = shot.camera.preset;
+  const move = getShotMove(project, shot);
+  const preset = move.preset;
   if (preset === "fixed" || preset === "orbit" || preset === "handheld") return null;
 
   // 中間点: 未設定なら軌道の中点(=直線の真ん中)
   const mid: Vec3 =
-    shot.camera.midPos ??
+    move.midPos ??
     ([
-      (shot.camera.startPos[0] + shot.camera.endPos[0]) / 2,
-      (shot.camera.startPos[1] + shot.camera.endPos[1]) / 2,
-      (shot.camera.startPos[2] + shot.camera.endPos[2]) / 2,
+      (move.startPos[0] + move.endPos[0]) / 2,
+      (move.startPos[1] + move.endPos[1]) / 2,
+      (move.startPos[2] + move.endPos[2]) / 2,
     ] as Vec3);
 
   const onPointerDown = (e: ThreeEvent<PointerEvent>) => {
