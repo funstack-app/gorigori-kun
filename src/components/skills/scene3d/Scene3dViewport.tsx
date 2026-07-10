@@ -285,32 +285,27 @@ export function Scene3dViewport() {
       camera={{ position: [4, 3, 6], fov: 50 }}
       // toBlob でフレームを回収するため描画バッファを保持する
       gl={{ preserveDrawingBuffer: true }}
-      style={{ background: "#0a0a0a" }}
       onPointerMissed={() => selectEntity(null)}
     >
-      <ambientLight intensity={0.6} />
-      <directionalLight position={[5, 8, 5]} intensity={1.2} castShadow />
+      {/* グレースタジオ(クレイ模型風)。奥はフォグで自然に消す */}
+      <color attach="background" args={["#75777b"]} />
+      <fog attach="fog" args={["#75777b", 18, 45]} />
+      <ambientLight intensity={0.75} />
+      <directionalLight position={[5, 8, 5]} intensity={1.1} castShadow />
       {/* 書き出し中は補助表示を消す(モーションガイドに写り込ませない) */}
       {!exporting && (
         <Grid
           args={[30, 30]}
-          cellColor="#1f2937"
-          sectionColor="#334155"
+          cellColor="#94969a"
+          sectionColor="#a8aaae"
           fadeDistance={25}
-          position={[0, 0, 0]}
+          position={[0, 0.001, 0]}
         />
       )}
-      {/* 書き出し時の床: 輪郭が分かる無地の床(Seedanceの空間手がかり) */}
-      {exporting && (
-        <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.002, 0]}>
-          <planeGeometry args={[60, 60]} />
-          <meshStandardMaterial color="#3f3f46" />
-        </mesh>
-      )}
-      {/* 影受けの床 */}
+      {/* グレーの床(編集時・書き出し時共通。Seedanceの空間手がかりにもなる) */}
       <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.001, 0]} receiveShadow>
         <planeGeometry args={[60, 60]} />
-        <shadowMaterial opacity={0.3} />
+        <meshStandardMaterial color="#818387" />
       </mesh>
       {entities.map((e) => (
         <EntityMesh key={e.id} entity={e} />
