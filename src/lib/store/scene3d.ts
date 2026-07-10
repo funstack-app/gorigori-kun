@@ -229,10 +229,25 @@ function renumberShots(shots: SceneShot[]): SceneShot[] {
   return shots.map((sh, i) => ({ ...sh, label: `カット${i + 1}` }));
 }
 
+const initialProject = ((): SceneProject => {
+  try {
+    const raw = localStorage.getItem("scene3d.project.v3");
+    if (raw) {
+      const parsed = JSON.parse(raw) as SceneProject;
+      if (parsed.schemaVersion === 3 && parsed.shots?.length && parsed.cameras?.length) {
+        return parsed;
+      }
+    }
+  } catch {
+    /* 壊れた保存データは無視して初期シーン */
+  }
+  return createDefaultProject();
+})();
+
 export const useScene3d = create<Scene3dState>((set, get) => ({
-  project: createDefaultProject(),
-  selectedEntityId: "actor-1",
-  selectedShotId: "shot-1",
+  project: initialProject,
+  selectedEntityId: initialProject.entities[0]?.id ?? null,
+  selectedShotId: initialProject.shots[0].id,
   cameraSelected: false,
   playing: false,
   cameraView: false,
@@ -800,6 +815,25 @@ export type PaneOp =
   | { type: "ratio"; id: string; delta: number }
   | { type: "toggleView"; id: string }
   | { type: "reset" };
+
+/* ---------------------------------- 自動保存 ---------------------------------- */
+// シーンはlocalStorageへ自動保存(アプリを閉じても消えない)。
+// アセットを含まない純JSONなので容量は数KB。将来はGORIプロジェクトへの保存に昇格予定
+
+const PROJECT_SAVE_KEY = "scene3d.project.v3";
+let saveTimer: ReturnType<typeof setTimeout> | null = null;
+
+useScene3d.subscribe((state, prevState) => {
+  if (state.project === prevState.project) return;
+  if (saveTimer) clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    try {
+      localStorage.setItem(PROJECT_SAVE_KEY, JSON.stringify(state.project));
+    } catch {
+      // 容量超過等は握りつぶす(シーンJSONは数KBのため実質起きない)
+    }
+  }, 400);
+});
 
 /* ---------------------------------- Undo / Redo ---------------------------------- */
 // 履歴はUI反応不要のためストア外のモジュール変数で持つ(project の参照変化だけ監視)。
