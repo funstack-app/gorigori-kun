@@ -25,6 +25,64 @@ export type ImportedMotion = {
 
 const library = new Map<string, ImportedMotion>();
 let seq = 1;
+let builtinLoaded = false;
+
+/** 標準ライブラリ(同梱CC0)の日本語名。無いものは英語名のまま */
+const BUILTIN_JP: Record<string, string> = {
+  Idle_Loop: "待機",
+  Idle_Talking_Loop: "会話(立ち)",
+  Walk_Loop: "歩く",
+  Walk_Formal_Loop: "歩く(フォーマル)",
+  Jog_Fwd_Loop: "ジョグ",
+  Sprint_Loop: "全力疾走",
+  Crouch_Idle_Loop: "しゃがみ待機",
+  Crouch_Fwd_Loop: "しゃがみ歩き",
+  Sitting_Enter: "座る(動作)",
+  Sitting_Idle_Loop: "座り待機",
+  Sitting_Talking_Loop: "座って会話",
+  Sitting_Exit: "立ち上がる",
+  Dance_Loop: "ダンス",
+  Jump_Start: "ジャンプ(踏切)",
+  Jump_Loop: "ジャンプ(滞空)",
+  Jump_Land: "着地",
+  Push_Loop: "押す",
+  PickUp_Table: "物を取る(机)",
+  Interact: "操作する",
+  Fixing_Kneeling: "しゃがんで作業",
+  Driving_Loop: "運転",
+  Swim_Idle_Loop: "立ち泳ぎ",
+  Swim_Fwd_Loop: "泳ぐ",
+  Punch_Jab: "パンチ(ジャブ)",
+  Punch_Cross: "パンチ(クロス)",
+  Hit_Chest: "被弾(胸)",
+  Hit_Head: "被弾(頭)",
+  Roll: "前転",
+  Death01: "倒れる",
+};
+
+/** 同梱の標準モーションライブラリ(CC0)を読み込む。初回のみ実体を構築 */
+export async function loadBuiltinMotions(): Promise<{ id: string; name: string }[]> {
+  if (builtinLoaded) {
+    return [...library.values()]
+      .filter((m) => m.id.startsWith("builtin-"))
+      .map((m) => ({ id: m.id, name: m.name }));
+  }
+  const res = await fetch("/motions/AnimationLibrary_Godot_Standard.glb");
+  if (!res.ok) throw new Error(`標準ライブラリの読み込みに失敗 (${res.status})`);
+  const buf = await res.arrayBuffer();
+  const gltf = await new GLTFLoader().parseAsync(buf, "");
+  const template = gltf.scene;
+  const out: { id: string; name: string }[] = [];
+  for (const clip of gltf.animations ?? []) {
+    if (clip.name === "A_TPose") continue; // ポーズ基準は除外
+    const id = `builtin-${clip.name}`;
+    const name = BUILTIN_JP[clip.name] ?? clip.name.replace(/_/g, " ");
+    library.set(id, { id, name, template, clip, scale: 1 });
+    out.push({ id, name });
+  }
+  builtinLoaded = true;
+  return out;
+}
 
 export function getImportedMotion(id: string): ImportedMotion | undefined {
   return library.get(id);

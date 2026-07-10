@@ -17,7 +17,7 @@ import type { ReactNode } from "react";
 import { ActiveProjectSelector } from "../../ActiveProjectSelector";
 import { WorkspaceTabs } from "../../WorkspaceTabs";
 import { getShotMove, totalDurationFrames } from "../../../lib/scene3d/evaluateScene";
-import { importMotionFiles } from "../../../lib/scene3d/motionLibrary";
+import { importMotionFiles, loadBuiltinMotions } from "../../../lib/scene3d/motionLibrary";
 import {
   CAMERA_PRESET_LABELS,
   cameraColor,
@@ -630,9 +630,37 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
   const fileRef = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
   const [errors, setErrors] = useState<string[]>([]);
+  const [filter, setFilter] = useState("");
+
+  // 標準ライブラリ(同梱CC0・46種)を初回に自動読み込み
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const items = await loadBuiltinMotions();
+        if (!cancelled) registerImportedMotions(items);
+      } catch (e) {
+        if (!cancelled) setErrors((prev) => [...prev, String(e)]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const entity = project.entities.find((e) => e.id === entityId);
   const activeClipId = entity?.motion?.type === "clip" ? entity.motion.clipId : null;
+  const match = (name: string) => name.toLowerCase().includes(filter.toLowerCase());
+  const builtin = importedMotions.filter((m) => m.id.startsWith("builtin-") && match(m.name));
+  const imported = importedMotions.filter((m) => !m.id.startsWith("builtin-") && match(m.name));
+
+  const motionBtnCls = (active: boolean) =>
+    `truncate rounded-lg border px-2 py-2 text-left text-xs ${
+      active
+        ? "border-lime-400 bg-lime-400/10 text-lime-300"
+        : "border-[#2a2a2a] bg-[#101010] text-neutral-300 hover:border-lime-400/50"
+    }`;
 
   const onFiles = async (list: FileList | null) => {
     if (!list || list.length === 0) return;
@@ -674,18 +702,25 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
         </div>
       )}
 
-      {importedMotions.length === 0 ? (
-        <p className="text-xs text-neutral-600">まだモーションがありません</p>
+      <input
+        type="text"
+        value={filter}
+        onChange={(e) => setFilter(e.target.value)}
+        placeholder="モーションを検索…"
+        className="mb-2 w-full rounded-lg border border-[#2a2a2a] bg-[#0d0d0d] px-2 py-1.5 text-xs text-neutral-200 placeholder:text-neutral-600 focus:border-pink-400/60 focus:outline-none"
+      />
+
+      <p className="mb-1.5 text-[11px] font-bold tracking-wide text-neutral-500">
+        標準ライブラリ(CC0・{builtin.length}種)
+      </p>
+      {builtin.length === 0 ? (
+        <p className="mb-2 text-xs text-neutral-600">読み込み中…</p>
       ) : (
-        <div className="grid grid-cols-2 gap-1.5">
-          {importedMotions.map((m) => (
+        <div className="mb-3 grid max-h-48 grid-cols-3 gap-1.5 overflow-y-auto">
+          {builtin.map((m) => (
             <button
               key={m.id}
-              className={`truncate rounded-lg border px-2 py-2 text-left text-xs ${
-                activeClipId === m.id
-                  ? "border-lime-400 bg-lime-400/10 text-lime-300"
-                  : "border-[#2a2a2a] bg-[#101010] text-neutral-300 hover:border-lime-400/50"
-              }`}
+              className={motionBtnCls(activeClipId === m.id)}
               onClick={() => setEntityMotionClip(entityId, m.id)}
               title={`${m.name} を割り当てる`}
             >
@@ -693,6 +728,26 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
             </button>
           ))}
         </div>
+      )}
+
+      {imported.length > 0 && (
+        <>
+          <p className="mb-1.5 text-[11px] font-bold tracking-wide text-neutral-500">
+            読み込んだモーション({imported.length})
+          </p>
+          <div className="grid max-h-40 grid-cols-2 gap-1.5 overflow-y-auto">
+            {imported.map((m) => (
+              <button
+                key={m.id}
+                className={motionBtnCls(activeClipId === m.id)}
+                onClick={() => setEntityMotionClip(entityId, m.id)}
+                title={`${m.name} を割り当てる`}
+              >
+                {m.name}
+              </button>
+            ))}
+          </div>
+        </>
       )}
     </Popup>
   );
