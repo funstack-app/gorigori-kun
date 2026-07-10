@@ -11,10 +11,12 @@ import { useEffect, useMemo, useRef } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { GizmoHelper, GizmoViewport, Grid, Line, OrbitControls } from "@react-three/drei";
 import type { ThreeEvent } from "@react-three/fiber";
-import { PerspectiveCamera, Vector2, Vector3 } from "three";
+import { AnimationMixer, PerspectiveCamera, Vector2, Vector3 } from "three";
+import { clone as cloneSkeleton } from "three/examples/jsm/utils/SkeletonUtils.js";
 import type { Group, PerspectiveCamera as ThreePerspectiveCamera, Ray } from "three";
 
 import { scene3d as scene3dIpc } from "../../../lib/ipc";
+import { getImportedMotion } from "../../../lib/scene3d/motionLibrary";
 import {
   evaluateCamera,
   evaluateEntityPose,
@@ -270,6 +272,22 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
   const rootRef = useRef<Group>(null);
   const rig = useRef<MannequinRig>({ body: null, arms: [null, null], legs: [null, null] });
   const selectEntity = useScene3d((s) => s.selectEntity);
+
+  // インポートしたクリップモーション: スキン付きキャラを複製してミキサーで駆動
+  const clipId = entity.motion?.type === "clip" ? entity.motion.clipId : null;
+  const clipRig = useMemo(() => {
+    if (!clipId) return null;
+    const m = getImportedMotion(clipId);
+    if (!m) return null;
+    const obj = cloneSkeleton(m.template) as Group;
+    obj.scale.setScalar(m.scale);
+    obj.traverse((child) => {
+      child.castShadow = true;
+    });
+    const mixer = new AnimationMixer(obj);
+    mixer.clipAction(m.clip).play();
+    return { obj, mixer, duration: m.clip.duration };
+  }, [clipId]);
   const moveEntity = useScene3d((s) => s.moveEntity);
   const setDragging = useScene3d((s) => s.setDragging);
   const selected = useScene3d((s) => s.selectedEntityId === entity.id);
@@ -322,6 +340,13 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
       root.position.set(pose.position[0], pose.position[1], pose.position[2]);
       root.rotation.y = pose.rotationY;
 
+      // インポートクリップ: フレーム時刻で決定論的に駆動(ループ)
+      if (clipRig) {
+        const t = (frame / st.project.fps) % Math.max(0.001, clipRig.duration);
+        clipRig.mixer.setTime(t);
+        return;
+      }
+
       const r = rig.current;
       if (!r.body) return;
       const { moving, phase, run } = pose.gait;
@@ -341,7 +366,7 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
     return () => {
       frameAppliers.delete(apply);
     };
-  }, [entity.id]);
+  }, [entity.id, clipRig]);
 
   const onDoubleClick = (e: ThreeEvent<MouseEvent>) => {
     e.stopPropagation();
@@ -364,7 +389,12 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
       onPointerUp={onPointerUp}
       onDoubleClick={onDoubleClick}
     >
-      {entity.kind === "mannequin" && <Mannequin color={color} selected={selected} rig={rig} />}
+      {entity.kind === "mannequin" &&
+        (clipRig ? (
+          <primitive object={clipRig.obj} />
+        ) : (
+          <Mannequin color={color} selected={selected} rig={rig} />
+        ))}
       {entity.kind === "sphere" && (
         <mesh position={[0, 0.5, 0]} castShadow>
           <sphereGeometry args={[0.5, 32, 24]} />
@@ -825,7 +855,13 @@ function MotionOverlay() {
   const draggingSelf = useScene3d((s) => s.draggingEntityId === "__motion-target");
 
   const entity = project.entities.find((e) => e.id === selectedEntityId);
-  if (!entity || entity.kind !== "mannequin" || !entity.motion || entity.motion.path.length === 0) {
+  if (
+    !entity ||
+    entity.kind !== "mannequin" ||
+    !entity.motion ||
+    entity.motion.type === "clip" ||
+    entity.motion.path.length === 0
+  ) {
     return null;
   }
   const dest = entity.motion.path[entity.motion.path.length - 1];

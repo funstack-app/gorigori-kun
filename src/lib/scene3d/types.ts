@@ -17,11 +17,17 @@ export type Vec3 = [number, number, number];
 
 /** 人物のモーション(タイムライン全体で再生。決定論プロシージャル歩行) */
 export type EntityMotionType = "walk" | "run";
-export type EntityMotion = {
-  type: EntityMotionType;
-  /** 経由点(開始位置は entity.position)。最後の点が到着点。到着後は立ち止まる */
-  path: Vec3[];
-};
+export type EntityMotion =
+  | {
+      type: EntityMotionType;
+      /** 経由点(開始位置は entity.position)。最後の点が到着点。到着後は立ち止まる */
+      path: Vec3[];
+    }
+  | {
+      /** インポートしたモーションクリップ(Mixamo等)をその場で再生 */
+      type: "clip";
+      clipId: string;
+    };
 
 export type SceneEntityKind =
   | "mannequin"

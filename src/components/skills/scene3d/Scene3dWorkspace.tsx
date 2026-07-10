@@ -17,6 +17,7 @@ import type { ReactNode } from "react";
 import { ActiveProjectSelector } from "../../ActiveProjectSelector";
 import { WorkspaceTabs } from "../../WorkspaceTabs";
 import { getShotMove, totalDurationFrames } from "../../../lib/scene3d/evaluateScene";
+import { importMotionFiles } from "../../../lib/scene3d/motionLibrary";
 import {
   CAMERA_PRESET_LABELS,
   cameraColor,
@@ -513,6 +514,87 @@ function AxisSlider({
   );
 }
 
+/**
+ * モーションライブラリ・ポップアップ。
+ * MixamoのFBX(With Skin推奨)を複数まとめて読み込み、選択中の人物に割り当てる。
+ * ファイルはユーザーが自分のアカウントで取得したものを持ち込む(アプリには同梱しない)
+ */
+function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: () => void }) {
+  const importedMotions = useScene3d((s) => s.importedMotions);
+  const registerImportedMotions = useScene3d((s) => s.registerImportedMotions);
+  const setEntityMotionClip = useScene3d((s) => s.setEntityMotionClip);
+  const project = useScene3d((s) => s.project);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [busy, setBusy] = useState(false);
+  const [errors, setErrors] = useState<string[]>([]);
+
+  const entity = project.entities.find((e) => e.id === entityId);
+  const activeClipId = entity?.motion?.type === "clip" ? entity.motion.clipId : null;
+
+  const onFiles = async (list: FileList | null) => {
+    if (!list || list.length === 0) return;
+    setBusy(true);
+    setErrors([]);
+    const { ok, errors: errs } = await importMotionFiles(Array.from(list));
+    registerImportedMotions(ok);
+    setErrors(errs);
+    setBusy(false);
+  };
+
+  return (
+    <Popup title="モーションライブラリ" onClose={onClose}>
+      <input
+        ref={fileRef}
+        type="file"
+        multiple
+        accept=".fbx,.glb,.gltf"
+        className="hidden"
+        onChange={(e) => void onFiles(e.target.files)}
+      />
+      <button
+        className="mb-3 w-full rounded-lg border border-dashed border-[#3a3a3a] px-3 py-2.5 text-sm text-neutral-400 hover:border-pink-400/60 hover:text-pink-300 disabled:opacity-50"
+        disabled={busy}
+        onClick={() => fileRef.current?.click()}
+      >
+        {busy ? "読み込み中…" : "モーションを読み込む…(FBX/GLB、複数選択可)"}
+      </button>
+      <p className="mb-3 text-[11px] leading-4 text-neutral-500">
+        Mixamoの場合: FBX Binary / With Skin でダウンロードしたファイルを選択。
+        まとめてShift選択で一気に取り込めます
+      </p>
+
+      {errors.length > 0 && (
+        <div className="mb-2 rounded border border-red-500/30 bg-red-500/10 p-2 text-[11px] text-red-300">
+          {errors.map((er, i) => (
+            <p key={i}>{er}</p>
+          ))}
+        </div>
+      )}
+
+      {importedMotions.length === 0 ? (
+        <p className="text-xs text-neutral-600">まだモーションがありません</p>
+      ) : (
+        <div className="grid grid-cols-2 gap-1.5">
+          {importedMotions.map((m) => (
+            <button
+              key={m.id}
+              className={`truncate rounded-lg border px-2 py-2 text-left text-xs ${
+                activeClipId === m.id
+                  ? "border-lime-400 bg-lime-400/10 text-lime-300"
+                  : "border-[#2a2a2a] bg-[#101010] text-neutral-300 hover:border-lime-400/50"
+              }`}
+              onClick={() => setEntityMotionClip(entityId, m.id)}
+              title={`${m.name} を割り当てる`}
+            >
+              {m.name}
+            </button>
+          ))}
+        </div>
+      )}
+    </Popup>
+  );
+}
+
 /** オブジェクト詳細ポップアップ(位置・大きさ・寸法・階数) */
 function ObjectDetailPopup({ entityId, onClose }: { entityId: string; onClose: () => void }) {
   const project = useScene3d((s) => s.project);
@@ -587,6 +669,7 @@ function SelectedObjectSection() {
   const rotateEntity = useScene3d((s) => s.rotateEntity);
   const setEntityMotion = useScene3d((s) => s.setEntityMotion);
   const [detailOpen, setDetailOpen] = useState(false);
+  const [motionLibOpen, setMotionLibOpen] = useState(false);
 
   const entity = project.entities.find((e) => e.id === selectedEntityId);
   if (!entity) return null;
@@ -620,10 +703,25 @@ function SelectedObjectSection() {
           </button>
         </div>
       )}
-      {entity.kind === "mannequin" && motionType && (
+      {entity.kind === "mannequin" && motionType && motionType !== "clip" && (
         <p className="text-[10px] leading-4 text-neutral-500">
           旗をドラッグで行き先を変更。再生で歩き出します
         </p>
+      )}
+      {entity.kind === "mannequin" && (
+        <button
+          className={`rounded-lg border px-2 py-1.5 text-xs ${
+            motionType === "clip"
+              ? "border-lime-400 bg-lime-400/10 text-lime-300"
+              : "border-[#2a2a2a] text-neutral-400 hover:border-lime-400/50 hover:text-neutral-200"
+          }`}
+          onClick={() => setMotionLibOpen(true)}
+        >
+          モーションライブラリ…(Mixamo読み込み)
+        </button>
+      )}
+      {motionLibOpen && (
+        <MotionLibraryPopup entityId={entity.id} onClose={() => setMotionLibOpen(false)} />
       )}
 
       <label className="flex flex-col gap-1 text-xs text-neutral-400">

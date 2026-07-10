@@ -117,8 +117,13 @@ type Scene3dState = {
   scaleEntity: (id: string, scale: number) => void;
   setEntityFloors: (id: string, floors: number) => void;
   setEntityParam: (id: string, key: "width" | "height" | "depth", value: number) => void;
+  /** インポート済みモーション一覧(実体は motionLibrary モジュールが持つ) */
+  importedMotions: { id: string; name: string }[];
+  registerImportedMotions: (items: { id: string; name: string }[]) => void;
   /** 人物のモーション設定(walk/run)。null=立ち止まる。開始時は前方2.5mが行き先 */
   setEntityMotion: (id: string, type: EntityMotionType | null) => void;
+  /** インポートしたクリップを人物に割当(その場再生) */
+  setEntityMotionClip: (id: string, clipId: string) => void;
   /** モーションの行き先(最終経由点)を動かす */
   moveMotionTarget: (id: string, position: Vec3) => void;
   setDragging: (id: string | null) => void;
@@ -336,6 +341,25 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
     });
   },
 
+  importedMotions: [],
+  registerImportedMotions: (items) => {
+    const { importedMotions } = get();
+    const known = new Set(importedMotions.map((m) => m.id));
+    set({ importedMotions: [...importedMotions, ...items.filter((m) => !known.has(m.id))] });
+  },
+
+  setEntityMotionClip: (id, clipId) => {
+    const { project } = get();
+    set({
+      project: {
+        ...project,
+        entities: project.entities.map((e) =>
+          e.id === id ? { ...e, motion: { type: "clip", clipId } } : e,
+        ),
+      },
+    });
+  },
+
   setEntityMotion: (id, type) => {
     const { project } = get();
     set({
@@ -346,7 +370,7 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
           if (type == null) return { ...e, motion: null };
           // 既存の経路は維持しつつ種類だけ変更。無ければ向いている方向へ2.5m
           const path =
-            e.motion?.path && e.motion.path.length > 0
+            e.motion && e.motion.type !== "clip" && e.motion.path.length > 0
               ? e.motion.path
               : ([
                   [
@@ -367,7 +391,7 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
       project: {
         ...project,
         entities: project.entities.map((e) => {
-          if (e.id !== id || !e.motion) return e;
+          if (e.id !== id || !e.motion || e.motion.type === "clip") return e;
           const path = [...e.motion.path];
           path[path.length - 1] = position;
           return { ...e, motion: { ...e.motion, path } };

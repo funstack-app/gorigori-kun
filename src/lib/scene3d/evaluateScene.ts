@@ -119,7 +119,9 @@ export function evaluateEntityPose(
     gait: { moving: false, phase: 0, run: false },
   };
   const motion = entity.motion;
-  if (!motion || motion.path.length === 0 || entity.kind !== "mannequin") return idle;
+  if (!motion || entity.kind !== "mannequin") return idle;
+  if (motion.type === "clip") return idle; // クリップはその場再生(位置は据え置き)
+  if (motion.path.length === 0) return idle;
 
   const g = GAIT[motion.type];
   const dist = (Math.max(0, globalFrame) / project.fps) * g.speed;
