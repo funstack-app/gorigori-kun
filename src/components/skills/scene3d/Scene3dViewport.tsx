@@ -663,7 +663,10 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
     const c = controls as unknown as { target: Vector3; update: () => void } | null;
     if (!c) return;
     const h = entity.kind === "mannequin" ? 1.1 : entity.kind === "building" ? 3 : 0.6;
-    c.target.set(entity.position[0], entity.position[1] + h * entity.scale, entity.position[2]);
+    // モーションで移動した後の「いま見えている位置」を注視する
+    const st = useScene3d.getState();
+    const pose = evaluateEntityPose(st.project, entity, st.currentFrame);
+    c.target.set(pose.position[0], pose.position[1] + h * entity.scale, pose.position[2]);
     c.update();
   };
 
@@ -1253,15 +1256,19 @@ function CameraRig({ mode, primary }: { mode: "editor" | "camera"; primary: bool
 
 /** 視点プリセット(正面/横/俯瞰/斜め/全体/リセット)。UIボタン(Workspace側)から呼ばれる */
 export type ViewPresetType = "front" | "side" | "top" | "iso" | "fit" | "reset";
-let viewPresetListener: ((t: ViewPresetType) => void) | null = null;
+/**
+ * 視点プリセットの受け手。単一変数だと後から開いたペインが独占し、
+ * そのペインが閉じたとき null になってボタンが無反応になる(実害あり)ため Set で持つ
+ */
+const viewPresetListeners = new Set<(t: ViewPresetType) => void>();
 export function requestViewPreset(t: ViewPresetType): void {
-  viewPresetListener?.(t);
+  viewPresetListeners.forEach((fn) => fn(t));
 }
 
 function ViewPresetController() {
   const { camera, controls } = useThree();
   useEffect(() => {
-    viewPresetListener = (t) => {
+    const listener = (t: ViewPresetType) => {
       const c = controls as unknown as { target: Vector3; update: () => void } | null;
 
       // リセット: 選択に関係なく原点の初期構図へ
@@ -1280,10 +1287,12 @@ function ViewPresetController() {
       if (selEntity) {
         const h =
           selEntity.kind === "mannequin" ? 1.1 : selEntity.kind === "building" ? 3 : 0.6;
+        // 開始位置ではなく「いま見えている位置」(モーションで移動した先)を基準にする
+        const pose = evaluateEntityPose(st.project, selEntity, st.currentFrame);
         target.set(
-          selEntity.position[0],
-          selEntity.position[1] + h * selEntity.scale,
-          selEntity.position[2],
+          pose.position[0],
+          pose.position[1] + h * selEntity.scale,
+          pose.position[2],
         );
       } else if (st.cameraSelected) {
         const shot = getSelectedShot(st);
@@ -1312,8 +1321,9 @@ function ViewPresetController() {
       camera.lookAt(target);
       c?.update();
     };
+    viewPresetListeners.add(listener);
     return () => {
-      viewPresetListener = null;
+      viewPresetListeners.delete(listener);
     };
   }, [camera, controls]);
   return null;
