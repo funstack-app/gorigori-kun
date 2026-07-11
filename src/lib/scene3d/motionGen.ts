@@ -141,18 +141,34 @@ export function validateGeneratedSpec(raw: unknown): GeneratedMotionSpec {
  * 仕様JSON → AnimationClip。テンプレート(標準ライブラリのリグ)のレストポーズに
  * 差分回転を乗せてキーフレームトラックを組む。トラック名は既存GLBクリップと同形式
  */
+/**
+ * GLTFLoader は読み込み時にノード名から予約文字( [ ] . : / )を除去する
+ * (PropertyBinding.sanitizeNodeName)。ALLOWED_BONES は GLB 生データの名前
+ * (DEF-spine.001 等)なので、照合は両者を同じ規則で正規化して行う
+ */
+function sanitizeBoneName(name: string): string {
+  return name.replace(/\s/g, "_").replace(/[[\].:/]/g, "");
+}
+
 export function buildGeneratedClip(
   template: Group,
   spec: GeneratedMotionSpec,
   id: string,
 ): AnimationClip {
-  // レストポーズ収集(テンプレートのボーン初期姿勢)
-  const rest = new Map<string, { quat: Quaternion; pos: [number, number, number] }>();
+  // レストポーズ収集: 仕様のボーン名(ドット付き)→ 実ノード(サニタイズ済み名)の対応表
+  const wanted = new Map<string, string>(); // sanitize済み名 → 仕様上の名前
+  for (const b of ALLOWED_BONES) wanted.set(sanitizeBoneName(b), b);
+  const rest = new Map<
+    string,
+    { quat: Quaternion; pos: [number, number, number]; nodeName: string }
+  >();
   template.traverse((node: Object3D) => {
-    if ((ALLOWED_BONES as readonly string[]).includes(node.name)) {
-      rest.set(node.name, {
+    const specName = wanted.get(sanitizeBoneName(node.name));
+    if (specName && !rest.has(specName)) {
+      rest.set(specName, {
         quat: node.quaternion.clone(),
         pos: [node.position.x, node.position.y, node.position.z],
+        nodeName: node.name,
       });
     }
   });
@@ -186,7 +202,8 @@ export function buildGeneratedClip(
       const q = restQuat.quat.clone().multiply(delta);
       values.push(q.x, q.y, q.z, q.w);
     }
-    tracks.push(new QuaternionKeyframeTrack(`${bone}.quaternion`, times, values));
+    // トラック名は実ノード名で組む(サニタイズ済み名でないとバインドされない)
+    tracks.push(new QuaternionKeyframeTrack(`${restQuat.nodeName}.quaternion`, times, values));
   }
 
   // 腰の上下(hipsY)が指定されていれば position トラックを足す
@@ -196,7 +213,7 @@ export function buildGeneratedClip(
     for (const kf of spec.keyframes) {
       values.push(hips.pos[0], hips.pos[1] + (kf.hipsY ?? 0), hips.pos[2]);
     }
-    tracks.push(new VectorKeyframeTrack("DEF-hips.position", times, values));
+    tracks.push(new VectorKeyframeTrack(`${hips.nodeName}.position`, times, values));
   }
 
   // _Loop 命名規約: 到着後アクションで使われたとき「繰り返す/最終姿勢で止まる」の判定に使う
