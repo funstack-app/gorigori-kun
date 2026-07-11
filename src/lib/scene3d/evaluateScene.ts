@@ -14,6 +14,7 @@ import type {
   CameraMove,
   CameraPose,
   SceneEntity,
+  SceneEntityKind,
   SceneProject,
   SceneShot,
   Vec3,
@@ -100,11 +101,19 @@ const GAIT = {
 export type EntityPose = {
   position: Vec3;
   rotationY: number;
+  /** 倒れモーションの傾き(rad)。向いている方向へ前傾(X軸)に加算する */
+  fallAngle?: number;
   /** 歩行サイクル: moving中は phase が 0..1 で循環 */
   gait: { moving: boolean; phase: number; run: boolean };
   /** 移動系クリップのみ: 経路を走破するのに要する秒数(到着後アクションの開始時刻) */
   travelSeconds?: number;
 };
+
+/**
+ * 進行方向へ向きを変える種類(「正面」が定義できる物)。
+ * 壁・柱・箱などは向きを保ったまま平行移動する(移動で勝手に回ると配置が壊れるため)
+ */
+const FACES_TRAVEL: ReadonlySet<SceneEntityKind> = new Set(["mannequin", "car"]);
 
 /**
  * 折れ線パスに沿って speed で進んだ位置(プロシージャル歩行と移動系クリップの共通経路)。
@@ -153,7 +162,7 @@ function followPath(
 }
 
 /**
- * 人物の位置・向き・歩行位相の決定性評価。
+ * エンティティの位置・向き・歩行位相の決定性評価(全種類共通)。
  * モーションはタイムライン全体で再生され、経路を歩き切ったら到着点で立ち止まる
  */
 export function evaluateEntityPose(
@@ -167,9 +176,20 @@ export function evaluateEntityPose(
     gait: { moving: false, phase: 0, run: false },
   };
   const motion = entity.motion;
-  if (!motion || entity.kind !== "mannequin") return idle;
+  if (!motion) return idle;
+
+  if (motion.type === "fall") {
+    // 倒れる: 少し間を置いてから重力っぽく加速して前方へ90度(倒れたら止まる)
+    const FALL_DELAY = 0.2;
+    const FALL_DURATION = 1.1;
+    const t = Math.max(0, globalFrame / project.fps - FALL_DELAY) / FALL_DURATION;
+    const p = clamp01(t);
+    if (p <= 0) return idle;
+    return { ...idle, fallAngle: (Math.PI / 2) * p * p };
+  }
 
   if (motion.type === "clip") {
+    if (entity.kind !== "mannequin") return idle; // クリップは骨格前提
     // 移動系クリップ: 焼き込まれた速度でパスに沿って移動(手足はミキサーが駆動)
     const speed = motion.speed ?? 0;
     const path = motion.path ?? [];
@@ -192,16 +212,18 @@ export function evaluateEntityPose(
   if (motion.path.length === 0) return idle;
   const g = GAIT[motion.type];
   const p = followPath(entity, motion.path, g.speed, project.fps, globalFrame);
+  // 正面のない物(壁・柱等)は向きを保ったまま平行移動する
+  const facing = FACES_TRAVEL.has(entity.kind) ? p.rotationY : entity.rotationY;
   if (p.arrived) {
     return {
       position: p.position,
-      rotationY: p.rotationY,
+      rotationY: facing,
       gait: { moving: false, phase: 0, run: false },
     };
   }
   return {
     position: p.position,
-    rotationY: p.rotationY,
+    rotationY: facing,
     gait: { moving: true, phase: (p.traveled % g.cycle) / g.cycle, run: motion.type === "run" },
   };
 }

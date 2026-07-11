@@ -606,7 +606,14 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
       if (!ent) return;
       const pose = evaluateEntityPose(st.project, ent, frame);
       root.position.set(pose.position[0], pose.position[1], pose.position[2]);
-      root.rotation.y = pose.rotationY;
+      // YXZ(向き→傾き): 倒れモーションが「向いている方向へ前傾」になる。
+      // 静的な傾き(rotationX/Z)もここで毎フレーム適用する(詳細調整の3軸回転)
+      root.rotation.set(
+        (ent.rotationX ?? 0) + (pose.fallAngle ?? 0),
+        pose.rotationY,
+        ent.rotationZ ?? 0,
+        "YXZ",
+      );
 
       // インポートクリップ: フレーム時刻から各アクションの時間・重みを直接決める
       // (mixer任せのループにせず手動で time を与える = スクラブしても同一フレーム→同一姿勢)
@@ -674,7 +681,7 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
     <group
       ref={rootRef}
       position={entity.position}
-      rotation={[0, entity.rotationY, 0]}
+      rotation={[entity.rotationX ?? 0, entity.rotationY, entity.rotationZ ?? 0, "YXZ"]}
       scale={entity.scale}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
@@ -1157,10 +1164,17 @@ function MotionOverlay() {
 
   const entity = project.entities.find((e) => e.id === selectedEntityId);
   const motion = entity?.motion;
-  // その場再生クリップ(speed 0)は行き先を持たないため旗を出さない
-  const path =
-    !motion ? [] : motion.type === "clip" ? ((motion.speed ?? 0) > 0 ? (motion.path ?? []) : []) : motion.path;
-  if (!entity || entity.kind !== "mannequin" || !motion || path.length === 0) {
+  // 倒れる・その場再生クリップ(speed 0)は行き先を持たないため旗を出さない
+  const path = !motion
+    ? []
+    : motion.type === "fall"
+      ? []
+      : motion.type === "clip"
+        ? (motion.speed ?? 0) > 0
+          ? (motion.path ?? [])
+          : []
+        : motion.path;
+  if (!entity || !motion || path.length === 0) {
     return null;
   }
   const dest = path[path.length - 1];

@@ -34,7 +34,7 @@ let shotSeq = 1;
 
 /** モーション種類を切り替えても行き先を引き継ぐための現経路(clip/walk/run共通) */
 function existingMotionPath(e: SceneEntity): Vec3[] {
-  if (!e.motion) return [];
+  if (!e.motion || e.motion.type === "fall") return [];
   return e.motion.type === "clip" ? (e.motion.path ?? []) : e.motion.path;
 }
 
@@ -167,6 +167,8 @@ type Scene3dState = {
   clearSelection: () => void;
   moveEntity: (id: string, position: Vec3) => void;
   rotateEntity: (id: string, rotationY: number) => void;
+  /** 3軸回転(BlenderのR相当)。axis指定で1軸ずつ設定(ラジアン) */
+  setEntityRotation: (id: string, axis: "x" | "y" | "z", radians: number) => void;
   scaleEntity: (id: string, scale: number) => void;
   setEntityFloors: (id: string, floors: number) => void;
   setEntityParam: (id: string, key: "width" | "height" | "depth", value: number) => void;
@@ -423,6 +425,19 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
     });
   },
 
+  setEntityRotation: (id, axis, radians) => {
+    const { project } = get();
+    const key = axis === "x" ? "rotationX" : axis === "y" ? "rotationY" : "rotationZ";
+    set({
+      project: {
+        ...project,
+        entities: project.entities.map((e) =>
+          e.id === id ? { ...e, [key]: radians } : e,
+        ),
+      },
+    });
+  },
+
   scaleEntity: (id, scale) => {
     const { project } = get();
     const clamped = Math.max(0.3, Math.min(4, scale));
@@ -528,6 +543,7 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
         entities: project.entities.map((e) => {
           if (e.id !== id) return e;
           if (type == null) return { ...e, motion: null };
+          if (type === "fall") return { ...e, motion: { type: "fall" } };
           // 既存の経路は維持しつつ種類だけ変更。無ければ向いている方向へ2.5m
           const prev = existingMotionPath(e);
           const path = prev.length > 0 ? prev : defaultMotionPath(e);
@@ -544,7 +560,8 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
         ...project,
         entities: project.entities.map((e) => {
           if (e.id !== id || !e.motion) return e;
-          // その場再生クリップは行き先を持たない
+          // 倒れる・その場再生クリップは行き先を持たない
+          if (e.motion.type === "fall") return e;
           if (e.motion.type === "clip" && (e.motion.speed ?? 0) <= 0) return e;
           const cur = e.motion.type === "clip" ? (e.motion.path ?? []) : e.motion.path;
           if (cur.length === 0) return e;

@@ -1162,6 +1162,7 @@ function ObjectDetailPopup({ entityId, onClose }: { entityId: string; onClose: (
   const project = useScene3d((s) => s.project);
   const moveEntity = useScene3d((s) => s.moveEntity);
   const scaleEntity = useScene3d((s) => s.scaleEntity);
+  const setEntityRotation = useScene3d((s) => s.setEntityRotation);
   const setEntityFloors = useScene3d((s) => s.setEntityFloors);
   const setEntityParam = useScene3d((s) => s.setEntityParam);
 
@@ -1169,6 +1170,12 @@ function ObjectDetailPopup({ entityId, onClose }: { entityId: string; onClose: (
   if (!entity) return null;
   const kind = entity.kind;
   const p = entity.params ?? {};
+  const toDeg = (rad: number) => {
+    // -180〜180 に正規化(向きスライダーは 0〜360 で保存するため)
+    const deg = Math.round((rad * 180) / Math.PI);
+    return ((deg + 180) % 360 + 360) % 360 - 180;
+  };
+  const toRad = (deg: number) => (deg * Math.PI) / 180;
 
   return (
     <Popup title={`${entity.label} の詳細`} onClose={onClose}>
@@ -1187,6 +1194,34 @@ function ObjectDetailPopup({ entityId, onClose }: { entityId: string; onClose: (
           min={-15}
           max={15}
           onChange={(v) => moveEntity(entity.id, [entity.position[0], entity.position[1], v])}
+        />
+
+        <p className="mt-1 text-[10px] font-bold tracking-wide text-neutral-500">
+          回転(度)。BlenderのR相当: 前後の傾き / 向き / 左右の傾き
+        </p>
+        <AxisSlider
+          label="傾きX"
+          value={toDeg(entity.rotationX ?? 0)}
+          min={-180}
+          max={180}
+          step={5}
+          onChange={(v) => setEntityRotation(entity.id, "x", toRad(v))}
+        />
+        <AxisSlider
+          label="向きY"
+          value={toDeg(entity.rotationY)}
+          min={-180}
+          max={180}
+          step={5}
+          onChange={(v) => setEntityRotation(entity.id, "y", toRad(v))}
+        />
+        <AxisSlider
+          label="傾きZ"
+          value={toDeg(entity.rotationZ ?? 0)}
+          min={-180}
+          max={180}
+          step={5}
+          onChange={(v) => setEntityRotation(entity.id, "z", toRad(v))}
         />
 
         <p className="mt-1 text-[10px] font-bold tracking-wide text-neutral-500">大きさ</p>
@@ -1258,7 +1293,7 @@ function SelectedObjectSection() {
         {entity.label}
       </p>
 
-      {entity.kind === "mannequin" && (
+      {entity.kind === "mannequin" ? (
         <div className="grid grid-cols-3 gap-1.5">
           <button className={motionBtn(motionType === null)} onClick={() => setEntityMotion(entity.id, null)}>
             立ち
@@ -1270,10 +1305,30 @@ function SelectedObjectSection() {
             走る
           </button>
         </div>
+      ) : (
+        <div className="grid grid-cols-4 gap-1.5">
+          <button className={motionBtn(motionType === null)} onClick={() => setEntityMotion(entity.id, null)}>
+            静止
+          </button>
+          <button className={motionBtn(motionType === "walk")} onClick={() => setEntityMotion(entity.id, "walk")} title="ゆっくり移動(1.4m/s)">
+            動く
+          </button>
+          <button className={motionBtn(motionType === "run")} onClick={() => setEntityMotion(entity.id, "run")} title="速く移動(3.4m/s)">
+            速く
+          </button>
+          <button className={motionBtn(motionType === "fall")} onClick={() => setEntityMotion(entity.id, "fall")} title="向いている方向へ倒れる">
+            倒れる
+          </button>
+        </div>
       )}
-      {entity.kind === "mannequin" && motionType && motionType !== "clip" && (
+      {motionType && motionType !== "clip" && motionType !== "fall" && (
         <p className="text-[10px] leading-4 text-neutral-500">
-          旗をドラッグで行き先を変更。再生で歩き出します
+          旗をドラッグで行き先を変更。再生で動き出します
+        </p>
+      )}
+      {motionType === "fall" && (
+        <p className="text-[10px] leading-4 text-neutral-500">
+          再生で向いている方向へ倒れます(向きスライダーで倒れる方向を変更)
         </p>
       )}
       {entity.kind === "mannequin" &&
@@ -1341,7 +1396,7 @@ function SelectedObjectSection() {
         className="rounded-lg border border-[#2a2a2a] px-2 py-1.5 text-xs text-neutral-400 hover:border-pink-400/60 hover:text-neutral-200"
         onClick={() => setDetailOpen(true)}
       >
-        詳細を調整…(位置・大きさ・寸法)
+        詳細を調整…(位置・回転・大きさ・寸法)
       </button>
       {detailOpen && <ObjectDetailPopup entityId={entity.id} onClose={() => setDetailOpen(false)} />}
     </div>

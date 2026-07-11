@@ -15,13 +15,17 @@ export const SCENE_FPS = 24 as const;
 
 export type Vec3 = [number, number, number];
 
-/** 人物のモーション(タイムライン全体で再生。決定論プロシージャル歩行) */
-export type EntityMotionType = "walk" | "run";
+/** エンティティのモーション(タイムライン全体で再生。決定論プロシージャル) */
+export type EntityMotionType = "walk" | "run" | "fall";
 export type EntityMotion =
   | {
-      type: EntityMotionType;
+      type: "walk" | "run";
       /** 経由点(開始位置は entity.position)。最後の点が到着点。到着後は立ち止まる */
       path: Vec3[];
+    }
+  | {
+      /** 倒れる(向いている方向へ前方に90度)。柱・木・棚などの転倒演出 */
+      type: "fall";
     }
   | {
       /** インポートしたモーションクリップ(Mixamo等)を再生 */
@@ -65,10 +69,16 @@ export type SceneEntity = {
   label: string;
   /** 床面上の配置位置(yは接地オフセット込みの原点) */
   position: Vec3;
-  /** 床上回転(ラジアン)。Y軸回転のみ */
+  /** 床上回転(ラジアン)。Y軸回転(向き) */
   rotationY: number;
+  /**
+   * 傾き回転(ラジアン)。BlenderのR相当。省略=0。
+   * 適用順は YXZ(向き→傾き): 壁を横に倒して床プレートにする等が素直にできる
+   */
+  rotationX?: number;
+  rotationZ?: number;
   scale: number;
-  /** 人物のモーション(mannequinのみ)。null/未指定=立ち */
+  /** モーション。null/未指定=静止。clipは骨格前提のためmannequinのみ */
   motion?: EntityMotion | null;
   /** プロシージャル形状のパラメータ。kindごとに解釈(未指定はkind既定値) */
   params?: {
