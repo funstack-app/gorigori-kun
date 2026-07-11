@@ -493,7 +493,15 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
   const clipMotion = entity.motion?.type === "clip" ? entity.motion : null;
   const clipId = clipMotion?.clipId ?? null;
   const clipMoves = (clipMotion?.speed ?? 0) > 0;
+  // 到着後アクション(未指定は待機)。骨格を共有する標準ライブラリ同士のみ
+  const arrivalClipId =
+    clipMoves && clipId?.startsWith("builtin-")
+      ? (clipMotion?.arrivalClipId ?? "builtin-Idle_Loop")
+      : null;
+  // ライブラリの読み込み完了で組み直す(再起動直後は実体が未登録のため)
+  const motionCount = useScene3d((s) => s.importedMotions.length);
   const clipRig = useMemo(() => {
+    void motionCount;
     if (!clipId) return null;
     const m = getImportedMotion(clipId);
     if (!m) return null;
@@ -505,18 +513,20 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
     const mixer = new AnimationMixer(obj);
     const main = mixer.clipAction(m.clip);
     main.play();
-    // 移動系クリップ: 到着後は待機へ切替(同一テンプレートを共有する標準ライブラリのみ)
-    let idle: AnimationAction | null = null;
-    if (clipMoves && clipId !== "builtin-Idle_Loop") {
-      const idleMotion = getImportedMotion("builtin-Idle_Loop");
-      if (idleMotion && idleMotion.template === m.template) {
-        idle = mixer.clipAction(idleMotion.clip);
-        idle.play();
-        idle.weight = 0;
+    // 到着後アクション: 同じテンプレート(=同じ骨格)のクリップだけ適用できる
+    let arrival: { action: AnimationAction; duration: number; loops: boolean } | null = null;
+    if (arrivalClipId && arrivalClipId !== clipId) {
+      const am = getImportedMotion(arrivalClipId);
+      if (am && am.template === m.template) {
+        const action = mixer.clipAction(am.clip);
+        action.play();
+        action.weight = 0;
+        // 名前が _Loop で終わらないクリップ(座る(動作)・着地等)は一回きり→最終姿勢で静止
+        arrival = { action, duration: am.clip.duration, loops: am.clip.name.endsWith("_Loop") };
       }
     }
-    return { obj, mixer, main, idle };
-  }, [clipId, clipMoves]);
+    return { obj, mixer, main, mainDuration: m.clip.duration, arrival };
+  }, [clipId, arrivalClipId, motionCount]);
   const moveEntity = useScene3d((s) => s.moveEntity);
   const setDragging = useScene3d((s) => s.setDragging);
   const selected = useScene3d((s) => s.selectedEntityId === entity.id);
@@ -598,15 +608,31 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
       root.position.set(pose.position[0], pose.position[1], pose.position[2]);
       root.rotation.y = pose.rotationY;
 
-      // インポートクリップ: フレーム時刻で決定論的に駆動(各アクションが内部でループ)
+      // インポートクリップ: フレーム時刻から各アクションの時間・重みを直接決める
+      // (mixer任せのループにせず手動で time を与える = スクラブしても同一フレーム→同一姿勢)
       if (clipRig) {
-        if (clipRig.idle) {
-          // 移動系クリップの到着後は待機へハード切替(同一フレーム→同一姿勢の決定性)
-          const moving = pose.gait.moving;
-          clipRig.main.weight = moving ? 1 : 0;
-          clipRig.idle.weight = moving ? 0 : 1;
+        const t = frame / st.project.fps;
+        const arrivalAt = pose.travelSeconds;
+        const arrived = arrivalAt != null && !pose.gait.moving;
+        const arr = clipRig.arrival;
+        if (arr && arrived) {
+          // 到着後アクションへハード切替
+          const ta = Math.max(0, t - arrivalAt);
+          clipRig.main.weight = 0;
+          clipRig.main.time = 0;
+          arr.action.weight = 1;
+          arr.action.time = arr.loops
+            ? ta % Math.max(0.001, arr.duration)
+            : Math.min(ta, Math.max(0.001, arr.duration - 0.0001));
+        } else {
+          clipRig.main.weight = 1;
+          clipRig.main.time = t % Math.max(0.001, clipRig.mainDuration);
+          if (arr) {
+            arr.action.weight = 0;
+            arr.action.time = 0;
+          }
         }
-        clipRig.mixer.setTime(frame / st.project.fps);
+        clipRig.mixer.update(0);
         return;
       }
 
@@ -1317,6 +1343,7 @@ export function Scene3dViewport({
 }) {
   const entities = useScene3d((s) => s.project.entities);
   const clearSelection = useScene3d((s) => s.clearSelection);
+  const cameraSelected = useScene3d((s) => s.cameraSelected);
   const exporting = useScene3d(
     (s) => s.exportStatus.phase === "rendering" || s.exportStatus.phase === "encoding",
   );
@@ -1363,10 +1390,11 @@ export function Scene3dViewport({
       {entities.map((e) => (
         <EntityMesh key={e.id} entity={e} />
       ))}
-      {!exporting && !isCameraPane && <CameraPathLine />}
+      {/* 軌道線・終点/中間ハンドルは「カメラを選んでいる間だけ」出す(触った物だけが語る) */}
+      {!exporting && !isCameraPane && cameraSelected && <CameraPathLine />}
       {!exporting && !isCameraPane && <AllCameraIndicators />}
-      {!exporting && !isCameraPane && <CameraEndMarker />}
-      {!exporting && !isCameraPane && <CameraMidMarker />}
+      {!exporting && !isCameraPane && cameraSelected && <CameraEndMarker />}
+      {!exporting && !isCameraPane && cameraSelected && <CameraMidMarker />}
       {!exporting && !isCameraPane && <MotionOverlay />}
       <CameraRig mode={mode} primary={primary} />
       {!isCameraPane && <ViewportControls />}
