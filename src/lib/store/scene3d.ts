@@ -137,6 +137,10 @@ type Scene3dState = {
 
   addEntity: (kind: SceneEntityKind) => void;
   removeEntity: (id: string) => void;
+  /** エンティティを複製(モーション・寸法ごと)。複製をそのまま選択する */
+  duplicateEntity: (id: string) => void;
+  /** レイヤー一覧の並び替え: id を overId の位置へ挿入 */
+  reorderEntity: (id: string, overId: string) => void;
   selectEntity: (id: string | null) => void;
   clearSelection: () => void;
   moveEntity: (id: string, position: Vec3) => void;
@@ -247,13 +251,30 @@ function renumberShots(shots: SceneShot[]): SceneShot[] {
   return shots.map((sh, i) => ({ ...sh, label: `カット${i + 1}` }));
 }
 
+/**
+ * 旧保存データの移行: speed/path を持たない clip モーション(移動系クリップ対応前の保存)は
+ * 旗(行き先)が出ないため、読込時に速度を焼き込む。標準ライブラリは clipId から解決できる
+ */
+function migrateProject(project: SceneProject): SceneProject {
+  return {
+    ...project,
+    entities: project.entities.map((e) => {
+      if (e.motion?.type !== "clip" || e.motion.speed !== undefined) return e;
+      const speed = resolveClipSpeed(e.motion.clipId);
+      if (speed <= 0) return e;
+      const path = e.motion.path?.length ? e.motion.path : defaultMotionPath(e);
+      return { ...e, motion: { ...e.motion, speed, path } };
+    }),
+  };
+}
+
 const initialProject = ((): SceneProject => {
   try {
     const raw = localStorage.getItem("scene3d.project.v3");
     if (raw) {
       const parsed = JSON.parse(raw) as SceneProject;
       if (parsed.schemaVersion === 3 && parsed.shots?.length && parsed.cameras?.length) {
-        return parsed;
+        return migrateProject(parsed);
       }
     }
   } catch {
@@ -264,7 +285,8 @@ const initialProject = ((): SceneProject => {
 
 export const useScene3d = create<Scene3dState>((set, get) => ({
   project: initialProject,
-  selectedEntityId: initialProject.entities[0]?.id ?? null,
+  // 起動時は何も選択しない(自由視点から始める。選択はユーザーのクリックで)
+  selectedEntityId: null,
   selectedShotId: initialProject.shots[0].id,
   cameraSelected: false,
   playing: false,
@@ -314,6 +336,37 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
       project: { ...project, entities, cameras },
       selectedEntityId: selectedEntityId === id ? null : selectedEntityId,
     });
+  },
+
+  duplicateEntity: (id) => {
+    const { project } = get();
+    const src = project.entities.find((e) => e.id === id);
+    if (!src) return;
+    const newId = `${src.kind}-${Date.now()}-${entitySeq++}`;
+    const copy: SceneEntity = {
+      ...src,
+      id: newId,
+      label: `${src.label}のコピー`,
+      // 元と重ならないよう斜めに0.6mずらす(高さは維持)
+      position: [src.position[0] + 0.6, src.position[1], src.position[2] + 0.6],
+      motion: src.motion ? (JSON.parse(JSON.stringify(src.motion)) as SceneEntity["motion"]) : src.motion,
+      params: src.params ? { ...src.params } : undefined,
+    };
+    const idx = project.entities.findIndex((e) => e.id === id);
+    const entities = [...project.entities];
+    entities.splice(idx + 1, 0, copy);
+    set({ project: { ...project, entities }, selectedEntityId: newId });
+  },
+
+  reorderEntity: (id, overId) => {
+    const { project } = get();
+    const from = project.entities.findIndex((e) => e.id === id);
+    const to = project.entities.findIndex((e) => e.id === overId);
+    if (from < 0 || to < 0 || from === to) return;
+    const entities = [...project.entities];
+    const [moved] = entities.splice(from, 1);
+    entities.splice(to, 0, moved);
+    set({ project: { ...project, entities } });
   },
 
   selectEntity: (id) => set({ selectedEntityId: id, cameraSelected: false }),
