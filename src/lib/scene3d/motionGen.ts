@@ -44,6 +44,11 @@ export type GeneratedMotionSpec = {
   duration: number;
   /** true=繰り返す動き / false=一回きり(最終姿勢で静止) */
   loop: boolean;
+  /**
+   * 前進を伴う動きの移動速度(m/s)。0=その場。AIが自己申告する
+   * (スキップ=前進1.8、ダンス=0 のような判断はAI側が持っている)
+   */
+  moveSpeed?: number;
   keyframes: {
     /** 秒。昇順、先頭は0 */
     time: number;
@@ -74,8 +79,10 @@ export function buildMotionPrompt(userText: string): { systemPrompt: string; pro
     "- 角度は -150〜150 度",
     "- loop:true(繰り返す動き)のときは最後のキーフレームを最初と同じ姿勢にする",
     "- 動かさないボーンは書かない。動きの要所だけキーを打ち、中間は補間に任せる",
+    '- moveSpeed: その動きが前進を伴うなら移動速度(m/s)を書く。その場の動きは 0。',
+    "  目安: 歩く1.4 / スキップ1.8 / 走る2.6 / 全力疾走4.5。キャラは別途この速度で平行移動する",
     "",
-    '出力形式: {"name":"短い日本語名","duration":2,"loop":true,"keyframes":[{"time":0,"hipsY":0,"bones":{"DEF-upper_arm.R":[0,0,80]}},...]}',
+    '出力形式: {"name":"短い日本語名","duration":2,"loop":true,"moveSpeed":0,"keyframes":[{"time":0,"hipsY":0,"bones":{"DEF-upper_arm.R":[0,0,80]}},...]}',
   ].join("\n");
   return { systemPrompt, prompt: `依頼された動き: ${userText}` };
 }
@@ -94,6 +101,7 @@ export function validateGeneratedSpec(raw: unknown): GeneratedMotionSpec {
   const name = typeof r.name === "string" && r.name.trim() ? r.name.trim().slice(0, 24) : "AIモーション";
   const duration = clampNum(Number(r.duration) || 2, 0.5, 10);
   const loop = Boolean(r.loop);
+  const moveSpeed = r.moveSpeed != null ? clampNum(Number(r.moveSpeed) || 0, 0, 6) : undefined;
   if (!Array.isArray(r.keyframes) || r.keyframes.length < 2) {
     throw new Error("キーフレームが2つ未満です。言い方を変えてもう一度生成してください");
   }
@@ -134,7 +142,7 @@ export function validateGeneratedSpec(raw: unknown): GeneratedMotionSpec {
   keyframes.sort((a, b) => a.time - b.time);
   if (keyframes[0].time !== 0) keyframes[0] = { ...keyframes[0], time: 0 };
 
-  return { name, duration, loop, keyframes };
+  return { name, duration, loop, moveSpeed, keyframes };
 }
 
 /**

@@ -21,14 +21,27 @@ const BUILTIN_SPEEDS: Record<string, number> = {
 const NAME_HEURISTICS: [RegExp, number][] = [
   [/sprint|dash|全力/i, 4.6],
   [/run|jog|走|ジョグ/i, 2.6],
+  [/skip|hop|スキップ|跳ね/i, 1.8],
   [/sneak|crouch|忍び|しゃがみ歩/i, 0.9],
   [/crawl|匍匐/i, 0.7],
   [/swim|泳/i, 1.1],
-  [/walk|歩/i, 1.4],
+  [/walk|歩|散歩/i, 1.4],
 ];
+
+/**
+ * 明示登録された速度(AI生成モーションが自己申告した moveSpeed 等)。
+ * 名前推定より優先する
+ */
+const REGISTERED_SPEEDS = new Map<string, number>();
+
+export function registerClipSpeed(clipId: string, speed: number): void {
+  REGISTERED_SPEEDS.set(clipId, Math.min(6, Math.max(0, speed)));
+}
 
 /** クリップの移動速度(m/s)を返す。0 = その場再生 */
 export function resolveClipSpeed(clipId: string, name?: string): number {
+  const registered = REGISTERED_SPEEDS.get(clipId);
+  if (registered !== undefined) return registered;
   if (clipId.startsWith("builtin-")) {
     return BUILTIN_SPEEDS[clipId.slice("builtin-".length)] ?? 0;
   }

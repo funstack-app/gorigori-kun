@@ -43,7 +43,7 @@ import {
   validateGeneratedSpec,
 } from "../../../lib/scene3d/motionGen";
 import { codexTextQuery } from "../../../lib/agents/codexQuery";
-import { resolveClipSpeed } from "../../../lib/scene3d/clipSpeed";
+import { registerClipSpeed, resolveClipSpeed } from "../../../lib/scene3d/clipSpeed";
 import {
   CAMERA_PRESET_LABELS,
   cameraColor,
@@ -891,6 +891,8 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
       const clip = buildGeneratedClip(template, spec, id);
       const entry = registerGeneratedClip(id, spec.name, clip);
       if (!entry) throw new Error("モーションの登録に失敗しました");
+      // 速度を登録してから割り当てる(割当時に speed が焼き込まれるため順序が重要)
+      if (spec.moveSpeed != null) registerClipSpeed(id, spec.moveSpeed);
       saveGeneratedSpec(id, spec);
       registerImportedMotions([entry]);
       setEntityMotionClip(entityId, id);
@@ -2527,12 +2529,29 @@ export function Scene3dWorkspace() {
           try {
             const clip = buildGeneratedClip(template, spec, id);
             const entry = registerGeneratedClip(id, spec.name, clip);
-            if (entry) restored.push(entry);
+            if (entry) {
+              // AIの自己申告速度(無ければ名前推定に任せる)を登録してから一覧へ
+              if (spec.moveSpeed != null) registerClipSpeed(id, spec.moveSpeed);
+              restored.push(entry);
+            }
           } catch {
             /* 壊れた保存データはスキップ(他の生成モーションは復元する) */
           }
         }
-        if (restored.length > 0) useScene3d.getState().registerImportedMotions(restored);
+        if (restored.length > 0) {
+          const st = useScene3d.getState();
+          st.registerImportedMotions(restored);
+          // 割当済みの人物の速度が古い(生成時は速度未対応だった等)場合は再割当で治す
+          for (const e of st.project.entities) {
+            const motion = e.motion;
+            if (motion?.type !== "clip" || !motion.clipId.startsWith("gen-")) continue;
+            const name = restored.find((m) => m.id === motion.clipId)?.name;
+            const nowSpeed = resolveClipSpeed(motion.clipId, name);
+            if ((motion.speed ?? 0) !== nowSpeed) {
+              st.setEntityMotionClip(e.id, motion.clipId);
+            }
+          }
+        }
       })
       .catch(() => {
         /* 読み込み失敗時はライブラリを開いたときに再試行される */
