@@ -225,6 +225,20 @@ function handheldOffset(frame: number, fps: number): Vec3 {
   ];
 }
 
+/** クイックパン用: 前後をためて中間で一気に振る(場面転換の「ヒュッ」) */
+function whipEase(x: number): number {
+  if (x < 0.4) return 0.04 * (x / 0.4);
+  if (x > 0.6) return 0.96 + 0.04 * ((x - 0.6) / 0.4);
+  const u = (x - 0.4) / 0.2;
+  return 0.04 + 0.92 * (u * u * (3 - 2 * u));
+}
+
+/** スナップズーム用: 出だしで一気に動いて後半で落ち着く */
+function snapEase(x: number): number {
+  const u = clamp01(x);
+  return 1 - (1 - u) * (1 - u) * (1 - u);
+}
+
 /** Y軸周りに point を center 中心で角度(度)回転 */
 function rotateAroundY(point: Vec3, center: Vec3, degrees: number): Vec3 {
   const rad = (degrees * Math.PI) / 180;
@@ -256,6 +270,7 @@ export function evaluateShotCamera(
   const lookAt = resolveLookAt(project, shot, globalFrame ?? localFrame);
 
   let position: Vec3;
+  let fovDeg = lensToFovDeg(camera.lensMm);
   switch (camera.preset) {
     case "fixed":
       position = camera.startPos;
@@ -267,6 +282,60 @@ export function evaluateShotCamera(
       const base = lerpVec3(camera.startPos, camera.endPos, t);
       const off = handheldOffset(localFrame, project.fps);
       position = [base[0] + off[0], base[1] + off[1], base[2] + off[2]];
+      break;
+    }
+    case "spiralIn": {
+      // 対象の周りを回り込みながら距離を詰め、目線の高さへ降りる
+      const rotated = rotateAroundY(camera.startPos, lookAt, camera.orbitDegrees * t);
+      const shrink = 1 - 0.55 * t;
+      position = [
+        lookAt[0] + (rotated[0] - lookAt[0]) * shrink,
+        rotated[1] + (lookAt[1] - rotated[1]) * 0.35 * t,
+        lookAt[2] + (rotated[2] - lookAt[2]) * shrink,
+      ];
+      break;
+    }
+    case "dollyZoom": {
+      // 寄りながら画角を広げる(被写体の大きさを保ったまま背景が伸びる「めまい」)
+      position = lerpVec3(camera.startPos, camera.endPos, t);
+      fovDeg = lensToFovDeg(lerp(camera.lensMm, Math.max(14, camera.lensMm * 0.45), t));
+      break;
+    }
+    case "follow": {
+      // 被写体の動きに相対位置でついていく(並走・追跡。歩く/走ると組み合わせる)
+      const target = findEntity(project, camera.targetEntityId);
+      const base = lerpVec3(camera.startPos, camera.endPos, t);
+      if (target) {
+        const pose = evaluateEntityPose(project, target, globalFrame ?? localFrame);
+        position = [
+          pose.position[0] + (base[0] - target.position[0]),
+          base[1],
+          pose.position[2] + (base[2] - target.position[2]),
+        ];
+      } else {
+        position = base;
+      }
+      break;
+    }
+    case "whipPan": {
+      position = lerpVec3(camera.startPos, camera.endPos, whipEase(t));
+      break;
+    }
+    case "shake": {
+      // 衝撃の揺れ: 開始が最大で徐々に収まる(爆発・着地・驚き)
+      const off = handheldOffset(localFrame * 3.1, project.fps);
+      const amp = 5 * (1 - t);
+      position = [
+        camera.startPos[0] + off[0] * amp,
+        camera.startPos[1] + off[1] * amp,
+        camera.startPos[2] + off[2] * amp,
+      ];
+      break;
+    }
+    case "snapZoom": {
+      // 位置固定のまま一気に寄る(ドキュメンタリー風の目線集中)
+      position = camera.startPos;
+      fovDeg = lensToFovDeg(lerp(camera.lensMm, camera.lensMm * 2.4, snapEase(t)));
       break;
     }
     // pushIn / pullOut / track / pan / crane は「開始→終了の補間」で表現が共通。
@@ -290,7 +359,7 @@ export function evaluateShotCamera(
   return {
     position,
     lookAt,
-    fovDeg: lensToFovDeg(camera.lensMm),
+    fovDeg,
   };
 }
 

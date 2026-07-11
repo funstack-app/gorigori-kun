@@ -77,6 +77,14 @@ const PRESET_ORDER: CameraPresetId[] = [
   "orbit",
   "crane",
   "handheld",
+  "spiralIn",
+  "dollyZoom",
+  "flyover",
+  "riseReveal",
+  "follow",
+  "whipPan",
+  "shake",
+  "snapZoom",
 ];
 
 const ASPECT_VALUES: Record<SceneAspectRatio, number> = {
@@ -312,6 +320,60 @@ function PresetGlyph({ preset }: { preset: CameraPresetId }) {
           <rect x="9" y="6" width="6" height="4" rx="1" />
         </Icon>
       );
+    case "spiralIn":
+      return (
+        <Icon className={cls}>
+          <circle cx="12" cy="12" r="1.5" />
+          <path d="M12 5a7 7 0 1 1-7 7 5 5 0 1 1 5 5 3 3 0 1 1 2-5" />
+        </Icon>
+      );
+    case "dollyZoom":
+      return (
+        <Icon className={cls}>
+          <circle cx="12" cy="12" r="2.5" />
+          <path d="M4 5l4 4M20 5l-4 4M4 19l4-4M20 19l-4-4" />
+        </Icon>
+      );
+    case "flyover":
+      return (
+        <Icon className={cls}>
+          <circle cx="12" cy="16" r="2" />
+          <path d="M4 16c2-8 14-8 16 0M17.5 13.5L20 16l-3 .8" />
+        </Icon>
+      );
+    case "riseReveal":
+      return (
+        <Icon className={cls}>
+          <path d="M4 20h16M12 17V6M9 9l3-3 3 3" />
+        </Icon>
+      );
+    case "follow":
+      return (
+        <Icon className={cls}>
+          <circle cx="8" cy="10" r="2" />
+          <rect x="14" y="8" width="6" height="4" rx="1" />
+          <path d="M6 17h12M15 14.5L18 17l-3 2.5" />
+        </Icon>
+      );
+    case "whipPan":
+      return (
+        <Icon className={cls}>
+          <path d="M3 12h13M12 8l5 4-5 4M19 7v10" />
+        </Icon>
+      );
+    case "shake":
+      return (
+        <Icon className={cls}>
+          <path d="M4 12l3-5 3 9 3-8 3 6 2-4" />
+        </Icon>
+      );
+    case "snapZoom":
+      return (
+        <Icon className={cls}>
+          <circle cx="12" cy="12" r="3" />
+          <path d="M4 4l4 4M20 4l-4 4M4 20l4-4M20 20l-4-4M12 10.5v3M10.5 12h3" />
+        </Icon>
+      );
   }
 }
 
@@ -448,6 +510,14 @@ function PresetPickerPopup({ onClose }: { onClose: () => void }) {
     orbit: "周囲を回り込む",
     crane: "上昇しながら見下ろす",
     handheld: "手持ち風の揺れ",
+    spiralIn: "回り込みながら寄る",
+    dollyZoom: "背景だけ伸びる緊張感",
+    flyover: "頭上を飛び越えて背後へ",
+    riseReveal: "足元から上昇して全景を見せる",
+    follow: "動く被写体を並走・追跡",
+    whipPan: "一瞬で振る場面転換",
+    shake: "爆発・衝撃の揺れ(収まる)",
+    snapZoom: "位置固定で一気に寄る",
   };
 
   return (

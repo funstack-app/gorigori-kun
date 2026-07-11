@@ -75,10 +75,32 @@ const ENTITY_LABELS: Record<SceneEntityKind, string> = {
 function presetPlacement(
   preset: CameraPresetId,
   target: Vec3,
-): { startPos: Vec3; endPos: Vec3; orbitDegrees: number } {
+): { startPos: Vec3; endPos: Vec3; orbitDegrees: number; midPos?: Vec3 } {
   const [tx, , tz] = target;
   const eye = 1.4; // 目線の高さ
   switch (preset) {
+    case "spiralIn":
+      return { startPos: [tx, 2.4, tz + 5], endPos: [tx, 2.4, tz + 5], orbitDegrees: 150 };
+    case "dollyZoom":
+      return { startPos: [tx, eye, tz + 6], endPos: [tx, eye, tz + 2.2], orbitDegrees: 0 };
+    case "flyover":
+      // 前方から頭上を飛び越えて背後へ(中間点を真上に置いた曲線)
+      return {
+        startPos: [tx, 1.2, tz + 6],
+        endPos: [tx, 1.6, tz - 6],
+        orbitDegrees: 0,
+        midPos: [tx, 4.5, tz],
+      };
+    case "riseReveal":
+      return { startPos: [tx, 0.3, tz + 2.2], endPos: [tx, 3.4, tz + 6], orbitDegrees: 0 };
+    case "follow":
+      return { startPos: [tx - 1.8, eye, tz + 2.6], endPos: [tx - 1.8, eye, tz + 2.6], orbitDegrees: 0 };
+    case "whipPan":
+      return { startPos: [tx - 2.5, eye, tz + 3.5], endPos: [tx + 2.5, eye, tz + 3.5], orbitDegrees: 0 };
+    case "shake":
+      return { startPos: [tx, eye, tz + 3.2], endPos: [tx, eye, tz + 3.2], orbitDegrees: 0 };
+    case "snapZoom":
+      return { startPos: [tx, eye, tz + 4.5], endPos: [tx, eye, tz + 4.5], orbitDegrees: 0 };
     case "pushIn":
       return { startPos: [tx, eye, tz + 5], endPos: [tx, eye - 0.1, tz + 1.8], orbitDegrees: 0 };
     case "pullOut":
@@ -698,7 +720,8 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
       ...m,
       preset,
       ...placement,
-      midPos: null,
+      // プリセットが中間点を持つ(飛び越え等)ならそれを採用、無ければ直線に戻す
+      midPos: placement.midPos ?? null,
     }));
     set({
       project: {

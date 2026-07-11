@@ -91,7 +91,15 @@ export type CameraPresetId =
   | "pan"
   | "orbit"
   | "crane"
-  | "handheld";
+  | "handheld"
+  | "spiralIn"
+  | "dollyZoom"
+  | "flyover"
+  | "riseReveal"
+  | "follow"
+  | "whipPan"
+  | "shake"
+  | "snapZoom";
 
 export type CameraEasing = "linear" | "easeInOut";
 
@@ -191,6 +199,14 @@ export const CAMERA_PRESET_LABELS: Record<CameraPresetId, string> = {
   orbit: "オービット",
   crane: "クレーン",
   handheld: "ハンドヘルド",
+  spiralIn: "スパイラル寄り",
+  dollyZoom: "めまい",
+  flyover: "飛び越え",
+  riseReveal: "上昇リビール",
+  follow: "追走",
+  whipPan: "クイックパン",
+  shake: "衝撃の揺れ",
+  snapZoom: "スナップズーム",
 };
 
 export function createDefaultCameraMove(): CameraMove {
