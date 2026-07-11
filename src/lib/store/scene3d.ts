@@ -169,7 +169,11 @@ type Scene3dState = {
   rotateEntity: (id: string, rotationY: number) => void;
   /** 3軸回転(BlenderのR相当)。axis指定で1軸ずつ設定(ラジアン) */
   setEntityRotation: (id: string, axis: "x" | "y" | "z", radians: number) => void;
+  /** R+ドラッグのグリグリ回転(差分加算。横=向きY / 縦=傾きX) */
+  rotateEntityFree: (id: string, dYaw: number, dPitch: number) => void;
   scaleEntity: (id: string, scale: number) => void;
+  /** S+ドラッグの拡縮(差分加算) */
+  scaleEntityBy: (id: string, delta: number) => void;
   setEntityFloors: (id: string, floors: number) => void;
   setEntityParam: (id: string, key: "width" | "height" | "depth", value: number) => void;
   /** インポート済みモーション一覧(実体は motionLibrary モジュールが持つ) */
@@ -433,6 +437,34 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
         ...project,
         entities: project.entities.map((e) =>
           e.id === id ? { ...e, [key]: radians } : e,
+        ),
+      },
+    });
+  },
+
+  rotateEntityFree: (id, dYaw, dPitch) => {
+    const { project } = get();
+    set({
+      project: {
+        ...project,
+        entities: project.entities.map((e) =>
+          e.id === id
+            ? { ...e, rotationY: e.rotationY + dYaw, rotationX: (e.rotationX ?? 0) + dPitch }
+            : e,
+        ),
+      },
+    });
+  },
+
+  scaleEntityBy: (id, delta) => {
+    const { project } = get();
+    set({
+      project: {
+        ...project,
+        entities: project.entities.map((e) =>
+          e.id === id
+            ? { ...e, scale: Math.max(0.3, Math.min(4, e.scale + delta)) }
+            : e,
         ),
       },
     });

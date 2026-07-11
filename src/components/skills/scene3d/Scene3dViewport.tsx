@@ -528,6 +528,8 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
     return { obj, mixer, main, mainDuration: m.clip.duration, arrival };
   }, [clipId, arrivalClipId, motionCount]);
   const moveEntity = useScene3d((s) => s.moveEntity);
+  const rotateEntityFree = useScene3d((s) => s.rotateEntityFree);
+  const scaleEntityBy = useScene3d((s) => s.scaleEntityBy);
   const setDragging = useScene3d((s) => s.setDragging);
   const selected = useScene3d((s) => s.selectedEntityId === entity.id);
   const draggingSelf = useScene3d((s) => s.draggingEntityId === entity.id);
@@ -547,6 +549,22 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
     if (!draggingSelf) return;
     const start = dragStart.current ?? entity.position;
     const snap = (v: number) => Math.round(v * 10) / 10;
+
+    // Rキー: グリグリ回転(BlenderのR相当)。横ドラッグ=向き / 縦ドラッグ=傾き
+    if (heldKeys.has("r")) {
+      const SENS = 0.012;
+      rotateEntityFree(
+        entity.id,
+        e.nativeEvent.movementX * SENS,
+        e.nativeEvent.movementY * SENS,
+      );
+      return;
+    }
+    // Sキー: 大きさ(BlenderのS相当)。上ドラッグ=大きく / 下=小さく
+    if (heldKeys.has("s")) {
+      scaleEntityBy(entity.id, -e.nativeEvent.movementY * 0.01);
+      return;
+    }
 
     // Yキー: 高さだけ動かす(カメラに正対する縦平面との交点で上下)
     if (heldKeys.has("y")) {

@@ -1157,8 +1157,12 @@ function ArrivalMotionPopup({ entityId, onClose }: { entityId: string; onClose: 
   );
 }
 
-/** オブジェクト詳細ポップアップ(位置・大きさ・寸法・階数) */
-function ObjectDetailPopup({ entityId, onClose }: { entityId: string; onClose: () => void }) {
+/**
+ * オブジェクト詳細設定(位置・回転・大きさ・寸法・階数)。
+ * ポップアップではなく「詳細を調整」ボタン下のトグル展開で表示する
+ * (中央ポップアップは作業ビューを隠すため。移動不可のモーダルは使わない)
+ */
+function ObjectDetailBody({ entityId }: { entityId: string }) {
   const project = useScene3d((s) => s.project);
   const moveEntity = useScene3d((s) => s.moveEntity);
   const scaleEntity = useScene3d((s) => s.scaleEntity);
@@ -1178,7 +1182,7 @@ function ObjectDetailPopup({ entityId, onClose }: { entityId: string; onClose: (
   const toRad = (deg: number) => (deg * Math.PI) / 180;
 
   return (
-    <Popup title={`${entity.label} の詳細`} onClose={onClose}>
+    <div className="rounded-lg border border-[#2a2a2a] bg-[#0c0c0c] p-2.5">
       <div className="flex flex-col gap-2.5">
         <p className="text-[10px] font-bold tracking-wide text-neutral-500">位置</p>
         <AxisSlider
@@ -1187,6 +1191,13 @@ function ObjectDetailPopup({ entityId, onClose }: { entityId: string; onClose: (
           min={-15}
           max={15}
           onChange={(v) => moveEntity(entity.id, [v, entity.position[1], entity.position[2]])}
+        />
+        <AxisSlider
+          label="高さ"
+          value={entity.position[1]}
+          min={0}
+          max={10}
+          onChange={(v) => moveEntity(entity.id, [entity.position[0], v, entity.position[2]])}
         />
         <AxisSlider
           label="奥"
@@ -1255,7 +1266,7 @@ function ObjectDetailPopup({ entityId, onClose }: { entityId: string; onClose: (
           </>
         )}
       </div>
-    </Popup>
+    </div>
   );
 }
 
@@ -1377,7 +1388,7 @@ function SelectedObjectSection() {
       )}
 
       <p className="text-[10px] leading-4 text-neutral-600">
-        ドラッグ中にキー長押しで軸移動: X=横 / Z=奥行き / Y=高さ
+        ドラッグ中にキー長押し: X=横 / Z=奥行き / Y=高さ / R=回転 / S=大きさ
       </p>
 
       <label className="flex flex-col gap-1 text-xs text-neutral-400">
@@ -1393,12 +1404,12 @@ function SelectedObjectSection() {
       </label>
 
       <button
-        className="rounded-lg border border-[#2a2a2a] px-2 py-1.5 text-xs text-neutral-400 hover:border-pink-400/60 hover:text-neutral-200"
-        onClick={() => setDetailOpen(true)}
+        className="rounded-lg border border-[#2a2a2a] px-2 py-1.5 text-left text-xs text-neutral-400 hover:border-pink-400/60 hover:text-neutral-200"
+        onClick={() => setDetailOpen((o) => !o)}
       >
-        詳細を調整…(位置・回転・大きさ・寸法)
+        {detailOpen ? "▾" : "▸"} 詳細を調整(位置・回転・大きさ・寸法)
       </button>
-      {detailOpen && <ObjectDetailPopup entityId={entity.id} onClose={() => setDetailOpen(false)} />}
+      {detailOpen && <ObjectDetailBody entityId={entity.id} />}
     </div>
   );
 }
