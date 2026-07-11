@@ -24,9 +24,16 @@ export type EntityMotion =
       path: Vec3[];
     }
   | {
-      /** インポートしたモーションクリップ(Mixamo等)をその場で再生 */
+      /** インポートしたモーションクリップ(Mixamo等)を再生 */
       type: "clip";
       clipId: string;
+      /**
+       * 移動速度(m/s)。移動系クリップ(歩く/走る等)は割り当て時に
+       * resolveClipSpeed の値を焼き込む。0/未指定 = その場再生
+       */
+      speed?: number;
+      /** 経由点(speed>0のとき使用)。最後の点が到着点。到着後は待機に切替 */
+      path?: Vec3[];
     };
 
 export type SceneEntityKind =

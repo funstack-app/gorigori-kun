@@ -26,10 +26,28 @@ import {
   resolveLookAt,
   totalDurationFrames,
 } from "../scene3d/evaluateScene";
+import { resolveClipSpeed } from "../scene3d/clipSpeed";
 import type { EntityMotionType } from "../scene3d/types";
 
 let entitySeq = 1;
 let shotSeq = 1;
+
+/** モーション種類を切り替えても行き先を引き継ぐための現経路(clip/walk/run共通) */
+function existingMotionPath(e: SceneEntity): Vec3[] {
+  if (!e.motion) return [];
+  return e.motion.type === "clip" ? (e.motion.path ?? []) : e.motion.path;
+}
+
+/** 経路が無いときの既定: 向いている方向へ2.5m */
+function defaultMotionPath(e: SceneEntity): Vec3[] {
+  return [
+    [
+      e.position[0] + Math.sin(e.rotationY) * 2.5,
+      e.position[1],
+      e.position[2] + Math.cos(e.rotationY) * 2.5,
+    ],
+  ];
+}
 
 const ENTITY_LABELS: Record<SceneEntityKind, string> = {
   mannequin: "人物",
@@ -373,13 +391,21 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
   },
 
   setEntityMotionClip: (id, clipId) => {
-    const { project } = get();
+    const { project, importedMotions } = get();
+    const clipName = importedMotions.find((m) => m.id === clipId)?.name;
+    const speed = resolveClipSpeed(clipId, clipName);
     set({
       project: {
         ...project,
-        entities: project.entities.map((e) =>
-          e.id === id ? { ...e, motion: { type: "clip", clipId } } : e,
-        ),
+        entities: project.entities.map((e) => {
+          if (e.id !== id) return e;
+          // その場再生クリップ(ダンス・座る等)は経路を持たない
+          if (speed <= 0) return { ...e, motion: { type: "clip", clipId } };
+          // 移動系クリップ(歩く/走る等): 既存の経路を維持。無ければ既定経路
+          const prev = existingMotionPath(e);
+          const path = prev.length > 0 ? prev : defaultMotionPath(e);
+          return { ...e, motion: { type: "clip", clipId, speed, path } };
+        }),
       },
     });
   },
@@ -393,16 +419,8 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
           if (e.id !== id) return e;
           if (type == null) return { ...e, motion: null };
           // 既存の経路は維持しつつ種類だけ変更。無ければ向いている方向へ2.5m
-          const path =
-            e.motion && e.motion.type !== "clip" && e.motion.path.length > 0
-              ? e.motion.path
-              : ([
-                  [
-                    e.position[0] + Math.sin(e.rotationY) * 2.5,
-                    e.position[1],
-                    e.position[2] + Math.cos(e.rotationY) * 2.5,
-                  ],
-                ] as Vec3[]);
+          const prev = existingMotionPath(e);
+          const path = prev.length > 0 ? prev : defaultMotionPath(e);
           return { ...e, motion: { type, path } };
         }),
       },
@@ -415,8 +433,12 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
       project: {
         ...project,
         entities: project.entities.map((e) => {
-          if (e.id !== id || !e.motion || e.motion.type === "clip") return e;
-          const path = [...e.motion.path];
+          if (e.id !== id || !e.motion) return e;
+          // その場再生クリップは行き先を持たない
+          if (e.motion.type === "clip" && (e.motion.speed ?? 0) <= 0) return e;
+          const cur = e.motion.type === "clip" ? (e.motion.path ?? []) : e.motion.path;
+          if (cur.length === 0) return e;
+          const path = [...cur];
           path[path.length - 1] = position;
           return { ...e, motion: { ...e.motion, path } };
         }),

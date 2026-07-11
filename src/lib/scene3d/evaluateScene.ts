@@ -105,6 +105,52 @@ export type EntityPose = {
 };
 
 /**
+ * 折れ線パスに沿って speed で進んだ位置(プロシージャル歩行と移動系クリップの共通経路)。
+ * traveled はタイムライン先頭からの移動距離(m)。歩行位相の算出に使う
+ */
+function followPath(
+  entity: SceneEntity,
+  path: Vec3[],
+  speed: number,
+  fps: number,
+  globalFrame: number,
+): { position: Vec3; rotationY: number; traveled: number; arrived: boolean } {
+  const traveled = (Math.max(0, globalFrame) / fps) * speed;
+  const points: Vec3[] = [entity.position, ...path];
+
+  let remaining = traveled;
+  for (let i = 0; i < points.length - 1; i++) {
+    const a = points[i];
+    const b = points[i + 1];
+    const dx = b[0] - a[0];
+    const dz = b[2] - a[2];
+    const segLen = Math.hypot(dx, dz);
+    if (segLen < 1e-6) continue;
+    const rotY = Math.atan2(dx, dz); // +Zが正面
+    if (remaining <= segLen) {
+      const t = remaining / segLen;
+      return {
+        position: [a[0] + dx * t, entity.position[1], a[2] + dz * t],
+        rotationY: rotY,
+        traveled,
+        arrived: false,
+      };
+    }
+    remaining -= segLen;
+  }
+  // 到着: 最終点で最後の向きのまま止まる
+  const last = points[points.length - 1];
+  const prev = points[points.length - 2] ?? entity.position;
+  const rotY = Math.atan2(last[0] - prev[0], last[2] - prev[2]);
+  return {
+    position: [last[0], entity.position[1], last[2]],
+    rotationY: Number.isFinite(rotY) ? rotY : entity.rotationY,
+    traveled,
+    arrived: true,
+  };
+}
+
+/**
  * 人物の位置・向き・歩行位相の決定性評価。
  * モーションはタイムライン全体で再生され、経路を歩き切ったら到着点で立ち止まる
  */
@@ -120,41 +166,34 @@ export function evaluateEntityPose(
   };
   const motion = entity.motion;
   if (!motion || entity.kind !== "mannequin") return idle;
-  if (motion.type === "clip") return idle; // クリップはその場再生(位置は据え置き)
-  if (motion.path.length === 0) return idle;
 
-  const g = GAIT[motion.type];
-  const dist = (Math.max(0, globalFrame) / project.fps) * g.speed;
-  const points: Vec3[] = [entity.position, ...motion.path];
-
-  // 折れ線に沿って dist だけ進んだ位置
-  let remaining = dist;
-  for (let i = 0; i < points.length - 1; i++) {
-    const a = points[i];
-    const b = points[i + 1];
-    const dx = b[0] - a[0];
-    const dz = b[2] - a[2];
-    const segLen = Math.hypot(dx, dz);
-    if (segLen < 1e-6) continue;
-    const rotY = Math.atan2(dx, dz); // +Zが正面
-    if (remaining <= segLen) {
-      const t = remaining / segLen;
-      return {
-        position: [a[0] + dx * t, entity.position[1], a[2] + dz * t],
-        rotationY: rotY,
-        gait: { moving: true, phase: (dist % g.cycle) / g.cycle, run: motion.type === "run" },
-      };
-    }
-    remaining -= segLen;
+  if (motion.type === "clip") {
+    // 移動系クリップ: 焼き込まれた速度でパスに沿って移動(手足はミキサーが駆動)
+    const speed = motion.speed ?? 0;
+    const path = motion.path ?? [];
+    if (speed <= 0 || path.length === 0) return idle;
+    const p = followPath(entity, path, speed, project.fps, globalFrame);
+    return {
+      position: p.position,
+      rotationY: p.rotationY,
+      gait: { moving: !p.arrived, phase: 0, run: false },
+    };
   }
-  // 到着: 最終点で最後の向きのまま立ち止まる
-  const last = points[points.length - 1];
-  const prev = points[points.length - 2] ?? entity.position;
-  const rotY = Math.atan2(last[0] - prev[0], last[2] - prev[2]);
+
+  if (motion.path.length === 0) return idle;
+  const g = GAIT[motion.type];
+  const p = followPath(entity, motion.path, g.speed, project.fps, globalFrame);
+  if (p.arrived) {
+    return {
+      position: p.position,
+      rotationY: p.rotationY,
+      gait: { moving: false, phase: 0, run: false },
+    };
+  }
   return {
-    position: [last[0], entity.position[1], last[2]],
-    rotationY: Number.isFinite(rotY) ? rotY : entity.rotationY,
-    gait: { moving: false, phase: 0, run: false },
+    position: p.position,
+    rotationY: p.rotationY,
+    gait: { moving: true, phase: (p.traveled % g.cycle) / g.cycle, run: motion.type === "run" },
   };
 }
 
