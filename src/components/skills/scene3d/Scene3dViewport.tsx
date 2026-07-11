@@ -63,7 +63,12 @@ function rayToPlaneY(ray: Ray, y: number): Vec3 | null {
  */
 const heldKeys = new Set<string>();
 if (typeof window !== "undefined") {
-  window.addEventListener("keydown", (e) => heldKeys.add(e.key.toLowerCase()));
+  window.addEventListener("keydown", (e) => {
+    // 文字入力中のx/y/zは拾わない(ラベル編集中のドラッグ複合操作での誤発動防止)
+    const t = e.target as HTMLElement | null;
+    if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+    heldKeys.add(e.key.toLowerCase());
+  });
   window.addEventListener("keyup", (e) => heldKeys.delete(e.key.toLowerCase()));
   window.addEventListener("blur", () => heldKeys.clear());
 }
