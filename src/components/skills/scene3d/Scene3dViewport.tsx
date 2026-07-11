@@ -13,7 +13,12 @@ import { GizmoHelper, GizmoViewport, Grid, Line, OrbitControls } from "@react-th
 import type { ThreeEvent } from "@react-three/fiber";
 import { AnimationMixer, PerspectiveCamera, Vector2, Vector3 } from "three";
 import { clone as cloneSkeleton } from "three/examples/jsm/utils/SkeletonUtils.js";
-import type { Group, PerspectiveCamera as ThreePerspectiveCamera, Ray } from "three";
+import type {
+  AnimationAction,
+  Group,
+  PerspectiveCamera as ThreePerspectiveCamera,
+  Ray,
+} from "three";
 
 import { scene3d as scene3dIpc } from "../../../lib/ipc";
 import { getImportedMotion } from "../../../lib/scene3d/motionLibrary";
@@ -447,7 +452,9 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
   const selectEntity = useScene3d((s) => s.selectEntity);
 
   // インポートしたクリップモーション: スキン付きキャラを複製してミキサーで駆動
-  const clipId = entity.motion?.type === "clip" ? entity.motion.clipId : null;
+  const clipMotion = entity.motion?.type === "clip" ? entity.motion : null;
+  const clipId = clipMotion?.clipId ?? null;
+  const clipMoves = (clipMotion?.speed ?? 0) > 0;
   const clipRig = useMemo(() => {
     if (!clipId) return null;
     const m = getImportedMotion(clipId);
@@ -458,9 +465,20 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
       child.castShadow = true;
     });
     const mixer = new AnimationMixer(obj);
-    mixer.clipAction(m.clip).play();
-    return { obj, mixer, duration: m.clip.duration };
-  }, [clipId]);
+    const main = mixer.clipAction(m.clip);
+    main.play();
+    // 移動系クリップ: 到着後は待機へ切替(同一テンプレートを共有する標準ライブラリのみ)
+    let idle: AnimationAction | null = null;
+    if (clipMoves && clipId !== "builtin-Idle_Loop") {
+      const idleMotion = getImportedMotion("builtin-Idle_Loop");
+      if (idleMotion && idleMotion.template === m.template) {
+        idle = mixer.clipAction(idleMotion.clip);
+        idle.play();
+        idle.weight = 0;
+      }
+    }
+    return { obj, mixer, main, idle };
+  }, [clipId, clipMoves]);
   const moveEntity = useScene3d((s) => s.moveEntity);
   const setDragging = useScene3d((s) => s.setDragging);
   const selected = useScene3d((s) => s.selectedEntityId === entity.id);
@@ -513,10 +531,15 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
       root.position.set(pose.position[0], pose.position[1], pose.position[2]);
       root.rotation.y = pose.rotationY;
 
-      // インポートクリップ: フレーム時刻で決定論的に駆動(ループ)
+      // インポートクリップ: フレーム時刻で決定論的に駆動(各アクションが内部でループ)
       if (clipRig) {
-        const t = (frame / st.project.fps) % Math.max(0.001, clipRig.duration);
-        clipRig.mixer.setTime(t);
+        if (clipRig.idle) {
+          // 移動系クリップの到着後は待機へハード切替(同一フレーム→同一姿勢の決定性)
+          const moving = pose.gait.moving;
+          clipRig.main.weight = moving ? 1 : 0;
+          clipRig.idle.weight = moving ? 0 : 1;
+        }
+        clipRig.mixer.setTime(frame / st.project.fps);
         return;
       }
 
@@ -1037,21 +1060,20 @@ function MotionOverlay() {
   const draggingSelf = useScene3d((s) => s.draggingEntityId === "__motion-target");
 
   const entity = project.entities.find((e) => e.id === selectedEntityId);
-  if (
-    !entity ||
-    entity.kind !== "mannequin" ||
-    !entity.motion ||
-    entity.motion.type === "clip" ||
-    entity.motion.path.length === 0
-  ) {
+  const motion = entity?.motion;
+  // その場再生クリップ(speed 0)は行き先を持たないため旗を出さない
+  const path =
+    !motion ? [] : motion.type === "clip" ? ((motion.speed ?? 0) > 0 ? (motion.path ?? []) : []) : motion.path;
+  if (!entity || entity.kind !== "mannequin" || !motion || path.length === 0) {
     return null;
   }
-  const dest = entity.motion.path[entity.motion.path.length - 1];
+  const dest = path[path.length - 1];
   const pathPoints: Vec3[] = [
     [entity.position[0], 0.03, entity.position[2]],
-    ...entity.motion.path.map((p): Vec3 => [p[0], 0.03, p[2]]),
+    ...path.map((p): Vec3 => [p[0], 0.03, p[2]]),
   ];
-  const color = entity.motion.type === "run" ? "#fb923c" : "#a3e635";
+  const color =
+    motion.type === "run" ? "#fb923c" : motion.type === "clip" ? "#38bdf8" : "#a3e635";
 
   const onPointerDown = (e: ThreeEvent<PointerEvent>) => {
     e.stopPropagation();

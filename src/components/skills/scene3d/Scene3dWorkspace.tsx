@@ -18,6 +18,7 @@ import { ActiveProjectSelector } from "../../ActiveProjectSelector";
 import { WorkspaceTabs } from "../../WorkspaceTabs";
 import { getShotMove, totalDurationFrames } from "../../../lib/scene3d/evaluateScene";
 import { importMotionFiles, loadBuiltinMotions } from "../../../lib/scene3d/motionLibrary";
+import { resolveClipSpeed } from "../../../lib/scene3d/clipSpeed";
 import {
   CAMERA_PRESET_LABELS,
   cameraColor,
@@ -711,7 +712,7 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
       />
 
       <p className="mb-1.5 text-[11px] font-bold tracking-wide text-neutral-500">
-        標準ライブラリ(CC0・{builtin.length}種)
+        標準ライブラリ(CC0・{builtin.length}種) — 🚶付きは旗の行き先まで移動
       </p>
       {builtin.length === 0 ? (
         <p className="mb-2 text-xs text-neutral-600">読み込み中…</p>
@@ -722,8 +723,13 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
               key={m.id}
               className={motionBtnCls(activeClipId === m.id)}
               onClick={() => setEntityMotionClip(entityId, m.id)}
-              title={`${m.name} を割り当てる`}
+              title={
+                resolveClipSpeed(m.id, m.name) > 0
+                  ? `${m.name} を割り当てる(旗の行き先まで移動)`
+                  : `${m.name} を割り当てる`
+              }
             >
+              {resolveClipSpeed(m.id, m.name) > 0 ? "🚶 " : ""}
               {m.name}
             </button>
           ))}
@@ -741,8 +747,13 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
                 key={m.id}
                 className={motionBtnCls(activeClipId === m.id)}
                 onClick={() => setEntityMotionClip(entityId, m.id)}
-                title={`${m.name} を割り当てる`}
+                title={
+                  resolveClipSpeed(m.id, m.name) > 0
+                    ? `${m.name} を割り当てる(旗の行き先まで移動)`
+                    : `${m.name} を割り当てる`
+                }
               >
+                {resolveClipSpeed(m.id, m.name) > 0 ? "🚶 " : ""}
                 {m.name}
               </button>
             ))}
@@ -866,6 +877,13 @@ function SelectedObjectSection() {
           旗をドラッグで行き先を変更。再生で歩き出します
         </p>
       )}
+      {entity.kind === "mannequin" &&
+        entity.motion?.type === "clip" &&
+        (entity.motion.speed ?? 0) > 0 && (
+          <p className="text-[10px] leading-4 text-neutral-500">
+            移動モーション: 旗をドラッグで行き先を変更。到着すると待機に切り替わります
+          </p>
+        )}
       {entity.kind === "mannequin" && (
         <button
           className={`rounded-lg border px-2 py-1.5 text-xs ${
