@@ -13,6 +13,16 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
+import {
+  DndContext,
+  PointerSensor,
+  closestCenter,
+  useSensor,
+  useSensors,
+} from "@dnd-kit/core";
+import type { DragEndEvent } from "@dnd-kit/core";
+import { SortableContext, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 
 import { ActiveProjectSelector } from "../../ActiveProjectSelector";
 import { WorkspaceTabs } from "../../WorkspaceTabs";
@@ -29,6 +39,7 @@ import {
 import type {
   CameraPresetId,
   SceneAspectRatio,
+  SceneEntity,
   SceneEntityKind,
   SceneShot,
 } from "../../../lib/scene3d/types";
@@ -461,6 +472,99 @@ function PresetPickerPopup({ onClose }: { onClose: () => void }) {
 
 /* ---------------------------------- 左パネル ---------------------------------- */
 
+/** シーン内リストの1行。上下ドラッグで並び替え、右クリックでメニュー */
+function EntityRow({
+  entity,
+  selected,
+  onSelect,
+  onRemove,
+  onContextMenu,
+}: {
+  entity: SceneEntity;
+  selected: boolean;
+  onSelect: () => void;
+  onRemove: () => void;
+  onContextMenu: (x: number, y: number) => void;
+}) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: entity.id,
+  });
+  return (
+    <li
+      ref={setNodeRef}
+      style={{ transform: CSS.Transform.toString(transform), transition }}
+      className={`group flex items-center justify-between rounded px-2 py-1.5 text-sm ${
+        isDragging ? "relative z-10 bg-[#1c1c1c] opacity-90" : ""
+      } ${
+        selected ? "bg-amber-500/15 text-amber-300" : "text-neutral-300 hover:bg-[#101010]"
+      }`}
+      onContextMenu={(ev) => {
+        ev.preventDefault();
+        onContextMenu(ev.clientX, ev.clientY);
+      }}
+      {...attributes}
+      {...listeners}
+    >
+      <button className="flex flex-1 items-center gap-2 text-left" onClick={onSelect}>
+        <EntityKindIcon kind={entity.kind} />
+        {entity.label}
+      </button>
+      <button
+        className="text-neutral-600 hover:text-red-400"
+        onClick={onRemove}
+        title="削除"
+      >
+        ✕
+      </button>
+    </li>
+  );
+}
+
+/** レイヤー右クリックメニュー(複製/削除)。外側クリックで閉じる */
+function EntityContextMenu({
+  x,
+  y,
+  onDuplicate,
+  onRemove,
+  onClose,
+}: {
+  x: number;
+  y: number;
+  onDuplicate: () => void;
+  onRemove: () => void;
+  onClose: () => void;
+}) {
+  useEffect(() => {
+    const close = () => onClose();
+    window.addEventListener("pointerdown", close);
+    window.addEventListener("blur", close);
+    return () => {
+      window.removeEventListener("pointerdown", close);
+      window.removeEventListener("blur", close);
+    };
+  }, [onClose]);
+  return (
+    <div
+      className="fixed z-50 min-w-32 rounded-lg border border-[#2a2a2a] bg-[#181818] py-1 shadow-xl"
+      style={{ left: x, top: y }}
+      onPointerDown={(ev) => ev.stopPropagation()}
+    >
+      <button
+        className="block w-full px-3 py-1.5 text-left text-xs text-neutral-200 hover:bg-[#242424]"
+        onClick={onDuplicate}
+      >
+        複製
+      </button>
+      <button
+        className="block w-full px-3 py-1.5 text-left text-xs text-red-300 hover:bg-[#242424]"
+        onClick={onRemove}
+      >
+        削除
+      </button>
+    </div>
+  );
+}
+
 function ShelfPanel() {
   const project = useScene3d((s) => s.project);
   const entities = useScene3d((s) => s.project.entities);
@@ -474,8 +578,19 @@ function ShelfPanel() {
   const addCamera = useScene3d((s) => s.addCamera);
   const removeCamera = useScene3d((s) => s.removeCamera);
   const removeEntity = useScene3d((s) => s.removeEntity);
+  const duplicateEntity = useScene3d((s) => s.duplicateEntity);
+  const reorderEntity = useScene3d((s) => s.reorderEntity);
   const selectedCameraId = getSelectedShot({ project, selectedShotId }).cameraId;
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [ctxMenu, setCtxMenu] = useState<{ id: string; x: number; y: number } | null>(null);
+  // 5px 動かすまでドラッグ扱いにしない(クリック選択と共存させる)
+  const dndSensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
+  const onEntityDragEnd = (ev: DragEndEvent) => {
+    const overId = ev.over?.id;
+    if (overId != null && ev.active.id !== overId) {
+      reorderEntity(String(ev.active.id), String(overId));
+    }
+  };
 
   return (
     <aside className="flex w-full flex-col gap-4 border-r border-[#242424] bg-[#141414] px-4 py-4">
@@ -488,33 +603,44 @@ function ShelfPanel() {
 
       <div className="min-h-0 flex-1 overflow-y-auto">
         <p className="mb-2 text-[11px] font-bold tracking-wide text-neutral-500">シーン内</p>
-        <ul className="flex flex-col gap-1">
-          {entities.map((e) => (
-            <li
-              key={e.id}
-              className={`group flex items-center justify-between rounded px-2 py-1.5 text-sm ${
-                selectedId === e.id
-                  ? "bg-amber-500/15 text-amber-300"
-                  : "text-neutral-300 hover:bg-[#101010]"
-              }`}
-            >
-              <button
-                className="flex flex-1 items-center gap-2 text-left"
-                onClick={() => selectEntity(e.id)}
-              >
-                <EntityKindIcon kind={e.kind} />
-                {e.label}
-              </button>
-              <button
-                className="text-neutral-600 hover:text-red-400"
-                onClick={() => removeEntity(e.id)}
-                title="削除"
-              >
-                ✕
-              </button>
-            </li>
-          ))}
-        </ul>
+        <DndContext
+          sensors={dndSensors}
+          collisionDetection={closestCenter}
+          onDragEnd={onEntityDragEnd}
+        >
+          <SortableContext
+            items={entities.map((e) => e.id)}
+            strategy={verticalListSortingStrategy}
+          >
+            <ul className="flex flex-col gap-1">
+              {entities.map((e) => (
+                <EntityRow
+                  key={e.id}
+                  entity={e}
+                  selected={selectedId === e.id}
+                  onSelect={() => selectEntity(e.id)}
+                  onRemove={() => removeEntity(e.id)}
+                  onContextMenu={(x, y) => setCtxMenu({ id: e.id, x, y })}
+                />
+              ))}
+            </ul>
+          </SortableContext>
+        </DndContext>
+        {ctxMenu && (
+          <EntityContextMenu
+            x={ctxMenu.x}
+            y={ctxMenu.y}
+            onDuplicate={() => {
+              duplicateEntity(ctxMenu.id);
+              setCtxMenu(null);
+            }}
+            onRemove={() => {
+              removeEntity(ctxMenu.id);
+              setCtxMenu(null);
+            }}
+            onClose={() => setCtxMenu(null)}
+          />
+        )}
 
         <p className="mb-2 mt-4 text-[11px] font-bold tracking-wide text-neutral-500">カメラ</p>
         <ul className="flex flex-col gap-1">
@@ -712,7 +838,8 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
       />
 
       <p className="mb-1.5 text-[11px] font-bold tracking-wide text-neutral-500">
-        標準ライブラリ(CC0・{builtin.length}種) — 🚶付きは旗の行き先まで移動
+        標準ライブラリ(CC0・{builtin.length}種) —{" "}
+        <span className="text-sky-400">移動</span> 付きは旗の行き先まで移動します
       </p>
       {builtin.length === 0 ? (
         <p className="mb-2 text-xs text-neutral-600">読み込み中…</p>
@@ -729,7 +856,11 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
                   : `${m.name} を割り当てる`
               }
             >
-              {resolveClipSpeed(m.id, m.name) > 0 ? "🚶 " : ""}
+              {resolveClipSpeed(m.id, m.name) > 0 && (
+                <span className="mr-1 rounded bg-sky-400/15 px-1 text-[9px] text-sky-300">
+                  移動
+                </span>
+              )}
               {m.name}
             </button>
           ))}
@@ -753,7 +884,11 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
                     : `${m.name} を割り当てる`
                 }
               >
-                {resolveClipSpeed(m.id, m.name) > 0 ? "🚶 " : ""}
+                {resolveClipSpeed(m.id, m.name) > 0 && (
+                  <span className="mr-1 rounded bg-sky-400/15 px-1 text-[9px] text-sky-300">
+                    移動
+                  </span>
+                )}
                 {m.name}
               </button>
             ))}
@@ -899,6 +1034,10 @@ function SelectedObjectSection() {
       {motionLibOpen && (
         <MotionLibraryPopup entityId={entity.id} onClose={() => setMotionLibOpen(false)} />
       )}
+
+      <p className="text-[10px] leading-4 text-neutral-600">
+        ドラッグ中にキー長押しで軸移動: X=横 / Z=奥行き / Y=高さ
+      </p>
 
       <label className="flex flex-col gap-1 text-xs text-neutral-400">
         向き: {degrees}°
@@ -1670,6 +1809,9 @@ function ShotTimeline() {
 
 /* ---------------------------------- キーボード操作 ---------------------------------- */
 
+/** Cmd/Ctrl+C でコピーしたエンティティID(Cmd/Ctrl+V で複製) */
+let copiedEntityId: string | null = null;
+
 function useKeyboardShortcuts() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -1701,6 +1843,15 @@ function useKeyboardShortcuts() {
         e.preventDefault();
         if (e.shiftKey) redoScene3d();
         else undoScene3d();
+      } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "c") {
+        // テキスト選択中は通常コピーを優先。それ以外は選択中エンティティをコピー
+        if (window.getSelection()?.toString()) return;
+        if (st.selectedEntityId) copiedEntityId = st.selectedEntityId;
+      } else if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "v") {
+        if (copiedEntityId) {
+          e.preventDefault();
+          st.duplicateEntity(copiedEntityId);
+        }
       } else if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
         e.preventDefault();
         const step = (e.shiftKey ? SCENE_FPS : 1) * (e.key === "ArrowLeft" ? -1 : 1);
