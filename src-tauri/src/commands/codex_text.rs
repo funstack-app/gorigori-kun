@@ -44,11 +44,14 @@ pub async fn codex_text_query(
     // codex-windows-sandbox-setup.exe を要求して「見つかりません」エラーになる
     // (画像生成 batch_gen と同じ問題)。--full-auto は workspace-write sandbox を
     // 選ぶため Windows で死ぬ。サンドボックス無効の bypass で回避(2026-06-09 修正)。
+    // --color never: ANSI カラー無効化。旧 --no-color は CLI 0.144 で廃止済み
+    // (codex_vision.rs と同じ書式。--no-color だと exit code 2 で即死する)
     cmd.args([
         "exec",
         "--dangerously-bypass-approvals-and-sandbox",
         "--skip-git-repo-check",
-        "--no-color",
+        "--color",
+        "never",
     ])
         .env("PATH", enriched_path())
         .stdin(Stdio::piped())
