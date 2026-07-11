@@ -884,7 +884,8 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
       const template = getBuiltinTemplate();
       if (!template) throw new Error("標準ライブラリの読み込み待ちです。少し待ってからもう一度");
       const { systemPrompt, prompt } = buildMotionPrompt(text);
-      const res = await codexTextQuery({ prompt, systemPrompt, expectJson: true });
+      // モーション設計は考える時間が長い(60秒では足りない実測あり)ため3分まで待つ
+      const res = await codexTextQuery({ prompt, systemPrompt, expectJson: true, timeoutSecs: 180 });
       const spec = validateGeneratedSpec(res.parsedJson);
       const id = `gen-${Date.now()}`;
       const clip = buildGeneratedClip(template, spec, id);
@@ -953,7 +954,7 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
           </button>
         </div>
         <p className="mt-1.5 text-[10px] leading-4 text-neutral-500">
-          リグ入りキャラの動きをAIが手付けします(10〜30秒)。当たり外れがあるので、
+          リグ入りキャラの動きをAIが手付けします(30秒〜2分ほど)。当たり外れがあるので、
           気に入らなければ言い方を変えてもう一度
         </p>
         {genError && (

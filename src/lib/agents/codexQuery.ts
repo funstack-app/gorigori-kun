@@ -4,6 +4,8 @@ export type CodexTextQueryArgs = {
   prompt: string;
   systemPrompt?: string;
   expectJson: boolean;
+  /** タイムアウト(秒)。未指定は60。重い生成(モーション設計等)は延長する(上限300) */
+  timeoutSecs?: number;
   signal?: AbortSignal;
 };
 
@@ -20,6 +22,7 @@ export async function codexTextQuery({
   prompt,
   systemPrompt,
   expectJson,
+  timeoutSecs,
   signal,
 }: CodexTextQueryArgs): Promise<CodexTextQueryResult> {
   if (signal?.aborted) {
@@ -36,6 +39,7 @@ export async function codexTextQuery({
       prompt,
       systemPrompt: systemPrompt ?? null,
       expectJson,
+      timeoutSecs: timeoutSecs ?? null,
     })
       .then((result: CodexTextQueryResult): void => {
         if (signal?.aborted) {

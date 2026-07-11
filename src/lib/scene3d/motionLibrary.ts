@@ -32,6 +32,7 @@ let builtinTemplate: Group | null = null;
 /** 標準ライブラリ(同梱CC0)の日本語名。無いものは英語名のまま */
 const BUILTIN_JP: Record<string, string> = {
   Idle_Loop: "待機",
+  Idle_Torch_Loop: "たいまつ待機",
   Idle_Talking_Loop: "会話(立ち)",
   Walk_Loop: "歩く",
   Walk_Formal_Loop: "歩く(フォーマル)",

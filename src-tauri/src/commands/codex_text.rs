@@ -8,7 +8,9 @@ use tokio::time::timeout;
 
 use crate::codex::process::{enriched_path, resolve_codex_cli_binary};
 
+/** 既定タイムアウト(秒)。重い生成(モーション設計等)は呼び出し側が timeout_secs で延長する */
 const CODEX_TEXT_TIMEOUT_SECS: u64 = 60;
+const CODEX_TEXT_TIMEOUT_MAX_SECS: u64 = 300;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -22,7 +24,11 @@ pub async fn codex_text_query(
     prompt: String,
     system_prompt: Option<String>,
     expect_json: bool,
+    timeout_secs: Option<u64>,
 ) -> Result<CodexTextQueryResult, String> {
+    let timeout_secs = timeout_secs
+        .unwrap_or(CODEX_TEXT_TIMEOUT_SECS)
+        .clamp(10, CODEX_TEXT_TIMEOUT_MAX_SECS);
     let prompt = prompt.trim();
     if prompt.is_empty() {
         return Err("prompt must not be empty".into());
@@ -75,13 +81,10 @@ pub async fn codex_text_query(
             .map_err(|e| format!("stdin 書き込み失敗: {e}"))?;
     }
 
-    let output = timeout(
-        Duration::from_secs(CODEX_TEXT_TIMEOUT_SECS),
-        child.wait_with_output(),
-    )
-    .await
-    .map_err(|_| format!("codex exec が {CODEX_TEXT_TIMEOUT_SECS} 秒でタイムアウトしました"))?
-    .map_err(|e| format!("codex exec 待機失敗: {e}"))?;
+    let output = timeout(Duration::from_secs(timeout_secs), child.wait_with_output())
+        .await
+        .map_err(|_| format!("codex exec が {timeout_secs} 秒でタイムアウトしました"))?
+        .map_err(|e| format!("codex exec 待機失敗: {e}"))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if !output.status.success() {
