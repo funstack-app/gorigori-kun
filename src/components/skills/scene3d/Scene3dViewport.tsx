@@ -57,6 +57,39 @@ function rayToPlaneY(ray: Ray, y: number): Vec3 | null {
   ];
 }
 
+/**
+ * 押下中キーの追跡(X/Y/Zキーの軸拘束ドラッグ用)。
+ * 参照されるのはエンティティのドラッグ中だけなので、入力欄のタイプとは干渉しない
+ */
+const heldKeys = new Set<string>();
+if (typeof window !== "undefined") {
+  window.addEventListener("keydown", (e) => heldKeys.add(e.key.toLowerCase()));
+  window.addEventListener("keyup", (e) => heldKeys.delete(e.key.toLowerCase()));
+  window.addEventListener("blur", () => heldKeys.clear());
+}
+
+/**
+ * ポインタのレイと「点p0を通りカメラに正対する縦平面」の交点(Yキーの高さ調整用)。
+ * 真上/真下からの視点では高さ操作できないため null
+ */
+function rayToVerticalPlane(ray: Ray, p0: Vec3): Vec3 | null {
+  let nx = -ray.direction.x;
+  let nz = -ray.direction.z;
+  const len = Math.hypot(nx, nz);
+  if (len < 1e-6) return null;
+  nx /= len;
+  nz /= len;
+  const denom = ray.direction.x * nx + ray.direction.z * nz;
+  if (Math.abs(denom) < 1e-6) return null;
+  const t = ((p0[0] - ray.origin.x) * nx + (p0[2] - ray.origin.z) * nz) / denom;
+  if (t < 0) return null;
+  return [
+    ray.origin.x + ray.direction.x * t,
+    ray.origin.y + ray.direction.y * t,
+    ray.origin.z + ray.direction.z * t,
+  ];
+}
+
 /** ポインタのレイと床面(y=0)の交点。交差しない場合は null */
 function rayToFloor(ray: Ray): Vec3 | null {
   if (Math.abs(ray.direction.y) < 1e-6) return null;
@@ -497,21 +530,50 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
   };
   const onPointerMove = (e: ThreeEvent<PointerEvent>) => {
     if (!draggingSelf) return;
-    const p = rayToFloor(e.ray);
+    const start = dragStart.current ?? entity.position;
+    const snap = (v: number) => Math.round(v * 10) / 10;
+
+    // Yキー: 高さだけ動かす(カメラに正対する縦平面との交点で上下)
+    if (heldKeys.has("y")) {
+      const v = rayToVerticalPlane(e.ray, start);
+      if (!v) return;
+      moveEntity(entity.id, [
+        entity.position[0],
+        Math.max(0, snap(v[1])),
+        entity.position[2],
+      ]);
+      return;
+    }
+
+    // 水平移動: 現在の高さの平面上でドラッグ(高さは変えない)
+    const p = rayToPlaneY(e.ray, entity.position[1]) ?? rayToFloor(e.ray);
     if (!p) return;
+    const nx = snap(p[0]);
+    const nz = snap(p[2]);
+    const y = entity.position[1];
+
+    // X/Zキー: その軸だけ動かす
+    if (heldKeys.has("x")) {
+      moveEntity(entity.id, [nx, y, start[2]]);
+      return;
+    }
+    if (heldKeys.has("z")) {
+      moveEntity(entity.id, [start[0], y, nz]);
+      return;
+    }
     // Shift: ドラッグ開始位置からの支配軸(X/Z)に沿って平行移動
     if (e.nativeEvent.shiftKey && dragStart.current) {
       const [sx, , sz] = dragStart.current;
-      const dx = Math.abs(p[0] - sx);
-      const dz = Math.abs(p[2] - sz);
+      const dx = Math.abs(nx - sx);
+      const dz = Math.abs(nz - sz);
       if (dx >= dz) {
-        moveEntity(entity.id, [p[0], 0, sz]);
+        moveEntity(entity.id, [nx, y, sz]);
       } else {
-        moveEntity(entity.id, [sx, 0, p[2]]);
+        moveEntity(entity.id, [sx, y, nz]);
       }
       return;
     }
-    moveEntity(entity.id, p);
+    moveEntity(entity.id, [nx, y, nz]);
   };
   const onPointerUp = (e: ThreeEvent<PointerEvent>) => {
     if (!draggingSelf) return;
