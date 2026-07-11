@@ -899,6 +899,68 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
   );
 }
 
+/**
+ * 到着後アクションのポップアップ(モーションミックス第1弾)。
+ * 標準ライブラリ(骨格を共有)から「着いたあとの動き」を選ぶ。既定は待機
+ */
+function ArrivalMotionPopup({ entityId, onClose }: { entityId: string; onClose: () => void }) {
+  const importedMotions = useScene3d((s) => s.importedMotions);
+  const registerImportedMotions = useScene3d((s) => s.registerImportedMotions);
+  const setEntityArrivalClip = useScene3d((s) => s.setEntityArrivalClip);
+  const project = useScene3d((s) => s.project);
+
+  // 標準ライブラリ未読み込みなら読み込む(通常はWorkspace起動時に読み込み済み)
+  useEffect(() => {
+    void loadBuiltinMotions()
+      .then(registerImportedMotions)
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const entity = project.entities.find((e) => e.id === entityId);
+  const current = entity?.motion?.type === "clip" ? entity.motion.arrivalClipId : undefined;
+  const builtin = importedMotions.filter((m) => m.id.startsWith("builtin-"));
+
+  const btnCls = (active: boolean) =>
+    `truncate rounded-lg border px-2 py-2 text-left text-xs ${
+      active
+        ? "border-sky-400 bg-sky-400/10 text-sky-300"
+        : "border-[#2a2a2a] bg-[#101010] text-neutral-300 hover:border-sky-400/50"
+    }`;
+
+  return (
+    <Popup title="着いたらどうする？" onClose={onClose}>
+      <p className="mb-2 text-[11px] leading-4 text-neutral-500">
+        行き先に着いたあとの動きです。「座る(動作)」など一回きりの動きは、最後の姿勢で止まります
+      </p>
+      <button
+        className={`mb-2 w-full ${btnCls(current == null)}`}
+        onClick={() => {
+          setEntityArrivalClip(entityId, null);
+          onClose();
+        }}
+      >
+        待機(既定)
+      </button>
+      <div className="grid max-h-64 grid-cols-3 gap-1.5 overflow-y-auto">
+        {builtin.map((m) => (
+          <button
+            key={m.id}
+            className={btnCls(current === m.id)}
+            onClick={() => {
+              setEntityArrivalClip(entityId, m.id);
+              onClose();
+            }}
+            title={`着いたら ${m.name}`}
+          >
+            {m.name}
+          </button>
+        ))}
+      </div>
+    </Popup>
+  );
+}
+
 /** オブジェクト詳細ポップアップ(位置・大きさ・寸法・階数) */
 function ObjectDetailPopup({ entityId, onClose }: { entityId: string; onClose: () => void }) {
   const project = useScene3d((s) => s.project);
@@ -972,14 +1034,20 @@ function SelectedObjectSection() {
   const selectedEntityId = useScene3d((s) => s.selectedEntityId);
   const rotateEntity = useScene3d((s) => s.rotateEntity);
   const setEntityMotion = useScene3d((s) => s.setEntityMotion);
+  const importedMotions = useScene3d((s) => s.importedMotions);
   const [detailOpen, setDetailOpen] = useState(false);
   const [motionLibOpen, setMotionLibOpen] = useState(false);
+  const [arrivalPickerOpen, setArrivalPickerOpen] = useState(false);
 
   const entity = project.entities.find((e) => e.id === selectedEntityId);
   if (!entity) return null;
 
   const degrees = ((Math.round((entity.rotationY * 180) / Math.PI) % 360) + 360) % 360;
   const motionType = entity.motion?.type ?? null;
+  const arrivalClipId = entity.motion?.type === "clip" ? entity.motion.arrivalClipId : undefined;
+  const arrivalName = arrivalClipId
+    ? (importedMotions.find((m) => m.id === arrivalClipId)?.name ?? "待機")
+    : "待機";
   const motionBtn = (active: boolean) =>
     `rounded-lg border px-2 py-1.5 text-xs ${
       active
@@ -1016,8 +1084,29 @@ function SelectedObjectSection() {
         entity.motion?.type === "clip" &&
         (entity.motion.speed ?? 0) > 0 && (
           <p className="text-[10px] leading-4 text-neutral-500">
-            移動モーション: 旗をドラッグで行き先を変更。到着すると待機に切り替わります
+            移動モーション: 旗をドラッグで行き先を変更できます
           </p>
+        )}
+      {/* 到着後アクション(標準ライブラリのクリップのみ。骨格を共有するため) */}
+      {entity.kind === "mannequin" &&
+        entity.motion?.type === "clip" &&
+        (entity.motion.speed ?? 0) > 0 &&
+        entity.motion.clipId.startsWith("builtin-") && (
+          <>
+            <button
+              className="rounded-lg border border-[#2a2a2a] bg-[#101010] px-2 py-1.5 text-left text-xs text-neutral-300 hover:border-sky-400/50"
+              onClick={() => setArrivalPickerOpen(true)}
+              title="行き先に着いたあとの動きを選ぶ"
+            >
+              着いたら: <span className="text-sky-300">{arrivalName}</span>
+            </button>
+            {arrivalPickerOpen && (
+              <ArrivalMotionPopup
+                entityId={entity.id}
+                onClose={() => setArrivalPickerOpen(false)}
+              />
+            )}
+          </>
         )}
       {entity.kind === "mannequin" && (
         <button
@@ -2229,6 +2318,15 @@ function usePanelOpen(key: string) {
 
 export function Scene3dWorkspace() {
   useKeyboardShortcuts();
+  // 標準モーションライブラリを最初に読み込む。なぜ: 保存済みシーンのクリップモーションは
+  // ライブラリの実体が無いと復元できない(ポップアップを開くまで人形に戻る問題の根治)
+  useEffect(() => {
+    void loadBuiltinMotions()
+      .then((items) => useScene3d.getState().registerImportedMotions(items))
+      .catch(() => {
+        /* 読み込み失敗時はライブラリを開いたときに再試行される */
+      });
+  }, []);
   const [rowRef, rowW] = useRowWidth();
   const [leftPct, setLeftPct] = usePanelPct("scene3d.panel.leftPct", 16, 8, 30);
   const [rightPct, setRightPct] = usePanelPct("scene3d.panel.rightPct", 22, 12, 35);

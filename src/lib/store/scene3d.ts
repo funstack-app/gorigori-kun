@@ -155,6 +155,8 @@ type Scene3dState = {
   setEntityMotion: (id: string, type: EntityMotionType | null) => void;
   /** インポートしたクリップを人物に割当(その場再生) */
   setEntityMotionClip: (id: string, clipId: string) => void;
+  /** 到着後アクションを設定。null=待機(既定)に戻す */
+  setEntityArrivalClip: (id: string, clipId: string | null) => void;
   /** モーションの行き先(最終経由点)を動かす */
   moveMotionTarget: (id: string, position: Vec3) => void;
   setDragging: (id: string | null) => void;
@@ -458,6 +460,19 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
           const prev = existingMotionPath(e);
           const path = prev.length > 0 ? prev : defaultMotionPath(e);
           return { ...e, motion: { type: "clip", clipId, speed, path } };
+        }),
+      },
+    });
+  },
+
+  setEntityArrivalClip: (id, clipId) => {
+    const { project } = get();
+    set({
+      project: {
+        ...project,
+        entities: project.entities.map((e) => {
+          if (e.id !== id || e.motion?.type !== "clip") return e;
+          return { ...e, motion: { ...e.motion, arrivalClipId: clipId ?? undefined } };
         }),
       },
     });

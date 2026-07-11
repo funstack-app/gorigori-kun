@@ -32,8 +32,13 @@ export type EntityMotion =
        * resolveClipSpeed の値を焼き込む。0/未指定 = その場再生
        */
       speed?: number;
-      /** 経由点(speed>0のとき使用)。最後の点が到着点。到着後は待機に切替 */
+      /** 経由点(speed>0のとき使用)。最後の点が到着点 */
       path?: Vec3[];
+      /**
+       * 到着後アクション(モーションミックス第1弾)。到着したらこのクリップに切替。
+       * 未指定は待機(Idle_Loop)。標準ライブラリ同士のみ(骨格を共有するため)
+       */
+      arrivalClipId?: string;
     };
 
 export type SceneEntityKind =

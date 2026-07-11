@@ -102,6 +102,8 @@ export type EntityPose = {
   rotationY: number;
   /** 歩行サイクル: moving中は phase が 0..1 で循環 */
   gait: { moving: boolean; phase: number; run: boolean };
+  /** 移動系クリップのみ: 経路を走破するのに要する秒数(到着後アクションの開始時刻) */
+  travelSeconds?: number;
 };
 
 /**
@@ -173,10 +175,17 @@ export function evaluateEntityPose(
     const path = motion.path ?? [];
     if (speed <= 0 || path.length === 0) return idle;
     const p = followPath(entity, path, speed, project.fps, globalFrame);
+    // 到着時刻(秒)。ビューポートが到着後アクションの開始時刻に使う
+    const points: Vec3[] = [entity.position, ...path];
+    let pathLen = 0;
+    for (let i = 0; i < points.length - 1; i++) {
+      pathLen += Math.hypot(points[i + 1][0] - points[i][0], points[i + 1][2] - points[i][2]);
+    }
     return {
       position: p.position,
       rotationY: p.rotationY,
       gait: { moving: !p.arrived, phase: 0, run: false },
+      travelSeconds: pathLen / speed,
     };
   }
 
