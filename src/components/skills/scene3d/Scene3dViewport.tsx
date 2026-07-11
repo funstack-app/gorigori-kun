@@ -493,9 +493,9 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
   const clipMotion = entity.motion?.type === "clip" ? entity.motion : null;
   const clipId = clipMotion?.clipId ?? null;
   const clipMoves = (clipMotion?.speed ?? 0) > 0;
-  // 到着後アクション(未指定は待機)。骨格を共有する標準ライブラリ同士のみ
+  // 到着後アクション(未指定は待機)。骨格を共有する標準ライブラリ/AI生成のみ
   const arrivalClipId =
-    clipMoves && clipId?.startsWith("builtin-")
+    clipMoves && (clipId?.startsWith("builtin-") || clipId?.startsWith("gen-"))
       ? (clipMotion?.arrivalClipId ?? "builtin-Idle_Loop")
       : null;
   // ライブラリの読み込み完了で組み直す(再起動直後は実体が未登録のため)

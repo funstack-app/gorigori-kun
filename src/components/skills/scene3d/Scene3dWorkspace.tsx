@@ -27,7 +27,22 @@ import { CSS } from "@dnd-kit/utilities";
 import { ActiveProjectSelector } from "../../ActiveProjectSelector";
 import { WorkspaceTabs } from "../../WorkspaceTabs";
 import { getShotMove, totalDurationFrames } from "../../../lib/scene3d/evaluateScene";
-import { importMotionFiles, loadBuiltinMotions } from "../../../lib/scene3d/motionLibrary";
+import {
+  getBuiltinTemplate,
+  importMotionFiles,
+  loadBuiltinMotions,
+  registerGeneratedClip,
+  unregisterMotion,
+} from "../../../lib/scene3d/motionLibrary";
+import {
+  buildGeneratedClip,
+  buildMotionPrompt,
+  loadGeneratedSpecs,
+  removeGeneratedSpec,
+  saveGeneratedSpec,
+  validateGeneratedSpec,
+} from "../../../lib/scene3d/motionGen";
+import { codexTextQuery } from "../../../lib/agents/codexQuery";
 import { resolveClipSpeed } from "../../../lib/scene3d/clipSpeed";
 import {
   CAMERA_PRESET_LABELS,
@@ -752,12 +767,16 @@ function AxisSlider({
 function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: () => void }) {
   const importedMotions = useScene3d((s) => s.importedMotions);
   const registerImportedMotions = useScene3d((s) => s.registerImportedMotions);
+  const removeImportedMotion = useScene3d((s) => s.removeImportedMotion);
   const setEntityMotionClip = useScene3d((s) => s.setEntityMotionClip);
   const project = useScene3d((s) => s.project);
   const fileRef = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
   const [errors, setErrors] = useState<string[]>([]);
   const [filter, setFilter] = useState("");
+  const [genText, setGenText] = useState("");
+  const [genBusy, setGenBusy] = useState(false);
+  const [genError, setGenError] = useState<string | null>(null);
 
   // 標準ライブラリ(同梱CC0・46種)を初回に自動読み込み
   useEffect(() => {
@@ -780,7 +799,44 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
   const activeClipId = entity?.motion?.type === "clip" ? entity.motion.clipId : null;
   const match = (name: string) => name.toLowerCase().includes(filter.toLowerCase());
   const builtin = importedMotions.filter((m) => m.id.startsWith("builtin-") && match(m.name));
-  const imported = importedMotions.filter((m) => !m.id.startsWith("builtin-") && match(m.name));
+  const generated = importedMotions.filter((m) => m.id.startsWith("gen-") && match(m.name));
+  const imported = importedMotions.filter(
+    (m) => !m.id.startsWith("builtin-") && !m.id.startsWith("gen-") && match(m.name),
+  );
+
+  // AIモーション生成: Codexにキーフレーム仕様を書かせ、標準リグの上に組み立てる
+  const onGenerate = async () => {
+    const text = genText.trim();
+    if (!text || genBusy) return;
+    setGenBusy(true);
+    setGenError(null);
+    try {
+      const template = getBuiltinTemplate();
+      if (!template) throw new Error("標準ライブラリの読み込み待ちです。少し待ってからもう一度");
+      const { systemPrompt, prompt } = buildMotionPrompt(text);
+      const res = await codexTextQuery({ prompt, systemPrompt, expectJson: true });
+      const spec = validateGeneratedSpec(res.parsedJson);
+      const id = `gen-${Date.now()}`;
+      const clip = buildGeneratedClip(template, spec, id);
+      const entry = registerGeneratedClip(id, spec.name, clip);
+      if (!entry) throw new Error("モーションの登録に失敗しました");
+      saveGeneratedSpec(id, spec);
+      registerImportedMotions([entry]);
+      setEntityMotionClip(entityId, id);
+      setGenText("");
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setGenError(msg.slice(0, 200));
+    } finally {
+      setGenBusy(false);
+    }
+  };
+
+  const onRemoveGenerated = (id: string) => {
+    unregisterMotion(id);
+    removeGeneratedSpec(id);
+    removeImportedMotion(id);
+  };
 
   const motionBtnCls = (active: boolean) =>
     `truncate rounded-lg border px-2 py-2 text-left text-xs ${
@@ -801,6 +857,42 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
 
   return (
     <Popup title="モーションライブラリ" onClose={onClose}>
+      {/* AIモーション生成(Codex) */}
+      <div className="mb-3 rounded-lg border border-sky-400/25 bg-sky-400/5 p-2.5">
+        <p className="mb-1.5 text-[11px] font-bold tracking-wide text-sky-300">
+          AIでモーションを作る
+        </p>
+        <div className="flex gap-1.5">
+          <input
+            type="text"
+            value={genText}
+            onChange={(e) => setGenText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void onGenerate();
+            }}
+            placeholder="例: 大きく手を振る / 深くお辞儀する / ガッツポーズ"
+            className="min-w-0 flex-1 rounded-lg border border-[#2a2a2a] bg-[#0d0d0d] px-2 py-1.5 text-xs text-neutral-200 placeholder:text-neutral-600 focus:border-sky-400/60 focus:outline-none"
+            disabled={genBusy}
+          />
+          <button
+            className="shrink-0 rounded-lg border border-sky-400/40 bg-sky-400/10 px-3 py-1.5 text-xs text-sky-300 hover:bg-sky-400/20 disabled:opacity-50"
+            onClick={() => void onGenerate()}
+            disabled={genBusy || !genText.trim()}
+          >
+            {genBusy ? "生成中…" : "生成"}
+          </button>
+        </div>
+        <p className="mt-1.5 text-[10px] leading-4 text-neutral-500">
+          リグ入りキャラの動きをAIが手付けします(10〜30秒)。当たり外れがあるので、
+          気に入らなければ言い方を変えてもう一度
+        </p>
+        {genError && (
+          <p className="mt-1 rounded border border-red-500/30 bg-red-500/10 p-1.5 text-[11px] text-red-300">
+            {genError}
+          </p>
+        )}
+      </div>
+
       <input
         ref={fileRef}
         type="file"
@@ -836,6 +928,34 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
         placeholder="モーションを検索…"
         className="mb-2 w-full rounded-lg border border-[#2a2a2a] bg-[#0d0d0d] px-2 py-1.5 text-xs text-neutral-200 placeholder:text-neutral-600 focus:border-pink-400/60 focus:outline-none"
       />
+
+      {generated.length > 0 && (
+        <>
+          <p className="mb-1.5 text-[11px] font-bold tracking-wide text-neutral-500">
+            AIで作ったモーション({generated.length})
+          </p>
+          <div className="mb-3 grid max-h-32 grid-cols-3 gap-1.5 overflow-y-auto">
+            {generated.map((m) => (
+              <div key={m.id} className="relative">
+                <button
+                  className={`w-full ${motionBtnCls(activeClipId === m.id)} pr-5`}
+                  onClick={() => setEntityMotionClip(entityId, m.id)}
+                  title={`${m.name} を割り当てる`}
+                >
+                  {m.name}
+                </button>
+                <button
+                  className="absolute right-1 top-1.5 text-[10px] text-neutral-600 hover:text-red-400"
+                  onClick={() => onRemoveGenerated(m.id)}
+                  title="このAIモーションを削除"
+                >
+                  ✕
+                </button>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
 
       <p className="mb-1.5 text-[11px] font-bold tracking-wide text-neutral-500">
         標準ライブラリ(CC0・{builtin.length}種) —{" "}
@@ -919,7 +1039,10 @@ function ArrivalMotionPopup({ entityId, onClose }: { entityId: string; onClose: 
 
   const entity = project.entities.find((e) => e.id === entityId);
   const current = entity?.motion?.type === "clip" ? entity.motion.arrivalClipId : undefined;
-  const builtin = importedMotions.filter((m) => m.id.startsWith("builtin-"));
+  // 標準ライブラリ + AI生成(どちらも同じ骨格なので到着後に切替できる)
+  const builtin = importedMotions.filter(
+    (m) => m.id.startsWith("builtin-") || m.id.startsWith("gen-"),
+  );
 
   const btnCls = (active: boolean) =>
     `truncate rounded-lg border px-2 py-2 text-left text-xs ${
@@ -1087,11 +1210,12 @@ function SelectedObjectSection() {
             移動モーション: 旗をドラッグで行き先を変更できます
           </p>
         )}
-      {/* 到着後アクション(標準ライブラリのクリップのみ。骨格を共有するため) */}
+      {/* 到着後アクション(標準ライブラリ/AI生成のみ。骨格を共有するため) */}
       {entity.kind === "mannequin" &&
         entity.motion?.type === "clip" &&
         (entity.motion.speed ?? 0) > 0 &&
-        entity.motion.clipId.startsWith("builtin-") && (
+        (entity.motion.clipId.startsWith("builtin-") ||
+          entity.motion.clipId.startsWith("gen-")) && (
           <>
             <button
               className="rounded-lg border border-[#2a2a2a] bg-[#101010] px-2 py-1.5 text-left text-xs text-neutral-300 hover:border-sky-400/50"
@@ -2319,10 +2443,26 @@ function usePanelOpen(key: string) {
 export function Scene3dWorkspace() {
   useKeyboardShortcuts();
   // 標準モーションライブラリを最初に読み込む。なぜ: 保存済みシーンのクリップモーションは
-  // ライブラリの実体が無いと復元できない(ポップアップを開くまで人形に戻る問題の根治)
+  // ライブラリの実体が無いと復元できない(ポップアップを開くまで人形に戻る問題の根治)。
+  // 続けて、保存済みのAI生成モーションを標準リグの上に再構築する
   useEffect(() => {
     void loadBuiltinMotions()
-      .then((items) => useScene3d.getState().registerImportedMotions(items))
+      .then((items) => {
+        useScene3d.getState().registerImportedMotions(items);
+        const template = getBuiltinTemplate();
+        if (!template) return;
+        const restored: { id: string; name: string }[] = [];
+        for (const { id, spec } of loadGeneratedSpecs()) {
+          try {
+            const clip = buildGeneratedClip(template, spec, id);
+            const entry = registerGeneratedClip(id, spec.name, clip);
+            if (entry) restored.push(entry);
+          } catch {
+            /* 壊れた保存データはスキップ(他の生成モーションは復元する) */
+          }
+        }
+        if (restored.length > 0) useScene3d.getState().registerImportedMotions(restored);
+      })
       .catch(() => {
         /* 読み込み失敗時はライブラリを開いたときに再試行される */
       });

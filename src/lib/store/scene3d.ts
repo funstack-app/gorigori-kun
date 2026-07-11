@@ -151,6 +151,8 @@ type Scene3dState = {
   /** インポート済みモーション一覧(実体は motionLibrary モジュールが持つ) */
   importedMotions: { id: string; name: string }[];
   registerImportedMotions: (items: { id: string; name: string }[]) => void;
+  /** モーションを一覧から外し、使用中の人物のモーションも解除する(AI生成の削除用) */
+  removeImportedMotion: (id: string) => void;
   /** 人物のモーション設定(walk/run)。null=立ち止まる。開始時は前方2.5mが行き先 */
   setEntityMotion: (id: string, type: EntityMotionType | null) => void;
   /** インポートしたクリップを人物に割当(その場再生) */
@@ -443,6 +445,24 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
     const { importedMotions } = get();
     const known = new Set(importedMotions.map((m) => m.id));
     set({ importedMotions: [...importedMotions, ...items.filter((m) => !known.has(m.id))] });
+  },
+
+  removeImportedMotion: (id) => {
+    const { project, importedMotions } = get();
+    set({
+      importedMotions: importedMotions.filter((m) => m.id !== id),
+      project: {
+        ...project,
+        entities: project.entities.map((e) => {
+          if (e.motion?.type !== "clip") return e;
+          if (e.motion.clipId === id) return { ...e, motion: null };
+          if (e.motion.arrivalClipId === id) {
+            return { ...e, motion: { ...e.motion, arrivalClipId: undefined } };
+          }
+          return e;
+        }),
+      },
+    });
   },
 
   setEntityMotionClip: (id, clipId) => {

@@ -26,6 +26,8 @@ export type ImportedMotion = {
 const library = new Map<string, ImportedMotion>();
 let seq = 1;
 let builtinLoaded = false;
+/** 標準ライブラリのリグ本体。AI生成モーション(gen-*)はこの骨格に後付けする */
+let builtinTemplate: Group | null = null;
 
 /** 標準ライブラリ(同梱CC0)の日本語名。無いものは英語名のまま */
 const BUILTIN_JP: Record<string, string> = {
@@ -72,6 +74,7 @@ export async function loadBuiltinMotions(): Promise<{ id: string; name: string }
   const buf = await res.arrayBuffer();
   const gltf = await new GLTFLoader().parseAsync(buf, "");
   const template = gltf.scene;
+  builtinTemplate = template;
   const out: { id: string; name: string }[] = [];
   for (const clip of gltf.animations ?? []) {
     if (clip.name === "A_TPose") continue; // ポーズ基準は除外
@@ -86,6 +89,27 @@ export async function loadBuiltinMotions(): Promise<{ id: string; name: string }
 
 export function getImportedMotion(id: string): ImportedMotion | undefined {
   return library.get(id);
+}
+
+/** 標準ライブラリのリグ(loadBuiltinMotions 後に有効)。AI生成モーションの土台 */
+export function getBuiltinTemplate(): Group | null {
+  return builtinTemplate;
+}
+
+/** AI生成クリップを標準リグの上に登録する。標準ライブラリ未読み込みなら null */
+export function registerGeneratedClip(
+  id: string,
+  name: string,
+  clip: AnimationClip,
+): { id: string; name: string } | null {
+  if (!builtinTemplate) return null;
+  library.set(id, { id, name, template: builtinTemplate, clip, scale: 1 });
+  return { id, name };
+}
+
+/** モーションをライブラリから外す(AI生成の削除用) */
+export function unregisterMotion(id: string): void {
+  library.delete(id);
 }
 
 function baseName(fileName: string): string {
