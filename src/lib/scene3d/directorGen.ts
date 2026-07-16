@@ -8,6 +8,7 @@
 
 import { codexTextQuery } from "../agents/codexQuery";
 import { getSelectedShot, useScene3d } from "../store/scene3d";
+import { surfaceHeightAt } from "./evaluateScene";
 import { registerClipSpeed } from "./clipSpeed";
 import {
   buildGeneratedClip,
@@ -44,6 +45,8 @@ export type DirectorMotion = {
   generate?: string;
   /** 到着後につなげる動きの列(モーション連結。つなぎ目は自動クロスフェード) */
   then?: string[];
+  /** 行き先[x,z]。高さは地形が決める(建物の上なら屋上に乗り、必要なら放物線で跳ぶ) */
+  to?: [number, number];
 };
 
 export type DirectorPlan = {
@@ -86,7 +89,7 @@ export function buildDirectorPrompt(
     "あなたは映像監督。ユーザーの日本語の演出指示を、3Dシーンのカット割りJSONに変換する。",
     "出力はJSONのみ。説明文・コードブロック記号は出さない。",
     "スキーマ:",
-    `{"cuts":[{"preset":string,"target":string|null,"seconds":number,"lensMm"?:number,"orbitDegrees"?:number,"startPos"?:[x,y,z],"endPos"?:[x,y,z],"pathPoints"?:[[x,y,z],...]}],"motions":[{"entity":string,"clip"?:string,"type"?:"walk"|"run","generate"?:string,"then"?:string[]}],"note":string}`,
+    `{"cuts":[{"preset":string,"target":string|null,"seconds":number,"lensMm"?:number,"orbitDegrees"?:number,"startPos"?:[x,y,z],"endPos"?:[x,y,z],"pathPoints"?:[[x,y,z],...]}],"motions":[{"entity":string,"clip"?:string,"type"?:"walk"|"run","generate"?:string,"then"?:string[],"to"?:[x,z]}],"note":string}`,
     `preset語彙: ${presets}`,
     "座標は[x, 高さ, z]メートル。人物の身長は約1.7m、目線は約1.5m。",
     "targetは追う相手のエンティティ名。動く人物を撮るなら基本入れる。",
@@ -95,6 +98,7 @@ export function buildDirectorPrompt(
     "motionsのclipは提供リストの名前から選ぶ。歩く/走るだけならtype(walk/run)でもよい。",
     "リストにもtypeにも合わない動き(踊る・座る・手を振る等)は、generateに動きの説明(日本語・20字以内)を書く(新規生成される)。clip/type/generateはどれか1つ。",
     "移動する人物には then で「到着後につなげる動き」を順番の配列で書ける(例: [\"ジャンプ\",\"ガッツポーズ\"])。リストの名前を優先し、無ければ短い説明を書く(新規生成される)。つなぎ目は自動で滑らかに混ざる。",
+    "移動する人物には to で行き先[x,z]を指定できる。高さは書かない(建物の上なら自動で屋上に乗り、放物線で跳ぶ)。",
     "secondsは1〜20。cutsは1〜6個。noteは組んだ内容の一言(日本語・30字以内)。",
   ].join("\n");
 
@@ -172,6 +176,17 @@ export function validateDirectorPlan(raw: unknown): DirectorPlan {
         const steps = mo.then.filter((x): x is string => typeof x === "string" && x.length > 0);
         if (steps.length > 0) out.then = steps.slice(0, 4).map((x) => x.slice(0, 60));
       }
+      if (
+        Array.isArray(mo.to) &&
+        mo.to.length >= 2 &&
+        mo.to.slice(0, 2).every((n) => typeof n === "number" && Number.isFinite(n))
+      ) {
+        // [x,z] または [x,y,z] を受け、水平位置だけ使う(高さは地形が決める)
+        const arr = mo.to as number[];
+        const tx = arr[0];
+        const tz = arr.length >= 3 ? arr[2] : arr[1];
+        out.to = [Math.max(-50, Math.min(50, tx)), Math.max(-50, Math.min(50, tz))];
+      }
       return [out];
     });
 
@@ -248,6 +263,12 @@ export async function applyDirectorPlan(
     if (!assigned && m.generate) {
       toGenerate.push({ entityId: id, desc: m.generate });
       assigned = true;
+    }
+    // 行き先: 高さは地形(磁石)が決める。建物の上なら屋上に乗り、放物線で跳ぶ
+    if (m.to) {
+      const [tx, tz] = m.to;
+      const y = surfaceHeightAt(st().project, tx, tz, id);
+      st().moveMotionTarget(id, [tx, y, tz]);
     }
     // 到着後につなげる列(モーション連結)。名前で見つかれば即つなぐ、無ければ生成キューへ
     for (const name of m.then ?? []) {

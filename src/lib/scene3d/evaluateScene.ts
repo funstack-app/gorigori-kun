@@ -119,6 +119,73 @@ const FACES_TRAVEL: ReadonlySet<SceneEntityKind> = new Set(["mannequin", "car"])
  * 折れ線パスに沿って speed で進んだ位置(プロシージャル歩行と移動系クリップの共通経路)。
  * traveled はタイムライン先頭からの移動距離(m)。歩行位相の算出に使う
  */
+/**
+ * 面スナップ(磁石)の土台: 座標(x,z)の地面の高さ。
+ * 建物・箱・壁・机・台座の上なら、その天面の高さを返す(重なりは一番高い面)。
+ * 何もなければ 0(地面)。人物のドラッグ・行き先旗・ジャンプの着地高さに使う
+ */
+export function surfaceHeightAt(
+  project: SceneProject,
+  x: number,
+  z: number,
+  excludeId?: string,
+): number {
+  let top = 0;
+  for (const e of project.entities) {
+    if (e.id === excludeId) continue;
+    // kind別の footprint(幅x奥行き)と高さ。ビューポートのジオメトリ定義と同じ値
+    let w: number;
+    let d: number;
+    let h: number;
+    const p = e.params ?? {};
+    switch (e.kind) {
+      case "building":
+        w = 5;
+        d = 4;
+        h = (p.floors ?? 3) * 3;
+        break;
+      case "box":
+        w = p.width ?? 0.8;
+        d = p.depth ?? 0.8;
+        h = p.height ?? 0.8;
+        break;
+      case "wall":
+        w = p.width ?? 3;
+        d = 0.15;
+        h = p.height ?? 2.6;
+        break;
+      case "table":
+        w = 1.4;
+        d = 0.8;
+        h = 0.78;
+        break;
+      case "pedestal":
+        w = 0.6;
+        d = 0.6;
+        h = 1.0;
+        break;
+      default:
+        continue;
+    }
+    // エンティティのローカル座標へ(向きの逆回転)
+    const dx = x - e.position[0];
+    const dz = z - e.position[2];
+    const cos = Math.cos(-e.rotationY);
+    const sin = Math.sin(-e.rotationY);
+    const lx = dx * cos - dz * sin;
+    const lz = dx * sin + dz * cos;
+    const s = e.scale;
+    if (Math.abs(lx) <= (w * s) / 2 && Math.abs(lz) <= (d * s) / 2) {
+      const t = e.position[1] + h * s;
+      if (t > top) top = t;
+    }
+  }
+  return top;
+}
+
+/** 跳躍とみなす高低差(m)。これ以下は歩いて乗れる段差として直線で上る */
+const JUMP_THRESHOLD = 0.4;
+
 function followPath(
   entity: SceneEntity,
   path: Vec3[],
@@ -135,13 +202,26 @@ function followPath(
     const b = points[i + 1];
     const dx = b[0] - a[0];
     const dz = b[2] - a[2];
+    const dy = (b[1] ?? 0) - (a[1] ?? 0);
     const segLen = Math.hypot(dx, dz);
     if (segLen < 1e-6) continue;
     const rotY = Math.atan2(dx, dz); // +Zが正面
     if (remaining <= segLen) {
       const t = remaining / segLen;
+      // 高さ: 高低差が小さければ直線で上る(段差)。大きければ放物線で跳ぶ。
+      // 放物線は両端より0.5m高い頂点を通る(物理っぽい弧。手で描かせない)
+      let y: number;
+      if (Math.abs(dy) <= JUMP_THRESHOLD) {
+        y = (a[1] ?? 0) + dy * t;
+      } else {
+        const apex = Math.max(a[1] ?? 0, b[1] ?? 0) + 0.5;
+        const linear = (a[1] ?? 0) + dy * t;
+        // 4t(1-t)は t=0,1 で 0 / t=0.5 で 1 の山。頂点分を持ち上げる
+        const lift = (apex - Math.max(a[1] ?? 0, b[1] ?? 0)) + Math.abs(dy) / 2;
+        y = linear + 4 * t * (1 - t) * lift;
+      }
       return {
-        position: [a[0] + dx * t, entity.position[1], a[2] + dz * t],
+        position: [a[0] + dx * t, y, a[2] + dz * t],
         rotationY: rotY,
         traveled,
         arrived: false,
@@ -154,7 +234,7 @@ function followPath(
   const prev = points[points.length - 2] ?? entity.position;
   const rotY = Math.atan2(last[0] - prev[0], last[2] - prev[2]);
   return {
-    position: [last[0], entity.position[1], last[2]],
+    position: [last[0], last[1] ?? entity.position[1], last[2]],
     rotationY: Number.isFinite(rotY) ? rotY : entity.rotationY,
     traveled,
     arrived: true,

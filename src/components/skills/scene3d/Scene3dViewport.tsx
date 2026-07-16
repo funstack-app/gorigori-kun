@@ -27,6 +27,7 @@ import {
   evaluateEntityPose,
   evaluateShotCamera,
   getShotMove,
+  surfaceHeightAt,
   resolveLookAt,
   totalDurationFrames,
 } from "../../../lib/scene3d/evaluateScene";
@@ -595,12 +596,16 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
       return;
     }
 
-    // 水平移動: 現在の高さの平面上でドラッグ(高さは変えない)
+    // 水平移動: 現在の高さの平面上でドラッグ。
+    // 人物は地形に吸着する(建物・箱・机の上に運ぶと天面に乗る=磁石)
     const p = rayToPlaneY(e.ray, entity.position[1]) ?? rayToFloor(e.ray);
     if (!p) return;
     const nx = snap(p[0]);
     const nz = snap(p[2]);
-    const y = entity.position[1];
+    const y =
+      entity.kind === "mannequin"
+        ? surfaceHeightAt(useScene3d.getState().project, nx, nz, entity.id)
+        : entity.position[1];
 
     // X/Zキー: その軸だけ動かす
     if (heldKeys.has("x")) {
@@ -1605,8 +1610,8 @@ function MotionOverlay() {
   }
   const dest = path[path.length - 1];
   const pathPoints: Vec3[] = [
-    [entity.position[0], 0.03, entity.position[2]],
-    ...path.map((p): Vec3 => [p[0], 0.03, p[2]]),
+    [entity.position[0], (entity.position[1] ?? 0) + 0.03, entity.position[2]],
+    ...path.map((p): Vec3 => [p[0], (p[1] ?? 0) + 0.03, p[2]]),
   ];
   const color =
     motion.type === "run" ? "#fb923c" : motion.type === "clip" ? "#38bdf8" : "#a3e635";
@@ -1619,7 +1624,10 @@ function MotionOverlay() {
   const onPointerMove = (e: ThreeEvent<PointerEvent>) => {
     if (!draggingSelf) return;
     const p = rayToFloor(e.ray);
-    if (p) moveMotionTarget(entity.id, p);
+    if (!p) return;
+    // 行き先の高さは地形が決める(建物の上に旗を挿すと放物線で飛び乗る)
+    const y = surfaceHeightAt(useScene3d.getState().project, p[0], p[2], entity.id);
+    moveMotionTarget(entity.id, [p[0], y, p[2]]);
   };
   const onPointerUp = (e: ThreeEvent<PointerEvent>) => {
     if (!draggingSelf) return;
@@ -1632,7 +1640,7 @@ function MotionOverlay() {
       <Line points={pathPoints} color={color} lineWidth={2} dashed dashSize={0.18} gapSize={0.12} />
       {/* 行き先の旗(ドラッグで移動) */}
       <group
-        position={[dest[0], 0, dest[2]]}
+        position={[dest[0], dest[1] ?? 0, dest[2]]}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
