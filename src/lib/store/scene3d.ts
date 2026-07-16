@@ -193,6 +193,12 @@ type Scene3dState = {
   removeEntityArrivalStep: (id: string, index: number) => void;
   /** モーションの行き先(最終経由点)を動かす */
   moveMotionTarget: (id: string, position: Vec3) => void;
+  /** 体の軌跡: 通過点をつかんだ位置に追加し、新しい通過点のindexを返す */
+  insertMotionPathPoint: (id: string, position: Vec3) => number;
+  /** 体の軌跡: index番目の通過点を動かす */
+  moveMotionPathPoint: (id: string, index: number, position: Vec3) => void;
+  /** 体の軌跡: index番目の通過点を消す(最後の1点=行き先は消せない) */
+  removeMotionPathPoint: (id: string, index: number) => void;
   setDragging: (id: string | null) => void;
 
   /** カット操作(CapCut風タイムライン) */
@@ -681,6 +687,81 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
           const path = [...cur];
           path[path.length - 1] = position;
           return { ...e, motion: { ...e.motion, path } };
+        }),
+      },
+    });
+  },
+
+  insertMotionPathPoint: (id, position) => {
+    const { project } = get();
+    const e = project.entities.find((en) => en.id === id);
+    const cur = e ? existingMotionPath(e) : [];
+    if (!e || cur.length === 0) return 0;
+    // 挿入位置: [現在地, ...経由点] の折れ線のうち、一番近い区間に入れる
+    const chain: Vec3[] = [e.position, ...cur];
+    let bestSeg = 0;
+    let bestD = Infinity;
+    for (let i = 0; i < chain.length - 1; i++) {
+      const a = chain[i];
+      const b = chain[i + 1];
+      const abx = b[0] - a[0];
+      const abz = b[2] - a[2];
+      const len2 = abx * abx + abz * abz;
+      const t =
+        len2 === 0
+          ? 0
+          : Math.max(0, Math.min(1, ((position[0] - a[0]) * abx + (position[2] - a[2]) * abz) / len2));
+      const d = Math.hypot(position[0] - (a[0] + abx * t), position[2] - (a[2] + abz * t));
+      if (d < bestD) {
+        bestD = d;
+        bestSeg = i;
+      }
+    }
+    const next = [...cur];
+    next.splice(bestSeg, 0, position);
+    set({
+      project: {
+        ...project,
+        entities: project.entities.map((en) =>
+          en.id === id && en.motion && en.motion.type !== "fall"
+            ? { ...en, motion: { ...en.motion, path: next } }
+            : en,
+        ),
+      },
+    });
+    return bestSeg;
+  },
+
+  moveMotionPathPoint: (id, index, position) => {
+    const { project } = get();
+    set({
+      project: {
+        ...project,
+        entities: project.entities.map((en) => {
+          if (en.id !== id || !en.motion || en.motion.type === "fall") return en;
+          const cur = existingMotionPath(en);
+          if (index < 0 || index >= cur.length) return en;
+          const path = [...cur];
+          path[index] = position;
+          return { ...en, motion: { ...en.motion, path } };
+        }),
+      },
+    });
+  },
+
+  removeMotionPathPoint: (id, index) => {
+    const { project } = get();
+    set({
+      project: {
+        ...project,
+        entities: project.entities.map((en) => {
+          if (en.id !== id || !en.motion || en.motion.type === "fall") return en;
+          const cur = existingMotionPath(en);
+          // 最後の1点(行き先)は消せない(旗が消えて操作不能になるため)
+          if (cur.length <= 1 || index < 0 || index >= cur.length) return en;
+          const path = [...cur];
+          path.splice(index, 1);
+          return { ...en, motion: { ...en.motion, path } };
         }),
       },
     });

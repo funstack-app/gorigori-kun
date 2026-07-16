@@ -1590,8 +1590,14 @@ function MotionOverlay() {
   const project = useScene3d((s) => s.project);
   const selectedEntityId = useScene3d((s) => s.selectedEntityId);
   const moveMotionTarget = useScene3d((s) => s.moveMotionTarget);
+  const insertMotionPathPoint = useScene3d((s) => s.insertMotionPathPoint);
+  const moveMotionPathPoint = useScene3d((s) => s.moveMotionPathPoint);
+  const removeMotionPathPoint = useScene3d((s) => s.removeMotionPathPoint);
   const setDragging = useScene3d((s) => s.setDragging);
+  const draggingEntityId = useScene3d((s) => s.draggingEntityId);
   const draggingSelf = useScene3d((s) => s.draggingEntityId === "__motion-target");
+  const [hoverGrab, setHoverGrab] = useState<number | null>(null);
+  const activePearl = useRef<number | null>(null);
 
   const entity = project.entities.find((e) => e.id === selectedEntityId);
   const motion = entity?.motion;
@@ -1635,9 +1641,145 @@ function MotionOverlay() {
     (e.target as Element).releasePointerCapture(e.pointerId);
   };
 
+  // 体の真珠(中間通過点。最後の1点は旗が担当)
+  const midPoints = path.slice(0, -1);
+
+  // 道つかみハンドル: 折れ線に沿って約0.8m間隔。既存の点の近くは避ける
+  const grabbers: Vec3[] = [];
+  {
+    const chain: Vec3[] = [entity.position, ...path];
+    for (let i = 0; i < chain.length - 1; i++) {
+      const a = chain[i];
+      const b = chain[i + 1];
+      const segLen = Math.hypot(b[0] - a[0], b[2] - a[2]);
+      const n = Math.floor(segLen / 0.8);
+      for (let k = 1; k <= n; k++) {
+        const t = k / (n + 1);
+        grabbers.push([
+          a[0] + (b[0] - a[0]) * t,
+          (a[1] ?? 0) + ((b[1] ?? 0) - (a[1] ?? 0)) * t,
+          a[2] + (b[2] - a[2]) * t,
+        ]);
+      }
+    }
+  }
+
+  const beginPearlDrag = (e: ThreeEvent<PointerEvent>, index: number) => {
+    e.stopPropagation();
+    activePearl.current = index;
+    setDragging(`__motion-path-${index}`);
+    (e.target as Element).setPointerCapture(e.pointerId);
+  };
+  const onPearlMove = (e: ThreeEvent<PointerEvent>) => {
+    const idx = activePearl.current;
+    if (idx == null || draggingEntityId !== `__motion-path-${idx}`) return;
+    const cur = path[idx];
+    if (!cur) return;
+    if (heldKeys.has("z")) {
+      // Z押しながら=高さを手動で(飛行・浮遊などの例外用)
+      const v = rayToVerticalPlane(e.ray, cur);
+      if (v) {
+        moveMotionPathPoint(entity.id, idx, [
+          cur[0],
+          Math.max(0, Math.round(v[1] * 10) / 10),
+          cur[2],
+        ]);
+      }
+      return;
+    }
+    // 普通のドラッグ=平面移動。高さは地形(磁石)が決める
+    const p = rayToFloor(e.ray);
+    if (!p) return;
+    const y = surfaceHeightAt(useScene3d.getState().project, p[0], p[2], entity.id);
+    moveMotionPathPoint(entity.id, idx, [
+      Math.round(p[0] * 10) / 10,
+      y,
+      Math.round(p[2] * 10) / 10,
+    ]);
+  };
+  const onPearlUp = (e: ThreeEvent<PointerEvent>) => {
+    if (activePearl.current == null) return;
+    activePearl.current = null;
+    setDragging(null);
+    (e.target as Element).releasePointerCapture(e.pointerId);
+  };
+
   return (
     <>
       <Line points={pathPoints} color={color} lineWidth={2} dashed dashSize={0.18} gapSize={0.12} />
+      {/* 道つかみ: 線をつかむと通過点が生まれ、そのまま曲げられる(カメラの真珠と同じ操作) */}
+      {grabbers.map((p, i) => (
+        <group key={`mgrab-${i}`} position={p}>
+          <mesh
+            visible={false}
+            onPointerDown={(e) => {
+              e.stopPropagation();
+              document.body.style.cursor = "";
+              const idx = insertMotionPathPoint(entity.id, [
+                Math.round(p[0] * 10) / 10,
+                Math.round((p[1] ?? 0) * 10) / 10,
+                Math.round(p[2] * 10) / 10,
+              ]);
+              beginPearlDrag(e, idx);
+            }}
+            onPointerMove={onPearlMove}
+            onPointerUp={onPearlUp}
+            onPointerOver={() => {
+              setHoverGrab(i);
+              document.body.style.cursor = "grab";
+            }}
+            onPointerOut={() => {
+              setHoverGrab((cur) => (cur === i ? null : cur));
+              document.body.style.cursor = "";
+            }}
+          >
+            <sphereGeometry args={[0.2, 8, 6]} />
+            <meshBasicMaterial />
+          </mesh>
+          {hoverGrab === i && (
+            <mesh>
+              <sphereGeometry args={[0.07, 12, 8]} />
+              <meshBasicMaterial color={color} />
+            </mesh>
+          )}
+        </group>
+      ))}
+      {/* 中間通過点(体の真珠): 床の影+紐+玉。ドラッグ=平面(磁石)/Z=高さ/2回クリック=削除 */}
+      {midPoints.map((p, i) => (
+        <group key={`mpearl-${i}`}>
+          {(p[1] ?? 0) > 0.05 && (
+            <Line
+              points={[[p[0], 0, p[2]] as Vec3, p]}
+              color={color}
+              lineWidth={1}
+              dashed
+              dashSize={0.08}
+              gapSize={0.06}
+              transparent
+              opacity={0.5}
+            />
+          )}
+          <group
+            position={p}
+            onPointerDown={(e) => beginPearlDrag(e, i)}
+            onPointerMove={onPearlMove}
+            onPointerUp={onPearlUp}
+            onDoubleClick={(e) => {
+              e.stopPropagation();
+              removeMotionPathPoint(entity.id, i);
+            }}
+          >
+            <mesh visible={false}>
+              <sphereGeometry args={[0.28, 8, 6]} />
+              <meshBasicMaterial />
+            </mesh>
+            <mesh>
+              <sphereGeometry args={[0.08, 16, 12]} />
+              <meshBasicMaterial color={color} />
+            </mesh>
+          </group>
+        </group>
+      ))}
       {/* 行き先の旗(ドラッグで移動) */}
       <group
         position={[dest[0], dest[1] ?? 0, dest[2]]}
