@@ -711,7 +711,7 @@ function Workspace({
         collapsed={navCollapsed}
         onCollapsedChange={onSetNavCollapsed}
       />
-      <div className="relative flex min-h-0 flex-1 flex-col bg-[#121212]">
+      <div className="relative flex min-h-0 min-w-0 flex-1 flex-col bg-[#121212]">
         <BoardHeader title={title} activePage={drawer} />
         <WorkspacePage page={drawer} setDrawer={setDrawer} onCreate={onCreate} onOpen={onOpen} />
       </div>
