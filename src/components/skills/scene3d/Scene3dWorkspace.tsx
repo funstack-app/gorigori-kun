@@ -998,7 +998,7 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
           </button>
         </div>
         <p className="mt-1.5 text-[10px] leading-4 text-neutral-500">
-          リグ入りキャラの動きをAIが手付けします(30秒〜2分ほど)。当たり外れがあるので、
+          キャラの動きをAIが手付けします(30秒〜2分ほど)。当たり外れがあるので、
           気に入らなければ言い方を変えてもう一度
         </p>
         {genError && (
@@ -2951,6 +2951,37 @@ function ShotReadback() {
   if (pearls > 0) extras.push(`通過点${pearls}個の道を通る`);
   extras.push(`${move.lensMm}mmレンズ`);
 
+  // 主役(被写体)の動きも読み上げる(連結・通過点・視線を変えた直後も一致するように)
+  const importedMotions = useScene3d((s) => s.importedMotions);
+  const nameOf = (id: string) => importedMotions.find((m) => m.id === id)?.name ?? "動き";
+  let actorText = "";
+  if (target) {
+    const mo = target.motion;
+    let motionPart = "立ち";
+    let waypoints = 0;
+    if (mo?.type === "walk" || mo?.type === "run") {
+      motionPart = mo.type === "run" ? "走る" : "歩く";
+      waypoints = Math.max(0, mo.path.length - 1);
+    } else if (mo?.type === "fall") {
+      motionPart = "倒れる";
+    } else if (mo?.type === "clip") {
+      const chain = [nameOf(mo.clipId)];
+      for (const st of mo.arrivalSequence ?? []) chain.push(nameOf(st.clipId));
+      if (!mo.arrivalSequence?.length && mo.arrivalClipId) chain.push(nameOf(mo.arrivalClipId));
+      motionPart = chain.join("→");
+      if (mo.overlayClipId) motionPart += `(上半身: ${nameOf(mo.overlayClipId)})`;
+      waypoints = Math.max(0, (mo.path?.length ?? 0) - 1);
+    }
+    const actorExtras: string[] = [];
+    if (waypoints > 0) actorExtras.push(`通過点${waypoints}個`);
+    if (target.lookAt) {
+      actorExtras.push(
+        `視線=${target.lookAt === "__camera" ? "カメラ" : (project.entities.find((e) => e.id === target.lookAt)?.label ?? "?")}`,
+      );
+    }
+    actorText = ` / ${target.label}は${motionPart}${actorExtras.length > 0 ? `(${actorExtras.join("・")})` : ""}`;
+  }
+
   return (
     <div className="flex items-center gap-2 border-t border-[#242424] bg-[#131313] px-4 py-1.5">
       <span className="shrink-0 rounded bg-[#222] px-1.5 py-0.5 text-[10px] font-bold text-neutral-400">
@@ -2960,6 +2991,7 @@ function ShotReadback() {
         {shot.label}: {camera?.label ?? "カメラ"}が、{subject} {seconds}秒かけて
         <span className="text-neutral-200">{verb}</span>
         <span className="text-neutral-500">（{extras.join("・")}）</span>
+        <span className="text-neutral-400">{actorText}</span>
       </p>
     </div>
   );

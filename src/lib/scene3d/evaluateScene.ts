@@ -187,6 +187,7 @@ export function surfaceHeightAt(
 const JUMP_THRESHOLD = 0.4;
 
 function followPath(
+  project: SceneProject,
   entity: SceneEntity,
   path: Vec3[],
   speed: number,
@@ -209,9 +210,23 @@ function followPath(
     if (remaining <= segLen) {
       const t = remaining / segLen;
       // 高さ: 高低差が小さければ直線で上る(段差)。大きければ放物線で跳ぶ。
+      // 同じ高さでも、区間の途中の地面が両端より下がっている(=ビルの隙間などの谷)なら跳ぶ。
       // 放物線は両端より0.5m高い頂点を通る(物理っぽい弧。手で描かせない)
+      let gapBelow = false;
+      const aY = a[1] ?? 0;
+      const bY = b[1] ?? 0;
+      if (Math.abs(dy) <= JUMP_THRESHOLD && Math.min(aY, bY) > 0.3) {
+        for (let k = 1; k <= 4; k++) {
+          const u = k / 5;
+          const g = surfaceHeightAt(project, a[0] + dx * u, a[2] + dz * u, entity.id);
+          if (g < Math.min(aY, bY) - JUMP_THRESHOLD) {
+            gapBelow = true;
+            break;
+          }
+        }
+      }
       let y: number;
-      if (Math.abs(dy) <= JUMP_THRESHOLD) {
+      if (Math.abs(dy) <= JUMP_THRESHOLD && !gapBelow) {
         y = (a[1] ?? 0) + dy * t;
       } else {
         const apex = Math.max(a[1] ?? 0, b[1] ?? 0) + 0.5;
@@ -274,7 +289,7 @@ export function evaluateEntityPose(
     const speed = motion.speed ?? 0;
     const path = motion.path ?? [];
     if (speed <= 0 || path.length === 0) return idle;
-    const p = followPath(entity, path, speed, project.fps, globalFrame);
+    const p = followPath(project, entity, path, speed, project.fps, globalFrame);
     // 到着時刻(秒)。ビューポートが到着後アクションの開始時刻に使う
     const points: Vec3[] = [entity.position, ...path];
     let pathLen = 0;
@@ -291,7 +306,7 @@ export function evaluateEntityPose(
 
   if (motion.path.length === 0) return idle;
   const g = GAIT[motion.type];
-  const p = followPath(entity, motion.path, g.speed, project.fps, globalFrame);
+  const p = followPath(project, entity, motion.path, g.speed, project.fps, globalFrame);
   // 正面のない物(壁・柱等)は向きを保ったまま平行移動する
   const facing = FACES_TRAVEL.has(entity.kind) ? p.rotationY : entity.rotationY;
   if (p.arrived) {
