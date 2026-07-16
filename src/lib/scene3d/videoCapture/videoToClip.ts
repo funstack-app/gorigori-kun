@@ -21,6 +21,12 @@ const SAMPLE_FPS = 12;
 const MAX_SECONDS = 20;
 
 let landmarkerPromise: Promise<PoseLandmarker> | null = null;
+/**
+ * landmarker はシングルトンで、VIDEOモードはインスタンス生涯で単調増加の
+ * タイムスタンプを要求する。取り込みごとに0へ巻き戻すと
+ * "Packet timestamp mismatch" で2回目以降が必ず落ちるため、通算で管理する。
+ */
+let lastTsMs = 0;
 
 /** PoseLandmarkerのシングルトン(初期化は重いので1回だけ) */
 function getLandmarker(): Promise<PoseLandmarker> {
@@ -70,7 +76,9 @@ export async function captureVideoToSpec(
 
     const frames: CapturedFrame[] = [];
     let missed = 0;
-    let lastTsMs = -1;
+    // 前回取り込みの続きから1秒空けて開始(トラッカーに別セグメントと認識させつつ、
+    // フレーム間の実時間間隔は保つ)
+    const baseTsMs = lastTsMs + 1000;
     const step = 1 / SAMPLE_FPS;
     for (let t = 0.001; t < duration; t += step) {
       video.currentTime = t;
@@ -78,7 +86,7 @@ export async function captureVideoToSpec(
         video.onseeked = () => r();
       });
       // 単調増加タイムスタンプ(同一・逆行を渡すと追跡が壊れる)
-      const tsMs = Math.max(lastTsMs + 1, Math.round(t * 1000));
+      const tsMs = Math.max(lastTsMs + 1, baseTsMs + Math.round(t * 1000));
       lastTsMs = tsMs;
       const res = landmarker.detectForVideo(video, tsMs);
       const world = res.worldLandmarks?.[0];
