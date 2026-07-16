@@ -520,6 +520,7 @@ function resolveLookTarget(
   return [p.position[0], p.position[1] + 1.5 * other.scale, p.position[2]];
 }
 
+const _footWorld = new Vector3();
 const _lookQy = new Quaternion();
 const _lookQx = new Quaternion();
 const _axisY = new Vector3(0, 1, 0);
@@ -614,8 +615,11 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
     // 視線ノード用の頭ボーン(名前に head を含むノード)。pre/post は蓄積防止用スナップショット
     // (クロージャ内代入はTSの型追跡が効かないためホルダー経由)
     const headHolder: { bone: import("three").Object3D | null } = { bone: null };
+    const feet: import("three").Object3D[] = [];
     obj.traverse((node) => {
       if (!headHolder.bone && /head/i.test(node.name)) headHolder.bone = node;
+      // 接地補正用の足ボーン(foot/toe)。DEF-foot.L等
+      if (/foot|toe/i.test(node.name)) feet.push(node);
     });
     const headState = { pre: new Quaternion(), post: new Quaternion(), primed: false };
     return {
@@ -627,6 +631,7 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
       overlay,
       headBone: headHolder.bone,
       headState,
+      feet,
     };
   }, [clipId, arrivalClipId, arrivalSeqKey, overlayClipId, motionCount, clipMotion?.arrivalSequence]);
   const moveEntity = useScene3d((s) => s.moveEntity);
@@ -831,6 +836,19 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
           hs.post.copy(hb.quaternion);
           hs.primed = true;
         }
+        // 接地補正(足IKの第一段): 足が地面・天面にめり込んだ分だけ体を持ち上げる。
+        // 姿勢(関節)は触らないため、骨格の軸に依存せず安全
+        if (clipRig.feet.length > 0) {
+          root.updateMatrixWorld(true);
+          let lift = 0;
+          for (const f of clipRig.feet) {
+            f.getWorldPosition(_footWorld);
+            const ground = surfaceHeightAt(st.project, _footWorld.x, _footWorld.z, ent.id);
+            const pen = ground - _footWorld.y;
+            if (pen > lift) lift = Math.min(pen, 0.5);
+          }
+          if (lift > 0.01) root.position.y += lift;
+        }
         return;
       }
 
@@ -859,7 +877,8 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
               pose.position[2],
             ];
             const { yaw, pitch } = lookAtAngles(headWorld, target, pose.rotationY);
-            r.head.rotation.set(pitch, yaw, 0); // グループはX正=上を向く
+            // three.jsの回転はX正=+Zが下がる(下を見る)。数値検証済み(2026-07-16)
+            r.head.rotation.set(-pitch, yaw, 0);
           } else {
             r.head.rotation.set(0, 0, 0);
           }
