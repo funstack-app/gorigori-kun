@@ -43,6 +43,11 @@ import {
   validateGeneratedSpec,
 } from "../../../lib/scene3d/motionGen";
 import { codexTextQuery } from "../../../lib/agents/codexQuery";
+import {
+  applyDirectorPlan,
+  buildDirectorPrompt,
+  validateDirectorPlan,
+} from "../../../lib/scene3d/directorGen";
 import { registerClipSpeed, resolveClipSpeed } from "../../../lib/scene3d/clipSpeed";
 import {
   CAMERA_PRESET_LABELS,
@@ -70,6 +75,7 @@ import { requestViewPreset, Scene3dViewport } from "./Scene3dViewport";
 
 const PRESET_ORDER: CameraPresetId[] = [
   "fixed",
+  "path",
   "pushIn",
   "pullOut",
   "track",
@@ -374,6 +380,14 @@ function PresetGlyph({ preset }: { preset: CameraPresetId }) {
           <path d="M4 4l4 4M20 4l-4 4M4 20l4-4M20 20l-4-4M12 10.5v3M10.5 12h3" />
         </Icon>
       );
+    case "path":
+      return (
+        <Icon className={cls}>
+          <path d="M4 18c4-8 6 6 10-2 2-4 4-5 6-5" />
+          <circle cx="9" cy="13" r="1.6" />
+          <circle cx="15" cy="12" r="1.6" />
+        </Icon>
+      );
   }
 }
 
@@ -518,6 +532,7 @@ function PresetPickerPopup({ onClose }: { onClose: () => void }) {
     whipPan: "一瞬で振る場面転換",
     shake: "爆発・衝撃の揺れ(収まる)",
     snapZoom: "位置固定で一気に寄る",
+    path: "つかんで曲げる自由な道",
   };
 
   return (
@@ -1388,7 +1403,7 @@ function SelectedObjectSection() {
       )}
 
       <p className="text-[10px] leading-4 text-neutral-600">
-        ドラッグ中にキー長押し: X=横 / Z=奥行き / Y=高さ / R=回転 / S=大きさ
+        ドラッグ中にキー長押し: X=横 / Y=奥行き / Z=高さ / R=回転 / S=大きさ
       </p>
 
       <label className="flex flex-col gap-1 text-xs text-neutral-400">
@@ -1461,6 +1476,9 @@ function DirectorPanel() {
   const project = useScene3d((s) => s.project);
   const selectedShotId = useScene3d((s) => s.selectedShotId);
   const setCameraTarget = useScene3d((s) => s.setCameraTarget);
+  const resetCameraWork = useScene3d((s) => s.resetCameraWork);
+  const pathDrawMode = useScene3d((s) => s.pathDrawMode);
+  const setPathDrawMode = useScene3d((s) => s.setPathDrawMode);
   const setLens = useScene3d((s) => s.setLens);
   const setOrbitDegrees = useScene3d((s) => s.setOrbitDegrees);
   const setShotDurationFrames = useScene3d((s) => s.setShotDurationFrames);
@@ -1519,6 +1537,7 @@ function DirectorPanel() {
 
       {/* 下段: カット/カメラ/書き出し */}
       <div className="flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto px-4 py-4">
+      <DirectorChat />
       <div>
         <p className="mb-2 text-[10px] font-bold uppercase tracking-widest text-neutral-600">
           カット
@@ -1587,6 +1606,24 @@ function DirectorPanel() {
         onClick={() => setCamPosOpen(true)}
       >
         カメラ位置を調整…(開始・終了・注視点)
+      </button>
+      <button
+        className={`rounded-lg border px-2 py-1.5 text-xs ${
+          pathDrawMode
+            ? "border-pink-400 bg-pink-400/10 text-pink-300"
+            : "border-[#2a2a2a] text-neutral-400 hover:border-pink-400/60 hover:text-neutral-200"
+        }`}
+        onClick={() => setPathDrawMode(!pathDrawMode)}
+        title="ビューポートで一筆書きするとカメラの通り道になる(始点・終点は固定)"
+      >
+        {pathDrawMode ? "描いてください…(Escで中止)" : "道を手で描く"}
+      </button>
+      <button
+        className="rounded-lg border border-[#2a2a2a] px-2 py-1.5 text-xs text-neutral-400 hover:border-amber-400/60 hover:text-amber-200"
+        onClick={() => resetCameraWork()}
+        title="真珠の道・曲げを消して、元のカメラの動きに戻す"
+      >
+        カメラワークをリセット
       </button>
       {camPosOpen && <CameraPositionPopup onClose={() => setCamPosOpen(false)} />}
 
@@ -2295,7 +2332,7 @@ function EditorPane({ showOverlays, primary = false }: { showOverlays: boolean; 
       )}
       {showOverlays && (
         <p className="pointer-events-none absolute bottom-2 left-3 text-[10px] text-white/45">
-          左ドラッグ: 回る · ホイール: 寄る · 右ドラッグ: ずらす · ダブルクリック: 注視 · Shift+物ドラッグ: 軸に沿って移動
+          左ドラッグ: 回る · ホイール: 寄る · 右ドラッグ: ずらす · ダブルクリック: 注視 · カメラの◎を人物へドラッグ: 追従 · ピンクの道はつかむと曲がる(ドラッグ=平面 / Z押しながら=高さ / 玉2回クリック=削除)
         </p>
       )}
     </div>
@@ -2551,6 +2588,236 @@ function PanelResizer({
   );
 }
 
+/* ---------------------------------- 演出チャット ---------------------------------- */
+
+/**
+ * 日本語演出→シーン自動構築。
+ * 「人物1が歩いてきて、カメラは頭上から回り込みながら寄る」→ Codexがカット割りJSONを設計し、
+ * モーション割当・カメラ配置・カット追加まで一式適用する
+ */
+function DirectorChat() {
+  const project = useScene3d((s) => s.project);
+  const importedMotions = useScene3d((s) => s.importedMotions);
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [note, setNote] = useState<string | null>(null);
+  const [progress, setProgress] = useState<string | null>(null);
+  // @メンション: シーン内の物体・カメラを候補から挿入する
+  const taRef = useRef<HTMLTextAreaElement>(null);
+  const [mention, setMention] = useState<{ query: string; start: number } | null>(null);
+  const [mentionIdx, setMentionIdx] = useState(0);
+
+  const mentionCandidates = mention
+    ? [
+        ...project.entities.map((e) => ({ label: e.label, kind: "物体" })),
+        ...project.cameras.map((c) => ({ label: c.label, kind: "カメラ" })),
+      ].filter((c) => c.label.toLowerCase().includes(mention.query.toLowerCase()))
+    : [];
+
+  const updateMention = (value: string, caret: number) => {
+    const upto = value.slice(0, caret);
+    const at = upto.lastIndexOf("@");
+    if (at === -1) {
+      setMention(null);
+      return;
+    }
+    const q = upto.slice(at + 1);
+    // @の後に空白・改行が来たらメンション入力は終わったとみなす
+    if (/[\s\n]/.test(q) || q.length > 20) {
+      setMention(null);
+      return;
+    }
+    setMention({ query: q, start: at });
+    setMentionIdx(0);
+  };
+
+  const pickMention = (label: string) => {
+    if (!mention) return;
+    const ta = taRef.current;
+    const caret = ta ? ta.selectionStart : mention.start + 1 + mention.query.length;
+    const next = text.slice(0, mention.start) + label + " " + text.slice(caret);
+    setText(next);
+    setMention(null);
+    // 挿入した名前の直後にカーソルを戻す
+    const pos = mention.start + label.length + 1;
+    requestAnimationFrame(() => {
+      taRef.current?.focus();
+      taRef.current?.setSelectionRange(pos, pos);
+    });
+  };
+
+  const onRun = async () => {
+    const t = text.trim();
+    if (!t || busy) return;
+    setBusy(true);
+    setError(null);
+    setNote(null);
+    setProgress("監督が考え中…(最大3分)");
+    try {
+      const clipNames = importedMotions.map((m) => m.name);
+      const { systemPrompt, prompt } = buildDirectorPrompt(t, project, clipNames);
+      // カット割り設計は考える時間が長め。3分まで待つ(AIモーション生成と同じ)
+      const res = await codexTextQuery({ prompt, systemPrompt, expectJson: true, timeoutSecs: 180 });
+      const plan = validateDirectorPlan(res.parsedJson);
+      await applyDirectorPlan(plan, (msg) => setProgress(msg));
+      setNote(plan.note || "組みました");
+      setText("");
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setError(msg.slice(0, 200));
+    } finally {
+      setBusy(false);
+      setProgress(null);
+    }
+  };
+
+  return (
+    <div>
+      <p className="mb-2 text-[10px] font-bold uppercase tracking-widest text-neutral-600">
+        演出チャット
+      </p>
+      <div className="relative">
+        <textarea
+          ref={taRef}
+          value={text}
+          onChange={(e) => {
+            setText(e.target.value);
+            updateMention(e.target.value, e.target.selectionStart);
+          }}
+          onKeyDown={(e) => {
+            if (e.nativeEvent.isComposing) return;
+            if (mention && mentionCandidates.length > 0) {
+              if (e.key === "ArrowDown") {
+                e.preventDefault();
+                setMentionIdx((i) => (i + 1) % mentionCandidates.length);
+                return;
+              }
+              if (e.key === "ArrowUp") {
+                e.preventDefault();
+                setMentionIdx((i) => (i - 1 + mentionCandidates.length) % mentionCandidates.length);
+                return;
+              }
+              if (e.key === "Enter" || e.key === "Tab") {
+                e.preventDefault();
+                pickMention(mentionCandidates[mentionIdx].label);
+                return;
+              }
+              if (e.key === "Escape") {
+                e.preventDefault();
+                setMention(null);
+                return;
+              }
+            }
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              void onRun();
+            }
+          }}
+          onBlur={() => {
+            // クリック選択(onMouseDown)より後に閉じる
+            window.setTimeout(() => setMention(null), 150);
+          }}
+          rows={2}
+          placeholder="例: @で物体を指定。人物1が歩いてきて、カメラは頭上から回り込みながら寄る"
+          className="w-full resize-none rounded-lg border border-[#2a2a2a] bg-[#0d0d0d] px-2 py-1.5 text-xs text-neutral-200 placeholder:text-neutral-600 focus:border-pink-400/60 focus:outline-none"
+        />
+        {mention && mentionCandidates.length > 0 && (
+          <div className="absolute left-0 top-full z-20 mt-1 max-h-44 w-full overflow-y-auto rounded-lg border border-[#333] bg-[#161616] shadow-xl">
+            {mentionCandidates.map((c, i) => (
+              <button
+                key={`${c.kind}-${c.label}`}
+                className={`flex w-full items-center justify-between px-2 py-1.5 text-left text-xs ${
+                  i === mentionIdx ? "bg-pink-500/20 text-pink-200" : "text-neutral-300 hover:bg-[#222]"
+                }`}
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  pickMention(c.label);
+                }}
+                onMouseEnter={() => setMentionIdx(i)}
+              >
+                <span className="truncate">{c.label}</span>
+                <span className="ml-2 shrink-0 text-[10px] text-neutral-600">{c.kind}</span>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+      <button
+        className="mt-1.5 w-full rounded-lg bg-pink-500/90 px-2 py-1.5 text-xs font-semibold text-white hover:bg-pink-500 disabled:opacity-40"
+        disabled={busy || text.trim().length === 0}
+        onClick={() => void onRun()}
+      >
+        {busy ? (progress ?? "監督が考え中…") : "AIに組ませる"}
+      </button>
+      {note && <p className="mt-1.5 text-[11px] text-lime-300">✓ {note}</p>}
+      {error && (
+        <p className="mt-1.5 rounded border border-red-500/30 bg-red-500/10 p-1.5 text-[11px] text-red-300">
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/* ---------------------------------- 逆読み上げ ---------------------------------- */
+
+/** プリセット→読み上げ用の動詞(「〜します」につながる形) */
+const READBACK_VERBS: Record<string, string> = {
+  fixed: "動かず据え置きで撮る",
+  pushIn: "被写体へ近づいていく",
+  pullOut: "被写体から離れていく",
+  track: "横に並走する",
+  pan: "位置は動かさず視線だけ流す",
+  orbit: "まわりを回り込む",
+  crane: "上昇しながら見下ろす",
+  handheld: "手持ちカメラ風に揺れながら撮る",
+  spiralIn: "回り込みながら寄っていく",
+  dollyZoom: "被写体の大きさを保ったまま背景だけ伸ばす",
+  flyover: "頭上を飛び越えて背後へ抜ける",
+  riseReveal: "足元から上昇して全景を見せる",
+  follow: "動きに合わせて並走・追跡する",
+  whipPan: "一瞬で振って場面を切り替える",
+  shake: "衝撃で揺れて徐々に収まる",
+  snapZoom: "位置はそのまま一気に寄る",
+  path: "自由な道を通って撮る",
+};
+
+/**
+ * 逆読み上げ: いまのカットを日本語1文で常時表示する。
+ * 初心者は「自分が何を作ったか」を言葉で確認できて初めて安心する(AI不要・シーンデータから機械生成)
+ */
+function ShotReadback() {
+  const project = useScene3d((s) => s.project);
+  const selectedShotId = useScene3d((s) => s.selectedShotId);
+  const shot = getSelectedShot({ project, selectedShotId });
+  const move = getShotMove(project, shot);
+  const camera = project.cameras.find((c) => c.id === shot.cameraId);
+  const target = project.entities.find((e) => e.id === move.targetEntityId);
+
+  const seconds = (shot.durationFrames / project.fps).toFixed(1);
+  const subject = target ? `${target.label}を追いながら` : "決めた一点を見つめたまま";
+  const verb = READBACK_VERBS[move.preset] ?? "動く";
+  const extras: string[] = [];
+  if (move.preset === "orbit") extras.push(`${move.orbitDegrees}°回り込み`);
+  const pearls = move.pathPoints?.length ?? 0;
+  if (pearls > 0) extras.push(`通過点${pearls}個の道を通る`);
+  extras.push(`${move.lensMm}mmレンズ`);
+
+  return (
+    <div className="flex items-center gap-2 border-t border-[#242424] bg-[#131313] px-4 py-1.5">
+      <span className="shrink-0 rounded bg-[#222] px-1.5 py-0.5 text-[10px] font-bold text-neutral-400">
+        いま
+      </span>
+      <p className="truncate text-[11px] text-neutral-400">
+        {shot.label}: {camera?.label ?? "カメラ"}が、{subject} {seconds}秒かけて
+        <span className="text-neutral-200">{verb}</span>
+        <span className="text-neutral-500">（{extras.join("・")}）</span>
+      </p>
+    </div>
+  );
+}
+
 /* ---------------------------------- ルート ---------------------------------- */
 
 /** 畳んだパネルの細レール(クリックで再展開) */
@@ -2662,6 +2929,7 @@ export function Scene3dWorkspace() {
         )}
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           <ViewportWithFrame />
+          <ShotReadback />
           <ShotTimeline />
         </div>
         {rightOpen ? (

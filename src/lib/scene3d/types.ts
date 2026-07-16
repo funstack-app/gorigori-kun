@@ -109,7 +109,8 @@ export type CameraPresetId =
   | "follow"
   | "whipPan"
   | "shake"
-  | "snapZoom";
+  | "snapZoom"
+  | "path";
 
 export type CameraEasing = "linear" | "easeInOut";
 
@@ -126,6 +127,13 @@ export type CameraMove = {
   orbitDegrees: number;
   /** 軌道の中間点(直線プリセットを曲げる)。null/未指定なら直線 */
   midPos?: Vec3 | null;
+  /**
+   * 軌道の通過点(真珠)。開始→終了の間をこの点を順に通る滑らかな道になる。
+   * 存在する場合は midPos より優先。対象は補間系プリセット(pushIn/pullOut/track/pan/crane/path)
+   */
+  pathPoints?: Vec3[];
+  /** 「自由な道」へ変換した元のプリセット(カメラワークのリセットで戻る先) */
+  pathConvertedFrom?: CameraPresetId;
   /** フルサイズ換算の焦点距離(mm)。fovに変換される */
   lensMm: number;
   easing: CameraEasing;
@@ -217,6 +225,7 @@ export const CAMERA_PRESET_LABELS: Record<CameraPresetId, string> = {
   whipPan: "クイックパン",
   shake: "衝撃の揺れ",
   snapZoom: "スナップズーム",
+  path: "自由な道",
 };
 
 export function createDefaultCameraMove(): CameraMove {

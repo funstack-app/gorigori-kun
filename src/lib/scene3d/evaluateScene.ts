@@ -275,6 +275,50 @@ function rotateAroundY(point: Vec3, center: Vec3, degrees: number): Vec3 {
   ];
 }
 
+/**
+ * 通過点を必ず通る滑らかな道(Catmull-Romスプライン)上の位置。
+ * 区間を弦長で重み付けし、道のどこでも体感速度がほぼ一定になるようにする
+ */
+export function evalPathSpline(points: Vec3[], t: number): Vec3 {
+  const n = points.length;
+  if (n === 0) return [0, 0, 0];
+  if (n === 1) return points[0];
+  // 区間ごとの長さ(弦長)で t→区間・区間内位置 にマップ
+  const lens: number[] = [];
+  let total = 0;
+  for (let i = 0; i < n - 1; i++) {
+    const a = points[i];
+    const b = points[i + 1];
+    const len = Math.max(
+      1e-6,
+      Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]),
+    );
+    lens.push(len);
+    total += len;
+  }
+  let target = clamp01(t) * total;
+  let seg = 0;
+  while (seg < n - 2 && target > lens[seg]) {
+    target -= lens[seg];
+    seg++;
+  }
+  const u = lens[seg] === 0 ? 0 : clamp01(target / lens[seg]);
+  // Catmull-Rom(端は点を複製してクランプ)
+  const p0 = points[Math.max(0, seg - 1)];
+  const p1 = points[seg];
+  const p2 = points[seg + 1];
+  const p3 = points[Math.min(n - 1, seg + 2)];
+  const u2 = u * u;
+  const u3 = u2 * u;
+  const cr = (a: number, b: number, c: number, d: number) =>
+    0.5 * (2 * b + (c - a) * u + (2 * a - 5 * b + 4 * c - d) * u2 + (3 * b - 3 * c + d - a) * u3);
+  return [
+    cr(p0[0], p1[0], p2[0], p3[0]),
+    cr(p0[1], p1[1], p2[1], p3[1]),
+    cr(p0[2], p1[2], p2[2], p3[2]),
+  ];
+}
+
 /** ショット内フレームでのカメラ姿勢評価 */
 export function evaluateShotCamera(
   project: SceneProject,
@@ -361,8 +405,13 @@ export function evaluateShotCamera(
       break;
     }
     // pushIn / pullOut / track / pan / crane は「開始→終了の補間」で表現が共通。
-    // midPos があれば2次ベジェで通り道を曲げる(軌道の自由調整)
+    // pathPoints(真珠の道)があればスプライン、midPos があれば2次ベジェで曲げる
     default: {
+      const pts = camera.pathPoints;
+      if (pts && pts.length > 0) {
+        position = evalPathSpline([camera.startPos, ...pts, camera.endPos], t);
+        break;
+      }
       const mid = camera.midPos;
       if (mid) {
         const u = 1 - t;

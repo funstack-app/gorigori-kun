@@ -216,6 +216,22 @@ type Scene3dState = {
   moveCameraEndpoint: (which: "start" | "end", position: Vec3) => void;
   /** 軌道の中間点を動かして通り道を曲げる(nullで直線に戻す) */
   moveCameraMid: (position: Vec3 | null) => void;
+  /** 真珠の道: 通過点をつかんだ位置に追加し、新しい真珠のindexを返す(挿入区間は自動判定) */
+  insertCameraPathPoint: (position: Vec3) => number;
+  /**
+   * 軌道系プリセット(オービット等)を、今の軌道の形を保ったまま「自由な道」へ変換する。
+   * 道をつかんだ瞬間に呼ばれる(見た目が変わらないので操作が驚きにならない)
+   */
+  convertCameraToFreePath: (startPos: Vec3, endPos: Vec3, mids: Vec3[]) => void;
+  /** カメラワークをリセット: 真珠・曲げを消し、変換前のプリセットに戻す */
+  resetCameraWork: () => void;
+  /** 道を手で描くモード(ビューポートの一筆書きでカメラ軌跡を作る) */
+  pathDrawMode: boolean;
+  setPathDrawMode: (on: boolean) => void;
+  /** 真珠の道: index番目の通過点を動かす */
+  moveCameraPathPoint: (index: number, position: Vec3) => void;
+  /** 真珠の道: index番目の通過点を消す(全部消えたら直線に戻る) */
+  removeCameraPathPoint: (index: number) => void;
 
   setPlaying: (playing: boolean) => void;
   /**
@@ -771,6 +787,9 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
       ...placement,
       // プリセットが中間点を持つ(飛び越え等)ならそれを採用、無ければ直線に戻す
       midPos: placement.midPos ?? null,
+      // 動きを選び直したら真珠の道は消す(前の道が新プリセットを乗っ取らないように)
+      pathPoints: undefined,
+      pathConvertedFrom: undefined,
     }));
     set({
       project: {
@@ -816,6 +835,92 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
 
   moveCameraMid: (position) => {
     set({ project: updateSelectedCameraMove(get(), (m) => ({ ...m, midPos: position })) });
+  },
+
+  // ---- 真珠の道(カメラ軌道の通過点) ----
+  insertCameraPathPoint: (position) => {
+    // 挿入位置: [start, ...真珠, end] の折れ線のうち、一番近い区間に入れる。
+    // 返り値は新しい真珠のindex(つかんだ瞬間からドラッグを始めるために使う)
+    const shot = getSelectedShot(get());
+    const cam = get().project.cameras.find((c) => c.id === shot.cameraId);
+    const m = cam?.move;
+    if (!m) return 0;
+    const pts = m.pathPoints ?? [];
+    const chain: Vec3[] = [m.startPos, ...pts, m.endPos];
+    let bestSeg = 0;
+    let bestD = Infinity;
+    for (let i = 0; i < chain.length - 1; i++) {
+      const a = chain[i];
+      const b = chain[i + 1];
+      const ab: Vec3 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+      const ap: Vec3 = [position[0] - a[0], position[1] - a[1], position[2] - a[2]];
+      const len2 = ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2];
+      const t = len2 === 0 ? 0 : Math.max(0, Math.min(1, (ap[0] * ab[0] + ap[1] * ab[1] + ap[2] * ab[2]) / len2));
+      const d = Math.hypot(
+        position[0] - (a[0] + ab[0] * t),
+        position[1] - (a[1] + ab[1] * t),
+        position[2] - (a[2] + ab[2] * t),
+      );
+      if (d < bestD) {
+        bestD = d;
+        bestSeg = i;
+      }
+    }
+    const next = [...pts];
+    next.splice(bestSeg, 0, position);
+    set({ project: updateSelectedCameraMove(get(), (mm) => ({ ...mm, pathPoints: next })) });
+    return bestSeg;
+  },
+
+  convertCameraToFreePath: (startPos, endPos, mids) => {
+    set({
+      project: updateSelectedCameraMove(get(), (m) => ({
+        ...m,
+        preset: "path",
+        pathConvertedFrom: m.preset === "path" ? m.pathConvertedFrom : m.preset,
+        startPos,
+        endPos,
+        pathPoints: mids,
+        midPos: null,
+      })),
+    });
+  },
+
+  pathDrawMode: false,
+  setPathDrawMode: (on) => set({ pathDrawMode: on }),
+
+  resetCameraWork: () => {
+    // 選択中のカメラワーク(プリセット)のデフォルト配置に戻す。
+    // 道つかみで「自由な道」に変換されていた場合は変換前のプリセットのデフォルトへ。
+    // setCameraPreset が既定配置・真珠クリア・moveWindowリセットを一括で行う
+    const shot = getSelectedShot(get());
+    const cam = get().project.cameras.find((c) => c.id === shot.cameraId);
+    if (!cam) return;
+    const m = cam.move;
+    const preset = m.preset === "path" ? (m.pathConvertedFrom ?? "path") : m.preset;
+    get().setCameraPreset(preset);
+  },
+
+  moveCameraPathPoint: (index, position) => {
+    set({
+      project: updateSelectedCameraMove(get(), (m) => {
+        const pts = [...(m.pathPoints ?? [])];
+        if (index < 0 || index >= pts.length) return m;
+        pts[index] = position;
+        return { ...m, pathPoints: pts };
+      }),
+    });
+  },
+
+  removeCameraPathPoint: (index) => {
+    set({
+      project: updateSelectedCameraMove(get(), (m) => {
+        const pts = [...(m.pathPoints ?? [])];
+        if (index < 0 || index >= pts.length) return m;
+        pts.splice(index, 1);
+        return { ...m, pathPoints: pts.length > 0 ? pts : undefined };
+      }),
+    });
   },
 
   setPlaying: (playing) => set({ playing }),

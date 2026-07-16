@@ -7,7 +7,7 @@
  *   (プレビューと書き出しが同じ評価器を通る = 決定性の担保)
  */
 
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { GizmoHelper, GizmoViewport, Grid, Line, OrbitControls } from "@react-three/drei";
 import type { ThreeEvent } from "@react-three/fiber";
@@ -566,8 +566,8 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
       return;
     }
 
-    // Yキー: 高さだけ動かす(カメラに正対する縦平面との交点で上下)
-    if (heldKeys.has("y")) {
+    // Zキー: 高さだけ動かす(Blender流: 縦=Z。カメラに正対する縦平面との交点で上下)
+    if (heldKeys.has("z")) {
       const v = rayToVerticalPlane(e.ray, start);
       if (!v) return;
       moveEntity(entity.id, [
@@ -590,7 +590,8 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
       moveEntity(entity.id, [nx, y, start[2]]);
       return;
     }
-    if (heldKeys.has("z")) {
+    if (heldKeys.has("y")) {
+      // Yキー: 奥行きだけ動かす(Blender流の呼び方。内部軸はthree.jsのz)
       moveEntity(entity.id, [start[0], y, nz]);
       return;
     }
@@ -861,7 +862,7 @@ function CameraPathLine() {
 
   const points = useMemo(() => {
     const pts: Vec3[] = [];
-    const samples = 24;
+    const samples = 48;
     for (let i = 0; i <= samples; i++) {
       const frame = Math.round(((shot.durationFrames - 1) * i) / samples);
       pts.push(evaluateShotCamera(project, shot, frame).position);
@@ -869,17 +870,231 @@ function CameraPathLine() {
     return pts;
   }, [project, shot]);
 
+  // 速度の点々: 時間の等間隔でサンプルするため「詰まっている=ゆっくり / まばら=速い」が見える
+  const speedDots = useMemo(() => {
+    const dots: Vec3[] = [];
+    const stepFrames = 3;
+    for (let f = stepFrames; f < shot.durationFrames - 1; f += stepFrames) {
+      dots.push(evaluateShotCamera(project, shot, f).position);
+    }
+    return dots;
+  }, [project, shot]);
+
   const lookAt = useMemo(() => resolveLookAt(project, shot), [project, shot]);
 
   return (
     <>
-      <Line points={points} color="#ec4899" lineWidth={2} dashed={false} />
+      <Line points={points} color="#ec4899" lineWidth={2} dashed={false} transparent opacity={0.55} />
+      {speedDots.map((p, i) => (
+        <mesh key={i} position={p}>
+          <sphereGeometry args={[0.028, 8, 6]} />
+          <meshBasicMaterial color="#f9a8d4" />
+        </mesh>
+      ))}
       {/* 終了点は CameraEndMarker(ドラッグ可能)が担う */}
       {/* 注視点マーカー */}
       <mesh position={lookAt}>
         <sphereGeometry args={[0.04, 12, 8]} />
         <meshBasicMaterial color="#ec4899" />
       </mesh>
+    </>
+  );
+}
+
+/** 真珠の道をそのまま出せるプリセット(開始→終了の補間系) */
+const PATH_PRESET_IDS = new Set(["pushIn", "pullOut", "track", "pan", "crane", "path"]);
+/**
+ * つかんだ瞬間に「自由な道」へ変換できる軌道系プリセット。
+ * 揺れ・ズーム演出が本体のもの(handheld/shake/whipPan/snapZoom/dollyZoom)と
+ * 被写体連動が本体の follow、道を持たない fixed は対象外
+ */
+const CONVERTIBLE_PRESET_IDS = new Set(["orbit", "spiralIn", "flyover", "riseReveal"]);
+
+/**
+ * 真珠の道: カメラの通り道を「つかんで曲げる」。
+ * - 道の上をつかむとその場所に真珠(通過点)が増え、そのままドラッグで曲げられる
+ * - 各真珠は「床の影 + 紐 + 風船」で表示: 影ドラッグ=平面移動 / 風船ドラッグ=高さだけ
+ * - 風船ダブルクリックで真珠を削除(全部消すと直線に戻る)
+ */
+function PathPearls() {
+  const project = useScene3d((s) => s.project);
+  const selectedShotId = useScene3d((s) => s.selectedShotId);
+  const insertCameraPathPoint = useScene3d((s) => s.insertCameraPathPoint);
+  const moveCameraPathPoint = useScene3d((s) => s.moveCameraPathPoint);
+  const removeCameraPathPoint = useScene3d((s) => s.removeCameraPathPoint);
+  const convertCameraToFreePath = useScene3d((s) => s.convertCameraToFreePath);
+  const setDragging = useScene3d((s) => s.setDragging);
+  const draggingEntityId = useScene3d((s) => s.draggingEntityId);
+  // ドラッグ中の真珠index。動かし方はキーで決まる(普通=平面を自由に / Z押しながら=高さ)
+  const activeDrag = useRef<{ index: number } | null>(null);
+
+  const shot = getSelectedShot({ project, selectedShotId });
+  const move = getShotMove(project, shot);
+  const pts = move.pathPoints ?? [];
+
+  const editable = PATH_PRESET_IDS.has(move.preset);
+  const convertible = CONVERTIBLE_PRESET_IDS.has(move.preset);
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+
+  // 道つかみハンドル。速度の点々(CameraPathLineの3フレームおきサンプル)と同じ位置に置き、
+  // 「見えている点=掴める点」を一致させる(ズレると反応が悪く感じる)
+  const grabbers = useMemo(() => {
+    if (!editable && !convertible) return [];
+    const out: Vec3[] = [];
+    const stepFrames = 3;
+    for (let f = stepFrames; f < shot.durationFrames - 1; f += stepFrames) {
+      const p = evaluateShotCamera(project, shot, f).position;
+      const nearPearl = pts.some((q) => Math.hypot(q[0] - p[0], q[1] - p[1], q[2] - p[2]) < 0.4);
+      if (!nearPearl) out.push(p);
+    }
+    return out;
+  }, [project, shot, editable, convertible, pts]);
+
+  if (!editable && !convertible) return null;
+
+  const beginDrag = (e: ThreeEvent<PointerEvent>, index: number) => {
+    e.stopPropagation();
+    activeDrag.current = { index };
+    setDragging(`__path-${index}`);
+    (e.target as Element).setPointerCapture(e.pointerId);
+  };
+  const onDragMove = (e: ThreeEvent<PointerEvent>) => {
+    const d = activeDrag.current;
+    if (!d || draggingEntityId !== `__path-${d.index}`) return;
+    const cur = (move.pathPoints ?? [])[d.index];
+    if (!cur) return;
+    if (heldKeys.has("z")) {
+      // Z押しながら=高さだけ(Blender流: 縦=Z)
+      const p = rayToVerticalPlane(e.ray, cur);
+      if (p) {
+        const y = Math.max(0.05, Math.min(20, Math.round(p[1] * 10) / 10));
+        moveCameraPathPoint(d.index, [cur[0], y, cur[2]]);
+      }
+      return;
+    }
+    // 普通のドラッグ=今の高さの平面上を自由に移動
+    const p = rayToPlaneY(e.ray, cur[1]) ?? rayToFloor(e.ray);
+    if (p) {
+      moveCameraPathPoint(d.index, [
+        Math.round(p[0] * 10) / 10,
+        cur[1],
+        Math.round(p[2] * 10) / 10,
+      ]);
+    }
+  };
+  const onDragUp = (e: ThreeEvent<PointerEvent>) => {
+    if (!activeDrag.current) return;
+    activeDrag.current = null;
+    setDragging(null);
+    (e.target as Element).releasePointerCapture(e.pointerId);
+  };
+
+  return (
+    <>
+      {/* 道つかみ: ピンクの点をつかむと真珠が生まれ、そのまま曲げられる */}
+      {grabbers.map((p, i) => (
+        <group key={`grab-${i}`} position={p}>
+          {/* 当たり判定(見えない)。見えている点より一回り大きく */}
+          <mesh
+            visible={false}
+            onPointerDown={(e) => {
+              e.stopPropagation();
+              document.body.style.cursor = "";
+              // オービット等の軌道系は、つかんだ瞬間に今の形のまま「自由な道」へ変換する
+              if (convertible) {
+                const last = shot.durationFrames - 1;
+                const sample = (f: number): Vec3 => {
+                  const q = evaluateShotCamera(project, shot, Math.round(f)).position;
+                  return [Math.round(q[0] * 10) / 10, Math.round(q[1] * 10) / 10, Math.round(q[2] * 10) / 10];
+                };
+                convertCameraToFreePath(
+                  sample(0),
+                  sample(last),
+                  [sample(last * 0.25), sample(last * 0.5), sample(last * 0.75)],
+                );
+              }
+              const idx = insertCameraPathPoint([
+                Math.round(p[0] * 10) / 10,
+                Math.round(p[1] * 10) / 10,
+                Math.round(p[2] * 10) / 10,
+              ]);
+              beginDrag(e, idx);
+            }}
+            onPointerMove={onDragMove}
+            onPointerUp={onDragUp}
+            onPointerOver={() => {
+              setHoverIdx(i);
+              document.body.style.cursor = "grab";
+            }}
+            onPointerOut={() => {
+              setHoverIdx((cur) => (cur === i ? null : cur));
+              document.body.style.cursor = "";
+            }}
+          >
+            <sphereGeometry args={[0.2, 8, 6]} />
+            <meshBasicMaterial />
+          </mesh>
+          {/* ホバーで点が膨らむ(掴める合図) */}
+          {hoverIdx === i && (
+            <mesh>
+              <sphereGeometry args={[0.075, 12, 8]} />
+              <meshBasicMaterial color="#f472b6" />
+            </mesh>
+          )}
+        </group>
+      ))}
+      {/* 真珠(通過点): 床の影 + 紐 + 風船 */}
+      {pts.map((p, i) => (
+        <group key={`pearl-${i}`}>
+          {/* 紐 */}
+          <Line
+            points={[[p[0], 0, p[2]] as Vec3, p]}
+            color="#ec4899"
+            lineWidth={1}
+            dashed
+            dashSize={0.08}
+            gapSize={0.06}
+            transparent
+            opacity={0.5}
+          />
+          {/* 床の影(ドラッグ=平面移動) */}
+          <group
+            position={[p[0], 0.015, p[2]]}
+            onPointerDown={(e) => beginDrag(e, i)}
+            onPointerMove={onDragMove}
+            onPointerUp={onDragUp}
+          >
+            <mesh visible={false}>
+              <sphereGeometry args={[0.3, 8, 6]} />
+              <meshBasicMaterial />
+            </mesh>
+            <mesh rotation={[-Math.PI / 2, 0, 0]}>
+              <ringGeometry args={[0.1, 0.17, 24]} />
+              <meshBasicMaterial color="#ec4899" transparent opacity={0.75} />
+            </mesh>
+          </group>
+          {/* 風船(ドラッグ=高さだけ / ダブルクリック=削除) */}
+          <group
+            position={p}
+            onPointerDown={(e) => beginDrag(e, i)}
+            onPointerMove={onDragMove}
+            onPointerUp={onDragUp}
+            onDoubleClick={(e) => {
+              e.stopPropagation();
+              removeCameraPathPoint(i);
+            }}
+          >
+            <mesh visible={false}>
+              <sphereGeometry args={[0.3, 8, 6]} />
+              <meshBasicMaterial />
+            </mesh>
+            <mesh>
+              <sphereGeometry args={[0.09, 16, 12]} />
+              <meshBasicMaterial color="#ec4899" />
+            </mesh>
+          </group>
+        </group>
+      ))}
     </>
   );
 }
@@ -896,9 +1111,15 @@ function CameraIndicator({ camera, selected }: { camera: SceneCamera; selected: 
   const selectedShotId = useScene3d((s) => s.selectedShotId);
   const cameraSelected = useScene3d((s) => s.cameraSelected);
   const setDragging = useScene3d((s) => s.setDragging);
+  const setCameraTarget = useScene3d((s) => s.setCameraTarget);
   const draggingSelf = useScene3d((s) => s.draggingEntityId === "__camera-start");
+  const linkDragging = useScene3d((s) => s.draggingEntityId === "__follow-link");
   const groupRef = useRef<Group>(null);
   const lastClientY = useRef(0);
+  // 追従リンクのドラッグ中カーソル(このカメラから引いている時だけ非null)
+  const [linkCursor, setLinkCursor] = useState<{ point: Vec3; snapId: string | null } | null>(
+    null,
+  );
 
   // このカメラの初期姿勢(動きの先頭)をプレビュー用ショットで評価
   const pose = evaluateShotCamera(
@@ -934,8 +1155,8 @@ function CameraIndicator({ camera, selected }: { camera: SceneCamera; selected: 
   const onPointerMove = (e: ThreeEvent<PointerEvent>) => {
     if (!draggingSelf || !selected) return;
     const start = camera.move.startPos;
-    if (e.nativeEvent.shiftKey) {
-      // Shift+上下ドラッグ = 高さ調整
+    if (heldKeys.has("z") || e.nativeEvent.shiftKey) {
+      // Z(またはShift)+上下ドラッグ = 高さ調整
       const dy = e.nativeEvent.clientY - lastClientY.current;
       lastClientY.current = e.nativeEvent.clientY;
       const nextY = Math.max(0.1, Math.min(20, start[1] - dy * 0.02));
@@ -952,6 +1173,58 @@ function CameraIndicator({ camera, selected }: { camera: SceneCamera; selected: 
     (e.target as Element).releasePointerCapture(e.pointerId);
   };
 
+  // ---- 追従リンク(◎ハンドルを人物へドラッグ&ドロップで「被写体を追う」を接続) ----
+  // レイに一番近い人物・物を探す(0.8m以内でスナップ)。外れたら床の上のカーソル位置
+  const snapToEntity = (ray: Ray): { point: Vec3; snapId: string | null } => {
+    let best: { id: string; d: number; c: Vec3 } | null = null;
+    for (const en of project.entities) {
+      const c: Vec3 = [en.position[0], en.position[1] + 0.9, en.position[2]];
+      const ox = c[0] - ray.origin.x;
+      const oy = c[1] - ray.origin.y;
+      const oz = c[2] - ray.origin.z;
+      const t = Math.max(0, ox * ray.direction.x + oy * ray.direction.y + oz * ray.direction.z);
+      const d = Math.hypot(
+        c[0] - (ray.origin.x + ray.direction.x * t),
+        c[1] - (ray.origin.y + ray.direction.y * t),
+        c[2] - (ray.origin.z + ray.direction.z * t),
+      );
+      if (d < 0.8 && (best == null || d < best.d)) best = { id: en.id, d, c };
+    }
+    if (best) return { point: best.c, snapId: best.id };
+    const p = rayToPlaneY(ray, 0.9) ?? rayToFloor(ray);
+    return { point: p ?? pose.position, snapId: null };
+  };
+  const onLinkDown = (e: ThreeEvent<PointerEvent>) => {
+    e.stopPropagation();
+    // setCameraTarget は「選択中カメラ」に効くため、先にこのカメラを選択状態にする
+    const usingShot = project.shots.find((sh) => sh.cameraId === camera.id);
+    if (usingShot) {
+      selectCameraOfShot(usingShot.id);
+    } else {
+      assignShotCamera(selectedShotId, camera.id);
+    }
+    setDragging("__follow-link");
+    setLinkCursor(snapToEntity(e.ray));
+    (e.target as Element).setPointerCapture(e.pointerId);
+  };
+  const onLinkMove = (e: ThreeEvent<PointerEvent>) => {
+    if (!linkDragging || linkCursor == null) return;
+    setLinkCursor(snapToEntity(e.ray));
+  };
+  const onLinkUp = (e: ThreeEvent<PointerEvent>) => {
+    if (!linkDragging || linkCursor == null) return;
+    setDragging(null);
+    (e.target as Element).releasePointerCapture(e.pointerId);
+    const drop = snapToEntity(e.ray);
+    if (drop.snapId) {
+      setCameraTarget(drop.snapId); // 人物・物の上で離した=追従を接続
+    } else if (camera.move.targetEntityId != null) {
+      setCameraTarget(null); // 何もない場所で離した=追従を解除
+    }
+    setLinkCursor(null);
+  };
+  const linked = camera.move.targetEntityId != null;
+
   // 視野の四角錐(選択中のみ。距離0.7mに画角どおりの枠)
   const d = 0.7;
   const h = 2 * Math.tan(((pose.fovDeg / 2) * Math.PI) / 180) * d;
@@ -963,6 +1236,7 @@ function CameraIndicator({ camera, selected }: { camera: SceneCamera; selected: 
   const zero: Vec3 = [0, 0, 0];
 
   return (
+    <>
     <group
       ref={groupRef}
       scale={0.55}
@@ -975,6 +1249,28 @@ function CameraIndicator({ camera, selected }: { camera: SceneCamera; selected: 
         <sphereGeometry args={[0.45, 8, 6]} />
         <meshBasicMaterial />
       </mesh>
+      {/* 追従リンクの◎ハンドル(人物へドラッグで「被写体を追う」を接続) */}
+      <group
+        position={[0, 0.42, -0.12]}
+        onPointerDown={onLinkDown}
+        onPointerMove={onLinkMove}
+        onPointerUp={onLinkUp}
+      >
+        <mesh visible={false}>
+          <sphereGeometry args={[0.32, 8, 6]} />
+          <meshBasicMaterial />
+        </mesh>
+        <mesh rotation={[Math.PI / 2, 0, 0]}>
+          <torusGeometry args={[0.1, 0.03, 10, 24]} />
+          <meshBasicMaterial color={linked ? "#22d3ee" : "#475569"} />
+        </mesh>
+        {linked && (
+          <mesh>
+            <sphereGeometry args={[0.045, 10, 8]} />
+            <meshBasicMaterial color="#22d3ee" />
+          </mesh>
+        )}
+      </group>
       {/* カメラボディ + レンズ */}
       <mesh position={[0, 0, -0.12]}>
         <boxGeometry args={[0.24, 0.18, 0.24]} />
@@ -999,6 +1295,61 @@ function CameraIndicator({ camera, selected }: { camera: SceneCamera; selected: 
         </>
       )}
     </group>
+    {/* ドラッグ中のゴムバンド線(ワールド座標)。人物にスナップしたら太い玉で知らせる */}
+    {linkDragging && linkCursor != null && (
+      <>
+        <Line
+          points={[pose.position, linkCursor.point]}
+          color="#22d3ee"
+          lineWidth={2}
+          dashed
+          dashSize={0.15}
+          gapSize={0.1}
+        />
+        <mesh position={linkCursor.point}>
+          <sphereGeometry args={[linkCursor.snapId ? 0.14 : 0.06, 12, 8]} />
+          <meshBasicMaterial color="#22d3ee" transparent opacity={0.9} />
+        </mesh>
+      </>
+    )}
+    </>
+  );
+}
+
+/**
+ * 追従リンクの常時可視化: 「被写体を追う」が接続されたカメラから相手へ水色の点線。
+ * どのカメラが誰を追っているかを一目で示す(接続はカメラの◎ハンドルをドラッグ)
+ */
+function CameraFollowLinks() {
+  const project = useScene3d((s) => s.project);
+  return (
+    <>
+      {project.cameras.map((cam) => {
+        const tid = cam.move.targetEntityId;
+        if (tid == null) return null;
+        const en = project.entities.find((e) => e.id === tid);
+        if (!en) return null;
+        const pose = evaluateShotCamera(
+          project,
+          { id: "__link", label: "", durationFrames: 2, cameraId: cam.id },
+          0,
+        );
+        const to: Vec3 = [en.position[0], en.position[1] + 0.9, en.position[2]];
+        return (
+          <Line
+            key={cam.id}
+            points={[pose.position, to]}
+            color="#22d3ee"
+            lineWidth={1}
+            dashed
+            dashSize={0.12}
+            gapSize={0.14}
+            transparent
+            opacity={0.45}
+          />
+        );
+      })}
+    </>
   );
 }
 
@@ -1060,7 +1411,7 @@ function CameraEndMarker() {
       return;
     }
     const endPos = move.endPos;
-    if (e.nativeEvent.shiftKey) {
+    if (heldKeys.has("z") || e.nativeEvent.shiftKey) {
       const dy = e.nativeEvent.clientY - lastClientY.current;
       lastClientY.current = e.nativeEvent.clientY;
       const nextY = Math.max(0.1, Math.min(20, endPos[1] - dy * 0.02));
@@ -1112,6 +1463,8 @@ function CameraMidMarker() {
   const move = getShotMove(project, shot);
   const preset = move.preset;
   if (preset === "fixed" || preset === "orbit" || preset === "handheld") return null;
+  // 真珠の道がある時は真珠側(PathPearls)が軌道編集を担う
+  if ((move.pathPoints?.length ?? 0) > 0) return null;
 
   // 中間点: 未設定なら軌道の中点(=直線の真ん中)
   const mid: Vec3 =
@@ -1130,7 +1483,7 @@ function CameraMidMarker() {
   };
   const onPointerMove = (e: ThreeEvent<PointerEvent>) => {
     if (!draggingSelf) return;
-    if (e.nativeEvent.shiftKey) {
+    if (heldKeys.has("z") || e.nativeEvent.shiftKey) {
       const dy = e.nativeEvent.clientY - lastClientY.current;
       lastClientY.current = e.nativeEvent.clientY;
       moveCameraMid([mid[0], Math.max(0.1, Math.min(20, mid[1] - dy * 0.02)), mid[2]]);
@@ -1361,18 +1714,218 @@ function ViewPresetController() {
   return null;
 }
 
+/**
+ * 道を手で描く: ビューポートの一筆書きでカメラ軌跡を作る。
+ * 始点・終点は変えず、描いたストロークを数個の真珠に要約して滑らかな道として補完する。
+ * 高さは始点→終点の高さを描いた位置に応じてなだらかに割り当てる(横の形は自由、縦は自動)
+ */
+function resampleStrokeToPearls(stroke: Vec3[], start: Vec3, end: Vec3): Vec3[] {
+  if (stroke.length < 2) return [];
+  const lens: number[] = [0];
+  let total = 0;
+  for (let i = 1; i < stroke.length; i++) {
+    total += Math.hypot(
+      stroke[i][0] - stroke[i - 1][0],
+      stroke[i][1] - stroke[i - 1][1],
+      stroke[i][2] - stroke[i - 1][2],
+    );
+    lens.push(total);
+  }
+  if (total < 0.5) return [];
+  // 真珠の数: 道の長さに応じて2〜5個
+  const K = Math.max(2, Math.min(5, Math.round(total / 2)));
+  const out: Vec3[] = [];
+  for (let k = 1; k <= K; k++) {
+    const target = (total * k) / (K + 1);
+    let j = 0;
+    while (j < lens.length - 2 && lens[j + 1] < target) j++;
+    const segLen = lens[j + 1] - lens[j];
+    const u = segLen === 0 ? 0 : (target - lens[j]) / segLen;
+    const t = k / (K + 1);
+    const y = start[1] + (end[1] - start[1]) * t;
+    out.push([
+      Math.round((stroke[j][0] + (stroke[j + 1][0] - stroke[j][0]) * u) * 10) / 10,
+      Math.round(y * 10) / 10,
+      Math.round((stroke[j][2] + (stroke[j + 1][2] - stroke[j][2]) * u) * 10) / 10,
+    ]);
+  }
+  return out;
+}
+
+function PathDrawOverlay() {
+  const pathDrawMode = useScene3d((s) => s.pathDrawMode);
+  const setPathDrawMode = useScene3d((s) => s.setPathDrawMode);
+  const project = useScene3d((s) => s.project);
+  const selectedShotId = useScene3d((s) => s.selectedShotId);
+  const convertCameraToFreePath = useScene3d((s) => s.convertCameraToFreePath);
+  const setDragging = useScene3d((s) => s.setDragging);
+  const [stroke, setStroke] = useState<Vec3[]>([]);
+  const drawing = useRef(false);
+
+  // Escで中止
+  useEffect(() => {
+    if (!pathDrawMode) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        drawing.current = false;
+        setStroke([]);
+        setPathDrawMode(false);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [pathDrawMode, setPathDrawMode]);
+
+  if (!pathDrawMode) return null;
+  const shot = getSelectedShot({ project, selectedShotId });
+  const move = getShotMove(project, shot);
+  // 描く平面の高さ: 始点と終点の中間(見た目のカーソル追従が素直になる)
+  const drawY = (move.startPos[1] + move.endPos[1]) / 2;
+
+  const finish = () => {
+    drawing.current = false;
+    setDragging(null);
+    const pearls = resampleStrokeToPearls(stroke, move.startPos, move.endPos);
+    if (pearls.length > 0) {
+      convertCameraToFreePath(move.startPos, move.endPos, pearls);
+    }
+    setStroke([]);
+    setPathDrawMode(false);
+  };
+
+  return (
+    <>
+      {/* 描画の受け皿(巨大な水平面。見えないがレイは受ける) */}
+      <mesh
+        visible={false}
+        position={[0, drawY, 0]}
+        rotation={[-Math.PI / 2, 0, 0]}
+        onPointerDown={(e) => {
+          e.stopPropagation();
+          drawing.current = true;
+          setDragging("__path-draw");
+          (e.target as Element).setPointerCapture(e.pointerId);
+          const p = rayToPlaneY(e.ray, drawY);
+          if (p) setStroke([p]);
+        }}
+        onPointerMove={(e) => {
+          if (!drawing.current) return;
+          const p = rayToPlaneY(e.ray, drawY);
+          if (!p) return;
+          setStroke((prev) => {
+            const last = prev[prev.length - 1];
+            if (last && Math.hypot(p[0] - last[0], p[2] - last[2]) < 0.15) return prev;
+            return [...prev, p];
+          });
+        }}
+        onPointerUp={(e) => {
+          if (!drawing.current) return;
+          (e.target as Element).releasePointerCapture(e.pointerId);
+          finish();
+        }}
+      >
+        <planeGeometry args={[400, 400]} />
+        <meshBasicMaterial />
+      </mesh>
+      {/* 描いている線 */}
+      {stroke.length >= 2 && (
+        <Line points={stroke} color="#f472b6" lineWidth={3} dashed={false} transparent opacity={0.9} />
+      )}
+      {/* 始点・終点の目印(ここは動かない) */}
+      <mesh position={move.startPos}>
+        <sphereGeometry args={[0.12, 12, 8]} />
+        <meshBasicMaterial color="#4ade80" />
+      </mesh>
+      <mesh position={move.endPos}>
+        <sphereGeometry args={[0.12, 12, 8]} />
+        <meshBasicMaterial color="#f87171" />
+      </mesh>
+    </>
+  );
+}
+
+/**
+ * カーソルへ寄るホイールズーム(自前実装)。
+ * OrbitControls標準のズームは「注視点までの残り%で刻む」ため近づくほど歩幅が縮み、
+ * 最後は壁になって寄れない。ここでは常にカーソルの先へ最低歩幅を保証して進む
+ * (Blenderのように被写体へ寄り切れる・通り抜けられる)。注視点も一緒に運ぶので
+ * 以降の回転もカーソルで寄った場所が中心になる
+ */
+function CursorZoom({ enabled }: { enabled: boolean }) {
+  const { camera, gl, controls } = useThree();
+  const pointerNdc = useRef(new Vector2(0, 0));
+  const enabledRef = useRef(enabled);
+  enabledRef.current = enabled;
+
+  useEffect(() => {
+    const el = gl.domElement;
+    const onMove = (e: PointerEvent) => {
+      const r = el.getBoundingClientRect();
+      pointerNdc.current.set(
+        ((e.clientX - r.left) / r.width) * 2 - 1,
+        -((e.clientY - r.top) / r.height) * 2 + 1,
+      );
+    };
+    const onWheel = (e: WheelEvent) => {
+      if (!enabledRef.current) return;
+      e.preventDefault();
+      const c = controls as unknown as { target: Vector3; update: () => void } | null;
+      if (!c) return;
+      // カーソル下のワールド点: 床(y=0)との交点。外れたら注視点までの距離の先
+      const dir3 = new Vector3(pointerNdc.current.x, pointerNdc.current.y, 0.5)
+        .unproject(camera)
+        .sub(camera.position)
+        .normalize();
+      let point: Vector3;
+      if (Math.abs(dir3.y) > 1e-4) {
+        const t = -camera.position.y / dir3.y;
+        point =
+          t > 0.1 && t < 300
+            ? camera.position.clone().addScaledVector(dir3, t)
+            : camera.position.clone().addScaledVector(dir3, camera.position.distanceTo(c.target));
+      } else {
+        point = camera.position.clone().addScaledVector(dir3, camera.position.distanceTo(c.target));
+      }
+      const toPoint = point.clone().sub(camera.position);
+      const dist = toPoint.length();
+      if (dist < 1e-3) return;
+      toPoint.normalize();
+      const zoomIn = e.deltaY < 0;
+      // 歩幅: 残り距離の12%。ただし最低0.12mを保証(=壁にならない)
+      const step = Math.max(0.12, dist * 0.12) * (zoomIn ? 1 : -1);
+      // ズームアウトの上限(迷子防止)
+      if (!zoomIn && camera.position.distanceTo(c.target) > 80) return;
+      camera.position.addScaledVector(toPoint, step);
+      c.target.addScaledVector(toPoint, step);
+      c.update();
+    };
+    el.addEventListener("pointermove", onMove);
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => {
+      el.removeEventListener("pointermove", onMove);
+      el.removeEventListener("wheel", onWheel);
+    };
+  }, [camera, gl, controls]);
+  return null;
+}
+
 function ViewportControls() {
   const dragging = useScene3d((s) => s.draggingEntityId != null);
   const playing = useScene3d((s) => s.playing);
   const cameraView = useScene3d((s) => s.cameraView);
   const splitView = useScene3d((s) => s.splitView);
+  const pathDrawMode = useScene3d((s) => s.pathDrawMode);
+  const enabled = !dragging && !pathDrawMode && (splitView || (!playing && !cameraView));
   return (
-    <OrbitControls
-      enabled={!dragging && (splitView || (!playing && !cameraView))}
-      makeDefault
-      minDistance={0.8}
-      maxDistance={45}
-    />
+    <>
+      <OrbitControls
+        enabled={enabled}
+        makeDefault
+        // ズームは CursorZoom(カーソルへ寄る自前実装)が担う
+        enableZoom={false}
+      />
+      <CursorZoom enabled={enabled} />
+    </>
   );
 }
 
@@ -1435,8 +1988,11 @@ export function Scene3dViewport({
       {/* 軌道線・終点/中間ハンドルは「カメラを選んでいる間だけ」出す(触った物だけが語る) */}
       {!exporting && !isCameraPane && cameraSelected && <CameraPathLine />}
       {!exporting && !isCameraPane && <AllCameraIndicators />}
+      {!exporting && !isCameraPane && <CameraFollowLinks />}
+      {!exporting && !isCameraPane && <PathDrawOverlay />}
       {!exporting && !isCameraPane && cameraSelected && <CameraEndMarker />}
       {!exporting && !isCameraPane && cameraSelected && <CameraMidMarker />}
+      {!exporting && !isCameraPane && cameraSelected && <PathPearls />}
       {!exporting && !isCameraPane && <MotionOverlay />}
       <CameraRig mode={mode} primary={primary} />
       {!isCameraPane && <ViewportControls />}
@@ -1445,7 +2001,9 @@ export function Scene3dViewport({
       {!exporting && !isCameraPane && (
         <GizmoHelper alignment="bottom-right" margin={[64, 64]}>
           <GizmoViewport
-            axisColors={["#e88b8b", "#8bc78b", "#8ba7e8"]}
+            // Blender流の呼び方に合わせ、縦軸(three.jsのY)を「Z」表示にする(内部座標は不変)
+            labels={["X", "Z", "Y"]}
+            axisColors={["#e88b8b", "#8ba7e8", "#8bc78b"]}
             labelColor="#ffffff"
           />
         </GizmoHelper>
