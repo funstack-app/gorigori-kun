@@ -13,6 +13,8 @@ import { registerClipSpeed } from "./clipSpeed";
 import {
   buildGeneratedClip,
   buildMotionPrompt,
+  buildMotionRevisePrompt,
+  loadGeneratedSpecs,
   saveGeneratedSpec,
   validateGeneratedSpec,
 } from "./motionGen";
@@ -47,6 +49,8 @@ export type DirectorMotion = {
   then?: string[];
   /** 行き先[x,z]。高さは地形が決める(建物の上なら屋上に乗り、必要なら放物線で跳ぶ) */
   to?: [number, number];
+  /** clipで指名したAI生成モーションへの修正指示(「もっと高く跳ぶ」等) */
+  revise?: string;
 };
 
 export type DirectorPlacement = {
@@ -107,7 +111,7 @@ export function buildDirectorPrompt(
     "あなたは映像監督。ユーザーの日本語の演出指示を、3Dシーンのカット割りJSONに変換する。",
     "出力はJSONのみ。説明文・コードブロック記号は出さない。",
     "スキーマ:",
-    `{"place":[{"kind":string,"at":[x,z],"floors"?:number}],"move":[{"entity":string,"at":[x,z]}],"cuts":[{"preset":string,"target":string|null,"seconds":number,"lensMm"?:number,"orbitDegrees"?:number,"startPos"?:[x,y,z],"endPos"?:[x,y,z],"pathPoints"?:[[x,y,z],...]}],"motions":[{"entity":string,"clip"?:string,"type"?:"walk"|"run","generate"?:string,"then"?:string[],"to"?:[x,z]}],"note":string}`,
+    `{"place":[{"kind":string,"at":[x,z],"floors"?:number}],"move":[{"entity":string,"at":[x,z]}],"cuts":[{"preset":string,"target":string|null,"seconds":number,"lensMm"?:number,"orbitDegrees"?:number,"startPos"?:[x,y,z],"endPos"?:[x,y,z],"pathPoints"?:[[x,y,z],...]}],"motions":[{"entity":string,"clip"?:string,"type"?:"walk"|"run","generate"?:string,"then"?:string[],"to"?:[x,z],"revise"?:string}],"note":string}`,
     "placeで足りない物を置ける。kind語彙: mannequin=人物 / building=ビル(floorsで階数、1階=3m) / box=箱 / wall=壁 / table=机 / chair=椅子 / car=車 / tree=木 / streetlight=街灯 / pedestal=台座。名前は自動で「ビル1」「人物2」等になる。既にシーンにある物は置き直さず再利用する。",
     "moveで既存の人物・物を立たせ直せる。atは[x,z]のみ。高さは地形が決める(ビルの座標なら屋上に立つ)。",
     `preset語彙: ${presets}`,
@@ -119,6 +123,7 @@ export function buildDirectorPrompt(
     "リストにもtypeにも合わない動き(踊る・座る・手を振る等)は、generateに動きの説明(日本語・20字以内)を書く(新規生成される)。clip/type/generateはどれか1つ。",
     "移動する人物には then で「到着後につなげる動き」を順番の配列で書ける(例: [\"ジャンプ\",\"ガッツポーズ\"])。リストの名前を優先し、無ければ短い説明を書く(新規生成される)。つなぎ目は自動で滑らかに混ざる。",
     "移動する人物には to で行き先[x,z]を指定できる。高さは書かない(建物の上なら自動で屋上に乗り、放物線で跳ぶ)。",
+    "既にあるAI生成モーションを直す指示(「さっきのジャンプをもっと高く」等)は、clipにその名前・reviseに修正内容を書く(改訂版が作られて割り当て直される)。",
     "secondsは1〜20。cutsは1〜6個。noteは組んだ内容の一言(日本語・30字以内)。",
   ].join("\n");
 
@@ -253,6 +258,9 @@ export function validateDirectorPlan(raw: unknown): DirectorPlan {
         const steps = mo.then.filter((x): x is string => typeof x === "string" && x.length > 0);
         if (steps.length > 0) out.then = steps.slice(0, 4).map((x) => x.slice(0, 60));
       }
+      if (typeof mo.revise === "string" && mo.revise.length > 0) {
+        out.revise = mo.revise.slice(0, 100);
+      }
       if (
         Array.isArray(mo.to) &&
         mo.to.length >= 2 &&
@@ -269,6 +277,31 @@ export function validateDirectorPlan(raw: unknown): DirectorPlan {
 
   const note = typeof o.note === "string" ? o.note.slice(0, 60) : "";
   return { place, move, cuts, motions, note };
+}
+
+/**
+ * AI生成モーションを会話で改訂する(元は残し、改訂版を新IDで登録して返す)。
+ * ライブラリポップアップの「AIで直す」と、AI監督の revise の共通経路
+ */
+export async function reviseGeneratedMotion(
+  clipId: string,
+  instruction: string,
+): Promise<{ id: string; name: string }> {
+  const stored = loadGeneratedSpecs().find((sp) => sp.id === clipId);
+  if (!stored) throw new Error("このモーションはAI生成ではないため、設計図を持っていません");
+  const template = getBuiltinTemplate();
+  if (!template) throw new Error("モーションライブラリの読み込み待ちです。少し待ってからもう一度");
+  const { systemPrompt, prompt } = buildMotionRevisePrompt(stored.spec, instruction);
+  const res = await codexTextQuery({ prompt, systemPrompt, expectJson: true, timeoutSecs: 180 });
+  const spec = validateGeneratedSpec(res.parsedJson);
+  const id = `gen-${Date.now()}`;
+  const clip = buildGeneratedClip(template, spec, id);
+  const entry = registerGeneratedClip(id, spec.name, clip);
+  if (!entry) throw new Error("改訂モーションの登録に失敗しました");
+  if (spec.moveSpeed != null) registerClipSpeed(id, spec.moveSpeed);
+  saveGeneratedSpec(id, spec);
+  useScene3d.getState().registerImportedMotions([entry]);
+  return entry;
 }
 
 /* ---------------------------------- 適用 ---------------------------------- */
@@ -332,6 +365,7 @@ export async function applyDirectorPlan(
 
   // モーション割り当て
   const toGenerate: { entityId: string; desc: string; append?: boolean }[] = [];
+  const toRevise: { entityId: string; clipId: string; instruction: string }[] = [];
   const findClip = (name: string) => {
     const clips = st().importedMotions;
     return (
@@ -345,7 +379,11 @@ export async function applyDirectorPlan(
     let assigned = false;
     if (m.clip) {
       const hit = findClip(m.clip);
-      if (hit) {
+      // AI生成モーションへの修正指示: 改訂して割り当て直す(後段の生成フェーズで実行)
+      if (hit && m.revise && hit.id.startsWith("gen-")) {
+        toRevise.push({ entityId: id, clipId: hit.id, instruction: m.revise });
+        assigned = true;
+      } else if (hit) {
         st().setEntityMotionClip(id, hit.id);
         assigned = true;
       }
@@ -370,6 +408,14 @@ export async function applyDirectorPlan(
       if (hit) st().appendEntityArrivalStep(id, hit.id);
       else toGenerate.push({ entityId: id, desc: name, append: true });
     }
+  }
+
+  // 既存AI生成モーションの改訂(会話でリグ調整。1件ずつ・遅い)
+  for (let i = 0; i < toRevise.length; i++) {
+    const r = toRevise[i];
+    onProgress?.(`モーション改訂中 (${i + 1}/${toRevise.length})…`);
+    const entry = await reviseGeneratedMotion(r.clipId, r.instruction);
+    st().setEntityMotionClip(r.entityId, entry.id);
   }
 
   // 新規モーション生成(AIアニメーターへ委譲。1件ずつ・遅い)

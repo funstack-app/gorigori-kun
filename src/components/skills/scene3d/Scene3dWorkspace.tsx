@@ -46,6 +46,7 @@ import { codexTextQuery } from "../../../lib/agents/codexQuery";
 import {
   applyDirectorPlan,
   buildDirectorPrompt,
+  reviseGeneratedMotion,
   validateDirectorPlan,
 } from "../../../lib/scene3d/directorGen";
 import { registerClipSpeed, resolveClipSpeed } from "../../../lib/scene3d/clipSpeed";
@@ -860,6 +861,8 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
   const [errors, setErrors] = useState<string[]>([]);
   const [filter, setFilter] = useState("");
   const [genText, setGenText] = useState("");
+  // AIで直す対象(nullなら新規生成モード)
+  const [reviseTarget, setReviseTarget] = useState<{ id: string; name: string } | null>(null);
   const [genBusy, setGenBusy] = useState(false);
   const [genError, setGenError] = useState<string | null>(null);
 
@@ -889,13 +892,21 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
     (m) => !m.id.startsWith("builtin-") && !m.id.startsWith("gen-") && match(m.name),
   );
 
-  // AIモーション生成: Codexにキーフレーム仕様を書かせ、標準リグの上に組み立てる
+  // AIモーション生成: Codexにキーフレーム仕様を書かせ、標準リグの上に組み立てる。
+  // reviseTarget があれば新規でなく既存生成モーションの改訂(会話でリグ調整)
   const onGenerate = async () => {
     const text = genText.trim();
     if (!text || genBusy) return;
     setGenBusy(true);
     setGenError(null);
     try {
+      if (reviseTarget) {
+        const entry = await reviseGeneratedMotion(reviseTarget.id, text);
+        setEntityMotionClip(entityId, entry.id);
+        setReviseTarget(null);
+        setGenText("");
+        return;
+      }
       const template = getBuiltinTemplate();
       if (!template) throw new Error("標準ライブラリの読み込み待ちです。少し待ってからもう一度");
       const { systemPrompt, prompt } = buildMotionPrompt(text);
@@ -948,7 +959,19 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
       {/* AIモーション生成(Codex) */}
       <div className="mb-3 rounded-lg border border-sky-400/25 bg-sky-400/5 p-2.5">
         <p className="mb-1.5 text-[11px] font-bold tracking-wide text-sky-300">
-          AIでモーションを作る
+          {reviseTarget ? (
+            <>
+              「{reviseTarget.name}」をAIで直す{" "}
+              <button
+                className="ml-1 font-normal text-neutral-500 underline hover:text-neutral-300"
+                onClick={() => setReviseTarget(null)}
+              >
+                やめる
+              </button>
+            </>
+          ) : (
+            "AIでモーションを作る"
+          )}
         </p>
         <div className="flex gap-1.5">
           <input
@@ -958,7 +981,11 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
             onKeyDown={(e) => {
               if (e.key === "Enter") void onGenerate();
             }}
-            placeholder="例: 大きく手を振る / 深くお辞儀する / ガッツポーズ"
+            placeholder={
+              reviseTarget
+                ? "例: もっと高く跳ぶ / 着地でしゃがむ / 半分の速さで"
+                : "例: 大きく手を振る / 深くお辞儀する / ガッツポーズ"
+            }
             className="min-w-0 flex-1 rounded-lg border border-[#2a2a2a] bg-[#0d0d0d] px-2 py-1.5 text-xs text-neutral-200 placeholder:text-neutral-600 focus:border-sky-400/60 focus:outline-none"
             disabled={genBusy}
           />
@@ -967,7 +994,7 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
             onClick={() => void onGenerate()}
             disabled={genBusy || !genText.trim()}
           >
-            {genBusy ? "生成中…" : "生成"}
+            {genBusy ? (reviseTarget ? "改訂中…" : "生成中…") : reviseTarget ? "直す" : "生成"}
           </button>
         </div>
         <p className="mt-1.5 text-[10px] leading-4 text-neutral-500">
@@ -1038,6 +1065,13 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
                   title="このAIモーションを削除"
                 >
                   ✕
+                </button>
+                <button
+                  className="absolute bottom-1.5 right-1 text-[10px] text-neutral-600 hover:text-sky-300"
+                  onClick={() => setReviseTarget({ id: m.id, name: m.name })}
+                  title="このAIモーションを会話で直す(元は残る)"
+                >
+                  ✎
                 </button>
               </div>
             ))}

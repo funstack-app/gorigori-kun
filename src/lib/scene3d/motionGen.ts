@@ -95,6 +95,25 @@ export function buildMotionPrompt(userText: string): { systemPrompt: string; pro
   return { systemPrompt, prompt: `依頼された動き: ${userText}` };
 }
 
+/**
+ * 既存のAI生成モーションを会話で改訂するプロンプト。
+ * 設計図(キーフレームJSON)を丸ごと渡し、指示箇所だけ変えた完全版を返させる
+ */
+export function buildMotionRevisePrompt(
+  current: GeneratedMotionSpec,
+  instruction: string,
+): { systemPrompt: string; prompt: string } {
+  const { systemPrompt } = buildMotionPrompt("");
+  const prompt = [
+    "以下は既存モーションの設計図。修正指示に沿って改訂した完全な設計図を、同じ形式のJSONだけで返す。",
+    "指示に関係ない部分の姿勢・タイミング・雰囲気はできるだけ保つ(ゼロから作り直さない)。",
+    "nameは内容が変わったことが分かる短い名前に更新してよい。",
+    `現在の設計図: ${JSON.stringify(current)}`,
+    `修正指示: ${instruction}`,
+  ].join("\n");
+  return { systemPrompt, prompt };
+}
+
 const clampNum = (v: number, min: number, max: number) => Math.min(max, Math.max(min, v));
 
 /**
