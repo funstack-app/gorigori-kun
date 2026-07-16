@@ -53,6 +53,8 @@ export type DirectorMotion = {
   revise?: string;
   /** 視線: 頭が追う相手("カメラ" またはエンティティ名) */
   lookAt?: string;
+  /** 並列レイヤー: 上半身(腕・手・首・頭)だけ重ねるクリップ名(「手を振る」等) */
+  overlay?: string;
 };
 
 export type DirectorPlacement = {
@@ -113,7 +115,7 @@ export function buildDirectorPrompt(
     "あなたは映像監督。ユーザーの日本語の演出指示を、3Dシーンのカット割りJSONに変換する。",
     "出力はJSONのみ。説明文・コードブロック記号は出さない。",
     "スキーマ:",
-    `{"place":[{"kind":string,"at":[x,z],"floors"?:number}],"move":[{"entity":string,"at":[x,z]}],"cuts":[{"preset":string,"target":string|null,"seconds":number,"lensMm"?:number,"orbitDegrees"?:number,"startPos"?:[x,y,z],"endPos"?:[x,y,z],"pathPoints"?:[[x,y,z],...]}],"motions":[{"entity":string,"clip"?:string,"type"?:"walk"|"run","generate"?:string,"then"?:string[],"to"?:[x,z],"revise"?:string,"lookAt"?:string}],"note":string}`,
+    `{"place":[{"kind":string,"at":[x,z],"floors"?:number}],"move":[{"entity":string,"at":[x,z]}],"cuts":[{"preset":string,"target":string|null,"seconds":number,"lensMm"?:number,"orbitDegrees"?:number,"startPos"?:[x,y,z],"endPos"?:[x,y,z],"pathPoints"?:[[x,y,z],...]}],"motions":[{"entity":string,"clip"?:string,"type"?:"walk"|"run","generate"?:string,"then"?:string[],"to"?:[x,z],"revise"?:string,"lookAt"?:string,"overlay"?:string}],"note":string}`,
     "placeで足りない物を置ける。kind語彙: mannequin=人物 / building=ビル(floorsで階数、1階=3m) / box=箱 / wall=壁 / table=机 / chair=椅子 / car=車 / tree=木 / streetlight=街灯 / pedestal=台座。名前は自動で「ビル1」「人物2」等になる。既にシーンにある物は置き直さず再利用する。",
     "moveで既存の人物・物を立たせ直せる。atは[x,z]のみ。高さは地形が決める(ビルの座標なら屋上に立つ)。",
     `preset語彙: ${presets}`,
@@ -127,6 +129,7 @@ export function buildDirectorPrompt(
     "移動する人物には to で行き先[x,z]を指定できる。高さは書かない(建物の上なら自動で屋上に乗り、放物線で跳ぶ)。",
     "既にあるAI生成モーションを直す指示(「さっきのジャンプをもっと高く」等)は、clipにその名前・reviseに修正内容を書く(改訂版が作られて割り当て直される)。",
     "lookAtで人物の頭が追い続ける相手を指定できる(\"カメラ\" またはエンティティ名)。カメラ目線・見つめ合いの演出用。",
+    "overlayで上半身(腕・手・首・頭)だけ別の動きを重ねられる(リストの名前から。例: 走りながら手を振る=clip:走る+overlay:手を振る)。",
     "secondsは1〜20。cutsは1〜6個。noteは組んだ内容の一言(日本語・30字以内)。",
   ].join("\n");
 
@@ -267,6 +270,9 @@ export function validateDirectorPlan(raw: unknown): DirectorPlan {
       if (typeof mo.lookAt === "string" && mo.lookAt.length > 0) {
         out.lookAt = mo.lookAt.slice(0, 40);
       }
+      if (typeof mo.overlay === "string" && mo.overlay.length > 0) {
+        out.overlay = mo.overlay.slice(0, 60);
+      }
       if (
         Array.isArray(mo.to) &&
         mo.to.length >= 2 &&
@@ -401,6 +407,11 @@ export async function applyDirectorPlan(
     if (!assigned && m.generate) {
       toGenerate.push({ entityId: id, desc: m.generate });
       assigned = true;
+    }
+    // 並列レイヤー: 上半身に重ねるクリップ(名前一致のみ。無ければ黙って捨てず生成対象にしない)
+    if (m.overlay) {
+      const hit = findClip(m.overlay);
+      if (hit) st().setEntityOverlayClip(id, hit.id);
     }
     // 視線: 頭が追う相手("カメラ"はアクティブカメラ)
     if (m.lookAt) {

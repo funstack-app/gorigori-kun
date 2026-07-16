@@ -11,7 +11,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { GizmoHelper, GizmoViewport, Grid, Line, OrbitControls } from "@react-three/drei";
 import type { ThreeEvent } from "@react-three/fiber";
-import { AnimationMixer, PerspectiveCamera, Quaternion, Vector2, Vector3 } from "three";
+import { AnimationClip, AnimationMixer, PerspectiveCamera, Quaternion, Vector2, Vector3 } from "three";
 import { clone as cloneSkeleton } from "three/examples/jsm/utils/SkeletonUtils.js";
 import type {
   AnimationAction,
@@ -546,6 +546,7 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
   const arrivalSeqKey = JSON.stringify(
     clipMotion?.arrivalSequence?.map((s) => `${s.clipId}:${s.seconds ?? ""}`) ?? null,
   );
+  const overlayClipId = clipMotion?.overlayClipId ?? null;
   const clipRig = useMemo(() => {
     void motionCount;
     void arrivalSeqKey;
@@ -558,8 +559,34 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
       child.castShadow = true;
     });
     const mixer = new AnimationMixer(obj);
-    const main = mixer.clipAction(m.clip);
+    // 並列レイヤー(上半身): overlay使用時は本体・連結列から上半身トラックを抜き、
+    // overlayが腕・手・首・頭を専有する(重み二重掛けによる姿勢崩れの防止)
+    const UPPER = /shoulder|arm|hand|neck|head/i;
+    const overlaySrc = overlayClipId ? getImportedMotion(overlayClipId) : null;
+    const useOverlay = !!(overlaySrc && overlaySrc.template === m.template);
+    const stripUpper = (clip: AnimationClip): AnimationClip =>
+      useOverlay
+        ? new AnimationClip(
+            `${clip.name}-lower`,
+            clip.duration,
+            clip.tracks.filter((t: { name: string }) => !UPPER.test(t.name)),
+          )
+        : clip;
+    const main = mixer.clipAction(stripUpper(m.clip));
     main.play();
+    let overlay: { action: AnimationAction; duration: number } | null = null;
+    if (useOverlay && overlaySrc) {
+      const upperClip = new AnimationClip(
+        `${overlaySrc.clip.name}-upper`,
+        overlaySrc.clip.duration,
+        overlaySrc.clip.tracks.filter((t: { name: string }) => UPPER.test(t.name)),
+      );
+      if (upperClip.tracks.length > 0) {
+        const action = mixer.clipAction(upperClip);
+        action.play();
+        overlay = { action, duration: overlaySrc.clip.duration };
+      }
+    }
     // 到着後アクションの列: 同じテンプレート(=同じ骨格)のクリップだけ適用できる。
     // 同じクリップを複数ステップで使えるよう、クリップは複製して独立アクションにする
     const stepSpecs =
@@ -573,7 +600,7 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
     for (const spec of stepSpecs) {
       const am = getImportedMotion(spec.clipId);
       if (!am || am.template !== m.template) continue;
-      const action = mixer.clipAction(am.clip.clone());
+      const action = mixer.clipAction(stripUpper(am.clip.clone()));
       action.play();
       action.weight = 0;
       // 名前が _Loop で終わらないクリップ(座る(動作)・着地等)は一回きり→最終姿勢で静止
@@ -597,10 +624,11 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
       main,
       mainDuration: m.clip.duration,
       steps,
+      overlay,
       headBone: headHolder.bone,
       headState,
     };
-  }, [clipId, arrivalClipId, arrivalSeqKey, motionCount, clipMotion?.arrivalSequence]);
+  }, [clipId, arrivalClipId, arrivalSeqKey, overlayClipId, motionCount, clipMotion?.arrivalSequence]);
   const moveEntity = useScene3d((s) => s.moveEntity);
   const rotateEntityFree = useScene3d((s) => s.rotateEntityFree);
   const scaleEntityBy = useScene3d((s) => s.scaleEntityBy);
@@ -773,6 +801,11 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
           clipRig.main.weight = 1;
           clipRig.main.time = t % Math.max(0.001, clipRig.mainDuration);
           for (const s of steps) s.action.weight = 0;
+        }
+        // 並列レイヤー: 上半身は常時このクリップ(時間はタイムラインと同期)
+        if (clipRig.overlay) {
+          clipRig.overlay.action.weight = 1;
+          clipRig.overlay.action.time = t % Math.max(0.001, clipRig.overlay.duration);
         }
         clipRig.mixer.update(0);
         // 視線ノード: 頭ボーンをターゲットへ向ける(ボーン局所: Y=左右捻り / X=前に倒す)

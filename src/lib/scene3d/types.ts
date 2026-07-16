@@ -49,6 +49,11 @@ export type EntityMotion =
        * seconds 省略時はクリップ1周分(最後のステップがループなら無限に続く)
        */
       arrivalSequence?: { clipId: string; seconds?: number }[];
+      /**
+       * 並列レイヤー(上半身): このクリップの腕・手・首・頭だけを重ねて再生する。
+       * 「走りながら手を振る」等、移動と上半身の演技の掛け算を作る(NLA相当)
+       */
+      overlayClipId?: string;
     };
 
 export type SceneEntityKind =

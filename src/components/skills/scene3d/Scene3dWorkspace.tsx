@@ -1148,17 +1148,21 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
 function ArrivalMotionPopup({
   entityId,
   append = false,
+  overlay = false,
   onClose,
 }: {
   entityId: string;
   /** true: 既存の列に追加する(モーション連結) / false: 単発で置き換える */
   append?: boolean;
+  /** true: 上半身レイヤーとして設定する(並列レイヤー) */
+  overlay?: boolean;
   onClose: () => void;
 }) {
   const importedMotions = useScene3d((s) => s.importedMotions);
   const registerImportedMotions = useScene3d((s) => s.registerImportedMotions);
   const setEntityArrivalClip = useScene3d((s) => s.setEntityArrivalClip);
   const appendEntityArrivalStep = useScene3d((s) => s.appendEntityArrivalStep);
+  const setEntityOverlayClip = useScene3d((s) => s.setEntityOverlayClip);
   const project = useScene3d((s) => s.project);
 
   // 標準ライブラリ未読み込みなら読み込む(通常はWorkspace起動時に読み込み済み)
@@ -1203,7 +1207,8 @@ function ArrivalMotionPopup({
             key={m.id}
             className={btnCls(current === m.id)}
             onClick={() => {
-              if (append) appendEntityArrivalStep(entityId, m.id);
+              if (overlay) setEntityOverlayClip(entityId, m.id);
+              else if (append) appendEntityArrivalStep(entityId, m.id);
               else setEntityArrivalClip(entityId, m.id);
               onClose();
             }}
@@ -1343,6 +1348,8 @@ function SelectedObjectSection() {
   const [arrivalAppendOpen, setArrivalAppendOpen] = useState(false);
   const removeEntityArrivalStep = useScene3d((s) => s.removeEntityArrivalStep);
   const setEntityLookAt = useScene3d((s) => s.setEntityLookAt);
+  const setEntityOverlayClip = useScene3d((s) => s.setEntityOverlayClip);
+  const [overlayPickerOpen, setOverlayPickerOpen] = useState(false);
 
   const entity = project.entities.find((e) => e.id === selectedEntityId);
   if (!entity) return null;
@@ -1486,6 +1493,38 @@ function SelectedObjectSection() {
       )}
       {motionLibOpen && (
         <MotionLibraryPopup entityId={entity.id} onClose={() => setMotionLibOpen(false)} />
+      )}
+
+      {/* 並列レイヤー: 上半身だけ別クリップを重ねる(走りながら手を振る等) */}
+      {entity.kind === "mannequin" && entity.motion?.type === "clip" && (
+        <div className="flex items-center gap-1.5">
+          <button
+            className="min-w-0 flex-1 truncate rounded-lg border border-[#2a2a2a] bg-[#101010] px-2 py-1.5 text-left text-xs text-neutral-300 hover:border-violet-400/50"
+            onClick={() => setOverlayPickerOpen(true)}
+            title="上半身(腕・手・首・頭)だけ別の動きを重ねる"
+          >
+            上半身で重ねる:{" "}
+            <span className="text-violet-300">
+              {entity.motion.overlayClipId ? clipNameOf(entity.motion.overlayClipId) : "なし"}
+            </span>
+          </button>
+          {entity.motion.overlayClipId && (
+            <button
+              className="shrink-0 text-xs text-neutral-600 hover:text-red-300"
+              onClick={() => setEntityOverlayClip(entity.id, null)}
+              title="上半身レイヤーを外す"
+            >
+              ✕
+            </button>
+          )}
+        </div>
+      )}
+      {overlayPickerOpen && (
+        <ArrivalMotionPopup
+          entityId={entity.id}
+          overlay
+          onClose={() => setOverlayPickerOpen(false)}
+        />
       )}
 
       {/* 視線ノード(TRACK_TO相当): 頭が相手を追い続ける */}
