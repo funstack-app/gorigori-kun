@@ -11,7 +11,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { GizmoHelper, GizmoViewport, Grid, Line, OrbitControls } from "@react-three/drei";
 import type { ThreeEvent } from "@react-three/fiber";
-import { AnimationMixer, PerspectiveCamera, Vector2, Vector3 } from "three";
+import { AnimationMixer, PerspectiveCamera, Quaternion, Vector2, Vector3 } from "three";
 import { clone as cloneSkeleton } from "three/examples/jsm/utils/SkeletonUtils.js";
 import type {
   AnimationAction,
@@ -33,7 +33,7 @@ import {
 } from "../../../lib/scene3d/evaluateScene";
 import { SCENE_FPS } from "../../../lib/scene3d/types";
 import { cameraColor } from "../../../lib/scene3d/types";
-import type { SceneAspectRatio, SceneCamera, SceneEntity, Vec3 } from "../../../lib/scene3d/types";
+import type { SceneAspectRatio, SceneCamera, SceneEntity, SceneProject, Vec3 } from "../../../lib/scene3d/types";
 import { getSelectedShot, useScene3d } from "../../../lib/store/scene3d";
 
 /**
@@ -114,6 +114,7 @@ function rayToFloor(ray: Ray): Vec3 | null {
  */
 export type MannequinRig = {
   body: Group | null;
+  head: Group | null;
   arms: (Group | null)[];
   legs: (Group | null)[];
 };
@@ -133,16 +134,18 @@ function Mannequin({
 
   return (
     <group ref={(el) => (rig.current.body = el)}>
-      {/* 頭(やや縦長) + 首 */}
-      <mesh position={[0, 1.58, 0]} scale={[0.92, 1.08, 0.98]} castShadow>
-        <sphereGeometry args={[0.105, 24, 18]} />
-        {mat}
-      </mesh>
-      <mesh position={[0, 1.575, 0.095]} castShadow>
-        {/* 鼻(正面の手がかり) */}
-        <coneGeometry args={[0.02, 0.05, 10]} />
-        {accentMat}
-      </mesh>
+      {/* 頭(やや縦長) + 鼻: 視線ノードで回せるよう首の付け根をピボットにグループ化 */}
+      <group ref={(el) => (rig.current.head = el)} position={[0, 1.5, 0]}>
+        <mesh position={[0, 0.08, 0]} scale={[0.92, 1.08, 0.98]} castShadow>
+          <sphereGeometry args={[0.105, 24, 18]} />
+          {mat}
+        </mesh>
+        <mesh position={[0, 0.075, 0.095]} castShadow>
+          {/* 鼻(正面の手がかり) */}
+          <coneGeometry args={[0.02, 0.05, 10]} />
+          {accentMat}
+        </mesh>
+      </group>
       <mesh position={[0, 1.465, 0]} castShadow>
         <cylinderGeometry args={[0.04, 0.05, 0.09, 12]} />
         {mat}
@@ -484,10 +487,48 @@ function Streetlight({ color }: { color: string }) {
   );
 }
 
+/** 視線ノードの必要回転(体の向き基準のyaw/pitch)。首の可動域でクランプ */
+function lookAtAngles(
+  headWorld: Vec3,
+  target: Vec3,
+  bodyYaw: number,
+): { yaw: number; pitch: number } {
+  const dx = target[0] - headWorld[0];
+  const dy = target[1] - headWorld[1];
+  const dz = target[2] - headWorld[2];
+  let yaw = Math.atan2(dx, dz) - bodyYaw;
+  while (yaw > Math.PI) yaw -= Math.PI * 2;
+  while (yaw < -Math.PI) yaw += Math.PI * 2;
+  yaw = Math.max(-1.1, Math.min(1.1, yaw)) * 0.9; // 完全に向けず9割(自然さ)
+  const hd = Math.hypot(dx, dz);
+  const pitch = Math.max(-0.7, Math.min(0.7, Math.atan2(dy, Math.max(0.001, hd)))) * 0.9;
+  return { yaw, pitch };
+}
+
+/** 視線ターゲットのワールド座標を解決("__camera"=選択カットのカメラ / entityId) */
+function resolveLookTarget(
+  st: { project: SceneProject },
+  targetId: string,
+  frame: number,
+): Vec3 | null {
+  if (targetId === "__camera") {
+    return evaluateCamera(st.project, Math.floor(frame)).position;
+  }
+  const other = st.project.entities.find((e) => e.id === targetId);
+  if (!other) return null;
+  const p = evaluateEntityPose(st.project, other, frame);
+  return [p.position[0], p.position[1] + 1.5 * other.scale, p.position[2]];
+}
+
+const _lookQy = new Quaternion();
+const _lookQx = new Quaternion();
+const _axisY = new Vector3(0, 1, 0);
+const _axisX = new Vector3(1, 0, 0);
+
 function EntityMesh({ entity }: { entity: SceneEntity }) {
   const controls = useThree((state) => state.controls);
   const rootRef = useRef<Group>(null);
-  const rig = useRef<MannequinRig>({ body: null, arms: [null, null], legs: [null, null] });
+  const rig = useRef<MannequinRig>({ body: null, head: null, arms: [null, null], legs: [null, null] });
   const selectEntity = useScene3d((s) => s.selectEntity);
 
   // インポートしたクリップモーション: スキン付きキャラを複製してミキサーで駆動
@@ -543,7 +584,22 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
         seconds: spec.seconds,
       });
     }
-    return { obj, mixer, main, mainDuration: m.clip.duration, steps };
+    // 視線ノード用の頭ボーン(名前に head を含むノード)。pre/post は蓄積防止用スナップショット
+    // (クロージャ内代入はTSの型追跡が効かないためホルダー経由)
+    const headHolder: { bone: import("three").Object3D | null } = { bone: null };
+    obj.traverse((node) => {
+      if (!headHolder.bone && /head/i.test(node.name)) headHolder.bone = node;
+    });
+    const headState = { pre: new Quaternion(), post: new Quaternion(), primed: false };
+    return {
+      obj,
+      mixer,
+      main,
+      mainDuration: m.clip.duration,
+      steps,
+      headBone: headHolder.bone,
+      headState,
+    };
   }, [clipId, arrivalClipId, arrivalSeqKey, motionCount, clipMotion?.arrivalSequence]);
   const moveEntity = useScene3d((s) => s.moveEntity);
   const rotateEntityFree = useScene3d((s) => s.rotateEntityFree);
@@ -719,6 +775,29 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
           for (const s of steps) s.action.weight = 0;
         }
         clipRig.mixer.update(0);
+        // 視線ノード: 頭ボーンをターゲットへ向ける(ボーン局所: Y=左右捻り / X=前に倒す)
+        const lookId = ent.lookAt;
+        const hb = clipRig.headBone;
+        if (lookId && hb) {
+          const hs = clipRig.headState;
+          // クリップが頭を書かないフレームでは前回の視線が残るため、素の姿勢に戻してから掛ける
+          if (hs.primed && hb.quaternion.equals(hs.post)) hb.quaternion.copy(hs.pre);
+          hs.pre.copy(hb.quaternion);
+          const target = resolveLookTarget(st, lookId, frame);
+          if (target) {
+            const headWorld: Vec3 = [
+              pose.position[0],
+              pose.position[1] + 1.55 * ent.scale,
+              pose.position[2],
+            ];
+            const { yaw, pitch } = lookAtAngles(headWorld, target, pose.rotationY);
+            _lookQy.setFromAxisAngle(_axisY, yaw);
+            _lookQx.setFromAxisAngle(_axisX, -pitch); // ボーンはX正=前に倒す(下を見る)
+            hb.quaternion.multiply(_lookQy).multiply(_lookQx);
+          }
+          hs.post.copy(hb.quaternion);
+          hs.primed = true;
+        }
         return;
       }
 
@@ -735,6 +814,26 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
       // 弾み(接地ごと)と前傾
       r.body.position.y = moving ? Math.abs(Math.sin(phase * Math.PI * 2)) * (run ? 0.06 : 0.03) : 0;
       r.body.rotation.x = run ? 0.18 : moving ? 0.06 : 0;
+      // 視線ノード: 頭グループをターゲットへ(絶対値セット)
+      if (r.head) {
+        const lookId = ent.lookAt;
+        if (lookId) {
+          const target = resolveLookTarget(st, lookId, frame);
+          if (target) {
+            const headWorld: Vec3 = [
+              pose.position[0],
+              pose.position[1] + 1.55 * ent.scale,
+              pose.position[2],
+            ];
+            const { yaw, pitch } = lookAtAngles(headWorld, target, pose.rotationY);
+            r.head.rotation.set(pitch, yaw, 0); // グループはX正=上を向く
+          } else {
+            r.head.rotation.set(0, 0, 0);
+          }
+        } else {
+          r.head.rotation.set(0, 0, 0);
+        }
+      }
     };
     frameAppliers.add(apply);
     apply(useScene3d.getState().currentFrame);

@@ -1342,6 +1342,7 @@ function SelectedObjectSection() {
   const [arrivalPickerOpen, setArrivalPickerOpen] = useState(false);
   const [arrivalAppendOpen, setArrivalAppendOpen] = useState(false);
   const removeEntityArrivalStep = useScene3d((s) => s.removeEntityArrivalStep);
+  const setEntityLookAt = useScene3d((s) => s.setEntityLookAt);
 
   const entity = project.entities.find((e) => e.id === selectedEntityId);
   if (!entity) return null;
@@ -1485,6 +1486,28 @@ function SelectedObjectSection() {
       )}
       {motionLibOpen && (
         <MotionLibraryPopup entityId={entity.id} onClose={() => setMotionLibOpen(false)} />
+      )}
+
+      {/* 視線ノード(TRACK_TO相当): 頭が相手を追い続ける */}
+      {entity.kind === "mannequin" && (
+        <label className="flex flex-col gap-1 text-xs text-neutral-400">
+          視線(頭が追う相手)
+          <select
+            className="rounded-lg border border-[#2a2a2a] bg-[#101010] px-2 py-1.5 text-sm text-neutral-200"
+            value={entity.lookAt ?? ""}
+            onChange={(e) => setEntityLookAt(entity.id, e.target.value || null)}
+          >
+            <option value="">なし</option>
+            <option value="__camera">カメラ(撮っているカメラ)</option>
+            {project.entities
+              .filter((en) => en.id !== entity.id)
+              .map((en) => (
+                <option key={en.id} value={en.id}>
+                  {en.label}
+                </option>
+              ))}
+          </select>
+        </label>
       )}
 
       <p className="text-[10px] leading-4 text-neutral-600">

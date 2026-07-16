@@ -86,6 +86,11 @@ export type SceneEntity = {
   scale: number;
   /** モーション。null/未指定=静止。clipは骨格前提のためmannequinのみ */
   motion?: EntityMotion | null;
+  /**
+   * 視線ノード(TRACK_TO相当): 頭がこの相手を追い続ける。
+   * "__camera"=選択カットのカメラ / それ以外=エンティティID / null・未指定=なし
+   */
+  lookAt?: string | null;
   /** プロシージャル形状のパラメータ。kindごとに解釈(未指定はkind既定値) */
   params?: {
     /** building: 階数 */

@@ -191,6 +191,8 @@ type Scene3dState = {
   appendEntityArrivalStep: (id: string, clipId: string) => void;
   /** モーション連結: 到着後アクションの列からindex番目を外す */
   removeEntityArrivalStep: (id: string, index: number) => void;
+  /** 視線ノード: 頭が追う相手を設定("__camera"=カメラ / entityId / null=なし) */
+  setEntityLookAt: (id: string, target: string | null) => void;
   /** モーションの行き先(最終経由点)を動かす */
   moveMotionTarget: (id: string, position: Vec3) => void;
   /** 体の軌跡: 通過点をつかんだ位置に追加し、新しい通過点のindexを返す */
@@ -763,6 +765,18 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
           path.splice(index, 1);
           return { ...en, motion: { ...en.motion, path } };
         }),
+      },
+    });
+  },
+
+  setEntityLookAt: (id, target) => {
+    const { project } = get();
+    set({
+      project: {
+        ...project,
+        entities: project.entities.map((e) =>
+          e.id === id ? { ...e, lookAt: target ?? undefined } : e,
+        ),
       },
     });
   },
