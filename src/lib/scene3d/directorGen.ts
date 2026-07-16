@@ -42,6 +42,8 @@ export type DirectorMotion = {
   type?: "walk" | "run";
   /** ライブラリに合う動きが無い時、AIモーション生成に渡す動きの説明(日本語) */
   generate?: string;
+  /** 到着後につなげる動きの列(モーション連結。つなぎ目は自動クロスフェード) */
+  then?: string[];
 };
 
 export type DirectorPlan = {
@@ -84,7 +86,7 @@ export function buildDirectorPrompt(
     "あなたは映像監督。ユーザーの日本語の演出指示を、3Dシーンのカット割りJSONに変換する。",
     "出力はJSONのみ。説明文・コードブロック記号は出さない。",
     "スキーマ:",
-    `{"cuts":[{"preset":string,"target":string|null,"seconds":number,"lensMm"?:number,"orbitDegrees"?:number,"startPos"?:[x,y,z],"endPos"?:[x,y,z],"pathPoints"?:[[x,y,z],...]}],"motions":[{"entity":string,"clip"?:string,"type"?:"walk"|"run"}],"note":string}`,
+    `{"cuts":[{"preset":string,"target":string|null,"seconds":number,"lensMm"?:number,"orbitDegrees"?:number,"startPos"?:[x,y,z],"endPos"?:[x,y,z],"pathPoints"?:[[x,y,z],...]}],"motions":[{"entity":string,"clip"?:string,"type"?:"walk"|"run","generate"?:string,"then"?:string[]}],"note":string}`,
     `preset語彙: ${presets}`,
     "座標は[x, 高さ, z]メートル。人物の身長は約1.7m、目線は約1.5m。",
     "targetは追う相手のエンティティ名。動く人物を撮るなら基本入れる。",
@@ -92,6 +94,7 @@ export function buildDirectorPrompt(
     "preset=pathの時だけpathPointsを2〜4点入れる(startPos/endPosも必須)。",
     "motionsのclipは提供リストの名前から選ぶ。歩く/走るだけならtype(walk/run)でもよい。",
     "リストにもtypeにも合わない動き(踊る・座る・手を振る等)は、generateに動きの説明(日本語・20字以内)を書く(新規生成される)。clip/type/generateはどれか1つ。",
+    "移動する人物には then で「到着後につなげる動き」を順番の配列で書ける(例: [\"ジャンプ\",\"ガッツポーズ\"])。リストの名前を優先し、無ければ短い説明を書く(新規生成される)。つなぎ目は自動で滑らかに混ざる。",
     "secondsは1〜20。cutsは1〜6個。noteは組んだ内容の一言(日本語・30字以内)。",
   ].join("\n");
 
@@ -165,6 +168,10 @@ export function validateDirectorPlan(raw: unknown): DirectorPlan {
       if (typeof mo.generate === "string" && mo.generate.length > 0) {
         out.generate = mo.generate.slice(0, 60);
       }
+      if (Array.isArray(mo.then)) {
+        const steps = mo.then.filter((x): x is string => typeof x === "string" && x.length > 0);
+        if (steps.length > 0) out.then = steps.slice(0, 4).map((x) => x.slice(0, 60));
+      }
       return [out];
     });
 
@@ -215,25 +222,39 @@ export async function applyDirectorPlan(
   });
 
   // モーション割り当て
-  const toGenerate: { entityId: string; desc: string }[] = [];
+  const toGenerate: { entityId: string; desc: string; append?: boolean }[] = [];
+  const findClip = (name: string) => {
+    const clips = st().importedMotions;
+    return (
+      clips.find((c) => c.name === name) ??
+      clips.find((c) => c.name.includes(name) || name.includes(c.name))
+    );
+  };
   for (const m of plan.motions) {
     const id = findEntityId(st().project, m.entity);
     if (!id) continue;
+    let assigned = false;
     if (m.clip) {
-      const clips = st().importedMotions;
-      const hit =
-        clips.find((c) => c.name === m.clip) ??
-        clips.find((c) => c.name.includes(m.clip ?? "") || (m.clip ?? "").includes(c.name));
+      const hit = findClip(m.clip);
       if (hit) {
         st().setEntityMotionClip(id, hit.id);
-        continue;
+        assigned = true;
       }
     }
-    if (m.type) {
+    if (!assigned && m.type) {
       st().setEntityMotion(id, m.type);
-      continue;
+      assigned = true;
     }
-    if (m.generate) toGenerate.push({ entityId: id, desc: m.generate });
+    if (!assigned && m.generate) {
+      toGenerate.push({ entityId: id, desc: m.generate });
+      assigned = true;
+    }
+    // 到着後につなげる列(モーション連結)。名前で見つかれば即つなぐ、無ければ生成キューへ
+    for (const name of m.then ?? []) {
+      const hit = findClip(name);
+      if (hit) st().appendEntityArrivalStep(id, hit.id);
+      else toGenerate.push({ entityId: id, desc: name, append: true });
+    }
   }
 
   // 新規モーション生成(AIアニメーターへ委譲。1件ずつ・遅い)
@@ -252,6 +273,7 @@ export async function applyDirectorPlan(
     if (spec.moveSpeed != null) registerClipSpeed(id, spec.moveSpeed);
     saveGeneratedSpec(id, spec);
     st().registerImportedMotions([entry]);
-    st().setEntityMotionClip(g.entityId, id);
+    if (g.append) st().appendEntityArrivalStep(g.entityId, id);
+    else st().setEntityMotionClip(g.entityId, id);
   }
 }

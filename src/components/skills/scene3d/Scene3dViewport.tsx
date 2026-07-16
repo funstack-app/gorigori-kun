@@ -500,8 +500,13 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
       : null;
   // ライブラリの読み込み完了で組み直す(再起動直後は実体が未登録のため)
   const motionCount = useScene3d((s) => s.importedMotions.length);
+  // 連結列(到着後アクションの列)。未指定は従来の単発(またはIdle)にフォールバック
+  const arrivalSeqKey = JSON.stringify(
+    clipMotion?.arrivalSequence?.map((s) => `${s.clipId}:${s.seconds ?? ""}`) ?? null,
+  );
   const clipRig = useMemo(() => {
     void motionCount;
+    void arrivalSeqKey;
     if (!clipId) return null;
     const m = getImportedMotion(clipId);
     if (!m) return null;
@@ -513,20 +518,32 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
     const mixer = new AnimationMixer(obj);
     const main = mixer.clipAction(m.clip);
     main.play();
-    // 到着後アクション: 同じテンプレート(=同じ骨格)のクリップだけ適用できる
-    let arrival: { action: AnimationAction; duration: number; loops: boolean } | null = null;
-    if (arrivalClipId && arrivalClipId !== clipId) {
-      const am = getImportedMotion(arrivalClipId);
-      if (am && am.template === m.template) {
-        const action = mixer.clipAction(am.clip);
-        action.play();
-        action.weight = 0;
-        // 名前が _Loop で終わらないクリップ(座る(動作)・着地等)は一回きり→最終姿勢で静止
-        arrival = { action, duration: am.clip.duration, loops: am.clip.name.endsWith("_Loop") };
-      }
+    // 到着後アクションの列: 同じテンプレート(=同じ骨格)のクリップだけ適用できる。
+    // 同じクリップを複数ステップで使えるよう、クリップは複製して独立アクションにする
+    const stepSpecs =
+      clipMotion?.arrivalSequence && clipMotion.arrivalSequence.length > 0
+        ? clipMotion.arrivalSequence
+        : arrivalClipId && arrivalClipId !== clipId
+          ? [{ clipId: arrivalClipId }]
+          : [];
+    const steps: { action: AnimationAction; duration: number; loops: boolean; seconds?: number }[] =
+      [];
+    for (const spec of stepSpecs) {
+      const am = getImportedMotion(spec.clipId);
+      if (!am || am.template !== m.template) continue;
+      const action = mixer.clipAction(am.clip.clone());
+      action.play();
+      action.weight = 0;
+      // 名前が _Loop で終わらないクリップ(座る(動作)・着地等)は一回きり→最終姿勢で静止
+      steps.push({
+        action,
+        duration: am.clip.duration,
+        loops: am.clip.name.endsWith("_Loop"),
+        seconds: spec.seconds,
+      });
     }
-    return { obj, mixer, main, mainDuration: m.clip.duration, arrival };
-  }, [clipId, arrivalClipId, motionCount]);
+    return { obj, mixer, main, mainDuration: m.clip.duration, steps };
+  }, [clipId, arrivalClipId, arrivalSeqKey, motionCount, clipMotion?.arrivalSequence]);
   const moveEntity = useScene3d((s) => s.moveEntity);
   const rotateEntityFree = useScene3d((s) => s.rotateEntityFree);
   const scaleEntityBy = useScene3d((s) => s.scaleEntityBy);
@@ -639,24 +656,62 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
       if (clipRig) {
         const t = frame / st.project.fps;
         const arrivalAt = pose.travelSeconds;
-        const arrived = arrivalAt != null && !pose.gait.moving;
-        const arr = clipRig.arrival;
-        if (arr && arrived) {
-          // 到着後アクションへハード切替
-          const ta = Math.max(0, t - arrivalAt);
+        const steps = clipRig.steps;
+        // つなぎ目のクロスフェード幅(秒)。ハード切替のカクつきをここで消す
+        const BLEND = 0.35;
+        const smooth = (w: number) => w * w * (3 - 2 * w);
+        const setTime = (
+          s: { action: AnimationAction; duration: number; loops: boolean },
+          local: number,
+        ) => {
+          s.action.time = s.loops
+            ? local % Math.max(0.001, s.duration)
+            : Math.min(local, Math.max(0.001, s.duration - 0.0001));
+        };
+
+        if (steps.length > 0 && arrivalAt != null) {
+          // タイムライン: 移動[0, arrivalAt] → step0, step1, ...
+          // 各stepは自分の開始BLEND秒前からフェードインし始める(着地は到着と同時に完了)
+          const eff = (i: number) =>
+            steps[i].seconds ?? (i === steps.length - 1 ? Infinity : Math.max(steps[i].duration, 0.5));
+          const startOf: number[] = [];
+          let acc = arrivalAt;
+          for (let i = 0; i < steps.length; i++) {
+            startOf.push(acc);
+            acc += eff(i);
+          }
+          // 現在アクティブなstep k (フェードイン開始 = startOf[k] - BLEND)
+          let k = -1; // -1 = まだ移動クリップのみ
+          for (let i = 0; i < steps.length; i++) {
+            if (t >= startOf[i] - BLEND) k = i;
+          }
+          // 全アクションを一旦ゼロに
           clipRig.main.weight = 0;
-          clipRig.main.time = 0;
-          arr.action.weight = 1;
-          arr.action.time = arr.loops
-            ? ta % Math.max(0.001, arr.duration)
-            : Math.min(ta, Math.max(0.001, arr.duration - 0.0001));
+          for (const s of steps) s.action.weight = 0;
+
+          if (k === -1) {
+            clipRig.main.weight = 1;
+            clipRig.main.time = t % Math.max(0.001, clipRig.mainDuration);
+          } else {
+            const fadeStart = startOf[k] - BLEND;
+            const w = smooth(Math.min(1, (t - fadeStart) / BLEND));
+            steps[k].action.weight = w;
+            setTime(steps[k], t - fadeStart);
+            // 混ざる相手: 前のstep、無ければ移動クリップ
+            if (w < 1) {
+              if (k === 0) {
+                clipRig.main.weight = 1 - w;
+                clipRig.main.time = t % Math.max(0.001, clipRig.mainDuration);
+              } else {
+                steps[k - 1].action.weight = 1 - w;
+                setTime(steps[k - 1], t - (startOf[k - 1] - BLEND));
+              }
+            }
+          }
         } else {
           clipRig.main.weight = 1;
           clipRig.main.time = t % Math.max(0.001, clipRig.mainDuration);
-          if (arr) {
-            arr.action.weight = 0;
-            arr.action.time = 0;
-          }
+          for (const s of steps) s.action.weight = 0;
         }
         clipRig.mixer.update(0);
         return;

@@ -1111,10 +1111,20 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
  * 到着後アクションのポップアップ(モーションミックス第1弾)。
  * 標準ライブラリ(骨格を共有)から「着いたあとの動き」を選ぶ。既定は待機
  */
-function ArrivalMotionPopup({ entityId, onClose }: { entityId: string; onClose: () => void }) {
+function ArrivalMotionPopup({
+  entityId,
+  append = false,
+  onClose,
+}: {
+  entityId: string;
+  /** true: 既存の列に追加する(モーション連結) / false: 単発で置き換える */
+  append?: boolean;
+  onClose: () => void;
+}) {
   const importedMotions = useScene3d((s) => s.importedMotions);
   const registerImportedMotions = useScene3d((s) => s.registerImportedMotions);
   const setEntityArrivalClip = useScene3d((s) => s.setEntityArrivalClip);
+  const appendEntityArrivalStep = useScene3d((s) => s.appendEntityArrivalStep);
   const project = useScene3d((s) => s.project);
 
   // 標準ライブラリ未読み込みなら読み込む(通常はWorkspace起動時に読み込み済み)
@@ -1159,7 +1169,8 @@ function ArrivalMotionPopup({ entityId, onClose }: { entityId: string; onClose: 
             key={m.id}
             className={btnCls(current === m.id)}
             onClick={() => {
-              setEntityArrivalClip(entityId, m.id);
+              if (append) appendEntityArrivalStep(entityId, m.id);
+              else setEntityArrivalClip(entityId, m.id);
               onClose();
             }}
             title={`着いたら ${m.name}`}
@@ -1295,6 +1306,8 @@ function SelectedObjectSection() {
   const [detailOpen, setDetailOpen] = useState(false);
   const [motionLibOpen, setMotionLibOpen] = useState(false);
   const [arrivalPickerOpen, setArrivalPickerOpen] = useState(false);
+  const [arrivalAppendOpen, setArrivalAppendOpen] = useState(false);
+  const removeEntityArrivalStep = useScene3d((s) => s.removeEntityArrivalStep);
 
   const entity = project.entities.find((e) => e.id === selectedEntityId);
   if (!entity) return null;
@@ -1302,9 +1315,15 @@ function SelectedObjectSection() {
   const degrees = ((Math.round((entity.rotationY * 180) / Math.PI) % 360) + 360) % 360;
   const motionType = entity.motion?.type ?? null;
   const arrivalClipId = entity.motion?.type === "clip" ? entity.motion.arrivalClipId : undefined;
-  const arrivalName = arrivalClipId
-    ? (importedMotions.find((m) => m.id === arrivalClipId)?.name ?? "待機")
-    : "待機";
+  // 連結列(あれば単発より優先で表示)
+  const arrivalSeq =
+    entity.motion?.type === "clip" ? (entity.motion.arrivalSequence ?? null) : null;
+  const clipNameOf = (id: string) => importedMotions.find((m) => m.id === id)?.name ?? "?";
+  const arrivalName = arrivalSeq
+    ? arrivalSeq.map((s) => clipNameOf(s.clipId)).join(" → ")
+    : arrivalClipId
+      ? (importedMotions.find((m) => m.id === arrivalClipId)?.name ?? "待機")
+      : "待機";
   const motionBtn = (active: boolean) =>
     `rounded-lg border px-2 py-1.5 text-xs ${
       active
@@ -1378,10 +1397,42 @@ function SelectedObjectSection() {
             >
               着いたら: <span className="text-sky-300">{arrivalName}</span>
             </button>
+            {/* モーション連結: 着いたあとの動きを列でつなぐ(つなぎ目は自動で滑らかに混ざる) */}
+            <div className="flex flex-wrap items-center gap-1">
+              {(arrivalSeq ?? []).map((s, i) => (
+                <span
+                  key={`${s.clipId}-${i}`}
+                  className="flex items-center gap-1 rounded border border-sky-400/30 bg-sky-400/10 px-1.5 py-0.5 text-[10px] text-sky-200"
+                >
+                  {clipNameOf(s.clipId)}
+                  <button
+                    className="text-sky-400/70 hover:text-red-300"
+                    onClick={() => removeEntityArrivalStep(entity.id, i)}
+                    title="この動きを列から外す"
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
+              <button
+                className="rounded border border-dashed border-[#3a3a3a] px-1.5 py-0.5 text-[10px] text-neutral-500 hover:border-sky-400/60 hover:text-sky-300"
+                onClick={() => setArrivalAppendOpen(true)}
+                title="着いたあとの動きをさらにつなげる(つなぎ目は自動で滑らかに)"
+              >
+                ＋つなげる
+              </button>
+            </div>
             {arrivalPickerOpen && (
               <ArrivalMotionPopup
                 entityId={entity.id}
                 onClose={() => setArrivalPickerOpen(false)}
+              />
+            )}
+            {arrivalAppendOpen && (
+              <ArrivalMotionPopup
+                entityId={entity.id}
+                append
+                onClose={() => setArrivalAppendOpen(false)}
               />
             )}
           </>

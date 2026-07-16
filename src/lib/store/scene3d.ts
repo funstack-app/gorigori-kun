@@ -187,6 +187,10 @@ type Scene3dState = {
   setEntityMotionClip: (id: string, clipId: string) => void;
   /** 到着後アクションを設定。null=待機(既定)に戻す */
   setEntityArrivalClip: (id: string, clipId: string | null) => void;
+  /** モーション連結: 到着後アクションの列に1つ追加(つなぎ目はクロスフェード) */
+  appendEntityArrivalStep: (id: string, clipId: string) => void;
+  /** モーション連結: 到着後アクションの列からindex番目を外す */
+  removeEntityArrivalStep: (id: string, index: number) => void;
   /** モーションの行き先(最終経由点)を動かす */
   moveMotionTarget: (id: string, position: Vec3) => void;
   setDragging: (id: string | null) => void;
@@ -541,8 +545,19 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
         entities: project.entities.map((e) => {
           if (e.motion?.type !== "clip") return e;
           if (e.motion.clipId === id) return { ...e, motion: null };
-          if (e.motion.arrivalClipId === id) {
-            return { ...e, motion: { ...e.motion, arrivalClipId: undefined } };
+          if (
+            e.motion.arrivalClipId === id ||
+            e.motion.arrivalSequence?.some((s) => s.clipId === id)
+          ) {
+            const seq = e.motion.arrivalSequence?.filter((s) => s.clipId !== id);
+            return {
+              ...e,
+              motion: {
+                ...e.motion,
+                arrivalClipId: e.motion.arrivalClipId === id ? undefined : e.motion.arrivalClipId,
+                arrivalSequence: seq && seq.length > 0 ? seq : undefined,
+              },
+            };
           }
           return e;
         }),
@@ -577,7 +592,53 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
         ...project,
         entities: project.entities.map((e) => {
           if (e.id !== id || e.motion?.type !== "clip") return e;
-          return { ...e, motion: { ...e.motion, arrivalClipId: clipId ?? undefined } };
+          // 単発指定は連結列を置き換える(触り慣れた既存挙動を維持)
+          return {
+            ...e,
+            motion: { ...e.motion, arrivalClipId: clipId ?? undefined, arrivalSequence: undefined },
+          };
+        }),
+      },
+    });
+  },
+
+  appendEntityArrivalStep: (id, clipId) => {
+    const { project } = get();
+    set({
+      project: {
+        ...project,
+        entities: project.entities.map((e) => {
+          if (e.id !== id || e.motion?.type !== "clip") return e;
+          const base =
+            e.motion.arrivalSequence ??
+            (e.motion.arrivalClipId ? [{ clipId: e.motion.arrivalClipId }] : []);
+          return {
+            ...e,
+            motion: {
+              ...e.motion,
+              arrivalSequence: [...base, { clipId }],
+              arrivalClipId: undefined,
+            },
+          };
+        }),
+      },
+    });
+  },
+
+  removeEntityArrivalStep: (id, index) => {
+    const { project } = get();
+    set({
+      project: {
+        ...project,
+        entities: project.entities.map((e) => {
+          if (e.id !== id || e.motion?.type !== "clip") return e;
+          const seq = [...(e.motion.arrivalSequence ?? [])];
+          if (index < 0 || index >= seq.length) return e;
+          seq.splice(index, 1);
+          return {
+            ...e,
+            motion: { ...e.motion, arrivalSequence: seq.length > 0 ? seq : undefined },
+          };
         }),
       },
     });

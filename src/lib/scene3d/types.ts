@@ -43,6 +43,12 @@ export type EntityMotion =
        * 未指定は待機(Idle_Loop)。標準ライブラリ同士のみ(骨格を共有するため)
        */
       arrivalClipId?: string;
+      /**
+       * 到着後アクションの列(モーション連結)。順に再生し、つなぎ目はクロスフェードで
+       * 滑らかに混ざる。指定時は arrivalClipId より優先。
+       * seconds 省略時はクリップ1周分(最後のステップがループなら無限に続く)
+       */
+      arrivalSequence?: { clipId: string; seconds?: number }[];
     };
 
 export type SceneEntityKind =
