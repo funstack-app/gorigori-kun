@@ -49,6 +49,7 @@ import {
   reviseGeneratedMotion,
   validateDirectorPlan,
 } from "../../../lib/scene3d/directorGen";
+import { captureVideoToSpec } from "../../../lib/scene3d/videoCapture/videoToClip";
 import { registerClipSpeed, resolveClipSpeed } from "../../../lib/scene3d/clipSpeed";
 import {
   CAMERA_PRESET_LABELS,
@@ -863,6 +864,34 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
   const [genText, setGenText] = useState("");
   // AIで直す対象(nullなら新規生成モード)
   const [reviseTarget, setReviseTarget] = useState<{ id: string; name: string } | null>(null);
+  // 動画から取り込み(完全ローカル・無料)
+  const videoRef = useRef<HTMLInputElement>(null);
+  const [capBusy, setCapBusy] = useState<string | null>(null);
+  const [capError, setCapError] = useState<string | null>(null);
+
+  const onCaptureVideo = async (file: File | null) => {
+    if (!file || capBusy) return;
+    setCapBusy("準備中…");
+    setCapError(null);
+    try {
+      const template = getBuiltinTemplate();
+      if (!template) throw new Error("標準ライブラリの読み込み待ちです。少し待ってからもう一度");
+      const spec = await captureVideoToSpec(file, (msg) => setCapBusy(msg));
+      const id = `gen-${Date.now()}`;
+      const clip = buildGeneratedClip(template, spec, id);
+      const entry = registerGeneratedClip(id, spec.name, clip);
+      if (!entry) throw new Error("クリップの登録に失敗しました");
+      saveGeneratedSpec(id, spec);
+      registerImportedMotions([entry]);
+      setEntityMotionClip(entityId, id);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setCapError(msg.slice(0, 200));
+    } finally {
+      setCapBusy(null);
+      if (videoRef.current) videoRef.current.value = "";
+    }
+  };
   const [genBusy, setGenBusy] = useState(false);
   const [genError, setGenError] = useState<string | null>(null);
 
@@ -1004,6 +1033,36 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
         {genError && (
           <p className="mt-1 rounded border border-red-500/30 bg-red-500/10 p-1.5 text-[11px] text-red-300">
             {genError}
+          </p>
+        )}
+      </div>
+
+      {/* 動画から取り込む(完全ローカル・無料。MediaPipe同梱) */}
+      <div className="mb-3 rounded-lg border border-emerald-400/25 bg-emerald-400/5 p-2.5">
+        <p className="mb-1.5 text-[11px] font-bold tracking-wide text-emerald-300">
+          動画から動きを取り込む(β)
+        </p>
+        <input
+          ref={videoRef}
+          type="file"
+          accept="video/mp4,video/quicktime,video/webm,video/*"
+          className="hidden"
+          onChange={(e) => void onCaptureVideo(e.target.files?.[0] ?? null)}
+        />
+        <button
+          className="w-full rounded-lg border border-emerald-400/40 bg-emerald-400/10 px-3 py-1.5 text-xs text-emerald-300 hover:bg-emerald-400/20 disabled:opacity-50"
+          disabled={!!capBusy}
+          onClick={() => videoRef.current?.click()}
+        >
+          {capBusy ?? "動画を選ぶ…(mp4/mov/webm・20秒まで)"}
+        </button>
+        <p className="mt-1.5 text-[10px] leading-4 text-neutral-500">
+          全身が映った実写の動画から、動きだけをキャラに写します(映像は取り込みません)。
+          処理は全てこのPC内で完結します。自分で撮った動画・権利のある映像を使ってください
+        </p>
+        {capError && (
+          <p className="mt-1 rounded border border-red-500/30 bg-red-500/10 p-1.5 text-[11px] text-red-300">
+            {capError}
           </p>
         )}
       </div>
