@@ -175,7 +175,7 @@ type Scene3dState = {
   /** S+ドラッグの拡縮(差分加算) */
   scaleEntityBy: (id: string, delta: number) => void;
   setEntityFloors: (id: string, floors: number) => void;
-  setEntityParam: (id: string, key: "width" | "height" | "depth", value: number) => void;
+  setEntityParam: (id: string, key: "width" | "height" | "depth" | "floors", value: number) => void;
   /** インポート済みモーション一覧(実体は motionLibrary モジュールが持つ) */
   importedMotions: { id: string; name: string }[];
   registerImportedMotions: (items: { id: string; name: string }[]) => void;
@@ -518,7 +518,11 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
 
   setEntityParam: (id, key, value) => {
     const { project } = get();
-    const clamped = Math.max(0.1, Math.min(30, value));
+    // floors(ビル階数)は整数1〜20、寸法系は0.1〜30m
+    const clamped =
+      key === "floors"
+        ? Math.max(1, Math.min(20, Math.round(value)))
+        : Math.max(0.1, Math.min(30, value));
     set({
       project: {
         ...project,

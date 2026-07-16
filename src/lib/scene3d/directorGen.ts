@@ -49,7 +49,25 @@ export type DirectorMotion = {
   to?: [number, number];
 };
 
+export type DirectorPlacement = {
+  /** 置く種類(mannequin/building/box/wall/table/car/tree等) */
+  kind: string;
+  /** 置く場所[x,z]。高さは地形が決める(人物はビルの上なら屋上に立つ) */
+  at: [number, number];
+  /** building専用: 階数(1階=3m) */
+  floors?: number;
+};
+
+export type DirectorMove = {
+  entity: string;
+  /** 立たせる場所[x,z]。高さは地形が決める */
+  at: [number, number];
+};
+
 export type DirectorPlan = {
+  /** シーンの下ごしらえ(足りない物を置く・人物を配置し直す) */
+  place: DirectorPlacement[];
+  move: DirectorMove[];
   cuts: DirectorCut[];
   motions: DirectorMotion[];
   note: string;
@@ -89,7 +107,9 @@ export function buildDirectorPrompt(
     "あなたは映像監督。ユーザーの日本語の演出指示を、3Dシーンのカット割りJSONに変換する。",
     "出力はJSONのみ。説明文・コードブロック記号は出さない。",
     "スキーマ:",
-    `{"cuts":[{"preset":string,"target":string|null,"seconds":number,"lensMm"?:number,"orbitDegrees"?:number,"startPos"?:[x,y,z],"endPos"?:[x,y,z],"pathPoints"?:[[x,y,z],...]}],"motions":[{"entity":string,"clip"?:string,"type"?:"walk"|"run","generate"?:string,"then"?:string[],"to"?:[x,z]}],"note":string}`,
+    `{"place":[{"kind":string,"at":[x,z],"floors"?:number}],"move":[{"entity":string,"at":[x,z]}],"cuts":[{"preset":string,"target":string|null,"seconds":number,"lensMm"?:number,"orbitDegrees"?:number,"startPos"?:[x,y,z],"endPos"?:[x,y,z],"pathPoints"?:[[x,y,z],...]}],"motions":[{"entity":string,"clip"?:string,"type"?:"walk"|"run","generate"?:string,"then"?:string[],"to"?:[x,z]}],"note":string}`,
+    "placeで足りない物を置ける。kind語彙: mannequin=人物 / building=ビル(floorsで階数、1階=3m) / box=箱 / wall=壁 / table=机 / chair=椅子 / car=車 / tree=木 / streetlight=街灯 / pedestal=台座。名前は自動で「ビル1」「人物2」等になる。既にシーンにある物は置き直さず再利用する。",
+    "moveで既存の人物・物を立たせ直せる。atは[x,z]のみ。高さは地形が決める(ビルの座標なら屋上に立つ)。",
     `preset語彙: ${presets}`,
     "座標は[x, 高さ, z]メートル。人物の身長は約1.7m、目線は約1.5m。",
     "targetは追う相手のエンティティ名。動く人物を撮るなら基本入れる。",
@@ -103,7 +123,13 @@ export function buildDirectorPrompt(
   ].join("\n");
 
   const entities = project.entities
-    .map((e) => `${e.label}(位置[${e.position.map((v) => v.toFixed(1)).join(",")}])`)
+    .map((e) => {
+      const pos = `位置[${e.position.map((v) => v.toFixed(1)).join(",")}]`;
+      // 上に乗れる物は天面の高さも教える(「屋上へ飛び移る」の空間推論に必要)
+      const top = surfaceHeightAt(project, e.position[0], e.position[2]);
+      const topInfo = top > 0.3 ? `, 天面高さ${top.toFixed(1)}m` : "";
+      return `${e.label}(${e.kind}, ${pos}${topInfo})`;
+    })
     .join(", ");
   const prompt = [
     `シーン内のエンティティ: ${entities || "(なし)"}`,
@@ -126,9 +152,60 @@ const clampVec = (v: Vec3): Vec3 => [
   Math.max(-50, Math.min(50, v[2])),
 ];
 
+const PLACEABLE_KINDS = new Set([
+  "mannequin",
+  "sphere",
+  "box",
+  "wall",
+  "column",
+  "stairs",
+  "building",
+  "table",
+  "chair",
+  "sofa",
+  "bed",
+  "shelf",
+  "pedestal",
+  "car",
+  "tree",
+  "streetlight",
+]);
+
+function asXZ(v: unknown): [number, number] | null {
+  if (!Array.isArray(v) || v.length < 2) return null;
+  const arr = v as number[];
+  if (!arr.slice(0, 2).every((n) => typeof n === "number" && Number.isFinite(n))) return null;
+  const x = arr[0];
+  const z = arr.length >= 3 ? arr[2] : arr[1];
+  return [Math.max(-50, Math.min(50, x)), Math.max(-50, Math.min(50, z))];
+}
+
 export function validateDirectorPlan(raw: unknown): DirectorPlan {
   if (raw == null || typeof raw !== "object") throw new Error("AIの出力がJSONになっていません");
   const o = raw as Record<string, unknown>;
+
+  const place: DirectorPlacement[] = (Array.isArray(o.place) ? o.place : [])
+    .slice(0, 8)
+    .flatMap((x) => {
+      const pl = x as Record<string, unknown>;
+      const kind = String(pl.kind ?? "");
+      const at = asXZ(pl.at);
+      if (!PLACEABLE_KINDS.has(kind) || !at) return [];
+      const out: DirectorPlacement = { kind, at };
+      const fl = Number(pl.floors);
+      if (Number.isFinite(fl)) out.floors = Math.max(1, Math.min(20, Math.round(fl)));
+      return [out];
+    });
+
+  const move: DirectorMove[] = (Array.isArray(o.move) ? o.move : [])
+    .slice(0, 8)
+    .flatMap((x) => {
+      const mv = x as Record<string, unknown>;
+      const entity = typeof mv.entity === "string" ? mv.entity : "";
+      const at = asXZ(mv.at);
+      if (!entity || !at) return [];
+      return [{ entity, at }];
+    });
   const rawCuts = Array.isArray(o.cuts) ? o.cuts : [];
   if (rawCuts.length === 0) throw new Error("カットが1つも生成されませんでした");
 
@@ -191,7 +268,7 @@ export function validateDirectorPlan(raw: unknown): DirectorPlan {
     });
 
   const note = typeof o.note === "string" ? o.note.slice(0, 60) : "";
-  return { cuts, motions, note };
+  return { place, move, cuts, motions, note };
 }
 
 /* ---------------------------------- 適用 ---------------------------------- */
@@ -218,7 +295,24 @@ export async function applyDirectorPlan(
   const st = () => useScene3d.getState();
   const fps = st().project.fps;
 
-  // カメラ・カットを先に適用(速い。ユーザーにすぐ結果が見える)
+  // シーンの下ごしらえ: 置く → 立たせ直す(高さは地形=磁石が決める)
+  for (const pl of plan.place) {
+    st().addEntity(pl.kind as Parameters<ReturnType<typeof useScene3d.getState>["addEntity"]>[0]);
+    const id = st().selectedEntityId;
+    if (!id) continue;
+    if (pl.floors != null) st().setEntityParam(id, "floors", pl.floors);
+    const y =
+      pl.kind === "mannequin" ? surfaceHeightAt(st().project, pl.at[0], pl.at[1], id) : 0;
+    st().moveEntity(id, [pl.at[0], y, pl.at[1]]);
+  }
+  for (const mv of plan.move) {
+    const id = findEntityId(st().project, mv.entity);
+    if (!id) continue;
+    const y = surfaceHeightAt(st().project, mv.at[0], mv.at[1], id);
+    st().moveEntity(id, [mv.at[0], y, mv.at[1]]);
+  }
+
+  // カメラ・カットを適用
   plan.cuts.forEach((cut, i) => {
     // カット2以降: 新しいカメラ+カットを作る(addCameraは新カットも足して選択する)
     if (i > 0) st().addCamera();
