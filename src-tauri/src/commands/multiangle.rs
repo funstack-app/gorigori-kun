@@ -186,6 +186,7 @@ pub async fn multiangle_regenerate_cut(
             },
         );
         match generate_one_cut(
+            &task_app,
             &codex_bin,
             &codex_home_orig,
             &prompt,
@@ -284,6 +285,7 @@ async fn run_multiangle_orchestrator(
                 );
                 let prompt = build_multiangle_prompt(&cut, &aspect_ratio, &environment);
                 match generate_one_cut(
+                    &app,
                     &codex_bin,
                     &codex_home_orig,
                     &prompt,
@@ -393,6 +395,7 @@ const MULTIANGLE_MAX_ATTEMPTS: u32 = 3;
 /// success のまま「生成画像が見つかりません」になる。1回で諦めず最大
 /// MULTIANGLE_MAX_ATTEMPTS 回まで作り直す。コア(batch_gen)の自動リトライと同思想。
 async fn generate_one_cut(
+    app: &AppHandle,
     codex_bin: &Path,
     codex_home_orig: &Path,
     prompt: &str,
@@ -404,6 +407,7 @@ async fn generate_one_cut(
     let mut last_err = String::new();
     for attempt in 1..=MULTIANGLE_MAX_ATTEMPTS {
         match attempt_one_cut(
+            app,
             codex_bin,
             codex_home_orig,
             prompt,
@@ -431,6 +435,7 @@ async fn generate_one_cut(
 
 /// 1枚生成の1試行。画像が出れば Ok、image_gen 未呼び出し等で画像が無ければ Err。
 async fn attempt_one_cut(
+    app: &AppHandle,
     codex_bin: &Path,
     codex_home_orig: &Path,
     prompt: &str,
@@ -488,6 +493,11 @@ async fn attempt_one_cut(
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("codex exec の spawn に失敗: {e}"))?;
+    let pid = child
+        .id()
+        .ok_or_else(|| "codex exec の PID を取得できません".to_string())?;
+    let worker_registration =
+        crate::commands::worker_registry::WorkerPidGuard::register(app, pid, "multiangle")?;
     if let Some(mut stdin) = child.stdin.take() {
         stdin
             .write_all(prompt.as_bytes())
@@ -501,6 +511,7 @@ async fn attempt_one_cut(
     .await
     .map_err(|_| format!("画像生成が {GENERATION_TIMEOUT_SECS} 秒でタイムアウトしました"))?
     .map_err(|e| format!("codex exec 待機失敗: {e}"))?;
+    drop(worker_registration);
     drop(gen_permit);
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -552,6 +563,7 @@ async fn attempt_one_cut(
 /// 現状 multiangle 本体では直接使わないが、storyboard と同じ流用基盤として持つ。
 #[allow(dead_code)]
 async fn codex_oneshot(
+    app: &AppHandle,
     codex_bin: &Path,
     prompt: &str,
     image_paths: &[&Path],
@@ -592,6 +604,11 @@ async fn codex_oneshot(
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("codex exec の spawn に失敗: {e}"))?;
+    let pid = child
+        .id()
+        .ok_or_else(|| "codex exec の PID を取得できません".to_string())?;
+    let worker_registration =
+        crate::commands::worker_registry::WorkerPidGuard::register(app, pid, "multiangle")?;
     if let Some(mut stdin) = child.stdin.take() {
         stdin
             .write_all(prompt.as_bytes())
@@ -603,6 +620,7 @@ async fn codex_oneshot(
         .await
         .map_err(|_| format!("codex exec が {timeout_secs} 秒でタイムアウトしました"))?
         .map_err(|e| format!("codex exec 待機失敗: {e}"))?;
+    drop(worker_registration);
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let detail = stderr

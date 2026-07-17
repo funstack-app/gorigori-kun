@@ -3,6 +3,7 @@
 //! Persists sessions, turns, and image records to a local SQLite database via
 //! `tauri-plugin-sql`.  The DB lives at `{app_data_dir}/history.db`.
 
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -506,6 +507,40 @@ pub async fn image_record(app: AppHandle, args: ImageRecordArgs) -> Result<Image
         thumbnail_path: args.thumbnail_path,
         created_at: now,
     })
+}
+
+/// Persist a PNG that has already been copied to its final output path.
+/// Batch workers call this directly so history does not depend on the webview
+/// staying alive long enough to receive a completion event.
+pub async fn record_generated_image(
+    app: &AppHandle,
+    turn_id: &str,
+    path: &Path,
+) -> Result<(), String> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|e| format!("生成画像のメタデータ取得失敗 ({}): {e}", path.display()))?;
+    let mtime_ms = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or_else(now_ms);
+
+    image_record(
+        app.clone(),
+        ImageRecordArgs {
+            turn_id: turn_id.to_string(),
+            path: path.to_string_lossy().into_owned(),
+            mtime_ms,
+            size: metadata.len() as i64,
+            kind: "created".to_string(),
+            media_type: Some("image".to_string()),
+            duration_seconds: None,
+            thumbnail_path: None,
+        },
+    )
+    .await
+    .map(|_| ())
 }
 
 /// Look up the generation-process snapshot associated with an exact image path.

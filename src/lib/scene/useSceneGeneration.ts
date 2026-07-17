@@ -315,6 +315,7 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
           promptOverride: prompt,
           refImagePaths,
           maskPaths: refImagePaths.map(() => ""),
+          turnId: batchDbTurnId ?? undefined,
           // Magnific が選ばれていたら最優先 (higgsfield/codex は使わない)。
           // 1件=単一生成、2件以上=比較生成。
           magnific:

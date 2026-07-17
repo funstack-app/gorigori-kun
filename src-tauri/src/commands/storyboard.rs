@@ -706,6 +706,7 @@ pub async fn storyboard_regenerate_cut(
         }
 
         let generated = generate_one_take(
+            &task_app,
             &codex_bin,
             &codex_home_orig,
             &prompt_obj,
@@ -793,7 +794,7 @@ async fn run_storyboard_orchestrator(
                 );
                 planned
             }
-            _ => plan_cuts(&codex_bin, &params, &skill_refs)
+            _ => plan_cuts(&app, &codex_bin, &params, &skill_refs)
                 .await
                 .unwrap_or_else(|err| {
                     tracing::warn!(target: "codex.storyboard", "scene planning fallback: {err}");
@@ -801,7 +802,7 @@ async fn run_storyboard_orchestrator(
                 }),
         }
     } else {
-        plan_cuts(&codex_bin, &params, &skill_refs)
+        plan_cuts(&app, &codex_bin, &params, &skill_refs)
             .await
             .unwrap_or_else(|err| {
                 tracing::warn!(target: "codex.storyboard", "scene planning fallback: {err}");
@@ -927,6 +928,7 @@ async fn run_storyboard_orchestrator(
             )
         } else {
             build_structured_prompt(
+                &app,
                 &codex_bin,
                 &params,
                 &skill_refs,
@@ -1329,6 +1331,7 @@ async fn read_skill_reference(refs_dir: &Path, name: &str) -> Result<String, Str
 }
 
 async fn plan_cuts(
+    app: &AppHandle,
     codex_bin: &Path,
     params: &StoryboardParams,
     refs: &SkillRefs,
@@ -1362,6 +1365,7 @@ async fn plan_cuts(
         tempo = params.tempo,
     );
     let raw = codex_oneshot(
+        app,
         codex_bin,
         &prompt,
         &[],
@@ -1495,6 +1499,7 @@ fn plan_from_scene_construction(
 }
 
 async fn build_structured_prompt(
+    app: &AppHandle,
     codex_bin: &Path,
     params: &StoryboardParams,
     refs: &SkillRefs,
@@ -1582,6 +1587,7 @@ async fn build_structured_prompt(
         recent_shots = recent_shots,
     );
     let raw = codex_oneshot(
+        app,
         codex_bin,
         &prompt,
         &[],
@@ -2595,6 +2601,7 @@ async fn generate_cut_takes(
             let cwd = cwd.clone();
             async move {
                 let result = generate_one_take(
+                    app,
                     codex_bin,
                     codex_home_orig,
                     structured_prompt,
@@ -2648,6 +2655,7 @@ const STORYBOARD_MAX_ATTEMPTS: u32 = 3;
 /// STORYBOARD_MAX_ATTEMPTS 回まで作り直す。
 #[allow(clippy::too_many_arguments)]
 async fn generate_one_take(
+    app: &AppHandle,
     codex_bin: &Path,
     codex_home_orig: &Path,
     structured_prompt: &Value,
@@ -2664,6 +2672,7 @@ async fn generate_one_take(
     let mut last_err = String::new();
     for attempt in 1..=STORYBOARD_MAX_ATTEMPTS {
         match attempt_one_take(
+            app,
             codex_bin,
             codex_home_orig,
             structured_prompt,
@@ -2697,6 +2706,7 @@ async fn generate_one_take(
 /// 1テイク生成の1試行。画像が出れば Ok、image_gen 未呼び出し等で画像が無ければ Err。
 #[allow(clippy::too_many_arguments)]
 async fn attempt_one_take(
+    app: &AppHandle,
     codex_bin: &Path,
     codex_home_orig: &Path,
     structured_prompt: &Value,
@@ -2767,6 +2777,11 @@ async fn attempt_one_take(
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("codex exec の spawn に失敗: {e}"))?;
+    let pid = child
+        .id()
+        .ok_or_else(|| "codex exec の PID を取得できません".to_string())?;
+    let worker_registration =
+        crate::commands::worker_registry::WorkerPidGuard::register(app, pid, "storyboard")?;
     if let Some(mut stdin) = child.stdin.take() {
         stdin
             .write_all(final_prompt.as_bytes())
@@ -2780,6 +2795,7 @@ async fn attempt_one_take(
     .await
     .map_err(|_| format!("画像生成が {GENERATION_TIMEOUT_SECS} 秒でタイムアウトしました"))?
     .map_err(|e| format!("codex exec 待機失敗: {e}"))?;
+    drop(worker_registration);
     drop(gen_permit);
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -2903,6 +2919,7 @@ fn build_generation_prompt(
 
 
 async fn codex_oneshot(
+    app: &AppHandle,
     codex_bin: &Path,
     prompt: &str,
     image_paths: &[&Path],
@@ -2942,6 +2959,11 @@ async fn codex_oneshot(
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("codex exec の spawn に失敗: {e}"))?;
+    let pid = child
+        .id()
+        .ok_or_else(|| "codex exec の PID を取得できません".to_string())?;
+    let worker_registration =
+        crate::commands::worker_registry::WorkerPidGuard::register(app, pid, "storyboard")?;
     if let Some(mut stdin) = child.stdin.take() {
         stdin
             .write_all(prompt.as_bytes())
@@ -2953,6 +2975,7 @@ async fn codex_oneshot(
         .await
         .map_err(|_| format!("codex exec が {timeout_secs} 秒でタイムアウトしました"))?
         .map_err(|e| format!("codex exec 待機失敗: {e}"))?;
+    drop(worker_registration);
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let detail = stderr

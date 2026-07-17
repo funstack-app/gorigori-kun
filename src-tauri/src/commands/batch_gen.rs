@@ -43,6 +43,8 @@ pub struct BatchGenArgs {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub aspect: Option<String>,
+    #[serde(default)]
+    pub turn_id: Option<String>,
 }
 
 #[derive(Serialize, Default)]
@@ -145,6 +147,7 @@ pub async fn images_generate_batch(
         let model = args.model.clone();
         let effort = args.effort.clone();
         let aspect = args.aspect.clone();
+        let turn_id = args.turn_id.clone();
         let total_count = args.count;
         handles.push(tokio::spawn(async move {
             run_one_worker(
@@ -162,6 +165,7 @@ pub async fn images_generate_batch(
                 effort,
                 aspect,
                 total_count,
+                turn_id,
             )
             .await
         }));
@@ -219,6 +223,7 @@ async fn run_one_worker(
     effort: Option<String>,
     aspect: Option<String>,
     total_count: u32,
+    turn_id: Option<String>,
     // Ok(成功画像パス) / Err(失敗理由)。理由を呼び出し元に伝えることで、
     // フロントが真因を表示できる (握りつぶし解消)。
 ) -> Result<String, String> {
@@ -239,6 +244,7 @@ async fn run_one_worker(
     let mut result: Result<String, String> = Err("未実行".to_string());
     for attempt in 1..=MAX_ATTEMPTS {
         result = run_one_worker_inner(
+            &app,
             codex_bin.clone(),
             codex_home_orig.clone(),
             &out_dir,
@@ -261,6 +267,25 @@ async fn run_one_worker(
                 target: "codex.batch_gen",
                 "worker {idx} attempt {attempt}/{MAX_ATTEMPTS} failed: {e}"
             );
+        }
+    }
+
+    // DB 記録失敗で画像生成そのものを再試行しないよう、既存の生成リトライが
+    // 終わった後に1回だけ確定記録する。PNG は inner ですでに保存済み。
+    if let (Some(path), Some(turn_id)) = (
+        result.as_ref().ok().cloned(),
+        turn_id.as_deref().filter(|id| !id.trim().is_empty()),
+    ) {
+        if let Err(error) = crate::commands::sessions::record_generated_image(
+            &app,
+            turn_id,
+            Path::new(&path),
+        )
+        .await
+        {
+            result = Err(format!(
+                "画像は保存しましたが、履歴DBへの記録に失敗しました: {error}"
+            ));
         }
     }
 
@@ -300,6 +325,7 @@ async fn run_one_worker(
 
 #[allow(clippy::too_many_arguments)]
 async fn run_one_worker_inner(
+    app: &AppHandle,
     codex_bin: PathBuf,
     codex_home_orig: PathBuf,
     out_dir: &Path,
@@ -421,6 +447,11 @@ async fn run_one_worker_inner(
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("codex exec の spawn に失敗: {e}"))?;
+    let pid = child
+        .id()
+        .ok_or_else(|| "codex exec の PID を取得できません".to_string())?;
+    let worker_registration =
+        crate::commands::worker_registry::WorkerPidGuard::register(app, pid, "batch")?;
     if let Some(mut stdin) = child.stdin.take() {
         stdin
             .write_all(final_prompt.as_bytes())
@@ -445,6 +476,7 @@ async fn run_one_worker_inner(
             ));
         }
     };
+    drop(worker_registration);
     drop(gen_permit);
 
     // 終了コードが非ゼロでも、画像が生成されていれば成功扱いにする

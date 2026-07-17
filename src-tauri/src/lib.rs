@@ -198,7 +198,7 @@ pub fn run() {
     let state = AppState::default();
     let state_for_setup = state.clone();
 
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
@@ -252,6 +252,8 @@ pub fn run() {
                 .app_data_dir()
                 .map_err(|e| format!("app_data_dir failed: {e}"))?;
             std::fs::create_dir_all(&app_data_dir)?;
+            // 前回クラッシュ時に台帳へ残った worker だけを、安全確認後に停止する。
+            commands::worker_registry::cleanup_stale_workers(&app.handle());
 
             // STΛCK 報告 (2026-05-18): Higgsfield 拡張パックの README に
             // 「app.codexframefactory/extensions/ にコピー」と書いてあるが、
@@ -445,6 +447,15 @@ pub fn run() {
             commands::storyboard::storyboard_read_adoptions,
             commands::storyboard::storyboard_read_debug_log,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+
+    app.run(|app_handle, event| {
+        if matches!(
+            event,
+            tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
+        ) {
+            commands::worker_registry::terminate_registered_workers(app_handle);
+        }
+    });
 }

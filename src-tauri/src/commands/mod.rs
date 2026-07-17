@@ -31,6 +31,7 @@ pub mod storage_cleanup;
 pub mod scene3d;
 pub mod storyboard;
 pub mod translate;
+pub mod worker_registry;
 
 use std::path::Path;
 

@@ -34,6 +34,7 @@ export type SceneGenerationOptions = {
   promptOverride?: string;
   refImagePaths?: string[];
   maskPaths?: string[];
+  turnId?: string;
   higgsfield?: {
     jobSetType: string;
     displayName: string;
@@ -259,6 +260,7 @@ export async function generateFromScene(
     model: options.model,
     effort: options.effort,
     aspect,
+    turnId: options.turnId,
   });
   return { ...r, errors: r.errors ?? [] };
 }

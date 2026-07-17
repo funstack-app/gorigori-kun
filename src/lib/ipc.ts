@@ -333,6 +333,7 @@ export const images = {
     model?: string;
     effort?: string;
     aspect?: string;
+    turnId?: string;
   }) =>
     invoke<{
       batchId: string;
