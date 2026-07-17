@@ -404,7 +404,12 @@ async fn run_one_worker_inner(
     if !worker_config.is_empty() {
         worker_config.push('\n');
     }
-    worker_config.push_str("[features]\nimage_generation = true\n");
+    // js_repl / multi_agent は明示的に無効化する。なぜ: 実行セル(cells)が有効だと
+    // モデルが imagegen を cells ブリッジ(tools.image_gen__imagegen)経由で呼び、
+    // 画像が generated_images/ にファイル保存されず base64 で返る個体が出る
+    // (2026-07-17 実測: 失敗3ワーカーは全て cells 経由、js_repl=false の対照実験は
+    //  参照画像+gpt-5.6-sol/low でも直接呼び出し+ファイル保存に戻った)。
+    worker_config.push_str("[features]\nimage_generation = true\nmulti_agent = false\njs_repl = false\n");
     std::fs::write(tmp_home.join("config.toml"), worker_config)
         .map_err(|e| format!("worker config.toml 作成失敗: {e}"))?;
 
