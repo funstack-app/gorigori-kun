@@ -1,5 +1,5 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { storyboard } from "../../../lib/ipc";
 import { useImagePreview } from "../../../lib/store/imagePreview";
@@ -44,8 +44,17 @@ export function GenerationProgressPanel() {
   // アンマウントされた瞬間にフラグが false に戻り重複 run が走ってしまうため、
   // ストア (storyboardRun.generationRunStartedAt) で起動済み判定を保持する。
   const generationRunStartedAt = useStoryboardRun((s) => s.generationRunStartedAt);
+  const lastEventAt = useStoryboardRun((s) => s.lastEventAt);
   const setGenerationRunStartedAt = useStoryboardRun((s) => s.setGenerationRunStartedAt);
   const generationStarted = generationRunStartedAt !== null;
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (status !== "running") return;
+    setNow(Date.now());
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [status]);
 
   // B2: キービジュアルをファイル選択で設定する。
   async function pickKeyVisual() {
@@ -513,7 +522,12 @@ export function GenerationProgressPanel() {
                       : s?.status === "review"
                         ? "選択待ち"
                         : s?.status === "running"
-                          ? "生成中…"
+                          ? `生成中… ${Math.max(
+                              0,
+                              Math.floor(
+                                (now - (lastEventAt ?? generationRunStartedAt ?? now)) / 1000,
+                              ),
+                            )}秒`
                           : s?.status === "failed"
                             ? "失敗"
                             : "待機中";

@@ -1,4 +1,5 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { useEffect, useState } from "react";
 
 import { useMultiAngleRun } from "../../../lib/store/multiAngleRun";
 import { useActiveProject } from "../../../lib/store/activeProject";
@@ -93,6 +94,7 @@ export function AngleGridPanel({
   const status = useMultiAngleRun((s) => s.status);
   const cuts = useMultiAngleRun((s) => s.cuts);
   const cutOrder = useMultiAngleRun((s) => s.cutOrder);
+  const cutStartedAt = useMultiAngleRun((s) => s.cutStartedAt);
   const runId = useMultiAngleRun((s) => s.runId);
   const characterImagePath = useMultiAngleRun((s) => s.characterImagePath);
   const environmentDescription = useMultiAngleRun((s) => s.environmentDescription);
@@ -123,6 +125,15 @@ export function AngleGridPanel({
 
   const doneCount = orderedCuts.filter((c) => c.status === "completed").length;
   const total = orderedCuts.length;
+  const hasRunningCut = orderedCuts.some((c) => c.status === "running");
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!hasRunningCut) return;
+    setNow(Date.now());
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [hasRunningCut]);
 
   function saveCutToProject(cut: CutState) {
     if (!activeProjectId) {
@@ -434,7 +445,12 @@ export function AngleGridPanel({
                           : "text-neutral-600"
                       }`}
                     >
-                      {cut.status === "running" ? "生成中…" : "待機中"}
+                      {cut.status === "running"
+                        ? `生成中… ${Math.max(
+                            0,
+                            Math.floor((now - (cutStartedAt[cut.cutId] ?? now)) / 1000),
+                          )}秒`
+                        : "待機中"}
                     </div>
                   </div>
                 )}

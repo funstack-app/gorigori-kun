@@ -13,6 +13,8 @@ type MultiAngleRunState = {
   cuts: Record<string, CutState>;
   /** 表示順 (beginRun で選択順に確定)。 */
   cutOrder: string[];
+  /** cutId → 実際に生成を開始した時刻 (epoch ms)。 */
+  cutStartedAt: Record<string, number>;
 
   // ===== 設定 (run を跨いで保持) =====
   characterImagePath: string | null;
@@ -68,6 +70,7 @@ const runEmptyState = {
   runId: null as string | null,
   cuts: {} as Record<string, CutState>,
   cutOrder: [] as string[],
+  cutStartedAt: {} as Record<string, number>,
 };
 
 export const useMultiAngleRun = create<MultiAngleRunState>((set) => ({
@@ -132,6 +135,7 @@ export const useMultiAngleRun = create<MultiAngleRunState>((set) => ({
     set((s) => {
       const cuts: Record<string, CutState> = {};
       const cutOrder: string[] = [];
+      const cutStartedAt: Record<string, number> = {};
       for (const { cutId, label } of selectedCutIds) {
         // 既にイベントで進んだカット (running/completed/failed) があれば、その状態を
         // 維持する。pending で上書きすると先行到着した cutCompleted が消える。
@@ -140,6 +144,9 @@ export const useMultiAngleRun = create<MultiAngleRunState>((set) => ({
           prev && prev.status !== "pending"
             ? { ...prev, label }
             : { cutId, label, status: "pending" };
+        if (prev?.status === "running" && s.cutStartedAt[cutId]) {
+          cutStartedAt[cutId] = s.cutStartedAt[cutId];
+        }
         cutOrder.push(cutId);
       }
       return {
@@ -147,6 +154,7 @@ export const useMultiAngleRun = create<MultiAngleRunState>((set) => ({
         runId: runId ?? s.runId,
         cuts,
         cutOrder,
+        cutStartedAt,
         // 新しい生成を始めたら、前 run の出力選択(緑✓)は持ち越さない。
         // 残すと前カットが選択済み表示で残り、全選択/一括保存の枚数が実態とズレる
         // (evaluator 指摘 2026-06-09)。新カット群に対して選び直す。
@@ -170,6 +178,7 @@ export const useMultiAngleRun = create<MultiAngleRunState>((set) => ({
           };
           return {
             cuts: { ...s.cuts, [e.cutId]: { ...prev, label: e.label, status: "running" as const } },
+            cutStartedAt: { ...s.cutStartedAt, [e.cutId]: Date.now() },
           };
         }
 
