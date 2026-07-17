@@ -22,7 +22,6 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
-use tokio::sync::Semaphore;
 
 use crate::codex::process::{enriched_path, resolve_codex_cli_binary};
 use crate::commands::gen_queue::GLOBAL_GEN_SEMAPHORE;
@@ -129,13 +128,8 @@ pub async fn images_generate_batch(
         },
     );
 
-    // 同時に走らせる worker 数の上限。gpt-image-2 は同時実行 3 までが安定で、5 で
-    // 時々 429、10 でほぼ確実にレート制限される(2026-06 実測/業界報告)。旧実装は
-    // 上限なしで count 個を一斉起動していたため、4枚でも 30枚でも全並列になり、
-    // レート制限/混雑で一部が ServerError 落ちしていた。3 に絞って 429 を避ける
-    // (2026-06-09 ServerError多発の対策。マルチアングルの MAX_CONCURRENT と同方針)。
-    const MAX_CONCURRENT: usize = 3;
-    let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT));
+    // 同時実行の制御は gen_queue::GLOBAL_GEN_SEMAPHORE(全機能共通・上限6)に一本化。
+    // 旧バッチ内上限3は撤去(2026-07-17 実測: 同時9枚まで429ゼロ)。
 
     let mut handles = Vec::with_capacity(args.count as usize);
     for idx in 1..=args.count {
@@ -152,11 +146,7 @@ pub async fn images_generate_batch(
         let effort = args.effort.clone();
         let aspect = args.aspect.clone();
         let total_count = args.count;
-        let semaphore = semaphore.clone();
         handles.push(tokio::spawn(async move {
-            // permit を取れるまで待つ(同時実行数を MAX_CONCURRENT に抑える)。
-            // permit は worker 終了時に drop されて次の worker が動き出す。
-            let _permit = semaphore.acquire().await;
             run_one_worker(
                 app,
                 codex_bin,

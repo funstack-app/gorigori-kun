@@ -20,7 +20,6 @@ use serde_json::Value;
 use tauri::{AppHandle, Emitter, State};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
-use tokio::sync::Semaphore;
 use tokio::time::timeout;
 
 use crate::codex::process::{enriched_path, resolve_codex_cli_binary};
@@ -35,7 +34,6 @@ const MULTIANGLE_EFFORT: &str = "low";
 /// 同時実行数の上限。rate limit 保護のため並列度を制限する (30枚を無制限同時起動すると
 /// プラン上限を直撃するため)。gpt-image-2 は同時実行 3 までが安定で 5 で時々 429 になる
 /// (2026-06 実測/業界報告)ため、5→3 に下げて ServerError/429 を減らす(2026-06-09)。
-const MAX_CONCURRENT: usize = 3;
 /// 選択上限。フロント側 MAX_CUTS と一致させる。
 const MAX_CUTS: usize = 30;
 
@@ -258,8 +256,8 @@ async fn run_multiangle_orchestrator(
     let environment = params.environment_description.clone();
     let cwd = params.cwd.clone();
 
-    // ★並列。選んだ全カットを一気に走らせる。semaphore で同時実行数を制限する。
-    let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT));
+    // ★並列。選んだ全カットを一気に走らせる。同時実行の制御は
+    // gen_queue::GLOBAL_GEN_SEMAPHORE(全機能共通・上限6)に一本化(2026-07-17)。
     let tasks = params
         .cut_prompts
         .iter()
@@ -274,10 +272,7 @@ async fn run_multiangle_orchestrator(
             let environment = environment.clone();
             let cwd = cwd.clone();
             let cut = cut.clone();
-            let semaphore = semaphore.clone();
             async move {
-                // semaphore のパーミットが取れるまで待つ (同時実行数を抑える)。
-                let _permit = semaphore.acquire().await;
 
                 let _ = app.emit(
                     EVENT_MULTIANGLE,
