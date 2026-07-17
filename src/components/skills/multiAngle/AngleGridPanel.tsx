@@ -15,6 +15,7 @@ import {
 } from "../../../lib/store/workspace";
 import { getAngleCut } from "../../../lib/multiangle/angles";
 import type { CutState, MultiAngleParams } from "../../../lib/multiangle/types";
+import { GenerationGauge } from "../../GenerationGauge";
 
 /**
  * 選択中アスペクト比 ("3:4" 等) を CSS の aspect-ratio 値 ("3 / 4") に変換する。
@@ -437,9 +438,9 @@ export function AngleGridPanel({
                     )}
                   </div>
                 ) : (
-                  <div className="flex h-full w-full items-center justify-center">
+                  <div className="flex h-full w-full items-center justify-center px-4">
                     <div
-                      className={`text-[11px] font-bold ${
+                      className={`flex w-full max-w-40 flex-col items-center gap-2 text-[11px] font-bold ${
                         cut.status === "running"
                           ? "animate-pulse text-pink-300"
                           : "text-neutral-600"
@@ -449,8 +450,11 @@ export function AngleGridPanel({
                         ? `生成中… ${Math.max(
                             0,
                             Math.floor((now - (cutStartedAt[cut.cutId] ?? now)) / 1000),
-                          )}秒`
+                        )}秒`
                         : "待機中"}
+                      {cut.status === "running" && cutStartedAt[cut.cutId] != null && (
+                        <GenerationGauge startedAt={cutStartedAt[cut.cutId]} />
+                      )}
                     </div>
                   </div>
                 )}

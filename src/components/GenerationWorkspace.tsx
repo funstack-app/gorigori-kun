@@ -36,6 +36,7 @@ import { StoryboardCutCard } from "./StoryboardCutCard";
 import { SkillRunActions } from "./SkillRunActions";
 import { extractDropped, isImageDrop, setDragRef } from "../lib/dragRef";
 import { sendImageToPlanForRediscuss } from "../lib/sendToPlan";
+import { GenerationGauge } from "./GenerationGauge";
 
 export function GenerationWorkspace() {
   const activeTab = useWorkspace((s) => s.activeTab);
@@ -1028,9 +1029,14 @@ function WorkerTile({
                 以降は順番待ちなので、待機中に経過秒を出すと誤解を招く。 */}
             <span>{isRunning ? "生成中" : "待機中"}</span>
             {isRunning && elapsed !== null && (
-              <span className="font-mono text-[9px] font-medium text-neutral-500">
-                {formatElapsed(elapsed)}
-              </span>
+              <>
+                <span className="font-mono text-[9px] font-medium text-neutral-500">
+                  {formatElapsed(elapsed)}
+                </span>
+                <div className="mt-1 w-3/4">
+                  <GenerationGauge startedAt={workerStartedAt} />
+                </div>
+              </>
             )}
           </>
         )}

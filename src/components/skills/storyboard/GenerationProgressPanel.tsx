@@ -7,6 +7,7 @@ import { usePlanChat } from "../../../lib/store/planChat";
 import { useStoryboardRun } from "../../../lib/store/storyboardRun";
 import { useToasts } from "../../../lib/store/toasts";
 import type { StoryboardSketchCut } from "../../../lib/storyboard/types";
+import { GenerationGauge } from "../../GenerationGauge";
 
 /**
  * Phase 3: GenerationProgress
@@ -554,6 +555,12 @@ export function GenerationProgressPanel() {
                         </span>
                         <span className={`text-[11px] ${statusColor}`}>{statusLabel}</span>
                       </div>
+                      {s?.status === "running" &&
+                        (lastEventAt ?? generationRunStartedAt) != null && (
+                          <GenerationGauge
+                            startedAt={(lastEventAt ?? generationRunStartedAt) as number}
+                          />
+                        )}
 
                       {/* P10: N take 並列サムネ (ユーザー選択枚数) + ダブルクリックプレビュー */}
                       <div
