@@ -20,7 +20,7 @@ import {
 import { useVideoGen } from "../lib/store/videoGen";
 import { history, sessions as sessionsApi, type PromptHistoryRow, type SessionFull, type TurnWithImages } from "../lib/ipc";
 import { useActiveProject } from "../lib/store/activeProject";
-import { useProjects } from "../lib/store/projects";
+import { exportProjectCsv, useProjects } from "../lib/store/projects";
 import { useSessions } from "../lib/store/sessions";
 import { ActiveProjectSelector } from "./ActiveProjectSelector";
 import { ensureStoryboardEventListener } from "../lib/storyboard/events";
@@ -55,6 +55,7 @@ export function GenerationWorkspace() {
         <div className="flex items-center gap-3">
           <WorkspaceTabs />
           <ActiveProjectSelector />
+          <ProjectCsvExportButton />
         </div>
       </div>
 
@@ -65,6 +66,52 @@ export function GenerationWorkspace() {
         {activeTab === "edit" && <EditWorkspace />}
       </div>
     </section>
+  );
+}
+
+function ProjectCsvExportButton() {
+  const activeProjectId = useActiveProject((s) => s.activeProjectId);
+  const activeProject = useProjects((s) =>
+    activeProjectId ? s.projects.find((p) => p.id === activeProjectId) ?? null : null,
+  );
+  const pushToast = useToasts((s) => s.push);
+  const [exporting, setExporting] = useState(false);
+
+  if (!activeProject) return null;
+
+  const handleExport = async () => {
+    setExporting(true);
+    try {
+      const saved = await exportProjectCsv(activeProject.id);
+      if (saved) {
+        pushToast({
+          kind: "success",
+          text: "プロジェクトの生成記録をCSVで保存しました",
+          ttlMs: 3200,
+        });
+      }
+    } catch (err) {
+      console.error("project CSV export failed", err);
+      pushToast({
+        kind: "error",
+        text: "CSVの保存に失敗しました。保存先を確認して、もう一度お試しください。",
+        ttlMs: 5000,
+      });
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  return (
+    <button
+      type="button"
+      disabled={exporting}
+      onClick={() => void handleExport()}
+      className="h-8 shrink-0 rounded-md border border-[#343434] bg-[#181818] px-3 text-[11px] font-bold text-neutral-300 transition hover:border-pink-400 hover:text-white disabled:cursor-wait disabled:opacity-50"
+      title={`${activeProject.name} の画像と生成記録をCSVで保存`}
+    >
+      {exporting ? "書き出し中..." : "CSVで書き出し"}
+    </button>
   );
 }
 

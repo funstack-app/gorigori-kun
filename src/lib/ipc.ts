@@ -783,6 +783,17 @@ export type ExportSummary = {
   missingImages: number;
 };
 
+export type GenerationInfo = {
+  prompt: string;
+  model: string | null;
+  modelDisplayName: string | null;
+  effort: string | null;
+  provider: string | null;
+  kind: string;
+  refImagePaths: string[];
+  generatedAt: number;
+};
+
 export const sessions = {
   list: () => invoke<Session[]>("sessions_list"),
   create: (title?: string) => invoke<Session>("session_create", { title }),
@@ -814,6 +825,8 @@ export type PromptHistoryRow = {
 
 export const history = {
   recent: (limit?: number) => invoke<PromptHistoryRow[]>("turns_recent", { limit }),
+  generationInfoForImage: (path: string) =>
+    invoke<GenerationInfo | null>("generation_info_for_image", { path }),
 };
 
 // ──────────── Auth ────────────

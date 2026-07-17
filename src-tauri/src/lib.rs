@@ -426,6 +426,7 @@ pub fn run() {
             commands::sessions::session_get_full,
             commands::sessions::turn_record,
             commands::sessions::image_record,
+            commands::sessions::generation_info_for_image,
             commands::sessions::session_export,
             commands::sessions::turns_recent,
             commands::sessions::turn_get,

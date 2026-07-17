@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { create } from "zustand";
+import type { GenerationInfo } from "../ipc";
 
 /**
  * プロジェクト = 制作物のアーカイブ箱。
@@ -31,6 +32,8 @@ export type ProjectItem = {
   prompt?: string;
   /** 元 session id（あれば、戻る導線用） */
   sourceSessionId?: string;
+  /** プロジェクト追加時点で history.db から取得した生成プロセスのスナップショット */
+  generation?: GenerationInfo;
   addedAt: number;
 };
 
@@ -449,6 +452,35 @@ export const useProjects = create<ProjectsState>((set, get) => ({
     );
     persist(next);
     set({ projects: next });
+
+    // 呼び出し側の同期 API は保ったまま、履歴が見つかった時だけ生成プロセスを追記する。
+    // 取得失敗・履歴なしの場合は推測で埋めず generation 未定義のまま残す。
+    if (!nextItem.generation) {
+      const itemId = nextItem.id;
+      const imagePath = nextItem.imagePath;
+      void import("../ipc")
+        .then(({ history }) => history.generationInfoForImage(imagePath))
+        .then((generation) => {
+          if (!generation) return;
+          const current = get().projects;
+          let changed = false;
+          const enriched = current.map((project) => {
+            if (project.id !== projectId) return project;
+            const items = project.items.map((item) => {
+              if (item.id !== itemId || item.generation) return item;
+              changed = true;
+              return { ...item, generation };
+            });
+            return changed ? { ...project, items, updatedAt: Date.now() } : project;
+          });
+          if (!changed) return;
+          persist(enriched);
+          set({ projects: enriched });
+        })
+        .catch((err) => {
+          console.warn("[projects] 生成プロセスの取得に失敗しました:", err);
+        });
+    }
     return nextItem;
   },
 
@@ -640,6 +672,82 @@ export const useProjects = create<ProjectsState>((set, get) => ({
     return `${header}\n${rows.join("\n")}\n`;
   },
 }));
+
+/**
+ * プロジェクト内の画像と生成プロセスを、Excel で開ける CSV として保存する。
+ * 旧データで generation が無い場合だけ history.db を後追い照会し、
+ * それでも見つからない生成項目は空欄にする。
+ */
+export async function exportProjectCsv(projectId: string): Promise<boolean> {
+  const target = useProjects.getState().projects.find((p) => p.id === projectId);
+  if (!target) {
+    throw new Error("プロジェクトが見つかりません");
+  }
+
+  const { save } = await import("@tauri-apps/plugin-dialog");
+  const destination = await save({
+    defaultPath: `${target.name}-生成記録.csv`,
+    filters: [{ name: "CSV", extensions: ["csv"] }],
+  });
+  if (!destination) return false;
+
+  const { history } = await import("../ipc");
+  const rows = await Promise.all(
+    target.items.map(async (item) => {
+      let generation = item.generation;
+      if (!generation) {
+        try {
+          generation =
+            (await history.generationInfoForImage(item.imagePath)) ?? undefined;
+        } catch (err) {
+          console.warn("[projects] CSV用の生成プロセス取得に失敗しました:", err);
+        }
+      }
+
+      return [
+        csvEscape(imageFileName(item.imagePath)),
+        csvEscape(item.imagePath),
+        csvEscape(toIsoOrEmpty(item.addedAt)),
+        csvEscape(toIsoOrEmpty(generation?.generatedAt)),
+        csvEscape(generation?.prompt ?? ""),
+        csvEscape(generation?.modelDisplayName ?? generation?.model ?? ""),
+        csvEscape(generation?.effort ?? ""),
+        csvEscape(generation?.provider ?? ""),
+        csvEscape(generation?.kind ?? ""),
+        csvEscape(generation?.refImagePaths.join("\n") ?? ""),
+        csvEscape(item.note ?? ""),
+      ].join(",");
+    }),
+  );
+
+  const header = [
+    "画像ファイル名",
+    "画像パス",
+    "プロジェクト追加日時(ISO)",
+    "生成日時(ISO)",
+    "プロンプト",
+    "モデル",
+    "思考レベル",
+    "生成元(provider)",
+    "種別(kind)",
+    "参照画像",
+    "メモ",
+  ].join(",");
+  const csv = `\uFEFF${header}\r\n${rows.join("\r\n")}${rows.length > 0 ? "\r\n" : ""}`;
+  const { writeTextFile } = await import("@tauri-apps/plugin-fs");
+  await writeTextFile(destination, csv);
+  return true;
+}
+
+function imageFileName(path: string): string {
+  return path.split(/[\\/]/).pop() ?? "";
+}
+
+function toIsoOrEmpty(value: number | undefined): string {
+  if (value == null) return "";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "" : date.toISOString();
+}
 
 /**
  * CSV の 1 セルをエスケープする。

@@ -165,6 +165,19 @@ pub struct ExportSummary {
     pub missing_images: u32,
 }
 
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct GenerationInfo {
+    pub prompt: String,
+    pub model: Option<String>,
+    pub model_display_name: Option<String>,
+    pub effort: Option<String>,
+    pub provider: Option<String>,
+    pub kind: String,
+    pub ref_image_paths: Vec<String>,
+    pub generated_at: i64,
+}
+
 // ──────────────────────────── commands ────────────────────────────
 
 #[tauri::command]
@@ -493,6 +506,49 @@ pub async fn image_record(app: AppHandle, args: ImageRecordArgs) -> Result<Image
         thumbnail_path: args.thumbnail_path,
         created_at: now,
     })
+}
+
+/// Look up the generation-process snapshot associated with an exact image path.
+/// Missing rows are expected for imported or legacy images, so they return None.
+#[tauri::command]
+pub async fn generation_info_for_image(
+    app: AppHandle,
+    path: String,
+) -> Result<Option<GenerationInfo>, String> {
+    let pool = get_sqlite_pool(&app).await?;
+    let row = sqlx::query(
+        "SELECT t.prompt, t.model, t.model_display_name, t.effort, t.provider, \
+                t.kind, t.ref_image_paths, t.created_at \
+         FROM images i \
+         JOIN turns t ON t.id = i.turn_id \
+         WHERE i.path = ?1 \
+         ORDER BY i.created_at DESC \
+         LIMIT 1",
+    )
+    .bind(&path)
+    .fetch_optional(&pool)
+    .await
+    .map_err(|e| format!("generation_info_for_image query failed: {e}"))?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let ref_paths_json = row
+        .get::<Option<String>, _>("ref_image_paths")
+        .unwrap_or_else(|| "[]".to_string());
+    let ref_image_paths = serde_json::from_str::<Vec<String>>(&ref_paths_json)
+        .map_err(|e| format!("generation_info_for_image invalid ref_image_paths: {e}"))?;
+
+    Ok(Some(GenerationInfo {
+        prompt: row.get::<String, _>("prompt"),
+        model: row.get::<Option<String>, _>("model"),
+        model_display_name: row.get::<Option<String>, _>("model_display_name"),
+        effort: row.get::<Option<String>, _>("effort"),
+        provider: row.get::<Option<String>, _>("provider"),
+        kind: row.get::<String, _>("kind"),
+        ref_image_paths,
+        generated_at: row.get::<i64, _>("created_at"),
+    }))
 }
 
 /// Load a single past turn with all its generated images. Used when
