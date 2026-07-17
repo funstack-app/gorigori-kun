@@ -10,7 +10,6 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -25,6 +24,20 @@ use crate::events::EVENT_IMAGE_BATCH;
 use crate::state::AppState;
 
 type ExecFallback = Result<(PathBuf, PathBuf), String>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AttemptPath {
+    Resident,
+    Exec,
+}
+
+fn next_attempt_path(resident_timed_out: bool) -> AttemptPath {
+    if resident_timed_out {
+        AttemptPath::Exec
+    } else {
+        AttemptPath::Resident
+    }
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -241,7 +254,9 @@ async fn run_one_worker(
     // リトライは inner 呼び出しだけをループする。
     const MAX_ATTEMPTS: u32 = 3;
     let mut result: Result<String, String> = Err("未実行".to_string());
+    let mut attempt_path = AttemptPath::Resident;
     for attempt in 1..=MAX_ATTEMPTS {
+        let mut resident_timed_out = false;
         result = run_one_worker_inner(
             &app,
             &state,
@@ -256,8 +271,11 @@ async fn run_one_worker(
             effort.clone(),
             aspect.clone(),
             total_count,
+            attempt_path,
+            &mut resident_timed_out,
         )
         .await;
+        attempt_path = next_attempt_path(resident_timed_out);
         if result.is_ok() {
             break;
         }
@@ -332,7 +350,33 @@ async fn run_one_worker_inner(
     effort: Option<String>,
     aspect: Option<String>,
     total_count: u32,
+    attempt_path: AttemptPath,
+    resident_timed_out: &mut bool,
 ) -> Result<String, String> {
+    if attempt_path == AttemptPath::Exec {
+        tracing::info!(
+            target: "codex.batch_gen",
+            "worker {idx}: 前試行の常駐 app-server タイムアウト後のため codex exec 経路を使用します"
+        );
+        let (codex_bin, codex_home_orig) = exec_fallback?;
+        return run_one_worker_exec_inner(
+            app,
+            codex_bin,
+            codex_home_orig,
+            out_dir,
+            idx,
+            prompt,
+            cwd,
+            ref_paths,
+            mask_paths,
+            model,
+            effort,
+            aspect,
+            total_count,
+        )
+        .await;
+    }
+
     // ref と mask は従来の `-i` と同じ順序で app-server の localImage input にする。
     let mut slots: Vec<(SlotKind, String)> = Vec::new();
     for (i, path) in ref_paths.iter().enumerate() {
@@ -371,8 +415,9 @@ async fn run_one_worker_inner(
         }
         Err(resident_error) => {
             if crate::codex::gen_server::is_timeout_error(&resident_error) {
-                // タイムアウトは生成自体が遅い/詰まっているサイン。旧経路で作り直すと
-                // 1試行が最悪 900秒x2 に伸びるため、旧実装同様この試行の失敗として返す。
+                // この試行で exec も続けると 900秒x2 になるため、
+                // 今回は失敗とし、同じ worker の次試行だけ旧 exec 経路に切り替える。
+                *resident_timed_out = true;
                 return Err(resident_error);
             }
             tracing::warn!(
@@ -436,47 +481,9 @@ async fn run_one_worker_exec_inner(
         .map_err(|e| format!("tempdir 作成失敗: {e}"))?;
     let tmp_home = tmp.path().to_path_buf();
 
-    // 2. ~/.codex/* を tmp_home に複製
-    //    (config.toml は最小構成で新規生成、generated_images は独立 dir)
-    //
-    // Unix: シンボリックリンクで参照だけ通す (高速、無料)
-    // Windows: シンボリックリンクは管理者権限必須。代わりに
-    //          ファイル/ディレクトリを再帰コピーする。
-    //          これがないと tmp_home に auth.json / cache/ などが無い状態で
-    //          codex exec が起動し、
-    //          認証なしエラーで即落ちする (Windows で生成ボタン押下
-    //          後の不発の真因)。
-    if codex_home_orig.exists() {
-        let entries = std::fs::read_dir(&codex_home_orig)
-            .map_err(|e| format!("CODEX_HOME 読み込み失敗: {e}"))?;
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            if name == "generated_images" {
-                continue;
-            }
-            let src = entry.path();
-            let dst = tmp_home.join(&name);
-            #[cfg(unix)]
-            {
-                let _ = std::os::unix::fs::symlink(&src, &dst);
-            }
-            #[cfg(windows)]
-            {
-                // Windows ではシンボリックリンクが原則使えないので、
-                // ファイルは fs::copy、ディレクトリは再帰コピーで複製する。
-                if let Err(err) = copy_recursive(&src, &dst) {
-                    tracing::warn!(
-                        target: "codex.batch_gen",
-                        "copy {src:?} -> {dst:?} failed: {err}"
-                    );
-                }
-            }
-        }
-    }
-
+    // 2. 認証・設定は元 HOME からミラーし、生成画像と会話履歴は分離する。
+    mirror_codex_home(&codex_home_orig, &tmp_home)?;
     let tmp_gen = tmp_home.join("generated_images");
-    std::fs::create_dir_all(&tmp_gen)
-        .map_err(|e| format!("worker generated_images 作成失敗: {e}"))?;
 
     // 3. ref と mask をペアで並べる ([source_i, mask_i?] の順)。codex exec は
     //    `-i` でファイルパスを attach するだけなので、prompt のテキストで
@@ -734,6 +741,52 @@ fn short_id() -> String {
     format!("{:016x}", nanos)
 }
 
+/// CODEX_HOME の認証・設定を worker HOME へミラーする。
+/// Unix では symlink、Windows ではコピーを使い、監視対象の
+/// `generated_images` と会話履歴の `sessions` だけは必ず独立ディレクトリにする。
+pub(crate) fn mirror_codex_home(codex_home_orig: &Path, worker_home: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(worker_home).map_err(|e| format!("worker CODEX_HOME 作成失敗: {e}"))?;
+
+    if codex_home_orig.exists() {
+        let entries = std::fs::read_dir(codex_home_orig)
+            .map_err(|e| format!("CODEX_HOME 読み込み失敗: {e}"))?;
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if name == "generated_images" || name == "sessions" {
+                continue;
+            }
+            let src = entry.path();
+            let dst = worker_home.join(&name);
+            #[cfg(unix)]
+            {
+                if let Err(error) = std::os::unix::fs::symlink(&src, &dst) {
+                    if error.kind() != std::io::ErrorKind::AlreadyExists {
+                        tracing::warn!(
+                            target: "codex.batch_gen",
+                            "symlink {src:?} -> {dst:?} failed: {error}"
+                        );
+                    }
+                }
+            }
+            #[cfg(windows)]
+            {
+                if let Err(err) = copy_recursive(&src, &dst) {
+                    tracing::warn!(
+                        target: "codex.batch_gen",
+                        "copy {src:?} -> {dst:?} failed: {err}"
+                    );
+                }
+            }
+        }
+    }
+
+    for local_dir in ["generated_images", "sessions"] {
+        std::fs::create_dir_all(worker_home.join(local_dir))
+            .map_err(|e| format!("worker {local_dir} 作成失敗: {e}"))?;
+    }
+    Ok(())
+}
+
 /// Windows で `~/.codex/` 配下を per-worker tmp_home に複製するヘルパー。
 /// シンボリックリンクが使えない環境向け。ファイルは fs::copy、
 /// ディレクトリは再帰コピー。
@@ -767,4 +820,15 @@ fn copy_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
         return Ok(());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{next_attempt_path, AttemptPath};
+
+    #[test]
+    fn resident_timeout_switches_only_the_next_attempt_to_exec() {
+        assert_eq!(next_attempt_path(true), AttemptPath::Exec);
+        assert_eq!(next_attempt_path(false), AttemptPath::Resident);
+    }
 }

@@ -4,18 +4,23 @@
 //! 消費する。初回生成時に遅延起動し、RPC/子プロセスの死活が失われていれば次回
 //! 利用時に自動で起動し直す。
 
-use std::path::PathBuf;
-use std::process::Command;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use tauri::{AppHandle, Manager};
-use tokio::process::Child;
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::{Child, Command as TokioCommand};
 use tokio::sync::broadcast;
 use tokio::time::{interval, timeout, MissedTickBehavior};
 
-use crate::codex::process::{resolve_codex_binary, spawn_app_server};
+use crate::codex::process::{
+    enriched_path, no_window_flag, resolve_codex_binary, AppServerProcess, StderrBuffer,
+};
 use crate::codex::rpc::{handshake, RpcClient, RpcNotification};
 use crate::commands::gen_queue::GLOBAL_GEN_SEMAPHORE;
 use crate::commands::worker_registry::WorkerPidGuard;
@@ -24,6 +29,8 @@ use crate::state::AppState;
 pub(crate) const GENERATION_TIMEOUT: Duration = Duration::from_secs(900);
 const GEN_SERVER_WORKER_KIND: &str = "batch-app-server";
 const WORKER_REGISTRY_FILE: &str = "worker-pids.json";
+const GEN_CODEX_HOME_DIR: &str = "codex-home-gen";
+const INTERRUPT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// AppState に 1 本だけ保持する生成専用プロセス。
 pub(crate) struct GenServerProcess {
@@ -35,6 +42,28 @@ pub(crate) struct GenServerProcess {
     /// API が無く、画像1枚ごとの thread がプロセス内に蓄積するため、
     /// 一定数でプロセスごと入れ替えてメモリ肥大を防ぐ(2026-07-17 レビュー指摘)。
     turns_started: u64,
+    /// 実行中の turn 数。プロセス交代は 0 のときだけ行う。
+    active_turns: Arc<AtomicU64>,
+    /// interrupt の完了を確認できず、次のアイドル時交代が必要な状態。
+    poisoned: Arc<AtomicBool>,
+}
+
+struct GenServerLease {
+    client: RpcClient,
+    poisoned: Arc<AtomicBool>,
+    _active_turn: ActiveTurnGuard,
+}
+
+/// generate_image がどの終了経路を通っても実行中数を戻すガード。
+struct ActiveTurnGuard {
+    active_turns: Arc<AtomicU64>,
+}
+
+impl Drop for ActiveTurnGuard {
+    fn drop(&mut self) {
+        let previous = self.active_turns.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0, "active turn counter underflow");
+    }
 }
 
 /// このターン数を超えたら次の ensure_client でプロセスを入れ替える。
@@ -54,7 +83,8 @@ pub(crate) async fn generate_image(
     model: Option<&str>,
     effort: Option<&str>,
 ) -> Result<PathBuf, String> {
-    let client = ensure_client(app, state).await?;
+    let server = ensure_client(app, state).await?;
+    let client = &server.client;
 
     let mut thread_params = Map::new();
     thread_params.insert("approvalPolicy".into(), Value::String("never".into()));
@@ -104,14 +134,28 @@ pub(crate) async fn generate_image(
     let remaining = GENERATION_TIMEOUT.saturating_sub(started_at.elapsed());
     match timeout(
         remaining,
-        wait_for_saved_path(&client, &mut notifications, &thread_id, &turn_id),
+        wait_for_saved_path(
+            client,
+            &mut notifications,
+            &thread_id,
+            &turn_id,
+            &server.poisoned,
+        ),
     )
     .await
     {
         Ok(result) => result,
         Err(_) => {
-            // exec の kill_on_drop と同じく、タイムアウト後の生成を裏で残さない。
-            best_effort_interrupt(&client, &thread_id, &turn_id).await;
+            // interrupt の RPC 成功と turn/completed の両方を確認する。
+            // 確認できなければサーバーを交代予約し、ゾンビ生成もプロセスごと止める。
+            interrupt_or_poison(
+                client,
+                &mut notifications,
+                &thread_id,
+                &turn_id,
+                &server.poisoned,
+            )
+            .await;
             Err(format!(
                 "画像生成がタイムアウトしました（{}秒）。プロンプトを短くするか、時間をおいて再試行してください。",
                 GENERATION_TIMEOUT.as_secs()
@@ -120,8 +164,8 @@ pub(crate) async fn generate_image(
     }
 }
 
-/// 常駐経路のタイムアウト失敗か(この場合は旧経路へ切替せず試行失敗として返す。
-/// 900秒の二重化で最悪1試行30分に伸びるのを防ぎ、旧実装と同じ上限を保つ)。
+/// 常駐経路のタイムアウト失敗か。呼び出し側は同じ試行内で二重化せず、
+/// 次の試行だけ旧 exec 経路へ切り替える。
 pub(crate) fn is_timeout_error(error: &str) -> bool {
     error.contains("画像生成がタイムアウトしました")
 }
@@ -131,6 +175,7 @@ async fn wait_for_saved_path(
     notifications: &mut broadcast::Receiver<RpcNotification>,
     thread_id: &str,
     turn_id: &str,
+    poisoned: &AtomicBool,
 ) -> Result<PathBuf, String> {
     let mut health_tick = interval(Duration::from_millis(250));
     health_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -178,7 +223,7 @@ async fn wait_for_saved_path(
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                        best_effort_interrupt(client, thread_id, turn_id).await;
+                        interrupt_or_poison(client, notifications, thread_id, turn_id, poisoned).await;
                         return Err(format!(
                             "生成用 app-server の通知が混雑し、{skipped}件を取りこぼしました"
                         ));
@@ -197,12 +242,73 @@ async fn wait_for_saved_path(
     }
 }
 
-async fn best_effort_interrupt(client: &RpcClient, thread_id: &str, turn_id: &str) {
+async fn interrupt_or_poison(
+    client: &RpcClient,
+    notifications: &mut broadcast::Receiver<RpcNotification>,
+    thread_id: &str,
+    turn_id: &str,
+    poisoned: &AtomicBool,
+) {
+    if let Err(error) = interrupt_and_confirm(client, notifications, thread_id, turn_id).await {
+        poisoned.store(true, Ordering::Release);
+        tracing::warn!(
+            target: "codex.gen_server",
+            "turn/interrupt 完了を確認できないため app-server を交代予約します: {error}"
+        );
+    }
+}
+
+async fn interrupt_and_confirm(
+    client: &RpcClient,
+    notifications: &mut broadcast::Receiver<RpcNotification>,
+    thread_id: &str,
+    turn_id: &str,
+) -> Result<(), String> {
     let request = client.request_raw(
         "turn/interrupt",
         json!({ "threadId": thread_id, "turnId": turn_id }),
     );
-    let _ = timeout(Duration::from_secs(5), request).await;
+    match timeout(INTERRUPT_TIMEOUT, request).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => return Err(format!("turn/interrupt 失敗: {error}")),
+        Err(_) => return Err("turn/interrupt 応答待機がタイムアウト".to_string()),
+    }
+
+    match timeout(
+        INTERRUPT_TIMEOUT,
+        wait_for_turn_completed(notifications, thread_id, turn_id),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => Err("interrupt 後の turn/completed 待機がタイムアウト".to_string()),
+    }
+}
+
+async fn wait_for_turn_completed(
+    notifications: &mut broadcast::Receiver<RpcNotification>,
+    thread_id: &str,
+    turn_id: &str,
+) -> Result<(), String> {
+    loop {
+        match notifications.recv().await {
+            Ok(notification)
+                if notification.method == "turn/completed"
+                    && turn_notification_matches(&notification.params, thread_id, turn_id) =>
+            {
+                return Ok(());
+            }
+            Ok(_) => {}
+            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                return Err(format!(
+                    "interrupt 完了通知を待つ間に {skipped}件を取りこぼしました"
+                ));
+            }
+            Err(broadcast::error::RecvError::Closed) => {
+                return Err("interrupt 完了通知を待つ前に接続が閉じました".to_string());
+            }
+        }
+    }
 }
 
 fn notification_matches(params: &Value, thread_id: &str, turn_id: &str) -> bool {
@@ -254,7 +360,11 @@ fn extract_turn_id(result: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
-async fn ensure_client(app: &AppHandle, state: &AppState) -> Result<RpcClient, String> {
+fn should_replace_server(turns_started: u64, active_turns: u64, poisoned: bool) -> bool {
+    active_turns == 0 && (turns_started >= MAX_TURNS_PER_SERVER || poisoned)
+}
+
+async fn ensure_client(app: &AppHandle, state: &AppState) -> Result<GenServerLease, String> {
     let mut slot = state.gen_server.lock().await;
     if let Some(server) = slot.as_mut() {
         let child_alive = match server.child.try_wait() {
@@ -275,14 +385,24 @@ async fn ensure_client(app: &AppHandle, state: &AppState) -> Result<RpcClient, S
             }
         };
         if child_alive && server.client.is_alive() {
-            if server.turns_started >= MAX_TURNS_PER_SERVER {
+            let active_turns = server.active_turns.load(Ordering::Acquire);
+            let poisoned = server.poisoned.load(Ordering::Acquire);
+            if should_replace_server(server.turns_started, active_turns, poisoned) {
                 tracing::info!(
                     target: "codex.gen_server",
-                    "生成 turn が {MAX_TURNS_PER_SERVER} 回に達したため app-server を入れ替えます(thread蓄積対策)"
+                    "生成用 app-server が交代条件に達したため、アイドル状態で入れ替えます (turns={}, poisoned={poisoned})",
+                    server.turns_started
                 );
             } else {
                 server.turns_started += 1;
-                return Ok(server.client.clone());
+                server.active_turns.fetch_add(1, Ordering::AcqRel);
+                return Ok(GenServerLease {
+                    client: server.client.clone(),
+                    poisoned: Arc::clone(&server.poisoned),
+                    _active_turn: ActiveTurnGuard {
+                        active_turns: Arc::clone(&server.active_turns),
+                    },
+                });
             }
         }
     }
@@ -293,18 +413,34 @@ async fn ensure_client(app: &AppHandle, state: &AppState) -> Result<RpcClient, S
 
     let mut server = spawn_server(app).await?;
     server.turns_started = 1;
-    let client = server.client.clone();
+    server.active_turns.store(1, Ordering::Release);
+    let lease = GenServerLease {
+        client: server.client.clone(),
+        poisoned: Arc::clone(&server.poisoned),
+        _active_turn: ActiveTurnGuard {
+            active_turns: Arc::clone(&server.active_turns),
+        },
+    };
     *slot = Some(server);
-    Ok(client)
+    Ok(lease)
 }
 
 async fn spawn_server(app: &AppHandle) -> Result<GenServerProcess, String> {
+    let source_home = crate::codex::home::resolve_command_codex_home()
+        .ok_or_else(|| "生成用 CODEX_HOME のミラー元を解決できません".to_string())?;
+    let generation_home = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("生成用 CODEX_HOME の場所を解決できません: {error}"))?
+        .join(GEN_CODEX_HOME_DIR);
+    crate::commands::batch_gen::mirror_codex_home(&source_home, &generation_home)?;
+
     let bin = resolve_codex_binary(None)
         .map_err(|error| format!("生成用 Codex app-server の解決に失敗: {error:#}"))?;
-    let proc = spawn_app_server(&bin)
+    let proc = spawn_generation_app_server(&bin, &generation_home)
         .await
-        .map_err(|error| format!("生成用 Codex app-server の起動に失敗: {error:#}"))?;
-    let crate::codex::process::AppServerProcess {
+        .map_err(|error| format!("生成用 Codex app-server の起動に失敗: {error}"))?;
+    let AppServerProcess {
         mut child,
         stdin,
         stdout,
@@ -371,6 +507,72 @@ async fn spawn_server(app: &AppHandle) -> Result<GenServerProcess, String> {
         child,
         _registration: registration,
         turns_started: 0,
+        active_turns: Arc::new(AtomicU64::new(0)),
+        poisoned: Arc::new(AtomicBool::new(false)),
+    })
+}
+
+async fn spawn_generation_app_server(
+    bin: &Path,
+    generation_home: &Path,
+) -> Result<AppServerProcess, String> {
+    let bin_name = bin
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let is_native_app_server = bin_name.starts_with("codex-app-server");
+
+    let mut cmd = TokioCommand::new(bin);
+    if !is_native_app_server {
+        cmd.arg("app-server");
+    }
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("PATH", enriched_path())
+        .env("CODEX_HOME", generation_home)
+        .kill_on_drop(true);
+    no_window_flag(&mut cmd);
+
+    let mut child = cmd.spawn().map_err(|error| {
+        format!(
+            "{} の起動に失敗 (CODEX_HOME={}): {error}",
+            bin.display(),
+            generation_home.display()
+        )
+    })?;
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "child stdin を取得できません".to_string())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "child stdout を取得できません".to_string())?;
+
+    let stderr_buf = StderrBuffer::default();
+    if let Some(stderr) = child.stderr.take() {
+        let logger_buf = stderr_buf.clone();
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                tracing::warn!(target: "codex.stderr", "{}", line);
+                logger_buf.push(line);
+            }
+        });
+    }
+
+    tracing::info!(
+        target: "codex.home",
+        path = %generation_home.display(),
+        "生成専用 app-server CODEX_HOME"
+    );
+    Ok(AppServerProcess {
+        child,
+        stdin,
+        stdout,
+        stderr_buf,
     })
 }
 
@@ -500,7 +702,10 @@ fn send_terminate(_pid: u32) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_thread_id, extract_turn_id, is_gen_server_command};
+    use super::{
+        extract_thread_id, extract_turn_id, is_gen_server_command, should_replace_server,
+        MAX_TURNS_PER_SERVER,
+    };
     use serde_json::json;
 
     #[test]
@@ -520,5 +725,13 @@ mod tests {
         assert!(is_gen_server_command("/usr/local/bin/codex app-server"));
         assert!(is_gen_server_command("/Applications/GORI/codex-app-server"));
         assert!(!is_gen_server_command("/usr/local/bin/codex exec -"));
+    }
+
+    #[test]
+    fn replaces_expired_or_poisoned_server_only_when_idle() {
+        assert!(should_replace_server(MAX_TURNS_PER_SERVER, 0, false));
+        assert!(!should_replace_server(MAX_TURNS_PER_SERVER, 1, false));
+        assert!(should_replace_server(1, 0, true));
+        assert!(!should_replace_server(1, 1, true));
     }
 }
