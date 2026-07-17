@@ -6,8 +6,8 @@
 //! drive for normal chat) only fires the built-in `image_gen` tool
 //! sequentially within a single turn — there is no `parallel: true`
 //! knob. We work around it by running N `codex exec` processes
-//! concurrently with a per-worker `CODEX_HOME` (everything symlinked
-//! except `generated_images/`, which is a fresh dir per worker).
+//! concurrently with a per-worker `CODEX_HOME` (most entries symlinked,
+//! with a sanitized `config.toml` and fresh `generated_images/` per worker).
 //!
 //! The completed PNGs are copied into the configured local storage root
 //! (default `~/Pictures/GORI GORI/batch-<id>/`) so user-visible output
@@ -270,6 +270,9 @@ async fn run_one_worker(
                 target: "codex.batch_gen",
                 "worker {idx} attempt {attempt}/{MAX_ATTEMPTS} failed: {e}"
             );
+            if is_permanent_worker_error(e) {
+                break;
+            }
         }
     }
 
@@ -306,6 +309,21 @@ async fn run_one_worker(
     normalized
 }
 
+fn is_permanent_worker_error(error: &str) -> bool {
+    let lower = error.to_lowercase();
+    [
+        "401",
+        "unauthorized",
+        "認証",
+        "ログイン",
+        "content policy",
+        "moderation",
+        "safety system",
+    ]
+    .iter()
+    .any(|pattern| lower.contains(pattern))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_one_worker_inner(
     codex_bin: PathBuf,
@@ -330,13 +348,14 @@ async fn run_one_worker_inner(
         .map_err(|e| format!("tempdir 作成失敗: {e}"))?;
     let tmp_home = tmp.path().to_path_buf();
 
-    // 2. ~/.codex/* を tmp_home に複製 (generated_images だけ独立 dir)
+    // 2. ~/.codex/* を tmp_home に複製
+    //    (config.toml は最小構成で新規生成、generated_images は独立 dir)
     //
     // Unix: シンボリックリンクで参照だけ通す (高速、無料)
     // Windows: シンボリックリンクは管理者権限必須。代わりに
     //          ファイル/ディレクトリを再帰コピーする。
-    //          これがないと tmp_home に config.toml / auth.json /
-    //          cache/ などが何も無い状態で codex exec が起動し、
+    //          これがないと tmp_home に auth.json / cache/ などが無い状態で
+    //          codex exec が起動し、
     //          認証なしエラーで即落ちする (Windows で生成ボタン押下
     //          後の不発の真因)。
     if codex_home_orig.exists() {
@@ -344,7 +363,7 @@ async fn run_one_worker_inner(
             .map_err(|e| format!("CODEX_HOME 読み込み失敗: {e}"))?;
         for entry in entries.flatten() {
             let name = entry.file_name();
-            if name == "generated_images" {
+            if name == "generated_images" || name == "config.toml" {
                 continue;
             }
             let src = entry.path();
@@ -366,6 +385,29 @@ async fn run_one_worker_inner(
             }
         }
     }
+
+    let mut worker_config = String::new();
+    if let Ok(source_config) = std::fs::read_to_string(codex_home_orig.join("config.toml")) {
+        for line in source_config.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with('[') {
+                break;
+            }
+            if let Some((key, _value)) = trimmed.split_once('=') {
+                if matches!(key.trim(), "model" | "model_reasoning_effort") {
+                    worker_config.push_str(trimmed);
+                    worker_config.push('\n');
+                }
+            }
+        }
+    }
+    if !worker_config.is_empty() {
+        worker_config.push('\n');
+    }
+    worker_config.push_str("[features]\nimage_generation = true\n");
+    std::fs::write(tmp_home.join("config.toml"), worker_config)
+        .map_err(|e| format!("worker config.toml 作成失敗: {e}"))?;
+
     let tmp_gen = tmp_home.join("generated_images");
     std::fs::create_dir_all(&tmp_gen)
         .map_err(|e| format!("worker generated_images 作成失敗: {e}"))?;
@@ -399,9 +441,12 @@ async fn run_one_worker_inner(
     if let Some(m) = model.as_deref().filter(|s| !s.is_empty()) {
         cmd.arg("-c").arg(format!("model={m}"));
     }
-    if let Some(e) = effort.as_deref().filter(|s| !s.is_empty()) {
-        cmd.arg("-c").arg(format!("model_reasoning_effort={e}"));
-    }
+    let effort = effort
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("low");
+    cmd.arg("-c")
+        .arg(format!("model_reasoning_effort={effort}"));
     for (_, p) in &slots {
         cmd.arg("-i").arg(p);
     }

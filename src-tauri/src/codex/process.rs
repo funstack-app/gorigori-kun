@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{anyhow, Context, Result};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
@@ -106,22 +106,32 @@ fn login_shell_path() -> Option<OsString> {
 /// クロスプラットフォーム対応 (Codex クロスレビュー 2026-05-19):
 /// `std::env::split_paths` / `join_paths` を使うので、Windows の `;` 区切りでも
 /// macOS/Linux の `:` 区切りでも正しく動く。以前は `:` 固定で Windows の PATH を
-/// 破壊していた。
+/// 破壊していた。login shell の起動は初回だけにし、結果をプロセス生涯キャッシュする。
 pub fn enriched_path() -> OsString {
-    let mut seen: HashSet<PathBuf> = HashSet::new();
-    let mut parts: Vec<PathBuf> = Vec::new();
-    for src in [std::env::var_os("PATH"), login_shell_path()]
-        .into_iter()
-        .flatten()
-    {
-        for p in std::env::split_paths(&src) {
-            if !p.as_os_str().is_empty() && seen.insert(p.clone()) {
-                parts.push(p);
-            }
-        }
-    }
-    std::env::join_paths(parts)
-        .unwrap_or_else(|_| std::env::var_os("PATH").unwrap_or_default())
+    static ENRICHED_PATH: OnceLock<String> = OnceLock::new();
+
+    OsString::from(
+        ENRICHED_PATH
+            .get_or_init(|| {
+                let mut seen: HashSet<PathBuf> = HashSet::new();
+                let mut parts: Vec<PathBuf> = Vec::new();
+                for src in [std::env::var_os("PATH"), login_shell_path()]
+                    .into_iter()
+                    .flatten()
+                {
+                    for p in std::env::split_paths(&src) {
+                        if !p.as_os_str().is_empty() && seen.insert(p.clone()) {
+                            parts.push(p);
+                        }
+                    }
+                }
+                std::env::join_paths(parts)
+                    .unwrap_or_else(|_| std::env::var_os("PATH").unwrap_or_default())
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .clone(),
+    )
 }
 
 /// 画像生成バッチ用に **codex CLI (codex exec を取れるバイナリ)** を解決する。
