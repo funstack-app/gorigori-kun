@@ -52,7 +52,7 @@ const MAX_CONCURRENT_BATCHES = 3;
 // FB#18 (2026-06-06): 一時的失敗を自動リトライする最大試行回数。
 // 1 回目 + 自動リトライ 2 回 = 計 3 回。恒久的失敗 (NSFW/クレジット不足等) は
 // classifyFailures が検出してリトライせず即停止する。
-const MAX_GENERATION_ATTEMPTS = 3;
+const MAX_EXTERNAL_PROVIDER_ATTEMPTS = 3;
 
 /** 全件失敗だったか (1 枚も生成できなかった)。 */
 function isTotalFailure(result: SceneGenerationResult): boolean {
@@ -398,15 +398,21 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
 
     let lastResult: SceneGenerationResult | null = null;
     let lastError: unknown = null;
+    // Codex は Rust 側で画像ごとに最大 3 回試行するため、フロントでは再試行しない。
+    // 外部 provider は従来どおりフロントで最大 3 回試行する。
+    const maxAttempts =
+      magnificActive || selectedHiggsfield || compareMode
+        ? MAX_EXTERNAL_PROVIDER_ATTEMPTS
+        : 1;
 
-    for (let attempt = 1; attempt <= MAX_GENERATION_ATTEMPTS; attempt++) {
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       if (attempt === 1) {
         setStatus({ kind: "running", message: "生成中..." });
       } else {
         // 例: 「再試行中 (2/3)...」。ConstructedPromptPanel は running の message を表示する。
         setStatus({
           kind: "running",
-          message: `失敗したため再試行中 (${attempt}/${MAX_GENERATION_ATTEMPTS})...`,
+          message: `失敗したため再試行中 (${attempt}/${maxAttempts})...`,
         });
       }
 
@@ -433,7 +439,7 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
 
         // 全件失敗。一時的失敗ならリトライ、恒久的失敗 (NSFW等) なら即停止。
         const decision = classifyFailures(result.errors, true);
-        const canRetryAgain = attempt < MAX_GENERATION_ATTEMPTS;
+        const canRetryAgain = attempt < maxAttempts;
 
         if (decision.shouldRetry && canRetryAgain) {
           // 一時的失敗 → 次のループで再試行する。
@@ -456,7 +462,7 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
           `[useSceneGeneration] generate attempt ${attempt} threw:`,
           error,
         );
-        if (attempt < MAX_GENERATION_ATTEMPTS) {
+        if (attempt < maxAttempts) {
           continue;
         }
       }
