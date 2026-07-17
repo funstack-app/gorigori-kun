@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { buildPrompt } from "./buildPrompt";
 import {
   generateFromScene,
@@ -134,11 +134,10 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
   const promptOverride = useScenePromptOverride((s) => s.value);
   const setPromptOverride = useScenePromptOverride((s) => s.set);
   const [status, setStatus] = useState<SceneGenerationStatus>({ kind: "idle" });
-  // generating: disabled 判定からは外したが、generate() 内で多重実行ガードに
-  // 引き続き使う (preflight 直後に二重呼びされた場合の保護)。
-  // 型エラー抑制のため _generating で受ける (未参照警告を黙らせる)。
-  const [_generating, setGenerating] = useState(false);
-  void _generating;
+  // ref は React の再描画を待たず同期的に切り替わるため、素早い二度押しも防げる。
+  // state はボタンの disabled 表示に使い、解除は generate() の finally に集約する。
+  const generationLockRef = useRef(false);
+  const [generating, setGenerating] = useState(false);
 
   const effectivePrompt =
     promptOverride !== null ? promptOverride : generatedPrompt;
@@ -146,14 +145,7 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
   const runningBatchCount = runningBatches.length;
   const hasRunningBatch = runningBatchCount > 0;
   const isQueueFull = runningBatchCount >= MAX_CONCURRENT_BATCHES;
-  // STΛCK 報告 (2026-05-17 v0.6.11): 生成ボタンを押すと画面がちらつく問題。
-  // 原因: ローカル `generating` ステートと `runningBatches`(notification 経由)
-  // が時間差で更新され、ボタンが disabled→enabled→disabled と細かく
-  // 切り替わってレイアウト再計算が走っていた。
-  // 修正: disabled 判定をキュー満杯チェックのみに変える。
-  // generating 状態自体は status メッセージ等で引き続き使うが、
-  // disabled 判定からは外して入力UIのちらつきを止める。
-  const disabled = isQueueFull;
+  const disabled = generating || isQueueFull;
 
   const activeBatchSummary = useMemo(() => {
     const active = runningBatches[0];
@@ -167,6 +159,8 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
   const generate = useCallback(async (
     opts?: { countOverride?: SceneGenerationCount },
   ): Promise<SceneGenerationResult | null> => {
+    if (generationLockRef.current) return null;
+
     const prompt = effectivePrompt.trim();
     if (!prompt) {
       setStatus({ kind: "error", message: "プロンプトが空です" });
@@ -178,77 +172,17 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
     const effectiveCount: SceneGenerationCount =
       opts?.countOverride ?? generationCount;
 
-    // STΛCK 報告 (2026-05-17 v0.6.7): 認証未完了で生成すると
-    // 「アスペクト比エラー」と誤表示されて原因特定に30分かかった。
-    // 生成開始前に Codex 認証を再チェックし、未認証なら明確な
-    // メッセージで toast 表示して止める。
-    const authState = useAuth.getState();
-    // 最新の認証状態を取り直す（OAuth完了直後の refresh 遅延対策）
-    // silent: 生成前の認証確認で AuthGate の Splash 差し替え(白フラッシュ)を
-    // 起こさないため loading を立てない (Bug修正 2026-05-28)。
-    await authState.refresh({ silent: true });
-    if (!useAuth.getState().account) {
-      const message =
-        "ChatGPT にログインしていないため、生成できません。\n" +
-        "左下の「ログイン」ボタンから ChatGPT にログインしてください。";
-      setStatus({ kind: "error", message });
-      useToasts.getState().push({
-        kind: "error",
-        text: message,
-        ttlMs: 0,
-      });
-      return null;
-    }
-
+    generationLockRef.current = true;
     setGenerating(true);
     setStatus({ kind: "running", message: "生成を開始しています..." });
 
-    // ユーザーの生成意図は 1 回だけ DB へ記録する (リトライで重複させない)。
-    // dbTurnId は後段(Magnific等のライブイベントを流さない経路)で生成画像を
-    // history.db に手動 recordImage するためにも使うので、関数スコープで保持する。
-    let batchDbTurnId: string | null = null;
-    try {
-      const sess = useSessions.getState();
-      const dbTurnId = await sess.recordTurn({
-        sessionId: sess.activeSessionId ?? "",
-        prompt,
-        model: selectedModel,
-        effort: selectedEffort,
-        provider: magnificActive
-          ? "magnific"
-          : selectedHiggsfield
-            ? "higgsfield"
-            : "codex",
-        modelJobSetType: compareMode ? undefined : selectedHiggsfield?.jobSetType,
-        modelDisplayName: magnificActive
-          ? magnificCompare
-            ? `${selectedMagnificModels.length} models compared`
-            : getMagnificModelName(selectedMagnificModels[0])
-          : compareMode
-            ? `${selectedHiggsfieldModels.length} models compared`
-            : (selectedHiggsfield?.displayName ?? "image_gen"),
-        refImagePaths,
-        count: effectiveCount,
-        kind: "batch",
-      });
-      if (dbTurnId) {
-        batchDbTurnId = dbTurnId;
-        sess.enqueueBatchDbTurnId(dbTurnId);
-      }
-    } catch (recordError) {
-      // turn 記録に失敗しても生成自体は続行する (履歴に残らないだけ)。
-      console.error("[useSceneGeneration] recordTurn failed:", recordError);
-    }
+    const provider = magnificActive
+      ? ("magnific" as const)
+      : selectedHiggsfield
+        ? ("higgsfield" as const)
+        : ("codex" as const);
 
-    // 1 回の生成試行を実行する。startBatch (楽観的カード) → generateFromScene。
-    // 戻り値は SceneGenerationResult。IPC が reject した場合は呼び出し側へ throw する。
-    const runOneAttempt = async (): Promise<{
-      result: SceneGenerationResult;
-      tempId: string;
-    }> => {
-      const tempId = `local-${Date.now()}-${Math.random()
-        .toString(36)
-        .slice(2, 8)}`;
+    const startOptimisticBatch = (tempId: string): void => {
       useBatches.getState().startBatch({
         batchId: tempId,
         prompt,
@@ -257,11 +191,7 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
           name: basename(path),
         })),
         count: effectiveCount,
-        provider: magnificActive
-          ? "magnific"
-          : selectedHiggsfield
-            ? "higgsfield"
-            : "codex",
+        provider,
         modelJobSetType: compareMode ? undefined : selectedHiggsfield?.jobSetType,
         modelDisplayName: magnificActive
           ? magnificCompare
@@ -271,8 +201,6 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
             ? undefined
             : (selectedHiggsfield?.displayName ?? "image_gen"),
         compareMode: compareMode || magnificCompare,
-        // 比較生成時、各画像下にモデル名を出す(Higgsと同じ。STΛCK要望 2026-06-08)。
-        // Magnific比較時は各Magnificモデル名を {jobSetType, displayName} 形に詰める。
         workerModels: magnificCompare
           ? selectedMagnificModels.map((id) => ({
               jobSetType: id,
@@ -282,6 +210,102 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
             ? selectedHiggsfieldModels
             : undefined,
       });
+    };
+
+    const firstTempId = `local-${Date.now()}-${Math.random()
+      .toString(36)
+      .slice(2, 8)}`;
+    // 最初の await より前にカードを置き、クリック直後に画面を反応させる。
+    startOptimisticBatch(firstTempId);
+
+    let batchDbTurnId: string | null = null;
+    const sess = useSessions.getState();
+    let authenticated = false;
+    let dbTurnId: string | null = null;
+    try {
+      // 認証確認と履歴保存は直列に待たず、カード表示後に並行して行う。
+      // turn ID は生成開始前にキューへ積み、既存のイベント結び付け順を保つ。
+      const authPromise = (async (): Promise<boolean> => {
+        const authState = useAuth.getState();
+        await authState.refresh({ silent: true });
+        return Boolean(useAuth.getState().account);
+      })().catch((authError) => {
+        console.error("[useSceneGeneration] auth refresh failed:", authError);
+        return false;
+      });
+      const recordTurnPromise = sess
+        .recordTurn({
+          sessionId: sess.activeSessionId ?? "",
+          prompt,
+          model: selectedModel,
+          effort: selectedEffort,
+          provider,
+          modelJobSetType: compareMode ? undefined : selectedHiggsfield?.jobSetType,
+          modelDisplayName: magnificActive
+            ? magnificCompare
+              ? `${selectedMagnificModels.length} models compared`
+              : getMagnificModelName(selectedMagnificModels[0])
+            : compareMode
+              ? `${selectedHiggsfieldModels.length} models compared`
+              : (selectedHiggsfield?.displayName ?? "image_gen"),
+          refImagePaths,
+          count: effectiveCount,
+          kind: "batch",
+        })
+        .catch((recordError) => {
+          // turn 記録に失敗しても生成自体は続行する (履歴に残らないだけ)。
+          console.error("[useSceneGeneration] recordTurn failed:", recordError);
+          return null;
+        });
+
+      [authenticated, dbTurnId] = await Promise.all([
+        authPromise,
+        recordTurnPromise,
+      ]);
+    } finally {
+      generationLockRef.current = false;
+      setGenerating(false);
+    }
+
+    if (!authenticated) {
+      const message =
+        "ChatGPT にログインしていないため、生成できません。\n" +
+        "左下の「ログイン」ボタンから ChatGPT にログインしてください。";
+      for (let idx = 1; idx <= effectiveCount; idx++) {
+        useBatches.getState().applyEvent({
+          kind: "workerFailed",
+          batchId: firstTempId,
+          idx,
+          error: message,
+        });
+      }
+      useBatches.getState().applyEvent({
+        kind: "completed",
+        batchId: firstTempId,
+        generatedPaths: Array.from({ length: effectiveCount }, () => ""),
+        failedCount: effectiveCount,
+        provider,
+      });
+      setStatus({ kind: "error", message });
+      useToasts.getState().push({
+        kind: "error",
+        text: message,
+        ttlMs: 0,
+      });
+      return null;
+    }
+
+    if (dbTurnId) {
+      batchDbTurnId = dbTurnId;
+      sess.enqueueBatchDbTurnId(dbTurnId);
+    }
+
+    // 1 回の生成試行を実行する。初回カードはクリック時に作成済み。
+    // 戻り値は SceneGenerationResult。IPC が reject した場合は呼び出し側へ throw する。
+    const runOneAttempt = async (tempId: string): Promise<{
+      result: SceneGenerationResult;
+      tempId: string;
+    }> => {
       try {
         const result = await generateFromScene(scene, {
           count: effectiveCount,
@@ -394,8 +418,6 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
       );
     };
 
-    setGenerating(false);
-
     let lastResult: SceneGenerationResult | null = null;
     let lastError: unknown = null;
     // Codex は Rust 側で画像ごとに最大 3 回試行するため、フロントでは再試行しない。
@@ -417,7 +439,12 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
       }
 
       try {
-        const { result } = await runOneAttempt();
+        const tempId =
+          attempt === 1
+            ? firstTempId
+            : `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        if (attempt > 1) startOptimisticBatch(tempId);
+        const { result } = await runOneAttempt(tempId);
         lastResult = result;
         lastError = null;
 
