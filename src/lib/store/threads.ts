@@ -19,7 +19,25 @@ import type {
 } from "../codex-types";
 
 /** Curated list of models we surface in the picker (ordered: best → mini). */
-const MODEL_WHITELIST = ["gpt-5.5", "gpt-5.4-mini", "gpt-5.4"] as const;
+const MODEL_WHITELIST = [
+  "gpt-5.6-sol",
+  "gpt-5.6-terra",
+  "gpt-5.6-luna",
+  "gpt-5.5",
+  "gpt-5.4-mini",
+] as const;
+
+/**
+ * model/list が新モデルをまだ返さない環境（app-server 側の一覧遅延）でも
+ * ピッカーに出すためのローカル表示名。CLI 0.144 以上なら実行自体は通る。
+ */
+const MODEL_LABELS: Record<string, string> = {
+  "gpt-5.6-sol": "GPT-5.6 Sol (標準・高品質)",
+  "gpt-5.6-terra": "GPT-5.6 Terra (軽量・高速)",
+  "gpt-5.6-luna": "GPT-5.6 Luna (最軽量)",
+  "gpt-5.5": "GPT-5.5 (旧標準)",
+  "gpt-5.4-mini": "GPT-5.4 mini (旧軽量)",
+};
 
 /** A historical turn rendered as if completed. */
 export type FrozenTurn = {
@@ -216,17 +234,23 @@ export const useThreads = create<ThreadsState>((set, get) => ({
       // whitelist order so "best" comes first in the picker.
       const visible = r.data.filter((m) => !m.hidden);
       const byId = new Map(visible.map((m) => [m.model ?? m.id, m]));
-      const filtered = MODEL_WHITELIST.map((id) => byId.get(id)).filter(
-        (m): m is Model => Boolean(m),
+      // 一覧に無い whitelist モデルはローカル定義で補完する
+      // (server の model/list が新世代の掲載に遅れても選べるようにする)
+      const filtered = MODEL_WHITELIST.map(
+        (id) =>
+          byId.get(id) ?? {
+            id,
+            model: id,
+            displayName: MODEL_LABELS[id] ?? id,
+          },
       );
       const fallback =
         filtered.length > 0
           ? filtered
           : visible.filter((m) => m.inputModalities?.includes("image"));
-      const def =
-        fallback.find((m) => m.isDefault) ??
-        fallback[0] ??
-        visible[0];
+      // whitelist の先頭 (= 現行の標準モデル) を既定にする。
+      // server 側 isDefault は旧世代を指し続けることがあるので使わない。
+      const def = fallback[0] ?? visible[0];
       set({
         models: fallback,
         selectedModel: get().selectedModel ?? def?.model ?? def?.id,

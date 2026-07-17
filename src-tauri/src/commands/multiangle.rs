@@ -29,7 +29,7 @@ use crate::events::EVENT_MULTIANGLE;
 use crate::state::AppState;
 
 const GENERATION_TIMEOUT_SECS: u64 = 900;
-const MULTIANGLE_MODEL: &str = "gpt-5.5";
+const MULTIANGLE_MODEL: &str = "gpt-5.6-sol";
 const MULTIANGLE_EFFORT: &str = "low";
 /// 同時実行数の上限。rate limit 保護のため並列度を制限する (30枚を無制限同時起動すると
 /// プラン上限を直撃するため)。gpt-image-2 は同時実行 3 までが安定で 5 で時々 429 になる

@@ -26,7 +26,7 @@ use crate::state::{AppState, CheckpointAction};
 // プロンプト生成は絵コンテ生成の前段で、ここが落ちると生成全体が巻き添えになるため 300 秒にする。
 const PROMPT_TIMEOUT_SECS: u64 = 300;
 const GENERATION_TIMEOUT_SECS: u64 = 900;
-const STORYBOARD_MODEL: &str = "gpt-5.5";
+const STORYBOARD_MODEL: &str = "gpt-5.6-sol";
 const STORYBOARD_EFFORT: &str = "low";
 
 #[derive(Deserialize, Serialize, Clone)]

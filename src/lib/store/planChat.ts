@@ -45,7 +45,7 @@ export type PlanMessage = {
   createdAt: number;
 };
 
-const PLAN_MODEL = "gpt-5.5";
+const PLAN_MODEL = "gpt-5.6-sol";
 
 /**
  * codex app-server の personality は列挙型 ('none' | 'friendly' | 'pragmatic')。

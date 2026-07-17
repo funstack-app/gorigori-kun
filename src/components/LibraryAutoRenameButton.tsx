@@ -11,7 +11,7 @@ import { useImages } from "../lib/store/images";
 import { useLibrarySelection } from "../lib/store/librarySelection";
 import { useToasts } from "../lib/store/toasts";
 
-const RENAME_MODEL = "gpt-5.5";
+const RENAME_MODEL = "gpt-5.6-terra";
 // 画像 vision で命名する場合、image エンコード + 推論で 1 枚あたり 5-15 秒。
 // 並列実行するので全体は最大画像 1 枚分の時間で済む想定。少し余裕を持たせて 90 秒。
 const AI_TIMEOUT_MS = 90_000;
