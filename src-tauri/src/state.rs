@@ -37,6 +37,8 @@ type CheckpointSenders = Arc<Mutex<HashMap<String, oneshot::Sender<CheckpointAct
 pub struct AppState {
     inner: Arc<RwLock<Inner>>,
     pub child: Arc<Mutex<Option<Child>>>,
+    /// 通常画像生成専用の常駐 app-server。初回生成時に遅延起動する。
+    pub(crate) gen_server: Arc<Mutex<Option<crate::codex::gen_server::GenServerProcess>>>,
     pub image_watcher: Arc<Mutex<Option<ImageWatcher>>>,
     /// SQLite pool for session history. Initialized in the Tauri setup
     /// hook after `app_data_dir` is resolvable; commands that need it

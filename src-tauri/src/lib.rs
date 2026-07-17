@@ -252,6 +252,9 @@ pub fn run() {
                 .app_data_dir()
                 .map_err(|e| format!("app_data_dir failed: {e}"))?;
             std::fs::create_dir_all(&app_data_dir)?;
+            // 前回クラッシュ時に台帳へ残った生成専用 app-server を先に停止する。
+            // この後の汎用清掃は台帳を空にするため、順序を逆にしない。
+            crate::codex::gen_server::cleanup_stale_registered_servers(&app.handle());
             // 前回クラッシュ時に台帳へ残った worker だけを、安全確認後に停止する。
             commands::worker_registry::cleanup_stale_workers(&app.handle());
 
@@ -455,6 +458,8 @@ pub fn run() {
             event,
             tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
         ) {
+            let state = app_handle.state::<AppState>().inner_clone();
+            tauri::async_runtime::block_on(crate::codex::gen_server::shutdown(&state));
             commands::worker_registry::terminate_registered_workers(app_handle);
         }
     });
