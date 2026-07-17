@@ -1,13 +1,8 @@
-//! Parallel image generation by spawning N independent `codex exec`
-//! workers, each isolated under its own `CODEX_HOME` so concurrent
-//! image_gen calls cannot stomp each other.
+//! Parallel image generation through a dedicated resident `codex app-server`.
 //!
-//! This exists because `codex app-server` (the JSON-RPC server we
-//! drive for normal chat) only fires the built-in `image_gen` tool
-//! sequentially within a single turn — there is no `parallel: true`
-//! knob. We work around it by running N `codex exec` processes
-//! concurrently with a per-worker `CODEX_HOME` (most entries symlinked,
-//! with a sanitized `config.toml` and fresh `generated_images/` per worker).
+//! Each image uses an independent app-server thread, so separate turns can run
+//! concurrently without paying the fixed `codex exec` startup cost per image.
+//! The former per-worker `codex exec` path remains as an automatic fallback.
 //!
 //! The completed PNGs are copied into the configured local storage root
 //! (default `~/Pictures/GORI GORI/batch-<id>/`) so user-visible output
@@ -15,11 +10,10 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, State};
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
@@ -27,6 +21,25 @@ use crate::codex::process::{enriched_path, resolve_codex_cli_binary};
 use crate::commands::gen_queue::GLOBAL_GEN_SEMAPHORE;
 use crate::commands::storage::{project_name_from_cwd, resolve_output_dir, StorageSettings};
 use crate::events::EVENT_IMAGE_BATCH;
+use crate::state::AppState;
+
+type ExecFallback = Result<(PathBuf, PathBuf), String>;
+
+#[cfg(not(windows))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AttemptPath {
+    Resident,
+    Exec,
+}
+
+#[cfg(not(windows))]
+fn next_attempt_path(resident_timed_out: bool) -> AttemptPath {
+    if resident_timed_out {
+        AttemptPath::Exec
+    } else {
+        AttemptPath::Resident
+    }
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -101,20 +114,21 @@ enum BatchEvent {
 #[tauri::command]
 pub async fn images_generate_batch(
     app: AppHandle,
+    state: State<'_, AppState>,
     args: BatchGenArgs,
 ) -> Result<BatchGenResult, String> {
     if args.count == 0 {
         return Err("count must be >= 1".into());
     }
-    // STΛCK 報告 (2026-05-17): app-server を使うと `exec` で失敗するので
-    // CLI 用バイナリを明示解決する。Codex クロスレビューで判明した root cause。
-    let codex_bin = resolve_codex_cli_binary()
-        .map_err(|e| format!("Codex CLI の解決に失敗: {e}"))?;
-
-    // FB#19: app-server と同じ GORI 専用 CODEX_HOME を使う。各 worker は
-    // この HOME から auth/config/skills を一時 HOME に複製して codex exec する。
-    let codex_home_orig = crate::codex::home::resolve_command_codex_home()
-        .ok_or_else(|| "CODEX_HOME を解決できません".to_string())?;
+    // 旧 codex exec 用の情報は予備ルートとして保持する。解決できなくても常駐
+    // app-server が成功する限り生成できるよう、エラーはフォールバック時まで遅延する。
+    let exec_fallback: ExecFallback = resolve_codex_cli_binary()
+        .map_err(|error| format!("Codex CLI の解決に失敗: {error}"))
+        .and_then(|codex_bin| {
+            crate::codex::home::resolve_command_codex_home()
+                .map(|codex_home| (codex_bin, codex_home))
+                .ok_or_else(|| "CODEX_HOME を解決できません".to_string())
+        });
 
     let batch_id = format!("batch-{}", short_id());
     let storage_settings = StorageSettings::load()?;
@@ -136,8 +150,8 @@ pub async fn images_generate_batch(
     let mut handles = Vec::with_capacity(args.count as usize);
     for idx in 1..=args.count {
         let app = app.clone();
-        let codex_bin = codex_bin.clone();
-        let codex_home_orig = codex_home_orig.clone();
+        let state = state.inner_clone();
+        let exec_fallback = exec_fallback.clone();
         let out_dir = out_dir.clone();
         let batch_id = batch_id.clone();
         let prompt = args.prompt.clone();
@@ -152,8 +166,8 @@ pub async fn images_generate_batch(
         handles.push(tokio::spawn(async move {
             run_one_worker(
                 app,
-                codex_bin,
-                codex_home_orig,
+                state,
+                exec_fallback,
                 out_dir,
                 batch_id,
                 idx,
@@ -210,8 +224,8 @@ pub async fn images_generate_batch(
 #[allow(clippy::too_many_arguments)]
 async fn run_one_worker(
     app: AppHandle,
-    codex_bin: PathBuf,
-    codex_home_orig: PathBuf,
+    state: AppState,
+    exec_fallback: ExecFallback,
     out_dir: PathBuf,
     batch_id: String,
     idx: u32,
@@ -242,23 +256,57 @@ async fn run_one_worker(
     // リトライは inner 呼び出しだけをループする。
     const MAX_ATTEMPTS: u32 = 3;
     let mut result: Result<String, String> = Err("未実行".to_string());
+    #[cfg(not(windows))]
+    let mut attempt_path = AttemptPath::Resident;
     for attempt in 1..=MAX_ATTEMPTS {
-        result = run_one_worker_inner(
-            &app,
-            codex_bin.clone(),
-            codex_home_orig.clone(),
-            &out_dir,
-            idx,
-            prompt.clone(),
-            cwd.clone(),
-            ref_paths.clone(),
-            mask_paths.clone(),
-            model.clone(),
-            effort.clone(),
-            aspect.clone(),
-            total_count,
-        )
-        .await;
+        #[cfg(windows)]
+        {
+            // Windows は常駐 app-server を使わず、各試行を従来の exec 経路へ直行させる。
+            result = match exec_fallback.clone() {
+                Ok((codex_bin, codex_home_orig)) => {
+                    run_one_worker_exec_inner(
+                        &app,
+                        codex_bin,
+                        codex_home_orig,
+                        &out_dir,
+                        idx,
+                        prompt.clone(),
+                        cwd.clone(),
+                        ref_paths.clone(),
+                        mask_paths.clone(),
+                        model.clone(),
+                        effort.clone(),
+                        aspect.clone(),
+                        total_count,
+                    )
+                    .await
+                }
+                Err(error) => Err(error),
+            };
+        }
+        #[cfg(not(windows))]
+        {
+            let mut resident_timed_out = false;
+            result = run_one_worker_inner(
+                &app,
+                &state,
+                exec_fallback.clone(),
+                &out_dir,
+                idx,
+                prompt.clone(),
+                cwd.clone(),
+                ref_paths.clone(),
+                mask_paths.clone(),
+                model.clone(),
+                effort.clone(),
+                aspect.clone(),
+                total_count,
+                attempt_path,
+                &mut resident_timed_out,
+            )
+            .await;
+            attempt_path = next_attempt_path(resident_timed_out);
+        }
         if result.is_ok() {
             break;
         }
@@ -276,12 +324,8 @@ async fn run_one_worker(
         result.as_ref().ok().cloned(),
         turn_id.as_deref().filter(|id| !id.trim().is_empty()),
     ) {
-        if let Err(error) = crate::commands::sessions::record_generated_image(
-            &app,
-            turn_id,
-            Path::new(&path),
-        )
-        .await
+        if let Err(error) =
+            crate::commands::sessions::record_generated_image(&app, turn_id, Path::new(&path)).await
         {
             result = Err(format!(
                 "画像は保存しましたが、履歴DBへの記録に失敗しました: {error}"
@@ -322,9 +366,130 @@ async fn run_one_worker(
     normalized
 }
 
-
 #[allow(clippy::too_many_arguments)]
+#[cfg(not(windows))]
 async fn run_one_worker_inner(
+    app: &AppHandle,
+    state: &AppState,
+    exec_fallback: ExecFallback,
+    out_dir: &Path,
+    idx: u32,
+    prompt: String,
+    cwd: Option<String>,
+    ref_paths: Vec<String>,
+    mask_paths: Vec<String>,
+    model: Option<String>,
+    effort: Option<String>,
+    aspect: Option<String>,
+    total_count: u32,
+    attempt_path: AttemptPath,
+    resident_timed_out: &mut bool,
+) -> Result<String, String> {
+    if attempt_path == AttemptPath::Exec {
+        tracing::info!(
+            target: "codex.batch_gen",
+            "worker {idx}: 前試行の常駐 app-server タイムアウト後のため codex exec 経路を使用します"
+        );
+        let (codex_bin, codex_home_orig) = exec_fallback?;
+        return run_one_worker_exec_inner(
+            app,
+            codex_bin,
+            codex_home_orig,
+            out_dir,
+            idx,
+            prompt,
+            cwd,
+            ref_paths,
+            mask_paths,
+            model,
+            effort,
+            aspect,
+            total_count,
+        )
+        .await;
+    }
+
+    // ref と mask は従来の `-i` と同じ順序で app-server の localImage input にする。
+    let mut slots: Vec<(SlotKind, String)> = Vec::new();
+    for (i, path) in ref_paths.iter().enumerate() {
+        slots.push((SlotKind::Source, path.clone()));
+        if let Some(mask) = mask_paths.get(i).filter(|mask| !mask.is_empty()) {
+            slots.push((SlotKind::Mask, mask.clone()));
+        }
+    }
+    let aspect_label = aspect
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .unwrap_or("1:1");
+    let final_prompt = build_final_prompt(&prompt, &slots, aspect_label, idx, total_count);
+    let image_paths: Vec<String> = slots.iter().map(|(_, path)| path.clone()).collect();
+
+    match crate::codex::gen_server::generate_image(
+        app,
+        state,
+        &final_prompt,
+        &image_paths,
+        cwd.as_deref().filter(|value| !value.is_empty()),
+        model.as_deref().filter(|value| !value.is_empty()),
+        effort.as_deref().filter(|value| !value.is_empty()),
+    )
+    .await
+    {
+        Ok(src_png) => {
+            let dest = out_dir.join(format!("ig_b{idx:02}_{}.png", short_id()));
+            std::fs::copy(&src_png, &dest).map_err(|error| {
+                format!(
+                    "app-server 生成画像の出力コピー失敗 ({}): {error}",
+                    src_png.display()
+                )
+            })?;
+            return Ok(dest.to_string_lossy().into_owned());
+        }
+        Err(resident_error) => {
+            if crate::codex::gen_server::is_timeout_error(&resident_error) {
+                // この試行で exec も続けると 900秒x2 になるため、
+                // 今回は失敗とし、同じ worker の次試行だけ旧 exec 経路に切り替える。
+                *resident_timed_out = true;
+                return Err(resident_error);
+            }
+            tracing::warn!(
+                target: "codex.batch_gen",
+                "worker {idx}: 常駐 app-server 経路に失敗したため codex exec へフォールバックします: {resident_error}"
+            );
+            let (codex_bin, codex_home_orig) = exec_fallback.map_err(|fallback_error| {
+                format!(
+                    "常駐 app-server 経路: {resident_error}; codex exec フォールバックを準備できません: {fallback_error}"
+                )
+            })?;
+            return run_one_worker_exec_inner(
+                app,
+                codex_bin,
+                codex_home_orig,
+                out_dir,
+                idx,
+                prompt,
+                cwd,
+                ref_paths,
+                mask_paths,
+                model,
+                effort,
+                aspect,
+                total_count,
+            )
+            .await
+            .map_err(|exec_error| {
+                format!(
+                    "常駐 app-server 経路: {resident_error}; codex exec フォールバック: {exec_error}"
+                )
+            });
+        }
+    }
+}
+
+/// 常駐 app-server が使えない場合の旧 `codex exec` 経路。
+/// tmp CODEX_HOME・PNG 走査・PID guard を含む従来実装を温存する。
+#[allow(clippy::too_many_arguments)]
+async fn run_one_worker_exec_inner(
     app: &AppHandle,
     codex_bin: PathBuf,
     codex_home_orig: PathBuf,
@@ -348,48 +513,9 @@ async fn run_one_worker_inner(
         .map_err(|e| format!("tempdir 作成失敗: {e}"))?;
     let tmp_home = tmp.path().to_path_buf();
 
-    // 2. ~/.codex/* を tmp_home に複製
-    //    (config.toml は最小構成で新規生成、generated_images は独立 dir)
-    //
-    // Unix: シンボリックリンクで参照だけ通す (高速、無料)
-    // Windows: シンボリックリンクは管理者権限必須。代わりに
-    //          ファイル/ディレクトリを再帰コピーする。
-    //          これがないと tmp_home に auth.json / cache/ などが無い状態で
-    //          codex exec が起動し、
-    //          認証なしエラーで即落ちする (Windows で生成ボタン押下
-    //          後の不発の真因)。
-    if codex_home_orig.exists() {
-        let entries = std::fs::read_dir(&codex_home_orig)
-            .map_err(|e| format!("CODEX_HOME 読み込み失敗: {e}"))?;
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            if name == "generated_images" {
-                continue;
-            }
-            let src = entry.path();
-            let dst = tmp_home.join(&name);
-            #[cfg(unix)]
-            {
-                let _ = std::os::unix::fs::symlink(&src, &dst);
-            }
-            #[cfg(windows)]
-            {
-                // Windows ではシンボリックリンクが原則使えないので、
-                // ファイルは fs::copy、ディレクトリは再帰コピーで複製する。
-                if let Err(err) = copy_recursive(&src, &dst) {
-                    tracing::warn!(
-                        target: "codex.batch_gen",
-                        "copy {src:?} -> {dst:?} failed: {err}"
-                    );
-                }
-            }
-        }
-    }
-
-
+    // 2. 認証・設定は元 HOME からミラーし、生成画像と会話履歴は分離する。
+    mirror_codex_home(&codex_home_orig, &tmp_home)?;
     let tmp_gen = tmp_home.join("generated_images");
-    std::fs::create_dir_all(&tmp_gen)
-        .map_err(|e| format!("worker generated_images 作成失敗: {e}"))?;
 
     // 3. ref と mask をペアで並べる ([source_i, mask_i?] の順)。codex exec は
     //    `-i` でファイルパスを attach するだけなので、prompt のテキストで
@@ -647,6 +773,61 @@ fn short_id() -> String {
     format!("{:016x}", nanos)
 }
 
+/// 常駐 `codex-home-gen` のミラー入口。Windows ではビルドせず、旧 exec 経路だけを使う。
+#[cfg(unix)]
+pub(crate) fn mirror_resident_codex_home(
+    codex_home_orig: &Path,
+    worker_home: &Path,
+) -> Result<(), String> {
+    mirror_codex_home(codex_home_orig, worker_home)
+}
+
+/// 旧 exec 経路の一時 worker HOME へ認証・設定をミラーする。
+/// Unix では symlink、Windows では従来どおり一時ディレクトリへコピーし、監視対象の
+/// `generated_images` と会話履歴の `sessions` だけは必ず独立ディレクトリにする。
+fn mirror_codex_home(codex_home_orig: &Path, worker_home: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(worker_home).map_err(|e| format!("worker CODEX_HOME 作成失敗: {e}"))?;
+
+    if codex_home_orig.exists() {
+        let entries = std::fs::read_dir(codex_home_orig)
+            .map_err(|e| format!("CODEX_HOME 読み込み失敗: {e}"))?;
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if name == "generated_images" || name == "sessions" {
+                continue;
+            }
+            let src = entry.path();
+            let dst = worker_home.join(&name);
+            #[cfg(unix)]
+            {
+                if let Err(error) = std::os::unix::fs::symlink(&src, &dst) {
+                    if error.kind() != std::io::ErrorKind::AlreadyExists {
+                        tracing::warn!(
+                            target: "codex.batch_gen",
+                            "symlink {src:?} -> {dst:?} failed: {error}"
+                        );
+                    }
+                }
+            }
+            #[cfg(windows)]
+            {
+                if let Err(err) = copy_recursive(&src, &dst) {
+                    tracing::warn!(
+                        target: "codex.batch_gen",
+                        "copy {src:?} -> {dst:?} failed: {err}"
+                    );
+                }
+            }
+        }
+    }
+
+    for local_dir in ["generated_images", "sessions"] {
+        std::fs::create_dir_all(worker_home.join(local_dir))
+            .map_err(|e| format!("worker {local_dir} 作成失敗: {e}"))?;
+    }
+    Ok(())
+}
+
 /// Windows で `~/.codex/` 配下を per-worker tmp_home に複製するヘルパー。
 /// シンボリックリンクが使えない環境向け。ファイルは fs::copy、
 /// ディレクトリは再帰コピー。
@@ -680,4 +861,15 @@ fn copy_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
         return Ok(());
     }
     Ok(())
+}
+
+#[cfg(all(test, not(windows)))]
+mod tests {
+    use super::{next_attempt_path, AttemptPath};
+
+    #[test]
+    fn resident_timeout_switches_only_the_next_attempt_to_exec() {
+        assert_eq!(next_attempt_path(true), AttemptPath::Exec);
+        assert_eq!(next_attempt_path(false), AttemptPath::Resident);
+    }
 }

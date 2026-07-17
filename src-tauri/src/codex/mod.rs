@@ -1,3 +1,4 @@
+pub mod gen_server;
 pub mod home;
 pub mod mcp_direct;
 pub mod mcp_shared;
