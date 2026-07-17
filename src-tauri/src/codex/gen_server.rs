@@ -31,7 +31,14 @@ pub(crate) struct GenServerProcess {
     child: Child,
     // 生存中は PID 台帳に残し、正常終了時は Drop で台帳から外す。
     _registration: WorkerPidGuard,
+    /// このプロセスで開始した生成 turn 数。app-server には thread を閉じる
+    /// API が無く、画像1枚ごとの thread がプロセス内に蓄積するため、
+    /// 一定数でプロセスごと入れ替えてメモリ肥大を防ぐ(2026-07-17 レビュー指摘)。
+    turns_started: u64,
 }
+
+/// このターン数を超えたら次の ensure_client でプロセスを入れ替える。
+const MAX_TURNS_PER_SERVER: u64 = 60;
 
 /// 1 turn で画像を生成し、app-server が通知した保存元パスを返す。
 ///
@@ -113,6 +120,12 @@ pub(crate) async fn generate_image(
     }
 }
 
+/// 常駐経路のタイムアウト失敗か(この場合は旧経路へ切替せず試行失敗として返す。
+/// 900秒の二重化で最悪1試行30分に伸びるのを防ぎ、旧実装と同じ上限を保つ)。
+pub(crate) fn is_timeout_error(error: &str) -> bool {
+    error.contains("画像生成がタイムアウトしました")
+}
+
 async fn wait_for_saved_path(
     client: &RpcClient,
     notifications: &mut broadcast::Receiver<RpcNotification>,
@@ -138,6 +151,15 @@ async fn wait_for_saved_path(
                                     .filter(|path| !path.is_empty())
                                 {
                                     let path = PathBuf::from(saved_path);
+                                    // PNG の書き込みが通知より遅れることがある
+                                    // (フロント側 MessageList にも同じレースの前例)。
+                                    // 250ms x 4 まで待ってから諦める。
+                                    for _ in 0..4 {
+                                        if path.is_file() {
+                                            return Ok(path);
+                                        }
+                                        tokio::time::sleep(Duration::from_millis(250)).await;
+                                    }
                                     if path.is_file() {
                                         return Ok(path);
                                     }
@@ -253,7 +275,15 @@ async fn ensure_client(app: &AppHandle, state: &AppState) -> Result<RpcClient, S
             }
         };
         if child_alive && server.client.is_alive() {
-            return Ok(server.client.clone());
+            if server.turns_started >= MAX_TURNS_PER_SERVER {
+                tracing::info!(
+                    target: "codex.gen_server",
+                    "生成 turn が {MAX_TURNS_PER_SERVER} 回に達したため app-server を入れ替えます(thread蓄積対策)"
+                );
+            } else {
+                server.turns_started += 1;
+                return Ok(server.client.clone());
+            }
         }
     }
 
@@ -261,7 +291,8 @@ async fn ensure_client(app: &AppHandle, state: &AppState) -> Result<RpcClient, S
         stop_server(server).await;
     }
 
-    let server = spawn_server(app).await?;
+    let mut server = spawn_server(app).await?;
+    server.turns_started = 1;
     let client = server.client.clone();
     *slot = Some(server);
     Ok(client)
@@ -339,6 +370,7 @@ async fn spawn_server(app: &AppHandle) -> Result<GenServerProcess, String> {
         client,
         child,
         _registration: registration,
+        turns_started: 0,
     })
 }
 

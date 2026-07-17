@@ -370,6 +370,11 @@ async fn run_one_worker_inner(
             return Ok(dest.to_string_lossy().into_owned());
         }
         Err(resident_error) => {
+            if crate::codex::gen_server::is_timeout_error(&resident_error) {
+                // タイムアウトは生成自体が遅い/詰まっているサイン。旧経路で作り直すと
+                // 1試行が最悪 900秒x2 に伸びるため、旧実装同様この試行の失敗として返す。
+                return Err(resident_error);
+            }
             tracing::warn!(
                 target: "codex.batch_gen",
                 "worker {idx}: 常駐 app-server 経路に失敗したため codex exec へフォールバックします: {resident_error}"
