@@ -270,9 +270,6 @@ async fn run_one_worker(
                 target: "codex.batch_gen",
                 "worker {idx} attempt {attempt}/{MAX_ATTEMPTS} failed: {e}"
             );
-            if is_permanent_worker_error(e) {
-                break;
-            }
         }
     }
 
@@ -309,20 +306,6 @@ async fn run_one_worker(
     normalized
 }
 
-fn is_permanent_worker_error(error: &str) -> bool {
-    let lower = error.to_lowercase();
-    [
-        "401",
-        "unauthorized",
-        "認証",
-        "ログイン",
-        "content policy",
-        "moderation",
-        "safety system",
-    ]
-    .iter()
-    .any(|pattern| lower.contains(pattern))
-}
 
 #[allow(clippy::too_many_arguments)]
 async fn run_one_worker_inner(
@@ -363,7 +346,7 @@ async fn run_one_worker_inner(
             .map_err(|e| format!("CODEX_HOME 読み込み失敗: {e}"))?;
         for entry in entries.flatten() {
             let name = entry.file_name();
-            if name == "generated_images" || name == "config.toml" {
+            if name == "generated_images" {
                 continue;
             }
             let src = entry.path();
@@ -386,32 +369,6 @@ async fn run_one_worker_inner(
         }
     }
 
-    let mut worker_config = String::new();
-    if let Ok(source_config) = std::fs::read_to_string(codex_home_orig.join("config.toml")) {
-        for line in source_config.lines() {
-            let trimmed = line.trim();
-            if trimmed.starts_with('[') {
-                break;
-            }
-            if let Some((key, _value)) = trimmed.split_once('=') {
-                if matches!(key.trim(), "model" | "model_reasoning_effort") {
-                    worker_config.push_str(trimmed);
-                    worker_config.push('\n');
-                }
-            }
-        }
-    }
-    if !worker_config.is_empty() {
-        worker_config.push('\n');
-    }
-    // js_repl / multi_agent は明示的に無効化する。なぜ: 実行セル(cells)が有効だと
-    // モデルが imagegen を cells ブリッジ(tools.image_gen__imagegen)経由で呼び、
-    // 画像が generated_images/ にファイル保存されず base64 で返る個体が出る
-    // (2026-07-17 実測: 失敗3ワーカーは全て cells 経由、js_repl=false の対照実験は
-    //  参照画像+gpt-5.6-sol/low でも直接呼び出し+ファイル保存に戻った)。
-    worker_config.push_str("[features]\nimage_generation = true\nmulti_agent = false\njs_repl = false\n");
-    std::fs::write(tmp_home.join("config.toml"), worker_config)
-        .map_err(|e| format!("worker config.toml 作成失敗: {e}"))?;
 
     let tmp_gen = tmp_home.join("generated_images");
     std::fs::create_dir_all(&tmp_gen)
@@ -446,12 +403,9 @@ async fn run_one_worker_inner(
     if let Some(m) = model.as_deref().filter(|s| !s.is_empty()) {
         cmd.arg("-c").arg(format!("model={m}"));
     }
-    let effort = effort
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .unwrap_or("low");
-    cmd.arg("-c")
-        .arg(format!("model_reasoning_effort={effort}"));
+    if let Some(e) = effort.as_deref().filter(|s| !s.is_empty()) {
+        cmd.arg("-c").arg(format!("model_reasoning_effort={e}"));
+    }
     for (_, p) in &slots {
         cmd.arg("-i").arg(p);
     }
@@ -525,13 +479,16 @@ async fn run_one_worker_inner(
             if let Ok(files) = std::fs::read_dir(&sess_path) {
                 for f in files.flatten() {
                     let p = f.path();
-                    // codex 0.128系は ig_*.png、0.144系は call_*.png で保存する
-                    let is_ig_png = p.extension().and_then(|e| e.to_str()) == Some("png")
-                        && p.file_name()
-                            .and_then(|n| n.to_str())
-                            .map(|n| n.starts_with("ig_") || n.starts_with("call_"))
+                    // 保存名は codex 世代・経路で変わる (0.128系=ig_*、0.144直接
+                    // 呼び出し=call_*、0.144実行セル経由=exec-*。2026-07-17実測)。
+                    // 内部名に依存すると新経路のたびに壊れるため、ワーカー専用
+                    // generated_images 配下の PNG なら名前を問わず回収する。
+                    let is_png = p.is_file()
+                        && p.extension()
+                            .and_then(|e| e.to_str())
+                            .map(|e| e.eq_ignore_ascii_case("png"))
                             .unwrap_or(false);
-                    if !is_ig_png {
+                    if !is_png {
                         continue;
                     }
                     let mtime = std::fs::metadata(&p)
@@ -564,8 +521,8 @@ async fn run_one_worker_inner(
                 ));
             }
             return Err(
-                "画像が生成されませんでした（AIが画像生成ツールを呼び出さなかった可能性があります）。\
-                 プロンプトをより具体的にするか、短くして再試行してください。"
+                "生成画像を回収できませんでした（画像ツールの出力ファイルが見つかりません）。\
+                 再試行しても続く場合は開発ログの確認が必要です。"
                     .to_string(),
             );
         }

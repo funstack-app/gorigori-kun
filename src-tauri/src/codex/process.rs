@@ -108,11 +108,10 @@ fn login_shell_path() -> Option<OsString> {
 /// macOS/Linux の `:` 区切りでも正しく動く。以前は `:` 固定で Windows の PATH を
 /// 破壊していた。login shell の起動は初回だけにし、結果をプロセス生涯キャッシュする。
 pub fn enriched_path() -> OsString {
-    static ENRICHED_PATH: OnceLock<String> = OnceLock::new();
+    static ENRICHED_PATH: OnceLock<OsString> = OnceLock::new();
 
-    OsString::from(
-        ENRICHED_PATH
-            .get_or_init(|| {
+    ENRICHED_PATH
+        .get_or_init(|| {
                 let mut seen: HashSet<PathBuf> = HashSet::new();
                 let mut parts: Vec<PathBuf> = Vec::new();
                 for src in [std::env::var_os("PATH"), login_shell_path()]
@@ -125,13 +124,10 @@ pub fn enriched_path() -> OsString {
                         }
                     }
                 }
-                std::env::join_paths(parts)
-                    .unwrap_or_else(|_| std::env::var_os("PATH").unwrap_or_default())
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .clone(),
-    )
+            std::env::join_paths(parts)
+                .unwrap_or_else(|_| std::env::var_os("PATH").unwrap_or_default())
+        })
+        .clone()
 }
 
 /// 画像生成バッチ用に **codex CLI (codex exec を取れるバイナリ)** を解決する。

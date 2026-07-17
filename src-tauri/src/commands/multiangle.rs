@@ -728,13 +728,15 @@ fn collect_generated_pngs(dir: &Path, newest: &mut Option<(u128, PathBuf)>) {
             collect_generated_pngs(&path, newest);
             continue;
         }
-        let is_ig_png = path.extension().and_then(OsStr::to_str) == Some("png")
+        // 保存名は codex 世代・経路で変わる(ig_*/call_*/exec-*)。名前に依存せず
+        // ワーカー専用 generated_images 配下の PNG を回収する(2026-07-17)。
+        let is_png = path.is_file()
             && path
-                .file_name()
+                .extension()
                 .and_then(OsStr::to_str)
-                .map(|name| name.starts_with("ig_") || name.starts_with("call_"))
+                .map(|e| e.eq_ignore_ascii_case("png"))
                 .unwrap_or(false);
-        if !is_ig_png {
+        if !is_png {
             continue;
         }
         let mtime = std::fs::metadata(&path)
