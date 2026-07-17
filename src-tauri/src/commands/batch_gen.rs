@@ -25,12 +25,14 @@ use crate::state::AppState;
 
 type ExecFallback = Result<(PathBuf, PathBuf), String>;
 
+#[cfg(not(windows))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AttemptPath {
     Resident,
     Exec,
 }
 
+#[cfg(not(windows))]
 fn next_attempt_path(resident_timed_out: bool) -> AttemptPath {
     if resident_timed_out {
         AttemptPath::Exec
@@ -254,28 +256,57 @@ async fn run_one_worker(
     // リトライは inner 呼び出しだけをループする。
     const MAX_ATTEMPTS: u32 = 3;
     let mut result: Result<String, String> = Err("未実行".to_string());
+    #[cfg(not(windows))]
     let mut attempt_path = AttemptPath::Resident;
     for attempt in 1..=MAX_ATTEMPTS {
-        let mut resident_timed_out = false;
-        result = run_one_worker_inner(
-            &app,
-            &state,
-            exec_fallback.clone(),
-            &out_dir,
-            idx,
-            prompt.clone(),
-            cwd.clone(),
-            ref_paths.clone(),
-            mask_paths.clone(),
-            model.clone(),
-            effort.clone(),
-            aspect.clone(),
-            total_count,
-            attempt_path,
-            &mut resident_timed_out,
-        )
-        .await;
-        attempt_path = next_attempt_path(resident_timed_out);
+        #[cfg(windows)]
+        {
+            // Windows は常駐 app-server を使わず、各試行を従来の exec 経路へ直行させる。
+            result = match exec_fallback.clone() {
+                Ok((codex_bin, codex_home_orig)) => {
+                    run_one_worker_exec_inner(
+                        &app,
+                        codex_bin,
+                        codex_home_orig,
+                        &out_dir,
+                        idx,
+                        prompt.clone(),
+                        cwd.clone(),
+                        ref_paths.clone(),
+                        mask_paths.clone(),
+                        model.clone(),
+                        effort.clone(),
+                        aspect.clone(),
+                        total_count,
+                    )
+                    .await
+                }
+                Err(error) => Err(error),
+            };
+        }
+        #[cfg(not(windows))]
+        {
+            let mut resident_timed_out = false;
+            result = run_one_worker_inner(
+                &app,
+                &state,
+                exec_fallback.clone(),
+                &out_dir,
+                idx,
+                prompt.clone(),
+                cwd.clone(),
+                ref_paths.clone(),
+                mask_paths.clone(),
+                model.clone(),
+                effort.clone(),
+                aspect.clone(),
+                total_count,
+                attempt_path,
+                &mut resident_timed_out,
+            )
+            .await;
+            attempt_path = next_attempt_path(resident_timed_out);
+        }
         if result.is_ok() {
             break;
         }
@@ -336,6 +367,7 @@ async fn run_one_worker(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(not(windows))]
 async fn run_one_worker_inner(
     app: &AppHandle,
     state: &AppState,
@@ -741,10 +773,19 @@ fn short_id() -> String {
     format!("{:016x}", nanos)
 }
 
-/// CODEX_HOME の認証・設定を worker HOME へミラーする。
-/// Unix では symlink、Windows ではコピーを使い、監視対象の
+/// 常駐 `codex-home-gen` のミラー入口。Windows ではビルドせず、旧 exec 経路だけを使う。
+#[cfg(unix)]
+pub(crate) fn mirror_resident_codex_home(
+    codex_home_orig: &Path,
+    worker_home: &Path,
+) -> Result<(), String> {
+    mirror_codex_home(codex_home_orig, worker_home)
+}
+
+/// 旧 exec 経路の一時 worker HOME へ認証・設定をミラーする。
+/// Unix では symlink、Windows では従来どおり一時ディレクトリへコピーし、監視対象の
 /// `generated_images` と会話履歴の `sessions` だけは必ず独立ディレクトリにする。
-pub(crate) fn mirror_codex_home(codex_home_orig: &Path, worker_home: &Path) -> Result<(), String> {
+fn mirror_codex_home(codex_home_orig: &Path, worker_home: &Path) -> Result<(), String> {
     std::fs::create_dir_all(worker_home).map_err(|e| format!("worker CODEX_HOME 作成失敗: {e}"))?;
 
     if codex_home_orig.exists() {
@@ -822,7 +863,7 @@ fn copy_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(windows)))]
 mod tests {
     use super::{next_attempt_path, AttemptPath};
 
