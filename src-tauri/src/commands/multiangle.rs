@@ -732,7 +732,7 @@ fn collect_generated_pngs(dir: &Path, newest: &mut Option<(u128, PathBuf)>) {
             && path
                 .file_name()
                 .and_then(OsStr::to_str)
-                .map(|name| name.starts_with("ig_"))
+                .map(|name| name.starts_with("ig_") || name.starts_with("call_"))
                 .unwrap_or(false);
         if !is_ig_png {
             continue;

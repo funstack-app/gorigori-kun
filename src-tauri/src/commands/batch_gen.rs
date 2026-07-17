@@ -475,10 +475,11 @@ async fn run_one_worker_inner(
             if let Ok(files) = std::fs::read_dir(&sess_path) {
                 for f in files.flatten() {
                     let p = f.path();
+                    // codex 0.128系は ig_*.png、0.144系は call_*.png で保存する
                     let is_ig_png = p.extension().and_then(|e| e.to_str()) == Some("png")
                         && p.file_name()
                             .and_then(|n| n.to_str())
-                            .map(|n| n.starts_with("ig_"))
+                            .map(|n| n.starts_with("ig_") || n.starts_with("call_"))
                             .unwrap_or(false);
                     if !is_ig_png {
                         continue;
