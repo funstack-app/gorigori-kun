@@ -1,5 +1,5 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { storyboard } from "../../../lib/ipc";
 import { useImagePreview } from "../../../lib/store/imagePreview";
@@ -7,7 +7,7 @@ import { usePlanChat } from "../../../lib/store/planChat";
 import { useStoryboardRun } from "../../../lib/store/storyboardRun";
 import { useToasts } from "../../../lib/store/toasts";
 import type { StoryboardSketchCut } from "../../../lib/storyboard/types";
-import { GenerationGauge } from "../../GenerationGauge";
+import { GenerationGauge, recordGenerationDuration } from "../../GenerationGauge";
 
 /**
  * Phase 3: GenerationProgress
@@ -49,6 +49,39 @@ export function GenerationProgressPanel() {
   const setGenerationRunStartedAt = useStoryboardRun((s) => s.setGenerationRunStartedAt);
   const generationStarted = generationRunStartedAt !== null;
   const [now, setNow] = useState(() => Date.now());
+  const previousCutStatusesRef = useRef<Record<string, string>>(
+    Object.fromEntries(Array.from(cuts, ([cutId, cut]) => [cutId, cut.status])),
+  );
+  const cutStartedAtRef = useRef<Record<string, number>>(
+    Object.fromEntries(
+      Array.from(cuts, ([cutId, cut]) =>
+        cut.status === "running"
+          ? [cutId, lastEventAt ?? generationRunStartedAt ?? Date.now()]
+          : [],
+      ).filter((entry) => entry.length === 2),
+    ),
+  );
+
+  useEffect(() => {
+    const previousStatuses = previousCutStatusesRef.current;
+    cuts.forEach((cut, cutId) => {
+      const previousStatus = previousStatuses[cutId];
+      if (cut.status === "running" && previousStatus !== "running") {
+        cutStartedAtRef.current[cutId] = lastEventAt ?? Date.now();
+      } else if (previousStatus === "running" && cut.status === "review") {
+        const startedAt = cutStartedAtRef.current[cutId];
+        if (startedAt != null) {
+          recordGenerationDuration(
+            "storyboard",
+            Math.max(0, (Date.now() - startedAt) / 1000),
+          );
+        }
+      }
+    });
+    previousCutStatusesRef.current = Object.fromEntries(
+      Array.from(cuts, ([cutId, cut]) => [cutId, cut.status]),
+    );
+  }, [cuts, lastEventAt]);
 
   useEffect(() => {
     if (status !== "running") return;
@@ -558,7 +591,11 @@ export function GenerationProgressPanel() {
                       {s?.status === "running" &&
                         (lastEventAt ?? generationRunStartedAt) != null && (
                           <GenerationGauge
-                            startedAt={(lastEventAt ?? generationRunStartedAt) as number}
+                            startedAt={
+                              cutStartedAtRef.current[o.cutId] ??
+                              (lastEventAt ?? generationRunStartedAt) as number
+                            }
+                            mode="storyboard"
                           />
                         )}
 

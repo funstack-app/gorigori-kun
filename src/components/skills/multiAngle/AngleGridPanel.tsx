@@ -1,5 +1,5 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { useMultiAngleRun } from "../../../lib/store/multiAngleRun";
 import { useActiveProject } from "../../../lib/store/activeProject";
@@ -15,7 +15,7 @@ import {
 } from "../../../lib/store/workspace";
 import { getAngleCut } from "../../../lib/multiangle/angles";
 import type { CutState, MultiAngleParams } from "../../../lib/multiangle/types";
-import { GenerationGauge } from "../../GenerationGauge";
+import { GenerationGauge, recordGenerationDuration } from "../../GenerationGauge";
 
 /**
  * 選択中アスペクト比 ("3:4" 等) を CSS の aspect-ratio 値 ("3 / 4") に変換する。
@@ -128,6 +128,27 @@ export function AngleGridPanel({
   const total = orderedCuts.length;
   const hasRunningCut = orderedCuts.some((c) => c.status === "running");
   const [now, setNow] = useState(() => Date.now());
+  const previousStatusesRef = useRef<Record<string, CutState["status"]>>(
+    Object.fromEntries(orderedCuts.map((cut) => [cut.cutId, cut.status])),
+  );
+
+  useEffect(() => {
+    const previousStatuses = previousStatusesRef.current;
+    for (const cut of orderedCuts) {
+      if (previousStatuses[cut.cutId] === "running" && cut.status === "completed") {
+        const startedAt = cutStartedAt[cut.cutId];
+        if (startedAt != null) {
+          recordGenerationDuration(
+            "multiangle",
+            Math.max(0, (Date.now() - startedAt) / 1000),
+          );
+        }
+      }
+    }
+    previousStatusesRef.current = Object.fromEntries(
+      orderedCuts.map((cut) => [cut.cutId, cut.status]),
+    );
+  }, [cuts, cutOrder, cutStartedAt]);
 
   useEffect(() => {
     if (!hasRunningCut) return;
@@ -453,7 +474,10 @@ export function AngleGridPanel({
                         )}秒`
                         : "待機中"}
                       {cut.status === "running" && cutStartedAt[cut.cutId] != null && (
-                        <GenerationGauge startedAt={cutStartedAt[cut.cutId]} />
+                        <GenerationGauge
+                          startedAt={cutStartedAt[cut.cutId]}
+                          mode="multiangle"
+                        />
                       )}
                     </div>
                   </div>
