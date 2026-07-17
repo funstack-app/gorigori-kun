@@ -13,6 +13,7 @@ pub mod edit_ocr;
 pub mod edit_sam2;
 pub mod edit_words;
 pub mod edit_segment;
+pub mod gen_queue;
 pub mod higgsfield_mcp;
 pub mod images;
 pub mod layer_splitter;

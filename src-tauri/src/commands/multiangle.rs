@@ -24,6 +24,7 @@ use tokio::sync::Semaphore;
 use tokio::time::timeout;
 
 use crate::codex::process::{enriched_path, resolve_codex_cli_binary};
+use crate::commands::gen_queue::GLOBAL_GEN_SEMAPHORE;
 use crate::commands::storage::{project_name_from_cwd, resolve_output_dir, StorageSettings};
 use crate::events::EVENT_MULTIANGLE;
 use crate::state::AppState;
@@ -485,6 +486,10 @@ async fn attempt_one_cut(
         .stderr(Stdio::piped());
     crate::codex::process::no_window_flag(&mut cmd);
 
+    let gen_permit = GLOBAL_GEN_SEMAPHORE
+        .acquire()
+        .await
+        .map_err(|_| "画像生成キューが閉じられました".to_string())?;
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("codex exec の spawn に失敗: {e}"))?;
@@ -501,6 +506,7 @@ async fn attempt_one_cut(
     .await
     .map_err(|_| format!("画像生成が {GENERATION_TIMEOUT_SECS} 秒でタイムアウトしました"))?
     .map_err(|e| format!("codex exec 待機失敗: {e}"))?;
+    drop(gen_permit);
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let last = stderr

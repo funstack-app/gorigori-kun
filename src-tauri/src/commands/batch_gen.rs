@@ -25,6 +25,7 @@ use tokio::process::Command;
 use tokio::sync::Semaphore;
 
 use crate::codex::process::{enriched_path, resolve_codex_cli_binary};
+use crate::commands::gen_queue::GLOBAL_GEN_SEMAPHORE;
 use crate::commands::storage::{project_name_from_cwd, resolve_output_dir, StorageSettings};
 use crate::events::EVENT_IMAGE_BATCH;
 
@@ -423,6 +424,10 @@ async fn run_one_worker_inner(
     cmd.kill_on_drop(true);
     crate::codex::process::no_window_flag(&mut cmd);
 
+    let gen_permit = GLOBAL_GEN_SEMAPHORE
+        .acquire()
+        .await
+        .map_err(|_| "画像生成キューが閉じられました".to_string())?;
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("codex exec の spawn に失敗: {e}"))?;
@@ -450,6 +455,7 @@ async fn run_one_worker_inner(
             ));
         }
     };
+    drop(gen_permit);
 
     // 終了コードが非ゼロでも、画像が生成されていれば成功扱いにする
     // (codex が最後に NG 自己申告や非ゼロ終了しても ig_*.png が残っていれば

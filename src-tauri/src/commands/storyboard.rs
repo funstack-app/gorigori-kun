@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use futures::future::join_all;
+use futures::stream::{FuturesUnordered, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, State};
@@ -18,6 +18,7 @@ use tokio::process::Command;
 use tokio::time::timeout;
 
 use crate::codex::process::{enriched_path, resolve_codex_cli_binary};
+use crate::commands::gen_queue::GLOBAL_GEN_SEMAPHORE;
 use crate::commands::storage::{project_name_from_cwd, resolve_output_dir, StorageSettings};
 use crate::events::EVENT_STORYBOARD;
 use crate::state::{AppState, CheckpointAction};
@@ -1089,6 +1090,7 @@ async fn run_storyboard_orchestrator(
                 .collect::<Vec<_>>();
 
             let generated = generate_cut_takes(
+                &app,
                 &codex_bin,
                 &codex_home_orig,
                 &structured_prompt,
@@ -1109,15 +1111,6 @@ async fn run_storyboard_orchestrator(
                         // 評価は行わない (撤去済み)。全 take をデフォルトスコアで素通し。
                         let scores = ScoreBundle::default();
                         let image_path_string = image_path.to_string_lossy().into_owned();
-                        let _ = app.emit(
-                            EVENT_STORYBOARD,
-                            StoryboardEvent::TakeCompleted {
-                                cut_id: cut.cut_id.clone(),
-                                take_id: take_id.clone(),
-                                image_path: image_path_string.clone(),
-                                scores: scores.clone(),
-                            },
-                        );
                         all_takes_for_manifest.push(ManifestTake {
                             take_id: take_id.clone(),
                             image_path: image_path_string,
@@ -2583,6 +2576,7 @@ fn previous_shot_summary(previous: &[String]) -> String {
 }
 
 async fn generate_cut_takes(
+    app: &AppHandle,
     codex_bin: &Path,
     codex_home_orig: &Path,
     structured_prompt: &Value,
@@ -2594,26 +2588,51 @@ async fn generate_cut_takes(
     aspect_ratio: &str,
     sketch_mode: bool,
 ) -> Vec<Result<(String, PathBuf), String>> {
-    let tasks = take_specs
+    let mut tasks = take_specs
         .iter()
-        .map(|(take_id, idx)| {
-            generate_one_take(
-                codex_bin,
-                codex_home_orig,
-                structured_prompt,
-                reference_images,
-                output_dir,
-                cut_id,
-                take_id,
-                *idx,
-                take_specs.len() as u32,
-                cwd.clone(),
-                aspect_ratio,
-                sketch_mode,
-            )
+        .enumerate()
+        .map(|(order, (take_id, idx))| {
+            let cwd = cwd.clone();
+            async move {
+                let result = generate_one_take(
+                    codex_bin,
+                    codex_home_orig,
+                    structured_prompt,
+                    reference_images,
+                    output_dir,
+                    cut_id,
+                    take_id,
+                    *idx,
+                    take_specs.len() as u32,
+                    cwd,
+                    aspect_ratio,
+                    sketch_mode,
+                )
+                .await;
+                (order, result)
+            }
         })
-        .collect::<Vec<_>>();
-    join_all(tasks).await
+        .collect::<FuturesUnordered<_>>();
+
+    let mut completed = Vec::with_capacity(take_specs.len());
+    while let Some((order, result)) = tasks.next().await {
+        if let Ok((take_id, image_path)) = &result {
+            let _ = app.emit(
+                EVENT_STORYBOARD,
+                StoryboardEvent::TakeCompleted {
+                    cut_id: cut_id.to_string(),
+                    take_id: take_id.clone(),
+                    image_path: image_path.to_string_lossy().into_owned(),
+                    scores: ScoreBundle::default(),
+                },
+            );
+        }
+        completed.push((order, result));
+    }
+
+    // 表示は完成順に行うが、主候補の選択結果は従来どおり take 番号順に保つ。
+    completed.sort_by_key(|(order, _)| *order);
+    completed.into_iter().map(|(_, result)| result).collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2741,6 +2760,10 @@ async fn attempt_one_take(
         .stderr(Stdio::piped());
     crate::codex::process::no_window_flag(&mut cmd);
 
+    let gen_permit = GLOBAL_GEN_SEMAPHORE
+        .acquire()
+        .await
+        .map_err(|_| "画像生成キューが閉じられました".to_string())?;
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("codex exec の spawn に失敗: {e}"))?;
@@ -2757,6 +2780,7 @@ async fn attempt_one_take(
     .await
     .map_err(|_| format!("画像生成が {GENERATION_TIMEOUT_SECS} 秒でタイムアウトしました"))?
     .map_err(|e| format!("codex exec 待機失敗: {e}"))?;
+    drop(gen_permit);
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let last = stderr
