@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { type ImageBatchEvent, type ImageBatchProvider } from "../ipc";
+import { recordGenerationDuration } from "../../components/GenerationGauge";
 
 // ──────────── Types ────────────
 
@@ -226,6 +227,15 @@ export const useBatches = create<BatchesState>((set, _get) => ({
         const wi = batch.workers.findIndex((w) => w.idx === e.idx);
         if (wi !== -1) {
           const prev = batch.workers[wi];
+          // ゲージ学習の実測記録は store 層で行う(画面部品の生死に依存しない。
+          // 完成と同時に親レイアウトが切り替わると部品側 effect は遷移を観測
+          // できないことがある — 2026-07-17 学習データ0件の実測より)
+          if (prev.status === "running" && prev.runningAt != null) {
+            recordGenerationDuration(
+              "batch",
+              Math.max(0, (Date.now() - prev.runningAt) / 1000),
+            );
+          }
           batch.workers[wi] = {
             idx: e.idx,
             status: "completed",

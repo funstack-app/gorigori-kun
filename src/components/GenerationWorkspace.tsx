@@ -36,7 +36,7 @@ import { StoryboardCutCard } from "./StoryboardCutCard";
 import { SkillRunActions } from "./SkillRunActions";
 import { extractDropped, isImageDrop, setDragRef } from "../lib/dragRef";
 import { sendImageToPlanForRediscuss } from "../lib/sendToPlan";
-import { GenerationGauge, recordGenerationDuration } from "./GenerationGauge";
+import { GenerationGauge } from "./GenerationGauge";
 
 export function GenerationWorkspace() {
   const activeTab = useWorkspace((s) => s.activeTab);
@@ -930,19 +930,6 @@ function WorkerTile({
       ? worker.runningAt
       : undefined;
   const isRunning = worker.status === "running" && workerStartedAt != null;
-  const startedAtRef = useRef<number | undefined>(workerStartedAt);
-  const previousStatusRef = useRef(worker.status);
-  if (workerStartedAt != null) startedAtRef.current = workerStartedAt;
-
-  useEffect(() => {
-    if (previousStatusRef.current === "running" && worker.status === "completed") {
-      const startedAt = startedAtRef.current;
-      if (startedAt != null) {
-        recordGenerationDuration("batch", Math.max(0, (Date.now() - startedAt) / 1000));
-      }
-    }
-    previousStatusRef.current = worker.status;
-  }, [worker.status]);
 
   const elapsed = useElapsedSeconds(isRunning, workerStartedAt);
   if (worker.status === "completed") {
