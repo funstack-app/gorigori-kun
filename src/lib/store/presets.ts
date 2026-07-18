@@ -145,9 +145,42 @@ export function presetAttachedImagesToReferences(
   }));
 }
 
+/**
+ * プリセットの種別（2026-07-19 スキル一覧v2.1 キャラクター登録）。
+ * プリセット = プロンプトもキャラも入る型付きの箱（専用ボタンは増やさない方針）。
+ * undefined は後方互換で "prompt" として扱う。
+ */
+export type PresetKind = "prompt" | "character";
+
+/**
+ * キャラ型プリセットのメタ情報。正本画像（3面図/表情/ディテール）は
+ * attachedImages に格納し、既存の composer 流し込み経路をそのまま使う。
+ */
+export type CharacterMeta = {
+  /** 属性テキスト（髪色・目・服装・体型など）。生成プロンプトに自動合成する */
+  attributes?: string;
+  /** 正本画像の役割マップ: path -> "front" | "side" | "back" | "face-detail" | "expression-*" 等 */
+  sheetRoles?: Record<string, string>;
+  /** IPアセット化パイプラインの同一性検品スコア（0-100） */
+  identityScore?: number;
+  /** 検品を通した日時（epoch ms）。未検品は undefined */
+  verifiedAt?: number;
+  /** 生成元になった元画像のパス */
+  sourceImage?: string;
+};
+
+/** kind 未設定の旧データを含めて種別を解決する。 */
+export function presetKind(preset: Preset): PresetKind {
+  return preset.kind === "character" ? "character" : "prompt";
+}
+
 export type Preset = {
   id: string;
   name: string;
+  /** 種別。undefined は後方互換で "prompt"。判定は presetKind() を使う */
+  kind?: PresetKind;
+  /** kind === "character" のときだけ持つメタ */
+  characterMeta?: CharacterMeta;
   /** プロンプトに挿入される本文。日本語可、@imgN 記法も使える */
   prompt: string;
   /** どのカテゴリに属すか。null は「未分類」 */
@@ -372,6 +405,11 @@ export const usePresets = create<PresetsState>((set, get) => ({
     const preset: Preset = {
       id: generateId(),
       name: data.name.trim(),
+      kind: data.kind === "character" ? "character" : undefined,
+      characterMeta:
+        data.kind === "character" && data.characterMeta
+          ? data.characterMeta
+          : undefined,
       prompt: data.prompt,
       categoryId: data.categoryId,
       description: data.description?.trim() || undefined,
