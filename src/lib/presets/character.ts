@@ -36,7 +36,10 @@ export function composePresetPrompt(
   separator = ", ",
 ): string {
   const character = characterPromptText(preset);
-  if (!character) return preset.prompt;
   const body = preset.prompt.trim();
+  // 属性テキストが無ければプロンプト本文だけを返す（空/空白のみなら空文字）。
+  // これで「preset.prompt が空白のみ」でも区切りだけが付く事故は起きない。
+  if (!character) return body;
+  // 本文が空/空白のみなら属性テキストのみ（先頭に区切りが付かない）。
   return body ? `${body}${separator}${character}` : character;
 }

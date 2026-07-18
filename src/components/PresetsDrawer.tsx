@@ -75,6 +75,16 @@ export function PresetsDrawer({ fullPage = false }: { fullPage?: boolean }) {
    * draftAttachedImages で保持して編集UIに反映する。
    */
   const [draftAttachedImages, setDraftAttachedImages] = useState<string[]>([]);
+  /**
+   * 編集中プリセットの種別と characterMeta を保持する。
+   * kind === "character" のとき、属性 textarea を出し、保存時は characterMeta を
+   * 維持したまま attributes だけ更新する（kind/他フィールドを黙って落とさない）。
+   */
+  const [draftKind, setDraftKind] = useState<"prompt" | "character">("prompt");
+  const [draftCharacterMeta, setDraftCharacterMeta] = useState<
+    Preset["characterMeta"] | undefined
+  >(undefined);
+  const [draftCharacterAttributes, setDraftCharacterAttributes] = useState<string>("");
   const [newCategoryName, setNewCategoryName] = useState<string>("");
   const [newCategoryColor, setNewCategoryColor] = useState<string>(DEFAULT_NEW_CATEGORY_COLOR);
   const [query, setQuery] = useState<string>("");
@@ -91,7 +101,9 @@ export function PresetsDrawer({ fullPage = false }: { fullPage?: boolean }) {
     const q = query.trim().toLowerCase();
     const searched = q
       ? kindFiltered.filter((p) =>
-          `${p.name} ${p.prompt} ${p.description ?? ""}`.toLowerCase().includes(q),
+          `${p.name} ${p.prompt} ${p.description ?? ""} ${p.characterMeta?.attributes ?? ""}`
+            .toLowerCase()
+            .includes(q),
         )
       : kindFiltered;
     return sortPresets(searched, sortKey);
@@ -106,6 +118,9 @@ export function PresetsDrawer({ fullPage = false }: { fullPage?: boolean }) {
     setDraftThumbnail(undefined);
     setDraftThumbnailFocus(undefined);
     setDraftAttachedImages([]);
+    setDraftKind("prompt");
+    setDraftCharacterMeta(undefined);
+    setDraftCharacterAttributes("");
   };
 
   const startEdit = (preset: Preset) => {
@@ -120,6 +135,11 @@ export function PresetsDrawer({ fullPage = false }: { fullPage?: boolean }) {
     setDraftAttachedImages(
       preset.attachedImages ? preset.attachedImages.map((a) => a.path) : [],
     );
+    // キャラ型なら characterMeta を丸ごと保持し、attributes を編集欄へ復元。
+    // 保存時は characterMeta を維持したまま attributes だけ差し替える。
+    setDraftKind(presetKind(preset));
+    setDraftCharacterMeta(preset.characterMeta);
+    setDraftCharacterAttributes(preset.characterMeta?.attributes ?? "");
   };
 
   const cancelEdit = () => {
@@ -131,22 +151,41 @@ export function PresetsDrawer({ fullPage = false }: { fullPage?: boolean }) {
     setDraftThumbnail(undefined);
     setDraftThumbnailFocus(undefined);
     setDraftAttachedImages([]);
+    setDraftKind("prompt");
+    setDraftCharacterMeta(undefined);
+    setDraftCharacterAttributes("");
   };
 
   const savePreset = () => {
     const name = draftName.trim();
     const prompt = draftPrompt.trim();
-    if (!name || !prompt) return;
+    const attributes = draftCharacterAttributes.trim();
+    const isCharacter = draftKind === "character";
+    // キャラ型は属性 or プロンプトのどちらかがあれば保存可。
+    // プロンプト型は従来どおりプロンプト必須。
+    const hasContent = isCharacter ? !!prompt || !!attributes : !!prompt;
+    if (!name || !hasContent) return;
     // サムネが無いなら focus は無意味なので落とす
     const focusOnSave = draftThumbnail ? draftThumbnailFocus : undefined;
     const attachedImagesForSave =
       draftAttachedImages.length > 0
         ? draftAttachedImages.map((path) => ({ path, role: "subject" }))
         : undefined;
+    // キャラ型のみ characterMeta を更新して渡す。既存の characterMeta
+    // (sheetRoles / identityScore / verifiedAt / sourceImage 等) を維持したまま
+    // attributes だけ差し替える。空なら attributes を落とす。
+    const characterMetaForSave = isCharacter
+      ? {
+          ...(draftCharacterMeta ?? {}),
+          attributes: attributes || undefined,
+        }
+      : undefined;
     if (editingPresetId === "__new__") {
       addPreset({
         name,
         prompt,
+        kind: isCharacter ? "character" : undefined,
+        characterMeta: characterMetaForSave,
         description: draftDescription.trim() || undefined,
         categoryId: activeCategoryId,
         tags: draftTags.length > 0 ? draftTags : undefined,
@@ -158,6 +197,9 @@ export function PresetsDrawer({ fullPage = false }: { fullPage?: boolean }) {
       updatePreset(editingPresetId, {
         name,
         prompt,
+        // kind は編集で変えない。characterMeta はキャラ型のときだけ更新する
+        // （プロンプト型に characterMeta を書き込まない）。
+        ...(isCharacter ? { characterMeta: characterMetaForSave } : {}),
         description: draftDescription.trim() || undefined,
         tags: draftTags.length > 0 ? draftTags : undefined,
         thumbnail: draftThumbnail,
@@ -232,8 +274,10 @@ export function PresetsDrawer({ fullPage = false }: { fullPage?: boolean }) {
   const presetFormModal = editingPresetId ? (
     <PresetFormModal
       isNew={editingPresetId === "__new__"}
+      kind={draftKind}
       name={draftName}
       prompt={draftPrompt}
+      characterAttributes={draftCharacterAttributes}
       description={draftDescription}
       tags={draftTags}
       thumbnail={draftThumbnail}
@@ -241,6 +285,7 @@ export function PresetsDrawer({ fullPage = false }: { fullPage?: boolean }) {
       attachedImages={draftAttachedImages}
       onChangeName={setDraftName}
       onChangePrompt={setDraftPrompt}
+      onChangeCharacterAttributes={setDraftCharacterAttributes}
       onChangeDescription={setDraftDescription}
       onChangeTags={setDraftTags}
       onChangeThumbnail={setDraftThumbnail}
@@ -680,8 +725,12 @@ function CategoryRow({
 
 type PresetFormProps = {
   isNew: boolean;
+  /** プリセット種別。"character" のとき属性 textarea を出す。 */
+  kind: "prompt" | "character";
   name: string;
   prompt: string;
+  /** キャラ型の属性テキスト（髪色・目・服装など）。プロンプト型では使わない。 */
+  characterAttributes: string;
   description: string;
   tags: string[];
   thumbnail?: string;
@@ -690,6 +739,7 @@ type PresetFormProps = {
   attachedImages: string[];
   onChangeName: (next: string) => void;
   onChangePrompt: (next: string) => void;
+  onChangeCharacterAttributes: (next: string) => void;
   onChangeDescription: (next: string) => void;
   onChangeTags: (next: string[]) => void;
   onChangeThumbnail: (next: string | undefined) => void;
@@ -773,8 +823,10 @@ function PresetFormModal(props: PresetFormProps) {
 
 function PresetForm({
   isNew,
+  kind,
   name,
   prompt,
+  characterAttributes,
   description,
   tags,
   thumbnail,
@@ -782,6 +834,7 @@ function PresetForm({
   attachedImages,
   onChangeName,
   onChangePrompt,
+  onChangeCharacterAttributes,
   onChangeDescription,
   onChangeTags,
   onChangeThumbnail,
@@ -790,7 +843,13 @@ function PresetForm({
   onSave,
   onCancel,
 }: PresetFormProps) {
-  const canSave = name.trim().length > 0 && prompt.trim().length > 0;
+  const isCharacter = kind === "character";
+  // キャラ型は属性 or プロンプトのどちらかがあれば保存可。プロンプト型はプロンプト必須。
+  const canSave =
+    name.trim().length > 0 &&
+    (isCharacter
+      ? prompt.trim().length > 0 || characterAttributes.trim().length > 0
+      : prompt.trim().length > 0);
   const [tagDraft, setTagDraft] = useState<string>("");
 
   /** Enter 単独では保存しない。Cmd/Ctrl+Enter のときだけ保存トリガー。
@@ -902,10 +961,32 @@ function PresetForm({
         value={prompt}
         onChange={(event) => onChangePrompt(event.target.value)}
         onKeyDown={onInputKey}
-        placeholder="プロンプト本文（プリセットを呼ぶと末尾に追記されます）"
+        placeholder={
+          isCharacter
+            ? "プロンプト本文（任意。属性だけでも保存できます）"
+            : "プロンプト本文（プリセットを呼ぶと末尾に追記されます）"
+        }
         rows={5}
         className="w-full resize-none rounded-md border border-[#343434] bg-[#0b0b0b] p-2 font-mono text-[11px] leading-5 text-neutral-100 outline-none focus:border-pink-400"
       />
+
+      {/* キャラ型プリセットのみ: 属性テキスト（髪色・目・服装・体型など）を編集する。
+          生成時に characterPromptText() でプロンプトへ自動合成される。 */}
+      {isCharacter && (
+        <div className="space-y-1.5">
+          <span className="text-[10px] font-black uppercase tracking-wide text-neutral-500">
+            キャラ属性
+          </span>
+          <textarea
+            value={characterAttributes}
+            onChange={(event) => onChangeCharacterAttributes(event.target.value)}
+            onKeyDown={onInputKey}
+            placeholder="髪色・目の色・服装・体型など（生成時にプロンプトへ自動で足されます）"
+            rows={3}
+            className="w-full resize-none rounded-md border border-[#343434] bg-[#0b0b0b] p-2 text-[11px] leading-5 text-neutral-100 outline-none focus:border-pink-400"
+          />
+        </div>
+      )}
 
       {/*
         STΛCK 報告 (2026-05-19): プリセット編集モーダルで attachedImages (キャラ画像)

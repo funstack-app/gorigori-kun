@@ -65,7 +65,8 @@ function matchesTagTokens(preset: Preset, tagTokens: string[]): boolean {
 
 function matchesTextTokens(preset: Preset, textTokens: string[]): boolean {
   if (textTokens.length === 0) return true;
-  const haystack = `${preset.name} ${preset.prompt} ${preset.description ?? ""}`.toLowerCase();
+  const haystack =
+    `${preset.name} ${preset.prompt} ${preset.description ?? ""} ${preset.characterMeta?.attributes ?? ""}`.toLowerCase();
   return textTokens.every((textToken) => haystack.includes(textToken));
 }
 
