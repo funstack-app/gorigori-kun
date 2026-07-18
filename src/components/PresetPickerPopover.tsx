@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
   focusToImageStyle,
+  presetKind,
   usePresets,
   type Preset,
   type PresetCategory,
@@ -440,6 +441,7 @@ function PickerRow({
   onPick: () => void;
 }) {
   const isFavorite = !!preset.favorite;
+  const isCharacter = presetKind(preset) === "character";
   // ユーザー指摘: グリッド / リスト / ピッカー（制作タブから呼ばれる）で
   // サムネ見え方を完全統一する。focal point + zoom の両方を反映。
   const imageStyle = focusToImageStyle(preset.thumbnailFocus);
@@ -468,6 +470,15 @@ function PickerRow({
       </span>
       <span className="min-w-0 flex-1">
         <span className="flex items-center gap-1.5">
+          {isCharacter && (
+            <span
+              className="inline-flex shrink-0 items-center gap-0.5 rounded-full border border-pink-400/60 bg-pink-500/10 px-1.5 py-px text-[9px] font-black text-pink-300"
+              title="キャラクター登録"
+            >
+              <span aria-hidden>👤</span>
+              キャラ
+            </span>
+          )}
           <span className="block truncate font-bold">{preset.name}</span>
           {isFavorite && (
             <span className="shrink-0 text-[10px] text-pink-400" aria-hidden>

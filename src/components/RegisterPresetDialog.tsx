@@ -6,7 +6,7 @@ import {
   type PromptHistoryRow,
   type TurnWithImages,
 } from "../lib/ipc";
-import { usePresets } from "../lib/store/presets";
+import { usePresets, type PresetKind } from "../lib/store/presets";
 import { useToasts } from "../lib/store/toasts";
 import { SafeImage } from "./SafeImage";
 
@@ -97,6 +97,13 @@ export function RegisterPresetDialog({ imagePath, defaultName, onClose }: Props)
   const [name, setName] = useState(defaultName ?? deriveDefaultName(imagePath));
   const [prompt, setPrompt] = useState("");
   const [categoryId, setCategoryId] = useState<string | null>(null);
+  /**
+   * プリセット種別（2026-07-19 キャラクター登録）。
+   * "prompt" = 従来のプロンプトプリセット、"character" = キャラクター登録。
+   * キャラ選択時は属性テキスト（attributes）を追加入力できる。
+   */
+  const [kind, setKind] = useState<PresetKind>("prompt");
+  const [characterAttributes, setCharacterAttributes] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -148,8 +155,15 @@ export function RegisterPresetDialog({ imagePath, defaultName, onClose }: Props)
   }, [imagePath]);
 
   const canSave = useMemo(
-    () => name.trim().length > 0 && prompt.trim().length > 0 && !saving,
-    [name, prompt, saving],
+    () =>
+      name.trim().length > 0 &&
+      // キャラ登録は属性テキストで代替できるためプロンプト空でも可。
+      // プロンプト型は従来どおりプロンプト必須。
+      (kind === "character"
+        ? prompt.trim().length > 0 || characterAttributes.trim().length > 0
+        : prompt.trim().length > 0) &&
+      !saving,
+    [name, prompt, kind, characterAttributes, saving],
   );
 
   const handleSave = async () => {
@@ -160,9 +174,18 @@ export function RegisterPresetDialog({ imagePath, defaultName, onClose }: Props)
       // 問題対策。登録元画像から 256x256 中央クロップ JPEG を生成して thumbnail
       // フィールドに保存する。失敗してもプリセット登録自体は続行。
       const thumbnail = await generateThumbnailDataUrl(imagePath);
+      const attrs = characterAttributes.trim();
       addPreset({
         name: name.trim(),
         prompt: prompt.trim(),
+        kind: kind === "character" ? "character" : undefined,
+        characterMeta:
+          kind === "character"
+            ? {
+                attributes: attrs || undefined,
+                sourceImage: imagePath,
+              }
+            : undefined,
         categoryId,
         thumbnail: thumbnail ?? undefined,
         attachedImages:
@@ -202,7 +225,9 @@ export function RegisterPresetDialog({ imagePath, defaultName, onClose }: Props)
             <p className="text-[10px] font-black uppercase tracking-wide text-neutral-500">
               SELECT
             </p>
-            <h3 className="text-sm font-black text-white">プリセットに登録</h3>
+            <h3 className="text-sm font-black text-white">
+              {kind === "character" ? "キャラクターとして登録" : "プリセットに登録"}
+            </h3>
           </div>
           <button
             type="button"
@@ -278,6 +303,38 @@ export function RegisterPresetDialog({ imagePath, defaultName, onClose }: Props)
 
           {/* 右カラム: 入力フォーム */}
           <div className="flex flex-col gap-4">
+            {/* 種別トグル: プロンプト / キャラクター。
+                プリセット = プロンプトもキャラも入る型付きの箱（専用ボタンは増やさない）。 */}
+            <div className="flex flex-col gap-1.5">
+              <span className="text-xs font-bold text-neutral-300">種別</span>
+              <div className="flex h-10 overflow-hidden rounded-md border border-[#343434] bg-[#101010]">
+                <button
+                  type="button"
+                  onClick={() => setKind("prompt")}
+                  className={[
+                    "flex-1 text-xs font-bold transition",
+                    kind === "prompt"
+                      ? "bg-pink-500 text-white"
+                      : "text-neutral-400 hover:text-white",
+                  ].join(" ")}
+                >
+                  プロンプト
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setKind("character")}
+                  className={[
+                    "flex-1 border-l border-[#343434] text-xs font-bold transition",
+                    kind === "character"
+                      ? "bg-pink-500 text-white"
+                      : "text-neutral-400 hover:text-white",
+                  ].join(" ")}
+                >
+                  👤 キャラクター
+                </button>
+              </div>
+            </div>
+
             <label className="flex flex-col gap-1.5 text-xs font-bold text-neutral-300">
               名前
               <input
@@ -303,6 +360,22 @@ export function RegisterPresetDialog({ imagePath, defaultName, onClose }: Props)
                 ))}
               </select>
             </label>
+
+            {kind === "character" && (
+              <label className="flex flex-col gap-1.5 text-xs font-bold text-neutral-300">
+                属性（髪色・目・服装・体型など）
+                <textarea
+                  value={characterAttributes}
+                  onChange={(e) => setCharacterAttributes(e.target.value)}
+                  rows={4}
+                  className="min-h-[88px] resize-none rounded-md border border-[#343434] bg-[#101010] px-3 py-2 text-sm text-neutral-100 outline-none focus:border-pink-400"
+                  placeholder="例: 黒髪ロング / 青い瞳 / 白いワンピース / 華奢な体型"
+                />
+                <span className="text-[10px] font-normal text-neutral-500">
+                  生成時にこの属性テキストがプロンプトへ自動合成されます。
+                </span>
+              </label>
+            )}
 
             <label className="flex min-h-0 flex-1 flex-col gap-1.5 text-xs font-bold text-neutral-300">
               プロンプト

@@ -6,6 +6,7 @@ import { SafeImage } from "./SafeImage";
 import { extractDropped, fileToUploadReference, isImageDrop } from "../lib/dragRef";
 import {
   focusToImageStyle,
+  presetKind,
   sortPresets,
   usePresets,
   type Preset,
@@ -79,17 +80,22 @@ export function PresetsDrawer({ fullPage = false }: { fullPage?: boolean }) {
   const [query, setQuery] = useState<string>("");
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
   const [sortKey, setSortKey] = useState<SortKey>("updatedDesc");
+  /** キャラ絞り込み。true のときは kind === "character" のプリセットだけ表示。 */
+  const [characterOnly, setCharacterOnly] = useState<boolean>(false);
 
   const visiblePresets = useMemo<Preset[]>(() => {
     const inCategory = presets.filter((p) => p.categoryId === activeCategoryId);
+    const kindFiltered = characterOnly
+      ? inCategory.filter((p) => presetKind(p) === "character")
+      : inCategory;
     const q = query.trim().toLowerCase();
     const searched = q
-      ? inCategory.filter((p) =>
+      ? kindFiltered.filter((p) =>
           `${p.name} ${p.prompt} ${p.description ?? ""}`.toLowerCase().includes(q),
         )
-      : inCategory;
+      : kindFiltered;
     return sortPresets(searched, sortKey);
-  }, [presets, activeCategoryId, query, sortKey]);
+  }, [presets, activeCategoryId, query, sortKey, characterOnly]);
 
   const startNew = () => {
     setEditingPresetId("__new__");
@@ -279,8 +285,23 @@ export function PresetsDrawer({ fullPage = false }: { fullPage?: boolean }) {
             onDragEnd: () => setDragId(null),
             className: dragId === preset.id ? "opacity-40" : "",
           };
+          const isCharacter = presetKind(preset) === "character";
           return isGridView ? (
-            <div key={preset.id} {...dragProps} title="ドラッグで並び替え">
+            <div
+              key={preset.id}
+              {...dragProps}
+              title="ドラッグで並び替え"
+              className={["relative", dragProps.className].join(" ").trim()}
+            >
+              {isCharacter && (
+                <span
+                  className="pointer-events-none absolute left-1/2 top-2 z-20 flex -translate-x-1/2 items-center gap-1 rounded-full border border-pink-400/60 bg-black/80 px-2 py-0.5 text-[9px] font-black text-pink-200 shadow-lg"
+                  title="キャラクター登録"
+                >
+                  <span aria-hidden>👤</span>
+                  キャラ
+                </span>
+              )}
               <PresetCard
                 preset={preset}
                 onEdit={() => startEdit(preset)}
@@ -363,13 +384,29 @@ export function PresetsDrawer({ fullPage = false }: { fullPage?: boolean }) {
                 </button>
               </div>
             </div>
-            <input
-              type="search"
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="検索（名前 / プロンプト本文 / メモ）"
-              className="h-9 w-full rounded-md border border-[#343434] bg-[#101010] px-3 text-xs text-neutral-100 outline-none focus:border-pink-400"
-            />
+            <div className="flex items-center gap-2">
+              <input
+                type="search"
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder="検索（名前 / プロンプト本文 / メモ）"
+                className="h-9 min-w-0 flex-1 rounded-md border border-[#343434] bg-[#101010] px-3 text-xs text-neutral-100 outline-none focus:border-pink-400"
+              />
+              <button
+                type="button"
+                onClick={() => setCharacterOnly((v) => !v)}
+                className={[
+                  "flex h-9 shrink-0 items-center gap-1.5 rounded-full border px-3 text-[11px] font-bold transition",
+                  characterOnly
+                    ? "border-pink-400 bg-pink-500/10 text-white"
+                    : "border-[#343434] bg-[#101010] text-neutral-400 hover:border-neutral-500 hover:text-neutral-200",
+                ].join(" ")}
+                title="キャラクター登録のみ表示"
+              >
+                <span aria-hidden>👤</span>
+                <span>キャラ</span>
+              </button>
+            </div>
             <div className="min-h-0 flex-1 overflow-y-auto pr-1">{presetGrid}</div>
           </main>
         </div>
@@ -1158,6 +1195,7 @@ function PresetRow({
 }) {
   const tags = preset.tags ?? [];
   const isFavorite = !!preset.favorite;
+  const isCharacter = presetKind(preset) === "character";
   // ユーザー指摘: グリッド / リスト / ピッカーで見え方を統一する。
   // focal point + zoom の両方を反映する（編集時に設定した見え方そのまま）。
   const imageStyle = focusToImageStyle(preset.thumbnailFocus);
@@ -1182,6 +1220,15 @@ function PresetRow({
       </div>
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
+          {isCharacter && (
+            <span
+              className="inline-flex shrink-0 items-center gap-0.5 rounded-full border border-pink-400/60 bg-pink-500/10 px-1.5 py-px text-[9px] font-black text-pink-300"
+              title="キャラクター登録"
+            >
+              <span aria-hidden>👤</span>
+              キャラ
+            </span>
+          )}
           <div className="truncate text-xs font-bold text-neutral-100">{preset.name}</div>
           {tags.length > 0 && (
             <div className="hidden shrink-0 flex-wrap items-center gap-1 sm:flex">
