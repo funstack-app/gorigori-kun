@@ -19,9 +19,9 @@ export const EVENT_CHARACTER_SHEET = "codex://character-sheet";
  */
 export type CharacterSheetEvent =
   | { kind: "started"; runId: string; total: number }
-  | { kind: "cutStarted"; cutId: string; role: string; index: number }
-  | { kind: "cutCompleted"; cutId: string; role: string; imagePath: string }
-  | { kind: "cutFailed"; cutId: string; reason: string }
+  | { kind: "cutStarted"; runId: string; cutId: string; role: string; index: number }
+  | { kind: "cutCompleted"; runId: string; cutId: string; role: string; imagePath: string }
+  | { kind: "cutFailed"; runId: string; cutId: string; reason: string }
   | { kind: "completed"; runId: string; outputDir: string };
 
 /** 1カット分の仕様。Rust 側 `SheetCutSpec` (camelCase) と一致。 */
@@ -41,6 +41,9 @@ export type CharacterSheetParams = {
   aspectRatio: string;
   cutSpecs: SheetCutSpec[];
   cwd?: string;
+  /** フロントが先に採番する run_id。beginRun 時点から確定 run_id を持ち、
+   *  画面往復後の別 run 後着通知を照合で捨てるために使う (B1 混線対策)。 */
+  runId?: string;
 };
 
 /** ストアが保持する1カットの実行状態。 */

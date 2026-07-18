@@ -142,6 +142,14 @@ export const useCharacterSheetRun = create<CharacterSheetRunState>((set) => ({
 
   applyEvent: (e) =>
     set((s) => {
+      // 後着通知混線対策(B1): 現在の run と runId が一致しないイベントは捨てる。
+      // 表情生成中にキャラ登録へ移動すると、前 run の遅延通知が別 run の状態・画像・
+      // 実行番号を上書きし得るため、runId 照合で自分の run のイベントだけ適用する。
+      // s.runId が未確定(null)のときは照合できないので従来どおり適用する
+      // (beginRun で確定 runId を先に建てる運用では通常ここは通らない)。
+      if (s.runId !== null && e.runId !== s.runId) {
+        return s;
+      }
       switch (e.kind) {
         case "started":
           return { status: "running" as const, runId: e.runId };

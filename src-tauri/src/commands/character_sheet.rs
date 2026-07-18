@@ -53,8 +53,15 @@ pub struct CharacterSheetParams {
     /// 出力先プロジェクト判定用の cwd (任意)。
     #[serde(default)]
     pub cwd: Option<String>,
+    /// フロントが先に採番する run_id (任意)。渡された場合はそれを使い、
+    /// beginRun 時点から確定 run_id を持てるようにする (B1 後着通知混線対策)。
+    /// 省略時はバックエンドで採番する (再生成など既存経路の互換のため)。
+    #[serde(default)]
+    pub run_id: Option<String>,
 }
 
+/// この run を識別するトークン。全バリアントに載せてフロントで照合し、
+/// 画面往復で別 run の後着通知が現在の状態を汚染するのを防ぐ (B1 混線対策)。
 #[derive(Serialize, Clone)]
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum CharacterSheetEvent {
@@ -63,16 +70,19 @@ pub enum CharacterSheetEvent {
         total: u32,
     },
     CutStarted {
+        run_id: String,
         cut_id: String,
         role: String,
         index: u32,
     },
     CutCompleted {
+        run_id: String,
         cut_id: String,
         role: String,
         image_path: String,
     },
     CutFailed {
+        run_id: String,
         cut_id: String,
         reason: String,
     },
@@ -95,9 +105,15 @@ pub async fn character_sheet_run(
 
     let codex_bin =
         resolve_codex_cli_binary().map_err(|e| format!("Codex CLI の解決に失敗: {e}"))?;
-    let run_id = format!("{}-{}", timestamp_id(), short_id());
+    // フロントが先に採番した run_id があればそれを使う。beginRun 時点から確定 run_id を
+    // 持てるので、全イベントがその run_id を載せ、画面往復後の後着通知を照合で捨てられる。
+    let run_id = match params.run_id.as_deref() {
+        Some(id) if !id.trim().is_empty() => id.to_string(),
+        _ => format!("{}-{}", timestamp_id(), short_id()),
+    };
     let task_run_id = run_id.clone();
 
+    let fail_run_id = run_id.clone();
     tokio::spawn(async move {
         if let Err(err) = run_character_sheet_orchestrator(
             app.clone(),
@@ -112,6 +128,7 @@ pub async fn character_sheet_run(
             let _ = app.emit(
                 EVENT_CHARACTER_SHEET,
                 CharacterSheetEvent::CutFailed {
+                    run_id: fail_run_id,
                     cut_id: "unknown".into(),
                     reason: err,
                 },
@@ -167,12 +184,14 @@ pub async fn character_sheet_regenerate_cut(
     let cwd = params.cwd.clone();
     let aspect_ratio = params.aspect_ratio.clone();
     let attributes = params.attributes.clone();
+    let event_run_id = run_id.clone();
 
     tokio::spawn(async move {
         let prompt = build_sheet_prompt(&cut, &aspect_ratio, &attributes);
         let _ = task_app.emit(
             EVENT_CHARACTER_SHEET,
             CharacterSheetEvent::CutStarted {
+                run_id: event_run_id.clone(),
                 cut_id: cut.cut_id.clone(),
                 role: cut.role.clone(),
                 index: 0,
@@ -194,6 +213,7 @@ pub async fn character_sheet_regenerate_cut(
                 let _ = task_app.emit(
                     EVENT_CHARACTER_SHEET,
                     CharacterSheetEvent::CutCompleted {
+                        run_id: event_run_id,
                         cut_id: cut.cut_id,
                         role: cut.role,
                         image_path: image_path.to_string_lossy().into_owned(),
@@ -205,6 +225,7 @@ pub async fn character_sheet_regenerate_cut(
                 let _ = task_app.emit(
                     EVENT_CHARACTER_SHEET,
                     CharacterSheetEvent::CutFailed {
+                        run_id: event_run_id,
                         cut_id: cut.cut_id,
                         reason: err,
                     },
@@ -266,10 +287,12 @@ async fn run_character_sheet_orchestrator(
             let attributes = attributes.clone();
             let cwd = cwd.clone();
             let cut = cut.clone();
+            let event_run_id = run_id.clone();
             async move {
                 let _ = app.emit(
                     EVENT_CHARACTER_SHEET,
                     CharacterSheetEvent::CutStarted {
+                        run_id: event_run_id.clone(),
                         cut_id: cut.cut_id.clone(),
                         role: cut.role.clone(),
                         index: index as u32,
@@ -292,6 +315,7 @@ async fn run_character_sheet_orchestrator(
                         let _ = app.emit(
                             EVENT_CHARACTER_SHEET,
                             CharacterSheetEvent::CutCompleted {
+                                run_id: event_run_id.clone(),
                                 cut_id: cut.cut_id.clone(),
                                 role: cut.role.clone(),
                                 image_path: image_path.to_string_lossy().into_owned(),
@@ -303,6 +327,7 @@ async fn run_character_sheet_orchestrator(
                         let _ = app.emit(
                             EVENT_CHARACTER_SHEET,
                             CharacterSheetEvent::CutFailed {
+                                run_id: event_run_id.clone(),
                                 cut_id: cut.cut_id.clone(),
                                 reason: err,
                             },

@@ -124,7 +124,6 @@ function StepInput() {
   const extended = useCharacterSheetRun((s) => s.extended);
   const setExtended = useCharacterSheetRun((s) => s.setExtended);
   const beginRun = useCharacterSheetRun((s) => s.beginRun);
-  const setRunId = useCharacterSheetRun((s) => s.setRunId);
   const status = useCharacterSheetRun((s) => s.status);
 
   const pushToast = useToasts((s) => s.push);
@@ -188,17 +187,23 @@ function StepInput() {
       promptFragment: c.promptFragment,
     }));
 
+    // フロントで先に run_id を採番し、beginRun 時点から確定 run_id を持つ。これで
+    // 全イベントが同じ run_id を載せ、画面往復後の別 run 後着通知を照合で捨てられる
+    // (B1 混線対策)。バックエンドは params.runId をそのまま使う。
+    const runId = crypto.randomUUID();
+
     const params: CharacterSheetParams = {
       characterImage: characterImagePath,
       attributes,
       aspectRatio,
       cutSpecs,
+      runId,
     };
 
     // 先に pending スケルトンを建てて listener を確実に間に合わせる(multiAngle と同じ思想)。
     beginRun(
       "character",
-      null,
+      runId,
       cutSpecs.map((c) => ({
         cutId: c.cutId,
         label: getSheetCut(c.cutId)?.label ?? c.cutId,
@@ -207,8 +212,7 @@ function StepInput() {
     );
 
     try {
-      const runId = await invoke<string>("character_sheet_run", { params });
-      setRunId(runId);
+      await invoke<string>("character_sheet_run", { params });
       pushToast({
         kind: "success",
         text: `${cutSpecs.length} カットの生成を開始しました。`,

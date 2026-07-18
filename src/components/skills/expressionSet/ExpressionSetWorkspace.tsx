@@ -135,7 +135,6 @@ function StepSelect() {
   );
 
   const beginRun = useCharacterSheetRun((s) => s.beginRun);
-  const setRunId = useCharacterSheetRun((s) => s.setRunId);
   const setAspectRatio = useCharacterSheetRun((s) => s.setAspectRatio);
   const setCharacterName = useCharacterSheetRun((s) => s.setCharacterName);
   const setCharacterImage = useCharacterSheetRun((s) => s.setCharacterImage);
@@ -199,17 +198,23 @@ function StepSelect() {
     setAttributes(attributes);
     setAspectRatio("1:1");
 
+    // フロントで先に run_id を採番し、beginRun 時点から確定 run_id を持つ。これで
+    // 全イベントが同じ run_id を載せ、画面往復後の別 run 後着通知を照合で捨てられる
+    // (B1 混線対策)。バックエンドは params.runId をそのまま使う。
+    const runId = crypto.randomUUID();
+
     const params: CharacterSheetParams = {
       characterImage: sourceImage,
       attributes,
       aspectRatio: "1:1",
       cutSpecs,
+      runId,
     };
 
     // 先に pending スケルトンを建てて listener を確実に間に合わせる（characterRegister と同じ思想）。
     beginRun(
       "expression",
-      null,
+      runId,
       cutSpecs.map((c) => ({
         cutId: c.cutId,
         label: getExpression(c.cutId)?.label ?? c.cutId,
@@ -218,8 +223,7 @@ function StepSelect() {
     );
 
     try {
-      const runId = await invoke<string>("character_sheet_run", { params });
-      setRunId(runId);
+      await invoke<string>("character_sheet_run", { params });
       pushToast({
         kind: "success",
         text: `${cutSpecs.length} 表情の生成を開始しました。`,

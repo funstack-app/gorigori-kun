@@ -47,12 +47,23 @@ let threadStartPromise: Promise<string> | undefined;
 let streamingText = "";
 /** 解釈のタイムアウトタイマー。完了/失敗/reset で必ず解除する。 */
 let interpretTimer: ReturnType<typeof setTimeout> | undefined;
+/**
+ * 実行トークン（単調増加）。interpret のたびに採番し、非同期継続（通知ハンドラ・
+ * タイムアウト・送信 catch・リスナー登録待ち）は「自分のトークンが現在トークンと
+ * 一致するときだけ状態を触る」。連打・reset・タイムアウト後の後着通知が古い実行の
+ * 状態を復帰させる競合を塞ぐ（B-Medium 対策）。
+ */
+let interpretToken = 0;
 
 /** 解釈完了までの上限。超過したら処理中を解除しエラー表示する。 */
 const REDLINE_INTERPRET_TIMEOUT_MS = 120_000;
 
-/** listener / timer を確実に片付ける（完了・失敗・reset 共通）。 */
+/**
+ * 実行を無効化する（完了・失敗・reset・タイムアウト共通）。
+ * トークンを進めて古い thread の非同期継続を全て無効化し、listener / timer を片付ける。
+ */
 function teardownInterpret(): void {
+  interpretToken += 1;
   listenerHandle?.();
   listenerHandle = undefined;
   if (interpretTimer !== undefined) {
@@ -93,6 +104,8 @@ export const useRedline = create<RedlineState>((set, get) => ({
   setRedlinePath: (redlinePath) => set({ redlinePath }),
 
   interpret: async () => {
+    // 連打防止(競合1): running 中の再実行は入口で早期 return。running=true を最初の
+    // await より前に同期で立てるので、この check と set の間に別の呼び出しは割り込めない。
     if (get().running) return;
     const { originalPath, redlinePath } = get();
     if (!redlinePath) {
@@ -100,10 +113,19 @@ export const useRedline = create<RedlineState>((set, get) => ({
       return;
     }
 
-    // 通知 listener を（冪等に）張り直す。threadId で自分の thread だけ拾う。
+    // 直前までの実行を無効化してトークンを採番し、running=true を await より前に立てる。
+    // 以降の全非同期継続は myToken の一致を確認してから状態を触る。
     teardownInterpret();
+    const myToken = interpretToken;
     streamingText = "";
-    listenerHandle = await onNotification((n: RpcNotification) => {
+    set({ running: true, result: null, error: null });
+
+    // 通知 listener を張り直す。threadId で自分の thread、myToken で自分の実行だけ拾う。
+    const handle = await onNotification((n: RpcNotification) => {
+      // 登録待ちの間に reset/連打でトークンが進んでいたら、この listener は古い実行の
+      // ものなので無視する（登録直後に自分自身を解除もする）。
+      if (interpretToken !== myToken) return;
+
       const params = n.params as any;
       const tid = params?.threadId ?? params?.thread?.id;
       if (!threadId || tid !== threadId) return;
@@ -147,19 +169,32 @@ export const useRedline = create<RedlineState>((set, get) => ({
       }
     });
 
+    // 登録待ち中(競合2)に reset/連打でトークンが進んでいたら、遅れて登録された listener を
+    // 即解除して捨てる。running へ復帰させない。
+    if (interpretToken !== myToken) {
+      handle();
+      return;
+    }
+    listenerHandle = handle;
+
     // 完了通知が来ない場合の保険。超過したら処理中を解除しエラー表示する。
     interpretTimer = setTimeout(() => {
-      if (!get().running) return;
+      if (interpretToken !== myToken) return;
+      // タイムアウト(競合3): 同じ thread を再利用すると、遅れて届いた前回結果を次の
+      // interpret が拾い得る。thread を破棄して次回は必ず新しい thread を開始させる。
       teardownInterpret();
+      threadId = undefined;
       const msg =
         "赤入れの解釈がタイムアウトしました（120秒）。もう一度お試しください。";
       set({ running: false, error: msg });
       useToasts.getState().push({ kind: "error", text: msg, ttlMs: 6000 });
     }, REDLINE_INTERPRET_TIMEOUT_MS);
 
-    set({ running: true, result: null, error: null });
     try {
       const tid = await ensureThread();
+      // ensureThread の await 中に reset/連打/タイムアウトが起きていたら、この実行は
+      // 既に無効。thread を使い回して turn を投げない（古い実行の復帰を防ぐ）。
+      if (interpretToken !== myToken) return;
       // 1 枚目 = 元画像（あれば）、2 枚目 = 赤入れ画像。プロンプトはこの順を前提。
       const imagePaths = [originalPath, redlinePath].filter(
         (p): p is string => Boolean(p),
@@ -171,7 +206,8 @@ export const useRedline = create<RedlineState>((set, get) => ({
       await rpcRequest("turn/start", { threadId: tid, input, model: REDLINE_MODEL });
       // running=false は turn/completed 通知で下ろす。
     } catch (err) {
-      // 送信自体に失敗＝完了通知は来ないので listener/timer を片付ける。
+      // 送信自体に失敗＝完了通知は来ない。ただし既に別実行へ切り替わっていたら触らない。
+      if (interpretToken !== myToken) return;
       teardownInterpret();
       const msg = `送信に失敗しました: ${(err as Error)?.message ?? err}`;
       set({ running: false, error: msg });
