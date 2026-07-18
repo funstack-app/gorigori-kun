@@ -39,15 +39,14 @@ import {
  */
 export function ExpressionSetWorkspace() {
   const openPreview = useImagePreview((s) => s.open);
-  const reset = useCharacterSheetRun((s) => s.reset);
-  const setStep = useCharacterSheetRun((s) => s.setStep);
+  const enterMode = useCharacterSheetRun((s) => s.enterMode);
 
-  // 登録ワークスペースと run ストアを共有するため、入場時に run 状態と step を初期化する。
+  // 登録ワークスペースと run ストアを共有するため、入場時に「他スキルの mode を
+  // 引き継いでいれば」初期化する。自分(expression)の実行中 run は保持する。
   useEffect(() => {
-    reset();
-    setStep(1);
+    enterMode("expression");
     void ensureCharacterSheetEventListener();
-  }, [reset, setStep]);
+  }, [enterMode]);
 
   return (
     <section className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#121212]">
@@ -209,6 +208,7 @@ function StepSelect() {
 
     // 先に pending スケルトンを建てて listener を確実に間に合わせる（characterRegister と同じ思想）。
     beginRun(
+      "expression",
       null,
       cutSpecs.map((c) => ({
         cutId: c.cutId,

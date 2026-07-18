@@ -45,6 +45,21 @@ let listenerHandle: undefined | (() => void);
 let threadStartPromise: Promise<string> | undefined;
 /** 現在解釈中の thread が積み上げているストリーミング本文。 */
 let streamingText = "";
+/** 解釈のタイムアウトタイマー。完了/失敗/reset で必ず解除する。 */
+let interpretTimer: ReturnType<typeof setTimeout> | undefined;
+
+/** 解釈完了までの上限。超過したら処理中を解除しエラー表示する。 */
+const REDLINE_INTERPRET_TIMEOUT_MS = 120_000;
+
+/** listener / timer を確実に片付ける（完了・失敗・reset 共通）。 */
+function teardownInterpret(): void {
+  listenerHandle?.();
+  listenerHandle = undefined;
+  if (interpretTimer !== undefined) {
+    clearTimeout(interpretTimer);
+    interpretTimer = undefined;
+  }
+}
 
 async function ensureThread(): Promise<string> {
   if (threadId) return threadId;
@@ -86,7 +101,7 @@ export const useRedline = create<RedlineState>((set, get) => ({
     }
 
     // 通知 listener を（冪等に）張り直す。threadId で自分の thread だけ拾う。
-    listenerHandle?.();
+    teardownInterpret();
     streamingText = "";
     listenerHandle = await onNotification((n: RpcNotification) => {
       const params = n.params as any;
@@ -112,6 +127,7 @@ export const useRedline = create<RedlineState>((set, get) => ({
         if (status === "failed") {
           const err =
             params?.turn?.error?.message ?? "赤入れの解釈でエラーが発生しました";
+          teardownInterpret();
           set({ running: false, error: err });
           useToasts.getState().push({ kind: "error", text: err, ttlMs: 6000 });
           return;
@@ -121,13 +137,25 @@ export const useRedline = create<RedlineState>((set, get) => ({
           // no-silent-gap-filling: 構造化に失敗したら推測で埋めず、失敗として提示。
           const msg =
             "赤入れを構造化できませんでした。画像が鮮明か、赤入れがはっきり写っているかを確認して、もう一度お試しください。";
+          teardownInterpret();
           set({ running: false, error: msg });
           useToasts.getState().push({ kind: "error", text: msg, ttlMs: 6000 });
           return;
         }
+        teardownInterpret();
         set({ running: false, result: parsed, error: null });
       }
     });
+
+    // 完了通知が来ない場合の保険。超過したら処理中を解除しエラー表示する。
+    interpretTimer = setTimeout(() => {
+      if (!get().running) return;
+      teardownInterpret();
+      const msg =
+        "赤入れの解釈がタイムアウトしました（120秒）。もう一度お試しください。";
+      set({ running: false, error: msg });
+      useToasts.getState().push({ kind: "error", text: msg, ttlMs: 6000 });
+    }, REDLINE_INTERPRET_TIMEOUT_MS);
 
     set({ running: true, result: null, error: null });
     try {
@@ -143,6 +171,8 @@ export const useRedline = create<RedlineState>((set, get) => ({
       await rpcRequest("turn/start", { threadId: tid, input, model: REDLINE_MODEL });
       // running=false は turn/completed 通知で下ろす。
     } catch (err) {
+      // 送信自体に失敗＝完了通知は来ないので listener/timer を片付ける。
+      teardownInterpret();
       const msg = `送信に失敗しました: ${(err as Error)?.message ?? err}`;
       set({ running: false, error: msg });
       useToasts.getState().push({ kind: "error", text: msg, ttlMs: 6000 });
@@ -150,6 +180,8 @@ export const useRedline = create<RedlineState>((set, get) => ({
   },
 
   reset: () => {
+    // 購読と保険タイマーを解除してから状態を初期化する（残留 listener 防止）。
+    teardownInterpret();
     // thread は会話内容と一対なので破棄して次回作り直す。
     threadId = undefined;
     streamingText = "";

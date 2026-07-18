@@ -109,6 +109,9 @@ export function ProductSetSettingsPanel() {
       aspectRatio,
       cutIds: selectedCutIds,
       cutPrompts,
+      // 商品の同一性維持句(形状/色/ラベル/ロゴ)へ切り替える。人物向けの「ロゴ禁止」が
+      // ラベル維持と衝突しないよう Rust 側でプロンプトを分岐させる。
+      subjectKind: "product",
     };
 
     // skeleton を invoke 前に建てて、先行到着イベントを取りこぼさない

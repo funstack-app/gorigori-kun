@@ -109,7 +109,7 @@ export const GORI_SKILLS: GoriSkill[] = [
     shortName: "Comic",
     icon: "📖",
     description:
-      "話を渡すとネーム(コマ割り+セリフ配置)→登録キャラ固定でコマ生成→吹き出し・写植→ページ完成まで一気通貫。",
+      "話を渡すとネーム(コマ割り+セリフ案)を起こし、登録キャラを固定してコマ画像を生成。セリフ案付きで各コマを並べる。",
     path: "~/.codex/skills/gori-comic",
     availableInApp: true,
     launchHint: "話からページ完成まで",
@@ -122,7 +122,7 @@ export const GORI_SKILLS: GoriSkill[] = [
     shortName: "Redline",
     icon: "🖍",
     description:
-      "赤入れPDF・注釈画像を読み取り、指している箇所をマスク化して部分修正。指示どおりか+周囲が壊れていないかを検品し、ワンタップで差し戻せる。",
+      "注釈画像の赤入れを読み取り、何をどう直したいかを日本語で言語化。そのまま編集タブに渡して部分修正に反映できる。",
     path: "~/.codex/skills/gori-redline",
     availableInApp: true,
     launchHint: "赤入れを部分修正に反映",

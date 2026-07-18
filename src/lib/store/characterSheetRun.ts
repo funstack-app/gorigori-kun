@@ -13,10 +13,21 @@ import type { CharacterSheetEvent, SheetCutState } from "../character/types";
 
 type CharacterSheetRunStatus = "idle" | "running" | "completed" | "failed";
 
+/**
+ * この run を所有しているスキル。キャラ登録と表情差分は同じストアを共有するため、
+ * 画面往復で他スキルの結果・ステップを引き継ぐのを防ぐ判別子として使う。
+ * null = まだどちらの run も開始していない。
+ */
+export type CharacterSheetRunMode = "character" | "expression" | null;
+
 /** 登録ウィザードのステップ。1=入力 / 2=生成中・結果 / 3=確認して登録。 */
 export type RegisterStep = 1 | 2 | 3;
 
 type CharacterSheetRunState = {
+  // ===== 所有スキル判別 =====
+  /** この run を所有するスキル(character/expression)。混線防止の判別子。 */
+  mode: CharacterSheetRunMode;
+
   // ===== ウィザード =====
   step: RegisterStep;
   setStep: (step: RegisterStep) => void;
@@ -53,14 +64,21 @@ type CharacterSheetRunState = {
    * (multiAngleRun と同じ「待機中固着バグ修正」思想)。
    */
   beginRun: (
+    mode: Exclude<CharacterSheetRunMode, null>,
     runId: string | null,
     cuts: { cutId: string; label: string; role: string }[],
   ) => void;
   /** beginRun(null, ...) の後でバックエンドの run_id を後付けする。 */
   setRunId: (runId: string) => void;
   applyEvent: (e: CharacterSheetEvent) => void;
-  /** run 状態だけ初期化(設定は保持)。 */
+  /** run 状態だけ初期化(設定は保持)。所有スキル(mode)も null に戻す。 */
   reset: () => void;
+  /**
+   * 入場したスキルの mode に合わせて run を確定する。mode が異なる(他スキルの
+   * 結果を引き継いでいる)場合だけ run 状態と step を初期化する。自分の mode の
+   * 実行中 run は消さない。CharacterRegister/ExpressionSet のマウント時に呼ぶ。
+   */
+  enterMode: (mode: Exclude<CharacterSheetRunMode, null>) => void;
 };
 
 const runEmptyState = {
@@ -72,6 +90,8 @@ const runEmptyState = {
 };
 
 export const useCharacterSheetRun = create<CharacterSheetRunState>((set) => ({
+  mode: null,
+
   step: 1,
   setStep: (step) => set({ step }),
 
@@ -89,7 +109,7 @@ export const useCharacterSheetRun = create<CharacterSheetRunState>((set) => ({
   setAspectRatio: (ratio) => set({ aspectRatio: ratio }),
   setExtended: (extended) => set({ extended }),
 
-  beginRun: (runId, cuts) =>
+  beginRun: (mode, runId, cuts) =>
     set((s) => {
       const nextCuts: Record<string, SheetCutState> = {};
       const cutOrder: string[] = [];
@@ -108,6 +128,7 @@ export const useCharacterSheetRun = create<CharacterSheetRunState>((set) => ({
         cutOrder.push(cutId);
       }
       return {
+        mode,
         status: "running" as const,
         runId: runId ?? s.runId,
         cuts: nextCuts,
@@ -184,5 +205,13 @@ export const useCharacterSheetRun = create<CharacterSheetRunState>((set) => ({
       }
     }),
 
-  reset: () => set({ ...runEmptyState }),
+  reset: () => set({ ...runEmptyState, mode: null }),
+
+  enterMode: (mode) =>
+    set((s) => {
+      // 既に自分の mode の run がある場合は触らない(実行中/結果を保持)。
+      if (s.mode === mode) return s;
+      // 他スキルの mode(または未確定)の状態を引き継がないよう初期化する。
+      return { ...runEmptyState, mode, step: 1 as RegisterStep };
+    }),
 }));

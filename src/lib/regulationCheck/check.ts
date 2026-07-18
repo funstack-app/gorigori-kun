@@ -126,15 +126,23 @@ async function judgeAgainstRules(
   });
 
   const parsed = res.parsedJson;
+  // 期待する形は {"issues": [...]}。issues キーが配列として存在するときだけ「検査成功」。
   if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
     const issues = (parsed as Record<string, unknown>).issues;
-    return normalizeIssues(issues, imagePath, validRuleIds);
+    if (Array.isArray(issues)) {
+      return normalizeIssues(issues, imagePath, validRuleIds);
+    }
   }
-  // parsedJson が配列そのもの（issues を包まず返す）ケースも一応拾う。
+  // parsedJson が配列そのもの（issues を包まず返す）ケースも合格扱いで拾う。
   if (Array.isArray(parsed)) {
     return normalizeIssues(parsed, imagePath, validRuleIds);
   }
-  return [];
+  // ここに来る = JSON として妥当だが形が違う（{} / {"issues":"wrong"} / null 等）。
+  // 空配列(=問題なし)と取り違えないよう、検査失敗として投げて error に落とす
+  // （no-silent-gap-filling: 壊れ出力を「問題なし」で埋めない）。
+  throw new Error(
+    "検査結果の形式が不正です（issues 配列が見つかりません）。もう一度お試しください。",
+  );
 }
 
 /**

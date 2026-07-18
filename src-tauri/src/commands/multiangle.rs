@@ -61,6 +61,11 @@ pub struct MultiAngleParams {
     /// 出力先プロジェクト判定用の cwd (任意)。
     #[serde(default)]
     pub cwd: Option<String>,
+    /// 被写体の種別。"character"(人物・既定) or "product"(商品)。
+    /// 未指定なら "character" 扱いで従来と完全に同一のプロンプトになる (後方互換)。
+    /// 人物向けの「顔・体型・服を維持」「画面内テキスト・ロゴ禁止」は product では出さない。
+    #[serde(default)]
+    pub subject_kind: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -170,9 +175,10 @@ pub async fn multiangle_regenerate_cut(
     let cwd = params.cwd.clone();
     let aspect_ratio = params.aspect_ratio.clone();
     let environment = params.environment_description.clone();
+    let subject_kind = resolve_subject_kind(&params);
 
     tokio::spawn(async move {
-        let prompt = build_multiangle_prompt(&cut, &aspect_ratio, &environment);
+        let prompt = build_multiangle_prompt(&cut, &aspect_ratio, &environment, subject_kind);
         let _ = task_app.emit(
             EVENT_MULTIANGLE,
             MultiAngleEvent::CutStarted {
@@ -252,6 +258,7 @@ async fn run_multiangle_orchestrator(
     let aspect_ratio = params.aspect_ratio.clone();
     let environment = params.environment_description.clone();
     let cwd = params.cwd.clone();
+    let subject_kind = resolve_subject_kind(&params);
 
     // ★並列。選んだ全カットを一気に走らせる。同時実行の制御は
     // gen_queue::GLOBAL_GEN_SEMAPHORE(全機能共通・上限6)に一本化(2026-07-17)。
@@ -279,7 +286,7 @@ async fn run_multiangle_orchestrator(
                         index: index as u32,
                     },
                 );
-                let prompt = build_multiangle_prompt(&cut, &aspect_ratio, &environment);
+                let prompt = build_multiangle_prompt(&cut, &aspect_ratio, &environment, subject_kind);
                 match generate_one_cut(
                     &app,
                     &codex_bin,
@@ -351,32 +358,76 @@ fn validate_params(params: &MultiAngleParams) -> Result<(), String> {
     Ok(())
 }
 
+/// 被写体の種別。人物(既定)と商品でプロンプトの同一性維持句を切り替える。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SubjectKind {
+    Character,
+    Product,
+}
+
+/// params.subject_kind を SubjectKind に解決する。未指定/未知の値は Character(後方互換)。
+fn resolve_subject_kind(params: &MultiAngleParams) -> SubjectKind {
+    match params.subject_kind.as_deref() {
+        Some("product") => SubjectKind::Product,
+        _ => SubjectKind::Character,
+    }
+}
+
 /// 構図プロンプトを組み立てる。storyboard の build_generation_prompt を参考にしつつ
 /// 大幅簡略化 (structured_prompt JSON も continuity も評価も不要)。
-fn build_multiangle_prompt(cut: &CutPromptSpec, aspect_ratio: &str, environment: &str) -> String {
+///
+/// subject_kind == Character のときは従来と完全に同一の文字列を返す (後方互換)。
+/// Product のときは同一性維持句を商品向け(形状/色/ラベル/ロゴ維持・別商品にしない)へ差し替え、
+/// 人物向けの「顔・体型・服」「画面内テキスト・ロゴ禁止」は出さない。
+fn build_multiangle_prompt(
+    cut: &CutPromptSpec,
+    aspect_ratio: &str,
+    environment: &str,
+    subject_kind: SubjectKind,
+) -> String {
     let environment_line = if environment.trim().is_empty() {
         String::new()
     } else {
         format!("\n- 環境・背景・ライティングは次の指示で固定する: {}\n", environment.trim())
     };
-    format!(
-        "添付したキャラクター参照画像を使い、次の構図で画像を1枚だけ生成してください。\n\n\
-         ## この画像の役割\n\
-         - 構図 (英語指定): {prompt_fragment}\n{environment_line}\n\
-         ## 厳守事項\n\
-         1. 被写体の同一性 (顔・体型・服) を参照画像から厳密に保つ。別人にしない。\n\
-         2. 環境・背景・ライティングは一貫させる。カメラだけが被写体の周りを移動したように見せる。\n\
-         3. 上記「構図 (英語指定)」のショット距離・カメラアングル・向きを正確に反映する。\n\
-         4. カメラ視点 (位置・距離・パース・被写体の見え方) は、前のアングルと見間違えないくらい大胆にはっきり変える。煽り・俯瞰・斜め・横顔などの違いを誇張気味に強調する。ただし顔・体型・服・環境の同一性は崩さない (変えるのはカメラだけ)。\n\
-         5. image_gen ツールを1回だけ呼び出す。\n\
-         6. アスペクト比は必ず {aspect_ratio} にする (縦長指定なら縦長で。勝手に 16:9 にしない)。high quality で生成する。\n\
-         7. 画面内テキスト、ロゴ、透かし、グリッド、コラージュ、複数パネルは禁止。1枚の単独画像にする。\n\
-         8. 出力先指定や画像変換は不要です。生成画像は $CODEX_HOME/generated_images/<session>/ig_*.png に保存されます。\n\n\
-         最終メッセージは OK または NG <理由> の1行のみ。",
-        prompt_fragment = cut.prompt_fragment,
-        environment_line = environment_line,
-        aspect_ratio = aspect_ratio,
-    )
+    match subject_kind {
+        SubjectKind::Character => format!(
+            "添付したキャラクター参照画像を使い、次の構図で画像を1枚だけ生成してください。\n\n\
+             ## この画像の役割\n\
+             - 構図 (英語指定): {prompt_fragment}\n{environment_line}\n\
+             ## 厳守事項\n\
+             1. 被写体の同一性 (顔・体型・服) を参照画像から厳密に保つ。別人にしない。\n\
+             2. 環境・背景・ライティングは一貫させる。カメラだけが被写体の周りを移動したように見せる。\n\
+             3. 上記「構図 (英語指定)」のショット距離・カメラアングル・向きを正確に反映する。\n\
+             4. カメラ視点 (位置・距離・パース・被写体の見え方) は、前のアングルと見間違えないくらい大胆にはっきり変える。煽り・俯瞰・斜め・横顔などの違いを誇張気味に強調する。ただし顔・体型・服・環境の同一性は崩さない (変えるのはカメラだけ)。\n\
+             5. image_gen ツールを1回だけ呼び出す。\n\
+             6. アスペクト比は必ず {aspect_ratio} にする (縦長指定なら縦長で。勝手に 16:9 にしない)。high quality で生成する。\n\
+             7. 画面内テキスト、ロゴ、透かし、グリッド、コラージュ、複数パネルは禁止。1枚の単独画像にする。\n\
+             8. 出力先指定や画像変換は不要です。生成画像は $CODEX_HOME/generated_images/<session>/ig_*.png に保存されます。\n\n\
+             最終メッセージは OK または NG <理由> の1行のみ。",
+            prompt_fragment = cut.prompt_fragment,
+            environment_line = environment_line,
+            aspect_ratio = aspect_ratio,
+        ),
+        SubjectKind::Product => format!(
+            "添付した商品参照画像を使い、次の構図で画像を1枚だけ生成してください。\n\n\
+             ## この画像の役割\n\
+             - 構図 (英語指定): {prompt_fragment}\n{environment_line}\n\
+             ## 厳守事項\n\
+             1. 商品の同一性 (形状・色・素材・ラベル・ロゴ・刻印) を参照画像から厳密に保つ。別商品にしない。ラベルやロゴの文字・配置も改変しない。\n\
+             2. 環境・背景・ライティングは一貫させる。カメラだけが商品の周りを移動したように見せる。\n\
+             3. 上記「構図 (英語指定)」のショット距離・カメラアングル・向きを正確に反映する。\n\
+             4. カメラ視点 (位置・距離・パース・商品の見え方) は、前のアングルと見間違えないくらい大胆にはっきり変える。俯瞰・煽り・斜め・真横などの違いを誇張気味に強調する。ただし商品の形状・色・ラベル・ロゴ・環境の同一性は崩さない (変えるのはカメラだけ)。\n\
+             5. image_gen ツールを1回だけ呼び出す。\n\
+             6. アスペクト比は必ず {aspect_ratio} にする (縦長指定なら縦長で。勝手に 16:9 にしない)。high quality で生成する。\n\
+             7. 透かし、グリッド、コラージュ、複数パネルは禁止。1枚の単独画像にする。商品本来のラベル・ロゴ・パッケージ文字はそのまま残す。\n\
+             8. 出力先指定や画像変換は不要です。生成画像は $CODEX_HOME/generated_images/<session>/ig_*.png に保存されます。\n\n\
+             最終メッセージは OK または NG <理由> の1行のみ。",
+            prompt_fragment = cut.prompt_fragment,
+            environment_line = environment_line,
+            aspect_ratio = aspect_ratio,
+        ),
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

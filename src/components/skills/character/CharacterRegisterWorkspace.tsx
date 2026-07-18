@@ -40,10 +40,14 @@ const IMAGE_EXTS = ["png", "jpg", "jpeg", "webp", "gif", "bmp"];
  */
 export function CharacterRegisterWorkspace() {
   const openPreview = useImagePreview((s) => s.open);
+  const enterMode = useCharacterSheetRun((s) => s.enterMode);
 
+  // 表情差分と run ストアを共有するため、入場時に「他スキルの mode を引き継いで
+  // いれば」初期化する。自分(character)の実行中 run は保持する。
   useEffect(() => {
+    enterMode("character");
     void ensureCharacterSheetEventListener();
-  }, []);
+  }, [enterMode]);
 
   return (
     <section className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#121212]">
@@ -193,6 +197,7 @@ function StepInput() {
 
     // 先に pending スケルトンを建てて listener を確実に間に合わせる(multiAngle と同じ思想)。
     beginRun(
+      "character",
       null,
       cutSpecs.map((c) => ({
         cutId: c.cutId,

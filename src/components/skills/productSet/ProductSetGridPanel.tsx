@@ -289,6 +289,8 @@ export function ProductSetGridPanel({
       aspectRatio,
       cutIds: selectedCutIds,
       cutPrompts,
+      // 再生成も商品向けプロンプト(ラベル・ロゴ維持)を使う。
+      subjectKind: "product",
     };
 
     try {

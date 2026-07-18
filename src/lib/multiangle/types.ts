@@ -43,6 +43,12 @@ export type MultiAngleParams = {
   cutIds: string[];
   cutPrompts: CutPromptSpec[];
   cwd?: string;
+  /**
+   * 被写体の種別。"character"(人物・既定) or "product"(商品)。
+   * 省略時は Rust 側で "character" 扱い＝従来と完全に同一のプロンプトになる。
+   * EC納品セットのみ "product" を渡し、商品の同一性維持句へ切り替える。
+   */
+  subjectKind?: "character" | "product";
 };
 
 /** ストアが保持する1カットの実行状態。 */
