@@ -24,7 +24,13 @@ export type UiMode =
   | "storyboard"
   | "multiAngle"
   | "scene3d"
-  | "characterRegister";
+  | "characterRegister"
+  | "expressionSet"
+  | "sceneRecreate"
+  | "comic"
+  | "redline"
+  | "regulationCheck"
+  | "productSet";
 
 type SkillUiModeState = {
   /** 現在アクティブなスキルの ID。null なら作品モード */
@@ -63,6 +69,12 @@ export const SKILL_UI_MODE_MAP: Record<string, UiMode> = {
   "gori-multi-angle": "multiAngle",
   "gori-scene-3d": "scene3d",
   "gori-character-register": "characterRegister",
+  "gori-expression-set": "expressionSet",
+  "gori-scene-recreate": "sceneRecreate",
+  "gori-comic": "comic",
+  "gori-redline": "redline",
+  "gori-regulation-check": "regulationCheck",
+  "gori-product-set": "productSet",
 };
 
 export function resolveUiMode(skillId: string): UiMode {

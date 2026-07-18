@@ -5,6 +5,12 @@ import { GenerationWorkspace } from "./GenerationWorkspace";
 import { StoryboardWorkspace } from "./skills/storyboard/StoryboardWorkspace";
 import { MultiAngleWorkspace } from "./skills/multiAngle/MultiAngleWorkspace";
 import { CharacterRegisterWorkspace } from "./skills/character/CharacterRegisterWorkspace";
+import { ExpressionSetWorkspace } from "./skills/expressionSet/ExpressionSetWorkspace";
+import { SceneRecreateWorkspace } from "./skills/sceneRecreate/SceneRecreateWorkspace";
+import { ComicWorkspace } from "./skills/comic/ComicWorkspace";
+import { RedlineWorkspace } from "./skills/redline/RedlineWorkspace";
+import { RegulationCheckWorkspace } from "./skills/regulationCheck/RegulationCheckWorkspace";
+import { ProductSetWorkspace } from "./skills/productSet/ProductSetWorkspace";
 
 // three.js を含むためメインバンドルから分離(スキルに入った時だけロード)
 const Scene3dWorkspace = lazy(() =>
@@ -41,6 +47,18 @@ export function SkillWorkspaceRouter() {
       return <MultiAngleWorkspace />;
     case "characterRegister":
       return <CharacterRegisterWorkspace />;
+    case "expressionSet":
+      return <ExpressionSetWorkspace />;
+    case "sceneRecreate":
+      return <SceneRecreateWorkspace />;
+    case "comic":
+      return <ComicWorkspace />;
+    case "redline":
+      return <RedlineWorkspace />;
+    case "regulationCheck":
+      return <RegulationCheckWorkspace />;
+    case "productSet":
+      return <ProductSetWorkspace />;
     case "scene3d":
       return (
         <Suspense

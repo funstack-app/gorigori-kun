@@ -3,16 +3,14 @@ export type GoriSkillId =
   | "gori-multi-angle"
   | "gori-scene-3d"
   | "gori-character-register"
-  | "gori-lp-builder"
-  | "gori-cutout-ocr"
-  | "gori-bg-swap"
-  | "gori-pose-transfer"
-  | "gori-product-shot"
-  | "gori-character-sheet"
-  | "gori-thumbnail-batch"
-  | "gori-style-transfer"
-  | "gori-color-palette"
-  | "gori-comic-panel";
+  | "gori-expression-set"
+  | "gori-scene-recreate"
+  | "gori-comic"
+  | "gori-redline"
+  | "gori-regulation-check"
+  | "gori-product-set"
+  | "gori-pose-studio"
+  | "gori-identity-qc";
 
 export type GoriSkill = {
   id: GoriSkillId;
@@ -30,7 +28,7 @@ export type GoriSkill = {
   imported?: boolean;
 };
 
-// 画像生成直結のクリエイティブ系スキルのみ収録。
+// スキル一覧 v2.1（2026-07-19 STΛCK確定）。
 // 「近日公開」枠は今後の拡張をワクワクさせるための表示。順次解放していく。
 export const GORI_SKILLS: GoriSkill[] = [
   {
@@ -78,138 +76,125 @@ export const GORI_SKILLS: GoriSkill[] = [
     launchHint: "1枚からキャラを資産化",
   },
   {
-    // 2026-07-10 追加 (Phase 0 スパイク): 3D空間に人物・小物を置き、カメラの動きを
-    // プリセット+ドラッグだけで演出 → Seedance 2.0 向けモーションガイド動画を書き出す。
+    // 2026-07-19 追加 (スキル一覧v2.1 #2): 登録キャラに表情セットを一括生成し、
+    // 同一人物に見えるかをAIが検品して崩れたカットだけ作り直す。
+    id: "gori-expression-set",
+    name: "表情差分",
+    shortName: "Expression Set",
+    icon: "😊",
+    description:
+      "登録キャラに喜怒哀楽〜細かい演技の表情セットを一括生成。同一人物に見えるかをAIが検品し、崩れたカットだけ自動で作り直す。",
+    path: "~/.codex/skills/gori-expression-set",
+    availableInApp: true,
+    launchHint: "表情バリエーションを一括生成",
+  },
+  {
+    // 2026-07-19 追加 (スキル一覧v2.1 #8): 参考動画URLからショット割り・カメラワーク・
+    // 映像文法を読み取り、自分のキャラ・商品で再現するプロンプト+3Dカメラプリセットを出力。
+    id: "gori-scene-recreate",
+    name: "シーン再現",
+    shortName: "Scene Recreate",
+    icon: "🔬",
+    description:
+      "参考動画のURLからショット割り・カメラワーク・映像文法まで読み取り演出意図を言語化。自分のキャラ・商品で同じ演出を再現するプロンプト+3Dカメラプリセットを出力。",
+    path: "~/.codex/skills/gori-scene-recreate",
+    availableInApp: true,
+    launchHint: "参考動画の演出を再現",
+  },
+  {
+    // 2026-07-19 追加 (スキル一覧v2.1 #9): 話からネーム→登録キャラ固定でコマ生成→
+    // 吹き出し・写植→ページ完成まで。漫画広告・SNS漫画のキャラ一貫性を管理。
+    id: "gori-comic",
+    name: "漫画制作",
+    shortName: "Comic",
+    icon: "📖",
+    description:
+      "話を渡すとネーム(コマ割り+セリフ配置)→登録キャラ固定でコマ生成→吹き出し・写植→ページ完成まで一気通貫。",
+    path: "~/.codex/skills/gori-comic",
+    availableInApp: true,
+    launchHint: "話からページ完成まで",
+  },
+  {
+    // 2026-07-19 追加 (スキル一覧v2.1 #10): クライアントの赤入れPDF・注釈画像を読み取り、
+    // 指している箇所をマスク化して部分修正。検品しワンタップで差し戻せる。
+    id: "gori-redline",
+    name: "赤入れ反映",
+    shortName: "Redline",
+    icon: "🖍",
+    description:
+      "赤入れPDF・注釈画像を読み取り、指している箇所をマスク化して部分修正。指示どおりか+周囲が壊れていないかを検品し、ワンタップで差し戻せる。",
+    path: "~/.codex/skills/gori-redline",
+    availableInApp: true,
+    launchHint: "赤入れを部分修正に反映",
+  },
+  {
+    // 2026-07-19 追加 (スキル一覧v2.1 #11): 入稿物一式を文字量比率・必須表記・ロゴ・
+    // NG表現の観点で検査し、根拠付きの指摘一覧を返す。
+    id: "gori-regulation-check",
+    name: "レギュレーション検査",
+    shortName: "Regulation Check",
+    icon: "✅",
+    description:
+      "入稿物一式を文字量比率・必須表記・ロゴ・NG表現の観点で検査し、根拠付きの指摘一覧を返す。",
+    path: "~/.codex/skills/gori-regulation-check",
+    availableInApp: true,
+    launchHint: "入稿物を観点別に検査",
+  },
+  {
+    // 2026-07-19 追加 (スキル一覧v2.1 #12): 商品写真1枚から白背景・シーンカット・
+    // ディテール寄りの納品一式をセットで生成・整形。
+    id: "gori-product-set",
+    name: "EC納品セット",
+    shortName: "Product Set",
+    icon: "📸",
+    description:
+      "商品写真1枚から、白背景・シーンカット・ディテール寄りの納品一式をセットで生成・整形。",
+    path: "~/.codex/skills/gori-product-set",
+    availableInApp: true,
+    launchHint: "撮影1枚から納品一式",
+  },
+  {
+    // 2026-07-10 追加 (Phase 0 スパイク) → v2.1 で 3D演出→動画に統合。
+    // 3D空間に人物・小物を置き、カメラの動きをプリセット+ドラッグで演出 →
+    // 登録キャラを指定して動画生成まで一気通貫(動画統合は実装中)。
     // 専用 Workspace は Scene3dWorkspace (SkillWorkspaceRouter "scene3d")。
     id: "gori-scene-3d",
-    name: "3Dシーン演出",
+    name: "3D演出→動画",
     shortName: "Scene 3D",
     icon: "🎥",
     description:
-      "3D空間に人物・小物を置いてカメラワークをドラッグで演出。動画AIに渡すモーションガイドを書き出す。",
+      "3D演出から動画生成まで一気通貫。3D空間に人物・小物を置きカメラワークをドラッグで演出し、登録キャラで動画生成まで繋ぐ(動画統合は実装中)。",
     path: "~/.codex/skills/gori-scene-3d",
     availableInApp: true,
-    launchHint: "Blender不要のカメラ演出",
+    launchHint: "Blender不要の演出→動画",
   },
   {
-    id: "gori-lp-builder",
-    name: "モバイル LP ビルダー",
-    shortName: "LP Builder",
-    icon: "📱",
-    description:
-      "参照画像からスマホ向け縦長 LP のヒーロー / 訴求 / CTA セクションを一気に組み立てる。",
-    path: "~/.codex/skills/gori-lp-builder",
-    availableInApp: false,
-    comingSoon: true,
-    launchHint: "1ファイルで完結する LP — 近日公開",
-  },
-  {
-    id: "gori-cutout-ocr",
-    name: "切り抜き + OCR",
-    shortName: "Cutout OCR",
-    icon: "✂️",
-    description:
-      "写真から人物・商品を綺麗に切り抜きながら、写り込んでいる文字も OCR で抽出。",
-    path: "~/.codex/skills/gori-cutout-ocr",
-    availableInApp: false,
-    comingSoon: true,
-    launchHint: "AI 切り抜き + テキスト抽出 — 近日公開",
-  },
-  {
-    id: "gori-bg-swap",
-    name: "背景差し替え",
-    shortName: "BG Swap",
-    icon: "🏞",
-    description:
-      "被写体はそのままに、背景だけプロンプトで自由に置き換える。EC・SNS 投稿の背景違い量産に。",
-    path: "~/.codex/skills/gori-bg-swap",
-    availableInApp: false,
-    comingSoon: true,
-    launchHint: "1枚から無限ロケ撮影 — 近日公開",
-  },
-  {
-    id: "gori-pose-transfer",
-    name: "ポーズ転写",
-    shortName: "Pose Transfer",
+    // 2026-07-19 追加 (スキル一覧v2.1 #3): リグ入り3D人形操作 or 参照トレースで
+    // ポーズを登録キャラに適用しセット生成。3Dビューポート実装待ちで近日公開。
+    id: "gori-pose-studio",
+    name: "ポーズスタジオ",
+    shortName: "Pose Studio",
     icon: "🤸",
     description:
-      "参照画像のポーズを抽出し、別キャラクターに同じポーズを取らせる。",
-    path: "~/.codex/skills/gori-pose-transfer",
+      "リグ入り3D人形を動かす or 参照画像・動画からポーズをトレースし、登録キャラに適用して複数ポーズを一度にセット生成。同一性検品付き。",
+    path: "~/.codex/skills/gori-pose-studio",
     availableInApp: false,
     comingSoon: true,
-    launchHint: "ポーズを別キャラに着せ替え — 近日公開",
+    launchHint: "3D人形でポーズ指定 — 近日公開",
   },
   {
-    id: "gori-product-shot",
-    name: "プロダクトショット",
-    shortName: "Product Shot",
-    icon: "📸",
+    // 2026-07-19 追加 (スキル一覧v2.1 #4): 生成済みバッチを登録キャラと照合し、
+    // 顔・髪・服・体型の観点別に採点。検品官パイプライン待ちで近日公開。
+    id: "gori-identity-qc",
+    name: "同一性QC",
+    shortName: "Identity QC",
+    icon: "🔎",
     description:
-      "商品写真を背景・小道具・ライティング込みで EC 用に整える。複数バリエーション同時生成。",
-    path: "~/.codex/skills/gori-product-shot",
+      "生成済みの画像バッチを登録キャラと照合し、顔・髪・服・体型の観点別に採点。NGの理由を日本語で返す。",
+    path: "~/.codex/skills/gori-identity-qc",
     availableInApp: false,
     comingSoon: true,
-    launchHint: "EC 撮影スタジオを内蔵 — 近日公開",
-  },
-  {
-    id: "gori-character-sheet",
-    name: "キャラクターシート",
-    shortName: "Character Sheet",
-    icon: "🧝",
-    description:
-      "1枚の参照画像から、表情・服装・小道具の異なる同一キャラクターを一括生成。",
-    path: "~/.codex/skills/gori-character-sheet",
-    availableInApp: false,
-    comingSoon: true,
-    launchHint: "キャラ立ち絵セットを量産 — 近日公開",
-  },
-  {
-    id: "gori-thumbnail-batch",
-    name: "サムネ量産",
-    shortName: "Thumbnail Batch",
-    icon: "🖼",
-    description:
-      "1つのコンセプトから YouTube/SNS 用サムネを構図違い・配色違いで 12 種同時生成。",
-    path: "~/.codex/skills/gori-thumbnail-batch",
-    availableInApp: false,
-    comingSoon: true,
-    launchHint: "クリック率テスト用に大量生成 — 近日公開",
-  },
-  {
-    id: "gori-style-transfer",
-    name: "スタイル転写",
-    shortName: "Style Transfer",
-    icon: "🎨",
-    description:
-      "参照画像の画風 (色調・タッチ) を抽出し、別の絵にその画風を適用。",
-    path: "~/.codex/skills/gori-style-transfer",
-    availableInApp: false,
-    comingSoon: true,
-    launchHint: "好きな画風で生成 — 近日公開",
-  },
-  {
-    id: "gori-color-palette",
-    name: "カラーパレット抽出",
-    shortName: "Color Palette",
-    icon: "🌈",
-    description:
-      "参照画像から主要 5〜8 色を抽出し、ブランドカラーパレットとして書き出す。",
-    path: "~/.codex/skills/gori-color-palette",
-    availableInApp: false,
-    comingSoon: true,
-    launchHint: "ブランドカラー設計補助 — 近日公開",
-  },
-  {
-    id: "gori-comic-panel",
-    name: "マンガコマ割り",
-    shortName: "Comic Panel",
-    icon: "📖",
-    description:
-      "ストーリーをマンガ形式 (4コマ / 8コマ) のレイアウトに分割して同時生成。",
-    path: "~/.codex/skills/gori-comic-panel",
-    availableInApp: false,
-    comingSoon: true,
-    launchHint: "マンガ風コマ割り生成 — 近日公開",
+    launchHint: "大量生成の目視検品を自動化 — 近日公開",
   },
 ];
 

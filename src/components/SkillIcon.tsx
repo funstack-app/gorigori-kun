@@ -56,7 +56,7 @@ const ICONS: Record<GoriSkillId, (props: IconProps) => ReactElement> = {
       <path d="M6 16c0-2 1.5-3 3-3s3 1 3 3M15 9h4M15 13h4" />
     </Box>
   ),
-  // 3Dシーン演出: 映画カメラ + 軌道の弧
+  // 3D演出→動画: 映画カメラ + 軌道の弧
   "gori-scene-3d": ({ className }) => (
     <Box className={className}>
       <rect x="4" y="9" width="10" height="8" rx="2" />
@@ -64,80 +64,60 @@ const ICONS: Record<GoriSkillId, (props: IconProps) => ReactElement> = {
       <path d="M3 5c4-2.5 12-2.5 16 0" />
     </Box>
   ),
-  // モバイル LP: 縦長矩形
-  "gori-lp-builder": ({ className }) => (
+  // 表情差分: 顔 + 表情ライン
+  "gori-expression-set": ({ className }) => (
     <Box className={className}>
-      <rect x="7" y="2" width="10" height="20" rx="2" />
-      <path d="M11 18h2" />
+      <circle cx="12" cy="12" r="9" />
+      <path d="M9 10h.01M15 10h.01M8.5 15c1 1.2 2.2 1.8 3.5 1.8s2.5-.6 3.5-1.8" />
     </Box>
   ),
-  // 切り抜き OCR: ハサミライン + テキストライン
-  "gori-cutout-ocr": ({ className }) => (
+  // シーン再現: 再生フレーム + 分析マーカー
+  "gori-scene-recreate": ({ className }) => (
     <Box className={className}>
-      <circle cx="6" cy="6" r="2" />
-      <circle cx="6" cy="18" r="2" />
-      <path d="M8 8l12 12M8 16l12-12" />
+      <rect x="3" y="5" width="18" height="14" rx="2" />
+      <path d="M10 9l5 3-5 3V9z" />
     </Box>
   ),
-  // 背景差し替え: 山 + 太陽
-  "gori-bg-swap": ({ className }) => (
+  // 漫画制作: コマ分割
+  "gori-comic": ({ className }) => (
     <Box className={className}>
-      <rect x="3" y="4" width="18" height="16" rx="2" />
-      <circle cx="9" cy="10" r="1.5" />
-      <path d="M3 17l5-5 4 4 4-4 5 5" />
+      <rect x="3" y="3" width="18" height="18" rx="2" />
+      <path d="M3 12h18M12 3v9" />
     </Box>
   ),
-  // ポーズ転写: 人型シルエット
-  "gori-pose-transfer": ({ className }) => (
+  // 赤入れ反映: ペン + 修正線
+  "gori-redline": ({ className }) => (
     <Box className={className}>
-      <circle cx="12" cy="5" r="2" />
-      <path d="M12 7v5M12 12l-3 4M12 12l3 4M12 12l-4 0M12 12l4 0" />
+      <path d="M12 20h9" />
+      <path d="M16.5 3.5a2.12 2.12 0 013 3L7 19l-4 1 1-4 12.5-12.5z" />
     </Box>
   ),
-  // プロダクトショット: 商品箱 + ライト
-  "gori-product-shot": ({ className }) => (
+  // レギュレーション検査: チェックリスト
+  "gori-regulation-check": ({ className }) => (
+    <Box className={className}>
+      <rect x="4" y="3" width="16" height="18" rx="2" />
+      <path d="M8 8l1.5 1.5L12 7M8 15l1.5 1.5L12 14M15 8h2M15 15h2" />
+    </Box>
+  ),
+  // EC納品セット: 商品箱 + ライト
+  "gori-product-set": ({ className }) => (
     <Box className={className}>
       <path d="M3 8l9-5 9 5v8l-9 5-9-5V8z" />
       <path d="M3 8l9 5 9-5M12 13v9" />
     </Box>
   ),
-  // キャラクターシート: 4 グリッド
-  "gori-character-sheet": ({ className }) => (
+  // ポーズスタジオ: 人型シルエット
+  "gori-pose-studio": ({ className }) => (
     <Box className={className}>
-      <rect x="3" y="3" width="8" height="8" rx="1" />
-      <rect x="13" y="3" width="8" height="8" rx="1" />
-      <rect x="3" y="13" width="8" height="8" rx="1" />
-      <rect x="13" y="13" width="8" height="8" rx="1" />
+      <circle cx="12" cy="5" r="2" />
+      <path d="M12 7v5M12 12l-3 4M12 12l3 4M12 12l-4 0M12 12l4 0" />
     </Box>
   ),
-  // サムネ量産: 重なった矩形
-  "gori-thumbnail-batch": ({ className }) => (
+  // 同一性QC: 虫眼鏡 + 顔
+  "gori-identity-qc": ({ className }) => (
     <Box className={className}>
-      <rect x="3" y="3" width="14" height="14" rx="2" />
-      <rect x="7" y="7" width="14" height="14" rx="2" />
-    </Box>
-  ),
-  // スタイル転写: 矢印 + パレット
-  "gori-style-transfer": ({ className }) => (
-    <Box className={className}>
-      <rect x="3" y="3" width="8" height="8" rx="1" />
-      <rect x="13" y="13" width="8" height="8" rx="1" />
-      <path d="M11 7h6a4 4 0 014 4v0" />
-    </Box>
-  ),
-  // カラーパレット: 円が並ぶ
-  "gori-color-palette": ({ className }) => (
-    <Box className={className}>
-      <circle cx="6" cy="12" r="3" />
-      <circle cx="12" cy="12" r="3" />
-      <circle cx="18" cy="12" r="3" />
-    </Box>
-  ),
-  // マンガコマ割り: コマ分割線
-  "gori-comic-panel": ({ className }) => (
-    <Box className={className}>
-      <rect x="3" y="3" width="18" height="18" rx="2" />
-      <path d="M3 12h18M12 3v9" />
+      <circle cx="10" cy="10" r="6" />
+      <path d="M10 8h.01M8.5 12c.5.6 1 .9 1.5.9s1-.3 1.5-.9M20 20l-4-4" />
     </Box>
   ),
 };
