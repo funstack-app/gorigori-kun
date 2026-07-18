@@ -4,6 +4,7 @@ import { useSkillUiMode } from "../lib/store/skillUiMode";
 import { GenerationWorkspace } from "./GenerationWorkspace";
 import { StoryboardWorkspace } from "./skills/storyboard/StoryboardWorkspace";
 import { MultiAngleWorkspace } from "./skills/multiAngle/MultiAngleWorkspace";
+import { CharacterRegisterWorkspace } from "./skills/character/CharacterRegisterWorkspace";
 
 // three.js を含むためメインバンドルから分離(スキルに入った時だけロード)
 const Scene3dWorkspace = lazy(() =>
@@ -38,6 +39,8 @@ export function SkillWorkspaceRouter() {
       return <StoryboardWorkspace />;
     case "multiAngle":
       return <MultiAngleWorkspace />;
+    case "characterRegister":
+      return <CharacterRegisterWorkspace />;
     case "scene3d":
       return (
         <Suspense

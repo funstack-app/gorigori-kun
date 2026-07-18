@@ -2,6 +2,7 @@ export type GoriSkillId =
   | "gori-storyboard"
   | "gori-multi-angle"
   | "gori-scene-3d"
+  | "gori-character-register"
   | "gori-lp-builder"
   | "gori-cutout-ocr"
   | "gori-bg-swap"
@@ -60,6 +61,21 @@ export const GORI_SKILLS: GoriSkill[] = [
     path: "~/.codex/skills/gori-multi-angle",
     availableInApp: true,
     launchHint: "30 カット一気に量産",
+  },
+  {
+    // 2026-07-19 追加 (スキル一覧v2.1 #1): 1枚の参照画像から 3面図+表情+顔ディテールを
+    // 並列生成し、キャラ型プリセットとして登録する IPアセット化パイプライン(スライスS4)。
+    // 専用 Workspace は CharacterRegisterWorkspace (SkillWorkspaceRouter "characterRegister")。
+    // カタログは src/lib/character/sheetCuts.ts、Rust は commands/character_sheet.rs。
+    id: "gori-character-register",
+    name: "キャラクター登録",
+    shortName: "Character Register",
+    icon: "🪪",
+    description:
+      "1枚の参照画像から3面図・表情・顔ディテールを一括生成し、同一キャラとしてプリセット登録。以降の生成で呼び出せる。",
+    path: "~/.codex/skills/gori-character-register",
+    availableInApp: true,
+    launchHint: "1枚からキャラを資産化",
   },
   {
     // 2026-07-10 追加 (Phase 0 スパイク): 3D空間に人物・小物を置き、カメラの動きを

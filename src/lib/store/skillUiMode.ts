@@ -19,7 +19,12 @@
 
 import { create } from "zustand";
 
-export type UiMode = "default" | "storyboard" | "multiAngle" | "scene3d";
+export type UiMode =
+  | "default"
+  | "storyboard"
+  | "multiAngle"
+  | "scene3d"
+  | "characterRegister";
 
 type SkillUiModeState = {
   /** 現在アクティブなスキルの ID。null なら作品モード */
@@ -57,6 +62,7 @@ export const SKILL_UI_MODE_MAP: Record<string, UiMode> = {
   "gori-storyboard": "storyboard",
   "gori-multi-angle": "multiAngle",
   "gori-scene-3d": "scene3d",
+  "gori-character-register": "characterRegister",
 };
 
 export function resolveUiMode(skillId: string): UiMode {
