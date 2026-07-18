@@ -446,6 +446,8 @@ pub fn run() {
             commands::storyboard::storyboard_regenerate_cut,
             commands::multiangle::multiangle_run,
             commands::multiangle::multiangle_regenerate_cut,
+            commands::character_sheet::character_sheet_run,
+            commands::character_sheet::character_sheet_regenerate_cut,
             commands::storyboard::storyboard_persist_adoption,
             commands::storyboard::storyboard_read_adoptions,
             commands::storyboard::storyboard_read_debug_log,

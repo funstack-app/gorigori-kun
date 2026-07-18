@@ -27,6 +27,11 @@ pub const EVENT_STORYBOARD: &str = "codex://storyboard";
 /// payload は kind discriminator 付きの camelCase JSON。
 pub const EVENT_MULTIANGLE: &str = "codex://multiangle";
 
+/// `codex://character-sheet` — キャラクター登録 (IPアセット化パイプライン) の実行進捗。
+/// 1枚の参照画像から 3面図+表情+顔ディテールの固定カタログを並列生成する進捗イベント。
+/// payload は kind discriminator 付きの camelCase JSON。
+pub const EVENT_CHARACTER_SHEET: &str = "codex://character-sheet";
+
 /// `codex://edit-model-progress` — 編集タブ用AIモデルDL進捗。
 pub const EVENT_EDIT_MODEL_PROGRESS: &str = "codex://edit-model-progress";
 

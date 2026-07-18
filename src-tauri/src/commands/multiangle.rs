@@ -4,15 +4,15 @@
 //! storyboard.rs と違い、ストーリー対話・絵コンテ・AI評価器・連続性契約・180度ルール・
 //! カット役割割当は持たない。各カットは独立した1枚画像で、生成された1枚をそのまま採用する。
 //!
-//! 共通ユーティリティ (mirror_codex_home / codex_oneshot / find_newest_generated_png /
-//! extract_json_from_codex_stdout) は storyboard.rs からコピーして独立させている。
-//! 段階3でキャラシートも作る時に shared モジュールへ括り出す (早すぎる抽象化を避ける)。
+//! 共通ユーティリティ (codex_oneshot / extract_json_from_codex_stdout) は storyboard.rs
+//! からコピーして独立させている。
+//! 1カット生成の下部構造 (generate_one_cut / attempt_one_cut / mirror_codex_home /
+//! find_newest_generated_png / collect_generated_pngs / timestamp_id / short_id) は
+//! 段階3 (キャラシート追加) で commands/gen_worker.rs へ括り出し、両者から共用する。
 
-use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
@@ -23,17 +23,13 @@ use tokio::process::Command;
 use tokio::time::timeout;
 
 use crate::codex::process::{enriched_path, resolve_codex_cli_binary};
-use crate::commands::gen_queue::GLOBAL_GEN_SEMAPHORE;
+use crate::commands::gen_worker::{
+    generate_one_cut, short_id, timestamp_id, GENERATION_EFFORT, GENERATION_MODEL,
+};
 use crate::commands::storage::{project_name_from_cwd, resolve_output_dir, StorageSettings};
 use crate::events::EVENT_MULTIANGLE;
 use crate::state::AppState;
 
-const GENERATION_TIMEOUT_SECS: u64 = 900;
-const MULTIANGLE_MODEL: &str = "gpt-5.6-sol";
-const MULTIANGLE_EFFORT: &str = "low";
-/// 同時実行数の上限。rate limit 保護のため並列度を制限する (30枚を無制限同時起動すると
-/// プラン上限を直撃するため)。gpt-image-2 は同時実行 3 までが安定で 5 で時々 429 になる
-/// (2026-06 実測/業界報告)ため、5→3 に下げて ServerError/429 を減らす(2026-06-09)。
 /// 選択上限。フロント側 MAX_CUTS と一致させる。
 const MAX_CUTS: usize = 30;
 
@@ -383,180 +379,9 @@ fn build_multiangle_prompt(cut: &CutPromptSpec, aspect_ratio: &str, environment:
     )
 }
 
-/// image_gen を呼ばずに codex が正常終了したとき(画像が生成されない)に
-/// 何回まで作り直すか。effort=low の GPT-5.5 が「OK」だけ返して image_gen を
-/// 呼び忘れるケースがあり、その救済(2026-06-08 マルチアングル生成失敗の修正)。
-const MULTIANGLE_MAX_ATTEMPTS: u32 = 3;
-
-/// 1枚生成の最小単位(リトライ込み)。
-///
-/// codex(GPT-5.5)が image_gen(gpt-image-2)を呼ばずに正常終了し、画像が
-/// 一枚も生成されないことがある。これは codex の異常終了ではないので status は
-/// success のまま「生成画像が見つかりません」になる。1回で諦めず最大
-/// MULTIANGLE_MAX_ATTEMPTS 回まで作り直す。コア(batch_gen)の自動リトライと同思想。
-async fn generate_one_cut(
-    app: &AppHandle,
-    codex_bin: &Path,
-    codex_home_orig: &Path,
-    prompt: &str,
-    reference_images: &[PathBuf],
-    output_dir: &Path,
-    cut_id: &str,
-    cwd: Option<String>,
-) -> Result<PathBuf, String> {
-    let mut last_err = String::new();
-    for attempt in 1..=MULTIANGLE_MAX_ATTEMPTS {
-        match attempt_one_cut(
-            app,
-            codex_bin,
-            codex_home_orig,
-            prompt,
-            reference_images,
-            output_dir,
-            cut_id,
-            cwd.clone(),
-        )
-        .await
-        {
-            Ok(path) => return Ok(path),
-            Err(e) => {
-                tracing::warn!(
-                    "multiangle cut {cut_id} attempt {attempt}/{MULTIANGLE_MAX_ATTEMPTS} failed: {e}"
-                );
-                last_err = e;
-            }
-        }
-    }
-    // 外部 API 障害(ServerError/5xx/401 等)なら非エンジニア向けの文言に整形する。
-    Err(crate::codex::process::humanize_generation_failure(&format!(
-        "{MULTIANGLE_MAX_ATTEMPTS}回試行しても生成できませんでした ({cut_id}): {last_err}"
-    )))
-}
-
-/// 1枚生成の1試行。画像が出れば Ok、image_gen 未呼び出し等で画像が無ければ Err。
-async fn attempt_one_cut(
-    app: &AppHandle,
-    codex_bin: &Path,
-    codex_home_orig: &Path,
-    prompt: &str,
-    reference_images: &[PathBuf],
-    output_dir: &Path,
-    cut_id: &str,
-    cwd: Option<String>,
-) -> Result<PathBuf, String> {
-    let tmp = tempfile::Builder::new()
-        .prefix(&format!("codex-multiangle-{cut_id}-"))
-        .tempdir()
-        .map_err(|e| format!("tempdir 作成失敗: {e}"))?;
-    let tmp_home = tmp.path().to_path_buf();
-    mirror_codex_home(codex_home_orig, &tmp_home)?;
-    let tmp_gen = tmp_home.join("generated_images");
-    std::fs::create_dir_all(&tmp_gen)
-        .map_err(|e| format!("worker generated_images 作成失敗: {e}"))?;
-
-    let mut cmd = Command::new(codex_bin);
-    cmd.args([
-        "exec",
-        // Windows では --full-auto(=--sandbox workspace-write)が
-        // codex-windows-sandbox-setup.exe を要求して「見つかりません」で死ぬ。
-        // サンドボックス無効の bypass を使う(2026-06-09 Windows修正。--full-auto
-        // では workspace-write になり直らなかった)。BYO 配布はユーザー自身の
-        // PC=外部サンドボックス環境なので bypass で問題ない(書き込み権限も維持)。
-        "--dangerously-bypass-approvals-and-sandbox",
-        "--skip-git-repo-check",
-        "--color",
-        "never",
-        "-c",
-        &format!("model={MULTIANGLE_MODEL}"),
-        "-c",
-        &format!("model_reasoning_effort={MULTIANGLE_EFFORT}"),
-    ]);
-    if let Some(c) = cwd.as_deref().filter(|s| !s.is_empty()) {
-        cmd.arg("-C").arg(c);
-    }
-    for image in reference_images {
-        cmd.arg("-i").arg(image);
-    }
-    cmd.arg("-");
-    cmd.env("CODEX_HOME", &tmp_home);
-    cmd.env("PATH", enriched_path());
-    cmd.kill_on_drop(true);
-    cmd.stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    crate::codex::process::no_window_flag(&mut cmd);
-
-    let gen_permit = GLOBAL_GEN_SEMAPHORE
-        .acquire()
-        .await
-        .map_err(|_| "画像生成キューが閉じられました".to_string())?;
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("codex exec の spawn に失敗: {e}"))?;
-    let pid = child
-        .id()
-        .ok_or_else(|| "codex exec の PID を取得できません".to_string())?;
-    let worker_registration =
-        crate::commands::worker_registry::WorkerPidGuard::register(app, pid, "multiangle")?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(prompt.as_bytes())
-            .await
-            .map_err(|e| format!("stdin 書き込み失敗: {e}"))?;
-    }
-    let output = timeout(
-        Duration::from_secs(GENERATION_TIMEOUT_SECS),
-        child.wait_with_output(),
-    )
-    .await
-    .map_err(|_| format!("画像生成が {GENERATION_TIMEOUT_SECS} 秒でタイムアウトしました"))?
-    .map_err(|e| format!("codex exec 待機失敗: {e}"))?;
-    drop(worker_registration);
-    drop(gen_permit);
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let last = stderr
-            .lines()
-            .rev()
-            .find(|line| !line.trim().is_empty())
-            .unwrap_or("(stderr 出力なし)");
-        return Err(format!(
-            "画像生成 codex exec が異常終了 (code={:?}): {last}",
-            output.status.code()
-        ));
-    }
-
-    let src_png = match find_newest_generated_png(&tmp_gen) {
-        Some(p) => p,
-        None => {
-            // codex は正常終了したのに画像が無い = image_gen を呼ばずに終わった等。
-            // 原因究明のため stdout 末尾を残す(GPT-5.5 が「OK」だけ返したか、NG 理由を
-            // 言ったか、image_gen を試みて失敗したかが分かる)。
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let tail = stdout
-                .lines()
-                .rev()
-                .filter(|l| !l.trim().is_empty())
-                .take(3)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect::<Vec<_>>()
-                .join(" / ");
-            return Err(format!(
-                "生成画像が見つかりませんでした: {cut_id} (codex最終出力: {})",
-                if tail.is_empty() { "(出力なし)" } else { &tail }
-            ));
-        }
-    };
-    let dest = output_dir.join(format!("{cut_id}.png"));
-    std::fs::copy(&src_png, &dest).map_err(|e| format!("出力コピー失敗: {e}"))?;
-    Ok(dest)
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // storyboard.rs からコピーした共通ユーティリティ (無変更)。
-// 段階3で shared モジュールへ括り出す予定。それまでは独立コピーで運用する。
+// 1カット生成の下部構造は commands/gen_worker.rs へ括り出し済み。
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// codex exec を1回だけ叩いて stdout を返す最小ヘルパ。
@@ -583,9 +408,9 @@ async fn codex_oneshot(
         "--color",
         "never",
         "-c",
-        &format!("model={MULTIANGLE_MODEL}"),
+        &format!("model={GENERATION_MODEL}"),
         "-c",
-        &format!("model_reasoning_effort={MULTIANGLE_EFFORT}"),
+        &format!("model_reasoning_effort={GENERATION_EFFORT}"),
     ]);
     if let Some(c) = cwd.filter(|s| !s.is_empty()) {
         cmd.arg("-C").arg(c);
@@ -700,89 +525,4 @@ fn extract_first_json_object(input: &str) -> Option<Value> {
         }
     }
     None
-}
-
-fn mirror_codex_home(codex_home_orig: &Path, tmp_home: &Path) -> Result<(), String> {
-    if codex_home_orig.exists() {
-        let entries = std::fs::read_dir(codex_home_orig)
-            .map_err(|e| format!("CODEX_HOME 読み込み失敗: {e}"))?;
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            if name == OsStr::new("generated_images") {
-                continue;
-            }
-            let dest = tmp_home.join(&name);
-            #[cfg(unix)]
-            {
-                let _ = std::os::unix::fs::symlink(entry.path(), dest);
-            }
-            #[cfg(not(unix))]
-            {
-                if entry.path().is_dir() {
-                    let _ = std::fs::create_dir_all(dest);
-                } else {
-                    let _ = std::fs::copy(entry.path(), dest);
-                }
-            }
-        }
-    }
-    std::fs::create_dir_all(tmp_home.join("generated_images"))
-        .map_err(|e| format!("multiangle generated_images 作成失敗: {e}"))?;
-    Ok(())
-}
-
-fn find_newest_generated_png(root: &Path) -> Option<PathBuf> {
-    let mut newest: Option<(u128, PathBuf)> = None;
-    collect_generated_pngs(root, &mut newest);
-    newest.map(|(_, path)| path)
-}
-
-fn collect_generated_pngs(dir: &Path, newest: &mut Option<(u128, PathBuf)>) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            collect_generated_pngs(&path, newest);
-            continue;
-        }
-        // 保存名は codex 世代・経路で変わる(ig_*/call_*/exec-*)。名前に依存せず
-        // ワーカー専用 generated_images 配下の PNG を回収する(2026-07-17)。
-        let is_png = path.is_file()
-            && path
-                .extension()
-                .and_then(OsStr::to_str)
-                .map(|e| e.eq_ignore_ascii_case("png"))
-                .unwrap_or(false);
-        if !is_png {
-            continue;
-        }
-        let mtime = std::fs::metadata(&path)
-            .and_then(|meta| meta.modified())
-            .ok()
-            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-            .map(|duration| duration.as_millis())
-            .unwrap_or(0);
-        match newest {
-            Some((best_time, _)) if *best_time > mtime => {}
-            _ => *newest = Some((mtime, path)),
-        }
-    }
-}
-
-fn timestamp_id() -> String {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0)
-        .to_string()
-}
-
-fn short_id() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
-    format!("{:08x}", nanos & 0xffff_ffff)
 }
