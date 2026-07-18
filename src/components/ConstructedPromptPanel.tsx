@@ -19,6 +19,7 @@ import {
   presetAttachedImagesToReferences,
   type Preset,
 } from "../lib/store/presets";
+import { composePresetPrompt } from "../lib/presets/character";
 import { HiggsfieldModelSelector } from "./HiggsfieldModelSelector";
 import { OptionPickerModal } from "./scene/OptionPickerModal";
 import { PresetPickerPopover } from "./PresetPickerPopover";
@@ -86,7 +87,10 @@ export function ConstructedPromptPanel() {
    */
   const appendPreset = (preset: Preset) => {
     const current = (isOverriding ? draft : generatedPrompt).trim();
-    const next = current ? `${current}, ${preset.prompt}` : preset.prompt;
+    // キャラ型プリセットは preset.prompt に加えて属性テキスト (characterMeta.attributes)
+    // を合成する (プロンプト型は composePresetPrompt が preset.prompt をそのまま返す)。
+    const presetBody = composePresetPrompt(preset, ", ");
+    const next = current ? `${current}, ${presetBody}` : presetBody;
     onChangeDraft(next);
     // F-#6/#7: プリセットに参照画像があれば composer.references にも自動追加。
     // role 検証は presetAttachedImagesToReferences 側で済み (不正値は undefined)。

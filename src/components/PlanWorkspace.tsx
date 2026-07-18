@@ -14,6 +14,7 @@ import {
 } from "../lib/sendToPlan";
 import { extractDropped, isImageDrop } from "../lib/dragRef";
 import { useReferenceRoles } from "../lib/store/referenceRoles";
+import { composePresetPrompt } from "../lib/presets/character";
 import { PresetPickerPopover } from "./PresetPickerPopover";
 import { ReferenceRoleToggle } from "./ReferenceRoleToggle";
 /**
@@ -786,7 +787,9 @@ function ChatInput({
         anchorRect={presetAnchor}
         onPick={(preset) => {
           const current = value.trim();
-          const next = current ? `${current}\n${preset.prompt}` : preset.prompt;
+          // キャラ型プリセットは属性テキストも合成 (プロンプト型は preset.prompt のまま)。
+          const presetBody = composePresetPrompt(preset, "\n");
+          const next = current ? `${current}\n${presetBody}` : presetBody;
           onChange(next);
           const paths = (preset.attachedImages ?? [])
             .map((img) => img.path)

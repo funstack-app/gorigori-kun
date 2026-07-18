@@ -21,6 +21,7 @@ import {
   presetAttachedImagesToReferences,
   type Preset,
 } from "../lib/store/presets";
+import { composePresetPrompt } from "../lib/presets/character";
 import { PresetPickerPopover } from "./PresetPickerPopover";
 import { SkillPickerPopover } from "./SkillPickerPopover";
 import { PromptTextareaWithMentions } from "./PromptTextareaWithMentions";
@@ -126,7 +127,9 @@ export function VideoConstructedPromptPanel() {
 
   const appendPreset = (preset: Preset) => {
     const current = (isOverriding ? draft : generatedPrompt).trim();
-    const next = current ? `${current}, ${preset.prompt}` : preset.prompt;
+    // キャラ型プリセットは属性テキストも合成 (プロンプト型は preset.prompt のまま)。
+    const presetBody = composePresetPrompt(preset, ", ");
+    const next = current ? `${current}, ${presetBody}` : presetBody;
     onChangeDraft(next);
     // F-#6/#7: プリセットの参照画像を composer.references に自動追加。
     const refs = presetAttachedImagesToReferences(preset);
