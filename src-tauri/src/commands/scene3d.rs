@@ -218,44 +218,60 @@ async fn fetch_via_page(url: String) -> Result<Vec<u8>, String> {
     };
     let dir = std::env::temp_dir().join("gorigori-url-capture");
     std::fs::create_dir_all(&dir).map_err(|e| format!("一時フォルダ作成失敗: {e}"))?;
-    let stem = format!("cap_{}", now_millis());
+    // pid+時刻で一意化(複数インスタンス同時実行での衝突対策)
+    let stem = format!("cap_{}_{}", std::process::id(), now_millis());
     let outtmpl = dir.join(format!("{stem}.%(ext)s")).to_string_lossy().into_owned();
     let has_ffmpeg = resolve_ffmpeg().is_some();
 
-    let output = tokio::task::spawn_blocking(move || {
-        let mut cmd = Command::new(&ytdlp);
-        cmd.args([
-            "--no-playlist",
-            "--max-filesize",
-            "150M",
-            "--socket-timeout",
-            "30",
-            "--retries",
-            "2",
-        ]);
-        if has_ffmpeg {
-            // 合成可能なら画質を絞りつつ先頭25秒だけ(取り込み上限20秒+余白)
-            cmd.args([
-                "-f",
-                "bv*[height<=1080]+ba/b",
-                "--merge-output-format",
-                "mp4",
-                "--download-sections",
-                "*0-25",
-            ]);
-        } else {
-            // ffmpegなし: 単一ファイル形式のみ(合成・切り出し不可)
-            cmd.args(["-f", "b[ext=mp4]/b"]);
+    // 失敗経路の残骸を掃除するヘルパ(成功時も最後に呼ぶ)
+    let cleanup = |dir: &Path, stem: &str| {
+        if let Ok(rd) = std::fs::read_dir(dir) {
+            for e in rd.flatten() {
+                if e.file_name().to_string_lossy().starts_with(stem) {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
         }
-        cmd.args(["-o", &outtmpl]);
-        cmd.arg(&url);
-        cmd.output()
-    })
-    .await
-    .map_err(|e| format!("ダウンロード処理の起動に失敗: {e}"))?
-    .map_err(|e| format!("yt-dlp 起動失敗: {e}"))?;
+    };
+
+    let mut cmd = tokio::process::Command::new(&ytdlp);
+    cmd.args([
+        "--no-playlist",
+        "--max-filesize",
+        "150M",
+        "--socket-timeout",
+        "30",
+        "--retries",
+        "2",
+    ]);
+    if has_ffmpeg {
+        // 合成可能なら画質を絞りつつ先頭25秒だけ(取り込み上限20秒+余白)
+        cmd.args([
+            "-f",
+            "bv*[height<=1080]+ba/b",
+            "--merge-output-format",
+            "mp4",
+            "--download-sections",
+            "*0-25",
+        ]);
+    } else {
+        // ffmpegなし: 単一ファイル形式のみ(合成・切り出し不可)
+        cmd.args(["-f", "b[ext=mp4]/b"]);
+    }
+    cmd.args(["-o", &outtmpl]);
+    cmd.arg("--"); // 以降をオプションと解釈させない(引数すり替え防御)
+    cmd.arg(&url);
+    cmd.kill_on_drop(true); // タイムアウト時に子プロセスを道連れにする(UIが処理中のまま固まる事故防止)
+    let output = tokio::time::timeout(std::time::Duration::from_secs(240), cmd.output())
+        .await
+        .map_err(|_| {
+            cleanup(&dir, &stem);
+            "ダウンロードが時間切れになりました(240秒)。短い動画で試してください".to_string()
+        })?
+        .map_err(|e| format!("yt-dlp 起動失敗: {e}"))?;
 
     if !output.status.success() {
+        cleanup(&dir, &stem);
         let stderr = String::from_utf8_lossy(&output.stderr);
         // 本質的なエラー行(ERROR:)を優先して見せる(末尾切り出しだと文が途中から始まり意味不明になる)
         let msg = stderr
@@ -268,19 +284,28 @@ async fn fetch_via_page(url: String) -> Result<Vec<u8>, String> {
         return Err(format!("このページから動画を取り出せませんでした: {msg}"));
     }
 
-    // 拡張子は yt-dlp が決めるので stem 前方一致で生成物を探す
+    // 拡張子は yt-dlp が決めるので stem 前方一致で生成物を探す(.part等の中間ファイルは除外)
     let produced = std::fs::read_dir(&dir)
         .map_err(|e| format!("一時フォルダ読み取り失敗: {e}"))?
         .filter_map(|e| e.ok())
-        .find(|e| e.file_name().to_string_lossy().starts_with(&stem))
-        .ok_or_else(|| "動画ファイルが生成されませんでした".to_string())?;
+        .find(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            name.starts_with(&stem) && !name.ends_with(".part") && !name.ends_with(".ytdl")
+        })
+        .ok_or_else(|| {
+            cleanup(&dir, &stem);
+            "動画ファイルが生成されませんでした".to_string()
+        })?;
+    // メモリへ読む前にサイズで弾く(--max-filesizeは分割取得・結合では厳密上限にならない)
+    let size = std::fs::metadata(produced.path()).map(|m| m.len()).unwrap_or(u64::MAX);
+    if size > CAPTURE_FETCH_MAX_BYTES {
+        cleanup(&dir, &stem);
+        return Err("動画が大きすぎます(150MBまで)。短い動画で試してください".into());
+    }
     let bytes = std::fs::read(produced.path()).map_err(|e| format!("読み取り失敗: {e}"))?;
-    let _ = std::fs::remove_file(produced.path());
+    cleanup(&dir, &stem);
     if bytes.is_empty() {
         return Err("空のファイルでした".into());
-    }
-    if bytes.len() as u64 > CAPTURE_FETCH_MAX_BYTES {
-        return Err("動画が大きすぎます(150MBまで)。短い動画で試してください".into());
     }
     Ok(bytes)
 }
