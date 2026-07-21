@@ -257,8 +257,15 @@ async fn fetch_via_page(url: String) -> Result<Vec<u8>, String> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        let tail: String = stderr.chars().rev().take(200).collect::<String>().chars().rev().collect();
-        return Err(format!("このページから動画を取り出せませんでした: {}", tail.trim()));
+        // 本質的なエラー行(ERROR:)を優先して見せる(末尾切り出しだと文が途中から始まり意味不明になる)
+        let msg = stderr
+            .lines()
+            .rev()
+            .find(|l| l.contains("ERROR"))
+            .map(|l| l.trim().to_string())
+            .unwrap_or_else(|| stderr.lines().last().unwrap_or("原因不明").trim().to_string());
+        let msg: String = msg.chars().take(240).collect();
+        return Err(format!("このページから動画を取り出せませんでした: {msg}"));
     }
 
     // 拡張子は yt-dlp が決めるので stem 前方一致で生成物を探す
