@@ -84,9 +84,17 @@ export async function captureVideoToSpec(
     const baseTsMs = lastTsMs + 1000;
     const step = 1 / SAMPLE_FPS;
     for (let t = 0.001; t < duration; t += step) {
-      video.currentTime = t;
-      await new Promise<void>((r) => {
-        video.onseeked = () => r();
+      // 競合対策(2026-07-21): リスナーを張ってからシークを開始する。
+      // 旧実装(currentTime代入→後からonseeked代入)は、直前シークの完了イベントを
+      // 誤って拾い、シーク未完了の画で骨格検出する取り違えが起きる
+      // (12fpsでは間隔が長く顕在化せず、24fps化で常時発火した)
+      await new Promise<void>((res) => {
+        const onSeeked = () => {
+          video.removeEventListener("seeked", onSeeked);
+          res();
+        };
+        video.addEventListener("seeked", onSeeked);
+        video.currentTime = t;
       });
       // 単調増加タイムスタンプ(同一・逆行を渡すと追跡が壊れる)
       const tsMs = Math.max(lastTsMs + 1, baseTsMs + Math.round(t * 1000));
