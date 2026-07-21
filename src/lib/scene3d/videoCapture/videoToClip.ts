@@ -101,6 +101,7 @@ export async function captureVideoToSpec(
       lastTsMs = tsMs;
       const res = landmarker.detectForVideo(video, tsMs);
       const world = res.worldLandmarks?.[0];
+      const img = res.landmarks?.[0];
       if (world && world.length >= 33) {
         frames.push({
           time: Math.round(t * 1000) / 1000,
@@ -110,6 +111,8 @@ export async function captureVideoToSpec(
             z: l.z,
             visibility: l.visibility,
           })),
+          // 画像座標も持ち回る(ジャンプ=床からの浮きの復元に使う)
+          image: img?.map((l) => ({ x: l.x, y: l.y, visibility: l.visibility })),
         });
       } else {
         missed++;

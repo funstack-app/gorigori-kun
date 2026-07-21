@@ -14,8 +14,13 @@
 import type { GeneratedMotionSpec } from "../motionGen";
 
 export type CapturedLandmark = { x: number; y: number; z: number; visibility?: number };
-/** 1フレーム分: MediaPipe world landmarks 33点(腰中央原点・メートル・yは画像流儀で下向き正) */
-export type CapturedFrame = { time: number; landmarks: CapturedLandmark[] };
+/** 1フレーム分: MediaPipe world landmarks 33点(腰中央原点・メートル・yは画像流儀で下向き正)。
+ * image は正規化画像座標(0-1・y下向き正)。ジャンプ(空中の浮き)の復元に使う(省略可) */
+export type CapturedFrame = {
+  time: number;
+  landmarks: CapturedLandmark[];
+  image?: { x: number; y: number; visibility?: number }[];
+};
 
 /* ---------------------------------- 小さなベクトル演算 ---------------------------------- */
 
@@ -327,6 +332,7 @@ export function smoothFrames(frames: CapturedFrame[]): CapturedFrame[] {
       z: filters[i][2].filter(l.z, f.time),
       visibility: l.visibility,
     })),
+    image: f.image, // 画像座標は平滑化せず素通し(ジャンプ復元用。落とすと浮きが常に0になる)
   }));
 }
 
@@ -371,6 +377,49 @@ export function solveFramesToSpec(
   for (const d of lowestSmooth) {
     if (d > standingDrop) standingDrop = d;
   }
+
+  // ジャンプ(空中の浮き)の復元: 画像座標で「体の最下点」が床ラインからどれだけ浮いたかを
+  // 胴体の実寸(m)でスケール換算する。world座標は腰原点のため空中移動が消える問題への対策。
+  // 前提: カメラがほぼ固定(通常のダンス動画)。image が無い旧データ・部分身体では0
+  const lowestImgY: number[] = frames.map((f) => {
+    if (!f.image || f.image.length < 33) return Number.NaN;
+    let low = Number.NEGATIVE_INFINITY;
+    for (const i of CONTACT_LMS) {
+      const pt = f.image[i];
+      if (!pt || (pt.visibility ?? 0) < MIN_VIS) continue;
+      if (pt.y > low) low = pt.y;
+    }
+    return Number.isFinite(low) ? low : Number.NaN;
+  });
+  // 床ライン = 各フレームの最下点の中央値。ダンスでは大半のフレームで片足が接地しており、
+  // 最下点の分布は床に密集する。最大値(全編で一番低い1点)だと外れ値1フレームが床を
+  // 引きずり下げ、全編に偽の浮きが乗る(実測: ホップ15cmが55cmに化けた)
+  const finiteLows = lowestImgY.filter((v) => Number.isFinite(v)).sort((a2, b2) => a2 - b2);
+  const floorImgY =
+    finiteLows.length > 0 ? finiteLows[Math.floor(finiteLows.length / 2)] : Number.NaN;
+  const liftRaw: number[] = frames.map((f, i) => {
+    const v = lowestImgY[i];
+    if (!f.image || !Number.isFinite(v) || !Number.isFinite(floorImgY)) return 0;
+    const hipI = f.image[LM.hipL] && f.image[LM.hipR]
+      ? [(f.image[LM.hipL].x + f.image[LM.hipR].x) / 2, (f.image[LM.hipL].y + f.image[LM.hipR].y) / 2]
+      : null;
+    const shI = f.image[LM.shoulderL] && f.image[LM.shoulderR]
+      ? [(f.image[LM.shoulderL].x + f.image[LM.shoulderR].x) / 2, (f.image[LM.shoulderL].y + f.image[LM.shoulderR].y) / 2]
+      : null;
+    if (!hipI || !shI) return 0;
+    const torsoImg = Math.hypot(shI[0] - hipI[0], shI[1] - hipI[1]);
+    if (torsoImg < 1e-4) return 0;
+    const hipW = mid(p(f, LM.hipL), p(f, LM.hipR));
+    const shW = mid(p(f, LM.shoulderL), p(f, LM.shoulderR));
+    const torsoM = len(sub(shW, hipW)); // 画像1単位あたり何mか = 実寸/画像長
+    return Math.max(0, (floorImgY - v) * (torsoM / torsoImg));
+  });
+  // 平滑化(窓3) + 3cm未満はノイズ扱い + 上限0.6m
+  const lift = liftRaw.map((_, i) => {
+    const s = liftRaw.slice(Math.max(0, i - 1), i + 2);
+    const v = s.reduce((a2, b2) => a2 + b2, 0) / s.length;
+    return v < 0.03 ? 0 : Math.min(v, 0.6);
+  });
 
   // rootYaw の基準: 最初のフレームの体の向き
   const b0 = bodyFrameOf(frames[0]);
@@ -496,7 +545,12 @@ export function solveFramesToSpec(
         );
         if (vFoot >= MIN_VIS) {
           const plantar = 90 - angleBetween(sub(an, kn), sub(toe, heel));
-          bones[footName] = [clampDeg(plantar, 45), 0, 0];
+          // つま先の向き(内股/ガニ股/ステップの向き)。体正面基準の水平角。
+          // 軸実測(synthbone): foot Y+ = つま先内向き(toe-in)。Rは左右鏡映
+          const footB = toBody(sub(toe, heel), b);
+          const sideSign = side === "L" ? 1 : -1;
+          const yawFoot = deg(Math.atan2(sideSign * footB[0], -footB[2]));
+          bones[footName] = [clampDeg(plantar, 45), clampDeg(yawFoot, 40), 0];
         } else {
           markMissing(footName, keyframes.length);
         }
@@ -550,10 +604,11 @@ export function solveFramesToSpec(
       }
     }
 
-    // ---- 骨盤の上下(しゃがみ・沈み込み。体重感の正体) ----
-    // 接地補正済みの最下端距離を使う(逆立ち・床技でも接地関節基準で骨盤高さが出る)
+    // ---- 骨盤の上下(しゃがみ・沈み込み + ジャンプの浮き) ----
+    // しゃがみ項: 接地補正済みの最下端距離(逆立ち・床技でも接地関節基準)。
+    // 浮き項: 画像座標から復元した床クリアランス(ジャンプで実際に空中へ上がる)
     const drop = lowestSmooth[fi];
-    const hipsY = Math.max(-0.4, Math.min(0.3, -(standingDrop - drop)));
+    const hipsY = Math.max(-0.4, Math.min(0.3, -(standingDrop - drop))) + lift[fi];
 
     // ---- 体の向き(rootYaw: 開始向きからの累積・左回り正) ----
     const yawNow = Math.atan2(-b.back[0], -b.back[2]);
