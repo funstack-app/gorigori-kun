@@ -324,10 +324,12 @@ export function solveFramesToSpec(
       );
       const upperName = `DEF-upper_arm.${side}`;
       const foreName = `DEF-forearm.${side}`;
+      const clavName = `DEF-shoulder.${side}`;
       if (v < MIN_VIS) {
-        // 低信頼: 直前の姿勢を保持
+        // 低信頼: 直前の姿勢を保持(鎖骨も含めて。省略するとレスト姿勢に跳ねる)
         if (prevBones[upperName]) bones[upperName] = prevBones[upperName];
         if (prevBones[foreName]) bones[foreName] = prevBones[foreName];
+        if (prevBones[clavName]) bones[clavName] = prevBones[clavName];
         continue;
       }
       const upperDir = toBody(sub(el, sh), b);
@@ -343,19 +345,21 @@ export function solveFramesToSpec(
 
       // ---- 鎖骨(肩の持ち上げ・すぼめ)。肩が胴体に張り付いたままの硬さを解消 ----
       // 軸実測(2026-07-21 synthbone): X+=腕ごと持ち上げ / Y+=前へ下げすぼめ / Z=視覚変化ほぼなし
+      // 注意: 抽象体フレームは Y=上+(bodyFrameOf)。Y下+と取り違えて符号が逆だった
+      // (Codex Verifier指摘 2026-07-21: 腕を下ろすと鎖骨が上がる逆連動になっていた)
       {
-        const shoulderName = `DEF-shoulder.${side}`;
         const shCenter = mid(p(f, LM.shoulderL), p(f, LM.shoulderR));
-        const clavDir = toBody(sub(sh, shCenter), b); // 体フレーム: x=右+ y=下+ z=後+
+        const clavDir = toBody(sub(sh, shCenter), b); // 体フレーム: x=右+ y=上+ z=後+
         const lat = Math.abs(clavDir[0]);
         if (lat > 1e-6) {
-          const liftDeg = deg(Math.atan2(-clavDir[1], lat)); // 肩線の傾き(上+)
+          const liftDeg = deg(Math.atan2(clavDir[1], lat)); // 肩のすくめ(上+)
           const fwdDeg = deg(Math.atan2(-clavDir[2], lat)); // 前に出る(+)
-          // 腕の挙上に連動して鎖骨が持ち上がる(人体では腕水平以降の可動は肩甲帯が担う)
+          // 腕の挙上に連動して鎖骨が持ち上がる(人体では腕水平以降の可動は肩甲帯が担う)。
+          // 挙上角: 下=-90 / 水平=0 / 真上=+90
           const u = norm(upperDir);
-          const armUp = deg(Math.asin(Math.max(-1, Math.min(1, -u[1]))));
+          const armUp = deg(Math.asin(Math.max(-1, Math.min(1, u[1]))));
           const coupled = Math.max(0, armUp - 60) * 0.4;
-          bones[shoulderName] = [
+          bones[clavName] = [
             clampDeg(liftDeg * 0.6 + coupled, 30),
             clampDeg(fwdDeg * 0.4, 20),
             0,
@@ -377,9 +381,11 @@ export function solveFramesToSpec(
       );
       const thighName = `DEF-thigh.${side}`;
       const shinName = `DEF-shin.${side}`;
+      const footHoldName = `DEF-foot.${side}`;
       if (v < MIN_VIS) {
         if (prevBones[thighName]) bones[thighName] = prevBones[thighName];
         if (prevBones[shinName]) bones[shinName] = prevBones[shinName];
+        if (prevBones[footHoldName]) bones[footHoldName] = prevBones[footHoldName];
         continue;
       }
       const thighDir = toBody(sub(kn, hip), b);
