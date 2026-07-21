@@ -340,6 +340,28 @@ export function solveFramesToSpec(
       const [ex, ey, ez] = limbEulerWithTwist(upperDir, bendNormal, [1, 0, 0]);
       bones[upperName] = [clampDeg(ex), clampDeg(ey), clampDeg(ez)];
       bones[foreName] = [elbowBend, 0, 0];
+
+      // ---- 鎖骨(肩の持ち上げ・すぼめ)。肩が胴体に張り付いたままの硬さを解消 ----
+      // 軸実測(2026-07-21 synthbone): X+=腕ごと持ち上げ / Y+=前へ下げすぼめ / Z=視覚変化ほぼなし
+      {
+        const shoulderName = `DEF-shoulder.${side}`;
+        const shCenter = mid(p(f, LM.shoulderL), p(f, LM.shoulderR));
+        const clavDir = toBody(sub(sh, shCenter), b); // 体フレーム: x=右+ y=下+ z=後+
+        const lat = Math.abs(clavDir[0]);
+        if (lat > 1e-6) {
+          const liftDeg = deg(Math.atan2(-clavDir[1], lat)); // 肩線の傾き(上+)
+          const fwdDeg = deg(Math.atan2(-clavDir[2], lat)); // 前に出る(+)
+          // 腕の挙上に連動して鎖骨が持ち上がる(人体では腕水平以降の可動は肩甲帯が担う)
+          const u = norm(upperDir);
+          const armUp = deg(Math.asin(Math.max(-1, Math.min(1, -u[1]))));
+          const coupled = Math.max(0, armUp - 60) * 0.4;
+          bones[shoulderName] = [
+            clampDeg(liftDeg * 0.6 + coupled, 30),
+            clampDeg(fwdDeg * 0.4, 20),
+            0,
+          ];
+        }
+      }
     }
 
     // ---- 脚(左右対称に処理) ----
@@ -369,6 +391,27 @@ export function solveFramesToSpec(
       // 腿の骨軸はX(前後)が反転している(docの符号規約)。基底解でも同様に反転して合わせる
       bones[thighName] = [clampDeg(-ex), clampDeg(-ey), clampDeg(ez)];
       bones[shinName] = [kneeBend, 0, 0];
+
+      // ---- 足首(つま先の上下)。足が板のまま=ステップが硬い問題の解消 ----
+      // 軸実測(2026-07-21 synthbone): X+=つま先を下げる(底屈)。
+      // 立位で脛(下向き)と足(踵→つま先)は約90°。90°からの差分が底屈/背屈
+      {
+        const footName = `DEF-foot.${side}`;
+        const heel = p(f, side === "L" ? LM.heelL : LM.heelR);
+        const toe = p(f, side === "L" ? LM.footL : LM.footR);
+        const vFoot = vis(
+          f,
+          side === "L" ? LM.heelL : LM.heelR,
+          side === "L" ? LM.footL : LM.footR,
+          side === "L" ? LM.ankleL : LM.ankleR,
+        );
+        if (vFoot >= MIN_VIS) {
+          const plantar = 90 - angleBetween(sub(an, kn), sub(toe, heel));
+          bones[footName] = [clampDeg(plantar, 45), 0, 0];
+        } else if (prevBones[footName]) {
+          bones[footName] = prevBones[footName];
+        }
+      }
     }
 
     // ---- 胴体(前後左右の傾き + 肩の捻りを spine 3本に分配) ----
