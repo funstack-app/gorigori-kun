@@ -304,6 +304,7 @@ export function solveFramesToSpec(
   const keyframes: KF[] = [];
   let prevBones: Record<string, [number, number, number]> = {};
   let prevYawDeg = 0;
+  let prevTwistDeg = 0;
 
   for (let fi = 0; fi < frames.length; fi++) {
     const f = frames[fi];
@@ -382,7 +383,16 @@ export function solveFramesToSpec(
       const leanS = deg(Math.asin(Math.max(-1, Math.min(1, dot(b.up, rH)))));
       // 肩線と腰線の水平ねじり(Y捻り)。体フレームは腰基準なので肩線の向き=捻り
       const shLine = toBody(sub(p(f, LM.shoulderL), p(f, LM.shoulderR)), b);
-      const twist = deg(Math.atan2(-shLine[2], shLine[0]));
+      // 肩線ベクトルは L-R = 本人の左向き = 体フレームで(-1,0,0)が無捻り。
+      // 旧式 atan2(-z, x) は基準が180°ずれ、常に±180付近を出力→クランプで±45に丸まり
+      // 符号ノイズで毎フレームΔ90°パタパタしていた(2026-07-21 ハーネス実測で発覚)。
+      // 正: 無捻りで0°になる atan2(z, -x)。さらにアンラップで±180跨ぎを連続化する
+      const twistRaw = deg(Math.atan2(shLine[2], -shLine[0]));
+      let twistCont = twistRaw;
+      while (twistCont - prevTwistDeg > 180) twistCont -= 360;
+      while (twistCont - prevTwistDeg < -180) twistCont += 360;
+      prevTwistDeg = twistCont;
+      const twist = Math.max(-135, Math.min(135, twistCont));
       const perX = clampDeg(leanF / 3, 40);
       const perY = clampDeg(twist / 3, 45);
       const perZ = clampDeg(-leanS / 3, 30);
