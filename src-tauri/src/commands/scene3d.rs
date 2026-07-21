@@ -134,6 +134,67 @@ pub async fn scene3d_encode(export_dir: String, fps: u32) -> Result<(String, Str
     ))
 }
 
+/// URL取り込みの上限(bytes)。20秒制限の動画用途では十分な余裕
+const CAPTURE_FETCH_MAX_BYTES: u64 = 300 * 1024 * 1024;
+
+/// 参照動画のURLをダウンロードして生バイトを返す(「動画から動きを取り込む」のURL入力用)。
+/// WebView の fetch は CORS で大半のホストに弾かれるため Rust 側で取得する。
+/// ファイルは保存せずメモリ経由でフロントへ渡す(取り込み後は破棄される)
+#[tauri::command]
+pub async fn scene3d_fetch_capture_video(url: String) -> Result<tauri::ipc::Response, String> {
+    let parsed =
+        reqwest::Url::parse(url.trim()).map_err(|_| "URLの形式が正しくありません".to_string())?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return Err("http/https のURLだけ対応しています".into());
+    }
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .map_err(|e| format!("HTTPクライアント初期化に失敗: {e}"))?;
+    let resp = client
+        .get(parsed)
+        .send()
+        .await
+        .map_err(|e| format!("ダウンロードできません: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!(
+            "ダウンロードできません (HTTP {})",
+            resp.status().as_u16()
+        ));
+    }
+    if let Some(len) = resp.content_length() {
+        if len > CAPTURE_FETCH_MAX_BYTES {
+            return Err("動画が大きすぎます(300MBまで)。短く切った動画を使ってください".into());
+        }
+    }
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if content_type.starts_with("text/html") {
+        return Err(
+            "動画ファイルの直リンクではないようです(Webページが返ってきました)。動画そのもののURLを貼ってください"
+                .into(),
+        );
+    }
+    use futures::StreamExt;
+    let mut stream = resp.bytes_stream();
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("ダウンロード中断: {e}"))?;
+        if (buf.len() as u64 + chunk.len() as u64) > CAPTURE_FETCH_MAX_BYTES {
+            return Err("動画が大きすぎます(300MBまで)。短く切った動画を使ってください".into());
+        }
+        buf.extend_from_slice(&chunk);
+    }
+    if buf.is_empty() {
+        return Err("空のファイルでした".into());
+    }
+    Ok(tauri::ipc::Response::new(buf))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

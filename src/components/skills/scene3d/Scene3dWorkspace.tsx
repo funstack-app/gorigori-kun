@@ -13,6 +13,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import {
   DndContext,
   PointerSensor,
@@ -869,8 +870,7 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
   const [capBusy, setCapBusy] = useState<string | null>(null);
   const [capError, setCapError] = useState<string | null>(null);
 
-  const onCaptureVideo = async (file: File | null) => {
-    if (!file || capBusy) return;
+  const captureFromFile = async (file: File) => {
     setCapBusy("準備中…");
     setCapError(null);
     try {
@@ -891,6 +891,38 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
       setCapBusy(null);
       if (videoRef.current) videoRef.current.value = "";
     }
+  };
+
+  const onCaptureVideo = async (file: File | null) => {
+    if (!file || capBusy) return;
+    await captureFromFile(file);
+  };
+
+  // URLから取り込み(直リンクの動画をRust側でダウンロードして同じ経路へ流す)
+  const [capUrl, setCapUrl] = useState("");
+  const onCaptureFromUrl = async () => {
+    const url = capUrl.trim();
+    if (!url || capBusy) return;
+    setCapBusy("動画をダウンロード中…");
+    setCapError(null);
+    let file: File;
+    try {
+      const data = await invoke<ArrayBuffer>("scene3d_fetch_capture_video", { url });
+      let name = "";
+      try {
+        name = decodeURIComponent(new URL(url).pathname.split("/").pop() ?? "");
+      } catch {
+        // URLが解析できなくてもデフォルト名で続行
+      }
+      file = new File([data], name || "URL動画.mp4");
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setCapError(msg.slice(0, 200));
+      setCapBusy(null);
+      return;
+    }
+    setCapUrl("");
+    await captureFromFile(file);
   };
   const [genBusy, setGenBusy] = useState(false);
   const [genError, setGenError] = useState<string | null>(null);
@@ -984,7 +1016,58 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
   };
 
   return (
-    <Popup title="モーションライブラリ" onClose={onClose}>
+    <Popup title="動きをつける" onClose={onClose}>
+      {/* 動画から取り込む(完全ローカル・無料。MediaPipe同梱)。主役機能なので先頭に置く */}
+      <div className="mb-3 rounded-lg border border-emerald-400/25 bg-emerald-400/5 p-2.5">
+        <p className="mb-1.5 text-[11px] font-bold tracking-wide text-emerald-300">
+          🎬 動画から動きを取り込む(β)
+        </p>
+        <input
+          ref={videoRef}
+          type="file"
+          accept="video/mp4,video/quicktime,video/webm,video/*"
+          className="hidden"
+          onChange={(e) => void onCaptureVideo(e.target.files?.[0] ?? null)}
+        />
+        <button
+          className="w-full rounded-lg border border-emerald-400/40 bg-emerald-400/10 px-3 py-1.5 text-xs text-emerald-300 hover:bg-emerald-400/20 disabled:opacity-50"
+          disabled={!!capBusy}
+          onClick={() => videoRef.current?.click()}
+        >
+          {capBusy ?? "📁 動画ファイルを選ぶ…(mp4/mov/webm・20秒まで)"}
+        </button>
+        <div className="mt-1.5 flex gap-1.5">
+          <input
+            type="text"
+            value={capUrl}
+            onChange={(e) => setCapUrl(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void onCaptureFromUrl();
+            }}
+            placeholder="🔗 または動画のURLを貼る(直リンク)"
+            className="min-w-0 flex-1 rounded-lg border border-[#2a2a2a] bg-[#0d0d0d] px-2 py-1.5 text-xs text-neutral-200 placeholder:text-neutral-600 focus:border-emerald-400/60 focus:outline-none"
+            disabled={!!capBusy}
+          />
+          <button
+            className="shrink-0 rounded-lg border border-emerald-400/40 bg-emerald-400/10 px-3 py-1.5 text-xs text-emerald-300 hover:bg-emerald-400/20 disabled:opacity-50"
+            onClick={() => void onCaptureFromUrl()}
+            disabled={!!capBusy || !capUrl.trim()}
+          >
+            取り込む
+          </button>
+        </div>
+        <p className="mt-1.5 text-[10px] leading-4 text-neutral-500">
+          全身が映った実写の動画から、動きだけをキャラに写します(映像は取り込みません)。
+          処理は全てこのPC内で完結します。自分で撮った動画・権利のある映像を使ってください。
+          URLは動画ファイルの直リンクのみ(YouTube等の再生ページURLは不可)
+        </p>
+        {capError && (
+          <p className="mt-1 rounded border border-red-500/30 bg-red-500/10 p-1.5 text-[11px] text-red-300">
+            {capError}
+          </p>
+        )}
+      </div>
+
       {/* AIモーション生成(Codex) */}
       <div className="mb-3 rounded-lg border border-sky-400/25 bg-sky-400/5 p-2.5">
         <p className="mb-1.5 text-[11px] font-bold tracking-wide text-sky-300">
@@ -1033,36 +1116,6 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
         {genError && (
           <p className="mt-1 rounded border border-red-500/30 bg-red-500/10 p-1.5 text-[11px] text-red-300">
             {genError}
-          </p>
-        )}
-      </div>
-
-      {/* 動画から取り込む(完全ローカル・無料。MediaPipe同梱) */}
-      <div className="mb-3 rounded-lg border border-emerald-400/25 bg-emerald-400/5 p-2.5">
-        <p className="mb-1.5 text-[11px] font-bold tracking-wide text-emerald-300">
-          動画から動きを取り込む(β)
-        </p>
-        <input
-          ref={videoRef}
-          type="file"
-          accept="video/mp4,video/quicktime,video/webm,video/*"
-          className="hidden"
-          onChange={(e) => void onCaptureVideo(e.target.files?.[0] ?? null)}
-        />
-        <button
-          className="w-full rounded-lg border border-emerald-400/40 bg-emerald-400/10 px-3 py-1.5 text-xs text-emerald-300 hover:bg-emerald-400/20 disabled:opacity-50"
-          disabled={!!capBusy}
-          onClick={() => videoRef.current?.click()}
-        >
-          {capBusy ?? "動画を選ぶ…(mp4/mov/webm・20秒まで)"}
-        </button>
-        <p className="mt-1.5 text-[10px] leading-4 text-neutral-500">
-          全身が映った実写の動画から、動きだけをキャラに写します(映像は取り込みません)。
-          処理は全てこのPC内で完結します。自分で撮った動画・権利のある映像を使ってください
-        </p>
-        {capError && (
-          <p className="mt-1 rounded border border-red-500/30 bg-red-500/10 p-1.5 text-[11px] text-red-300">
-            {capError}
           </p>
         )}
       </div>
@@ -1547,7 +1600,7 @@ function SelectedObjectSection() {
           }`}
           onClick={() => setMotionLibOpen(true)}
         >
-          モーションライブラリ…(Mixamo読み込み)
+          🎬 動きをつける…(動画から取り込み / AI生成 / ライブラリ)
         </button>
       )}
       {motionLibOpen && (

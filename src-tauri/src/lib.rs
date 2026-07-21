@@ -441,6 +441,7 @@ pub fn run() {
             commands::scene3d::scene3d_export_begin,
             commands::scene3d::scene3d_write_frame,
             commands::scene3d::scene3d_encode,
+            commands::scene3d::scene3d_fetch_capture_video,
             commands::storyboard::storyboard_run,
             commands::storyboard::storyboard_checkpoint_resume,
             commands::storyboard::storyboard_regenerate_cut,
