@@ -37,6 +37,12 @@ const norm = (a: V3): V3 => {
 const mid = (a: V3, b: V3): V3 => [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2];
 const deg = (rad: number): number => (rad * 180) / Math.PI;
 const clampDeg = (d: number, lim = 150): number => Math.max(-lim, Math.min(lim, d));
+const wrap180 = (d: number): number => {
+  let x = d % 360;
+  if (x > 180) x -= 360;
+  if (x < -180) x += 360;
+  return x;
+};
 
 /* ---------------------------------- ランドマーク定義 ---------------------------------- */
 
@@ -107,26 +113,97 @@ const toBody = (v: V3, b: BodyFrame): V3 => [dot(v, b.right), dot(v, b.up), dot(
 
 /* ---------------------------------- swing → euler ---------------------------------- */
 
-/**
- * 静止方向(0,-1,0)を dir へ向ける最小回転(swing)を、XYZ euler(度)に分解する。
- * q = rest→dir の最短回転。R = Rx*Ry*Rz(XYZ order)としてeuler抽出
- */
-function swingEulerFromDown(dir: V3): [number, number, number] {
+type Quat = [number, number, number, number]; // x, y, z, w
+
+/** 静止方向(0,-1,0)→dir の最短回転クォータニオン */
+function quatSwingFromDown(dir: V3): Quat {
   const d = norm(dir);
-  if (len(d) < 1e-6) return [0, 0, 0];
+  if (len(d) < 1e-6) return [0, 0, 0, 1];
   const restV: V3 = [0, -1, 0];
-  // 最短回転クォータニオン
   const c = cross(restV, d);
   const w = 1 + dot(restV, d);
-  if (w < 1e-6) return [180, 0, 0]; // 真逆(真上): X180で表現
-  let [qx, qy, qz] = c;
-  let qw = w;
-  const ql = Math.hypot(qx, qy, qz, qw);
-  qx /= ql;
-  qy /= ql;
-  qz /= ql;
-  qw /= ql;
-  // XYZ order euler抽出(three.js Euler.setFromQuaternion 'XYZ' と同式)
+  if (w < 1e-6) return [1, 0, 0, 0]; // 真逆(真上): X180
+  const ql = Math.hypot(c[0], c[1], c[2], w);
+  return [c[0] / ql, c[1] / ql, c[2] / ql, w / ql];
+}
+
+/** 3x3回転行列(行優先 m[row][col]) → クォータニオン (Shepperd法) */
+function quatFromMatrix(m: number[][]): Quat {
+  const tr = m[0][0] + m[1][1] + m[2][2];
+  let q: Quat;
+  if (tr > 0) {
+    const s = Math.sqrt(tr + 1) * 2;
+    q = [(m[2][1] - m[1][2]) / s, (m[0][2] - m[2][0]) / s, (m[1][0] - m[0][1]) / s, s / 4];
+  } else if (m[0][0] > m[1][1] && m[0][0] > m[2][2]) {
+    const s = Math.sqrt(1 + m[0][0] - m[1][1] - m[2][2]) * 2;
+    q = [s / 4, (m[0][1] + m[1][0]) / s, (m[0][2] + m[2][0]) / s, (m[2][1] - m[1][2]) / s];
+  } else if (m[1][1] > m[2][2]) {
+    const s = Math.sqrt(1 + m[1][1] - m[0][0] - m[2][2]) * 2;
+    q = [(m[0][1] + m[1][0]) / s, s / 4, (m[1][2] + m[2][1]) / s, (m[0][2] - m[2][0]) / s];
+  } else {
+    const s = Math.sqrt(1 + m[2][2] - m[0][0] - m[1][1]) * 2;
+    q = [(m[0][2] + m[2][0]) / s, (m[1][2] + m[2][1]) / s, s / 4, (m[1][0] - m[0][1]) / s];
+  }
+  const l = Math.hypot(...q);
+  return [q[0] / l, q[1] / l, q[2] / l, q[3] / l];
+}
+
+/** 球面線形補間(最短経路) */
+function slerpQ(a: Quat, b: Quat, t: number): Quat {
+  let d = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
+  let bb: Quat = b;
+  if (d < 0) {
+    bb = [-b[0], -b[1], -b[2], -b[3]];
+    d = -d;
+  }
+  if (d > 0.9995) {
+    const q: Quat = [
+      a[0] + (bb[0] - a[0]) * t,
+      a[1] + (bb[1] - a[1]) * t,
+      a[2] + (bb[2] - a[2]) * t,
+      a[3] + (bb[3] - a[3]) * t,
+    ];
+    const l = Math.hypot(...q);
+    return [q[0] / l, q[1] / l, q[2] / l, q[3] / l];
+  }
+  const th = Math.acos(d);
+  const sa = Math.sin((1 - t) * th) / Math.sin(th);
+  const sb = Math.sin(t * th) / Math.sin(th);
+  return [
+    a[0] * sa + bb[0] * sb,
+    a[1] * sa + bb[1] * sb,
+    a[2] * sa + bb[2] * sb,
+    a[3] * sa + bb[3] * sb,
+  ];
+}
+
+/** XYZ euler(度) → クォータニオン */
+function quatFromEulerXYZ([dx, dy, dz]: [number, number, number]): Quat {
+  const x = (dx * Math.PI) / 360;
+  const y = (dy * Math.PI) / 360;
+  const z = (dz * Math.PI) / 360;
+  const cx = Math.cos(x);
+  const sx = Math.sin(x);
+  const cy = Math.cos(y);
+  const sy = Math.sin(y);
+  const cz = Math.cos(z);
+  const sz = Math.sin(z);
+  return [
+    sx * cy * cz + cx * sy * sz,
+    cx * sy * cz - sx * cy * sz,
+    cx * cy * sz + sx * sy * cz,
+    cx * cy * cz - sx * sy * sz,
+  ];
+}
+
+/** 2クォータニオン間の実回転角(度) */
+function quatAngle(a: Quat, b: Quat): number {
+  const d = Math.abs(a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]);
+  return deg(2 * Math.acos(Math.min(1, d)));
+}
+
+/** クォータニオン → XYZ euler(度)。three.js Euler.setFromQuaternion 'XYZ' と同式 */
+function eulerXYZFromQuat([qx, qy, qz, qw]: Quat): [number, number, number] {
   const m11 = 1 - 2 * (qy * qy + qz * qz);
   const m12 = 2 * (qx * qy - qz * qw);
   const m13 = 2 * (qx * qz + qy * qw);
@@ -148,19 +225,26 @@ function swingEulerFromDown(dir: V3): [number, number, number] {
 /**
  * 3点(付け根・関節・先端)から、付け根ボーンの回転を捻れ込みで解く。
  * 静止基準: ボーン方向=(0,-1,0)、曲げ軸=restBendAxis(肘=+X:前へ曲がる / 膝=-X:後ろへ曲がる)。
- * 目標: ボーン方向→dir、曲げ軸→実際の曲げ平面法線。曲げが浅い時は法線が不安定なのでswingのみ
+ * 曲げが浅いと法線が不安定なため、旧実装は15°で捻れ解をON/OFFの急切替にしていたが、
+ * 高速動作で境界をまたぐ瞬間に実回転105°/フレームのスナップが出た(2026-07-21 実測)。
+ * → swing解と捻れ解をクォータニオン空間で混合し、曲げ10°〜25°でなめらかに移行する
  */
 function limbEulerWithTwist(
   dir: V3,
   bendPlaneNormal: V3 | null,
   restBendAxis: V3,
+  bendDeg: number,
 ): [number, number, number] {
   const d = norm(dir);
   if (len(d) < 1e-6) return [0, 0, 0];
-  if (!bendPlaneNormal) return swingEulerFromDown(d);
+  const qSwing = quatSwingFromDown(d);
+  // 混合重み: 曲げ10°以下=swingのみ / 25°以上=捻れ解のみ / 間はスムーズステップ
+  const tRaw = Math.max(0, Math.min(1, (bendDeg - 10) / 15));
+  const w = tRaw * tRaw * (3 - 2 * tRaw);
+  if (!bendPlaneNormal || w <= 0) return eulerXYZFromQuat(qSwing);
   // 目標基底: t1=ボーン方向, t2=曲げ軸(dirと直交化), t3=t1×t2
-  let t2 = norm(sub(bendPlaneNormal, scale(d, dot(bendPlaneNormal, d))));
-  if (len(t2) < 1e-6) return swingEulerFromDown(d);
+  const t2 = norm(sub(bendPlaneNormal, scale(d, dot(bendPlaneNormal, d))));
+  if (len(t2) < 1e-6) return eulerXYZFromQuat(qSwing);
   const t3 = cross(d, t2);
   // 静止基底: r1=(0,-1,0), r2=restBendAxis, r3=r1×r2
   const r1: V3 = [0, -1, 0];
@@ -177,18 +261,8 @@ function limbEulerWithTwist(
   for (let i = 0; i < 3; i++)
     for (let j = 0; j < 3; j++)
       m[i][j] = T[0][i] * R[0][j] + T[1][i] * R[1][j] + T[2][i] * R[2][j];
-  // XYZ euler抽出(three.js Euler 'XYZ' と同式)
-  const ey = Math.asin(Math.max(-1, Math.min(1, m[0][2])));
-  let ex: number;
-  let ez: number;
-  if (Math.abs(m[0][2]) < 0.9999999) {
-    ex = Math.atan2(-m[1][2], m[2][2]);
-    ez = Math.atan2(-m[0][1], m[0][0]);
-  } else {
-    ex = Math.atan2(m[2][1], m[1][1]);
-    ez = 0;
-  }
-  return [deg(ex), deg(ey), deg(ez)];
+  const qTwist = quatFromMatrix(m);
+  return eulerXYZFromQuat(w >= 1 ? qTwist : slerpQ(qSwing, qTwist, w));
 }
 
 /** 2ベクトルのなす角(度) */
@@ -206,8 +280,10 @@ class OneEuro {
   private dxPrev = 0;
   private tPrev: number | null = null;
   constructor(
-    private minCutoff = 1.5,
-    private beta = 0.3,
+    // 2026-07-21 高速ダンス向け調整(Sol設計レビュー採用): 旧(1.5, 0.3)は手ブレ除去寄りで
+    // 速い反転・着地の衝撃を丸めていた。minCutoff↑=静止時の追従を上げ、beta↑=高速時の遅れを減らす
+    private minCutoff = 2.5,
+    private beta = 0.6,
     private dCutoff = 1.0,
   ) {}
   private alpha(cutoff: number, dt: number): number {
@@ -305,6 +381,13 @@ export function solveFramesToSpec(
   let prevBones: Record<string, [number, number, number]> = {};
   let prevYawDeg = 0;
   let prevTwistDeg = 0;
+  // 低信頼で解けなかった(ボーン, キーフレーム番号)の記録。後段で前後の実測から補間する
+  const missing = new Map<string, number[]>();
+  const markMissing = (bn: string, idx: number) => {
+    let arr = missing.get(bn);
+    if (!arr) missing.set(bn, (arr = []));
+    arr.push(idx);
+  };
 
   for (let fi = 0; fi < frames.length; fi++) {
     const f = frames[fi];
@@ -326,20 +409,20 @@ export function solveFramesToSpec(
       const foreName = `DEF-forearm.${side}`;
       const clavName = `DEF-shoulder.${side}`;
       if (v < MIN_VIS) {
-        // 低信頼: 直前の姿勢を保持(鎖骨も含めて。省略するとレスト姿勢に跳ねる)
-        if (prevBones[upperName]) bones[upperName] = prevBones[upperName];
-        if (prevBones[foreName]) bones[foreName] = prevBones[foreName];
-        if (prevBones[clavName]) bones[clavName] = prevBones[clavName];
+        // 低信頼: この場では書かず「欠測」として記録 → 後段で前後の実測から補間する
+        // (旧: 直前姿勢を保持 → 激しい動きの最中に固まり、復帰時にワープしていた)
+        markMissing(upperName, keyframes.length);
+        markMissing(foreName, keyframes.length);
+        markMissing(clavName, keyframes.length);
         continue;
       }
       const upperDir = toBody(sub(el, sh), b);
       const foreDir = toBody(sub(wr, el), b);
       // 肘: 内角180°=伸び切り → 曲げ角=180-内角(正)。doc: forearm X正=肘曲げ
       const elbowBend = clampDeg(Math.max(0, 180 - angleBetween(sub(sh, el), sub(wr, el))));
-      // 曲げが浅いと平面法線が不安定 → swingのみにフォールバック
-      const bendNormal =
-        elbowBend > 15 ? norm(cross(upperDir, foreDir)) : null;
-      const [ex, ey, ez] = limbEulerWithTwist(upperDir, bendNormal, [1, 0, 0]);
+      // 曲げが浅いと平面法線が不安定 → 10°〜25°でswing解へなめらかに移行(急切替禁止)
+      const bendNormal = elbowBend > 10 ? norm(cross(upperDir, foreDir)) : null;
+      const [ex, ey, ez] = limbEulerWithTwist(upperDir, bendNormal, [1, 0, 0], elbowBend);
       bones[upperName] = [clampDeg(ex), clampDeg(ey), clampDeg(ez)];
       bones[foreName] = [elbowBend, 0, 0];
 
@@ -383,17 +466,17 @@ export function solveFramesToSpec(
       const shinName = `DEF-shin.${side}`;
       const footHoldName = `DEF-foot.${side}`;
       if (v < MIN_VIS) {
-        if (prevBones[thighName]) bones[thighName] = prevBones[thighName];
-        if (prevBones[shinName]) bones[shinName] = prevBones[shinName];
-        if (prevBones[footHoldName]) bones[footHoldName] = prevBones[footHoldName];
+        markMissing(thighName, keyframes.length);
+        markMissing(shinName, keyframes.length);
+        markMissing(footHoldName, keyframes.length);
         continue;
       }
       const thighDir = toBody(sub(kn, hip), b);
       const shinDir = toBody(sub(an, kn), b);
       const kneeBend = clampDeg(Math.max(0, 180 - angleBetween(sub(hip, kn), sub(an, kn))));
-      const bendNormal = kneeBend > 15 ? norm(cross(thighDir, shinDir)) : null;
+      const bendNormal = kneeBend > 10 ? norm(cross(thighDir, shinDir)) : null;
       // 脚の骨軸は腕と鏡映(doc: thigh X負=前上げ / shin X正=後ろ曲げ) → 静止曲げ軸=-X
-      const [ex, ey, ez] = limbEulerWithTwist(thighDir, bendNormal, [-1, 0, 0]);
+      const [ex, ey, ez] = limbEulerWithTwist(thighDir, bendNormal, [-1, 0, 0], kneeBend);
       // 腿の骨軸はX(前後)が反転している(docの符号規約)。基底解でも同様に反転して合わせる
       bones[thighName] = [clampDeg(-ex), clampDeg(-ey), clampDeg(ez)];
       bones[shinName] = [kneeBend, 0, 0];
@@ -414,8 +497,8 @@ export function solveFramesToSpec(
         if (vFoot >= MIN_VIS) {
           const plantar = 90 - angleBetween(sub(an, kn), sub(toe, heel));
           bones[footName] = [clampDeg(plantar, 45), 0, 0];
-        } else if (prevBones[footName]) {
-          bones[footName] = prevBones[footName];
+        } else {
+          markMissing(footName, keyframes.length);
         }
       }
     }
@@ -487,6 +570,63 @@ export function solveFramesToSpec(
       bones,
     });
     prevBones = bones;
+  }
+
+  // 欠測スパンの補完: 0.6秒以下は前後の実測から線形補間(オフライン処理の利点)。
+  // それ超・冒頭末尾は最寄りの実測を保持。全キーへ値を書き切る
+  // (キーに無いボーンはレスト姿勢に落ち、跳ねの原因になるため)
+  const lerpDeg = (a: number, b2: number, t: number) => a + wrap180(b2 - a) * t;
+  for (const [bn, idxs] of missing) {
+    let i = 0;
+    while (i < idxs.length) {
+      let j = i;
+      while (j + 1 < idxs.length && idxs[j + 1] === idxs[j] + 1) j++;
+      const s = idxs[i];
+      const e = idxs[j];
+      const before = s > 0 ? keyframes[s - 1].bones[bn] : undefined;
+      const after = e + 1 < keyframes.length ? keyframes[e + 1].bones[bn] : undefined;
+      const spanSec = keyframes[e].time - keyframes[s].time;
+      for (let k = s; k <= e; k++) {
+        if (before && after && spanSec <= 0.6) {
+          const t = (k - s + 1) / (e - s + 2);
+          keyframes[k].bones[bn] = [
+            lerpDeg(before[0], after[0], t),
+            lerpDeg(before[1], after[1], t),
+            lerpDeg(before[2], after[2], t),
+          ];
+        } else {
+          const src = before ?? after;
+          if (src) keyframes[k].bones[bn] = [src[0], src[1], src[2]];
+        }
+      }
+      i = j + 1;
+    }
+  }
+
+  // 単発スパイク除去(2026-07-21 Sol設計レビュー#4の「解いた後の回転を整える」層):
+  // 各ボーンの回転列に角距離メディアン(窓3)。1フレームだけの外れ姿勢
+  // (検出ノイズ由来の実回転100°超/フレームの往復)を潰し、持続する速い動きはそのまま通す
+  {
+    const boneNames = new Set<string>();
+    for (const kf of keyframes) for (const bnn of Object.keys(kf.bones)) boneNames.add(bnn);
+    for (const bn of boneNames) {
+      const eulers = keyframes.map((kf) => kf.bones[bn]);
+      const quats = eulers.map((e) => (e ? quatFromEulerXYZ(e) : null));
+      for (let k = 1; k < keyframes.length - 1; k++) {
+        const a = quats[k - 1];
+        const q = quats[k];
+        const c = quats[k + 1];
+        if (!a || !q || !c) continue;
+        // 3点のうち「他2点への角距離の和」が最小のものをメディアンとして採用
+        const costA = quatAngle(a, q) + quatAngle(a, c);
+        const costQ = quatAngle(q, a) + quatAngle(q, c);
+        const costC = quatAngle(c, a) + quatAngle(c, q);
+        if (costQ <= costA && costQ <= costC) continue; // 中央値が自分=変更なし
+        const src = costA < costC ? k - 1 : k + 1;
+        const e = eulers[src];
+        if (e) keyframes[k].bones[bn] = [e[0], e[1], e[2]];
+      }
+    }
   }
 
   const duration = frames[frames.length - 1].time;
