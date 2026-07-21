@@ -57,7 +57,17 @@ const LM = {
   kneeR: 26,
   ankleL: 27,
   ankleR: 28,
+  heelL: 29,
+  heelR: 30,
+  footL: 31,
+  footR: 32,
 } as const;
+
+/** 接地しうる関節(逆立ち=手首、正座=膝も床に着く)。hipsY の接地補正で使う */
+const CONTACT_LMS = [
+  LM.wristL, LM.wristR, LM.kneeL, LM.kneeR,
+  LM.ankleL, LM.ankleR, LM.heelL, LM.heelR, LM.footL, LM.footR,
+] as const;
 
 const p = (f: CapturedFrame, i: number): V3 => {
   const l = f.landmarks[i];
@@ -130,6 +140,52 @@ function swingEulerFromDown(dir: V3): [number, number, number] {
     ez = Math.atan2(-m12, m11);
   } else {
     ex = Math.atan2(2 * (qy * qz + qx * qw), 1 - 2 * (qx * qx + qz * qz));
+    ez = 0;
+  }
+  return [deg(ex), deg(ey), deg(ez)];
+}
+
+/**
+ * 3点(付け根・関節・先端)から、付け根ボーンの回転を捻れ込みで解く。
+ * 静止基準: ボーン方向=(0,-1,0)、曲げ軸=restBendAxis(肘=+X:前へ曲がる / 膝=-X:後ろへ曲がる)。
+ * 目標: ボーン方向→dir、曲げ軸→実際の曲げ平面法線。曲げが浅い時は法線が不安定なのでswingのみ
+ */
+function limbEulerWithTwist(
+  dir: V3,
+  bendPlaneNormal: V3 | null,
+  restBendAxis: V3,
+): [number, number, number] {
+  const d = norm(dir);
+  if (len(d) < 1e-6) return [0, 0, 0];
+  if (!bendPlaneNormal) return swingEulerFromDown(d);
+  // 目標基底: t1=ボーン方向, t2=曲げ軸(dirと直交化), t3=t1×t2
+  let t2 = norm(sub(bendPlaneNormal, scale(d, dot(bendPlaneNormal, d))));
+  if (len(t2) < 1e-6) return swingEulerFromDown(d);
+  const t3 = cross(d, t2);
+  // 静止基底: r1=(0,-1,0), r2=restBendAxis, r3=r1×r2
+  const r1: V3 = [0, -1, 0];
+  const r2 = restBendAxis;
+  const r3 = cross(r1, r2);
+  // 回転行列 M = T * R^T (Rの各列→Tの各列へ写す)
+  const T = [d, t2, t3];
+  const R = [r1, r2, r3];
+  const m: number[][] = [
+    [0, 0, 0],
+    [0, 0, 0],
+    [0, 0, 0],
+  ];
+  for (let i = 0; i < 3; i++)
+    for (let j = 0; j < 3; j++)
+      m[i][j] = T[0][i] * R[0][j] + T[1][i] * R[1][j] + T[2][i] * R[2][j];
+  // XYZ euler抽出(three.js Euler 'XYZ' と同式)
+  const ey = Math.asin(Math.max(-1, Math.min(1, m[0][2])));
+  let ex: number;
+  let ez: number;
+  if (Math.abs(m[0][2]) < 0.9999999) {
+    ex = Math.atan2(-m[1][2], m[2][2]);
+    ez = Math.atan2(-m[0][1], m[0][0]);
+  } else {
+    ex = Math.atan2(m[2][1], m[1][1]);
     ez = 0;
   }
   return [deg(ex), deg(ey), deg(ez)];
@@ -212,13 +268,32 @@ export function solveFramesToSpec(
 ): GeneratedMotionSpec {
   if (frames.length < 2) throw new Error("フレームが足りません(2枚以上必要)");
 
-  // 立ち姿勢の基準: 腰→足首の上下距離の最大値(最も伸びた瞬間)を「立ち」とみなす
-  let standingDrop = 0;
-  for (const f of frames) {
+  // 接地補正: 腰から「最下端の接地候補関節」までの上下距離(逆立ちでは手首、正座では膝が基準になる)。
+  // 足首固定だと逆立ち・床技で骨盤が最大まで沈む誤りになる(2026-07-21 PoC実測)
+  const lowestDropOf = (f: CapturedFrame): number => {
     const hipC = mid(p(f, LM.hipL), p(f, LM.hipR));
+    let best: number | null = null;
+    for (const i of CONTACT_LMS) {
+      if ((f.landmarks[i]?.visibility ?? 0) < MIN_VIS) continue;
+      const d = f.landmarks[i].y - hipC[1]; // y下向き正: 正の値=関節が腰より下
+      if (best == null || d > best) best = d;
+    }
+    if (best != null) return best;
+    // 全候補が低信頼: 従来どおり足首中点で代用
     const ankC = mid(p(f, LM.ankleL), p(f, LM.ankleR));
-    const drop = ankC[1] - hipC[1]; // y下向き正: 正の値=足首が腰より下
-    if (drop > standingDrop) standingDrop = drop;
+    return ankC[1] - hipC[1];
+  };
+  const lowestDrops = frames.map(lowestDropOf);
+  // 3フレーム移動平均(接地関節が足首→手首に切り替わる瞬間の段差をならす)
+  const lowestSmooth = lowestDrops.map((_, i) => {
+    const s = lowestDrops.slice(Math.max(0, i - 1), i + 2);
+    return s.reduce((a, v) => a + v, 0) / s.length;
+  });
+
+  // 立ち姿勢の基準: 接地距離の最大値(最も伸びた瞬間)を「立ち」とみなす
+  let standingDrop = 0;
+  for (const d of lowestSmooth) {
+    if (d > standingDrop) standingDrop = d;
   }
 
   // rootYaw の基準: 最初のフレームの体の向き
@@ -230,7 +305,8 @@ export function solveFramesToSpec(
   let prevBones: Record<string, [number, number, number]> = {};
   let prevYawDeg = 0;
 
-  for (const f of frames) {
+  for (let fi = 0; fi < frames.length; fi++) {
+    const f = frames[fi];
     const b = bodyFrameOf(f);
     const bones: Record<string, [number, number, number]> = {};
 
@@ -254,10 +330,14 @@ export function solveFramesToSpec(
         continue;
       }
       const upperDir = toBody(sub(el, sh), b);
-      const [ex, ey, ez] = swingEulerFromDown(upperDir);
-      bones[upperName] = [clampDeg(ex), clampDeg(ey), clampDeg(ez)];
+      const foreDir = toBody(sub(wr, el), b);
       // 肘: 内角180°=伸び切り → 曲げ角=180-内角(正)。doc: forearm X正=肘曲げ
       const elbowBend = clampDeg(Math.max(0, 180 - angleBetween(sub(sh, el), sub(wr, el))));
+      // 曲げが浅いと平面法線が不安定 → swingのみにフォールバック
+      const bendNormal =
+        elbowBend > 15 ? norm(cross(upperDir, foreDir)) : null;
+      const [ex, ey, ez] = limbEulerWithTwist(upperDir, bendNormal, [1, 0, 0]);
+      bones[upperName] = [clampDeg(ex), clampDeg(ey), clampDeg(ez)];
       bones[foreName] = [elbowBend, 0, 0];
     }
 
@@ -280,11 +360,13 @@ export function solveFramesToSpec(
         continue;
       }
       const thighDir = toBody(sub(kn, hip), b);
-      const [ex, ey, ez] = swingEulerFromDown(thighDir);
-      // doc: thigh X負=腿を前へ上げる。腕(X正=前)と逆符号の骨軸なのでXを反転する
-      bones[thighName] = [clampDeg(-ex), clampDeg(ey), clampDeg(ez)];
-      // 膝: 曲げ=正(doc: shin X正=膝曲げ)
+      const shinDir = toBody(sub(an, kn), b);
       const kneeBend = clampDeg(Math.max(0, 180 - angleBetween(sub(hip, kn), sub(an, kn))));
+      const bendNormal = kneeBend > 15 ? norm(cross(thighDir, shinDir)) : null;
+      // 脚の骨軸は腕と鏡映(doc: thigh X負=前上げ / shin X正=後ろ曲げ) → 静止曲げ軸=-X
+      const [ex, ey, ez] = limbEulerWithTwist(thighDir, bendNormal, [-1, 0, 0]);
+      // 腿の骨軸はX(前後)が反転している(docの符号規約)。基底解でも同様に反転して合わせる
+      bones[thighName] = [clampDeg(-ex), clampDeg(-ey), clampDeg(ez)];
       bones[shinName] = [kneeBend, 0, 0];
     }
 
@@ -304,12 +386,11 @@ export function solveFramesToSpec(
       const perX = clampDeg(leanF / 3, 40);
       const perY = clampDeg(twist / 3, 45);
       const perZ = clampDeg(-leanS / 3, 30);
-      if (Math.abs(perX) > 1.5 || Math.abs(perY) > 2 || Math.abs(perZ) > 1.5) {
-        const v: [number, number, number] = [perX, perY, perZ];
-        bones["DEF-spine.001"] = v;
-        bones["DEF-spine.002"] = v;
-        bones["DEF-spine.003"] = v;
-      }
+      // 常に書き込む(しきい値で書いたり書かなかったりすると0との間で震える)
+      const v: [number, number, number] = [perX, perY, perZ];
+      bones["DEF-spine.001"] = v;
+      bones["DEF-spine.002"] = v;
+      bones["DEF-spine.003"] = v;
     }
 
     // ---- 頭(鼻と耳から向きの概算) ----
@@ -328,9 +409,8 @@ export function solveFramesToSpec(
     }
 
     // ---- 骨盤の上下(しゃがみ・沈み込み。体重感の正体) ----
-    const hipC = mid(p(f, LM.hipL), p(f, LM.hipR));
-    const ankC = mid(p(f, LM.ankleL), p(f, LM.ankleR));
-    const drop = ankC[1] - hipC[1];
+    // 接地補正済みの最下端距離を使う(逆立ち・床技でも接地関節基準で骨盤高さが出る)
+    const drop = lowestSmooth[fi];
     const hipsY = Math.max(-0.4, Math.min(0.3, -(standingDrop - drop)));
 
     // ---- 体の向き(rootYaw: 開始向きからの累積・左回り正) ----
