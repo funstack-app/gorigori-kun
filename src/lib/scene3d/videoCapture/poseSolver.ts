@@ -421,6 +421,41 @@ export function solveFramesToSpec(
     return v < 0.03 ? 0 : Math.min(v, 0.6);
   });
 
+  // 重心スウェイ(左右の体重移動): 腰の画像x位置の、動画中央値からのズレをメートル換算。
+  // ポーズが合っていても体が1点に釘付けだと人形感が出る(グルーヴの正体は重心の揺れ)。
+  // ジャンプ復元と同じくカメラほぼ固定前提。画面右+
+  const hipImgX: number[] = frames.map((f) => {
+    if (!f.image || f.image.length < 33) return Number.NaN;
+    const hL = f.image[LM.hipL];
+    const hR = f.image[LM.hipR];
+    if (!hL || !hR) return Number.NaN;
+    return (hL.x + hR.x) / 2;
+  });
+  const finiteX = hipImgX.filter((v) => Number.isFinite(v)).sort((a2, b2) => a2 - b2);
+  const baseHipX = finiteX.length > 0 ? finiteX[Math.floor(finiteX.length / 2)] : Number.NaN;
+  const swayRaw: number[] = frames.map((f, i) => {
+    if (!Number.isFinite(hipImgX[i]) || !Number.isFinite(baseHipX) || !f.image) return 0;
+    const sL = f.image[LM.shoulderL];
+    const sR = f.image[LM.shoulderR];
+    const hL = f.image[LM.hipL];
+    const hR = f.image[LM.hipR];
+    if (!sL || !sR || !hL || !hR) return 0;
+    const torsoImg = Math.hypot(
+      (sL.x + sR.x) / 2 - (hL.x + hR.x) / 2,
+      (sL.y + sR.y) / 2 - (hL.y + hR.y) / 2,
+    );
+    if (torsoImg < 1e-4) return 0;
+    const hipW = mid(p(f, LM.hipL), p(f, LM.hipR));
+    const shW = mid(p(f, LM.shoulderL), p(f, LM.shoulderR));
+    const torsoM = len(sub(shW, hipW));
+    return (hipImgX[i] - baseHipX) * (torsoM / torsoImg);
+  });
+  const sway = swayRaw.map((_, i) => {
+    const s = swayRaw.slice(Math.max(0, i - 1), i + 2);
+    const v = s.reduce((a2, b2) => a2 + b2, 0) / s.length;
+    return Math.max(-0.7, Math.min(0.7, v));
+  });
+
   // rootYaw の基準: 最初のフレームの体の向き
   const b0 = bodyFrameOf(frames[0]);
   const yaw0 = Math.atan2(-b0.back[0], -b0.back[2]); // 前方ベクトル(-back)の水平角
@@ -442,6 +477,23 @@ export function solveFramesToSpec(
     const f = frames[fi];
     const b = bodyFrameOf(f);
     const bones: Record<string, [number, number, number]> = {};
+
+    // ---- 骨盤ロール(腰振り)。胴体一枚板の解消その1 ----
+    // 腰ライン(R-L)の体フレーム上下成分 = 骨盤の左右の傾き。
+    // 軸実測(synthbone): DEF-hips Z+ = 本人の左へ傾く(右腰が上がる)
+    const hipLineB = toBody(sub(p(f, LM.hipR), p(f, LM.hipL)), b);
+    const pelvisRoll = clampDeg(
+      deg(Math.atan2(hipLineB[1], Math.abs(hipLineB[0]) + 1e-9)),
+      25,
+    );
+    bones["DEF-hips"] = [0, 0, pelvisRoll];
+    // 骨盤を回した分、子である脚の狙い方向を骨盤フレームへ戻す(二重掛け防止)
+    const rotAroundBack = (v: V3, a: number): V3 => {
+      const r = (a * Math.PI) / 180;
+      const c = Math.cos(r);
+      const s2 = Math.sin(r);
+      return [v[0] * c - v[1] * s2, v[0] * s2 + v[1] * c, v[2]];
+    };
 
     // ---- 腕(左右対称に処理) ----
     for (const side of ["L", "R"] as const) {
@@ -520,8 +572,8 @@ export function solveFramesToSpec(
         markMissing(footHoldName, keyframes.length);
         continue;
       }
-      const thighDir = toBody(sub(kn, hip), b);
-      const shinDir = toBody(sub(an, kn), b);
+      const thighDir = rotAroundBack(toBody(sub(kn, hip), b), -pelvisRoll);
+      const shinDir = rotAroundBack(toBody(sub(an, kn), b), -pelvisRoll);
       const kneeBend = clampDeg(Math.max(0, 180 - angleBetween(sub(hip, kn), sub(an, kn))));
       const bendNormal = kneeBend > 10 ? norm(cross(thighDir, shinDir)) : null;
       // 脚の骨軸は腕と鏡映(doc: thigh X負=前上げ / shin X正=後ろ曲げ) → 静止曲げ軸=-X
@@ -579,14 +631,24 @@ export function solveFramesToSpec(
       while (twistCont - prevTwistDeg < -180) twistCont += 360;
       prevTwistDeg = twistCont;
       const twist = Math.max(-135, Math.min(135, twistCont));
-      const perX = clampDeg(leanF / 3, 40);
-      const perY = clampDeg(twist / 3, 45);
-      const perZ = clampDeg(-leanS / 3, 30);
+      // 胴体一枚板の解消その2: 均等コピー(/3×3)をやめ、解剖学寄りの重み配分。
+      // 傾きは下0.25/中0.35/上0.40、ねじりは胸郭が主に担うので上寄り(0.15/0.35/0.50)。
+      // さらに胸ロール(肩ライン傾き)-骨盤ロール=アイソレーション成分を上2節に配分
+      const shLineRB = toBody(sub(p(f, LM.shoulderR), p(f, LM.shoulderL)), b);
+      const chestRoll = deg(Math.atan2(shLineRB[1], Math.abs(shLineRB[0]) + 1e-9));
+      const isoRoll = clampDeg(chestRoll - pelvisRoll, 30);
+      const WL = [0.25, 0.35, 0.4];
+      const WT = [0.15, 0.35, 0.5];
+      const ISO = [0, 0.4, 0.6];
+      const spineNames = ["DEF-spine.001", "DEF-spine.002", "DEF-spine.003"] as const;
       // 常に書き込む(しきい値で書いたり書かなかったりすると0との間で震える)
-      const v: [number, number, number] = [perX, perY, perZ];
-      bones["DEF-spine.001"] = v;
-      bones["DEF-spine.002"] = v;
-      bones["DEF-spine.003"] = v;
+      for (let si = 0; si < 3; si++) {
+        bones[spineNames[si]] = [
+          clampDeg(leanF * WL[si], 40),
+          clampDeg(twist * WT[si], 45),
+          clampDeg(-leanS * WL[si] + isoRoll * ISO[si], 30),
+        ];
+      }
     }
 
     // ---- 頭(鼻と耳から向きの概算) ----
@@ -621,6 +683,7 @@ export function solveFramesToSpec(
     keyframes.push({
       time: Math.round(f.time * 1000) / 1000,
       hipsY: Math.round(hipsY * 1000) / 1000,
+      hipsX: Math.round(sway[fi] * 1000) / 1000,
       rootYaw: Math.round(dYaw * 10) / 10,
       bones,
     });

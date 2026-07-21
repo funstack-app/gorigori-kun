@@ -55,6 +55,8 @@ export type GeneratedMotionSpec = {
     time: number;
     /** 腰の上下(m)。しゃがみ・ジャンプ用。省略=0 */
     hipsY?: number;
+    /** 腰の左右スウェイ(m、画面右+)。重心移動の再現用(動画取り込みが出力)。省略=0 */
+    hipsX?: number;
     /**
      * 体全体の向き(度)。開始向きからの累積角度(上から見て左回りが正)。
      * ターン・振り向き・スピン用。省略=0。一回転=360
@@ -259,12 +261,14 @@ export function buildGeneratedClip(
   // 固定 UP_AXIS(0,1,0) はこのリグの腰親空間では前後軸にあたり、ターンが「前転」として
   // 焼き込まれていた(2026-07-21 合成rootYawテストで実証: _work/capturetest)
   let yawAxis = UP_AXIS;
+  let swayAxis = new Vector3(1, 0, 0); // 腰の親空間での「世界の右」(hipsXスウェイ用)
   // TSはtraverseクロージャ内の代入を追跡できずnever化するため明示キャスト
   const hn = hipsNode as Object3D | null;
   if (hn && hn.parent) {
     hn.parent.updateWorldMatrix(true, false);
     const inv = hn.parent.getWorldQuaternion(new Quaternion()).invert();
     yawAxis = new Vector3(0, 1, 0).applyQuaternion(inv).normalize();
+    swayAxis = new Vector3(1, 0, 0).applyQuaternion(inv).normalize();
   }
   if (rest.size === 0) {
     throw new Error("リグのボーンが見つかりません(標準ライブラリ未読み込み)");
@@ -334,14 +338,15 @@ export function buildGeneratedClip(
   // (2026-07-21 合成hipsYテストで実証: 世界Y不動・世界Zが最大0.34m移動)。
   // rootYawと同じく、親空間へ写した「世界の上」(yawAxis)に沿って動かす
   const hips = rest.get("DEF-hips");
-  if (hips && spec.keyframes.some((k) => (k.hipsY ?? 0) !== 0)) {
+  if (hips && spec.keyframes.some((k) => (k.hipsY ?? 0) !== 0 || (k.hipsX ?? 0) !== 0)) {
     const values: number[] = [];
     for (const kf of spec.keyframes) {
       const dy = kf.hipsY ?? 0;
+      const dx = kf.hipsX ?? 0; // 重心スウェイ(世界の右+)
       values.push(
-        hips.pos[0] + yawAxis.x * dy,
-        hips.pos[1] + yawAxis.y * dy,
-        hips.pos[2] + yawAxis.z * dy,
+        hips.pos[0] + yawAxis.x * dy + swayAxis.x * dx,
+        hips.pos[1] + yawAxis.y * dy + swayAxis.y * dx,
+        hips.pos[2] + yawAxis.z * dy + swayAxis.z * dx,
       );
     }
     tracks.push(new VectorKeyframeTrack(`${hips.nodeName}.position`, times, values));
