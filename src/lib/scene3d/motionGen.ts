@@ -243,9 +243,11 @@ export function buildGeneratedClip(
     string,
     { quat: Quaternion; pos: [number, number, number]; nodeName: string }
   >();
+  let hipsNode: Object3D | null = null;
   template.traverse((node: Object3D) => {
     const specName = wanted.get(sanitizeBoneName(node.name));
     if (specName && !rest.has(specName)) {
+      if (specName === "DEF-hips") hipsNode = node;
       rest.set(specName, {
         quat: node.quaternion.clone(),
         pos: [node.position.x, node.position.y, node.position.z],
@@ -253,6 +255,17 @@ export function buildGeneratedClip(
       });
     }
   });
+  // rootYaw の回転軸: 腰の親空間での「世界の上」を実測する(リグの軸規約に依存しない)。
+  // 固定 UP_AXIS(0,1,0) はこのリグの腰親空間では前後軸にあたり、ターンが「前転」として
+  // 焼き込まれていた(2026-07-21 合成rootYawテストで実証: _work/capturetest)
+  let yawAxis = UP_AXIS;
+  // TSはtraverseクロージャ内の代入を追跡できずnever化するため明示キャスト
+  const hn = hipsNode as Object3D | null;
+  if (hn && hn.parent) {
+    hn.parent.updateWorldMatrix(true, false);
+    const inv = hn.parent.getWorldQuaternion(new Quaternion()).invert();
+    yawAxis = new Vector3(0, 1, 0).applyQuaternion(inv).normalize();
+  }
   if (rest.size === 0) {
     throw new Error("リグのボーンが見つかりません(標準ライブラリ未読み込み)");
   }
@@ -281,8 +294,8 @@ export function buildGeneratedClip(
     delta.setFromEuler(euler);
     const q = restQ.clone().multiply(delta);
     if (yawDeg !== 0) {
-      // 親空間の上向き軸まわりに前置乗算 = 体ごと水平に回す
-      const yawQ = new Quaternion().setFromAxisAngle(UP_AXIS, (yawDeg * Math.PI) / 180);
+      // 親空間へ写した「世界の上」まわりに前置乗算 = 体ごと水平に回す
+      const yawQ = new Quaternion().setFromAxisAngle(yawAxis, (yawDeg * Math.PI) / 180);
       q.premultiply(yawQ);
     }
     return q;
