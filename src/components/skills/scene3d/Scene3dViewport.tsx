@@ -634,6 +634,47 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
       feet,
     };
   }, [clipId, arrivalClipId, arrivalSeqKey, overlayClipId, motionCount, clipMotion?.arrivalSequence]);
+
+  // 統一マネキン(2026-07-21): クリップ未適用時も標準骨格のスキンモデルで表示する。
+  // 「配置用の簡易マネキン」と「モーション再生用モデル」が別人に見える問題の解消。
+  // 標準ライブラリ読み込み前だけ従来の簡易マネキンで代替する
+  const idleMotionType = entity.motion?.type ?? null;
+  const idleRig = useMemo(() => {
+    void motionCount;
+    if (entity.kind !== "mannequin" || clipRig) return null;
+    const idleM = getImportedMotion("builtin-Idle_Loop");
+    if (!idleM) return null;
+    const moveM =
+      idleMotionType === "walk" || idleMotionType === "run"
+        ? getImportedMotion("builtin-Jog_Fwd_Loop")
+        : null;
+    const obj = cloneSkeleton(idleM.template) as Group;
+    obj.scale.setScalar(idleM.scale);
+    obj.traverse((child) => {
+      child.castShadow = true;
+    });
+    const mixer = new AnimationMixer(obj);
+    const idleAction = mixer.clipAction(idleM.clip);
+    idleAction.play();
+    let move: { action: AnimationAction; duration: number } | null = null;
+    if (moveM && moveM.template === idleM.template) {
+      const action = mixer.clipAction(moveM.clip);
+      action.play();
+      action.weight = 0;
+      move = { action, duration: Math.max(0.001, moveM.clip.duration) };
+    }
+    const headHolder: { bone: import("three").Object3D | null } = { bone: null };
+    obj.traverse((node) => {
+      if (!headHolder.bone && /head/i.test(node.name)) headHolder.bone = node;
+    });
+    return {
+      obj,
+      mixer,
+      idle: { action: idleAction, duration: Math.max(0.001, idleM.clip.duration) },
+      move,
+      headBone: headHolder.bone,
+    };
+  }, [entity.kind, idleMotionType, clipRig, motionCount]);
   const moveEntity = useScene3d((s) => s.moveEntity);
   const rotateEntityFree = useScene3d((s) => s.rotateEntityFree);
   const scaleEntityBy = useScene3d((s) => s.scaleEntityBy);
@@ -852,6 +893,41 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
         return;
       }
 
+      // 統一マネキン(クリップ未適用): Idle/移動ループを時刻同期で再生(スクラブしても同一フレーム→同一姿勢)
+      if (idleRig) {
+        const t = frame / st.project.fps;
+        const gait = pose.gait;
+        if (idleRig.move && gait.moving) {
+          idleRig.move.action.weight = 1;
+          idleRig.idle.action.weight = 0;
+          // 歩調(gait.phase 0-1)をループ時間へ写像し、足取りを移動速度と同期
+          idleRig.move.action.time = (gait.phase % 1) * idleRig.move.duration;
+        } else {
+          idleRig.idle.action.weight = 1;
+          if (idleRig.move) idleRig.move.action.weight = 0;
+          idleRig.idle.action.time = t % idleRig.idle.duration;
+        }
+        idleRig.mixer.update(0);
+        // 視線ノード: クリップ再生時と同じ方式で頭ボーンを向ける
+        // (mixer.update が毎フレーム頭を書き直すため、乗算の蓄積は起きない)
+        const lookId = ent.lookAt;
+        if (lookId && idleRig.headBone) {
+          const target = resolveLookTarget(st, lookId, frame);
+          if (target) {
+            const headWorld: Vec3 = [
+              pose.position[0],
+              pose.position[1] + 1.55 * ent.scale,
+              pose.position[2],
+            ];
+            const { yaw, pitch } = lookAtAngles(headWorld, target, pose.rotationY);
+            _lookQy.setFromAxisAngle(_axisY, yaw);
+            _lookQx.setFromAxisAngle(_axisX, -pitch);
+            idleRig.headBone.quaternion.multiply(_lookQy).multiply(_lookQx);
+          }
+        }
+        return;
+      }
+
       const r = rig.current;
       if (!r.body) return;
       const { moving, phase, run } = pose.gait;
@@ -892,7 +968,7 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
     return () => {
       frameAppliers.delete(apply);
     };
-  }, [entity.id, clipRig]);
+  }, [entity.id, clipRig, idleRig]);
 
   const onDoubleClick = (e: ThreeEvent<MouseEvent>) => {
     e.stopPropagation();
@@ -921,6 +997,15 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
       {entity.kind === "mannequin" &&
         (clipRig ? (
           <primitive object={clipRig.obj} />
+        ) : idleRig ? (
+          <>
+            <primitive object={idleRig.obj} />
+            {/* 個体識別リング: 統一モデル化で失われた色分け・選択表示の代替 */}
+            <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.02, 0]}>
+              <ringGeometry args={[0.42, 0.5, 32]} />
+              <meshBasicMaterial color={color} transparent opacity={selected ? 0.9 : 0.3} />
+            </mesh>
+          </>
         ) : (
           <Mannequin color={color} selected={selected} rig={rig} />
         ))}
@@ -2311,8 +2396,21 @@ export function Scene3dViewport({
     >
       {/* グレースタジオ(クレイ模型風)。霧は視認性を殺すため使わない */}
       <color attach="background" args={["#75777b"]} />
-      <ambientLight intensity={0.85} />
-      <directionalLight position={[5, 8, 5]} intensity={1.1} castShadow />
+      {/* 照明(2026-07-21): 強い環境光1灯の平板な絵をやめ、キー/フィル/リム3灯+半球光へ。
+          同モデルのA/B実証: projects/codex-frame-factory/_work/lighttest/light_{old,new}.png */}
+      <ambientLight intensity={0.22} />
+      <hemisphereLight args={[0xdde4ff, 0x8a7a68, 0.5]} />
+      <directionalLight
+        position={[3, 5, 3.5]}
+        intensity={2.6}
+        color={0xfff2e0}
+        castShadow
+        shadow-mapSize-width={2048}
+        shadow-mapSize-height={2048}
+        shadow-bias={-0.0002}
+      />
+      <directionalLight position={[-4, 2.5, 2]} intensity={0.7} color={0xdfe8ff} />
+      <directionalLight position={[-1.5, 4, -4]} intensity={1.1} />
       {/* 書き出し中とカメラペインでは補助表示を消す(書き出される画と一致させる) */}
       {!exporting && !isCameraPane && (
         <Grid
