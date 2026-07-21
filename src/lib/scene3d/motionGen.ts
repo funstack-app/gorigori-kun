@@ -328,12 +328,21 @@ export function buildGeneratedClip(
     tracks.push(new QuaternionKeyframeTrack(`${restQuat.nodeName}.quaternion`, times, values));
   }
 
-  // 腰の上下(hipsY)が指定されていれば position トラックを足す
+  // 腰の上下(hipsY)が指定されていれば position トラックを足す。
+  // 旧実装は親空間Yへ直接加算していたが、このリグの腰親空間ではYは前後軸で、
+  // しゃがみ・弾みが「前後スライド」として焼き込まれていた
+  // (2026-07-21 合成hipsYテストで実証: 世界Y不動・世界Zが最大0.34m移動)。
+  // rootYawと同じく、親空間へ写した「世界の上」(yawAxis)に沿って動かす
   const hips = rest.get("DEF-hips");
   if (hips && spec.keyframes.some((k) => (k.hipsY ?? 0) !== 0)) {
     const values: number[] = [];
     for (const kf of spec.keyframes) {
-      values.push(hips.pos[0], hips.pos[1] + (kf.hipsY ?? 0), hips.pos[2]);
+      const dy = kf.hipsY ?? 0;
+      values.push(
+        hips.pos[0] + yawAxis.x * dy,
+        hips.pos[1] + yawAxis.y * dy,
+        hips.pos[2] + yawAxis.z * dy,
+      );
     }
     tracks.push(new VectorKeyframeTrack(`${hips.nodeName}.position`, times, values));
   }
