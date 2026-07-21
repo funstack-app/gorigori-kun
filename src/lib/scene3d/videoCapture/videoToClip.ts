@@ -125,7 +125,9 @@ export async function captureVideoToSpec(
     onProgress?.("動きをキャラの骨格に変換中…", 0.95);
     const smoothed = smoothFrames(frames);
     const baseName = file.name.replace(/\.[^.]+$/, "").slice(0, 20) || "取り込み";
-    return solveFramesToSpec(smoothed, `${baseName}(動画)`);
+    // 取り込み時刻を名前に含める(同じ動画を設定違いで取り込み直したとき一覧で区別できるように)
+    const stamp = new Date().toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" });
+    return solveFramesToSpec(smoothed, `${baseName}(動画 ${stamp})`);
   } finally {
     URL.revokeObjectURL(url);
     video.src = "";
