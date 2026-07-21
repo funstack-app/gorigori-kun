@@ -134,19 +134,34 @@ pub async fn scene3d_encode(export_dir: String, fps: u32) -> Result<(String, Str
     ))
 }
 
-/// URL取り込みの上限(bytes)。20秒制限の動画用途では十分な余裕
-const CAPTURE_FETCH_MAX_BYTES: u64 = 300 * 1024 * 1024;
+/// URL取り込みの上限(bytes)。取り込み自体が20秒制限なので150MBで十分
+/// (Rustバッファ+ArrayBuffer+File+デコードが重なるため上限は控えめにする)
+const CAPTURE_FETCH_MAX_BYTES: u64 = 150 * 1024 * 1024;
 
-/// 参照動画のURLをダウンロードして生バイトを返す(「動画から動きを取り込む」のURL入力用)。
-/// WebView の fetch は CORS で大半のホストに弾かれるため Rust 側で取得する。
-/// ファイルは保存せずメモリ経由でフロントへ渡す(取り込み後は破棄される)
-#[tauri::command]
-pub async fn scene3d_fetch_capture_video(url: String) -> Result<tauri::ipc::Response, String> {
-    let parsed =
-        reqwest::Url::parse(url.trim()).map_err(|_| "URLの形式が正しくありません".to_string())?;
-    if parsed.scheme() != "http" && parsed.scheme() != "https" {
-        return Err("http/https のURLだけ対応しています".into());
+fn resolve_ytdlp() -> Option<PathBuf> {
+    let candidates = [
+        "yt-dlp",
+        "/opt/homebrew/bin/yt-dlp",
+        "/usr/local/bin/yt-dlp",
+        "/usr/bin/yt-dlp",
+    ];
+    for cand in candidates {
+        let ok = Command::new(cand)
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if ok {
+            return Some(PathBuf::from(cand));
+        }
     }
+    None
+}
+
+/// 直リンクをダウンロードする。Ok(None) = 動画でなくWebページだった(ページ解析へフォールバック)
+async fn fetch_direct(parsed: reqwest::Url) -> Result<Option<Vec<u8>>, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
         .build()
@@ -164,7 +179,7 @@ pub async fn scene3d_fetch_capture_video(url: String) -> Result<tauri::ipc::Resp
     }
     if let Some(len) = resp.content_length() {
         if len > CAPTURE_FETCH_MAX_BYTES {
-            return Err("動画が大きすぎます(300MBまで)。短く切った動画を使ってください".into());
+            return Err("動画が大きすぎます(150MBまで)。短く切った動画を使ってください".into());
         }
     }
     let content_type = resp
@@ -174,10 +189,7 @@ pub async fn scene3d_fetch_capture_video(url: String) -> Result<tauri::ipc::Resp
         .unwrap_or("")
         .to_ascii_lowercase();
     if content_type.starts_with("text/html") {
-        return Err(
-            "動画ファイルの直リンクではないようです(Webページが返ってきました)。動画そのもののURLを貼ってください"
-                .into(),
-        );
+        return Ok(None);
     }
     use futures::StreamExt;
     let mut stream = resp.bytes_stream();
@@ -185,14 +197,103 @@ pub async fn scene3d_fetch_capture_video(url: String) -> Result<tauri::ipc::Resp
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| format!("ダウンロード中断: {e}"))?;
         if (buf.len() as u64 + chunk.len() as u64) > CAPTURE_FETCH_MAX_BYTES {
-            return Err("動画が大きすぎます(300MBまで)。短く切った動画を使ってください".into());
+            return Err("動画が大きすぎます(150MBまで)。短く切った動画を使ってください".into());
         }
         buf.extend_from_slice(&chunk);
     }
     if buf.is_empty() {
         return Err("空のファイルでした".into());
     }
-    Ok(tauri::ipc::Response::new(buf))
+    Ok(Some(buf))
+}
+
+/// 動画ページのURLから yt-dlp で動画を取り出す(PCに導入済みの場合のみ。同梱はしない)。
+/// 取り込み上限が20秒なので、ffmpegがあれば先頭25秒だけダウンロードする
+async fn fetch_via_page(url: String) -> Result<Vec<u8>, String> {
+    let Some(ytdlp) = resolve_ytdlp() else {
+        return Err(
+            "動画ページのURLのようです。PCに yt-dlp をインストールすると、ページURLからの取り込みに対応します(Mac: brew install yt-dlp)。権利のある動画だけに使ってください"
+                .into(),
+        );
+    };
+    let dir = std::env::temp_dir().join("gorigori-url-capture");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("一時フォルダ作成失敗: {e}"))?;
+    let stem = format!("cap_{}", now_millis());
+    let outtmpl = dir.join(format!("{stem}.%(ext)s")).to_string_lossy().into_owned();
+    let has_ffmpeg = resolve_ffmpeg().is_some();
+
+    let output = tokio::task::spawn_blocking(move || {
+        let mut cmd = Command::new(&ytdlp);
+        cmd.args([
+            "--no-playlist",
+            "--max-filesize",
+            "150M",
+            "--socket-timeout",
+            "30",
+            "--retries",
+            "2",
+        ]);
+        if has_ffmpeg {
+            // 合成可能なら画質を絞りつつ先頭25秒だけ(取り込み上限20秒+余白)
+            cmd.args([
+                "-f",
+                "bv*[height<=1080]+ba/b",
+                "--merge-output-format",
+                "mp4",
+                "--download-sections",
+                "*0-25",
+            ]);
+        } else {
+            // ffmpegなし: 単一ファイル形式のみ(合成・切り出し不可)
+            cmd.args(["-f", "b[ext=mp4]/b"]);
+        }
+        cmd.args(["-o", &outtmpl]);
+        cmd.arg(&url);
+        cmd.output()
+    })
+    .await
+    .map_err(|e| format!("ダウンロード処理の起動に失敗: {e}"))?
+    .map_err(|e| format!("yt-dlp 起動失敗: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let tail: String = stderr.chars().rev().take(200).collect::<String>().chars().rev().collect();
+        return Err(format!("このページから動画を取り出せませんでした: {}", tail.trim()));
+    }
+
+    // 拡張子は yt-dlp が決めるので stem 前方一致で生成物を探す
+    let produced = std::fs::read_dir(&dir)
+        .map_err(|e| format!("一時フォルダ読み取り失敗: {e}"))?
+        .filter_map(|e| e.ok())
+        .find(|e| e.file_name().to_string_lossy().starts_with(&stem))
+        .ok_or_else(|| "動画ファイルが生成されませんでした".to_string())?;
+    let bytes = std::fs::read(produced.path()).map_err(|e| format!("読み取り失敗: {e}"))?;
+    let _ = std::fs::remove_file(produced.path());
+    if bytes.is_empty() {
+        return Err("空のファイルでした".into());
+    }
+    if bytes.len() as u64 > CAPTURE_FETCH_MAX_BYTES {
+        return Err("動画が大きすぎます(150MBまで)。短い動画で試してください".into());
+    }
+    Ok(bytes)
+}
+
+/// 参照動画のURLをダウンロードして生バイトを返す(「動画から動きを取り込む」のURL入力用)。
+/// WebView の fetch は CORS で大半のホストに弾かれるため Rust 側で取得する。
+/// 直リンクはそのまま、動画ページは yt-dlp(導入済みの場合)で取り出す。
+/// ファイルは保存せずメモリ経由でフロントへ渡す(取り込み後は破棄される)
+#[tauri::command]
+pub async fn scene3d_fetch_capture_video(url: String) -> Result<tauri::ipc::Response, String> {
+    let trimmed = url.trim().to_string();
+    let parsed =
+        reqwest::Url::parse(&trimmed).map_err(|_| "URLの形式が正しくありません".to_string())?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return Err("http/https のURLだけ対応しています".into());
+    }
+    match fetch_direct(parsed).await? {
+        Some(bytes) => Ok(tauri::ipc::Response::new(bytes)),
+        None => Ok(tauri::ipc::Response::new(fetch_via_page(trimmed).await?)),
+    }
 }
 
 #[cfg(test)]

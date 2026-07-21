@@ -1044,7 +1044,7 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
             onKeyDown={(e) => {
               if (e.key === "Enter") void onCaptureFromUrl();
             }}
-            placeholder="🔗 または動画のURLを貼る(直リンク)"
+            placeholder="🔗 または動画のURLを貼る(ページURLもOK)"
             className="min-w-0 flex-1 rounded-lg border border-[#2a2a2a] bg-[#0d0d0d] px-2 py-1.5 text-xs text-neutral-200 placeholder:text-neutral-600 focus:border-emerald-400/60 focus:outline-none"
             disabled={!!capBusy}
           />
@@ -1059,7 +1059,7 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
         <p className="mt-1.5 text-[10px] leading-4 text-neutral-500">
           全身が映った実写の動画から、動きだけをキャラに写します(映像は取り込みません)。
           処理は全てこのPC内で完結します。自分で撮った動画・権利のある映像を使ってください。
-          URLは動画ファイルの直リンクのみ(YouTube等の再生ページURLは不可)
+          URLは動画の直リンクのほか、PCに yt-dlp が入っていれば動画ページのURLにも対応します
         </p>
         {capError && (
           <p className="mt-1 rounded border border-red-500/30 bg-red-500/10 p-1.5 text-[11px] text-red-300">
