@@ -15,8 +15,11 @@ import type { GeneratedMotionSpec } from "../motionGen";
 import { smoothFrames, solveFramesToSpec } from "./poseSolver";
 import type { CapturedFrame } from "./poseSolver";
 
-/** キーフレームのサンプリングレート(fps)。補間が滑らかにするので撮影fpsより低くてよい */
-const SAMPLE_FPS = 12;
+/** キーフレームのサンプリングレート(fps)。
+ * 12→24に引き上げ(2026-07-21): 対称比較の実測で 12fps は関節角RMS 3.5-5.1度・キレ9%損失、
+ * 24fps で RMS 1.5-2.5度・損失2-3%まで回復(diagnose_solver.cjs、ダンスShort 473フレーム)。
+ * 取り込み時間は約2倍になるが進捗表示があるため許容 */
+const SAMPLE_FPS = 24;
 /** v1の取り込み上限(秒)。長尺はUIで分割を促す */
 const MAX_SECONDS = 20;
 
