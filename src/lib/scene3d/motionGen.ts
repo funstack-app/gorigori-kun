@@ -128,7 +128,8 @@ export function validateGeneratedSpec(raw: unknown): GeneratedMotionSpec {
   }
   const r = raw as Record<string, unknown>;
   const name = typeof r.name === "string" && r.name.trim() ? r.name.trim().slice(0, 24) : "AIモーション";
-  const duration = clampNum(Number(r.duration) || 2, 0.5, 10);
+  // 上限20秒: 動画取り込みクリップ(最大20秒)がAI改訂経路を通っても後半が切られないように
+  const duration = clampNum(Number(r.duration) || 2, 0.5, 20);
   const loop = Boolean(r.loop);
   const moveSpeed = r.moveSpeed != null ? clampNum(Number(r.moveSpeed) || 0, 0, 6) : undefined;
   if (!Array.isArray(r.keyframes) || r.keyframes.length < 2) {
@@ -161,6 +162,8 @@ export function validateGeneratedSpec(raw: unknown): GeneratedMotionSpec {
     return {
       time: clampNum(Number(kf.time) || 0, 0, duration),
       hipsY: kf.hipsY != null ? clampNum(Number(kf.hipsY) || 0, -0.5, 0.5) : undefined,
+      // hipsX(重心スウェイ)も通す。落とすと動画取り込みクリップのAI改訂で重心移動が消える
+      hipsX: kf.hipsX != null ? clampNum(Number(kf.hipsX) || 0, -1, 1) : undefined,
       rootYaw,
       bones,
     };
@@ -314,8 +317,13 @@ export function buildGeneratedClip(
       const keys = subdivideYawKeys(spec.keyframes);
       const t: number[] = [];
       const values: number[] = [];
+      let prevQ: Quaternion | null = null;
       for (const k of keys) {
         const q = boneQuat(restQuat.quat, k.deg, k.yawDeg);
+        // 符号連続化: q と -q は同じ回転だが、隣接キーで符号が割れると線形補間経路が乱れる。
+        // 生成時に前キーと同符号へ揃える(業界定石。Blender側フィルタは不完全と公式Issueで既知)
+        if (prevQ && prevQ.dot(q) < 0) q.set(-q.x, -q.y, -q.z, -q.w);
+        prevQ = q.clone();
         t.push(k.time);
         values.push(q.x, q.y, q.z, q.w);
       }
@@ -324,8 +332,11 @@ export function buildGeneratedClip(
     }
 
     const values: number[] = [];
+    let prevQ: Quaternion | null = null;
     for (const kf of spec.keyframes) {
       const q = boneQuat(restQuat.quat, kf.bones[bone] ?? [0, 0, 0], 0);
+      if (prevQ && prevQ.dot(q) < 0) q.set(-q.x, -q.y, -q.z, -q.w);
+      prevQ = q.clone();
       values.push(q.x, q.y, q.z, q.w);
     }
     // トラック名は実ノード名で組む(サニタイズ済み名でないとバインドされない)
