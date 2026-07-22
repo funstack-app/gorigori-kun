@@ -12,6 +12,7 @@
 import { FilesetResolver, PoseLandmarker } from "@mediapipe/tasks-vision";
 
 import type { GeneratedMotionSpec } from "../motionGen";
+import { liftFrames } from "./poseLifter";
 import { smoothFrames, solveFramesToSpec } from "./poseSolver";
 import type { CapturedFrame } from "./poseSolver";
 
@@ -135,8 +136,15 @@ export async function captureVideoToSpec(
       );
     }
 
-    onProgress?.("動きをキャラの骨格に変換中…", 0.95);
-    const smoothed = smoothFrames(frames);
+    // 時系列3D補正(震え・奥行きブレの除去)。失敗時は同じ配列が返り現行方式で続行
+    onProgress?.("動きをなめらかに補正中…", 0.9);
+    const aspect = video.videoHeight / Math.max(1, video.videoWidth);
+    const lifted = await liftFrames(frames, aspect);
+    onProgress?.(
+      lifted === frames ? "動きをキャラの骨格に変換中…(補正なし)" : "動きをキャラの骨格に変換中…",
+      0.95,
+    );
+    const smoothed = smoothFrames(lifted);
     const baseName = file.name.replace(/\.[^.]+$/, "").slice(0, 20) || "取り込み";
     // 取り込み時刻を名前に含める(同じ動画を設定違いで取り込み直したとき一覧で区別できるように)
     const stamp = new Date().toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" });
