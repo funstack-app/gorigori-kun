@@ -38,6 +38,9 @@ export const ALLOWED_BONES = [
   "DEF-foot.R",
 ] as const;
 
+/** 足の接地スパン(動画取り込みが検出)。再生側が足IKで滑りを止める区間 */
+export type PlantSpan = { side: "L" | "R"; start: number; end: number };
+
 export type GeneratedMotionSpec = {
   /** 表示名(日本語可) */
   name: string;
@@ -65,6 +68,8 @@ export type GeneratedMotionSpec = {
     /** ボーン名 → レストポーズからの差分オイラー角 [x,y,z] (度) */
     bones: Record<string, [number, number, number]>;
   }[];
+  /** 足の接地スパン(任意。動画取り込みのみが出力し、再生側の足IKが消費する) */
+  plants?: PlantSpan[];
 };
 
 /** Codexへ渡すプロンプトを組み立てる */

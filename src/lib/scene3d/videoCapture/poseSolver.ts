@@ -456,6 +456,89 @@ export function solveFramesToSpec(
     return Math.max(-0.7, Math.min(0.7, v));
   });
 
+  // 足の接地スパン検出(Sol設計 2026-07-22): 高さ(床クリアランス)+水平速度+visibility、
+  // 入り/抜きで別しきい値(ヒステリシス)、最短接地3キーフレーム。再生側の足IKが消費する
+  const plants: import("../motionGen").PlantSpan[] = [];
+  const imgScaleOf = (f: CapturedFrame): number => {
+    if (!f.image) return 0;
+    const sL = f.image[LM.shoulderL];
+    const sR = f.image[LM.shoulderR];
+    const hL2 = f.image[LM.hipL];
+    const hR2 = f.image[LM.hipR];
+    if (!sL || !sR || !hL2 || !hR2) return 0;
+    const torsoImg = Math.hypot(
+      (sL.x + sR.x) / 2 - (hL2.x + hR2.x) / 2,
+      (sL.y + sR.y) / 2 - (hL2.y + hR2.y) / 2,
+    );
+    if (torsoImg < 1e-4) return 0;
+    const torsoM = len(sub(mid(p(f, LM.shoulderL), p(f, LM.shoulderR)), mid(p(f, LM.hipL), p(f, LM.hipR))));
+    return torsoM / torsoImg;
+  };
+  for (const side of ["L", "R"] as const) {
+    const heelI = side === "L" ? LM.heelL : LM.heelR;
+    const toeI = side === "L" ? LM.footL : LM.footR;
+    let planted = false;
+    let startIdx = 0;
+    let startX = 0;
+    let startY = 0;
+    const closeSpan = (endIdx: number) => {
+      if (endIdx - startIdx + 1 >= 3) {
+        plants.push({
+          side,
+          start: Math.round(frames[startIdx].time * 1000) / 1000,
+          end: Math.round(frames[endIdx].time * 1000) / 1000,
+        });
+      }
+    };
+    for (let i = 0; i < frames.length; i++) {
+      const f = frames[i];
+      const heel = f.image?.[heelI];
+      const toe = f.image?.[toeI];
+      const scaleM = imgScaleOf(f);
+      const midX = heel && toe ? (heel.x + toe.x) / 2 : 0;
+      const midY = heel && toe ? (heel.y + toe.y) / 2 : 0;
+      let ok = planted; // データ不足時は状態維持
+      if (heel && toe && scaleM > 0 && Number.isFinite(floorImgY)) {
+        const visOk = (heel.visibility ?? 0) >= MIN_VIS && (toe.visibility ?? 0) >= MIN_VIS;
+        const lowY = Math.max(heel.y, toe.y);
+        const clear = (floorImgY - lowY) * scaleM; // 床からの高さ(m)
+        let speed = 0;
+        const fp = frames[i - 1];
+        if (fp?.image?.[heelI] && fp.image[toeI]) {
+          const dt = Math.max(1e-3, f.time - fp.time);
+          const mx = midX - (fp.image[heelI].x + fp.image[toeI].x) / 2;
+          const my = midY - (fp.image[heelI].y + fp.image[toeI].y) / 2;
+          speed = (Math.hypot(mx, my) * scaleM) / dt; // m/s
+        }
+        if (visOk) {
+          // ヒステリシス: 入りは厳しく(低く遅い)、抜きは緩く(高いか速い)
+          ok = planted ? !(clear > 0.1 || speed > 0.8) : clear < 0.05 && speed < 0.35;
+        }
+        // 累積ドリフト: 「ゆっくり流れる足」を接地扱いし続けるとアンカーから離れてIKが破綻する。
+        // スパン開始位置から6cm動いたら接地を区切り直す(真に静止した区間だけをスパンにする)
+        if (ok && planted) {
+          const drift = Math.hypot(midX - startX, midY - startY) * scaleM;
+          if (drift > 0.06) {
+            closeSpan(i - 1);
+            startIdx = i;
+            startX = midX;
+            startY = midY;
+          }
+        }
+      }
+      if (ok && !planted) {
+        planted = true;
+        startIdx = i;
+        startX = midX;
+        startY = midY;
+      } else if (!ok && planted) {
+        planted = false;
+        closeSpan(i - 1);
+      }
+    }
+    if (planted) closeSpan(frames.length - 1);
+  }
+
   // rootYaw の基準: 最初のフレームの体の向き
   const b0 = bodyFrameOf(frames[0]);
   const yaw0 = Math.atan2(-b0.back[0], -b0.back[2]); // 前方ベクトル(-back)の水平角
@@ -766,5 +849,6 @@ export function solveFramesToSpec(
     loop: false,
     moveSpeed: 0, // 平行移動は捨てる(軌跡は別レイヤー)。骨盤上下・向きは残す
     keyframes,
+    plants,
   };
 }
