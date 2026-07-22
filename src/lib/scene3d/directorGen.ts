@@ -18,7 +18,7 @@ import {
   saveGeneratedSpec,
   validateGeneratedSpec,
 } from "./motionGen";
-import { getBuiltinTemplate, registerGeneratedClip } from "./motionLibrary";
+import { getBuiltinTemplate, loadCaptureRig, registerGeneratedClip } from "./motionLibrary";
 import { CAMERA_PRESET_LABELS } from "./types";
 import type { CameraPresetId, SceneProject, Vec3 } from "./types";
 
@@ -301,14 +301,20 @@ export async function reviseGeneratedMotion(
 ): Promise<{ id: string; name: string }> {
   const stored = loadGeneratedSpecs().find((sp) => sp.id === clipId);
   if (!stored) throw new Error("このモーションはAI生成ではないため、設計図を持っていません");
-  const template = getBuiltinTemplate();
+  // 元specの骨格規格を引き継ぐ(AIの応答がrigを落としても勝手に旧規格へ戻さない)
+  const rig = stored.spec.rig ?? "rigify";
+  const template = rig === "mixamo" ? await loadCaptureRig() : getBuiltinTemplate();
   if (!template) throw new Error("モーションライブラリの読み込み待ちです。少し待ってからもう一度");
   const { systemPrompt, prompt } = buildMotionRevisePrompt(stored.spec, instruction);
   const res = await codexTextQuery({ prompt, systemPrompt, expectJson: true, timeoutSecs: 180 });
-  const spec = validateGeneratedSpec(res.parsedJson);
+  const parsed = res.parsedJson;
+  const spec = validateGeneratedSpec(
+    parsed && typeof parsed === "object" ? { ...(parsed as object), rig } : parsed,
+  );
   const id = `gen-${Date.now()}`;
   const clip = buildGeneratedClip(template, spec, id);
-  const entry = registerGeneratedClip(id, spec.name, clip);
+  // plantsは引き継がない: AI改訂でタイミングが変わると古い接地スパンがIK破綻の原因になる
+  const entry = registerGeneratedClip(id, spec.name, clip, undefined, rig);
   if (!entry) throw new Error("改訂モーションの登録に失敗しました");
   if (spec.moveSpeed != null) registerClipSpeed(id, spec.moveSpeed);
   saveGeneratedSpec(id, spec);
@@ -445,14 +451,17 @@ export async function applyDirectorPlan(
   for (let i = 0; i < toGenerate.length; i++) {
     const g = toGenerate[i];
     onProgress?.(`モーション生成中: 「${g.desc}」(${i + 1}/${toGenerate.length})…`);
-    const template = getBuiltinTemplate();
-    if (!template) throw new Error("モーションライブラリの読み込み待ちです。少し待ってからもう一度");
-    const { systemPrompt, prompt } = buildMotionPrompt(g.desc);
+    // AI監督の新規生成もMixamo規格(Y Bot)に統一(2026-07-22移行)
+    const template = await loadCaptureRig();
+    const { systemPrompt, prompt } = buildMotionPrompt(g.desc, "mixamo");
     const res = await codexTextQuery({ prompt, systemPrompt, expectJson: true, timeoutSecs: 180 });
-    const spec = validateGeneratedSpec(res.parsedJson);
+    const parsed = res.parsedJson;
+    const spec = validateGeneratedSpec(
+      parsed && typeof parsed === "object" ? { ...(parsed as object), rig: "mixamo" } : parsed,
+    );
     const id = `gen-${Date.now()}-${i}`;
     const clip = buildGeneratedClip(template, spec, id);
-    const entry = registerGeneratedClip(id, spec.name, clip);
+    const entry = registerGeneratedClip(id, spec.name, clip, undefined, spec.rig);
     if (!entry) throw new Error(`モーション「${g.desc}」の登録に失敗しました`);
     if (spec.moveSpeed != null) registerClipSpeed(id, spec.moveSpeed);
     saveGeneratedSpec(id, spec);

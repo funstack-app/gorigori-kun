@@ -32,6 +32,7 @@ import {
   getBuiltinTemplate,
   importMotionFiles,
   loadBuiltinMotions,
+  loadCaptureRig,
   registerGeneratedClip,
   unregisterMotion,
 } from "../../../lib/scene3d/motionLibrary";
@@ -874,12 +875,13 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
     setCapBusy("準備中…");
     setCapError(null);
     try {
-      const template = getBuiltinTemplate();
-      if (!template) throw new Error("標準ライブラリの読み込み待ちです。少し待ってからもう一度");
       const spec = await captureVideoToSpec(file, (msg) => setCapBusy(msg));
+      // 取り込みはMixamo規格(Y Bot)で再生する(2026-07-22移行)。旧specは標準リグのまま
+      const template = spec.rig === "mixamo" ? await loadCaptureRig() : getBuiltinTemplate();
+      if (!template) throw new Error("標準ライブラリの読み込み待ちです。少し待ってからもう一度");
       const id = `gen-${Date.now()}`;
       const clip = buildGeneratedClip(template, spec, id);
-      const entry = registerGeneratedClip(id, spec.name, clip, spec.plants);
+      const entry = registerGeneratedClip(id, spec.name, clip, spec.plants, spec.rig);
       if (!entry) throw new Error("クリップの登録に失敗しました");
       saveGeneratedSpec(id, spec);
       registerImportedMotions([entry]);
@@ -968,15 +970,18 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
         setGenText("");
         return;
       }
-      const template = getBuiltinTemplate();
-      if (!template) throw new Error("標準ライブラリの読み込み待ちです。少し待ってからもう一度");
-      const { systemPrompt, prompt } = buildMotionPrompt(text);
+      // AI生成もMixamo規格(Y Bot)で作る。AIはMixamoの骨名の方が学習量が多く間違いが減る
+      const template = await loadCaptureRig();
+      const { systemPrompt, prompt } = buildMotionPrompt(text, "mixamo");
       // モーション設計は考える時間が長い(60秒では足りない実測あり)ため3分まで待つ
       const res = await codexTextQuery({ prompt, systemPrompt, expectJson: true, timeoutSecs: 180 });
-      const spec = validateGeneratedSpec(res.parsedJson);
+      const parsed = res.parsedJson;
+      const spec = validateGeneratedSpec(
+        parsed && typeof parsed === "object" ? { ...(parsed as object), rig: "mixamo" } : parsed,
+      );
       const id = `gen-${Date.now()}`;
       const clip = buildGeneratedClip(template, spec, id);
-      const entry = registerGeneratedClip(id, spec.name, clip);
+      const entry = registerGeneratedClip(id, spec.name, clip, undefined, spec.rig);
       if (!entry) throw new Error("モーションの登録に失敗しました");
       // 速度を登録してから割り当てる(割当時に speed が焼き込まれるため順序が重要)
       if (spec.moveSpeed != null) registerClipSpeed(id, spec.moveSpeed);
@@ -3144,15 +3149,20 @@ export function Scene3dWorkspace() {
   // 続けて、保存済みのAI生成モーションを標準リグの上に再構築する
   useEffect(() => {
     void loadBuiltinMotions()
-      .then((items) => {
+      .then(async (items) => {
         useScene3d.getState().registerImportedMotions(items);
         const template = getBuiltinTemplate();
         if (!template) return;
+        const specs = loadGeneratedSpecs();
+        // Mixamo規格(Y Bot)のspecが1つでもあれば取り込みマネキンも読み込む
+        const ybot = specs.some(({ spec }) => spec.rig === "mixamo") ? await loadCaptureRig() : null;
         const restored: { id: string; name: string }[] = [];
-        for (const { id, spec } of loadGeneratedSpecs()) {
+        for (const { id, spec } of specs) {
           try {
-            const clip = buildGeneratedClip(template, spec, id);
-            const entry = registerGeneratedClip(id, spec.name, clip, spec.plants);
+            const tpl = spec.rig === "mixamo" ? ybot : template;
+            if (!tpl) continue;
+            const clip = buildGeneratedClip(tpl, spec, id);
+            const entry = registerGeneratedClip(id, spec.name, clip, spec.plants, spec.rig);
             if (entry) {
               // AIの自己申告速度(無ければ名前推定に任せる)を登録してから一覧へ
               if (spec.moveSpeed != null) registerClipSpeed(id, spec.moveSpeed);
