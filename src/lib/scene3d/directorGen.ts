@@ -309,7 +309,9 @@ export async function reviseGeneratedMotion(
   const res = await codexTextQuery({ prompt, systemPrompt, expectJson: true, timeoutSecs: 180 });
   const parsed = res.parsedJson;
   const spec = validateGeneratedSpec(
-    parsed && typeof parsed === "object" ? { ...(parsed as object), rig } : parsed,
+    parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? { ...(parsed as object), rig }
+      : parsed,
   );
   const id = `gen-${Date.now()}`;
   const clip = buildGeneratedClip(template, spec, id);
@@ -457,7 +459,9 @@ export async function applyDirectorPlan(
     const res = await codexTextQuery({ prompt, systemPrompt, expectJson: true, timeoutSecs: 180 });
     const parsed = res.parsedJson;
     const spec = validateGeneratedSpec(
-      parsed && typeof parsed === "object" ? { ...(parsed as object), rig: "mixamo" } : parsed,
+      parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? { ...(parsed as object), rig: "mixamo" }
+        : parsed,
     );
     const id = `gen-${Date.now()}-${i}`;
     const clip = buildGeneratedClip(template, spec, id);

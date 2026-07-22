@@ -976,8 +976,11 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
       // モーション設計は考える時間が長い(60秒では足りない実測あり)ため3分まで待つ
       const res = await codexTextQuery({ prompt, systemPrompt, expectJson: true, timeoutSecs: 180 });
       const parsed = res.parsedJson;
+      // 配列をspreadするとオブジェクト化されて検証をすり抜けるため除外(Codex Verifier指摘)
       const spec = validateGeneratedSpec(
-        parsed && typeof parsed === "object" ? { ...(parsed as object), rig: "mixamo" } : parsed,
+        parsed && typeof parsed === "object" && !Array.isArray(parsed)
+          ? { ...(parsed as object), rig: "mixamo" }
+          : parsed,
       );
       const id = `gen-${Date.now()}`;
       const clip = buildGeneratedClip(template, spec, id);
@@ -3153,9 +3156,17 @@ export function Scene3dWorkspace() {
         useScene3d.getState().registerImportedMotions(items);
         const template = getBuiltinTemplate();
         if (!template) return;
-        const specs = loadGeneratedSpecs();
-        // Mixamo規格(Y Bot)のspecが1つでもあれば取り込みマネキンも読み込む
-        const ybot = specs.some(({ spec }) => spec.rig === "mixamo") ? await loadCaptureRig() : null;
+        const specs = loadGeneratedSpecs().filter((sp) => sp.spec != null);
+        // Mixamo規格(Y Bot)のspecが1つでもあれば取り込みマネキンも読み込む。
+        // Y Bot読込失敗は局所化する(失敗が旧規格specの復元まで巻き添えにしない。Codex Verifier指摘)
+        let ybot: import("three").Group | null = null;
+        if (specs.some(({ spec }) => spec.rig === "mixamo")) {
+          try {
+            ybot = await loadCaptureRig();
+          } catch {
+            /* Y Bot無しでも旧規格の復元は続行 */
+          }
+        }
         const restored: { id: string; name: string }[] = [];
         for (const { id, spec } of specs) {
           try {
