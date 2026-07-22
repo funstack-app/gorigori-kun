@@ -473,9 +473,14 @@ export function solveFramesToSpec(
     arr.push(idx);
   };
 
+  let prevBodyFrame: BodyFrame | null = null;
   for (let fi = 0; fi < frames.length; fi++) {
     const f = frames[fi];
-    const b = bodyFrameOf(f);
+    // 体の基準フレーム: 腰・肩の信頼度が低い時は直前の基準を保持する
+    // (基準が壊れると全身の解が波及して飛ぶ。Solレビュー2026-07-22 mid指摘)
+    const coreVis = vis(f, LM.hipL, LM.hipR, LM.shoulderL, LM.shoulderR);
+    const b: BodyFrame = coreVis >= MIN_VIS || !prevBodyFrame ? bodyFrameOf(f) : prevBodyFrame;
+    prevBodyFrame = b;
     const bones: Record<string, [number, number, number]> = {};
 
     // ---- 骨盤ロール(腰振り)。胴体一枚板の解消その1 ----
@@ -494,6 +499,11 @@ export function solveFramesToSpec(
       const s2 = Math.sin(r);
       return [v[0] * c - v[1] * s2, v[0] * s2 + v[1] * c, v[2]];
     };
+    // 胸の分離(アイソレーション)成分は腕・鎖骨・頭の親(spine上部)を追加回転させる。
+    // 腕側の狙い方向から相殺しないと二重回転になる(Solレビュー2026-07-22 high指摘)ため先に算出
+    const shLineRB = toBody(sub(p(f, LM.shoulderR), p(f, LM.shoulderL)), b);
+    const chestRoll = deg(Math.atan2(shLineRB[1], Math.abs(shLineRB[0]) + 1e-9));
+    const isoRoll = clampDeg(chestRoll - pelvisRoll, 30);
 
     // ---- 腕(左右対称に処理) ----
     for (const side of ["L", "R"] as const) {
@@ -517,8 +527,10 @@ export function solveFramesToSpec(
         markMissing(clavName, keyframes.length);
         continue;
       }
-      const upperDir = toBody(sub(el, sh), b);
-      const foreDir = toBody(sub(wr, el), b);
+      // 腕は spine 上部(胸)の子。胸へ足したアイソレーション回転(合計=isoRoll)を相殺して
+      // から解く(相殺しないと腕が isoRoll 分だけ余分に回る二重回転になる)
+      const upperDir = rotAroundBack(toBody(sub(el, sh), b), -isoRoll);
+      const foreDir = rotAroundBack(toBody(sub(wr, el), b), -isoRoll);
       // 肘: 内角180°=伸び切り → 曲げ角=180-内角(正)。doc: forearm X正=肘曲げ
       const elbowBend = clampDeg(Math.max(0, 180 - angleBetween(sub(sh, el), sub(wr, el))));
       // 曲げが浅いと平面法線が不安定 → 10°〜25°でswing解へなめらかに移行(急切替禁止)
@@ -533,7 +545,8 @@ export function solveFramesToSpec(
       // (Codex Verifier指摘 2026-07-21: 腕を下ろすと鎖骨が上がる逆連動になっていた)
       {
         const shCenter = mid(p(f, LM.shoulderL), p(f, LM.shoulderR));
-        const clavDir = toBody(sub(sh, shCenter), b); // 体フレーム: x=右+ y=上+ z=後+
+        // 鎖骨も胸の子なのでアイソレーション分を相殺してから解く
+        const clavDir = rotAroundBack(toBody(sub(sh, shCenter), b), -isoRoll); // x=右+ y=上+ z=後+
         const lat = Math.abs(clavDir[0]);
         if (lat > 1e-6) {
           const liftDeg = deg(Math.atan2(clavDir[1], lat)); // 肩のすくめ(上+)
@@ -597,12 +610,10 @@ export function solveFramesToSpec(
         );
         if (vFoot >= MIN_VIS) {
           const plantar = 90 - angleBetween(sub(an, kn), sub(toe, heel));
-          // つま先の向き(内股/ガニ股/ステップの向き)。体正面基準の水平角。
-          // 軸実測(synthbone): foot Y+ = つま先内向き(toe-in)。Rは左右鏡映
-          const footB = toBody(sub(toe, heel), b);
-          const sideSign = side === "L" ? 1 : -1;
-          const yawFoot = deg(Math.atan2(sideSign * footB[0], -footB[2]));
-          bones[footName] = [clampDeg(plantar, 45), clampDeg(yawFoot, 40), 0];
+          // 注: つま先の向き(yaw)は一時実装を撤去(2026-07-22 Solレビュー high指摘)。
+          // 体正面基準の絶対角をローカル足ボーンへ入れており、脚チェーンが回ると二重回転になる。
+          // 脛フレーム相対で解く設計ができるまで底屈/背屈(pitch)のみとする
+          bones[footName] = [clampDeg(plantar, 45), 0, 0];
         } else {
           markMissing(footName, keyframes.length);
         }
@@ -633,10 +644,7 @@ export function solveFramesToSpec(
       const twist = Math.max(-135, Math.min(135, twistCont));
       // 胴体一枚板の解消その2: 均等コピー(/3×3)をやめ、解剖学寄りの重み配分。
       // 傾きは下0.25/中0.35/上0.40、ねじりは胸郭が主に担うので上寄り(0.15/0.35/0.50)。
-      // さらに胸ロール(肩ライン傾き)-骨盤ロール=アイソレーション成分を上2節に配分
-      const shLineRB = toBody(sub(p(f, LM.shoulderR), p(f, LM.shoulderL)), b);
-      const chestRoll = deg(Math.atan2(shLineRB[1], Math.abs(shLineRB[0]) + 1e-9));
-      const isoRoll = clampDeg(chestRoll - pelvisRoll, 30);
+      // さらに胸ロール-骨盤ロール=アイソレーション成分(isoRoll、フレーム冒頭で算出済み)を上2節に配分
       const WL = [0.25, 0.35, 0.4];
       const WT = [0.15, 0.35, 0.5];
       const ISO = [0, 0.4, 0.6];
@@ -656,7 +664,8 @@ export function solveFramesToSpec(
       const v = vis(f, LM.nose, LM.earL, LM.earR);
       if (v >= MIN_VIS) {
         const earC = mid(p(f, LM.earL), p(f, LM.earR));
-        const headF = toBody(sub(p(f, LM.nose), earC), b);
+        // 頭も spine 上部の子なのでアイソレーション回転を相殺してから解く
+        const headF = rotAroundBack(toBody(sub(p(f, LM.nose), earC), b), -isoRoll);
         // 前=-Z(back負)。左右向き(Y捻り)と上下(X)を概算
         const yaw = deg(Math.atan2(headF[0], -headF[2]));
         const pitch = deg(Math.atan2(-headF[1], Math.hypot(headF[0], headF[2])));
@@ -735,14 +744,17 @@ export function solveFramesToSpec(
         const q = quats[k];
         const c = quats[k + 1];
         if (!a || !q || !c) continue;
-        // 3点のうち「他2点への角距離の和」が最小のものをメディアンとして採用
-        const costA = quatAngle(a, q) + quatAngle(a, c);
-        const costQ = quatAngle(q, a) + quatAngle(q, c);
-        const costC = quatAngle(c, a) + quatAngle(c, q);
-        if (costQ <= costA && costQ <= costC) continue; // 中央値が自分=変更なし
-        const src = costA < costC ? k - 1 : k + 1;
-        const e = eulers[src];
-        if (e) keyframes[k].bones[bn] = [e[0], e[1], e[2]];
+        // 「往復スパイク」だけ潰す条件付き置換(Solレビュー2026-07-22: 無条件メディアンは
+        // 1フレームの意図的な「キメ」まで消す)。行って戻る形=前後は近いのに自分だけ遠い、
+        // かつ物理的に過大(45°/フレーム超)な場合のみノイズと断定し、前後の中間へ置換
+        const dPrevCur = quatAngle(a, q);
+        const dCurNext = quatAngle(q, c);
+        const dPrevNext = quatAngle(a, c);
+        const isRoundTripSpike =
+          dPrevCur > 45 && dCurNext > 45 && dPrevNext < Math.min(dPrevCur, dCurNext) * 0.5;
+        if (!isRoundTripSpike) continue;
+        const [ex2, ey2, ez2] = eulerXYZFromQuat(slerpQ(a, c, 0.5));
+        keyframes[k].bones[bn] = [ex2, ey2, ez2];
       }
     }
   }
