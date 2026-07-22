@@ -30,6 +30,8 @@ let seq = 1;
 let builtinLoaded = false;
 /** 標準ライブラリのリグ本体。AI生成モーション(gen-*)はこの骨格に後付けする */
 let builtinTemplate: Group | null = null;
+/** Mixamo規格の取り込みマネキン(Y Bot)。rig:"mixamo" のクリップはこの骨格で再生する */
+let captureTemplate: Group | null = null;
 
 /** 標準ライブラリ(同梱CC0)の日本語名。無いものは英語名のまま */
 const BUILTIN_JP: Record<string, string> = {
@@ -99,15 +101,32 @@ export function getBuiltinTemplate(): Group | null {
   return builtinTemplate;
 }
 
-/** AI生成クリップを標準リグの上に登録する。標準ライブラリ未読み込みなら null */
+/** Mixamo規格の取り込みマネキン(Y Bot)を読み込む。初回のみfetch */
+export async function loadCaptureRig(): Promise<Group> {
+  if (captureTemplate) return captureTemplate;
+  const res = await fetch("/models/ybot.glb");
+  if (!res.ok) throw new Error(`取り込みマネキンの読み込みに失敗 (${res.status})`);
+  const gltf = await new GLTFLoader().parseAsync(await res.arrayBuffer(), "");
+  captureTemplate = gltf.scene;
+  return captureTemplate;
+}
+
+/** Y Botテンプレート(loadCaptureRig 後に有効) */
+export function getCaptureTemplate(): Group | null {
+  return captureTemplate;
+}
+
+/** AI生成クリップを規格に合ったリグの上に登録する。テンプレート未読み込みなら null */
 export function registerGeneratedClip(
   id: string,
   name: string,
   clip: AnimationClip,
   plants?: import("./motionGen").PlantSpan[],
+  rig?: import("./motionGen").RigId,
 ): { id: string; name: string } | null {
-  if (!builtinTemplate) return null;
-  library.set(id, { id, name, template: builtinTemplate, clip, scale: 1, plants });
+  const template = rig === "mixamo" ? captureTemplate : builtinTemplate;
+  if (!template) return null;
+  library.set(id, { id, name, template, clip, scale: 1, plants });
   return { id, name };
 }
 

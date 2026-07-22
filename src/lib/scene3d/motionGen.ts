@@ -14,6 +14,9 @@
 import { AnimationClip, Euler, Quaternion, QuaternionKeyframeTrack, Vector3, VectorKeyframeTrack } from "three";
 import type { Group, Object3D } from "three";
 
+/** 骨格規格。rigify=旧標準ライブラリ(DEF-*) / mixamo=Y Bot系(mixamorig:*) */
+export type RigId = "rigify" | "mixamo";
+
 /** Codexに使わせる主要ボーン(標準ライブラリGLBの実名) */
 export const ALLOWED_BONES = [
   "DEF-hips",
@@ -38,10 +41,44 @@ export const ALLOWED_BONES = [
   "DEF-foot.R",
 ] as const;
 
+/** Mixamo規格(Y Bot)の主要ボーン。つま先あり(旧規格より足先の表現力が高い) */
+export const MIXAMO_BONES = [
+  "mixamorig:Hips",
+  "mixamorig:Spine",
+  "mixamorig:Spine1",
+  "mixamorig:Spine2",
+  "mixamorig:Neck",
+  "mixamorig:Head",
+  "mixamorig:LeftShoulder",
+  "mixamorig:LeftArm",
+  "mixamorig:LeftForeArm",
+  "mixamorig:LeftHand",
+  "mixamorig:RightShoulder",
+  "mixamorig:RightArm",
+  "mixamorig:RightForeArm",
+  "mixamorig:RightHand",
+  "mixamorig:LeftUpLeg",
+  "mixamorig:LeftLeg",
+  "mixamorig:LeftFoot",
+  "mixamorig:LeftToeBase",
+  "mixamorig:RightUpLeg",
+  "mixamorig:RightLeg",
+  "mixamorig:RightFoot",
+  "mixamorig:RightToeBase",
+] as const;
+
+/** 規格ごとのボーン語彙と腰ボーン名 */
+export const RIG_PROFILES: Record<RigId, { bones: readonly string[]; hips: string }> = {
+  rigify: { bones: ALLOWED_BONES, hips: "DEF-hips" },
+  mixamo: { bones: MIXAMO_BONES, hips: "mixamorig:Hips" },
+};
+
 /** 足の接地スパン(動画取り込みが検出)。再生側が足IKで滑りを止める区間 */
 export type PlantSpan = { side: "L" | "R"; start: number; end: number };
 
 export type GeneratedMotionSpec = {
+  /** 骨格規格。省略=rigify(旧データ互換)。動画取り込みの新規出力は mixamo */
+  rig?: RigId;
   /** 表示名(日本語可) */
   name: string;
   /** 尺(秒) 0.5〜10 */
@@ -72,19 +109,37 @@ export type GeneratedMotionSpec = {
   plants?: PlantSpan[];
 };
 
-/** Codexへ渡すプロンプトを組み立てる */
-export function buildMotionPrompt(userText: string): { systemPrompt: string; prompt: string } {
+/** Codexへ渡すプロンプトを組み立てる。rigごとにボーン語彙と軸の目安を差し替える */
+export function buildMotionPrompt(userText: string, rig: RigId = "rigify"): { systemPrompt: string; prompt: string } {
+  // 軸の目安は全て実測値(synthbone プローブ)。推測で書かない
+  const rigGuide =
+    rig === "mixamo"
+      ? [
+          "回転はレストポーズ(Tポーズ: 直立・両腕を真横に水平)からの差分。各ボーンのローカル軸のオイラー角 [x,y,z] を度で書く。",
+          "目安:",
+          "- 背骨(Spine/Spine1/Spine2)・首・頭: X正=前に倒す、Y正=左に捻る、Z正=右に傾げる",
+          "- 腕(LeftArm/RightArm): X正=腕を下げる(90で気をつけの姿勢)。前へ振るのは左腕Z正/右腕Z負",
+          "- 肘(LeftForeArm): Z正=肘を曲げる / 右肘(RightForeArm): Z負=曲げる",
+          "- 肩(Shoulder): X負=すくめて持ち上げる",
+          "- 脚(LeftUpLeg/RightUpLeg): X正=腿を前へ上げる、Z=横へ開く(左右とも+Xが本人の左方向)",
+          "- 膝(LeftLeg/RightLeg): X負=膝を曲げる",
+          "- 足首(Foot): X正=つま先を上げる、X負=つま先立ち / つま先(ToeBase): X正=反らす",
+        ]
+      : [
+          "回転はレストポーズ(直立・腕は体側)からの差分。各ボーンのローカル軸のオイラー角 [x,y,z] を度で書く。",
+          "目安:",
+          "- 背骨(spine)・首・頭: X正=前に倒す、Z=左右に傾げる、Y=左右に捻る",
+          "- 腕(upper_arm): Z負=左腕を体側から横へ上げる / 右腕はZ正。X正=腕を前へ振り上げる",
+          "- 肘(forearm): X正=肘を曲げる",
+          "- 脚(thigh): X負=腿を前へ上げる / 膝(shin): X正=膝を曲げる",
+        ];
+  const exampleBone = rig === "mixamo" ? '"mixamorig:RightArm":[45,0,0]' : '"DEF-upper_arm.R":[0,0,80]';
   const systemPrompt = [
     "あなたは3Dヒューマノイドの手付けアニメーター。依頼された動きのキーフレームをJSONだけで返す。説明文・コードブロック記号は書かない。",
     "",
-    `使えるボーン(これ以外は禁止): ${ALLOWED_BONES.join(", ")}`,
+    `使えるボーン(これ以外は禁止): ${RIG_PROFILES[rig].bones.join(", ")}`,
     "",
-    "回転はレストポーズ(直立・腕は体側)からの差分。各ボーンのローカル軸のオイラー角 [x,y,z] を度で書く。",
-    "目安:",
-    "- 背骨(spine)・首・頭: X正=前に倒す、Z=左右に傾げる、Y=左右に捻る",
-    "- 腕(upper_arm): Z負=左腕を体側から横へ上げる / 右腕はZ正。X正=腕を前へ振り上げる",
-    "- 肘(forearm): X正=肘を曲げる",
-    "- 脚(thigh): X負=腿を前へ上げる / 膝(shin): X正=膝を曲げる",
+    ...rigGuide,
     "- しゃがむ・跳ぶは hipsY(腰の上下、メートル。-0.4〜0.3)も併用する",
     "- 振り向く・ターン・スピンは rootYaw(体全体の向き、度)を使う。開始向きからの累積角度で、上から見て左回りが正",
     "  例: 半回転ターン=最後のキーで rootYaw:180 / その場で一回転=最後のキーで rootYaw:360(中間キーにも90刻み程度で経過角度を書く)",
@@ -97,7 +152,7 @@ export function buildMotionPrompt(userText: string): { systemPrompt: string; pro
     '- moveSpeed: その動きが前進を伴うなら移動速度(m/s)を書く。その場の動きは 0。',
     "  目安: 歩く1.4 / スキップ1.8 / 走る2.6 / 全力疾走4.5。キャラは別途この速度で平行移動する",
     "",
-    '出力形式: {"name":"短い日本語名","duration":2,"loop":true,"moveSpeed":0,"keyframes":[{"time":0,"hipsY":0,"rootYaw":0,"bones":{"DEF-upper_arm.R":[0,0,80]}},...]}',
+    `出力形式: {"name":"短い日本語名","duration":2,"loop":true,"moveSpeed":0,"keyframes":[{"time":0,"hipsY":0,"rootYaw":0,"bones":{${exampleBone}}},...]}`,
   ].join("\n");
   return { systemPrompt, prompt: `依頼された動き: ${userText}` };
 }
@@ -110,7 +165,7 @@ export function buildMotionRevisePrompt(
   current: GeneratedMotionSpec,
   instruction: string,
 ): { systemPrompt: string; prompt: string } {
-  const { systemPrompt } = buildMotionPrompt("");
+  const { systemPrompt } = buildMotionPrompt("", current.rig ?? "rigify");
   const prompt = [
     "以下は既存モーションの設計図。修正指示に沿って改訂した完全な設計図を、同じ形式のJSONだけで返す。",
     "指示に関係ない部分の姿勢・タイミング・雰囲気はできるだけ保つ(ゼロから作り直さない)。",
@@ -132,6 +187,7 @@ export function validateGeneratedSpec(raw: unknown): GeneratedMotionSpec {
     throw new Error("AIの応答がモーションJSONの形をしていません");
   }
   const r = raw as Record<string, unknown>;
+  const rig: RigId = r.rig === "mixamo" ? "mixamo" : "rigify";
   const name = typeof r.name === "string" && r.name.trim() ? r.name.trim().slice(0, 24) : "AIモーション";
   // 上限20秒: 動画取り込みクリップ(最大20秒)がAI改訂経路を通っても後半が切られないように
   const duration = clampNum(Number(r.duration) || 2, 0.5, 20);
@@ -141,7 +197,7 @@ export function validateGeneratedSpec(raw: unknown): GeneratedMotionSpec {
     throw new Error("キーフレームが2つ未満です。言い方を変えてもう一度生成してください");
   }
 
-  const allowed = new Set<string>(ALLOWED_BONES);
+  const allowed = new Set<string>(RIG_PROFILES[rig].bones);
   let dropped = 0;
   let usedBones = 0;
   let usedYaw = false;
@@ -184,7 +240,7 @@ export function validateGeneratedSpec(raw: unknown): GeneratedMotionSpec {
   keyframes.sort((a, b) => a.time - b.time);
   if (keyframes[0].time !== 0) keyframes[0] = { ...keyframes[0], time: 0 };
 
-  return { name, duration, loop, moveSpeed, keyframes };
+  return { rig, name, duration, loop, moveSpeed, keyframes };
 }
 
 /**
@@ -210,11 +266,11 @@ type YawKey = { time: number; yawDeg: number; deg: [number, number, number] };
  * 90度以下になるまで中間キーを線形補間で挿入する(クォータニオンの最短経路対策。
  * これが無いと「0→360」は無回転、「0→270」は逆回り90度になる)
  */
-function subdivideYawKeys(keyframes: GeneratedMotionSpec["keyframes"]): YawKey[] {
+function subdivideYawKeys(keyframes: GeneratedMotionSpec["keyframes"], hipsName: string): YawKey[] {
   const base: YawKey[] = keyframes.map((kf) => ({
     time: kf.time,
     yawDeg: kf.rootYaw ?? 0,
-    deg: kf.bones["DEF-hips"] ?? [0, 0, 0],
+    deg: kf.bones[hipsName] ?? [0, 0, 0],
   }));
   const out: YawKey[] = [];
   for (let i = 0; i < base.length; i++) {
@@ -247,8 +303,10 @@ export function buildGeneratedClip(
   id: string,
 ): AnimationClip {
   // レストポーズ収集: 仕様のボーン名(ドット付き)→ 実ノード(サニタイズ済み名)の対応表
+  const profile = RIG_PROFILES[spec.rig ?? "rigify"];
+  const hipsName = profile.hips;
   const wanted = new Map<string, string>(); // sanitize済み名 → 仕様上の名前
-  for (const b of ALLOWED_BONES) wanted.set(sanitizeBoneName(b), b);
+  for (const b of profile.bones) wanted.set(sanitizeBoneName(b), b);
   const rest = new Map<
     string,
     { quat: Quaternion; pos: [number, number, number]; nodeName: string }
@@ -257,7 +315,7 @@ export function buildGeneratedClip(
   template.traverse((node: Object3D) => {
     const specName = wanted.get(sanitizeBoneName(node.name));
     if (specName && !rest.has(specName)) {
-      if (specName === "DEF-hips") hipsNode = node;
+      if (specName === hipsName) hipsNode = node;
       rest.set(specName, {
         quat: node.quaternion.clone(),
         pos: [node.position.x, node.position.y, node.position.z],
@@ -270,6 +328,9 @@ export function buildGeneratedClip(
   // 焼き込まれていた(2026-07-21 合成rootYawテストで実証: _work/capturetest)
   let yawAxis = UP_AXIS;
   let swayAxis = new Vector3(1, 0, 0); // 腰の親空間での「世界の右」(hipsXスウェイ用)
+  // 腰の親空間の単位換算。FBX由来リグ(Y Bot等)は親にスケール0.01が掛かっており、
+  // メートル指定のhipsY/hipsXが1/100に潰れる(2026-07-22 synthhips実測)。世界スケールで割って吸収
+  let posScale = 1;
   // TSはtraverseクロージャ内の代入を追跡できずnever化するため明示キャスト
   const hn = hipsNode as Object3D | null;
   if (hn && hn.parent) {
@@ -277,6 +338,9 @@ export function buildGeneratedClip(
     const inv = hn.parent.getWorldQuaternion(new Quaternion()).invert();
     yawAxis = new Vector3(0, 1, 0).applyQuaternion(inv).normalize();
     swayAxis = new Vector3(1, 0, 0).applyQuaternion(inv).normalize();
+    const ws = hn.parent.getWorldScale(new Vector3());
+    const s = (Math.abs(ws.x) + Math.abs(ws.y) + Math.abs(ws.z)) / 3;
+    if (s > 1e-6) posScale = 1 / s;
   }
   if (rest.size === 0) {
     throw new Error("リグのボーンが見つかりません(標準ライブラリ未読み込み)");
@@ -290,7 +354,7 @@ export function buildGeneratedClip(
   // 体全体の回転(rootYaw)は腰(=リグのルート)の回転として焼き込む。
   // hipsY の position トラックが親空間Yで上下する実績があるため、親空間Y=上と扱える
   const yawUsed = spec.keyframes.some((k) => (k.rootYaw ?? 0) !== 0);
-  if (yawUsed && rest.has("DEF-hips")) usedBones.add("DEF-hips");
+  if (yawUsed && rest.has(hipsName)) usedBones.add(hipsName);
   const times = spec.keyframes.map((k) => k.time);
 
   const tracks: (QuaternionKeyframeTrack | VectorKeyframeTrack)[] = [];
@@ -316,10 +380,10 @@ export function buildGeneratedClip(
     const restQuat = rest.get(bone);
     if (!restQuat) continue;
 
-    if (bone === "DEF-hips" && yawUsed) {
+    if (bone === hipsName && yawUsed) {
       // クォータニオン補間は最短経路を通るため、キー間の回転が90度を超えると
       // 逆回り・回転抜けになる。90度以下の区間になるまで中間キーを自動挿入する
-      const keys = subdivideYawKeys(spec.keyframes);
+      const keys = subdivideYawKeys(spec.keyframes, hipsName);
       const t: number[] = [];
       const values: number[] = [];
       let prevQ: Quaternion | null = null;
@@ -353,12 +417,12 @@ export function buildGeneratedClip(
   // しゃがみ・弾みが「前後スライド」として焼き込まれていた
   // (2026-07-21 合成hipsYテストで実証: 世界Y不動・世界Zが最大0.34m移動)。
   // rootYawと同じく、親空間へ写した「世界の上」(yawAxis)に沿って動かす
-  const hips = rest.get("DEF-hips");
+  const hips = rest.get(hipsName);
   if (hips && spec.keyframes.some((k) => (k.hipsY ?? 0) !== 0 || (k.hipsX ?? 0) !== 0)) {
     const values: number[] = [];
     for (const kf of spec.keyframes) {
-      const dy = kf.hipsY ?? 0;
-      const dx = kf.hipsX ?? 0; // 重心スウェイ(世界の右+)
+      const dy = (kf.hipsY ?? 0) * posScale;
+      const dx = (kf.hipsX ?? 0) * posScale; // 重心スウェイ(世界の右+)
       values.push(
         hips.pos[0] + yawAxis.x * dy + swayAxis.x * dx,
         hips.pos[1] + yawAxis.y * dy + swayAxis.y * dx,

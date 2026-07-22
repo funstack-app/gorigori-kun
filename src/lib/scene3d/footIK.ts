@@ -21,12 +21,19 @@ export type FootIKState = {
 /** スパン端のブレンド幅(秒)。硬い切替はポップになる */
 const BLEND = 0.12;
 
-/** リグから左右の脚チェーン(腿・脛・足)を拾う。GLTFLoaderのサニタイズ済み名に対応 */
+/** リグから左右の脚チェーン(腿・脛・足)を拾う。GLTFLoaderのサニタイズ済み名に対応。
+ * Rigify系(DEF-thigh.L)とMixamo系(mixamorig:LeftUpLeg)の両規格を認識する */
+const MIXAMO_PART: Record<string, keyof FootChain> = { UpLeg: "thigh", Leg: "shin", Foot: "foot" };
 export function buildFootChains(obj: Object3D): FootIKState {
   const found: Record<"L" | "R", Partial<FootChain>> = { L: {}, R: {} };
   obj.traverse((n) => {
     const m = n.name.match(/DEF-?(thigh|shin|foot)\.?([LR])$/);
-    if (m) found[m[2] as "L" | "R"][m[1] as keyof FootChain] = n;
+    if (m) {
+      found[m[2] as "L" | "R"][m[1] as keyof FootChain] = n;
+      return;
+    }
+    const mx = n.name.match(/mixamorig:?(Left|Right)(UpLeg|Leg|Foot)$/);
+    if (mx) found[mx[1] === "Left" ? "L" : "R"][MIXAMO_PART[mx[2]]] = n;
   });
   const chains: FootIKState["chains"] = {};
   for (const s of ["L", "R"] as const) {
