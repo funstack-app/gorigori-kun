@@ -37,7 +37,9 @@ function getLandmarker(): Promise<PoseLandmarker> {
     landmarkerPromise = (async () => {
       const fileset = await FilesetResolver.forVisionTasks("/mediapipe-wasm");
       return PoseLandmarker.createFromOptions(fileset, {
-        baseOptions: { modelAssetPath: "/models/pose_landmarker_full.task" },
+        // heavy採用(2026-07-22): fullは太いズボン等で下半身が布に迷子になり足の開きを
+        // 過小評価(冒頭実測: 足首間0.125m→heavy 0.177m)。取り込みはオフライン処理なので精度優先
+        baseOptions: { modelAssetPath: "/models/pose_landmarker_heavy.task" },
         runningMode: "VIDEO",
         numPoses: 1,
       });
