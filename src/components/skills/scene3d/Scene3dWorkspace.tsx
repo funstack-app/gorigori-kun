@@ -879,7 +879,7 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
       const spec = await captureVideoToSpec(file, (msg) => setCapBusy(msg));
       const id = `gen-${Date.now()}`;
       const clip = buildGeneratedClip(template, spec, id);
-      const entry = registerGeneratedClip(id, spec.name, clip);
+      const entry = registerGeneratedClip(id, spec.name, clip, spec.plants);
       if (!entry) throw new Error("クリップの登録に失敗しました");
       saveGeneratedSpec(id, spec);
       registerImportedMotions([entry]);
@@ -3152,7 +3152,7 @@ export function Scene3dWorkspace() {
         for (const { id, spec } of loadGeneratedSpecs()) {
           try {
             const clip = buildGeneratedClip(template, spec, id);
-            const entry = registerGeneratedClip(id, spec.name, clip);
+            const entry = registerGeneratedClip(id, spec.name, clip, spec.plants);
             if (entry) {
               // AIの自己申告速度(無ければ名前推定に任せる)を登録してから一覧へ
               if (spec.moveSpeed != null) registerClipSpeed(id, spec.moveSpeed);

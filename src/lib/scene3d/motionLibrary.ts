@@ -21,6 +21,8 @@ export type ImportedMotion = {
   clip: AnimationClip;
   /** cm系(FBX)なら0.01。GLBは1 */
   scale: number;
+  /** 足の接地スパン(動画取り込みクリップのみ)。再生側の足IKが消費 */
+  plants?: import("./motionGen").PlantSpan[];
 };
 
 const library = new Map<string, ImportedMotion>();
@@ -102,9 +104,10 @@ export function registerGeneratedClip(
   id: string,
   name: string,
   clip: AnimationClip,
+  plants?: import("./motionGen").PlantSpan[],
 ): { id: string; name: string } | null {
   if (!builtinTemplate) return null;
-  library.set(id, { id, name, template: builtinTemplate, clip, scale: 1 });
+  library.set(id, { id, name, template: builtinTemplate, clip, scale: 1, plants });
   return { id, name };
 }
 

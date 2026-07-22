@@ -22,6 +22,7 @@ import type {
 
 import { scene3d as scene3dIpc } from "../../../lib/ipc";
 import { getImportedMotion } from "../../../lib/scene3d/motionLibrary";
+import { applyFootIK, buildFootChains } from "../../../lib/scene3d/footIK";
 import {
   evaluateCamera,
   evaluateEntityPose,
@@ -632,6 +633,9 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
       headBone: headHolder.bone,
       headState,
       feet,
+      // 足の接地ロック(動画取り込みクリップのみ plants を持つ)
+      plants: m.plants,
+      footIK: buildFootChains(obj),
     };
   }, [clipId, arrivalClipId, arrivalSeqKey, overlayClipId, motionCount, clipMotion?.arrivalSequence]);
 
@@ -854,6 +858,15 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
           clipRig.overlay.action.time = t % Math.max(0.001, clipRig.overlay.duration);
         }
         clipRig.mixer.update(0);
+        // 足の接地ロック: 接地スパン中は足首をアンカーへIK固定(足滑り対策)。
+        // 連結列・上半身レイヤー使用時はタイムラインが複合するためv1では適用しない
+        if (clipRig.plants && steps.length === 0 && !clipRig.overlay) {
+          const tcNow = t % Math.max(0.001, clipRig.mainDuration);
+          applyFootIK(clipRig.footIK, clipRig.plants, tcNow, clipRig.obj, (tt) => {
+            clipRig.main.time = Math.min(tt, Math.max(0.001, clipRig.mainDuration - 0.0001));
+            clipRig.mixer.update(0);
+          });
+        }
         // 視線ノード: 頭ボーンをターゲットへ向ける(ボーン局所: Y=左右捻り / X=前に倒す)
         const lookId = ent.lookAt;
         const hb = clipRig.headBone;
