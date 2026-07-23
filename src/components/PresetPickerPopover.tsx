@@ -7,6 +7,7 @@ import {
   type Preset,
   type PresetCategory,
 } from "../lib/store/presets";
+import { CharacterIcon } from "./SkillIcon";
 
 type Props = {
   open: boolean;
@@ -476,7 +477,7 @@ function PickerRow({
               className="inline-flex shrink-0 items-center gap-0.5 rounded-full border border-pink-400/60 bg-pink-500/10 px-1.5 py-px text-[9px] font-black text-pink-300"
               title="キャラクター登録"
             >
-              <span aria-hidden>👤</span>
+              <CharacterIcon className="h-2.5 w-2.5" />
               キャラ
             </span>
           )}

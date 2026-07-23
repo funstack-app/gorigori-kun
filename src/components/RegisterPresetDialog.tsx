@@ -9,6 +9,7 @@ import {
 import { usePresets, type PresetKind } from "../lib/store/presets";
 import { useToasts } from "../lib/store/toasts";
 import { SafeImage } from "./SafeImage";
+import { CharacterIcon } from "./SkillIcon";
 
 /**
  * 画像 path から 256x256 のサムネ JPEG (base64 data URL) を生成する。
@@ -324,13 +325,14 @@ export function RegisterPresetDialog({ imagePath, defaultName, onClose }: Props)
                   type="button"
                   onClick={() => setKind("character")}
                   className={[
-                    "flex-1 border-l border-[#343434] text-xs font-bold transition",
+                    "flex flex-1 items-center justify-center gap-1.5 border-l border-[#343434] text-xs font-bold transition",
                     kind === "character"
                       ? "bg-pink-500 text-white"
                       : "text-neutral-400 hover:text-white",
                   ].join(" ")}
                 >
-                  👤 キャラクター
+                  <CharacterIcon className="h-3.5 w-3.5" />
+                  キャラクター
                 </button>
               </div>
             </div>

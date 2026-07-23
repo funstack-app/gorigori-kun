@@ -3,6 +3,7 @@ import { useMemo, useState } from "react";
 
 import { ActiveProjectSelector } from "../../ActiveProjectSelector";
 import { WorkspaceTabs } from "../../WorkspaceTabs";
+import { ClapperIcon, FilmIcon } from "../../SkillIcon";
 import { useImagePreview } from "../../../lib/store/imagePreview";
 import { useToasts } from "../../../lib/store/toasts";
 import { usePresets, presetKind, type Preset } from "../../../lib/store/presets";
@@ -172,7 +173,7 @@ export function SceneRecreateWorkspace() {
                 disabled={running}
                 className="flex aspect-video w-full flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-[#3a3a3a] bg-[#0d0d0d] text-neutral-500 hover:border-pink-400/60 hover:text-neutral-300 disabled:opacity-40"
               >
-                <span className="text-2xl">🎬</span>
+                <ClapperIcon className="h-6 w-6" />
                 <span className="text-[12px] font-bold">キーフレームを選ぶ</span>
               </button>
             ) : (
@@ -263,7 +264,7 @@ export function SceneRecreateWorkspace() {
             <AnalysisResult analysis={analysis} />
           ) : (
             <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center text-neutral-500">
-              <div className="text-3xl">🎞️</div>
+              <FilmIcon className="h-9 w-9 text-neutral-500" />
               <p className="text-[13px] font-bold text-neutral-300">
                 映像を「読む」ワークスペース
               </p>

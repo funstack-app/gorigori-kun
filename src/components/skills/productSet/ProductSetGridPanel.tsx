@@ -8,6 +8,7 @@ import { useProjects } from "../../../lib/store/projects";
 import { useImages } from "../../../lib/store/images";
 import { images as imagesIpc } from "../../../lib/ipc";
 import { useToasts } from "../../../lib/store/toasts";
+import { ProductShotIcon, SaveIcon } from "../../SkillIcon";
 import {
   useWorkspace,
   TIMELINE_SIZE_MIN,
@@ -318,7 +319,7 @@ export function ProductSetGridPanel({
   if (status === "idle" || orderedCuts.length === 0) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-2 text-center text-neutral-500">
-        <div className="text-3xl">📸</div>
+        <ProductShotIcon className="h-9 w-9 text-neutral-500" />
         <p className="text-[13px] font-bold">商品写真1枚と納品カットを選んで「生成」を押すと</p>
         <p className="text-[12px]">白背景・シーン・ディテールの納品一式がセットで出てきます</p>
       </div>
@@ -357,15 +358,16 @@ export function ProductSetGridPanel({
                 disabled={selectedCount === 0}
                 title="選択した画像をフォルダを選んでローカルに保存"
                 className={
-                  "rounded-lg px-3 py-1.5 text-[12px] font-bold transition " +
+                  "flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[12px] font-bold transition " +
                   (selectedCount === 0
                     ? "cursor-not-allowed bg-[#242424] text-neutral-600"
                     : "bg-emerald-600 text-white hover:bg-emerald-500")
                 }
               >
+                <SaveIcon className="h-3.5 w-3.5" />
                 {selectedCount > 0
-                  ? `💾 ローカルに保存 (${selectedCount})`
-                  : "💾 ローカルに保存"}
+                  ? `ローカルに保存 (${selectedCount})`
+                  : "ローカルに保存"}
               </button>
             </>
           )}

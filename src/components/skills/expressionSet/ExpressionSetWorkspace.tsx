@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { ActiveProjectSelector } from "../../ActiveProjectSelector";
 import { WorkspaceTabs } from "../../WorkspaceTabs";
+import { CharacterIcon, FaceIcon } from "../../SkillIcon";
 import { useImagePreview } from "../../../lib/store/imagePreview";
 import { useToasts } from "../../../lib/store/toasts";
 import { useCharacterSheetRun } from "../../../lib/store/characterSheetRun";
@@ -279,7 +280,7 @@ function StepSelect() {
                         />
                       ) : (
                         <div className="flex h-full w-full items-center justify-center text-neutral-600">
-                          🧝
+                          <CharacterIcon className="h-6 w-6" />
                         </div>
                       )}
                     </div>
@@ -374,7 +375,7 @@ function StepSelect() {
           </div>
         ) : (
           <>
-            <div className="text-3xl">😊</div>
+            <FaceIcon className="h-9 w-9 text-neutral-500" />
             <p className="text-[13px] font-bold">登録キャラを1体選んでください</p>
             <p className="text-[12px]">
               選んだキャラの顔を固定したまま、表情差分をまとめて生成します

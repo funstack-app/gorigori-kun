@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { PresetCard } from "./PresetCard";
+import { CharacterIcon } from "./SkillIcon";
 import { PresetThumbnailFocusModal } from "./PresetThumbnailFocus";
 import { SafeImage } from "./SafeImage";
 import { extractDropped, fileToUploadReference, isImageDrop } from "../lib/dragRef";
@@ -343,7 +344,7 @@ export function PresetsDrawer({ fullPage = false }: { fullPage?: boolean }) {
                   className="pointer-events-none absolute left-1/2 top-2 z-20 flex -translate-x-1/2 items-center gap-1 rounded-full border border-pink-400/60 bg-black/80 px-2 py-0.5 text-[9px] font-black text-pink-200 shadow-lg"
                   title="キャラクター登録"
                 >
-                  <span aria-hidden>👤</span>
+                  <CharacterIcon className="h-2.5 w-2.5" />
                   キャラ
                 </span>
               )}
@@ -1306,7 +1307,7 @@ function PresetRow({
               className="inline-flex shrink-0 items-center gap-0.5 rounded-full border border-pink-400/60 bg-pink-500/10 px-1.5 py-px text-[9px] font-black text-pink-300"
               title="キャラクター登録"
             >
-              <span aria-hidden>👤</span>
+              <CharacterIcon className="h-2.5 w-2.5" />
               キャラ
             </span>
           )}

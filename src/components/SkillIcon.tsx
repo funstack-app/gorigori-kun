@@ -122,6 +122,65 @@ const ICONS: Record<GoriSkillId, (props: IconProps) => ReactElement> = {
   ),
 };
 
+/**
+ * 汎用フラットアイコン (絵文字置き換え用)。
+ * プリセットのキャラバッジや空状態のプレースホルダで使う。
+ * SkillIcon と同じ 24x24 / stroke 1.5 / currentColor 方針。
+ */
+export function CharacterIcon({ className }: IconProps) {
+  return (
+    <Box className={className}>
+      <circle cx="12" cy="8" r="4" />
+      <path d="M4 21c0-4 3.5-6 8-6s8 2 8 6" />
+    </Box>
+  );
+}
+
+export function FaceIcon({ className }: IconProps) {
+  return (
+    <Box className={className}>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M9 10h.01M15 10h.01M8.5 15c1 1.2 2.2 1.8 3.5 1.8s2.5-.6 3.5-1.8" />
+    </Box>
+  );
+}
+
+export function ProductShotIcon({ className }: IconProps) {
+  return (
+    <Box className={className}>
+      <path d="M3 8l9-5 9 5v8l-9 5-9-5V8z" />
+      <path d="M3 8l9 5 9-5M12 13v9" />
+    </Box>
+  );
+}
+
+export function FilmIcon({ className }: IconProps) {
+  return (
+    <Box className={className}>
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <path d="M7 4v16M17 4v16M3 9h4M3 15h4M17 9h4M17 15h4" />
+    </Box>
+  );
+}
+
+export function ClapperIcon({ className }: IconProps) {
+  return (
+    <Box className={className}>
+      <rect x="3" y="8" width="18" height="12" rx="2" />
+      <path d="M3 8l3-4 3 4M9 8l3-4 3 4M15 8l3-4 3 4" />
+    </Box>
+  );
+}
+
+export function SaveIcon({ className }: IconProps) {
+  return (
+    <Box className={className}>
+      <path d="M5 3h11l3 3v13a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2z" />
+      <path d="M8 3v5h7V3M8 21v-6h8v6" />
+    </Box>
+  );
+}
+
 export function SkillIcon({ id, className }: { id: string; className?: string }) {
   const Component = ICONS[id as GoriSkillId];
   if (!Component) {

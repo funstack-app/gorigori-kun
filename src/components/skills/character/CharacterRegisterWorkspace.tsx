@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { ActiveProjectSelector } from "../../ActiveProjectSelector";
 import { WorkspaceTabs } from "../../WorkspaceTabs";
+import { CharacterIcon } from "../../SkillIcon";
 import { useImagePreview } from "../../../lib/store/imagePreview";
 import { useToasts } from "../../../lib/store/toasts";
 import { useCharacterSheetRun } from "../../../lib/store/characterSheetRun";
@@ -379,7 +380,7 @@ function StepInput() {
           </div>
         ) : (
           <>
-            <div className="text-3xl">🧝</div>
+            <CharacterIcon className="h-9 w-9 text-neutral-500" />
             <p className="text-[13px] font-bold">参照画像を1枚選んでください</p>
             <p className="text-[12px]">3面図・表情・顔ディテールをまとめて生成します</p>
           </>
