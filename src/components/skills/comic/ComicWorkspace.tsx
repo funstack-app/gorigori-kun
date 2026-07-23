@@ -14,11 +14,8 @@ import type {
   ComicPanelResult,
   ComicPhase,
 } from "../../../lib/comic/types";
-import {
-  presetAttachedImagesToReferences,
-  presetKind,
-  usePresets,
-} from "../../../lib/store/presets";
+import { presetKind, usePresets } from "../../../lib/store/presets";
+import { selectCharacterReferences } from "../../../lib/presets/character";
 import { useToasts } from "../../../lib/store/toasts";
 import { ActiveProjectSelector } from "../../ActiveProjectSelector";
 import { SafeImage } from "../../SafeImage";
@@ -88,7 +85,8 @@ function ComicFlow() {
         presetId: p.id,
         name: p.name,
         attributes: p.characterMeta?.attributes,
-        referenceImagePaths: presetAttachedImagesToReferences(p).map((r) => r.path),
+        // キャラ参照は速度対策で既定3枚に絞る (selectCharacterReferences)。
+        referenceImagePaths: selectCharacterReferences(p).map((r) => r.path),
       }));
   }, [selectedIds, characterPresets]);
 

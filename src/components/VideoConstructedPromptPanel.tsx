@@ -18,10 +18,13 @@ import {
   type VideoModelParam,
 } from "../lib/videoModels";
 import {
-  presetAttachedImagesToReferences,
+  presetKind,
   type Preset,
 } from "../lib/store/presets";
-import { composePresetPrompt } from "../lib/presets/character";
+import {
+  composePresetPrompt,
+  selectCharacterReferences,
+} from "../lib/presets/character";
 import { PresetPickerPopover } from "./PresetPickerPopover";
 import { SkillPickerPopover } from "./SkillPickerPopover";
 import { PromptTextareaWithMentions } from "./PromptTextareaWithMentions";
@@ -109,6 +112,7 @@ export function VideoConstructedPromptPanel() {
   const references = useComposer((s) => s.references);
   const addReference = useComposer((s) => s.addReference);
   const removeReference = useComposer((s) => s.removeReference);
+  const removeReferenceGroup = useComposer((s) => s.removeReferenceGroup);
 
   const setModel = useVideoGen((s) => s.setModel);
   const duration = useVideoGen((s) => s.duration);
@@ -132,9 +136,18 @@ export function VideoConstructedPromptPanel() {
     const next = current ? `${current}, ${presetBody}` : presetBody;
     onChangeDraft(next);
     // F-#6/#7: プリセットの参照画像を composer.references に自動追加。
-    const refs = presetAttachedImagesToReferences(preset);
+    // キャラ型は既定3枚に絞り、同一キャラを1チップに畳む groupId/groupLabel を付ける。
+    const isCharacter = presetKind(preset) === "character";
+    const refs = selectCharacterReferences(preset);
     if (refs.length > 0) {
-      useComposer.getState().addReferences(refs as Reference[]);
+      const withGroup = isCharacter
+        ? refs.map((r) => ({
+            ...r,
+            groupId: `preset:${preset.id}`,
+            groupLabel: preset.name.trim() || "キャラ",
+          }))
+        : refs;
+      useComposer.getState().addReferences(withGroup as Reference[]);
     }
   };
 
@@ -268,6 +281,7 @@ export function VideoConstructedPromptPanel() {
         <ReferenceRack
           references={references}
           onRemove={(path) => removeReference(path)}
+          onRemoveGroup={(groupId) => removeReferenceGroup(groupId)}
           onOpenLibrary={() => setLibraryOpen(true)}
           onOpenStock={() => setStockOpen(true)}
           onOpenPreset={openPreset}
@@ -884,6 +898,7 @@ function SettingsGearIcon() {
 function ReferenceRack({
   references,
   onRemove,
+  onRemoveGroup,
   onOpenLibrary,
   onOpenStock,
   onOpenPreset,
@@ -893,6 +908,7 @@ function ReferenceRack({
 }: {
   references: ReturnType<typeof useComposer.getState>["references"];
   onRemove: (path: string) => void;
+  onRemoveGroup: (groupId: string) => void;
   onOpenLibrary: () => void;
   onOpenStock: () => void;
   onOpenPreset: () => void;
@@ -967,19 +983,49 @@ function ReferenceRack({
 
       {references.length > 0 && (
         <div className="mt-2 flex flex-wrap items-center gap-2">
-          {references.map((ref, index) => (
-            <ReferenceChip
-              key={ref.path}
-              index={index + 1}
-              path={ref.path}
-              name={ref.name}
-              onRemove={() => onRemove(ref.path)}
-            />
-          ))}
+          {renderReferenceChips(references, onRemove, onRemoveGroup)}
         </div>
       )}
     </div>
   );
+}
+
+/**
+ * 参照チップを描画する。groupId 付きの参照は1チップ「@<groupLabel>」に畳む。
+ * `@imgN` の N は参照の絶対位置(index+1)を保ち、エンジンへの採番は変えない。
+ */
+function renderReferenceChips(
+  references: ReturnType<typeof useComposer.getState>["references"],
+  onRemove: (path: string) => void,
+  onRemoveGroup: (groupId: string) => void,
+) {
+  const renderedGroups = new Set<string>();
+  return references.map((ref, index) => {
+    if (ref.groupId) {
+      if (renderedGroups.has(ref.groupId)) return null;
+      renderedGroups.add(ref.groupId);
+      const members = references.filter((r) => r.groupId === ref.groupId);
+      const groupId = ref.groupId;
+      return (
+        <GroupReferenceChip
+          key={`group:${groupId}`}
+          label={ref.groupLabel || "キャラ"}
+          path={ref.path}
+          count={members.length}
+          onRemove={() => onRemoveGroup(groupId)}
+        />
+      );
+    }
+    return (
+      <ReferenceChip
+        key={ref.path}
+        index={index + 1}
+        path={ref.path}
+        name={ref.name}
+        onRemove={() => onRemove(ref.path)}
+      />
+    );
+  });
 }
 
 function ReferenceChip({
@@ -1003,6 +1049,44 @@ function ReferenceChip({
         type="button"
         onClick={onRemove}
         aria-label="参照を外す"
+        className="absolute right-0.5 top-0.5 hidden h-4 w-4 items-center justify-center rounded-full bg-black/80 text-[10px] font-black text-white group-hover:flex hover:bg-red-500"
+      >
+        ×
+      </button>
+    </div>
+  );
+}
+
+/** キャラ等の参照グループを1つに畳んだチップ。ラベルは `@<キャラ名>`。 */
+function GroupReferenceChip({
+  label,
+  path,
+  count,
+  onRemove,
+}: {
+  label: string;
+  path: string;
+  count: number;
+  onRemove: () => void;
+}) {
+  return (
+    <div
+      className="group relative h-14 w-14 overflow-hidden rounded-md border border-pink-400/60 bg-[#0b0b0b]"
+      title={`${label}（参照${count}枚）`}
+    >
+      <img src={convertFileSrc(path)} alt={label} className="h-full w-full object-cover" />
+      <span className="absolute inset-x-0 bottom-0 truncate bg-black/70 px-1 text-[9px] font-black text-pink-200">
+        @{label}
+      </span>
+      {count > 1 && (
+        <span className="absolute left-0.5 top-0.5 rounded bg-pink-500/90 px-1 text-[9px] font-black text-white">
+          {count}
+        </span>
+      )}
+      <button
+        type="button"
+        onClick={onRemove}
+        aria-label="キャラ参照を外す"
         className="absolute right-0.5 top-0.5 hidden h-4 w-4 items-center justify-center rounded-full bg-black/80 text-[10px] font-black text-white group-hover:flex hover:bg-red-500"
       >
         ×

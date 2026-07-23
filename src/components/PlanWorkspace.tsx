@@ -14,7 +14,10 @@ import {
 } from "../lib/sendToPlan";
 import { extractDropped, isImageDrop } from "../lib/dragRef";
 import { useReferenceRoles } from "../lib/store/referenceRoles";
-import { composePresetPrompt } from "../lib/presets/character";
+import {
+  composePresetPrompt,
+  selectCharacterReferences,
+} from "../lib/presets/character";
 import { PresetPickerPopover } from "./PresetPickerPopover";
 import { ReferenceRoleToggle } from "./ReferenceRoleToggle";
 /**
@@ -791,8 +794,10 @@ function ChatInput({
           const presetBody = composePresetPrompt(preset, "\n");
           const next = current ? `${current}\n${presetBody}` : presetBody;
           onChange(next);
-          const paths = (preset.attachedImages ?? [])
-            .map((img) => img.path)
+          // キャラ型は速度対策で既定3枚に絞る (selectCharacterReferences)。
+          // 企画タブは path 配列で添付するので、絞った参照の path を流す。
+          const paths = selectCharacterReferences(preset)
+            .map((ref) => ref.path)
             .filter((p) => p.length > 0);
           if (paths.length > 0) onAddImagePaths(paths);
         }}

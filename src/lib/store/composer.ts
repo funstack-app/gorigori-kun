@@ -93,6 +93,14 @@ export type Reference = {
    * 未定義の場合は自分のライブラリ / アップロード素材。
    */
   stockSource?: StockSource;
+  /**
+   * 同一グループ (例: 1体のキャラの複数リファレンス) の識別子。
+   * UI ではグループ単位で1チップに畳んで表示し、削除もグループ単位で行う。
+   * エンジンに渡す実体 (path / @imgN 採番) は個々の Reference のまま変えない。
+   */
+  groupId?: string;
+  /** グループの表示名 (例: キャラ名)。UI チップに `@<groupLabel>` として出す。 */
+  groupLabel?: string;
 };
 
 type ComposerState = {
@@ -123,6 +131,8 @@ type ComposerState = {
   /** Add many at once. De-dups against existing paths. */
   addReferences: (refs: Reference[]) => void;
   removeReference: (path: string) => void;
+  /** 同一 groupId の参照をまとめて外す (キャラチップの一括削除)。 */
+  removeReferenceGroup: (groupId: string) => void;
   setReferenceRole: (path: string, role: ReferenceRole) => void;
   /** Attach a mask PNG to a specific reference. */
   setMaskFor: (path: string, maskPath: string) => void;
@@ -185,6 +195,10 @@ export const useComposer = create<ComposerState>((set, get) => ({
     }),
   removeReference: (path) =>
     set((s) => ({ references: s.references.filter((r) => r.path !== path) })),
+  removeReferenceGroup: (groupId) =>
+    set((s) => ({
+      references: s.references.filter((r) => r.groupId !== groupId),
+    })),
   setReferenceRole: (path, role) =>
     set((s) => ({
       references: s.references.map((r) =>
