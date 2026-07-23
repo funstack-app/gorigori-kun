@@ -27,8 +27,9 @@ export type SheetCut = {
 export const MAX_SHEET_CUTS = 30;
 
 /**
- * 14カット全カタログ。既定セット(DEFAULT_SHEET_CUT_IDS)は 3面図3+顔基準1+表情5+顔ディテール1 の10。
- * 4,12,13,14(三面図補強/目・手・服のディテール)は「詳しく」トグルで追加する。
+ * 14カット全カタログ。既定セット(DEFAULT_SHEET_CUT_IDS)は 3面図3+顔ディテール1+表情3 の7。
+ * STΛCK 指示 (2026-07-19): 参照が多いと生成が重いので既定を絞り、
+ * 残り(顔基準/斜め前/表情2枚/目・手・服のディテール)は「詳しく」トグルで足す。
  */
 export const SHEET_CUTS: SheetCut[] = [
   // ── 3面図 ──
@@ -149,18 +150,19 @@ export const SHEET_CUTS: SheetCut[] = [
   },
 ];
 
-/** 既定セット(10カット): 3面図3 + 顔基準1 + 表情5 + 顔ディテール1。 */
+/**
+ * 既定セット(7カット): 3面図3 + 顔ディテール1 + 表情3。
+ * STΛCK 指示 (2026-07-19): 生成の重さ対策で既定枚数を7に絞る。
+ * カタログ自体(SHEET_CUTS)は14カットのまま。追加分は EXTENDED で「詳しく」に残す。
+ */
 export const DEFAULT_SHEET_CUT_IDS: string[] = [
   "front",
   "side",
   "back",
-  "face-front",
+  "face-detail",
   "expression-neutral",
   "expression-smile",
   "expression-angry",
-  "expression-sad",
-  "expression-surprised",
-  "face-detail",
 ];
 
 /** 「詳しく」で追加される拡張カット(全14カット化)。 */

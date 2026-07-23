@@ -13,8 +13,12 @@ import type { SheetCutState } from "./types";
  * presetAttachedImagesToReferences 経路で画像・動画生成へそのまま流れる(S3 で確認済みの導線)。
  */
 
-/** 生成カットの正面(サムネ元)を選ぶ優先順。上から順に最初に完成しているカットを使う。 */
-const THUMBNAIL_PREFERENCE = ["front", "face-front", "face-detail"];
+/**
+ * サムネ元(=正本画像)に選ぶカットの優先順。上から順に最初に完成しているカットを使う。
+ * STΛCK 指示 (2026-07-19): 顔が一番よく見えるカットを正本にする。
+ * 顔ディテール → 顔・正面 → 全身正面 の順。該当が無ければ先頭の完成カットへフォールバック。
+ */
+const THUMBNAIL_PREFERENCE = ["face-detail", "face-front", "front"];
 
 /**
  * 画像 path から 256x256 のサムネ JPEG(base64 data URL)を生成する。
@@ -64,7 +68,7 @@ async function generateThumbnailDataUrl(imagePath: string): Promise<string | nul
   });
 }
 
-/** サムネ元にする完成カットの path を選ぶ(front→face-front→face-detail→先頭の完成カット)。 */
+/** サムネ元にする完成カットの path を選ぶ(face-detail→face-front→front→先頭の完成カット)。 */
 function pickThumbnailPath(cuts: SheetCutState[]): string | undefined {
   const completed = cuts.filter(
     (c) => c.status === "completed" && Boolean(c.imagePath),
@@ -99,9 +103,21 @@ export async function registerCharacter(
   );
   if (completed.length === 0) return null;
 
+  const thumbnailPath = pickThumbnailPath(completed);
+
+  // 正本(顔が一番見えるカット)を attachedImages 先頭に置く。
+  // STΛCK 指示 (2026-07-19): 呼び出し時の代表参照 (@img1) が顔基準になるように。
+  // path・@imgN 採番の実体は変えず、並び順だけ変える。
+  const orderedCompleted = thumbnailPath
+    ? [
+        ...completed.filter((c) => c.imagePath === thumbnailPath),
+        ...completed.filter((c) => c.imagePath !== thumbnailPath),
+      ]
+    : completed;
+
   // sheetRoles: path -> role。同一 role の重複は最初の1枚を採用。
   const sheetRoles: Record<string, string> = {};
-  const attachedImages = completed.map((c) => {
+  const attachedImages = orderedCompleted.map((c) => {
     const path = c.imagePath as string;
     if (sheetRoles[path] === undefined) {
       sheetRoles[path] = c.role;
@@ -109,7 +125,6 @@ export async function registerCharacter(
     return { path, role: "subject" };
   });
 
-  const thumbnailPath = pickThumbnailPath(completed);
   const thumbnail = thumbnailPath
     ? await generateThumbnailDataUrl(thumbnailPath)
     : null;
