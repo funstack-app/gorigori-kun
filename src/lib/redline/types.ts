@@ -49,6 +49,11 @@ export type RedlineInstruction = {
   number: number;
   /** 対象領域の説明（位置を言葉で。例: 「右上のロゴ付近」）。 */
   areaDescription: string;
+  /**
+   * 画像全体を 0..1 とした修正範囲 [x, y, width, height]。
+   * AI が範囲を確信できる場合だけ付与し、曖昧なら省略する。
+   */
+  bbox?: [number, number, number, number];
   /** 指示内容（何をどう直すか）。 */
   instruction: string;
   /** 修正種別。 */
