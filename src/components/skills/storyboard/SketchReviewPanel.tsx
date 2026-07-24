@@ -159,8 +159,12 @@ export function SketchReviewPanel() {
     }
 
     setSketchStarting(true);
+    let issuedRunId: string | null = null;
     try {
+      const runId = crypto.randomUUID();
+      issuedRunId = runId;
       const params = {
+        runId,
         storyPrompt: goal.summary || "ストーリーカット",
         characterReferenceImage: goal.characterReferencePath,
         styleReferenceImage: goal.styleReferencePath,
@@ -176,8 +180,8 @@ export function SketchReviewPanel() {
         sceneConstruction,
         sketchMode: true,
       };
-      const runId = await storyboard.run(params);
       useStoryboardRun.getState().beginRun(runId, params);
+      await storyboard.run(params);
       setSketchRunStartedAt(Date.now());
       useToasts.getState().push({
         kind: "info",
@@ -185,9 +189,18 @@ export function SketchReviewPanel() {
         ttlMs: 2400,
       });
     } catch (e) {
+      const message = (e as Error)?.message ?? String(e);
+      const run = useStoryboardRun.getState();
+      if (issuedRunId && run.activeRunId === issuedRunId) {
+        useStoryboardRun.setState({
+          activeRunId: null,
+          status: "failed",
+          lastError: message,
+        });
+      }
       useToasts.getState().push({
         kind: "error",
-        text: `絵コンテ生成の起動に失敗: ${(e as Error)?.message ?? e}`,
+        text: `絵コンテ生成の起動に失敗: ${message}`,
         ttlMs: 6000,
       });
     } finally {
@@ -388,6 +401,7 @@ export function SketchReviewPanel() {
         ttlMs: 3000,
       });
     } catch (e) {
+      updateSketchCut(cut.cutId, { sketchStatus: "failed" });
       useToasts.getState().push({
         kind: "error",
         text: `再生成に失敗: ${(e as Error)?.message ?? e}`,
@@ -1142,4 +1156,3 @@ function inferFilmNotes(index: number, total: number): string[] {
   if (index === Math.floor(total / 2)) notes.push("B-roll 候補: 状況説明・引きの絵");
   return notes;
 }
-

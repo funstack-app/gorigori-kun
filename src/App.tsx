@@ -345,7 +345,7 @@ function SignedInScaffold() {
     // 各 Workspace の useEffect で張ると listen() の解決前に生成を開始した場合に
     // cutStarted/cutCompleted を取りこぼす。idempotent singleton なので二重登録はされない。
     void ensureMultiAngleEventListener();
-    void ensureStoryboardEventListener();
+    void ensureStoryboardEventListener().catch(() => undefined);
     useAccounts.getState().refresh();
     // v0.6.9: プロジェクトをファイル保存に移行。起動時にファイルから読み出し、
     // 旧 localStorage データがあればファイルへマイグレーション。

@@ -14,6 +14,7 @@ import type {
 } from "../storyboard/types";
 import { useActiveProject } from "./activeProject";
 import { useProjects } from "./projects";
+import { useToasts } from "./toasts";
 
 export type Take = {
   takeId: string;
@@ -115,12 +116,12 @@ type StoryboardRunState = {
    * 送り、ローカル状態を running に戻す。Rust が実際に await 停止しているので、
    * これを呼ぶまで残りカットは生成されない。
    */
-  continueCheckpoint: () => void;
+  continueCheckpoint: () => Promise<boolean>;
   /**
    * A-2: 方向性チェックで「中止」。Rust 側の停止ループへ cancel を送り、ローカル
    * 状態を cancelled にする。生成済みカットは保持される。
    */
-  cancelCheckpoint: () => void;
+  cancelCheckpoint: () => Promise<boolean>;
   /** run 関連だけリセット (phase/goal/sketchVersions/chatMessages は保持) */
   reset: () => void;
   /** Phase ワークフロー (phase/goal/sketchVersions/chatMessages) もリセット */
@@ -189,7 +190,7 @@ type StoryboardRunState = {
   revertCut: (cutId: string) => void;
   /** review 状態の take を切り替え (左右ボタンで比較) */
   selectTake: (cutId: string, takeId: string) => void;
-  /** 再生成リクエスト (まだバックエンド未対応、status を running に戻すだけ) */
+  /** 未対応の再生成リクエスト。状態は変えず、案内だけ表示する。 */
   regenerateCut: (cutId: string) => void;
   /** スキップして次へ進む (このカットは confirmed 扱いで次に行く) */
   skipCut: (cutId: string) => void;
@@ -259,7 +260,7 @@ function ensureCut(cuts: Map<string, CutState>, cutId: string): CutState {
   return created;
 }
 
-export const useStoryboardRun = create<StoryboardRunState>((set) => ({
+export const useStoryboardRun = create<StoryboardRunState>((set, get) => ({
   ...emptyState,
   pastRuns: [],
   // B1' 補完: 本生成開始時に撮る確定絵コンテメタのスナップショット。
@@ -315,6 +316,11 @@ export const useStoryboardRun = create<StoryboardRunState>((set) => ({
 
   applyEvent: (e) => {
     set((s) => {
+      // 別 run の遅延イベントを現在の画面へ混ぜない。
+      // run 未開始時も受け入れず、beginRun() で activeRunId が確定してから処理する。
+      if (s.activeRunId === null || e.runId !== s.activeRunId) {
+        return s;
+      }
       const debugLog = [...s.debugLog, e];
       // B-6: イベント受信時刻を記録し、生成中カットの経過秒表示に使う。
       const lastEventAt = Date.now();
@@ -333,7 +339,6 @@ export const useStoryboardRun = create<StoryboardRunState>((set) => ({
       if (e.kind === "started") {
         return {
           ...s,
-          activeRunId: e.runId,
           totalCuts: e.totalCuts,
           sceneGroups: e.sceneGroups,
           status: "running",
@@ -410,7 +415,6 @@ export const useStoryboardRun = create<StoryboardRunState>((set) => ({
         }
         return {
           ...s,
-          activeRunId: e.runId,
           status: "completed",
           manifestPath: e.manifestPath,
           debugLog,
@@ -425,43 +429,88 @@ export const useStoryboardRun = create<StoryboardRunState>((set) => ({
   setStatus: (status) => set({ status }),
   dismissCheckpoint: () => set({ checkpointCutId: null, status: "running" }),
 
-  // A-2: 「このまま続ける」。Rust の停止ループへ continue を送り running に戻す。
-  // checkpointResume は fire-and-forget (失敗しても UI 状態は先に戻す)。
-  continueCheckpoint: () =>
-    set((s) => {
-      if (s.activeRunId) {
-        void storyboard.checkpointResume(s.activeRunId, "continue").catch((err) => {
-          console.warn("[storyboardRun] checkpointResume(continue) failed:", err);
+  // A-2: backend が続行を受理した場合だけ、画面を running に戻す。
+  continueCheckpoint: async () => {
+    const { activeRunId, checkpointCutId } = get();
+    if (!activeRunId || !checkpointCutId) {
+      useToasts.getState().push({
+        kind: "error",
+        text: "続行できる停止中の生成がありません。",
+      });
+      return false;
+    }
+    try {
+      const delivered = await storyboard.checkpointResume(activeRunId, "continue");
+      if (!delivered) {
+        useToasts.getState().push({
+          kind: "error",
+          text: "生成を続行できませんでした。画面の状態は変更していません。",
         });
+        return false;
       }
-      return {
-        checkpointCutId: null,
-        status: "running" as const,
-        uiDebugLog: [
-          ...s.uiDebugLog,
-          { ts: Date.now(), level: "info" as const, message: "checkpoint: continue" },
-        ].slice(-500),
-      };
-    }),
+      set((s) =>
+        s.activeRunId === activeRunId && s.checkpointCutId === checkpointCutId
+          ? {
+              checkpointCutId: null,
+              status: "running" as const,
+              uiDebugLog: [
+                ...s.uiDebugLog,
+                { ts: Date.now(), level: "info" as const, message: "checkpoint: continue" },
+              ].slice(-500),
+            }
+          : s,
+      );
+      return true;
+    } catch {
+      useToasts.getState().push({
+        kind: "error",
+        text: "生成を続行できませんでした。画面の状態は変更していません。",
+      });
+      return false;
+    }
+  },
 
-  // A-2: 「中止」。Rust の停止ループへ cancel を送り cancelled にする。
-  // 生成済みカットは Map に残るので、そのまま確認/採用できる。
-  cancelCheckpoint: () =>
-    set((s) => {
-      if (s.activeRunId) {
-        void storyboard.checkpointResume(s.activeRunId, "cancel").catch((err) => {
-          console.warn("[storyboardRun] checkpointResume(cancel) failed:", err);
+  // A-2: backend が安全中断を受理した場合だけ cancelled にする。
+  // 生成済みカットは Map に残るので、そのまま確認・採用できる。
+  cancelCheckpoint: async () => {
+    const { activeRunId, checkpointCutId } = get();
+    if (!activeRunId || !checkpointCutId) {
+      useToasts.getState().push({
+        kind: "error",
+        text: "中断できる停止中の生成がありません。",
+      });
+      return false;
+    }
+    try {
+      const delivered = await storyboard.checkpointResume(activeRunId, "cancel");
+      if (!delivered) {
+        useToasts.getState().push({
+          kind: "error",
+          text: "生成を中断できませんでした。画面の状態は変更していません。",
         });
+        return false;
       }
-      return {
-        checkpointCutId: null,
-        status: "cancelled" as const,
-        uiDebugLog: [
-          ...s.uiDebugLog,
-          { ts: Date.now(), level: "info" as const, message: "checkpoint: cancel" },
-        ].slice(-500),
-      };
-    }),
+      set((s) =>
+        s.activeRunId === activeRunId && s.checkpointCutId === checkpointCutId
+          ? {
+              checkpointCutId: null,
+              status: "cancelled" as const,
+              uiDebugLog: [
+                ...s.uiDebugLog,
+                { ts: Date.now(), level: "info" as const, message: "checkpoint: cancel" },
+              ].slice(-500),
+            }
+          : s,
+      );
+      return true;
+    } catch {
+      useToasts.getState().push({
+        kind: "error",
+        text: "生成を中断できませんでした。画面の状態は変更していません。",
+      });
+      return false;
+    }
+  },
 
   // ===== Phase 操作 =====
   setPhase: (phase) =>
@@ -584,8 +633,11 @@ export const useStoryboardRun = create<StoryboardRunState>((set) => ({
       if (s.activeRunId && finalTakeId) {
         void storyboard
           .persistAdoption(s.activeRunId, cutId, finalTakeId)
-          .catch((err) => {
-            console.warn("[storyboardRun] persistAdoption failed:", err);
+          .catch(() => {
+            useToasts.getState().push({
+              kind: "error",
+              text: "採用結果を保存できませんでした。画面上の選択は残っています。",
+            });
           });
       }
       return { ...s, cuts: next, uiDebugLog: log.slice(-500) };
@@ -632,25 +684,10 @@ export const useStoryboardRun = create<StoryboardRunState>((set) => ({
     }),
 
   regenerateCut: (cutId) =>
-    set((s) => {
-      const cut = s.cuts.get(cutId);
-      if (!cut) return s;
-      const next = new Map(s.cuts);
-      next.set(cutId, { ...cut, status: "running", takes: [], error: undefined });
-      // 実際のバックエンド再実行はまだ未対応。
-      // status を running に戻すことで UI 上「やり直し中」を表現するのみ。
-      return {
-        ...s,
-        cuts: next,
-        uiDebugLog: [
-          ...s.uiDebugLog,
-          {
-            ts: Date.now(),
-            level: "warn" as const,
-            message: `regenerateCut: ${cutId} (バックエンド再生成は未実装。UI 状態のみリセット)`,
-          },
-        ].slice(-500),
-      };
+    useToasts.getState().push({
+      kind: "warn",
+      text: `Cut ${cutId} の再生成は、このバージョンでは未対応です。`,
+      ttlMs: 4000,
     }),
 
   skipCut: (cutId) =>

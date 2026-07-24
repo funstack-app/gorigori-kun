@@ -28,9 +28,10 @@ export function GenerationProgressPanel() {
   const totalCuts = useStoryboardRun((s) => s.totalCuts);
   const status = useStoryboardRun((s) => s.status);
   const activeRunId = useStoryboardRun((s) => s.activeRunId);
+  const checkpointCutId = useStoryboardRun((s) => s.checkpointCutId);
   const beginRun = useStoryboardRun((s) => s.beginRun);
   const setPhase = useStoryboardRun((s) => s.setPhase);
-  const setStatus = useStoryboardRun((s) => s.setStatus);
+  const cancelCheckpoint = useStoryboardRun((s) => s.cancelCheckpoint);
   const adoptTake = useStoryboardRun((s) => s.adoptTake);
   // B2: キービジュアル固定参照 (全カット共通の基準画像)
   const keyVisualPath = useStoryboardRun((s) => s.keyVisualPath);
@@ -131,6 +132,7 @@ export function GenerationProgressPanel() {
     }
     setStarting(true);
     setStartError(null);
+    let issuedRunId: string | null = null;
     try {
       // === B1 修正 (2026-06-06): 絵コンテ混在の根絶 ===
       // 本生成で参照する絵コンテは「(a) 確定 (confirmed===true) かつ
@@ -208,7 +210,10 @@ export function GenerationProgressPanel() {
         return { ...sceneConstruction, cuts: reordered };
       })();
 
+      const runId = crypto.randomUUID();
+      issuedRunId = runId;
       const params = {
+        runId,
         storyPrompt: goal.summary || "ストーリーカット",
         characterReferenceImage: goal.characterReferencePath,
         styleReferenceImage: goal.styleReferencePath,
@@ -225,8 +230,8 @@ export function GenerationProgressPanel() {
         manualSelection: true,
         sketchReferences,
       };
-      const runId = await storyboard.run(params);
       beginRun(runId, params);
+      await storyboard.run(params);
       setGenerationRunStartedAt(Date.now());
       useToasts.getState().push({
         kind: "success",
@@ -235,6 +240,14 @@ export function GenerationProgressPanel() {
       });
     } catch (e) {
       const msg = (e as Error)?.message ?? String(e);
+      const run = useStoryboardRun.getState();
+      if (issuedRunId && run.activeRunId === issuedRunId) {
+        useStoryboardRun.setState({
+          activeRunId: null,
+          status: "failed",
+          lastError: msg,
+        });
+      }
       setStartError(msg);
       useToasts.getState().push({
         kind: "error",
@@ -244,44 +257,6 @@ export function GenerationProgressPanel() {
     } finally {
       setStarting(false);
     }
-  }
-
-  // FB#3 修正 (2026-06-06 夜): 「一時停止 / 中断」ボタンを生成画面に追加する。
-  //
-  // 鉄則 (STΛCK 指示): 停止しても UI レイアウト / フェーズは変えない。
-  //   - 旧 GenerationWorkspace の StoryboardRunPanel では「中断」が run.reset() を
-  //     呼んで cuts を全消去 → カードが消えて画面が崩れていた。これが「停止で UI が
-  //     変わる」症状の元。
-  //   - ここでは reset() / setPhase() を一切呼ばず、run の status を "paused" に
-  //     するだけにする。これで生成は止める意思表示をしつつ、既出カード・進捗・
-  //     Phase 3 のレイアウトはそのまま保持される。
-  //   - 再開ボタンで status を "running" に戻せる (バックエンドはイベントを流し
-  //     続けるので、実体としては「UI 上の停止表示」)。
-  function pauseGeneration() {
-    setStatus("paused");
-    useToasts.getState().push({
-      kind: "info",
-      text: "生成を一時停止しました (画面はそのままです)。",
-      ttlMs: 2600,
-    });
-  }
-  function resumeGeneration() {
-    setStatus("running");
-    useToasts.getState().push({
-      kind: "info",
-      text: "生成を再開しました。",
-      ttlMs: 2000,
-    });
-  }
-  function stopGeneration() {
-    // 中断: cuts / phase は保持。status のみ paused にして以降の進行を止める意思表示。
-    // 既に生成済みのカットはそのまま「最終確認へ」進める。
-    setStatus("paused");
-    useToasts.getState().push({
-      kind: "info",
-      text: "生成を中断しました。生成済みのカットはそのまま確認・採用できます。",
-      ttlMs: 3600,
-    });
   }
 
   // P2 修正 (2026-05-20): manual_selection ではユーザー採用待ちなので自動遷移しない。
@@ -406,33 +381,24 @@ export function GenerationProgressPanel() {
                 >
                   最終確認へ →
                 </button>
-                {/* FB#3: 一時停止 / 再開 / 中断。phase も cuts も変えない (UI 維持)。 */}
+                {/* backend に実在する安全中断だけを表示。一時停止は未対応なので出さない。 */}
                 {!allDoneGen && (
                   <div className="flex gap-2">
-                    {status === "paused" ? (
-                      <button
-                        type="button"
-                        onClick={resumeGeneration}
-                        className="rounded-md border border-[#2a2a2a] px-3 py-1.5 text-xs text-zinc-300 hover:border-pink-500/40 hover:bg-pink-500/5"
-                        title="生成を再開する (画面は変わりません)"
-                      >
-                        再開
-                      </button>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={pauseGeneration}
-                        className="rounded-md border border-[#2a2a2a] px-3 py-1.5 text-xs text-zinc-300 hover:border-pink-500/40 hover:bg-pink-500/5"
-                        title="生成を一時停止する (画面は変わりません)"
-                      >
-                        一時停止
-                      </button>
-                    )}
                     <button
                       type="button"
-                      onClick={stopGeneration}
-                      className="rounded-md border border-red-400/40 px-3 py-1.5 text-xs text-red-200 hover:bg-red-500/10"
-                      title="生成を中断する (生成済みカットは残ります)"
+                      onClick={() => void cancelCheckpoint()}
+                      disabled={!checkpointCutId}
+                      className={[
+                        "rounded-md border px-3 py-1.5 text-xs",
+                        checkpointCutId
+                          ? "border-red-400/40 text-red-200 hover:bg-red-500/10"
+                          : "cursor-not-allowed border-[#2a2a2a] text-zinc-600",
+                      ].join(" ")}
+                      title={
+                        checkpointCutId
+                          ? "生成を安全に中断する（生成済みカットは残ります）"
+                          : "方向性確認で停止中のときだけ中断できます"
+                      }
                     >
                       中断
                     </button>

@@ -18,11 +18,18 @@ export type SceneGroup = {
 
 export type StoryboardEvent =
   | { kind: "started"; runId: string; totalCuts: number; sceneGroups: SceneGroup[] }
-  | { kind: "cutStarted"; cutId: string; sceneGroupId: string; takeCount: number }
-  | { kind: "takeCompleted"; cutId: string; takeId: string; imagePath: string; scores: ScoreBundle }
-  | { kind: "cutCheckpoint"; cutId: string; reason: string }
-  | { kind: "cutConfirmed"; cutId: string; selectedTakeId: string }
-  | { kind: "cutFailed"; cutId: string; reason: string }
+  | { kind: "cutStarted"; runId: string; cutId: string; sceneGroupId: string; takeCount: number }
+  | {
+      kind: "takeCompleted";
+      runId: string;
+      cutId: string;
+      takeId: string;
+      imagePath: string;
+      scores: ScoreBundle;
+    }
+  | { kind: "cutCheckpoint"; runId: string; cutId: string; reason: string }
+  | { kind: "cutConfirmed"; runId: string; cutId: string; selectedTakeId: string }
+  | { kind: "cutFailed"; runId: string; cutId: string; reason: string }
   | { kind: "completed"; runId: string; manifestPath: string };
 
 // GPT Image 2 公式対応の10種に揃える (scene/types.ts SceneAspectRatio と同一集合)。
@@ -125,6 +132,7 @@ export type SceneConstruction = {
 export type CandidatesPerCut = 1 | 2 | 3;
 
 export type StoryboardRunParams = {
+  runId?: string;
   storyPrompt: string;
   characterReferenceImage: string;
   styleReferenceImage?: string;

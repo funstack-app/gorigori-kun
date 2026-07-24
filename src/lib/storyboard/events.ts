@@ -14,8 +14,15 @@ export function onStoryboardEvent(
 
 export function ensureStoryboardEventListener(): Promise<UnlistenFn> {
   if (!listenerPromise) {
-    listenerPromise = onStoryboardEvent((event) => {
+    const pendingListener = onStoryboardEvent((event) => {
       useStoryboardRun.getState().applyEvent(event);
+    });
+    listenerPromise = pendingListener;
+    // 登録失敗をキャッシュし続けず、次回の画面入場で再試行できるようにする。
+    void pendingListener.catch(() => {
+      if (listenerPromise === pendingListener) {
+        listenerPromise = null;
+      }
     });
   }
   return listenerPromise;

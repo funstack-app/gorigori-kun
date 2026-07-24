@@ -1163,20 +1163,23 @@ function StoryboardRunPanel() {
         <StoryboardCheckpointDialog
           cuts={checkpointCuts}
           onContinue={run.continueCheckpoint}
-          onCancel={() => {
-            run.cancelCheckpoint();
+          onCancel={async () => {
+            const cancelled = await run.cancelCheckpoint();
+            if (!cancelled) return;
             pushToast({ kind: "info", text: "生成を中止しました。ここまでのカットは残ります。", ttlMs: 2800 });
           }}
-          onReset={() => {
+          onReset={async () => {
             // 停止中の Rust ループへ cancel を送ってから local を初期化する
             // (cancel を送らないと Rust ループが await 停止したまま残る)。
-            run.cancelCheckpoint();
+            const cancelled = await run.cancelCheckpoint();
+            if (!cancelled) return;
             run.reset();
             pushToast({ kind: "info", text: "方向性チェックをリセットしました。", ttlMs: 2400 });
           }}
-          onRegenerateCut={() => {
+          onRegenerateCut={async () => {
             // 一旦続行して停止ループを解除する (Cut3 再生成は既存のカード再生成に接続予定)。
-            run.continueCheckpoint();
+            const continued = await run.continueCheckpoint();
+            if (!continued) return;
             pushToast({ kind: "info", text: "Cut3再生成は次フェーズで手動再実行に接続します。", ttlMs: 3200 });
           }}
         />
@@ -1376,8 +1379,10 @@ function SkillSettingsPanel() {
       return;
     }
     setStarting(true);
+    const runId = crypto.randomUUID();
     try {
       const params = {
+        runId,
         storyPrompt,
         // キャラ参照は任意 (2026-06-08)。未設定なら空文字で渡し、Rust側でテキスト生成にフォールバック。
         characterReferenceImage: storyboardParams.character_reference_path ?? "",
@@ -1392,11 +1397,20 @@ function SkillSettingsPanel() {
         cwd: undefined,
         sceneConstruction,
       };
-      const runId = await storyboard.run(params);
       beginRun(runId, params);
+      await storyboard.run(params);
       pushToast({ kind: "success", text: "gori-storyboard を起動しました。", ttlMs: 2400 });
     } catch (error) {
-      pushToast({ kind: "error", text: `スキル起動に失敗しました: ${String(error)}`, ttlMs: 6000 });
+      const message = (error as Error)?.message ?? String(error);
+      const run = useStoryboardRun.getState();
+      if (run.activeRunId === runId) {
+        useStoryboardRun.setState({
+          activeRunId: null,
+          status: "failed",
+          lastError: message,
+        });
+      }
+      pushToast({ kind: "error", text: `スキル起動に失敗しました: ${message}`, ttlMs: 6000 });
     } finally {
       setStarting(false);
     }

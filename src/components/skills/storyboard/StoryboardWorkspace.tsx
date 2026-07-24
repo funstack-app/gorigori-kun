@@ -1,11 +1,13 @@
 import { useEffect } from "react";
 import { useStoryboardRun } from "../../../lib/store/storyboardRun";
+import { useToasts } from "../../../lib/store/toasts";
 import { useWorkspace } from "../../../lib/store/workspace";
 import { ensureStoryboardEventListener } from "../../../lib/storyboard/events";
 import { ActiveProjectSelector } from "../../ActiveProjectSelector";
 import { EditWorkspace } from "../../EditWorkspace";
 import { Timeline } from "../../GenerationWorkspace";
 import { PlanWorkspace } from "../../PlanWorkspace";
+import { StoryboardCheckpointDialog } from "../../StoryboardCheckpointDialog";
 import { VideoGenerationWorkspace } from "../../VideoGenerationWorkspace";
 import { WorkspaceTabs } from "../../WorkspaceTabs";
 import { CutGridReviewPanel } from "./CutGridReviewPanel";
@@ -41,10 +43,42 @@ import { SketchReviewPanel } from "./SketchReviewPanel";
  */
 export function StoryboardWorkspace() {
   const phase = useStoryboardRun((s) => s.phase);
+  const cuts = useStoryboardRun((s) => s.cuts);
+  const checkpointCutId = useStoryboardRun((s) => s.checkpointCutId);
+  const continueCheckpoint = useStoryboardRun((s) => s.continueCheckpoint);
+  const cancelCheckpoint = useStoryboardRun((s) => s.cancelCheckpoint);
+  const reset = useStoryboardRun((s) => s.reset);
   const activeTab = useWorkspace((s) => s.activeTab);
+  const checkpointCuts = Array.from(cuts.values()).slice(0, 3);
+
+  const checkpointDialog = checkpointCutId ? (
+    <StoryboardCheckpointDialog
+      cuts={checkpointCuts}
+      onContinue={continueCheckpoint}
+      onCancel={cancelCheckpoint}
+      onReset={async () => {
+        const cancelled = await cancelCheckpoint();
+        if (cancelled) reset();
+      }}
+      onRegenerateCut={() => {
+        // backend の部分再生成へは未接続。停止を解除せず、正直に案内する。
+        useStoryboardRun.getState().regenerateCut(checkpointCutId);
+      }}
+    />
+  ) : null;
 
   useEffect(() => {
-    void ensureStoryboardEventListener();
+    void ensureStoryboardEventListener().catch((error) => {
+      const run = useStoryboardRun.getState();
+      if (run.status === "running") {
+        run.setStatus("failed");
+      }
+      useToasts.getState().push({
+        kind: "error",
+        text: `絵コンテの通知準備に失敗しました: ${(error as Error)?.message ?? error}`,
+        ttlMs: 6000,
+      });
+    });
   }, []);
 
   // 動画 / 企画 / 編集タブは、ストーリーモードを保ったままインライン描画する。
@@ -52,7 +86,8 @@ export function StoryboardWorkspace() {
   // 「画像生成」タブを押してストーリーカットの Phase フローに戻れる。
   if (activeTab !== "generate") {
     return (
-      <section className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#121212]">
+      <section className="relative flex min-h-0 flex-1 flex-col overflow-hidden bg-[#121212]">
+        {checkpointDialog}
         <div className="border-b border-[#242424] bg-[#121212] px-4 py-3">
           <div className="flex items-center gap-3">
             <WorkspaceTabs />
@@ -69,7 +104,8 @@ export function StoryboardWorkspace() {
   }
 
   return (
-    <section className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#121212]">
+    <section className="relative flex min-h-0 flex-1 flex-col overflow-hidden bg-[#121212]">
+      {checkpointDialog}
       <div className="border-b border-[#242424] bg-[#121212] px-4 py-3">
         <div className="flex items-center gap-3">
           <WorkspaceTabs />

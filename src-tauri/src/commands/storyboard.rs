@@ -33,6 +33,8 @@ const STORYBOARD_EFFORT: &str = "low";
 #[derive(Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct StoryboardParams {
+    #[serde(default)]
+    pub run_id: Option<String>,
     pub story_prompt: String,
     pub character_reference_image: String,
     pub style_reference_image: Option<String>,
@@ -117,25 +119,30 @@ pub enum StoryboardEvent {
         scene_groups: Vec<SceneGroup>,
     },
     CutStarted {
+        run_id: String,
         cut_id: String,
         scene_group_id: String,
         take_count: u32,
     },
     TakeCompleted {
+        run_id: String,
         cut_id: String,
         take_id: String,
         image_path: String,
         scores: ScoreBundle,
     },
     CutCheckpoint {
+        run_id: String,
         cut_id: String,
         reason: String,
     },
     CutConfirmed {
+        run_id: String,
         cut_id: String,
         selected_take_id: String,
     },
     CutFailed {
+        run_id: String,
         cut_id: String,
         reason: String,
     },
@@ -541,7 +548,10 @@ pub async fn storyboard_run(
 
     let codex_bin =
         resolve_codex_cli_binary().map_err(|e| format!("Codex CLI の解決に失敗: {e}"))?;
-    let run_id = format!("{}-{}", timestamp_id(), short_id());
+    let run_id = params
+        .run_id
+        .clone()
+        .unwrap_or_else(|| format!("{}-{}", timestamp_id(), short_id()));
     let task_run_id = run_id.clone();
     // AppState は Arc ベースなので clone は共有ハンドル。checkpoint シグナルを
     // spawn した orchestrator と `storyboard_checkpoint_resume` の両方から触る。
@@ -566,6 +576,7 @@ pub async fn storyboard_run(
             let _ = app.emit(
                 EVENT_STORYBOARD,
                 StoryboardEvent::CutFailed {
+                    run_id: task_run_id,
                     cut_id: "unknown".into(),
                     reason: err,
                 },
@@ -657,6 +668,7 @@ pub async fn storyboard_regenerate_cut(
 
     let take_id = format!("re_{}", short_id());
     let task_app = app.clone();
+    let task_run_id = params.run_id.clone();
     let task_cut_id = params.cut_id.clone();
     let task_take_id = take_id.clone();
 
@@ -728,6 +740,7 @@ pub async fn storyboard_regenerate_cut(
                 let _ = task_app.emit(
                     EVENT_STORYBOARD,
                     StoryboardEvent::TakeCompleted {
+                        run_id: task_run_id,
                         cut_id: task_cut_id,
                         take_id: tid,
                         image_path: image_path_string,
@@ -740,6 +753,7 @@ pub async fn storyboard_regenerate_cut(
                 let _ = task_app.emit(
                     EVENT_STORYBOARD,
                     StoryboardEvent::CutFailed {
+                        run_id: task_run_id,
                         cut_id: task_cut_id,
                         reason: err,
                     },
@@ -903,6 +917,7 @@ async fn run_storyboard_orchestrator(
         let _ = app.emit(
             EVENT_STORYBOARD,
             StoryboardEvent::CutStarted {
+                run_id: run_id.clone(),
                 cut_id: cut.cut_id.clone(),
                 scene_group_id: cut.scene_group_id.clone(),
                 take_count: candidates_per_cut,
@@ -1098,6 +1113,7 @@ async fn run_storyboard_orchestrator(
                 &structured_prompt,
                 &reference_images,
                 &out_dir,
+                &run_id,
                 &cut.cut_id,
                 &take_specs,
                 params.cwd.clone(),
@@ -1137,6 +1153,7 @@ async fn run_storyboard_orchestrator(
                 let _ = app.emit(
                     EVENT_STORYBOARD,
                     StoryboardEvent::CutConfirmed {
+                        run_id: run_id.clone(),
                         cut_id: cut.cut_id.clone(),
                         selected_take_id: best.take_id.clone(),
                     },
@@ -1155,6 +1172,7 @@ async fn run_storyboard_orchestrator(
             let _ = app.emit(
                 EVENT_STORYBOARD,
                 StoryboardEvent::CutFailed {
+                    run_id: run_id.clone(),
                     cut_id: cut.cut_id.clone(),
                     reason,
                 },
@@ -1184,6 +1202,7 @@ async fn run_storyboard_orchestrator(
             let _ = app.emit(
                 EVENT_STORYBOARD,
                 StoryboardEvent::CutCheckpoint {
+                    run_id: run_id.clone(),
                     cut_id: cut.cut_id.clone(),
                     reason: "midRun review at cut 3".into(),
                 },
@@ -2588,6 +2607,7 @@ async fn generate_cut_takes(
     structured_prompt: &Value,
     reference_images: &[PathBuf],
     output_dir: &Path,
+    run_id: &str,
     cut_id: &str,
     take_specs: &[(String, u32)],
     cwd: Option<String>,
@@ -2627,6 +2647,7 @@ async fn generate_cut_takes(
             let _ = app.emit(
                 EVENT_STORYBOARD,
                 StoryboardEvent::TakeCompleted {
+                    run_id: run_id.to_string(),
                     cut_id: cut_id.to_string(),
                     take_id: take_id.clone(),
                     image_path: image_path.to_string_lossy().into_owned(),
