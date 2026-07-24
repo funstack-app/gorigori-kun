@@ -49,15 +49,12 @@ type CharacterSheetRunState = {
   characterImagePath: string | null;
   attributes: string;
   aspectRatio: string;
-  /** 「詳しく」トグル。true なら全14カット、false なら既定10カット。 */
-  extended: boolean;
 
   // ===== 設定アクション =====
   setCharacterName: (name: string) => void;
   setCharacterImage: (path: string | null) => void;
   setAttributes: (text: string) => void;
   setAspectRatio: (ratio: string) => void;
-  setExtended: (extended: boolean) => void;
 
   // ===== run アクション =====
   /**
@@ -101,13 +98,11 @@ export const useCharacterSheetRun = create<CharacterSheetRunState>((set) => ({
   characterImagePath: null,
   attributes: "",
   aspectRatio: "1:1",
-  extended: false,
 
   setCharacterName: (name) => set({ characterName: name }),
   setCharacterImage: (path) => set({ characterImagePath: path }),
   setAttributes: (text) => set({ attributes: text }),
   setAspectRatio: (ratio) => set({ aspectRatio: ratio }),
-  setExtended: (extended) => set({ extended }),
 
   beginRun: (mode, runId, cuts) =>
     set((s) => {
@@ -193,6 +188,12 @@ export const useCharacterSheetRun = create<CharacterSheetRunState>((set) => ({
             status: "pending" as const,
           };
           return {
+            status:
+              s.mode === "character" &&
+              s.cutOrder.length === 1 &&
+              s.cutOrder[0] === e.cutId
+                ? ("failed" as const)
+                : s.status,
             cuts: {
               ...s.cuts,
               [e.cutId]: { ...prev, status: "failed" as const, reason: e.reason },
@@ -201,7 +202,15 @@ export const useCharacterSheetRun = create<CharacterSheetRunState>((set) => ({
         }
 
         case "completed":
-          return { status: "completed" as const, runId: e.runId };
+          return {
+            status:
+              s.mode === "character" &&
+              s.cutOrder.length === 1 &&
+              s.cuts[s.cutOrder[0]]?.status === "failed"
+                ? ("failed" as const)
+                : ("completed" as const),
+            runId: e.runId,
+          };
 
         default:
           return s;

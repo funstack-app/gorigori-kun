@@ -2,8 +2,8 @@
  * キャラクター登録パイプラインのフロント型定義。
  *
  * Rust 側 `CharacterSheetEvent` (serde tag="kind", rename_all="camelCase") と 1:1 で対応する。
- * 1枚の参照画像から固定カタログ(3面図+表情+ディテール)を並列生成し、終わったものから
- * 順にイベントで通知される。multiangle の types.ts を役割(role)ベースに読み替えた複製。
+ * 1枚の参照画像から、キャラクター登録では統合シート1枚、表情差分では複数カットを生成し、
+ * 終わったものから順にイベントで通知される。
  */
 
 /** Tauri emit のイベントチャンネル名。Rust 側 `EVENT_CHARACTER_SHEET` と一致。 */
@@ -31,6 +31,9 @@ export type SheetCutSpec = {
   promptFragment: string;
 };
 
+/** Rust 側で選ぶ生成経路。未指定は後方互換で従来の複数カット生成。 */
+export type CharacterSheetGenerationMode = "composite" | "multi-cut";
+
 /**
  * `invoke("character_sheet_run", { params })` に渡す引数 (camelCase)。
  * Rust 側 `CharacterSheetParams` (serde rename_all="camelCase") と一致。
@@ -39,7 +42,10 @@ export type CharacterSheetParams = {
   characterImage: string;
   attributes: string;
   aspectRatio: string;
-  cutSpecs: SheetCutSpec[];
+  /** キャラクター登録は composite、表情差分は未指定のまま従来経路を使う。 */
+  generationMode?: CharacterSheetGenerationMode;
+  /** 複数カット生成だけで使用。統合シート生成では送らない。 */
+  cutSpecs?: SheetCutSpec[];
   cwd?: string;
   /** フロントが先に採番する run_id。beginRun 時点から確定 run_id を持ち、
    *  画面往復後の別 run 後着通知を照合で捨てるために使う (B1 混線対策)。 */

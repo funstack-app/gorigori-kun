@@ -8,12 +8,6 @@ import { useImagePreview } from "../../../lib/store/imagePreview";
 import { useToasts } from "../../../lib/store/toasts";
 import { useCharacterSheetRun } from "../../../lib/store/characterSheetRun";
 import { ensureCharacterSheetEventListener } from "../../../lib/character/events";
-import {
-  DEFAULT_SHEET_CUT_IDS,
-  EXTENDED_SHEET_CUT_IDS,
-  getSheetCut,
-  resolveSheetCuts,
-} from "../../../lib/character/sheetCuts";
 import type {
   CharacterSheetParams,
   SheetCutState,
@@ -21,20 +15,34 @@ import type {
 import { defaultIdentityChecker } from "../../../lib/character/identityCheck";
 import type { IdentityCheckResult } from "../../../lib/character/identityCheck";
 import { registerCharacter } from "../../../lib/character/registerCharacter";
-import {
-  ASPECT_RATIO_HINTS,
-  ASPECT_RATIO_PICKER_OPTIONS,
-} from "../../../lib/scene/aspectRatioPicker";
-import type { SceneAspectRatio } from "../../../lib/scene/types";
-import { OptionPickerModal } from "../../scene/OptionPickerModal";
 
 const IMAGE_EXTS = ["png", "jpg", "jpeg", "webp", "gif", "bmp"];
+const COMPOSITE_ASPECT_RATIO = "3:4";
+const COMPOSITE_SHEET_CUT = {
+  cutId: "character-sheet",
+  label: "キャラクターシート",
+  role: "character-sheet",
+} as const;
+
+function buildCompositeSheetParams(
+  characterImage: string,
+  attributes: string,
+  runId: string,
+): CharacterSheetParams {
+  return {
+    characterImage,
+    attributes,
+    aspectRatio: COMPOSITE_ASPECT_RATIO,
+    generationMode: "composite",
+    runId,
+  };
+}
 
 /**
  * キャラクター登録 Workspace(IPアセット化パイプライン・スライスS4)
  *
- * 1枚の参照画像から 3面図+表情+顔ディテールを並列生成し、キャラ型プリセットへ登録する
- * ウィザード(ステップ制の1ワークスペース)。MultiAngleWorkspace の2ペインパターンを踏襲。
+ * 1枚の参照画像から統合キャラクターシート1枚を生成し、キャラ型プリセットへ登録する
+ * ウィザード(ステップ制の1ワークスペース)。
  *
  * SkillWorkspaceRouter が activeUiMode === "characterRegister" のとき本コンポーネントを描画する。
  * 既存の GenerationWorkspace / MultiAngleWorkspace は触らない。
@@ -138,18 +146,12 @@ function StepInput() {
   const setCharacterImage = useCharacterSheetRun((s) => s.setCharacterImage);
   const attributes = useCharacterSheetRun((s) => s.attributes);
   const setAttributes = useCharacterSheetRun((s) => s.setAttributes);
-  const aspectRatio = useCharacterSheetRun((s) => s.aspectRatio);
-  const setAspectRatio = useCharacterSheetRun((s) => s.setAspectRatio);
-  const extended = useCharacterSheetRun((s) => s.extended);
-  const setExtended = useCharacterSheetRun((s) => s.setExtended);
   const beginRun = useCharacterSheetRun((s) => s.beginRun);
   const status = useCharacterSheetRun((s) => s.status);
 
   const pushToast = useToasts((s) => s.push);
-  const [aspectPickerOpen, setAspectPickerOpen] = useState(false);
   const [extracting, setExtracting] = useState(false);
 
-  const cutIds = extended ? EXTENDED_SHEET_CUT_IDS : DEFAULT_SHEET_CUT_IDS;
   const running = status === "running";
   const canRun = Boolean(characterImagePath) && !running;
 
@@ -200,41 +202,22 @@ function StepInput() {
       pushToast({ kind: "info", text: "先に参照画像を選んでください。", ttlMs: 3000 });
       return;
     }
-    const cutSpecs = resolveSheetCuts(cutIds).map((c) => ({
-      cutId: c.cutId,
-      role: c.role,
-      promptFragment: c.promptFragment,
-    }));
 
     // フロントで先に run_id を採番し、beginRun 時点から確定 run_id を持つ。これで
     // 全イベントが同じ run_id を載せ、画面往復後の別 run 後着通知を照合で捨てられる
     // (B1 混線対策)。バックエンドは params.runId をそのまま使う。
     const runId = crypto.randomUUID();
 
-    const params: CharacterSheetParams = {
-      characterImage: characterImagePath,
-      attributes,
-      aspectRatio,
-      cutSpecs,
-      runId,
-    };
+    const params = buildCompositeSheetParams(characterImagePath, attributes, runId);
 
-    // 先に pending スケルトンを建てて listener を確実に間に合わせる(multiAngle と同じ思想)。
-    beginRun(
-      "character",
-      runId,
-      cutSpecs.map((c) => ({
-        cutId: c.cutId,
-        label: getSheetCut(c.cutId)?.label ?? c.cutId,
-        role: c.role,
-      })),
-    );
+    // 先に1枚分の pending 状態を作り、開始直後の通知も取りこぼさない。
+    beginRun("character", runId, [COMPOSITE_SHEET_CUT]);
 
     try {
       await invoke<string>("character_sheet_run", { params });
       pushToast({
         kind: "success",
-        text: `${cutSpecs.length} カットの生成を開始しました。`,
+        text: "キャラクターシートの生成を開始しました。",
         ttlMs: 3000,
       });
     } catch (err) {
@@ -318,46 +301,16 @@ function StepInput() {
             className="w-full resize-none rounded-lg border border-[#2a2a2a] bg-[#0d0d0d] px-3 py-2 text-[12px] text-neutral-200 placeholder:text-neutral-600 focus:border-pink-400/60 focus:outline-none"
           />
           <p className="mt-1 text-[10px] text-neutral-600">
-            全カット共通で焼き込みます。空欄なら参照画像の見た目を踏襲します。
+            シート全体に反映します。空欄なら参照画像の見た目を踏襲します。
           </p>
         </div>
 
-        <div>
-          <div className="mb-1.5 text-[11px] font-black uppercase tracking-wider text-neutral-500">
-            アスペクト比
-          </div>
-          <button
-            type="button"
-            onClick={() => setAspectPickerOpen(true)}
-            className="flex w-full items-center justify-between gap-2 rounded-lg border border-[#343434] bg-[#101010] px-3 py-2 text-left text-[13px] font-semibold text-neutral-100 transition hover:border-pink-400 hover:bg-[#151515]"
-          >
-            <span className="flex min-w-0 items-center gap-1.5">
-              <span className="shrink-0 font-bold text-neutral-100">{aspectRatio}</span>
-              <span className="truncate text-[11px] font-medium text-neutral-500">
-                {ASPECT_RATIO_HINTS[aspectRatio as SceneAspectRatio] ?? ""}
-              </span>
-            </span>
-            <span className="shrink-0 text-[11px] text-neutral-500" aria-hidden>
-              ▾
-            </span>
-          </button>
-        </div>
-
         <div className="border-t border-[#242424] pt-4">
-          <label className="flex cursor-pointer items-center justify-between gap-2">
-            <span className="text-[12px] font-bold text-neutral-300">
-              詳しく(顔補強・目・手・服のディテールも生成)
-            </span>
-            <input
-              type="checkbox"
-              checked={extended}
-              onChange={(e) => setExtended(e.target.checked)}
-              className="h-4 w-4 accent-pink-500"
-            />
-          </label>
           <div className="mt-2 text-center text-[12px] font-bold text-neutral-400">
-            生成:{" "}
-            <span className="text-pink-300">{cutIds.length} カット</span>
+            生成: <span className="text-pink-300">統合シート 1枚</span>
+          </div>
+          <div className="mt-1 text-center text-[10px] text-neutral-600">
+            縦長 3:4・全身三面図とシーンショットを1枚にまとめます
           </div>
         </div>
 
@@ -371,17 +324,8 @@ function StepInput() {
               : "cursor-not-allowed bg-[#242424] text-neutral-600"
           }`}
         >
-          {running ? "生成中…" : `${cutIds.length} カットを生成する`}
+          {running ? "生成中…" : "キャラクターシートを生成する"}
         </button>
-
-        <OptionPickerModal
-          open={aspectPickerOpen}
-          title="アスペクト比を選ぶ"
-          options={ASPECT_RATIO_PICKER_OPTIONS}
-          selectedValue={aspectRatio}
-          onPick={(value) => setAspectRatio(value)}
-          onClose={() => setAspectPickerOpen(false)}
-        />
       </aside>
 
       <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 px-6 text-center text-neutral-500">
@@ -393,14 +337,15 @@ function StepInput() {
               className="mx-auto max-h-[60vh] rounded-xl border border-[#2a2a2a] object-contain"
             />
             <p className="mt-4 text-[12px]">
-              この1枚から 3面図・表情・顔ディテールをまとめて生成し、キャラとして登録します。
+              この1枚から、全身三面図とシーンショットをまとめた
+              キャラクターシートを生成します。
             </p>
           </div>
         ) : (
           <>
             <CharacterIcon className="h-9 w-9 text-neutral-500" />
             <p className="text-[13px] font-bold">参照画像を1枚選んでください</p>
-            <p className="text-[12px]">3面図・表情・顔ディテールをまとめて生成します</p>
+            <p className="text-[12px]">統合キャラクターシートを1枚生成します</p>
           </>
         )}
       </div>
@@ -412,12 +357,6 @@ function StepInput() {
 // Step 2: 生成中・結果
 // ─────────────────────────────────────────────────────────────────────────────
 
-function aspectRatioCss(ratio: string): string {
-  const [w, h] = ratio.split(":").map((s) => parseInt(s, 10));
-  if (!w || !h) return "1 / 1";
-  return `${w} / ${h}`;
-}
-
 function StepGenerate({
   onPreview,
 }: {
@@ -426,52 +365,39 @@ function StepGenerate({
   const status = useCharacterSheetRun((s) => s.status);
   const cuts = useCharacterSheetRun((s) => s.cuts);
   const cutOrder = useCharacterSheetRun((s) => s.cutOrder);
-  const runId = useCharacterSheetRun((s) => s.runId);
   const characterImagePath = useCharacterSheetRun((s) => s.characterImagePath);
   const attributes = useCharacterSheetRun((s) => s.attributes);
-  const aspectRatio = useCharacterSheetRun((s) => s.aspectRatio);
+  const beginRun = useCharacterSheetRun((s) => s.beginRun);
   const setStep = useCharacterSheetRun((s) => s.setStep);
   const pushToast = useToasts((s) => s.push);
 
-  const tileAspectCss = aspectRatioCss(aspectRatio);
-
-  const orderedCuts = cutOrder
+  const sheet = cutOrder
     .map((id) => cuts[id])
-    .filter((c): c is SheetCutState => Boolean(c));
-  const completedPaths = orderedCuts
-    .filter((c) => c.status === "completed" && c.imagePath)
-    .map((c) => c.imagePath as string);
-  const doneCount = orderedCuts.filter((c) => c.status === "completed").length;
-  const total = orderedCuts.length;
-  const allCutsResolved =
-    total > 0 &&
-    orderedCuts.every((c) => c.status === "completed" || c.status === "failed");
+    .find((cut): cut is SheetCutState => Boolean(cut));
+  const completedPaths =
+    sheet?.status === "completed" && sheet.imagePath ? [sheet.imagePath] : [];
   const canProceedToRegister =
-    doneCount > 0 &&
-    (status === "completed" || status === "failed" || allCutsResolved);
+    sheet?.status === "completed" && Boolean(sheet.imagePath);
 
-  async function regenerateCut(cut: SheetCutState) {
-    if (!runId || !characterImagePath) return;
-    const spec = getSheetCut(cut.cutId);
-    if (!spec) return;
-
-    const params: CharacterSheetParams = {
-      characterImage: characterImagePath,
+  async function regenerateSheet() {
+    if (!characterImagePath || status === "running") return;
+    const nextRunId = crypto.randomUUID();
+    const params = buildCompositeSheetParams(
+      characterImagePath,
       attributes,
-      aspectRatio,
-      cutSpecs: [
-        { cutId: spec.cutId, role: spec.role, promptFragment: spec.promptFragment },
-      ],
-    };
+      nextRunId,
+    );
+    beginRun("character", nextRunId, [COMPOSITE_SHEET_CUT]);
 
     try {
-      await invoke<string>("character_sheet_regenerate_cut", {
-        runId,
-        cutId: cut.cutId,
-        params,
+      await invoke<string>("character_sheet_run", { params });
+      pushToast({
+        kind: "info",
+        text: "キャラクターシートを再生成しています。",
+        ttlMs: 2500,
       });
-      pushToast({ kind: "info", text: `「${cut.label}」を再生成中…`, ttlMs: 2500 });
     } catch (err) {
+      useCharacterSheetRun.getState().reset();
       pushToast({
         kind: "error",
         text: `再生成に失敗しました: ${(err as Error)?.message ?? err}`,
@@ -484,10 +410,13 @@ function StepGenerate({
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex items-center justify-between border-b border-[#242424] px-4 py-3">
         <div className="text-[12px] font-bold text-neutral-300">
-          {status === "running" ? "並列生成中…" : "生成完了"}{" "}
-          <span className="text-neutral-500">
-            ({doneCount}/{total})
-          </span>
+          {sheet?.status === "failed"
+            ? "生成失敗"
+            : sheet?.status === "completed"
+              ? "生成完了"
+              : sheet?.status === "running"
+                ? "生成中…"
+                : "待機中"}
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -514,64 +443,55 @@ function StepGenerate({
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
-          {orderedCuts.map((cut) => (
-            <div
-              key={cut.cutId}
-              className="flex flex-col overflow-hidden rounded-xl border border-[#2a2a2a] bg-[#141414]"
-            >
-              <div
-                className="relative w-full bg-[#0d0d0d]"
-                style={{ aspectRatio: tileAspectCss }}
-              >
-                {cut.status === "completed" && cut.imagePath ? (
-                  <img
-                    src={convertFileSrc(cut.imagePath)}
-                    alt={cut.label}
-                    className="h-full w-full cursor-pointer object-contain"
-                    onClick={() =>
-                      onPreview(cut.imagePath as string, completedPaths)
-                    }
-                  />
-                ) : cut.status === "failed" ? (
-                  <div className="flex h-full w-full flex-col items-center justify-center gap-1 px-2 text-center text-[11px] text-red-300">
-                    <span>生成失敗</span>
-                    {cut.reason && (
-                      <span className="line-clamp-2 text-[9px] text-neutral-500">
-                        {cut.reason}
-                      </span>
-                    )}
-                  </div>
-                ) : (
-                  <div className="flex h-full w-full items-center justify-center">
-                    <span
-                      className={
-                        "text-[11px] font-bold " +
-                        (cut.status === "running"
-                          ? "animate-pulse text-pink-300"
-                          : "text-neutral-600")
-                      }
-                    >
-                      {cut.status === "running" ? "生成中…" : "待機中"}
-                    </span>
-                  </div>
+        <div className="mx-auto flex w-full max-w-3xl flex-col overflow-hidden rounded-xl border border-[#2a2a2a] bg-[#141414]">
+          <div
+            className="relative w-full bg-[#0d0d0d]"
+            style={{ aspectRatio: "3 / 4" }}
+          >
+            {sheet?.status === "completed" && sheet.imagePath ? (
+              <img
+                src={convertFileSrc(sheet.imagePath)}
+                alt={sheet.label}
+                className="h-full w-full cursor-pointer object-contain"
+                onClick={() => onPreview(sheet.imagePath as string, completedPaths)}
+              />
+            ) : sheet?.status === "failed" ? (
+              <div className="flex h-full w-full flex-col items-center justify-center gap-2 px-6 text-center text-[12px] text-red-300">
+                <span className="font-bold">生成に失敗しました</span>
+                {sheet.reason && (
+                  <span className="max-w-lg text-[10px] text-neutral-500">
+                    {sheet.reason}
+                  </span>
                 )}
               </div>
-              <div className="flex flex-col gap-1.5 px-2 py-2">
-                <div className="truncate text-[11px] font-bold text-neutral-200">
-                  {cut.label}
-                </div>
-                <button
-                  type="button"
-                  onClick={() => void regenerateCut(cut)}
-                  disabled={status === "running" && cut.status === "running"}
-                  className="rounded-md border border-[#343434] px-1.5 py-1 text-[10px] font-bold text-neutral-400 hover:border-pink-400/60 hover:text-white disabled:opacity-40"
+            ) : (
+              <div className="flex h-full w-full items-center justify-center">
+                <span
+                  className={
+                    "text-[12px] font-bold " +
+                    (sheet?.status === "running"
+                      ? "animate-pulse text-pink-300"
+                      : "text-neutral-600")
+                  }
                 >
-                  再生成
-                </button>
+                  {sheet?.status === "running" ? "生成中…" : "待機中"}
+                </span>
               </div>
+            )}
+          </div>
+          <div className="flex items-center justify-between gap-3 px-3 py-3">
+            <div className="text-[12px] font-bold text-neutral-200">
+              キャラクターシート（3:4）
             </div>
-          ))}
+            <button
+              type="button"
+              onClick={() => void regenerateSheet()}
+              disabled={status === "running"}
+              className="rounded-lg border border-[#343434] px-3 py-1.5 text-[11px] font-bold text-neutral-300 hover:border-pink-400/60 hover:text-white disabled:opacity-40"
+            >
+              再生成
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -607,6 +527,7 @@ function StepRegister({
     () => orderedCuts.filter((c) => c.status === "completed" && c.imagePath),
     [orderedCuts],
   );
+  const sheet = completed[0];
   const completedPaths = completed.map((c) => c.imagePath as string);
 
   const [identity, setIdentity] = useState<IdentityCheckResult | null>(null);
@@ -637,7 +558,8 @@ function StepRegister({
     // completed は run 完了後は不変。参照画像とカット数で再検品する。
   }, [characterImagePath, completed.length]);
 
-  const canRegister = completed.length > 0 && characterName.trim().length > 0 && !saving;
+  const canRegister =
+    Boolean(sheet?.imagePath) && characterName.trim().length > 0 && !saving;
 
   async function handleRegister() {
     if (!canRegister || !characterImagePath) return;
@@ -647,13 +569,13 @@ function StepRegister({
         name: characterName,
         attributes,
         sourceImage: characterImagePath,
-        cuts: completed,
+        cuts: sheet ? [sheet] : [],
         identity: identity ?? undefined,
       });
       if (!preset) {
         pushToast({
           kind: "error",
-          text: "登録できる完成カットがありません。",
+          text: "登録できるキャラクターシートがありません。",
           ttlMs: 4000,
         });
         setSaving(false);
@@ -685,8 +607,7 @@ function StepRegister({
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex items-center justify-between border-b border-[#242424] px-4 py-3">
         <div className="text-[12px] font-bold text-neutral-300">
-          登録内容の確認{" "}
-          <span className="text-neutral-500">({completed.length} カット)</span>
+          登録内容の確認 <span className="text-neutral-500">(シート 1枚)</span>
         </div>
         <button
           type="button"
@@ -717,27 +638,20 @@ function StepRegister({
           )}
         </div>
 
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
-          {completed.map((cut) => (
-            <div
-              key={cut.cutId}
-              className="flex flex-col overflow-hidden rounded-xl border border-[#2a2a2a] bg-[#141414]"
-            >
-              <img
-                src={convertFileSrc(cut.imagePath as string)}
-                alt={cut.label}
-                className="aspect-square w-full cursor-pointer object-cover"
-                onClick={() => onPreview(cut.imagePath as string, completedPaths)}
-              />
-              <div className="px-2 py-1.5">
-                <div className="truncate text-[11px] font-bold text-neutral-200">
-                  {cut.label}
-                </div>
-                <div className="truncate text-[10px] text-neutral-500">{cut.role}</div>
-              </div>
+        {sheet?.imagePath && (
+          <div className="mx-auto flex w-full max-w-3xl flex-col overflow-hidden rounded-xl border border-[#2a2a2a] bg-[#141414]">
+            <img
+              src={convertFileSrc(sheet.imagePath)}
+              alt={sheet.label}
+              className="w-full cursor-pointer bg-[#0d0d0d] object-contain"
+              style={{ aspectRatio: "3 / 4" }}
+              onClick={() => onPreview(sheet.imagePath as string, completedPaths)}
+            />
+            <div className="px-3 py-2 text-[11px] font-bold text-neutral-200">
+              キャラクターシート
             </div>
-          ))}
-        </div>
+          </div>
+        )}
       </div>
 
       <div className="flex items-center justify-end gap-2 border-t border-[#242424] px-4 py-3">

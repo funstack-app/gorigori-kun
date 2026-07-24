@@ -1,10 +1,7 @@
-//! キャラクター登録 IPアセット化パイプライン (スライスS4) の Rust オーケストレータ。
+//! キャラクター登録 / 表情差分パイプラインの Rust オーケストレータ。
 //!
-//! 1枚の参照画像から「3面図 + 表情セット + 顔ディテール」の固定カタログを【並列】生成する。
-//! multiangle_run の直接流用ではなく新コマンドにした理由 (設計書 §3):
-//!   - カットの供給元が違う (可変な構図カタログ vs 固定のシートカタログ)
-//!   - 全カット共通で *不変の見た目属性* を焼き込む必要がある (multiangle の environment とは別軸)
-//!   - プロンプトの主眼が反転する (multiangle=カメラを大胆に変える / sheet=表情カットはアングル固定)
+//! キャラクター登録は統合キャラクターシート1枚を生成し、表情差分は従来どおり
+//! 任意の複数カットを並列生成する。生成経路は params.generation_mode で分ける。
 //!
 //! 生成の下部構造 (セマフォ / PID台帳 / PNG回収 / リトライ / timeout) は
 //! commands/gen_worker.rs を multiangle と共用する。
@@ -24,6 +21,70 @@ use crate::state::AppState;
 /// カタログ上限。フロント側 DEFAULT_SHEET(10) / 詳しく(14) を安全に収める。
 /// gen_queue::GLOBAL_GEN_SEMAPHORE(上限6)が同時実行を絞るので枚数自体は安全。
 const MAX_SHEET_CUTS: usize = 30;
+
+const COMPOSITE_CUT_ID: &str = "character-sheet";
+const COMPOSITE_ROLE: &str = "character-sheet";
+
+const COMPOSITE_CHARACTER_SHEET_PROMPT: &str = r#"役割:
+あなたはプロのキャラクターデザイナー兼コンセプトアーティストです。添付した参考画像1枚のキャラクターを、商業作品で使用できる品質のキャラクターシートに再構築してください。原画の造形・配色・衣装・小物・世界観のディテールは一切変えず、忠実に保持してください。
+
+出力スタイル:添付した写真通り
+
+出力構成
+1枚の縦長レイアウト(アスペクト比 3:4)で、上下2段構成にしてください。
+上段:リファレンスシート(全身三面図+アセット詳細)
+・背景はニュートラルなオフホワイト(淡いベージュ系)で統一
+・全身の三面図を等身を揃え、共通の地平線で水平に整列配置
+└ Front View(正面・全身)
+└ Side Profile (L)(左側面・全身)
+└ Back View(背面・全身)
+・各ビューの下に英語ラベルを小さく入れる
+・三面図と重ならない上部中央またはサイドの余白に、以下2つのインセットボックスを配置
+└ Head Detail:頭部のクローズアップ(別状態・別表情のバリエーションを含む)
+└ Costume / Pattern Detail:衣装の柄・テクスチャ・ロゴの拡大
+・右下隅にカラーパレットのスウォッチ(主要色を5〜7色、四角いタイル状に小さく並べる)
+・各インセットには英語の小見出しと簡潔な説明文を1〜2行添える
+下段:シーンショット(シネマティック・横並び2カット)
+キャラクターを原画の世界観に沿った環境内に配置し、劇場映画のキービジュアル風にドラマティックな光と影で演出してください。横並びの2カット構成です。
+左カット:顔(または頭部)のエクストリーム・クローズアップ
+・キャラクターの最も象徴的な顔・頭部の特徴をフレームいっぱいに切り取る
+・表情・造形ディテール・素材感を強調
+・背景は最小限、または暗めにフェードさせて顔を主役にする
+右カット:背景が写っている全身ショット
+・立位または座位で、キャラクターの世界観・空気感が伝わる背景込みの構図
+・ロケーションが読み取れるだけの引き(全身がフレームに収まる)
+・小物や環境ディテールも一緒に映り込ませる
+・2カットでカメラアングルに変化をつける(クローズアップは正面・アイレベル寄り、全身は俯瞰/ローアングル/横位置など)
+ビジュアル原則
+・上段は資料的で整然とした構図、下段はシネマティックでドラマティックな構図
+・上段と下段は「スタイル指定」で書いた1つのスタイルで全体を統一すること(混在禁止)
+・全体を通して同一キャラクターであることが一目で分かる一貫性を最優先
+・解像度は最高品質、描写の精度を保つこと
+厳密に保持すべき要素(変更禁止)
+・顔立ち、髪型、瞳の形と色
+・体型とプロポーション、頭身
+・衣装のシルエット、色、柄、装飾、素材感
+・アクセサリー、小道具、ロゴ、武器、シンボル
+・キャラクター固有のモチーフや象徴的なディテール
+変更してよい要素
+・各カットの表情(自然な範囲で)
+・ポーズと身体の向き
+・光源の方向と色温度
+・背景の細部(世界観の範囲内で)
+禁止事項
+・原画にない衣装や装飾の追加
+・体型・年齢・人種の改変
+・「スタイル指定」で記入したスタイル以外の描画方式が混入すること
+・参考画像と異なる配色への置き換え
+・ロゴ・シンボル・固有モチーフの省略や改変"#;
+
+#[derive(Deserialize, Serialize, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CharacterSheetGenerationMode {
+    Composite,
+    #[default]
+    MultiCut,
+}
 
 /// フロントが SHEET_CUTS から展開して渡す各カット。
 /// `src/lib/character/sheetCuts.ts` の SheetCut から { cutId, role, promptFragment } を抜いたもの。
@@ -48,7 +109,11 @@ pub struct CharacterSheetParams {
     pub attributes: String,
     /// "1:1" | "9:16" | "16:9" | "4:5" など。
     pub aspect_ratio: String,
-    /// 生成するカットのカタログ (フロントが SHEET_CUTS から展開)。
+    /// composite=統合シート1枚 / multi-cut=従来の複数カット。省略時は後方互換で multi-cut。
+    #[serde(default)]
+    pub generation_mode: CharacterSheetGenerationMode,
+    /// 生成するカットのカタログ。multi-cut のときだけ使用する。
+    #[serde(default)]
     pub cut_specs: Vec<SheetCutSpec>,
     /// 出力先プロジェクト判定用の cwd (任意)。
     #[serde(default)]
@@ -63,7 +128,11 @@ pub struct CharacterSheetParams {
 /// この run を識別するトークン。全バリアントに載せてフロントで照合し、
 /// 画面往復で別 run の後着通知が現在の状態を汚染するのを防ぐ (B1 混線対策)。
 #[derive(Serialize, Clone)]
-#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum CharacterSheetEvent {
     Started {
         run_id: String,
@@ -114,6 +183,10 @@ pub async fn character_sheet_run(
     let task_run_id = run_id.clone();
 
     let fail_run_id = run_id.clone();
+    let fail_cut_id = match params.generation_mode {
+        CharacterSheetGenerationMode::Composite => COMPOSITE_CUT_ID,
+        CharacterSheetGenerationMode::MultiCut => "unknown",
+    };
     tokio::spawn(async move {
         if let Err(err) = run_character_sheet_orchestrator(
             app.clone(),
@@ -129,7 +202,7 @@ pub async fn character_sheet_run(
                 EVENT_CHARACTER_SHEET,
                 CharacterSheetEvent::CutFailed {
                     run_id: fail_run_id,
-                    cut_id: "unknown".into(),
+                    cut_id: fail_cut_id.into(),
                     reason: err,
                 },
             );
@@ -257,7 +330,10 @@ async fn run_character_sheet_orchestrator(
         .await
         .map_err(|e| format!("character-sheet 出力先作成失敗: {e}"))?;
 
-    let total = params.cut_specs.len() as u32;
+    let total = match params.generation_mode {
+        CharacterSheetGenerationMode::Composite => 1,
+        CharacterSheetGenerationMode::MultiCut => params.cut_specs.len() as u32,
+    };
     let _ = app.emit(
         EVENT_CHARACTER_SHEET,
         CharacterSheetEvent::Started {
@@ -271,73 +347,123 @@ async fn run_character_sheet_orchestrator(
     let attributes = params.attributes.clone();
     let cwd = params.cwd.clone();
 
-    // ★並列。カタログの全カットを一気に走らせる。同時実行の制御は
-    // gen_queue::GLOBAL_GEN_SEMAPHORE(全機能共通・上限6)に一本化。
-    let tasks = params
-        .cut_specs
-        .iter()
-        .enumerate()
-        .map(|(index, cut)| {
-            let app = app.clone();
-            let codex_bin = codex_bin.clone();
-            let codex_home_orig = codex_home_orig.clone();
-            let character_path = character_path.clone();
-            let out_dir = out_dir.clone();
-            let aspect_ratio = aspect_ratio.clone();
-            let attributes = attributes.clone();
-            let cwd = cwd.clone();
-            let cut = cut.clone();
-            let event_run_id = run_id.clone();
-            async move {
-                let _ = app.emit(
-                    EVENT_CHARACTER_SHEET,
-                    CharacterSheetEvent::CutStarted {
-                        run_id: event_run_id.clone(),
-                        cut_id: cut.cut_id.clone(),
-                        role: cut.role.clone(),
-                        index: index as u32,
-                    },
-                );
-                let prompt = build_sheet_prompt(&cut, &aspect_ratio, &attributes);
-                match generate_one_cut(
-                    &app,
-                    &codex_bin,
-                    &codex_home_orig,
-                    &prompt,
-                    &[character_path],
-                    &out_dir,
-                    &cut.cut_id,
-                    cwd,
-                )
-                .await
-                {
-                    Ok(image_path) => {
+    match params.generation_mode {
+        CharacterSheetGenerationMode::Composite => {
+            let _ = app.emit(
+                EVENT_CHARACTER_SHEET,
+                CharacterSheetEvent::CutStarted {
+                    run_id: run_id.clone(),
+                    cut_id: COMPOSITE_CUT_ID.into(),
+                    role: COMPOSITE_ROLE.into(),
+                    index: 0,
+                },
+            );
+            let prompt = build_composite_character_sheet_prompt(&attributes);
+            match generate_one_cut(
+                &app,
+                &codex_bin,
+                &codex_home_orig,
+                &prompt,
+                &[character_path],
+                &out_dir,
+                COMPOSITE_CUT_ID,
+                cwd,
+            )
+            .await
+            {
+                Ok(image_path) => {
+                    let _ = app.emit(
+                        EVENT_CHARACTER_SHEET,
+                        CharacterSheetEvent::CutCompleted {
+                            run_id: run_id.clone(),
+                            cut_id: COMPOSITE_CUT_ID.into(),
+                            role: COMPOSITE_ROLE.into(),
+                            image_path: image_path.to_string_lossy().into_owned(),
+                        },
+                    );
+                }
+                Err(err) => {
+                    tracing::warn!(target: "codex.character_sheet", "composite sheet failed: {err}");
+                    let _ = app.emit(
+                        EVENT_CHARACTER_SHEET,
+                        CharacterSheetEvent::CutFailed {
+                            run_id: run_id.clone(),
+                            cut_id: COMPOSITE_CUT_ID.into(),
+                            reason: err,
+                        },
+                    );
+                }
+            }
+        }
+        CharacterSheetGenerationMode::MultiCut => {
+            // 従来の複数カット生成。表情差分が利用するため、並列処理をそのまま維持する。
+            let tasks = params
+                .cut_specs
+                .iter()
+                .enumerate()
+                .map(|(index, cut)| {
+                    let app = app.clone();
+                    let codex_bin = codex_bin.clone();
+                    let codex_home_orig = codex_home_orig.clone();
+                    let character_path = character_path.clone();
+                    let out_dir = out_dir.clone();
+                    let aspect_ratio = aspect_ratio.clone();
+                    let attributes = attributes.clone();
+                    let cwd = cwd.clone();
+                    let cut = cut.clone();
+                    let event_run_id = run_id.clone();
+                    async move {
                         let _ = app.emit(
                             EVENT_CHARACTER_SHEET,
-                            CharacterSheetEvent::CutCompleted {
+                            CharacterSheetEvent::CutStarted {
                                 run_id: event_run_id.clone(),
                                 cut_id: cut.cut_id.clone(),
                                 role: cut.role.clone(),
-                                image_path: image_path.to_string_lossy().into_owned(),
+                                index: index as u32,
                             },
                         );
+                        let prompt = build_sheet_prompt(&cut, &aspect_ratio, &attributes);
+                        match generate_one_cut(
+                            &app,
+                            &codex_bin,
+                            &codex_home_orig,
+                            &prompt,
+                            &[character_path],
+                            &out_dir,
+                            &cut.cut_id,
+                            cwd,
+                        )
+                        .await
+                        {
+                            Ok(image_path) => {
+                                let _ = app.emit(
+                                    EVENT_CHARACTER_SHEET,
+                                    CharacterSheetEvent::CutCompleted {
+                                        run_id: event_run_id.clone(),
+                                        cut_id: cut.cut_id.clone(),
+                                        role: cut.role.clone(),
+                                        image_path: image_path.to_string_lossy().into_owned(),
+                                    },
+                                );
+                            }
+                            Err(err) => {
+                                tracing::warn!(target: "codex.character_sheet", "cut {} failed: {err}", cut.cut_id);
+                                let _ = app.emit(
+                                    EVENT_CHARACTER_SHEET,
+                                    CharacterSheetEvent::CutFailed {
+                                        run_id: event_run_id.clone(),
+                                        cut_id: cut.cut_id.clone(),
+                                        reason: err,
+                                    },
+                                );
+                            }
+                        }
                     }
-                    Err(err) => {
-                        tracing::warn!(target: "codex.character_sheet", "cut {} failed: {err}", cut.cut_id);
-                        let _ = app.emit(
-                            EVENT_CHARACTER_SHEET,
-                            CharacterSheetEvent::CutFailed {
-                                run_id: event_run_id.clone(),
-                                cut_id: cut.cut_id.clone(),
-                                reason: err,
-                            },
-                        );
-                    }
-                }
-            }
-        })
-        .collect::<Vec<_>>();
-    join_all(tasks).await;
+                })
+                .collect::<Vec<_>>();
+            join_all(tasks).await;
+        }
+    }
 
     let _ = app.emit(
         EVENT_CHARACTER_SHEET,
@@ -360,16 +486,28 @@ fn validate_params(params: &CharacterSheetParams) -> Result<(), String> {
             params.character_image
         ));
     }
-    if params.cut_specs.is_empty() {
-        return Err("生成するカットが1個も選択されていません".into());
-    }
-    if params.cut_specs.len() > MAX_SHEET_CUTS {
-        return Err(format!(
-            "カット数が上限 {MAX_SHEET_CUTS} を超えています ({} 個)",
-            params.cut_specs.len()
-        ));
+    if params.generation_mode == CharacterSheetGenerationMode::MultiCut {
+        if params.cut_specs.is_empty() {
+            return Err("生成するカットが1個も選択されていません".into());
+        }
+        if params.cut_specs.len() > MAX_SHEET_CUTS {
+            return Err(format!(
+                "カット数が上限 {MAX_SHEET_CUTS} を超えています ({} 個)",
+                params.cut_specs.len()
+            ));
+        }
     }
     Ok(())
+}
+
+fn build_composite_character_sheet_prompt(attributes: &str) -> String {
+    if attributes.trim().is_empty() {
+        return COMPOSITE_CHARACTER_SHEET_PROMPT.to_string();
+    }
+    format!(
+        "{COMPOSITE_CHARACTER_SHEET_PROMPT}\n\n追加の見た目指定: {}",
+        attributes.trim()
+    )
 }
 
 /// シートカット用のプロンプトを組み立てる。build_multiangle_prompt とは主眼が違い、
