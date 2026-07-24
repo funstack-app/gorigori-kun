@@ -1,7 +1,13 @@
 import { lazy, Suspense } from "react";
 
 import { useSkillUiMode } from "../lib/store/skillUiMode";
-import { GenerationWorkspace } from "./GenerationWorkspace";
+import { useWorkspace } from "../lib/store/workspace";
+import { ActiveProjectSelector } from "./ActiveProjectSelector";
+import { EditWorkspace } from "./EditWorkspace";
+import { GenerationWorkspace, Timeline } from "./GenerationWorkspace";
+import { PlanWorkspace } from "./PlanWorkspace";
+import { VideoGenerationWorkspace } from "./VideoGenerationWorkspace";
+import { WorkspaceTabs } from "./WorkspaceTabs";
 import { StoryboardWorkspace } from "./skills/storyboard/StoryboardWorkspace";
 import { MultiAngleWorkspace } from "./skills/multiAngle/MultiAngleWorkspace";
 import { CharacterRegisterWorkspace } from "./skills/character/CharacterRegisterWorkspace";
@@ -39,40 +45,74 @@ const Scene3dWorkspace = lazy(() =>
  */
 export function SkillWorkspaceRouter() {
   const activeUiMode = useSkillUiMode((s) => s.activeUiMode);
+  const activeTab = useWorkspace((s) => s.activeTab);
 
-  switch (activeUiMode) {
-    case "storyboard":
-      return <StoryboardWorkspace />;
-    case "multiAngle":
-      return <MultiAngleWorkspace />;
-    case "characterRegister":
-      return <CharacterRegisterWorkspace />;
-    case "expressionSet":
-      return <ExpressionSetWorkspace />;
-    case "sceneRecreate":
-      return <SceneRecreateWorkspace />;
-    case "comic":
-      return <ComicWorkspace />;
-    case "redline":
-      return <RedlineWorkspace />;
-    case "regulationCheck":
-      return <RegulationCheckWorkspace />;
-    case "productSet":
-      return <ProductSetWorkspace />;
-    case "scene3d":
-      return (
-        <Suspense
-          fallback={
-            <section className="flex min-h-0 flex-1 items-center justify-center bg-[#121212] text-sm text-neutral-500">
-              3Dシーンを準備中…
-            </section>
-          }
-        >
-          <Scene3dWorkspace />
-        </Suspense>
-      );
-    case "default":
-    default:
-      return <GenerationWorkspace />;
+  if (activeUiMode === "default") {
+    return <GenerationWorkspace />;
   }
+
+  if (activeUiMode === "storyboard") {
+    return <StoryboardWorkspace />;
+  }
+
+  const skillWorkspace = (() => {
+    switch (activeUiMode) {
+      case "multiAngle":
+        return <MultiAngleWorkspace />;
+      case "characterRegister":
+        return <CharacterRegisterWorkspace />;
+      case "expressionSet":
+        return <ExpressionSetWorkspace />;
+      case "sceneRecreate":
+        return <SceneRecreateWorkspace />;
+      case "comic":
+        return <ComicWorkspace />;
+      case "redline":
+        return <RedlineWorkspace />;
+      case "regulationCheck":
+        return <RegulationCheckWorkspace />;
+      case "productSet":
+        return <ProductSetWorkspace />;
+      case "scene3d":
+        return (
+          <Suspense
+            fallback={
+              <section className="flex min-h-0 flex-1 items-center justify-center bg-[#121212] text-sm text-neutral-500">
+                3Dシーンを準備中…
+              </section>
+            }
+          >
+            <Scene3dWorkspace />
+          </Suspense>
+        );
+      default:
+        return null;
+    }
+  })();
+
+  return (
+    <>
+      <div style={{ display: activeTab === "generate" ? "contents" : "none" }}>
+        {skillWorkspace}
+      </div>
+      {activeTab !== "generate" && (
+        <section className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#121212]">
+          <div className="border-b border-[#242424] bg-[#121212] px-4 py-3">
+            <div className="flex items-center gap-3">
+              <WorkspaceTabs />
+              <ActiveProjectSelector />
+            </div>
+          </div>
+
+          <div className="min-h-0 flex-1 overflow-hidden px-4 py-4">
+            {activeTab === "plan" && <PlanWorkspace />}
+            {activeTab === "video" && (
+              <VideoGenerationWorkspace timeline={<Timeline />} />
+            )}
+            {activeTab === "edit" && <EditWorkspace />}
+          </div>
+        </section>
+      )}
+    </>
+  );
 }
