@@ -42,13 +42,31 @@ const IMAGE_EXTS = ["png", "jpg", "jpeg", "webp", "gif", "bmp"];
 export function CharacterRegisterWorkspace() {
   const openPreview = useImagePreview((s) => s.open);
   const enterMode = useCharacterSheetRun((s) => s.enterMode);
+  const pushToast = useToasts((s) => s.push);
 
   // 表情差分と run ストアを共有するため、入場時に「他スキルの mode を引き継いで
   // いれば」初期化する。自分(character)の実行中 run は保持する。
   useEffect(() => {
+    let cancelled = false;
     enterMode("character");
-    void ensureCharacterSheetEventListener();
-  }, [enterMode]);
+    async function registerEventListener() {
+      try {
+        await ensureCharacterSheetEventListener();
+      } catch (err) {
+        if (cancelled) return;
+        useCharacterSheetRun.getState().reset();
+        pushToast({
+          kind: "error",
+          text: `進捗通知の受信準備に失敗しました: ${(err as Error)?.message ?? err}`,
+          ttlMs: 6000,
+        });
+      }
+    }
+    void registerEventListener();
+    return () => {
+      cancelled = true;
+    };
+  }, [enterMode, pushToast]);
 
   return (
     <section className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#121212]">
@@ -425,6 +443,12 @@ function StepGenerate({
     .map((c) => c.imagePath as string);
   const doneCount = orderedCuts.filter((c) => c.status === "completed").length;
   const total = orderedCuts.length;
+  const allCutsResolved =
+    total > 0 &&
+    orderedCuts.every((c) => c.status === "completed" || c.status === "failed");
+  const canProceedToRegister =
+    doneCount > 0 &&
+    (status === "completed" || status === "failed" || allCutsResolved);
 
   async function regenerateCut(cut: SheetCutState) {
     if (!runId || !characterImagePath) return;
@@ -476,10 +500,10 @@ function StepGenerate({
           <button
             type="button"
             onClick={() => setStep(3)}
-            disabled={doneCount === 0}
+            disabled={!canProceedToRegister}
             className={
               "rounded-lg px-3 py-1.5 text-[12px] font-black transition " +
-              (doneCount === 0
+              (!canProceedToRegister
                 ? "cursor-not-allowed bg-[#242424] text-neutral-600"
                 : "bg-pink-500 text-white hover:bg-pink-400")
             }

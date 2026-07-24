@@ -7,8 +7,8 @@ import type { CharacterSheetEvent, SheetCutState } from "../character/types";
  * キャラクター登録パイプラインの run ストア。
  *
  * multiAngleRun.ts の「pending スケルトン先建て → イベント適用」の仕組みを役割(role)ベースに
- * 複製したもの。イベント取りこぼし対策(先行到着した cutStarted/cutCompleted を pending で
- * 上書きしない)も踏襲する。加えて登録ウィザードの step を持つ。
+ * 複製したもの。各 run は確定 runId と新しい pending 状態から開始し、同じ runId のイベントだけを
+ * 適用する。加えて登録ウィザードの step を持つ。
  */
 
 type CharacterSheetRunStatus = "idle" | "running" | "completed" | "failed";
@@ -35,6 +35,8 @@ type CharacterSheetRunState = {
   // ===== run 状態 =====
   status: CharacterSheetRunStatus;
   runId: string | null;
+  /** reset / mode 切替 / 再実行で終了扱いにした直前の run。後着通知の墓標。 */
+  lastEndedRunId: string | null;
   /** cutId → 実行状態。immutable に clone して更新する。 */
   cuts: Record<string, SheetCutState>;
   /** 表示順(beginRun で確定)。 */
@@ -59,17 +61,14 @@ type CharacterSheetRunState = {
 
   // ===== run アクション =====
   /**
-   * 生成 run を開始する。pending スケルトンを作って status=running にする。
-   * runId は invoke の前に呼んで skeleton を先に建てるため null 許容
-   * (multiAngleRun と同じ「待機中固着バグ修正」思想)。
+   * クライアントで確定した runId を使い、invoke 前に pending スケルトンを作って
+   * status=running にする。先行イベントも同じ runId で安全に受け取れる。
    */
   beginRun: (
     mode: Exclude<CharacterSheetRunMode, null>,
-    runId: string | null,
+    runId: string,
     cuts: { cutId: string; label: string; role: string }[],
   ) => void;
-  /** beginRun(null, ...) の後でバックエンドの run_id を後付けする。 */
-  setRunId: (runId: string) => void;
   applyEvent: (e: CharacterSheetEvent) => void;
   /** run 状態だけ初期化(設定は保持)。所有スキル(mode)も null に戻す。 */
   reset: () => void;
@@ -84,6 +83,7 @@ type CharacterSheetRunState = {
 const runEmptyState = {
   status: "idle" as CharacterSheetRunStatus,
   runId: null as string | null,
+  lastEndedRunId: null as string | null,
   cuts: {} as Record<string, SheetCutState>,
   cutOrder: [] as string[],
   cutStartedAt: {} as Record<string, number>,
@@ -113,41 +113,36 @@ export const useCharacterSheetRun = create<CharacterSheetRunState>((set) => ({
     set((s) => {
       const nextCuts: Record<string, SheetCutState> = {};
       const cutOrder: string[] = [];
-      const cutStartedAt: Record<string, number> = {};
       for (const { cutId, label, role } of cuts) {
-        // 既にイベントで進んだカット(running/completed/failed)があれば維持する。
-        // pending で上書きすると先行到着した cutCompleted が消える。
-        const prev = s.cuts[cutId];
-        nextCuts[cutId] =
-          prev && prev.status !== "pending"
-            ? { ...prev, label, role }
-            : { cutId, label, role, status: "pending" };
-        if (prev?.status === "running" && s.cutStartedAt[cutId]) {
-          cutStartedAt[cutId] = s.cutStartedAt[cutId];
-        }
+        // 別 run の完了画像や失敗状態を引き継がず、必ず新しい pending から始める。
+        nextCuts[cutId] = { cutId, label, role, status: "pending" };
         cutOrder.push(cutId);
       }
+      const endedRunId =
+        s.runId !== null && s.runId !== runId ? s.runId : s.lastEndedRunId;
       return {
         mode,
         status: "running" as const,
-        runId: runId ?? s.runId,
+        runId,
+        lastEndedRunId: endedRunId === runId ? null : endedRunId,
         cuts: nextCuts,
         cutOrder,
-        cutStartedAt,
+        cutStartedAt: {},
         step: 2 as RegisterStep,
       };
     }),
 
-  setRunId: (runId) => set({ runId }),
-
   applyEvent: (e) =>
     set((s) => {
-      // 後着通知混線対策(B1): 現在の run と runId が一致しないイベントは捨てる。
+      // 後着通知混線対策(B1): 現在の run と runId が完全一致するイベントだけ適用する。
       // 表情生成中にキャラ登録へ移動すると、前 run の遅延通知が別 run の状態・画像・
       // 実行番号を上書きし得るため、runId 照合で自分の run のイベントだけ適用する。
-      // s.runId が未確定(null)のときは照合できないので従来どおり適用する
-      // (beginRun で確定 runId を先に建てる運用では通常ここは通らない)。
-      if (s.runId !== null && e.runId !== s.runId) {
+      // runId=null は受け入れ先が無い状態なので、終了 run の後着通知を含め必ず捨てる。
+      if (
+        s.runId === null ||
+        e.runId !== s.runId ||
+        e.runId === s.lastEndedRunId
+      ) {
         return s;
       }
       switch (e.kind) {
@@ -213,13 +208,23 @@ export const useCharacterSheetRun = create<CharacterSheetRunState>((set) => ({
       }
     }),
 
-  reset: () => set({ ...runEmptyState, mode: null }),
+  reset: () =>
+    set((s) => ({
+      ...runEmptyState,
+      lastEndedRunId: s.runId ?? s.lastEndedRunId,
+      mode: null,
+    })),
 
   enterMode: (mode) =>
     set((s) => {
       // 既に自分の mode の run がある場合は触らない(実行中/結果を保持)。
       if (s.mode === mode) return s;
       // 他スキルの mode(または未確定)の状態を引き継がないよう初期化する。
-      return { ...runEmptyState, mode, step: 1 as RegisterStep };
+      return {
+        ...runEmptyState,
+        lastEndedRunId: s.runId ?? s.lastEndedRunId,
+        mode,
+        step: 1 as RegisterStep,
+      };
     }),
 }));

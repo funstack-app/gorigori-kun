@@ -15,8 +15,15 @@ export function onCharacterSheetEvent(
 
 export function ensureCharacterSheetEventListener(): Promise<UnlistenFn> {
   if (!listenerPromise) {
-    listenerPromise = onCharacterSheetEvent((event) => {
+    const pendingListener = onCharacterSheetEvent((event) => {
       useCharacterSheetRun.getState().applyEvent(event);
+    });
+    listenerPromise = pendingListener;
+    // 登録失敗をキャッシュし続けず、次回の画面入場で再試行できるようにする。
+    void pendingListener.catch(() => {
+      if (listenerPromise === pendingListener) {
+        listenerPromise = null;
+      }
     });
   }
   return listenerPromise;

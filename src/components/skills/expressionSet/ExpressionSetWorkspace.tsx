@@ -41,13 +41,31 @@ import {
 export function ExpressionSetWorkspace() {
   const openPreview = useImagePreview((s) => s.open);
   const enterMode = useCharacterSheetRun((s) => s.enterMode);
+  const pushToast = useToasts((s) => s.push);
 
   // 登録ワークスペースと run ストアを共有するため、入場時に「他スキルの mode を
   // 引き継いでいれば」初期化する。自分(expression)の実行中 run は保持する。
   useEffect(() => {
+    let cancelled = false;
     enterMode("expression");
-    void ensureCharacterSheetEventListener();
-  }, [enterMode]);
+    async function registerEventListener() {
+      try {
+        await ensureCharacterSheetEventListener();
+      } catch (err) {
+        if (cancelled) return;
+        useCharacterSheetRun.getState().reset();
+        pushToast({
+          kind: "error",
+          text: `進捗通知の受信準備に失敗しました: ${(err as Error)?.message ?? err}`,
+          ttlMs: 6000,
+        });
+      }
+    }
+    void registerEventListener();
+    return () => {
+      cancelled = true;
+    };
+  }, [enterMode, pushToast]);
 
   return (
     <section className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#121212]">
