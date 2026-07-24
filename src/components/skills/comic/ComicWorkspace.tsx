@@ -16,6 +16,9 @@ import type {
 } from "../../../lib/comic/types";
 import { presetKind, usePresets } from "../../../lib/store/presets";
 import { selectCharacterReferences } from "../../../lib/presets/character";
+import { useActiveProject } from "../../../lib/store/activeProject";
+import { useImages } from "../../../lib/store/images";
+import { useProjects } from "../../../lib/store/projects";
 import { useToasts } from "../../../lib/store/toasts";
 import { ActiveProjectSelector } from "../../ActiveProjectSelector";
 import { SafeImage } from "../../SafeImage";
@@ -556,12 +559,99 @@ function PreviewPhase({
   panels: ComicPanel[];
   results: ComicPanelResult[];
 }) {
+  const activeProjectId = useActiveProject((s) => s.activeProjectId);
+  const projects = useProjects((s) => s.projects);
+  const addItem = useProjects((s) => s.addItem);
+  const downloadAs = useImages((s) => s.downloadAs);
+  const pushToast = useToasts((s) => s.push);
+  const activeProject = projects.find((p) => p.id === activeProjectId) ?? null;
+  const completedResults = results.filter(
+    (result): result is ComicPanelResult & { imagePath: string } =>
+      Boolean(result.imagePath),
+  );
+
+  function savePanelToProject(panel: ComicPanel, imagePath?: string) {
+    if (!activeProjectId) {
+      pushToast({
+        kind: "info",
+        text: "上の「プロジェクト」から保存先の案件を選んでください。",
+        ttlMs: 4000,
+      });
+      return;
+    }
+    if (!imagePath) return;
+    addItem(activeProjectId, {
+      imagePath,
+      note: `漫画: コマ ${panel.index}`,
+    });
+    pushToast({
+      kind: "success",
+      text: `コマ ${panel.index} を ${activeProject?.name ?? "プロジェクト"} に保存しました。`,
+      ttlMs: 2500,
+    });
+  }
+
+  function saveAllToProject() {
+    if (!activeProjectId) {
+      pushToast({
+        kind: "info",
+        text: "上の「プロジェクト」から保存先の案件を選んでください。",
+        ttlMs: 4000,
+      });
+      return;
+    }
+    for (const result of completedResults) {
+      addItem(activeProjectId, {
+        imagePath: result.imagePath,
+        note: `漫画: コマ ${result.index}`,
+      });
+    }
+    pushToast({
+      kind: completedResults.length > 0 ? "success" : "info",
+      text:
+        completedResults.length > 0
+          ? `${completedResults.length} コマを ${activeProject?.name ?? "プロジェクト"} に保存しました。`
+          : "保存できるコマがまだありません。",
+      ttlMs: 3000,
+    });
+  }
+
+  async function savePanelToLocal(panel: ComicPanel, imagePath?: string) {
+    if (!imagePath) return;
+    const ext = imagePath.split(".").pop()?.toLowerCase() || "png";
+    try {
+      const dest = await downloadAs(imagePath, `comic-p${panel.index}.${ext}`);
+      if (!dest) return;
+      pushToast({
+        kind: "success",
+        text: `コマ ${panel.index} をローカルに保存しました。`,
+        ttlMs: 2500,
+      });
+    } catch (err) {
+      pushToast({
+        kind: "error",
+        text: `画像の保存に失敗しました: ${(err as Error)?.message ?? err}`,
+        ttlMs: 6000,
+      });
+    }
+  }
+
   return (
     <div className="flex flex-col gap-3">
       <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
         吹き出し・写植（セリフの画像合成）は今後対応します。現状はコマの下にセリフをテキスト表示します。
       </div>
-      <p className="text-xs text-neutral-500">{format}コマの縦組みプレビュー</p>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="text-xs text-neutral-500">{format}コマの縦組みプレビュー</p>
+        <button
+          type="button"
+          onClick={saveAllToProject}
+          disabled={completedResults.length === 0}
+          className="rounded-md border border-indigo-500 bg-indigo-500/20 px-3 py-1.5 text-xs font-semibold text-indigo-100 transition hover:bg-indigo-500/30 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          全コマをプロジェクトに保存
+        </button>
+      </div>
       <div className="mx-auto flex w-full max-w-sm flex-col gap-4 rounded-lg border border-[#2a2a2a] bg-[#0f0f0f] p-4">
         {panels.map((panel) => {
           const result = results.find((r) => r.index === panel.index);
@@ -579,6 +669,24 @@ function PreviewPhase({
                     コマ {panel.index}（未生成）
                   </span>
                 )}
+              </div>
+              <div className="grid grid-cols-2 gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => savePanelToProject(panel, result?.imagePath)}
+                  disabled={!result?.imagePath}
+                  className="rounded border border-[#2a2a2a] bg-[#1a1a1a] px-2 py-1 text-[11px] font-medium text-neutral-300 transition hover:border-indigo-500 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  プロジェクトに保存
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void savePanelToLocal(panel, result?.imagePath)}
+                  disabled={!result?.imagePath}
+                  className="rounded border border-[#2a2a2a] bg-[#1a1a1a] px-2 py-1 text-[11px] font-medium text-neutral-300 transition hover:border-emerald-500 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  ローカルに保存
+                </button>
               </div>
               {panel.dialogue.trim() && (
                 <p className="whitespace-pre-wrap rounded bg-[#1a1a1a] px-2 py-1 text-xs text-neutral-200">

@@ -4,7 +4,10 @@ import { useEffect, useMemo, useState } from "react";
 import { ActiveProjectSelector } from "../../ActiveProjectSelector";
 import { WorkspaceTabs } from "../../WorkspaceTabs";
 import { CharacterIcon, FaceIcon } from "../../SkillIcon";
+import { useActiveProject } from "../../../lib/store/activeProject";
 import { useImagePreview } from "../../../lib/store/imagePreview";
+import { useImages } from "../../../lib/store/images";
+import { useProjects } from "../../../lib/store/projects";
 import { useToasts } from "../../../lib/store/toasts";
 import { useCharacterSheetRun } from "../../../lib/store/characterSheetRun";
 import { ensureCharacterSheetEventListener } from "../../../lib/character/events";
@@ -423,6 +426,10 @@ function StepGenerate({
   const attributes = useCharacterSheetRun((s) => s.attributes);
   const aspectRatio = useCharacterSheetRun((s) => s.aspectRatio);
   const setStep = useCharacterSheetRun((s) => s.setStep);
+  const activeProjectId = useActiveProject((s) => s.activeProjectId);
+  const projects = useProjects((s) => s.projects);
+  const addItem = useProjects((s) => s.addItem);
+  const downloadAs = useImages((s) => s.downloadAs);
   const pushToast = useToasts((s) => s.push);
 
   const orderedCuts = cutOrder
@@ -433,6 +440,77 @@ function StepGenerate({
     .map((c) => c.imagePath as string);
   const doneCount = orderedCuts.filter((c) => c.status === "completed").length;
   const total = orderedCuts.length;
+  const activeProject = projects.find((p) => p.id === activeProjectId) ?? null;
+
+  function saveCutToProject(cut: SheetCutState) {
+    if (!activeProjectId) {
+      pushToast({
+        kind: "info",
+        text: "上の「プロジェクト」から保存先の案件を選んでください。",
+        ttlMs: 4000,
+      });
+      return;
+    }
+    if (cut.status !== "completed" || !cut.imagePath) return;
+    addItem(activeProjectId, {
+      imagePath: cut.imagePath,
+      note: `表情セット: ${cut.label}`,
+    });
+    pushToast({
+      kind: "success",
+      text: `「${cut.label}」を ${activeProject?.name ?? "プロジェクト"} に保存しました。`,
+      ttlMs: 2500,
+    });
+  }
+
+  function saveAllToProject() {
+    if (!activeProjectId) {
+      pushToast({
+        kind: "info",
+        text: "上の「プロジェクト」から保存先の案件を選んでください。",
+        ttlMs: 4000,
+      });
+      return;
+    }
+    let saved = 0;
+    for (const cut of orderedCuts) {
+      if (cut.status !== "completed" || !cut.imagePath) continue;
+      addItem(activeProjectId, {
+        imagePath: cut.imagePath,
+        note: `表情セット: ${cut.label}`,
+      });
+      saved += 1;
+    }
+    pushToast({
+      kind: saved > 0 ? "success" : "info",
+      text:
+        saved > 0
+          ? `表情セット ${saved} 枚を ${activeProject?.name ?? "プロジェクト"} に保存しました。`
+          : "保存できる完成画像がまだありません。",
+      ttlMs: 3000,
+    });
+  }
+
+  async function saveCutToLocal(cut: SheetCutState) {
+    if (cut.status !== "completed" || !cut.imagePath) return;
+    const ext = cut.imagePath.split(".").pop()?.toLowerCase() || "png";
+    const fileName = `${cut.label}.${ext}`.replace(/[\\/:*?"<>|]/g, "_");
+    try {
+      const dest = await downloadAs(cut.imagePath, fileName);
+      if (!dest) return;
+      pushToast({
+        kind: "success",
+        text: `「${cut.label}」をローカルに保存しました。`,
+        ttlMs: 2500,
+      });
+    } catch (err) {
+      pushToast({
+        kind: "error",
+        text: `画像の保存に失敗しました: ${(err as Error)?.message ?? err}`,
+        ttlMs: 6000,
+      });
+    }
+  }
 
   async function regenerateCut(cut: SheetCutState) {
     if (!runId || !characterImagePath) return;
@@ -485,13 +563,23 @@ function StepGenerate({
             未検品(同一性採点は未実装)
           </span>
         </div>
-        <button
-          type="button"
-          onClick={() => setStep(1)}
-          className="rounded-lg border border-[#343434] px-3 py-1.5 text-[12px] font-bold text-neutral-300 transition hover:border-neutral-500 hover:text-white"
-        >
-          ← キャラ選択に戻る
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={saveAllToProject}
+            disabled={doneCount === 0}
+            className="rounded-lg border border-[#343434] px-3 py-1.5 text-[12px] font-bold text-neutral-300 transition hover:border-pink-400/60 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            全部プロジェクトに保存
+          </button>
+          <button
+            type="button"
+            onClick={() => setStep(1)}
+            className="rounded-lg border border-[#343434] px-3 py-1.5 text-[12px] font-bold text-neutral-300 transition hover:border-neutral-500 hover:text-white"
+          >
+            ← キャラ選択に戻る
+          </button>
+        </div>
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
@@ -546,6 +634,22 @@ function StepGenerate({
                   className="rounded-md border border-[#343434] px-1.5 py-1 text-[10px] font-bold text-neutral-400 hover:border-pink-400/60 hover:text-white disabled:opacity-40"
                 >
                   再生成
+                </button>
+                <button
+                  type="button"
+                  onClick={() => saveCutToProject(cut)}
+                  disabled={cut.status !== "completed" || !cut.imagePath}
+                  className="rounded-md border border-[#343434] px-1.5 py-1 text-[10px] font-bold text-neutral-400 hover:border-pink-400/60 hover:text-white disabled:opacity-40"
+                >
+                  プロジェクトに保存
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void saveCutToLocal(cut)}
+                  disabled={cut.status !== "completed" || !cut.imagePath}
+                  className="rounded-md border border-[#343434] px-1.5 py-1 text-[10px] font-bold text-neutral-400 hover:border-emerald-400/60 hover:text-white disabled:opacity-40"
+                >
+                  ローカルに保存
                 </button>
               </div>
             </div>
