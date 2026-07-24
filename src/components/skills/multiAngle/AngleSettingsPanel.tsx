@@ -11,6 +11,7 @@ import {
 import type { SceneAspectRatio } from "../../../lib/scene/types";
 import { OptionPickerModal } from "../../scene/OptionPickerModal";
 import { AnglePickerModal } from "./AnglePickerModal";
+import { CharacterPresetPickerModal } from "./CharacterPresetPickerModal";
 
 const IMAGE_EXTS = ["png", "jpg", "jpeg", "webp", "gif", "bmp"];
 
@@ -37,6 +38,7 @@ export function AngleSettingsPanel() {
   const pushToast = useToasts((s) => s.push);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [aspectPickerOpen, setAspectPickerOpen] = useState(false);
+  const [characterPickerOpen, setCharacterPickerOpen] = useState(false);
 
   const count = selectedCutIds.length;
   const running = status === "running";
@@ -130,23 +132,41 @@ export function AngleSettingsPanel() {
                 className="aspect-square w-full object-cover"
               />
             </div>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={pickCharacterImage}
+                className="w-full rounded-lg border border-[#343434] px-3 py-1.5 text-[12px] font-bold text-neutral-300 hover:border-pink-400 hover:text-white"
+              >
+                画像を変更
+              </button>
+              <button
+                type="button"
+                onClick={() => setCharacterPickerOpen(true)}
+                className="w-full rounded-lg border border-[#343434] px-3 py-1.5 text-[12px] font-bold text-neutral-300 hover:border-pink-400 hover:text-white"
+              >
+                登録キャラから
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-2">
             <button
               type="button"
               onClick={pickCharacterImage}
+              className="flex aspect-square w-full flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-[#3a3a3a] bg-[#0d0d0d] text-neutral-500 hover:border-pink-400/60 hover:text-neutral-300"
+            >
+              <span className="text-2xl">＋</span>
+              <span className="text-[12px] font-bold">参照画像を選ぶ</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setCharacterPickerOpen(true)}
               className="w-full rounded-lg border border-[#343434] px-3 py-1.5 text-[12px] font-bold text-neutral-300 hover:border-pink-400 hover:text-white"
             >
-              画像を変更
+              登録キャラから選ぶ
             </button>
           </div>
-        ) : (
-          <button
-            type="button"
-            onClick={pickCharacterImage}
-            className="flex aspect-square w-full flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-[#3a3a3a] bg-[#0d0d0d] text-neutral-500 hover:border-pink-400/60 hover:text-neutral-300"
-          >
-            <span className="text-2xl">＋</span>
-            <span className="text-[12px] font-bold">参照画像を選ぶ</span>
-          </button>
         )}
       </div>
 
@@ -221,6 +241,15 @@ export function AngleSettingsPanel() {
       </button>
 
       {pickerOpen && <AnglePickerModal onClose={() => setPickerOpen(false)} />}
+      {characterPickerOpen && (
+        <CharacterPresetPickerModal
+          onClose={() => setCharacterPickerOpen(false)}
+          onPick={(imagePath) => {
+            setCharacterImage(imagePath);
+            pushToast({ kind: "success", text: "登録キャラの元画像を参照に設定しました。", ttlMs: 2500 });
+          }}
+        />
+      )}
       <OptionPickerModal
         open={aspectPickerOpen}
         title="アスペクト比を選ぶ"
