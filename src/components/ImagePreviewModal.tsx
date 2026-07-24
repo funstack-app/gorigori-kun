@@ -28,6 +28,7 @@ export function ImagePreviewModal() {
   // 判定 (採用/ボツ)。path が変わっても購読で追従する。
   const judgement = useImages((s) => (path ? s.judgements.get(path) : undefined));
   const setJudgement = useImages((s) => s.setJudgement);
+  const pushToast = useToasts((s) => s.push);
   // Fallback リスト: open(path) だけで開かれた場合も矢印キーで巡回できるように
   // useImages.items 全体 (mtime 降順) を採用する。
   // ライブラリ / タイムライン由来のプレビューはこれで十分カバー、
@@ -74,6 +75,19 @@ export function ImagePreviewModal() {
         (idx + delta + fallbackSiblings.length) % fallbackSiblings.length
       ];
     setPreview(next);
+  };
+
+  const downloadImageAs = (imagePath: string, suggestedName: string) => {
+    void useImages
+      .getState()
+      .downloadAs(imagePath, suggestedName)
+      .catch((err) => {
+        pushToast({
+          kind: "error",
+          text: `画像の保存に失敗しました: ${(err as Error)?.message ?? err}`,
+          ttlMs: 6000,
+        });
+      });
   };
 
   useEffect(() => {
@@ -406,7 +420,7 @@ export function ImagePreviewModal() {
                 icon={<DownloadIcon />}
                 label="名前を付けて保存"
                 hint="ローカル PC にダウンロード"
-                onClick={() => void useImages.getState().downloadAs(path, name)}
+                onClick={() => downloadImageAs(path, name)}
               />
               <ActionRow
                 icon={<FinderIcon />}
@@ -443,8 +457,7 @@ export function ImagePreviewModal() {
               { kind: "separator" },
               {
                 label: "名前を付けて保存…",
-                onClick: () =>
-                  useImages.getState().downloadAs(path, name),
+                onClick: () => downloadImageAs(path, name),
               },
               {
                 label: "マスクで編集",

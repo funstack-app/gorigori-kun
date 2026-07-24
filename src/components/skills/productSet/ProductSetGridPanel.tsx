@@ -198,12 +198,19 @@ export function ProductSetGridPanel({
     if (cut.status !== "completed" || !cut.imagePath) return;
     const ext = cut.imagePath.split(".").pop()?.toLowerCase() || "png";
     const fileName = `${cut.label}.${ext}`.replace(/[\\/:*?"<>|]/g, "_");
-    const dest = await downloadAs(cut.imagePath, fileName);
-    if (dest) {
+    try {
+      const dest = await downloadAs(cut.imagePath, fileName);
+      if (!dest) return;
       pushToast({
         kind: "success",
         text: `「${cut.label}」をローカルに保存しました。`,
         ttlMs: 2500,
+      });
+    } catch (err) {
+      pushToast({
+        kind: "error",
+        text: `画像の保存に失敗しました: ${(err as Error)?.message ?? err}`,
+        ttlMs: 6000,
       });
     }
   }
@@ -233,6 +240,7 @@ export function ProductSetGridPanel({
       if (typeof dir !== "string") return;
 
       let saved = 0;
+      let failed = 0;
       const used = new Set<string>();
       for (const cut of targets) {
         const src = cut.imagePath as string;
@@ -249,16 +257,19 @@ export function ProductSetGridPanel({
           await imagesIpc.saveAs(src, `${dir}/${name}`);
           saved += 1;
         } catch (err) {
+          failed += 1;
           console.warn("productSet local save failed", { src, error: err });
         }
       }
       pushToast({
-        kind: saved > 0 ? "success" : "error",
+        kind: failed > 0 ? "error" : "success",
         text:
-          saved > 0
-            ? `納品セット ${saved} 枚をローカルに保存しました。`
-            : "保存できませんでした。",
-        ttlMs: 3000,
+          failed > 0
+            ? saved > 0
+              ? `納品セット ${saved} 枚保存、${failed} 枚失敗しました。`
+              : `納品セット ${failed} 枚の保存に失敗しました。`
+            : `納品セット ${saved} 枚をローカルに保存しました。`,
+        ttlMs: failed > 0 ? 6000 : 3000,
       });
     } catch (err) {
       pushToast({

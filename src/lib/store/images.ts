@@ -357,22 +357,17 @@ export const useImages = create<ImagesState>((set, get) => ({
   },
 
   downloadAs: async (path, suggestedName) => {
-    try {
-      const { save } = await import("@tauri-apps/plugin-dialog");
-      const fallbackName =
-        suggestedName ?? path.split("/").pop() ?? "image.png";
-      const ext = fallbackName.split(".").pop() ?? "png";
-      const dest = await save({
-        defaultPath: fallbackName,
-        filters: [{ name: "Image", extensions: [ext, "png", "jpg", "webp"] }],
-      });
-      if (typeof dest !== "string") return null;
-      await imagesIpc.saveAs(path, dest);
-      return dest;
-    } catch (err) {
-      console.error("downloadAs failed", err);
-      return null;
-    }
+    const { save } = await import("@tauri-apps/plugin-dialog");
+    const fallbackName =
+      suggestedName ?? path.split("/").pop() ?? "image.png";
+    const ext = fallbackName.split(".").pop() ?? "png";
+    const dest = await save({
+      defaultPath: fallbackName,
+      filters: [{ name: "Image", extensions: [ext, "png", "jpg", "webp"] }],
+    });
+    if (typeof dest !== "string") return null;
+    await imagesIpc.saveAs(path, dest);
+    return dest;
   },
 
   removeBackground: async (path, bgColorHex) => {

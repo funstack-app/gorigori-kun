@@ -77,6 +77,19 @@ async function loadPromptIntoComposer(path: string): Promise<void> {
   });
 }
 
+function downloadImageAs(path: string, suggestedName: string): void {
+  void useImages
+    .getState()
+    .downloadAs(path, suggestedName)
+    .catch((err) => {
+      useToasts.getState().push({
+        kind: "error",
+        text: `画像の保存に失敗しました: ${(err as Error)?.message ?? err}`,
+        ttlMs: 6000,
+      });
+    });
+}
+
 /**
  * F-#12 (没作品削除): ライブラリ/プロジェクトの没作品を物理削除する共通処理。
  * 破壊的操作なので必ず確認ダイアログを挟む。Tauri ネイティブ ask() を優先し、
@@ -275,7 +288,7 @@ export function buildGalleryItemMenu(
     {
       label: "名前を付けて保存…",
       icon: "D",
-      onClick: () => useImages.getState().downloadAs(item.path, item.name),
+      onClick: () => downloadImageAs(item.path, item.name),
     },
     {
       label: item.savedTo ? "プロジェクトへ保存済み" : "プロジェクトへ移動",
