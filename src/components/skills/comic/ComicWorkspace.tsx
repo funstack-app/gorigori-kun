@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { images } from "../../../lib/ipc";
 import { runComicTextTurn } from "../../../lib/comic/codexText";
@@ -75,6 +75,15 @@ function ComicFlow() {
   const [panels, setPanels] = useState<ComicPanel[]>([]);
   const [results, setResults] = useState<ComicPanelResult[]>([]);
   const [generatingName, setGeneratingName] = useState(false);
+  const [generatingAll, setGeneratingAll] = useState(false);
+  const runTokenRef = useRef(0);
+
+  useEffect(
+    () => () => {
+      runTokenRef.current += 1;
+    },
+    [],
+  );
 
   // 選択されたキャラプリセットを ComicCharacter に変換
   const characters = useMemo<ComicCharacter[]>(() => {
@@ -101,10 +110,15 @@ function ComicFlow() {
       pushToast({ kind: "error", text: "話（あらすじ）を入力してください", ttlMs: 4000 });
       return;
     }
+    const runToken = runTokenRef.current + 1;
+    runTokenRef.current = runToken;
+    setGeneratingAll(false);
+    setResults((prev) => prev.map((result) => ({ ...result, generating: false })));
     setGeneratingName(true);
     try {
       const prompt = buildNamePrompt(synopsis, format, characters);
       const raw = await runComicTextTurn(prompt);
+      if (runTokenRef.current !== runToken) return;
       const parsed = parseComicName(raw);
       if (!parsed) {
         pushToast({
@@ -118,13 +132,14 @@ function ComicFlow() {
       setResults(parsed.map((p) => ({ index: p.index, generating: false })));
       setPhase("name");
     } catch (err) {
+      if (runTokenRef.current !== runToken) return;
       pushToast({
         kind: "error",
         text: `ネーム生成に失敗しました: ${(err as Error)?.message ?? err}`,
         ttlMs: 6000,
       });
     } finally {
-      setGeneratingName(false);
+      if (runTokenRef.current === runToken) setGeneratingName(false);
     }
   };
 
@@ -132,7 +147,10 @@ function ComicFlow() {
     setPanels((prev) => prev.map((p) => (p.index === index ? { ...p, ...patch } : p)));
   };
 
-  const generatePanel = async (panel: ComicPanel) => {
+  const generatePanel = async (panel: ComicPanel, batchToken?: number) => {
+    if (batchToken === undefined && generatingAll) return;
+    const runToken = batchToken ?? runTokenRef.current;
+    if (runTokenRef.current !== runToken) return;
     setResults((prev) =>
       prev.map((r) =>
         r.index === panel.index ? { ...r, generating: true, error: undefined } : r,
@@ -149,6 +167,7 @@ function ComicFlow() {
         count: 1,
         refImagePaths: refPaths.length > 0 ? refPaths : undefined,
       });
+      if (runTokenRef.current !== runToken) return;
       const imagePath = res.generatedPaths[0];
       if (!imagePath) {
         throw new Error(res.errors[0] ?? "画像が生成されませんでした");
@@ -159,6 +178,7 @@ function ComicFlow() {
         ),
       );
     } catch (err) {
+      if (runTokenRef.current !== runToken) return;
       setResults((prev) =>
         prev.map((r) =>
           r.index === panel.index
@@ -175,9 +195,17 @@ function ComicFlow() {
   };
 
   const generateAllPanels = async () => {
-    for (const panel of panels) {
-      // 逐次生成（並列にすると CODEX_HOME / セマフォ競合の懸念があるため MVP は直列）
-      await generatePanel(panel);
+    if (generatingAll || results.some((result) => result.generating)) return;
+    const runToken = runTokenRef.current;
+    setGeneratingAll(true);
+    try {
+      for (const panel of panels) {
+        if (runTokenRef.current !== runToken) return;
+        // 逐次生成（並列にすると CODEX_HOME / セマフォ競合の懸念があるため MVP は直列）
+        await generatePanel(panel, runToken);
+      }
+    } finally {
+      if (runTokenRef.current === runToken) setGeneratingAll(false);
     }
   };
 
@@ -210,6 +238,7 @@ function ComicFlow() {
           onGeneratePanel={generatePanel}
           onGenerateAll={generateAllPanels}
           onPreview={() => setPhase("preview")}
+          generatingAll={generatingAll}
         />
       )}
 
@@ -441,14 +470,16 @@ function PanelsPhase({
   onGeneratePanel,
   onGenerateAll,
   onPreview,
+  generatingAll,
 }: {
   panels: ComicPanel[];
   results: ComicPanelResult[];
   onGeneratePanel: (panel: ComicPanel) => void;
   onGenerateAll: () => void;
   onPreview: () => void;
+  generatingAll: boolean;
 }) {
-  const anyGenerating = results.some((r) => r.generating);
+  const anyGenerating = generatingAll || results.some((r) => r.generating);
   const anyDone = results.some((r) => r.imagePath);
   return (
     <div className="flex flex-col gap-3">
@@ -484,7 +515,7 @@ function PanelsPhase({
                 <button
                   type="button"
                   onClick={() => onGeneratePanel(panel)}
-                  disabled={result?.generating}
+                  disabled={generatingAll || result?.generating}
                   className="rounded border border-[#2a2a2a] bg-[#1a1a1a] px-2 py-0.5 text-[11px] text-neutral-300 transition hover:border-indigo-500 disabled:opacity-40"
                 >
                   {result?.generating ? "…" : result?.imagePath ? "再生成" : "生成"}

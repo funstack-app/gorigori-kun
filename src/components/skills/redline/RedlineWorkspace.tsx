@@ -89,12 +89,20 @@ export function RedlineWorkspace() {
   ) => {
     const file = Array.from(files)[0];
     if (!file) return;
-    const path = await fileToImagePath(file);
-    if (!path) {
-      pushToast({ kind: "error", text: "画像ファイルを選んでください。", ttlMs: 3000 });
-      return;
+    try {
+      const path = await fileToImagePath(file);
+      if (!path) {
+        pushToast({ kind: "error", text: "画像ファイルを選んでください。", ttlMs: 3000 });
+        return;
+      }
+      setPath(path);
+    } catch {
+      pushToast({
+        kind: "error",
+        text: "画像の読み込みに失敗しました。別の画像でお試しください。",
+        ttlMs: 5000,
+      });
     }
-    setPath(path);
   };
 
   const canInterpret = Boolean(redlinePath) && !running;
@@ -310,7 +318,11 @@ function RedlineCard({
       await navigator.clipboard.writeText(instruction.instruction);
       useToasts.getState().push({ kind: "success", text: "指示をコピーしました", ttlMs: 1800 });
     } catch {
-      /* noop */
+      useToasts.getState().push({
+        kind: "error",
+        text: "コピーに失敗しました。もう一度お試しください。",
+        ttlMs: 4000,
+      });
     }
   };
 

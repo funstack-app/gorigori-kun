@@ -54,22 +54,35 @@ function normalizeIssues(
   imagePath: string,
   validRuleIds: ReadonlySet<string>,
 ): RegulationIssue[] {
-  if (!Array.isArray(raw)) return [];
+  if (!Array.isArray(raw)) {
+    throw new Error("検査結果の内容が不正です。もう一度お試しください。");
+  }
   const out: RegulationIssue[] = [];
   for (const entry of raw) {
-    if (typeof entry !== "object" || entry === null) continue;
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+      throw new Error("検査結果の内容が不正です。もう一度お試しください。");
+    }
     const e = entry as Record<string, unknown>;
     const ruleId = typeof e.ruleId === "string" ? e.ruleId : "";
-    const severity =
-      typeof e.severity === "string" &&
-      VALID_SEVERITIES.includes(e.severity as RegulationSeverity)
-        ? (e.severity as RegulationSeverity)
-        : "mid";
+    const severity = e.severity;
     const message = typeof e.message === "string" ? e.message.trim() : "";
     const evidence = typeof e.evidence === "string" ? e.evidence.trim() : "";
-    // ruleId が既知セットに無い / message が空 の壊れ issue は捨てる（推測で補完しない）。
-    if (!validRuleIds.has(ruleId) || !message) continue;
-    out.push({ imagePath, ruleId, severity, message, evidence });
+    if (
+      !validRuleIds.has(ruleId) ||
+      typeof severity !== "string" ||
+      !VALID_SEVERITIES.includes(severity as RegulationSeverity) ||
+      !message ||
+      !evidence
+    ) {
+      throw new Error("検査結果の内容が不正です。もう一度お試しください。");
+    }
+    out.push({
+      imagePath,
+      ruleId,
+      severity: severity as RegulationSeverity,
+      message,
+      evidence,
+    });
   }
   return out;
 }

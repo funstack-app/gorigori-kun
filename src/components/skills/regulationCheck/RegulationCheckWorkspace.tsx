@@ -1,5 +1,5 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { ActiveProjectSelector } from "../../ActiveProjectSelector";
 import { WorkspaceTabs } from "../../WorkspaceTabs";
@@ -47,6 +47,14 @@ export function RegulationCheckWorkspace() {
   const [customRule, setCustomRule] = useState("");
   const [running, setRunning] = useState(false);
   const [results, setResults] = useState<RegulationImageResult[]>([]);
+  const runTokenRef = useRef(0);
+
+  useEffect(
+    () => () => {
+      runTokenRef.current += 1;
+    },
+    [],
+  );
 
   const ruleSet: RegulationRuleSet = useMemo(
     () => DEFAULT_RULE_SETS.find((r) => r.id === ruleSetId) ?? DEFAULT_RULE_SETS[0],
@@ -89,6 +97,8 @@ export function RegulationCheckWorkspace() {
   }
 
   function clearAll() {
+    runTokenRef.current += 1;
+    setRunning(false);
     setImagePaths([]);
     setResults([]);
   }
@@ -98,15 +108,19 @@ export function RegulationCheckWorkspace() {
       pushToast({ kind: "info", text: "先に検査する画像を選んでください。", ttlMs: 3000 });
       return;
     }
+    const runToken = runTokenRef.current + 1;
+    runTokenRef.current = runToken;
     setRunning(true);
     setResults([]);
     try {
       const rules = activeRules;
+      const paths = [...imagePaths];
       const collected: RegulationImageResult[] = [];
       // 画像は1枚ずつ Codex に渡す（description 取得は画像入力の実処理）。
       // 逐次実行で結果を順に積み上げ、途中経過を表示する。
-      for (const path of imagePaths) {
+      for (const path of paths) {
         const result = await checkImage(path, rules);
+        if (runTokenRef.current !== runToken) return;
         collected.push(result);
         setResults([...collected]);
       }
@@ -129,13 +143,14 @@ export function RegulationCheckWorkspace() {
         });
       }
     } catch (err) {
+      if (runTokenRef.current !== runToken) return;
       pushToast({
         kind: "error",
         text: `検査に失敗しました: ${(err as Error)?.message ?? err}`,
         ttlMs: 6000,
       });
     } finally {
-      setRunning(false);
+      if (runTokenRef.current === runToken) setRunning(false);
     }
   }
 

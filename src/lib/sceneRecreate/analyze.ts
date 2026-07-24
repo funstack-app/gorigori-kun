@@ -26,6 +26,8 @@ import type { Keyframe, SceneAnalysis } from "./types";
 export type AnalyzeProgress = {
   /** 説明文化が完了したフレーム数 / 全体。 */
   onDescribeProgress?: (done: number, total: number) => void;
+  /** 一部フレームだけ説明文化に失敗した場合に件数を通知する。 */
+  onDescribePartialFailure?: (failed: number, total: number) => void;
 };
 
 /** 1フレームを説明文化する。失敗しても他フレームを止めないため、空文字で継続する。 */
@@ -64,6 +66,10 @@ export async function analyzeScene(
     throw new Error(
       "キーフレームの説明を取得できませんでした(Codex 認証・ネットワークを確認してください)。",
     );
+  }
+  const failedDescriptions = descriptions.filter((d) => d.length === 0).length;
+  if (failedDescriptions > 0) {
+    progress?.onDescribePartialFailure?.(failedDescriptions, total);
   }
 
   // 第2段: 説明文列 + 補足を JSON でショット割り化。

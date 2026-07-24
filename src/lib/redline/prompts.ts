@@ -143,10 +143,15 @@ export function parseRedlineResult(text: string): RedlineResult | null {
   const payload = jsonAfterMarker(text, REDLINE_MARKER);
   if (!payload || typeof payload !== "object") return null;
   const root = payload as Record<string, unknown>;
-  const rawList = Array.isArray(root.instructions) ? root.instructions : [];
-  const instructions = rawList
-    .map((item, index) => normalizeInstruction(item, index + 1))
-    .filter((item): item is RedlineInstruction => item !== null)
+  if (!Array.isArray(root.instructions)) return null;
+  const rawList = root.instructions;
+  const normalized = rawList.map((item, index) =>
+    normalizeInstruction(item, index + 1),
+  );
+  if (!normalized.every((item): item is RedlineInstruction => item !== null)) {
+    return null;
+  }
+  const instructions = normalized
     // 番号でソート（AI が番号を飛ばしても表示は昇順に揃える）。
     .sort((a, b) => a.number - b.number);
   return {

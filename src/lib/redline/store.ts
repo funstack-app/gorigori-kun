@@ -121,53 +121,63 @@ export const useRedline = create<RedlineState>((set, get) => ({
     set({ running: true, result: null, error: null });
 
     // 通知 listener を張り直す。threadId で自分の thread、myToken で自分の実行だけ拾う。
-    const handle = await onNotification((n: RpcNotification) => {
-      // 登録待ちの間に reset/連打でトークンが進んでいたら、この listener は古い実行の
-      // ものなので無視する（登録直後に自分自身を解除もする）。
+    let handle: () => void;
+    try {
+      handle = await onNotification((n: RpcNotification) => {
+        // 登録待ちの間に reset/連打でトークンが進んでいたら、この listener は古い実行の
+        // ものなので無視する（登録直後に自分自身を解除もする）。
+        if (interpretToken !== myToken) return;
+
+        const params = n.params as any;
+        const tid = params?.threadId ?? params?.thread?.id;
+        if (!threadId || tid !== threadId) return;
+
+        if (n.method === "item/agentMessage/delta") {
+          const delta =
+            typeof params?.delta === "string"
+              ? params.delta
+              : typeof params?.textDelta === "string"
+                ? params.textDelta
+                : undefined;
+          if (delta) streamingText += delta;
+        } else if (n.method === "item/completed") {
+          const item = params?.item;
+          if (item?.type === "agentMessage" && typeof item.text === "string" && item.text.length > 0) {
+            // 完了 item の全文があればストリーミング蓄積より優先する。
+            streamingText = item.text;
+          }
+        } else if (n.method === "turn/completed") {
+          const status = params?.turn?.status;
+          if (status === "failed") {
+            const err =
+              params?.turn?.error?.message ?? "赤入れの解釈でエラーが発生しました";
+            teardownInterpret();
+            set({ running: false, error: err });
+            useToasts.getState().push({ kind: "error", text: err, ttlMs: 6000 });
+            return;
+          }
+          const parsed = parseRedlineResult(streamingText);
+          if (!parsed) {
+            // no-silent-gap-filling: 構造化に失敗したら推測で埋めず、失敗として提示。
+            const msg =
+              "赤入れを構造化できませんでした。画像が鮮明か、赤入れがはっきり写っているかを確認して、もう一度お試しください。";
+            teardownInterpret();
+            set({ running: false, error: msg });
+            useToasts.getState().push({ kind: "error", text: msg, ttlMs: 6000 });
+            return;
+          }
+          teardownInterpret();
+          set({ running: false, result: parsed, error: null });
+        }
+      });
+    } catch {
       if (interpretToken !== myToken) return;
-
-      const params = n.params as any;
-      const tid = params?.threadId ?? params?.thread?.id;
-      if (!threadId || tid !== threadId) return;
-
-      if (n.method === "item/agentMessage/delta") {
-        const delta =
-          typeof params?.delta === "string"
-            ? params.delta
-            : typeof params?.textDelta === "string"
-              ? params.textDelta
-              : undefined;
-        if (delta) streamingText += delta;
-      } else if (n.method === "item/completed") {
-        const item = params?.item;
-        if (item?.type === "agentMessage" && typeof item.text === "string" && item.text.length > 0) {
-          // 完了 item の全文があればストリーミング蓄積より優先する。
-          streamingText = item.text;
-        }
-      } else if (n.method === "turn/completed") {
-        const status = params?.turn?.status;
-        if (status === "failed") {
-          const err =
-            params?.turn?.error?.message ?? "赤入れの解釈でエラーが発生しました";
-          teardownInterpret();
-          set({ running: false, error: err });
-          useToasts.getState().push({ kind: "error", text: err, ttlMs: 6000 });
-          return;
-        }
-        const parsed = parseRedlineResult(streamingText);
-        if (!parsed) {
-          // no-silent-gap-filling: 構造化に失敗したら推測で埋めず、失敗として提示。
-          const msg =
-            "赤入れを構造化できませんでした。画像が鮮明か、赤入れがはっきり写っているかを確認して、もう一度お試しください。";
-          teardownInterpret();
-          set({ running: false, error: msg });
-          useToasts.getState().push({ kind: "error", text: msg, ttlMs: 6000 });
-          return;
-        }
-        teardownInterpret();
-        set({ running: false, result: parsed, error: null });
-      }
-    });
+      teardownInterpret();
+      const msg = "通知の準備に失敗しました。もう一度お試しください。";
+      set({ running: false, error: msg });
+      useToasts.getState().push({ kind: "error", text: msg, ttlMs: 6000 });
+      return;
+    }
 
     // 登録待ち中(競合2)に reset/連打でトークンが進んでいたら、遅れて登録された listener を
     // 即解除して捨てる。running へ復帰させない。

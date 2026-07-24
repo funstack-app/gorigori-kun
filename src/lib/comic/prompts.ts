@@ -85,24 +85,37 @@ export function parseComicName(raw: string): ComicPanel[] | null {
   } catch {
     return null;
   }
-  if (!Array.isArray(data)) return null;
+  if (!Array.isArray(data) || data.length === 0) return null;
 
-  const panels: ComicPanel[] = data.map((item, i) => {
-    const obj = (item ?? {}) as Record<string, unknown>;
+  const panels: ComicPanel[] = [];
+  const panelNumbers = new Set<number>();
+  for (const item of data) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+    const obj = item as Record<string, unknown>;
+    if (
+      typeof obj.index !== "number" ||
+      !Number.isInteger(obj.index) ||
+      obj.index < 1 ||
+      panelNumbers.has(obj.index)
+    ) {
+      return null;
+    }
+    if (typeof obj.prompt !== "string" || !obj.prompt.trim()) return null;
+    panelNumbers.add(obj.index);
     const chars = Array.isArray(obj.characters)
       ? obj.characters.filter((c): c is string => typeof c === "string")
       : [];
-    return {
-      index: typeof obj.index === "number" ? obj.index : i + 1,
+    panels.push({
+      index: obj.index,
       composition: typeof obj.composition === "string" ? obj.composition : "",
       characters: chars,
       acting: typeof obj.acting === "string" ? obj.acting : "",
       dialogue: typeof obj.dialogue === "string" ? obj.dialogue : "",
-      prompt: typeof obj.prompt === "string" ? obj.prompt : "",
-    };
-  });
+      prompt: obj.prompt,
+    });
+  }
 
-  return panels.length > 0 ? panels : null;
+  return panels;
 }
 
 /**

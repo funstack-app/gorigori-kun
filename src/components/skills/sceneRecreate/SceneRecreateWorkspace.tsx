@@ -1,5 +1,5 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { ActiveProjectSelector } from "../../ActiveProjectSelector";
 import { WorkspaceTabs } from "../../WorkspaceTabs";
@@ -53,6 +53,14 @@ export function SceneRecreateWorkspace() {
   const [status, setStatus] = useState<AnalyzeStatus>("idle");
   const [describeDone, setDescribeDone] = useState(0);
   const [analysis, setAnalysis] = useState<SceneAnalysis | null>(null);
+  const runTokenRef = useRef(0);
+
+  useEffect(
+    () => () => {
+      runTokenRef.current += 1;
+    },
+    [],
+  );
 
   const running = status === "describing" || status === "analyzing";
   const allPaths = useMemo(() => keyframes.map((k) => k.path), [keyframes]);
@@ -105,16 +113,30 @@ export function SceneRecreateWorkspace() {
       pushToast({ kind: "info", text: "先にキーフレームを投入してください。", ttlMs: 3000 });
       return;
     }
+    const runToken = runTokenRef.current + 1;
+    runTokenRef.current = runToken;
+    const targetKeyframes = [...keyframes];
+    const targetNote = userNote;
     setAnalysis(null);
     setDescribeDone(0);
     setStatus("describing");
     try {
-      const result = await analyzeScene(keyframes, userNote, {
+      const result = await analyzeScene(targetKeyframes, targetNote, {
         onDescribeProgress: (done, total) => {
+          if (runTokenRef.current !== runToken) return;
           setDescribeDone(done);
           if (done === total) setStatus("analyzing");
         },
+        onDescribePartialFailure: (failed, total) => {
+          if (runTokenRef.current !== runToken) return;
+          pushToast({
+            kind: "warn",
+            text: `${failed}/${total}枚の解析に失敗しました。成功した画像だけで続けます。`,
+            ttlMs: 5000,
+          });
+        },
       });
+      if (runTokenRef.current !== runToken) return;
       setAnalysis(result);
       setStatus("done");
       pushToast({
@@ -123,6 +145,7 @@ export function SceneRecreateWorkspace() {
         ttlMs: 3000,
       });
     } catch (err) {
+      if (runTokenRef.current !== runToken) return;
       setStatus("error");
       pushToast({
         kind: "error",

@@ -62,11 +62,11 @@ export async function runComicTextTurn(
       finish(() => reject(new Error("ネーム生成がタイムアウトしました")));
     }, timeoutMs);
 
-    void onNotification((n: RpcNotification) => {
+    const handleNotification = (n: RpcNotification) => {
       const params = n.params as any;
       const tid = params?.threadId ?? params?.thread?.id;
       // このスレッド以外の通知（他の生成スレッド）は無視する
-      if (tid && tid !== threadId) return;
+      if (tid !== threadId) return;
 
       if (n.method === "item/started") {
         const item = params?.item;
@@ -90,14 +90,29 @@ export async function runComicTextTurn(
           finish(() => resolve(buffer));
         }
       }
-    }).then((fn) => {
-      unlisten = fn;
-      // リスナー登録前に turn が完了していたケースの保険はタイムアウトが拾う
-    });
+    };
 
-    const input: InputItem[] = [{ type: "text", text: prompt }];
-    rpcRequest("turn/start", { threadId, input, model: COMIC_MODEL }).catch(
-      (err) => finish(() => reject(err as Error)),
-    );
+    void (async () => {
+      try {
+        const handle = await onNotification(handleNotification);
+        if (settled) {
+          handle();
+          return;
+        }
+        unlisten = handle;
+      } catch {
+        finish(() =>
+          reject(new Error("通知の準備に失敗しました。もう一度お試しください。")),
+        );
+        return;
+      }
+
+      const input: InputItem[] = [{ type: "text", text: prompt }];
+      try {
+        await rpcRequest("turn/start", { threadId, input, model: COMIC_MODEL });
+      } catch (err) {
+        finish(() => reject(err as Error));
+      }
+    })();
   });
 }
