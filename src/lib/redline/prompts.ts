@@ -35,11 +35,12 @@ export const REDLINE_INTERPRET_PROMPT = [
   "",
   "【やること】",
   "赤入れの注釈（丸囲み・矢印・取り消し線・手書き文字・付箋コメント）を 1 つずつ読み取り、",
-  "「どの領域を・何と・どう直すか」を構造化してください。位置は座標ではなく言葉で説明します。",
+  "「どの領域を・何と・どう直すか」を構造化してください。位置は言葉で説明し、範囲を確信できる場合だけ bbox も付けます。",
   "",
   "【各指示に必ず含める項目】",
   "- number: 通し番号（1 始まり）",
   "- areaDescription: 対象領域を言葉で（例:「右上のロゴ付近」「見出しの2行目」「中央の人物の左手」）",
+  "- bbox（範囲を確信できる場合だけ）: [x, y, width, height]。画像全体の幅・高さを 1 とした 0〜1 の小数で、x,y は左上。width,height は 0 より大きく、x+width と y+height は 1 以下",
   "- instruction: 何をどう直すか（例:「キャッチコピーを『春の新作』に変更」「背景の看板を消す」）",
   "- fixKind: 修正種別。次のいずれか:",
   "    remove（消す） / replace（置き換える） / adjust（位置・色・サイズを直す） / text（文字修正） / other（判別不能）",
@@ -49,13 +50,14 @@ export const REDLINE_INTERPRET_PROMPT = [
   "【最重要・推測で埋めない】",
   "赤入れの文字が読めない、矢印がどこを指すか不明、複数解釈できる等の場合は、",
   "もっともらしく決めつけないでください。ambiguous を true にし、ambiguityReason に理由を書いてください。",
+  "修正範囲を確信できない場合は bbox を推測で作らず、必ず省略して ambiguous を true にしてください。",
   "「読めない箇所を読めたことにする」のが最も避けたい失敗です。",
   "",
   "【出力フォーマット】",
   "最初に、見つけた修正点を日本語で簡潔に箇条書きしてください（人間が読む用）。",
   "そのあと、返答の末尾に必ず次の 1 行だけの JSON を出力してください（この行はアプリが機械的に読みます）:",
   "",
-  `${REDLINE_MARKER} {"instructions":[{"number":1,"areaDescription":"...","instruction":"...","fixKind":"text","ambiguous":false},{"number":2,"areaDescription":"...","instruction":"...","fixKind":"remove","ambiguous":true,"ambiguityReason":"矢印の指す先が不明瞭"}],"overallNote":"任意の全体所見"}`,
+  `${REDLINE_MARKER} {"instructions":[{"number":1,"areaDescription":"...","bbox":[0.1,0.2,0.3,0.15],"instruction":"...","fixKind":"text","ambiguous":false},{"number":2,"areaDescription":"...","instruction":"...","fixKind":"remove","ambiguous":true,"ambiguityReason":"矢印の指す先が不明瞭"}],"overallNote":"任意の全体所見"}`,
   "",
   "JSON は 1 行で。instructions が空でも空配列で出力してください。",
 ].join("\n");
@@ -110,6 +112,32 @@ function normalizeFixKind(v: unknown): RedlineFixKind {
   return isRedlineFixKind(v) ? v : "other";
 }
 
+function normalizeBbox(v: unknown): [number, number, number, number] | undefined {
+  if (!Array.isArray(v) || v.length !== 4) return undefined;
+  const [x, y, width, height] = v;
+  if (
+    typeof x !== "number" ||
+    typeof y !== "number" ||
+    typeof width !== "number" ||
+    typeof height !== "number" ||
+    !Number.isFinite(x) ||
+    !Number.isFinite(y) ||
+    !Number.isFinite(width) ||
+    !Number.isFinite(height) ||
+    x < 0 ||
+    y < 0 ||
+    width <= 0 ||
+    height <= 0 ||
+    x > 1 ||
+    y > 1 ||
+    x + width > 1 ||
+    y + height > 1
+  ) {
+    return undefined;
+  }
+  return [x, y, width, height];
+}
+
 function normalizeInstruction(
   raw: unknown,
   fallbackNumber: number,
@@ -125,9 +153,12 @@ function normalizeInstruction(
       ? (o.number as number)
       : fallbackNumber;
   const ambiguous = o.ambiguous === true;
+  // 曖昧な指示や不正な座標は bbox を欠落のまま保ち、推測・補正しない。
+  const bbox = ambiguous ? undefined : normalizeBbox(o.bbox);
   return {
     number: numberValue,
     areaDescription: areaDescription ?? "（領域の説明なし）",
+    ...(bbox ? { bbox } : {}),
     instruction,
     fixKind: normalizeFixKind(o.fixKind),
     ambiguous,

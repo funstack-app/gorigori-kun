@@ -3,14 +3,13 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 
 import { ActiveProjectSelector } from "../../ActiveProjectSelector";
 import { WorkspaceTabs } from "../../WorkspaceTabs";
+import { useEditorActions } from "../../edit/editor/useEditor";
 import { images } from "../../../lib/ipc";
 import { useRedline } from "../../../lib/redline/store";
 import {
   REDLINE_FIX_KIND_LABEL,
   type RedlineInstruction,
 } from "../../../lib/redline/types";
-import { useEditLayers } from "../../../lib/store/editLayers";
-import { useEditTab } from "../../../lib/store/editTab";
 import { useToasts } from "../../../lib/store/toasts";
 import { useWorkspace } from "../../../lib/store/workspace";
 
@@ -24,7 +23,7 @@ import { useWorkspace } from "../../../lib/store/workspace";
  *
  * MVP 実装範囲:
  *  - 読む / 指す: 元画像 + 赤入れ画像を AI に渡し、修正指示リスト（JSON）を得る
- *  - 直す: 各カードの「編集タブで開く」で 元画像 + 指示テキストを編集タブへ受け渡す
+ *  - 直す: bbox があれば指定範囲だけを修正し、無ければ元画像 + コピー済み指示を編集タブへ渡す
  *  - 検品: 未実装（後続で実ブラウザ検証相当を組む）
  */
 
@@ -50,25 +49,6 @@ async function fileToImagePath(file: File): Promise<string | null> {
   if (!file.type.startsWith("image/") && !isImageFileName(file.name)) return null;
   const bytes = new Uint8Array(await file.arrayBuffer());
   return images.writeUpload(file.name || `redline-${Date.now()}.png`, bytes);
-}
-
-/**
- * 元画像 + 指示テキストを編集タブへ受け渡して開く。
- * SkillRunActions.openImageInEditTab と同じ導線に、赤入れの指示テキスト付与を足したもの。
- */
-function openInEditTab(imagePath: string, instruction: string) {
-  useWorkspace.getState().setActiveTab("edit");
-  const editTab = useEditTab.getState();
-  editTab.setSelectedImagePath(imagePath);
-  editTab.setInstruction(instruction);
-  const editLayers = useEditLayers.getState();
-  editLayers.setSource(imagePath);
-  editLayers.setLayers([]);
-  useToasts.getState().push({
-    kind: "success",
-    text: "編集タブで開きました。指示テキストを入力欄に入れています。",
-    ttlMs: 2800,
-  });
 }
 
 export function RedlineWorkspace() {
@@ -203,6 +183,7 @@ export function RedlineWorkspace() {
                     key={ins.number}
                     instruction={ins}
                     editTarget={originalPath ?? redlinePath}
+                    applyTarget={originalPath}
                   />
                 ))}
               </div>
@@ -309,21 +290,71 @@ function ImageDropSlot({
 function RedlineCard({
   instruction,
   editTarget,
+  applyTarget,
 }: {
   instruction: RedlineInstruction;
+  /** 「編集タブで開く」フォールバック用。手動レイヤー分解の起点にすぎないため赤入れ画像でも可。 */
   editTarget: string | null;
+  /**
+   * 「この範囲だけ直す」用。赤入れの書き込み（丸・矢印・手書き文字）が写り込んだ画像を
+   * そのままAIへ渡すと、修正結果に書き込みが焼き付く。必ず元画像（書き込みなし）を要求し、
+   * 元画像が無ければボタンごと無効化する（no-silent-gap-filling: 不確かな入力で実行しない）。
+   */
+  applyTarget: string | null;
 }) {
-  const copy = async () => {
+  const { applyRedlineFix, openImageForEditing } = useEditorActions();
+
+  const copyInstruction = async (showSuccess = true): Promise<boolean> => {
     try {
       await navigator.clipboard.writeText(instruction.instruction);
-      useToasts.getState().push({ kind: "success", text: "指示をコピーしました", ttlMs: 1800 });
+      if (showSuccess) {
+        useToasts.getState().push({
+          kind: "success",
+          text: "指示をコピーしました",
+          ttlMs: 1800,
+        });
+      }
+      return true;
     } catch {
       useToasts.getState().push({
         kind: "error",
         text: "コピーに失敗しました。もう一度お試しください。",
         ttlMs: 4000,
       });
+      return false;
     }
+  };
+
+  const applyOnlyThisArea = async () => {
+    if (!applyTarget || !instruction.bbox) return;
+    useWorkspace.getState().setActiveTab("edit");
+    const applied = await applyRedlineFix(
+      applyTarget,
+      instruction.bbox,
+      instruction.instruction,
+    );
+    if (applied) {
+      useToasts.getState().push({
+        kind: "success",
+        text: "指定範囲だけを修正しました。マスク外の画素には触れていません。",
+        ttlMs: 5000,
+      });
+    }
+  };
+
+  const openFallbackInEditTab = async () => {
+    if (!editTarget) return;
+    const copied = await copyInstruction(false);
+    useWorkspace.getState().setActiveTab("edit");
+    const opened = await openImageForEditing(editTarget);
+    if (!opened) return;
+    useToasts.getState().push({
+      kind: copied ? "success" : "warn",
+      text: copied
+        ? "編集タブで開き、指示をコピーしました。「ことばで分離」または手動でレイヤーを選び、貼り付けてください。"
+        : "編集タブで開きました。指示のコピーに失敗したため、「ことばで分離」または手動選択後に指示を入力してください。",
+      ttlMs: 6000,
+    });
   };
 
   return (
@@ -358,30 +389,36 @@ function RedlineCard({
       <div className="mt-2.5 flex items-center justify-end gap-1.5">
         <button
           type="button"
-          onClick={copy}
+          onClick={() => void copyInstruction()}
           className="rounded-md border border-[#343434] bg-[#0b0b0b] px-2 py-1 text-[10px] font-bold text-neutral-300 hover:border-pink-400 hover:text-white"
         >
           指示をコピー
         </button>
-        <button
-          type="button"
-          onClick={() => {
-            if (!editTarget) {
-              useToasts.getState().push({
-                kind: "error",
-                text: "編集タブへ渡す画像がありません。",
-                ttlMs: 2800,
-              });
-              return;
+        {instruction.bbox ? (
+          <button
+            type="button"
+            onClick={() => void applyOnlyThisArea()}
+            disabled={!applyTarget}
+            className="rounded-md bg-pink-500 px-3 py-1 text-[11px] font-bold text-white hover:bg-pink-400 disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-500"
+            title={
+              applyTarget
+                ? "赤入れで示された範囲だけを修正する"
+                : "元画像（書き込みなし）が無いため使えません。元画像をセットしてください。"
             }
-            openInEditTab(editTarget, instruction.instruction);
-          }}
-          disabled={!editTarget}
-          className="rounded-md bg-pink-500 px-3 py-1 text-[11px] font-bold text-white hover:bg-pink-400 disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-500"
-          title="この修正を編集タブで開く（元画像 + 指示テキストを渡す）"
-        >
-          編集タブで開く
-        </button>
+          >
+            この範囲だけ直す
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={() => void openFallbackInEditTab()}
+            disabled={!editTarget}
+            className="rounded-md bg-pink-500 px-3 py-1 text-[11px] font-bold text-white hover:bg-pink-400 disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-500"
+            title="範囲を特定できないため、元画像を実エディターで開いて指示をコピーする"
+          >
+            編集タブで開く
+          </button>
+        )}
       </div>
     </div>
   );
