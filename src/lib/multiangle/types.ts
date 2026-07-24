@@ -20,9 +20,9 @@ export const EVENT_MULTIANGLE = "codex://multiangle";
  */
 export type MultiAngleEvent =
   | { kind: "started"; runId: string; total: number }
-  | { kind: "cutStarted"; cutId: string; label: string; index: number }
-  | { kind: "cutCompleted"; cutId: string; label: string; imagePath: string }
-  | { kind: "cutFailed"; cutId: string; reason: string }
+  | { kind: "cutStarted"; runId: string; cutId: string; label: string; index: number }
+  | { kind: "cutCompleted"; runId: string; cutId: string; label: string; imagePath: string }
+  | { kind: "cutFailed"; runId: string; cutId: string; reason: string }
   | { kind: "completed"; runId: string; outputDir: string };
 
 /** 1カット分のプロンプト素材。Rust 側に渡す（cutId + 表示名 + 構図の英語句）。 */
@@ -43,6 +43,8 @@ export type MultiAngleParams = {
   cutIds: string[];
   cutPrompts: CutPromptSpec[];
   cwd?: string;
+  /** 画面側で生成する、この実行専用の識別子。省略時は Rust 側で採番する。 */
+  runId?: string;
   /**
    * 被写体の種別。"character"(人物・既定) or "product"(商品)。
    * 省略時は Rust 側で "character" 扱い＝従来と完全に同一のプロンプトになる。

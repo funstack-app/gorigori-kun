@@ -66,8 +66,15 @@ pub struct MultiAngleParams {
     /// 人物向けの「顔・体型・服を維持」「画面内テキスト・ロゴ禁止」は product では出さない。
     #[serde(default)]
     pub subject_kind: Option<String>,
+    /// フロントが先に採番する run_id (任意)。渡された場合はそれを使い、
+    /// beginRun 時点から確定 run_id を持てるようにする。
+    /// 省略時はバックエンドで採番し、既存の呼び出しとの互換性を保つ。
+    #[serde(default)]
+    pub run_id: Option<String>,
 }
 
+/// この run を識別するトークン。共有イベントチャンネル上で別スキルの通知を
+/// フロントが確実に除外できるよう、全バリアントに載せる。
 #[derive(Serialize, Clone)]
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum MultiAngleEvent {
@@ -76,16 +83,19 @@ pub enum MultiAngleEvent {
         total: u32,
     },
     CutStarted {
+        run_id: String,
         cut_id: String,
         label: String,
         index: u32,
     },
     CutCompleted {
+        run_id: String,
         cut_id: String,
         label: String,
         image_path: String,
     },
     CutFailed {
+        run_id: String,
         cut_id: String,
         reason: String,
     },
@@ -108,8 +118,12 @@ pub async fn multiangle_run(
 
     let codex_bin =
         resolve_codex_cli_binary().map_err(|e| format!("Codex CLI の解決に失敗: {e}"))?;
-    let run_id = format!("{}-{}", timestamp_id(), short_id());
+    let run_id = match params.run_id.as_deref() {
+        Some(id) if !id.trim().is_empty() => id.to_string(),
+        _ => format!("{}-{}", timestamp_id(), short_id()),
+    };
     let task_run_id = run_id.clone();
+    let fail_run_id = run_id.clone();
 
     tokio::spawn(async move {
         if let Err(err) =
@@ -120,6 +134,7 @@ pub async fn multiangle_run(
             let _ = app.emit(
                 EVENT_MULTIANGLE,
                 MultiAngleEvent::CutFailed {
+                    run_id: fail_run_id,
                     cut_id: "unknown".into(),
                     reason: err,
                 },
@@ -176,12 +191,14 @@ pub async fn multiangle_regenerate_cut(
     let aspect_ratio = params.aspect_ratio.clone();
     let environment = params.environment_description.clone();
     let subject_kind = resolve_subject_kind(&params);
+    let event_run_id = run_id.clone();
 
     tokio::spawn(async move {
         let prompt = build_multiangle_prompt(&cut, &aspect_ratio, &environment, subject_kind);
         let _ = task_app.emit(
             EVENT_MULTIANGLE,
             MultiAngleEvent::CutStarted {
+                run_id: event_run_id.clone(),
                 cut_id: cut.cut_id.clone(),
                 label: cut.label.clone(),
                 index: 0,
@@ -203,6 +220,7 @@ pub async fn multiangle_regenerate_cut(
                 let _ = task_app.emit(
                     EVENT_MULTIANGLE,
                     MultiAngleEvent::CutCompleted {
+                        run_id: event_run_id,
                         cut_id: cut.cut_id,
                         label: cut.label,
                         image_path: image_path.to_string_lossy().into_owned(),
@@ -214,6 +232,7 @@ pub async fn multiangle_regenerate_cut(
                 let _ = task_app.emit(
                     EVENT_MULTIANGLE,
                     MultiAngleEvent::CutFailed {
+                        run_id: event_run_id,
                         cut_id: cut.cut_id,
                         reason: err,
                     },
@@ -276,11 +295,13 @@ async fn run_multiangle_orchestrator(
             let environment = environment.clone();
             let cwd = cwd.clone();
             let cut = cut.clone();
+            let event_run_id = run_id.clone();
             async move {
 
                 let _ = app.emit(
                     EVENT_MULTIANGLE,
                     MultiAngleEvent::CutStarted {
+                        run_id: event_run_id.clone(),
                         cut_id: cut.cut_id.clone(),
                         label: cut.label.clone(),
                         index: index as u32,
@@ -303,6 +324,7 @@ async fn run_multiangle_orchestrator(
                         let _ = app.emit(
                             EVENT_MULTIANGLE,
                             MultiAngleEvent::CutCompleted {
+                                run_id: event_run_id.clone(),
                                 cut_id: cut.cut_id.clone(),
                                 label: cut.label.clone(),
                                 image_path: image_path.to_string_lossy().into_owned(),
@@ -314,6 +336,7 @@ async fn run_multiangle_orchestrator(
                         let _ = app.emit(
                             EVENT_MULTIANGLE,
                             MultiAngleEvent::CutFailed {
+                                run_id: event_run_id.clone(),
                                 cut_id: cut.cut_id.clone(),
                                 reason: err,
                             },

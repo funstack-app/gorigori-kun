@@ -15,6 +15,9 @@ export function ensureMultiAngleEventListener(): Promise<UnlistenFn> {
   if (!listenerPromise) {
     listenerPromise = onMultiAngleEvent((event) => {
       useMultiAngleRun.getState().applyEvent(event);
+    }).catch((err) => {
+      listenerPromise = null;
+      throw err;
     });
   }
   return listenerPromise;

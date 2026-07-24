@@ -4,6 +4,8 @@ import { ActiveProjectSelector } from "../../ActiveProjectSelector";
 import { WorkspaceTabs } from "../../WorkspaceTabs";
 import { useImagePreview } from "../../../lib/store/imagePreview";
 import { ensureProductSetEventListener } from "../../../lib/productSet/events";
+import { useProductSetRun } from "../../../lib/productSet/store";
+import { useToasts } from "../../../lib/store/toasts";
 
 import { ProductSetSettingsPanel } from "./ProductSetSettingsPanel";
 import { ProductSetGridPanel } from "./ProductSetGridPanel";
@@ -22,10 +24,17 @@ import { ProductSetGridPanel } from "./ProductSetGridPanel";
  */
 export function ProductSetWorkspace() {
   const openPreview = useImagePreview((s) => s.open);
+  const pushToast = useToasts((s) => s.push);
 
   useEffect(() => {
-    void ensureProductSetEventListener();
-  }, []);
+    void ensureProductSetEventListener().catch((err) => {
+      useProductSetRun.getState().reset();
+      pushToast({
+        kind: "error",
+        text: `生成結果の受信準備に失敗しました: ${(err as Error)?.message ?? err}`,
+      });
+    });
+  }, [pushToast]);
 
   return (
     <section className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#121212]">

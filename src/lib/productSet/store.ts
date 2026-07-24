@@ -49,8 +49,7 @@ type ProductSetRunState = {
   clearOutputSelection: () => void;
 
   // ===== run アクション =====
-  beginRun: (runId: string | null, selectedCuts: { cutId: string; label: string }[]) => void;
-  setRunId: (runId: string) => void;
+  beginRun: (runId: string, selectedCuts: { cutId: string; label: string }[]) => void;
   applyEvent: (e: MultiAngleEvent) => void;
   reset: () => void;
 };
@@ -131,7 +130,7 @@ export const useProductSetRun = create<ProductSetRunState>((set) => ({
       }
       return {
         status: "running" as const,
-        runId: runId ?? s.runId,
+        runId,
         cuts,
         cutOrder,
         cutStartedAt,
@@ -139,13 +138,13 @@ export const useProductSetRun = create<ProductSetRunState>((set) => ({
       };
     }),
 
-  setRunId: (runId) => set({ runId }),
-
   applyEvent: (e) =>
     set((s) => {
+      if (!s.runId || e.runId !== s.runId) return s;
+
       switch (e.kind) {
         case "started":
-          return { status: "running" as const, runId: e.runId };
+          return { status: "running" as const };
 
         case "cutStarted": {
           const prev = s.cuts[e.cutId] ?? {
@@ -196,7 +195,7 @@ export const useProductSetRun = create<ProductSetRunState>((set) => ({
         }
 
         case "completed":
-          return { status: "completed" as const, runId: e.runId };
+          return { status: "completed" as const };
 
         default:
           return s;

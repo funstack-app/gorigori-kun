@@ -51,15 +51,11 @@ type MultiAngleRunState = {
   /**
    * 生成 run を開始する。pending スケルトンを作って status=running にする。
    *
-   * 重要 (待機中 0/N 固着バグ修正 2026-06-06):
-   *   runId は **invoke の前** に呼んで skeleton を先に建てるため null 許容。
-   *   バックエンドの run_id が返ったら setRunId で後付けする。
-   *   こうしないと Rust 側が invoke 直後に spawn して cutStarted/cutCompleted を
-   *   先に emit するため、後から走る beginRun がそれらを pending で上書きしてしまう。
+   * runId はフロントで先に採番し、invoke 前に skeleton と一緒に記録する。
+   * これにより、先行イベントを取りこぼさず、共有チャンネル上の別スキルの
+   * イベントも runId の不一致で除外できる。
    */
-  beginRun: (runId: string | null, selectedCutIds: { cutId: string; label: string }[]) => void;
-  /** beginRun(null, ...) の後でバックエンドの run_id を後付けする。 */
-  setRunId: (runId: string) => void;
+  beginRun: (runId: string, selectedCutIds: { cutId: string; label: string }[]) => void;
   applyEvent: (e: MultiAngleEvent) => void;
   /** run 状態だけ初期化 (設定は保持)。 */
   reset: () => void;
@@ -151,7 +147,7 @@ export const useMultiAngleRun = create<MultiAngleRunState>((set) => ({
       }
       return {
         status: "running" as const,
-        runId: runId ?? s.runId,
+        runId,
         cuts,
         cutOrder,
         cutStartedAt,
@@ -162,13 +158,13 @@ export const useMultiAngleRun = create<MultiAngleRunState>((set) => ({
       };
     }),
 
-  setRunId: (runId) => set({ runId }),
-
   applyEvent: (e) =>
     set((s) => {
+      if (!s.runId || e.runId !== s.runId) return s;
+
       switch (e.kind) {
         case "started":
-          return { status: "running" as const, runId: e.runId };
+          return { status: "running" as const };
 
         case "cutStarted": {
           const prev = s.cuts[e.cutId] ?? {
@@ -216,7 +212,7 @@ export const useMultiAngleRun = create<MultiAngleRunState>((set) => ({
         }
 
         case "completed":
-          return { status: "completed" as const, runId: e.runId };
+          return { status: "completed" as const };
 
         default:
           return s;

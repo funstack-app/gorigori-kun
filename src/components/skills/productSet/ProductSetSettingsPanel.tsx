@@ -49,7 +49,6 @@ export function ProductSetSettingsPanel() {
   const clearSelection = useProductSetRun((s) => s.clearSelection);
   const status = useProductSetRun((s) => s.status);
   const beginRun = useProductSetRun((s) => s.beginRun);
-  const setRunId = useProductSetRun((s) => s.setRunId);
 
   const pushToast = useToasts((s) => s.push);
   const [aspectPickerOpen, setAspectPickerOpen] = useState(false);
@@ -102,6 +101,7 @@ export function ProductSetSettingsPanel() {
       })
       .filter((x): x is NonNullable<typeof x> => x !== null);
 
+    const runId = crypto.randomUUID();
     const params: MultiAngleParams = {
       characterImage: productImagePath,
       // 環境固定句はシーン指定を優先。空なら白背景系のため空文字のまま。
@@ -112,18 +112,18 @@ export function ProductSetSettingsPanel() {
       // 商品の同一性維持句(形状/色/ラベル/ロゴ)へ切り替える。人物向けの「ロゴ禁止」が
       // ラベル維持と衝突しないよう Rust 側でプロンプトを分岐させる。
       subjectKind: "product",
+      runId,
     };
 
     // skeleton を invoke 前に建てて、先行到着イベントを取りこぼさない
     // （マルチアングルの 0/N 固着修正と同じ順序）。
     beginRun(
-      null,
+      runId,
       cutPrompts.map((c) => ({ cutId: c.cutId, label: c.label })),
     );
 
     try {
-      const runId = await invoke<string>("multiangle_run", { params });
-      setRunId(runId);
+      await invoke<string>("multiangle_run", { params });
       pushToast({
         kind: "success",
         text: `${count} カットの納品セット生成を開始しました。`,

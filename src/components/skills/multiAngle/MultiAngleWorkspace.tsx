@@ -4,6 +4,8 @@ import { ActiveProjectSelector } from "../../ActiveProjectSelector";
 import { WorkspaceTabs } from "../../WorkspaceTabs";
 import { useImagePreview } from "../../../lib/store/imagePreview";
 import { ensureMultiAngleEventListener } from "../../../lib/multiangle/events";
+import { useMultiAngleRun } from "../../../lib/store/multiAngleRun";
+import { useToasts } from "../../../lib/store/toasts";
 
 import { AngleSettingsPanel } from "./AngleSettingsPanel";
 import { AngleGridPanel } from "./AngleGridPanel";
@@ -23,10 +25,17 @@ import { AngleGridPanel } from "./AngleGridPanel";
  */
 export function MultiAngleWorkspace() {
   const openPreview = useImagePreview((s) => s.open);
+  const pushToast = useToasts((s) => s.push);
 
   useEffect(() => {
-    void ensureMultiAngleEventListener();
-  }, []);
+    void ensureMultiAngleEventListener().catch((err) => {
+      useMultiAngleRun.getState().reset();
+      pushToast({
+        kind: "error",
+        text: `生成結果の受信準備に失敗しました: ${(err as Error)?.message ?? err}`,
+      });
+    });
+  }, [pushToast]);
 
   return (
     <section className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#121212]">

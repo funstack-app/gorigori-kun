@@ -33,7 +33,6 @@ export function AngleSettingsPanel() {
   const selectedCutIds = useMultiAngleRun((s) => s.selectedCutIds);
   const status = useMultiAngleRun((s) => s.status);
   const beginRun = useMultiAngleRun((s) => s.beginRun);
-  const setRunId = useMultiAngleRun((s) => s.setRunId);
 
   const pushToast = useToasts((s) => s.push);
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -80,25 +79,26 @@ export function AngleSettingsPanel() {
       })
       .filter((x): x is NonNullable<typeof x> => x !== null);
 
+    const runId = crypto.randomUUID();
     const params: MultiAngleParams = {
       characterImage: characterImagePath,
       environmentDescription,
       aspectRatio,
       cutIds: selectedCutIds,
       cutPrompts,
+      runId,
     };
 
     // 先に pending スケルトンを建てて listener を確実に間に合わせる。
     // バックエンドは invoke 直後に spawn して cutStarted/cutCompleted を emit する。
     // skeleton を invoke の前に建てておけば、先行到着したイベントも取りこぼさない。
     beginRun(
-      null,
+      runId,
       cutPrompts.map((c) => ({ cutId: c.cutId, label: c.label })),
     );
 
     try {
-      const runId = await invoke<string>("multiangle_run", { params });
-      setRunId(runId);
+      await invoke<string>("multiangle_run", { params });
       pushToast({
         kind: "success",
         text: `${count} カットの生成を開始しました。`,
