@@ -438,11 +438,94 @@ export function useEditorActions() {
    * どちらでいくかはユーザーが選ぶ (2026-07-03 STΛCK指摘)。
    */
   const openImageForEditing = async (path: string) => {
-    if (!canvas) return;
-    await showSourceImagePreview(canvas, path);
-    resetHistory();
-    bumpRevision();
-    setMessage("画像を開きました。右の「レイヤーに分解する」か、左レールの「ことばで分離」を選んでください。");
+    setSourceImagePath(path);
+    const liveCanvas = canvas ?? (await waitForEditorCanvas());
+    if (!liveCanvas) {
+      setError("編集キャンバスを準備できませんでした。もう一度お試しください。");
+      return false;
+    }
+    try {
+      await showSourceImagePreview(liveCanvas, path);
+      resetHistory();
+      bumpRevision();
+      setMessage("画像を開きました。右の「レイヤーに分解する」か、左レールの「ことばで分離」を選んでください。");
+      return true;
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+      return false;
+    }
+  };
+
+  /**
+   * 赤入れの正規化 bbox を使い、分解なしで指定範囲だけを AI 修正する。
+   * 元画像を開き直してから、既存の生成 → 差分パッチ経路を新規レイヤーとして重ねる。
+   */
+  const applyRedlineFix = async (
+    imagePath: string,
+    bboxNorm: [number, number, number, number],
+    instruction: string,
+  ): Promise<boolean> => {
+    if (!imagePath || !instruction.trim()) {
+      setError("修正する画像または指示がありません。");
+      return false;
+    }
+    if (!isValidNormalizedBbox(bboxNorm)) {
+      setError("赤入れの修正範囲が不正です。範囲を確認して、もう一度読み取ってください。");
+      return false;
+    }
+    const opened = await openImageForEditing(imagePath);
+    if (!opened) return false;
+    const liveCanvas = useEditor.getState().canvas;
+    if (!liveCanvas) {
+      setError("編集キャンバスを準備できませんでした。もう一度お試しください。");
+      return false;
+    }
+
+    setBusyTool("inpaint");
+    setError(null);
+    setMessage("赤入れの指定範囲だけを描き直しています… (30秒〜2分)");
+    try {
+      // 1) 正規化 bbox を元画像の実寸へ変換し、黒地に白い矩形のマスクを作る。
+      const mask = await buildFullSizeMaskFromNormalizedBbox(imagePath, bboxNorm);
+      const maskPath = await images.writeUpload(
+        `redline-mask-${Date.now()}.png`,
+        dataUrlToBytes(mask.dataUrl),
+      );
+
+      // 2) 既存のインペイント生成経路へ、元画像・マスク・赤入れ指示をそのまま渡す。
+      const result = await images.generateBatch({
+        prompt: instruction,
+        count: 1,
+        refImagePaths: [imagePath],
+        maskPaths: [maskPath],
+      });
+      const generatedPath = result.generatedPaths[0];
+      if (!generatedPath || result.failedCount > 0) {
+        throw new Error(result.errors[0] ?? "赤入れの部分修正に失敗しました。");
+      }
+
+      // 3) 既存の差分化を通し、bbox 外を透明に固定したパッチだけを新規レイヤーにする。
+      const patch = await buildDiffPatch(imagePath, generatedPath, mask.bbox, true);
+      const patchPath = await images.writeUpload(
+        `redline-patch-${Date.now()}.png`,
+        dataUrlToBytes(patch.dataUrl),
+      );
+      await addImageLayerToCanvas(liveCanvas, patchPath, "赤入れ修正", {
+        left: patch.left,
+        top: patch.top,
+        sourcePath: patchPath,
+        sourceBbox: [patch.left, patch.top, patch.width, patch.height],
+      });
+      bumpRevision();
+      pushHistory();
+      setMessage("指定範囲だけを修正しました。気に入らなければ ⌘Z で戻せます。");
+      return true;
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+      return false;
+    } finally {
+      setBusyTool(null);
+    }
   };
 
   const runMagic = async (path: string, tool: EditorTool = "magic", runProjectName = projectName) => {
@@ -680,6 +763,8 @@ export function useEditorActions() {
     exportPng,
     restyleSelectedLayer,
     chooseImage,
+    openImageForEditing,
+    applyRedlineFix,
     runMagic,
     handleCanvasClickForTool,
     confirmGrab,
@@ -700,6 +785,50 @@ function base64ToBytes(base64: string): Uint8Array {
   return bytes;
 }
 
+/** 編集タブのマウント直後など、Fabric canvas が store に登録されるまで少し待つ。 */
+async function waitForEditorCanvas(timeoutMs = 4_000): Promise<unknown | null> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const canvas = useEditor.getState().canvas;
+    if (canvas) return canvas;
+    await new Promise((resolve) => setTimeout(resolve, 16));
+  }
+  return useEditor.getState().canvas;
+}
+
+function isValidNormalizedBbox(
+  bbox: [number, number, number, number],
+): boolean {
+  const [x, y, width, height] = bbox;
+  return (
+    bbox.length === 4 &&
+    bbox.every((value) => Number.isFinite(value)) &&
+    x >= 0 &&
+    y >= 0 &&
+    width > 0 &&
+    height > 0 &&
+    x <= 1 &&
+    y <= 1 &&
+    x + width <= 1 &&
+    y + height <= 1
+  );
+}
+
+/** フルサイズの不透明な黒マスク canvas を作る（各マスク経路の共通土台）。 */
+function createBlackMaskCanvas(
+  width: number,
+  height: number,
+): { canvas: HTMLCanvasElement; context: CanvasRenderingContext2D } {
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("canvas context を取得できません。");
+  context.fillStyle = "#000";
+  context.fillRect(0, 0, width, height);
+  return { canvas, context };
+}
+
 /** クロップPNG (bbox位置) をフルサイズの白黒マスク dataURL にする。 */
 async function buildFullSizeMaskFromCrop(
   cropPath: string,
@@ -711,13 +840,7 @@ async function buildFullSizeMaskFromCrop(
   const base = getCanvasBaseSize(canvas as never);
   if (!base) throw new Error("元画像の寸法が取得できません。");
   const img = await loadHtmlImage(convertFileSrc(cropPath));
-  const work = document.createElement("canvas");
-  work.width = base.width;
-  work.height = base.height;
-  const ctx = work.getContext("2d");
-  if (!ctx) throw new Error("canvas context を取得できません。");
-  ctx.fillStyle = "#000";
-  ctx.fillRect(0, 0, work.width, work.height);
+  const { canvas: work, context: ctx } = createBlackMaskCanvas(base.width, base.height);
   ctx.drawImage(img, bbox[0], bbox[1]);
   const data = ctx.getImageData(0, 0, work.width, work.height);
   const px = data.data;
@@ -732,11 +855,41 @@ async function buildFullSizeMaskFromCrop(
   return work.toDataURL("image/png");
 }
 
+/** 正規化 bbox を元画像の実寸に合わせ、フルサイズの矩形マスクにする。 */
+async function buildFullSizeMaskFromNormalizedBbox(
+  sourcePath: string,
+  bboxNorm: [number, number, number, number],
+): Promise<{ dataUrl: string; bbox: [number, number, number, number] }> {
+  const { convertFileSrc } = await import("@tauri-apps/api/core");
+  const image = await loadHtmlImage(convertFileSrc(sourcePath));
+  const imageWidth = image.naturalWidth;
+  const imageHeight = image.naturalHeight;
+  if (imageWidth <= 0 || imageHeight <= 0) {
+    throw new Error("元画像の寸法が取得できません。");
+  }
+  const [x, y, width, height] = bboxNorm;
+  const left = Math.floor(x * imageWidth);
+  const top = Math.floor(y * imageHeight);
+  const right = Math.min(imageWidth, Math.ceil((x + width) * imageWidth));
+  const bottom = Math.min(imageHeight, Math.ceil((y + height) * imageHeight));
+  const bbox: [number, number, number, number] = [
+    left,
+    top,
+    right - left,
+    bottom - top,
+  ];
+  const { canvas, context } = createBlackMaskCanvas(imageWidth, imageHeight);
+  context.fillStyle = "#fff";
+  context.fillRect(...bbox);
+  return { dataUrl: canvas.toDataURL("image/png"), bbox };
+}
+
 /** 元画像と生成結果の差分領域を透過パッチにする (bbox+余白の範囲だけ見る)。 */
 async function buildDiffPatch(
   sourcePath: string,
   generatedPath: string,
   bbox: [number, number, number, number],
+  limitToBbox = false,
 ): Promise<{ dataUrl: string; left: number; top: number; width: number; height: number }> {
   const { convertFileSrc } = await import("@tauri-apps/api/core");
   const [src, gen] = await Promise.all([
@@ -767,7 +920,17 @@ async function buildDiffPatch(
   const srcData = srcDraw.ctx.getImageData(0, 0, width, height);
   const genData = genDraw.ctx.getImageData(0, 0, width, height);
   const out = genDraw.ctx.createImageData(width, height);
+  const bboxRight = bbox[0] + bbox[2];
+  const bboxBottom = bbox[1] + bbox[3];
   for (let i = 0; i < out.data.length; i += 4) {
+    const pixelIndex = i / 4;
+    const sourceX = left + (pixelIndex % width);
+    const sourceY = top + Math.floor(pixelIndex / width);
+    const insideBbox =
+      sourceX >= bbox[0] &&
+      sourceX < bboxRight &&
+      sourceY >= bbox[1] &&
+      sourceY < bboxBottom;
     const diff =
       Math.abs(srcData.data[i] - genData.data[i]) +
       Math.abs(srcData.data[i + 1] - genData.data[i + 1]) +
@@ -775,7 +938,9 @@ async function buildDiffPatch(
     out.data[i] = genData.data[i];
     out.data[i + 1] = genData.data[i + 1];
     out.data[i + 2] = genData.data[i + 2];
-    out.data[i + 3] = diff > 36 ? 255 : 0;
+    // 赤入れ経路は bbox 外を必ず透明にし、最終合成でマスク外の変更画素を 0 にする。
+    // 既存の diff>36 判定は維持し、生成画像を丸ごと採用しない。
+    out.data[i + 3] = diff > 36 && (!limitToBbox || insideBbox) ? 255 : 0;
   }
   const result = document.createElement("canvas");
   result.width = width;
