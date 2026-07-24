@@ -30,6 +30,66 @@ function nextKeyframeId(): string {
   return `kf-${Date.now()}-${keyframeSeq}`;
 }
 
+function fileTimestamp(date = new Date()): string {
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return [
+    date.getFullYear(),
+    pad(date.getMonth() + 1),
+    pad(date.getDate()),
+    "-",
+    pad(date.getHours()),
+    pad(date.getMinutes()),
+  ].join("");
+}
+
+function formatAnalysisAsMarkdown(
+  analysis: SceneAnalysis,
+  recreatePrompts: readonly RecreateShotPrompt[],
+): string {
+  const textOrFallback = (value: string) => value.trim() || "(記述なし)";
+  const lines = [
+    "# シーン再現 分析結果",
+    "",
+    "## シーン全体の演出構造",
+    "",
+    textOrFallback(analysis.overallStructure),
+    "",
+    "## 180度ルール / 視線誘導",
+    "",
+    textOrFallback(analysis.continuityAndEyeline),
+    "",
+    `## ショット割り（${analysis.shots.length}件）`,
+  ];
+
+  for (const shot of analysis.shots) {
+    lines.push(
+      "",
+      `### ショット ${shot.shotNumber}`,
+      "",
+      `- ショットサイズ: ${SHOT_SIZE_LABELS[shot.shotSize]}`,
+      `- アングル: ${CAMERA_ANGLE_LABELS[shot.angle]}`,
+      `- カメラワーク: ${CAMERA_WORK_LABELS[shot.cameraWork]}`,
+      `- 被写体の動き: ${textOrFallback(shot.subjectMotion)}`,
+      `- カットの動機: ${textOrFallback(shot.cutMotivation)}`,
+      `- 演出意図: ${textOrFallback(shot.directorialIntent)}`,
+    );
+  }
+
+  lines.push("", "## 再現プロンプト");
+  for (const item of recreatePrompts) {
+    lines.push(
+      "",
+      `### ショット ${item.shotNumber}`,
+      "",
+      "```text",
+      item.prompt,
+      "```",
+    );
+  }
+
+  return `${lines.join("\n")}\n`;
+}
+
 /**
  * シーン再現 Workspace(映像分析 MVP・スキル一覧v2.1 #8)
  *
@@ -391,6 +451,7 @@ function Field({ label, value }: { label: string; value: string }) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 function RecreatePanel({ analysis }: { analysis: SceneAnalysis }) {
+  const pushToast = useToasts((s) => s.push);
   const presets = usePresets((s) => s.presets);
   const characterPresets = useMemo(
     () => presets.filter((p) => presetKind(p) === "character"),
@@ -416,11 +477,48 @@ function RecreatePanel({ analysis }: { analysis: SceneAnalysis }) {
     [analysis.shots, subjectPrompt],
   );
 
+  async function saveAnalysis() {
+    try {
+      const { save } = await import("@tauri-apps/plugin-dialog");
+      const destination = await save({
+        defaultPath: `scene-analysis-${fileTimestamp()}.md`,
+        filters: [{ name: "Markdown", extensions: ["md"] }],
+      });
+      if (!destination) return;
+
+      const { writeTextFile } = await import("@tauri-apps/plugin-fs");
+      await writeTextFile(
+        destination,
+        formatAnalysisAsMarkdown(analysis, recreatePrompts),
+      );
+      pushToast({
+        kind: "success",
+        text: "分析結果をファイルに保存しました。",
+        ttlMs: 3000,
+      });
+    } catch (err) {
+      pushToast({
+        kind: "error",
+        text: `保存に失敗しました: ${(err as Error)?.message ?? err}`,
+        ttlMs: 5000,
+      });
+    }
+  }
+
   return (
     <div className="rounded-xl border border-[#2a2a2a] bg-[#161616] p-4">
-      <h3 className="mb-1 text-[12px] font-black text-pink-300">
-        自分のキャラで再現
-      </h3>
+      <div className="mb-1 flex items-center justify-between gap-3">
+        <h3 className="text-[12px] font-black text-pink-300">
+          自分のキャラで再現
+        </h3>
+        <button
+          type="button"
+          onClick={() => void saveAnalysis()}
+          className="shrink-0 rounded-md border border-[#343434] px-2 py-1 text-[10px] font-bold text-neutral-300 hover:border-pink-400 hover:text-white"
+        >
+          結果をファイルに保存
+        </button>
+      </div>
       <p className="mb-3 text-[11px] text-neutral-500">
         キャラ型プリセットを選ぶと、上のショット割りをそのまま再現する
         プロンプトをショットごとに生成します。

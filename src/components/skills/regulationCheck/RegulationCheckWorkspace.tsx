@@ -13,6 +13,7 @@ import {
   DEFAULT_RULE_SETS,
   findRule,
   resolveRules,
+  type RegulationRule,
   type RegulationRuleSet,
   type RegulationSeverity,
 } from "../../../lib/regulationCheck/rules";
@@ -32,6 +33,52 @@ function basename(p: string): string {
   return p.split(/[\\/]/).pop() ?? p;
 }
 
+type RuleSetSnapshot = {
+  id: string;
+  name: string;
+  rules: RegulationRule[];
+};
+
+type CheckResultsState = {
+  ruleSet: RuleSetSnapshot;
+  results: RegulationImageResult[];
+};
+
+function fileTimestamp(date = new Date()): string {
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return [
+    date.getFullYear(),
+    pad(date.getMonth() + 1),
+    pad(date.getDate()),
+    "-",
+    pad(date.getHours()),
+    pad(date.getMinutes()),
+  ].join("");
+}
+
+function formatReportAsMarkdown(state: CheckResultsState): string {
+  const lines = [
+    "# レギュレーション検査レポート",
+    "",
+    `- ルールセット: ${state.ruleSet.name}`,
+    `- ルールセットID: ${state.ruleSet.id}`,
+    "",
+    "## 適用ルール",
+  ];
+
+  for (const rule of state.ruleSet.rules) {
+    lines.push("", `### ${rule.name}`, "", rule.criteria);
+  }
+
+  lines.push(
+    "",
+    "## 検査結果",
+    "",
+    formatResultsAsText(state.results, state.ruleSet.rules),
+  );
+  return `${lines.join("\n")}\n`;
+}
+
 /**
  * レギュレーション検査 Workspace（スキル一覧v2.1 #11・MVP実装）
  *
@@ -46,7 +93,7 @@ export function RegulationCheckWorkspace() {
   const [ruleSetId, setRuleSetId] = useState<string>(DEFAULT_RULE_SETS[0].id);
   const [customRule, setCustomRule] = useState("");
   const [running, setRunning] = useState(false);
-  const [results, setResults] = useState<RegulationImageResult[]>([]);
+  const [resultState, setResultState] = useState<CheckResultsState | null>(null);
   const runTokenRef = useRef(0);
 
   useEffect(
@@ -66,6 +113,8 @@ export function RegulationCheckWorkspace() {
   );
 
   const canRun = imagePaths.length > 0 && !running;
+  const results = resultState?.results ?? [];
+  const resultRules = resultState?.ruleSet.rules ?? [];
 
   async function pickImages() {
     try {
@@ -100,7 +149,7 @@ export function RegulationCheckWorkspace() {
     runTokenRef.current += 1;
     setRunning(false);
     setImagePaths([]);
-    setResults([]);
+    setResultState(null);
   }
 
   async function runCheck() {
@@ -110,10 +159,15 @@ export function RegulationCheckWorkspace() {
     }
     const runToken = runTokenRef.current + 1;
     runTokenRef.current = runToken;
+    const ruleSnapshot: RuleSetSnapshot = {
+      id: ruleSet.id,
+      name: ruleSet.name,
+      rules: activeRules.map((rule) => ({ ...rule })),
+    };
     setRunning(true);
-    setResults([]);
+    setResultState({ ruleSet: ruleSnapshot, results: [] });
     try {
-      const rules = activeRules;
+      const rules = ruleSnapshot.rules;
       const paths = [...imagePaths];
       const collected: RegulationImageResult[] = [];
       // 画像は1枚ずつ Codex に渡す（description 取得は画像入力の実処理）。
@@ -122,7 +176,7 @@ export function RegulationCheckWorkspace() {
         const result = await checkImage(path, rules);
         if (runTokenRef.current !== runToken) return;
         collected.push(result);
-        setResults([...collected]);
+        setResultState({ ruleSet: ruleSnapshot, results: [...collected] });
       }
       const failed = collected.filter((r) => r.error).length;
       const flagged = collected.filter((r) => r.issues.length > 0).length;
@@ -155,8 +209,11 @@ export function RegulationCheckWorkspace() {
   }
 
   async function copyResults() {
-    if (results.length === 0) return;
-    const text = formatResultsAsText(results, activeRules);
+    if (!resultState || resultState.results.length === 0) return;
+    const text = formatResultsAsText(
+      resultState.results,
+      resultState.ruleSet.rules,
+    );
     try {
       await navigator.clipboard.writeText(text);
       pushToast({ kind: "success", text: "検査結果をコピーしました。", ttlMs: 2500 });
@@ -164,6 +221,32 @@ export function RegulationCheckWorkspace() {
       pushToast({
         kind: "error",
         text: `コピーに失敗しました: ${(err as Error)?.message ?? err}`,
+        ttlMs: 5000,
+      });
+    }
+  }
+
+  async function saveReport() {
+    if (!resultState || resultState.results.length === 0) return;
+    try {
+      const { save } = await import("@tauri-apps/plugin-dialog");
+      const destination = await save({
+        defaultPath: `regulation-report-${fileTimestamp()}.md`,
+        filters: [{ name: "Markdown", extensions: ["md"] }],
+      });
+      if (!destination) return;
+
+      const { writeTextFile } = await import("@tauri-apps/plugin-fs");
+      await writeTextFile(destination, formatReportAsMarkdown(resultState));
+      pushToast({
+        kind: "success",
+        text: "検査レポートをファイルに保存しました。",
+        ttlMs: 3000,
+      });
+    } catch (err) {
+      pushToast({
+        kind: "error",
+        text: `保存に失敗しました: ${(err as Error)?.message ?? err}`,
         ttlMs: 5000,
       });
     }
@@ -305,15 +388,28 @@ export function RegulationCheckWorkspace() {
         {/* 右: 結果パネル */}
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
           <div className="flex items-center justify-between border-b border-[#242424] px-4 py-2.5">
-            <span className="text-xs font-medium text-neutral-300">検査結果</span>
-            <button
-              type="button"
-              onClick={copyResults}
-              disabled={results.length === 0}
-              className="rounded border border-[#2c2c2c] px-2 py-1 text-[11px] text-neutral-300 hover:bg-[#222] disabled:opacity-40"
-            >
-              テキストでコピー
-            </button>
+            <span className="text-xs font-medium text-neutral-300">
+              検査結果
+              {resultState ? `（${resultState.ruleSet.name}）` : ""}
+            </span>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={copyResults}
+                disabled={results.length === 0}
+                className="rounded border border-[#2c2c2c] px-2 py-1 text-[11px] text-neutral-300 hover:bg-[#222] disabled:opacity-40"
+              >
+                テキストでコピー
+              </button>
+              <button
+                type="button"
+                onClick={() => void saveReport()}
+                disabled={results.length === 0}
+                className="rounded border border-[#2c2c2c] px-2 py-1 text-[11px] text-neutral-300 hover:bg-[#222] disabled:opacity-40"
+              >
+                レポートをファイルに保存
+              </button>
+            </div>
           </div>
 
           <div className="min-h-0 flex-1 overflow-y-auto p-4">
@@ -330,7 +426,7 @@ export function RegulationCheckWorkspace() {
                   <ResultCard
                     key={result.imagePath}
                     result={result}
-                    ruleName={(id) => findRule(activeRules, id)?.name ?? id}
+                    ruleName={(id) => findRule(resultRules, id)?.name ?? id}
                   />
                 ))}
                 {running && (
