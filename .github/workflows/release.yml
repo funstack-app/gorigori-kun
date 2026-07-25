@@ -34,8 +34,23 @@ concurrency:
 
 jobs:
   # ─────────────────────────────────────────────────────────────
-  # macOS (.dmg) - Apple Silicon + Intel の 2ターゲット並列ビルド
-  # v0.6.17 STΛCK 指示: Intel Mac 対応のため matrix 化。
+  # macOS (.dmg) - Apple Silicon のみ
+  #
+  # v0.6.17 で Intel Mac 対応のため matrix 化したが、v2.0.0 (2026-07-25) で
+  # x86_64-apple-darwin を外した。理由: ort-sys 2.0.0-rc.12 の配布表
+  # (build/download/dist.txt) から x86_64-apple-darwin が消え、
+  # 「ort does not provide prebuilt binaries for the target」でビルドが落ちる。
+  # 配布表には Windows/Linux/Android/iOS/Apple Silicon が揃っており、
+  # Intel Mac だけが唯一の欠落 = 上流がサポートを落とした。
+  #
+  # なお v1.2.0 の Intel 版 dmg がビルドできていたのは load-dynamic 有効時で、
+  # あれは実行時に dylib を探して無限ハングする構成だった (2026-06-18 に判明し除去)。
+  # つまり「動いていた Intel 版を失った」のではなく、壊れていたことが露出した。
+  #
+  # 復活させるなら: ort が Intel Mac 配布を再開する / ONNX Runtime を自前ビルドして
+  # リンクする / 純Rust バックエンド (ort-tract) へ移す のいずれか。
+  # SAM2/SAM3/LaMa/BiRefNet/PP-OCR を通す必要があるため ort-tract は要検証。
+  # matrix 構造は残してあるので、行を1本足せば戻せる。
   # ─────────────────────────────────────────────────────────────
   macos:
     runs-on: macos-14
@@ -44,7 +59,6 @@ jobs:
       matrix:
         target:
           - aarch64-apple-darwin   # Apple Silicon (M1/M2/M3/M4)
-          - x86_64-apple-darwin    # Intel Mac
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -302,22 +316,23 @@ jobs:
             gh release download "$TAG" -p "$name" -O - 2>/dev/null | tr -d '\n' || echo ""
           }
 
-          DARWIN_AARCH64_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/GORI.GORI_aarch64.app.tar.gz"
-          DARWIN_X86_64_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/GORI.GORI_x64.app.tar.gz"
-          # STΛCK 報告 (2026-05-19): tauri-action v0.6.2 は Windows で
-          # .nsis.zip / .nsis.zip.sig を release にアップロードしない。
-          # 実際に上がるのは .exe / .exe.sig なので、Tauri Updater v2 は
-          # .exe URL でも動くため (NSIS installer を直接実行) こちらを使う。
-          WINDOWS_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/GORI.GORI_${TAG_NUM}_x64-setup.exe"
-
-          DARWIN_AARCH64_SIG="$(fetch_sig "GORI.GORI_aarch64.app.tar.gz.sig")"
-          DARWIN_X86_64_SIG="$(fetch_sig "GORI.GORI_x64.app.tar.gz.sig")"
-          WINDOWS_SIG="$(fetch_sig "GORI.GORI_${TAG_NUM}_x64-setup.exe.sig")"
-
-          echo "== signatures =="
-          echo "darwin-aarch64: ${#DARWIN_AARCH64_SIG} bytes"
-          echo "darwin-x86_64:  ${#DARWIN_X86_64_SIG} bytes"
-          echo "windows-x86_64: ${#WINDOWS_SIG} bytes"
+          # ── 配布プラットフォームの単一の正本 ───────────────────────────
+          # 「Tauri の platform 名 | 更新用アーカイブ名」を1箇所で定義し、
+          # 署名検証と latest.json 生成の両方をここから導出する。
+          #
+          # なぜ1箇所にまとめたか (2026-07-25):
+          #   以前は検証ループと latest.json 本文が別々にプラットフォームを列挙して
+          #   いた。片方だけ直すと「検証は Intel を必須にしているのに latest.json
+          #   には出さない」「逆に latest.json に空署名だけ載る」というズレが生まれ、
+          #   しかもどちらも CI 上は自然に見える。列挙を1本にすれば構造的に起きない。
+          #
+          # Intel Mac (darwin-x86_64) は v2.0.0 で除外した。理由は macos job の
+          # コメント参照 (ort-sys が Intel Mac の prebuilt 配布を終了)。
+          # 復活させるときはこの表に1行足すだけでよく、検証も latest.json も追従する。
+          PLATFORMS=(
+            "darwin-aarch64|GORI.GORI_aarch64.app.tar.gz"
+            "windows-x86_64|GORI.GORI_${TAG_NUM}_x64-setup.exe"
+          )
 
           # 署名が1つでも欠けたら job を失敗させる (2026-07-25 修正)。
           #
@@ -336,20 +351,33 @@ jobs:
           # 極端に短い値は「取得できたが中身が壊れている」ケースを示す。
           MIN_SIG_BYTES=200
           SIG_ERROR=0
-          for entry in \
-            "darwin-aarch64:${DARWIN_AARCH64_SIG}" \
-            "darwin-x86_64:${DARWIN_X86_64_SIG}" \
-            "windows-x86_64:${WINDOWS_SIG}"; do
-            name="${entry%%:*}"
-            value="${entry#*:}"
-            if [ -z "$value" ]; then
-              echo "::error::${name} の .sig が取得できませんでした"
+          PLATFORM_JSON=""
+
+          echo "== signatures =="
+          for entry in "${PLATFORMS[@]}"; do
+            name="${entry%%|*}"
+            asset="${entry#*|}"
+            sig="$(fetch_sig "${asset}.sig")"
+            url="https://github.com/${{ github.repository }}/releases/download/${TAG}/${asset}"
+
+            echo "${name}: ${#sig} bytes (${asset})"
+
+            if [ -z "$sig" ]; then
+              echo "::error::${name} の .sig が取得できませんでした (${asset}.sig)"
               SIG_ERROR=1
-            elif [ "${#value}" -lt "$MIN_SIG_BYTES" ]; then
-              echo "::error::${name} の .sig が短すぎます (${#value} bytes < ${MIN_SIG_BYTES})"
+            elif [ "${#sig}" -lt "$MIN_SIG_BYTES" ]; then
+              echo "::error::${name} の .sig が短すぎます (${#sig} bytes < ${MIN_SIG_BYTES})"
               SIG_ERROR=1
             fi
+
+            [ -n "$PLATFORM_JSON" ] && PLATFORM_JSON="${PLATFORM_JSON},"
+            PLATFORM_JSON="${PLATFORM_JSON}
+              \"${name}\": {
+                \"signature\": \"${sig}\",
+                \"url\": \"${url}\"
+              }"
           done
+
           if [ "$SIG_ERROR" -ne 0 ]; then
             echo "::error::署名が揃わないため latest.json を publish しません (既存ユーザーは旧版のまま安全に留まります)"
             exit 1
@@ -360,25 +388,21 @@ jobs:
             "version": "${TAG_NUM}",
             "notes": "GORI GORI KUN ${TAG}",
             "pub_date": "${PUB_DATE}",
-            "platforms": {
-              "darwin-aarch64": {
-                "signature": "${DARWIN_AARCH64_SIG}",
-                "url": "${DARWIN_AARCH64_URL}"
-              },
-              "darwin-x86_64": {
-                "signature": "${DARWIN_X86_64_SIG}",
-                "url": "${DARWIN_X86_64_URL}"
-              },
-              "windows-x86_64": {
-                "signature": "${WINDOWS_SIG}",
-                "url": "${WINDOWS_URL}"
-              }
+            "platforms": {${PLATFORM_JSON}
             }
           }
           JSON
 
           echo "== latest.json =="
           cat /tmp/latest.json
+
+          # 生成した JSON が壊れていないことをここで確かめる。
+          # 文字列連結で組んでいるため、署名に想定外の文字が混ざると
+          # updater 側で初めて壊れが分かる (=ユーザーが踏む) 事故になりうる。
+          python3 -c "import json,sys; d=json.load(open('/tmp/latest.json')); \
+            ps=d['platforms']; \
+            print('platforms:', ', '.join(sorted(ps))); \
+            sys.exit(0 if ps else 1)"
 
       - name: Upload latest.json to release (overwrite)
         uses: softprops/action-gh-release@v2
