@@ -27,10 +27,24 @@ export function SkillsWorkspace({ onUseSkill }: { onUseSkill?: () => void }) {
   const setSkillEnabled = useSkillMode((s) => s.setEnabled);
   const setSelectedSkillId = useSkillMode((s) => s.setSelectedSkillId);
 
+  // SKILL.md の実在チェックは「インポートされたカスタムスキル」だけに掛ける。
+  // なぜ (2026-07-25 STΛCK指示で修正):
+  //   組み込みスキルは専用 Workspace (SkillWorkspaceRouter) がアプリ内に実装されており、
+  //   ~/.codex/skills/ 配下の SKILL.md を必要としない。実際に SKILL.md を読むのは
+  //   絵コンテ (storyboard.rs) だけで、それは bundle.resources で同梱済み。
+  //   にもかかわらず全スキルに実在チェックを掛けていたため、実装が完成して動作する
+  //   スキルにまで「未検出」バッジが出て、初見ユーザーが「壊れている/セットアップ失敗」と
+  //   誤解していた (availableInApp:true で押せることと矛盾する表示)。
+  //   カスタムスキルは外部ファイルが正本なので、そちらだけチェックを残す。
   useEffect(() => {
     let cancelled = false;
+    const needsFileCheck = GORI_SKILLS.filter((skill) => skill.imported);
+    if (needsFileCheck.length === 0) {
+      setPresent(Object.fromEntries(GORI_SKILLS.map((skill) => [skill.id, true])));
+      return;
+    }
     Promise.all(
-      GORI_SKILLS.map(async (skill) => {
+      needsFileCheck.map(async (skill) => {
         try {
           const ok = await exists(`${relativeSkillPath(skill)}/SKILL.md`, {
             baseDir: BaseDirectory.Home,
@@ -41,7 +55,13 @@ export function SkillsWorkspace({ onUseSkill }: { onUseSkill?: () => void }) {
         }
       }),
     ).then((entries) => {
-      if (!cancelled) setPresent(Object.fromEntries(entries));
+      if (!cancelled) {
+        // 組み込みスキルは常に present 扱い。カスタムのみ実測結果で上書きする。
+        setPresent({
+          ...Object.fromEntries(GORI_SKILLS.map((skill) => [skill.id, true])),
+          ...Object.fromEntries(entries),
+        });
+      }
     });
     return () => {
       cancelled = true;
