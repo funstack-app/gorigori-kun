@@ -5,6 +5,10 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { storyboard } from "../lib/ipc";
 import { usePlanChat } from "../lib/store/planChat";
 import { useStoryboardRun, type CutState } from "../lib/store/storyboardRun";
+import { ContextMenu } from "./ContextMenu";
+import { buildGalleryItemMenu } from "./galleryItemMenu";
+import { RegisterPresetDialog } from "./RegisterPresetDialog";
+import { useImages } from "../lib/store/images";
 
 /**
  * B-6: 生成中カットの経過秒を 1 秒ごとに更新する (通常生成 WorkerTile と同じ流儀)。
@@ -161,6 +165,22 @@ export function StoryboardCutCard({ cut }: { cut: CutState }) {
       });
   };
 
+  /*
+   * 右クリックメニュー (STΛCK指示 2026-07-25:
+   * 「タイムライン上からもそのまま生成したものに関して保存の選択ができて、
+   *  保存できるようにしてください」)。
+   *
+   * ライブラリ (VirtualGalleryGrid / MessageList) と同じ buildGalleryItemMenu を使う。
+   * メニューを別に作らないのは、項目が増えたときに片方だけ古くなるのを防ぐため。
+   * ギャラリーに登録済みの画像ならその実体を使う (savedTo / お気に入り等の
+   * 判定が正しくなる)。無ければ最小の GalleryItem を組み立ててフォールバックする。
+   */
+  const [menuPos, setMenuPos] = useState<{ x: number; y: number } | null>(null);
+  const [presetTarget, setPresetTarget] = useState<string | null>(null);
+  const galleryItems = useImages((s) => s.items);
+  const favorites = useImages((s) => s.favorites);
+  const toggleFavorite = useImages((s) => s.toggleFavorite);
+
   const selectedIndex = cut.takes.findIndex((t) => t.takeId === cut.selectedTakeId);
   const selected =
     cut.takes.find((take) => take.takeId === cut.selectedTakeId) ?? cut.takes[0];
@@ -184,6 +204,12 @@ export function StoryboardCutCard({ cut }: { cut: CutState }) {
         <button
           type="button"
           disabled={!selected}
+          onContextMenu={(e) => {
+            if (!selected) return;
+            e.preventDefault();
+            setMenuPos({ x: e.clientX, y: e.clientY });
+          }}
+          title={selected ? "右クリックで保存・書き出しメニュー" : undefined}
           className="h-24 w-24 shrink-0 overflow-hidden rounded-lg border border-black/30 bg-[#0b0b0b] disabled:cursor-default"
         >
           {selected ? (
@@ -316,6 +342,40 @@ export function StoryboardCutCard({ cut }: { cut: CutState }) {
           )}
         </div>
       </div>
+
+      {/* 右クリックメニュー: ライブラリと同じ項目 (保存/プリセット登録/SNS書き出し等) */}
+      {menuPos && selected && (
+        <ContextMenu
+          x={menuPos.x}
+          y={menuPos.y}
+          items={buildGalleryItemMenu(
+            // ギャラリーに登録済みならその実体を使い、無ければ最小構成で組む
+            galleryItems.find((it) => it.path === selected.imagePath) ?? {
+              path: selected.imagePath,
+              name: selected.imagePath.split("/").pop() ?? cut.cutId,
+              bucket: "storyboard",
+              mtimeMs: Date.now(),
+              size: 0,
+              kind: "created" as const,
+            },
+            {
+              favorites,
+              onToggleFavorite: toggleFavorite,
+              onRegisterPreset: (path) => setPresetTarget(path),
+            },
+          )}
+          onClose={() => setMenuPos(null)}
+        />
+      )}
+      {presetTarget && (
+        <RegisterPresetDialog
+          imagePath={presetTarget}
+          onClose={() => {
+            setPresetTarget(null);
+            setMenuPos(null);
+          }}
+        />
+      )}
     </article>
   );
 }
