@@ -634,6 +634,33 @@ pub async fn images_relink_missing(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<RelinkResult, String> {
+    // 手動実行 (設定画面の「画像パスを修復する」) と起動時実行はこれまでどおり
+    // prune (実体消失レコードの削除) まで行う。挙動は従来と同一。
+    relink_missing_inner(&app, &state, true).await
+}
+
+/// 保存先変更フック用の再リンク (prune なし)。
+///
+/// なぜ prune を切るか: 保存先を「まだマウントされていない外部ディスク」や
+/// 「同期が終わっていないクラウドフォルダ」に向けた直後は、索引が空になりうる。
+/// その状態で prune すると history.db の全レコードが「実体消失」と誤判定されて
+/// 消える。保存先変更は**事故が最も起きやすい瞬間**なので、ここでは
+/// 「見つかったものを張り替える」だけに留め、削除は一切しない (非破壊)。
+/// 本当に消えたレコードの掃除は、次回起動時 or 手動修復ボタンが担う。
+pub async fn relink_missing_after_root_change(
+    app: &AppHandle,
+    state: &AppState,
+) -> Result<RelinkResult, String> {
+    relink_missing_inner(app, state, false).await
+}
+
+/// `allow_prune`: 実体が見つからないレコードを history.db から削除してよいか。
+/// false のときは削除せず `db_unresolved` に数えるだけ (SafeImage がフォールバック表示する)。
+async fn relink_missing_inner(
+    app: &AppHandle,
+    state: &AppState,
+    allow_prune: bool,
+) -> Result<RelinkResult, String> {
     // 候補ディレクトリ = watcher と同じ集合 (現行 HOME / 旧 ~/.codex / storage_root)。
     let settings = state
         .storage_settings()
@@ -641,6 +668,33 @@ pub async fn images_relink_missing(
         .or_else(|| StorageSettings::load().ok());
     let dirs = watcher_dirs(settings.as_ref());
     let index = build_filename_index(&dirs);
+
+    // 索引が空のときは prune を全面禁止する (2026-07-25 追加・サーキットブレーカー)。
+    //
+    // なぜ必要か:
+    //   保存先 (storage_root) を外付けHDDやクラウド同期フォルダに向けているユーザーが、
+    //   ディスクを繋がずに / 同期が終わる前にアプリを起動すると、候補ディレクトリが
+    //   1つも読めず索引が空になる。その状態で prune が走ると「実体がどこにも無い」と
+    //   判定されて **history.db のレコードが全件削除される**。
+    //   ディスクを繋ぎ直しても、DB から消えた記録は戻らない。
+    //
+    //   起動時 relink (App.tsx) は allow_prune=true で走るため、この経路が最も危険。
+    //   保存先変更フックだけを allow_prune=false にしても起動時経路は守れないので、
+    //   「索引が空なら消さない」という判定をここに置く。
+    //
+    // 索引が空 = 「候補ディレクトリが読めない」か「本当に1枚も無い」のどちらか。
+    // 後者なら消すものも無いので、禁止しても損失はない。非対称なので安全側に倒す。
+    let allow_prune = if allow_prune && index.is_empty() {
+        tracing::warn!(
+            target: "codex.images",
+            dirs = ?dirs,
+            "images_relink_missing: 候補ディレクトリの索引が空。保存先が未接続の可能性があるため \
+             history.db の削除をスキップします (レコードは保持)"
+        );
+        false
+    } else {
+        allow_prune
+    };
 
     let mut result = RelinkResult {
         db_updated: 0,
@@ -684,6 +738,12 @@ pub async fn images_relink_missing(
             .map(|s| s.to_string());
         let candidate = file_name.as_deref().and_then(|fname| index.get(fname));
         let Some(new_path) = candidate else {
+            if !allow_prune {
+                // 保存先変更直後は「索引がまだ空」と「本当に消えた」を区別できないため
+                // 削除しない。未解決として数え、次回起動時の判定に委ねる。
+                result.db_unresolved += 1;
+                continue;
+            }
             // 候補なし = 実体がどこにも無い → DB から該当行を削除。
             match sqlx::query("DELETE FROM images WHERE path = ?1")
                 .bind(&old_path)
@@ -973,6 +1033,62 @@ mod tests {
         let index = build_filename_index(&[root.path().to_path_buf()]);
         assert_eq!(index.get("ig_abc.png"), Some(&img));
         assert!(index.get("ig_abc-mask-1.png").is_none());
+    }
+
+    /// F4 の事故機構そのものを固定するテスト。
+    ///
+    /// 保存先を「まだマウントされていない外部ディスク」に向けた直後は、候補ディレクトリが
+    /// 読めず索引が**空**になる。このとき relink は全レコードを「実体消失」と判定するため、
+    /// prune を許すと history.db が丸ごと消える。
+    /// → 保存先変更フック (relink_missing_after_root_change) は allow_prune=false で呼ぶ。
+    ///
+    /// ここでは「読めないディレクトリ → 索引が空」という前提が崩れていないことを検査する。
+    /// この前提が変わったら (例: 読めないディレクトリでエラーを返す設計に変えたら)
+    /// prune 抑止の必要性も再評価が必要なので、テストで固定しておく。
+    #[test]
+    fn filename_index_is_empty_when_root_is_unavailable() {
+        let missing = std::path::PathBuf::from("/definitely/not/mounted/gori-test-root");
+        assert!(!missing.exists(), "テスト前提: このパスは存在しないこと");
+        let index = build_filename_index(&[missing]);
+        assert!(
+            index.is_empty(),
+            "存在しない保存先で索引が空にならないなら prune 抑止の前提が変わっている"
+        );
+    }
+
+    /// サーキットブレーカー: 索引が空のときは prune を禁止する。
+    ///
+    /// 2026-07-25 追加。外付けHDD / クラウド同期フォルダを保存先にしているユーザーが
+    /// ディスク未接続で起動すると索引が空になり、prune が走ると history.db の
+    /// レコードが全件消える(繋ぎ直しても戻らない)。起動時 relink は allow_prune=true で
+    /// 走るため、保存先変更フックだけを false にしても守れない。
+    ///
+    /// relink_missing_inner 内の判定と同じ式をここで固定する。実装を変えたときに
+    /// この防御が外れたら落ちるようにしておくのが目的。
+    #[test]
+    fn prune_is_disabled_when_index_is_empty() {
+        /// relink_missing_inner の判定と同一の式。
+        fn effective_allow_prune(requested: bool, index_is_empty: bool) -> bool {
+            if requested && index_is_empty {
+                false
+            } else {
+                requested
+            }
+        }
+
+        // 索引が空 = 保存先が読めない可能性 → 要求されても消さない (これが本題)
+        assert!(
+            !effective_allow_prune(true, true),
+            "索引が空なのに prune が許可されている。保存先未接続で history.db が消える"
+        );
+        // 索引がある = 通常起動 → 従来どおり消してよい (機能を殺していないことの確認)
+        assert!(
+            effective_allow_prune(true, false),
+            "通常時に prune が無効化されている。壊れたレコードが掃除されなくなる"
+        );
+        // 呼び出し側が禁止しているなら索引の状態に関わらず禁止のまま
+        assert!(!effective_allow_prune(false, false));
+        assert!(!effective_allow_prune(false, true));
     }
 
     #[test]

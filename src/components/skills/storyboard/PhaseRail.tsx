@@ -1,11 +1,13 @@
 import { useMemo } from "react";
 
+import { usePlanChat } from "../../../lib/store/planChat";
 import { useStoryboardRun } from "../../../lib/store/storyboardRun";
 import type { StoryboardPhase } from "../../../lib/storyboard/types";
 
 const PHASES: Array<{ id: StoryboardPhase; label: string; subLabel: string }> = [
   { id: "goal", label: "1. 目標", subLabel: "AIと深掘り" },
-  { id: "sketch", label: "2. 絵コンテ", subLabel: "カット案レビュー" },
+  // SB-3: 絵コンテは任意工程。スキップして 3. 生成へ直行できることを UI 上でも示す。
+  { id: "sketch", label: "2. 絵コンテ", subLabel: "任意 / スキップ可" },
   { id: "generation", label: "3. 生成", subLabel: "順次描画中" },
   { id: "review", label: "4. 確認", subLabel: "最終チェック" },
 ];
@@ -21,7 +23,16 @@ const PHASES: Array<{ id: StoryboardPhase; label: string; subLabel: string }> = 
 export function PhaseRail() {
   const phase = useStoryboardRun((s) => s.phase);
   const goal = useStoryboardRun((s) => s.goal);
-  const sketchVersions = useStoryboardRun((s) => s.sketchVersions);
+  // SB-3 (2026-07-25 STΛCK指示「絵コンテなしで本生成へ直行できるようにする」):
+  // 生成 Phase の入場条件は sketchVersions ではなく sceneConstruction を見る。
+  //
+  // なぜ変えるか: 生成の実際の前提条件は GenerationProgressPanel.startGeneration の
+  // `if (!goal || !sceneConstruction) return;` であって絵コンテではない。絵コンテが
+  // 無い場合 sketchReferences は空のまま渡り、プロンプトのみで正常に生成される
+  // (B1 修正のコメント参照)。つまり sketchVersions.length > 0 を要求していたのは
+  // 実装上の必要条件ではなく、絵コンテ経路だけを通す UI 上の縛りだった。
+  // ここを緩めても生成側は無改造で成立する。
+  const sceneConstruction = usePlanChat((s) => s.sceneConstruction);
   const totalCuts = useStoryboardRun((s) => s.totalCuts);
   const cuts = useStoryboardRun((s) => s.cuts);
   const runStatus = useStoryboardRun((s) => s.status);
@@ -41,7 +52,8 @@ export function PhaseRail() {
       case "sketch":
         return goal !== null;
       case "generation":
-        return sketchVersions.length > 0;
+        // 絵コンテ (sketch) は任意。企画で構成が確定していれば直行できる。
+        return goal !== null && sceneConstruction !== null;
       case "review":
         return totalCuts > 0;
     }

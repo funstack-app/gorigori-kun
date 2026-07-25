@@ -10,6 +10,7 @@ import {
 } from "../lib/scene/buildPromptJson";
 import { refineVideoPrompt } from "../lib/scene/refinePrompt";
 import { useToasts } from "../lib/store/toasts";
+import { useAccounts } from "../lib/store/accounts";
 import { useComposer, type Reference } from "../lib/store/composer";
 import { useVideoGen } from "../lib/store/videoGen";
 import {
@@ -104,6 +105,11 @@ export function VideoConstructedPromptPanel() {
     disabled,
     generate,
   } = useVideoSceneGeneration();
+
+  // API-02 (2026-07-25): 動画生成は必ず Higgsfield MCP (higgsfieldMcp.generateBatch) を叩く。
+  // 未接続のまま押せると MCP エラーで落ち、ユーザーには原因が見えなかった。
+  // 接続済み判定は HiggsfieldModelSelector と同じ accounts.higgsfield.authenticated を正とする。
+  const higgsfieldAuthed = useAccounts((s) => s.higgsfield.authenticated);
 
   const [draft, setDraft] = useState<string>(generatedPrompt);
   const [elementModalOpen, setElementModalOpen] = useState(false);
@@ -287,7 +293,9 @@ export function VideoConstructedPromptPanel() {
     // Higgsfield CLI は --prompt 内の "@..." をファイル参照と解釈するため、
     // @img1 を残すと "Failed to read img1" でコスト計算が失敗する (2026-06-04 修正)。
     const prompt = resolveImageMentions(effectivePrompt, references).cleanedPrompt.trim();
-    if (!prompt) {
+    // API-02: 未接続なら get_cost も必ず MCP エラーになる。静的見積もりのまま置き、
+    // 入力のたびに失敗する MCP 呼び出しを投げない (エラーを増やさない)。
+    if (!prompt || !higgsfieldAuthed) {
       setCost({ kind: "idle", value: fallback, source: "static" });
       return () => {
         cancelled = true;
@@ -309,7 +317,16 @@ export function VideoConstructedPromptPanel() {
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [model, effectivePrompt, references, aspectRatio, duration, extraParamValues]);
+    // higgsfieldAuthed を依存に入れる: 接続直後に実コストを取り直すため。
+  }, [
+    model,
+    effectivePrompt,
+    references,
+    aspectRatio,
+    duration,
+    extraParamValues,
+    higgsfieldAuthed,
+  ]);
 
   // 設定サマリ行のラベル。
   // 比較モード: 「N モデルで比較 · 16:9」。単一モード: 「Kling · 9秒 · 16:9 · ...」
@@ -428,17 +445,38 @@ export function VideoConstructedPromptPanel() {
           </p>
         )}
 
+        {/* API-02: 未接続を「押せるが落ちる」から「押せない + 次の一手が読める」へ。
+            原因不明のエラーで終わらせないため、案内をボタンの直上に置く。 */}
+        {!higgsfieldAuthed && (
+          <div className="rounded-md border border-amber-500/40 bg-amber-500/5 px-2.5 py-2">
+            <p className="text-[11px] font-black text-amber-200">
+              Higgsfield に接続してください
+            </p>
+            <p className="mt-1 text-[10px] leading-relaxed text-neutral-400">
+              動画生成は Higgsfield を使います。設定 → 接続先 → HiggsField を接続すると
+              このボタンが押せるようになります。
+            </p>
+          </div>
+        )}
+
         <button
           type="button"
           onClick={() => void generate()}
-          disabled={disabled}
+          disabled={disabled || !higgsfieldAuthed}
+          title={
+            higgsfieldAuthed
+              ? undefined
+              : "Higgsfield 未接続のため生成できません (設定 → 接続先)"
+          }
           className="h-9 w-full rounded-md bg-pink-500 px-4 py-1.5 text-sm font-black text-white transition hover:bg-pink-600 disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-500"
         >
-          {isQueueFull
-            ? `生成中 ${runningBatchCount}/${maxConcurrentBatches}`
-            : compareMode
-              ? `${compareModelIds.length}モデルで比較生成`
-              : "動画を生成"}
+          {!higgsfieldAuthed
+            ? "Higgsfield 未接続"
+            : isQueueFull
+              ? `生成中 ${runningBatchCount}/${maxConcurrentBatches}`
+              : compareMode
+                ? `${compareModelIds.length}モデルで比較生成`
+                : "動画を生成"}
         </button>
 
         {status.kind !== "idle" && (

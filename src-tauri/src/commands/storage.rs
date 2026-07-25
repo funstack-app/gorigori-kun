@@ -129,9 +129,43 @@ pub async fn storage_set_settings(
     state: State<'_, AppState>,
     settings: StorageSettings,
 ) -> Result<(), String> {
+    // F4: 保存先 (storage_root) を変えると、history.db / projects.json に絶対パスで
+    // 記録済みの既存画像が「その場所に無い」状態になり、まとめて見えなくなる。
+    // 変更前の値を先に控え、実際に変わったときだけ再リンクを走らせる。
+    // (毎回走らせると全画像の再帰走査が発生して設定保存が重くなるため、変化検知で絞る)
+    let previous_root = match state.storage_settings().await {
+        Some(previous) => Some(previous.storage_root),
+        // state に無ければディスクの現行値を読む (起動直後の初回保存でも比較できるように)。
+        None => StorageSettings::load().ok().map(|s| s.storage_root),
+    };
+    let root_changed = previous_root
+        .as_deref()
+        .is_some_and(|previous| previous != settings.storage_root);
+
     settings.save()?;
     state.set_storage_settings(settings).await;
     restart_image_watcher(&app, &state).await;
+
+    if root_changed {
+        // 既存の再リンク実装をそのまま呼ぶ (パスの保存形式は変えない)。
+        // 削除なし版を使う理由は relink_missing_after_root_change のコメント参照。
+        // 失敗しても設定変更自体は成功させる: 保存先の切り替えを再リンクの都合で
+        // 巻き戻すと、ユーザーは「保存先が変えられない」ほうの詰まりに遭う。
+        // 手動の「画像パスを修復する」ボタンで後追いできる。
+        match crate::commands::images::relink_missing_after_root_change(&app, &state).await {
+            Ok(result) => {
+                tracing::info!(
+                    target: "codex.storage",
+                    db_updated = result.db_updated,
+                    db_unresolved = result.db_unresolved,
+                    "storage_set_settings: 保存先変更を検知して画像パスを再リンクした"
+                );
+            }
+            Err(err) => {
+                tracing::warn!(target: "codex.storage", "保存先変更後の再リンクに失敗 (設定変更は成功): {err}");
+            }
+        }
+    }
     Ok(())
 }
 

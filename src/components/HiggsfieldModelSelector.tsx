@@ -291,7 +291,9 @@ export function HiggsfieldModelSelector({ media }: { media: "image" | "video" })
 
 function ModelPickerPopover({
   anchorRect,
-  loadState: _loadState,
+  // API-02 (2026-07-25): 以前は未使用 (_loadState) だったが、空一覧の理由を
+  // 「未接続」と「該当なし/読込中」に書き分けるために使うようにした。
+  loadState,
   query,
   onQueryChange,
   sections,
@@ -477,9 +479,23 @@ function ModelPickerPopover({
 
         {providerTab === "higgsfield" &&
           (sections.length === 0 ? (
-            <p className="rounded-md px-2 py-3 text-center text-[11px] text-neutral-600">
-              設定の「接続先」から HiggsField を接続するとモデルが出ます。
-            </p>
+            // API-02 (2026-07-25): 「モデルが無い」と「未接続」を区別する。
+            // 未接続のときは次にやること (設定 → 接続先) を明記する。
+            loadState === "needsAuth" || loadState === "missing" ? (
+              <div className="rounded-md border border-amber-500/40 bg-amber-500/5 px-2.5 py-2.5">
+                <p className="text-[11px] font-black text-amber-200">HiggsField 未接続</p>
+                <p className="mt-1 text-[10px] leading-relaxed text-neutral-400">
+                  設定 → 接続先 → HiggsField を接続するとモデルが出ます。画像生成は接続なしでも
+                  デフォルトモデルで動きます。
+                </p>
+              </div>
+            ) : (
+              <p className="rounded-md px-2 py-3 text-center text-[11px] text-neutral-600">
+                {loadState === "loading"
+                  ? "モデル一覧を確認中…"
+                  : "該当モデルがありません"}
+              </p>
+            )
           ) : (
             sections.map((section) => (
               <section key={section.title} className="mb-3 last:mb-0">

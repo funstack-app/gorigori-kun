@@ -118,6 +118,63 @@ function classifyUpdateFailure(err: unknown): UpdateFailure {
   };
 }
 
+/**
+ * 起動時の自動更新チェック (UPD-03, 2026-07-25)。
+ *
+ * なぜ:
+ *   従来は設定画面を開いて「アップデートを確認」を手で押すまでチェックが
+ *   走らず、既存ユーザーが新版に気づけなかった。起動後に一度だけ静かに見にいく。
+ *
+ * 設計の制約 (押し付けない・起動を遅くしない):
+ *   - モーダルで止めない。控えめな info トーストだけ出し、実際の更新は
+ *     設定画面の既存 UI から任意のタイミングで実行させる。
+ *   - 失敗は完全に沈黙する。起動直後はネットワーク未接続が普通にあり、
+ *     ここでエラートーストを出すと「起動したら毎回赤い通知」になる。
+ *     手動チェック側は理由を分類して出すので、情報自体は失われない。
+ *   - 呼び出し側を待たせない (即 return して裏で走る)。
+ *   - モジュールスコープのフラグで多重起動を防ぐ。UpdateChecker は設定タブの
+ *     出入りで再マウントされるため、これが無いと開くたびに走ってしまう。
+ */
+let startupCheckStarted = false;
+
+/** 起動直後の重い初期化 (codex 起動・認証) と競合させないための待ち。 */
+const STARTUP_CHECK_DELAY_MS = 8000;
+
+export function startStartupUpdateCheck(): void {
+  if (startupCheckStarted) return;
+  startupCheckStarted = true;
+
+  setTimeout(() => {
+    void (async () => {
+      try {
+        const update = await check();
+        if (!update) return; // 最新版。何も言わない
+        useToasts.getState().push({
+          kind: "info",
+          text: `新しいバージョン ${update.version} があります。設定 → アップデートから更新できます。`,
+          ttlMs: 12000,
+        });
+      } catch {
+        // 起動時チェックの失敗は無視する (オフライン起動で赤い通知を出さない)。
+      }
+    })();
+  }, STARTUP_CHECK_DELAY_MS);
+}
+
+/*
+ * 起動時チェックの発火点。
+ *
+ * このモジュールは SettingsWorkspace → App.tsx の静的 import で繋がっており、
+ * 設定タブを開かなくてもアプリ起動時に必ず評価される。そのためここで呼ぶだけで
+ * 「起動後に一度」が成立する (App.tsx を触らずに済む)。
+ *
+ * dev では実行しない。開発中はバージョンが配布版より新しく、更新なしと分かって
+ * いるのに毎回 HTTP を叩くだけになるため。
+ */
+if (!import.meta.env.DEV) {
+  startStartupUpdateCheck();
+}
+
 /** リリースページを既定ブラウザで開く。既存流儀に合わせて動的 import する。 */
 async function openReleasesPage(): Promise<void> {
   try {

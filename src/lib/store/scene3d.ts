@@ -10,7 +10,12 @@
 
 import { create } from "zustand";
 
-import { createDefaultProject, createDefaultShot, SCENE_FPS } from "../scene3d/types";
+import {
+  createDefaultCameraMove,
+  createDefaultProject,
+  createDefaultShot,
+  SCENE_FPS,
+} from "../scene3d/types";
 import type {
   CameraPresetId,
   SceneAspectRatio,
@@ -128,6 +133,42 @@ export type Scene3dExportStatus =
   | { phase: "done"; mp4Path: string | null; firstFramePath: string | null; framesDir: string }
   | { phase: "error"; message: string };
 
+/**
+ * 絵コンテ由来のカット1件 (CHAIN-01)。3D の shot へ写す入力。
+ *
+ * なぜ「絵コンテ→3D」の橋が必要か (2026-07-25):
+ * 3D は localStorage "scene3d.project.v3" に閉じた独立アプリ状態で、絵コンテで
+ * 決めた尺・カメラ意図・採用画像が一切渡らず、ユーザーが全部手入力し直していた。
+ * 尺と枚数(カット数)が入るだけで手入力量が激減するため、カメラプリセットは
+ * 初期値のままにして「尺 + カット数 + 意図の記録」だけを移送する。
+ */
+export type StoryboardCutImport = {
+  cutId: string;
+  /** カットの尺(秒)。3D は frame 管理なので SCENE_FPS で換算する */
+  durationSeconds: number;
+  /** 採用テイクの画像パス (未採用なら undefined)。 */
+  imagePath?: string;
+  /** カットの説明 (絵コンテの intent など)。 */
+  description?: string;
+  /** カメラ意図のメモ (絵コンテの cameraNote)。カメラ設定には反映せず記録だけ。 */
+  cameraNote?: string;
+};
+
+/**
+ * 3D の shot が「どの絵コンテカット由来か」の記録。
+ *
+ * SceneProject(= localStorage 保存スキーマ v3)には足さない。理由は 2つ:
+ * (1) 保存スキーマを変えると既存ユーザーのプロジェクトが移行対象になる
+ * (2) renumberShots() が label を「カットN」で毎回上書きするため label には保持できない
+ * よって shotId をキーにしたストア内の別マップとして持つ(セッション内の参照用)。
+ */
+export type StoryboardShotOrigin = {
+  cutId: string;
+  imagePath?: string;
+  description?: string;
+  cameraNote?: string;
+};
+
 type Scene3dState = {
   project: SceneProject;
   selectedEntityId: string | null;
@@ -204,6 +245,19 @@ type Scene3dState = {
   /** 体の軌跡: index番目の通過点を消す(最後の1点=行き先は消せない) */
   removeMotionPathPoint: (id: string, index: number) => void;
   setDragging: (id: string | null) => void;
+
+  /**
+   * shotId → 絵コンテ由来カットの記録 (CHAIN-01)。
+   * 絵コンテから読み込んだ shot だけがここに載る。手で足した shot は載らない。
+   */
+  storyboardOrigins: Record<string, StoryboardShotOrigin>;
+  /**
+   * 絵コンテの確定カットを shots へ写す (CHAIN-01)。
+   * mode="append" は既存カットを残して末尾へ追加、mode="replace" は shots を作り直す。
+   * カメラは 1 カット 1 台を新規作成し、プリセットは初期値のまま(尺と枚数だけ移送)。
+   * 返り値: 実際に取り込んだカット数。
+   */
+  importStoryboardCuts: (cuts: StoryboardCutImport[], mode: "append" | "replace") => number;
 
   /** カット操作(CapCut風タイムライン) */
   selectShot: (id: string) => void;
@@ -364,6 +418,9 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
   })(),
   exportRequest: 0,
   exportStatus: { phase: "idle" },
+  // 絵コンテ由来カットの記録 (CHAIN-01)。localStorage には保存しない
+  // (保存スキーマ v3 を変えないため。読み込みはユーザー操作でやり直せる)
+  storyboardOrigins: {},
 
   addEntity: (kind) => {
     const { project } = get();
@@ -817,6 +874,59 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
     });
   },
 
+  importStoryboardCuts: (cuts, mode) => {
+    const usable = cuts.filter((c) => c.cutId);
+    if (usable.length === 0) return 0;
+
+    const { project, storyboardOrigins } = get();
+    const stamp = Date.now();
+
+    // 1カット = 1カメラ。プリセットは初期値のまま(尺と枚数の移送が目的で、
+    // カメラワークは 3D 側でドラッグして決める前提)。
+    const newCameras = usable.map((_, i) => ({
+      id: `camera-sb-${stamp}-${shotSeq + i}`,
+      label: `カメラ${(mode === "replace" ? 0 : project.cameras.length) + i + 1}`,
+      move: createDefaultCameraMove(),
+    }));
+    const newShots: SceneShot[] = usable.map((c, i) => {
+      const shot = createDefaultShot(`shot-sb-${stamp}-${shotSeq + i}`, "", newCameras[i].id);
+      // 尺は秒 → フレーム換算。0以下・NaN は既定尺(createDefaultShot)のまま残す
+      const frames = Math.round((c.durationSeconds ?? 0) * SCENE_FPS);
+      return frames > 0 ? { ...shot, durationFrames: frames } : shot;
+    });
+    shotSeq += usable.length;
+
+    const nextShots =
+      mode === "replace" ? renumberShots(newShots) : renumberShots([...project.shots, ...newShots]);
+    const nextCameras =
+      mode === "replace"
+        ? newCameras
+        : [...project.cameras, ...newCameras];
+
+    // replace では既存 shot の記録も一緒に捨てる(残すと孤児レコードになる)
+    const nextOrigins: Record<string, StoryboardShotOrigin> =
+      mode === "replace" ? {} : { ...storyboardOrigins };
+    usable.forEach((c, i) => {
+      nextOrigins[newShots[i].id] = {
+        cutId: c.cutId,
+        imagePath: c.imagePath,
+        description: c.description,
+        cameraNote: c.cameraNote,
+      };
+    });
+
+    const next: SceneProject = { ...project, shots: nextShots, cameras: nextCameras };
+    const firstId = nextShots.find((s) => s.id === newShots[0].id)?.id ?? nextShots[0].id;
+    set({
+      project: next,
+      storyboardOrigins: nextOrigins,
+      selectedShotId: firstId,
+      currentFrame: shotStartFrame(next, firstId),
+      playing: false,
+    });
+    return usable.length;
+  },
+
   addShot: () => {
     const { project } = get();
     const id = `shot-${Date.now()}-${shotSeq++}`;
@@ -897,8 +1007,11 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
     );
     const next = { ...project, shots, cameras };
     const nextSelected = selectedShotId === id ? shots[0].id : selectedShotId;
+    // 消した shot の絵コンテ記録も落とす(残すと孤児レコードになる。CHAIN-01)
+    const { [id]: _removed, ...restOrigins } = get().storyboardOrigins;
     set({
       project: next,
+      storyboardOrigins: restOrigins,
       selectedShotId: nextSelected,
       currentFrame: Math.min(get().currentFrame, totalDurationFrames(next) - 1),
     });
@@ -1158,6 +1271,8 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
   resetProject: () =>
     set({
       project: createDefaultProject(),
+      // シーンを作り直すので絵コンテ由来の記録も破棄する (CHAIN-01)
+      storyboardOrigins: {},
       selectedEntityId: "actor-1",
       selectedShotId: "shot-1",
       playing: false,

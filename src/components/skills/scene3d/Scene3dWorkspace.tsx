@@ -74,7 +74,11 @@ import {
   undoScene3d,
   useScene3d,
 } from "../../../lib/store/scene3d";
-import type { PaneNode } from "../../../lib/store/scene3d";
+import type { PaneNode, StoryboardCutImport } from "../../../lib/store/scene3d";
+import { useStoryboardRun } from "../../../lib/store/storyboardRun";
+import { useToasts } from "../../../lib/store/toasts";
+import type { StoryboardSketchCut } from "../../../lib/storyboard/types";
+import { sendCutToVideoTab } from "../../../lib/storyboard/sendCutToVideo";
 import { requestViewPreset, Scene3dViewport } from "./Scene3dViewport";
 
 const PRESET_ORDER: CameraPresetId[] = [
@@ -2025,10 +2029,144 @@ function DirectorPanel() {
         </div>
       </div>
 
+      <StoryboardImportSection />
       <ExportSection />
       </div>
       {presetOpen && <PresetPickerPopup onClose={() => setPresetOpen(false)} />}
     </aside>
+  );
+}
+
+/**
+ * 絵コンテの確定カットを読み出す (CHAIN-01)。
+ *
+ * 3D は localStorage に閉じた独立状態で、絵コンテで決めた尺・カメラ意図・採用画像が
+ * 渡らずユーザーが全部手入力し直していた。ここで storyboardRun ストアから
+ * 「確定(confirmed)カット + 採用テイク画像 + 絵コンテメタ(尺/意図/カメラノート)」
+ * を取り出し、3D の shot 配列へ写せる形に整える。
+ *
+ * 読み方は CutGridReviewPanel と同じ流儀に合わせる:
+ * 絵コンテメタは generationCutSketchMeta(本生成 run のスナップショット)を優先し、
+ * 無ければ live sketchVersions にフォールバックする(reset() 前の経路用)。
+ */
+function readConfirmedStoryboardCuts(): StoryboardCutImport[] {
+  const st = useStoryboardRun.getState();
+  const sketchByCutId = new Map<string, StoryboardSketchCut>();
+  for (const [cutId, cut] of Object.entries(st.generationCutSketchMeta)) {
+    sketchByCutId.set(cutId, cut);
+  }
+  if (sketchByCutId.size === 0) {
+    const active =
+      st.sketchVersions.find((v) => v.versionId === st.activeSketchVersionId) ??
+      st.sketchVersions[st.sketchVersions.length - 1] ??
+      null;
+    for (const c of active?.cuts ?? []) sketchByCutId.set(c.cutId, c);
+  }
+
+  const confirmed = Array.from(st.cuts.values()).filter((c) => c.status === "confirmed");
+  return confirmed.map((c) => {
+    const sketch = sketchByCutId.get(c.cutId) ?? null;
+    const adopted = c.takes.find((t) => t.takeId === c.selectedTakeId) ?? c.takes[0];
+    return {
+      cutId: c.cutId,
+      // 尺は絵コンテメタが正。無ければ 0 を渡して 3D 側の既定尺に任せる
+      // (ここで適当な秒数を捏造すると「決めた尺」と区別が付かなくなる)
+      durationSeconds: sketch?.durationSeconds ?? 0,
+      imagePath: adopted?.imagePath,
+      description: c.description ?? sketch?.intent,
+      cameraNote: sketch?.cameraNote,
+    };
+  });
+}
+
+/** 絵コンテ → 3D の取り込み (CHAIN-01)。尺とカット数が入るだけで手入力が激減する */
+function StoryboardImportSection() {
+  const importStoryboardCuts = useScene3d((s) => s.importStoryboardCuts);
+  const shotCount = useScene3d((s) => s.project.shots.length);
+  const origins = useScene3d((s) => s.storyboardOrigins);
+  const importedCount = Object.keys(origins).length;
+  // 確定カット数は「絵コンテを確定して 3D に来た」導線でしか変わらないので、
+  // ストア購読ではなくクリック時に読む(3D 編集中の再描画を増やさない)。
+  const [pending, setPending] = useState<StoryboardCutImport[] | null>(null);
+
+  const openPicker = () => {
+    const cuts = readConfirmedStoryboardCuts();
+    if (cuts.length === 0) {
+      useToasts.getState().push({
+        kind: "error",
+        text: "確定した絵コンテのカットが見つかりません。ストーリーモードでカットを確定してください。",
+        ttlMs: 4500,
+      });
+      return;
+    }
+    setPending(cuts);
+  };
+
+  const run = (mode: "append" | "replace") => {
+    if (!pending) return;
+    const n = importStoryboardCuts(pending, mode);
+    setPending(null);
+    useToasts.getState().push({
+      kind: "success",
+      text:
+        mode === "replace"
+          ? `絵コンテの${n}カットで作り直しました(尺を反映)。`
+          : `絵コンテの${n}カットを追加しました(尺を反映)。`,
+      ttlMs: 4000,
+    });
+  };
+
+  return (
+    <div className="flex flex-col gap-2 border-t border-[#242424] pt-3">
+      <p className="text-[11px] font-bold tracking-wide text-neutral-500">絵コンテから読み込む</p>
+      {pending ? (
+        <div className="flex flex-col gap-1.5">
+          <p className="text-[11px] leading-4 text-neutral-400">
+            確定カット
+            <span className="font-mono tabular-nums"> {pending.length}</span> 件が見つかりました。
+            今のカット
+            <span className="font-mono tabular-nums"> {shotCount}</span> 本をどうしますか
+          </p>
+          <div className="grid grid-cols-2 gap-1.5">
+            <button
+              className="rounded-lg border border-[#2a2a2a] bg-[#101010] px-2 py-1.5 text-[11px] text-neutral-300 transition hover:border-neutral-500"
+              onClick={() => run("append")}
+            >
+              残して追加
+            </button>
+            <button
+              className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-2 py-1.5 text-[11px] text-amber-300 transition hover:border-amber-400"
+              onClick={() => run("replace")}
+            >
+              作り直す
+            </button>
+          </div>
+          <button
+            className="self-start text-[10px] text-neutral-500 hover:text-neutral-300"
+            onClick={() => setPending(null)}
+          >
+            やめる
+          </button>
+        </div>
+      ) : (
+        <button
+          className="rounded-xl border border-[#2a2a2a] bg-[#101010] px-3 py-2 text-[12px] font-bold text-neutral-200 transition hover:border-neutral-500"
+          onClick={openPicker}
+        >
+          絵コンテから読み込む
+        </button>
+      )}
+      {importedCount > 0 && (
+        <p className="text-[10px] leading-4 text-neutral-500">
+          このシーンの
+          <span className="font-mono tabular-nums"> {importedCount}</span>
+          カットは絵コンテ由来です(尺・採用画像・意図を記録済み)
+        </p>
+      )}
+      <p className="text-[10px] leading-4 text-neutral-500">
+        カット数と尺だけを写します。カメラワークは初期値なので、ここでドラッグして決めます
+      </p>
+    </div>
   );
 }
 
@@ -2044,6 +2182,22 @@ function ExportSection() {
   const revealInFinder = async (path: string) => {
     const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
     await revealItemInDir(path);
+  };
+
+  /**
+   * 開始フレームPNGを動画タブの開始画像へ渡す (CHAIN-03)。
+   *
+   * これまで書き出し結果は Finder で開くだけで、動画タブへは手で渡し直していた。
+   * sendCutToVideoTab は「スキルモードを抜けずに activeTab だけ video にする」実装なので、
+   * 3D から呼んでも 3D の状態(localStorage 保存前のシーン)は失われない
+   * (SkillWorkspaceRouter が scene3d の workspace を display:none で保持したまま
+   *  動画タブをインライン描画する)。
+   *
+   * mp4 を「参照動画」として渡すのは今は出来ない: videoGen ストアに参照動画の口が無く、
+   * 動画モデル側の受け口も未実装。よってパスの案内 + Finder 表示に留める(嘘の導線を作らない)。
+   */
+  const sendFirstFrameToVideo = (firstFramePath: string) => {
+    sendCutToVideoTab({ imagePath: firstFramePath });
   };
 
   return (
@@ -2096,14 +2250,33 @@ function ExportSection() {
               </button>
             </>
           )}
+
+          {/* CHAIN-03: 開始フレームPNGをそのまま動画タブの開始画像へ渡す。
+              手渡し(Finderで開いて動画タブで選び直す)を省くための導線 */}
+          {status.firstFramePath && (
+            <button
+              className="rounded-lg bg-pink-500/90 px-2 py-1.5 text-left text-[11px] font-bold text-white transition hover:bg-pink-400"
+              onClick={() => sendFirstFrameToVideo(status.firstFramePath!)}
+            >
+              開始フレームを動画タブへ送る
+            </button>
+          )}
+          {status.mp4Path && (
+            <p className="text-[10px] leading-4 text-neutral-500">
+              参照動画は動画タブからの自動セットに未対応です。上の mp4
+              を書き出し先から手で選んでください
+            </p>
+          )}
         </div>
       )}
       {status.phase === "error" && (
         <p className="text-[11px] text-red-400">書き出し失敗: {status.message}</p>
       )}
+      {/* 開始画像はボタンで動画タブへ渡せるが、参照動画は手渡しのままなので
+          「どちらが自動か」を書き分ける(できない導線を約束しない) */}
       <p className="text-[11px] leading-4 text-neutral-500">
-        書き出した動画は動画生成AIの「参照動画」として、開始フレームPNGは「開始画像」として使います。
-        保存先(既定 ~/Pictures/GORI GORI)のプロジェクトフォルダに残ります
+        開始フレームPNGは動画生成の「開始画像」としてボタンで渡せます。書き出した動画は
+        「参照動画」として手で選びます。保存先(既定 ~/Pictures/GORI GORI)のプロジェクトフォルダに残ります
       </p>
     </div>
   );

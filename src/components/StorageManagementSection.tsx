@@ -1,12 +1,14 @@
 import { useEffect, useState } from "react";
 
 import {
+  editModels,
   images,
   storage,
   storageCleanup,
   type CleanupInspection,
   type CleanupReport,
 } from "../lib/ipc";
+import type { ModelStatus } from "../lib/edit/types";
 import { useProjects } from "../lib/store/projects";
 import { useToasts } from "../lib/store/toasts";
 
@@ -109,6 +111,10 @@ export function StorageManagementSection() {
   const [busy, setBusy] = useState(false);
   const [relinking, setRelinking] = useState(false);
   const [lastReport, setLastReport] = useState<CleanupReport | null>(null);
+  // F-4 (2026-07-25): 再DL可能な AI モデル (models/ 配下) は掃除手段が無く数GB残っていた。
+  // 自動削除はしない (機能が壊れる)。DL 済みだけを一覧し、明示操作で消せるようにする。
+  const [models, setModels] = useState<ModelStatus[] | null>(null);
+  const [deletingModelId, setDeletingModelId] = useState<string | null>(null);
   const pushToast = useToasts((s) => s.push);
 
   const refresh = async () => {
@@ -123,6 +129,13 @@ export function StorageManagementSection() {
       setWorkSize(stats.totalBytes);
     } catch (err) {
       pushToast({ kind: "error", text: `ストレージ情報の取得失敗: ${String(err)}` });
+    }
+    // モデル一覧は失敗しても他の表示を止めない (未DL環境では空一覧が正常)。
+    try {
+      setModels(await editModels.list());
+    } catch (err) {
+      console.error("[StorageManagementSection] model list failed:", err);
+      setModels([]);
     }
   };
 
@@ -157,6 +170,30 @@ export function StorageManagementSection() {
       setRelinking(false);
     }
   };
+
+  /**
+   * F-4: DL 済みモデルを1件削除する。実体は既存の edit_models_delete (ファイル1本を消して
+   * 推論ランタイムをクリア)。次に使うときに自動で再DLされるため作品データは失われない。
+   */
+  const deleteModel = async (model: ModelStatus) => {
+    if (deletingModelId) return;
+    setDeletingModelId(model.id);
+    try {
+      await editModels.delete(model.id);
+      pushToast({
+        kind: "success",
+        text: `${model.displayName} を削除しました (次に使うとき自動で再ダウンロード)`,
+      });
+      await refresh();
+    } catch (err) {
+      pushToast({ kind: "error", text: `削除に失敗: ${String(err)}` });
+    } finally {
+      setDeletingModelId(null);
+    }
+  };
+
+  const downloadedModels = (models ?? []).filter((m) => m.downloaded);
+  const downloadedModelBytes = downloadedModels.reduce((sum, m) => sum + m.sizeBytes, 0);
 
   const runCleanup = async () => {
     if (busy) return;
@@ -196,14 +233,24 @@ export function StorageManagementSection() {
       </header>
 
       <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/5 p-3">
+        {/* SET-03 (2026-07-25): サイドバーの容量表示と設定画面の容量表示が
+            互いに素の集合を数えており、どちらも「何の合計か」が書いていなかった。
+            数える対象は変えず、役割とラベルを分ける:
+              ・ここ(作品データ) = 作業フォルダ配下の総量。サイドバーの数値と同じ集計
+                (storage_usage_stats)。Finder で作業フォルダを見たサイズに対応する。
+              ・下(一時データ)   = 掃除対象だけの内訳 (storage_cleanup_inspect)。
+                作業フォルダの外にある Codex ログ・キャッシュなので上とは重複しない。
+            2つを足しても「アプリが使う容量の全部」ではない (下のモデル欄が別枠)。 */}
         <h4 className="flex items-center gap-2 text-[13px] font-black text-emerald-300">
           <LockIcon />
           <span>あなたの作品データ</span>
         </h4>
-        <p className="mt-1 text-[10px] text-emerald-200/50">自動削除されません</p>
+        <p className="mt-1 text-[10px] text-emerald-200/50">
+          自動削除されません / サイドバーの容量表示と同じ数値
+        </p>
         <ul className="mt-2.5 space-y-1 border-t border-emerald-500/15 pt-2.5 text-[11px] text-neutral-300">
           <li className="flex items-center justify-between">
-            <span>生成画像</span>
+            <span>作業フォルダの合計</span>
             <span className="font-mono tabular-nums text-neutral-400">{formatBytes(workSize)}</span>
           </li>
           <li className="flex items-center justify-between text-[10px] text-neutral-500">
@@ -248,7 +295,9 @@ export function StorageManagementSection() {
           <TrashIcon />
           <span>一時データ</span>
         </h4>
-        <p className="mt-1 text-[10px] text-amber-200/50">24時間ごとに自動で軽くします</p>
+        <p className="mt-1 text-[10px] text-amber-200/50">
+          24時間ごとに自動で軽くします / 作業フォルダの外にある掃除対象だけの合計
+        </p>
         <ul className="mt-2.5 space-y-1 border-t border-amber-500/15 pt-2.5 text-[11px] text-neutral-300">
           <li className="flex items-center justify-between">
             <span>Codex 対話履歴</span>
@@ -276,7 +325,7 @@ export function StorageManagementSection() {
           </li>
         </ul>
         <div className="mt-3 flex items-center justify-between border-t border-amber-500/20 pt-2">
-          <span className="text-[11px] font-bold text-amber-200">合計</span>
+          <span className="text-[11px] font-bold text-amber-200">一時データの合計</span>
           <span className="font-mono tabular-nums text-sm font-black text-amber-100">
             {formatBytes(inspection?.totalBytes)}
           </span>
@@ -290,6 +339,51 @@ export function StorageManagementSection() {
           {busy ? "整理中…" : "今すぐ整理する"}
         </button>
       </div>
+
+      {/* F-4 (2026-07-25): 再ダウンロードできる資産 (AI モデル)。
+          自動削除はしない。機能を使うと自動で再DLされるので、消しても作品は失われない。
+          何が消えて何が再DLされるかを行ごとに書く。 */}
+      {downloadedModels.length > 0 && (
+        <div className="rounded-xl border border-sky-500/30 bg-sky-500/5 p-3">
+          <h4 className="flex items-center gap-2 text-[13px] font-black text-sky-300">
+            <TrashIcon />
+            <span>再ダウンロードできる資産</span>
+          </h4>
+          <p className="mt-1 text-[10px] text-sky-200/50">
+            自動削除されません / 消しても次に使うとき自動で入り直します
+          </p>
+          <ul className="mt-2.5 space-y-1.5 border-t border-sky-500/15 pt-2.5 text-[11px] text-neutral-300">
+            {downloadedModels.map((model) => (
+              <li key={model.id} className="flex items-center justify-between gap-2">
+                <span className="min-w-0 flex-1 truncate">{model.displayName}</span>
+                <span className="shrink-0 font-mono tabular-nums text-[10px] text-neutral-500">
+                  {formatBytes(model.sizeBytes)}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => void deleteModel(model)}
+                  disabled={deletingModelId !== null}
+                  className="shrink-0 rounded-md border border-sky-500/40 bg-sky-500/10 px-2 py-1 text-[10px] font-black text-sky-100 hover:border-sky-400 hover:bg-sky-500/20 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  {deletingModelId === model.id ? "削除中…" : "削除"}
+                </button>
+              </li>
+            ))}
+          </ul>
+          <div className="mt-3 flex items-center justify-between border-t border-sky-500/20 pt-2">
+            <span className="text-[11px] font-bold text-sky-200">削除できる合計 (目安)</span>
+            <span className="font-mono tabular-nums text-sm font-black text-sky-100">
+              {formatBytes(downloadedModelBytes)}
+            </span>
+          </div>
+          <p className="mt-2 text-[10px] leading-relaxed text-neutral-500">
+            消えるのは AI モデルのファイルだけです (背景除去・ことばで分離・人物パーツ認識など
+            編集機能が使うもの)。作品・プリセット・スキル・設定は消えません。次にその機能を
+            使ったときに自動でダウンロードし直すので、通信量だけがかかります。容量は
+            ダウンロード時の想定サイズで、実ファイルとわずかにずれることがあります。
+          </p>
+        </div>
+      )}
 
       {lastReport && (
         <div className="rounded-lg border border-[#2a2a2a] bg-[#101010] p-3 text-[11px] text-neutral-300">
