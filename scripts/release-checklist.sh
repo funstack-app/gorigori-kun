@@ -57,11 +57,46 @@ for job in "${REQUIRED_JOBS[@]}"; do
   fi
 done
 
-# 5. matrix で aarch64 + x64 両方ビルドする設定があるか
-if grep -q "aarch64-apple-darwin" "$RELEASE_YML" && grep -q "x86_64-apple-darwin" "$RELEASE_YML"; then
-  ok "Mac matrix (aarch64 + x86_64) 設定あり"
+# 5. macOS の matrix に載っている target を実体から読む
+#
+# 以前は `grep -q "x86_64-apple-darwin"` で判定していたが、これはファイル内の
+# **コメント文にもヒットする**。2026-07-25 に Intel Mac を matrix から外し、
+# その理由をコメントで残したところ、matrix には無いのにチェックは ✅ を出した。
+# 「検査が実態でなく文字列の存在を見ている」典型で、通ったのに実態が違う状態は
+# 検査が無いより危ない。matrix ブロックを構造として読む方式へ変更する。
+MAC_TARGETS="$(python3 - "$RELEASE_YML" <<'PY'
+import sys, yaml
+# 正規表現でなく YAML として読む。文字列マッチだと本文とコメントを区別できず、
+# 貪欲マッチで後続の `- name:` まで拾ってしまう (実際に両方踏んだ)。
+try:
+    doc = yaml.safe_load(open(sys.argv[1]))
+    targets = doc["jobs"]["macos"]["strategy"]["matrix"]["target"]
+except Exception:
+    sys.exit(1)
+if not isinstance(targets, list) or not targets:
+    sys.exit(1)
+for t in targets:
+    print(str(t).strip())
+PY
+)" || MAC_TARGETS=""
+
+if [ -z "$MAC_TARGETS" ]; then
+  fail "macOS の matrix.target を読み取れない (release.yml の構造が変わった?)"
 else
-  fail "Mac matrix が aarch64 / x86_64 両方を含んでいない"
+  # Apple Silicon は必須。これが無いと STΛCK 自身の機械向けが作られない。
+  if printf '%s\n' "$MAC_TARGETS" | grep -qx "aarch64-apple-darwin"; then
+    ok "Mac matrix: $(printf '%s' "$MAC_TARGETS" | tr '\n' ' ')"
+  else
+    fail "Mac matrix に aarch64-apple-darwin (Apple Silicon) が無い"
+  fi
+  # Intel は 2026-07-25 に意図的に外した (ort が prebuilt 配布を終了)。
+  # 無いこと自体は失敗ではないが、README の記載と食い違うと利用者が混乱するため
+  # 状態を明示して、README 側の整合も確認させる。
+  if printf '%s\n' "$MAC_TARGETS" | grep -qx "x86_64-apple-darwin"; then
+    echo "ℹ️  Intel Mac (x86_64) をビルドします — README の動作要件も対応表記か確認"
+  else
+    echo "ℹ️  Intel Mac (x86_64) は対象外 — README も未対応表記であることを確認済みか"
+  fi
 fi
 
 # 6. git working tree clean (オプション、警告のみ)
