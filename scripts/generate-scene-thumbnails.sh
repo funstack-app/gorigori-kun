@@ -88,68 +88,24 @@ trap cleanup EXIT
 
 python3 - "$PROMPTS_FILE" "$MODE" "$CATEGORY" > "$ITEMS_FILE" <<'PY'
 import json
+import os
 import re
 import sys
 
 prompts_path, mode, category_filter = sys.argv[1:4]
 
-slug_map = {
-    "Close Up": "close-up",
-    "Medium": "medium",
-    "Wide": "wide",
-    "Bird's-eye": "birds-eye",
-    "Dutch Angle": "dutch-angle",
-    "Over-the-shoulder": "over-the-shoulder",
-    "16:9": "16-9",
-    "1:1": "1-1",
-    "9:16": "9-16",
-    "4:3": "4-3",
-    "自然光": "natural-light",
-    "スタジオ": "studio",
-    "逆光": "backlight",
-    "Blue Hour": "blue-hour",
-    "Candlelight": "candlelight",
-    "Softbox": "softbox",
-    "フィルム": "film-camera",
-    "デジタル": "digital-camera",
-    "VHS": "vhs",
-    "Sony FX6": "sony-fx6",
-    "ARRI Alexa Mini": "arri-alexa-mini",
-    "iPhone Pro": "iphone-pro",
-    "8mm": "8mm",
-    "35mm": "35mm",
-    "50mm": "50mm",
-    "85mm": "85mm",
-    "200mm": "200mm",
-    "Anamorphic": "anamorphic",
-    "Fisheye": "fisheye",
-    "Macro": "macro",
-    "Tilt-shift": "tilt-shift",
-    "Prime": "prime",
-    "Telephoto": "telephoto",
-    "Cinestill": "cinestill",
-    "Kodak": "kodak",
-    "Fuji": "fuji",
-    "Ilford": "ilford",
-    "Ektachrome": "ektachrome",
-    "Portra": "portra",
-    "Annie Leibovitz": "annie-leibovitz",
-    "Alec Soth": "alec-soth",
-    "Andreas Gursky": "andreas-gursky",
-    "Daido Moriyama": "daido-moriyama",
-    "Vivian Maier": "vivian-maier",
-    "Neo noir": "neo-noir",
-    "Clean commercial": "clean-commercial",
-    "Documentary realism": "documentary-realism",
-    "Muted drama": "muted-drama",
-    "High contrast": "high-contrast",
-    "Pastel daylight": "pastel-daylight",
-    "Subtle grain": "subtle-grain",
-    "Halation": "halation",
-    "Bleach bypass": "bleach-bypass",
-    "Soft bloom": "soft-bloom",
-    "Matte finish": "matte-finish",
-}
+# slug は scene-thumbnails-slugs.json から引く (2026-07-25)。
+# 以前はこのスクリプト内に手書きの slug_map があり、prompts.json を更新しても
+# slug を足し忘れると fallback_slug に落ちて意図しないファイル名になっていた。
+# さらに実在ブランド名 (Sony FX6 / ARRI / iPhone Pro / 写真家名) が残っており、
+# 商標・人名をプロンプトに含めない方針と矛盾していた。
+# 定義を1箇所 (slugs.json) に寄せ、prompts.json と同時に生成する。
+slug_path = os.path.join(os.path.dirname(prompts_path), "scene-thumbnails-slugs.json")
+slug_table = {}
+if os.path.exists(slug_path):
+    with open(slug_path, "r", encoding="utf-8") as fh:
+        slug_table = json.load(fh)
+
 
 with open(prompts_path, "r", encoding="utf-8") as fh:
     data = json.load(fh)
@@ -172,7 +128,7 @@ def fallback_slug(label: str) -> str:
 for category in categories:
     options = data[category]
     for label, prompt in options.items():
-        slug = slug_map.get(label) or fallback_slug(label)
+        slug = (slug_table.get(category) or {}).get(label) or fallback_slug(label)
         if not slug:
             print(f"ERROR: no ASCII slug for {category}/{label}", file=sys.stderr)
             sys.exit(2)

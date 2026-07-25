@@ -67,12 +67,144 @@ const NO_SELECT_OPTION: SceneOption = {
 
 export const compositionOptions: SceneOption[] = [
   NO_SELECT_OPTION,
-  { value: "Close Up", hint: "顔・ディテール", visual: "frame-close", thumbnail: thumb("composition", "close-up", "Close Up") },
-  { value: "Medium", hint: "胸から上", visual: "frame-medium", thumbnail: thumb("composition", "medium", "Medium") },
-  { value: "Wide", hint: "全身・引き", visual: "frame-wide", thumbnail: thumb("composition", "wide", "Wide") },
-  { value: "Bird's-eye", hint: "真上から", visual: "frame-aerial", thumbnail: thumb("composition", "birds-eye", "Bird's-eye") },
-  { value: "Dutch Angle", hint: "斜めの傾き", visual: "frame-tilt", thumbnail: thumb("composition", "dutch-angle", "Dutch Angle") },
-  { value: "Over-the-shoulder", hint: "肩越し", visual: "frame-shoulder", thumbnail: thumb("composition", "over-the-shoulder", "Over-the-shoulder") },
+  {
+    value: "Extreme Close Up",
+    hint: "部分の極寄り",
+    visual: "frame-close",
+    thumbnail: thumb("composition", "extreme-close-up", "Extreme Close Up"),
+  },
+  {
+    value: "Close Up",
+    hint: "頭部から肩まで",
+    visual: "frame-close",
+    thumbnail: thumb("composition", "close-up", "Close Up"),
+  },
+  {
+    value: "Bust Shot",
+    hint: "胸上・証明写真",
+    visual: "frame-close",
+    thumbnail: thumb("composition", "bust-shot", "Bust Shot"),
+  },
+  {
+    value: "Medium",
+    hint: "腰から上",
+    visual: "frame-medium",
+    thumbnail: thumb("composition", "medium", "Medium"),
+  },
+  {
+    value: "Cowboy Shot",
+    hint: "膝上・腿まで",
+    visual: "frame-medium",
+    thumbnail: thumb("composition", "cowboy-shot", "Cowboy Shot"),
+  },
+  {
+    value: "Full Shot",
+    hint: "全身ぴったり",
+    visual: "frame-wide",
+    thumbnail: thumb("composition", "full-shot", "Full Shot"),
+  },
+  {
+    value: "Wide",
+    hint: "全身・空間に余白",
+    visual: "frame-wide",
+    thumbnail: thumb("composition", "wide", "Wide"),
+  },
+  {
+    value: "Bird's-eye",
+    hint: "真上から見下ろす",
+    visual: "frame-aerial",
+    thumbnail: thumb("composition", "birds-eye", "Bird's-eye"),
+  },
+  {
+    value: "High Angle",
+    hint: "やや上から見下ろす",
+    visual: "frame-medium",
+    thumbnail: thumb("composition", "high-angle", "High Angle"),
+  },
+  {
+    value: "Eye Level Straight",
+    hint: "目線の高さ・基準",
+    visual: "frame-medium",
+    thumbnail: thumb("composition", "eye-level-straight", "Eye Level Straight"),
+  },
+  {
+    value: "Low Angle",
+    hint: "下から見上げる",
+    visual: "frame-medium",
+    thumbnail: thumb("composition", "low-angle", "Low Angle"),
+  },
+  {
+    value: "Worm's-eye",
+    hint: "床から極端に見上げる",
+    visual: "frame-medium",
+    thumbnail: thumb("composition", "worms-eye", "Worm's-eye"),
+  },
+  {
+    value: "Dutch Angle",
+    hint: "カメラを傾ける",
+    visual: "frame-tilt",
+    thumbnail: thumb("composition", "dutch-angle", "Dutch Angle"),
+  },
+  {
+    value: "Three-Quarter View",
+    hint: "斜め45度から",
+    visual: "frame-medium",
+    thumbnail: thumb("composition", "three-quarter-view", "Three-Quarter View"),
+  },
+  {
+    value: "Profile View",
+    hint: "真横から",
+    visual: "frame-medium",
+    thumbnail: thumb("composition", "profile-view", "Profile View"),
+  },
+  {
+    value: "Back View",
+    hint: "真後ろから",
+    visual: "frame-medium",
+    thumbnail: thumb("composition", "back-view", "Back View"),
+  },
+  {
+    value: "Rule of Thirds Left",
+    hint: "左三分割に寄せる",
+    visual: "frame-medium",
+    thumbnail: thumb("composition", "rule-of-thirds-left", "Rule of Thirds Left"),
+  },
+  {
+    value: "Rule of Thirds Right",
+    hint: "右三分割に寄せる",
+    visual: "frame-medium",
+    thumbnail: thumb("composition", "rule-of-thirds-right", "Rule of Thirds Right"),
+  },
+  {
+    value: "Negative Space Top",
+    hint: "上部を大きく空ける",
+    visual: "frame-aerial",
+    thumbnail: thumb("composition", "negative-space-top", "Negative Space Top"),
+  },
+  {
+    value: "Symmetrical Center",
+    hint: "完全中央・左右対称",
+    visual: "frame-medium",
+    thumbnail: thumb("composition", "symmetrical-center", "Symmetrical Center"),
+  },
+  {
+    value: "Edge Crop",
+    hint: "画面端で断ち切る",
+    visual: "frame-medium",
+    thumbnail: thumb("composition", "edge-crop", "Edge Crop"),
+  },
+  {
+    value: "Floor Level Long Lens",
+    hint: "床すれすれの水平",
+    visual: "frame-medium",
+    thumbnail: thumb("composition", "floor-level-long-lens", "Floor Level Long Lens"),
+  },
+  {
+    value: "Over-the-shoulder",
+    hint: "肩越しに見る視点",
+    visual: "frame-shoulder",
+    thumbnail: thumb("composition", "over-the-shoulder", "Over-the-shoulder"),
+  },
 ];
 
 // STΛCK 指示 (2026-06-09): GPT Image 2 公式対応比率から撮影用途を厚く (5:4 / 3:4 追加)。
@@ -93,12 +225,96 @@ export const aspectRatioOptions: SceneAspectRatio[] = [
 
 export const lightSourceOptions: SceneOption[] = [
   NO_SELECT_OPTION,
-  { value: "自然光", hint: "屋外・窓辺", visual: "light-natural", thumbnail: thumb("light_source", "natural-light", "自然光") },
-  { value: "スタジオ", hint: "均一光・撮影所", visual: "light-studio", thumbnail: thumb("light_source", "studio", "スタジオ") },
-  { value: "逆光", hint: "後ろから差す光", visual: "light-back", thumbnail: thumb("light_source", "backlight", "逆光") },
-  { value: "Blue Hour", hint: "夕暮れの青い時間", visual: "light-blue-hour", thumbnail: thumb("light_source", "blue-hour", "Blue Hour") },
-  { value: "Candlelight", hint: "ろうそくの暖色", visual: "light-candle", thumbnail: thumb("light_source", "candlelight", "Candlelight") },
-  { value: "Softbox", hint: "拡散柔光", visual: "light-softbox", thumbnail: thumb("light_source", "softbox", "Softbox") },
+  {
+    value: "スタジオ",
+    hint: "均一光・影ほぼ無し",
+    visual: "light-studio",
+    thumbnail: thumb("light_source", "studio", "スタジオ"),
+  },
+  {
+    value: "Softbox",
+    hint: "拡散柔光・影が柔らかい",
+    visual: "light-softbox",
+    thumbnail: thumb("light_source", "softbox", "Softbox"),
+  },
+  {
+    value: "逆光",
+    hint: "後ろから差す光",
+    visual: "light-back",
+    thumbnail: thumb("light_source", "backlight", "逆光"),
+  },
+  {
+    value: "Front Flat",
+    hint: "正面から平坦に",
+    visual: "light-studio",
+    thumbnail: thumb("light_source", "front-flat", "Front Flat"),
+  },
+  {
+    value: "Side Light",
+    hint: "真横から・半分陰",
+    visual: "light-studio",
+    thumbnail: thumb("light_source", "side-light", "Side Light"),
+  },
+  {
+    value: "Rim Light",
+    hint: "輪郭だけ光る",
+    visual: "light-back",
+    thumbnail: thumb("light_source", "rim-light", "Rim Light"),
+  },
+  {
+    value: "Top Light",
+    hint: "真上から落ちる光",
+    visual: "light-studio",
+    thumbnail: thumb("light_source", "top-light", "Top Light"),
+  },
+  {
+    value: "Under Light",
+    hint: "真下から上向き",
+    visual: "light-studio",
+    thumbnail: thumb("light_source", "under-light", "Under Light"),
+  },
+  {
+    value: "Hard Direct",
+    hint: "硬い直射・輪郭鋭い",
+    visual: "light-studio",
+    thumbnail: thumb("light_source", "hard-direct", "Hard Direct"),
+  },
+  {
+    value: "自然光",
+    hint: "屋外・窓辺の昼光",
+    visual: "light-natural",
+    thumbnail: thumb("light_source", "natural-light", "自然光"),
+  },
+  {
+    value: "Golden Hour",
+    hint: "低い太陽・強い暖色",
+    visual: "light-studio",
+    thumbnail: thumb("light_source", "golden-hour", "Golden Hour"),
+  },
+  {
+    value: "Blue Hour",
+    hint: "日没後の青い時間",
+    visual: "light-blue-hour",
+    thumbnail: thumb("light_source", "blue-hour", "Blue Hour"),
+  },
+  {
+    value: "Candlelight",
+    hint: "ろうそく・弱い暖色点光源",
+    visual: "light-candle",
+    thumbnail: thumb("light_source", "candlelight", "Candlelight"),
+  },
+  {
+    value: "ネオン管",
+    hint: "実在ネオン管が唯一の光源",
+    visual: "light-studio",
+    thumbnail: thumb("light_source", "neon-tube", "ネオン管"),
+  },
+  {
+    value: "Overcast",
+    hint: "曇天・全方向から均一",
+    visual: "light-natural",
+    thumbnail: thumb("light_source", "overcast", "Overcast"),
+  },
 ];
 
 /**
@@ -109,39 +325,140 @@ export const lightSourceOptions: SceneOption[] = [
 export const cameraEquipmentOptions: SceneOption[] = [
   NO_SELECT_OPTION,
   {
-    value: "シネマカメラ",
-    hint: "FX6・Alexa 等",
-    visual: "camera-cinema",
-    thumbnail: thumb("camera_equipment", "arri-alexa-mini", "シネマカメラ"),
-    prompt: "modern cinema camera, high dynamic range, professional cinematography",
+    value: "スマホ",
+    hint: "気軽・全体にピント",
+    visual: "camera-mobile",
+    thumbnail: thumb("camera_equipment", "iphone-pro", "スマホ"),
+    prompt:
+      "shot on a smartphone camera, wide near-pan-focus depth of field, casual immediate everyday framing, sharp computational HDR detail",
+  },
+  {
+    value: "APS-Cミラーレス",
+    hint: "軽装備・少し深め",
+    visual: "camera-digital",
+    thumbnail: thumb("camera_equipment", "aps-c-mirrorless", "APS-Cミラーレス"),
+    prompt:
+      "shot on an APS-C mirrorless camera, moderate depth of field with the background softly separated but still readable, crisp lightweight documentary look",
+  },
+  {
+    value: "フルフレームミラーレス",
+    hint: "背景がとろける定番",
+    visual: "camera-digital",
+    thumbnail: thumb("camera_equipment", "full-frame-mirrorless", "フルフレームミラーレス"),
+    prompt:
+      "shot on a full-frame mirrorless camera with a fast prime lens, shallow depth of field, creamy rounded bokeh, clean modern color separation",
   },
   {
     value: "デジタル一眼",
     hint: "クリーン・高解像",
     visual: "camera-digital",
     thumbnail: thumb("camera_equipment", "digital-camera", "デジタル一眼"),
-    prompt: "digital DSLR camera, clean sharp resolution",
+    prompt:
+      "shot on a digital DSLR, clean sharp resolution, controlled dynamic range, medium depth of field with a naturally soft background",
+  },
+  {
+    value: "シネマカメラ",
+    hint: "映画の質感・浅い",
+    visual: "camera-cinema",
+    thumbnail: thumb("camera_equipment", "arri-alexa-mini", "シネマカメラ"),
+    prompt:
+      "shot on a digital cinema camera, high dynamic range, gentle highlight rolloff, shallow cinematic depth of field, natural filmic color science",
+  },
+  {
+    value: "放送用ビデオカメラ",
+    hint: "報道・全部はっきり",
+    visual: "camera-digital",
+    thumbnail: thumb("camera_equipment", "broadcast-video-camera", "放送用ビデオカメラ"),
+    prompt:
+      "shot on a shoulder-mount broadcast video camera, deep depth of field keeping subject and location both sharp, neutral news-broadcast rendering, video-style motion look",
+  },
+  {
+    value: "大判ビューカメラ",
+    hint: "建築向き・面が薄い",
+    visual: "camera-digital",
+    thumbnail: thumb("camera_equipment", "large-format-view-camera", "大判ビューカメラ"),
+    prompt:
+      "shot on a large-format view camera, extremely shallow razor-thin plane of focus with tilt-shift control, hyper-detailed edge-to-edge resolution, perfectly straight corrected verticals",
+  },
+  {
+    value: "中判フィルム",
+    hint: "高精細・上品なボケ",
+    visual: "camera-film",
+    thumbnail: thumb("camera_equipment", "medium-format-film", "中判フィルム"),
+    prompt:
+      "shot on medium format film, very shallow depth of field with smooth gradual falloff, exceptionally fine detail and tonal gradation, refined natural color",
   },
   {
     value: "フィルムカメラ",
     hint: "粒状・温かみ",
     visual: "camera-film",
     thumbnail: thumb("camera_equipment", "film-camera", "フィルムカメラ"),
-    prompt: "shot on film, organic grain, warm color reproduction",
+    prompt:
+      "shot on 35mm film, organic grain, warm color reproduction, gentle highlight rolloff, moderately shallow depth of field",
   },
   {
-    value: "スマホ",
-    hint: "即時性・自然",
-    visual: "camera-mobile",
-    thumbnail: thumb("camera_equipment", "iphone-pro", "スマホ"),
-    prompt: "smartphone camera, casual immediate look, natural everyday framing",
+    value: "レンジファインダー",
+    hint: "素直な画・スナップ向き",
+    visual: "camera-digital",
+    thumbnail: thumb("camera_equipment", "vintage-rangefinder", "レンジファインダー"),
+    prompt:
+      "shot on a vintage rangefinder camera, moderate depth of field, quiet unobtrusive street framing, honest low-contrast optics with subtle vintage character",
+  },
+  {
+    value: "二眼レフ",
+    hint: "正方形・見上げる目線",
+    visual: "camera-digital",
+    thumbnail: thumb("camera_equipment", "twin-lens-reflex", "二眼レフ"),
+    prompt:
+      "shot on a twin-lens reflex camera, square 6x6 framing, waist-level low camera height, medium depth of field, soft classic film tonality",
+  },
+  {
+    value: "インスタントカメラ",
+    hint: "色が転ぶ・白フチ",
+    visual: "camera-digital",
+    thumbnail: thumb("camera_equipment", "instant-camera", "インスタントカメラ"),
+    prompt:
+      "shot on instant film, soft low-resolution optics, fairly deep depth of field, shifted pastel color cast, slightly blown highlights and milky shadows",
   },
   {
     value: "VHS",
     hint: "ローファイ・90年代",
     visual: "camera-retro",
     thumbnail: thumb("camera_equipment", "vhs", "VHS"),
-    prompt: "vintage VHS recording, lo-fi 90s aesthetic, scan lines, soft tape texture",
+    prompt:
+      "recorded on VHS tape, lo-fi 90s video aesthetic, scan lines, chroma smear, soft tape texture, deep unrefined depth of field",
+  },
+  {
+    value: "アクションカメラ",
+    hint: "超広角・全体にピント",
+    visual: "camera-digital",
+    thumbnail: thumb("camera_equipment", "action-camera", "アクションカメラ"),
+    prompt:
+      "shot on a wearable action camera, ultra-wide barrel-distorted field of view, very deep depth of field with everything in focus, close-to-subject high-energy perspective",
+  },
+  {
+    value: "ドローンカメラ",
+    hint: "上から俯瞰・全部シャープ",
+    visual: "camera-digital",
+    thumbnail: thumb("camera_equipment", "drone-camera", "ドローンカメラ"),
+    prompt:
+      "shot from an aerial drone camera, high elevated vantage point looking down, wide field of view, deep depth of field with the whole landscape sharp, smooth gimbal-stabilized framing",
+  },
+  {
+    value: "ウェブカメラ",
+    hint: "配信っぽい・粗い",
+    visual: "camera-digital",
+    thumbnail: thumb("camera_equipment", "webcam", "ウェブカメラ"),
+    prompt:
+      "shot on a webcam, fixed frontal eye-level framing, deep flat depth of field, mild digital noise and compression softness, plain video-call rendering",
+  },
+  {
+    value: "ハイスピードカメラ",
+    hint: "止まった瞬間・硬い光",
+    visual: "camera-digital",
+    thumbnail: thumb("camera_equipment", "high-speed-camera", "ハイスピードカメラ"),
+    prompt:
+      "shot on a high-speed camera, extreme slow-motion frozen instant, zero motion blur, crisp frozen droplets and debris, medium depth of field under bright hard light",
   },
 ];
 
@@ -157,60 +474,100 @@ export const cameraEquipmentOptions: SceneOption[] = [
 export const shotOptions: SceneOption[] = [
   NO_SELECT_OPTION,
   {
-    value: "超広角・魚眼",
-    hint: "歪み・没入感（8mm）",
+    value: "超広角14mm",
+    hint: "空間が大きく歪む",
     visual: "focal",
-    thumbnail: thumb("focal_length", "8mm", "超広角・魚眼"),
-    prompt: "ultra-wide-angle fisheye lens, immersive distortion",
+    thumbnail: thumb("shot", "14mm", "超広角14mm"),
+    prompt:
+      "14mm ultra-wide-angle lens, extreme field of view, strongly stretched perspective",
+  },
+  {
+    value: "広角24mm",
+    hint: "周囲がぐっと入る",
+    visual: "focal",
+    thumbnail: thumb("shot", "24mm", "広角24mm"),
+    prompt:
+      "24mm wide-angle lens, broad field of view, expanded perspective",
   },
   {
     value: "広角",
-    hint: "風景・空間（35mm）",
+    hint: "自然な広さで空間も入る",
     visual: "focal",
-    thumbnail: thumb("focal_length", "35mm", "広角"),
-    prompt: "35mm wide-angle lens, generous environmental framing",
+    thumbnail: thumb("shot", "35mm", "広角"),
+    prompt:
+      "35mm wide-angle lens, generous natural field of view, mild perspective",
   },
   {
     value: "標準",
-    hint: "人の視点（50mm）",
+    hint: "肉眼どおりの見え方",
     visual: "focal",
-    thumbnail: thumb("focal_length", "50mm", "標準"),
-    prompt: "50mm standard lens, natural human-eye perspective",
+    thumbnail: thumb("shot", "50mm", "標準"),
+    prompt:
+      "50mm standard lens, natural human-eye perspective, neutral depth rendering",
   },
   {
     value: "ポートレート",
-    hint: "人物・浅い被写界深度（85mm）",
+    hint: "背景が寄って主役が浮く",
     visual: "focal",
-    thumbnail: thumb("focal_length", "85mm", "ポートレート"),
-    prompt: "85mm portrait lens, shallow depth of field, creamy background bokeh",
+    thumbnail: thumb("shot", "85mm", "ポートレート"),
+    prompt:
+      "85mm short-telephoto lens, mild compression, shallow depth of field, clean subject separation",
+  },
+  {
+    value: "中望遠135mm",
+    hint: "背景が壁のように迫る",
+    visual: "focal",
+    thumbnail: thumb("shot", "135mm", "中望遠135mm"),
+    prompt:
+      "135mm telephoto lens, marked compression, flattened background plane",
   },
   {
     value: "望遠",
-    hint: "圧縮・遠景（200mm）",
+    hint: "奥行きが潰れて平面的",
     visual: "focal",
-    thumbnail: thumb("focal_length", "200mm", "望遠"),
-    prompt: "200mm telephoto lens, compressed perspective, isolated subject",
+    thumbnail: thumb("shot", "200mm", "望遠"),
+    prompt:
+      "200mm long-telephoto lens, strong compression, collapsed depth, flat layered planes",
+  },
+  {
+    value: "超望遠300mm",
+    hint: "奥行きが完全に消える",
+    visual: "focal",
+    thumbnail: thumb("shot", "300mm", "超望遠300mm"),
+    prompt:
+      "300mm super-telephoto lens, maximum compression, depth cues nearly removed",
   },
   {
     value: "マクロ接写",
-    hint: "ディテール・質感",
-    visual: "lens",
-    thumbnail: thumb("lens", "macro", "マクロ接写"),
-    prompt: "macro close-up, extreme detail and texture",
+    hint: "手だけを極端に寄る",
+    visual: "focal",
+    thumbnail: thumb("shot", "macro", "マクロ接写"),
+    prompt:
+      "macro lens at minimum focus distance, life-size detail, extremely shallow plane of focus",
   },
   {
     value: "ティルトシフト",
-    hint: "ミニチュア感",
-    visual: "lens",
-    thumbnail: thumb("lens", "tilt-shift", "ティルトシフト"),
-    prompt: "tilt-shift miniature effect, selective focal plane",
+    hint: "1本の帯だけピント",
+    visual: "focal",
+    thumbnail: thumb("shot", "tilt-shift", "ティルトシフト"),
+    prompt:
+      "tilt-shift lens, tilted plane of focus, narrow sharp band, miniature-model impression",
+  },
+  {
+    value: "超広角・魚眼",
+    hint: "画面全体が丸く反る",
+    visual: "focal",
+    thumbnail: thumb("shot", "fisheye", "超広角・魚眼"),
+    prompt:
+      "8mm fisheye lens, pronounced barrel distortion, near-180-degree field of view",
   },
   {
     value: "アナモルフィック",
-    hint: "シネマ横長ボケ",
-    visual: "lens",
-    thumbnail: thumb("lens", "anamorphic", "アナモルフィック"),
-    prompt: "anamorphic lens, oval bokeh, cinematic widescreen flare",
+    hint: "横長・楕円ボケ",
+    visual: "focal",
+    thumbnail: thumb("shot", "anamorphic", "アナモルフィック"),
+    prompt:
+      "anamorphic lens, wider horizontal field of view, oval bokeh, subtle horizontal stretch",
   },
 ];
 
@@ -232,81 +589,212 @@ export const shotOptions: SceneOption[] = [
 export const styleOptions: SceneOption[] = [
   NO_SELECT_OPTION,
   {
-    value: "ドキュメンタリーリアリズム",
-    hint: "誠実・自然・報道写真",
-    visual: "style",
-    thumbnail: thumb("cinematic_look", "documentary-realism", "ドキュメンタリーリアリズム"),
-    prompt: "documentary realism, naturalistic light, photojournalism feel, subtle grain",
-  },
-  {
-    value: "ネオノワール",
-    hint: "暗闇・ネオン・影",
-    visual: "style",
-    thumbnail: thumb("cinematic_look", "neo-noir", "ネオノワール"),
-    prompt: "neo-noir, low-key lighting, deep shadows, neon accents, high contrast, subtle halation",
-  },
-  {
-    value: "パステル昼光",
-    hint: "柔らかな昼光・夢見心地",
-    visual: "style",
-    thumbnail: thumb("cinematic_look", "pastel-daylight", "パステル昼光"),
-    prompt: "pastel daylight palette, soft natural light, airy cinematic mood, light film grain",
-  },
-  {
-    value: "ハイコントラスト劇的",
-    hint: "強い陰影・キアロスクーロ",
-    visual: "style",
-    thumbnail: thumb("cinematic_look", "high-contrast", "ハイコントラスト劇的"),
-    prompt: "high-contrast cinematic lighting, dramatic chiaroscuro, deep blacks, controlled highlights",
-  },
-  {
-    value: "ミュートドラマ",
-    hint: "彩度抑え・絵画的",
-    visual: "style",
-    thumbnail: thumb("cinematic_look", "muted-drama", "ミュートドラマ"),
-    prompt: "muted dramatic palette, desaturated grading, painterly atmosphere, classical composition",
-  },
-  {
     value: "クリーンコマーシャル",
-    hint: "明るく整った商業",
+    hint: "広告写真そのままの清潔さ",
     visual: "style",
-    thumbnail: thumb("cinematic_look", "clean-commercial", "クリーンコマーシャル"),
-    prompt: "clean commercial photography, bright even lighting, polished editorial finish",
+    thumbnail: thumb("style", "clean-commercial", "クリーンコマーシャル"),
+    prompt:
+      "clean commercial product photography, crisp edge-to-edge sharpness, polished neutral finish, high fidelity surface detail",
+  },
+  {
+    value: "photorealistic",
+    hint: "実写そのまま・加工感なし",
+    visual: "style",
+    thumbnail: thumb("style", "photorealistic", "photorealistic"),
+    prompt:
+      "photorealistic photography, true-to-life materials and micro-surface texture, natural optical depth of field, unprocessed neutral color",
+  },
+  {
+    value: "ドキュメンタリーリアリズム",
+    hint: "報道写真の素っ気なさ",
+    visual: "style",
+    thumbnail: thumb("style", "documentary-realism", "ドキュメンタリーリアリズム"),
+    prompt:
+      "documentary photojournalism rendering, unretouched reportage look, honest flat neutral color, fine natural 35mm grain",
   },
   {
     value: "エディトリアルポートレート",
-    hint: "雑誌風・人物中心",
+    hint: "雑誌の質感・きれいに整う",
     visual: "style",
-    thumbnail: thumb("photographer", "annie-leibovitz", "エディトリアルポートレート"),
-    prompt: "editorial portrait, magazine cover quality, environmental context, controlled drama",
-  },
-  {
-    value: "アメリカーナ叙情",
-    hint: "アメリカ的・物語性",
-    visual: "style",
-    thumbnail: thumb("photographer", "alec-soth", "アメリカーナ叙情"),
-    prompt: "narrative americana documentary photography, quiet observation, poetic atmosphere",
+    thumbnail: thumb("style", "editorial-portrait", "エディトリアルポートレート"),
+    prompt:
+      "editorial fashion magazine rendering, refined medium-format clarity, smooth tonal gradation, immaculate retouched surfaces",
   },
   {
     value: "大判建築",
-    hint: "建築・厳密・大判",
+    hint: "隅々まで異様に解像する",
     visual: "style",
-    thumbnail: thumb("photographer", "andreas-gursky", "大判建築"),
-    prompt: "large-format architectural photography, monumental scale, hyper-detailed precision",
+    thumbnail: thumb("style", "large-format-architectural", "大判建築"),
+    prompt:
+      "large-format technical photography rendering, hyper-detailed resolution across the whole frame, rectilinear geometry, deep uniform focus",
   },
   {
-    value: "ストリート粒子",
-    hint: "街・粒子感・モノクロ寄り",
+    value: "シネマティックフィルム",
+    hint: "映画のワンカットに見える",
     visual: "style",
-    thumbnail: thumb("photographer", "daido-moriyama", "ストリート粒子"),
-    prompt: "high-contrast street photography with heavy grain, gritty urban observation",
+    thumbnail: thumb("style", "cinematic-film", "シネマティックフィルム"),
+    prompt:
+      "cinematic 35mm motion-picture film rendering, anamorphic edge softness, filmic highlight rolloff, subtle organic grain",
+  },
+  {
+    value: "ミュートドラマ",
+    hint: "彩度を殺して重くする",
+    visual: "style",
+    thumbnail: thumb("style", "muted-drama", "ミュートドラマ"),
+    prompt:
+      "muted painterly film rendering, heavily desaturated palette, low contrast, soft matte surfaces, restrained classical tonality",
+  },
+  {
+    value: "パステル昼光",
+    hint: "色が淡く軽く抜ける",
+    visual: "style",
+    thumbnail: thumb("style", "pastel-daylight", "パステル昼光"),
+    prompt:
+      "pastel high-key film rendering, lifted blacks, airy pale tonality, gentle low-contrast gradation, delicate soft grain",
+  },
+  {
+    value: "ハイコントラスト劇的",
+    hint: "黒が潰れて白が飛ぶ",
+    visual: "style",
+    thumbnail: thumb("style", "high-contrast", "ハイコントラスト劇的"),
+    prompt:
+      "high-contrast graphic rendering, crushed deep blacks, clean blown whites, steep tonal curve, hard-edged value separation",
+  },
+  {
+    value: "ネオノワール",
+    hint: "黒が深く沈むノワール",
+    visual: "style",
+    thumbnail: thumb("style", "neo-noir", "ネオノワール"),
+    prompt:
+      "neo-noir film rendering, dense inky shadow density, cool desaturated grade, glossy hard surface sheen, heavy filmic contrast",
   },
   {
     value: "モノクロストリート",
-    hint: "白黒・候補的瞬間",
+    hint: "白黒・階調がきれい",
     visual: "style",
-    thumbnail: thumb("photographer", "vivian-maier", "モノクロストリート"),
-    prompt: "classic black-and-white street photography, decisive moment, subtle film grain",
+    thumbnail: thumb("style", "monochrome-street", "モノクロストリート"),
+    prompt:
+      "classic black-and-white silver gelatin rendering, fully monochrome, rich mid-tone gradation, fine even grain, darkroom print finish",
+  },
+  {
+    value: "ストリート粒子",
+    hint: "荒い粒子でざらつく",
+    visual: "style",
+    thumbnail: thumb("style", "street-grain", "ストリート粒子"),
+    prompt:
+      "gritty high-ISO black-and-white rendering, coarse heavy grain, harsh blown contrast, rough push-processed texture",
+  },
+  {
+    value: "アメリカーナ叙情",
+    hint: "退色した昔の写真感",
+    visual: "style",
+    thumbnail: thumb("style", "americana-lyric", "アメリカーナ叙情"),
+    prompt:
+      "faded vintage color negative rendering, aged dye shift, soft low-saturation palette, gentle analog softness, mild visible grain",
+  },
+  {
+    value: "3Dレンダー",
+    hint: "CGらしいツルツルの立体",
+    visual: "style",
+    thumbnail: thumb("style", "3d-render", "3Dレンダー"),
+    prompt:
+      "modern 3D CGI render, physically based matte shader, smooth synthetic surfaces, clean raytraced ambient occlusion",
+  },
+  {
+    value: "クレイアニメ",
+    hint: "粘土細工の手作り感",
+    visual: "style",
+    thumbnail: thumb("style", "claymation", "クレイアニメ"),
+    prompt:
+      "stop-motion claymation rendering, sculpted plasticine surfaces with fingerprint dents, soft handmade irregularity, tactile miniature feel",
+  },
+  {
+    value: "油彩画",
+    hint: "絵の具の厚みが見える",
+    visual: "style",
+    thumbnail: thumb("style", "oil-painting", "油彩画"),
+    prompt:
+      "traditional oil painting on canvas, thick impasto brush strokes, visible bristle marks, woven canvas texture, painterly edges",
+  },
+  {
+    value: "水彩画",
+    hint: "にじみと余白で軽い",
+    visual: "style",
+    thumbnail: thumb("style", "watercolor", "水彩画"),
+    prompt:
+      "watercolor painting on cold-press paper, translucent washes, soft bleeding pigment edges, wet-on-wet blooms, white paper highlights",
+  },
+  {
+    value: "鉛筆スケッチ",
+    hint: "手描きの下描きに見える",
+    visual: "style",
+    thumbnail: thumb("style", "pencil-sketch", "鉛筆スケッチ"),
+    prompt:
+      "graphite pencil sketch on sketchbook paper, hand-drawn contour lines, cross-hatched shading, visible construction lines and eraser smudges",
+  },
+  {
+    value: "アニメ",
+    hint: "アニメのセル画になる",
+    visual: "style",
+    thumbnail: thumb("style", "anime", "アニメ"),
+    prompt:
+      "Japanese anime cel rendering, clean uniform ink outlines, flat two-tone cel shading with hard shadow edges, limited palette",
+  },
+  {
+    value: "漫画線画",
+    hint: "白黒漫画の線とトーン",
+    visual: "style",
+    thumbnail: thumb("style", "manga-line-art", "漫画線画"),
+    prompt:
+      "black-and-white manga line art, crisp variable-weight ink linework, screentone halftone shading, pure black and white only",
+  },
+  {
+    value: "リソグラフ印刷",
+    hint: "版ズレしたZINE印刷",
+    visual: "style",
+    thumbnail: thumb("style", "risograph", "リソグラフ印刷"),
+    prompt:
+      "risograph print rendering, coarse halftone dot screens, slight ink misregistration, uneven ink coverage, matte recycled paper texture",
+  },
+  {
+    value: "スクリーン印刷",
+    hint: "ポスター版画の平べったさ",
+    visual: "style",
+    thumbnail: thumb("style", "screen-print", "スクリーン印刷"),
+    prompt:
+      "silkscreen poster print rendering, posterized flat tonal blocks, hard-edged stencil separations, squeegee ink texture, heavy paper stock",
+  },
+  {
+    value: "ベクターフラット",
+    hint: "アイコン的にのっぺりする",
+    visual: "style",
+    thumbnail: thumb("style", "vector-flat", "ベクターフラット"),
+    prompt:
+      "flat vector illustration, clean geometric shapes, solid uniform fills, no gradients, crisp mathematical edges, icon-like reduction",
+  },
+  {
+    value: "ピクセルアート",
+    hint: "ドット絵に粗く落ちる",
+    visual: "style",
+    thumbnail: thumb("style", "pixel-art", "ピクセルアート"),
+    prompt:
+      "low-resolution pixel art rendering, visible square pixel grid, hard aliased edges, limited index palette, dithered shading, no anti-aliasing",
+  },
+  {
+    value: "設計図ブループリント",
+    hint: "図面・線だけの設計図",
+    visual: "style",
+    thumbnail: thumb("style", "blueprint-technical", "設計図ブループリント"),
+    prompt:
+      "technical blueprint drafting rendering, precise thin uniform outlines, orthographic engineering-drawing clarity, no fills, no shading",
+  },
+  {
+    value: "ワイヤーフレーム",
+    hint: "骨組みだけの線メッシュ",
+    visual: "style",
+    thumbnail: thumb("style", "wireframe", "ワイヤーフレーム"),
+    prompt:
+      "3D wireframe rendering, open polygon mesh of thin edge lines, visible topology, no surface shading, CAD viewport look",
   },
 ];
 
