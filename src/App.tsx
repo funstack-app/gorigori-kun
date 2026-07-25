@@ -19,6 +19,7 @@ import { SettingsWorkspace } from "./components/SettingsWorkspace";
 import { SkillsWorkspace } from "./components/SkillsWorkspace";
 import { SkillWorkspaceRouter } from "./components/SkillWorkspaceRouter";
 import { Toaster } from "./components/Toaster";
+import { GenerationStatusPanel } from "./components/GenerationStatusPanel";
 import { Badge, Button, EmptyState, SegmentedTabs } from "./components/ui";
 import { attachWindowDragDrop } from "./lib/dragDrop";
 import { type AuthAccount, images as imagesIpc, onImageBatch, onImageGenerated } from "./lib/ipc";
@@ -239,6 +240,7 @@ function App() {
       <MaskEditorModal />
       <SnsExportModalMount />
       <Toaster />
+      <GenerationStatusPanel />
       <FirstRunStorageNotice />
     </main>
   );

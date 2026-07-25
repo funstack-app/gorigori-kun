@@ -2,6 +2,7 @@ import { create } from "zustand";
 
 import { getSheetCut } from "../character/sheetCuts";
 import type { CharacterSheetEvent, SheetCutState } from "../character/types";
+import { syncCutRunStatus, useGenerationStatus } from "./generationStatus";
 
 /**
  * キャラクター登録パイプラインの run ストア。
@@ -77,6 +78,25 @@ type CharacterSheetRunState = {
   enterMode: (mode: Exclude<CharacterSheetRunMode, null>) => void;
 };
 
+/**
+ * run のイベントを右上の生成状況パネルへ橋渡しする。
+ *
+ * 実イベント (cutStarted / cutCompleted / cutFailed) を数えるので、
+ * 経過時間からの推定ではなく **実際の並列稼働数と完了数** が表示される。
+ * これが「動いているのに固まって見える」問題への対処の本体。
+ */
+function syncGenerationStatus(
+  state: { cutOrder: string[]; cuts: Record<string, SheetCutState>; mode: CharacterSheetRunMode },
+  e: CharacterSheetEvent,
+) {
+  syncCutRunStatus(
+    state.mode === "expression" ? "expressionSet" : "characterSheet",
+    state.cuts,
+    state.cutOrder.length,
+    e,
+  );
+}
+
 const runEmptyState = {
   status: "idle" as CharacterSheetRunStatus,
   runId: null as string | null,
@@ -115,6 +135,13 @@ export const useCharacterSheetRun = create<CharacterSheetRunState>((set) => ({
       }
       const endedRunId =
         s.runId !== null && s.runId !== runId ? s.runId : s.lastEndedRunId;
+      // 生成状況パネルへ即座に登録する。started イベントを待たないのは、
+      // 「押した直後から何か見えている」ことがフリーズ誤認を防ぐ要点だから。
+      useGenerationStatus.getState().start({
+        id: runId,
+        kind: mode === "expression" ? "expressionSet" : "characterSheet",
+        total: cutOrder.length || undefined,
+      });
       return {
         mode,
         status: "running" as const,
@@ -140,6 +167,11 @@ export const useCharacterSheetRun = create<CharacterSheetRunState>((set) => ({
       ) {
         return s;
       }
+      // 生成状況パネル(右上)へ橋渡しする。2026-07-25 STΛCK指示:
+      // 「並列で何枚動いているか・進まない原因」を常時見せ、フリーズに見せない。
+      // store 側で1回だけ繋ぐ (各コンポーネントに散らすと繋ぎ忘れが出る)。
+      syncGenerationStatus(s, e);
+
       switch (e.kind) {
         case "started":
           return { status: "running" as const, runId: e.runId };

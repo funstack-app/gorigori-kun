@@ -1,0 +1,298 @@
+import { create } from "zustand";
+
+/**
+ * 生成の「今どうなっているか」を1箇所に集約するストア。
+ *
+ * ## なぜこれが必要か (2026-07-25 STΛCK指示)
+ *
+ * 実機テストで「生成中のまま進まない」状態に遭遇したが、ログを見ると
+ * codex exec が4本並列で正常に走っていた。つまり **止まっていたのではなく、
+ * 動いているのが見えていなかった**。ユーザーからは区別が付かない。
+ *
+ * さらに従来のゲージ (GenerationGauge) は経過時間からの推定のみで実進捗を見ておらず、
+ * 実際に完了しても 50% 付近を指したままになることがあった。
+ *
+ * そこで「何枚が実際に動いていて、何枚終わって、なぜ止まっているか」を
+ * 全生成経路が同じ形で報告する場所を作る。UI はここだけを見れば状態が分かる。
+ *
+ * 設計の要点:
+ * - **実イベントを正とする**。running / completed / failed は実際の worker から更新する。
+ * - 推定は「経過時間」だけに留め、進捗率の主役にしない。
+ * - 進まないときは理由 (stallReason) を必ず持つ。フリーズに見せない。
+ */
+
+/** 生成の種類。全スキルを網羅する (従来は batch/multiangle/storyboard の3種のみだった)。 */
+export type GenerationKind =
+  | "batch"
+  | "multiangle"
+  | "storyboard"
+  | "expressionSet"
+  | "comic"
+  | "productSet"
+  | "sceneRecreate"
+  | "characterSheet"
+  | "video";
+
+export const GENERATION_KIND_LABEL: Record<GenerationKind, string> = {
+  batch: "画像生成",
+  multiangle: "マルチアングル",
+  storyboard: "ストーリーカット",
+  expressionSet: "表情差分",
+  comic: "漫画",
+  productSet: "EC納品セット",
+  sceneRecreate: "シーン再現",
+  characterSheet: "キャラクターシート",
+  video: "動画生成",
+};
+
+/** 進まない理由。UI がそのまま文言にできる粒度で持つ。 */
+export type StallReason =
+  | { type: "waiting-slot"; ahead: number } // 並列上限で順番待ち
+  | { type: "auth-required"; service: string } // 認証切れ・未接続
+  | { type: "no-response"; sinceMs: number } // 応答が来ない
+  | { type: "error"; message: string; code?: string }; // 明示的な失敗
+
+export type GenerationJob = {
+  id: string;
+  kind: GenerationKind;
+  /** 全体で何枚作る予定か。不明なら undefined。 */
+  total?: number;
+  /** 実際に完了した枚数 (実イベント由来。推定しない)。 */
+  completed: number;
+  /** 実際に失敗した枚数。 */
+  failed: number;
+  /** いま実行中の枚数 (並列稼働数)。STΛCK が知りたい値。 */
+  running: number;
+  startedAt: number;
+  /** 最後にイベントを受け取った時刻。無反応検出に使う。 */
+  lastEventAt: number;
+  /** 進まない理由。null なら順調。 */
+  stall: StallReason | null;
+  /** 終了済みか。 */
+  finished: boolean;
+};
+
+type GenerationStatusState = {
+  jobs: Record<string, GenerationJob>;
+  /** 生成を開始する。同じ id なら上書きせず既存を返す。 */
+  start: (input: { id: string; kind: GenerationKind; total?: number }) => void;
+  /** 並列稼働数を更新する。 */
+  setRunning: (id: string, running: number) => void;
+  /** 1枚完了。 */
+  addCompleted: (id: string, count?: number) => void;
+  /** 1枚失敗。 */
+  addFailed: (id: string, count?: number) => void;
+  /** 進まない理由を設定/解除する。 */
+  setStall: (id: string, stall: StallReason | null) => void;
+  /** 終了させる。 */
+  finish: (id: string) => void;
+  /** 片付け。 */
+  clear: (id: string) => void;
+};
+
+export const useGenerationStatus = create<GenerationStatusState>((set) => ({
+  jobs: {},
+
+  start: ({ id, kind, total }) =>
+    set((s) => {
+      if (s.jobs[id]) return s;
+      const now = Date.now();
+      return {
+        jobs: {
+          ...s.jobs,
+          [id]: {
+            id,
+            kind,
+            total,
+            completed: 0,
+            failed: 0,
+            running: 0,
+            startedAt: now,
+            lastEventAt: now,
+            stall: null,
+            finished: false,
+          },
+        },
+      };
+    }),
+
+  setRunning: (id, running) =>
+    set((s) => {
+      const job = s.jobs[id];
+      if (!job) return s;
+      return {
+        jobs: {
+          ...s.jobs,
+          [id]: { ...job, running, lastEventAt: Date.now(), stall: running > 0 ? null : job.stall },
+        },
+      };
+    }),
+
+  addCompleted: (id, count = 1) =>
+    set((s) => {
+      const job = s.jobs[id];
+      if (!job) return s;
+      return {
+        jobs: {
+          ...s.jobs,
+          [id]: {
+            ...job,
+            completed: job.completed + count,
+            lastEventAt: Date.now(),
+            stall: null,
+          },
+        },
+      };
+    }),
+
+  addFailed: (id, count = 1) =>
+    set((s) => {
+      const job = s.jobs[id];
+      if (!job) return s;
+      return {
+        jobs: {
+          ...s.jobs,
+          [id]: { ...job, failed: job.failed + count, lastEventAt: Date.now() },
+        },
+      };
+    }),
+
+  setStall: (id, stall) =>
+    set((s) => {
+      const job = s.jobs[id];
+      if (!job) return s;
+      return { jobs: { ...s.jobs, [id]: { ...job, stall } } };
+    }),
+
+  finish: (id) =>
+    set((s) => {
+      const job = s.jobs[id];
+      if (!job) return s;
+      return {
+        jobs: {
+          ...s.jobs,
+          [id]: { ...job, finished: true, running: 0, lastEventAt: Date.now(), stall: null },
+        },
+      };
+    }),
+
+  clear: (id) =>
+    set((s) => {
+      if (!s.jobs[id]) return s;
+      const next = { ...s.jobs };
+      delete next[id];
+      return { jobs: next };
+    }),
+}));
+
+/**
+ * 実進捗を優先した進捗率を返す。
+ *
+ * total が分かっていれば **完了枚数 ÷ 総数** をそのまま使う (推定しない)。
+ * total が不明なときだけ経過時間で補間するが、その場合も 90% で頭打ちにし、
+ * 「終わっていないのに 100% に見える」ことを防ぐ。
+ */
+export function jobPercent(job: GenerationJob, expectedSeconds: number): number {
+  if (job.finished) return 100;
+  const settled = job.completed + job.failed;
+  if (job.total && job.total > 0) {
+    return Math.min(99, (settled / job.total) * 100);
+  }
+  const elapsed = (Date.now() - job.startedAt) / 1000;
+  if (expectedSeconds <= 0) return 0;
+  return Math.min(90, 90 * (elapsed / expectedSeconds));
+}
+
+/** 無反応と見なす閾値。これを超えたら理由を出す。 */
+export const NO_RESPONSE_THRESHOLD_MS = 90_000;
+
+/**
+ * 失敗理由の文字列から、UI に出す stall を組み立てる。
+ *
+ * 認証切れは「設定から再ログイン」という次の行動が決まっているので専用扱いにする。
+ * それ以外は原文をそのまま見せる (Rust 側の humanize_generation_failure が
+ * 既に日本語化しており、エラーコードが含まれる場合もそのまま残したい)。
+ */
+export function stallFromFailure(reason: string): StallReason {
+  const lower = (reason ?? "").toLowerCase();
+  const authHints = [
+    "unauthorized",
+    "not authenticated",
+    "認証が切れ",
+    "認証切れ",
+    "再ログイン",
+    "401",
+  ];
+  if (authHints.some((hint) => lower.includes(hint))) {
+    return { type: "auth-required", service: "画像生成サービス" };
+  }
+  // HTTP ステータスや既知のエラーコードを拾えたら code として分離して見せる。
+  const codeMatch = reason?.match(/\b(4\d{2}|5\d{2}|E[A-Z_]{3,})\b/);
+  return {
+    type: "error",
+    message: reason || "原因不明のエラー",
+    code: codeMatch?.[1],
+  };
+}
+
+/**
+ * cutStarted / cutCompleted / cutFailed / completed 形式のイベントを持つ run store
+ * (characterSheetRun / multiAngleRun / storyboardRun 系) の共通橋渡し。
+ *
+ * cuts の現在状態から running を毎回数え直すので、イベントの取りこぼしがあっても
+ * 表示が破綻しない。呼び出し側は「イベント適用前の state」を渡す。
+ */
+export function syncCutRunStatus(
+  kind: GenerationKind,
+  cuts: Record<string, { status: string }>,
+  totalCuts: number,
+  e:
+    | { kind: "started"; runId: string }
+    | { kind: "cutStarted"; runId: string }
+    | { kind: "cutCompleted"; runId: string }
+    | { kind: "cutFailed"; runId: string; reason?: string }
+    | { kind: "completed"; runId: string }
+    | { kind: string; runId: string; reason?: string },
+) {
+  const status = useGenerationStatus.getState();
+  const runningNow = Object.values(cuts).filter((c) => c.status === "running").length;
+
+  switch (e.kind) {
+    case "started":
+      status.start({ id: e.runId, kind, total: totalCuts || undefined });
+      break;
+    case "cutStarted":
+      // state はまだ更新前なのでこのイベント分を +1 する
+      status.setRunning(e.runId, runningNow + 1);
+      break;
+    case "cutCompleted":
+      status.addCompleted(e.runId);
+      status.setRunning(e.runId, Math.max(0, runningNow - 1));
+      break;
+    case "cutFailed":
+      status.addFailed(e.runId);
+      status.setRunning(e.runId, Math.max(0, runningNow - 1));
+      if (e.reason) status.setStall(e.runId, stallFromFailure(e.reason));
+      break;
+    case "completed":
+      status.finish(e.runId);
+      setTimeout(() => useGenerationStatus.getState().clear(e.runId), 4000);
+      break;
+  }
+}
+
+/** 進まない理由を人間の言葉にする。UI はこれを表示すればよい。 */
+export function describeStall(stall: StallReason): string {
+  switch (stall.type) {
+    case "waiting-slot":
+      return stall.ahead > 0
+        ? `順番待ち (前に ${stall.ahead} 件)`
+        : "順番待ち";
+    case "auth-required":
+      return `${stall.service} の認証が切れています。設定から再ログインしてください`;
+    case "no-response":
+      return `${Math.round(stall.sinceMs / 1000)} 秒間 応答がありません`;
+    case "error":
+      return stall.code ? `エラー ${stall.code}: ${stall.message}` : `エラー: ${stall.message}`;
+  }
+}

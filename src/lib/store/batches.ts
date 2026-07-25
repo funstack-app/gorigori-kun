@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { type ImageBatchEvent, type ImageBatchProvider } from "../ipc";
 import { recordGenerationDuration } from "../../components/GenerationGauge";
+import { stallFromFailure, useGenerationStatus } from "./generationStatus";
 
 // ──────────── Types ────────────
 
@@ -309,12 +310,60 @@ export const useBatches = create<BatchesState>((set, _get) => ({
         ).length;
       }
 
+      // 右上の生成状況パネルへ実績を橋渡しする (2026-07-25 STΛCK指示)。
+      // workers 配列を毎回集計するので、どのイベント経路でも値が正しくなる。
+      // 完了数を実測で持つため、ゲージは経過時間の推定でなく実進捗になる
+      // (「50%で生成が終わる」問題への対処)。
+      syncBatchStatus(batch);
+
       const next = [...batches];
       next[idx] = batch;
       return { batches: next };
     });
   },
 }));
+
+/** batch の workers 配列から実際の稼働数・完了数を数えてパネルへ反映する。 */
+function syncBatchStatus(batch: {
+  batchId: string;
+  status: string;
+  workers: { status: string; error?: string }[];
+  mediaType?: string;
+}) {
+  const status = useGenerationStatus.getState();
+  const id = batch.batchId;
+  const running = batch.workers.filter((w) => w.status === "running").length;
+  const completed = batch.workers.filter((w) => w.status === "completed").length;
+  const failed = batch.workers.filter((w) => w.status === "failed").length;
+
+  const job = status.jobs[id];
+  if (!job) {
+    status.start({
+      id,
+      kind: batch.mediaType === "video" ? "video" : "batch",
+      total: batch.workers.length || undefined,
+    });
+  }
+
+  status.setRunning(id, running);
+  // 差分だけ加算する (addCompleted は累積するため、実測との差を埋める)
+  const current = useGenerationStatus.getState().jobs[id];
+  if (current) {
+    if (completed > current.completed) {
+      status.addCompleted(id, completed - current.completed);
+    }
+    if (failed > current.failed) {
+      status.addFailed(id, failed - current.failed);
+      const firstError = batch.workers.find((w) => w.status === "failed" && w.error)?.error;
+      if (firstError) status.setStall(id, stallFromFailure(firstError));
+    }
+  }
+
+  if (batch.status === "completed" || batch.status === "cancelled") {
+    status.finish(id);
+    setTimeout(() => useGenerationStatus.getState().clear(id), 4000);
+  }
+}
 
 // dev-only: expose store for Playwright UI tests / inspection
 if (typeof import.meta !== "undefined" && (import.meta as any).env?.DEV) {

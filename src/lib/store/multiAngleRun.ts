@@ -2,6 +2,7 @@ import { create } from "zustand";
 
 import { MAX_CUTS } from "../multiangle/angles";
 import type { CutState, MultiAngleEvent } from "../multiangle/types";
+import { syncCutRunStatus, useGenerationStatus } from "./generationStatus";
 
 type MultiAngleRunStatus = "idle" | "running" | "completed" | "failed";
 
@@ -145,6 +146,12 @@ export const useMultiAngleRun = create<MultiAngleRunState>((set) => ({
         }
         cutOrder.push(cutId);
       }
+      // 押した直後から右上に表示する (started イベントを待たない)
+      useGenerationStatus.getState().start({
+        id: runId,
+        kind: "multiangle",
+        total: cutOrder.length || undefined,
+      });
       return {
         status: "running" as const,
         runId,
@@ -161,6 +168,9 @@ export const useMultiAngleRun = create<MultiAngleRunState>((set) => ({
   applyEvent: (e) =>
     set((s) => {
       if (!s.runId || e.runId !== s.runId) return s;
+
+      // 右上の生成状況パネルへ橋渡し (2026-07-25 STΛCK指示: 並列稼働数と原因を常時表示)
+      syncCutRunStatus("multiangle", s.cuts, s.cutOrder.length, e);
 
       switch (e.kind) {
         case "started":
