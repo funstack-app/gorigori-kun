@@ -1542,6 +1542,36 @@ async fn build_structured_prompt(
     let role_assignment = assign_cut_role(cut_index, total_cuts, &cut.description);
     let step_zoom_hint =
         compute_step_zoom_hint(previous_shot_types, role_assignment.shot_type_hint);
+
+    // 絵コンテ(sketch_mode)では写実ディテールの義務付けを外す。
+    // なぜ (2026-07-25 STΛCK指示): 絵コンテはモノクロ鉛筆ラフが正解で、
+    // 詳細に描き込むと情報が乗りすぎて害になる。この経路は
+    // 「Cinematic Detail Mandate (MUST FILL)」として light_fall / motion_residue /
+    // atmospheric_layer / color_grade_note を LLM に必ず埋めさせていたため、
+    // 決定論側(local_structured_prompt)で写実項目を落としても、この経路に落ちた
+    // カットだけ写実指示が復活してしまっていた(フォールバックが sketch_mode を無視)。
+    let detail_mandate = if params.sketch_mode {
+        "## Storyboard Sketch Mandate (MUST FOLLOW)\n\
+         This is a ROUGH STORYBOARD SKETCH, not a finished frame. Fill ONLY composition fields.\n\
+         - The output JSON's `framing` MUST include `body_position_in_frame` (where the subject sits in frame).\n\
+         - Do NOT include `focus_detail`, `light_fall`, `motion_residue`, or `atmospheric_layer`. \
+         Lighting, texture and atmosphere are meaningless for a monochrome pencil sketch and must be omitted.\n\
+         - The output JSON's `style` MUST NOT include `color_grade_note` or `motion_blur_intent`.\n\
+         - The output JSON's `narrative` MUST include `cut_role` set to \"{cut_role}\".\n\n"
+    } else {
+        "## Cinematic Detail Mandate (MUST FILL)\n\
+         The output JSON's `framing` MUST include these fields beyond shot_type and camera_angle:\n\
+         - `focus_detail`: which body part or object the camera fixates on. Be specific (e.g. \"right hand fingers gripping the lever\", \"left iris with a sliver of blue glow reflection\").\n\
+         - `body_position_in_frame`: where the subject sits in the frame (e.g. \"left third, gaze leading toward right negative space\").\n\
+         - `light_fall`: light source direction relative to subject (e.g. \"rim from screen-right, soft fill below\").\n\
+         - `motion_residue`: what was just moving and is now mid-flow (e.g. \"hair mid-flick, fabric in S-curve\").\n\
+         - `atmospheric_layer`: foreground/background depth cues (e.g. \"foreground bokeh of glassware, background dust motes in light shaft\").\n\
+         The output JSON's `narrative` MUST include `cut_role` set to \"{cut_role}\".\n\
+         The output JSON's `style` MUST include `color_grade_note` and `motion_blur_intent`.\n\
+         Skip the cinematic detail mandate ONLY if the resulting fields would be meaningless for the action; otherwise fill all.\n\n"
+    }
+    .replace("{cut_role}", role_assignment.role);
+
     let prompt = format!(
         "You are GORI storyboard prompt builder. Reference the following specs.\n\n\
          ## SKILL.md\n{skill_md}\n\n\
@@ -1573,16 +1603,7 @@ async fn build_structured_prompt(
          - The shot_type MUST be derived from the verb mapping in `Verb Dictionary` and justified by the `current_action`. If you cannot justify it from the action, choose again.\n\
          - Rotate camera_angle among at least 3 distinct values across the sequence: eye-level, low angle, high angle, dutch tilt, top-down, ground-up.\n\
          - The Step Zoom Rule applies. Read the `step_zoom_direction` above and pick framing accordingly.\n\n\
-         ## Cinematic Detail Mandate (MUST FILL)\n\
-         The output JSON's `framing` MUST include these fields beyond shot_type and camera_angle:\n\
-         - `focus_detail`: which body part or object the camera fixates on. Be specific (e.g. \"right hand fingers gripping the lever\", \"left iris with a sliver of blue glow reflection\").\n\
-         - `body_position_in_frame`: where the subject sits in the frame (e.g. \"left third, gaze leading toward right negative space\").\n\
-         - `light_fall`: light source direction relative to subject (e.g. \"rim from screen-right, soft fill below\").\n\
-         - `motion_residue`: what was just moving and is now mid-flow (e.g. \"hair mid-flick, fabric in S-curve\").\n\
-         - `atmospheric_layer`: foreground/background depth cues (e.g. \"foreground bokeh of glassware, background dust motes in light shaft\").\n\
-         The output JSON's `narrative` MUST include `cut_role` set to \"{cut_role}\".\n\
-         The output JSON's `style` MUST include `color_grade_note` and `motion_blur_intent`.\n\
-         Skip the cinematic detail mandate ONLY if the resulting fields would be meaningless for the action; otherwise fill all.\n\n\
+         {detail_mandate}\
          Return ONLY the JSON object matching the Prompt Builder shape. No prose, no markdown fence.",
         skill_md = refs.skill_md,
         prompt_builder = refs.prompt_builder,
@@ -1647,6 +1668,73 @@ fn local_structured_prompt(
         shot_type = verb_shot;
     }
     let camera_angle = pick_diverse_camera_angle(&cut.description, previous_shot_types.len());
+
+    // 絵コンテ(sketch_mode)では写実ディテールを構造化プロンプトから落とす。
+    //
+    // なぜ (2026-07-25 STΛCK指示「絵コンテはモノクロの棒人間ラフでいい。
+    // 詳細に描きすぎると情報が乗りすぎて害」):
+    //   build_generation_prompt は sketch_mode で「鉛筆ラフ・モノクロ・写実禁止」を
+    //   指示しているのに、この JSON 側は sketch_mode を見ておらず
+    //   light_fall(照明の当たり方) / motion_residue(髪や布の残像) /
+    //   atmospheric_layer(前景ボケ・光条の埃) / color_grade_note / motion_blur_intent
+    //   といった写実描写を要求していた。**同一リクエスト内で矛盾した2つの指示**を
+    //   出しており、モデルは写実側に引っ張られて絵コンテがラフにならなかった。
+    //   絵コンテに必要なのは構図情報(shot_type / camera_angle / 被写体位置 / 動き)
+    //   だけなので、質感・光・空気感の項目は絵コンテでは渡さない。
+    let sketch = params.sketch_mode;
+
+    // style: 絵コンテでは画風の固定だけ残し、色調・モーションブラー意図は落とす
+    let style_block = if sketch {
+        serde_json::json!({
+            "style_reference": style_ref,
+            "must_keep": ["same character design", "same silhouette"],
+            "render_note": "rough monochrome pencil sketch; ignore color, texture and lighting fidelity"
+        })
+    } else {
+        serde_json::json!({
+            "style_reference": style_ref,
+            "must_keep": ["same art direction", "same color tone", "same lighting feel"],
+            "color_grade_note": "preserve the established palette and tonality",
+            "motion_blur_intent": "tack-sharp subject with subtle motion residue on moving extremities"
+        })
+    };
+
+    // framing: 絵コンテでは構図に関わる項目だけ残す
+    let framing_block = if sketch {
+        serde_json::json!({
+            "aspect_ratio": params.aspect_ratio,
+            "shot_type": shot_type,
+            "camera_angle": camera_angle,
+            "spatial_room_for_motion": infer_motion_room(&cut.description),
+            "body_position_in_frame": "rule-of-thirds placement consistent with the cut role",
+            "rule_of_thirds": true,
+            "head_room": "standard",
+            "lead_room": "forward"
+        })
+    } else {
+        serde_json::json!({
+            "aspect_ratio": params.aspect_ratio,
+            "shot_type": shot_type,
+            "camera_angle": camera_angle,
+            "spatial_room_for_motion": infer_motion_room(&cut.description),
+            "focus_detail": infer_focus_detail(&cut.description, role_assignment.role),
+            "body_position_in_frame": "rule-of-thirds placement consistent with the cut role",
+            "light_fall": "directional fill consistent with the established lighting",
+            "motion_residue": "fabric or hair caught mid-flow if the body is in motion",
+            "atmospheric_layer": "subtle foreground/background depth without competing with subject",
+            "rule_of_thirds": true,
+            "head_room": "standard",
+            "lead_room": "forward"
+        })
+    };
+
+    // negative: 絵コンテでは「写実になること」自体を禁止側に加える
+    let negative = if sketch {
+        "photorealistic rendering, color, painted shading, detailed texture, background clutter, text, logo, watermark, collage, split screen, multiple panels"
+    } else {
+        "different face, outfit drift, missing props, distorted face, broken hands, background discontinuity, text, logo, watermark, collage, split screen"
+    };
+
     serde_json::json!({
         "scene_context": {
             "scene_id": cut.cut_id,
@@ -1660,33 +1748,15 @@ fn local_structured_prompt(
             "character_reference": params.character_reference_image,
             "must_keep": ["same face", "same hair", "same body type", "same outfit"]
         },
-        "style": {
-            "style_reference": style_ref,
-            "must_keep": ["same art direction", "same color tone", "same lighting feel"],
-            "color_grade_note": "preserve the established palette and tonality",
-            "motion_blur_intent": "tack-sharp subject with subtle motion residue on moving extremities"
-        },
+        "style": style_block,
         "narrative": {
             "previous_cut_state": previous_cut.map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|| "first cut".into()),
             "current_action": cut.description,
             "cut_role": role_assignment.role,
             "must_change": ["camera angle", "composition", "story progression"]
         },
-        "framing": {
-            "aspect_ratio": params.aspect_ratio,
-            "shot_type": shot_type,
-            "camera_angle": camera_angle,
-            "spatial_room_for_motion": infer_motion_room(&cut.description),
-            "focus_detail": infer_focus_detail(&cut.description, role_assignment.role),
-            "body_position_in_frame": "rule-of-thirds placement consistent with the cut role",
-            "light_fall": "directional fill consistent with the established lighting",
-            "motion_residue": "fabric or hair caught mid-flow if the body is in motion",
-            "atmospheric_layer": "subtle foreground/background depth without competing with subject",
-            "rule_of_thirds": true,
-            "head_room": "standard",
-            "lead_room": "forward"
-        },
-        "negative": "different face, outfit drift, missing props, distorted face, broken hands, background discontinuity, text, logo, watermark, collage, split screen"
+        "framing": framing_block,
+        "negative": negative
     })
 }
 
@@ -1759,9 +1829,14 @@ fn prefilled_structured_prompt(
     }
 
     // ルック分析を style に注入 (色/質感/ムードを全カット共通の一貫性アンカーに)。
-    if let (Some(style), Some(look)) =
-        (base.get_mut("style").and_then(|v| v.as_object_mut()), look)
-    {
+    // 絵コンテ(sketch_mode)では注入しない: 色・質感・ムードはモノクロ鉛筆ラフに
+    // 不要なうえ、local_structured_prompt 側で写実項目を落とした意図を打ち消して
+    // しまう (2026-07-25「情報が乗りすぎると害」)。
+    if let (Some(style), Some(look), false) = (
+        base.get_mut("style").and_then(|v| v.as_object_mut()),
+        look,
+        params.sketch_mode,
+    ) {
         if let Some(color) = look
             .get("colorProfile")
             .or_else(|| look.get("color_profile"))
@@ -3517,4 +3592,112 @@ fn short_id() -> String {
         .map(|duration| duration.as_nanos())
         .unwrap_or(0);
     format!("{:08x}", nanos & 0xffff_ffff)
+}
+
+#[cfg(test)]
+mod sketch_mode_tests {
+    use super::*;
+
+    /// 絵コンテ / 本生成の切り替えだけを変えた最小の params を作る。
+    fn params(sketch_mode: bool) -> StoryboardParams {
+        StoryboardParams {
+            run_id: Some("test-run".into()),
+            story_prompt: "駅のホームで電車を待つ".into(),
+            character_reference_image: "/tmp/char.png".into(),
+            style_reference_image: None,
+            character_reference_images: Vec::new(),
+            style_reference_images: Vec::new(),
+            aspect_ratio: "9:16".into(),
+            duration_seconds: 15.0,
+            tempo: "normal".into(),
+            candidates_per_cut: 1,
+            cwd: None,
+            scene_construction: None,
+            sketch_mode,
+            manual_selection: false,
+            sketch_references: std::collections::HashMap::new(),
+        }
+    }
+
+    fn cut() -> CutPlan {
+        CutPlan {
+            cut_id: "shot_001".into(),
+            scene_group_id: "station".into(),
+            description: "ドアが開き、車内に乗り込む".into(),
+            duration_seconds: 3.0,
+            prefilled: None,
+        }
+    }
+
+    /// 写実ディテールを要求するキー。絵コンテでは1つも入ってはいけない。
+    /// (2026-07-25: モノクロ鉛筆ラフの指示と矛盾し、情報過多で絵が破綻していた)
+    const PHOTOREAL_KEYS: &[&str] = &[
+        "light_fall",
+        "motion_residue",
+        "atmospheric_layer",
+        "focus_detail",
+        "color_grade_note",
+        "motion_blur_intent",
+    ];
+
+    fn collect_keys(value: &Value) -> Vec<String> {
+        let mut found = Vec::new();
+        if let Some(obj) = value.as_object() {
+            for (key, nested) in obj {
+                found.push(key.clone());
+                found.extend(collect_keys(nested));
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn sketch_mode_drops_photoreal_detail_fields() {
+        let prompt = local_structured_prompt(&params(true), &cut(), None, &[]);
+        let keys = collect_keys(&prompt);
+        for key in PHOTOREAL_KEYS {
+            assert!(
+                !keys.iter().any(|k| k == key),
+                "絵コンテ(sketch_mode=true)に写実項目 `{key}` が残っている。\
+                 モノクロ鉛筆ラフの指示と矛盾するため落とさなければならない。実際のキー: {keys:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn production_mode_keeps_photoreal_detail_fields() {
+        // 逆方向の検査: 本生成では写実項目が残っていること。
+        // これが無いと「全部落とす」実装でも上のテストが通ってしまう。
+        let prompt = local_structured_prompt(&params(false), &cut(), None, &[]);
+        let keys = collect_keys(&prompt);
+        for key in PHOTOREAL_KEYS {
+            assert!(
+                keys.iter().any(|k| k == key),
+                "本生成(sketch_mode=false)で写実項目 `{key}` が失われている。実際のキー: {keys:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sketch_mode_keeps_composition_fields() {
+        // 絵コンテに必要な構図情報は残っていること (落としすぎの検出)。
+        let prompt = local_structured_prompt(&params(true), &cut(), None, &[]);
+        let framing = prompt.get("framing").expect("framing がない");
+        for key in ["shot_type", "camera_angle", "aspect_ratio", "body_position_in_frame"] {
+            assert!(
+                framing.get(key).is_some(),
+                "絵コンテに必要な構図情報 `{key}` が落ちている"
+            );
+        }
+    }
+
+    #[test]
+    fn sketch_mode_negative_forbids_photorealism() {
+        let prompt = local_structured_prompt(&params(true), &cut(), None, &[]);
+        let negative = prompt.get("negative").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(
+            negative.contains("photorealistic"),
+            "絵コンテの negative に photorealistic 禁止が入っていない: {negative}"
+        );
+    }
 }
