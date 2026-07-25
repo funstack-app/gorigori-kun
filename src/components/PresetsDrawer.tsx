@@ -10,6 +10,7 @@ import {
   presetKind,
   sortPresets,
   usePresets,
+  CHARACTER_CATEGORY_ID,
   type Preset,
   type PresetCategory,
   type SortKey,
@@ -60,8 +61,21 @@ export function PresetsDrawer({ fullPage = false }: { fullPage?: boolean }) {
   const reorderPresets = usePresets((s) => s.reorderPresets);
   const [dragId, setDragId] = useState<string | null>(null);
 
+  /*
+   * 初期表示カテゴリ。
+   *
+   * 2026-07-25 修正: 「キャラクター」カテゴリを新設して DEFAULT_CATEGORIES の
+   * 先頭に置いたため、categories[0] のままだと引き出しを開いた瞬間に
+   * 空のキャラクタータブが出て「プリセットが全部消えた」ように見えていた。
+   * さらにその状態で普通のプロンプトプリセットを登録すると、下の
+   * `categoryId: activeCategoryId` でキャラの箱に混ざる
+   * (カテゴリを分けた目的の正反対)。
+   * → 初期表示は **キャラクター以外の先頭** にする。
+   */
   const [activeCategoryId, setActiveCategoryId] = useState<string | null>(
-    categories[0]?.id ?? null,
+    categories.find((c) => c.id !== CHARACTER_CATEGORY_ID)?.id ??
+      categories[0]?.id ??
+      null,
   );
   const [editingPresetId, setEditingPresetId] = useState<string | null>(null);
   const [draftName, setDraftName] = useState<string>("");
@@ -188,7 +202,15 @@ export function PresetsDrawer({ fullPage = false }: { fullPage?: boolean }) {
         kind: isCharacter ? "character" : undefined,
         characterMeta: characterMetaForSave,
         description: draftDescription.trim() || undefined,
-        categoryId: activeCategoryId,
+        // 2026-07-25: 種別とカテゴリを一致させる。
+        // キャラ型は必ずキャラクターカテゴリへ。逆に、キャラクターカテゴリを
+        // 表示中に「プロンプト型」を登録した場合はキャラの箱に入れない
+        // (カテゴリを分けた目的が崩れるため null = 未分類に落とす)。
+        categoryId: isCharacter
+          ? CHARACTER_CATEGORY_ID
+          : activeCategoryId === CHARACTER_CATEGORY_ID
+            ? null
+            : activeCategoryId,
         tags: draftTags.length > 0 ? draftTags : undefined,
         thumbnail: draftThumbnail,
         thumbnailFocus: focusOnSave,
