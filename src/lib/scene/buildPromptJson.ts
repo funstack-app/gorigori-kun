@@ -141,6 +141,12 @@ export type VideoPromptJson = {
   references?: { slot: string; note?: string }[];
 };
 
+/**
+ * 動画用の JSON は buildVideoScenePrompt.ts 側で組み立てる
+ * (英語表現の辞書がそこに private で置かれており、export して外から引くと
+ *  結合が強くなる)。この型だけを共有する。
+ */
+
 /** JSON を整形文字列にする。キーが空なら空文字を返す (呼び出し側で分岐しやすい)。 */
 export function stringifyPromptJson(
   json: ImagePromptJson | VideoPromptJson,

@@ -1,8 +1,15 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { higgsfieldMcp, type HiggsfieldMcpCostArgs } from "../lib/ipc";
 import { paramsToVideoArgs, useVideoSceneGeneration } from "../lib/scene/useVideoSceneGeneration";
 import { resolveImageMentions } from "../lib/scene/resolveImageMentions";
+import { buildVideoScenePromptJson } from "../lib/scene/buildVideoScenePrompt";
+import {
+  countPromptJsonElements,
+  stringifyPromptJson,
+} from "../lib/scene/buildPromptJson";
+import { refineVideoPrompt } from "../lib/scene/refinePrompt";
+import { useToasts } from "../lib/store/toasts";
 import { useComposer, type Reference } from "../lib/store/composer";
 import { useVideoGen } from "../lib/store/videoGen";
 import {
@@ -82,6 +89,7 @@ function toMcpCostArgs(
  */
 export function VideoConstructedPromptPanel() {
   const {
+    scene,
     generatedPrompt,
     model,
     promptOverride,
@@ -99,6 +107,8 @@ export function VideoConstructedPromptPanel() {
 
   const [draft, setDraft] = useState<string>(generatedPrompt);
   const [elementModalOpen, setElementModalOpen] = useState(false);
+  /** 「AIで整える」実行中フラグ。二重起動を防ぐ。 */
+  const [refining, setRefining] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [libraryOpen, setLibraryOpen] = useState(false);
   const [stockOpen, setStockOpen] = useState(false);
@@ -118,6 +128,7 @@ export function VideoConstructedPromptPanel() {
   const duration = useVideoGen((s) => s.duration);
   const setDuration = useVideoGen((s) => s.setDuration);
   const aspectRatio = useVideoGen((s) => s.aspectRatio);
+  const pushToast = useToasts((s) => s.push);
   const setAspectRatio = useVideoGen((s) => s.setAspectRatio);
   const count = useVideoGen((s) => s.count);
   const setCount = useVideoGen((s) => s.setCount);
@@ -196,6 +207,47 @@ export function VideoConstructedPromptPanel() {
     // sceneSignature の変化だけをトリガーにする (無限ループ回避)。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sceneSignature]);
+
+  /** 選択から積まれた動画JSON。要素数の表示とAI整形の両方で使う。 */
+  const videoPromptJson = useMemo(
+    () => buildVideoScenePromptJson(scene, { aspectRatio, durationSeconds: duration }),
+    [scene, aspectRatio, duration],
+  );
+  const videoElementCount = countPromptJsonElements(videoPromptJson);
+
+  /**
+   * 「AIで整える」— 動画用のJSONへ整えて textarea に入れる。
+   * 画像とは別スキーマ (subject_motion / camera_motion / duration_seconds 等)。
+   * override として入るので「自動に戻す」で元に戻せる。
+   */
+  const refineVideoPromptWithAi = async () => {
+    if (refining || videoElementCount === 0) return;
+    setRefining(true);
+    try {
+      const result = await refineVideoPrompt(videoPromptJson);
+      const text = stringifyPromptJson(result.json);
+      if (!text) {
+        pushToast({ kind: "info", text: "整える要素がありません。", ttlMs: 3000 });
+        return;
+      }
+      onChangeDraft(text);
+      pushToast({
+        kind: result.refined ? "success" : "info",
+        text: result.refined
+          ? "プロンプトを整えました。"
+          : `AIの整形は使えませんでした（選んだ内容をJSONにしました）: ${result.error ?? ""}`,
+        ttlMs: result.refined ? 3000 : 5000,
+      });
+    } catch (err) {
+      pushToast({
+        kind: "error",
+        text: `整形に失敗しました: ${(err as Error)?.message ?? err}`,
+        ttlMs: 5000,
+      });
+    } finally {
+      setRefining(false);
+    }
+  };
 
   const onChangeDraft = (next: string) => {
     setDraft(next);
@@ -293,6 +345,20 @@ export function VideoConstructedPromptPanel() {
 
       <div className="shrink-13-textarea flex min-h-[80px] flex-1 flex-col p-3">
         <div className="mb-1.5 flex items-center justify-end gap-1.5">
+          {/*
+            「AIで整える」— 要素別編集の左 (STΛCK指示 2026-07-25)。
+            動画は画像と別スキーマ (時間軸の軸を持つ) の JSON へ整える。
+          */}
+          <button
+            type="button"
+            onClick={() => void refineVideoPromptWithAi()}
+            disabled={refining || videoElementCount === 0}
+            className="flex items-center gap-1.5 rounded border border-[#343434] bg-[#101010] px-2 py-1 text-[10px] font-bold text-neutral-400 transition hover:border-pink-400 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+            title="選んだ要素を、動画生成AIが読みやすい構造化プロンプト(JSON)に整えます。要素は足しません"
+          >
+            <SparkleIcon />
+            <span>{refining ? "整えています…" : "AIで整える"}</span>
+          </button>
           <button
             type="button"
             onClick={() => setElementModalOpen(true)}
@@ -1137,6 +1203,16 @@ function PlusIcon() {
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <line x1="12" y1="5" x2="12" y2="19" />
       <line x1="5" y1="12" x2="19" y2="12" />
+    </svg>
+  );
+}
+
+/** 「AIで整える」用。きらめき (絵文字を使わずフラットアイコンで表現)。 */
+function SparkleIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 3l1.8 4.9L18.7 9.7l-4.9 1.8L12 16.4l-1.8-4.9L5.3 9.7l4.9-1.8L12 3Z" />
+      <path d="M18.5 15.5l.7 1.9 1.9.7-1.9.7-.7 1.9-.7-1.9-1.9-.7 1.9-.7.7-1.9Z" />
     </svg>
   );
 }

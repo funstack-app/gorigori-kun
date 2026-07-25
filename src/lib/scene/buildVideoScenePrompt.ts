@@ -1,3 +1,4 @@
+import type { VideoPromptJson } from "./buildPromptJson";
 import { NO_SELECT } from "./catalog";
 import type { VideoSceneState } from "./video-types";
 
@@ -190,4 +191,74 @@ export function buildVideoScenePrompt(scene: VideoSceneState): string {
   }
 
   return sentences.filter((s) => s.length > 0).join(" ");
+}
+
+/**
+ * 4軸シーン状態から **JSON 構造化プロンプト** を作る (2026-07-25 STΛCK指示)。
+ *
+ * buildVideoScenePrompt は英文の連なりを返すが、文章は軸の境界が溶けるため
+ * 「どの語が被写体の動きで、どの語がカメラの動きか」をモデルが取り違えうる。
+ * JSON にして軸を立てる。
+ *
+ * 辞書の値は文章形式 (先頭大文字・末尾ピリオド) なので、JSON では
+ * 値として読みやすい形に落とす (文末記号を外し、先頭の "The camera " 等は残す —
+ * 何が動くのかの情報なので削らない)。
+ */
+export function buildVideoScenePromptJson(
+  scene: VideoSceneState,
+  extra?: { aspectRatio?: string; durationSeconds?: number },
+): VideoPromptJson {
+  const json: VideoPromptJson = {};
+
+  /** 辞書の文章表現を JSON の値向けに整える (末尾のピリオドだけ外す)。 */
+  const asValue = (text: string): string => text.trim().replace(/\.$/, "");
+
+  const subject = scene.subject.text.trim();
+  if (subject) json.subject = subject;
+
+  if (has(scene.motion.verb)) {
+    const verb = lookup(MOTION_VERB, scene.motion.verb) || scene.motion.verb;
+    if (verb) json.subject_motion = asValue(verb);
+  }
+  if (has(scene.motion.intensity)) {
+    const intensity = lookup(MOTION_INTENSITY, scene.motion.intensity);
+    if (intensity) json.motion_strength = asValue(intensity);
+  }
+
+  if (has(scene.camera.motion)) {
+    const cam = lookup(CAMERA_MOTION, scene.camera.motion) || scene.camera.motion;
+    const speed = has(scene.camera.speed) ? lookup(CAMERA_SPEED, scene.camera.speed) : "";
+    const combined = [asValue(cam), asValue(speed)].filter((s) => s.length > 0).join(", ");
+    if (combined) json.camera_motion = combined;
+  }
+
+  if (has(scene.staging.lighting)) {
+    const light = lookup(LIGHTING, scene.staging.lighting);
+    if (light) json.lighting = asValue(light);
+  }
+
+  // 天候と環境の動きはどちらも「場の変化」なので staging にまとめる
+  const stagingParts: string[] = [];
+  if (has(scene.staging.weather)) {
+    const w = lookup(WEATHER, scene.staging.weather);
+    if (w) stagingParts.push(asValue(w));
+  }
+  if (has(scene.staging.environment)) {
+    const e = lookup(ENVIRONMENT, scene.staging.environment);
+    if (e) stagingParts.push(asValue(e));
+  }
+  if (stagingParts.length > 0) json.staging = stagingParts.join(", ");
+
+  if (has(scene.staging.style)) {
+    const s = lookup(STYLE, scene.staging.style);
+    if (s) json.style = asValue(s);
+  }
+
+  const aspect = (extra?.aspectRatio ?? "").trim();
+  if (aspect && aspect !== NO_SELECT) json.aspect_ratio = aspect;
+  if (typeof extra?.durationSeconds === "number" && extra.durationSeconds > 0) {
+    json.duration_seconds = extra.durationSeconds;
+  }
+
+  return json;
 }
