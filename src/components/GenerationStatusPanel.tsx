@@ -57,6 +57,21 @@ function AlertIcon({ className = "" }: { className?: string }) {
   );
 }
 
+function ClockIcon({ className = "" }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" className={className} fill="none" aria-hidden="true">
+      <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="1.6" />
+      <path
+        d="M12 7.5V12l3 2"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 function JobRow({ job }: { job: GenerationJob }) {
   const [now, setNow] = useState(() => Date.now());
 
@@ -76,7 +91,10 @@ function JobRow({ job }: { job: GenerationJob }) {
 
   const percent = jobPercent(job, 120);
   const settled = job.completed + job.failed;
+  // 「待ち」は異常ではないので赤くしない (仕様上の停止をエラーに見せない)
   const isError = effectiveStall?.type === "error" || effectiveStall?.type === "auth-required";
+  const isWaiting =
+    effectiveStall?.type === "waiting-user" || effectiveStall?.type === "waiting-slot";
 
   return (
     <div className="rounded-lg border border-[#2a2a2a] bg-[#141414]/95 px-3 py-2.5 shadow-lg backdrop-blur">
@@ -126,10 +144,18 @@ function JobRow({ job }: { job: GenerationJob }) {
         <div
           className={
             "mt-2 flex items-start gap-1.5 rounded-md px-2 py-1.5 text-[11px] leading-snug " +
-            (isError ? "bg-[#2a1818] text-red-300" : "bg-[#1e1e1e] text-amber-300")
+            (isError
+              ? "bg-[#2a1818] text-red-300"
+              : isWaiting
+                ? "bg-[#18202a] text-sky-300"
+                : "bg-[#1e1e1e] text-amber-300")
           }
         >
-          <AlertIcon className="mt-[1px] h-3.5 w-3.5 shrink-0" />
+          {isWaiting ? (
+            <ClockIcon className="mt-[1px] h-3.5 w-3.5 shrink-0" />
+          ) : (
+            <AlertIcon className="mt-[1px] h-3.5 w-3.5 shrink-0" />
+          )}
           <span>{describeStall(effectiveStall)}</span>
         </div>
       )}

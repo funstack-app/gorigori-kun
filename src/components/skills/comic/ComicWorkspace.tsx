@@ -23,6 +23,7 @@ import { useToasts } from "../../../lib/store/toasts";
 import { ActiveProjectSelector } from "../../ActiveProjectSelector";
 import { SafeImage } from "../../SafeImage";
 import { WorkspaceTabs } from "../../WorkspaceTabs";
+import { beginDirectRun } from "../../../lib/store/generationStatus";
 
 /**
  * 漫画制作 Workspace（スキル一覧v2.1 #9・MVP）
@@ -80,6 +81,8 @@ function ComicFlow() {
   const [generatingName, setGeneratingName] = useState(false);
   const [generatingAll, setGeneratingAll] = useState(false);
   const runTokenRef = useRef(0);
+  /** 全コマ生成中に右上パネルへ進捗を報告するためのトラッカー。 */
+  const comicTrackRef = useRef<ReturnType<typeof beginDirectRun> | null>(null);
 
   useEffect(
     () => () => {
@@ -159,6 +162,7 @@ function ComicFlow() {
         r.index === panel.index ? { ...r, generating: true, error: undefined } : r,
       ),
     );
+    comicTrackRef.current?.markStarted();
     try {
       const prompt = buildPanelImagePrompt(panel, characters);
       // このコマに登場するキャラの参照画像を集める
@@ -180,15 +184,18 @@ function ComicFlow() {
           r.index === panel.index ? { ...r, generating: false, imagePath } : r,
         ),
       );
+      comicTrackRef.current?.markCompleted();
     } catch (err) {
       if (runTokenRef.current !== runToken) return;
+      const message = (err as Error)?.message ?? String(err);
       setResults((prev) =>
         prev.map((r) =>
           r.index === panel.index
-            ? { ...r, generating: false, error: (err as Error)?.message ?? String(err) }
+            ? { ...r, generating: false, error: message }
             : r,
         ),
       );
+      comicTrackRef.current?.fail(message);
       pushToast({
         kind: "error",
         text: `コマ ${panel.index} の生成に失敗しました`,
@@ -201,6 +208,11 @@ function ComicFlow() {
     if (generatingAll || results.some((result) => result.generating)) return;
     const runToken = runTokenRef.current;
     setGeneratingAll(true);
+    // 右上の生成状況パネルへ全体の進捗を出す (2026-07-25 STΛCK指示)。
+    // 逐次生成なので「何コマ目か」が分かることが体感に直結する。
+    // 各コマの成否は generatePanel 側から直接 track へ報告する。
+    const track = beginDirectRun("comic", panels.length);
+    comicTrackRef.current = track;
     try {
       for (const panel of panels) {
         if (runTokenRef.current !== runToken) return;
@@ -208,6 +220,8 @@ function ComicFlow() {
         await generatePanel(panel, runToken);
       }
     } finally {
+      track.done();
+      comicTrackRef.current = null;
       if (runTokenRef.current === runToken) setGeneratingAll(false);
     }
   };

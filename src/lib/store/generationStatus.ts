@@ -48,6 +48,7 @@ export const GENERATION_KIND_LABEL: Record<GenerationKind, string> = {
 /** 進まない理由。UI がそのまま文言にできる粒度で持つ。 */
 export type StallReason =
   | { type: "waiting-slot"; ahead: number } // 並列上限で順番待ち
+  | { type: "waiting-user"; message: string } // 仕様上の停止 (人間の確認待ち)。異常ではない
   | { type: "auth-required"; service: string } // 認証切れ・未接続
   | { type: "no-response"; sinceMs: number } // 応答が来ない
   | { type: "error"; message: string; code?: string }; // 明示的な失敗
@@ -281,6 +282,68 @@ export function syncCutRunStatus(
   }
 }
 
+/**
+ * images.generateBatch を直接呼ぶスキル (漫画・シーン再現など) 用のラッパー。
+ *
+ * これらのスキルは batches ストアを経由せず ipc を直叩きするため、
+ * batch 側の橋渡しでは拾えない。1件ずつ順に呼ぶ構造なので、
+ * 「全体で何件やるか」を最初に宣言し、各件の前後で running を上下させる。
+ *
+ * 使い方:
+ *   const track = beginDirectRun("comic", panels.length);
+ *   for (const panel of panels) {
+ *     await track.step(() => images.generateBatch({...}));
+ *   }
+ *   track.done();
+ */
+export function beginDirectRun(kind: GenerationKind, total: number, id?: string) {
+  const runId = id ?? `${kind}-${Date.now()}`;
+  const status = useGenerationStatus.getState();
+  status.start({ id: runId, kind, total: total || undefined });
+
+  return {
+    id: runId,
+    /** 1件の生成を実行し、成否を状況へ反映する。例外はそのまま投げ直す。 */
+    async step<T>(run: () => Promise<T>): Promise<T> {
+      const s = useGenerationStatus.getState();
+      s.setRunning(runId, 1);
+      try {
+        const result = await run();
+        useGenerationStatus.getState().addCompleted(runId);
+        useGenerationStatus.getState().setRunning(runId, 0);
+        return result;
+      } catch (err) {
+        const st = useGenerationStatus.getState();
+        st.addFailed(runId);
+        st.setRunning(runId, 0);
+        st.setStall(runId, stallFromFailure(String((err as Error)?.message ?? err)));
+        throw err;
+      }
+    },
+    /** 1件開始したことを記録する (step を使わず自前で await する経路用)。 */
+    markStarted() {
+      useGenerationStatus.getState().setRunning(runId, 1);
+    },
+    /** 1件成功したことを記録する。 */
+    markCompleted() {
+      const s = useGenerationStatus.getState();
+      s.addCompleted(runId);
+      s.setRunning(runId, 0);
+    },
+    /** 失敗を明示的に記録する (例外を投げない経路用)。 */
+    fail(reason: string) {
+      const s = useGenerationStatus.getState();
+      s.addFailed(runId);
+      s.setRunning(runId, 0);
+      s.setStall(runId, stallFromFailure(reason));
+    },
+    done() {
+      useGenerationStatus.getState().finish(runId);
+      setTimeout(() => useGenerationStatus.getState().clear(runId), 4000);
+    },
+  };
+}
+
 /** 進まない理由を人間の言葉にする。UI はこれを表示すればよい。 */
 export function describeStall(stall: StallReason): string {
   switch (stall.type) {
@@ -288,6 +351,8 @@ export function describeStall(stall: StallReason): string {
       return stall.ahead > 0
         ? `順番待ち (前に ${stall.ahead} 件)`
         : "順番待ち";
+    case "waiting-user":
+      return stall.message;
     case "auth-required":
       return `${stall.service} の認証が切れています。設定から再ログインしてください`;
     case "no-response":

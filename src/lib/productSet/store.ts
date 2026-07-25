@@ -2,6 +2,7 @@ import { create } from "zustand";
 
 import { DEFAULT_SELECTED_CUT_IDS } from "./catalog";
 import type { CutState, MultiAngleEvent } from "../multiangle/types";
+import { syncCutRunStatus, useGenerationStatus } from "../store/generationStatus";
 
 /**
  * EC納品セットの run 状態ストア。
@@ -128,6 +129,12 @@ export const useProductSetRun = create<ProductSetRunState>((set) => ({
         }
         cutOrder.push(cutId);
       }
+      // 押した直後から右上に表示する
+      useGenerationStatus.getState().start({
+        id: runId,
+        kind: "productSet",
+        total: cutOrder.length || undefined,
+      });
       return {
         status: "running" as const,
         runId,
@@ -141,6 +148,9 @@ export const useProductSetRun = create<ProductSetRunState>((set) => ({
   applyEvent: (e) =>
     set((s) => {
       if (!s.runId || e.runId !== s.runId) return s;
+
+      // 右上の生成状況パネルへ橋渡し (2026-07-25 STΛCK指示)
+      syncCutRunStatus("productSet", s.cuts, s.cutOrder.length, e);
 
       switch (e.kind) {
         case "started":

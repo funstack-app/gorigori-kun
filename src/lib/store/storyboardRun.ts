@@ -13,6 +13,11 @@ import type {
   StoryboardSketchVersion,
 } from "../storyboard/types";
 import { useActiveProject } from "./activeProject";
+import {
+  stallFromFailure,
+  useGenerationStatus,
+  type GenerationKind,
+} from "./generationStatus";
 import { useProjects } from "./projects";
 import { useToasts } from "./toasts";
 
@@ -335,6 +340,38 @@ export const useStoryboardRun = create<StoryboardRunState>((set, get) => ({
         isSketch
           ? ({ ...s, sketchCuts: targetMap, debugLog, lastEventAt, ...patch } as typeof s)
           : ({ ...s, cuts: targetMap, debugLog, lastEventAt, ...patch } as typeof s);
+
+      // 右上の生成状況パネルへ橋渡し (2026-07-25 STΛCK指示)。
+      // 絵コンテは他スキルとイベント名が違い(takeCompleted / cutConfirmed /
+      // cutCheckpoint)、さらに「人間の確認待ち」で意図的に止まる区間があるため専用に扱う。
+      // 待ちであることを理由として出すのが要点 — 出さないと固まったと誤解される。
+      {
+        const gs = useGenerationStatus.getState();
+        const kind: GenerationKind = "storyboard";
+        if (e.kind === "started") {
+          gs.start({ id: e.runId, kind, total: e.totalCuts });
+        } else if (e.kind === "cutStarted") {
+          gs.setRunning(e.runId, e.takeCount ?? 1);
+          gs.setStall(e.runId, null);
+        } else if (e.kind === "cutConfirmed") {
+          gs.addCompleted(e.runId);
+          gs.setRunning(e.runId, 0);
+        } else if (e.kind === "cutCheckpoint") {
+          // 仕様上の停止。原因を明示して「待っている」と分かるようにする。
+          gs.setRunning(e.runId, 0);
+          gs.setStall(e.runId, {
+            type: "waiting-user",
+            message: "方向性の確認待ちです。画面で続けるか選んでください",
+          });
+        } else if (e.kind === "cutFailed") {
+          gs.addFailed(e.runId);
+          gs.setRunning(e.runId, 0);
+          if (e.reason) gs.setStall(e.runId, stallFromFailure(e.reason));
+        } else if (e.kind === "completed") {
+          gs.finish(e.runId);
+          setTimeout(() => useGenerationStatus.getState().clear(e.runId), 4000);
+        }
+      }
 
       if (e.kind === "started") {
         return {
