@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import type { ReactElement, ReactNode } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 
 import { storyboard } from "../lib/ipc";
@@ -38,17 +39,91 @@ const STATUS_CLASS: Record<CutState["status"], string> = {
   failed: "border-red-400/50 bg-red-500/10 text-red-100",
 };
 
+/* ---------- フラットラインアイコン (絵文字を使わない。STΛCK 指示 2026-07-25) ---------- */
+
+function StatusIcon({ children }: { children: ReactNode }) {
+  return (
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+      className="shrink-0"
+    >
+      {children}
+    </svg>
+  );
+}
+
+/** 待機中: 時計 */
+const PendingIcon = () => (
+  <StatusIcon>
+    <circle cx="12" cy="12" r="9" />
+    <path d="M12 7v5l3 2" />
+  </StatusIcon>
+);
+/** 生成中: 回転矢印 */
+const RunningIcon = () => (
+  <StatusIcon>
+    <path d="M20 12a8 8 0 1 1-2.34-5.66" />
+    <path d="M20 4v4h-4" />
+  </StatusIcon>
+);
+/** 採用待ち: 目 */
+const ReviewIcon = () => (
+  <StatusIcon>
+    <path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12z" />
+    <circle cx="12" cy="12" r="2.5" />
+  </StatusIcon>
+);
+/** 採用済み: チェック */
+const ConfirmedIcon = () => (
+  <StatusIcon>
+    <path d="M20 6L9 17l-5-5" />
+  </StatusIcon>
+);
+/** 失敗: バツ印 */
+const FailedIcon = () => (
+  <StatusIcon>
+    <path d="M18 6L6 18M6 6l12 12" />
+  </StatusIcon>
+);
+
+/** 前の案: 左向き山括弧 */
+const ChevronLeftIcon = () => (
+  <StatusIcon>
+    <path d="M15 18l-6-6 6-6" />
+  </StatusIcon>
+);
+/** 次の案: 右向き山括弧 */
+const ChevronRightIcon = () => (
+  <StatusIcon>
+    <path d="M9 18l6-6-6-6" />
+  </StatusIcon>
+);
+
 /**
  * 状態ラベル (STΛCK 指示 2026-05-15):
  *  「確認待ち」が何を待ってるかが伝わるようにする。
  *  - review = 3案が出揃って AI が一番をベスト判定したあと、ユーザーが確定するのを待ってる状態
+ *
+ * 2026-07-25: 絵文字プレフィックスを廃止し、アイコン(icon)と語句(text)に分離した。
+ * review だけは「何を待っているか」の補足(hint)を小さめの階層で出す。
  */
-const STATUS_LABEL: Record<CutState["status"], string> = {
-  pending: "⏳ 待機中",
-  running: "🔄 生成中…",
-  review: "👀 採用待ち (どれを使うか選んでください)",
-  confirmed: "✅ 採用済み",
-  failed: "❌ 失敗",
+const STATUS_LABEL: Record<
+  CutState["status"],
+  { icon: () => ReactElement; text: string; hint?: string }
+> = {
+  pending: { icon: PendingIcon, text: "待機中" },
+  running: { icon: RunningIcon, text: "生成中…" },
+  review: { icon: ReviewIcon, text: "採用待ち", hint: "どれを使うか選んでください" },
+  confirmed: { icon: ConfirmedIcon, text: "採用済み" },
+  failed: { icon: FailedIcon, text: "失敗" },
 };
 
 export function StoryboardCutCard({ cut }: { cut: CutState }) {
@@ -125,29 +200,50 @@ export function StoryboardCutCard({ cut }: { cut: CutState }) {
           )}
         </button>
         <div className="min-w-0 flex-1">
-          <div className="flex items-center justify-between gap-2">
-            <h4 className="font-mono text-xs font-black text-white">{cut.cutId}</h4>
-            <span className="text-[11px] font-black">
-              {STATUS_LABEL[cut.status]}
-              {cut.status === "running" && elapsed !== null && (
-                <span className="ml-1 font-mono text-[10px] font-bold tabular-nums text-blue-200/80">
-                  {formatElapsed(elapsed)}
+          <div className="flex items-start justify-between gap-2">
+            {/* カット番号は最上位の見出し。数値なので等幅を維持する */}
+            <h4 className="font-mono text-[13px] font-black tabular-nums text-white">
+              {cut.cutId}
+            </h4>
+            <span className="flex flex-col items-end">
+              <span className="flex items-center gap-1 text-[12px] font-bold">
+                {(() => {
+                  const Icon = STATUS_LABEL[cut.status].icon;
+                  return <Icon />;
+                })()}
+                {STATUS_LABEL[cut.status].text}
+                {cut.status === "running" && elapsed !== null && (
+                  <span className="font-mono text-[10px] font-bold tabular-nums text-blue-200/80">
+                    {formatElapsed(elapsed)}
+                  </span>
+                )}
+              </span>
+              {STATUS_LABEL[cut.status].hint && (
+                <span className="text-[10px] font-normal opacity-70">
+                  {STATUS_LABEL[cut.status].hint}
                 </span>
               )}
             </span>
           </div>
-          <p className="mt-1 text-[11px] text-neutral-300">
-            シーン: {cut.description ?? cut.sceneGroupId ?? "未設定"}
+          <p className="mt-1 text-[11px] text-neutral-400">
+            <span className="font-bold text-neutral-300">シーン</span>{" "}
+            {cut.description ?? cut.sceneGroupId ?? "未設定"}
           </p>
           {selected && (
-            <div className="mt-2 grid grid-cols-3 gap-1 text-[10px] text-neutral-300">
+            <>
+              {/* 採点は補足情報。見出し(10px 太字)+数値(10px 等幅)で層を分ける */}
+              <p className="mt-2 text-[10px] font-bold tracking-wide text-neutral-500">
+                自動採点
+              </p>
+              <div className="mt-1 grid grid-cols-3 gap-1 text-[10px] text-neutral-300">
               <Score label="Identity" value={selected.scores.identity} />
               <Score label="Outfit" value={selected.scores.outfit} />
               <Score label="Prop" value={selected.scores.prop} />
               <Score label="Face" value={selected.scores.face} />
               <Score label="Hand" value={selected.scores.hand} />
               <Score label="Bg" value={selected.scores.background} />
-            </div>
+              </div>
+            </>
           )}
           {cut.error && (
             <p className="mt-2 text-[11px] font-bold text-red-200">{cut.error}</p>
@@ -159,21 +255,21 @@ export function StoryboardCutCard({ cut }: { cut: CutState }) {
               <button
                 type="button"
                 onClick={showPrev}
-                className="rounded border border-[#343434] bg-[#0b0b0b] px-2 py-0.5 font-bold hover:border-pink-400"
+                className="flex items-center rounded border border-[#343434] bg-[#0b0b0b] px-1.5 py-1 hover:border-pink-400"
                 aria-label="前の案"
               >
-                ◀
+                <ChevronLeftIcon />
               </button>
-              <span className="font-mono">
+              <span className="font-mono tabular-nums">
                 案 {selectedIndex < 0 ? 1 : selectedIndex + 1} / {cut.takes.length}
               </span>
               <button
                 type="button"
                 onClick={showNext}
-                className="rounded border border-[#343434] bg-[#0b0b0b] px-2 py-0.5 font-bold hover:border-pink-400"
+                className="flex items-center rounded border border-[#343434] bg-[#0b0b0b] px-1.5 py-1 hover:border-pink-400"
                 aria-label="次の案"
               >
-                ▶
+                <ChevronRightIcon />
               </button>
             </div>
           )}
@@ -226,8 +322,11 @@ export function StoryboardCutCard({ cut }: { cut: CutState }) {
 
 function Score({ label, value }: { label: string; value: number }) {
   return (
-    <span className="rounded bg-black/20 px-1.5 py-1 tabular-nums">
-      {label}:{Math.round(value)}
+    <span className="flex items-baseline justify-between gap-1 rounded bg-black/20 px-1.5 py-1">
+      <span className="text-[9px] text-neutral-500">{label}</span>
+      <span className="font-mono text-[10px] font-bold tabular-nums">
+        {Math.round(value)}
+      </span>
     </span>
   );
 }

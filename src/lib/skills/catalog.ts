@@ -14,7 +14,12 @@ export type GoriSkill = {
   id: GoriSkillId;
   name: string;
   shortName: string;
-  icon: string;
+  /**
+   * 2026-07-25: 絵文字アイコンを全廃。描画は id ベースの SkillIcon
+   * (src/components/SkillIcon.tsx) が担うため、このフィールドは非推奨。
+   * 未使用の旧経路 (SkillSelector.tsx) の互換のため型だけ残す。
+   */
+  icon?: string;
   description: string;
   path: string;
   /** アプリ内から直接利用可能なスキル。false の場合はグレイアウト表示。 */
@@ -37,7 +42,6 @@ export const GORI_SKILLS: GoriSkill[] = [
     id: "gori-storyboard",
     name: "ストーリーカット生成",
     shortName: "Storyboard",
-    icon: "🎬",
     description:
       "ストーリーから一貫したカット列を連続生成。キャラ/スタイルを固定して物語を進める。",
     path: "~/.codex/skills/gori-storyboard",
@@ -51,7 +55,6 @@ export const GORI_SKILLS: GoriSkill[] = [
     id: "gori-multi-angle",
     name: "マルチアングル生成",
     shortName: "Multi-Angle",
-    icon: "📐",
     description:
       "環境と被写体を固定し、ショット距離(クローズアップ/ミディアム/ロング)とアングル(俯瞰/煽り/正面)だけ変えて一気にカット量産。",
     path: "~/.codex/skills/gori-multi-angle",
@@ -66,7 +69,6 @@ export const GORI_SKILLS: GoriSkill[] = [
     id: "gori-character-register",
     name: "キャラクター登録",
     shortName: "Character Register",
-    icon: "🪪",
     description:
       "1枚の参照画像から3面図・表情・顔ディテールを一括生成し、同一キャラとしてプリセット登録。以降の生成で呼び出せる。",
     path: "~/.codex/skills/gori-character-register",
@@ -79,7 +81,6 @@ export const GORI_SKILLS: GoriSkill[] = [
     id: "gori-expression-set",
     name: "表情差分",
     shortName: "Expression Set",
-    icon: "😊",
     description:
       "登録キャラに喜怒哀楽〜細かい演技の表情セットを一括生成。同一人物に見えるかをAIが検品し、崩れたカットだけ自動で作り直す。",
     path: "~/.codex/skills/gori-expression-set",
@@ -92,7 +93,6 @@ export const GORI_SKILLS: GoriSkill[] = [
     id: "gori-scene-recreate",
     name: "シーン再現",
     shortName: "Scene Recreate",
-    icon: "🔬",
     description:
       "参考動画のURLからショット割り・カメラワーク・映像文法まで読み取り演出意図を言語化。自分のキャラ・商品で同じ演出を再現するプロンプト+3Dカメラプリセットを出力。",
     path: "~/.codex/skills/gori-scene-recreate",
@@ -105,7 +105,6 @@ export const GORI_SKILLS: GoriSkill[] = [
     id: "gori-comic",
     name: "漫画制作",
     shortName: "Comic",
-    icon: "📖",
     description:
       "話を渡すとネーム(コマ割り+セリフ案)を起こし、登録キャラを固定してコマ画像を生成。セリフ案付きで各コマを並べる。",
     path: "~/.codex/skills/gori-comic",
@@ -118,7 +117,6 @@ export const GORI_SKILLS: GoriSkill[] = [
     id: "gori-redline",
     name: "赤入れ反映",
     shortName: "Redline",
-    icon: "🖍",
     description:
       "注釈画像の赤入れを読み取り、何をどう直したいかを日本語で言語化。そのまま編集タブに渡して部分修正に反映できる。",
     path: "~/.codex/skills/gori-redline",
@@ -131,7 +129,6 @@ export const GORI_SKILLS: GoriSkill[] = [
     id: "gori-regulation-check",
     name: "レギュレーション検査",
     shortName: "Regulation Check",
-    icon: "✅",
     description:
       "入稿物一式を文字量比率・必須表記・ロゴ・NG表現の観点で検査し、根拠付きの指摘一覧を返す。",
     path: "~/.codex/skills/gori-regulation-check",
@@ -144,7 +141,6 @@ export const GORI_SKILLS: GoriSkill[] = [
     id: "gori-product-set",
     name: "EC納品セット",
     shortName: "Product Set",
-    icon: "📸",
     description:
       "商品写真1枚から、白背景・シーンカット・ディテール寄りの納品一式をセットで生成・整形。",
     path: "~/.codex/skills/gori-product-set",
@@ -163,7 +159,6 @@ export const GORI_SKILLS: GoriSkill[] = [
     // 手渡しが残る。名前が約束していないことをやらない状態にする。
     name: "3Dカメラワーク",
     shortName: "Scene 3D",
-    icon: "🎥",
     description:
       "3D空間に人物・小物を置き、カメラワークをドラッグで演出。モーションガイド動画と開始フレーム画像を書き出し、動画生成の「参照動画」「開始画像」として使う。",
     path: "~/.codex/skills/gori-scene-3d",

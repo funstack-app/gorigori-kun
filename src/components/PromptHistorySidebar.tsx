@@ -89,7 +89,15 @@ export function PromptHistoryToggleButton({
       aria-label={open ? "ヒストリーを閉じる" : "ヒストリーを開く"}
       title={open ? "ヒストリーを閉じる" : "ヒストリーを開く"}
     >
-      {open ? "◀" : "▶"}
+      {open ? (
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+          <path d="M15 6l-6 6 6 6" />
+        </svg>
+      ) : (
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+          <path d="M9 6l6 6-6 6" />
+        </svg>
+      )}
     </button>
   );
 }

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   comparePrompts,
   useSavedPrompts,
@@ -122,7 +122,7 @@ export function PromptLibraryModal({ open, onClose }: Props) {
               title="閉じる (Esc)"
               className="flex h-7 w-7 items-center justify-center rounded-md border border-neutral-700 bg-neutral-800 text-neutral-200 transition hover:border-rose-500/60 hover:bg-rose-500/20 hover:text-rose-100"
             >
-              ✕
+              <CloseIcon />
             </button>
           </div>
 
@@ -149,9 +149,10 @@ export function PromptLibraryModal({ open, onClose }: Props) {
               <button
                 type="button"
                 onClick={() => setEditor({ open: true, mode: "create" })}
-                className="rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-500"
+                className="flex items-center gap-1 rounded-md bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-500"
               >
-                ＋ 新規
+                <PlusIcon />
+                <span>新規</span>
               </button>
             </div>
 
@@ -191,7 +192,7 @@ export function PromptLibraryModal({ open, onClose }: Props) {
                   <span>
                     まだ保存したプロンプトはありません。
                     <br />
-                    入力欄で本文を書いて「保存」を押すか、右上の「＋ 新規」から追加してください。
+                    入力欄で本文を書いて「保存」を押すか、右上の「新規」から追加してください。
                   </span>
                 ) : (
                   <span>条件に一致するプロンプトがありません。</span>
@@ -292,11 +293,11 @@ function PromptRow({
         >
           <div className="flex items-center gap-2">
             {prompt.pinned && (
-              <span aria-label="ピン留め" title="ピン留め">
-                📌
+              <span className="shrink-0 text-amber-400" aria-label="ピン留め" title="ピン留め">
+                <PinIcon filled />
               </span>
             )}
-            <span className="truncate text-sm font-medium text-neutral-100">
+            <span className="truncate text-[13px] font-bold text-neutral-100">
               {prompt.title}
             </span>
             {prompt.useCount > 0 && (
@@ -305,7 +306,7 @@ function PromptRow({
               </span>
             )}
           </div>
-          <p className="mt-0.5 line-clamp-2 text-xs text-neutral-400">
+          <p className="mt-0.5 line-clamp-2 text-[11px] leading-relaxed text-neutral-400">
             {preview || <em className="text-neutral-600">(空)</em>}
           </p>
           {prompt.tags.length > 0 && (
@@ -323,18 +324,18 @@ function PromptRow({
         </button>
         <div className="flex flex-shrink-0 flex-col gap-1 opacity-80 transition group-hover:opacity-100">
           <div className="flex gap-1">
-            <RowBtn label="挿入" icon="⤵" onClick={onInsert} primary />
-            <RowBtn label="末尾追加" icon="＋" onClick={onAppend} />
+            <RowBtn label="挿入" icon={<InsertIcon />} onClick={onInsert} primary />
+            <RowBtn label="末尾追加" icon={<PlusIcon />} onClick={onAppend} />
           </div>
           <div className="flex gap-1">
             <RowBtn
               label={prompt.pinned ? "ピンを外す" : "ピン留め"}
-              icon="📌"
+              icon={<PinIcon filled={prompt.pinned} />}
               onClick={onTogglePin}
             />
-            <RowBtn label="複製" icon="📋" onClick={onDuplicate} />
-            <RowBtn label="編集" icon="✏" onClick={onEdit} />
-            <RowBtn label="削除" icon="🗑" onClick={onDelete} danger />
+            <RowBtn label="複製" icon={<DuplicateIcon />} onClick={onDuplicate} />
+            <RowBtn label="編集" icon={<PencilIcon />} onClick={onEdit} />
+            <RowBtn label="削除" icon={<TrashIcon />} onClick={onDelete} danger />
           </div>
         </div>
       </div>
@@ -350,7 +351,7 @@ function RowBtn({
   danger,
 }: {
   label: string;
-  icon: string;
+  icon: ReactNode;
   onClick: () => void;
   primary?: boolean;
   danger?: boolean;
@@ -364,8 +365,90 @@ function RowBtn({
       : `${base} border border-neutral-700 text-neutral-300 hover:border-neutral-500 hover:text-neutral-100`;
   return (
     <button type="button" onClick={onClick} className={cls} aria-label={label}>
-      <span aria-hidden>{icon}</span>
+      <span className="flex shrink-0 items-center" aria-hidden>
+        {icon}
+      </span>
       <span>{label}</span>
     </button>
+  );
+}
+
+/* --- フラットアイコン (絵文字廃止) --- */
+
+const LIB_SVG = {
+  width: 12,
+  height: 12,
+  viewBox: "0 0 24 24",
+  fill: "none",
+  stroke: "currentColor",
+  strokeWidth: 1.9,
+  strokeLinecap: "round" as const,
+  strokeLinejoin: "round" as const,
+};
+
+/** ピン (留め具)。 */
+function PinIcon({ filled = false }: { filled?: boolean }) {
+  return (
+    <svg {...LIB_SVG} fill={filled ? "currentColor" : "none"} aria-hidden>
+      <path d="M12 17v4" />
+      <path d="M8 4h8l-1 6 3 3H6l3-3-1-6z" />
+    </svg>
+  );
+}
+
+/** 挿入 (下向きに折れる矢印)。 */
+function InsertIcon() {
+  return (
+    <svg {...LIB_SVG} aria-hidden>
+      <path d="M18 5v8a3 3 0 01-3 3H6" />
+      <path d="M9 13l-3 3 3 3" />
+    </svg>
+  );
+}
+
+/** 末尾追加 (プラス)。 */
+function PlusIcon() {
+  return (
+    <svg {...LIB_SVG} aria-hidden>
+      <path d="M12 5v14M5 12h14" />
+    </svg>
+  );
+}
+
+/** 複製 (重ねた矩形)。 */
+function DuplicateIcon() {
+  return (
+    <svg {...LIB_SVG} aria-hidden>
+      <rect x="9" y="9" width="11" height="11" rx="1.5" />
+      <path d="M15 6V5a1 1 0 00-1-1H5a1 1 0 00-1 1v9a1 1 0 001 1h1" />
+    </svg>
+  );
+}
+
+/** 編集 (ペン)。 */
+function PencilIcon() {
+  return (
+    <svg {...LIB_SVG} aria-hidden>
+      <path d="M4 20h4l11-11-4-4L4 16v4z" />
+      <path d="M13.5 5.5l4 4" />
+    </svg>
+  );
+}
+
+/** 削除 (ゴミ箱)。 */
+function TrashIcon() {
+  return (
+    <svg {...LIB_SVG} aria-hidden>
+      <path d="M4 7h16M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2M6 7l1 13a1 1 0 001 1h8a1 1 0 001-1l1-13M10 11v6M14 11v6" />
+    </svg>
+  );
+}
+
+/** 閉じる (×)。 */
+function CloseIcon() {
+  return (
+    <svg {...LIB_SVG} width={14} height={14} aria-hidden>
+      <path d="M6 6l12 12M18 6L6 18" />
+    </svg>
   );
 }

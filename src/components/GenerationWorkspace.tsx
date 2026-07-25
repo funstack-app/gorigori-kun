@@ -323,10 +323,11 @@ export function Timeline() {
           </span>
           {activeProject && (
             <span
-              className="rounded-full bg-pink-500/15 px-2 py-0.5 text-[10px] font-bold text-pink-200 ring-1 ring-pink-500/30"
+              className="inline-flex items-center gap-1 rounded-full bg-pink-500/15 px-2 py-0.5 text-[10px] font-bold text-pink-200 ring-1 ring-pink-500/30"
               title="プロジェクト内のみ表示中"
             >
-              ◱ {activeProject.name}
+              <ProjectFilterIcon />
+              <span>{activeProject.name}</span>
             </span>
           )}
         </div>
@@ -384,7 +385,7 @@ export function Timeline() {
  * displayedSession.turns を時系列降順でバッチブロック化。各 turn の images は
  * すでに SessionFull に含まれているので追加 fetch なし。
  *
- * 上部にバナー: 「📜 [セッション名] を表示中・ライブに戻る」
+ * 上部にバナー: 「(履歴アイコン) [セッション名] を表示中・ライブに戻る」
  * ライブに戻るボタン → useSessions.switchToLive で通常タイムラインに復帰
  */
 function FrozenSessionTimeline({
@@ -409,8 +410,9 @@ function FrozenSessionTimeline({
     <section className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-pink-400/40 bg-[#181818]">
       <div className="flex items-center justify-between gap-3 border-b border-pink-400/30 bg-pink-500/5 px-4 py-3">
         <div className="flex min-w-0 items-center gap-3">
-          <span className="rounded-full bg-pink-500/20 px-2 py-0.5 text-[10px] font-bold text-pink-200 ring-1 ring-pink-400/40">
-            📜 セッション表示
+          <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-pink-500/20 px-2 py-0.5 text-[10px] font-bold text-pink-200 ring-1 ring-pink-400/40">
+            <HistoryIcon />
+            <span>セッション表示</span>
           </span>
           <h3 className="truncate text-sm font-black text-white">
             {session.session.title}
@@ -1051,6 +1053,62 @@ function WorkerTile({
   );
 }
 
+/*
+  フラットアイコン群 (絵文字を使わずインライン SVG で表現)。
+  stroke="currentColor" なので親の text-* をそのまま継承する。
+*/
+
+/** プロジェクト絞り込みバッジ用。フォルダ + フィルタ。 */
+function ProjectFilterIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+      <path d="M8 12h8l-3 3.5V19l-2-1v-2.5z" />
+    </svg>
+  );
+}
+
+/** frozen セッション表示バナー用。時計を巻き戻す = 過去ログ。 */
+function HistoryIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M3 12a9 9 0 1 0 3-6.7L3 8" />
+      <path d="M3 3v5h5" />
+      <path d="M12 8v4l3 2" />
+    </svg>
+  );
+}
+
+/** 連続カット生成 (動画寄りの工程) 用。カチンコ。 */
+function ClapperIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M3 10h18v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+      <path d="M3.5 10 2.8 6.4a1 1 0 0 1 .8-1.2l14.7-2.6a1 1 0 0 1 1.2.8L20 7z" />
+      <path d="m8.4 3.9 1 4.8M13.4 3 14.4 7.8" />
+    </svg>
+  );
+}
+
+/** デバッグログの読み込みボタン用。クリップボード。 */
+function ClipboardIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <rect x="8" y="2" width="8" height="4" rx="1" ry="1" />
+      <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" />
+    </svg>
+  );
+}
+
+/** スキル実行ボタン用。再生三角。 */
+function PlayIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M7 4.5v15l13-7.5z" />
+    </svg>
+  );
+}
+
 /** 軽量な CSS スピナー (生成中タイル用)。 */
 function Spinner() {
   return (
@@ -1188,7 +1246,10 @@ function StoryboardRunPanel() {
       <div className="border-b border-[#242424] bg-[#161616] px-4 py-3">
         <div className="flex items-center justify-between gap-3">
           <div>
-            <h3 className="text-sm font-black text-white">🎬 連続カット生成 - {statusLabel(run.status)}</h3>
+            <h3 className="flex items-center gap-1.5 text-sm font-black text-white">
+              <ClapperIcon />
+              <span>連続カット生成 - {statusLabel(run.status)}</span>
+            </h3>
             <p className="mt-0.5 text-[11px] text-neutral-500">run: {run.activeRunId ?? "未開始"}</p>
           </div>
           <div className="flex items-center gap-2 text-[11px] font-bold">
@@ -1237,10 +1298,13 @@ function StoryboardRunPanel() {
               type="button"
               onClick={loadDebugLog}
               disabled={!run.activeRunId || debugLoading}
-              className="rounded border border-[#343434] px-3 py-1 text-[11px] font-bold text-neutral-200 hover:border-pink-400 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+              className="flex items-center gap-1.5 rounded border border-[#343434] px-3 py-1 text-[11px] font-bold text-neutral-200 hover:border-pink-400 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
               title="完了済み run の構造化プロンプト履歴を読み込む"
             >
-              {debugLoading ? "読み込み中..." : "📋 構造化プロンプト履歴を読み込む"}
+              <ClipboardIcon />
+              <span>
+                {debugLoading ? "読み込み中..." : "構造化プロンプト履歴を読み込む"}
+              </span>
             </button>
             <span className="text-[10px] text-neutral-500">
               {run.activeRunId ? `run: ${run.activeRunId}` : "run なし"}
@@ -1428,7 +1492,7 @@ function SkillSettingsPanel() {
           */}
           <div className="rounded border border-[#2a2a2a] bg-[#0b0b0b] p-2 text-[11px] text-neutral-300">
             <div className="flex items-center justify-between gap-2">
-              <p className="font-black text-white">現在の構成</p>
+              <p className="text-[13px] font-black text-neutral-100">現在の構成</p>
               <button
                 type="button"
                 onClick={() => setDetailOpen(true)}
@@ -1451,9 +1515,10 @@ function SkillSettingsPanel() {
             )}
           </div>
 
-          <div className="space-y-1.5">
-            <p className="font-bold text-neutral-300">候補数モード</p>
-            <label className="flex items-center gap-2 rounded border border-[#2a2a2a] px-2 py-1.5">
+          {/* 区切り線 + 小見出しで「設定のかたまり」を視覚的に分ける (文字だけの羅列を防ぐ)。 */}
+          <div className="space-y-1.5 border-t border-[#242424] pt-3">
+            <p className="text-[12px] font-bold text-neutral-200">候補数モード</p>
+            <label className="flex items-center gap-2 rounded border border-[#2a2a2a] px-2 py-1.5 text-[11px] text-neutral-400">
               <input
                 type="radio"
                 checked={candidatesPerCut === 3}
@@ -1462,7 +1527,7 @@ function SkillSettingsPanel() {
               />
               <span>並列3案（高品質、レート消費大）</span>
             </label>
-            <label className="flex items-center gap-2 rounded border border-[#2a2a2a] px-2 py-1.5">
+            <label className="flex items-center gap-2 rounded border border-[#2a2a2a] px-2 py-1.5 text-[11px] text-neutral-400">
               <input
                 type="radio"
                 checked={candidatesPerCut === 1}
@@ -1472,22 +1537,32 @@ function SkillSettingsPanel() {
             </label>
           </div>
 
-          <ReferenceSummary
-            label="キャラ参照画像"
-            path={storyboardParams?.character_reference_path}
-          />
-          <ReferenceSummary
-            label="スタイル参照画像"
-            path={storyboardParams?.style_reference_path}
-          />
+          <div className="space-y-1.5 border-t border-[#242424] pt-3">
+            <p className="text-[12px] font-bold text-neutral-200">参照画像</p>
+            <ReferenceSummary
+              label="キャラ参照画像"
+              path={storyboardParams?.character_reference_path}
+            />
+            <ReferenceSummary
+              label="スタイル参照画像"
+              path={storyboardParams?.style_reference_path}
+            />
+          </div>
 
           <button
             type="button"
             onClick={runSkill}
             disabled={!canRun || starting}
-            className="w-full rounded-lg bg-pink-500 px-3 py-2 text-sm font-black text-white hover:bg-pink-400 disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-500"
+            className="flex w-full items-center justify-center gap-1.5 rounded-lg bg-pink-500 px-3 py-2 text-sm font-black text-white hover:bg-pink-400 disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-500"
           >
-            {starting ? "起動中..." : "▶ 実行"}
+            {starting ? (
+              <span>起動中...</span>
+            ) : (
+              <>
+                <PlayIcon />
+                <span>実行</span>
+              </>
+            )}
           </button>
 
           {detailOpen && (
@@ -1618,9 +1693,11 @@ function StoryboardConfigDetail({
 
 function ReferenceSummary({ label, path }: { label: string; path?: string }) {
   return (
-    <div className="rounded border border-[#2a2a2a] bg-[#0b0b0b] p-2 text-[11px]">
-      <p className="font-bold text-neutral-300">{label}</p>
-      <p className="mt-1 truncate font-mono text-neutral-500">{path || "未設定"}</p>
+    <div className="rounded border border-[#2a2a2a] bg-[#0b0b0b] p-2">
+      <p className="text-[11px] font-bold text-neutral-300">{label}</p>
+      <p className="mt-1 truncate font-mono text-[10px] tabular-nums text-neutral-500">
+        {path || "未設定"}
+      </p>
     </div>
   );
 }

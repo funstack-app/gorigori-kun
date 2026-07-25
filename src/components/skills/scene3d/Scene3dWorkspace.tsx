@@ -138,6 +138,49 @@ const CameraViewIcon = () => (
     <path d="M15 10l6-3v10l-6-3" />
   </Icon>
 );
+/**
+ * 汎用の小アイコン群 (2026-07-25)。冒頭の UI原則「絵文字を使わない」に反して
+ * バツ / 鉛筆 / 三角 / チェック / カチンコ / フォルダ / リンク の絵文字が混ざっていたので、
+ * すべてこのラインSVGへ置換した(placeholder 文字列だけは SVG を入れられないため文言のみ)。
+ */
+const CloseIcon = ({ className }: { className?: string }) => (
+  <Icon className={className ?? "h-3.5 w-3.5"}>
+    <path d="M18 6L6 18M6 6l12 12" />
+  </Icon>
+);
+const PencilIcon = ({ className }: { className?: string }) => (
+  <Icon className={className ?? "h-3 w-3"}>
+    <path d="M4 20h4L20 8l-4-4L4 16v4z" />
+  </Icon>
+);
+const CheckIcon = ({ className }: { className?: string }) => (
+  <Icon className={className ?? "h-3.5 w-3.5"}>
+    <path d="M20 6L9 17l-5-5" />
+  </Icon>
+);
+const ChevronDownIcon = ({ className }: { className?: string }) => (
+  <Icon className={className ?? "h-3.5 w-3.5"}>
+    <path d="M6 9l6 6 6-6" />
+  </Icon>
+);
+const ChevronRightIcon = ({ className }: { className?: string }) => (
+  <Icon className={className ?? "h-3.5 w-3.5"}>
+    <path d="M9 6l6 6-6 6" />
+  </Icon>
+);
+/** カチンコ(動画・モーション関連の見出し) */
+const ClapperIcon = ({ className }: { className?: string }) => (
+  <Icon className={className ?? "h-3.5 w-3.5"}>
+    <path d="M3 10h18v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-9z" />
+    <path d="M3.5 10L5 5l16 2-.6 3" />
+  </Icon>
+);
+/** フォルダ(ファイルを選ぶ) */
+const FolderIcon = ({ className }: { className?: string }) => (
+  <Icon className={className ?? "h-3.5 w-3.5"}>
+    <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z" />
+  </Icon>
+);
 const PersonIcon = ({ className }: { className?: string }) => (
   <Icon className={className}>
     <circle cx="12" cy="6" r="3" />
@@ -415,10 +458,15 @@ function Popup({
         className="max-h-[80vh] w-[440px] overflow-y-auto rounded-xl border border-[#2a2a2a] bg-[#141414] p-5 shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="mb-3 flex items-center justify-between">
-          <p className="text-sm font-semibold text-neutral-200">{title}</p>
-          <button className="text-neutral-500 hover:text-neutral-200" onClick={onClose}>
-            ✕
+        {/* ポップアップの題は最上位の見出し。区切り線で本文と層を分ける */}
+        <div className="mb-3 flex items-center justify-between border-b border-[#2a2a2a] pb-2.5">
+          <p className="text-[15px] font-black text-neutral-100">{title}</p>
+          <button
+            className="text-neutral-500 hover:text-neutral-200"
+            onClick={onClose}
+            aria-label="閉じる"
+          >
+            <CloseIcon />
           </button>
         </div>
         {children}
@@ -617,8 +665,9 @@ function EntityRow({
         className="text-neutral-600 hover:text-red-400"
         onClick={onRemove}
         title="削除"
+        aria-label="削除"
       >
-        ✕
+        <CloseIcon className="h-3 w-3" />
       </button>
     </li>
   );
@@ -779,11 +828,12 @@ function ShelfPanel() {
                 </button>
                 {usingShots.length === 0 && cameras.length > 1 && (
                   <button
-                    className="absolute right-1 top-1.5 text-[10px] text-neutral-600 hover:text-red-400"
+                    className="absolute right-1 top-1.5 text-neutral-600 hover:text-red-400"
                     onClick={() => removeCamera(cam.id)}
                     title="このカメラを削除"
+                    aria-label="このカメラを削除"
                   >
-                    ✕
+                    <CloseIcon className="h-3 w-3" />
                   </button>
                 )}
               </li>
@@ -1027,8 +1077,9 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
     <Popup title="動きをつける" onClose={onClose}>
       {/* 動画から取り込む(完全ローカル・無料。MediaPipe同梱)。主役機能なので先頭に置く */}
       <div className="mb-3 rounded-lg border border-emerald-400/25 bg-emerald-400/5 p-2.5">
-        <p className="mb-1.5 text-[11px] font-bold tracking-wide text-emerald-300">
-          🎬 動画から動きを取り込む(β)
+        <p className="mb-1.5 flex items-center gap-1.5 text-[12px] font-bold tracking-wide text-emerald-300">
+          <ClapperIcon />
+          動画から動きを取り込む(β)
         </p>
         <input
           ref={videoRef}
@@ -1038,11 +1089,16 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
           onChange={(e) => void onCaptureVideo(e.target.files?.[0] ?? null)}
         />
         <button
-          className="w-full rounded-lg border border-emerald-400/40 bg-emerald-400/10 px-3 py-1.5 text-xs text-emerald-300 hover:bg-emerald-400/20 disabled:opacity-50"
+          className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-emerald-400/40 bg-emerald-400/10 px-3 py-1.5 text-xs text-emerald-300 hover:bg-emerald-400/20 disabled:opacity-50"
           disabled={!!capBusy}
           onClick={() => videoRef.current?.click()}
         >
-          {capBusy ?? "📁 動画ファイルを選ぶ…(mp4/mov/webm・20秒まで)"}
+          {capBusy ?? (
+            <>
+              <FolderIcon />
+              動画ファイルを選ぶ…(mp4/mov/webm・20秒まで)
+            </>
+          )}
         </button>
         <div className="mt-1.5 flex gap-1.5">
           <input
@@ -1052,7 +1108,8 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
             onKeyDown={(e) => {
               if (e.key === "Enter") void onCaptureFromUrl();
             }}
-            placeholder="🔗 または動画のURLを貼る(ページURLもOK)"
+            /* placeholder には SVG を入れられないので、絵文字は外して文言だけにする */
+            placeholder="または動画のURLを貼る(ページURLもOK)"
             className="min-w-0 flex-1 rounded-lg border border-[#2a2a2a] bg-[#0d0d0d] px-2 py-1.5 text-xs text-neutral-200 placeholder:text-neutral-600 focus:border-emerald-400/60 focus:outline-none"
             disabled={!!capBusy}
           />
@@ -1180,18 +1237,20 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
                   {m.name}
                 </button>
                 <button
-                  className="absolute right-1 top-1.5 text-[10px] text-neutral-600 hover:text-red-400"
+                  className="absolute right-1 top-1.5 text-neutral-600 hover:text-red-400"
                   onClick={() => onRemoveGenerated(m.id)}
                   title="このAIモーションを削除"
+                  aria-label="このAIモーションを削除"
                 >
-                  ✕
+                  <CloseIcon className="h-2.5 w-2.5" />
                 </button>
                 <button
-                  className="absolute bottom-1.5 right-1 text-[10px] text-neutral-600 hover:text-sky-300"
+                  className="absolute bottom-1.5 right-1 text-neutral-600 hover:text-sky-300"
                   onClick={() => setReviseTarget({ id: m.id, name: m.name })}
                   title="このAIモーションを会話で直す(元は残る)"
+                  aria-label="このAIモーションを会話で直す"
                 >
-                  ✎
+                  <PencilIcon />
                 </button>
               </div>
             ))}
@@ -1601,14 +1660,20 @@ function SelectedObjectSection() {
         )}
       {entity.kind === "mannequin" && (
         <button
-          className={`rounded-lg border px-2 py-1.5 text-xs ${
+          className={`flex items-center gap-1.5 rounded-lg border px-2 py-1.5 text-left text-xs ${
             motionType === "clip"
               ? "border-lime-400 bg-lime-400/10 text-lime-300"
               : "border-[#2a2a2a] text-neutral-400 hover:border-lime-400/50 hover:text-neutral-200"
           }`}
           onClick={() => setMotionLibOpen(true)}
         >
-          🎬 動きをつける…(動画から取り込み / AI生成 / ライブラリ)
+          <ClapperIcon />
+          <span>
+            <span className="font-bold">動きをつける…</span>
+            <span className="block text-[10px] opacity-70">
+              動画から取り込み / AI生成 / ライブラリ
+            </span>
+          </span>
         </button>
       )}
       {motionLibOpen && (
@@ -1630,11 +1695,12 @@ function SelectedObjectSection() {
           </button>
           {entity.motion.overlayClipId && (
             <button
-              className="shrink-0 text-xs text-neutral-600 hover:text-red-300"
+              className="shrink-0 text-neutral-600 hover:text-red-300"
               onClick={() => setEntityOverlayClip(entity.id, null)}
               title="上半身レイヤーを外す"
+              aria-label="上半身レイヤーを外す"
             >
-              ✕
+              <CloseIcon className="h-3 w-3" />
             </button>
           )}
         </div>
@@ -1686,10 +1752,11 @@ function SelectedObjectSection() {
       </label>
 
       <button
-        className="rounded-lg border border-[#2a2a2a] px-2 py-1.5 text-left text-xs text-neutral-400 hover:border-pink-400/60 hover:text-neutral-200"
+        className="flex items-center gap-1.5 rounded-lg border border-[#2a2a2a] px-2 py-1.5 text-left text-xs text-neutral-400 hover:border-pink-400/60 hover:text-neutral-200"
         onClick={() => setDetailOpen((o) => !o)}
       >
-        {detailOpen ? "▾" : "▸"} 詳細を調整(位置・回転・大きさ・寸法)
+        {detailOpen ? <ChevronDownIcon /> : <ChevronRightIcon />}
+        詳細を調整(位置・回転・大きさ・寸法)
       </button>
       {detailOpen && <ObjectDetailBody entityId={entity.id} />}
     </div>
@@ -2158,7 +2225,9 @@ function LaneClip({
       {/* 色帯(カメラ識別色) */}
       <div className="h-1 w-full shrink-0" style={{ backgroundColor: clipColor }} />
       <div className="flex min-h-0 flex-1 flex-col justify-center px-1.5">
-        <p className={`truncate text-[11px] font-medium ${selected ? "text-white" : "text-neutral-300"}`}>
+        <p
+          className={`truncate font-mono text-[11px] font-bold tabular-nums ${selected ? "text-white" : "text-neutral-300"}`}
+        >
           {(shot.durationFrames / SCENE_FPS).toFixed(1)}s
         </p>
         <p className="truncate text-[9px]" style={{ color: clipColor }}>
@@ -2167,15 +2236,16 @@ function LaneClip({
       </div>
       {segs.length > 1 && (
         <button
-          className="absolute right-0.5 top-1 hidden text-[10px] text-neutral-500 hover:text-red-400 group-hover:block"
+          className="absolute right-0.5 top-1 hidden text-neutral-500 hover:text-red-400 group-hover:block"
           onPointerDown={(e) => e.stopPropagation()}
           onClick={(e) => {
             e.stopPropagation();
             removeShot(shot.id);
           }}
           title="リップル削除"
+          aria-label="リップル削除"
         >
-          ✕
+          <CloseIcon className="h-2.5 w-2.5" />
         </button>
       )}
       <div
@@ -3018,7 +3088,12 @@ function DirectorChat() {
       >
         {busy ? (progress ?? "監督が考え中…") : "AIに組ませる"}
       </button>
-      {note && <p className="mt-1.5 text-[11px] text-lime-300">✓ {note}</p>}
+      {note && (
+        <p className="mt-1.5 flex items-start gap-1 text-[11px] text-lime-300">
+          <CheckIcon className="mt-0.5 h-3 w-3 shrink-0" />
+          <span>{note}</span>
+        </p>
+      )}
       {error && (
         <p className="mt-1.5 rounded border border-red-500/30 bg-red-500/10 p-1.5 text-[11px] text-red-300">
           {error}

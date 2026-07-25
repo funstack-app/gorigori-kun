@@ -167,6 +167,18 @@ export function SaveIcon({ className }: IconProps) {
   );
 }
 
+/**
+ * プロジェクト（作品の箱）。2026-07-25: 旧「◱」の置換先。
+ * 生成物の保存先を表す文脈で使う。
+ */
+export function ProjectIcon({ className }: IconProps) {
+  return (
+    <Box className={className}>
+      <path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V7z" />
+    </Box>
+  );
+}
+
 export function SkillIcon({ id, className }: { id: string; className?: string }) {
   const Component = ICONS[id as GoriSkillId];
   if (!Component) {

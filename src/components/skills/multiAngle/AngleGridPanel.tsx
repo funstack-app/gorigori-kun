@@ -1,5 +1,6 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { useEffect, useRef, useState } from "react";
+import type { ReactNode } from "react";
 
 import { useMultiAngleRun } from "../../../lib/store/multiAngleRun";
 import { useActiveProject } from "../../../lib/store/activeProject";
@@ -16,6 +17,63 @@ import {
 import { getAngleCut } from "../../../lib/multiangle/angles";
 import type { CutState, MultiAngleParams } from "../../../lib/multiangle/types";
 import { GenerationGauge, recordGenerationDuration } from "../../GenerationGauge";
+
+/* ---------- フラットラインアイコン (絵文字を使わない。STΛCK 指示 2026-07-25) ---------- */
+
+function LineIcon({
+  children,
+  size = 12,
+  className,
+}: {
+  children: ReactNode;
+  size?: number;
+  className?: string;
+}) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+      className={className ?? "shrink-0"}
+    >
+      {children}
+    </svg>
+  );
+}
+
+/** 空状態: 三角定規(構図を選ぶ画面のシンボル) */
+const RulerIcon = () => (
+  <LineIcon size={32} className="text-neutral-600">
+    <path d="M4 20h16L4 4v16z" />
+    <path d="M8 20v-3M12 20v-5" />
+  </LineIcon>
+);
+/** 保存: フロッピー */
+const SaveIcon = () => (
+  <LineIcon>
+    <path d="M5 3h11l3 3v15H5z" />
+    <path d="M8 3v6h8V3M8 21v-6h8v6" />
+  </LineIcon>
+);
+/** 選択済みチェック */
+const CheckIcon = () => (
+  <LineIcon size={14}>
+    <path d="M20 6L9 17l-5-5" />
+  </LineIcon>
+);
+/** ローカルに保存: 下向き矢印 + 受け皿 */
+const DownloadIcon = () => (
+  <LineIcon size={11}>
+    <path d="M12 3v11M8 10.5l4 4 4-4" />
+    <path d="M4 20h16" />
+  </LineIcon>
+);
 
 /**
  * 選択中アスペクト比 ("3:4" 等) を CSS の aspect-ratio 値 ("3 / 4") に変換する。
@@ -346,9 +404,13 @@ export function AngleGridPanel({
   if (status === "idle" || orderedCuts.length === 0) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-2 text-center text-neutral-500">
-        <div className="text-3xl">📐</div>
-        <p className="text-[13px] font-bold">構図を選んで「一気に生成」を押すと</p>
-        <p className="text-[12px]">参照画像のキャラがいろんなアングルで出てきます</p>
+        <RulerIcon />
+        <p className="text-[13px] font-black text-neutral-300">
+          構図を選んで「一気に生成」を押すと
+        </p>
+        <p className="text-[11px] text-neutral-500">
+          参照画像のキャラがいろんなアングルで出てきます
+        </p>
       </div>
     );
   }
@@ -357,13 +419,20 @@ export function AngleGridPanel({
     <div className="flex h-full min-h-0 flex-col">
       {/* 上部バー: 進捗 + 全保存 */}
       <div className="flex items-center justify-between border-b border-[#242424] px-4 py-3">
-        <div className="text-[12px] font-bold text-neutral-300">
-          {status === "running" ? "並列生成中…" : "生成完了"}{" "}
-          <span className="text-neutral-500">
-            ({doneCount}/{total})
-          </span>
+        {/* 進捗はこのバーの見出し。件数は等幅、保存先は補足の階層に落とす */}
+        <div className="min-w-0">
+          <div className="flex items-baseline gap-1.5">
+            <span className="text-[13px] font-black text-neutral-100">
+              {status === "running" ? "並列生成中…" : "生成完了"}
+            </span>
+            <span className="font-mono text-[11px] font-bold tabular-nums text-neutral-400">
+              {doneCount}/{total}
+            </span>
+          </div>
           {activeProject && (
-            <span className="text-neutral-500"> · 保存先: {activeProject.name}</span>
+            <p className="truncate text-[10px] text-neutral-500">
+              保存先: {activeProject.name}
+            </p>
           )}
         </div>
         <div className="flex items-center gap-2">
@@ -385,15 +454,17 @@ export function AngleGridPanel({
                 disabled={selectedCount === 0}
                 title="選択した画像をフォルダを選んでローカルに保存"
                 className={
-                  "rounded-lg px-3 py-1.5 text-[12px] font-bold transition " +
+                  "flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[12px] font-bold transition " +
                   (selectedCount === 0
                     ? "cursor-not-allowed bg-[#242424] text-neutral-600"
                     : "bg-emerald-600 text-white hover:bg-emerald-500")
                 }
               >
-                {selectedCount > 0
-                  ? `💾 ローカルに保存 (${selectedCount})`
-                  : "💾 ローカルに保存"}
+                <SaveIcon />
+                ローカルに保存
+                {selectedCount > 0 && (
+                  <span className="font-mono tabular-nums">({selectedCount})</span>
+                )}
               </button>
             </>
           )}
@@ -441,13 +512,13 @@ export function AngleGridPanel({
                     onClick={() => toggleOutputCut(cut.cutId)}
                     title="選択 (ローカルに一括保存する対象にする)"
                     className={
-                      "absolute left-1.5 top-1.5 z-10 flex h-6 w-6 items-center justify-center rounded-md border text-[13px] font-black transition " +
+                      "absolute left-1.5 top-1.5 z-10 flex h-6 w-6 items-center justify-center rounded-md border transition " +
                       (selectedOutputCutIds.includes(cut.cutId)
                         ? "border-emerald-400 bg-emerald-500 text-white"
                         : "border-white/40 bg-black/50 text-transparent hover:text-white/60")
                     }
                   >
-                    ✓
+                    <CheckIcon />
                   </button>
                 )}
                 {cut.status === "completed" && cut.imagePath ? (
@@ -477,12 +548,20 @@ export function AngleGridPanel({
                           : "text-neutral-600"
                       }`}
                     >
-                      {cut.status === "running"
-                        ? `生成中… ${Math.max(
-                            0,
-                            Math.floor((now - (cutStartedAt[cut.cutId] ?? now)) / 1000),
-                        )}秒`
-                        : "待機中"}
+                      {cut.status === "running" ? (
+                        <span>
+                          生成中…{" "}
+                          <span className="font-mono tabular-nums">
+                            {Math.max(
+                              0,
+                              Math.floor((now - (cutStartedAt[cut.cutId] ?? now)) / 1000),
+                            )}
+                          </span>
+                          秒
+                        </span>
+                      ) : (
+                        "待機中"
+                      )}
                       {cut.status === "running" && cutStartedAt[cut.cutId] != null && (
                         <GenerationGauge
                           startedAt={cutStartedAt[cut.cutId]}
@@ -495,7 +574,7 @@ export function AngleGridPanel({
               </div>
 
               <div className="flex flex-col gap-1.5 px-2 py-2">
-                <div className="truncate text-[11px] font-bold text-neutral-200">
+                <div className="truncate text-[12px] font-bold text-neutral-200">
                   {cut.label}
                 </div>
                 <div className="flex gap-1">
@@ -521,9 +600,10 @@ export function AngleGridPanel({
                     onClick={() => void saveCutToLocal(cut)}
                     disabled={cut.status !== "completed"}
                     title="名前を付けてローカルに保存"
-                    className="flex-1 rounded-md border border-[#343434] px-1.5 py-1 text-[10px] font-bold text-neutral-400 hover:border-emerald-400/60 hover:text-white disabled:opacity-40"
+                    className="flex flex-1 items-center justify-center gap-1 rounded-md border border-[#343434] px-1.5 py-1 text-[10px] font-bold text-neutral-400 hover:border-emerald-400/60 hover:text-white disabled:opacity-40"
                   >
-                    ⤓ ローカル
+                    <DownloadIcon />
+                    ローカル
                   </button>
                 </div>
               </div>

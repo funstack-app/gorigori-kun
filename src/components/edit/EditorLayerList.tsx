@@ -127,19 +127,21 @@ export function EditorLayerList() {
             <button
               type="button"
               onClick={() => void groupSelection()}
-              className="w-full rounded border border-[#3a3a3a] bg-[#161616] px-2 py-1 text-[11px] font-bold text-neutral-200 hover:border-[#4a4a4a] hover:text-white"
+              className="flex w-full items-center justify-center gap-1.5 rounded border border-[#3a3a3a] bg-[#161616] px-2 py-1 text-[11px] font-bold text-neutral-200 hover:border-[#4a4a4a] hover:text-white"
               title={`選択中の${groupState.count}レイヤーを1つにまとめる`}
             >
-              🔗 {groupState.count}個をグループ化
+              <LinkIcon />
+              <span>{groupState.count}個をグループ化</span>
             </button>
           ) : (
             <button
               type="button"
               onClick={() => void ungroupSelection(groupState.id)}
-              className="w-full rounded border border-[#3a3a3a] bg-[#161616] px-2 py-1 text-[11px] font-bold text-neutral-200 hover:border-[#4a4a4a] hover:text-white"
+              className="flex w-full items-center justify-center gap-1.5 rounded border border-[#3a3a3a] bg-[#161616] px-2 py-1 text-[11px] font-bold text-neutral-200 hover:border-[#4a4a4a] hover:text-white"
               title="グループを解除して個別レイヤーに戻す"
             >
-              ⛓️‍💥 グループを解除
+              <LinkBrokenIcon />
+              <span>グループを解除</span>
             </button>
           )}
         </div>
@@ -446,6 +448,28 @@ function LockOpenIcon() {
     <svg {...LAYER_SVG} width={14} height={14} aria-hidden>
       <rect x="5" y="11" width="14" height="9" rx="1.5" />
       <path d="M8 11V8a4 4 0 017.5-2" />
+    </svg>
+  );
+}
+
+/** グループ化 (つながった鎖)。 */
+function LinkIcon() {
+  return (
+    <svg {...LAYER_SVG} width={13} height={13} aria-hidden>
+      <path d="M9.5 14.5l5-5" />
+      <path d="M13 7l1.3-1.3a3.5 3.5 0 015 5L18 12" />
+      <path d="M11 17l-1.3 1.3a3.5 3.5 0 01-5-5L6 12" />
+    </svg>
+  );
+}
+
+/** グループ解除 (切れた鎖)。 */
+function LinkBrokenIcon() {
+  return (
+    <svg {...LAYER_SVG} width={13} height={13} aria-hidden>
+      <path d="M13 7l1.3-1.3a3.5 3.5 0 015 5L18 12" />
+      <path d="M11 17l-1.3 1.3a3.5 3.5 0 01-5-5L6 12" />
+      <path d="M8 4.5v2M4.5 8h2M16 19.5v-2M19.5 16h-2" />
     </svg>
   );
 }

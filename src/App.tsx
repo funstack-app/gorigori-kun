@@ -1066,8 +1066,8 @@ function DarkGlobalNav({
           collapsed ? "justify-center" : ""
         }`}
       >
-        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-pink-500 text-base font-semibold text-white shadow-sm transition hover:bg-pink-600">
-          ＋
+        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-pink-500 text-white shadow-sm transition hover:bg-pink-600">
+          <PlusIcon />
         </span>
         {!collapsed && <span>作成</span>}
       </button>
@@ -1223,7 +1223,7 @@ function StorageIndicator() {
       <div>
         <div className="flex items-baseline justify-between gap-2">
           <span className="text-[10px] font-bold text-neutral-500">ローカル</span>
-          <span className={`text-[11px] font-black ${tone}`}>{display}</span>
+          <span className={`text-[11px] font-black tabular-nums ${tone}`}>{display}</span>
         </div>
         <p
           className="mt-1 truncate font-mono text-[9px] text-neutral-500"
@@ -1231,19 +1231,27 @@ function StorageIndicator() {
         >
           {shortPath}
         </p>
-        <p className="mt-0.5 text-[9px] text-neutral-600">{stats.fileCount} ファイル</p>
+        <p className="mt-0.5 text-[9px] tabular-nums text-neutral-600">
+          {stats.fileCount} ファイル
+        </p>
       </div>
       {cloudUsage && (
         <div className="border-t border-[#242424] pt-1">
           <div className="flex items-baseline justify-between gap-2">
-            <span className="text-[10px] font-bold text-neutral-500">☁️ Supabase</span>
-            <span className={`text-[11px] font-black ${cloudTone}`}>
+            <span className="flex items-center gap-1 text-[10px] font-bold text-neutral-500">
+              <CloudIcon />
+              Supabase
+            </span>
+            <span className={`text-[11px] font-black tabular-nums ${cloudTone}`}>
               {formatSidebarBytes(cloudUsage.usedBytes)} /{" "}
               {formatSidebarBytes(cloudUsage.limitBytes)}
             </span>
           </div>
           {cloudUsage.limitBytes > 0 && cloudUsage.usedBytes / cloudUsage.limitBytes > 0.8 && (
-            <p className="mt-0.5 text-[9px] text-amber-300">⚠️ 残り少なめ</p>
+            <p className="mt-0.5 flex items-center gap-1 text-[9px] text-amber-300">
+              <WarnTriangleIcon />
+              残り少なめ
+            </p>
           )}
         </div>
       )}
@@ -1611,7 +1619,10 @@ function UsageGauges() {
           className="flex items-center gap-1.5 rounded-md border border-pink-400/40 bg-pink-500/10 px-2.5 py-1 text-[11px] font-bold text-pink-100"
           title={`HiggsField credits: ${Math.round(hfCredits)}`}
         >
-          <span className="text-pink-300">⚡ HiggsField</span>
+          <span className="flex items-center gap-1 text-pink-300">
+            <BoltIcon />
+            HiggsField
+          </span>
           <span className="tabular-nums text-white">{Math.round(hfCredits)}</span>
         </div>
       )}
@@ -1620,7 +1631,10 @@ function UsageGauges() {
           className="flex items-center gap-1.5 rounded-md border border-violet-400/40 bg-violet-500/10 px-2.5 py-1 text-[11px] font-bold text-violet-100"
           title="Magnific 接続済み"
         >
-          <span className="text-violet-300">⚡ Magnific</span>
+          <span className="flex items-center gap-1 text-violet-300">
+            <BoltIcon />
+            Magnific
+          </span>
         </div>
       )}
     </div>
@@ -1764,21 +1778,23 @@ function AssetsWorkspace() {
               type="button"
               onClick={() => setViewMode("grid")}
               title="グリッド表示"
-              className={`h-6 px-2 rounded text-[11px] font-medium transition ${
+              className={`flex h-6 items-center gap-1 rounded px-2 text-[11px] font-medium transition ${
                 viewMode === "grid" ? "bg-pink-500 text-white" : "text-neutral-400 hover:text-white"
               }`}
             >
-              ▦ グリッド
+              <GridViewIcon />
+              グリッド
             </button>
             <button
               type="button"
               onClick={() => setViewMode("list")}
               title="リスト表示"
-              className={`h-6 px-2 rounded text-[11px] font-medium transition ${
+              className={`flex h-6 items-center gap-1 rounded px-2 text-[11px] font-medium transition ${
                 viewMode === "list" ? "bg-pink-500 text-white" : "text-neutral-400 hover:text-white"
               }`}
             >
-              ☰ リスト
+              <ListViewIcon />
+              リスト
             </button>
           </div>
           {/* グリッド時のみタイルサイズスライダー */}
@@ -1824,10 +1840,11 @@ function AssetsWorkspace() {
             <button
               type="button"
               onClick={enterMode}
-              className="h-7 rounded-md bg-pink-500 px-3 text-[11px] font-bold text-white hover:bg-pink-400"
+              className="flex h-7 items-center gap-1.5 rounded-md bg-pink-500 px-3 text-[11px] font-bold text-white hover:bg-pink-400"
               disabled={items.length === 0}
             >
-              ☑︎ 選択モード
+              <CheckSquareIcon />
+              選択モード
             </button>
           )}
         </div>
@@ -1889,7 +1906,7 @@ function AssetsWorkspace() {
                     <p className="mt-1 text-[10px] text-neutral-500">
                       {selectionMode
                         ? isSelected
-                          ? "✓ 選択中（クリックで外す）"
+                          ? "選択中（クリックで外す）"
                           : "クリックで選択"
                         : "クリックで参照 / ダブルクリックで拡大"}
                     </p>
@@ -1898,13 +1915,13 @@ function AssetsWorkspace() {
                 {selectionMode && (
                   <div
                     className={[
-                      "pointer-events-none absolute left-2 top-2 flex h-6 w-6 items-center justify-center rounded-md border-2 text-[12px] font-black",
+                      "pointer-events-none absolute left-2 top-2 flex h-6 w-6 items-center justify-center rounded-md border-2",
                       isSelected
                         ? "border-pink-400 bg-pink-500 text-white"
                         : "border-white/70 bg-black/60 text-transparent",
                     ].join(" ")}
                   >
-                    ✓
+                    <CheckIcon />
                   </div>
                 )}
                 {judgement && (
@@ -1967,7 +1984,7 @@ function AssetsWorkspace() {
                   <p className="truncate text-[10px] text-neutral-500">
                     {selectionMode
                       ? isSelected
-                        ? "✓ 選択中（クリックで外す）"
+                        ? "選択中（クリックで外す）"
                         : "クリックで選択"
                       : "クリックで参照 / ダブルクリックで拡大"}
                   </p>
@@ -1985,7 +2002,9 @@ function AssetsWorkspace() {
                   </span>
                 )}
                 {selectionMode && isSelected && (
-                  <span className="text-[14px] font-black text-pink-400">✓</span>
+                  <span className="shrink-0 text-pink-400" aria-hidden>
+                    <CheckIcon />
+                  </span>
                 )}
               </button>
             );
@@ -2049,13 +2068,20 @@ function LibraryDeleteButton() {
       onClick={handleClick}
       disabled={disabled}
       className={[
-        "h-7 rounded-md px-3 text-[11px] font-bold transition",
+        "flex h-7 items-center gap-1.5 rounded-md px-3 text-[11px] font-bold transition",
         disabled
           ? "cursor-not-allowed bg-neutral-800 text-neutral-600"
           : "bg-rose-600 text-white hover:bg-rose-500",
       ].join(" ")}
     >
-      {running ? "削除中…" : `🗑 削除${selected.size > 0 ? ` (${selected.size})` : ""}`}
+      {running ? (
+        "削除中…"
+      ) : (
+        <>
+          <TrashIcon />
+          <span>削除{selected.size > 0 ? ` (${selected.size})` : ""}</span>
+        </>
+      )}
     </button>
   );
 }
@@ -2121,7 +2147,7 @@ function LibraryAddToProjectButton() {
         onClick={() => setOpen((prev) => !prev)}
         disabled={disabled}
         className={[
-          "h-7 rounded-md px-3 text-[11px] font-bold transition",
+          "flex h-7 items-center gap-1.5 rounded-md px-3 text-[11px] font-bold transition",
           disabled
             ? "cursor-not-allowed bg-neutral-800 text-neutral-600"
             : open
@@ -2130,7 +2156,9 @@ function LibraryAddToProjectButton() {
         ].join(" ")}
         title="選択中の画像をプロジェクトに追加"
       >
-        ◱ {selected.size} 件をプロジェクトへ ▾
+        <FolderAddIcon />
+        <span className="tabular-nums">{selected.size} 件をプロジェクトへ</span>
+        <CaretDownIcon />
       </button>
       {open && !disabled && (
         <div className="absolute right-0 top-full z-40 mt-1 w-72 rounded-lg border border-[#2a2a2a] bg-[#161616] shadow-2xl">
@@ -2314,9 +2342,10 @@ function ProjectsWorkspace() {
           type="button"
           onClick={handleCreate}
           disabled={!draftName.trim()}
-          className="h-9 rounded-md bg-pink-500 px-4 text-xs font-bold text-white hover:bg-pink-400 disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-500"
+          className="flex h-9 items-center gap-1.5 rounded-md bg-pink-500 px-4 text-xs font-bold text-white hover:bg-pink-400 disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-500"
         >
-          ＋ 作成
+          <PlusIcon size={12} />
+          作成
         </button>
       </div>
 
@@ -2655,18 +2684,20 @@ function ProjectCard({
             setDraft(project.name);
             setEditing(true);
           }}
-          className="h-7 rounded-md border border-[#343434] bg-[#0b0b0b] px-2 text-[10px] text-neutral-400 hover:text-white"
+          className="flex h-7 items-center justify-center rounded-md border border-[#343434] bg-[#0b0b0b] px-2 text-neutral-400 hover:text-white"
           title="名前を編集"
+          aria-label="名前を編集"
         >
-          ✎
+          <PencilIcon />
         </button>
         <button
           type="button"
           onClick={onRemove}
-          className="h-7 rounded-md border border-[#343434] bg-[#0b0b0b] px-2 text-[10px] text-neutral-400 hover:text-red-400"
+          className="flex h-7 items-center justify-center rounded-md border border-[#343434] bg-[#0b0b0b] px-2 text-neutral-400 hover:text-red-400"
           title="削除"
+          aria-label="削除"
         >
-          ×
+          <CloseIcon />
         </button>
       </div>
     </div>
@@ -2838,18 +2869,20 @@ function ChatHistoryWorkspace({ onOpen }: { onOpen: (id: string) => Promise<void
                       type="button"
                       onClick={() => startEdit(session.id, session.title)}
                       title="名前を変更"
-                      className="opacity-0 transition group-hover:opacity-100 shrink-0 rounded-md border border-[#343434] bg-[#0b0b0b] px-2 py-1 text-[10px] font-medium text-neutral-300 hover:border-pink-400 hover:text-white"
+                      className="opacity-0 transition group-hover:opacity-100 shrink-0 flex items-center gap-1 rounded-md border border-[#343434] bg-[#0b0b0b] px-2 py-1 text-[10px] font-medium text-neutral-300 hover:border-pink-400 hover:text-white"
                     >
-                      ✎ 名前
+                      <PencilIcon />
+                      名前
                     </button>
                   )}
                   {!isEditing && (
                     <button
                       type="button"
                       onClick={() => void onOpen(session.id)}
-                      className="shrink-0 text-[11px] font-medium text-neutral-500 hover:text-white"
+                      className="flex shrink-0 items-center gap-1 text-[11px] font-medium text-neutral-500 hover:text-white"
                     >
-                      開く →
+                      開く
+                      <ArrowRightIcon />
                     </button>
                   )}
                 </div>
@@ -3993,6 +4026,150 @@ function timeAgo(ms: number) {
   const day = Math.floor(hour / 24);
   if (day < 7) return `${day}日前`;
   return new Date(ms).toLocaleDateString("ja-JP", { month: "numeric", day: "numeric" });
+}
+
+/* --- フラットアイコン (絵文字廃止) --- */
+
+const APP_SVG = {
+  viewBox: "0 0 24 24",
+  fill: "none",
+  stroke: "currentColor",
+  strokeWidth: 2,
+  strokeLinecap: "round" as const,
+  strokeLinejoin: "round" as const,
+};
+
+/** クラウド (Supabase 使用量ラベル)。 */
+function CloudIcon() {
+  return (
+    <svg {...APP_SVG} width={11} height={11} className="shrink-0" aria-hidden>
+      <path d="M7 18h10a4 4 0 000-8 6 6 0 00-11.6 2A3.5 3.5 0 006 18z" />
+    </svg>
+  );
+}
+
+/** 警告 (三角 + ビックリ)。 */
+function WarnTriangleIcon() {
+  return (
+    <svg {...APP_SVG} width={10} height={10} className="shrink-0" aria-hidden>
+      <path d="M12 3.5L22 20H2z" />
+      <path d="M12 9.5v4.5M12 16.9v.3" />
+    </svg>
+  );
+}
+
+/** 稲妻 (拡張接続バッジ)。 */
+function BoltIcon() {
+  return (
+    <svg {...APP_SVG} width={11} height={11} className="shrink-0" aria-hidden>
+      <path d="M13 2L4.5 13.5H11l-1 8.5L19.5 10H13z" />
+    </svg>
+  );
+}
+
+/** グリッド表示。 */
+function GridViewIcon() {
+  return (
+    <svg {...APP_SVG} width={12} height={12} strokeWidth={1.8} className="shrink-0" aria-hidden>
+      <rect x="3" y="3" width="7.5" height="7.5" rx="1" />
+      <rect x="13.5" y="3" width="7.5" height="7.5" rx="1" />
+      <rect x="3" y="13.5" width="7.5" height="7.5" rx="1" />
+      <rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1" />
+    </svg>
+  );
+}
+
+/** リスト表示。 */
+function ListViewIcon() {
+  return (
+    <svg {...APP_SVG} width={12} height={12} className="shrink-0" aria-hidden>
+      <path d="M4 6h16M4 12h16M4 18h16" />
+    </svg>
+  );
+}
+
+/** チェック済みの四角 (選択モード開始)。 */
+function CheckSquareIcon() {
+  return (
+    <svg {...APP_SVG} width={12} height={12} strokeWidth={1.8} className="shrink-0" aria-hidden>
+      <rect x="3.5" y="3.5" width="17" height="17" rx="2" />
+      <path d="M7.5 12.2l3 3 6-6.4" />
+    </svg>
+  );
+}
+
+/** チェック (選択中バッジ)。 */
+function CheckIcon() {
+  return (
+    <svg {...APP_SVG} width={13} height={13} strokeWidth={2.8} className="shrink-0" aria-hidden>
+      <path d="M4 12.5l5.5 5.5L20 6" />
+    </svg>
+  );
+}
+
+/** ゴミ箱 (削除)。 */
+function TrashIcon() {
+  return (
+    <svg {...APP_SVG} width={12} height={12} strokeWidth={1.8} className="shrink-0" aria-hidden>
+      <path d="M4 7h16M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2M6 7l1 13a1 1 0 001 1h8a1 1 0 001-1l1-13M10 11v6M14 11v6" />
+    </svg>
+  );
+}
+
+/** フォルダ + プラス (プロジェクトへ追加)。 */
+function FolderAddIcon() {
+  return (
+    <svg {...APP_SVG} width={12} height={12} strokeWidth={1.8} className="shrink-0" aria-hidden>
+      <path d="M3 7.5a1.5 1.5 0 011.5-1.5h4l2 2.5h8A1.5 1.5 0 0120 10v8a1.5 1.5 0 01-1.5 1.5h-14A1.5 1.5 0 013 18z" />
+      <path d="M11.5 14h4M13.5 12v4" />
+    </svg>
+  );
+}
+
+/** プラス (新規作成)。size で見出し脇 / 本文内を切り替える。 */
+function PlusIcon({ size = 16 }: { size?: number }) {
+  return (
+    <svg {...APP_SVG} width={size} height={size} strokeWidth={2.4} className="shrink-0" aria-hidden>
+      <path d="M12 5v14M5 12h14" />
+    </svg>
+  );
+}
+
+/** 下向き山カッコ (ポップオーバー開閉)。 */
+function CaretDownIcon() {
+  return (
+    <svg {...APP_SVG} width={10} height={10} strokeWidth={2.4} className="shrink-0" aria-hidden>
+      <path d="M6 9l6 6 6-6" />
+    </svg>
+  );
+}
+
+/** ペン (名前を編集)。 */
+function PencilIcon() {
+  return (
+    <svg {...APP_SVG} width={12} height={12} strokeWidth={1.8} className="shrink-0" aria-hidden>
+      <path d="M4 20h4l11-11-4-4L4 16v4z" />
+      <path d="M13.5 5.5l4 4" />
+    </svg>
+  );
+}
+
+/** × (閉じる / 削除)。 */
+function CloseIcon() {
+  return (
+    <svg {...APP_SVG} width={12} height={12} strokeWidth={2.2} className="shrink-0" aria-hidden>
+      <path d="M6 6l12 12M18 6L6 18" />
+    </svg>
+  );
+}
+
+/** 右矢印 (開く)。 */
+function ArrowRightIcon() {
+  return (
+    <svg {...APP_SVG} width={11} height={11} strokeWidth={2.2} className="shrink-0" aria-hidden>
+      <path d="M5 12h13M13 6l6 6-6 6" />
+    </svg>
+  );
 }
 
 // 既存のライトUI部品は段階移行中のため保持。次の整理フェーズで削除する。

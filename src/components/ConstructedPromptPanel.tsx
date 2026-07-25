@@ -305,7 +305,7 @@ export function ConstructedPromptPanel() {
         - 上: 「ライブラリ / 素材 / 追加 / プリセット / スキル」
               (シーン構築パネルの直下、参照追加系)
         - 区切り線 (ReferenceRack 内の border-b で既に表現済み)
-        - 中: 「⛶ 要素別編集」ボタン (textarea の直前で目立たせる)
+        - 中: 「要素別編集」ボタン (textarea の直前で目立たせる)
         - 下: プロンプト textarea
       */}
       <div className="shrink-0">
@@ -448,8 +448,8 @@ export function ConstructedPromptPanel() {
                 {ASPECT_RATIO_HINTS[aspectRatio as SceneAspectRatio] ?? ""}
               </span>
             </span>
-            <span className="shrink-0 text-xs text-neutral-500" aria-hidden>
-              ▾
+            <span className="shrink-0 text-neutral-500">
+              <ChevronDownIcon />
             </span>
           </button>
         </div>
@@ -552,7 +552,7 @@ export function ConstructedPromptPanel() {
  * - 「ライブラリ」ボタン: 過去生成画像から選ぶモーダルを開く
  * - 「素材」ボタン: 接続済みストック素材 API から検索して追加する
  * - 「追加」ボタン: ローカル PC から画像を選ぶ（ReferencePicker 経由）
- * - 各チップにマウスを乗せると × で外せる
+ * - 各チップにマウスを乗せると閉じるボタンで外せる
  */
 function ReferenceRack({
   references,
@@ -765,9 +765,9 @@ function GroupReferenceChip({
         type="button"
         onClick={onRemove}
         aria-label="キャラ参照を外す"
-        className="absolute right-0.5 top-0.5 hidden h-4 w-4 items-center justify-center rounded-full bg-black/80 text-[10px] font-black text-white group-hover:flex hover:bg-red-500"
+        className="absolute right-0.5 top-0.5 hidden h-4 w-4 items-center justify-center rounded-full bg-black/80 text-white group-hover:flex hover:bg-red-500"
       >
-        ×
+        <CloseIcon />
       </button>
     </div>
   );
@@ -801,9 +801,9 @@ function ReferenceChip({
         type="button"
         onClick={onRemove}
         aria-label="参照を外す"
-        className="absolute right-0.5 top-0.5 hidden h-4 w-4 items-center justify-center rounded-full bg-black/80 text-[10px] font-black text-white group-hover:flex hover:bg-red-500"
+        className="absolute right-0.5 top-0.5 hidden h-4 w-4 items-center justify-center rounded-full bg-black/80 text-white group-hover:flex hover:bg-red-500"
       >
-        ×
+        <CloseIcon />
       </button>
     </div>
   );
@@ -875,6 +875,24 @@ function SparkleIcon() {
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M12 3l1.8 4.9L18.7 9.7l-4.9 1.8L12 16.4l-1.8-4.9L5.3 9.7l4.9-1.8L12 3Z" />
       <path d="M18.5 15.5l.7 1.9 1.9.7-1.9.7-.7 1.9-.7-1.9-1.9-.7 1.9-.7.7-1.9Z" />
+    </svg>
+  );
+}
+
+/** チップの「外す」ボタン用。× 記号でなくフラットアイコンで描く。 */
+function CloseIcon() {
+  return (
+    <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M18 6 6 18M6 6l12 12" />
+    </svg>
+  );
+}
+
+/** アスペクト比セレクタの開閉インジケータ (記号でなくフラットアイコン)。 */
+function ChevronDownIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="m6 9 6 6 6-6" />
     </svg>
   );
 }

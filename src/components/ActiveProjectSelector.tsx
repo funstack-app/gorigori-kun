@@ -5,6 +5,7 @@ import { usePlanChat } from "../lib/store/planChat";
 import { useProjects } from "../lib/store/projects";
 import { useSceneStore } from "../lib/store/scene";
 import { useToasts } from "../lib/store/toasts";
+import { ProjectIcon } from "./SkillIcon";
 
 /**
  * 作業中プロジェクトを「別の」プロジェクトへ切り替えるときに、前プロジェクトの
@@ -144,7 +145,9 @@ export function ActiveProjectSelector() {
         ].join(" ")}
         title="現在作業中のプロジェクト（企画ログと生成画像が自動保存される）"
       >
-        <span className={active ? "text-pink-300" : "text-neutral-500"}>◱</span>
+        <ProjectIcon
+          className={`h-3.5 w-3.5 shrink-0 ${active ? "text-pink-300" : "text-neutral-500"}`}
+        />
         <span className="max-w-[140px] truncate">
           {active ? active.name : "プロジェクト未選択"}
         </span>

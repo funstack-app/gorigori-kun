@@ -39,6 +39,17 @@ function buildName(
   return `${prefix}${num}.${ext}`;
 }
 
+/** 一括保存 — フロッピー型の保存アイコン (絵文字を使わずフラットアイコンで表現)。 */
+function SaveIcon() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z" />
+      <path d="M17 21v-8H7v8" />
+      <path d="M7 3v5h8" />
+    </svg>
+  );
+}
+
 export function LibraryBatchSaveButton() {
   const selected = useLibrarySelection((s) => s.selected);
   const exitMode = useLibrarySelection((s) => s.exitMode);
@@ -137,7 +148,13 @@ export function LibraryBatchSaveButton() {
             : "bg-emerald-600 text-white hover:bg-emerald-500",
         ].join(" ")}
       >
-        {`💾 一括保存${selectedPaths.length > 0 ? ` (${selectedPaths.length})` : ""}`}
+        <span className="flex items-center justify-center gap-1.5">
+          <SaveIcon />
+          <span>
+            一括保存
+            {selectedPaths.length > 0 ? ` (${selectedPaths.length})` : ""}
+          </span>
+        </span>
       </button>
 
       {open && (
@@ -151,7 +168,7 @@ export function LibraryBatchSaveButton() {
             className="w-[360px] rounded-xl border border-[#2a2a2a] bg-[#181818] p-4 shadow-2xl"
             onClick={(e) => e.stopPropagation()}
           >
-            <h3 className="mb-1 text-[13px] font-bold text-neutral-100">
+            <h3 className="mb-1 text-[13px] font-black text-neutral-100">
               ローカルに一括保存
             </h3>
             <p className="mb-3 text-[11px] text-neutral-400">
@@ -160,7 +177,7 @@ export function LibraryBatchSaveButton() {
 
             <div className="space-y-3">
               <label className="block">
-                <span className="mb-1 block text-[11px] font-medium text-neutral-300">
+                <span className="mb-1 block text-[12px] font-bold text-neutral-200">
                   プレフィックス
                 </span>
                 <input
@@ -174,7 +191,7 @@ export function LibraryBatchSaveButton() {
 
               <div className="flex gap-3">
                 <label className="flex-1">
-                  <span className="mb-1 block text-[11px] font-medium text-neutral-300">
+                  <span className="mb-1 block text-[12px] font-bold text-neutral-200">
                     開始番号
                   </span>
                   <input
@@ -188,7 +205,7 @@ export function LibraryBatchSaveButton() {
                   />
                 </label>
                 <label className="flex-1">
-                  <span className="mb-1 block text-[11px] font-medium text-neutral-300">
+                  <span className="mb-1 block text-[12px] font-bold text-neutral-200">
                     ゼロ埋め桁数
                   </span>
                   <input

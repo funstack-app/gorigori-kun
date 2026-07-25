@@ -16,6 +16,29 @@ function imageSrc(path: string): string {
   return convertFileSrc(path);
 }
 
+/* --- フラットアイコン (絵文字廃止) --- */
+
+/** 切り抜き (はさみ)。 */
+function ScissorsIcon() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <circle cx="6" cy="6" r="2.5" />
+      <circle cx="6" cy="18" r="2.5" />
+      <path d="M8 7.5L20 18M8 16.5L20 6" />
+    </svg>
+  );
+}
+
 export function LayerDecomposeTab() {
   const [imagePath, setImagePath] = useState("");
   const [result, setResult] = useState<SegmentResult | null>(null);
@@ -103,7 +126,7 @@ export function LayerDecomposeTab() {
 
           <aside className="flex flex-col gap-4 rounded-lg border border-zinc-800 bg-[#161616] p-4">
             <div className="flex flex-col gap-2">
-              <div className="text-sm font-medium text-zinc-300">対象画像</div>
+              <div className="text-[13px] font-black text-zinc-100">対象画像</div>
               <button
                 type="button"
                 onClick={handleChooseImage}
@@ -112,23 +135,24 @@ export function LayerDecomposeTab() {
               >
                 画像を選ぶ
               </button>
-              <div className="min-h-10 rounded-md border border-zinc-800 bg-[#0f0f0f] px-3 py-2 text-xs text-zinc-400">
+              <div className="min-h-10 rounded-md border border-zinc-800 bg-[#0f0f0f] px-3 py-2 text-[10px] text-zinc-400">
                 {imagePath ? (
-                  <span className="break-all">{imagePath}</span>
+                  <span className="break-all font-mono">{imagePath}</span>
                 ) : (
                   <span className="text-zinc-600">未選択</span>
                 )}
               </div>
             </div>
 
-            <div className="rounded-md border border-zinc-800 bg-[#0f0f0f] p-3 text-sm text-zinc-400">
-              <div className="font-medium text-zinc-200">切り抜き (BiRefNet)</div>
-              <div className="mt-1">
+            <div className="rounded-md border border-zinc-800 bg-[#0f0f0f] p-3">
+              <div className="text-[12px] font-bold text-zinc-200">切り抜き (BiRefNet)</div>
+              <div className="mt-1 text-[11px] leading-relaxed text-zinc-400">
                 1024px入力 + ImageNet正規化で前景マスクを推論します。
               </div>
               {activeProjectName ? (
-                <div className="mt-2 text-xs text-zinc-500">
-                  保存先プロジェクト: {activeProjectName}
+                <div className="mt-2 border-t border-zinc-800 pt-2 text-[10px] text-zinc-500">
+                  保存先プロジェクト:{" "}
+                  <span className="font-mono text-zinc-400">{activeProjectName}</span>
                 </div>
               ) : null}
             </div>
@@ -137,13 +161,14 @@ export function LayerDecomposeTab() {
               type="button"
               onClick={run}
               disabled={running || !imagePath.trim()}
-              className="rounded-md bg-pink-500 px-4 py-2 text-sm font-semibold text-white hover:bg-pink-400 disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-500"
+              className="flex items-center justify-center gap-2 rounded-md bg-pink-500 px-4 py-2 text-sm font-semibold text-white hover:bg-pink-400 disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-500"
             >
-              {running ? "切り抜き中..." : "✂️ 切り抜き実行 (BiRefNet)"}
+              {!running && <ScissorsIcon />}
+              <span>{running ? "切り抜き中..." : "切り抜き実行 (BiRefNet)"}</span>
             </button>
 
             {message ? (
-              <div className="rounded-md border border-zinc-800 bg-[#0f0f0f] p-3 text-sm text-zinc-300">
+              <div className="rounded-md border border-zinc-800 bg-[#0f0f0f] p-3 text-[11px] leading-relaxed text-zinc-300">
                 {message}
               </div>
             ) : null}

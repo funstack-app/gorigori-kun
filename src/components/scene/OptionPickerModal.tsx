@@ -196,7 +196,10 @@ function PickerCard({
                 hovering ? "opacity-0" : "opacity-100",
               ].join(" ")}
             >
-              ▶ ホバーで再生
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor" aria-hidden className="inline-block">
+                <path d="M8 5l11 7-11 7V5z" />
+              </svg>{" "}
+              ホバーで再生
             </span>
           </>
         ) : option.thumbnail ? (

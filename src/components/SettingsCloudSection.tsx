@@ -9,6 +9,69 @@ const MUTED_BUTTON =
 const DANGER_BUTTON =
   "rounded-md border border-rose-500/40 bg-rose-500/10 font-bold text-rose-200 hover:border-rose-300 disabled:opacity-40";
 
+/**
+ * フラットラインアイコン群 (STΛCK 指示 2026-07-25: 絵文字を全廃し SVG へ)。
+ * SkillIcon.tsx と同じ流儀: 24x24 viewBox / stroke=currentColor。
+ */
+function CloudIcon() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+      className="shrink-0"
+    >
+      <path d="M17.5 19a4.5 4.5 0 0 0 .3-9 6 6 0 0 0-11.6 1.5A3.75 3.75 0 0 0 7 19z" />
+    </svg>
+  );
+}
+
+function AlertIcon() {
+  return (
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+      className="shrink-0"
+    >
+      <path d="M10.3 3.9 2.4 17.5A1.9 1.9 0 0 0 4 20.4h16a1.9 1.9 0 0 0 1.6-2.9L13.7 3.9a1.9 1.9 0 0 0-3.4 0z" />
+      <path d="M12 9v4" />
+      <path d="M12 17h.01" />
+    </svg>
+  );
+}
+
+function CheckIcon() {
+  return (
+    <svg
+      width="12"
+      height="12"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+      className="mt-[3px] shrink-0"
+    >
+      <path d="M20 6 9 17l-5-5" />
+    </svg>
+  );
+}
+
 export function SettingsCloudSection() {
   const { config, usage, loading, lastSync, refresh, syncNow, disconnect } = useCloudSupabase();
   const push = useToasts((s) => s.push);
@@ -25,7 +88,7 @@ export function SettingsCloudSection() {
   if (loading && !config) {
     return (
       <Panel title="クラウドストレージ連携">
-        <p className="text-xs text-neutral-500">読み込み中…</p>
+        <p className="text-[11px] text-neutral-500">読み込み中…</p>
       </Panel>
     );
   }
@@ -76,8 +139,13 @@ export function SettingsCloudSection() {
       <section className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-4">
         <div className="flex items-start justify-between gap-3">
           <div>
-            <h3 className="text-sm font-black text-emerald-100">☁️ 連携済み</h3>
-            <p className="mt-1 text-xs text-neutral-500">生成画像をあなたの Supabase Storage に同期します。</p>
+            <h3 className="flex items-center gap-2 text-[13px] font-black text-emerald-100">
+              <CloudIcon />
+              <span>連携済み</span>
+            </h3>
+            <p className="mt-1 text-[11px] leading-relaxed text-neutral-400">
+              生成画像をあなたの Supabase Storage に同期します。
+            </p>
           </div>
           <button type="button" onClick={() => void refresh()} className={`${MUTED_BUTTON} h-9 px-3 text-xs`}>
             更新
@@ -99,19 +167,31 @@ export function SettingsCloudSection() {
               style={{ width: `${Math.min(100, usageRatio * 100)}%` }}
             />
           </div>
-          <div className="mt-2 flex items-center justify-between text-xs">
-            <span className="font-bold text-neutral-200">
+          <div className="mt-2 flex items-center justify-between">
+            <span className="font-mono text-[12px] font-bold tabular-nums text-neutral-100">
               {formatBytes(usage?.usedBytes ?? 0)} / {formatBytes(usage?.limitBytes ?? 1024 * 1024 * 1024)}
             </span>
-            <span className="text-neutral-500">{usage?.fileCount ?? 0} ファイル</span>
+            <span className="font-mono text-[10px] tabular-nums text-neutral-500">
+              {usage?.fileCount ?? 0} ファイル
+            </span>
           </div>
-          {usageRatio > 0.8 && <p className="mt-1 text-[11px] text-amber-300">⚠️ 無料枠の残りが少なめです。</p>}
+          {usageRatio > 0.8 && (
+            <p className="mt-1.5 flex items-center gap-1.5 text-[10px] text-amber-300">
+              <AlertIcon />
+              <span>無料枠の残りが少なめです。</span>
+            </p>
+          )}
         </div>
       </Field>
 
       {lastSync && (
-        <div className="rounded-lg border border-[#2a2a2a] bg-[#151515] p-3 text-xs text-neutral-400">
-          直近の同期: アップロード {lastSync.uploadedCount} 件 / 失敗 {lastSync.failedCount} 件
+        <div className="rounded-lg border border-[#2a2a2a] bg-[#151515] p-3">
+          <p className="text-[10px] font-bold uppercase tracking-wide text-neutral-500">
+            直近の同期
+          </p>
+          <p className="mt-1 font-mono text-[11px] tabular-nums text-neutral-300">
+            アップロード {lastSync.uploadedCount} 件 / 失敗 {lastSync.failedCount} 件
+          </p>
         </div>
       )}
 
@@ -124,9 +204,14 @@ export function SettingsCloudSection() {
         </button>
       </div>
 
-      <p className="text-[11px] leading-relaxed text-neutral-500">
-        α版では5分ごとのバックグラウンド同期と手動同期に対応しています。30日保持の自動削除は Supabase 側の bucket ポリシーで設定してください。
-      </p>
+      <div className="flex gap-2 rounded-lg border border-[#2a2a2a] bg-[#101010] px-3 py-2 text-neutral-500">
+        <span className="mt-[2px]">
+          <AlertIcon />
+        </span>
+        <p className="text-[10px] leading-relaxed">
+          α版では5分ごとのバックグラウンド同期と手動同期に対応しています。30日保持の自動削除は Supabase 側の bucket ポリシーで設定してください。
+        </p>
+      </div>
     </Panel>
   );
 }
@@ -170,8 +255,8 @@ function SetupWizard() {
   return (
     <Panel title="クラウドストレージ連携">
       <section className="rounded-lg border border-sky-500/30 bg-sky-500/5 p-4">
-        <h3 className="text-sm font-black text-sky-100">セットアップウィザード</h3>
-        <p className="mt-1 text-xs leading-relaxed text-neutral-400">
+        <h3 className="text-[13px] font-black text-sky-100">セットアップウィザード</h3>
+        <p className="mt-1 text-[11px] leading-relaxed text-neutral-400">
           STΛCK 側のクラウド費用を使わず、あなた自身の Supabase 無料枠へ画像を保存します。目安は10〜15分です。
         </p>
         <div className="mt-3 grid grid-cols-4 gap-1">
@@ -210,9 +295,11 @@ function SetupWizard() {
       )}
       {step === 4 && (
         <section className="rounded-lg border border-[#2a2a2a] bg-[#151515] p-4">
-          <h3 className="text-sm font-black text-white">4. 接続情報を入力</h3>
-          <p className="mt-1 text-xs text-neutral-500">Settings → API から Project URL と anon public key をコピーしてください。</p>
-          <div className="mt-4 space-y-3">
+          <h3 className="text-[13px] font-black text-neutral-50">4. 接続情報を入力</h3>
+          <p className="mt-1 text-[11px] leading-relaxed text-neutral-400">
+            Settings → API から Project URL と anon public key をコピーしてください。
+          </p>
+          <div className="mt-4 space-y-3 border-t border-[#2a2a2a] pt-3">
             <Field label="Project URL">
               <TextInput value={projectUrl} onChange={setProjectUrl} placeholder="https://xxxx.supabase.co" mono />
             </Field>
@@ -259,14 +346,16 @@ function GuideCard({
 }) {
   return (
     <section className="rounded-lg border border-[#2a2a2a] bg-[#151515] p-4">
-      <h3 className="text-sm font-black text-white">{title}</h3>
-      <div className="mt-3 rounded-lg border border-dashed border-[#3a3a3a] bg-[#101010] p-4 text-center text-xs text-neutral-500">
+      <h3 className="text-[13px] font-black text-neutral-50">{title}</h3>
+      <div className="mt-3 rounded-lg border border-dashed border-[#3a3a3a] bg-[#101010] p-4 text-center text-[10px] leading-relaxed text-neutral-500">
         スクリーンショットの代替ガイド: 画面上のボタン名を確認しながら進めてください。
       </div>
-      <ul className="mt-3 space-y-2 text-xs text-neutral-300">
+      <ul className="mt-3 space-y-2 text-[11px] leading-relaxed text-neutral-300">
         {bullets.map((bullet) => (
           <li key={bullet} className="flex gap-2">
-            <span className="text-sky-300">✓</span>
+            <span className="text-sky-300">
+              <CheckIcon />
+            </span>
             <span>{bullet}</span>
           </li>
         ))}
@@ -283,7 +372,9 @@ function GuideCard({
 function Panel({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div className="mx-auto max-w-4xl space-y-4">
-      <h2 className="text-lg font-black text-white">{title}</h2>
+      <h2 className="border-b border-[#2a2a2a] pb-3 text-[19px] font-black tracking-tight text-white">
+        {title}
+      </h2>
       {children}
     </div>
   );
@@ -292,7 +383,7 @@ function Panel({ title, children }: { title: string; children: React.ReactNode }
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <label className="block space-y-1">
-      <span className="text-xs font-medium text-neutral-300">{label}</span>
+      <span className="text-[12px] font-bold text-neutral-200">{label}</span>
       {children}
     </label>
   );

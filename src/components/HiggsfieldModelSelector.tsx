@@ -253,9 +253,7 @@ export function HiggsfieldModelSelector({ media }: { media: "image" | "video" })
             {selectedModels.length}
           </span>
         )}
-        <span className="shrink-0 text-xs text-neutral-500" aria-hidden>
-          ▾
-        </span>
+        <ChevronDownIcon />
       </button>
       {helperText && (
         <p
@@ -385,6 +383,7 @@ function ModelPickerPopover({
         position: "fixed",
         top: placement.top,
         left: placement.left,
+        width: placement.width,
         maxHeight: placement.maxHeight,
         zIndex: 60,
       }
@@ -394,18 +393,20 @@ function ModelPickerPopover({
         top: "50%",
         left: "50%",
         transform: "translate(-50%, -50%)",
+        // 狭い window でも横にはみ出さないよう viewport で打ち切る。
+        width: `min(${PICKER_WIDTH}px, calc(100vw - 16px))`,
         maxHeight: "70vh",
         zIndex: 60,
       };
 
   return (
     <div
-      style={{ ...style, width: PICKER_WIDTH }}
+      style={style}
       className="flex flex-col overflow-hidden rounded-xl border border-[#2a2a2a] bg-[#141414] shadow-2xl"
     >
       <div className="flex shrink-0 items-center justify-between border-b border-[#242424] px-3 py-2">
-        <h3 className="text-xs font-semibold text-white">生成モデル</h3>
-        <span className="text-[10px] font-medium text-neutral-500">
+        <h3 className="text-[13px] font-black text-neutral-100">生成モデル</h3>
+        <span className="text-[10px] font-medium tabular-nums text-neutral-500">
           {totalVisibleModels} 件
         </span>
       </div>
@@ -486,7 +487,7 @@ function ModelPickerPopover({
                   <h4 className="text-[10px] font-semibold uppercase tracking-wide text-neutral-500">
                     {section.title}
                   </h4>
-                  <span className="text-[10px] font-medium text-neutral-700">
+                  <span className="text-[10px] font-medium tabular-nums text-neutral-600">
                     {section.items.length}
                   </span>
                 </div>
@@ -640,8 +641,8 @@ function ModelRow({
         </span>
       </span>
       {selected && (
-        <span className={`shrink-0 self-center pr-1 text-sm font-semibold ${checkColor}`} aria-hidden>
-          ✓
+        <span className={`shrink-0 self-center pr-1 ${checkColor}`} aria-hidden>
+          <CheckIcon />
         </span>
       )}
     </button>
@@ -668,6 +669,35 @@ function ModelLabelPill({ label }: { label: ModelLabel }) {
     <span className="inline-flex h-[16px] shrink-0 items-center self-center rounded-md bg-lime-300 px-1.5 text-[9px] font-black italic uppercase leading-none text-black shadow-sm">
       {label}
     </span>
+  );
+}
+
+/* --- フラットアイコン (絵文字廃止) --- */
+
+const PICKER_SVG = {
+  viewBox: "0 0 24 24",
+  fill: "none",
+  stroke: "currentColor",
+  strokeWidth: 2.2,
+  strokeLinecap: "round" as const,
+  strokeLinejoin: "round" as const,
+};
+
+/** トリガーボタンの下向き山カッコ。 */
+function ChevronDownIcon() {
+  return (
+    <svg {...PICKER_SVG} width={12} height={12} className="shrink-0 text-neutral-500" aria-hidden>
+      <path d="M6 9l6 6 6-6" />
+    </svg>
+  );
+}
+
+/** 選択済みモデル行のチェック。 */
+function CheckIcon() {
+  return (
+    <svg {...PICKER_SVG} width={14} height={14} strokeWidth={2.6} aria-hidden>
+      <path d="M4 12.5l5.5 5.5L20 6" />
+    </svg>
   );
 }
 
@@ -752,18 +782,27 @@ function formatCost(cost: CostState): string {
   return `${cost.credits} credits`;
 }
 
-function getPopoverLeft(anchorRect: DOMRect): number {
+/**
+ * ピッカーの実幅。狭い window (13インチ / 分割表示) では PICKER_WIDTH が
+ * viewport を超えて横にはみ出すため、左右 8px の余白を残して詰める。
+ */
+function getPopoverWidth(): number {
+  return Math.min(PICKER_WIDTH, Math.max(240, window.innerWidth - 16));
+}
+
+function getPopoverLeft(anchorRect: DOMRect, width: number): number {
   const viewportWidth = window.innerWidth;
-  const maxLeft = Math.max(8, viewportWidth - PICKER_WIDTH - 8);
+  const maxLeft = Math.max(8, viewportWidth - width - 8);
   return Math.min(Math.max(8, anchorRect.left), maxLeft);
 }
 
 /**
- * アンカー位置と画面サイズから、ピッカーの top / max-height を決める。
+ * アンカー位置と画面サイズから、ピッカーの top / left / 幅 / max-height を決める。
  */
 function computePlacement(anchorRect: DOMRect): {
   top: number;
   left: number;
+  width: number;
   maxHeight: number;
 } {
   const GAP = 8;
@@ -774,14 +813,20 @@ function computePlacement(anchorRect: DOMRect): {
 
   const spaceBelow = viewportHeight - anchorRect.bottom - GAP - PADDING;
   const spaceAbove = anchorRect.top - GAP - PADDING;
-  const left = getPopoverLeft(anchorRect);
+  const width = getPopoverWidth();
+  const left = getPopoverLeft(anchorRect, width);
 
   if (spaceBelow >= MIN_HEIGHT || spaceBelow >= spaceAbove) {
     const maxHeight = Math.min(PREFERRED_HEIGHT, Math.max(MIN_HEIGHT, spaceBelow));
-    return { top: anchorRect.bottom + GAP, left, maxHeight };
+    return { top: anchorRect.bottom + GAP, left, width, maxHeight };
   }
-  const maxHeight = Math.min(PREFERRED_HEIGHT, Math.max(MIN_HEIGHT, spaceAbove));
-  return { top: anchorRect.top - GAP - maxHeight, left, maxHeight };
+  // 上フリップ: maxHeight に MIN_HEIGHT の下駄を履かせているため、上の空きが
+  // MIN_HEIGHT 未満だと top が負になり画面上端からはみ出す (2026-07-25 修正)。
+  // maxHeight は実際に使える高さで打ち切り、top は 8px 以上に clamp する。
+  const usableAbove = Math.max(MIN_HEIGHT, spaceAbove);
+  const maxHeight = Math.min(PREFERRED_HEIGHT, usableAbove, viewportHeight - 2 * PADDING);
+  const top = Math.max(PADDING / 2, anchorRect.top - GAP - maxHeight);
+  return { top, left, width, maxHeight };
 }
 
 /**

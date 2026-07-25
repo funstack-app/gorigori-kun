@@ -108,8 +108,8 @@ function ErrorSplash({ error, onRetry }: { error?: string; onRetry: () => void }
     <div className="flex min-h-full flex-col items-center justify-center bg-stone-100 p-6">
       <div className="w-full max-w-md rounded-md border border-neutral-200 bg-white shadow-sm">
         <div className="px-6 py-6 text-center">
-          <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-rose-50">
-            <span className="text-2xl">⚠</span>
+          <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-rose-50 text-rose-500">
+            <WarnTriangleIcon />
           </div>
           <h2 className="mb-2 text-base font-semibold text-neutral-900">
             起動に失敗しました
@@ -135,15 +135,17 @@ function ErrorSplash({ error, onRetry }: { error?: string; onRetry: () => void }
           <button
             type="button"
             onClick={() => setShowDetails((v) => !v)}
-            className="flex w-full items-center justify-between text-xs font-medium text-neutral-500 hover:text-neutral-700"
+            className="flex w-full items-center gap-1.5 text-[12px] font-bold text-neutral-500 hover:text-neutral-700"
+            aria-expanded={showDetails}
           >
-            <span>{showDetails ? "▼ 詳細を隠す" : "▶ 詳細を表示 (サポート向け)"}</span>
+            <DisclosureIcon open={showDetails} />
+            <span>{showDetails ? "詳細を隠す" : "詳細を表示 (サポート向け)"}</span>
           </button>
 
           {showDetails && (
             <div className="mt-3 space-y-3">
               <div>
-                <h3 className="mb-1 text-xs font-bold uppercase tracking-wider text-neutral-500">
+                <h3 className="mb-1 text-[11px] font-black uppercase tracking-wider text-neutral-600">
                   エラー内容
                 </h3>
                 <pre className="max-h-48 overflow-auto whitespace-pre-wrap rounded border border-neutral-200 bg-neutral-50 p-2 text-[11px] text-neutral-700">
@@ -152,7 +154,7 @@ function ErrorSplash({ error, onRetry }: { error?: string; onRetry: () => void }
               </div>
 
               <div>
-                <h3 className="mb-1 text-xs font-bold uppercase tracking-wider text-neutral-500">
+                <h3 className="mb-1 text-[11px] font-black uppercase tracking-wider text-neutral-600">
                   環境情報
                 </h3>
                 <pre className="whitespace-pre-wrap rounded border border-neutral-200 bg-neutral-50 p-2 text-[11px] text-neutral-700">
@@ -169,9 +171,10 @@ function ErrorSplash({ error, onRetry }: { error?: string; onRetry: () => void }
                 <button
                   type="button"
                   onClick={copyAll}
-                  className="rounded-md bg-neutral-100 px-3 py-1.5 text-xs font-medium text-neutral-700 hover:bg-neutral-200"
+                  className="flex items-center gap-1.5 rounded-md bg-neutral-100 px-3 py-1.5 text-xs font-medium text-neutral-700 hover:bg-neutral-200"
                 >
-                  {copied ? "✓ コピー済み" : "情報をコピー"}
+                  {copied && <CheckIcon />}
+                  <span>{copied ? "コピー済み" : "情報をコピー"}</span>
                 </button>
                 {diag?.logDir && (
                   <button
@@ -188,6 +191,49 @@ function ErrorSplash({ error, onRetry }: { error?: string; onRetry: () => void }
         </div>
       </div>
     </div>
+  );
+}
+
+/* --- フラットアイコン (絵文字廃止) --- */
+
+const GATE_SVG = {
+  viewBox: "0 0 24 24",
+  fill: "none",
+  stroke: "currentColor",
+  strokeWidth: 2,
+  strokeLinecap: "round" as const,
+  strokeLinejoin: "round" as const,
+};
+
+function WarnTriangleIcon() {
+  return (
+    <svg {...GATE_SVG} width={24} height={24} aria-hidden>
+      <path d="M12 3.5L22 20H2z" />
+      <path d="M12 9.5v4.5M12 16.9v.3" />
+    </svg>
+  );
+}
+
+/** 折りたたみ三角 (open=展開中で下向き, 閉=右向き)。 */
+function DisclosureIcon({ open }: { open: boolean }) {
+  return (
+    <svg
+      {...GATE_SVG}
+      width={11}
+      height={11}
+      className={`shrink-0 transition-transform ${open ? "rotate-90" : ""}`}
+      aria-hidden
+    >
+      <path d="M9 6l6 6-6 6" />
+    </svg>
+  );
+}
+
+function CheckIcon() {
+  return (
+    <svg {...GATE_SVG} width={12} height={12} strokeWidth={2.6} aria-hidden>
+      <path d="M4 12.5l5.5 5.5L20 6" />
+    </svg>
   );
 }
 

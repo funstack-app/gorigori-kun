@@ -846,7 +846,8 @@ export function SaveToProjectButton({ path }: { path: string }) {
         ].join(" ")}
         title="プロジェクトに保存"
       >
-        ◱ プロジェクトに保存
+        <ProjectIcon />
+        <span>プロジェクトに保存</span>
       </button>
       {open && (
         <div

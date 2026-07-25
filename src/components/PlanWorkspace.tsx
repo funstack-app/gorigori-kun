@@ -545,7 +545,7 @@ function ChatBubble({
             {msg.streaming && (
               <span className="ml-1 inline-block h-3 w-1 animate-pulse bg-pink-300" />
             )}
-            {/* 通常メッセージ末尾の「✓ この回答を採用」は撤去。
+            {/* 通常メッセージ末尾の「この回答を採用」は撤去。
                 採用ボタンは PromptBlock 内（```で囲まれた最終プロンプト）のみに表示する。
                 理由: AI 対話の各応答に都度ボタンが出ると採用ポイントが曖昧になるため。
                 最終確定プロンプトを ``` で囲ませる運用に統一。 */}
@@ -561,8 +561,8 @@ function ChatBubble({
  * モノスペースで原文表示 + 「採用」ボタン + コピー用ボタン。
  *
  * 採用ボタンは promptKind で出し分ける:
- *  - image: 「✓ 画像で採用」→ 画像生成タブへ
- *  - video: 「🎬 動画で採用」→ 動画生成タブへ (プロンプト入力済み状態)
+ *  - image: 「画像で採用」(チェックアイコン) → 画像生成タブへ
+ *  - video: 「動画で採用」(クラッパーアイコン) → 動画生成タブへ (プロンプト入力済み状態)
  */
 function PromptBlock({
   prompt,
@@ -587,13 +587,16 @@ function PromptBlock({
     <div className="overflow-hidden rounded-lg border border-[#3a3a3a] bg-[#0d0d0d]">
       <div
         className={[
-          "flex items-center gap-1.5 border-b px-3 py-1 text-[10px] font-black",
+          "flex items-center gap-1.5 border-b px-3 py-1.5 text-[12px] font-black",
           isVideo
             ? "border-purple-500/30 bg-purple-500/10 text-purple-200"
             : "border-pink-500/30 bg-pink-500/10 text-pink-200",
         ].join(" ")}
       >
-        {isVideo ? "🎬 動画化プロンプト (Image to Video)" : "🖼 画像生成プロンプト"}
+        {isVideo ? <ClapperIcon /> : <ImageIcon />}
+        <span>
+          {isVideo ? "動画化プロンプト (Image to Video)" : "画像生成プロンプト"}
+        </span>
       </div>
       <pre className="m-0 max-h-64 overflow-auto whitespace-pre-wrap break-words p-3 font-mono text-[11px] leading-relaxed text-neutral-100">
         {prompt}
@@ -612,7 +615,7 @@ function PromptBlock({
           onClick={() => onAdopt(prompt, promptKind)}
           disabled={disabled}
           className={[
-            "rounded-md px-3 py-1 text-[11px] font-bold text-white disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-500",
+            "flex items-center gap-1.5 rounded-md px-3 py-1 text-[11px] font-bold text-white disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-500",
             "bg-pink-500 hover:bg-pink-400",
           ].join(" ")}
           title={
@@ -621,10 +624,51 @@ function PromptBlock({
               : "このプロンプトを採用して画像生成タブへ"
           }
         >
-          {isVideo ? "🎬 動画で採用" : "✓ 画像で採用"}
+          {isVideo ? <ClapperIcon /> : <CheckIcon />}
+          <span>{isVideo ? "動画で採用" : "画像で採用"}</span>
         </button>
       </div>
     </div>
+  );
+}
+
+/** 動画プロンプト用。カチンコ (絵文字を使わずフラットアイコンで表現)。 */
+function ClapperIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M3 10h18v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+      <path d="M3.5 10 2.8 6.4a1 1 0 0 1 .8-1.2l14.7-2.6a1 1 0 0 1 1.2.8L20 7z" />
+      <path d="m8.4 3.9 1 4.8M13.4 3 14.4 7.8" />
+    </svg>
+  );
+}
+
+/** 画像プロンプト用。写真フレーム (絵文字を使わずフラットアイコンで表現)。 */
+function ImageIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+      <circle cx="8.5" cy="8.5" r="1.5" />
+      <path d="M21 15l-5-5L5 21" />
+    </svg>
+  );
+}
+
+/** 添付を外すボタン用。× 記号でなくフラットアイコンで描く。 */
+function CloseIcon() {
+  return (
+    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M18 6 6 18M6 6l12 12" />
+    </svg>
+  );
+}
+
+/** 採用ボタン用のチェック。 */
+function CheckIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+      <path d="M20 6 9 17l-5-5" />
+    </svg>
   );
 }
 
@@ -672,9 +716,12 @@ function ChatInput({
     <div className="space-y-2">
       {attachments.length > 0 && (
         <div className="space-y-1.5 rounded-lg border border-[#2a2a2a] bg-[#101010] p-2">
-          <p className="text-[10px] font-bold text-neutral-500">
-            各画像の役割を選べます (キャラ参照 = 同一性を保つ / スタイル参照 = タッチのみ)
-          </p>
+          <div>
+            <p className="text-[12px] font-bold text-neutral-200">添付画像の役割</p>
+            <p className="mt-0.5 text-[10px] text-neutral-500">
+              キャラ参照 = 同一性を保つ / スタイル参照 = タッチのみ
+            </p>
+          </div>
           <div className="flex flex-wrap gap-2">
             {attachments.map((path) => (
               <div
@@ -687,10 +734,10 @@ function ChatInput({
                   <button
                     type="button"
                     onClick={() => onRemoveAttachment(path)}
-                    className="text-xs font-black text-neutral-500 hover:text-white"
+                    className="text-neutral-500 hover:text-white"
                     aria-label={`${basename(path)} を外す`}
                   >
-                    ×
+                    <CloseIcon />
                   </button>
                 </div>
                 <ReferenceRoleToggle path={path} />

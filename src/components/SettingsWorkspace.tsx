@@ -16,6 +16,7 @@ import { useToasts } from "../lib/store/toasts";
 import { SettingsConnections } from "./SettingsConnections";
 import { StorageManagementSection } from "./StorageManagementSection";
 import { UpdateChecker } from "./UpdateChecker";
+import { FONT_SCALE_OPTIONS, useFontScale } from "../lib/store/fontScale";
 
 type Tab = "basic" | "storage" | "accounts" | "connections";
 const TABS: Array<{ id: Tab; label: string }> = [
@@ -91,6 +92,10 @@ function BasicSettings() {
   const { settings, save, load, loaded } = useSettings();
   const { models, selectedModel, setSelectedModel, setSelectedEffort, setCwd } = useThreads();
   const push = useToasts((s) => s.push);
+  // 文字サイズは localStorage 即時反映なので、settings の保存フローとは独立させる
+  // (保存ボタンを押さなくても押した瞬間に効く)。
+  const fontScale = useFontScale((s) => s.scale);
+  const setFontScale = useFontScale((s) => s.setScale);
   const [draft, setDraft] = useState(settings);
   useEffect(() => {
     if (!loaded) void load();
@@ -117,6 +122,42 @@ function BasicSettings() {
   };
   return (
     <Panel title="基本">
+      {/*
+        文字サイズ (STΛCK指示 2026-07-25)。
+        画面サイズは人によって違うので、自動調整の上にユーザーの好みを掛ける。
+        rem 基準への倍率なので余白・ボタン高さも一緒に拡縮し、崩れない。
+        押した瞬間に反映される (保存ボタン不要) ため、見ながら選べる。
+      */}
+      <Field label="文字サイズ">
+        <div className="flex gap-1.5">
+          {FONT_SCALE_OPTIONS.map((option) => {
+            const isActive = Math.abs(fontScale - option.value) < 0.001;
+            return (
+              <button
+                key={option.value}
+                type="button"
+                onClick={() => setFontScale(option.value)}
+                title={option.hint}
+                aria-pressed={isActive}
+                className={`flex h-9 flex-1 flex-col items-center justify-center rounded-md border transition ${
+                  isActive
+                    ? "border-pink-500 bg-pink-500/15 text-pink-100"
+                    : "border-[#343434] bg-[#101010] text-neutral-400 hover:border-neutral-500 hover:text-neutral-100"
+                }`}
+              >
+                <span className="text-[12px] font-black leading-none">{option.label}</span>
+                <span className="mt-0.5 text-[9px] leading-none opacity-70">
+                  {Math.round(option.value * 100)}%
+                </span>
+              </button>
+            );
+          })}
+        </div>
+        <p className="mt-1.5 text-[10px] leading-relaxed text-neutral-500">
+          画面の大きさに応じた自動調整に、この倍率を掛けます。押すとすぐ反映されます。
+          小さい画面で「特大」にすると、ボタンが収まらない場合があります。
+        </p>
+      </Field>
       <Field label="Codex 本体のパス (空欄で自動検出)">
         <TextInput
           value={draft.codexBinaryPath ?? ""}
