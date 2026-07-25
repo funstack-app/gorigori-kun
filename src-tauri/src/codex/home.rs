@@ -36,6 +36,10 @@ use std::path::PathBuf;
 /// `~/.local/share/app.codexframefactory/codex-home` (Linux) に解決される。
 const CODEX_HOME_LEAF: &str = "codex-home";
 
+/// 生成専用 app-server の CODEX_HOME サブディレクトリ名。
+/// `gen_server.rs` の GEN_CODEX_HOME_DIR と同じ値を指す唯一の正本。
+pub const GEN_CODEX_HOME_LEAF: &str = "codex-home-gen";
+
 /// 初回コピー移行でコピーするファイル/ディレクトリ。
 /// `generated_images` (肥大化・不要) と `sessions` (会話履歴・巨大) は **含めない**。
 // auth.json は絶対にコピーしない（2026-07-10 改訂）: OAuth はリフレッシュトークン
@@ -59,6 +63,46 @@ pub fn legacy_codex_home() -> Option<PathBuf> {
 /// 呼んでディレクトリ作成と初回移行を済ませること。
 pub fn gori_codex_home_path() -> Option<PathBuf> {
     dirs::data_dir().map(|data| data.join(crate::secrets::SERVICE_NAME).join(CODEX_HOME_LEAF))
+}
+
+/// 生成専用 app-server の CODEX_HOME (`codex-home-gen`) のパスを返す。
+///
+/// `gen_server.rs` が `AppHandle::app_data_dir()` から組み立てるのと同じ場所を、
+/// AppHandle を持たない呼び出し元 (storage_cleanup など) 向けに解決する。
+pub fn gen_codex_home_path() -> Option<PathBuf> {
+    dirs::data_dir().map(|data| data.join(crate::secrets::SERVICE_NAME).join(GEN_CODEX_HOME_LEAF))
+}
+
+/// 掃除・容量集計の対象になる CODEX_HOME を **1箇所で** 列挙する。
+///
+/// ## なぜこの関数が必要か (2026-07-25 実測を受けて新設)
+///
+/// 以前は「どの CODEX_HOME を見るか」の列挙が storage_cleanup の session_dirs /
+/// log_homes / inspect の3箇所に手書きで重複していた。その結果、後から追加された
+/// `codex-home-gen` が3箇所すべてから漏れ、実測 2.5GB (sessions 1.5G +
+/// logs_2.sqlite 866M) が **掃除にも容量表示にも一切現れない** 状態になっていた。
+/// ユーザーが「今すぐ整理する」を押しても最も太った領域が1バイトも減らなかった。
+///
+/// 同型の漏れは 7/2 監査でも `codex-home` について起きており、個別に直しても
+/// 次に保存先が増えれば再発する。そこで列挙をこの関数に集約し、
+/// **新しい CODEX_HOME はここを通さないと掃除にも集計にも出ない構造**にする。
+///
+/// 重複パスは除去して返す (同一パスの二重掃除を防ぐ)。
+pub fn cleanup_target_codex_homes() -> Vec<PathBuf> {
+    let mut homes: Vec<PathBuf> = Vec::new();
+    for candidate in [
+        gori_codex_home_path(),
+        gen_codex_home_path(),
+        legacy_codex_home(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if !homes.contains(&candidate) {
+            homes.push(candidate);
+        }
+    }
+    homes
 }
 
 /// 専用 CODEX_HOME を解決し、無ければ作成し、初回コピー移行を冪等に実行する。

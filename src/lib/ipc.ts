@@ -183,9 +183,17 @@ export const editWords = {
 
 // ──────────── Storage Cleanup ────────────
 export type CleanupReport = {
+  /** @deprecated 会話は削除しない設計のため Rust 側で常に 0。UI では使わない。 */
   sessionsDeleted: number;
+  /** @deprecated 上と同じ理由で常に 0。 */
   sessionsBytesFreed: number;
+  /** 画像ペイロードを除去した rollout ファイル数 (実際に効いている指標)。 */
+  strippedFiles: number;
+  /** 画像ペイロード除去で削減したバイト数。 */
+  strippedBytesFreed: number;
+  /** @deprecated Rust 側で代入箇所が無く常に 0。 */
   generatedImagesDeleted: number;
+  /** @deprecated 上と同じ理由で常に 0。 */
   generatedImagesBytesFreed: number;
   cacheBytesFreed: number;
   errors: string[];

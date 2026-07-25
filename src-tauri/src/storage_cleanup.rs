@@ -91,20 +91,15 @@ pub fn spawn_background_cleanup() {
 pub async fn run_cleanup() -> Result<CleanupReport, String> {
     let mut report = CleanupReport::default();
 
-    // 掃除対象の sessions ディレクトリ候補:
-    //   1. GORI 専用 CODEX_HOME/sessions (今後 GORI が吐く本体)
-    //   2. 旧 ~/.codex/sessions (後方互換)
-    // 同一パスになるケースは無いが、重複時の二重掃除を避けるため dedup する。
-    let mut session_dirs: Vec<PathBuf> = Vec::new();
-    if let Some(gori_home) = gori_codex_home_dir() {
-        session_dirs.push(gori_home.join("sessions"));
-    }
-    if let Some(legacy_home) = legacy_codex_home_dir() {
-        let legacy_sessions = legacy_home.join("sessions");
-        if !session_dirs.iter().any(|d| d == &legacy_sessions) {
-            session_dirs.push(legacy_sessions);
-        }
-    }
+    // 掃除対象の sessions ディレクトリ候補は codex::home::cleanup_target_codex_homes()
+    // が唯一の正本 (GORI 専用 / 生成専用 codex-home-gen / 旧 ~/.codex)。
+    // 2026-07-25: 以前ここに手書きで列挙していたため codex-home-gen が漏れ、
+    // sessions 1.5GB が掃除にも容量表示にも現れていなかった。
+    let codex_homes = crate::codex::home::cleanup_target_codex_homes();
+    let session_dirs: Vec<PathBuf> = codex_homes
+        .iter()
+        .map(|home| home.join("sessions"))
+        .collect();
     if session_dirs.is_empty() {
         return Err("$HOME が解決できません".to_string());
     }
@@ -129,17 +124,10 @@ pub async fn run_cleanup() -> Result<CleanupReport, String> {
     //    一切消していなかったため、「今すぐ整理する」を押しても合計がほとんど減らず
     //    「効かない」と見えていた。いずれも再生成される一時データだけを対象にする。
     if let Some(home) = dirs::home_dir() {
-        // Codex ログ (専用 CODEX_HOME と 旧 ~/.codex の両方)
-        let mut log_homes: Vec<PathBuf> = Vec::new();
-        if let Some(gori) = gori_codex_home_dir() {
-            log_homes.push(gori);
-        }
-        if let Some(legacy) = legacy_codex_home_dir() {
-            if !log_homes.iter().any(|h| h == &legacy) {
-                log_homes.push(legacy);
-            }
-        }
-        for ch in &log_homes {
+        // Codex ログ。対象ホームは session_dirs と同じ正本 (codex_homes) を使う。
+        // 2026-07-25: codex-home-gen/logs_2.sqlite が実測 866MB あったが、
+        // ここの列挙漏れで一切回収されていなかった。
+        for ch in &codex_homes {
             for name in ["logs_2.sqlite", "logs_2.sqlite-wal", "logs_2.sqlite-shm"] {
                 report.cache_bytes_freed += remove_file_if_exists(&ch.join(name)).await;
             }
@@ -158,9 +146,17 @@ pub async fn run_cleanup() -> Result<CleanupReport, String> {
         }
 
         // WebView キャッシュ (macOS のみ実体あり。他 OS では候補が存在せず 0)
+        // 2026-07-25 修正: 以前は "gori-gori-kun" をハードコードしていたが、実際の
+        // ディレクトリ名は bundle identifier (app.codexframefactory) であり、
+        // 掃除も容量表示も常に空振りしていた (実体 WebKit/app.codexframefactory は 4.3MB)。
+        // identifier を正本 (secrets::SERVICE_NAME) から組み立てて再発を防ぐ。
+        // 旧名は空ディレクトリとして残っている環境があるため候補に残す (無害)。
+        let service = crate::secrets::SERVICE_NAME;
         for rel in [
-            "Library/Caches/gori-gori-kun",
-            "Library/WebKit/gori-gori-kun",
+            format!("Library/Caches/{service}"),
+            format!("Library/WebKit/{service}"),
+            "Library/Caches/gori-gori-kun".to_string(),
+            "Library/WebKit/gori-gori-kun".to_string(),
         ] {
             let dir = home.join(rel);
             if dir.exists() {

@@ -142,8 +142,11 @@ export function StorageManagementSection() {
       </div>
 
       <div className="rounded-xl border border-amber-500/30 bg-amber-500/5 p-3">
+        {/* 2026-07-25 文言修正: 実装は「24時間より古い対話履歴の画像部分を除去」+
+            「ログ/キャッシュの削除」であり、対話履歴そのものは削除しない。
+            以前の「3日以上前のものは自動削除」は実装と不一致だった。 */}
         <h4 className="text-xs font-black text-amber-300">
-          🗑 一時データ (3日以上前のものは自動削除)
+          🗑 一時データ (24時間ごとに自動で軽くします)
         </h4>
         <ul className="mt-2 space-y-1 text-[11px] text-neutral-300">
           <li className="flex items-center justify-between">
@@ -189,15 +192,16 @@ export function StorageManagementSection() {
 
       {lastReport && (
         <div className="rounded-lg border border-[#2a2a2a] bg-[#101010] p-3 text-[11px] text-neutral-300">
+          {/* 2026-07-25: sessionsDeleted / generatedImagesDeleted は Rust 側で
+              代入される箇所が無く常に 0 だった (会話は削除しない設計なので当然)。
+              常に「0 件削除」と出て壊れて見えるため、実際に効いている
+              「画像部分の除去」と「キャッシュ削除」だけを表示する。 */}
           <p className="font-bold text-neutral-100">前回の整理結果</p>
           <p className="mt-1">
-            セッション {lastReport.sessionsDeleted} 件 (
-            {formatBytes(lastReport.sessionsBytesFreed)}) 削除
+            対話履歴を軽量化: {lastReport.strippedFiles} 件 (
+            {formatBytes(lastReport.strippedBytesFreed)} 削減)
           </p>
-          <p>
-            古い画像キャッシュ {lastReport.generatedImagesDeleted} 件 (
-            {formatBytes(lastReport.generatedImagesBytesFreed)}) 削除
-          </p>
+          <p>キャッシュ・ログ削除: {formatBytes(lastReport.cacheBytesFreed)}</p>
           {lastReport.errors.length > 0 && (
             <p className="mt-1 text-red-300">
               エラー: {lastReport.errors.join(", ")}
@@ -207,8 +211,9 @@ export function StorageManagementSection() {
       )}
 
       <p className="rounded-lg border border-[#2a2a2a] bg-[#101010] px-3 py-2 text-[10px] leading-relaxed text-neutral-500">
-        💡 一時データを残しておくと PC の空き容量を圧迫します。3日以上前のものは
-        裏側で自動的に削除しています。作品(画像/プリセット/スキル)には一切影響しません。
+        💡 一時データを残しておくと PC の空き容量を圧迫します。24時間ごとに、裏側で
+        古い対話履歴の画像部分とログ・キャッシュを自動で整理しています(会話の文章は
+        消しません)。作品(画像/プリセット/スキル)には一切影響しません。
       </p>
     </section>
   );

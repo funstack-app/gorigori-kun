@@ -19,15 +19,10 @@ pub async fn storage_cleanup_inspect() -> Result<CleanupInspection, String> {
 
     let home = dirs::home_dir().ok_or_else(|| "$HOME 解決失敗".to_string())?;
 
-    let mut homes: Vec<PathBuf> = Vec::new();
-    if let Some(gori) = crate::codex::home::gori_codex_home_path() {
-        homes.push(gori);
-    }
-    if let Some(legacy) = crate::codex::home::legacy_codex_home() {
-        if !homes.iter().any(|h| h == &legacy) {
-            homes.push(legacy);
-        }
-    }
+    // 集計対象は run_cleanup と同じ正本を使う (codex-home / codex-home-gen / ~/.codex)。
+    // 2026-07-25: ここに手書きで列挙していたため codex-home-gen が漏れ、実測 2.5GB が
+    // 「一時データ」の合計に1バイトも出てこなかった。掃除側と集計側で必ず同じ列挙を使う。
+    let homes: Vec<PathBuf> = crate::codex::home::cleanup_target_codex_homes();
 
     let mut sessions_bytes = 0u64;
     let mut logs_bytes = 0u64;
@@ -88,11 +83,23 @@ async fn file_size(path: &std::path::Path) -> u64 {
     tokio::fs::metadata(path).await.map(|m| m.len()).unwrap_or(0)
 }
 
+// 2026-07-25 修正: ディレクトリ名は bundle identifier (app.codexframefactory)。
+// 以前は "gori-gori-kun" をハードコードしており、実体 (WebKit/app.codexframefactory)
+// を見ていなかったため表示が常に 0B だった。掃除側 (storage_cleanup.rs) と同じ
+// 組み立て方に揃える。旧名は空ディレクトリが残る環境向けに加算しても無害。
 #[cfg(target_os = "macos")]
 async fn mac_cache_size(home: &std::path::Path) -> u64 {
-    let cache = home.join("Library/Caches/gori-gori-kun");
-    let webkit = home.join("Library/WebKit/gori-gori-kun");
-    dir_size(&cache).await + dir_size(&webkit).await
+    let service = crate::secrets::SERVICE_NAME;
+    let mut total = 0u64;
+    for rel in [
+        format!("Library/Caches/{service}"),
+        format!("Library/WebKit/{service}"),
+        "Library/Caches/gori-gori-kun".to_string(),
+        "Library/WebKit/gori-gori-kun".to_string(),
+    ] {
+        total += dir_size(&home.join(rel)).await;
+    }
+    total
 }
 
 #[cfg(not(target_os = "macos"))]

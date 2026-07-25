@@ -29,8 +29,10 @@ use crate::state::AppState;
 pub(crate) const GENERATION_TIMEOUT: Duration = Duration::from_secs(900);
 const GEN_SERVER_WORKER_KIND: &str = "batch-app-server";
 const WORKER_REGISTRY_FILE: &str = "worker-pids.json";
+// ディレクトリ名の正本は codex::home 側に置く (storage_cleanup の掃除対象列挙と
+// 同じ値を2箇所に持たせないため。2026-07-25: この値が掃除から漏れて 2.5GB 溜まった)
 #[cfg(unix)]
-const GEN_CODEX_HOME_DIR: &str = "codex-home-gen";
+use crate::codex::home::GEN_CODEX_HOME_LEAF as GEN_CODEX_HOME_DIR;
 const INTERRUPT_TIMEOUT: Duration = Duration::from_secs(5);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 
