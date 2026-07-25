@@ -106,20 +106,6 @@ const ICONS: Record<GoriSkillId, (props: IconProps) => ReactElement> = {
       <path d="M3 8l9 5 9-5M12 13v9" />
     </Box>
   ),
-  // ポーズスタジオ: 人型シルエット
-  "gori-pose-studio": ({ className }) => (
-    <Box className={className}>
-      <circle cx="12" cy="5" r="2" />
-      <path d="M12 7v5M12 12l-3 4M12 12l3 4M12 12l-4 0M12 12l4 0" />
-    </Box>
-  ),
-  // 同一性QC: 虫眼鏡 + 顔
-  "gori-identity-qc": ({ className }) => (
-    <Box className={className}>
-      <circle cx="10" cy="10" r="6" />
-      <path d="M10 8h.01M8.5 12c.5.6 1 .9 1.5.9s1-.3 1.5-.9M20 20l-4-4" />
-    </Box>
-  ),
 };
 
 /**

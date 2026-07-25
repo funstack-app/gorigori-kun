@@ -8,9 +8,7 @@ export type GoriSkillId =
   | "gori-comic"
   | "gori-redline"
   | "gori-regulation-check"
-  | "gori-product-set"
-  | "gori-pose-studio"
-  | "gori-identity-qc";
+  | "gori-product-set";
 
 export type GoriSkill = {
   id: GoriSkillId;
@@ -167,34 +165,6 @@ export const GORI_SKILLS: GoriSkill[] = [
     path: "~/.codex/skills/gori-scene-3d",
     availableInApp: true,
     launchHint: "Blender不要の演出→動画",
-  },
-  {
-    // 2026-07-19 追加 (スキル一覧v2.1 #3): リグ入り3D人形操作 or 参照トレースで
-    // ポーズを登録キャラに適用しセット生成。3Dビューポート実装待ちで近日公開。
-    id: "gori-pose-studio",
-    name: "ポーズスタジオ",
-    shortName: "Pose Studio",
-    icon: "🤸",
-    description:
-      "リグ入り3D人形を動かす or 参照画像・動画からポーズをトレースし、登録キャラに適用して複数ポーズを一度にセット生成。同一性検品付き。",
-    path: "~/.codex/skills/gori-pose-studio",
-    availableInApp: false,
-    comingSoon: true,
-    launchHint: "3D人形でポーズ指定 — 近日公開",
-  },
-  {
-    // 2026-07-19 追加 (スキル一覧v2.1 #4): 生成済みバッチを登録キャラと照合し、
-    // 顔・髪・服・体型の観点別に採点。検品官パイプライン待ちで近日公開。
-    id: "gori-identity-qc",
-    name: "同一性QC",
-    shortName: "Identity QC",
-    icon: "🔎",
-    description:
-      "生成済みの画像バッチを登録キャラと照合し、顔・髪・服・体型の観点別に採点。NGの理由を日本語で返す。",
-    path: "~/.codex/skills/gori-identity-qc",
-    availableInApp: false,
-    comingSoon: true,
-    launchHint: "大量生成の目視検品を自動化 — 近日公開",
   },
 ];
 
