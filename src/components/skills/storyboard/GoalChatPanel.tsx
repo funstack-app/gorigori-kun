@@ -9,6 +9,8 @@ import { useImagePreview } from "../../../lib/store/imagePreview";
 import { useReferenceRoles } from "../../../lib/store/referenceRoles";
 import type { StoryboardGoal } from "../../../lib/storyboard/types";
 import { ReferenceLibraryModal } from "../../ReferenceLibraryModal";
+import { PresetPickerPopover } from "../../PresetPickerPopover";
+import { selectCharacterReferences } from "../../../lib/presets/character";
 import { ReferenceRoleToggle } from "../../ReferenceRoleToggle";
 import { CandidatesSelect } from "./CandidatesSelect";
 
@@ -54,6 +56,19 @@ export function GoalChatPanel() {
 
   const [draft, setDraft] = useState("");
   const [attachedImages, setAttachedImages] = useState<string[]>([]);
+  /*
+   * 登録キャラの選択 (STΛCK指示 2026-07-25)。
+   *
+   * なぜ必要か: 絵コンテ (ストーリーカット) だけ登録キャラを選ぶ導線が無く、
+   * 自分のIPで映像を作るという主動線が絵コンテで途切れていた。
+   * 参照画像の入口が「PCから添付」と「ライブラリから選ぶ」の2つしかなく、
+   * キャラを使うにはライブラリの全生成画像の中から目で探す必要があった
+   * (キャラ名で引けない)。企画タブ (PlanWorkspace) と同じ
+   * PresetPickerPopover を置いて、キャラ名で選べるようにする。
+   */
+  const [presetOpen, setPresetOpen] = useState(false);
+  const [presetAnchor, setPresetAnchor] = useState<DOMRect | null>(null);
+  const presetButtonRef = useRef<HTMLButtonElement | null>(null);
   // 「ゴール確定」を押した直後フラグ。JSON 応答が来たら自動で次フェーズに進む。
   // P7 (2026-05-20): 進む先を sketch / generation で選べるよう保持する。
   const [awaitingTarget, setAwaitingTarget] = useState<null | "sketch" | "generation">(null);
@@ -451,6 +466,22 @@ export function GoalChatPanel() {
             >
               <IconLibrary />
             </button>
+            {/* 登録キャラを名前で選ぶ (企画タブと同じ PresetPickerPopover) */}
+            <button
+              type="button"
+              ref={presetButtonRef}
+              onClick={() => {
+                if (presetButtonRef.current) {
+                  setPresetAnchor(presetButtonRef.current.getBoundingClientRect());
+                }
+                setPresetOpen(true);
+              }}
+              className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-[#2a2a2a] text-zinc-300 hover:border-pink-500/40 hover:text-pink-200"
+              title="登録したキャラクターを使う"
+              aria-label="登録したキャラクターを使う"
+            >
+              <IconCharacter />
+            </button>
           </div>
           <button
             type="button"
@@ -478,6 +509,28 @@ export function GoalChatPanel() {
           setAttachedImages((prev) => {
             const set = new Set(prev);
             set.add(path);
+            return Array.from(set);
+          });
+        }}
+      />
+      {/*
+        登録キャラのピッカー。企画タブ (PlanWorkspace) と同じ onPick 構造にする。
+        キャラ型は速度対策で既定3枚に絞られる (selectCharacterReferences)。
+        ここで添付すると useReferenceRoles.ensureRoles が role を付け、
+        planChat の character_reference_path 抽出経路にそのまま乗る。
+      */}
+      <PresetPickerPopover
+        open={presetOpen}
+        onClose={() => setPresetOpen(false)}
+        anchorRect={presetAnchor}
+        onPick={(preset) => {
+          const paths = selectCharacterReferences(preset)
+            .map((ref) => ref.path)
+            .filter((path) => path.length > 0);
+          if (paths.length === 0) return;
+          setAttachedImages((prev) => {
+            const set = new Set(prev);
+            for (const path of paths) set.add(path);
             return Array.from(set);
           });
         }}
@@ -520,6 +573,26 @@ function IconClose() {
       aria-hidden="true"
     >
       <path d="M18 6 6 18M6 6l12 12" />
+    </svg>
+  );
+}
+
+function IconCharacter() {
+  // 人物のシルエット (登録キャラを表す)
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width="14"
+      height="14"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <circle cx="12" cy="8" r="4" />
+      <path d="M4 21c0-4 3.5-6 8-6s8 2 8 6" />
     </svg>
   );
 }
