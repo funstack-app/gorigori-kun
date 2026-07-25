@@ -319,8 +319,40 @@ jobs:
           echo "darwin-x86_64:  ${#DARWIN_X86_64_SIG} bytes"
           echo "windows-x86_64: ${#WINDOWS_SIG} bytes"
 
-          if [ -z "$DARWIN_AARCH64_SIG" ] || [ -z "$DARWIN_X86_64_SIG" ] || [ -z "$WINDOWS_SIG" ]; then
-            echo "::warning::1つ以上の .sig が見つかりません。latest.json は不完全になります"
+          # 署名が1つでも欠けたら job を失敗させる (2026-07-25 修正)。
+          #
+          # なぜ warning から error に変えたか:
+          #   以前は warning だったため、たとえば Windows の .sig だけ取得に失敗しても
+          #   CI は緑で終わり、windows-x86_64.signature が空文字の latest.json が
+          #   publish されていた。その状態で Windows ユーザーが更新ボタンを押すと
+          #   署名検証に失敗し、生のエラー文言だけが出て永久に更新できない。
+          #   しかも CI が成功しているのでリリース側は気づけず、
+          #   「Mac は更新できて Windows だけ詰まる」という環境差の事故になる。
+          #
+          # ここで落ちた場合 latest.json は更新されないだけで、既存ユーザーは
+          # 旧版のまま安全に留まる。これが正しい失敗の形。
+          #
+          # 長さも見る: minisign 署名は base64 で数百バイトになるため、
+          # 極端に短い値は「取得できたが中身が壊れている」ケースを示す。
+          MIN_SIG_BYTES=200
+          SIG_ERROR=0
+          for entry in \
+            "darwin-aarch64:${DARWIN_AARCH64_SIG}" \
+            "darwin-x86_64:${DARWIN_X86_64_SIG}" \
+            "windows-x86_64:${WINDOWS_SIG}"; do
+            name="${entry%%:*}"
+            value="${entry#*:}"
+            if [ -z "$value" ]; then
+              echo "::error::${name} の .sig が取得できませんでした"
+              SIG_ERROR=1
+            elif [ "${#value}" -lt "$MIN_SIG_BYTES" ]; then
+              echo "::error::${name} の .sig が短すぎます (${#value} bytes < ${MIN_SIG_BYTES})"
+              SIG_ERROR=1
+            fi
+          done
+          if [ "$SIG_ERROR" -ne 0 ]; then
+            echo "::error::署名が揃わないため latest.json を publish しません (既存ユーザーは旧版のまま安全に留まります)"
+            exit 1
           fi
 
           cat > /tmp/latest.json <<JSON
