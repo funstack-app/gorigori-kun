@@ -578,8 +578,7 @@ function StepRegister({
           text: "登録できるキャラクターシートがありません。",
           ttlMs: 4000,
         });
-        setSaving(false);
-        return;
+        return; // saving は finally で解除する
       }
       pushToast({
         kind: "success",
@@ -593,15 +592,24 @@ function StepRegister({
         text: `登録に失敗しました: ${(err as Error)?.message ?? err}`,
         ttlMs: 6000,
       });
+    } finally {
+      // 2026-07-25 修正: 成功パスで setSaving(false) が呼ばれておらず、
+      // ボタンが永久に「登録中…」のまま固まっていた。reset() は
+      // useCharacterSheetRun(store) の関数で、このコンポーネントのローカル state
+      // である saving には触らないため、成功しても解除されなかった。
+      // 成功・失敗どちらでも必ず解除する。
       setSaving(false);
     }
   }
 
+  // 同一性スコアが取れたときだけバッジを出す。
+  // 2026-07-25 STΛCK指示: 内部の未実装事情(「同一性採点は未実装」等)はUIに書かない。
+  // 採点できないことはユーザーの関心事ではないので、黙って何も出さない。
   const identityLabel = checking
-    ? "検品中…"
+    ? "検品中"
     : identity?.score != null
-      ? `同一性スコア: ${identity.score}`
-      : "未検品(同一性採点は未実装)";
+      ? `同一性スコア ${identity.score}`
+      : null;
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -621,16 +629,18 @@ function StepRegister({
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
         <div className="mb-3 flex flex-wrap items-center gap-3 text-[12px]">
           <span className="font-black text-white">{characterName || "(名前未入力)"}</span>
-          <span
-            className={
-              "rounded-full px-2 py-0.5 text-[11px] font-bold " +
-              (identity?.score != null
-                ? "bg-[#1c2a20] text-emerald-300"
-                : "bg-[#2a2418] text-amber-300")
-            }
-          >
-            {identityLabel}
-          </span>
+          {identityLabel && (
+            <span
+              className={
+                "rounded-full px-2 py-0.5 text-[11px] font-bold " +
+                (identity?.score != null
+                  ? "bg-[#1c2a20] text-emerald-300"
+                  : "bg-[#242424] text-neutral-400")
+              }
+            >
+              {identityLabel}
+            </span>
+          )}
           {attributes.trim() && (
             <span className="truncate text-[11px] text-neutral-500">
               属性: {attributes.trim()}
