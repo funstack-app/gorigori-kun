@@ -87,8 +87,20 @@ pub async fn scene3d_write_frame(
 
 /// PNG 連番を H.264 MP4 にエンコードし、開始フレームPNGも複製する。
 /// 戻り値: (mp4パス, 開始フレームPNGパス)
+///
+/// 成果物の置き場 (2026-07-25 修正):
+///   フレーム連番は OS の一時領域のまま(エンコード後は不要)。
+///   **完成した mp4 と開始フレーム PNG はユーザーの保存先** (`storage_root`、
+///   既定 `~/Pictures/GORI GORI`、プロジェクト別サブフォルダ) に出す。
+///   以前は成果物も temp_dir 配下に置いていたため、再起動や OS のクリーンアップで
+///   消え、「時間をかけて書き出したのに無くなった」事故になっていた。
+///   保存先の解決は他スキル(batch_gen 等)と同じ resolve_output_dir を使う。
 #[tauri::command]
-pub async fn scene3d_encode(export_dir: String, fps: u32) -> Result<(String, String), String> {
+pub async fn scene3d_encode(
+    export_dir: String,
+    fps: u32,
+    project_name: Option<String>,
+) -> Result<(String, String), String> {
     let dir = validate_export_dir(&export_dir)?;
     let frames = frames_dir(&dir);
     let first = frames.join("frame_00000.png");
@@ -96,8 +108,43 @@ pub async fn scene3d_encode(export_dir: String, fps: u32) -> Result<(String, Str
         return Err("フレームが1枚も書き出されていません".into());
     }
 
+    // 完成物の出力先(消えない場所)。解決に失敗した場合のみ temp 配下へ退避する。
+    let leaf = dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("scene3d");
+    let out_dir = match crate::commands::storage::StorageSettings::load() {
+        Ok(settings) => {
+            let resolved = crate::commands::storage::resolve_output_dir(
+                &settings,
+                project_name.as_deref(),
+                &format!("scene3d-{leaf}"),
+            );
+            match std::fs::create_dir_all(&resolved) {
+                Ok(()) => resolved,
+                Err(err) => {
+                    tracing::warn!(
+                        target: "scene3d",
+                        error = %err,
+                        path = %resolved.display(),
+                        "保存先の作成に失敗したため一時領域へ書き出します"
+                    );
+                    dir.clone()
+                }
+            }
+        }
+        Err(err) => {
+            tracing::warn!(
+                target: "scene3d",
+                error = %err,
+                "ストレージ設定の読み込みに失敗したため一時領域へ書き出します"
+            );
+            dir.clone()
+        }
+    };
+
     // 開始フレーム(Seedance の start_image 用)を複製
-    let first_frame_out = dir.join("first-frame.png");
+    let first_frame_out = out_dir.join("first-frame.png");
     std::fs::copy(&first, &first_frame_out).map_err(|e| format!("first-frame 複製失敗: {e}"))?;
 
     let ffmpeg = resolve_ffmpeg().ok_or_else(|| {
@@ -105,7 +152,7 @@ pub async fn scene3d_encode(export_dir: String, fps: u32) -> Result<(String, Str
             .to_string()
     })?;
 
-    let out = dir.join("motion-guide.mp4");
+    let out = out_dir.join("motion-guide.mp4");
     let pattern = frames.join("frame_%05d.png");
     let status = Command::new(&ffmpeg)
         .args([

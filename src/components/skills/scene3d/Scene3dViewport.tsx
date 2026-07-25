@@ -36,6 +36,8 @@ import { SCENE_FPS } from "../../../lib/scene3d/types";
 import { cameraColor } from "../../../lib/scene3d/types";
 import type { SceneAspectRatio, SceneCamera, SceneEntity, SceneProject, Vec3 } from "../../../lib/scene3d/types";
 import { getSelectedShot, useScene3d } from "../../../lib/store/scene3d";
+import { useActiveProject } from "../../../lib/store/activeProject";
+import { useProjects } from "../../../lib/store/projects";
 
 /**
  * フレーム適用レジストリ: アニメーションする要素が「このフレームの姿勢にせよ」
@@ -1122,7 +1124,17 @@ function ExportDriver() {
 
         useScene3d.getState().setExportStatus({ phase: "encoding" });
         try {
-          const [mp4Path, firstFramePath] = await scene3dIpc.encode(exportDir, project.fps);
+          // 成果物は一時領域でなく保存先(プロジェクト別サブフォルダ)へ出す。
+          // 2026-07-25: 以前は temp_dir に置いていたため再起動で消えていた。
+          const activeProjectId = useActiveProject.getState().activeProjectId;
+          const projectName = activeProjectId
+            ? useProjects.getState().projects.find((p) => p.id === activeProjectId)?.name
+            : undefined;
+          const [mp4Path, firstFramePath] = await scene3dIpc.encode(
+            exportDir,
+            project.fps,
+            projectName,
+          );
           useScene3d.getState().setExportStatus({
             phase: "done",
             mp4Path,

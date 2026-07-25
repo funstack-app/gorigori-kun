@@ -2035,7 +2035,8 @@ function ExportSection() {
         <p className="text-[11px] text-red-400">書き出し失敗: {status.message}</p>
       )}
       <p className="text-[11px] leading-4 text-neutral-500">
-        書き出した動画は動画生成AIの「参照動画」として、開始フレームPNGは「開始画像」として使います
+        書き出した動画は動画生成AIの「参照動画」として、開始フレームPNGは「開始画像」として使います。
+        保存先(既定 ~/Pictures/GORI GORI)のプロジェクトフォルダに残ります
       </p>
     </div>
   );

@@ -989,7 +989,11 @@ export const scene3d = {
   /** 1フレーム分の PNG バイト列を書き込む。 */
   writeFrame: (exportDir: string, index: number, pngBytes: Uint8Array) =>
     invoke<void>("scene3d_write_frame", { exportDir, index, pngBytes }),
-  /** PNG連番を MP4 化。戻り値: [mp4パス, 開始フレームPNGパス]。 */
-  encode: (exportDir: string, fps: number) =>
-    invoke<[string, string]>("scene3d_encode", { exportDir, fps }),
+  /**
+   * PNG連番を MP4 化。戻り値: [mp4パス, 開始フレームPNGパス]。
+   * projectName を渡すと保存先のプロジェクト別サブフォルダへ出力される
+   * (未指定なら storage_root 直下)。成果物は一時領域ではなく保存先に残る。
+   */
+  encode: (exportDir: string, fps: number, projectName?: string) =>
+    invoke<[string, string]>("scene3d_encode", { exportDir, fps, projectName }),
 };

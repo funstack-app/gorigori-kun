@@ -157,14 +157,18 @@ export const GORI_SKILLS: GoriSkill[] = [
     // 登録キャラを指定して動画生成まで一気通貫(動画統合は実装中)。
     // 専用 Workspace は Scene3dWorkspace (SkillWorkspaceRouter "scene3d")。
     id: "gori-scene-3d",
-    name: "3D演出→動画",
+    // 2026-07-25 名称・説明を実態に合わせた。以前は「3D演出→動画」「動画生成まで
+    // 一気通貫」と書いていたが、実際には動画生成APIを呼ばず、モーションガイド動画
+    // (mp4)と開始フレームPNGを書き出すところまで。それを動画生成の参照として使う
+    // 手渡しが残る。名前が約束していないことをやらない状態にする。
+    name: "3Dカメラワーク",
     shortName: "Scene 3D",
     icon: "🎥",
     description:
-      "3D演出から動画生成まで一気通貫。3D空間に人物・小物を置きカメラワークをドラッグで演出し、登録キャラで動画生成まで繋ぐ(動画統合は実装中)。",
+      "3D空間に人物・小物を置き、カメラワークをドラッグで演出。モーションガイド動画と開始フレーム画像を書き出し、動画生成の「参照動画」「開始画像」として使う。",
     path: "~/.codex/skills/gori-scene-3d",
     availableInApp: true,
-    launchHint: "Blender不要の演出→動画",
+    launchHint: "Blender不要でカメラワークを作る",
   },
 ];
 
