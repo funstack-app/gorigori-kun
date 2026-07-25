@@ -580,10 +580,12 @@ function StepRegister({
         });
         return; // saving は finally で解除する
       }
+      // どこに入ったかを伝える。2026-07-25 に登録先を「キャラクター」カテゴリへ
+      // 変更したので、場所を言わないと「登録したのに見つからない」になる。
       pushToast({
         kind: "success",
-        text: `キャラ「${characterName.trim()}」を登録しました。`,
-        ttlMs: 3500,
+        text: `キャラ「${characterName.trim()}」を登録しました。プリセットの「キャラクター」から使えます。`,
+        ttlMs: 4500,
       });
       reset();
     } catch (err) {
