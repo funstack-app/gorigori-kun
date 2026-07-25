@@ -182,7 +182,8 @@ export function EditorCanvas() {
             </div>
             <h3 className="mt-3 text-sm font-black text-white">画像をドロップ</h3>
             <p className="mt-2 text-xs font-bold leading-5 text-neutral-400">
-              ドロップすると自動でレイヤー分解され、背景・前景・テキストに分かれます。
+              開いたら右の「ことばで直す」に指示を書くだけ。
+              レイヤーに分解したいときは、その下のボタンから。
             </p>
             <button
               type="button"

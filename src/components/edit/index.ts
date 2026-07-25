@@ -1,4 +1,4 @@
-export { AICommandBar } from "./AICommandBar";
+export { AiEditPanel } from "./AiEditPanel";
 export { EditCanvas } from "./EditCanvas";
 export { LayerPanel } from "./LayerPanel";
 export { InpaintTool } from "./InpaintTool";

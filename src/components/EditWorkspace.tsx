@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 
+import { AiEditPanel } from "./edit/AiEditPanel";
 import { EditorCanvas } from "./edit/EditorCanvas";
 import { EditorLayerList } from "./edit/EditorLayerList";
 import { EditorPropertyPanel } from "./edit/EditorPropertyPanel";
@@ -108,8 +109,13 @@ export function EditWorkspace() {
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <EditorToolbar />
         <EditorCanvas />
-        <aside className="flex min-h-0 w-[320px] shrink-0 flex-col overflow-x-hidden overflow-y-hidden border-l border-[#2a2a2a] bg-[#252525] [&_*]:max-w-full [&_*]:min-w-0">
-          {/* ① 主導線: 分解前は大ボタン、実行中は進捗。分解済みは自身を畳む。 */}
+        <aside className="flex min-h-0 w-[320px] shrink-0 flex-col overflow-x-hidden overflow-y-auto border-l border-[#2a2a2a] bg-[#252525] [&_*]:max-w-full [&_*]:min-w-0">
+          {/* ① 主導線: 「ことばで直す」AI編集 (2026-07-25 STΛCK 指示で最上段へ)。
+              従来はレイヤー分解が主導線だったが、分解は手段の1つにすぎず、
+              ローカル AI モデルの DL を必要とし環境依存も大きい。
+              まず「ことばで指示すれば直る」を見せる。 */}
+          <AiEditPanel />
+          {/* ② レイヤー分解: 主導線から降格。使いたい人だけが開く。 */}
           <EditPrimaryAction />
           {/* ①' ことばで分離: 左レールで選んだときだけ入力パネルを出す。 */}
           {activeTool === "words" ? <WordsToolPanel /> : null}

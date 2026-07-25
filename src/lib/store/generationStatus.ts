@@ -31,7 +31,8 @@ export type GenerationKind =
   | "productSet"
   | "sceneRecreate"
   | "characterSheet"
-  | "video";
+  | "video"
+  | "aiEdit";
 
 export const GENERATION_KIND_LABEL: Record<GenerationKind, string> = {
   batch: "画像生成",
@@ -43,6 +44,7 @@ export const GENERATION_KIND_LABEL: Record<GenerationKind, string> = {
   sceneRecreate: "シーン再現",
   characterSheet: "キャラクターシート",
   video: "動画生成",
+  aiEdit: "AI編集",
 };
 
 /** 進まない理由。UI がそのまま文言にできる粒度で持つ。 */
