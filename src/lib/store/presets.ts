@@ -331,7 +331,16 @@ export function sortPresets(presets: Preset[], key: SortKey): Preset[] {
   });
 }
 
+/**
+ * 登録キャラクターの既定カテゴリ ID。
+ * キャラ登録 (registerCharacter) は必ずここへ入れる。
+ */
+export const CHARACTER_CATEGORY_ID = "characters";
+
 const DEFAULT_CATEGORIES: PresetCategory[] = [
+  // 2026-07-25 STΛCK指示で新設。登録したキャラが「ポートレート」等の
+  // 用途カテゴリに混ざると、自分のIPを探せなくなる。キャラは独立した箱にする。
+  { id: CHARACTER_CATEGORY_ID, name: "キャラクター", color: "#f472b6" },
   { id: "default-portrait", name: "ポートレート", color: "#ec4899" },
   { id: "default-product", name: "プロダクト", color: "#6366f1" },
   { id: "default-landscape", name: "風景", color: "#10b981" },
@@ -358,8 +367,28 @@ type PresetsState = {
   reorderPresets: (fromId: string, toId: string) => void;
 };
 
+/**
+ * 既存ユーザーのカテゴリ一覧に「キャラクター」を足す。
+ *
+ * カテゴリは localStorage に永続化されるため、DEFAULT_CATEGORIES に追記しても
+ * 既存ユーザーには出てこない (保存済みの配列が優先される)。先頭に差し込む。
+ * 冪等 (既にあれば何もしない)。
+ */
+function ensureCharacterCategory(saved: PresetCategory[]): PresetCategory[] {
+  if (saved.some((c) => c.id === CHARACTER_CATEGORY_ID)) return saved;
+  const characterCategory = DEFAULT_CATEGORIES.find(
+    (c) => c.id === CHARACTER_CATEGORY_ID,
+  );
+  if (!characterCategory) return saved;
+  const next = [characterCategory, ...saved];
+  persist(CATEGORIES_LS_KEY, next);
+  return next;
+}
+
 export const usePresets = create<PresetsState>((set, get) => ({
-  categories: readPersisted<PresetCategory[]>(CATEGORIES_LS_KEY, DEFAULT_CATEGORIES),
+  categories: ensureCharacterCategory(
+    readPersisted<PresetCategory[]>(CATEGORIES_LS_KEY, DEFAULT_CATEGORIES),
+  ),
   presets: (() => {
     const existing = loadPresets();
     const migrated = migrateLegacyReferenceSets();

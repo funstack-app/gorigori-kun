@@ -1,5 +1,8 @@
 import { useEffect, useRef } from "react";
 import { useWorkspace, type WorkspaceTab } from "../lib/store/workspace";
+import { useSkillMode } from "../lib/store/skillMode";
+import { getGoriSkill } from "../lib/skills/catalog";
+import { useToasts } from "../lib/store/toasts";
 
 type Tab = {
   id: WorkspaceTab;
@@ -23,6 +26,33 @@ const NAVIGABLE_TABS: WorkspaceTab[] = TABS.filter((t) => !t.disabled).map((t) =
 export function WorkspaceTabs() {
   const activeTab = useWorkspace((s) => s.activeTab);
   const setActiveTab = useWorkspace((s) => s.setActiveTab);
+
+  /*
+   * 実行中スキルの表示と停止導線 (STΛCK指示 2026-07-25)。
+   *
+   * なぜここに置くか: 従来は停止ボタンがスキル一覧のカード内にしかなく、
+   * スキルを起動すると画面がスキル画面へ切り替わるため、止めるには
+   * 「スキル一覧まで戻る」必要があった。それが分かりにくく、STΛCK が
+   * 「解除ボタンが出ない」と踏んだ (実際には一覧に戻れば出る)。
+   * タブ列は常に見える場所なので、ここに出せば迷わない。
+   */
+  const skillEnabled = useSkillMode((s) => s.enabled);
+  const selectedSkillId = useSkillMode((s) => s.selectedSkillId);
+  const setSkillEnabled = useSkillMode((s) => s.setEnabled);
+  const setSelectedSkillId = useSkillMode((s) => s.setSelectedSkillId);
+  const activeSkill = skillEnabled && selectedSkillId ? getGoriSkill(selectedSkillId) : undefined;
+
+  const stopActiveSkill = () => {
+    if (!activeSkill) return;
+    setSkillEnabled(false);
+    setSelectedSkillId(null);
+    useWorkspace.getState().setPurpose("artwork");
+    useToasts.getState().push({
+      kind: "info",
+      text: `${activeSkill.name} を停止しました。作品モードに戻ります。`,
+      ttlMs: 3000,
+    });
+  };
 
   /**
    * FB#15: タブのスワイプ / トラックパッドジェスチャ移動 (最小実装)。
@@ -84,6 +114,7 @@ export function WorkspaceTabs() {
   }, [setActiveTab]);
 
   return (
+    <div className="flex items-center gap-2">
     <div
       ref={stripRef}
       className="grid w-full grid-cols-4 rounded-lg border border-[#2a2a2a] bg-[#0f0f0f] p-1 sm:w-[420px]"
@@ -126,6 +157,25 @@ export function WorkspaceTabs() {
           </button>
         );
       })}
+    </div>
+
+      {/* 実行中スキル: 名前と停止ボタンを常に見える場所に出す */}
+      {activeSkill && (
+        <div className="flex shrink-0 items-center gap-1.5 rounded-lg border border-pink-500/40 bg-pink-500/10 pl-2.5 pr-1 py-1">
+          <span className="text-[11px] font-black text-pink-100">{activeSkill.shortName}</span>
+          <button
+            type="button"
+            onClick={stopActiveSkill}
+            title={`${activeSkill.name} を停止して作品モードに戻る`}
+            className="flex h-6 w-6 items-center justify-center rounded text-pink-200 transition hover:bg-pink-500/25 hover:text-white"
+            aria-label={`${activeSkill.name} を停止`}
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round">
+              <path d="M6 6l12 12M18 6L6 18" />
+            </svg>
+          </button>
+        </div>
+      )}
     </div>
   );
 }

@@ -1,6 +1,10 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 
-import { usePresets, type Preset } from "../store/presets";
+import {
+  CHARACTER_CATEGORY_ID,
+  usePresets,
+  type Preset,
+} from "../store/presets";
 import type { IdentityCheckResult } from "./identityCheck";
 import type { SheetCutState } from "./types";
 
@@ -106,7 +110,10 @@ export async function registerCharacter(
       identityScore: args.identity?.score,
       verifiedAt: args.identity?.checkedAt,
     },
-    categoryId: args.categoryId ?? null,
+    // 2026-07-25 STΛCK指示: 登録キャラは「キャラクター」カテゴリへ入れる。
+    // 以前は null で保存され、UI 側の並び順で「衣装」等の用途カテゴリに
+    // 紛れて見えていた。自分のIPを探せなくなるため独立した箱に入れる。
+    categoryId: args.categoryId ?? CHARACTER_CATEGORY_ID,
     thumbnail: thumbnail ?? undefined,
     attachedImages: attachedImages.length > 0 ? attachedImages : undefined,
   });
