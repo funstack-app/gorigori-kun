@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
-import { convertFileSrc } from "@tauri-apps/api/core";
 
+import { SafeImage } from "./SafeImage";
 import { useComposer } from "../lib/store/composer";
 import { images } from "../lib/ipc";
 import { usePlanChat, type PlanMessage } from "../lib/store/planChat";
@@ -729,7 +729,7 @@ function ChatInput({
                 className="flex flex-col gap-1.5 rounded-md border border-[#343434] bg-[#0b0b0b] p-1.5"
               >
                 <div className="flex items-center gap-2">
-                  <img src={convertFileSrc(path)} alt="" className="h-9 w-9 rounded object-cover" />
+                  <SafeImage path={path} alt="" className="h-9 w-9 rounded object-cover" fallbackLabel="なし" />
                   <span className="max-w-[140px] truncate text-[10px] font-bold text-neutral-300">{basename(path)}</span>
                   <button
                     type="button"
@@ -859,7 +859,7 @@ function AttachmentThumbs({ paths }: { paths: string[] }) {
     <div className="flex flex-wrap gap-2 pt-1">
       {paths.map((path) => (
         <div key={path} className="overflow-hidden rounded-md border border-pink-300/30 bg-black/20">
-          <img src={convertFileSrc(path)} alt={basename(path)} className="h-16 w-16 object-cover" />
+          <SafeImage path={path} alt={basename(path)} className="h-16 w-16 object-cover" />
         </div>
       ))}
     </div>

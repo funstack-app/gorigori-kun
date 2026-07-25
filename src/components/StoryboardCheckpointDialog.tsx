@@ -1,5 +1,6 @@
-import { convertFileSrc } from "@tauri-apps/api/core";
 import { useState } from "react";
+
+import { SafeImage } from "./SafeImage";
 
 import type { CutState } from "../lib/store/storyboardRun";
 
@@ -72,7 +73,7 @@ export function StoryboardCheckpointDialog({
             return (
               <div key={cut.cutId} className="rounded-lg border border-[#343434] bg-[#101010] p-2">
                 <div className="aspect-square overflow-hidden rounded bg-[#0b0b0b]">
-                  {take && <img src={convertFileSrc(take.imagePath)} alt="" className="h-full w-full object-cover" />}
+                  {take && <SafeImage path={take.imagePath} alt="" className="h-full w-full object-cover" />}
                 </div>
                 <p className="mt-1 text-center font-mono text-[10px] font-bold tabular-nums text-neutral-400">{cut.cutId}</p>
               </div>

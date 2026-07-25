@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { convertFileSrc } from "@tauri-apps/api/core";
+
+import { SafeImage } from "./SafeImage";
 import { higgsfieldMcp, type HiggsfieldMcpCostArgs } from "../lib/ipc";
 import { paramsToVideoArgs, useVideoSceneGeneration } from "../lib/scene/useVideoSceneGeneration";
 import { resolveImageMentions } from "../lib/scene/resolveImageMentions";
@@ -1145,7 +1146,7 @@ function ReferenceChip({
 }) {
   return (
     <div className="group relative h-14 w-14 overflow-hidden rounded-md border border-[#343434] bg-[#0b0b0b]" title={name}>
-      <img src={convertFileSrc(path)} alt={name} className="h-full w-full object-cover" />
+      <SafeImage path={path} alt={name} className="h-full w-full object-cover" fallbackLabel="なし" />
       <span className="absolute left-0.5 top-0.5 rounded bg-black/70 px-1 text-[9px] font-black text-white">
         @img{index}
       </span>
@@ -1178,7 +1179,7 @@ function GroupReferenceChip({
       className="group relative h-14 w-14 overflow-hidden rounded-md border border-pink-400/60 bg-[#0b0b0b]"
       title={`${label}（参照${count}枚）`}
     >
-      <img src={convertFileSrc(path)} alt={label} className="h-full w-full object-cover" />
+      <SafeImage path={path} alt={label} className="h-full w-full object-cover" fallbackLabel="なし" />
       <span className="absolute inset-x-0 bottom-0 truncate bg-black/70 px-1 text-[9px] font-black text-pink-200">
         @{label}
       </span>

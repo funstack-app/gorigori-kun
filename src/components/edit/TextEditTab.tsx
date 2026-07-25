@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 
+import { SafeImage } from "../SafeImage";
 import { editInpaint, editOcr, images as imagesIpc } from "../../lib/ipc";
 import type { TextRegion } from "../../lib/edit/types";
 import { EditModelGate } from "../EditModelGate";
@@ -76,7 +77,7 @@ export function TextEditTab({ inputPath, projectName, onResult }: TextEditTabPro
 
         {inputPath && selected ? (
           <div className="mt-3 overflow-hidden rounded-lg border border-sky-400/30 bg-[#101010]">
-            <img src={convertFileSrc(inputPath)} alt="" className="h-24 w-full object-contain" />
+            <SafeImage path={inputPath} alt="" className="h-24 w-full object-contain" />
           </div>
         ) : null}
 

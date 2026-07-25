@@ -3241,7 +3241,7 @@ function BatchWorkerTile({ worker }: { worker: BatchWorker }) {
       onClick={() => useImagePreview.getState().open(worker.path)}
       className="aspect-square overflow-hidden rounded-2xl border border-neutral-200 bg-white shadow-sm hover:border-blue-400"
     >
-      <img src={convertFileSrc(worker.path)} alt="" className="h-full w-full object-cover" />
+      <SafeImage path={worker.path} alt="" className="h-full w-full object-cover" />
     </button>
   );
 }
