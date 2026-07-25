@@ -11,7 +11,15 @@ type Status =
   | { kind: "available"; version: string; notes?: string }
   | { kind: "downloading"; downloaded: number; total: number }
   | { kind: "installing" }
-  | { kind: "error"; message: string };
+  | {
+      kind: "error";
+      /** ユーザー向けの説明。次の行動が分かる日本語。 */
+      message: string;
+      /** 手動DLの導線を出すか。 */
+      showManual?: boolean;
+      /** 報告用の生メッセージ。 */
+      raw?: string;
+    };
 
 /**
  * 設定画面に置く「アップデート確認」セクション。
@@ -20,6 +28,106 @@ type Status =
  *   https://github.com/funstack-app/gorigori-kun/releases/latest/download/latest.json
  * (このコメントは説明用。実際の参照先は必ず tauri.conf.json 側を正とする)
  */
+/** リリースページ。更新が自動で通らないときの手動DL先。 */
+const RELEASES_URL = "https://github.com/funstack-app/gorigori-kun/releases/latest";
+
+type UpdateFailure = {
+  /** ユーザーに見せる本文。次の行動が分かる日本語にする。 */
+  text: string;
+  /** 手動DLの導線を出すか。署名系・原因不明では必ず出す。 */
+  showManual: boolean;
+  /** 報告用に残す生のメッセージ。 */
+  raw: string;
+};
+
+/**
+ * 更新の失敗を分類して、ユーザーが次に何をすればよいかを示す。
+ *
+ * なぜ (2026-07-25 配布検証の指摘):
+ *   従来は String(err) をそのまま「更新に失敗: <生の英語>」と出していた。
+ *   ネットワーク断・署名検証失敗・ディスク不足・権限不足が全て同じ見た目になり、
+ *   非エンジニアは何が起きたか判断できない。しかも署名不一致のように
+ *   「再試行しても永久に直らない」種類の失敗で再試行ボタンだけを見せると、
+ *   ユーザーは抜け出せない。
+ *   分類して文言を出し分け、どの分岐でも手動DLの逃げ道を残す。
+ */
+function classifyUpdateFailure(err: unknown): UpdateFailure {
+  const raw = String(err);
+  const lower = raw.toLowerCase();
+
+  const isNetwork =
+    lower.includes("network") ||
+    lower.includes("timeout") ||
+    lower.includes("timed out") ||
+    lower.includes("dns") ||
+    lower.includes("connection") ||
+    lower.includes("failed to fetch") ||
+    lower.includes("could not connect");
+  if (isNetwork) {
+    return {
+      text: "インターネットに接続できませんでした。接続を確認してもう一度お試しください。",
+      showManual: false,
+      raw,
+    };
+  }
+
+  const isSignature =
+    lower.includes("signature") ||
+    lower.includes("verify") ||
+    lower.includes("verification") ||
+    lower.includes("untrusted") ||
+    lower.includes("minisign");
+  if (isSignature) {
+    return {
+      // 再試行しても直らない種類。手動DLへ誘導する。
+      text: "更新ファイルの検証に失敗しました。お手数ですが、下のボタンから最新版を直接ダウンロードしてください。",
+      showManual: true,
+      raw,
+    };
+  }
+
+  const isDisk =
+    lower.includes("no space") ||
+    lower.includes("disk full") ||
+    lower.includes("enospc");
+  if (isDisk) {
+    return {
+      text: "ディスクの空き容量が足りません。空き容量を作ってからもう一度お試しください。",
+      showManual: false,
+      raw,
+    };
+  }
+
+  const isPermission =
+    lower.includes("permission") ||
+    lower.includes("access is denied") ||
+    lower.includes("eacces") ||
+    lower.includes("operation not permitted");
+  if (isPermission) {
+    return {
+      text: "更新の書き込みが許可されませんでした。アプリを一度終了してから、もう一度お試しください。",
+      showManual: true,
+      raw,
+    };
+  }
+
+  return {
+    text: "更新に失敗しました。下のボタンから最新版を直接ダウンロードできます。",
+    showManual: true,
+    raw,
+  };
+}
+
+/** リリースページを既定ブラウザで開く。既存流儀に合わせて動的 import する。 */
+async function openReleasesPage(): Promise<void> {
+  try {
+    const { openUrl } = await import("@tauri-apps/plugin-opener");
+    await openUrl(RELEASES_URL);
+  } catch {
+    // 開けなくてもアプリは壊さない。URL は画面に出ているので手で開ける。
+  }
+}
+
 export function UpdateChecker() {
   const [current, setCurrent] = useState<string>("...");
   const [status, setStatus] = useState<Status>({ kind: "idle" });
@@ -45,9 +153,14 @@ export function UpdateChecker() {
         notes: update.body,
       });
     } catch (err) {
-      const msg = String(err);
-      setStatus({ kind: "error", message: msg });
-      pushToast({ kind: "error", text: `更新確認に失敗: ${msg}`, ttlMs: 6000 });
+      const failure = classifyUpdateFailure(err);
+      setStatus({
+        kind: "error",
+        message: failure.text,
+        showManual: failure.showManual,
+        raw: failure.raw,
+      });
+      pushToast({ kind: "error", text: failure.text, ttlMs: 7000 });
     }
   };
 
@@ -75,9 +188,14 @@ export function UpdateChecker() {
       // インストール完了 → 再起動
       await relaunch();
     } catch (err) {
-      const msg = String(err);
-      setStatus({ kind: "error", message: msg });
-      pushToast({ kind: "error", text: `更新に失敗: ${msg}`, ttlMs: 8000 });
+      const failure = classifyUpdateFailure(err);
+      setStatus({
+        kind: "error",
+        message: failure.text,
+        showManual: failure.showManual,
+        raw: failure.raw,
+      });
+      pushToast({ kind: "error", text: failure.text, ttlMs: 8000 });
     }
   };
 
@@ -173,15 +291,41 @@ export function UpdateChecker() {
         {status.kind === "error" && (
           <div className="space-y-2">
             <p className="rounded-lg border border-rose-500/30 bg-rose-500/5 px-2 py-2 text-[11px] text-rose-200">
-              エラー: {status.message}
+              {status.message}
             </p>
-            <button
-              type="button"
-              onClick={runCheck}
-              className="w-full rounded-lg border border-[#343434] bg-[#1e1e1e] px-3 py-1.5 text-xs font-bold text-neutral-300 hover:border-pink-400 hover:text-white"
-            >
-              再試行
-            </button>
+            <div className="mt-2 flex gap-2">
+              <button
+                type="button"
+                onClick={runCheck}
+                className="flex-1 rounded-lg border border-[#343434] bg-[#1e1e1e] px-3 py-1.5 text-xs font-bold text-neutral-300 hover:border-pink-400 hover:text-white"
+              >
+                もう一度試す
+              </button>
+              {/*
+                手動DLの逃げ道。署名検証失敗のように再試行では直らない失敗で、
+                これが無いとユーザーは抜け出せない (2026-07-25 配布検証の指摘)。
+              */}
+              {status.showManual && (
+                <button
+                  type="button"
+                  onClick={() => void openReleasesPage()}
+                  className="flex-1 rounded-lg border border-pink-500/50 bg-pink-500/10 px-3 py-1.5 text-xs font-black text-pink-100 hover:border-pink-400 hover:bg-pink-500/20"
+                >
+                  最新版をダウンロード
+                </button>
+              )}
+            </div>
+            {/* 報告用。原因の切り分けに必要なので隠さず、ただし小さく置く */}
+            {status.raw && (
+              <details className="mt-2">
+                <summary className="cursor-pointer text-[10px] text-neutral-600 hover:text-neutral-400">
+                  詳細（報告用）
+                </summary>
+                <p className="mt-1 break-all font-mono text-[10px] leading-relaxed text-neutral-500">
+                  {status.raw}
+                </p>
+              </details>
+            )}
           </div>
         )}
       </div>
