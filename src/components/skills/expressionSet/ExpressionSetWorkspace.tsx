@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { ActiveProjectSelector } from "../../ActiveProjectSelector";
 import { WorkspaceTabs } from "../../WorkspaceTabs";
+import { SkillIntro } from "../SkillIntro";
 import { CharacterIcon, FaceIcon } from "../../SkillIcon";
 import { useActiveProject } from "../../../lib/store/activeProject";
 import { useImagePreview } from "../../../lib/store/imagePreview";
@@ -81,6 +82,13 @@ export function ExpressionSetWorkspace() {
 
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
         <StepIndicator />
+        <div className="px-4 pt-3">
+          <SkillIntro
+            what="登録済みのキャラを1体選ぶと、その顔のまま表情だけを変えたカットをまとめて作ります。"
+            first="まずは下から、表情を作りたいキャラを選んでください。先にキャラクター登録を済ませておく必要があります。"
+            note="似ているかどうかの最終判断は人の目で行います。自動での作り直しはしません。"
+          />
+        </div>
         <div className="min-h-0 flex-1 overflow-hidden">
           <ExpressionSetBody onPreview={(path, all) => openPreview(path, all)} />
         </div>

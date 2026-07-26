@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import { ActiveProjectSelector } from "../../ActiveProjectSelector";
 import { WorkspaceTabs } from "../../WorkspaceTabs";
+import { SkillIntro } from "../SkillIntro";
 import { useToasts } from "../../../lib/store/toasts";
 import {
   checkImage,
@@ -264,12 +265,10 @@ export function RegulationCheckWorkspace() {
       <div className="flex min-h-0 flex-1 overflow-hidden">
         {/* 左: 設定パネル */}
         <div className="flex w-[340px] shrink-0 flex-col gap-4 overflow-y-auto border-r border-[#242424] p-4">
-          <div>
-            <h2 className="text-sm font-semibold text-neutral-200">レギュレーション検査</h2>
-            <p className="mt-1 text-xs text-neutral-500">
-              入稿画像を媒体ルールで検査し、根拠付きの指摘一覧を返します。
-            </p>
-          </div>
+          <SkillIntro
+            what="入稿前のクリエイティブを渡すと、文字の占める割合・入れ忘れてはいけない表記・ロゴの扱い・使ってはいけない表現を見て、引っかかる箇所を理由つきで指摘します。"
+            first="まずは出す先の媒体を下から選び、検査したい画像を入れてください。"
+          />
 
           {/* 媒体プリセット */}
           <div className="flex flex-col gap-1.5">

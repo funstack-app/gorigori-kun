@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { ActiveProjectSelector } from "../../ActiveProjectSelector";
 import { WorkspaceTabs } from "../../WorkspaceTabs";
+import { SkillIntro } from "../SkillIntro";
 import { CharacterIcon } from "../../SkillIcon";
 import { useImagePreview } from "../../../lib/store/imagePreview";
 import { useToasts } from "../../../lib/store/toasts";
@@ -87,6 +88,12 @@ export function CharacterRegisterWorkspace() {
 
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
         <StepIndicator />
+        <div className="px-4 pt-3">
+          <SkillIntro
+            what="キャラの絵を1枚渡すと、正面・横・後ろ姿と表情、顔アップをまとめて作り、「このキャラ」として登録します。登録しておくと、他のスキルからも同じ顔のまま呼び出せます。"
+            first="まずは下から、そのキャラが写った絵を1枚選んでください。"
+          />
+        </div>
         <div className="min-h-0 flex-1 overflow-hidden">
           <CharacterRegisterBody onPreview={(path, all) => openPreview(path, all)} />
         </div>

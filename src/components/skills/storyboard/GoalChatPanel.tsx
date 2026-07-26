@@ -12,6 +12,7 @@ import { ReferenceLibraryModal } from "../../ReferenceLibraryModal";
 import { PresetPickerPopover } from "../../PresetPickerPopover";
 import { selectCharacterReferences } from "../../../lib/presets/character";
 import { ReferenceRoleToggle } from "../../ReferenceRoleToggle";
+import { SkillIntro } from "../SkillIntro";
 import { CandidatesSelect } from "./CandidatesSelect";
 
 const IMAGE_EXTS = ["png", "jpg", "jpeg", "webp", "gif", "bmp"];
@@ -280,9 +281,13 @@ export function GoalChatPanel() {
               </button>
             )}
           </div>
-          <p className="mt-1 text-xs text-zinc-500">
-            AI が「作りたい映像」を引き出します。思いつきの一言からで OK。
-          </p>
+          <div className="mt-2 max-w-xl">
+            <SkillIntro
+              what="作りたい話を伝えると、AI が聞き返しながら絵コンテに起こし、そのままカットを続けて作ります。登録キャラと画風を固定するので、話が進んでも同じ人物・同じ絵柄のまま並びます。"
+              first="まずは下の入力欄に、作りたい映像を思いつきの一言で書いてください。足りないところは AI が聞き返します。"
+              note="同じ人物のまま並べるには、参照画像を1枚以上入れてください。"
+            />
+          </div>
           {probingFromAi && (
             <div className="mt-2 inline-flex items-center gap-2 rounded-full border border-pink-500/40 bg-pink-500/10 px-3 py-1 text-[11px] text-pink-200">
               <span className="opacity-70">AI が知りたい:</span>

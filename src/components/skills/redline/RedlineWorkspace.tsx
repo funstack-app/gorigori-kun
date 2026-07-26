@@ -3,6 +3,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 
 import { ActiveProjectSelector } from "../../ActiveProjectSelector";
 import { WorkspaceTabs } from "../../WorkspaceTabs";
+import { SkillIntro } from "../SkillIntro";
 import { useEditorActions } from "../../edit/editor/useEditor";
 import { images } from "../../../lib/ipc";
 import { useRedline } from "../../../lib/redline/store";
@@ -97,6 +98,12 @@ export function RedlineWorkspace() {
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-4 py-4">
+        <SkillIntro
+          what="赤ペンや注釈の入った画像を渡すと、どこを何色でどう直せと言われているのかを読み取って、日本語の直し指示に起こします。"
+          first="まずは下の「赤入れ画像」に、書き込みが入った画像を入れてください。修正前の元画像もあれば、見比べて精度が上がります。"
+          note="赤入れが PDF の場合は、ページを画像（PNG / JPG）に書き出してから入れてください。現バージョンは画像のみ対応です。"
+        />
+
         {/* 入力エリア: 元画像 + 赤入れ画像 */}
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           <ImageDropSlot
@@ -115,12 +122,6 @@ export function RedlineWorkspace() {
             onClear={() => setRedlinePath(null)}
           />
         </div>
-
-        {/* PDF の案内（MVP は画像のみ） */}
-        <p className="rounded-lg border border-[#2a2a2a] bg-[#181818] px-3 py-2 text-[11px] leading-relaxed text-neutral-400">
-          赤入れが PDF の場合は、ページを画像（PNG / JPG）に書き出してから投入してください。
-          現バージョンは画像のみ対応です。
-        </p>
 
         {/* アクション */}
         <div className="flex items-center gap-2">

@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import { ActiveProjectSelector } from "../../ActiveProjectSelector";
 import { WorkspaceTabs } from "../../WorkspaceTabs";
+import { SkillIntro } from "../SkillIntro";
 import { ClapperIcon, FilmIcon } from "../../SkillIcon";
 import { useImagePreview } from "../../../lib/store/imagePreview";
 import { useToasts } from "../../../lib/store/toasts";
@@ -227,12 +228,11 @@ export function SceneRecreateWorkspace() {
       <div className="flex min-h-0 flex-1 overflow-hidden">
         {/* 左: 入力 */}
         <aside className="flex w-96 shrink-0 flex-col gap-4 overflow-y-auto border-r border-[#242424] bg-[#141414] px-4 py-4">
-          <div className="rounded-lg border border-[#2a2a2a] bg-[#0d0d0d] px-3 py-2.5 text-[11px] leading-relaxed text-neutral-400">
-            参考動画のキーフレーム(気になる瞬間のスクショ)を
-            <span className="font-bold text-neutral-200">時系列順</span>
-            に複数枚入れてください。映像を直接読むことはまだできないため、
-            スクショから映像文法を推定します。
-          </div>
+          <SkillIntro
+            what="気になった映像のスクショを数枚渡すと、構図・光・被写体の置き方を読み解いて言葉にし、自分のキャラや商品で同じ画作りをするための指示文を出します。"
+            first="まずは下から、真似したい場面のスクショを時系列の順に数枚選んでください。"
+            note="動画URLからの取り込みには未対応です。静止画からはカメラが動く速さやカットのテンポは読み取れません。"
+          />
 
           <div>
             <div className="mb-1.5 flex items-center justify-between">

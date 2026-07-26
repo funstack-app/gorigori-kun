@@ -23,6 +23,7 @@ import { useToasts } from "../../../lib/store/toasts";
 import { ActiveProjectSelector } from "../../ActiveProjectSelector";
 import { SafeImage } from "../../SafeImage";
 import { WorkspaceTabs } from "../../WorkspaceTabs";
+import { SkillIntro } from "../SkillIntro";
 import { beginDirectRun } from "../../../lib/store/generationStatus";
 
 /**
@@ -228,6 +229,11 @@ function ComicFlow() {
 
   return (
     <div className="mx-auto flex max-w-4xl flex-col gap-4 text-neutral-200">
+      <SkillIntro
+        what="話を渡すとコマ割りとセリフ案を起こし、登録キャラのままコマの絵を作ります。コマごとに構図もセリフも直せます。"
+        first="まずは下の「話（あらすじ）」に、どんな話にしたいかを書いてください。"
+        note="セリフはコマの下にテキストで付きます。吹き出しの焼き込みは今後対応です。"
+      />
       <PhaseNav phase={phase} setPhase={setPhase} hasPanels={panels.length > 0} />
 
       {phase === "input" && (
