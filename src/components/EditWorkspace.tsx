@@ -6,6 +6,7 @@ import { beginDirectRun } from "../lib/store/generationStatus";
 import { useThreads } from "../lib/store/threads";
 import { useToasts } from "../lib/store/toasts";
 import { EditorCanvas } from "./edit/EditorCanvas";
+import type { NormalizedBbox } from "./edit/RegionSelectOverlay";
 import { useEditor } from "./edit/editor/editorStore";
 import { useEditorActions } from "./edit/editor/useEditor";
 
@@ -38,15 +39,34 @@ function basename(path: string) {
  *     その内部実装がレイヤー機構の上に載っている (消すと赤入れが壊れる)
  *   - 「レイヤー分解に戻したい」となったとき、復帰が import 1行で済む
  * 画面に出さないだけで、機構は生きている。
+ *
+ * ## 範囲指定 (2026-07-26 追記)
+ *
+ * ChatGPT の画像編集と同じで「直したい場所を囲んでから言う」ができる。
+ * 囲まなければ従来どおり画像全体。**道具は増やさない** — 増えたのは
+ * 「キャンバスをドラッグすると四角ができる」ことだけで、押すボタンは
+ * 「AIで直す」1つのまま。
+ *
+ * 範囲ありのときは applyRedlineFix (赤入れ反映と同じ経路) に流す。自前で
+ * マスク生成を書き直さないのは、この経路がマスク外の非改変を**画素レベルで**
+ * 保証しているため (詳細は下の runRegion() のコメント)。
  */
 export function EditWorkspace() {
   const sourceImagePath = useEditor((state) => state.sourceImagePath);
   const busyTool = useEditor((state) => state.busyTool);
-  const { chooseImage, performUndo, performRedo, exportPng } = useEditorActions();
+  const { chooseImage, performUndo, performRedo, exportPng, applyRedlineFix } =
+    useEditorActions();
 
   const [instruction, setInstruction] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  /** 直す範囲 (0..1 の正規化 bbox)。null = 画像全体。 */
+  const [region, setRegion] = useState<NormalizedBbox | null>(null);
+
+  // 画像を差し替えたら選択は無効になる (前の画像の座標を持ち越さない)。
+  useEffect(() => {
+    setRegion(null);
+  }, [sourceImagePath]);
 
   const canRun = Boolean(sourceImagePath && instruction.trim()) && !busy && busyTool === null;
 
@@ -79,7 +99,57 @@ export function EditWorkspace() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [performUndo, performRedo]);
 
+  /**
+   * 選んだ範囲だけを直す。
+   *
+   * ## なぜ applyRedlineFix を使い回すのか (自前でマスクを作らない理由)
+   *
+   * 「マスクを渡す」だけでは、その範囲だけが変わる保証にならない。
+   * Rust 側 (batch_gen.rs build_final_prompt) はマスク画像を画像生成モデルへの
+   * **プロンプト上の指示**として添えているだけで、モデルが素直に従う保証はない。
+   * 実際 build_final_prompt は「白い領域だけ編集、それ以外は 1 ピクセルも変更しない」
+   * と文章で頼んでいるにすぎない。ここで止めると「範囲を選んだのに全体が変わる」
+   * という、押せるのに効かない機能になる。
+   *
+   * applyRedlineFix はその先を持っている:
+   *   1. 正規化 bbox → 元画像の実寸マスク PNG (buildFullSizeMaskFromNormalizedBbox)
+   *   2. 生成 (マスク付き)
+   *   3. buildDiffPatch(..., limitToBbox=true) で、**bbox の外の画素の alpha を 0 に
+   *      叩き落とした透過パッチ**を作り、元画像の上に同じ座標で重ねる
+   * つまりモデルが範囲外を描き変えてしまっても、その画素は透明にされて捨てられ、
+   * 下の元画像がそのまま見える。非改変は文章のお願いではなく合成で担保される。
+   */
+  const runRegion = async () => {
+    const prompt = instruction.trim();
+    if (!sourceImagePath || !prompt || !region || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const applied = await applyRedlineFix(sourceImagePath, region, prompt);
+      if (applied) {
+        useToasts.getState().push({
+          kind: "success",
+          text: "囲んだところだけ直しました。外側の画素は変えていません。⌘Zで戻せます。",
+          ttlMs: 5200,
+        });
+        setInstruction("");
+      } else {
+        // applyRedlineFix は失敗理由を editor store の error に入れる。
+        // キャンバス下部のエラーカードに出るので、ここで二重に出さない。
+        setError("直せませんでした。キャンバス下のメッセージを確認してください。");
+      }
+    } catch (err) {
+      setError(`直せませんでした: ${String(err)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const run = async () => {
+    if (region) {
+      await runRegion();
+      return;
+    }
     const prompt = instruction.trim();
     if (!sourceImagePath || !prompt || busy) return;
 
@@ -173,12 +243,46 @@ export function EditWorkspace() {
       <div className="flex min-h-0 flex-1 overflow-hidden">
         {sourceImagePath ? (
           <>
-            <EditorCanvas />
+            <EditorCanvas
+              regionSelect={{
+                value: region,
+                onChange: setRegion,
+                disabled: busy || busyTool !== null,
+              }}
+            />
             <aside className="flex min-h-0 w-[320px] shrink-0 flex-col border-l border-[#2a2a2a] bg-[#252525]">
               <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-3">
                 <h3 className="text-xs font-black text-white">ことばで直す</h3>
                 <p className="mt-1 text-[10px] font-bold leading-4 text-neutral-500">
                   直したいところを、ふつうの日本語で書いてください。
+                </p>
+
+                {/*
+                  どこが対象なのかを、押す前に必ず1行で見せる。
+                  「全体に効いたつもりが一部だった」の取り違えが一番こわい。
+                */}
+                <div className="mt-2.5 flex items-center gap-2 rounded-lg border border-[#343434] bg-[#1c1c1c] px-2.5 py-2">
+                  <span className={region ? "text-pink-300" : "text-neutral-500"}>
+                    {region ? <FrameIcon /> : <FullImageIcon />}
+                  </span>
+                  <span className="min-w-0 flex-1 text-[10px] font-bold leading-4 text-neutral-300">
+                    {region ? "囲んだところだけ直す" : "画像ぜんぶを直す"}
+                  </span>
+                  {region ? (
+                    <button
+                      type="button"
+                      onClick={() => setRegion(null)}
+                      disabled={busy}
+                      className="shrink-0 rounded border border-[#3a3a3a] px-1.5 py-0.5 text-[10px] font-bold text-neutral-400 hover:border-pink-400 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      範囲をやめる
+                    </button>
+                  ) : null}
+                </div>
+                <p className="mt-1 text-[10px] font-bold leading-4 text-neutral-500">
+                  {region
+                    ? "囲み直すには、もう一度ドラッグしてください。"
+                    : "画像の上をドラッグで囲むと、そこだけ直せます。"}
                 </p>
 
                 <textarea
@@ -198,8 +302,14 @@ export function EditWorkspace() {
                   {busy ? "AIが直しています…" : "AIで直す"}
                 </button>
 
+                {/*
+                  行き先は範囲の有無で本当に変わる (全体=制作タブ / 範囲=この場で重なる)。
+                  同じ文言を出すと「制作タブに無い」という問い合わせになるので出し分ける。
+                */}
                 <p className="mt-1.5 text-[10px] font-bold leading-4 text-neutral-500">
-                  画像全体に対して実行します。結果は制作タブに届きます。
+                  {region
+                    ? "囲んだところだけを描き直し、この画面に重ねます。外側は変わりません。"
+                    : "画像全体に対して実行します。結果は制作タブに届きます。"}
                 </p>
 
                 {error ? (
@@ -242,6 +352,47 @@ export function EditWorkspace() {
         )}
       </div>
     </div>
+  );
+}
+
+/** 範囲あり: 破線の枠 (囲んだ状態)。絵文字は使わない方針。 */
+function FrameIcon() {
+  return (
+    <svg
+      width={14}
+      height={14}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.6}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3" />
+      <path d="M9 12h6" />
+    </svg>
+  );
+}
+
+/** 範囲なし: 画像ぜんぶ。 */
+function FullImageIcon() {
+  return (
+    <svg
+      width={14}
+      height={14}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.6}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <path d="M3 15l4.5-4.5 4 4 3-3L21 16" />
+      <circle cx="9" cy="9" r="1.4" />
+    </svg>
   );
 }
 

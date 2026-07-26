@@ -7,12 +7,28 @@ import { useEditor } from "./editor/editorStore";
 import { useEditorActions } from "./editor/useEditor";
 import { convertTextImageToTextbox, fitCanvasToImage } from "./editor/magicLayerToFabric";
 import { objectId } from "./editor/layerHelpers";
+import { RegionSelectOverlay, type NormalizedBbox } from "./RegionSelectOverlay";
 
-export function EditorCanvas() {
+type EditorCanvasProps = {
+  /**
+   * 範囲選択オーバーレイの状態。渡されたときだけ「ドラッグで囲む」モードになる。
+   * 未指定なら従来どおり素のキャンバス (赤入れ等、他の呼び出し元を壊さない)。
+   */
+  regionSelect?: {
+    value: NormalizedBbox | null;
+    onChange: (bbox: NormalizedBbox | null) => void;
+    disabled?: boolean;
+  };
+};
+
+export function EditorCanvas({ regionSelect }: EditorCanvasProps = {}) {
   const hostRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fabricCanvasRef = useRef<any>(null);
   const sourceImagePath = useEditor((state) => state.sourceImagePath);
+  // store 経由で読む (ref だと fabric 初期化完了で再描画されず、オーバーレイが
+  // canvas=null のまま固まる)。setCanvas が呼ばれた時点で再描画が走る。
+  const liveCanvas = useEditor((state) => state.canvas);
   const activeTool = useEditor((state) => state.activeTool);
   const message = useEditor((state) => state.message);
   const error = useEditor((state) => state.error);
@@ -174,6 +190,19 @@ export function EditorCanvas() {
     >
       <canvas ref={canvasRef} id="editor-canvas" className="block" />
 
+      {/*
+        範囲選択オーバーレイ。画像を開いている間だけ、キャンバスの上に重ねる。
+        fabric のオブジェクトではないので、書き出した PNG に選択枠は入らない。
+      */}
+      {regionSelect && sourceImagePath && liveCanvas ? (
+        <RegionSelectOverlay
+          canvas={liveCanvas}
+          value={regionSelect.value}
+          onChange={regionSelect.onChange}
+          disabled={regionSelect.disabled}
+        />
+      ) : null}
+
       {!sourceImagePath ? (
         <div className="pointer-events-none absolute inset-0 flex items-center justify-center p-8">
           <div className="pointer-events-auto max-w-sm rounded-2xl border border-dashed border-pink-400/50 bg-[#101010]/90 p-6 text-center shadow-2xl">
@@ -183,7 +212,7 @@ export function EditorCanvas() {
             <h3 className="mt-3 text-sm font-black text-white">画像をドロップ</h3>
             <p className="mt-2 text-xs font-bold leading-5 text-neutral-400">
               開いたら右の「ことばで直す」に指示を書くだけ。
-              レイヤーに分解したいときは、その下のボタンから。
+              直したい場所をドラッグで囲めば、そこだけ直せます。
             </p>
             <button
               type="button"
