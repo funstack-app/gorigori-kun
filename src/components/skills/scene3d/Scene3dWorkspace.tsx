@@ -1566,6 +1566,33 @@ function SelectedObjectSection() {
         {entity.label}
       </p>
 
+      {/* AIで動きをつける導線を、手で選ぶ「歩く/走る」より上に出す。なぜ: 目玉機能が
+          プリセットの下に埋もれて見つからない(2026-07-26 指摘) */}
+      {entity.kind === "mannequin" && (
+        <button
+          className={`flex items-center gap-1.5 rounded-lg border px-2 py-1.5 text-left text-xs ${
+            motionType === "clip"
+              ? "border-lime-400 bg-lime-400/10 text-lime-300"
+              : "border-[#2a2a2a] text-neutral-400 hover:border-lime-400/50 hover:text-neutral-200"
+          }`}
+          onClick={() => setMotionLibOpen(true)}
+        >
+          <ClapperIcon />
+          <span>
+            <span className="font-bold">動きをつける…</span>
+            <span className="block text-[10px] opacity-70">
+              言葉から AI生成 / 実写動画から取り込み / ライブラリから選ぶ
+            </span>
+          </span>
+        </button>
+      )}
+
+      {entity.kind === "mannequin" && (
+        <p className="text-[10px] leading-4 text-neutral-600">
+          かんたんな移動だけなら下から選べます
+        </p>
+      )}
+
       {entity.kind === "mannequin" ? (
         <div className="grid grid-cols-3 gap-1.5">
           <button className={motionBtn(motionType === null)} onClick={() => setEntityMotion(entity.id, null)}>
@@ -1665,24 +1692,6 @@ function SelectedObjectSection() {
             )}
           </>
         )}
-      {entity.kind === "mannequin" && (
-        <button
-          className={`flex items-center gap-1.5 rounded-lg border px-2 py-1.5 text-left text-xs ${
-            motionType === "clip"
-              ? "border-lime-400 bg-lime-400/10 text-lime-300"
-              : "border-[#2a2a2a] text-neutral-400 hover:border-lime-400/50 hover:text-neutral-200"
-          }`}
-          onClick={() => setMotionLibOpen(true)}
-        >
-          <ClapperIcon />
-          <span>
-            <span className="font-bold">動きをつける…</span>
-            <span className="block text-[10px] opacity-70">
-              動画から取り込み / AI生成 / ライブラリ
-            </span>
-          </span>
-        </button>
-      )}
       {motionLibOpen && (
         <MotionLibraryPopup entityId={entity.id} onClose={() => setMotionLibOpen(false)} />
       )}
@@ -1847,7 +1856,15 @@ function DirectorPanel() {
 
   return (
     <aside className="flex w-full flex-col overflow-hidden border-l border-[#242424] bg-[#141414]">
-      {/* 上段: 選択オブジェクト(高さは境界ドラッグで調整) */}
+      {/* 最上段: 演出チャット(この画面の主役)。
+          オブジェクト選択の有無に関わらず常に一番上に出す。なぜ: 下段に置くと
+          オブジェクト選択時に240pxの上段に押し下げられて画面外になり、
+          「AIに動きを組ませる」導線が見つからない(2026-07-26 指摘) */}
+      <div className="shrink-0 border-b border-[#242424] px-4 pb-3 pt-4">
+        <DirectorChat />
+      </div>
+
+      {/* 中段: 選択オブジェクト(高さは境界ドラッグで調整) */}
       {hasEntity && (
         <>
           <div style={{ height: objH }} className="shrink-0 overflow-y-auto px-4 pt-4">
@@ -1878,7 +1895,6 @@ function DirectorPanel() {
 
       {/* 下段: カット/カメラ/書き出し */}
       <div className="flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto px-4 py-4">
-      <DirectorChat />
       <div>
         <p className="mb-2 text-[10px] font-bold uppercase tracking-widest text-neutral-600">
           カット
@@ -3191,8 +3207,13 @@ function DirectorChat() {
 
   return (
     <div>
-      <p className="mb-2 text-[10px] font-bold uppercase tracking-widest text-neutral-600">
-        演出チャット
+      <p className="flex items-center gap-1.5 text-[11px] font-bold tracking-wide text-pink-300">
+        <ClapperIcon />
+        AIに動きを組ませる
+      </p>
+      <p className="mb-2 mt-1 text-[10px] leading-4 text-neutral-500">
+        やりたいことを日本語で書くと、AIが人の動き・カメラの動き・カット割りまでまとめて組みます。
+        1つずつ手で選ぶ必要はありません
       </p>
       <div className="relative">
         <textarea

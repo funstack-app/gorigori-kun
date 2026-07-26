@@ -16,6 +16,7 @@ import {
 } from "../../../lib/store/workspace";
 import { getAngleCut } from "../../../lib/multiangle/angles";
 import type { CutState, MultiAngleParams } from "../../../lib/multiangle/types";
+import { sendImageToCharacterRegister } from "../../../lib/character/sendImageToCharacterRegister";
 import { GenerationGauge, recordGenerationDuration } from "../../GenerationGauge";
 
 /* ---------- フラットラインアイコン (絵文字を使わない。STΛCK 指示 2026-07-25) ---------- */
@@ -72,6 +73,14 @@ const DownloadIcon = () => (
   <LineIcon size={11}>
     <path d="M12 3v11M8 10.5l4 4 4-4" />
     <path d="M4 20h16" />
+  </LineIcon>
+);
+/** キャラクター登録: 人型 + プラス */
+const CharacterAddIcon = () => (
+  <LineIcon size={11}>
+    <circle cx="9" cy="8" r="3.2" />
+    <path d="M3.5 20c0-3.2 2.5-5.4 5.5-5.4s5.5 2.2 5.5 5.4" />
+    <path d="M18 12v6M15 15h6" />
   </LineIcon>
 );
 
@@ -609,6 +618,27 @@ export function AngleGridPanel({
                     ローカル
                   </button>
                 </div>
+                {/*
+                  STΛCK 要望 (2026-07-26): 気に入った 1 枚からそのままキャラを登録したい。
+                  このカットを参照画像にしてキャラクター登録スキルへ移動する。
+                  保存系 3 つとは役割が違う「次の工程へ進む」導線なので、行を分けて
+                  アクセント色 (ピンク) を当てる。
+                */}
+                <button
+                  type="button"
+                  onClick={() =>
+                    sendImageToCharacterRegister({
+                      imagePath: cut.imagePath as string,
+                      sourceLabel: cut.label,
+                    })
+                  }
+                  disabled={cut.status !== "completed" || !cut.imagePath}
+                  title="このカットを参照画像にしてキャラクター登録に進む"
+                  className="flex w-full items-center justify-center gap-1 rounded-md border border-pink-500/40 bg-pink-500/10 px-1.5 py-1 text-[10px] font-bold text-pink-200 transition hover:border-pink-400 hover:bg-pink-500/20 hover:text-white disabled:cursor-not-allowed disabled:border-[#343434] disabled:bg-transparent disabled:text-neutral-600"
+                >
+                  <CharacterAddIcon />
+                  このカットでキャラクター登録
+                </button>
               </div>
             </div>
           ))}
