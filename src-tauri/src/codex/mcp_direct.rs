@@ -150,7 +150,48 @@ pub async fn call_tool(
                 // threadId が無効 (app-server 再起動等) の可能性があるときだけ、
                 // スレッドを作り直して 1 回リトライする。2 回目も失敗なら諦める。
                 invalidate_utility_thread().await;
+
+                // 「そんな MCP サーバーは無い」と言われた場合は、**設定も読み直してから**
+                // 再試行する (2026-07-26 STΛCK 報告)。
+                //
+                // なぜ: app-server は起動時にしか config.toml を読まない。アプリを立ち上げた
+                // 後に接続した場合も、逆に接続済みの状態でアプリを起動した場合も、
+                // 常駐サーバーの側が古い顔ぶれを持ったままになることがある。実際に
+                // higgsfield が登録済み・OAuth 認証済みなのに
+                //   `rpc error -32603: unknown MCP server 'higgsfield'`
+                // で動画生成が落ちた。ユーザーには「接続済みなのに使えない」としか
+                // 見えず、再接続もアプリ再起動も効かない詰みになる。
+                //
+                // スレッド破棄だけでは足りない (新しいスレッドを作っても、サーバー側の
+                // 一覧が古ければ同じ結果になる) ので、設定の読み直しと対で行う。
+                let msg = e.to_string();
+                let unknown_server =
+                    msg.contains("unknown MCP server") || msg.contains("unknown mcp server");
+                if unknown_server && attempt == 0 {
+                    tracing::warn!(
+                        target: "mcp_direct",
+                        "{server} が見つからないと言われました。MCP 設定を読み直して再試行します"
+                    );
+                    if let Err(reload_err) = client
+                        .request_raw("config/mcpServer/reload", Value::Null)
+                        .await
+                    {
+                        tracing::warn!(
+                            target: "mcp_direct",
+                            "設定の読み直しに失敗 (再試行は続行): {reload_err}"
+                        );
+                    }
+                }
+
                 if attempt == 1 {
+                    // 最後まで見つからなかった場合は、次の行動が分かる言い方にする。
+                    // 生の rpc error だけだと非エンジニアには何をすべきか分からない。
+                    if unknown_server {
+                        return Err(format!(
+                            "{server} に接続できませんでした。設定画面で {server} の接続を確認してください \
+                             (接続済みの場合は、一度切断してから接続し直すと直ることがあります)。詳細: {e}"
+                        ));
+                    }
                     return Err(format!("{server} の {tool} 呼び出しに失敗しました: {e}"));
                 }
             }
@@ -175,6 +216,26 @@ pub async fn reload_mcp_servers(state: &AppState) {
     {
         tracing::warn!(target: "mcp_direct", "config/mcpServer/reload 失敗 (次回起動時に反映): {e}");
     }
+
+    // 設定を読み直したら、**使い回しているスレッドも捨てる** (2026-07-26 STΛCK 報告)。
+    //
+    // ## なぜこれが要るか
+    //
+    // UTILITY_THREAD は一度作ったら以後ずっと使い回す。ところがスレッドは
+    // **作られた時点の MCP サーバー一覧を持つ**ため、後から config.toml に
+    // higgsfield を足して reload しても、既存スレッドから見える顔ぶれは古いまま。
+    // 結果、接続は成功しているのに実行だけが
+    //   `rpc error -32603: unknown MCP server 'higgsfield'`
+    // で落ちる。ユーザーからは「接続済みなのに使えない」に見え、
+    // 再接続もアプリ再起動も効かない (再起動時は起動→接続の順なので同じ状態に戻る)。
+    //
+    // reload と対で捨てておけば、次の call_tool が新しい設定でスレッドを作り直す。
+    // 捨てるコストはスレッド1本の作り直しだけで、生成中の処理には影響しない。
+    invalidate_utility_thread().await;
+    tracing::info!(
+        target: "mcp_direct",
+        "MCP 設定を読み直し、キャッシュ済みスレッドを破棄しました (次回呼び出しで新しい設定が効きます)"
+    );
 }
 
 #[cfg(test)]
