@@ -34,6 +34,26 @@ concurrency:
 
 jobs:
   # ─────────────────────────────────────────────────────────────
+  # 出荷前ゲート: 既定モデルを同梱 CLI で実行できるかを検査する
+  #
+  # なぜ CI にも置くか (2026-07-26):
+  #   scripts/release-checklist.sh からも同じ検査を呼んでいるが、
+  #   チェックを走らせずにタグを push すればすり抜ける。
+  #   実際に v2.0.0 / v2.1.0 は「既定モデルが 400 で必ず失敗する」状態で
+  #   出荷され、発覚はユーザー報告まで9日かかった。
+  #   ビルドの前に落とせば、壊れた配布物がリリースに上がることが構造的に無くなる。
+  #
+  #   ubuntu で 30 秒未満、依存は python3 だけ。ビルド 25分の前段としては安い。
+  # ─────────────────────────────────────────────────────────────
+  preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: 既定モデル × 同梱 codex CLI の整合を検査
+        run: python3 scripts/check-model-cli-match.py
+
+  # ─────────────────────────────────────────────────────────────
   # macOS (.dmg) - Apple Silicon のみ
   #
   # v0.6.17 で Intel Mac 対応のため matrix 化したが、v2.0.0 (2026-07-25) で
@@ -53,6 +73,7 @@ jobs:
   # matrix 構造は残してあるので、行を1本足せば戻せる。
   # ─────────────────────────────────────────────────────────────
   macos:
+    needs: preflight
     runs-on: macos-14
     strategy:
       fail-fast: false
@@ -173,6 +194,7 @@ jobs:
   # STΛCK 指示 (2026-05-15): 友達に渡して動かせる Windows 版を作る
   # ─────────────────────────────────────────────────────────────
   windows:
+    needs: preflight
     runs-on: windows-latest
     steps:
       - name: Checkout

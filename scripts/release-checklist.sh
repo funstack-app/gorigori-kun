@@ -99,7 +99,24 @@ else
   fi
 fi
 
-# 6. git working tree clean (オプション、警告のみ)
+# 6. 既定モデル × 同梱 codex CLI の整合 (2026-07-26 実害を受けて追加)
+#
+# なぜ: 2026-07-17 にモデルを 5.6 世代へ更新した際、同梱 CLI の更新を忘れ、
+# 「既定モデルが 400 で必ず失敗する」状態を v2.0.0 / v2.1.0 として出荷した。
+# dev では PATH の新しい CLI を拾うため再現せず、発覚はユーザー報告まで9日。
+# 整合を取るべき値が別ファイルにあるので、人の注意ではなくコードで検査する。
+if [ -f "$ROOT/scripts/check-model-cli-match.py" ]; then
+  if python3 "$ROOT/scripts/check-model-cli-match.py" > /tmp/model-cli-check.txt 2>&1; then
+    ok "既定モデルと同梱 codex CLI の整合"
+  else
+    fail "既定モデルと同梱 codex CLI が不整合"
+    sed 's/^/     /' /tmp/model-cli-check.txt
+  fi
+else
+  fail "scripts/check-model-cli-match.py が見つからない (検査が消えている)"
+fi
+
+# 7. git working tree clean (オプション、警告のみ)
 if [ -n "$(git status --porcelain)" ]; then
   echo "⚠️  未コミットの変更あり (git status で確認)"
 fi
