@@ -238,11 +238,12 @@ pub fn run() {
             // its pool is only created when the frontend explicitly
             // calls `Database.load(url)` — adding an extra hop and a
             // capability requirement that's easy to miss.
-            tauri::async_runtime::block_on(commands::storage::initialize_storage(&state_for_setup))
-                .map_err(|e| {
-                    tracing::error!(target: "codex.storage", "storage init failed: {e}");
-                    Box::<dyn std::error::Error>::from(e)
-                })?;
+            // initialize_storage は失敗しない (Err を返さない) 設計にした。
+            // 以前は `?` で伝播しており、設定JSONの破損や保存先ボリュームの不在で
+            // **ウィンドウが出る前にアプリが終了**していた。ユーザーには
+            // 「ダブルクリックしても何も起きない」としか見えず、設定画面に
+            // 到達できないため保存先を戻すこともできなかった (2026-07-26 監査)。
+            tauri::async_runtime::block_on(commands::storage::initialize_storage(&state_for_setup));
             crate::cloud::sync_worker::spawn_background_sync();
             crate::storage_cleanup::spawn_background_cleanup();
 

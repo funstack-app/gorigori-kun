@@ -50,17 +50,36 @@ impl Default for StorageSettings {
 impl StorageSettings {
     pub fn load() -> Result<Self, String> {
         let path = settings_path()?;
-        let settings = if path.exists() {
-            let text = fs::read_to_string(&path)
-                .map_err(|e| format!("保存先設定の読み込みに失敗 ({}): {e}", path.display()))?;
-            if text.trim().is_empty() {
-                Self::default()
-            } else {
-                serde_json::from_str::<Self>(&text)
-                    .map_err(|e| format!("保存先設定の解析に失敗 ({}): {e}", path.display()))?
-            }
+        // 新パスに無ければ旧パス (macOS 決め打ちだった場所) から拾う。
+        // Windows で旧実装が書いた設定を引き継ぐため (2026-07-26)。
+        // 読むだけで、書き戻しは save() が新パスへ行う。
+        let source = if path.exists() {
+            Some(path.clone())
         } else {
-            Self::default()
+            match legacy_settings_path() {
+                Some(legacy) if legacy.exists() && legacy != path => {
+                    tracing::info!(
+                        target: "codex.storage",
+                        "旧パスの保存先設定を引き継ぎます: {}",
+                        legacy.display()
+                    );
+                    Some(legacy)
+                }
+                _ => None,
+            }
+        };
+        let settings = match source {
+            Some(src) => {
+                let text = fs::read_to_string(&src)
+                    .map_err(|e| format!("保存先設定の読み込みに失敗 ({}): {e}", src.display()))?;
+                if text.trim().is_empty() {
+                    Self::default()
+                } else {
+                    serde_json::from_str::<Self>(&text)
+                        .map_err(|e| format!("保存先設定の解析に失敗 ({}): {e}", src.display()))?
+                }
+            }
+            None => Self::default(),
         };
         settings.ensure_root()?;
         Ok(settings)
@@ -277,9 +296,38 @@ pub async fn storage_legacy_summary() -> Result<LegacySummary, String> {
     })
 }
 
+/// 保存先設定ファイルのパス。**OS ごとの正しい場所を使う。**
+///
+/// ## なぜ直したか (2026-07-26 監査で発見)
+///
+/// 以前は `home.join("Library/Application Support/app.codexframefactory")` と
+/// **macOS のパスを決め打ち**していた。Windows には
+/// `Library/Application Support` が存在しないため:
+///   1. 読み込みが必ず失敗し、load() が既定値を返す（エラーにならないので気づけない）
+///   2. 保存先を外付けSSDやクラウド同期フォルダに変えても
+///      **再起動のたびに ~/Pictures/GORI GORI に戻る**
+///   3. save() は create_dir_all するので、ホームに
+///      `Library\Application Support\` という異物フォルダが作られる
+///
+/// 同じファイルの `default_projects_file_path()` は正しく `dirs::data_dir()` を
+/// 使い、コメントに「Win: %APPDATA%」と明記していた。
+/// **projects.json だけが移行済みで、storage-settings.json が取り残されていた**
+/// （矛盾として明示した上で、取り残された側を直す）。
 pub fn settings_path() -> Result<PathBuf, String> {
-    let home = dirs::home_dir().ok_or_else(|| "ホームディレクトリの解決に失敗".to_string())?;
-    Ok(home.join(SERVICE_DIR).join(SETTINGS_FILE))
+    let dir = dirs::data_dir()
+        .ok_or_else(|| "アプリ設定ディレクトリの解決に失敗".to_string())?
+        .join(crate::secrets::SERVICE_NAME);
+    Ok(dir.join(SETTINGS_FILE))
+}
+
+/// 旧パス（macOS 決め打ち）。**移行元として読むだけで、書き込みはしない。**
+///
+/// macOS では `dirs::data_dir()` が `~/Library/Application Support` を返すため
+/// 新旧が同じ場所になり移行は起きない。Windows では旧パスに実ファイルが
+/// 存在しうる（save() が create_dir_all で作っていたため）ので、
+/// そこに設定を書いていた人の保存先を引き継ぐために読む。
+fn legacy_settings_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|home| home.join(SERVICE_DIR).join(SETTINGS_FILE))
 }
 
 pub fn resolve_output_dir(
@@ -313,11 +361,114 @@ pub fn sanitize_filename(name: &str) -> String {
         .collect()
 }
 
-pub async fn initialize_storage(state: &AppState) -> Result<StorageSettings, String> {
-    let settings = StorageSettings::load()?;
-    settings.save()?;
+/// 起動時のストレージ初期化。**失敗しても Err を返さない。**
+///
+/// ## なぜ絶対に失敗させてはいけないか (2026-07-26 監査で発見)
+///
+/// この関数は lib.rs の Tauri `setup` から `?` で呼ばれていた。つまり Err を
+/// 返すと **ウィンドウが生成される前にアプリが終了する**。エラー画面もトーストも
+/// 出ないので、ユーザーには「ダブルクリックしても何も起きない」としか見えない。
+///
+/// 実際に詰む経路が2つあった:
+///   1. 保存先を外付けSSD / クラウド同期フォルダにした人が、それを外して起動
+///      → ensure_root() の create_dir_all が失敗 → 起動しない
+///      → 設定画面に到達できないので保存先を戻せない = 完全な詰み
+///   2. 生成中に電源が落ちて storage-settings.json が途中書きで壊れた
+///      → serde_json::from_str が失敗 → 起動しない
+///      (空文字だけは default に落ちるが、途中で切れた JSON は救われなかった)
+///
+/// 設定の読み込み失敗より「アプリが開くこと」が優先される。開けば設定画面から
+/// 保存先を直せるし、壊れた JSON も上書きできる。開けなければ何もできない。
+///
+/// 同ファイル :152 付近には「保存先の切り替えを巻き戻すとユーザーは詰まる」と
+/// 書いて設定変更を優先する設計判断が記録されているのに、起動経路だけが逆に
+/// 詰ませる側になっていた。**矛盾**として明示した上で、起動側を直す。
+pub async fn initialize_storage(state: &AppState) -> StorageSettings {
+    // ① 設定を読む。壊れていたら既定値で続ける (捨てずに退避する)。
+    let settings = match StorageSettings::load() {
+        Ok(settings) => settings,
+        Err(err) => {
+            tracing::error!(
+                target: "codex.storage",
+                "保存先設定を読めませんでした。既定値で起動します: {err}"
+            );
+            quarantine_broken_settings();
+            StorageSettings::default()
+        }
+    };
+
+    // ② 保存先が使えるか確かめる。使えなければ既定の保存先へ退避する。
+    //    ここで return せず、必ず「使えるどこか」を state に入れて起動を通す。
+    let settings = if settings.ensure_root().is_ok() {
+        settings
+    } else {
+        let fallback = StorageSettings::default();
+        tracing::error!(
+            target: "codex.storage",
+            "保存先 {} が使えません。既定の保存先で起動します: {}",
+            settings.storage_root,
+            fallback.storage_root
+        );
+        // 既定側も作れないなら、それでも起動は通す (state には入れる)。
+        // 生成時に個別のエラーとして出るほうが、起動しないより救いがある。
+        let _ = fallback.ensure_root();
+        fallback
+    };
+
+    // ③ 保存は失敗しても続行する。書けないことは起動を止める理由にならない。
+    if let Err(err) = settings.save() {
+        tracing::warn!(target: "codex.storage", "保存先設定の保存に失敗 (続行): {err}");
+    }
+
     state.set_storage_settings(settings.clone()).await;
-    Ok(settings)
+    settings
+}
+
+/// 壊れた storage-settings.json を消さずに退避する。
+///
+/// なぜ消さないか: 中に「ユーザーが設定した保存先のパス」が入っている。
+/// 壊れていても人が読めば復元できる情報なので、上書きで消してはいけない
+/// (欠落は埋めずに可視化する / 資産は残す)。
+///
+/// なぜ退避先を固定名にしないか: 壊れる事象は繰り返し起きうる (電源断が続く等)。
+/// 固定名だと2回目の退避が1回目を上書きし、**ユーザーの保存先パスが残る唯一の
+/// 記録を消してしまう**。空いている番号を探して衝突を避ける。
+fn quarantine_broken_settings() {
+    let Ok(path) = settings_path() else { return };
+    if !path.exists() {
+        return;
+    }
+    let backup = next_free_backup_path(&path);
+    match fs::rename(&path, &backup) {
+        Ok(()) => tracing::warn!(
+            target: "codex.storage",
+            "壊れた設定を {} に退避しました (中の保存先パスは人が読めば復元できます)",
+            backup.display()
+        ),
+        Err(err) => tracing::warn!(
+            target: "codex.storage",
+            "壊れた設定の退避に失敗 (続行): {err}"
+        ),
+    }
+}
+
+/// 既存の退避ファイルを潰さない退避先を返す。
+///
+/// `foo.json` → `foo.json.broken` → 埋まっていれば `foo.json.broken.2`,
+/// `.broken.3` … と空きを探す。上限まで全部埋まっていたら最後の名前を返す
+/// (その1件だけは上書きされるが、無限ループやディスク圧迫よりは軽い被害)。
+fn next_free_backup_path(path: &Path) -> PathBuf {
+    let first = path.with_extension("json.broken");
+    if !first.exists() {
+        return first;
+    }
+    for n in 2..=50 {
+        let candidate = path.with_extension(format!("json.broken.{n}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    path.with_extension("json.broken.50")
 }
 
 async fn restart_image_watcher(app: &AppHandle, state: &AppState) {
@@ -358,11 +509,25 @@ pub fn watcher_dirs(settings: Option<&StorageSettings>) -> Vec<PathBuf> {
 }
 
 fn default_storage_root_string() -> String {
-    let home = dirs::home_dir().expect("home dir");
-    home.join("Pictures")
-        .join("GORI GORI")
-        .to_string_lossy()
-        .into_owned()
+    // panic させない (2026-07-26 監査)。
+    //
+    // なぜ: この関数は `#[serde(default = ...)]` から呼ばれるため、
+    // **JSON デシリアライズの途中で実行される**。以前は `.expect("home dir")`
+    // だったので、HOME が解決できない環境ではエラーではなく即クラッシュした。
+    // 同じリポジトリの codex/home.rs は同種の処理を Option で返しており、
+    // ここだけ流儀が違っていた（矛盾）。
+    //
+    // HOME が無い環境では一時ディレクトリへ退避する。保存先として理想では
+    // ないが、クラッシュして何も保存できないより良い。
+    //
+    // picture_dir() は `~/Pictures` 自体を返すので、ここで `Pictures` を
+    // 足し直すと `~/Pictures/Pictures` になる。段の付け方が home_dir とは
+    // 違うため、分岐ごとに「GORI GORI の親になるディレクトリ」まで解決する。
+    let parent = match dirs::home_dir() {
+        Some(home) => home.join("Pictures"),
+        None => dirs::picture_dir().unwrap_or_else(std::env::temp_dir),
+    };
+    parent.join("GORI GORI").to_string_lossy().into_owned()
 }
 
 fn default_project_subfolder() -> bool {
@@ -770,4 +935,65 @@ pub async fn projects_set_data_root(
     settings.save()?;
     state.set_storage_settings(settings).await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 壊れた設定が2回続けて出ても、1回目の退避を潰さないこと。
+    ///
+    /// なぜこのテストが要るか: 退避先が固定名だと、2回目の電源断で
+    /// 「ユーザーが設定した保存先パスが残る唯一の記録」が消える。
+    #[test]
+    fn quarantine_does_not_clobber_previous_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("storage-settings.json");
+
+        let first = next_free_backup_path(&settings);
+        assert_eq!(first.file_name().unwrap(), "storage-settings.json.broken");
+        fs::write(&first, b"1st").unwrap();
+
+        let second = next_free_backup_path(&settings);
+        assert_eq!(second.file_name().unwrap(), "storage-settings.json.broken.2");
+        fs::write(&second, b"2nd").unwrap();
+
+        let third = next_free_backup_path(&settings);
+        assert_eq!(third.file_name().unwrap(), "storage-settings.json.broken.3");
+
+        // 先に退避した中身が生きていること (上書きされていない)
+        assert_eq!(fs::read_to_string(&first).unwrap(), "1st");
+        assert_eq!(fs::read_to_string(&second).unwrap(), "2nd");
+    }
+
+    /// 既定の保存先が `Pictures` を二重に重ねないこと。
+    ///
+    /// なぜ: picture_dir() は `~/Pictures` 自体を返すため、home_dir() と
+    /// 同じ扱いで `Pictures` を足すと `~/Pictures/Pictures/GORI GORI` になる。
+    #[test]
+    fn default_storage_root_has_no_duplicated_pictures_segment() {
+        let root = default_storage_root_string();
+        assert!(
+            !root.contains("Pictures/Pictures") && !root.contains("Pictures\\Pictures"),
+            "既定の保存先で Pictures が二重になっている: {root}"
+        );
+        assert!(root.ends_with("GORI GORI"), "末尾が GORI GORI でない: {root}");
+    }
+
+    /// 設定ファイルは OS 標準のアプリデータ領域に置くこと。
+    ///
+    /// なぜ: 以前は macOS のパスを決め打ちしており、Windows では
+    /// 設定が永続せず保存先が毎回リセットされていた。
+    #[test]
+    fn settings_path_lives_under_os_data_dir() {
+        let path = settings_path().unwrap();
+        let data_dir = dirs::data_dir().unwrap();
+        assert!(
+            path.starts_with(&data_dir),
+            "設定パス {} が OS のデータ領域 {} の下にない",
+            path.display(),
+            data_dir.display()
+        );
+        assert!(path.ends_with(SETTINGS_FILE));
+    }
 }
