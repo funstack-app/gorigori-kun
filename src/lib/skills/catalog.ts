@@ -59,10 +59,10 @@ export const GORI_SKILLS: GoriSkill[] = [
     name: "キャラクター登録",
     shortName: "Character Register",
     description:
-      "1枚の参照画像から3面図・表情・顔ディテールを一括生成し、同一キャラとしてプリセット登録。以降の生成で呼び出せる。",
+      "キャラの絵を1枚渡すと、正面・横・後ろ姿や表情、顔アップをまとめて作って「このキャラ」として登録します。登録しておくと、以降どのスキルでも同じ顔のまま呼び出せます。",
     path: "~/.codex/skills/gori-character-register",
     availableInApp: true,
-    launchHint: "まずはここから: 1枚からキャラを資産化",
+    launchHint: "まずはここから · 絵1枚 → 登録キャラ",
   },
   {
     // 2026-05-20 開放: β版で 4-Phase 専用 Workspace (StoryboardWorkspace) を
@@ -73,10 +73,10 @@ export const GORI_SKILLS: GoriSkill[] = [
     name: "ストーリーカット生成",
     shortName: "Storyboard",
     description:
-      "ストーリーから一貫したカット列を連続生成。キャラ/スタイルを固定して物語を進める。",
+      "作りたい話を伝えると、AIが聞き返しながら絵コンテに起こし、そのままカットを連続生成します。登録キャラと画風を固定するので、話が進んでも同じ人物・同じ絵柄のまま並びます。",
     path: "~/.codex/skills/gori-storyboard",
     availableInApp: true,
-    launchHint: "AI と対話してカット列を量産",
+    launchHint: "話す → 絵コンテ → カット一式",
   },
   {
     // 2026-06-06 開放: β版で専用 Workspace (MultiAngleWorkspace) を実装。
@@ -86,46 +86,66 @@ export const GORI_SKILLS: GoriSkill[] = [
     name: "マルチアングル生成",
     shortName: "Multi-Angle",
     description:
-      "環境と被写体を固定し、ショット距離(クローズアップ/ミディアム/ロング)とアングル(俯瞰/煽り/正面)だけ変えて一気にカット量産。",
+      "被写体と場所はそのままに、寄り／引きとカメラの高さ（見上げ・見下ろし・正面）だけを変えたカットを、選んだ分だけ一度に作ります。同じシーンの画角違いが最大30枚そろいます。",
     path: "~/.codex/skills/gori-multi-angle",
     availableInApp: true,
-    launchHint: "30 カット一気に量産",
+    launchHint: "同じ場面を画角違いで最大30枚",
   },
   {
-    // 2026-07-19 追加 (スキル一覧v2.1 #2): 登録キャラに表情セットを一括生成し、
-    // 同一人物に見えるかをAIが検品して崩れたカットだけ作り直す。
+    // 2026-07-19 追加 (スキル一覧v2.1 #2): 登録キャラに表情セットを一括生成する。
+    //
+    // 2026-07-26 説明文を実装に合わせて修正:
+    // 以前は「同一人物に見えるかをAIが検品し、崩れたカットだけ自動で作り直す」と
+    // 書いていたが、**同一性の自動検品は未実装**。ExpressionSetWorkspace.tsx:40 に
+    // 「検品（同一性採点）は未実装のため『未検品』バッジのみ表示する」とあり、
+    // identityCheck.ts の実体は NoopIdentityChecker (欠落を欠落のまま返す)。
+    // 名前が約束していないことをやらない状態にする (scene-3d と同じ扱い)。
     id: "gori-expression-set",
     name: "表情差分",
     shortName: "Expression Set",
     description:
-      "登録キャラに喜怒哀楽〜細かい演技の表情セットを一括生成。同一人物に見えるかをAIが検品し、崩れたカットだけ自動で作り直す。",
+      "登録したキャラの表情違いを一度にまとめて作ります。喜怒哀楽から細かい演技まで、同じ顔のまま表情だけを差し替えたカットがそろいます。似ているかどうかの最終判断は人の目で行います。",
     path: "~/.codex/skills/gori-expression-set",
     availableInApp: true,
-    launchHint: "表情バリエーションを一括生成",
+    launchHint: "登録キャラ → 表情ちがいを一式",
   },
   {
-    // 2026-07-19 追加 (スキル一覧v2.1 #8): 参考動画URLからショット割り・カメラワーク・
-    // 映像文法を読み取り、自分のキャラ・商品で再現するプロンプト+3Dカメラプリセットを出力。
+    // 2026-07-19 追加 (スキル一覧v2.1 #8)。
+    //
+    // 2026-07-26 説明文を実装に合わせて修正 (STΛCK 指摘):
+    // 以前は「参考動画のURLから読み取り」「3Dカメラプリセットを出力」と書いていたが、
+    // **どちらも実装されていない**。SceneRecreateWorkspace.tsx:100 に
+    // 「codex は動画を直接見られないため時系列キーフレームを投入する方式で成立させる」
+    // とあり、実際の入力は静止画 (IMAGE_EXTS) のみ。URL欄は「参考動画の補足(任意)」の
+    // 自由記述メモで、そこから何かを取得する処理は無い。3Dカメラプリセットも
+    // 「今後の Scene 3D 連携として表示のみ」。
+    //
+    // また STΛCK 指摘のとおり、静止画からは**時間的な動き**(カメラが寄る速さ、
+    // カットのテンポ)は原理的に読めない。読めるのは構図・光・被写体配置まで。
+    // 説明でも「動き」を約束しない。
     id: "gori-scene-recreate",
     name: "シーン再現",
     shortName: "Scene Recreate",
     description:
-      "参考動画のURLからショット割り・カメラワーク・映像文法まで読み取り演出意図を言語化。自分のキャラ・商品で同じ演出を再現するプロンプト+3Dカメラプリセットを出力。",
+      "気になった映像のスクショを何枚か並べて渡すと、構図・光・被写体の置き方を読み解いて言葉にし、自分のキャラや商品で同じ画作りを再現するプロンプトを出します。動画URLからの取り込みには未対応です。",
     path: "~/.codex/skills/gori-scene-recreate",
     availableInApp: true,
-    launchHint: "参考動画の演出を再現",
+    launchHint: "スクショ数枚 → 同じ画作りの指示文",
   },
   {
     // 2026-07-19 追加 (スキル一覧v2.1 #9): 話からネーム→登録キャラ固定でコマ生成→
     // 吹き出し・写植→ページ完成まで。漫画広告・SNS漫画のキャラ一貫性を管理。
+    // 2026-07-26 説明文を実装に合わせて修正: 吹き出し・写植の画像合成は未実装
+    // (ComicWorkspace.tsx:32「写植・吹き出し合成は MVP 対象外」/ :656「現状はコマの下に
+    // セリフをテキスト表示します」)。launchHint の「ページ完成まで」は過大な約束だった。
     id: "gori-comic",
     name: "漫画制作",
     shortName: "Comic",
     description:
-      "話を渡すとネーム(コマ割り+セリフ案)を起こし、登録キャラを固定してコマ画像を生成。セリフ案付きで各コマを並べる。",
+      "話を渡すとコマ割りとセリフ案を起こし、登録キャラのままコマの絵を生成します。コマごとに構図もセリフも直せます。セリフはコマの下にテキストで付き、吹き出しの焼き込みは今後対応です。",
     path: "~/.codex/skills/gori-comic",
     availableInApp: true,
-    launchHint: "話からページ完成まで",
+    launchHint: "話 → コマ割り → コマの絵",
   },
   {
     // 2026-07-19 追加 (スキル一覧v2.1 #10): クライアントの赤入れPDF・注釈画像を読み取り、
@@ -134,10 +154,10 @@ export const GORI_SKILLS: GoriSkill[] = [
     name: "赤入れ反映",
     shortName: "Redline",
     description:
-      "注釈画像の赤入れを読み取り、何をどう直したいかを日本語で言語化。そのまま編集タブに渡して部分修正に反映できる。",
+      "赤ペンや注釈の入った画像を渡すと、どこを何色でどう直せと言われているのかを読み取って日本語に起こします。指している範囲がはっきりしていれば、その部分だけを直せます。",
     path: "~/.codex/skills/gori-redline",
     availableInApp: true,
-    launchHint: "赤入れを部分修正に反映",
+    launchHint: "赤入れ画像 → 直しの指示に変換",
   },
   {
     // 2026-07-19 追加 (スキル一覧v2.1 #11): 入稿物一式を文字量比率・必須表記・ロゴ・
@@ -146,10 +166,10 @@ export const GORI_SKILLS: GoriSkill[] = [
     name: "レギュレーション検査",
     shortName: "Regulation Check",
     description:
-      "入稿物一式を文字量比率・必須表記・ロゴ・NG表現の観点で検査し、根拠付きの指摘一覧を返す。",
+      "入稿前のクリエイティブを渡すと、文字の占める割合・入れ忘れてはいけない表記・ロゴの扱い・使ってはいけない表現を見て、どこが引っかかるかを理由つきで指摘します。",
     path: "~/.codex/skills/gori-regulation-check",
     availableInApp: true,
-    launchHint: "入稿物を観点別に検査",
+    launchHint: "入稿前に引っかかる箇所を洗い出す",
   },
   {
     // 2026-07-19 追加 (スキル一覧v2.1 #12): 商品写真1枚から白背景・シーンカット・
@@ -158,10 +178,10 @@ export const GORI_SKILLS: GoriSkill[] = [
     name: "EC納品セット",
     shortName: "Product Set",
     description:
-      "商品写真1枚から、白背景・シーンカット・ディテール寄りの納品一式をセットで生成・整形。",
+      "商品写真を1枚渡すと、白背景の商品単体・使用シーン・寄りのディテールを一式にして作ります。撮り直しなしで、ECに載せる用の絵がひととおりそろいます。",
     path: "~/.codex/skills/gori-product-set",
     availableInApp: true,
-    launchHint: "撮影1枚から納品一式",
+    launchHint: "商品写真1枚 → 掲載用ひと揃い",
   },
   {
     // 2026-07-10 追加 (Phase 0 スパイク) → v2.1 で 3D演出→動画に統合。
@@ -176,7 +196,7 @@ export const GORI_SKILLS: GoriSkill[] = [
     name: "3Dカメラワーク",
     shortName: "Scene 3D",
     description:
-      "3D空間に人物・小物を置き、カメラワークをドラッグで演出。モーションガイド動画と開始フレーム画像を書き出し、動画生成の「参照動画」「開始画像」として使う。",
+      "3Dの空間に人物や小物を置いて、カメラの動きをドラッグで作れます。作った動きは案内用の動画と最初のコマの画像として書き出せるので、動画生成にそのまま渡せます。動画そのものはここでは作りません。",
     path: "~/.codex/skills/gori-scene-3d",
     availableInApp: true,
     launchHint: "Blender不要でカメラワークを作る",
