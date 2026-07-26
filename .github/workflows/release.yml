@@ -172,25 +172,18 @@ jobs:
           print("✓ tauri.conf.json updated, resources:", existing)
           PYEOF
 
-      - name: Build and publish (macOS ${{ matrix.target }})
-        uses: tauri-apps/tauri-action@v0.6.2
+      # 2026-07-26: tauri-action をやめて素の build に切り替えた。
+      #
+      # なぜ: CI からリリースを作れない (組織設定で GITHUB_TOKEN が read 固定 /
+      # RELEASE_PAT は期限切れ)。tauri-action で includeRelease: false にすると
+      # 「公開もしないしビルドもしない」状態になり `No artifacts were found` で
+      # 即終了した (実測: 1分で失敗)。ビルドと公開を分離し、ここではビルドだけ行う。
+      # 成果物は次のステップで artifact にし、手元の権限で publish する。
+      - name: Build (macOS ${{ matrix.target }})
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
-        with:
-          tagName: ${{ inputs.tag || github.ref_name }}
-          releaseName: 'GORI GORI KUN ${{ inputs.tag || github.ref_name }}'
-          # Codex指摘 (2026-05-19): draft release は releases/latest/download
-          # URL から取得できないため、updater 経路が壊れる。non-draft で publish する。
-          releaseDraft: false
-          prerelease: false
-          # 2026-07-26: CI からリリースを作れない (組織設定で GITHUB_TOKEN が read 固定、
-          # RELEASE_PAT は期限切れ)。ビルドだけ行い、成果物は artifact で持ち出して
-          # 手元の権限で publish する。恒久対応は PAT 再発行か組織設定の変更。
-          includeRelease: false
-          includeUpdaterJson: true
-          args: '--target ${{ matrix.target }}'
+        run: npm run tauri build -- --target ${{ matrix.target }}
 
       # 2026-07-26: CI からリリースを作れないため、成果物を持ち出せるようにする。
       # 手元で `gh run download` して `gh release create` で publish する。
@@ -298,24 +291,12 @@ jobs:
           Write-Host "✓ tauri.conf.json updated:"
           Get-Content $confPath | Select-String -Pattern "resources" -Context 0,5
 
-      - name: Build and publish (Windows)
-        uses: tauri-apps/tauri-action@v0.6.2
+      # 2026-07-26: mac 側と同じ理由で tauri-action をやめ、素の build にした。
+      - name: Build (Windows)
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
-        with:
-          tagName: ${{ inputs.tag || github.ref_name }}
-          releaseName: 'GORI GORI KUN ${{ inputs.tag || github.ref_name }}'
-          # Codex指摘 (2026-05-19): mac jobs と統一して non-draft で publish
-          releaseDraft: false
-          prerelease: false
-          # 2026-07-26: CI からリリースを作れない (組織設定で GITHUB_TOKEN が read 固定、
-          # RELEASE_PAT は期限切れ)。ビルドだけ行い、成果物は artifact で持ち出して
-          # 手元の権限で publish する。恒久対応は PAT 再発行か組織設定の変更。
-          includeRelease: false
-          includeUpdaterJson: true
-          args: '--target x86_64-pc-windows-msvc'
+        run: npm run tauri build -- --target x86_64-pc-windows-msvc
 
       # 2026-07-26: mac 側と同じ理由で成果物を持ち出す。
       - name: Upload build artifacts (Windows)
