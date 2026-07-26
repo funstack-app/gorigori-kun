@@ -255,8 +255,35 @@ pub struct Diagnostics {
     pub app_version: String,
     pub resolved_codex_path: Option<String>,
     pub codex_path_exists: bool,
+    /// 解決された codex CLI の `--version` 出力から取った版 (例 "0.145.0")。
+    /// 取れなければ None。フロントは「古い CLI で使えないモデルを選ばせない」
+    /// 判定に使う (2026-07-26: 同梱 CLI 0.131 が新モデルを 400 で弾いた実害)。
+    pub codex_cli_version: Option<String>,
     pub current_exe: Option<String>,
     pub log_dir: Option<String>,
+}
+
+/// `codex --version` を実行して版だけ取り出す。
+///
+/// 失敗しても None を返すだけで、呼び出し元は止めない。バージョンが取れない
+/// ことを理由に機能を絞ると、原因不明の「モデルが選べない」を作ってしまう。
+async fn probe_codex_cli_version(bin: &std::path::Path) -> Option<String> {
+    let mut cmd = tokio::process::Command::new(bin);
+    cmd.arg("--version");
+    cmd.env("PATH", crate::codex::process::enriched_path());
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::null());
+    crate::codex::process::no_window_flag(&mut cmd);
+
+    let out = tokio::time::timeout(std::time::Duration::from_secs(10), cmd.output())
+        .await
+        .ok()?
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    // "codex-cli 0.145.0" / "codex-cli 0.146.0-alpha.3.1" 等から版だけ拾う
+    text.split_whitespace()
+        .find(|token| token.chars().next().is_some_and(|c| c.is_ascii_digit()))
+        .map(|s| s.to_string())
 }
 
 #[tauri::command]
@@ -266,12 +293,17 @@ pub async fn codex_diagnostics(binary_override: Option<String>) -> Result<Diagno
         Ok(p) => (Some(p.display().to_string()), p.is_file()),
         Err(_) => (None, false),
     };
+    let cli_version = match &resolved {
+        Ok(p) if p.is_file() => probe_codex_cli_version(p).await,
+        _ => None,
+    };
     Ok(Diagnostics {
         os: std::env::consts::OS.to_string(),
         arch: std::env::consts::ARCH.to_string(),
         app_version: env!("CARGO_PKG_VERSION").to_string(),
         resolved_codex_path: path_str,
         codex_path_exists: path_exists,
+        codex_cli_version: cli_version,
         current_exe: std::env::current_exe()
             .ok()
             .map(|p| p.display().to_string()),

@@ -88,7 +88,15 @@ jobs:
       - name: Fetch Codex CLI binaries (macOS ${{ matrix.target }})
         run: |
           set -e
-          codexVer="rust-v0.131.0-alpha.19"
+          # 2026-07-26: 0.131.0-alpha.19 (5/15ビルド) から 0.145.0 (安定版) へ更新。
+          # 理由: 古い CLI は新モデル (gpt-5.6-sol 等) を知らず、指定されると
+          #   400 invalid_request_error "requires a newer version of Codex"
+          # で全件失敗する。Codex デスクトップを更新した人の ~/.codex/config.toml に
+          # model = "gpt-5.6-sol" が書かれ、それを GORI の CODEX_HOME が引き継ぐため
+          # 「Codex を更新した人だけが動かない」という分かりにくい形で発症した
+          # (ユーザー報告 2026-07-26 で切り分け済み。手元で 0.145.0 なら通ることを実測)。
+          # alpha は配布物に焼かない (prerelease=false の最新を選ぶ)。
+          codexVer="rust-v0.145.0"
           base="https://github.com/openai/codex/releases/download/$codexVer"
           # matrix.target からファイル名を逆引き
           codex_arch="${{ matrix.target }}"
@@ -195,7 +203,8 @@ jobs:
       - name: Fetch Codex CLI binaries (Windows x86_64)
         shell: pwsh
         run: |
-          $codexVer = "rust-v0.131.0-alpha.19"
+          # macOS 側と同じ理由で更新 (2026-07-26)。両方を同じバージョンに保つ。
+          $codexVer = "rust-v0.145.0"
           $base = "https://github.com/openai/codex/releases/download/$codexVer"
 
           New-Item -ItemType Directory -Force -Path "src-tauri/resources" | Out-Null

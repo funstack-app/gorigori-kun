@@ -1,3 +1,4 @@
+import { invoke } from "@tauri-apps/api/core";
 import { create } from "zustand";
 import { applyNotification } from "../codex-events";
 import {
@@ -28,8 +29,73 @@ const MODEL_WHITELIST = [
 ] as const;
 
 /**
+ * ホワイトリストの各モデルが必要とする codex CLI の最小バージョン。
+ *
+ * ## なぜこの表が必要か (2026-07-26 実害を受けて新設)
+ *
+ * 2026-07-17 にホワイトリストを 5.6 世代へ更新したが、**配布版に同梱する
+ * codex CLI の更新を忘れた**(0.131.0-alpha.19 / 5月ビルドのまま)。
+ * 古い CLI は新モデル名を知らないため、既定モデル gpt-5.6-sol が選ばれると
+ *   400 invalid_request_error
+ *   "The 'gpt-5.6-sol' model requires a newer version of Codex."
+ * で画像生成が 100% 失敗した。
+ *
+ * 発覚が遅れた理由: 開発環境は PATH の新しい CLI (0.144) を拾うため一度も
+ * 再現せず、配布版だけが壊れていた。さらに selectedModel は端末に保存される
+ * ので、以前 5.5 を選んでいた人は動き続け、「動く人と動かない人がいる」
+ * という切り分けにくい形で表面化した。
+ *
+ * この表は再発を防ぐためのもの。モデルを足すときは必要 CLI も一緒に書き、
+ * CLI が古い端末では選ばせない (ピッカーから外す)。散文の注意書きでは
+ * 同じ忘れ方をするので、コードで判定する。
+ */
+const MODEL_MIN_CLI: Record<string, string> = {
+  "gpt-5.6-sol": "0.144.0",
+  "gpt-5.6-terra": "0.144.0",
+  "gpt-5.6-luna": "0.144.0",
+  "gpt-5.5": "0.0.0",
+  "gpt-5.4-mini": "0.0.0",
+};
+
+/** "0.144.0-alpha.3" のような版を数値配列にして比較する (alpha 等の接尾は無視)。 */
+function parseCliVersion(raw: string): number[] {
+  const core = raw.trim().replace(/^v/, "").split("-")[0] ?? "";
+  return core.split(".").map((part) => Number.parseInt(part, 10) || 0);
+}
+
+/** a >= b か。桁数が違っても不足桁は 0 として扱う。 */
+export function cliVersionAtLeast(actual: string, required: string): boolean {
+  const a = parseCliVersion(actual);
+  const b = parseCliVersion(required);
+  for (let i = 0; i < Math.max(a.length, b.length); i += 1) {
+    const av = a[i] ?? 0;
+    const bv = b[i] ?? 0;
+    if (av !== bv) return av > bv;
+  }
+  return true;
+}
+
+/**
+ * この CLI バージョンで実際に使えるモデルだけに絞る。
+ * cliVersion が不明 (null) のときは絞らない — 判定できないことを理由に
+ * 使えるモデルまで隠すと、原因不明の「モデルが選べない」を作ってしまう。
+ */
+export function modelsUsableOnCli<T extends { model?: string; id: string }>(
+  models: T[],
+  cliVersion: string | null,
+): T[] {
+  if (!cliVersion) return models;
+  return models.filter((m) => {
+    const required = MODEL_MIN_CLI[m.model ?? m.id];
+    if (!required) return true; // 表に無いモデルは判定材料が無いので通す
+    return cliVersionAtLeast(cliVersion, required);
+  });
+}
+
+/**
  * model/list が新モデルをまだ返さない環境（app-server 側の一覧遅延）でも
- * ピッカーに出すためのローカル表示名。CLI 0.144 以上なら実行自体は通る。
+ * ピッカーに出すためのローカル表示名。
+ * 実行可否は MODEL_MIN_CLI で判定する（バージョンをここに書かない）。
  */
 const MODEL_LABELS: Record<string, string> = {
   "gpt-5.6-sol": "GPT-5.6 Sol (標準・高品質)",
@@ -244,16 +310,49 @@ export const useThreads = create<ThreadsState>((set, get) => ({
             displayName: MODEL_LABELS[id] ?? id,
           },
       );
-      const fallback =
+      const candidates =
         filtered.length > 0
           ? filtered
           : visible.filter((m) => m.inputModalities?.includes("image"));
+
+      // この端末の codex CLI で実際に通るモデルだけに絞る (2026-07-26)。
+      //
+      // なぜ: 古い CLI は新モデル名を知らず、選ばれると 400 で全件失敗する。
+      // 配布版の同梱 CLI が 0.131 だった間、既定の gpt-5.6-sol が 100% 失敗した。
+      // 「選べるのに必ず失敗する」のが最悪なので、選ばせない。
+      // 版が取れない場合 (cliVersion=null) は絞らない — 判定できないことを
+      // 理由に使えるモデルまで隠すと、原因不明の「選べない」を作ってしまう。
+      let cliVersion: string | null = null;
+      try {
+        const diag = await invoke<{ codexCliVersion?: string | null }>(
+          "codex_diagnostics",
+        );
+        cliVersion = diag?.codexCliVersion ?? null;
+      } catch {
+        cliVersion = null;
+      }
+      const usable = modelsUsableOnCli(candidates, cliVersion);
+      // 全部弾かれたら絞り込みを捨てる。1つも選べない状態を作らない
+      // (CLI が極端に古い場合でも、旧モデルは表に無いので通る想定だが保険)。
+      const fallback = usable.length > 0 ? usable : candidates;
+      if (cliVersion && usable.length < candidates.length) {
+        console.warn(
+          `[models] codex CLI ${cliVersion} では使えないモデルを ${candidates.length - usable.length} 件除外しました`,
+        );
+      }
+
       // whitelist の先頭 (= 現行の標準モデル) を既定にする。
       // server 側 isDefault は旧世代を指し続けることがあるので使わない。
       const def = fallback[0] ?? visible[0];
+      // 保存済みの selectedModel がこの CLI で使えないなら捨てて選び直す。
+      // これをしないと「以前 5.6 を選んだ端末が CLI を戻したときに詰む」。
+      const savedModel = get().selectedModel;
+      const savedStillUsable =
+        savedModel != null &&
+        fallback.some((m) => (m.model ?? m.id) === savedModel);
       set({
         models: fallback,
-        selectedModel: get().selectedModel ?? def?.model ?? def?.id,
+        selectedModel: savedStillUsable ? savedModel : (def?.model ?? def?.id),
         selectedEffort:
           get().selectedEffort ?? def?.defaultReasoningEffort ?? undefined,
       });
