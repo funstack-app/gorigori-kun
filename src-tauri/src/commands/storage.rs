@@ -81,7 +81,16 @@ impl StorageSettings {
             }
             None => Self::default(),
         };
-        settings.ensure_root()?;
+        // ここで ensure_root() を呼ばない (2026-07-26 監査)。
+        //
+        // なぜ: 以前は呼んでいたため、**設定ファイルは完全に健全なのに
+        // 保存先の外付けドライブが未接続なだけ**で load() が Err になった。
+        // 起動時の呼び出し元はその Err を「設定が壊れている」と解釈して
+        // 健全な設定を .broken へ退避し、既定値で上書きしてしまう。
+        // ドライブを挿し直しても保存先が戻らない、という設定喪失になる。
+        //
+        // 「読めたか」と「その保存先が今使えるか」は別の問いなので分ける。
+        // ディレクトリの作成が要る場面 (save / 実際の書き出し) で個別に行う。
         Ok(settings)
     }
 
@@ -314,10 +323,20 @@ pub async fn storage_legacy_summary() -> Result<LegacySummary, String> {
 /// **projects.json だけが移行済みで、storage-settings.json が取り残されていた**
 /// （矛盾として明示した上で、取り残された側を直す）。
 pub fn settings_path() -> Result<PathBuf, String> {
-    let dir = dirs::data_dir()
-        .ok_or_else(|| "アプリ設定ディレクトリの解決に失敗".to_string())?
-        .join(crate::secrets::SERVICE_NAME);
-    Ok(dir.join(SETTINGS_FILE))
+    let data_dir =
+        dirs::data_dir().ok_or_else(|| "アプリ設定ディレクトリの解決に失敗".to_string())?;
+    Ok(settings_path_in(&data_dir))
+}
+
+/// `settings_path()` のうち、OS に問い合わせない純粋な組み立て部分。
+///
+/// なぜ分けたか: これを分けないと、テストが実行中のマシンの `data_dir()` に
+/// 依存してしまう。macOS では `data_dir()` が `~/Library/Application Support`
+/// なので、**修正前の macOS 決め打ち実装でもテストが緑になり**、
+/// 「Windows で設定が永続しない」という守りたい退行を検出できない。
+/// 引数で Windows 相当のパスを渡せる形にして、macOS 上でも牙を持たせる。
+fn settings_path_in(data_dir: &Path) -> PathBuf {
+    data_dir.join(crate::secrets::SERVICE_NAME).join(SETTINGS_FILE)
 }
 
 /// 旧パス（macOS 決め打ち）。**移行元として読むだけで、書き込みはしない。**
@@ -397,15 +416,18 @@ pub async fn initialize_storage(state: &AppState) -> StorageSettings {
         }
     };
 
-    // ② 保存先が使えるか確かめる。使えなければ既定の保存先へ退避する。
+    // ② 保存先が使えるか確かめる。使えなければ既定の保存先で起動する。
     //    ここで return せず、必ず「使えるどこか」を state に入れて起動を通す。
-    let settings = if settings.ensure_root().is_ok() {
+    let usable = settings.ensure_root().is_ok();
+    let settings = if usable {
         settings
     } else {
         let fallback = StorageSettings::default();
         tracing::error!(
             target: "codex.storage",
-            "保存先 {} が使えません。既定の保存先で起動します: {}",
+            "保存先 {} が今は使えません (外付けドライブ未接続など)。\
+             このセッションは既定の保存先で動きます: {}。\
+             設定ファイルは書き換えないので、元の場所が戻れば次回そのまま復帰します。",
             settings.storage_root,
             fallback.storage_root
         );
@@ -415,9 +437,18 @@ pub async fn initialize_storage(state: &AppState) -> StorageSettings {
         fallback
     };
 
-    // ③ 保存は失敗しても続行する。書けないことは起動を止める理由にならない。
-    if let Err(err) = settings.save() {
-        tracing::warn!(target: "codex.storage", "保存先設定の保存に失敗 (続行): {err}");
+    // ③ 保存する。ただし ② でフォールバックしたときは書かない。
+    //
+    //    なぜ書かないか (2026-07-26 監査): 外付けSSDを外して1度起動しただけで
+    //    ユーザーが設定した保存先が既定値に上書きされると、SSD を挿し直しても
+    //    元に戻らない。「今このセッションで使う場所」と「ユーザーが設定した場所」
+    //    は別物で、後者をディスクから消してよい理由がない。
+    //
+    //    保存自体の失敗は握り潰して続行する。書けないことは起動を止める理由にならない。
+    if usable {
+        if let Err(err) = settings.save() {
+            tracing::warn!(target: "codex.storage", "保存先設定の保存に失敗 (続行): {err}");
+        }
     }
 
     state.set_storage_settings(settings.clone()).await;
@@ -523,9 +554,19 @@ fn default_storage_root_string() -> String {
     // picture_dir() は `~/Pictures` 自体を返すので、ここで `Pictures` を
     // 足し直すと `~/Pictures/Pictures` になる。段の付け方が home_dir とは
     // 違うため、分岐ごとに「GORI GORI の親になるディレクトリ」まで解決する。
-    let parent = match dirs::home_dir() {
+    default_storage_root_from(dirs::home_dir(), dirs::picture_dir())
+}
+
+/// `default_storage_root_string()` のうち、OS に問い合わせない純粋な部分。
+///
+/// なぜ分けたか: home が無い分岐 (picture_dir 側) は macOS/Linux では
+/// **絶対に実行されない**ため、そこにデグレを入れてもテストが緑のまま通る。
+/// 引数で `home = None` を渡せる形にして、両分岐を明示的に検査できるようにする。
+fn default_storage_root_from(home: Option<PathBuf>, pictures: Option<PathBuf>) -> String {
+    let parent = match home {
         Some(home) => home.join("Pictures"),
-        None => dirs::picture_dir().unwrap_or_else(std::env::temp_dir),
+        // picture_dir() は `~/Pictures` 自体。ここで Pictures を足さない。
+        None => pictures.unwrap_or_else(std::env::temp_dir),
     };
     parent.join("GORI GORI").to_string_lossy().into_owned()
 }
@@ -966,34 +1007,78 @@ mod tests {
         assert_eq!(fs::read_to_string(&second).unwrap(), "2nd");
     }
 
-    /// 既定の保存先が `Pictures` を二重に重ねないこと。
+    /// 既定の保存先が `Pictures` を二重に重ねないこと。**両分岐を叩く。**
     ///
-    /// なぜ: picture_dir() は `~/Pictures` 自体を返すため、home_dir() と
-    /// 同じ扱いで `Pictures` を足すと `~/Pictures/Pictures/GORI GORI` になる。
+    /// なぜ引数渡しにするか: home がある分岐しか macOS/Linux では実行されない
+    /// ため、`default_storage_root_string()` をそのまま呼ぶテストでは
+    /// picture_dir 側のデグレ (Pictures 二重) を検出できない。
     #[test]
     fn default_storage_root_has_no_duplicated_pictures_segment() {
-        let root = default_storage_root_string();
-        assert!(
-            !root.contains("Pictures/Pictures") && !root.contains("Pictures\\Pictures"),
-            "既定の保存先で Pictures が二重になっている: {root}"
+        // home がある場合: ~/Pictures/GORI GORI
+        let with_home = default_storage_root_from(
+            Some(PathBuf::from("/home/taro")),
+            Some(PathBuf::from("/home/taro/Pictures")),
         );
-        assert!(root.ends_with("GORI GORI"), "末尾が GORI GORI でない: {root}");
+        assert_eq!(with_home, "/home/taro/Pictures/GORI GORI");
+
+        // home が無い場合: picture_dir はすでに Pictures を含むので足さない
+        let without_home =
+            default_storage_root_from(None, Some(PathBuf::from("/home/taro/Pictures")));
+        assert_eq!(
+            without_home, "/home/taro/Pictures/GORI GORI",
+            "picture_dir 分岐で Pictures が二重になっている"
+        );
+
+        // 実環境の値でも二重にならないこと
+        let actual = default_storage_root_string();
+        assert!(
+            !actual.contains("Pictures/Pictures") && !actual.contains("Pictures\\Pictures"),
+            "既定の保存先で Pictures が二重になっている: {actual}"
+        );
+        assert!(actual.ends_with("GORI GORI"));
     }
 
-    /// 設定ファイルは OS 標準のアプリデータ領域に置くこと。
+    /// 設定ファイルのパスに macOS 固有の `Library/Application Support` を
+    /// 焼き込まないこと。**Windows 相当のパスを渡して検査する。**
     ///
-    /// なぜ: 以前は macOS のパスを決め打ちしており、Windows では
-    /// 設定が永続せず保存先が毎回リセットされていた。
+    /// なぜ実環境の data_dir() と比較しないか: macOS では data_dir() が
+    /// `~/Library/Application Support` を返すため、**修正前の macOS 決め打ち
+    /// 実装でもそのテストは緑になる**。守りたい退行 (Windows で設定が
+    /// 永続しない) をまったく検出しないので、検査として無意味だった。
     #[test]
-    fn settings_path_lives_under_os_data_dir() {
-        let path = settings_path().unwrap();
-        let data_dir = dirs::data_dir().unwrap();
+    fn settings_path_does_not_hardcode_macos_layout() {
+        let win_data_dir = PathBuf::from(r"C:\Users\taro\AppData\Roaming");
+        let path = settings_path_in(&win_data_dir);
+
         assert!(
-            path.starts_with(&data_dir),
-            "設定パス {} が OS のデータ領域 {} の下にない",
-            path.display(),
-            data_dir.display()
+            path.starts_with(&win_data_dir),
+            "渡した data_dir の下に無い: {}",
+            path.display()
+        );
+        let shown = path.to_string_lossy();
+        assert!(
+            !shown.contains("Library"),
+            "macOS 固有の Library が混入している: {shown}"
         );
         assert!(path.ends_with(SETTINGS_FILE));
+
+        // 実環境でも data_dir 起点であること
+        assert!(settings_path().unwrap().ends_with(SETTINGS_FILE));
+    }
+
+    /// 旧パス(移行元)は macOS レイアウトのままであること。
+    ///
+    /// なぜ検査するか: ここを「直そう」として data_dir 起点に変えると、
+    /// 新パスと同一になって**移行元を見失う**（Windows ユーザーの保存先が
+    /// 引き継がれなくなる）。意図的に古い形を保つ場所だと明示する。
+    #[test]
+    fn legacy_path_keeps_macos_layout_on_purpose() {
+        let legacy = legacy_settings_path().expect("home dir");
+        let shown = legacy.to_string_lossy();
+        assert!(
+            shown.contains("Library/Application Support"),
+            "移行元の旧パスが macOS レイアウトでない: {shown}"
+        );
+        assert!(legacy.ends_with(SETTINGS_FILE));
     }
 }

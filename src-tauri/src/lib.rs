@@ -83,6 +83,95 @@ async fn apply_media_type_migration(pool: &sqlx::SqlitePool) -> Result<(), Strin
     Ok(())
 }
 
+/// 履歴DBを開いてマイグレーションを当て、state に載せる。
+///
+/// setup フックから2回呼ばれうる (1回目が壊れたDBで失敗 → 退避 → 作り直し)。
+/// そのため副作用は「pool を作って state に入れる」だけに閉じている。
+async fn init_history_db(db_url: &str, state: &state::AppState) -> Result<(), String> {
+    use sqlx::sqlite::SqlitePoolOptions;
+    let pool = SqlitePoolOptions::new()
+        .max_connections(4)
+        .connect(db_url)
+        .await
+        .map_err(|e| format!("sqlite connect failed: {e}"))?;
+    // Foreign-key checks must be enabled explicitly per
+    // connection — SQLite ships with them OFF.
+    sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(&pool)
+        .await
+        .map_err(|e| format!("PRAGMA foreign_keys failed: {e}"))?;
+    // Apply migrations idempotently. Base/index migrations are
+    // IF NOT EXISTS; column migrations check PRAGMA table_info first.
+    sqlx::raw_sql(include_str!("../migrations/001_init.sql"))
+        .execute(&pool)
+        .await
+        .map_err(|e| format!("migration 001 failed: {e}"))?;
+    sqlx::raw_sql(include_str!("../migrations/002_dedup_images.sql"))
+        .execute(&pool)
+        .await
+        .map_err(|e| format!("migration 002 failed: {e}"))?;
+    apply_provider_model_migration(&pool).await?;
+    apply_media_type_migration(&pool).await?;
+    state.set_db(pool).await;
+    Ok(())
+}
+
+/// 壊れた履歴DBを消さずに退避する。退避できたら true。
+///
+/// なぜ消さないか: 中にユーザーの生成履歴が入っている。SQLite は一部が
+/// 壊れていても `sqlite3 .recover` で救えることがあるので、上書きで消しては
+/// いけない。退避先は連番で、前回の退避を潰さない。
+///
+/// WAL/SHM も一緒に退避する。本体だけ動かすと、次回接続時に古い WAL が
+/// 新しい空DBへ適用されて壊れ方が伝染する。
+fn quarantine_broken_db(db_path: &std::path::Path) -> bool {
+    if !db_path.exists() {
+        // そもそもDBが無いのに失敗した = ディスクフルや権限の問題。
+        // 退避しても直らないので、作り直しを試みない。
+        return false;
+    }
+    let Some(backup) = next_free_db_backup(db_path) else {
+        tracing::error!(target: "codex.sessions", "履歴DBの退避先が確保できませんでした");
+        return false;
+    };
+    if let Err(e) = std::fs::rename(db_path, &backup) {
+        tracing::error!(target: "codex.sessions", "履歴DBの退避に失敗 (続行): {e}");
+        return false;
+    }
+    // 付随ファイルも同じ接尾辞で退避する (無ければ何もしない)。
+    for suffix in ["-wal", "-shm"] {
+        let side = with_suffix(db_path, suffix);
+        if side.exists() {
+            let _ = std::fs::rename(&side, with_suffix(&backup, suffix));
+        }
+    }
+    tracing::warn!(
+        target: "codex.sessions",
+        "壊れた履歴DBを {} に退避しました (sqlite3 で救える可能性があります)",
+        backup.display()
+    );
+    true
+}
+
+/// 既存の退避を潰さないDBの退避先。`history.db.broken` → `.broken.2` …
+fn next_free_db_backup(db_path: &std::path::Path) -> Option<std::path::PathBuf> {
+    let first = with_suffix(db_path, ".broken");
+    if !first.exists() {
+        return Some(first);
+    }
+    (2..=50)
+        .map(|n| with_suffix(db_path, &format!(".broken.{n}")))
+        .find(|candidate| !candidate.exists())
+}
+
+/// パス末尾に文字列を足す。`with_extension` と違い既存の拡張子を消さない
+/// (`history.db` → `history.db-wal` を作りたいため)。
+fn with_suffix(path: &std::path::Path, suffix: &str) -> std::path::PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(suffix);
+    std::path::PathBuf::from(name)
+}
+
 pub fn log_dir() -> Option<std::path::PathBuf> {
     #[cfg(target_os = "macos")]
     {
@@ -206,8 +295,12 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .setup(move |app| {
+            // ウィンドウの大きさ調整は「できたら嬉しい」処理であって、
+            // 失敗しても既定サイズで開けばよい。`?` で伝播させると
+            // モニタ情報が取れない環境 (リモートデスクトップ・ディスプレイの
+            // 抜き差し直後・ヘッドレス) で **窓が出る前にアプリが終了する**。
             if let Some(window) = app.get_webview_window("main") {
-                if let Some(monitor) = window.current_monitor()? {
+                if let Ok(Some(monitor)) = window.current_monitor() {
                     let size = monitor.size();
                     let scale = monitor.scale_factor();
                     let logical_w = size.width as f64 / scale;
@@ -215,8 +308,8 @@ pub fn run() {
                     let target_w = (logical_w * 0.8).clamp(820.0, 1400.0);
                     let target_h = (logical_h * 0.8).clamp(540.0, 900.0);
 
-                    window.set_size(tauri::LogicalSize::new(target_w, target_h))?;
-                    window.center()?;
+                    let _ = window.set_size(tauri::LogicalSize::new(target_w, target_h));
+                    let _ = window.center();
 
                     tracing::info!(
                         target: "codex.window",
@@ -247,12 +340,31 @@ pub fn run() {
             crate::cloud::sync_worker::spawn_background_sync();
             crate::storage_cleanup::spawn_background_cleanup();
 
-            let app_data_dir = app
-                .handle()
-                .path()
-                .app_data_dir()
-                .map_err(|e| format!("app_data_dir failed: {e}"))?;
-            std::fs::create_dir_all(&app_data_dir)?;
+            // アプリデータ置き場。**ここでも起動を止めない。**
+            //
+            // 解決できない/作れない場合 (権限破損・読み取り専用・ディスクフル)
+            // でも、一時ディレクトリへ退避してウィンドウは開く。履歴が残らない
+            // 不便より、「ダブルクリックしても何も起きない」ほうが圧倒的に困る。
+            let app_data_dir = match app.handle().path().app_data_dir() {
+                Ok(dir) => dir,
+                Err(e) => {
+                    let fallback = std::env::temp_dir().join(crate::secrets::SERVICE_NAME);
+                    tracing::error!(
+                        target: "codex.storage",
+                        "アプリデータ置き場を解決できません ({e})。一時領域で起動します: {}",
+                        fallback.display()
+                    );
+                    fallback
+                }
+            };
+            if let Err(e) = std::fs::create_dir_all(&app_data_dir) {
+                tracing::error!(
+                    target: "codex.storage",
+                    error = ?e,
+                    path = %app_data_dir.display(),
+                    "アプリデータ置き場を作れませんでした (起動は続行。履歴が保存できない可能性があります)"
+                );
+            }
             // 前回クラッシュ時に台帳へ残った生成専用 app-server を先に停止する。
             // この後の汎用清掃は台帳を空にするため、順序を逆にしない。
             crate::codex::gen_server::cleanup_stale_registered_servers(&app.handle());
@@ -294,40 +406,39 @@ pub fn run() {
             let db_url = format!("sqlite:{}?mode=rwc", db_path.display());
             tracing::info!(target: "codex.sessions", "db url: {db_url}");
 
+            // 履歴DBの初期化。**失敗しても起動を止めない (2026-07-26 監査)。**
+            //
+            // なぜ: 以前は `?` で伝播していたため、生成中に電源が落ちて
+            // history.db が壊れると **ウィンドウが出る前にアプリが終了**した。
+            // ユーザーには「ダブルクリックしても何も起きない」としか見えず、
+            // アプリ内から履歴を作り直すこともできない完全な詰みになる。
+            // これは同 setup 内の initialize_storage で塞いだのと同型の穴で、
+            // 電源断という物理原因まで同じだった (方針が不統一だった)。
+            //
+            // state.db は元々 Option 型で、「commands that need it await
+            // db_pool() and surface a clear error if init failed」と
+            // state.rs:43-45 に設計が明記されている。つまりコマンド側は
+            // 未初期化を織り込み済みで、ここで止める必要がそもそも無かった。
             let state_for_init = state_for_setup.clone();
-            tauri::async_runtime::block_on(async move {
-                use sqlx::sqlite::SqlitePoolOptions;
-                let pool = SqlitePoolOptions::new()
-                    .max_connections(4)
-                    .connect(&db_url)
-                    .await
-                    .map_err(|e| format!("sqlite connect failed: {e}"))?;
-                // Foreign-key checks must be enabled explicitly per
-                // connection — SQLite ships with them OFF.
-                sqlx::query("PRAGMA foreign_keys = ON")
-                    .execute(&pool)
-                    .await
-                    .map_err(|e| format!("PRAGMA foreign_keys failed: {e}"))?;
-                // Apply migrations idempotently. Base/index migrations are
-                // IF NOT EXISTS; column migrations check PRAGMA table_info first.
-                sqlx::raw_sql(include_str!("../migrations/001_init.sql"))
-                    .execute(&pool)
-                    .await
-                    .map_err(|e| format!("migration 001 failed: {e}"))?;
-                sqlx::raw_sql(include_str!("../migrations/002_dedup_images.sql"))
-                    .execute(&pool)
-                    .await
-                    .map_err(|e| format!("migration 002 failed: {e}"))?;
-                apply_provider_model_migration(&pool).await?;
-                apply_media_type_migration(&pool).await?;
-                state_for_init.set_db(pool).await;
-                tracing::info!(target: "codex.sessions", "db ready at {}", db_path.display());
-                Ok::<(), String>(())
-            })
-            .map_err(|e| {
+            let db_init = tauri::async_runtime::block_on(init_history_db(&db_url, &state_for_init));
+            if let Err(e) = db_init {
                 tracing::error!(target: "codex.sessions", "db init failed: {e}");
-                Box::<dyn std::error::Error>::from(e)
-            })?;
+                // 壊れたDBを退避して1度だけ作り直す。退避せずに削除しないのは、
+                // 中にユーザーの生成履歴が入っており、壊れていても後から
+                // sqlite3 で救える可能性があるため (資産は残す)。
+                if quarantine_broken_db(&db_path) {
+                    match tauri::async_runtime::block_on(init_history_db(&db_url, &state_for_init)) {
+                        Ok(()) => tracing::warn!(
+                            target: "codex.sessions",
+                            "壊れた履歴DBを退避し、新しい履歴DBで起動しました"
+                        ),
+                        Err(e) => tracing::error!(
+                            target: "codex.sessions",
+                            "履歴DBを作り直せませんでした (起動は続行。履歴機能は使えません): {e}"
+                        ),
+                    }
+                }
+            }
             Ok(())
         })
         .manage(state)
