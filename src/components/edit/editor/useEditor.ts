@@ -448,7 +448,9 @@ export function useEditorActions() {
       await showSourceImagePreview(liveCanvas, path);
       resetHistory();
       bumpRevision();
-      setMessage("画像を開きました。右の「レイヤーに分解する」か、左レールの「ことばで分離」を選んでください。");
+      // 2026-07-26: 編集タブを「ことばで直す」だけの画面に絞ったため、
+      // 分解・ことばで分離への案内は実在しない導線になった。今ある操作を案内する。
+      setMessage("画像を開きました。右の入力欄に、直したいところをことばで書いてください。");
       return true;
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));

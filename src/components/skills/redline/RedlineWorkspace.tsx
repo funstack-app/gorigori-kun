@@ -348,11 +348,13 @@ function RedlineCard({
     useWorkspace.getState().setActiveTab("edit");
     const opened = await openImageForEditing(editTarget);
     if (!opened) return;
+    // 2026-07-26: 編集タブから分解系の道具を全て外し「ことばで直す」だけにしたため、
+    // 「ことばで分離」「レイヤーを選ぶ」を案内すると実在しない操作を指してしまう。
     useToasts.getState().push({
       kind: copied ? "success" : "warn",
       text: copied
-        ? "編集タブで開き、指示をコピーしました。「ことばで分離」または手動でレイヤーを選び、貼り付けてください。"
-        : "編集タブで開きました。指示のコピーに失敗したため、「ことばで分離」または手動選択後に指示を入力してください。",
+        ? "編集タブで開き、指示をコピーしました。右の入力欄に貼り付けて「AIで直す」を押してください。"
+        : "編集タブで開きました。指示のコピーに失敗したため、右の入力欄に直したい内容を書いてください。",
       ttlMs: 6000,
     });
   };

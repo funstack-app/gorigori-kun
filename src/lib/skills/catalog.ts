@@ -33,7 +33,37 @@ export type GoriSkill = {
 
 // スキル一覧 v2.1（2026-07-19 STΛCK確定）。
 // 「近日公開」枠は今後の拡張をワクワクさせるための表示。順次解放していく。
+//
+// ## 並び順 = 使う順番 (2026-07-26 STΛCK 指示)
+//
+// この配列の順序がそのまま画面の並びになる。カード同士は独立して見えるが、
+// 実際には **前のスキルの成果物が次のスキルの入力になる** 依存がある:
+//
+//   ① キャラクター登録 … 1枚の絵からキャラを資産化する。ここで登録しないと
+//                        ②③ で「同じ人物」を指定できず、カットごとに顔が変わる
+//   ② ストーリーカット … 登録キャラを固定して物語のカット列を作る
+//   ③ マルチアングル   … 決まった被写体のアングル違いを量産する
+//
+// つまり「登録 → 物語を作る → 角度を増やす」が正しい進み方。以前は
+// ストーリーカットが先頭にあったため、登録せずに始めて顔が崩れる入り方を
+// 誘導していた。順番自体をガイドにする。
 export const GORI_SKILLS: GoriSkill[] = [
+  {
+    // 2026-07-19 追加 (スキル一覧v2.1 #1): 1枚の参照画像から 3面図+表情+顔ディテールを
+    // 並列生成し、キャラ型プリセットとして登録する IPアセット化パイプライン(スライスS4)。
+    // 専用 Workspace は CharacterRegisterWorkspace (SkillWorkspaceRouter "characterRegister")。
+    // カタログは src/lib/character/sheetCuts.ts、Rust は commands/character_sheet.rs。
+    //
+    // 2026-07-26: 先頭へ移動。これが起点であることを並びで示す (上のコメント参照)。
+    id: "gori-character-register",
+    name: "キャラクター登録",
+    shortName: "Character Register",
+    description:
+      "1枚の参照画像から3面図・表情・顔ディテールを一括生成し、同一キャラとしてプリセット登録。以降の生成で呼び出せる。",
+    path: "~/.codex/skills/gori-character-register",
+    availableInApp: true,
+    launchHint: "まずはここから: 1枚からキャラを資産化",
+  },
   {
     // 2026-05-20 開放: β版で 4-Phase 専用 Workspace (StoryboardWorkspace) を
     // 実装し、agentic UX (AI が深掘り対話 → 絵コンテ → 生成 → 確認) で
@@ -60,20 +90,6 @@ export const GORI_SKILLS: GoriSkill[] = [
     path: "~/.codex/skills/gori-multi-angle",
     availableInApp: true,
     launchHint: "30 カット一気に量産",
-  },
-  {
-    // 2026-07-19 追加 (スキル一覧v2.1 #1): 1枚の参照画像から 3面図+表情+顔ディテールを
-    // 並列生成し、キャラ型プリセットとして登録する IPアセット化パイプライン(スライスS4)。
-    // 専用 Workspace は CharacterRegisterWorkspace (SkillWorkspaceRouter "characterRegister")。
-    // カタログは src/lib/character/sheetCuts.ts、Rust は commands/character_sheet.rs。
-    id: "gori-character-register",
-    name: "キャラクター登録",
-    shortName: "Character Register",
-    description:
-      "1枚の参照画像から3面図・表情・顔ディテールを一括生成し、同一キャラとしてプリセット登録。以降の生成で呼び出せる。",
-    path: "~/.codex/skills/gori-character-register",
-    availableInApp: true,
-    launchHint: "1枚からキャラを資産化",
   },
   {
     // 2026-07-19 追加 (スキル一覧v2.1 #2): 登録キャラに表情セットを一括生成し、
