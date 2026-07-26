@@ -52,6 +52,9 @@ export async function regenerateLayer({
     prompt: trimmedPrompt,
     references: [{ path: sourceImagePath, name: `${layer.name} を編集` }],
     count: 1,
+    // レイヤー再生成も codex 経路。タイムラインでモデル名を出すため渡す。
+    provider: "codex",
+    modelDisplayName: model ?? "image_gen",
   });
 
   try {

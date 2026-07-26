@@ -217,6 +217,11 @@ export function PromptComposer({
       prompt: trimmed,
       references: effectiveReferences.map((r) => ({ path: r.path, name: r.name })),
       count: snap.count,
+      // このコンポーザーは常に codex の image_gen 経路で生成する
+      // (Higgsfield/Magnific の選択UIは制作タブ側にしか無い)。
+      // タイムラインで「どのモデルで作ったか」を出すため provider/モデル名を渡す。
+      provider: "codex",
+      modelDisplayName: t.selectedModel ?? "image_gen",
     });
 
     const sess = useSessions.getState();

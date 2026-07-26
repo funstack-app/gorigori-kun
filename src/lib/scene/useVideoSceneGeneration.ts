@@ -262,6 +262,14 @@ export function useVideoSceneGeneration(): UseVideoSceneGenerationReturn {
         : model.label,
       compareMode,
       mediaType: "video",
+      // 比較モードは 1 モデル = 1 本。どの動画がどのモデルかタイル下に出すため
+      // worker ごとのモデル名を渡す (画像側の useSceneGeneration と同型)。
+      workerModels: compareMode
+        ? compareModels.map((m) => ({
+            jobSetType: m.jobSetType,
+            displayName: m.label,
+          }))
+        : undefined,
     });
 
     try {

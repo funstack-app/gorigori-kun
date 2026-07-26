@@ -396,8 +396,11 @@ function InputPhase({
           type="button"
           onClick={onGenerate}
           disabled={generatingName || !synopsis.trim()}
-          className="rounded-md border border-indigo-500 bg-indigo-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-indigo-400 disabled:cursor-not-allowed disabled:opacity-40"
+          className="flex items-center justify-center gap-2 rounded-md border border-indigo-500 bg-indigo-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-indigo-400 disabled:cursor-not-allowed disabled:opacity-40"
         >
+          {generatingName && (
+            <span className="h-4 w-4 animate-spin rounded-full border-2 border-indigo-200 border-t-transparent" />
+          )}
           {generatingName ? "ネーム生成中…" : "ネームを生成"}
         </button>
       </div>
@@ -505,9 +508,14 @@ function PanelsPhase({
           type="button"
           onClick={onGenerateAll}
           disabled={anyGenerating}
-          className="rounded-md border border-indigo-500 bg-indigo-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-indigo-400 disabled:cursor-not-allowed disabled:opacity-40"
+          className="flex items-center justify-center gap-2 rounded-md border border-indigo-500 bg-indigo-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-indigo-400 disabled:cursor-not-allowed disabled:opacity-40"
         >
-          {anyGenerating ? "生成中…" : "全コマ生成"}
+          {anyGenerating && (
+            <span className="h-4 w-4 animate-spin rounded-full border-2 border-indigo-200 border-t-transparent" />
+          )}
+          {anyGenerating
+            ? `生成中… (${results.filter((r) => r.imagePath).length}/${panels.length})`
+            : "全コマ生成"}
         </button>
         <button
           type="button"
@@ -540,7 +548,10 @@ function PanelsPhase({
               </div>
               <div className="flex aspect-square items-center justify-center overflow-hidden rounded bg-[#0f0f0f]">
                 {result?.generating ? (
-                  <span className="text-[11px] text-neutral-500">生成中…</span>
+                  <span className="flex flex-col items-center gap-1.5 text-[11px] text-neutral-500">
+                    <span className="h-5 w-5 animate-spin rounded-full border-2 border-indigo-500/40 border-t-indigo-300" />
+                    生成中…
+                  </span>
                 ) : result?.imagePath ? (
                   <SafeImage
                     path={result.imagePath}

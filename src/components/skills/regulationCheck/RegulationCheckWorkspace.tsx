@@ -379,8 +379,11 @@ export function RegulationCheckWorkspace() {
             type="button"
             onClick={runCheck}
             disabled={!canRun}
-            className="mt-auto rounded-md bg-neutral-100 px-3 py-2 text-xs font-semibold text-neutral-900 hover:bg-white disabled:cursor-not-allowed disabled:opacity-40"
+            className="mt-auto flex items-center justify-center gap-2 rounded-md bg-neutral-100 px-3 py-2 text-xs font-semibold text-neutral-900 hover:bg-white disabled:cursor-not-allowed disabled:opacity-40"
           >
+            {running && (
+              <span className="h-4 w-4 animate-spin rounded-full border-2 border-neutral-400 border-t-transparent" />
+            )}
             {running ? "検査中…" : "検査を実行"}
           </button>
         </div>
@@ -430,7 +433,8 @@ export function RegulationCheckWorkspace() {
                   />
                 ))}
                 {running && (
-                  <p className="text-xs text-neutral-500">
+                  <p className="flex items-center gap-2 text-xs text-neutral-500">
+                    <span className="h-4 w-4 animate-spin rounded-full border-2 border-pink-500/30 border-t-pink-400" />
                     Codex が画像を解析しています…（{results.length}/{imagePaths.length}）
                   </p>
                 )}

@@ -360,12 +360,15 @@ function StepSelect() {
           type="button"
           onClick={() => void runGeneration()}
           disabled={!canRun}
-          className={`mt-auto w-full rounded-xl px-4 py-3 text-[14px] font-black transition ${
+          className={`mt-auto flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-[14px] font-black transition ${
             canRun
               ? "bg-pink-500 text-white hover:bg-pink-400"
               : "cursor-not-allowed bg-[#242424] text-neutral-600"
           }`}
         >
+          {running && (
+            <span className="h-4 w-4 animate-spin rounded-full border-2 border-pink-200 border-t-transparent" />
+          )}
           {running
             ? "生成中…"
             : `${selectedExprIds.length} 表情を生成する`}
@@ -550,7 +553,10 @@ function StepGenerate({
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex items-center justify-between border-b border-[#242424] px-4 py-3">
         <div className="flex items-center gap-3">
-          <div className="text-[12px] font-bold text-neutral-300">
+          <div className="flex items-center gap-1.5 text-[12px] font-bold text-neutral-300">
+            {status === "running" && (
+              <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-pink-500/30 border-t-pink-400" />
+            )}
             {status === "running" ? "並列生成中…" : "生成完了"}{" "}
             <span className="text-neutral-500">
               ({doneCount}/{total})
@@ -612,12 +618,13 @@ function StepGenerate({
                   <div className="flex h-full w-full items-center justify-center">
                     <span
                       className={
-                        "text-[11px] font-bold " +
-                        (cut.status === "running"
-                          ? "animate-pulse text-pink-300"
-                          : "text-neutral-600")
+                        "flex flex-col items-center gap-2 text-[11px] font-bold " +
+                        (cut.status === "running" ? "text-pink-300" : "text-neutral-600")
                       }
                     >
+                      {cut.status === "running" && (
+                        <span className="h-5 w-5 animate-spin rounded-full border-2 border-pink-500/30 border-t-pink-400" />
+                      )}
                       {cut.status === "running" ? "生成中…" : "待機中"}
                     </span>
                   </div>

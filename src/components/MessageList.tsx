@@ -677,9 +677,15 @@ function ModelTagPill({
       : provider === "higgsfield"
         ? "Higgsfield"
         : "Codex";
+  // 2026-07-26 STΛCK 報告「生成したモデル名が表示されない」への対応。
+  //
+  // 比較モードでは以前「N models compared」とだけ出しており、**どの絵がどのモデルか
+  // が分からなかった**。比較は「どれが良いか」を見るための機能なので、モデル名が
+  // 消えるのは目的に反する。個別のモデル名は各画像の下 (BatchWorkerCell の caption)
+  // に出るので、ヘッダは「何モデルを比べているか」の件数表示に徹し、日本語にする。
   const label =
     compareMode && (provider === "higgsfield" || provider === "magnific")
-      ? `${providerLabel} · ${count ?? 0} models compared`
+      ? `${providerLabel} · ${count ?? 0}モデルを比較`
       : modelDisplayName
         ? `${providerLabel} · ${modelDisplayName}`
         : null;

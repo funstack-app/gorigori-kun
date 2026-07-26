@@ -61,6 +61,9 @@ export function AiEditPanel() {
       prompt,
       references: [{ path: sourceImagePath, name: basename(sourceImagePath) }],
       count: 1,
+      // AI編集も codex 経路。タイムラインでモデル名を出すため渡す。
+      provider: "codex",
+      modelDisplayName: threads.selectedModel ?? "image_gen",
     });
 
     try {

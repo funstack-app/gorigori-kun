@@ -422,6 +422,9 @@ export function AngleGridPanel({
         {/* 進捗はこのバーの見出し。件数は等幅、保存先は補足の階層に落とす */}
         <div className="min-w-0">
           <div className="flex items-baseline gap-1.5">
+            {status === "running" && (
+              <span className="h-3.5 w-3.5 self-center animate-spin rounded-full border-2 border-pink-500/30 border-t-pink-400" />
+            )}
             <span className="text-[13px] font-black text-neutral-100">
               {status === "running" ? "並列生成中…" : "生成完了"}
             </span>

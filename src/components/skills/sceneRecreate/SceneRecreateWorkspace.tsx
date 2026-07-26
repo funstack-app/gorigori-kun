@@ -327,12 +327,15 @@ export function SceneRecreateWorkspace() {
             type="button"
             onClick={() => void runAnalysis()}
             disabled={running || keyframes.length === 0}
-            className={`mt-auto w-full rounded-xl px-4 py-3 text-[14px] font-black transition ${
+            className={`mt-auto flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-[14px] font-black transition ${
               running || keyframes.length === 0
                 ? "cursor-not-allowed bg-[#242424] text-neutral-600"
                 : "bg-pink-500 text-white hover:bg-pink-400"
             }`}
           >
+            {running && (
+              <span className="h-4 w-4 animate-spin rounded-full border-2 border-pink-200 border-t-transparent" />
+            )}
             {status === "describing"
               ? `フレーム解析中… (${describeDone}/${keyframes.length})`
               : status === "analyzing"

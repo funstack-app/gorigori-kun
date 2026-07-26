@@ -7,6 +7,7 @@ import {
   useGenerationStatus,
   type GenerationJob,
 } from "../lib/store/generationStatus";
+import { useBatches } from "../lib/store/batches";
 
 /**
  * 右上に常駐する「生成の今」パネル。
@@ -72,6 +73,19 @@ function ClockIcon({ className = "" }: { className?: string }) {
   );
 }
 
+function CloseIcon({ className = "" }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" className={className} fill="none" aria-hidden="true">
+      <path
+        d="M6 6l12 12M18 6 6 18"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
 function JobRow({ job }: { job: GenerationJob }) {
   const [now, setNow] = useState(() => Date.now());
 
@@ -111,6 +125,17 @@ function JobRow({ job }: { job: GenerationJob }) {
             {job.running}枚 同時実行
           </span>
         )}
+        {/* 表示を消す。生成そのものは止められない (Rust 側に中断コマンドが無い)
+            ので、文言も「中止」ではなく実際にできることに合わせる。 */}
+        <button
+          type="button"
+          onClick={() => dismissJob(job.id)}
+          title="この表示を消します（進行中の生成そのものは止まりません）"
+          aria-label={`${GENERATION_KIND_LABEL[job.kind]}の表示を消す`}
+          className="ml-auto shrink-0 rounded-md p-1 text-neutral-500 transition-colors hover:bg-[#2a2a2a] hover:text-pink-300"
+        >
+          <CloseIcon className="h-3.5 w-3.5" />
+        </button>
       </div>
 
       {/* 本文: 数値の内訳。見出しより小さく、色を落とす */}
@@ -163,13 +188,28 @@ function JobRow({ job }: { job: GenerationJob }) {
   );
 }
 
+/**
+ * 進行表示を消す。
+ *
+ * バッチ経路では job.id が batchId と同一 (batches.ts の syncBatchStatus が
+ * batchId をそのまま job id にしている) なので、残っているバッチカードも
+ * 一緒に取り除く。id が一致しない経路 (beginDirectRun 系) では removeBatch は
+ * 何にもマッチせず無害に終わる。
+ */
+function dismissJob(id: string) {
+  useGenerationStatus.getState().dismiss(id);
+  useBatches.getState().removeBatch(id);
+}
+
 export function GenerationStatusPanel() {
   const jobs = useGenerationStatus((s) => s.jobs);
   const active = Object.values(jobs).filter((job) => !job.finished);
   if (active.length === 0) return null;
 
   return (
-    <div className="pointer-events-none fixed right-4 top-32 z-30 flex w-72 flex-col gap-2">
+    // pointer-events-auto が要る: 親が pointer-events-none のままだと
+    // 中止ボタンがクリックできず「押せるのに効かない」状態になる。
+    <div className="pointer-events-auto fixed right-4 top-32 z-30 flex w-72 flex-col gap-2">
       {active.map((job) => (
         <JobRow key={job.id} job={job} />
       ))}

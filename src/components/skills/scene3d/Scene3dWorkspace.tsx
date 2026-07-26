@@ -1198,10 +1198,13 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
         onChange={(e) => void onFiles(e.target.files)}
       />
       <button
-        className="mb-3 w-full rounded-lg border border-dashed border-[#3a3a3a] px-3 py-2.5 text-sm text-neutral-400 hover:border-pink-400/60 hover:text-pink-300 disabled:opacity-50"
+        className="mb-3 flex w-full items-center justify-center gap-2 rounded-lg border border-dashed border-[#3a3a3a] px-3 py-2.5 text-sm text-neutral-400 hover:border-pink-400/60 hover:text-pink-300 disabled:opacity-50"
         disabled={busy}
         onClick={() => fileRef.current?.click()}
       >
+        {busy && (
+          <span className="h-4 w-4 animate-spin rounded-full border-2 border-pink-400/60 border-t-transparent" />
+        )}
         {busy ? "読み込み中…" : "モーションを読み込む…(FBX/GLB、複数選択可)"}
       </button>
       <p className="mb-3 text-[11px] leading-4 text-neutral-500">
@@ -2210,10 +2213,13 @@ function ExportSection() {
         </p>
       )}
       <button
-        className="rounded-xl bg-pink-500 px-3 py-2.5 text-[13px] font-bold text-white transition hover:bg-pink-400 disabled:opacity-50"
+        className="flex items-center justify-center gap-2 rounded-xl bg-pink-500 px-3 py-2.5 text-[13px] font-bold text-white transition hover:bg-pink-400 disabled:opacity-50"
         disabled={busy}
         onClick={requestExport}
       >
+        {busy && (
+          <span className="h-4 w-4 animate-spin rounded-full border-2 border-pink-200 border-t-transparent" />
+        )}
         {busy ? "書き出し中…" : "モーションガイドを書き出す"}
       </button>
 
@@ -3255,10 +3261,13 @@ function DirectorChat() {
         )}
       </div>
       <button
-        className="mt-1.5 w-full rounded-lg bg-pink-500/90 px-2 py-1.5 text-xs font-semibold text-white hover:bg-pink-500 disabled:opacity-40"
+        className="mt-1.5 flex w-full items-center justify-center gap-2 rounded-lg bg-pink-500/90 px-2 py-1.5 text-xs font-semibold text-white hover:bg-pink-500 disabled:opacity-40"
         disabled={busy || text.trim().length === 0}
         onClick={() => void onRun()}
       >
+        {busy && (
+          <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-pink-200 border-t-transparent" />
+        )}
         {busy ? (progress ?? "監督が考え中…") : "AIに組ませる"}
       </button>
       {note && (

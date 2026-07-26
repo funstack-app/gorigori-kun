@@ -128,9 +128,12 @@ export function RedlineWorkspace() {
             type="button"
             onClick={() => void interpret()}
             disabled={!canInterpret}
-            className="rounded-lg bg-pink-500 px-4 py-2 text-xs font-black text-white shadow hover:bg-pink-400 disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-500"
+            className="flex items-center justify-center gap-2 rounded-lg bg-pink-500 px-4 py-2 text-xs font-black text-white shadow hover:bg-pink-400 disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-500"
             title="赤入れを読み取って修正指示リストを作る"
           >
+            {running && (
+              <span className="h-4 w-4 animate-spin rounded-full border-2 border-pink-200 border-t-transparent" />
+            )}
             {running ? "解釈中…" : "赤入れを読み取る"}
           </button>
           {(result || error || originalPath || redlinePath) && (

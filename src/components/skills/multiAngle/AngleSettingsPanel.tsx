@@ -231,12 +231,15 @@ export function AngleSettingsPanel() {
         type="button"
         onClick={runGeneration}
         disabled={!canRun}
-        className={`mt-auto w-full rounded-xl px-4 py-3 text-[14px] font-black transition ${
+        className={`mt-auto flex w-full items-center justify-center gap-2 rounded-xl px-4 py-3 text-[14px] font-black transition ${
           canRun
             ? "bg-pink-500 text-white hover:bg-pink-400"
             : "cursor-not-allowed bg-[#242424] text-neutral-600"
         }`}
       >
+        {running && (
+          <span className="h-4 w-4 animate-spin rounded-full border-2 border-pink-200 border-t-transparent" />
+        )}
         {running ? "生成中…" : count > 0 ? `${count} カットを一気に生成` : "一気に生成"}
       </button>
 

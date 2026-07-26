@@ -91,6 +91,20 @@ type GenerationStatusState = {
   finish: (id: string) => void;
   /** 片付け。 */
   clear: (id: string) => void;
+  /**
+   * ユーザー操作でこの生成の追跡をやめる (2026-07-26 STΛCK指示)。
+   *
+   * ## できること / できないこと (重要)
+   *
+   * **走っている生成そのものは止まらない**。Rust 側に生成を中断するコマンドが
+   * 存在しないため (`#[tauri::command]` に cancel/abort 系は無く、MCP 生成は
+   * 同期完結でサーバー側に「実行中ジョブ」を持たない — batches.ts cancelBatch の
+   * コメント参照)、フロントからできるのは「待つのをやめて結果を捨てる」だけ。
+   *
+   * したがって UI の文言も「中止」ではなく **表示を消す** と書く。
+   * 押せるのに効かないボタンを作らないことが、このアプリの一貫した方針。
+   */
+  dismiss: (id: string) => void;
 };
 
 export const useGenerationStatus = create<GenerationStatusState>((set) => ({
@@ -186,6 +200,17 @@ export const useGenerationStatus = create<GenerationStatusState>((set) => ({
       delete next[id];
       return { jobs: next };
     }),
+
+  // 実体は clear と同じ「この id の追跡をやめる」。別名にしているのは、
+  // 自動の片付け (clear) と、ユーザーが自分の意思で消したもの (dismiss) を
+  // 呼び出し側の意図として区別できるようにするため。
+  dismiss: (id) =>
+    set((s) => {
+      if (!s.jobs[id]) return s;
+      const next = { ...s.jobs };
+      delete next[id];
+      return { jobs: next };
+    }),
 }));
 
 /**
@@ -206,8 +231,27 @@ export function jobPercent(job: GenerationJob, expectedSeconds: number): number 
   return Math.min(90, 90 * (elapsed / expectedSeconds));
 }
 
-/** 無反応と見なす閾値。これを超えたら理由を出す。 */
-export const NO_RESPONSE_THRESHOLD_MS = 90_000;
+/**
+ * 無反応と見なす閾値。これを超えたら理由を出す。
+ *
+ * ## なぜ 90秒 → 6分 に延ばしたか (2026-07-26 STΛCK 報告)
+ *
+ * 90秒は**正常な生成に対して短すぎた**。実測: EC納品セット(6枚同時)は
+ * 1分38秒の時点でまだ 0/6 で、この間ずっと黄色い警告アイコン付きで
+ * 「98 秒間 応答がありません」が出ていた。何も壊れていないのに
+ * 失敗したように見えるため、ユーザーが不安になって中断してしまう。
+ *
+ * 画像生成は 1枚あたり数十秒〜、複数枚の同時生成では数分かかるのが普通で、
+ * その間サーバーからの中間報告は来ない。「応答が無い」のは異常ではなく既定。
+ *
+ * 6分にした根拠: 上記の実測(6枚で 1分38秒 経過時点で未完了)に対し、
+ * 枚数が増えた場合の余白を見込む。境界ぴったりに合わせず余裕を取る。
+ * ここを超えて無反応なら、本当に固まっている可能性が高い。
+ *
+ * **警告そのものは消さない**。本当に固まったときに何も出ないほうが困る。
+ * 変えるのは「いつ出すか」と「どう言うか」だけ (describeStall 参照)。
+ */
+export const NO_RESPONSE_THRESHOLD_MS = 360_000;
 
 /**
  * 失敗理由の文字列から、UI に出す stall を組み立てる。
@@ -357,8 +401,15 @@ export function describeStall(stall: StallReason): string {
       return stall.message;
     case "auth-required":
       return `${stall.service} の認証が切れています。設定から再ログインしてください`;
-    case "no-response":
-      return `${Math.round(stall.sinceMs / 1000)} 秒間 応答がありません`;
+    case "no-response": {
+      // 2026-07-26: 「N秒間 応答がありません」は、実際には正常に生成中でも
+      // 出るため「失敗した」と誤解される (STΛCK 報告)。事実 (時間が経っている)
+      // は伝えつつ、壊れたと読めない言い方にする。秒でなく分で言うのは、
+      // ここに到達する時点で既に数分経っており、秒表示だと桁が大きく
+      // 不安を煽るため。
+      const minutes = Math.max(1, Math.round(stall.sinceMs / 60_000));
+      return `${minutes}分ほど時間がかかっています（生成は続いています）`;
+    }
     case "error":
       return stall.code ? `エラー ${stall.code}: ${stall.message}` : `エラー: ${stall.message}`;
   }

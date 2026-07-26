@@ -104,8 +104,17 @@ export const useBatches = create<BatchesState>((set, _get) => ({
       workers: Array.from({ length: count }, (_, i) => ({
         idx: i + 1,
         status: "pending" as const,
-        modelJobSetType: workerModels?.[i]?.jobSetType,
-        modelDisplayName: workerModels?.[i]?.displayName,
+        modelJobSetType: workerModels?.[i]?.jobSetType ?? modelJobSetType,
+        // 2026-07-26 STΛCK 報告「生成したモデル名が表示されない」への対応。
+        //
+        // workerModels は**モデル比較のときだけ**渡される (1枚ごとに別モデルなので
+        // 枚数分の配列が要る)。通常の生成では渡されないため、各画像の下の
+        // キャプション (BatchWorkerCell の caption) が空になり、
+        // 「何で作ったか」が画像を見ても分からなかった。
+        //
+        // 比較でない場合はバッチ全体のモデルが全枚数に等しく効いているので、
+        // それをフォールバックとして入れる (推測ではなく、同じ値の再掲)。
+        modelDisplayName: workerModels?.[i]?.displayName ?? modelDisplayName,
         mediaType: resolvedMediaType,
       })),
       status: "running",

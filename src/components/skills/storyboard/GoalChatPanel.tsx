@@ -383,7 +383,10 @@ export function GoalChatPanel() {
               )}
               <div className="whitespace-pre-wrap leading-relaxed">{m.text}</div>
               {m.streaming && (
-                <div className="mt-1 text-[10px] text-zinc-500">入力中…</div>
+                <div className="mt-1 flex items-center gap-1.5 text-[10px] text-zinc-500">
+                  <span className="h-3 w-3 animate-spin rounded-full border-2 border-pink-500/30 border-t-pink-400" />
+                  入力中…
+                </div>
               )}
             </li>
           ))}
@@ -488,12 +491,15 @@ export function GoalChatPanel() {
             onClick={handleSend}
             disabled={!draft.trim() || sending}
             className={[
-              "rounded-md px-4 py-2 text-sm font-semibold transition",
+              "flex items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-semibold transition",
               !draft.trim() || sending
                 ? "cursor-not-allowed bg-zinc-700 text-zinc-400"
                 : "bg-pink-500 text-white hover:bg-pink-400",
             ].join(" ")}
           >
+            {sending && (
+              <span className="h-4 w-4 animate-spin rounded-full border-2 border-pink-500/30 border-t-pink-400" />
+            )}
             {sending ? "送信中…" : "送信"}
           </button>
         </div>

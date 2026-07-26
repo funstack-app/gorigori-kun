@@ -341,7 +341,10 @@ export function ProductSetGridPanel({
     <div className="flex h-full min-h-0 flex-col">
       {/* 上部バー: 進捗 + 保存 */}
       <div className="flex items-center justify-between border-b border-[#242424] px-4 py-3">
-        <div className="text-[12px] font-bold text-neutral-300">
+        <div className="flex items-center gap-1.5 text-[12px] font-bold text-neutral-300">
+          {status === "running" && (
+            <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-pink-500/30 border-t-pink-400" />
+          )}
           {status === "running" ? "納品セット生成中…" : "生成完了"}{" "}
           <span className="text-neutral-500">
             ({doneCount}/{total})
