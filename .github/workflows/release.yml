@@ -175,7 +175,7 @@ jobs:
       - name: Build and publish (macOS ${{ matrix.target }})
         uses: tauri-apps/tauri-action@v0.6.2
         env:
-          GITHUB_TOKEN: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
         with:
@@ -185,9 +185,25 @@ jobs:
           # URL から取得できないため、updater 経路が壊れる。non-draft で publish する。
           releaseDraft: false
           prerelease: false
-          includeRelease: true
+          # 2026-07-26: CI からリリースを作れない (組織設定で GITHUB_TOKEN が read 固定、
+          # RELEASE_PAT は期限切れ)。ビルドだけ行い、成果物は artifact で持ち出して
+          # 手元の権限で publish する。恒久対応は PAT 再発行か組織設定の変更。
+          includeRelease: false
           includeUpdaterJson: true
           args: '--target ${{ matrix.target }}'
+
+      # 2026-07-26: CI からリリースを作れないため、成果物を持ち出せるようにする。
+      # 手元で `gh run download` して `gh release create` で publish する。
+      - name: Upload build artifacts (macOS ${{ matrix.target }})
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.target }}
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            src-tauri/target/${{ matrix.target }}/release/bundle/dmg/*.dmg
+            src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz
+            src-tauri/target/${{ matrix.target }}/release/bundle/macos/*.app.tar.gz.sig
 
   # ─────────────────────────────────────────────────────────────
   # Windows x86_64 (.exe + .zip)
@@ -285,7 +301,7 @@ jobs:
       - name: Build and publish (Windows)
         uses: tauri-apps/tauri-action@v0.6.2
         env:
-          GITHUB_TOKEN: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
         with:
@@ -294,9 +310,24 @@ jobs:
           # Codex指摘 (2026-05-19): mac jobs と統一して non-draft で publish
           releaseDraft: false
           prerelease: false
-          includeRelease: true
+          # 2026-07-26: CI からリリースを作れない (組織設定で GITHUB_TOKEN が read 固定、
+          # RELEASE_PAT は期限切れ)。ビルドだけ行い、成果物は artifact で持ち出して
+          # 手元の権限で publish する。恒久対応は PAT 再発行か組織設定の変更。
+          includeRelease: false
           includeUpdaterJson: true
           args: '--target x86_64-pc-windows-msvc'
+
+      # 2026-07-26: mac 側と同じ理由で成果物を持ち出す。
+      - name: Upload build artifacts (Windows)
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x86_64
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.nsis.zip
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.nsis.zip.sig
 
   # ─────────────────────────────────────────────────────────────
   # Higgsfield 拡張パックは廃止 (MCP 方式へ移行済み)。
@@ -318,13 +349,19 @@ jobs:
   updater-manifest:
     needs: [macos, windows]
     runs-on: ubuntu-latest
+    # 2026-07-26: このジョブは「リリースが既に存在する」前提で .sig を集める。
+    # 今は CI がリリースを作れない (組織設定で GITHUB_TOKEN が read 固定 /
+    # RELEASE_PAT 期限切れ) ため、手元で publish した後に
+    # `gh workflow run release.yml` の workflow_dispatch から回す。
+    # タグ push では走らせない (リリース不在で必ず失敗するため)。
+    if: github.event_name == 'workflow_dispatch'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Build unified latest.json
         env:
-          GH_TOKEN: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           set -e
@@ -499,4 +536,4 @@ jobs:
             「更新を確認」を押すだけで最新版になります。
             作品データ・プリセット・設定は引き継がれます。
         env:
-          GITHUB_TOKEN: ${{ secrets.RELEASE_PAT || secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
