@@ -588,21 +588,22 @@ export const shotOptions: SceneOption[] = [
  */
 export const styleOptions: SceneOption[] = [
   NO_SELECT_OPTION,
+  // 2026-07-27 統合: 旧「クリーンコマーシャル」と旧「photorealistic」を1本にまとめた。
+  //
+  // なぜ: 両者は「加工感のない実写」という同じことを別の言葉で言っており、同じ被写体を
+  // 同じ構図で生成すると出力が実質同一になる（サムネ検品で「背景の白さがわずかに違う
+  // だけで判別不能」と実測）。言葉が違っても選んだ結果が変わらない選択肢は、選ぶ側の
+  // 負担を増やすだけで機能しない。
+  //
+  // 旧 value を保存していたプリセットは buildPrompt.stylePiece のフォールバック
+  // （styleOptions に無い value はそのまま prompt に渡る）で従来どおり動く。
   {
-    value: "クリーンコマーシャル",
-    hint: "広告写真そのままの清潔さ",
+    value: "実写・広告写真",
+    hint: "加工感のない実写・広告の清潔さ",
     visual: "style",
-    thumbnail: thumb("style", "clean-commercial", "クリーンコマーシャル"),
+    thumbnail: thumb("style", "photorealistic", "実写・広告写真"),
     prompt:
-      "clean commercial product photography, crisp edge-to-edge sharpness, polished neutral finish, high fidelity surface detail",
-  },
-  {
-    value: "photorealistic",
-    hint: "実写そのまま・加工感なし",
-    visual: "style",
-    thumbnail: thumb("style", "photorealistic", "photorealistic"),
-    prompt:
-      "photorealistic photography, true-to-life materials and micro-surface texture, natural optical depth of field, unprocessed neutral color",
+      "photorealistic commercial photography, true-to-life materials and micro-surface texture, crisp edge-to-edge sharpness, polished neutral finish, natural optical depth of field, unprocessed neutral color",
   },
   {
     value: "ドキュメンタリーリアリズム",
@@ -668,21 +669,22 @@ export const styleOptions: SceneOption[] = [
     prompt:
       "neo-noir film rendering, dense inky shadow density, cool desaturated grade, glossy hard surface sheen, heavy filmic contrast",
   },
+  // 2026-07-27 統合: 旧「モノクロストリート」を「ストリート粒子」に寄せて1本にした。
+  //
+  // なぜ: 検品で旧モノクロストリートは「ストリート粒子から粒を抜いた残り」に見えると
+  // 判定された。白黒でどう見せるかの性格が「粒子の粗さ」しか無く、その粗さを持つ側と
+  // 持たない側を別項目にすると、後者に選ぶ理由が説明できない。
+  // 白黒の階調表現は「ハイコントラスト劇的」（硬調）と本項目（粒子）で足りる。
+  //
+  // 旧 value「モノクロストリート」を保存していたプリセットは
+  // buildPrompt.stylePiece のフォールバックで従来どおり動く。
   {
-    value: "モノクロストリート",
-    hint: "白黒・階調がきれい",
+    value: "モノクロ・粒子",
+    hint: "白黒・粒子でざらつく",
     visual: "style",
-    thumbnail: thumb("style", "monochrome-street", "モノクロストリート"),
+    thumbnail: thumb("style", "street-grain", "モノクロ・粒子"),
     prompt:
-      "classic black-and-white silver gelatin rendering, fully monochrome, rich mid-tone gradation, fine even grain, darkroom print finish",
-  },
-  {
-    value: "ストリート粒子",
-    hint: "荒い粒子でざらつく",
-    visual: "style",
-    thumbnail: thumb("style", "street-grain", "ストリート粒子"),
-    prompt:
-      "gritty high-ISO black-and-white rendering, coarse heavy grain, harsh blown contrast, rough push-processed texture",
+      "gritty high-ISO black-and-white rendering, fully monochrome, coarse heavy grain, harsh blown contrast, rough push-processed texture, darkroom print finish",
   },
   {
     value: "アメリカーナ叙情",
