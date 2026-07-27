@@ -22,6 +22,7 @@ import { buildExportFileName } from "../../../lib/exportNaming";
 import { useProjects } from "../../../lib/store/projects";
 import { useToasts } from "../../../lib/store/toasts";
 import { ActiveProjectSelector } from "../../ActiveProjectSelector";
+import { GenerationGauge } from "../../GenerationGauge";
 import { SafeImage } from "../../SafeImage";
 import { WorkspaceTabs } from "../../WorkspaceTabs";
 import { SkillIntro } from "../SkillIntro";
@@ -81,6 +82,8 @@ function ComicFlow() {
   const [panels, setPanels] = useState<ComicPanel[]>([]);
   const [results, setResults] = useState<ComicPanelResult[]>([]);
   const [generatingName, setGeneratingName] = useState(false);
+  /** ネーム生成の開始時刻。推定進捗ゲージ(GenerationGauge)の基準。 */
+  const [nameStartedAt, setNameStartedAt] = useState<number | undefined>(undefined);
   const [generatingAll, setGeneratingAll] = useState(false);
   const runTokenRef = useRef(0);
   /** 全コマ生成中に右上パネルへ進捗を報告するためのトラッカー。 */
@@ -121,7 +124,10 @@ function ComicFlow() {
     const runToken = runTokenRef.current + 1;
     runTokenRef.current = runToken;
     setGeneratingAll(false);
-    setResults((prev) => prev.map((result) => ({ ...result, generating: false })));
+    setResults((prev) =>
+      prev.map((result) => ({ ...result, generating: false, startedAt: undefined })),
+    );
+    setNameStartedAt(Date.now());
     setGeneratingName(true);
     try {
       const prompt = buildNamePrompt(synopsis, format, characters);
@@ -137,7 +143,9 @@ function ComicFlow() {
         return;
       }
       setPanels(parsed);
-      setResults(parsed.map((p) => ({ index: p.index, generating: false })));
+      setResults(
+        parsed.map((p) => ({ index: p.index, generating: false, startedAt: undefined })),
+      );
       setPhase("name");
     } catch (err) {
       if (runTokenRef.current !== runToken) return;
@@ -159,9 +167,13 @@ function ComicFlow() {
     if (batchToken === undefined && generatingAll) return;
     const runToken = batchToken ?? runTokenRef.current;
     if (runTokenRef.current !== runToken) return;
+    // 開始時刻を持たせて、待っている間に推定進捗ゲージを出せるようにする。
+    const startedAt = Date.now();
     setResults((prev) =>
       prev.map((r) =>
-        r.index === panel.index ? { ...r, generating: true, error: undefined } : r,
+        r.index === panel.index
+          ? { ...r, generating: true, error: undefined, startedAt }
+          : r,
       ),
     );
     comicTrackRef.current?.markStarted();
@@ -183,7 +195,9 @@ function ComicFlow() {
       }
       setResults((prev) =>
         prev.map((r) =>
-          r.index === panel.index ? { ...r, generating: false, imagePath } : r,
+          r.index === panel.index
+            ? { ...r, generating: false, imagePath, startedAt: undefined }
+            : r,
         ),
       );
       comicTrackRef.current?.markCompleted();
@@ -193,7 +207,7 @@ function ComicFlow() {
       setResults((prev) =>
         prev.map((r) =>
           r.index === panel.index
-            ? { ...r, generating: false, error: message }
+            ? { ...r, generating: false, error: message, startedAt: undefined }
             : r,
         ),
       );
@@ -247,6 +261,7 @@ function ComicFlow() {
           selectedIds={selectedIds}
           toggleCharacter={toggleCharacter}
           generatingName={generatingName}
+          nameStartedAt={nameStartedAt}
           onGenerate={generateName}
         />
       )}
@@ -317,6 +332,7 @@ function InputPhase({
   selectedIds,
   toggleCharacter,
   generatingName,
+  nameStartedAt,
   onGenerate,
 }: {
   synopsis: string;
@@ -327,6 +343,7 @@ function InputPhase({
   selectedIds: string[];
   toggleCharacter: (id: string) => void;
   generatingName: boolean;
+  nameStartedAt?: number;
   onGenerate: () => void;
 }) {
   return (
@@ -398,7 +415,7 @@ function InputPhase({
         )}
       </div>
 
-      <div>
+      <div className="flex flex-col gap-3">
         <button
           type="button"
           onClick={onGenerate}
@@ -410,6 +427,18 @@ function InputPhase({
           )}
           {generatingName ? "ネーム生成中…" : "ネームを生成"}
         </button>
+        {/* 通常の画像生成と同じ「ぐるぐる＋推定ゲージ」に揃える (2026-07-27 STΛCK指示)。 */}
+        {generatingName && (
+          <div className="flex w-full flex-col items-center justify-center gap-3 rounded-md border border-[#2a2a2a] bg-[#181818] px-8 py-5">
+            <span className="h-8 w-8 animate-spin rounded-full border-2 border-pink-300 border-t-transparent" />
+            <span className="text-[12px] font-bold text-pink-300">生成中…</span>
+            {nameStartedAt ? (
+              <div className="w-full max-w-xs">
+                <GenerationGauge startedAt={nameStartedAt} mode="batch" />
+              </div>
+            ) : null}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -555,10 +584,16 @@ function PanelsPhase({
               </div>
               <div className="flex aspect-square items-center justify-center overflow-hidden rounded bg-[#0f0f0f]">
                 {result?.generating ? (
-                  <span className="flex flex-col items-center gap-1.5 text-[11px] text-neutral-500">
-                    <span className="h-5 w-5 animate-spin rounded-full border-2 border-indigo-500/40 border-t-indigo-300" />
-                    生成中…
-                  </span>
+                  // 通常の画像生成と同じ「ぐるぐる＋推定ゲージ」に揃える (2026-07-27 STΛCK指示)。
+                  <div className="flex h-full w-full flex-col items-center justify-center gap-3 px-4">
+                    <span className="h-8 w-8 animate-spin rounded-full border-2 border-pink-300 border-t-transparent" />
+                    <span className="text-[12px] font-bold text-pink-300">生成中…</span>
+                    {result.startedAt ? (
+                      <div className="w-full max-w-xs">
+                        <GenerationGauge startedAt={result.startedAt} mode="batch" />
+                      </div>
+                    ) : null}
+                  </div>
                 ) : result?.imagePath ? (
                   <SafeImage
                     path={result.imagePath}

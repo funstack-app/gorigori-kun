@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   GENERATION_KIND_LABEL,
   NO_RESPONSE_THRESHOLD_MS,
@@ -201,15 +201,100 @@ function dismissJob(id: string) {
   useBatches.getState().removeBatch(id);
 }
 
+/** パネル位置の保存キー。次回起動時も同じ場所に出す。 */
+const PANEL_POS_KEY = "gori.generationStatusPanel.pos";
+const PANEL_WIDTH = 288; // w-72
+
+type PanelPos = { x: number; y: number };
+
+function loadPanelPos(): PanelPos | null {
+  try {
+    const raw = localStorage.getItem(PANEL_POS_KEY);
+    if (!raw) return null;
+    const p = JSON.parse(raw) as Partial<PanelPos>;
+    if (typeof p?.x !== "number" || typeof p?.y !== "number") return null;
+    return { x: p.x, y: p.y };
+  } catch {
+    return null;
+  }
+}
+
+/** 画面内に収める。ウィンドウを小さくした後でもパネルが画面外に消えないように。 */
+function clampToViewport(pos: PanelPos): PanelPos {
+  const maxX = Math.max(0, window.innerWidth - PANEL_WIDTH - 8);
+  const maxY = Math.max(0, window.innerHeight - 80);
+  return {
+    x: Math.min(Math.max(0, pos.x), maxX),
+    y: Math.min(Math.max(0, pos.y), maxY),
+  };
+}
+
 export function GenerationStatusPanel() {
   const jobs = useGenerationStatus((s) => s.jobs);
   const active = Object.values(jobs).filter((job) => !job.finished);
+
+  // 2026-07-27: パネルをドラッグで動かせるようにした (STΛCK 指摘)。
+  // 以前は right-4 top-32 の固定で、生成中は右上のボタン (Magnific / 生成準備OK /
+  // プロジェクト選択) が隠れて押せなかった。全スキル画面で同じ場所に出るため、
+  // どの画面でも同じ問題が起きていた。
+  const [pos, setPos] = useState<PanelPos | null>(() => loadPanelPos());
+  const dragRef = useRef<{ dx: number; dy: number } | null>(null);
+
+  // ウィンドウリサイズで画面外に出たら引き戻す
+  useEffect(() => {
+    if (!pos) return;
+    const onResize = () => setPos((prev) => (prev ? clampToViewport(prev) : prev));
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, [pos]);
+
+  useEffect(() => {
+    if (!pos) return;
+    try {
+      localStorage.setItem(PANEL_POS_KEY, JSON.stringify(pos));
+    } catch {
+      // 保存できなくても動作には影響しない (次回また既定位置に出るだけ)
+    }
+  }, [pos]);
+
   if (active.length === 0) return null;
+
+  const onPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    // ボタン類の上では掴まない (中止ボタンが押せなくなる)
+    if ((event.target as HTMLElement).closest("button")) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    dragRef.current = { dx: event.clientX - rect.left, dy: event.clientY - rect.top };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+
+  const onPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    const d = dragRef.current;
+    if (!d) return;
+    setPos(clampToViewport({ x: event.clientX - d.dx, y: event.clientY - d.dy }));
+  };
+
+  const endDrag = (event: React.PointerEvent<HTMLDivElement>) => {
+    dragRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  };
 
   return (
     // pointer-events-auto が要る: 親が pointer-events-none のままだと
     // 中止ボタンがクリックできず「押せるのに効かない」状態になる。
-    <div className="pointer-events-auto fixed right-4 top-32 z-30 flex w-72 flex-col gap-2">
+    <div
+      className={[
+        "pointer-events-auto fixed z-30 flex w-72 cursor-grab flex-col gap-2 active:cursor-grabbing",
+        pos ? "" : "right-4 top-32",
+      ].join(" ")}
+      style={pos ? { left: pos.x, top: pos.y } : undefined}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={endDrag}
+      onPointerCancel={endDrag}
+      title="ドラッグで移動できます"
+    >
       {active.map((job) => (
         <JobRow key={job.id} job={job} />
       ))}

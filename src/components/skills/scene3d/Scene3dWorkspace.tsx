@@ -80,6 +80,7 @@ import { useToasts } from "../../../lib/store/toasts";
 import type { StoryboardSketchCut } from "../../../lib/storyboard/types";
 import { sendCutToVideoTab } from "../../../lib/storyboard/sendCutToVideo";
 import { requestViewPreset, Scene3dViewport } from "./Scene3dViewport";
+import { GenerationGauge } from "../../GenerationGauge";
 
 const PRESET_ORDER: CameraPresetId[] = [
   "fixed",
@@ -924,9 +925,12 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
   const videoRef = useRef<HTMLInputElement>(null);
   const [capBusy, setCapBusy] = useState<string | null>(null);
   const [capError, setCapError] = useState<string | null>(null);
+  // 待ち時間の推定ゲージ用の開始時刻(実進捗が取れない処理なので経過時間で見せる)
+  const [capStartedAt, setCapStartedAt] = useState<number | null>(null);
 
   const captureFromFile = async (file: File) => {
     setCapBusy("準備中…");
+    setCapStartedAt((prev) => prev ?? Date.now());
     setCapError(null);
     try {
       const spec = await captureVideoToSpec(file, (msg) => setCapBusy(msg));
@@ -945,6 +949,7 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
       setCapError(msg.slice(0, 200));
     } finally {
       setCapBusy(null);
+      setCapStartedAt(null);
       if (videoRef.current) videoRef.current.value = "";
     }
   };
@@ -960,6 +965,7 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
     const url = capUrl.trim();
     if (!url || capBusy) return;
     setCapBusy("動画をダウンロード中…");
+    setCapStartedAt(Date.now());
     setCapError(null);
     let file: File;
     try {
@@ -975,6 +981,7 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
       const msg = e instanceof Error ? e.message : String(e);
       setCapError(msg.slice(0, 200));
       setCapBusy(null);
+      setCapStartedAt(null);
       return;
     }
     setCapUrl("");
@@ -982,6 +989,8 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
   };
   const [genBusy, setGenBusy] = useState(false);
   const [genError, setGenError] = useState<string | null>(null);
+  // AIモーション生成も実進捗が取れないため、開始時刻から推定ゲージを出す
+  const [genStartedAt, setGenStartedAt] = useState<number | null>(null);
 
   // 標準ライブラリ(同梱CC0・46種)を初回に自動読み込み
   useEffect(() => {
@@ -1015,6 +1024,7 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
     const text = genText.trim();
     if (!text || genBusy) return;
     setGenBusy(true);
+    setGenStartedAt(Date.now());
     setGenError(null);
     try {
       if (reviseTarget) {
@@ -1051,6 +1061,7 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
       setGenError(msg.slice(0, 200));
     } finally {
       setGenBusy(false);
+      setGenStartedAt(null);
     }
   };
 
@@ -1097,13 +1108,23 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
           disabled={!!capBusy}
           onClick={() => videoRef.current?.click()}
         >
-          {capBusy ?? (
+          {capBusy ? (
+            <>
+              <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-emerald-200 border-t-transparent" />
+              {capBusy}
+            </>
+          ) : (
             <>
               <FolderIcon />
               動画ファイルを選ぶ…(mp4/mov/webm・20秒まで)
             </>
           )}
         </button>
+        {capBusy && capStartedAt ? (
+          <div className="mt-1.5">
+            <GenerationGauge startedAt={capStartedAt} mode="batch" />
+          </div>
+        ) : null}
         <div className="mt-1.5 flex gap-1.5">
           <input
             type="text"
@@ -1171,13 +1192,21 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
             disabled={genBusy}
           />
           <button
-            className="shrink-0 rounded-lg border border-sky-400/40 bg-sky-400/10 px-3 py-1.5 text-xs text-sky-300 hover:bg-sky-400/20 disabled:opacity-50"
+            className="flex shrink-0 items-center justify-center gap-1.5 rounded-lg border border-sky-400/40 bg-sky-400/10 px-3 py-1.5 text-xs text-sky-300 hover:bg-sky-400/20 disabled:opacity-50"
             onClick={() => void onGenerate()}
             disabled={genBusy || !genText.trim()}
           >
+            {genBusy && (
+              <span className="h-3 w-3 animate-spin rounded-full border-2 border-sky-200 border-t-transparent" />
+            )}
             {genBusy ? (reviseTarget ? "改訂中…" : "生成中…") : reviseTarget ? "直す" : "生成"}
           </button>
         </div>
+        {genBusy && genStartedAt ? (
+          <div className="mt-1.5">
+            <GenerationGauge startedAt={genStartedAt} mode="batch" />
+          </div>
+        ) : null}
         <p className="mt-1.5 text-[10px] leading-4 text-neutral-500">
           キャラの動きをAIが手付けします(30秒〜2分ほど)。当たり外れがあるので、
           気に入らなければ言い方を変えてもう一度
@@ -3136,6 +3165,8 @@ function DirectorChat() {
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [progress, setProgress] = useState<string | null>(null);
+  // カット割り設計も実進捗が取れないため、開始時刻から推定ゲージを出す
+  const [startedAt, setStartedAt] = useState<number | null>(null);
   // @メンション: シーン内の物体・カメラを候補から挿入する
   const taRef = useRef<HTMLTextAreaElement>(null);
   const [mention, setMention] = useState<{ query: string; start: number } | null>(null);
@@ -3186,6 +3217,7 @@ function DirectorChat() {
     setBusy(true);
     setError(null);
     setNote(null);
+    setStartedAt(Date.now());
     setProgress("監督が考え中…(最大3分)");
     try {
       const clipNames = importedMotions.map((m) => m.name);
@@ -3202,6 +3234,7 @@ function DirectorChat() {
     } finally {
       setBusy(false);
       setProgress(null);
+      setStartedAt(null);
     }
   };
 
@@ -3291,6 +3324,11 @@ function DirectorChat() {
         )}
         {busy ? (progress ?? "監督が考え中…") : "AIに組ませる"}
       </button>
+      {busy && startedAt ? (
+        <div className="mt-1.5">
+          <GenerationGauge startedAt={startedAt} mode="batch" />
+        </div>
+      ) : null}
       {note && (
         <p className="mt-1.5 flex items-start gap-1 text-[11px] text-lime-300">
           <CheckIcon className="mt-0.5 h-3 w-3 shrink-0" />

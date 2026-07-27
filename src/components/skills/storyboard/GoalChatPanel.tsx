@@ -444,13 +444,19 @@ export function GoalChatPanel() {
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-              e.preventDefault();
-              void handleSend();
-            }
+            // 2026-07-27: 企画チャット・3D画面と規則を揃えた (Enter=送信 / Shift+Enter=改行)。
+            // 以前は ⌘/Ctrl+Enter のみで、同じアプリ内でも画面ごとに送信キーが違っていた。
+            // 変換確定の Enter を送信と取り違えないよう isComposing でガードする
+            // (旧実装にはこのガードが無く、日本語入力中に誤送信しうる状態だった)。
+            const isComposing =
+              (e.nativeEvent as KeyboardEvent).isComposing || e.keyCode === 229;
+            if (e.key !== "Enter" || isComposing) return;
+            if (e.shiftKey) return; // 改行
+            e.preventDefault();
+            void handleSend();
           }}
           rows={4}
-          placeholder="作りたい映像を一言で… (⌘+Enter で送信)"
+          placeholder="作りたい映像を一言で… (Enter で送信・改行は Shift+Enter)"
           className="w-full resize-none bg-transparent text-sm text-zinc-200 outline-none placeholder:text-zinc-600"
         />
 

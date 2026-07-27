@@ -1,5 +1,5 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { ActiveProjectSelector } from "../../ActiveProjectSelector";
 import { WorkspaceTabs } from "../../WorkspaceTabs";
@@ -12,6 +12,7 @@ import { buildExportFileName } from "../../../lib/exportNaming";
 import { useProjects } from "../../../lib/store/projects";
 import { useToasts } from "../../../lib/store/toasts";
 import { useCharacterSheetRun } from "../../../lib/store/characterSheetRun";
+import { GenerationGauge, recordGenerationDuration } from "../../GenerationGauge";
 import { ensureCharacterSheetEventListener } from "../../../lib/character/events";
 import type {
   CharacterSheetParams,
@@ -432,6 +433,7 @@ function StepGenerate({
   const status = useCharacterSheetRun((s) => s.status);
   const cuts = useCharacterSheetRun((s) => s.cuts);
   const cutOrder = useCharacterSheetRun((s) => s.cutOrder);
+  const cutStartedAt = useCharacterSheetRun((s) => s.cutStartedAt);
   const runId = useCharacterSheetRun((s) => s.runId);
   const characterName = useCharacterSheetRun((s) => s.characterName);
   const characterImagePath = useCharacterSheetRun((s) => s.characterImagePath);
@@ -453,6 +455,31 @@ function StepGenerate({
   const doneCount = orderedCuts.filter((c) => c.status === "completed").length;
   const total = orderedCuts.length;
   const activeProject = projects.find((p) => p.id === activeProjectId) ?? null;
+
+  // 実測時間の学習: running → completed へ変わったカットの所要秒だけをゲージ履歴へ積む。
+  // 表情差分は専用 mode を持たないため、バッチ生成と同じ "batch" の履歴を共有する
+  // (GenerationGaugeMode に expression が無い。該当が無ければ batch を使う既定に従う)。
+  const previousStatusesRef = useRef<Record<string, SheetCutState["status"]>>(
+    Object.fromEntries(orderedCuts.map((cut) => [cut.cutId, cut.status])),
+  );
+
+  useEffect(() => {
+    const previousStatuses = previousStatusesRef.current;
+    for (const cut of orderedCuts) {
+      if (previousStatuses[cut.cutId] === "running" && cut.status === "completed") {
+        const startedAt = cutStartedAt[cut.cutId];
+        if (startedAt != null) {
+          recordGenerationDuration(
+            "batch",
+            Math.max(0, (Date.now() - startedAt) / 1000),
+          );
+        }
+      }
+    }
+    previousStatusesRef.current = Object.fromEntries(
+      orderedCuts.map((cut) => [cut.cutId, cut.status]),
+    );
+  }, [cuts, cutOrder, cutStartedAt]);
 
   function saveCutToProject(cut: SheetCutState) {
     if (!activeProjectId) {
@@ -635,18 +662,23 @@ function StepGenerate({
                     )}
                   </div>
                 ) : (
-                  <div className="flex h-full w-full items-center justify-center">
-                    <span
-                      className={
-                        "flex flex-col items-center gap-2 text-[11px] font-bold " +
-                        (cut.status === "running" ? "text-pink-300" : "text-neutral-600")
-                      }
-                    >
-                      {cut.status === "running" && (
-                        <span className="h-5 w-5 animate-spin rounded-full border-2 border-pink-500/30 border-t-pink-400" />
-                      )}
-                      {cut.status === "running" ? "生成中…" : "待機中"}
-                    </span>
+                  <div className="flex h-full w-full flex-col items-center justify-center gap-3 px-4">
+                    {cut.status === "running" ? (
+                      <>
+                        <span className="h-8 w-8 animate-spin rounded-full border-2 border-pink-300 border-t-transparent" />
+                        <span className="text-[12px] font-bold text-pink-300">生成中…</span>
+                        {cutStartedAt[cut.cutId] != null ? (
+                          <div className="w-full max-w-xs">
+                            <GenerationGauge
+                              startedAt={cutStartedAt[cut.cutId]}
+                              mode="batch"
+                            />
+                          </div>
+                        ) : null}
+                      </>
+                    ) : (
+                      <span className="text-[12px] font-bold text-neutral-600">待機中</span>
+                    )}
                   </div>
                 )}
               </div>

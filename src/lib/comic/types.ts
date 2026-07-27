@@ -59,6 +59,8 @@ export type ComicPanelResult = {
   imagePath?: string;
   /** 生成中フラグ。 */
   generating: boolean;
+  /** 生成開始時刻（Date.now()）。推定進捗ゲージの基準。未開始は undefined。 */
+  startedAt?: number;
   /** 生成エラーメッセージ（成功時は undefined）。 */
   error?: string;
 };

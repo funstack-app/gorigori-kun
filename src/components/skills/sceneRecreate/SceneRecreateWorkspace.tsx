@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ActiveProjectSelector } from "../../ActiveProjectSelector";
 import { WorkspaceTabs } from "../../WorkspaceTabs";
 import { SkillIntro } from "../SkillIntro";
+import { GenerationGauge } from "../../GenerationGauge";
 import { ClapperIcon, FilmIcon } from "../../SkillIcon";
 import { useImagePreview } from "../../../lib/store/imagePreview";
 import { useToasts } from "../../../lib/store/toasts";
@@ -114,6 +115,10 @@ export function SceneRecreateWorkspace() {
   const [status, setStatus] = useState<AnalyzeStatus>("idle");
   const [describeDone, setDescribeDone] = useState(0);
   const [analysis, setAnalysis] = useState<SceneAnalysis | null>(null);
+  // 2026-07-27: 解析中ゲージ用の開始時刻。本スキルは専用ストアを持たない
+  // (解析はこのコンポーネントのローカル state で完結する) ため、
+  // 分析開始時に Date.now() をここへ入れる。
+  const [startedAt, setStartedAt] = useState<number | null>(null);
   const runTokenRef = useRef(0);
 
   useEffect(
@@ -180,6 +185,7 @@ export function SceneRecreateWorkspace() {
     const targetNote = userNote;
     setAnalysis(null);
     setDescribeDone(0);
+    setStartedAt(Date.now());
     setStatus("describing");
     try {
       const result = await analyzeScene(targetKeyframes, targetNote, {
@@ -348,6 +354,27 @@ export function SceneRecreateWorkspace() {
         <div className="min-h-0 flex-1 overflow-y-auto">
           {analysis ? (
             <AnalysisResult analysis={analysis} />
+          ) : running ? (
+            /*
+              2026-07-27: 解析中の待ち表示を、通常の画像生成と同じ
+              「ぐるぐる + 進捗ゲージ」に揃えた (STΛCK 要望)。
+              以前は右ペインが説明文のままで、ボタンの小さなスピナーしか
+              動いておらず、待っている間に進んでいるのか固まったのか
+              分からなかった。
+            */
+            <div className="flex h-full w-full flex-col items-center justify-center gap-3 px-8">
+              <span className="h-8 w-8 animate-spin rounded-full border-2 border-pink-300 border-t-transparent" />
+              <span className="text-[12px] font-bold text-pink-300">
+                {status === "describing"
+                  ? `フレーム解析中… (${describeDone}/${keyframes.length})`
+                  : "ショット割りを分析中…"}
+              </span>
+              {startedAt ? (
+                <div className="w-full max-w-xs">
+                  <GenerationGauge startedAt={startedAt} mode="batch" />
+                </div>
+              ) : null}
+            </div>
           ) : (
             <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center text-neutral-500">
               <FilmIcon className="h-9 w-9 text-neutral-500" />

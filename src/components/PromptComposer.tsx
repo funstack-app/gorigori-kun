@@ -610,10 +610,15 @@ export function PromptComposer({
                 return;
               }
             }
-            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
-              e.preventDefault();
-              submit();
-            }
+            // 2026-07-27: アプリ内の入力欄で送信キーが画面ごとに違っていたため、
+            // Enter=送信 / Shift+Enter=改行 に統一した (企画チャット / 絵コンテ / 3D と同じ)。
+            // 変換確定の Enter を送信と取り違えないよう isComposing でガードする。
+            const isComposing =
+              (e.nativeEvent as KeyboardEvent).isComposing || e.keyCode === 229;
+            if (e.key !== "Enter" || isComposing) return;
+            if (e.shiftKey) return; // 改行
+            e.preventDefault();
+            submit();
           }}
           placeholder={placeholder(references, hasMask, primaryMode, imageMode, videoMode)}
           className={`w-full resize-none rounded-xl border px-3 py-2.5 text-sm leading-relaxed shadow-sm outline-none placeholder:text-neutral-500 focus:border-pink-500 focus:ring-2 focus:ring-pink-500/20 ${

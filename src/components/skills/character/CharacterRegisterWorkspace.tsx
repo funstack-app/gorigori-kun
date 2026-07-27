@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { ActiveProjectSelector } from "../../ActiveProjectSelector";
 import { WorkspaceTabs } from "../../WorkspaceTabs";
 import { SkillIntro } from "../SkillIntro";
+import { GenerationGauge } from "../../GenerationGauge";
 import { CharacterIcon } from "../../SkillIcon";
 import { useImagePreview } from "../../../lib/store/imagePreview";
 import { useToasts } from "../../../lib/store/toasts";
@@ -375,6 +376,8 @@ function StepGenerate({
   const status = useCharacterSheetRun((s) => s.status);
   const cuts = useCharacterSheetRun((s) => s.cuts);
   const cutOrder = useCharacterSheetRun((s) => s.cutOrder);
+  // 2026-07-27: 生成中ゲージ用。カット開始時刻から経過を測る。
+  const cutStartedAt = useCharacterSheetRun((s) => s.cutStartedAt);
   const characterImagePath = useCharacterSheetRun((s) => s.characterImagePath);
   const attributes = useCharacterSheetRun((s) => s.attributes);
   const beginRun = useCharacterSheetRun((s) => s.beginRun);
@@ -384,6 +387,7 @@ function StepGenerate({
   const sheet = cutOrder
     .map((id) => cuts[id])
     .find((cut): cut is SheetCutState => Boolean(cut));
+  const startedAt = sheet ? cutStartedAt[sheet.cutId] : undefined;
   const completedPaths =
     sheet?.status === "completed" && sheet.imagePath ? [sheet.imagePath] : [];
   const canProceedToRegister =
@@ -475,17 +479,25 @@ function StepGenerate({
                 )}
               </div>
             ) : (
-              <div className="flex h-full w-full items-center justify-center">
-                <span
-                  className={
-                    "text-[12px] font-bold " +
-                    (sheet?.status === "running"
-                      ? "animate-pulse text-pink-300"
-                      : "text-neutral-600")
-                  }
-                >
-                  {sheet?.status === "running" ? "生成中…" : "待機中"}
-                </span>
+              /*
+                2026-07-27: 生成中の表示を「生成中…」の文字だけから、通常の画像生成と
+                同じ「ぐるぐる + 進捗ゲージ」に揃えた (STΛCK 要望)。
+                文字だけだと、待たされている間に進んでいるのか固まったのか分からない。
+              */
+              <div className="flex h-full w-full flex-col items-center justify-center gap-3 px-8">
+                {sheet?.status === "running" ? (
+                  <>
+                    <span className="h-8 w-8 animate-spin rounded-full border-2 border-pink-300 border-t-transparent" />
+                    <span className="text-[12px] font-bold text-pink-300">生成中…</span>
+                    {startedAt ? (
+                      <div className="w-full max-w-xs">
+                        <GenerationGauge startedAt={startedAt} mode="batch" />
+                      </div>
+                    ) : null}
+                  </>
+                ) : (
+                  <span className="text-[12px] font-bold text-neutral-600">待機中</span>
+                )}
               </div>
             )}
           </div>
