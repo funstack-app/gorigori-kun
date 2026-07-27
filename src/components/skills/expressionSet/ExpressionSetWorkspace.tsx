@@ -508,9 +508,13 @@ function StepGenerate({
     const ext = cut.imagePath.split(".").pop()?.toLowerCase() || "png";
     // 2026-07-27: キャラ資産形式 (`yuki_smile.png`)。キャラ名が名前に入らないと
     // 複数キャラの差分が混ざって管理できない (外注へ渡すときに identify できない)。
+    // 2026-07-27: index を渡す。他2スキル (productSet / multiAngle) は渡していて
+    // ここだけ抜けており、役割名が空になったときに全部同名になっていた。
     const fileName = buildExportFileName({
       style: "asset",
       prefix: characterName || undefined,
+      index: cutOrder.indexOf(cut.cutId) + 1,
+      digits: 2,
       role: cut.label,
       ext,
     });

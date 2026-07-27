@@ -414,7 +414,11 @@ export const useStoryboardRun = create<StoryboardRunState>((set, get) => ({
           { takeId: e.takeId, imagePath: e.imagePath, scores: e.scores },
         ];
         targetMap.set(e.cutId, { ...cut, status: "review", takes });
-        return applyMap({ status: "running" as const });
+        // 2026-07-27: チェックポイントで止まっている間に「このカットだけ作り直す」を
+        // 使った場合、Rust 側は resume 待ちで止まったままなのに、ここで全体を running
+        // に上書きすると画面だけ「実行中」になり、1カットも進まない嘘の表示になる。
+        // 停止中は全体ステータスを触らない。
+        return applyMap(s.checkpointCutId ? {} : { status: "running" as const });
       }
 
       if (e.kind === "cutCheckpoint") {
@@ -735,6 +739,10 @@ export const useStoryboardRun = create<StoryboardRunState>((set, get) => ({
     const state = get();
     const runId = state.activeRunId;
     const cut = state.cuts.get(cutId);
+    // 2026-07-27: 多重起動ガード。ボタンが即再押下できるため、連打すると同じカットに
+    // 対して生成が何本も並列で走っていた (Rust 側に重複ガードが無い)。
+    // 既に running のカットへの再要求は黙って無視する。
+    if (cut?.status === "running") return;
     if (!runId || !cut) {
       useToasts.getState().push({
         kind: "warn",
@@ -768,8 +776,10 @@ export const useStoryboardRun = create<StoryboardRunState>((set, get) => ({
         cutDescription: cut.description ?? "",
       })
       .catch((err) => {
-        // 失敗したら running のまま放置せず、review に戻して理由を出す
-        // (押しても何も起きないように見えるのを防ぐ)。
+        // ここに来るのは Codex の起動失敗など **生成が始まる前のエラーだけ**。
+        // 生成が始まった後の失敗は Rust が Ok を返した後に cutFailed イベントで届く
+        // (commands/storyboard.rs)。そちらは applyEvent 側で処理される。
+        // running のまま固まらないよう review / failed へ戻して理由を出す。
         set((s) => {
           const target = s.cuts.get(cutId);
           if (!target) return s;

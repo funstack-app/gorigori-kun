@@ -69,26 +69,71 @@ export function toSafeSegment(raw: string): string {
  * `_` 区切りの安全な文字列として残す)。
  */
 const ROLE_DICTIONARY: ReadonlyArray<readonly [RegExp, string]> = [
-  [/正面|フロント/, "front"],
-  [/背面|後ろ|後姿|バック/, "back"],
-  [/側面|横|サイド/, "side"],
-  [/斜め|3\/4|クォーター/, "three_quarter"],
-  [/顔|フェイス|アップ/, "face"],
-  [/全身/, "full_body"],
+  // 背景・場面（複合ラベルで先に来てほしいので上に置く）
   [/白背景/, "white_bg"],
   [/使用シーン|シーン/, "scene"],
+  // 画角・距離
+  [/全身/, "full_body"],
   [/ディテール|寄り|クローズ/, "detail"],
   [/引き|ロング/, "wide"],
+  // 向き
+  [/正面|フロント/, "front"],
+  [/背面|後ろ|後姿|バック/, "back"],
+  [/側面|真横|横顔|サイド/, "side"],
+  [/斜め|3\/4|クォーター/, "three_quarter"],
+  [/顔|フェイス|アップ/, "face"],
+  // 高さ
   [/見上げ|ローアングル/, "low_angle"],
   [/見下ろし|ハイアングル/, "high_angle"],
   [/俯瞰/, "overhead"],
+  // 表情（表情差分スキル。ここが無いと日本語ラベルが空になり全部同名になる）
+  // 注: 「笑顔」は上の /顔/ にも当たるので face_smile と二重になる。
+  // 表情語は単独で意味が通るため、当たったら顔系を落とす（下の toRoleSlug で処理）。
+  [/ニュートラル|真顔|無表情/, "neutral"],
+  [/笑顔|笑い|スマイル/, "smile"],
+  [/怒り|怒っ/, "angry"],
+  [/悲し|泣き/, "sad"],
+  [/驚き|驚い/, "surprised"],
+  [/照れ|恥ずかし/, "shy"],
+  [/困り|困惑/, "troubled"],
+  [/不安|心配/, "worried"],
+  [/得意|ドヤ/, "confident"],
+  [/呆れ/, "unimpressed"],
+  [/眠|寝/, "sleepy"],
 ];
 
-export function toRoleSlug(label: string): string {
+/**
+ * 日本語ラベルを英数の役割名へ寄せる。
+ *
+ * 2026-07-27 修正: 以前は (a) 最初に当たった1語だけ返し (b) 辞書に無ければ
+ * `toSafeSegment` の結果をそのまま返していた。この2つが同時に事故を起こしていた:
+ *
+ * - (a) 「白背景・正面」が `front` になり、白背景かシーンかが名前から消えた
+ * - (b) `toSafeSegment` は全角を全部 `_` に変えてから前後の `_` を削るので、
+ *   **日本語だけのラベルは必ず空文字になる**（「怒り」「悲しみ」→ ""）。
+ *   空になった役割名は buildExportFileName の filter(Boolean) で落ち、
+ *   最後の受け皿 "image" に落ちて **11枚中8枚が image.png** になっていた（実測）。
+ *
+ * 現在は当たった語を辞書の定義順に全部連結し、1つも当たらなければ null を返す
+ * （呼び出し側が index 等の代替で一意性を保てるようにする。空文字を返さない）。
+ */
+const EXPRESSION_SLUGS = new Set([
+  "neutral", "smile", "angry", "sad", "surprised",
+  "shy", "troubled", "worried", "confident", "unimpressed", "sleepy",
+]);
+
+export function toRoleSlug(label: string): string | null {
+  let hits: string[] = [];
   for (const [pattern, slug] of ROLE_DICTIONARY) {
-    if (pattern.test(label)) return slug;
+    if (pattern.test(label) && !hits.includes(slug)) hits.push(slug);
   }
-  return toSafeSegment(label).toLowerCase();
+  // 表情語が当たっているなら "face" は冗長 (「笑顔」→ face_smile を smile にする)
+  if (hits.some((h) => EXPRESSION_SLUGS.has(h))) {
+    hits = hits.filter((h) => h !== "face");
+  }
+  if (hits.length > 0) return hits.join("_");
+  const fallback = toSafeSegment(label).toLowerCase();
+  return fallback || null;
 }
 
 /** 通し番号をゼロ埋めする。 */
@@ -108,7 +153,9 @@ function padIndex(index: number, digits: number): string {
 export function buildExportFileName(opts: NamingOptions): string {
   const digits = opts.digits ?? 3;
   const prefix = opts.prefix ? toSafeSegment(opts.prefix) : "";
-  const role = opts.role ? toRoleSlug(opts.role) : "";
+  // toRoleSlug は当てはまらなければ null。空文字を混ぜると parts から落ちて
+  // 全部同名になるため、null は最初から無かったものとして扱う。
+  const role = (opts.role ? toRoleSlug(opts.role) : null) ?? "";
   const parts: string[] = [];
 
   switch (opts.style) {
@@ -145,13 +192,15 @@ export function buildExportFileName(opts: NamingOptions): string {
   return `${stem}.${ext}`;
 }
 
-/** スキル単位の既定スタイル。UI の初期値に使う。 */
-export const DEFAULT_NAMING_STYLE: Record<string, NamingStyle> = {
-  "gori-product-set": "sku",
-  "gori-storyboard": "sequence",
-  "gori-multi-angle": "sequence",
-  "gori-comic": "sequence",
-  "gori-character-register": "asset",
-  "gori-expression-set": "asset",
-  "gori-scene-3d": "sequence",
-};
+// 2026-07-27: DEFAULT_NAMING_STYLE を削除した。
+//
+// どこからも参照されておらず (呼び出し4箇所はすべて style を直書き)、書き換えても挙動が
+// 変わらない死んだ台帳だった。さらに載せていた7スキルのうち storyboard / character-register
+// / scene-3d は buildExportFileName を1度も呼んでおらず、**実装のない挙動を「対応済み」と
+// 記述している**状態で、次に読む人を誤認させる。
+//
+// TODO: 下記3スキルは書き出し名の統一が未対応。対応するときはここに命名規則を戻すか、
+// 各スキルの保存処理で buildExportFileName を呼ぶ。
+//   - gori-storyboard        (絵コンテ: 連番 C001 形式にすべき)
+//   - gori-character-register (キャラ登録: キャラ名_役割 形式にすべき)
+//   - gori-scene-3d          (3D: 連番形式にすべき)

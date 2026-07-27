@@ -49,9 +49,22 @@ async function measureImage(imagePath: string): Promise<{ width: number; height:
  */
 function parseTextBlocks(raw: string): TextBlock[] {
   const trimmed = raw.trim().replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
+
+  // 2026-07-27 修正: 以前は trimmed 全体を JSON.parse していたため、AI が
+  // 「以下が解析結果です。{...}」のように前置きを1行付けただけで検査が丸ごと失敗し、
+  // 文字だけでなく構図・色・NG表現の判定もまとめて消えていた。
+  // Rust 側の同じ出力を食う parse_design_understanding (edit/understanding.rs:77-83) は
+  // 最初の { と最後の } で切り出しており、そのテストデータには「前置き {…} 後置き」が
+  // 「実測の揺れを再現」というコメント付きで入っている。**Rust は前置きが付くと知って
+  // いるのに TS 側だけ JSON だけ来る前提だった**ため、同じ規則へ揃える。
+  const s = trimmed.indexOf("{");
+  const e = trimmed.lastIndexOf("}");
+  if (s < 0 || e <= s) {
+    throw new Error("文字抽出の応答に JSON が含まれていませんでした");
+  }
   let parsed: unknown;
   try {
-    parsed = JSON.parse(trimmed);
+    parsed = JSON.parse(trimmed.slice(s, e + 1));
   } catch {
     throw new Error("文字抽出の応答が JSON として読めませんでした");
   }
@@ -74,16 +87,69 @@ function parseTextBlocks(raw: string): TextBlock[] {
     if (!Array.isArray(bboxRaw) || bboxRaw.length !== 4) continue;
     const nums = bboxRaw.map((v) => (typeof v === "number" && Number.isFinite(v) ? v : null));
     if (nums.some((v) => v === null)) continue;
-    const [x, y, w, h] = nums as [number, number, number, number];
-    if (w <= 0 || h <= 0) continue;
+    const box = normalizeBbox(nums as [number, number, number, number]);
+    if (!box) continue;
 
     result.push({
       text,
-      bbox: [x, y, w, h],
+      bbox: box,
       color: typeof rec.color === "string" ? rec.color : null,
     });
   }
   return result;
+}
+
+/**
+ * bbox を 0〜1000 の正規化スケールへ揃える。範囲外・壊れた値は null で捨てる。
+ *
+ * 2026-07-27 追加: 以前は値をそのまま信じていたため、AI が指示を無視して実ピクセル座標
+ * (例 [100,200,1800,400]) を返すと素通りし、文字面積が「画像の72%」のように誤って
+ * 報告され、実際は5%しかない画像に重い違反が付いていた。
+ *
+ * Rust 側の normalize_bbox (edit/understanding.rs:131-162) が同じ入力に対して
+ * (a) ピクセル座標判定 (b) xywh/xyxy の書式揺れ判定 (c) 画像内クランプ を全部やっており、
+ * 「4000px 原寸でモデルがピクセル座標を返した」実測もコメントに残っている。
+ * **同じプロンプトの同じ出力を食う2経路で解釈がズレないよう**、規則をこちらへ移す。
+ */
+const NORM_MARGIN = 8;
+
+function normalizeBbox(
+  raw: [number, number, number, number],
+): [number, number, number, number] | null {
+  const [a, b, c, d] = raw;
+  // 1つでも 1000 を明確に超えるならピクセル座標とみなす。正規化スケールが不明なので
+  // 換算できず、面積比が壊れるため捨てる (推測で埋めない)。
+  if (raw.some((v) => v > NORMALIZED_SCALE + NORM_MARGIN)) return null;
+  if (raw.some((v) => v < -NORM_MARGIN)) return null;
+
+  // xywh / xyxy の書式揺れを吸収する
+  const xywhFits =
+    c > 0 && d > 0 && a + c <= NORMALIZED_SCALE + NORM_MARGIN && b + d <= NORMALIZED_SCALE + NORM_MARGIN;
+  const xyxyFits = c > a && d > b;
+  let x = a;
+  let y = b;
+  let w: number;
+  let h: number;
+  if (xywhFits) {
+    w = c;
+    h = d;
+  } else if (xyxyFits) {
+    w = c - a;
+    h = d - b;
+  } else {
+    return null;
+  }
+
+  // 画像内へクランプ
+  const x0 = Math.max(0, Math.min(x, NORMALIZED_SCALE));
+  const y0 = Math.max(0, Math.min(y, NORMALIZED_SCALE));
+  const x1 = Math.max(0, Math.min(x + w, NORMALIZED_SCALE));
+  const y1 = Math.max(0, Math.min(y + h, NORMALIZED_SCALE));
+  w = x1 - x0;
+  h = y1 - y0;
+  // 極端に小さいものはノイズとして捨てる (Rust 側の 2px 相当)
+  if (w < 2 || h < 2) return null;
+  return [x0, y0, w, h];
 }
 
 /**
