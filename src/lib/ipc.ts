@@ -945,6 +945,18 @@ export const codexVision = {
       "codex_list_image_objects",
       { imagePath },
     ),
+  /**
+   * レギュレーション検査用: 画像内の文字ブロックを座標付きで抽出する (生 JSON 文字列)。
+   *
+   * describeImage は「AI画像生成で再現するための英語プロンプト1行」を返すもので、
+   * 画像内の文字列を含まない。文字面積・NG表現・打消し表記・ロゴといった
+   * 文字前提のルールは、この抽出結果を渡さないと構造的に判定できない
+   * (2026-07-27 監査で空振りを検出)。
+   *
+   * 返り値は未検証の生出力。パースは呼び出し側 (regulationCheck/textBlocks.ts) が行う。
+   */
+  extractTextBlocks: (imagePath: string, imgW: number, imgH: number) =>
+    invoke<string>("codex_extract_text_blocks", { imagePath, imgW, imgH }),
 };
 
 // ──────────── Codex MCP servers (~/.codex/config.toml) ────────────

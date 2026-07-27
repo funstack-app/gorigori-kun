@@ -1,21 +1,28 @@
 /**
  * レギュレーション検査の実行ロジック（Codex 画像入力ベース・MVP）
  *
- * 検査経路（既存 Codex 経路を再利用。新規 Rust コマンドは追加しない）:
- *   1. codex_describe_image (ipc: codexVision.describeImage) — 画像を Codex(-i 添付)に
- *      実入力し、被写体/構図/色/背景/読み取れる文字などの詳細な description を得る。
- *      → ここで「画像が実際に Codex に渡る」。
- *   2. codex_text_query (agents/codexQuery: codexTextQuery, expectJson) — 上記 description と
- *      ルールセットを渡し、issue の JSON を構造化させる。
+ * 検査経路（画像を2つの角度から読み、両方を判定材料にする）:
+ *   1a. codex_describe_image (codexVision.describeImage) — 画像の「見た目」。被写体/構図/
+ *       色/背景を英語プロンプト1行で得る。**文字列は含まれない**（AI画像生成用の記述のため）。
+ *   1b. codex_extract_text_blocks (regulationCheck/textBlocks: extractTextInfo) — 画像内の
+ *       「文字」。文字内容・座標・サイズ・色を構造化して得る。文字面積比もここで算出する。
+ *   2.  codex_text_query (agents/codexQuery: codexTextQuery, expectJson) — 1a と 1b の
+ *       両方をルールセットと共に渡し、issue の JSON を構造化させる。
  *
- * MVP の既知ギャップ（報告済み）:
- * - Codex はルール文と画像を「同時」には見ない。画像は step1 の description 経由でしか
- *   参照されないため、微細な文字/ロゴのピクセル判定はリファレンスが description の精度に依存する。
- *   画像+任意プロンプトを一度に渡す汎用 Rust コマンドが無いことによる制約（src-tauri 編集は本タスク対象外）。
+ * なぜ 1b を足したか（2026-07-27）:
+ *   以前は 1a だけを判定材料にしていた。あれは「絵として何が写っているか」であり、
+ *   画像内の文字を1文字も含まない。そのため文字面積 / NG表現（必ず・100%・日本一）/
+ *   打消し表記の入れ忘れ / ロゴサイズ といった *文字を読まないと判定できないルール* が
+ *   構造的に空振りしていた（「業界No.1」と大書きされていても検出されない）。
+ *   ルール定義（rules.ts）はこれらを数値基準で要求しているのに、材料が入力に無かった。
+ *
+ * 失敗時の扱い: 1a/1b/2 のいずれかが失敗したら checkImage が error に落とし、
+ * 画面が「検査エラー」と赤字で出す。空の issues（＝問題なし）で握りつぶさない。
  */
 
 import { codexVision } from "../ipc";
 import { codexTextQuery } from "../agents/codexQuery";
+import { extractTextInfo, formatTextInfoForPrompt } from "./textBlocks";
 import {
   type RegulationRule,
   type RegulationSeverity,
@@ -104,22 +111,27 @@ function formatRulesForPrompt(rules: readonly RegulationRule[]): string {
  */
 async function judgeAgainstRules(
   description: string,
+  textInfo: string,
   imagePath: string,
   rules: readonly RegulationRule[],
   signal?: AbortSignal,
 ): Promise<RegulationIssue[]> {
   const validRuleIds = new Set(rules.map((r) => r.id));
   const systemPrompt =
-    "あなたは広告・クリエイティブのレギュレーション審査官です。与えられた画像の説明文を、指定された検査基準に照らして厳密に審査します。基準に照らして問題があるものだけを issue として挙げ、確信が持てないものは挙げません。前置き・説明は書かず、JSON だけを出力します。";
+    "あなたは広告・クリエイティブのレギュレーション審査官です。与えられた画像の説明文と、画像から抽出された文字情報を、指定された検査基準に照らして厳密に審査します。基準に照らして問題があるものだけを issue として挙げ、確信が持てないものは挙げません。前置き・説明は書かず、JSON だけを出力します。";
   const prompt = [
     "# 検査対象の画像説明（この画像を Codex が解析した description）",
     description,
+    "",
+    "# 画像から抽出した文字情報（文字に関する基準はこちらを根拠に判定すること）",
+    textInfo,
     "",
     "# 検査基準（各行の ruleId をそのまま issue.ruleId に使うこと）",
     formatRulesForPrompt(rules),
     "",
     "# 指示",
-    "上の説明文から読み取れる範囲で、各検査基準に抵触する点だけを issue として列挙してください。",
+    "上の説明文と文字情報から読み取れる範囲で、各検査基準に抵触する点だけを issue として列挙してください。",
+    "- 文字面積・禁止表現・必須表記の有無・ロゴサイズなど文字に関する基準は、必ず「文字情報」セクションを根拠にする（画像説明文には文字が含まれないため）。",
     "- 抵触が無ければ issues を空配列にする。",
     "- ruleId は上記の基準に存在するものだけを使う（新しい id を作らない）。",
     "- severity は high / mid / low のいずれか。",
@@ -168,8 +180,21 @@ export async function checkImage(
   signal?: AbortSignal,
 ): Promise<RegulationImageResult> {
   try {
-    const description = await codexVision.describeImage(imagePath);
-    const issues = await judgeAgainstRules(description, imagePath, rules, signal);
+    // 画像の見た目 (description) と 画像内の文字 (textInfo) は別経路で取る。
+    // description は AI 画像生成用の英語プロンプトで文字を一切含まないため、
+    // 文字前提のルール (面積 / NG表現 / 必須表記 / ロゴ) はこれだけでは判定できない
+    // (2026-07-27 監査で空振りを検出し textInfo を追加)。
+    const [description, textExtraction] = await Promise.all([
+      codexVision.describeImage(imagePath),
+      extractTextInfo(imagePath),
+    ]);
+    const issues = await judgeAgainstRules(
+      description,
+      formatTextInfoForPrompt(textExtraction),
+      imagePath,
+      rules,
+      signal,
+    );
     return { imagePath, issues, description, error: null };
   } catch (err) {
     const message = (err as Error)?.message ?? String(err);

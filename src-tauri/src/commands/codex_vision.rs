@@ -71,6 +71,24 @@ pub async fn codex_list_image_objects(image_path: String) -> Result<Vec<ImageObj
     parse_object_words(&stdout)
 }
 
+/// レギュレーション検査用: 画像内の文字ブロックを座標付きで抽出して JSON 文字列で返す。
+///
+/// なぜ独立コマンドにするか (2026-07-27):
+///   レギュレーション検査は `codex_describe_image` の出力 (AI画像生成用の英語プロンプト1行)
+///   だけを判定材料にしていた。あれは「絵として何が写っているか」を書くもので、画像内の
+///   文字列を1文字も含まない。そのため文字面積・NG表現・打消し表記・ロゴといった
+///   *文字を読まないと判定できないルール* が構造的に空振りしていた
+///   (「業界No.1」と大書きされていても検出されない)。
+///   文字抽出の実装自体は `codex_analyze_design` として既に存在したが、Tauri コマンドとして
+///   公開されておらず編集タブの内部からしか呼べなかった。ここを公開経路にする。
+///
+/// 返り値は `codex_analyze_design` の生出力 (未検証の JSON 文字列)。パースと検証は
+/// 呼び出し側が行う (未信頼入力の検証を呼び出し側1箇所に集約する)。
+#[tauri::command]
+pub async fn codex_extract_text_blocks(image_path: String, img_w: u32, img_h: u32) -> Result<String, String> {
+    codex_analyze_design(&image_path, img_w, img_h).await
+}
+
 /// 理解層 (工程0): 画像をグラフィックデザインとして分解した構造化 JSON を返す。
 ///
 /// 生出力をそのまま返し、解析・検証は `edit::understanding::parse_design_understanding`

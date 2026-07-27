@@ -463,6 +463,7 @@ pub fn run() {
             commands::codex_text::codex_text_query,
             commands::codex_vision::codex_describe_image,
             commands::codex_vision::codex_list_image_objects,
+            commands::codex_vision::codex_extract_text_blocks,
             commands::edit_models::edit_models_list,
             commands::edit_models::edit_models_download,
             commands::edit_models::edit_models_delete,
