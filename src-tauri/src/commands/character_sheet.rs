@@ -164,7 +164,7 @@ pub enum CharacterSheetEvent {
 #[tauri::command]
 pub async fn character_sheet_run(
     app: AppHandle,
-    _state: State<'_, AppState>,
+    state: State<'_, AppState>,
     params: CharacterSheetParams,
 ) -> Result<String, String> {
     // app-server と同じ GORI 専用 CODEX_HOME を使う。worker は mirror_codex_home で
@@ -187,9 +187,12 @@ pub async fn character_sheet_run(
         CharacterSheetGenerationMode::Composite => COMPOSITE_CUT_ID,
         CharacterSheetGenerationMode::MultiCut => "unknown",
     };
+    // 2026-07-27: 常駐 app-server 経路 (gen_worker) へ渡すため state を複製する
+    let task_state = state.inner_clone();
     tokio::spawn(async move {
         if let Err(err) = run_character_sheet_orchestrator(
             app.clone(),
+            task_state,
             codex_bin,
             codex_home_orig,
             task_run_id,
@@ -216,7 +219,7 @@ pub async fn character_sheet_run(
 #[tauri::command]
 pub async fn character_sheet_regenerate_cut(
     app: AppHandle,
-    _state: State<'_, AppState>,
+    state: State<'_, AppState>,
     run_id: String,
     cut_id: String,
     params: CharacterSheetParams,
@@ -254,6 +257,10 @@ pub async fn character_sheet_regenerate_cut(
         .map_err(|e| format!("character-sheet 出力先作成失敗: {e}"))?;
 
     let task_app = app.clone();
+
+    // 2026-07-27: 常駐 app-server 経路 (gen_worker) に渡すため state も複製する
+
+    let task_state = state.inner_clone();
     let cwd = params.cwd.clone();
     let aspect_ratio = params.aspect_ratio.clone();
     let attributes = params.attributes.clone();
@@ -272,6 +279,7 @@ pub async fn character_sheet_regenerate_cut(
         );
         match generate_one_cut(
             &task_app,
+            &task_state,
             &codex_bin,
             &codex_home_orig,
             &prompt,
@@ -312,6 +320,8 @@ pub async fn character_sheet_regenerate_cut(
 
 async fn run_character_sheet_orchestrator(
     app: AppHandle,
+    // 2026-07-27: 常駐 app-server 経路 (gen_worker) へ渡すため追加
+    state: AppState,
     codex_bin: PathBuf,
     codex_home_orig: PathBuf,
     run_id: String,
@@ -361,6 +371,7 @@ async fn run_character_sheet_orchestrator(
             let prompt = build_composite_character_sheet_prompt(&attributes);
             match generate_one_cut(
                 &app,
+                &state,
                 &codex_bin,
                 &codex_home_orig,
                 &prompt,
@@ -412,6 +423,8 @@ async fn run_character_sheet_orchestrator(
                     let cwd = cwd.clone();
                     let cut = cut.clone();
                     let event_run_id = run_id.clone();
+                    // 2026-07-27: 各カットのクロージャへ渡すため複製する
+                    let state = state.inner_clone();
                     async move {
                         let _ = app.emit(
                             EVENT_CHARACTER_SHEET,
@@ -425,6 +438,7 @@ async fn run_character_sheet_orchestrator(
                         let prompt = build_sheet_prompt(&cut, &aspect_ratio, &attributes);
                         match generate_one_cut(
                             &app,
+                            &state,
                             &codex_bin,
                             &codex_home_orig,
                             &prompt,

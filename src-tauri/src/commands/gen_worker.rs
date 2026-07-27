@@ -44,8 +44,10 @@ pub const GENERATION_MAX_ATTEMPTS: u32 = 3;
 /// 一枚も生成されないことがある。これは codex の異常終了ではないので status は
 /// success のまま「生成画像が見つかりません」になる。1回で諦めず最大
 /// GENERATION_MAX_ATTEMPTS 回まで作り直す。コア(batch_gen)の自動リトライと同思想。
+#[allow(clippy::too_many_arguments)]
 pub async fn generate_one_cut(
     app: &AppHandle,
+    state: &crate::state::AppState,
     codex_bin: &Path,
     codex_home_orig: &Path,
     prompt: &str,
@@ -54,6 +56,52 @@ pub async fn generate_one_cut(
     cut_id: &str,
     cwd: Option<String>,
 ) -> Result<PathBuf, String> {
+    // ── 常駐 app-server 経路を先に試す (2026-07-27) ────────────────────
+    //
+    // なぜ: batch_gen.rs は冒頭コメントのとおり「1枚ごとの codex exec 起動コストを
+    // 払わないため」に常駐化済みだが、スキル系 (マルチアングル / キャラ登録 / 絵コンテ) は
+    // その改修から取り残され、1カットごとに codex プロセスを新規起動していた。
+    // codex は Node.js 実装なので起動だけで数秒かかり、それがカット数ぶん積み上がる。
+    //
+    // 失敗したら従来の codex exec 経路へ落ちるので、常駐が使えない環境
+    // (Windows は gen_server 側で無効) でも挙動は変わらない。
+    let image_paths: Vec<String> = reference_images
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    match crate::codex::gen_server::generate_image(
+        app,
+        state,
+        prompt,
+        &image_paths,
+        cwd.as_deref().filter(|value| !value.is_empty()),
+        Some(GENERATION_MODEL),
+        Some(GENERATION_EFFORT),
+    )
+    .await
+    {
+        Ok(src_png) => {
+            let dest = output_dir.join(format!("cut_{cut_id}_{}.png", short_id()));
+            match std::fs::copy(&src_png, &dest) {
+                Ok(_) => return Ok(dest),
+                Err(error) => {
+                    // コピーだけ失敗した場合は exec 経路でも同じ結果にならないので、
+                    // フォールバックせずそのまま失敗を返す。
+                    return Err(format!(
+                        "常駐経路の生成画像コピー失敗 ({}): {error}",
+                        src_png.display()
+                    ));
+                }
+            }
+        }
+        Err(resident_error) => {
+            tracing::warn!(
+                target: "codex.gen_worker",
+                "cut {cut_id}: 常駐 app-server 経路に失敗したため codex exec へフォールバックします: {resident_error}"
+            );
+        }
+    }
+
     let mut last_err = String::new();
     for attempt in 1..=GENERATION_MAX_ATTEMPTS {
         match attempt_one_cut(

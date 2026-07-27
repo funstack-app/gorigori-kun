@@ -108,7 +108,7 @@ pub enum MultiAngleEvent {
 #[tauri::command]
 pub async fn multiangle_run(
     app: AppHandle,
-    _state: State<'_, AppState>,
+    state: State<'_, AppState>,
     params: MultiAngleParams,
 ) -> Result<String, String> {
     // app-server と同じ GORI 専用 CODEX_HOME を使う。worker は mirror_codex_home で
@@ -124,10 +124,12 @@ pub async fn multiangle_run(
     };
     let task_run_id = run_id.clone();
     let fail_run_id = run_id.clone();
+    // 2026-07-27: 常駐 app-server 経路 (gen_worker) へ渡すため state を複製する
+    let task_state = state.inner_clone();
 
     tokio::spawn(async move {
         if let Err(err) =
-            run_multiangle_orchestrator(app.clone(), codex_bin, codex_home_orig, task_run_id, params)
+            run_multiangle_orchestrator(app.clone(), task_state, codex_bin, codex_home_orig, task_run_id, params)
                 .await
         {
             tracing::warn!(target: "codex.multiangle", "multiangle orchestrator failed: {err}");
@@ -149,7 +151,7 @@ pub async fn multiangle_run(
 #[tauri::command]
 pub async fn multiangle_regenerate_cut(
     app: AppHandle,
-    _state: State<'_, AppState>,
+    state: State<'_, AppState>,
     run_id: String,
     cut_id: String,
     params: MultiAngleParams,
@@ -192,6 +194,8 @@ pub async fn multiangle_regenerate_cut(
     let environment = params.environment_description.clone();
     let subject_kind = resolve_subject_kind(&params);
     let event_run_id = run_id.clone();
+    // 2026-07-27: 常駐 app-server 経路 (gen_worker) へ渡すため複製する
+    let task_state = state.inner_clone();
 
     tokio::spawn(async move {
         let prompt = build_multiangle_prompt(&cut, &aspect_ratio, &environment, subject_kind);
@@ -206,6 +210,7 @@ pub async fn multiangle_regenerate_cut(
         );
         match generate_one_cut(
             &task_app,
+            &task_state,
             &codex_bin,
             &codex_home_orig,
             &prompt,
@@ -246,6 +251,8 @@ pub async fn multiangle_regenerate_cut(
 
 async fn run_multiangle_orchestrator(
     app: AppHandle,
+    // 2026-07-27: 常駐 app-server 経路 (gen_worker) へ渡すため追加
+    state: AppState,
     codex_bin: PathBuf,
     codex_home_orig: PathBuf,
     run_id: String,
@@ -296,6 +303,8 @@ async fn run_multiangle_orchestrator(
             let cwd = cwd.clone();
             let cut = cut.clone();
             let event_run_id = run_id.clone();
+            // 2026-07-27: 各カットのクロージャへ渡すため複製する
+            let state = state.inner_clone();
             async move {
 
                 let _ = app.emit(
@@ -310,6 +319,7 @@ async fn run_multiangle_orchestrator(
                 let prompt = build_multiangle_prompt(&cut, &aspect_ratio, &environment, subject_kind);
                 match generate_one_cut(
                     &app,
+                    &state,
                     &codex_bin,
                     &codex_home_orig,
                     &prompt,
