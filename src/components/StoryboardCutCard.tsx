@@ -2,8 +2,6 @@ import { useEffect, useState } from "react";
 import type { ReactElement, ReactNode } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 
-import { storyboard } from "../lib/ipc";
-import { usePlanChat } from "../lib/store/planChat";
 import { useStoryboardRun, type CutState } from "../lib/store/storyboardRun";
 import { ContextMenu } from "./ContextMenu";
 import { buildGalleryItemMenu } from "./galleryItemMenu";
@@ -136,33 +134,20 @@ export function StoryboardCutCard({ cut }: { cut: CutState }) {
   const selectTake = useStoryboardRun((s) => s.selectTake);
   const regenerateCut = useStoryboardRun((s) => s.regenerateCut);
   const skipCut = useStoryboardRun((s) => s.skipCut);
-  const activeRunId = useStoryboardRun((s) => s.activeRunId);
   const lastEventAt = useStoryboardRun((s) => s.lastEventAt);
-  const storyboardParams = usePlanChat((s) => s.storyboardParams);
 
   // B-6: このカットが生成中のとき、直近イベントからの経過秒を表示する。
   const elapsed = useElapsedSeconds(cut.status === "running", lastEventAt);
 
   // その場で1枚だけ再生成する (2026-06-08 STΛCK指示「1枚生成＋気に入らなければその場で再生成」)。
-  // 旧 regenerateCut() は UI を running 表示に戻すだけでバックエンド未接続だった。
-  // ここで storyboard_regenerate_cut を実呼び出しし、新 take が TakeCompleted で
-  // 既存ストアに追加されるようにする。参照画像/比率は planChat.storyboardParams から取る。
+  //
+  // 2026-07-27: 実呼び出しをここに持たせるのをやめ、ストアの regenerateCut に集約した。
+  // 以前はこのカードだけが自前で storyboard_regenerate_cut を呼び、ストア側は
+  // 「未対応です」のトーストを出す空実装だったため、同じ「作り直す」でも
+  // カードからは動き、チェックポイント画面からは動かないという分裂が起きていた。
+  // 失敗時に review へ戻す処理もストア側に入っている。
   const handleRegenerate = () => {
-    regenerateCut(cut.cutId); // UI を「生成中」表示に戻す (既存挙動を維持)
-    if (!activeRunId) return;
-    void storyboard
-      .regenerateCut({
-        runId: activeRunId,
-        cutId: cut.cutId,
-        characterReferenceImage: storyboardParams?.character_reference_path ?? "",
-        styleReferenceImage: storyboardParams?.style_reference_path,
-        additionalRefs: [],
-        aspectRatio: storyboardParams?.aspect_ratio ?? "9:16",
-        cutDescription: cut.description ?? "",
-      })
-      .catch(() => {
-        // 失敗は UI 上 running のまま残るが、握りつぶさず将来トースト化する余地を残す。
-      });
+    regenerateCut(cut.cutId);
   };
 
   /*

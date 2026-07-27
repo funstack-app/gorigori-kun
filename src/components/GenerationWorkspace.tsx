@@ -1234,11 +1234,12 @@ function StoryboardRunPanel() {
             run.reset();
             pushToast({ kind: "info", text: "方向性チェックをリセットしました。", ttlMs: 2400 });
           }}
-          onRegenerateCut={async () => {
-            // 一旦続行して停止ループを解除する (Cut3 再生成は既存のカード再生成に接続予定)。
-            const continued = await run.continueCheckpoint();
-            if (!continued) return;
-            pushToast({ kind: "info", text: "Cut3再生成は次フェーズで手動再実行に接続します。", ttlMs: 3200 });
+          onRegenerateCut={() => {
+            // 2026-07-27: 以前は continueCheckpoint() を呼んでいた。つまり
+            // 「作り直す」を押すと再生成されないまま生成が先へ進んでいた
+            // (押した意図と逆の結果になる最悪の形)。ストアの regenerateCut が
+            // 実際の再生成を持つようになったので、そちらへ繋ぐ。
+            if (run.checkpointCutId) run.regenerateCut(run.checkpointCutId);
           }}
         />
       )}

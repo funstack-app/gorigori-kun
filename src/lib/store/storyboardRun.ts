@@ -18,6 +18,7 @@ import {
   useGenerationStatus,
   type GenerationKind,
 } from "./generationStatus";
+import { usePlanChat } from "./planChat";
 import { useProjects } from "./projects";
 import { useToasts } from "./toasts";
 
@@ -195,7 +196,17 @@ type StoryboardRunState = {
   revertCut: (cutId: string) => void;
   /** review 状態の take を切り替え (左右ボタンで比較) */
   selectTake: (cutId: string, takeId: string) => void;
-  /** 未対応の再生成リクエスト。状態は変えず、案内だけ表示する。 */
+  /**
+   * このカットを1枚だけ作り直す。UI を「生成中」に戻し、Rust の
+   * storyboard_regenerate_cut を呼ぶ。新しい take は TakeCompleted イベントで
+   * ストアに追加される。
+   *
+   * 2026-07-27: 以前はトーストで「未対応です」と出すだけの空実装だった。
+   * Rust 側 (commands/storyboard.rs) と ipc (storyboard.regenerateCut) は完成済みで、
+   * StoryboardCutCard だけが自前で実呼び出しを持っていたため、
+   * 「絵コンテ段階のボタンは動くのに本生成中のボタンは死んでいる」状態になっていた。
+   * ストア側に実装を集約し、呼び出し元すべてが同じ挙動になるようにする。
+   */
   regenerateCut: (cutId: string) => void;
   /** スキップして次へ進む (このカットは confirmed 扱いで次に行く) */
   skipCut: (cutId: string) => void;
@@ -720,12 +731,59 @@ export const useStoryboardRun = create<StoryboardRunState>((set, get) => ({
       };
     }),
 
-  regenerateCut: (cutId) =>
-    useToasts.getState().push({
-      kind: "warn",
-      text: `Cut ${cutId} の再生成は、このバージョンでは未対応です。`,
-      ttlMs: 4000,
-    }),
+  regenerateCut: (cutId) => {
+    const state = get();
+    const runId = state.activeRunId;
+    const cut = state.cuts.get(cutId);
+    if (!runId || !cut) {
+      useToasts.getState().push({
+        kind: "warn",
+        text: "生成中のカットが見つかりませんでした。",
+        ttlMs: 3000,
+      });
+      return;
+    }
+
+    // UI を先に「生成中」へ戻す (押した手応えを即返す)。実際の take 追加は
+    // TakeCompleted イベント経由で入る。
+    set((s) => {
+      const target = s.cuts.get(cutId);
+      if (!target) return s;
+      const next = new Map(s.cuts);
+      next.set(cutId, { ...target, status: "running" });
+      return { cuts: next };
+    });
+
+    // 参照画像・比率は企画チャットが保持している生成パラメータから取る
+    // (StoryboardCutCard が個別に持っていたのと同じ経路に揃える)。
+    const params = usePlanChat.getState().storyboardParams;
+    void storyboard
+      .regenerateCut({
+        runId,
+        cutId,
+        characterReferenceImage: params?.character_reference_path ?? "",
+        styleReferenceImage: params?.style_reference_path,
+        additionalRefs: [],
+        aspectRatio: params?.aspect_ratio ?? "9:16",
+        cutDescription: cut.description ?? "",
+      })
+      .catch((err) => {
+        // 失敗したら running のまま放置せず、review に戻して理由を出す
+        // (押しても何も起きないように見えるのを防ぐ)。
+        set((s) => {
+          const target = s.cuts.get(cutId);
+          if (!target) return s;
+          const next = new Map(s.cuts);
+          next.set(cutId, { ...target, status: target.takes.length > 0 ? "review" : "failed" });
+          return { cuts: next };
+        });
+        useToasts.getState().push({
+          kind: "error",
+          text: `作り直しに失敗しました: ${(err as Error)?.message ?? String(err)}`,
+          ttlMs: 5000,
+        });
+      });
+  },
 
   skipCut: (cutId) =>
     set((s) => {

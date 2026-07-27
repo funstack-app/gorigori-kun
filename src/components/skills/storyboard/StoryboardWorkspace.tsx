@@ -61,7 +61,8 @@ export function StoryboardWorkspace() {
         if (cancelled) reset();
       }}
       onRegenerateCut={() => {
-        // backend の部分再生成へは未接続。停止を解除せず、正直に案内する。
+        // 2026-07-27: ストアの regenerateCut が実際の再生成 (storyboard_regenerate_cut)
+        // を持つようになったため、この呼び出しでそのまま作り直しが走る。
         useStoryboardRun.getState().regenerateCut(checkpointCutId);
       }}
     />
