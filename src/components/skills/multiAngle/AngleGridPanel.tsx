@@ -7,6 +7,7 @@ import { useActiveProject } from "../../../lib/store/activeProject";
 import { useProjects } from "../../../lib/store/projects";
 import { useImages } from "../../../lib/store/images";
 import { images as imagesIpc } from "../../../lib/ipc";
+import { buildExportFileName } from "../../../lib/exportNaming";
 import { useToasts } from "../../../lib/store/toasts";
 import {
   useWorkspace,
@@ -281,7 +282,14 @@ export function AngleGridPanel({
   async function saveCutToLocal(cut: CutState) {
     if (cut.status !== "completed" || !cut.imagePath) return;
     const ext = cut.imagePath.split(".").pop()?.toLowerCase() || "png";
-    const fileName = `${cut.label}.${ext}`.replace(/[\\/:*?"<>|]/g, "_");
+    // 2026-07-27: 日本語ラベル名 (`寄り・見上げ.png`) から連番形式 (`C001_low_angle.png`)
+    // へ変更。映像編集ソフトは連番でないと昇順に並べられず、カット差し替えができない。
+    const fileName = buildExportFileName({
+      style: "sequence",
+      index: cutOrder.indexOf(cut.cutId) + 1,
+      role: cut.label,
+      ext,
+    });
     try {
       const dest = await downloadAs(cut.imagePath, fileName);
       if (!dest) return;
@@ -333,9 +341,16 @@ export function AngleGridPanel({
       for (const cut of targets) {
         const src = cut.imagePath as string;
         const ext = src.split(".").pop()?.toLowerCase() || "png";
-        const base = `${cut.label}`.replace(/[\\/:*?"<>|]/g, "_");
+        // 2026-07-27: 連番形式 (`C001_low_angle.png`)。映像編集ソフトが昇順に並べられる形。
+        const name0 = buildExportFileName({
+          style: "sequence",
+          index: cutOrder.indexOf(cut.cutId) + 1,
+          role: cut.label,
+          ext,
+        });
+        const base = name0.slice(0, name0.lastIndexOf("."));
         // 同名ラベル衝突は連番フォールバック (上書き事故防止)
-        let name = `${base}.${ext}`;
+        let name = name0;
         let n = 2;
         while (used.has(name)) {
           name = `${base}_${n}.${ext}`;

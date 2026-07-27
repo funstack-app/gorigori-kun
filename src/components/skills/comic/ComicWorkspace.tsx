@@ -18,6 +18,7 @@ import { presetKind, usePresets } from "../../../lib/store/presets";
 import { selectCharacterReferences } from "../../../lib/presets/character";
 import { useActiveProject } from "../../../lib/store/activeProject";
 import { useImages } from "../../../lib/store/images";
+import { buildExportFileName } from "../../../lib/exportNaming";
 import { useProjects } from "../../../lib/store/projects";
 import { useToasts } from "../../../lib/store/toasts";
 import { ActiveProjectSelector } from "../../ActiveProjectSelector";
@@ -651,7 +652,12 @@ function PreviewPhase({
     if (!imagePath) return;
     const ext = imagePath.split(".").pop()?.toLowerCase() || "png";
     try {
-      const dest = await downloadAs(imagePath, `comic-p${panel.index}.${ext}`);
+      // 2026-07-27: `comic-p10` が `comic-p2` より前に並ぶゼロ埋め無しをやめ、
+      // `C010` 形式に統一 (連番はゼロ埋めしないとファイル一覧で順序が壊れる)。
+      const dest = await downloadAs(
+        imagePath,
+        buildExportFileName({ style: "sequence", index: panel.index, ext }),
+      );
       if (!dest) return;
       pushToast({
         kind: "success",

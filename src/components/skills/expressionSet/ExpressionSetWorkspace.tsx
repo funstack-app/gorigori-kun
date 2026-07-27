@@ -8,6 +8,7 @@ import { CharacterIcon, FaceIcon } from "../../SkillIcon";
 import { useActiveProject } from "../../../lib/store/activeProject";
 import { useImagePreview } from "../../../lib/store/imagePreview";
 import { useImages } from "../../../lib/store/images";
+import { buildExportFileName } from "../../../lib/exportNaming";
 import { useProjects } from "../../../lib/store/projects";
 import { useToasts } from "../../../lib/store/toasts";
 import { useCharacterSheetRun } from "../../../lib/store/characterSheetRun";
@@ -505,7 +506,14 @@ function StepGenerate({
   async function saveCutToLocal(cut: SheetCutState) {
     if (cut.status !== "completed" || !cut.imagePath) return;
     const ext = cut.imagePath.split(".").pop()?.toLowerCase() || "png";
-    const fileName = `${cut.label}.${ext}`.replace(/[\\/:*?"<>|]/g, "_");
+    // 2026-07-27: キャラ資産形式 (`yuki_smile.png`)。キャラ名が名前に入らないと
+    // 複数キャラの差分が混ざって管理できない (外注へ渡すときに identify できない)。
+    const fileName = buildExportFileName({
+      style: "asset",
+      prefix: characterName || undefined,
+      role: cut.label,
+      ext,
+    });
     try {
       const dest = await downloadAs(cut.imagePath, fileName);
       if (!dest) return;

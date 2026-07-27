@@ -29,6 +29,14 @@ type ProductSetRunState = {
   productDescription: string;
   /** ライフスタイルシーン指定（例:「木目のテーブル」「屋外」）。任意。 */
   sceneHint: string;
+  /**
+   * 商品の品番 (SKU)。書き出しファイル名の接頭辞に使う。任意。
+   *
+   * 2026-07-27: EC実務の診断で「日本語ファイル名はモールに弾かれる」「SKU が
+   * 名前に無いと数十〜数百点を捌けない」が判明したため追加。生成内容には影響せず、
+   * 書き出し時の命名だけに使う。
+   */
+  sku: string;
   aspectRatio: string;
   /** 生成対象として選択中の納品カット cutId 群。 */
   selectedCutIds: string[];
@@ -39,6 +47,7 @@ type ProductSetRunState = {
   setProductImage: (path: string | null) => void;
   setProductDescription: (text: string) => void;
   setSceneHint: (text: string) => void;
+  setSku: (sku: string) => void;
   setAspectRatio: (ratio: string) => void;
   toggleCut: (cutId: string) => void;
   clearSelection: () => void;
@@ -69,6 +78,7 @@ export const useProductSetRun = create<ProductSetRunState>((set) => ({
   productImagePath: null,
   productDescription: "",
   sceneHint: "",
+  sku: "",
   aspectRatio: "1:1",
   selectedCutIds: [...DEFAULT_SELECTED_CUT_IDS],
   selectedOutputCutIds: [],
@@ -76,6 +86,7 @@ export const useProductSetRun = create<ProductSetRunState>((set) => ({
   setProductImage: (path) => set({ productImagePath: path }),
   setProductDescription: (text) => set({ productDescription: text }),
   setSceneHint: (text) => set({ sceneHint: text }),
+  setSku: (sku) => set({ sku }),
   setAspectRatio: (ratio) => set({ aspectRatio: ratio }),
 
   toggleCut: (cutId) =>

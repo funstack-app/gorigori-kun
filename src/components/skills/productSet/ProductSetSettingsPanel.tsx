@@ -41,6 +41,8 @@ export function ProductSetSettingsPanel() {
   const setProductDescription = useProductSetRun((s) => s.setProductDescription);
   const sceneHint = useProductSetRun((s) => s.sceneHint);
   const setSceneHint = useProductSetRun((s) => s.setSceneHint);
+  const sku = useProductSetRun((s) => s.sku);
+  const setSku = useProductSetRun((s) => s.setSku);
   const aspectRatio = useProductSetRun((s) => s.aspectRatio);
   const setAspectRatio = useProductSetRun((s) => s.setAspectRatio);
   const selectedCutIds = useProductSetRun((s) => s.selectedCutIds);
@@ -203,6 +205,25 @@ export function ProductSetSettingsPanel() {
         />
         <p className="mt-1 text-[10px] text-neutral-600">
           ライフスタイルシーンのカットに反映されます。
+        </p>
+      </div>
+
+      {/* 2026-07-27: EC実務の診断で追加。生成内容には影響せず、書き出しファイル名
+          だけに使う。日本語ファイル名はモールに弾かれるため、SKU を入れると
+          `SKU123_01_white_bg.png` の形で書き出せる。 */}
+      <div>
+        <div className="mb-1.5 text-[11px] font-black uppercase tracking-wider text-neutral-500">
+          品番・SKU（任意）
+        </div>
+        <input
+          type="text"
+          value={sku}
+          onChange={(e) => setSku(e.target.value)}
+          placeholder="例: ABC-1234"
+          className="w-full rounded-lg border border-[#2a2a2a] bg-[#0d0d0d] px-3 py-2 text-[12px] text-neutral-200 placeholder:text-neutral-600 focus:border-pink-400/60 focus:outline-none"
+        />
+        <p className="mt-1 text-[10px] text-neutral-600">
+          入れると書き出しファイル名が「品番_連番_役割」になります（モールに入稿できる半角の名前）。
         </p>
       </div>
 

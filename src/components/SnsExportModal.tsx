@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 
 import { images as imagesIpc, type ResizeResult } from "../lib/ipc";
-import { SNS_TARGETS, type ResizeMode } from "../lib/snsTargets";
+import { SNS_TARGETS, groupTargetsByCategory, type ResizeMode } from "../lib/snsTargets";
 import { useToasts } from "../lib/store/toasts";
 
 /**
@@ -27,12 +27,17 @@ export type SnsExportModalProps = {
 export function SnsExportModal({ paths, onClose }: SnsExportModalProps) {
   const pushToast = useToasts((s) => s.push);
 
-  // 既定で全ターゲット選択。name をキーに ON/OFF を持つ。
+  // 既定は SNS のみ ON。name をキーに ON/OFF を持つ。
+  //
+  // 2026-07-27: 以前は全ターゲット ON だった。広告バナー・ECモール規格を足して
+  // 19件になったため、全 ON のままだと 1 枚書き出すつもりで 19 枚出てしまう。
+  // 既定は従来と同じ SNS 5 種に絞り、他は必要なときに選ぶ形にする。
   const [selected, setSelected] = useState<Record<string, boolean>>(() =>
-    Object.fromEntries(SNS_TARGETS.map((t) => [t.name, true])),
+    Object.fromEntries(SNS_TARGETS.map((t) => [t.name, (t.category ?? "sns") === "sns"])),
   );
-  // cover / contain の一括切替 (プリセット個別 mode は使わず、統一値を採る)。
-  const [mode, setMode] = useState<ResizeMode>("cover");
+  // リサイズ方式。"auto" は各プリセットの既定に従う (EC は余白付き、SNS は中央クロップ)。
+  // cover / contain を選ぶと全プリセットへ一括で強制する。
+  const [mode, setMode] = useState<ResizeMode | "auto">("auto");
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<ResizeResult | null>(null);
 
@@ -64,11 +69,15 @@ export function SnsExportModal({ paths, onClose }: SnsExportModalProps) {
         return;
       }
 
+      // 2026-07-27: mode="auto" を既定にした。以前は全プリセットへ単一 mode を
+      // 強制していたため、EC モール規格 (商品を切ってはいけない=contain) を選んでも
+      // 中央クロップで書き出され、商品の端が欠けたまま入稿される事故が起きうる。
+      // auto では各プリセットの既定 (snsTargets.ts の mode) をそのまま使う。
       const targets = selectedTargets.map((t) => ({
         name: t.name,
         width: t.width,
         height: t.height,
-        mode,
+        mode: mode === "auto" ? t.mode : mode,
       }));
 
       const res = await imagesIpc.exportResized(paths, targets, dir);
@@ -117,10 +126,10 @@ export function SnsExportModal({ paths, onClose }: SnsExportModalProps) {
         onClick={(e) => e.stopPropagation()}
       >
         <h3 className="mb-1 text-[14px] font-bold text-neutral-100">
-          SNS サイズに書き出し
+          入稿サイズに書き出し
         </h3>
         <p className="mb-4 text-[11px] text-neutral-400">
-          選択中の {paths.length} 枚を、各 SNS の推奨サイズにリサイズして書き出します。
+          選択中の {paths.length} 枚を、SNS・広告バナー・ECモールの規格サイズにリサイズして書き出します。
         </p>
 
         {/* cover / contain 切替 */}
@@ -129,6 +138,23 @@ export function SnsExportModal({ paths, onClose }: SnsExportModalProps) {
             リサイズ方式
           </span>
           <div className="flex gap-2">
+            <button
+              type="button"
+              onClick={() => setMode("auto")}
+              className={[
+                "flex-1 rounded-md border px-3 py-2 text-left transition",
+                mode === "auto"
+                  ? "border-pink-400 bg-pink-500/10"
+                  : "border-[#343434] bg-[#0b0b0b] hover:border-neutral-500",
+              ].join(" ")}
+            >
+              <span className="block text-[12px] font-bold text-neutral-100">
+                おまかせ
+              </span>
+              <span className="mt-0.5 block text-[10px] text-neutral-400">
+                サイズごとに最適な方式（EC は余白付き）
+              </span>
+            </button>
             <button
               type="button"
               onClick={() => setMode("cover")}
@@ -171,29 +197,49 @@ export function SnsExportModal({ paths, onClose }: SnsExportModalProps) {
           <span className="mb-1.5 block text-[11px] font-medium text-neutral-300">
             書き出しサイズ
           </span>
-          <div className="space-y-1.5">
-            {SNS_TARGETS.map((t) => {
-              const on = !!selected[t.name];
-              return (
-                <label
-                  key={t.name}
-                  className={[
-                    "flex cursor-pointer items-center gap-2.5 rounded-md border px-3 py-2 transition",
-                    on
-                      ? "border-[#3a3a3a] bg-[#0f0f0f]"
-                      : "border-[#242424] bg-[#0b0b0b] opacity-60",
-                  ].join(" ")}
-                >
-                  <input
-                    type="checkbox"
-                    checked={on}
-                    onChange={() => toggleTarget(t.name)}
-                    className="h-3.5 w-3.5 accent-pink-500"
-                  />
-                  <span className="text-[12px] text-neutral-200">{t.label}</span>
-                </label>
-              );
-            })}
+          {/* 2026-07-27: 広告バナー・ECモール規格を足して19件になったため、
+              用途で区切って選べるようにする (ベタ並べだと目的のサイズを探せない)。 */}
+          <div className="space-y-3">
+            {groupTargetsByCategory().map((group) => (
+              <div key={group.category}>
+                <div className="mb-1 text-[10px] font-black uppercase tracking-wider text-neutral-500">
+                  {group.label}
+                </div>
+                <div className="space-y-1.5">
+                  {group.targets.map((t) => {
+                    const on = !!selected[t.name];
+                    return (
+                      <label
+                        key={t.name}
+                        title={t.note}
+                        className={[
+                          "flex cursor-pointer items-center gap-2.5 rounded-md border px-3 py-2 transition",
+                          on
+                            ? "border-[#3a3a3a] bg-[#0f0f0f]"
+                            : "border-[#242424] bg-[#0b0b0b] opacity-60",
+                        ].join(" ")}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={on}
+                          onChange={() => toggleTarget(t.name)}
+                          className="h-3.5 w-3.5 accent-pink-500"
+                        />
+                        <span className="min-w-0 flex-1 truncate text-[12px] text-neutral-200">
+                          {t.label}
+                        </span>
+                        {/* 商品を切らない設定は入稿可否に直結するので明示する */}
+                        {t.mode === "contain" ? (
+                          <span className="shrink-0 rounded bg-[#1a1a1a] px-1.5 py-0.5 text-[9px] font-bold text-sky-300">
+                            余白付き
+                          </span>
+                        ) : null}
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
           </div>
         </div>
 

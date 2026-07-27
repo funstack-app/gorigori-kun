@@ -7,6 +7,7 @@ import { useActiveProject } from "../../../lib/store/activeProject";
 import { useProjects } from "../../../lib/store/projects";
 import { useImages } from "../../../lib/store/images";
 import { images as imagesIpc } from "../../../lib/ipc";
+import { buildExportFileName } from "../../../lib/exportNaming";
 import { useToasts } from "../../../lib/store/toasts";
 import { ProductShotIcon, SaveIcon } from "../../SkillIcon";
 import {
@@ -85,6 +86,7 @@ export function ProductSetGridPanel({
   const productImagePath = useProductSetRun((s) => s.productImagePath);
   const productDescription = useProductSetRun((s) => s.productDescription);
   const sceneHint = useProductSetRun((s) => s.sceneHint);
+  const sku = useProductSetRun((s) => s.sku);
   const aspectRatio = useProductSetRun((s) => s.aspectRatio);
   const selectedCutIds = useProductSetRun((s) => s.selectedCutIds);
   const selectedOutputCutIds = useProductSetRun((s) => s.selectedOutputCutIds);
@@ -197,7 +199,16 @@ export function ProductSetGridPanel({
   async function saveCutToLocal(cut: CutState) {
     if (cut.status !== "completed" || !cut.imagePath) return;
     const ext = cut.imagePath.split(".").pop()?.toLowerCase() || "png";
-    const fileName = `${cut.label}.${ext}`.replace(/[\\/:*?"<>|]/g, "_");
+    // 2026-07-27: 以前は `${cut.label}.png`(例「白背景・正面.png」)で書き出していた。
+    // ECモールは日本語ファイル名を受け付けないため、そのままでは入稿できない。
+    // SKU が入力されていれば `SKU123_01_white_bg.png` の形にする。
+    const fileName = buildExportFileName({
+      style: "sku",
+      prefix: sku || undefined,
+      index: cutOrder.indexOf(cut.cutId) + 1,
+      role: cut.label,
+      ext,
+    });
     try {
       const dest = await downloadAs(cut.imagePath, fileName);
       if (!dest) return;
@@ -245,8 +256,17 @@ export function ProductSetGridPanel({
       for (const cut of targets) {
         const src = cut.imagePath as string;
         const ext = src.split(".").pop()?.toLowerCase() || "png";
-        const base = `${cut.label}`.replace(/[\\/:*?"<>|]/g, "_");
-        let name = `${base}.${ext}`;
+        // 2026-07-27: 日本語ラベル名から SKU_連番_役割 形式へ変更 (ECモールは
+        // 日本語ファイル名を弾く / SKU が名前に無いと数十点を捌けない)。
+        const name0 = buildExportFileName({
+          style: "sku",
+          prefix: sku || undefined,
+          index: cutOrder.indexOf(cut.cutId) + 1,
+          role: cut.label,
+          ext,
+        });
+        const base = name0.slice(0, name0.lastIndexOf("."));
+        let name = name0;
         let n = 2;
         while (used.has(name)) {
           name = `${base}_${n}.${ext}`;
