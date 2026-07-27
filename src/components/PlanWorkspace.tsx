@@ -359,8 +359,15 @@ export function PlanWorkspace() {
             {messages.map((msg) => (
               <ChatBubble key={msg.id} msg={msg} onAdopt={adopt} />
             ))}
+            {/*
+              2026-07-27: 送信〜返信開始の間の表示を、絵コンテのチャットと同じ形に揃えた。
+              小さい文字だけだと、送ったのに動いていないように見える (STΛCK 指摘)。
+            */}
             {sending && messages[messages.length - 1]?.role !== "assistant" && (
-              <div className="text-[11px] text-neutral-500">考え中...</div>
+              <div className="flex items-center gap-2 text-[12px] text-neutral-400">
+                <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-pink-500/30 border-t-pink-400" />
+                考えています…
+              </div>
             )}
           </div>
         )}

@@ -246,6 +246,15 @@ export function GoalChatPanel() {
         <div>
           <div className="flex items-center gap-2">
             <h2 className="text-sm font-semibold text-zinc-200">Phase 1: ゴール深掘り</h2>
+            {/*
+              2026-07-27: 説明を見出しの横のヘルプボタンに畳んだ (STΛCK 指摘
+              「貴重なUIを説明で取りすぎている」)。旧: 見出しの下に常時4行のボックス。
+            */}
+            <SkillIntro
+              what="作りたい話を伝えると、AI が聞き返しながら絵コンテに起こし、そのままカットを続けて作ります。登録キャラと画風を固定するので、話が進んでも同じ人物・同じ絵柄のまま並びます。"
+              first="まずは下の入力欄に、作りたい映像を思いつきの一言で書いてください。足りないところは AI が聞き返します。"
+              note="同じ人物のまま並べるには、参照画像を1枚以上入れてください。"
+            />
             {messages.length > 0 && (
               <button
                 type="button"
@@ -280,13 +289,6 @@ export function GoalChatPanel() {
                 ↺ リセット
               </button>
             )}
-          </div>
-          <div className="mt-2 max-w-xl">
-            <SkillIntro
-              what="作りたい話を伝えると、AI が聞き返しながら絵コンテに起こし、そのままカットを続けて作ります。登録キャラと画風を固定するので、話が進んでも同じ人物・同じ絵柄のまま並びます。"
-              first="まずは下の入力欄に、作りたい映像を思いつきの一言で書いてください。足りないところは AI が聞き返します。"
-              note="同じ人物のまま並べるには、参照画像を1枚以上入れてください。"
-            />
           </div>
           {probingFromAi && (
             <div className="mt-2 inline-flex items-center gap-2 rounded-full border border-pink-500/40 bg-pink-500/10 px-3 py-1 text-[11px] text-pink-200">
@@ -395,6 +397,25 @@ export function GoalChatPanel() {
               )}
             </li>
           ))}
+          {/*
+            2026-07-27: 送信してから AI の返信が始まるまでの空白を埋める (STΛCK 指摘)。
+            以前この間の表示は右下の送信ボタン (「送信中…」) だけだった。
+            視線は会話の流れを追っているのに、状態は入力欄の隅にしか出ておらず、
+            送ったのに何も起きていないように見えていた。
+            返信が始まれば m.streaming の「入力中…」に引き継がれるので、
+            AI の吹き出しが既にある場合はこれを出さない (二重表示の防止)。
+          */}
+          {sending && messages[messages.length - 1]?.role !== "assistant" && (
+            <li className="max-w-[80%] rounded-md bg-[#1c1c1c] px-3 py-2 text-sm text-zinc-200">
+              <div className="mb-1 text-[10px] uppercase tracking-wider text-zinc-500">
+                AI
+              </div>
+              <div className="flex items-center gap-2 text-[12px] text-zinc-400">
+                <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-pink-500/30 border-t-pink-400" />
+                考えています…
+              </div>
+            </li>
+          )}
         </ul>
       </div>
 
