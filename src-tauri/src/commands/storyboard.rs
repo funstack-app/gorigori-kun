@@ -646,7 +646,7 @@ fn default_duration() -> f64 {
 #[tauri::command]
 pub async fn storyboard_regenerate_cut(
     app: AppHandle,
-    _state: State<'_, AppState>,
+    state: State<'_, AppState>,
     params: RegenerateCutParams,
 ) -> Result<String, String> {
     // FB#19: app-server と同じ GORI 専用 CODEX_HOME を使う (regenerate も同様)。
@@ -668,6 +668,8 @@ pub async fn storyboard_regenerate_cut(
 
     let take_id = format!("re_{}", short_id());
     let task_app = app.clone();
+    // 2026-07-27: 常駐 app-server 経路 (gen_server) へ渡すため state を複製する
+    let task_state = state.inner_clone();
     let task_run_id = params.run_id.clone();
     let task_cut_id = params.cut_id.clone();
     let task_take_id = take_id.clone();
@@ -719,6 +721,7 @@ pub async fn storyboard_regenerate_cut(
 
         let generated = generate_one_take(
             &task_app,
+            &task_state,
             &codex_bin,
             &codex_home_orig,
             &prompt_obj,
@@ -1108,6 +1111,7 @@ async fn run_storyboard_orchestrator(
 
             let generated = generate_cut_takes(
                 &app,
+                &state,
                 &codex_bin,
                 &codex_home_orig,
                 &structured_prompt,
@@ -2710,8 +2714,10 @@ fn previous_shot_summary(previous: &[String]) -> String {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn generate_cut_takes(
     app: &AppHandle,
+    state: &crate::state::AppState,
     codex_bin: &Path,
     codex_home_orig: &Path,
     structured_prompt: &Value,
@@ -2732,6 +2738,7 @@ async fn generate_cut_takes(
             async move {
                 let result = generate_one_take(
                     app,
+                    state,
                     codex_bin,
                     codex_home_orig,
                     structured_prompt,
@@ -2785,8 +2792,10 @@ const STORYBOARD_MAX_ATTEMPTS: u32 = 3;
 /// success のまま「生成画像が見つかりません」になる)。1回で諦めず最大
 /// STORYBOARD_MAX_ATTEMPTS 回まで作り直す。
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 async fn generate_one_take(
     app: &AppHandle,
+    state: &crate::state::AppState,
     codex_bin: &Path,
     codex_home_orig: &Path,
     structured_prompt: &Value,
@@ -2800,6 +2809,62 @@ async fn generate_one_take(
     aspect_ratio: &str,
     sketch_mode: bool,
 ) -> Result<(String, PathBuf), String> {
+    // ── 常駐 app-server 経路を先に試す (2026-07-27) ────────────────────
+    //
+    // なぜ: batch_gen.rs は「1枚ごとの codex exec 起動コストを払わないため」に
+    // 常駐化済みだが、絵コンテはその改修から取り残され、1カットごとに codex
+    // プロセスを新規起動していた。codex は Node.js 実装なので起動だけで数秒かかり、
+    // 12カットならそれが12回積み上がる (STΛCK 実測: 全カット「順番待ち」で 0/12)。
+    // 同日にマルチアングル / キャラ登録 (gen_worker.rs) へ入れたのと同じ手当て。
+    //
+    // 失敗したら従来の codex exec 経路へ落ちるので、常駐が使えない環境
+    // (Windows は gen_server 側で無効) でも挙動は変わらない。
+    {
+        let final_prompt = build_generation_prompt(
+            structured_prompt,
+            cut_id,
+            take_id,
+            candidate_index,
+            candidate_count,
+            aspect_ratio,
+            sketch_mode,
+        );
+        let image_paths: Vec<String> = reference_images
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        match crate::codex::gen_server::generate_image(
+            app,
+            state,
+            &final_prompt,
+            &image_paths,
+            cwd.as_deref().filter(|value| !value.is_empty()),
+            Some(STORYBOARD_MODEL),
+            Some(STORYBOARD_EFFORT),
+        )
+        .await
+        {
+            Ok(src_png) => {
+                let dest = output_dir.join(format!("{cut_id}_{take_id}.png"));
+                match std::fs::copy(&src_png, &dest) {
+                    Ok(_) => return Ok((take_id.to_string(), dest)),
+                    Err(error) => {
+                        return Err(format!(
+                            "常駐経路の生成画像コピー失敗 ({}): {error}",
+                            src_png.display()
+                        ));
+                    }
+                }
+            }
+            Err(resident_error) => {
+                tracing::warn!(
+                    target: "codex.storyboard",
+                    "{cut_id}/{take_id}: 常駐 app-server 経路に失敗したため codex exec へフォールバックします: {resident_error}"
+                );
+            }
+        }
+    }
+
     let mut last_err = String::new();
     for attempt in 1..=STORYBOARD_MAX_ATTEMPTS {
         match attempt_one_take(
