@@ -1730,10 +1730,45 @@ fn local_structured_prompt(
 
     // negative: 絵コンテでは「写実になること」自体を禁止側に加える
     let negative = if sketch {
-        "photorealistic rendering, color, painted shading, detailed texture, background clutter, text, logo, watermark, collage, split screen, multiple panels"
+        // 2026-07-27: 「描き込みすぎ」を明示的に禁止する語を足した。
+        // 従来は photorealistic / color / texture は禁じていたが、
+        // 「丁寧に清書された線画」「細かい陰影のある鉛筆画」は禁止語に当たらず、
+        // 結果として情報量の多い絵が出ていた (STΛCK 指摘)。
+        "photorealistic rendering, color, colored, painted shading, detailed texture, \
+         highly detailed, intricate detail, finished illustration, clean lineart, polished rendering, \
+         rendered shading, cross-hatching, heavy shading, detailed face, facial features detail, \
+         detailed clothing pattern, background clutter, detailed background, \
+         text, logo, watermark, collage, split screen, multiple panels"
     } else {
         "different face, outfit drift, missing props, distorted face, broken hands, background discontinuity, text, logo, watermark, collage, split screen"
     };
+
+    // 絵コンテ(sketch_mode)は本番と同じ構造を渡さない。
+    //
+    // なぜ (2026-07-27 STΛCK指示「絵コンテの生成詳細に書きすぎ。限りなくラフに」):
+    //   従来は sketch_mode でも本番用の構造 (scene_context の180度ルール /
+    //   identity の顔・髪・体型・衣装の維持 / framing の三分割・ヘッドルーム・
+    //   リードルーム / narrative の前カット状態・役割・変えるべき要素) を丸ごと
+    //   渡していた。個々の写実項目は既に落としていたが、**残った構図細則と
+    //   同一性要求そのものが「情報量の多い絵」を要求してしまう**。
+    //   絵コンテに要るのは「誰が・どう動き・どこに居るか」だけなので、
+    //   ここを最小限まで削る。ポーズと動きと背景の最低限だけが線で描かれる状態を狙う。
+    if sketch {
+        return serde_json::json!({
+            "purpose": "rough black-and-white storyboard sketch (pre-visualization only)",
+            "character_reference": params.character_reference_image,
+            "action": cut.description,
+            "shot_type": shot_type,
+            "camera_angle": camera_angle,
+            "aspect_ratio": params.aspect_ratio,
+            "draw_only": [
+                "character pose and movement",
+                "rough placement in frame",
+                "minimum background lines to show where this is"
+            ],
+            "negative": negative
+        });
+    }
 
     serde_json::json!({
         "scene_context": {
@@ -2956,12 +2991,19 @@ fn build_generation_prompt(
              - 候補 {candidate_index}/{candidate_count}\n\
              - 参照画像は順に、キャラクター基準、スタイル基準、必要なら直前確定カットです。\n\
              - これは「絵コンテ」です。本番の写真品質ではなく、紙に鉛筆で描いたラフなスケッチが正解。\n\n\
+             ## 描き方 (最重要)\n\
+             絵コンテは全て白黒で描き、ラフスケッチや下描き線といった手描きのようなテイストにすること。\n\
+             キャラクターのポーズや動き、そして背景の最低限の情報のみが描かれるような、情報量の少ない線で描くこと。カラーは禁止とする。\n\n\
+             - 描き込まない。線は少なく、荒く、速い。清書しない。\n\
+             - 顔の造作・衣服の柄・小物の細部・質感・陰影は描かない (誰がどんなポーズで居るかが分かれば十分)。\n\
+             - 背景は空間が分かる最小限の線だけ (床・壁・地平線・大きな物の輪郭程度)。描き込んだ背景は不正解。\n\
+             - 参照画像は「誰か」を掴むためだけに見る。参照画像の描き込み量・色・質感は一切真似しない。\n\n\
              ## 手順\n\
              1. image_gen ツールを1回だけ呼び出す。\n\
              2. {aspect_ratio} aspect ratio で生成する。\n\
              3. 必ず以下のスタイルを厳守:\n\
-                rough pencil sketch on storyboard paper, monochrome graphite drawing, hand-drawn loose linework, low fidelity, no color, no photorealism, traditional film storyboard panel style, quick concept sketch, visible pencil strokes, off-white paper background, minimal shading.\n\
-             4. 構造化プロンプトの shot_type / camera_angle / subject_position / motion / props を必ず構図に反映する (絵コンテとして読めること)。\n\
+                rough black-and-white storyboard sketch, loose hand-drawn pencil lines, under-drawing / construction lines visible, very low detail, minimal linework, only pose, movement and the barest suggestion of background, no color, monochrome only, no shading, no rendering, no texture, no photorealism, unfinished rough draft feel, off-white paper.\n\
+             4. shot_type / camera_angle は構図に反映する (絵コンテとして読めること)。\n\
              5. 画面内テキスト、ロゴ、透かし、グリッド線、コラージュ、複数パネルは禁止。\n\
              6. 出力先指定や画像変換は不要です。生成画像は $CODEX_HOME/generated_images/<session>/ig_*.png に保存されます。\n\n\
              ## Structured Prompt JSON\n{prompt_json}\n\n\
@@ -3681,12 +3723,40 @@ mod sketch_mode_tests {
     #[test]
     fn sketch_mode_keeps_composition_fields() {
         // 絵コンテに必要な構図情報は残っていること (落としすぎの検出)。
+        //
+        // 2026-07-27: 絵コンテの構造をフラットな最小形へ変えたのに合わせて更新。
+        // 以前は framing ブロック配下を見ていたが、絵コンテでは入れ子をやめて
+        // トップレベルに置いている (情報量を減らすため)。検査の意図
+        // 「ラフにしすぎて構図が読めなくなっていないか」は変えていない。
         let prompt = local_structured_prompt(&params(true), &cut(), None, &[]);
-        let framing = prompt.get("framing").expect("framing がない");
-        for key in ["shot_type", "camera_angle", "aspect_ratio", "body_position_in_frame"] {
+        for key in ["shot_type", "camera_angle", "aspect_ratio", "action"] {
             assert!(
-                framing.get(key).is_some(),
-                "絵コンテに必要な構図情報 `{key}` が落ちている"
+                prompt.get(key).is_some(),
+                "絵コンテに必要な構図情報 `{key}` が落ちている。実際: {prompt}"
+            );
+        }
+    }
+
+    #[test]
+    fn sketch_mode_drops_production_only_blocks() {
+        // 絵コンテに本番用の重い構造が残っていないこと (削り忘れの検出)。
+        //
+        // これが無いと「フラット化したつもりで本番構造も併記している」実装でも
+        // 上のテストが通ってしまう。STΛCK 指摘「生成詳細に書きすぎ」の再発検査。
+        let prompt = local_structured_prompt(&params(true), &cut(), None, &[]);
+        for key in ["scene_context", "identity", "style", "narrative", "framing"] {
+            assert!(
+                prompt.get(key).is_none(),
+                "絵コンテに本番用ブロック `{key}` が残っている。情報量が増え、\
+                 ラフスケッチにならない。実際: {prompt}"
+            );
+        }
+        // 逆方向: 本生成では残っていること
+        let production = local_structured_prompt(&params(false), &cut(), None, &[]);
+        for key in ["scene_context", "identity", "style", "narrative", "framing"] {
+            assert!(
+                production.get(key).is_some(),
+                "本生成で `{key}` が失われている"
             );
         }
     }
