@@ -1,7 +1,4 @@
-import {
-  cameraEquipmentOptions,
-  shotOptions,
-} from "../../lib/scene/catalog";
+import { cameraEquipmentOptions } from "../../lib/scene/catalog";
 import { useSceneStore } from "../../lib/store/scene";
 import { OptionPickerButton } from "./OptionPickerButton";
 
@@ -32,13 +29,14 @@ export function CameraSection() {
         onPick={(value) => setCameraField("equipment", value)}
         modalTitle="カメラ機材を選ぶ"
       />
-      <OptionPickerButton
-        label="ショット幅"
-        options={shotOptions}
-        value={camera.focalLength}
-        onPick={(value) => setCameraField("focalLength", value)}
-        modalTitle="ショット幅を選ぶ"
-      />
+      {/*
+        2026-07-27: 「ショット幅」(レンズの画角) をここから「主役と構図」へ移した。
+        理由: レンズが決めるのは機材ではなく **背景がどう見えるか**(広角=周りが広く入り
+        遠近が誇張される / 望遠=背景が壁のように迫る)。構図の話なのにカメラの中にあり、
+        さらに構図側にも Close Up / Full Shot など写る範囲の指定があったため、
+        「どこに何を入れればいいか分からない」状態になっていた (STΛCK 指摘)。
+        保存先は camera.focalLength のまま (過去のプリセットを壊さないため)。
+      */}
     </div>
   );
 }

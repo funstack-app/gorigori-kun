@@ -19,6 +19,7 @@ import {
   selectCharacterReferences,
 } from "../lib/presets/character";
 import { PresetPickerPopover } from "./PresetPickerPopover";
+import { ReferenceLibraryModal } from "./ReferenceLibraryModal";
 import { ReferenceRoleToggle } from "./ReferenceRoleToggle";
 /**
  * 企画ワークスペース。
@@ -84,6 +85,8 @@ export function PlanWorkspace() {
   const pushToast = useToasts((s) => s.push);
 
   const [draft, setDraft] = useState("");
+  // 2026-07-27: ライブラリから既存画像を添付する経路 (STΛCK 要望)
+  const [libraryOpen, setLibraryOpen] = useState(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
   const ensureRoles = useReferenceRoles((s) => s.ensureRoles);
@@ -411,6 +414,7 @@ export function PlanWorkspace() {
           attachments={pendingImages}
           onAddFiles={addFiles}
           onAddImagePaths={addPendingImages}
+          onOpenLibrary={() => setLibraryOpen(true)}
           onRemoveAttachment={(path) => {
             removePendingImage(path);
             // FB#3: 添付解除時に役割エントリも掃除する。
@@ -421,6 +425,18 @@ export function PlanWorkspace() {
           disabled={sending || starting}
         />
       </div>
+
+      {/* 2026-07-27: ライブラリから既存画像を選んで添付する (STΛCK 要望)。
+          storyboard の GoalChatPanel と同じ部品を使い、挙動を揃える。 */}
+      <ReferenceLibraryModal
+        open={libraryOpen}
+        onClose={() => setLibraryOpen(false)}
+        roleMode
+        onPick={(path) => {
+          addPendingImages([path]);
+          pushToast({ kind: "success", text: "ライブラリから添付しました", ttlMs: 2000 });
+        }}
+      />
     </section>
   );
 }
@@ -676,6 +692,7 @@ function ChatInput({
   value,
   attachments,
   onAddFiles,
+  onOpenLibrary,
   onAddImagePaths,
   onRemoveAttachment,
   onChange,
@@ -685,6 +702,8 @@ function ChatInput({
   value: string;
   attachments: string[];
   onAddFiles: (files: FileList | File[]) => void;
+  /** ライブラリ選択モーダルを開く (2026-07-27 追加)。 */
+  onOpenLibrary: () => void;
   /** プリセット由来の参照画像パスを直接添付する (File 変換を経由しない)。 */
   onAddImagePaths: (paths: string[]) => void;
   onRemoveAttachment: (path: string) => void;
@@ -765,13 +784,24 @@ function ChatInput({
           value={value}
           onChange={(event) => onChange(event.target.value)}
           onKeyDown={(event) => {
+            // 日本語入力の変換確定 Enter を送信と取り違えないためのガード。
+            // isComposing / keyCode 229 のどちらかが立っていたら変換中。
             const isComposing =
               (event.nativeEvent as KeyboardEvent).isComposing ||
               event.keyCode === 229;
-            if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && !isComposing) {
-              event.preventDefault();
-              onSend();
-            }
+            if (event.key !== "Enter" || isComposing) return;
+            // 2026-07-27: キーボードだけで送れるようにした (STΛCK 要望: 送信がボタンだけ)。
+            //
+            // 規則は Enter=送信 / Shift+Enter=改行。一度 Shift+Enter=送信 で実装したが、
+            // (a) Slack / ChatGPT / Discord など主要チャットは全て Shift+Enter=改行で、
+            //     箇条書きを書こうとした瞬間に書きかけが送信される
+            // (b) このアプリ内でも 3D 画面 (Scene3dWorkspace.tsx:3250) が Enter=送信・
+            //     Shift+Enter=改行 で、同じアプリで真逆になる
+            // という2点でレビューに落ちたため、標準側へ寄せた。
+            // ⌘/Ctrl+Enter も送信のまま残す (絵コンテ GoalChatPanel との互換)。
+            if (event.shiftKey) return; // 改行
+            event.preventDefault();
+            onSend();
           }}
           rows={1}
           placeholder="メッセージを入力"
@@ -809,12 +839,31 @@ function ChatInput({
                 <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" />
               </svg>
             </button>
+            {/*
+              2026-07-27: ライブラリ呼び出し (STΛCK 要望)。
+              以前はファイル選択しか無く、アプリ内に既にある画像を使うのに
+              一度書き出してから選び直す必要があった。
+            */}
+            <button
+              type="button"
+              onClick={onOpenLibrary}
+              disabled={disabled}
+              title="ライブラリから選ぶ"
+              aria-label="ライブラリから選ぶ"
+              className="flex h-8 w-8 items-center justify-center rounded-full text-neutral-400 hover:bg-[#1a1a1a] hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                <rect x="3" y="3" width="18" height="18" rx="2" />
+                <circle cx="8.5" cy="8.5" r="1.5" />
+                <path d="M21 15l-5-5L5 21" />
+              </svg>
+            </button>
           </div>
           <button
             type="button"
             onClick={onSend}
             disabled={disabled || !canSend}
-            title="送信 (⌘/Ctrl + Enter)"
+            title="送信 (Enter / 改行は Shift + Enter)"
             aria-label="送信"
             className="flex h-8 w-8 items-center justify-center rounded-full bg-pink-500 text-white shadow hover:bg-pink-400 disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-500"
           >

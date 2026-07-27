@@ -86,8 +86,17 @@ export function buildPrompt(
   const subject = scene.subjectFraming.subject.trim();
   if (subject) pieces.push(`subject: ${subject}`);
 
-  const composition = piece("composition", scene.subjectFraming.composition);
+  // 2026-07-27: 旧「構図」を distance / angle / framing の3軸へ分割した。
+  // 3つは併用できる (「胸上まで寄って・下から見上げて・左に寄せる」)。
+  // それぞれ別の要素としてプロンプトに出す。
+  const composition = piece("shot size", scene.subjectFraming.composition);
   if (composition) pieces.push(composition);
+
+  const cameraAngle = piece("camera angle", scene.subjectFraming.cameraAngle);
+  if (cameraAngle) pieces.push(cameraAngle);
+
+  const framing = piece("framing", scene.subjectFraming.framing);
+  if (framing) pieces.push(framing);
 
   if (includeAspectRatio) {
     const aspect = piece("aspect ratio", scene.subjectFraming.aspectRatio);

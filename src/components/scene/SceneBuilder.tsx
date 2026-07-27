@@ -41,17 +41,24 @@ export function SceneBuilder() {
   const [openSection, setOpenSection] = useState<SectionId | null>(null);
   const close = () => setOpenSection(null);
 
+  // 2026-07-27: 構図を3軸へ割り、ショット幅(レンズ)もここへ移したので、
+  // 折りたたみ時の要約にも4つとも出す。compact が NO_SELECT を落とすので
+  // 「指定なし」のものは表示されない。
   const subjectSummary = compact(
     show(subjectFraming.subject, "主役未入力"),
     subjectFraming.composition,
+    subjectFraming.cameraAngle,
+    subjectFraming.framing,
+    camera.focalLength,
     subjectFraming.aspectRatio,
   );
   const lightingSummary = compact(
     lightingMood.lightSource,
     show(lightingMood.mood, ""),
   );
-  // ショット幅は focalLength 保存先を再利用
-  const cameraSummary = compact(camera.equipment, camera.focalLength);
+  // ショット幅(レンズ)は「主役と構図」へ移設したので、ここには出さない
+  // (保存先は camera.focalLength のままだが、選ぶ場所と要約の場所を一致させる)。
+  const cameraSummary = compact(camera.equipment);
   const styleSummary = compact(style.cinematicLook);
 
   return (

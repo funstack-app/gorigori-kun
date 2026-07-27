@@ -63,7 +63,14 @@ function references(slots: SceneReferenceSlot[]) {
 /** 画像生成用の構造化プロンプト。undefined のキーは JSON 化時に落ちる。 */
 export type ImagePromptJson = {
   subject?: string;
+  /** 旧・単一の構図キー。3軸分割 (2026-07-27) 以降は使わないが、外部で参照されうるため型は残す。 */
   composition?: string;
+  /** どこまで写すか (Close Up / Full Shot 等)。 */
+  shot_size?: string;
+  /** どこから撮るか (Low Angle / Profile View 等)。 */
+  camera_angle?: string;
+  /** どう見せるか (Rule of Thirds / Frame in Frame 等)。 */
+  framing?: string;
   aspect_ratio?: string;
   environment?: string;
   lighting?: string;
@@ -88,8 +95,16 @@ export function buildImagePromptJson(
   const subject = scene.subjectFraming.subject.trim();
   if (subject) json.subject = subject;
 
+  // 2026-07-27: 構図を3軸 (どこまで写す / どこから撮る / どう見せる) へ分割。
+  // 併用できる指定なので、それぞれ別キーで出す。
   if (hasText(scene.subjectFraming.composition)) {
-    json.composition = normalize(scene.subjectFraming.composition);
+    json.shot_size = normalize(scene.subjectFraming.composition);
+  }
+  if (hasText(scene.subjectFraming.cameraAngle)) {
+    json.camera_angle = normalize(scene.subjectFraming.cameraAngle);
+  }
+  if (hasText(scene.subjectFraming.framing)) {
+    json.framing = normalize(scene.subjectFraming.framing);
   }
   if (includeAspectRatio && hasText(scene.subjectFraming.aspectRatio)) {
     json.aspect_ratio = scene.subjectFraming.aspectRatio.trim();

@@ -1,13 +1,18 @@
 import type { ChangeEvent } from "react";
-import { compositionOptions } from "../../lib/scene/catalog";
+import { compositionOptionsFor, shotOptions } from "../../lib/scene/catalog";
 import { useSceneStore } from "../../lib/store/scene";
 import { OptionPickerButton } from "./OptionPickerButton";
 
 export function SubjectFramingSection() {
   const subject = useSceneStore((state) => state.subjectFraming.subject);
   const composition = useSceneStore((state) => state.subjectFraming.composition);
+  const cameraAngle = useSceneStore((state) => state.subjectFraming.cameraAngle);
+  const framing = useSceneStore((state) => state.subjectFraming.framing);
   const environment = useSceneStore((state) => state.subjectFraming.environment);
   const setSubjectFramingField = useSceneStore((state) => state.setSubjectFramingField);
+  // ショット幅は保存先が camera.focalLength のまま (表示位置だけをここへ移した)
+  const focalLength = useSceneStore((state) => state.camera.focalLength);
+  const setCameraField = useSceneStore((state) => state.setCameraField);
 
   const onSubjectChange = (event: ChangeEvent<HTMLInputElement>) => {
     setSubjectFramingField("subject", event.target.value);
@@ -29,12 +34,48 @@ export function SubjectFramingSection() {
         />
       </label>
 
+      {/*
+        2026-07-27: 旧「構図」(34件を1つの一覧から1つだけ選ぶ形) を役割で4つに割った。
+        以前は「胸上まで寄って・下から見上げて・左に寄せる」という実際の撮影で普通に
+        併用する指定が、1つのフィールドを奪い合うため同時にできなかった (STΛCK 指摘)。
+        4つは互いに独立していて、すべて「指定なし」のままにもできる。
+      */}
       <OptionPickerButton
-        label="構図"
-        options={compositionOptions}
+        label="どこまで写す"
+        options={compositionOptionsFor("distance")}
         value={composition}
         onPick={(value) => setSubjectFramingField("composition", value)}
-        modalTitle="構図を選ぶ"
+        modalTitle="どこまで写すかを選ぶ"
+      />
+
+      <OptionPickerButton
+        label="どこから撮る"
+        options={compositionOptionsFor("angle")}
+        value={cameraAngle}
+        onPick={(value) => setSubjectFramingField("cameraAngle", value)}
+        modalTitle="どこから撮るかを選ぶ"
+      />
+
+      <OptionPickerButton
+        label="どう見せる"
+        options={compositionOptionsFor("framing")}
+        value={framing}
+        onPick={(value) => setSubjectFramingField("framing", value)}
+        modalTitle="どう見せるかを選ぶ"
+      />
+
+      {/*
+        「ショット幅」を「カメラ」からここへ移設。レンズが決めるのは機材ではなく
+        背景の見え方 (広角=周りが広く入る / 望遠=背景が壁のように迫る) なので、
+        構図と同じ場所で選べる方が迷わない。
+        保存先は camera.focalLength のまま。
+      */}
+      <OptionPickerButton
+        label="背景の見え方（レンズ）"
+        options={shotOptions}
+        value={focalLength}
+        onPick={(value) => setCameraField("focalLength", value)}
+        modalTitle="背景の見え方を選ぶ"
       />
 
       {/*

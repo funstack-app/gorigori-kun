@@ -23,6 +23,8 @@ const initialSceneState: SceneState = {
   subjectFraming: {
     subject: "",
     composition: NO_SELECT,
+    cameraAngle: NO_SELECT,
+    framing: NO_SELECT,
     aspectRatio: "16:9",
     environment: "",
   },

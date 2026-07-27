@@ -1,8 +1,38 @@
 import type { ReferenceSlotId, SceneAspectRatio } from "./types";
 
+/**
+ * 構図の役割グループ。UI で「どこに何を入れればいいか」を分かるようにするための見出し。
+ *
+ * なぜ追加したか (2026-07-27):
+ *   STΛCK から「構図とカメラで選択が分かれていて、どこに何を入れればいいか分からない」
+ *   と指摘された。実際に見ると (a)「ショット幅」がカメラの中にあり、(b) 構図の中にも
+ *   Close Up / Full Shot など写る範囲の指定が混ざっていて、**同じことを決める場所が
+ *   2箇所に分かれていた**。
+ *
+ *   保存されるデータ構造は変えず (subjectFraming.composition と camera.focalLength の
+ *   ままにする)、表示だけを役割ごとに束ねる。過去のプリセットを壊さずに分かりやすさだけ
+ *   を上げるため。
+ */
+export type CompositionGroup =
+  /** どこまで写すか (被写体との距離)。極寄り→全身→引き の段階 */
+  | "distance"
+  /** どこから撮るか (カメラの位置・角度・被写体の向き) */
+  | "angle"
+  /** どう見せるか (画面内の配置・遮蔽・反射などの演出) */
+  | "framing";
+
+export const COMPOSITION_GROUP_LABELS: Record<CompositionGroup, { title: string; hint: string }> = {
+  distance: { title: "どこまで写す", hint: "被写体にどこまで寄るか" },
+  angle: { title: "どこから撮る", hint: "カメラの高さ・角度・向き" },
+  framing: { title: "どう見せる", hint: "画面のどこに置くか・何で遮るか" },
+};
+
+
 export type SceneOption = {
   /** Stored value (label). Keep as the source-of-truth so buildPrompt stays simple. */
   value: string;
+  /** 構図の役割グループ。compositionOptions のみ使う。UI のグループ見出しになる。 */
+  group?: CompositionGroup;
   /** Short Japanese hint shown under the label. */
   hint?: string;
   /** Visual cue category. UI renders a glyph based on this. */
@@ -69,141 +99,249 @@ export const compositionOptions: SceneOption[] = [
   NO_SELECT_OPTION,
   {
     value: "Extreme Close Up",
+    group: "distance",
     hint: "部分の極寄り",
     visual: "frame-close",
     thumbnail: thumb("composition", "extreme-close-up", "Extreme Close Up"),
   },
   {
     value: "Close Up",
+    group: "distance",
     hint: "頭部から肩まで",
     visual: "frame-close",
     thumbnail: thumb("composition", "close-up", "Close Up"),
   },
   {
     value: "Bust Shot",
+    group: "distance",
     hint: "胸上・証明写真",
     visual: "frame-close",
     thumbnail: thumb("composition", "bust-shot", "Bust Shot"),
   },
   {
     value: "Medium",
+    group: "distance",
     hint: "腰から上",
     visual: "frame-medium",
     thumbnail: thumb("composition", "medium", "Medium"),
   },
   {
     value: "Cowboy Shot",
+    group: "distance",
     hint: "膝上・腿まで",
     visual: "frame-medium",
     thumbnail: thumb("composition", "cowboy-shot", "Cowboy Shot"),
   },
   {
     value: "Full Shot",
+    group: "distance",
     hint: "全身ぴったり",
     visual: "frame-wide",
     thumbnail: thumb("composition", "full-shot", "Full Shot"),
   },
   {
     value: "Wide",
+    group: "distance",
     hint: "全身・空間に余白",
     visual: "frame-wide",
     thumbnail: thumb("composition", "wide", "Wide"),
   },
   {
     value: "Bird's-eye",
+    group: "angle",
     hint: "真上から見下ろす",
     visual: "frame-aerial",
     thumbnail: thumb("composition", "birds-eye", "Bird's-eye"),
   },
   {
     value: "High Angle",
+    group: "angle",
     hint: "やや上から見下ろす",
     visual: "frame-medium",
     thumbnail: thumb("composition", "high-angle", "High Angle"),
   },
   {
     value: "Eye Level Straight",
+    group: "angle",
     hint: "目線の高さ・基準",
     visual: "frame-medium",
     thumbnail: thumb("composition", "eye-level-straight", "Eye Level Straight"),
   },
   {
     value: "Low Angle",
+    group: "angle",
     hint: "下から見上げる",
     visual: "frame-medium",
     thumbnail: thumb("composition", "low-angle", "Low Angle"),
   },
   {
     value: "Worm's-eye",
+    group: "angle",
     hint: "床から極端に見上げる",
     visual: "frame-medium",
     thumbnail: thumb("composition", "worms-eye", "Worm's-eye"),
   },
   {
     value: "Dutch Angle",
+    group: "angle",
     hint: "カメラを傾ける",
     visual: "frame-tilt",
     thumbnail: thumb("composition", "dutch-angle", "Dutch Angle"),
   },
   {
     value: "Three-Quarter View",
+    group: "angle",
     hint: "斜め45度から",
     visual: "frame-medium",
     thumbnail: thumb("composition", "three-quarter-view", "Three-Quarter View"),
   },
   {
     value: "Profile View",
+    group: "angle",
     hint: "真横から",
     visual: "frame-medium",
     thumbnail: thumb("composition", "profile-view", "Profile View"),
   },
   {
     value: "Back View",
+    group: "angle",
     hint: "真後ろから",
     visual: "frame-medium",
     thumbnail: thumb("composition", "back-view", "Back View"),
   },
   {
     value: "Rule of Thirds Left",
+    group: "framing",
     hint: "左三分割に寄せる",
     visual: "frame-medium",
     thumbnail: thumb("composition", "rule-of-thirds-left", "Rule of Thirds Left"),
   },
   {
     value: "Rule of Thirds Right",
+    group: "framing",
     hint: "右三分割に寄せる",
     visual: "frame-medium",
     thumbnail: thumb("composition", "rule-of-thirds-right", "Rule of Thirds Right"),
   },
   {
     value: "Negative Space Top",
+    group: "framing",
     hint: "上部を大きく空ける",
     visual: "frame-aerial",
     thumbnail: thumb("composition", "negative-space-top", "Negative Space Top"),
   },
   {
     value: "Symmetrical Center",
+    group: "framing",
     hint: "完全中央・左右対称",
     visual: "frame-medium",
     thumbnail: thumb("composition", "symmetrical-center", "Symmetrical Center"),
   },
   {
     value: "Edge Crop",
+    group: "framing",
     hint: "画面端で断ち切る",
     visual: "frame-medium",
     thumbnail: thumb("composition", "edge-crop", "Edge Crop"),
   },
   {
     value: "Floor Level Long Lens",
+    group: "angle",
     hint: "床すれすれの水平",
     visual: "frame-medium",
     thumbnail: thumb("composition", "floor-level-long-lens", "Floor Level Long Lens"),
   },
   {
     value: "Over-the-shoulder",
+    group: "angle",
     hint: "肩越しに見る視点",
     visual: "frame-shoulder",
     thumbnail: thumb("composition", "over-the-shoulder", "Over-the-shoulder"),
+  },
+
+  // ── 特殊構図 (2026-07-27 追加) ──────────────────────────────
+  //
+  // なぜ足したか: 既存23件は三分割・見上げ・肩越しといった撮影入門書の基本形ばかりで、
+  // STΛCK から「もっと特殊な、海外の広告/MVで見るような構図がないのか」と指摘された。
+  // 基本形は実務で最も使うので残し、その上に「見たことがない側」を積む。
+  //
+  // 分類の軸は3つ: (1)空間の使い方が特殊 (2)カメラの物理位置が特殊 (3)関係性・演出が特殊。
+  {
+    value: "Frame in Frame",
+    group: "framing",
+    hint: "ドア枠や窓の中に収める",
+    visual: "frame-shoulder",
+    thumbnail: thumb("composition", "frame-in-frame", "Frame in Frame"),
+  },
+  {
+    value: "Foreground Occlusion",
+    group: "framing",
+    hint: "手前を遮って覗き見る",
+    visual: "frame-shoulder",
+    thumbnail: thumb("composition", "foreground-occlusion", "Foreground Occlusion"),
+  },
+  {
+    value: "Reflection Subject",
+    group: "framing",
+    hint: "水たまりや窓の映り込みが主役",
+    visual: "frame-shoulder",
+    thumbnail: thumb("composition", "reflection-subject", "Reflection Subject"),
+  },
+  {
+    value: "Extreme Negative Space",
+    group: "framing",
+    hint: "9割が空白・人は隅に小さく",
+    visual: "frame-aerial",
+    thumbnail: thumb("composition", "extreme-negative-space", "Extreme Negative Space"),
+  },
+  {
+    value: "God's-eye Flat",
+    group: "angle",
+    hint: "真上から・奥行きを完全に消す",
+    visual: "frame-aerial",
+    thumbnail: thumb("composition", "gods-eye-flat", "God's-eye Flat"),
+  },
+  {
+    value: "Ground Crawl",
+    group: "angle",
+    hint: "路面が巨大・這うような視点",
+    visual: "frame-tilt",
+    thumbnail: thumb("composition", "ground-crawl", "Ground Crawl"),
+  },
+  {
+    value: "POV Behind",
+    group: "angle",
+    hint: "後頭部越しに見える世界",
+    visual: "frame-shoulder",
+    thumbnail: thumb("composition", "pov-behind", "POV Behind"),
+  },
+  {
+    value: "Deep Focus Two-Plane",
+    group: "framing",
+    hint: "手前も奥も両方くっきり",
+    visual: "frame-shoulder",
+    thumbnail: thumb("composition", "deep-focus-two-plane", "Deep Focus Two-Plane"),
+  },
+  {
+    value: "Overhead Hands",
+    group: "framing",
+    hint: "手だけを真上から平面的に",
+    visual: "frame-aerial",
+    thumbnail: thumb("composition", "overhead-hands", "Overhead Hands"),
+  },
+  {
+    value: "Silhouette Only",
+    group: "framing",
+    hint: "逆光で真っ黒・形だけで見せる",
+    visual: "frame-shoulder",
+    thumbnail: thumb("composition", "silhouette-only", "Silhouette Only"),
+  },
+  {
+    value: "Dutch Low Wide",
+    group: "angle",
+    hint: "歪み+傾き+見上げの全部乗せ",
+    visual: "frame-tilt",
+    thumbnail: thumb("composition", "dutch-low-wide", "Dutch Low Wide"),
   },
 ];
 
@@ -471,6 +609,17 @@ export const cameraEquipmentOptions: SceneOption[] = [
  *
  * value は日本語ラベル（中級プロが読みやすい）、prompt は英語完成形。
  */
+/**
+ * 構図の選択肢を役割グループで絞る。UI は3つの独立した選択として出す。
+ *
+ * 3つは併用できる (「胸上まで寄って・下から見上げて・左に寄せる」) ので、
+ * 1つの一覧から1つだけ選ばせる形では表現できない (2026-07-27 STΛCK 指摘)。
+ * 各グループの先頭には「指定なし」を必ず置く (選ばない自由を残す)。
+ */
+export function compositionOptionsFor(group: CompositionGroup): SceneOption[] {
+  return [NO_SELECT_OPTION, ...compositionOptions.filter((o) => o.group === group)];
+}
+
 export const shotOptions: SceneOption[] = [
   NO_SELECT_OPTION,
   {

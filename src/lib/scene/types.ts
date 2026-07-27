@@ -20,7 +20,19 @@ export type ReferenceSlotId = "@img1" | "@img2" | "@img3" | "@img4" | "@img5";
 
 export type SubjectFramingState = {
   subject: string;
+  /**
+   * どこまで写すか (被写体との距離)。極寄り→顔→胸上→腰上→膝上→全身→引き。
+   *
+   * 2026-07-27: 旧「構図」を役割で3つに割った1つ目。以前は distance / angle / framing が
+   * 1つのフィールドを奪い合っており、「胸上まで寄って、下から見上げて、左に寄せる」という
+   * 実際の撮影で普通に併用する指定が同時にできなかった (STΛCK 指摘)。
+   * buildPrompt では3つとも別々の要素としてプロンプトに出す。
+   */
   composition: string;
+  /** どこから撮るか (カメラの高さ・角度・被写体の向き)。 */
+  cameraAngle: string;
+  /** どう見せるか (画面内の配置・遮蔽・反射などの演出)。 */
+  framing: string;
   aspectRatio: SceneAspectRatio;
   environment: string;
 };
