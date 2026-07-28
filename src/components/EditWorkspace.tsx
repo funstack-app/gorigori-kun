@@ -5,10 +5,20 @@ import { useBatches } from "../lib/store/batches";
 import { beginDirectRun } from "../lib/store/generationStatus";
 import { useThreads } from "../lib/store/threads";
 import { useToasts } from "../lib/store/toasts";
+import { AdjustPanel } from "./edit/AdjustPanel";
+import { CropPanel } from "./edit/CropPanel";
 import { EditorCanvas } from "./edit/EditorCanvas";
+import { ExportDialog } from "./edit/ExportDialog";
 import type { NormalizedBbox } from "./edit/RegionSelectOverlay";
 import { TextOverlayPanel, type TextOverlayValues } from "./edit/TextOverlayPanel";
+import {
+  NEUTRAL_ADJUST,
+  readAdjustFromCanvas,
+  type AdjustValues,
+} from "./edit/editor/adjustFilters";
+import type { TransformKind } from "./edit/editor/canvasTransforms";
 import { useEditor } from "./edit/editor/editorStore";
+import type { ExportFormat, ExportSize } from "./edit/editor/exportImage";
 import { readOverlayTextValues } from "./edit/editor/magicLayerToFabric";
 import { useEditorActions } from "./edit/editor/useEditor";
 
@@ -40,8 +50,13 @@ const DEFAULT_TEXT_VALUES: TextOverlayValues = {
  *
  * 素の状態 = "select" を既定に置き、囲みが要るモードのときだけオーバーレイを敷く。
  * これは画像編集ソフト共通の「矢印ツールが原点」に合わせた形でもある。
+ *
+ * 2026-07-28 追記: 「調整」「切り抜き」を追加した。どちらも **AI を一切通さない
+ * 数学的処理だけ**で組んであり、Intel Mac / Apple Silicon / Windows で同じ結果になる
+ * (待ち時間ゼロ・課金ゼロ)。中途半端に AI を混ぜると OS 差・待ち・課金が生えるため、
+ * 決定論で出せる品質だけを入れる、という方針で選んでいる。
  */
-type EditTool = "select" | "ai" | "text";
+type EditTool = "select" | "ai" | "text" | "adjust" | "crop";
 
 /**
  * 編集タブ = 「ことばで直す」だけの画面 (2026-07-26 STΛCK 指示で全面再設計)。
@@ -94,7 +109,10 @@ export function EditWorkspace() {
     chooseImage,
     performUndo,
     performRedo,
-    exportPng,
+    exportImageAs,
+    applyAdjust,
+    cropToRegion,
+    rotateOrFlip,
     saveAsArtwork,
     applyRedlineFix,
     applyTextOverlay,
@@ -123,8 +141,18 @@ export function EditWorkspace() {
    * null なら右パネルは「新しく置く」フォームのまま。
    */
   const [editingTextId, setEditingTextId] = useState<string | null>(null);
+  /**
+   * 「調整」の現在値 (明るさ・コントラスト・彩度・色合い・粒子)。
+   * キャンバス側にも `adjust` として保存してあり、undo/redo と画像切替のあとは
+   * そちらから読み戻す (見た目とつまみの位置がズレないようにする)。
+   */
+  const [adjust, setAdjust] = useState<AdjustValues>(NEUTRAL_ADJUST);
+  /** 書き出しダイアログの開閉。 */
+  const [exportOpen, setExportOpen] = useState(false);
 
   const textMode = tool === "text";
+  /** 囲みが要る道具かどうか (囲みオーバーレイを敷く判定を1箇所にまとめる)。 */
+  const needsRegion = tool === "ai" || tool === "text" || tool === "crop";
 
   // 画像を差し替えたら選択は無効になる (前の画像の座標を持ち越さない)。
   // 道具も既定 (選択・移動) に戻す (前の画像に対する作業の続きに見えるのを防ぐ)。
@@ -133,6 +161,9 @@ export function EditWorkspace() {
     setTool("select");
     setEyedropper(false);
     setEditingTextId(null);
+    // 調整も画像ごとにやり直し。前の画像の補正値がつまみに残っていると
+    // 「触っていないのに数値が入っている」状態になる。
+    setAdjust(NEUTRAL_ADJUST);
   }, [sourceImagePath]);
 
   /**
@@ -241,6 +272,73 @@ export function EditWorkspace() {
     setEditingTextId(null);
   };
 
+  /**
+   * 調整のつまみを動かしている最中 (プレビューだけ更新・履歴は積まない)。
+   * 離した時点で commitAdjust が履歴を1手だけ積む。
+   */
+  const changeAdjust = (patch: Partial<AdjustValues>) => {
+    const next = { ...adjust, ...patch };
+    setAdjust(next);
+    void applyAdjust(next, false);
+  };
+
+  /** つまみを離した = 1操作の確定。ここで履歴を積む。 */
+  const commitAdjust = () => {
+    void applyAdjust(adjust, true);
+  };
+
+  /** プリセットを押した = 値の差し替え + 即確定 (1操作 = 1手)。 */
+  const applyPreset = (values: AdjustValues) => {
+    setAdjust(values);
+    void applyAdjust(values, true);
+  };
+
+  /** 「リセット」= 調整を全部外す。これも1手として履歴に積む。 */
+  const resetAdjust = () => {
+    setAdjust(NEUTRAL_ADJUST);
+    void applyAdjust(NEUTRAL_ADJUST, true);
+  };
+
+  /**
+   * 囲んだ範囲で切り抜く。
+   *
+   * 切り抜きは「焼いて切る」ので、キャンバスは1枚に統合される。つまみの値は
+   * 焼き込み済みなので、切ったあとの調整は無調整からのやり直しになる
+   * (焼いた画素に対してさらに補正をかける形)。表示値もそれに合わせて戻す。
+   * 終わったら囲みを外して「選択・移動」へ戻す (置いたら掴める、と同じ動線)。
+   */
+  const runCrop = async () => {
+    if (!region) return;
+    setError(null);
+    const done = await cropToRegion(region);
+    if (!done) {
+      setError("切り抜けませんでした。キャンバス下のメッセージを確認してください。");
+      return;
+    }
+    setRegion(null);
+    setAdjust(NEUTRAL_ADJUST);
+    setTool("select");
+  };
+
+  /** 90°回転・反転。即時に効き、『戻す』1手で戻る。 */
+  const runTransform = async (kind: TransformKind) => {
+    setError(null);
+    const done = await rotateOrFlip(kind);
+    if (!done) {
+      setError("向きを変えられませんでした。キャンバス下のメッセージを確認してください。");
+      return;
+    }
+    // 回転も焼き込みなので、調整値は焼かれた側に移る。つまみは無調整へ戻す。
+    setAdjust(NEUTRAL_ADJUST);
+  };
+
+  /** 書き出しダイアログからの実行。成功・キャンセルどちらでもダイアログは閉じる。 */
+  const runExport = async (format: ExportFormat, size: ExportSize) => {
+    setError(null);
+    setExportOpen(false);
+    await exportImageAs(format, size);
+  };
+
   /*
    * ギャラリー右クリック / プレビューモーダルの「編集スタジオで開く」を受ける。
    *
@@ -278,6 +376,27 @@ export function EditWorkspace() {
 
   const canRun = Boolean(sourceImagePath && instruction.trim()) && !busy && busyTool === null;
 
+  /**
+   * 戻す / やり直したあとに、調整のつまみをキャンバスの実値へ引き直す。
+   *
+   * filters 自体は履歴に載っているので**見た目は勝手に戻る**が、右パネルの
+   * つまみは React の state なので置いていかれる。見た目と数値がズレたままだと
+   * 「表示は元に戻ったのに、つまみを触ると一気に元の補正へ飛ぶ」事故になる。
+   */
+  const syncAdjustFromCanvas = () => {
+    setAdjust(readAdjustFromCanvas(useEditor.getState().canvas));
+  };
+
+  const undoWithSync = async () => {
+    await performUndo();
+    syncAdjustFromCanvas();
+  };
+
+  const redoWithSync = async () => {
+    await performRedo();
+    syncAdjustFromCanvas();
+  };
+
   // Cmd/Ctrl+Z = 元に戻す / Cmd/Ctrl+Shift+Z = やり直す。
   // 編集タブ表示中だけ有効 (このコンポーネントがマウントされている間だけ listener を張る)。
   // input / textarea / contentEditable にフォーカスがあるときは発火しない
@@ -309,11 +428,13 @@ export function EditWorkspace() {
       if (event.key.toLowerCase() !== "z") return;
       if (typing) return;
       event.preventDefault();
-      if (event.shiftKey) {
-        void performRedo();
-      } else {
-        void performUndo();
-      }
+      // ショートカット経由でも、戻したあとに調整のつまみを実値へ引き直す
+      // (ヘッダーのボタン経由と挙動を揃える)。setAdjust は setter なので
+      // 依存配列に足す必要がなく、listener を張り替えずに済む。
+      const run = event.shiftKey ? performRedo : performUndo;
+      void Promise.resolve(run()).then(() => {
+        setAdjust(readAdjustFromCanvas(useEditor.getState().canvas));
+      });
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
@@ -460,7 +581,7 @@ export function EditWorkspace() {
   };
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-[#2a2a2a] bg-[#1e1e1e]">
+    <div className="relative flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-[#2a2a2a] bg-[#1e1e1e]">
       {/* 上部バー: 画像名と、画像の入れ替え・書き出しだけ。 */}
       <header className="flex h-10 shrink-0 items-center gap-2 border-b border-[#2a2a2a] bg-[#252525] px-3">
         <span
@@ -477,7 +598,7 @@ export function EditWorkspace() {
             */}
             <button
               type="button"
-              onClick={() => void performUndo()}
+              onClick={() => void undoWithSync()}
               disabled={!canUndo || busyTool !== null || busy}
               className="rounded-md border border-[#3a3a3a] bg-[#1a1a1a] px-3 py-1.5 text-[11px] font-black text-neutral-200 hover:border-pink-400 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
             >
@@ -485,7 +606,7 @@ export function EditWorkspace() {
             </button>
             <button
               type="button"
-              onClick={() => void performRedo()}
+              onClick={() => void redoWithSync()}
               disabled={!canRedo || busyTool !== null || busy}
               className="rounded-md border border-[#3a3a3a] bg-[#1a1a1a] px-3 py-1.5 text-[11px] font-black text-neutral-200 hover:border-pink-400 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
             >
@@ -501,7 +622,7 @@ export function EditWorkspace() {
             </button>
             <button
               type="button"
-              onClick={() => void exportPng()}
+              onClick={() => setExportOpen(true)}
               disabled={busyTool !== null || busy}
               className="rounded-md border border-[#3a3a3a] bg-[#1a1a1a] px-3 py-1.5 text-[11px] font-black text-neutral-200 hover:border-pink-400 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
             >
@@ -534,6 +655,8 @@ export function EditWorkspace() {
             { id: "select", label: "選択・移動" },
             { id: "ai", label: "ことばで直す" },
             { id: "text", label: "セリフ・文字を直す" },
+            { id: "adjust", label: "調整" },
+            { id: "crop", label: "切り抜き" },
           ] as const).map((item) => (
             <button
               key={item.id}
@@ -566,16 +689,18 @@ export function EditWorkspace() {
             */}
             <EditorCanvas
               regionSelect={
-                tool === "select"
-                  ? undefined
-                  : {
+                needsRegion
+                  ? {
                       value: region,
                       onChange: setRegion,
                       disabled: busy || busyTool !== null || eyedropper,
                       hint: textMode
                         ? "直したいセリフをドラッグで囲む"
-                        : "直したいところをドラッグで囲む",
+                        : tool === "crop"
+                          ? "残したいところをドラッグで囲む"
+                          : "直したいところをドラッグで囲む",
                     }
+                  : undefined
               }
               eyedropper={{
                 active: eyedropper,
@@ -590,10 +715,29 @@ export function EditWorkspace() {
                 右パネルの出し分け:
                   - 文字を選んでいる → その文字の再編集フォーム (道具は問わない)
                   - 「セリフ・文字を直す」 → 新しく置くフォーム
+                  - 「調整」            → 明るさ・色のパネル (AI 不使用)
+                  - 「切り抜き」        → 囲んで切るパネル (AI 不使用)
                   - 「選択・移動」      → 何ができるかの案内
                   - 「ことばで直す」    → AI 指示欄
               */}
-              {editingTextId ? (
+              {tool === "adjust" ? (
+                <AdjustPanel
+                  values={adjust}
+                  onChange={changeAdjust}
+                  onCommit={commitAdjust}
+                  onPreset={applyPreset}
+                  onReset={resetAdjust}
+                  onTransform={(kind) => void runTransform(kind)}
+                  busy={busy || busyTool !== null}
+                />
+              ) : tool === "crop" ? (
+                <CropPanel
+                  region={region}
+                  onApply={() => void runCrop()}
+                  onClear={() => setRegion(null)}
+                  busy={busy || busyTool !== null}
+                />
+              ) : editingTextId ? (
                 <TextOverlayPanel
                   region={region}
                   values={textValues}
@@ -723,6 +867,18 @@ export function EditWorkspace() {
           </div>
         )}
       </div>
+
+      {/*
+        書き出しダイアログ。編集タブの中に閉じたオーバーレイにする (別ウィンドウにしない)。
+        親に relative があるので inset-0 がこのタブの領域にちょうど収まる。
+      */}
+      {exportOpen && sourceImagePath ? (
+        <ExportDialog
+          onExport={(format, size) => void runExport(format, size)}
+          onClose={() => setExportOpen(false)}
+          busy={busy || busyTool !== null}
+        />
+      ) : null}
     </div>
   );
 }

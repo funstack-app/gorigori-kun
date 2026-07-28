@@ -42,6 +42,13 @@ import {
   showGrabPreviewOverlay,
 } from "./magicLayerToFabric";
 import { restoreCanvas } from "./history";
+import { applyAdjustToCanvas, type AdjustValues } from "./adjustFilters";
+import { cropCanvasToRegion, transformCanvas, type TransformKind } from "./canvasTransforms";
+import {
+  saveExportedImage,
+  type ExportFormat,
+  type ExportSize,
+} from "./exportImage";
 import { groupSelectedLayers, objectId, ungroupLayer } from "./layerHelpers";
 import { normalizeGenre, type LayerGenre } from "../../../lib/edit/genre";
 import { resolveWord, splitWordsInput } from "../../../lib/edit/wordPresets";
@@ -471,6 +478,120 @@ export function useEditorActions() {
       setMessage(`書き出しました: ${target}`);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
+    }
+  };
+
+  /**
+   * 「調整」の色調補正をベース画像へ反映する (AI 不使用・即時)。
+   *
+   * `commit` が true のときだけ履歴を積む。スライダーを動かしている最中は
+   * false で呼び、離した時点 (pointerup) で true にする。動かしている間ずっと
+   * 積むと1ドラッグで数十手になり「戻す」が実質使えなくなる
+   * (updateSelectedTextLayer と同じ流儀)。
+   */
+  const applyAdjust = async (values: AdjustValues, commit = false): Promise<boolean> => {
+    const liveCanvas = canvas ?? useEditor.getState().canvas;
+    if (!liveCanvas) {
+      setError("キャンバスを初期化中です。");
+      return false;
+    }
+    const applied = await applyAdjustToCanvas(liveCanvas, values);
+    if (!applied) {
+      setError("調整できる画像がありません。画像を開き直してください。");
+      return false;
+    }
+    bumpRevision();
+    if (commit) pushHistory();
+    return true;
+  };
+
+  /**
+   * 囲んだ範囲でキャンバスを切り抜く (AI 不使用・即時)。
+   *
+   * 履歴は**リセットしない**。1回の「戻す」で切り抜く前の状態に戻れる
+   * (切り抜きは取り返しのつく操作にしておく)。
+   */
+  const cropToRegion = async (
+    bboxNorm: [number, number, number, number],
+  ): Promise<boolean> => {
+    const liveCanvas = canvas ?? useEditor.getState().canvas;
+    if (!liveCanvas) {
+      setError("キャンバスを初期化中です。");
+      return false;
+    }
+    if (!isValidNormalizedBbox(bboxNorm)) {
+      setError("切り抜く範囲が不正です。もう一度囲んでください。");
+      return false;
+    }
+    try {
+      const done = await cropCanvasToRegion(liveCanvas, bboxNorm);
+      if (!done) {
+        setError("切り抜けませんでした。画像を開き直してください。");
+        return false;
+      }
+      useEditor.getState().setSelectedLayerId(null);
+      bumpRevision();
+      pushHistory();
+      setMessage("切り抜きました。『戻す』で元に戻せます。");
+      return true;
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+      return false;
+    }
+  };
+
+  /** キャンバス全体を90°回転 / 反転する (AI 不使用・即時・undo 対応)。 */
+  const rotateOrFlip = async (kind: TransformKind): Promise<boolean> => {
+    const liveCanvas = canvas ?? useEditor.getState().canvas;
+    if (!liveCanvas) {
+      setError("キャンバスを初期化中です。");
+      return false;
+    }
+    try {
+      const done = await transformCanvas(liveCanvas, kind);
+      if (!done) {
+        setError("回転できませんでした。画像を開き直してください。");
+        return false;
+      }
+      useEditor.getState().setSelectedLayerId(null);
+      bumpRevision();
+      pushHistory();
+      setMessage("向きを変えました。『戻す』で元に戻せます。");
+      return true;
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+      return false;
+    }
+  };
+
+  /**
+   * 形式・サイズを指定して書き出す (PNG / JPEG / WebP)。
+   *
+   * 焼く元は exportCanvasPngBase64 = 「書き出し」「作品にする」と同じ関数なので、
+   * **調整フィルタも置いた文字も焼き込まれた1枚**がそのまま変換対象になる。
+   */
+  const exportImageAs = async (format: ExportFormat, size: ExportSize): Promise<boolean> => {
+    const liveCanvas = canvas ?? useEditor.getState().canvas;
+    if (!liveCanvas) {
+      setError("キャンバスを初期化中です。");
+      return false;
+    }
+    const base64 = exportCanvasPngBase64(liveCanvas);
+    if (!base64) {
+      setError("書き出しデータの生成に失敗しました。");
+      return false;
+    }
+    try {
+      const dest = await saveExportedImage(base64, format, size);
+      if (!dest) {
+        setMessage("書き出しをキャンセルしました。");
+        return false;
+      }
+      setMessage(`書き出しました: ${dest}`);
+      return true;
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+      return false;
     }
   };
 
@@ -914,6 +1035,10 @@ export function useEditorActions() {
     groupSelection,
     ungroupSelection,
     exportPng,
+    exportImageAs,
+    applyAdjust,
+    cropToRegion,
+    rotateOrFlip,
     saveAsArtwork,
     applyTextOverlay,
     updateSelectedTextLayer,
