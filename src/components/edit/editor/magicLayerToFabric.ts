@@ -582,6 +582,254 @@ export async function addTextLayer(canvas: FabricCanvas) {
 }
 
 /**
+ * 「セリフ・文字を直す」の下地。指定範囲を単色 (既定 #FFFFFF) で塗りつぶす矩形レイヤー。
+ *
+ * ## なぜ AI ではなく矩形なのか
+ *
+ * 吹き出しのセリフを AI (範囲指定の再生成) で差し替えると、文字が崩壊する
+ * (STΛCK 実測)。画像生成モデルは文字を「描く」のが構造的に苦手で、
+ * 日本語ではさらに悪化する。**下地を塗って、その上にフォントで文字を載せる**のが
+ * 決定論の正解 — 即時・無料・文字化けゼロ・全 OS で同じ結果になる。
+ *
+ * 座標は元画像の実寸 (scene 座標)。RegionSelectOverlay が返す正規化 bbox を
+ * __ggBaseSize で実寸へ戻してから渡す。fabric の通常オブジェクトなので、
+ * 移動・拡縮・undo/redo・統合PNG書き出しにそのまま乗る。
+ */
+export async function addFillRectLayer(
+  canvas: FabricCanvas,
+  rect: { left: number; top: number; width: number; height: number },
+  color: string,
+): Promise<FabricObject> {
+  const fabric = await importFabric();
+  const object = new fabric.Rect({
+    id: createLayerId(),
+    name: "下地",
+    layerKind: "image",
+    genre: "prop",
+    left: rect.left,
+    top: rect.top,
+    width: Math.max(1, rect.width),
+    height: Math.max(1, rect.height),
+    fill: color,
+    // 塗りの縁に元画像が透けるアンチエイリアス線が残らないよう、境界を素直に描く。
+    strokeWidth: 0,
+    selectable: true,
+  });
+  canvas.add(object);
+  canvas.requestRenderAll?.();
+  return object;
+}
+
+/** 縦書きで1列あたりの文字ピッチ (fontSize 倍率)。行間の詰まりを CSS の見え方に寄せる。 */
+export const VERTICAL_TEXT_LINE_HEIGHT = 1.05;
+
+/**
+ * 縦書き表示用に、1文字ずつ改行を挟んだ文字列を作る。
+ *
+ * fabric には CSS の `writing-mode: vertical-rl` に当たる機能が無い
+ * (comic の書き出しも同じ理由で手組みしている: `src/lib/comic/pageExport.ts:364`)。
+ * Textbox は「1行 = 1文字」にすれば縦一列に積み上がるので、表示テキストだけ
+ * 変換して載せる。**打った本文 (原文) は textVertical で別に保持する**ので、
+ * 縦横を切り替えても入力内容は失われない。
+ *
+ * 元の改行は列の区切りとして扱い、fabric の行送り方向 (上→下) の制約から
+ * 複数列の右→左配置はしない (1列に収める)。長文は横書きを使う想定。
+ */
+export function toVerticalDisplayText(text: string): string {
+  return [...text.replace(/\r\n?/g, "\n")].filter((ch) => ch !== "\n").join("\n");
+}
+
+/**
+ * 下地の上に載せる文字レイヤー (「セリフ・文字を直す」)。
+ *
+ * カスタム属性:
+ *   - `textOrientation`: "vertical" | "horizontal" — どちら向きで組んでいるか
+ *   - `textSource`: ユーザーが打った原文 (縦書き時の表示用 text とは別に保つ)
+ * どちらも history の HISTORY_PROPERTIES に列挙してあるので undo/redo で消えない。
+ */
+export async function addOverlayTextLayer(
+  canvas: FabricCanvas,
+  rect: { left: number; top: number; width: number; height: number },
+  options: {
+    text: string;
+    orientation: "vertical" | "horizontal";
+    fontSize: number;
+    fill: string;
+    fontFamily: string;
+  },
+): Promise<FabricObject> {
+  const fabric = await importFabric();
+  const vertical = options.orientation === "vertical";
+  const display = vertical ? toVerticalDisplayText(options.text) : options.text;
+  const textbox = new fabric.Textbox(display || " ", {
+    id: createLayerId(),
+    name: "文字",
+    layerKind: "text",
+    genre: "text",
+    textOrientation: options.orientation,
+    textSource: options.text,
+    // 縦書きは1文字幅の細い列、横書きは囲んだ幅いっぱいに折り返す。
+    left: vertical
+      ? rect.left + Math.max(0, (rect.width - options.fontSize) / 2)
+      : rect.left,
+    top: rect.top,
+    width: vertical ? Math.max(options.fontSize, 1) : Math.max(1, rect.width),
+    fontSize: options.fontSize,
+    fill: options.fill,
+    fontFamily: options.fontFamily,
+    textAlign: "center",
+    lineHeight: vertical ? VERTICAL_TEXT_LINE_HEIGHT : 1.16,
+    selectable: true,
+  });
+  canvas.add(textbox);
+  canvas.setActiveObject?.(textbox);
+  canvas.requestRenderAll?.();
+  return textbox;
+}
+
+/**
+ * 「セリフ・文字を直す」で置いた文字レイヤーの、いま入っている値を読む。
+ *
+ * 縦書きは表示用 text を1文字ずつ改行した文字列に組み替えているため、
+ * 本文は必ず `textSource` (原文) を優先して読む。原文が無い個体
+ * (旧バージョンで置いたもの・ダブルクリック変換で生まれたもの) だけ
+ * 表示テキストで代用する。
+ *
+ * 対象外 (画像レイヤー等) には null を返す。呼び出し側は「再編集フォームを
+ * 出さない」判断に使う。
+ */
+export function readOverlayTextValues(object: FabricObject | null | undefined): {
+  text: string;
+  orientation: "vertical" | "horizontal";
+  fontSize: number;
+  color: string;
+  fontFamily: string;
+} | null {
+  if (!object) return null;
+  const type = (object.type ?? "").toString().toLowerCase();
+  if (type !== "textbox" && type !== "i-text" && type !== "text") return null;
+  const source = object.get?.("textSource");
+  const display = object.get?.("text");
+  const orientation = object.get?.("textOrientation") === "vertical" ? "vertical" : "horizontal";
+  const raw = typeof source === "string" ? source : typeof display === "string" ? display : "";
+  // 縦書きの表示テキスト (1文字1行) を原文の代わりに使うときは改行を畳んで戻す。
+  const text =
+    typeof source === "string" || orientation !== "vertical" ? raw : raw.replace(/\n/g, "");
+  const fontSize = object.get?.("fontSize");
+  const fill = object.get?.("fill");
+  const fontFamily = object.get?.("fontFamily");
+  return {
+    text,
+    orientation,
+    fontSize: typeof fontSize === "number" && Number.isFinite(fontSize) ? fontSize : 32,
+    color: typeof fill === "string" ? fill : "#000000",
+    fontFamily: typeof fontFamily === "string" && fontFamily ? fontFamily : "Hiragino Sans",
+  };
+}
+
+/**
+ * 置いた文字レイヤーを、あとから編集する (内容・向き・大きさ・色・フォント)。
+ *
+ * ## なぜ「置き直し」ではなく既存オブジェクトの更新か
+ *
+ * 消して置き直すと、ユーザーが動かした位置・回転・拡縮が毎回リセットされる。
+ * 「文字だけ直したいのに位置が戻る」は実害が大きいので、既存オブジェクトの
+ * プロパティだけを差し替える。
+ *
+ * 縦横の切り替えだけは幅の意味が変わる (縦=1文字幅の列 / 横=折り返す幅) ため、
+ * 向きが変わったときに限り width を組み直す。位置 (left/top) は動かさない。
+ */
+export function updateOverlayTextLayer(
+  canvas: FabricCanvas,
+  object: FabricObject,
+  patch: Partial<{
+    text: string;
+    orientation: "vertical" | "horizontal";
+    fontSize: number;
+    color: string;
+    fontFamily: string;
+  }>,
+): void {
+  const current = readOverlayTextValues(object);
+  if (!current) return;
+  const next = { ...current, ...patch };
+  const vertical = next.orientation === "vertical";
+  const values: Record<string, unknown> = {
+    textOrientation: next.orientation,
+    textSource: next.text,
+    text: (vertical ? toVerticalDisplayText(next.text) : next.text) || " ",
+    fontSize: next.fontSize,
+    fill: next.color,
+    fontFamily: next.fontFamily,
+    lineHeight: vertical ? VERTICAL_TEXT_LINE_HEIGHT : 1.16,
+  };
+  // 向きが変わったときだけ、その向きに合う幅へ組み直す。
+  //
+  // width は fabric の内部 (未スケール) 単位で、見た目の幅は width * scaleX。
+  // ここで扱うのは内部単位なので scaleX を掛けない (掛けると、拡大済みの
+  // テキストで幅が二重に効いて横に飛ぶ)。fontSize も同じ内部単位なので、
+  // 縦書きの「1文字幅の列」はそのまま fontSize でよい。
+  if (patch.orientation && patch.orientation !== current.orientation) {
+    if (vertical) {
+      values.width = Math.max(next.fontSize, 1);
+    } else {
+      // 縦 → 横。縦書きの列幅 (1文字分) をそのまま使うと極端に細い折り返しに
+      // なるので、文字数ぶんの幅を確保する。ただし元画像の幅からはみ出さない
+      // ように、画像の実寸が分かるときはそこで頭を打つ。
+      const wanted = next.fontSize * Math.max(1, [...next.text].length);
+      const limit = getCanvasBaseSize(canvas)?.width;
+      const left = typeof object.left === "number" ? object.left : 0;
+      const room = typeof limit === "number" ? Math.max(next.fontSize, limit - left) : wanted;
+      values.width = Math.max(next.fontSize, Math.min(wanted, room));
+    }
+  } else if (vertical && patch.fontSize && patch.fontSize !== current.fontSize) {
+    // 縦書きのまま文字サイズだけ変えたときは、列幅を新しい文字幅に追従させる。
+    values.width = Math.max(next.fontSize, 1);
+  }
+  object.set?.(values);
+  (object as { initDimensions?: () => void }).initDimensions?.();
+  object.setCoords?.();
+  canvas.requestRenderAll?.();
+}
+
+/**
+ * キャンバス上の1点 (scene 座標) の色を拾う (スポイト)。
+ * 白以外の下地に塗りを合わせるために使う。canvas を一時的に等倍へ戻して
+ * 元画像解像度で 1px 読むので、ズーム率に依存しない。
+ */
+export function pickCanvasColorAt(
+  canvas: FabricCanvas,
+  point: { x: number; y: number },
+): string | null {
+  const element: HTMLCanvasElement | undefined = (canvas as {
+    lowerCanvasEl?: HTMLCanvasElement;
+  }).lowerCanvasEl;
+  const vpt: number[] | undefined = (canvas as { viewportTransform?: number[] })
+    .viewportTransform;
+  if (!element) return null;
+  const zoom = vpt?.[0] ?? 1;
+  const offsetX = vpt?.[4] ?? 0;
+  const offsetY = vpt?.[5] ?? 0;
+  // scene 座標 → 画面 (lowerCanvas) 座標。devicePixelRatio 分の拡大も戻す。
+  const ratio = (canvas as { getRetinaScaling?: () => number }).getRetinaScaling?.() ?? 1;
+  const screenX = Math.round((point.x * zoom + offsetX) * ratio);
+  const screenY = Math.round((point.y * zoom + offsetY) * ratio);
+  if (
+    screenX < 0 ||
+    screenY < 0 ||
+    screenX >= element.width ||
+    screenY >= element.height
+  ) {
+    return null;
+  }
+  const context = element.getContext("2d", { willReadFrequently: true });
+  if (!context) return null;
+  const data = context.getImageData(screenX, screenY, 1, 1).data;
+  const hex = (value: number) => value.toString(16).padStart(2, "0");
+  return `#${hex(data[0])}${hex(data[1])}${hex(data[2])}`;
+}
+
+/**
  * 分解直後のレイヤー初期座標を画像内 (0..limit) に収める安全弁。
  * bbox が負値・NaN・画像外を返しても、レイヤーを画面外に飛ばさない。
  * limit (= 画像幅/高さ) が不明なときは 0 以上にだけ丸める。

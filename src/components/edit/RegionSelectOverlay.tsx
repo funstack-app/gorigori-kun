@@ -39,6 +39,11 @@ type Props = {
   onChange: (bbox: NormalizedBbox | null) => void;
   /** 実行中は選択を触らせない。 */
   disabled?: boolean;
+  /**
+   * 未選択時に出す案内文。用途で意味が変わる (AI に直させる範囲 / 塗りつぶす範囲)
+   * ため、呼び出し側が指定できるようにする。未指定なら AI 修正向けの既定文。
+   */
+  hint?: string;
 };
 
 /** ドラッグ中の画面座標での矩形 (オーバーレイ div のローカル座標)。 */
@@ -79,7 +84,7 @@ function bboxToScreen(
   };
 }
 
-export function RegionSelectOverlay({ canvas, value, onChange, disabled }: Props) {
+export function RegionSelectOverlay({ canvas, value, onChange, disabled, hint }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const startRef = useRef<{ x: number; y: number } | null>(null);
   const [dragRect, setDragRect] = useState<ScreenRect | null>(null);
@@ -223,7 +228,7 @@ export function RegionSelectOverlay({ canvas, value, onChange, disabled }: Props
 
       {ready && !shown ? (
         <div className="pointer-events-none absolute left-1/2 top-4 -translate-x-1/2 rounded-full border border-pink-400/60 bg-[#101010]/95 px-3 py-1.5 text-[11px] font-bold text-pink-100 shadow-xl">
-          直したいところをドラッグで囲む
+          {hint ?? "直したいところをドラッグで囲む"}
         </div>
       ) : null}
     </div>

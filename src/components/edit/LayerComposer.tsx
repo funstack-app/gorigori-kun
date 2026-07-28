@@ -362,6 +362,9 @@ export function LayerComposer({ background, foreground, textLayers, clickMasks }
 function loadImage(src: string) {
   return new Promise<HTMLImageElement>((resolve, reject) => {
     const img = new Image();
+    // asset:// は cross-origin。crossOrigin を付けた CORS ロードでないと canvas が
+    // 汚染され toBlob が "The operation is insecure." で死ぬ（pageExport.ts と同型）。
+    img.crossOrigin = "anonymous";
     img.onload = () => resolve(img);
     img.onerror = () => reject(new Error(`画像を読み込めません: ${src}`));
     img.src = src;

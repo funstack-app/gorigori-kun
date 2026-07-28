@@ -7,12 +7,41 @@ import { useThreads } from "../lib/store/threads";
 import { useToasts } from "../lib/store/toasts";
 import { EditorCanvas } from "./edit/EditorCanvas";
 import type { NormalizedBbox } from "./edit/RegionSelectOverlay";
+import { TextOverlayPanel, type TextOverlayValues } from "./edit/TextOverlayPanel";
 import { useEditor } from "./edit/editor/editorStore";
+import { readOverlayTextValues } from "./edit/editor/magicLayerToFabric";
 import { useEditorActions } from "./edit/editor/useEditor";
 
 function basename(path: string) {
   return path.split(/[\\/]/).pop() ?? path;
 }
+
+/**
+ * 「セリフ・文字を直す」の初期値。
+ * 吹き出しの打ち替えが主用途なので、下地=白・文字=黒・縦書きから始める
+ * (日本語の漫画・広告の既定)。フォントはヒラギノ角ゴ (mac 標準) を初期選択にし、
+ * 一覧が取れたらユーザーが選び直せる。
+ */
+const DEFAULT_TEXT_VALUES: TextOverlayValues = {
+  text: "",
+  orientation: "vertical",
+  fontSize: 32,
+  color: "#000000",
+  fontFamily: "Hiragino Sans",
+  fillColor: "#ffffff",
+};
+
+/**
+ * 編集タブの操作モード (2026-07-28 STΛCK 実機指摘で追加)。
+ *
+ * これまでは「ことばで直す」と「セリフ・文字を直す」の2択しかなく、どちらも
+ * キャンバス全面に囲みオーバーレイを敷いていた。そのため**置いた文字を掴めない**
+ * (オーバーレイがクリックを全部吸う) という詰みが起きていた。
+ *
+ * 素の状態 = "select" を既定に置き、囲みが要るモードのときだけオーバーレイを敷く。
+ * これは画像編集ソフト共通の「矢印ツールが原点」に合わせた形でもある。
+ */
+type EditTool = "select" | "ai" | "text";
 
 /**
  * 編集タブ = 「ことばで直す」だけの画面 (2026-07-26 STΛCK 指示で全面再設計)。
@@ -54,19 +83,198 @@ function basename(path: string) {
 export function EditWorkspace() {
   const sourceImagePath = useEditor((state) => state.sourceImagePath);
   const busyTool = useEditor((state) => state.busyTool);
-  const { chooseImage, performUndo, performRedo, exportPng, applyRedlineFix } =
-    useEditorActions();
+  const canUndo = useEditor((state) => state.canUndo);
+  const canRedo = useEditor((state) => state.canRedo);
+  const pendingOpenPath = useEditor((state) => state.pendingOpenPath);
+  // 選択が変わるたびに右パネルを引き直すための購読。
+  // selectedLayerId は EditorCanvas の selection:* イベントで更新される。
+  const selectedLayerId = useEditor((state) => state.selectedLayerId);
+  const canvas = useEditor((state) => state.canvas);
+  const {
+    chooseImage,
+    performUndo,
+    performRedo,
+    exportPng,
+    saveAsArtwork,
+    applyRedlineFix,
+    applyTextOverlay,
+    updateSelectedTextLayer,
+    openImageForEditing,
+  } = useEditorActions();
 
   const [instruction, setInstruction] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  /** 「作品にする」の実行中フラグ (二重押しでギャラリーに2枚入るのを防ぐ)。 */
+  const [savingArtwork, setSavingArtwork] = useState(false);
   /** 直す範囲 (0..1 の正規化 bbox)。null = 画像全体。 */
   const [region, setRegion] = useState<NormalizedBbox | null>(null);
+  /**
+   * いま選んでいる道具。既定は "select" (選択・移動) で、囲みオーバーレイを敷かない
+   * 素の状態。"ai" と "text" のときだけキャンバスがドラッグで囲むモードになる。
+   */
+  const [tool, setTool] = useState<EditTool>("select");
+  /** 下地の色を画像から拾う待機状態 (スポイト)。 */
+  const [eyedropper, setEyedropper] = useState(false);
+  const [textValues, setTextValues] = useState<TextOverlayValues>(DEFAULT_TEXT_VALUES);
+  /**
+   * 再編集の対象になっている文字レイヤーの id。
+   * 「置いた直後」と「選択・移動で文字をクリックしたとき」の両方でここに入る。
+   * null なら右パネルは「新しく置く」フォームのまま。
+   */
+  const [editingTextId, setEditingTextId] = useState<string | null>(null);
+
+  const textMode = tool === "text";
 
   // 画像を差し替えたら選択は無効になる (前の画像の座標を持ち越さない)。
+  // 道具も既定 (選択・移動) に戻す (前の画像に対する作業の続きに見えるのを防ぐ)。
   useEffect(() => {
     setRegion(null);
+    setTool("select");
+    setEyedropper(false);
+    setEditingTextId(null);
   }, [sourceImagePath]);
+
+  /**
+   * 道具を切り替える。囲みの残骸・スポイト待ち・再編集対象を必ず一緒に落とす。
+   *
+   * ここを1本にまとめる理由: モード状態が複数あると、どれか1つ消し忘れた組み合わせ
+   * (例: 囲み枠だけ残る) が必ず出る。切り替え口を1つにして、消す物を1箇所で数える。
+   */
+  const selectTool = (next: EditTool) => {
+    setTool(next);
+    setRegion(null);
+    setEyedropper(false);
+    setError(null);
+    setEditingTextId(null);
+    // 別の道具へ移るときは、キャンバス側の選択も外す。
+    // 選択枠が残ったまま囲みモードに入ると「何が対象なのか」が二重になる。
+    if (next !== "select") {
+      const active = useEditor.getState().canvas as
+        | { discardActiveObject?: () => void; requestRenderAll?: () => void }
+        | null;
+      active?.discardActiveObject?.();
+      active?.requestRenderAll?.();
+      useEditor.getState().setSelectedLayerId(null);
+    }
+  };
+
+  /**
+   * キャンバスで選ばれているオブジェクトが「置いた文字」なら、その値を右パネルへ引く。
+   *
+   * selectedLayerId は EditorCanvas の selection:created/updated/cleared で更新される
+   * ので、クリックで選び直すたびにここが走る。文字以外 (下地の矩形・画像レイヤー) を
+   * 選んだときは再編集フォームを出さない (直せる属性が無いのにフォームを出すと、
+   * 打っても効かないように見える)。
+   */
+  useEffect(() => {
+    if (!selectedLayerId) {
+      setEditingTextId(null);
+      return;
+    }
+    const active = (canvas as { getActiveObject?: () => unknown } | null)?.getActiveObject?.();
+    const values = readOverlayTextValues(active);
+    if (!values) {
+      setEditingTextId(null);
+      return;
+    }
+    setEditingTextId(selectedLayerId);
+    // 選んだ文字の現在値をフォームへ流し込む。fillColor (下地) はこの文字の属性では
+    // ないので触らず、直前の値をそのまま残す。
+    setTextValues((current) => ({ ...current, ...values }));
+  }, [selectedLayerId, canvas]);
+
+  /**
+   * 囲んだ範囲を塗りつぶして、その上に文字を置く (AI 不使用)。
+   *
+   * 置いたら**囲みモードを抜けて「選択・移動」に戻る**。理由は STΛCK 実機指摘:
+   * 囲みオーバーレイはキャンバス全面を覆ってクリックを吸うため、敷いたままだと
+   * 置いた文字を掴めない。置いた直後こそ位置を微調整したい瞬間なので、
+   * そのまま掴める状態に落とす (applyTextOverlay 側が置いた文字を選択済みにして返す)。
+   */
+  const placeText = async () => {
+    if (!region) return;
+    setError(null);
+    const placedId = await applyTextOverlay(region, {
+      text: textValues.text,
+      orientation: textValues.orientation,
+      fontSize: textValues.fontSize,
+      color: textValues.color,
+      fontFamily: textValues.fontFamily,
+      fillColor: textValues.fillColor,
+    });
+    if (placedId) {
+      setRegion(null);
+      setEyedropper(false);
+      // 囲みオーバーレイを外す。これをしないと置いた文字をクリックできない。
+      setTool("select");
+      setEditingTextId(placedId);
+    } else {
+      setError("文字を置けませんでした。キャンバス下のメッセージを確認してください。");
+    }
+  };
+
+  /** 再編集フォームの値を、選択中の文字レイヤーへ反映する。 */
+  const editSelectedText = (patch: Partial<TextOverlayValues>, commit = false) => {
+    setTextValues((current) => ({ ...current, ...patch }));
+    if (!editingTextId) return;
+    updateSelectedTextLayer(
+      {
+        text: patch.text,
+        orientation: patch.orientation,
+        fontSize: patch.fontSize,
+        color: patch.color,
+        fontFamily: patch.fontFamily,
+      },
+      commit,
+    );
+  };
+
+  /** キャンバスの選択を外して「新しく置く」フォームへ戻す。 */
+  const deselectText = () => {
+    const active = useEditor.getState().canvas as
+      | { discardActiveObject?: () => void; requestRenderAll?: () => void }
+      | null;
+    active?.discardActiveObject?.();
+    active?.requestRenderAll?.();
+    useEditor.getState().setSelectedLayerId(null);
+    setEditingTextId(null);
+  };
+
+  /*
+   * ギャラリー右クリック / プレビューモーダルの「編集スタジオで開く」を受ける。
+   *
+   * あちら側は「予約 (setPendingOpenPath) + タブ切替」しかしない。編集タブは
+   * 非アクティブ時にアンマウントされているので、開く処理はマウントされた
+   * こちら側が担う。openImageForEditing は内部で waitForEditorCanvas (最大4秒)
+   * を通るため、EditorCanvas の初期化前に来ても取りこぼさない。
+   *
+   * 予約は「消費する前に」消す。開く処理が失敗しても予約が残り続けると、
+   * 以降マウントのたびに同じ画像を開き直してしまう。
+   */
+  useEffect(() => {
+    if (!pendingOpenPath) return;
+    const path = pendingOpenPath;
+    useEditor.getState().setPendingOpenPath(null);
+    void (async () => {
+      // 作業中のキャンバスを黙って捨てない。既存レイヤーがあるときだけ確認する。
+      const objects = (
+        useEditor.getState().canvas as { getObjects?: () => unknown[] } | null
+      )?.getObjects?.().length;
+      if (objects) {
+        const message = "既存レイヤーをクリアして、この画像を開きますか?";
+        let ok = false;
+        try {
+          const { ask } = await import("@tauri-apps/plugin-dialog");
+          ok = await ask(message, { title: "レイヤーのクリア", kind: "warning" });
+        } catch {
+          ok = window.confirm(message);
+        }
+        if (!ok) return;
+      }
+      await openImageForEditing(path);
+    })();
+  }, [pendingOpenPath, openImageForEditing]);
 
   const canRun = Boolean(sourceImagePath && instruction.trim()) && !busy && busyTool === null;
 
@@ -76,18 +284,30 @@ export function EditWorkspace() {
   // (テキスト入力の標準 Undo を奪わないため)。
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (!(event.metaKey || event.ctrlKey)) return;
-      if (event.key.toLowerCase() !== "z") return;
       const target = event.target as HTMLElement | null;
       const tag = target?.tagName;
-      if (
+      const typing =
         tag === "INPUT" ||
         tag === "TEXTAREA" ||
         tag === "SELECT" ||
-        target?.isContentEditable
-      ) {
+        Boolean(target?.isContentEditable);
+
+      // Esc = いつでも「選択・移動」へ戻る非常口。
+      // 囲みかけ・スポイト待ち・文字入力中のどこで詰まっても、ここから抜けられる。
+      // 入力欄にいるときはフォーカスを外すだけにして、打っている途中の値を消さない。
+      if (event.key === "Escape") {
+        if (typing) {
+          target?.blur();
+          return;
+        }
+        event.preventDefault();
+        selectTool("select");
         return;
       }
+
+      if (!(event.metaKey || event.ctrlKey)) return;
+      if (event.key.toLowerCase() !== "z") return;
+      if (typing) return;
       event.preventDefault();
       if (event.shiftKey) {
         void performRedo();
@@ -97,7 +317,39 @@ export function EditWorkspace() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
+    // selectTool は毎レンダー作り直されるが、中で読むのは state setter と
+    // useEditor.getState() だけ (古い値を掴まない) ので依存に入れない。
+    // 入れると keydown listener が毎レンダー張り替わる。
   }, [performUndo, performRedo]);
+
+  /**
+   * 編集結果を「作品」にする (ギャラリーへ合流)。保存先は聞かない。
+   * 書き出し (OS の保存ダイアログ) とは役割が違う: こちらはアプリの中の
+   * 資産管理 (ギャラリー・履歴・プロジェクト保存) に載せるための1クリック。
+   */
+  const saveArtwork = async () => {
+    if (savingArtwork) return;
+    setSavingArtwork(true);
+    setError(null);
+    try {
+      const saved = await saveAsArtwork();
+      if (saved) {
+        useToasts.getState().push({
+          kind: "success",
+          text: "作品にしました。制作タブのギャラリーに入っています。",
+          ttlMs: 4000,
+        });
+      } else {
+        // saveAsArtwork は失敗理由を editor store の error に入れる
+        // (キャンバス下のエラーカードに出る)。ここで二重に出さない。
+        setError("作品にできませんでした。キャンバス下のメッセージを確認してください。");
+      }
+    } catch (err) {
+      setError(`作品にできませんでした: ${String(err)}`);
+    } finally {
+      setSavingArtwork(false);
+    }
+  };
 
   /**
    * 選んだ範囲だけを直す。
@@ -129,7 +381,7 @@ export function EditWorkspace() {
       if (applied) {
         useToasts.getState().push({
           kind: "success",
-          text: "囲んだところだけ直しました。外側の画素は変えていません。⌘Zで戻せます。",
+          text: "囲んだところだけ直しました。外側は変えていません。『戻す』で戻せます。",
           ttlMs: 5200,
         });
         setInstruction("");
@@ -219,6 +471,34 @@ export function EditWorkspace() {
         </span>
         {sourceImagePath ? (
           <>
+            {/*
+              ⌘Z を知らない人・Windows の人でも戻せるようにする。
+              キーボードショートカット (下の useEffect) はそのまま併存する。
+            */}
+            <button
+              type="button"
+              onClick={() => void performUndo()}
+              disabled={!canUndo || busyTool !== null || busy}
+              className="rounded-md border border-[#3a3a3a] bg-[#1a1a1a] px-3 py-1.5 text-[11px] font-black text-neutral-200 hover:border-pink-400 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              戻す
+            </button>
+            <button
+              type="button"
+              onClick={() => void performRedo()}
+              disabled={!canRedo || busyTool !== null || busy}
+              className="rounded-md border border-[#3a3a3a] bg-[#1a1a1a] px-3 py-1.5 text-[11px] font-black text-neutral-200 hover:border-pink-400 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              やり直す
+            </button>
+            <button
+              type="button"
+              onClick={() => void saveArtwork()}
+              disabled={busyTool !== null || busy || savingArtwork}
+              className="rounded-md border border-pink-400/50 bg-pink-500/15 px-3 py-1.5 text-[11px] font-black text-pink-100 hover:border-pink-300 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              作品にする
+            </button>
             <button
               type="button"
               onClick={() => void exportPng()}
@@ -239,18 +519,109 @@ export function EditWorkspace() {
         ) : null}
       </header>
 
+      {/*
+        タスクチップ列。「なにをしたい?」を先に選ばせる。道具名 (インペイント等) は出さない。
+        今は AI で直すか、AI を使わず文字を置き直すかの2択。
+      */}
+      {sourceImagePath ? (
+        <div className="flex h-9 shrink-0 items-center gap-2 border-b border-[#2a2a2a] bg-[#1e1e1e] px-3">
+          <span className="shrink-0 text-[10px] font-black text-neutral-500">なにをしたい?</span>
+          {/*
+            先頭は素の状態 (選択・移動)。囲みオーバーレイを敷かないので、置いた文字を
+            クリックして掴める。ここが原点で、他は「囲んでから何かする」道具。
+          */}
+          {([
+            { id: "select", label: "選択・移動" },
+            { id: "ai", label: "ことばで直す" },
+            { id: "text", label: "セリフ・文字を直す" },
+          ] as const).map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              onClick={() => selectTool(item.id)}
+              className={[
+                "shrink-0 rounded-full border px-3 py-1 text-[11px] font-bold",
+                tool === item.id
+                  ? "border-pink-400 bg-pink-500/20 text-pink-100"
+                  : "border-[#3a3a3a] bg-[#1a1a1a] text-neutral-300 hover:border-pink-400 hover:text-white",
+              ].join(" ")}
+            >
+              {item.label}
+            </button>
+          ))}
+          <span className="ml-auto shrink-0 text-[10px] font-bold text-neutral-600">
+            Esc で「選択・移動」に戻ります
+          </span>
+        </div>
+      ) : null}
+
       {/* 本体: キャンバス (主役) + 右に指示欄だけ。左レールは廃止。 */}
       <div className="flex min-h-0 flex-1 overflow-hidden">
         {sourceImagePath ? (
           <>
+            {/*
+              囲みオーバーレイは「囲んでから何かする」道具のときだけ渡す。
+              選択・移動のときに渡すと、オーバーレイがキャンバス全面のクリックを
+              吸ってしまい、置いた文字を掴めなくなる (STΛCK 実機指摘の詰み)。
+            */}
             <EditorCanvas
-              regionSelect={{
-                value: region,
-                onChange: setRegion,
-                disabled: busy || busyTool !== null,
+              regionSelect={
+                tool === "select"
+                  ? undefined
+                  : {
+                      value: region,
+                      onChange: setRegion,
+                      disabled: busy || busyTool !== null || eyedropper,
+                      hint: textMode
+                        ? "直したいセリフをドラッグで囲む"
+                        : "直したいところをドラッグで囲む",
+                    }
+              }
+              eyedropper={{
+                active: eyedropper,
+                onPick: (hex) => {
+                  setTextValues((current) => ({ ...current, fillColor: hex }));
+                  setEyedropper(false);
+                },
               }}
             />
             <aside className="flex min-h-0 w-[320px] shrink-0 flex-col border-l border-[#2a2a2a] bg-[#252525]">
+              {/*
+                右パネルの出し分け:
+                  - 文字を選んでいる → その文字の再編集フォーム (道具は問わない)
+                  - 「セリフ・文字を直す」 → 新しく置くフォーム
+                  - 「選択・移動」      → 何ができるかの案内
+                  - 「ことばで直す」    → AI 指示欄
+              */}
+              {editingTextId ? (
+                <TextOverlayPanel
+                  region={region}
+                  values={textValues}
+                  onChange={(patch) => editSelectedText(patch)}
+                  onApply={() => void placeText()}
+                  // 再編集中の「やめる」= この文字の編集をやめる (選択を外す)。
+                  // 道具の切り替えではない (もともと選択・移動にいることが多い)。
+                  onExit={deselectText}
+                  eyedropperActive={eyedropper}
+                  onToggleEyedropper={() => setEyedropper((on) => !on)}
+                  busy={busy || busyTool !== null}
+                  editingExisting
+                  onCommit={() => updateSelectedTextLayer({}, true)}
+                />
+              ) : textMode ? (
+                <TextOverlayPanel
+                  region={region}
+                  values={textValues}
+                  onChange={(patch) => setTextValues((current) => ({ ...current, ...patch }))}
+                  onApply={() => void placeText()}
+                  onExit={() => selectTool("select")}
+                  eyedropperActive={eyedropper}
+                  onToggleEyedropper={() => setEyedropper((on) => !on)}
+                  busy={busy || busyTool !== null}
+                />
+              ) : tool === "select" ? (
+                <SelectToolPanel />
+              ) : (
               <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-3">
                 <h3 className="text-xs font-black text-white">ことばで直す</h3>
                 <p className="mt-1 text-[10px] font-bold leading-4 text-neutral-500">
@@ -327,6 +698,7 @@ export function EditWorkspace() {
                   </ul>
                 </div>
               </div>
+              )}
             </aside>
           </>
         ) : (
@@ -351,6 +723,33 @@ export function EditWorkspace() {
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+/**
+ * 「選択・移動」を選んでいて、まだ何も選んでいないときの右パネル。
+ *
+ * ここは道具ではなく素の状態なので、設定するものが無い。代わりに
+ * 「この状態で何ができるか」だけを短く置く。空パネルにすると
+ * 「壊れている / 読み込み中」に見える。
+ */
+function SelectToolPanel() {
+  return (
+    <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-3">
+      <h3 className="text-xs font-black text-white">選択・移動</h3>
+      <p className="mt-1 text-[10px] font-bold leading-4 text-neutral-500">
+        置いたものをクリックすると選べます。
+      </p>
+      <ul className="mt-3 space-y-1.5 rounded-lg border border-[#333] bg-[#1c1c1c] p-2.5 text-[10px] font-bold leading-4 text-neutral-400">
+        <li>・ドラッグで動かす</li>
+        <li>・四隅をつまんで大きさを変える</li>
+        <li>・上のつまみで回す</li>
+        <li>・置いた文字を選ぶと、ここで内容や色を直せます</li>
+      </ul>
+      <p className="mt-3 text-[10px] font-bold leading-4 text-neutral-500">
+        画像そのものを直すときは、上の「ことばで直す」か「セリフ・文字を直す」を選んでください。
+      </p>
     </div>
   );
 }

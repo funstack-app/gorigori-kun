@@ -17,6 +17,8 @@
  * brightness/contrast はプロパティパネルの数値表示復元用に別途保存する。
  */
 
+import { applyBrandSelectionToCanvas } from "./selectionStyle";
+
 /**
  * 履歴の 1 スナップショット。fabric の toJSON が返す任意構造をそのまま持つ。
  * fabric 型は編集タブ全体で any 扱いに統一しているのでここも any。
@@ -37,6 +39,11 @@ export const HISTORY_PROPERTIES = [
   "textSpec",
   "sourcePath",
   "sourceBbox",
+  // 「セリフ・文字を直す」で載せた文字レイヤーの向きと原文。
+  // 縦書きは表示用 text を1文字ずつ改行した文字列に組み替えているため、原文
+  // (textSource) を保存しないと undo/redo 後に縦→横へ戻せなくなる。
+  "textOrientation",
+  "textSource",
   "locked",
   "selectable",
   "evented",
@@ -157,6 +164,10 @@ export async function restoreCanvas(
   if (viewport && fabricCanvas.setViewportTransform) {
     fabricCanvas.setViewportTransform(viewport);
   }
+  // 復元で作り直されたオブジェクトの選択枠をブランド色に揃える。
+  // ownDefaults は「これから作られる分」に効くが、スナップショット JSON に
+  // 旧い borderColor が焼かれている場合はそちらが勝つため、明示的に上書きする。
+  applyBrandSelectionToCanvas(fabricCanvas);
   fabricCanvas.discardActiveObject?.();
   (fabricCanvas.requestRenderAll ?? fabricCanvas.renderAll)?.();
 }

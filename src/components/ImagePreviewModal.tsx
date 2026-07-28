@@ -6,9 +6,11 @@ import { useMaskEditor } from "../lib/store/maskEditor";
 import { useProjects } from "../lib/store/projects";
 import { useSnsExport } from "../lib/store/snsExport";
 import { useToasts } from "../lib/store/toasts";
+import { useWorkspace } from "../lib/store/workspace";
 import { sendImageToPlanForRediscuss } from "../lib/sendToPlan";
 import { setDragRef } from "../lib/dragRef";
 import { ContextMenu, type ContextMenuItem } from "./ContextMenu";
+import { useEditor } from "./edit/editor/editorStore";
 import { deleteGalleryImage } from "./galleryItemMenu";
 import { ImageMetaPanel } from "./ImageMetaPanel";
 import { RegisterPresetDialog } from "./RegisterPresetDialog";
@@ -395,6 +397,16 @@ export function ImagePreviewModal() {
                 }}
               />
               <ActionRow
+                icon={<EditStudioIcon />}
+                label="編集スタジオで開く"
+                hint="ことばで直す・切り抜く・文字を入れる"
+                onClick={() => {
+                  useEditor.getState().setPendingOpenPath(path);
+                  useWorkspace.getState().setActiveTab("edit");
+                  close();
+                }}
+              />
+              <ActionRow
                 icon={<MaskIcon />}
                 label="マスクで編集"
                 hint="部分的に塗って AI 編集"
@@ -735,6 +747,16 @@ function ChatIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+    </svg>
+  );
+}
+
+function EditStudioIcon() {
+  // 編集スタジオ (キャンバスとペン先) を示すアイコン。
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M11 4H5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h13a2 2 0 0 0 2-2v-6" />
+      <path d="M18.5 2.5a2.12 2.12 0 0 1 3 3L12 15l-4 1 1-4z" />
     </svg>
   );
 }

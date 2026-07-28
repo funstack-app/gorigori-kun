@@ -15,13 +15,19 @@ import {
 import { useActiveProject } from "../../../lib/store/activeProject";
 import { useEditMagic } from "../../../lib/store/editMagic";
 import { useProjects } from "../../../lib/store/projects";
+import { useThreads } from "../../../lib/store/threads";
 import type { EditorTool } from "./editorStore";
 import { OBJECT_COUNT_BY_MODE, useEditor } from "./editorStore";
 import {
+  addFillRectLayer,
   addImageLayerToCanvas,
   addMaskLayerFromBase64,
+  addOverlayTextLayer,
   addTextLayer,
   addTextRegionsToCanvas,
+  getCanvasBaseSize,
+  readOverlayTextValues,
+  updateOverlayTextLayer,
   addWordLayersToCanvas,
   applyWordsResultToCanvas,
   addShapeToCanvas,
@@ -36,7 +42,7 @@ import {
   showGrabPreviewOverlay,
 } from "./magicLayerToFabric";
 import { restoreCanvas } from "./history";
-import { groupSelectedLayers, ungroupLayer } from "./layerHelpers";
+import { groupSelectedLayers, objectId, ungroupLayer } from "./layerHelpers";
 import { normalizeGenre, type LayerGenre } from "../../../lib/edit/genre";
 import { resolveWord, splitWordsInput } from "../../../lib/edit/wordPresets";
 
@@ -331,6 +337,115 @@ export function useEditorActions() {
     setMessage(`グループを解除しました (${count}レイヤー)。`);
   };
 
+  /**
+   * 「セリフ・文字を直す」: 囲んだ範囲を単色で塗りつぶし、その上に文字を載せる。
+   *
+   * AI を一切通さない決定論経路。範囲指定の AI 修正でセリフを書き換えると
+   * 文字が崩壊する (画像生成モデルは文字を描くのが構造的に苦手) ため、
+   * 「下地を塗る + フォントで書く」に置き換える。即時・無料・文字化けゼロ。
+   *
+   * 塗りと文字は連続して add するが、履歴は最後に1回だけ積む。1回の「戻す」で
+   * 塗りも文字もまとめて消えるのが、ユーザーの体感する「1操作」と一致する。
+   *
+   * 置いた直後は**その文字を選択状態にして返す** (2026-07-28 STΛCK 実機指摘)。
+   * 置いた本人が続けて動かす・大きさを変えるのが自然な流れなのに、選択されて
+   * いないと「置いた文字をもう一度探して掴む」ひと手間が挟まる。返り値の
+   * レイヤー ID は、呼び出し側が右パネルを再編集フォームへ切り替えるのに使う。
+   */
+  const applyTextOverlay = async (
+    bboxNorm: [number, number, number, number],
+    options: {
+      text: string;
+      orientation: "vertical" | "horizontal";
+      fontSize: number;
+      color: string;
+      fontFamily: string;
+      fillColor: string;
+    },
+  ): Promise<string | null> => {
+    const liveCanvas = canvas ?? useEditor.getState().canvas;
+    if (!liveCanvas) {
+      setError("キャンバスを初期化中です。");
+      return null;
+    }
+    if (!isValidNormalizedBbox(bboxNorm)) {
+      setError("塗る範囲が不正です。もう一度囲んでください。");
+      return null;
+    }
+    const base = getCanvasBaseSize(liveCanvas);
+    if (!base) {
+      setError("元画像の寸法が取得できません。画像を開き直してください。");
+      return null;
+    }
+    // 正規化 bbox → 元画像の実寸 (scene 座標)。実行時の表示倍率には依存しない。
+    const rect = {
+      left: bboxNorm[0] * base.width,
+      top: bboxNorm[1] * base.height,
+      width: bboxNorm[2] * base.width,
+      height: bboxNorm[3] * base.height,
+    };
+    try {
+      const fill = await addFillRectLayer(liveCanvas, rect, options.fillColor);
+      // 文字が空なら下地だけ。その場合は下地を選択対象にする
+      // (「置いたものが選ばれている」を、どちらの場合でも成り立たせる)。
+      const placed = options.text.trim()
+        ? await addOverlayTextLayer(liveCanvas, rect, {
+            text: options.text,
+            orientation: options.orientation,
+            fontSize: options.fontSize,
+            fill: options.color,
+            fontFamily: options.fontFamily,
+          })
+        : fill;
+      const target = liveCanvas as {
+        setActiveObject?: (object: unknown) => void;
+        requestRenderAll?: () => void;
+      };
+      target.setActiveObject?.(placed);
+      target.requestRenderAll?.();
+      const placedId = objectId(placed);
+      useEditor.getState().setSelectedLayerId(placedId);
+      bumpRevision();
+      pushHistory();
+      setMessage("文字を置きました。そのままドラッグで動かせます。『戻す』で元に戻せます。");
+      return placedId;
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+      return null;
+    }
+  };
+
+  /**
+   * 置いた文字レイヤーを、あとから直す (内容・向き・大きさ・色・フォント)。
+   *
+   * 選択中のオブジェクトが文字でなければ何もせず false を返す
+   * (右パネルは選択が文字のときだけ再編集フォームを出すので、通常は起きない)。
+   *
+   * 履歴は `commit` が true のときだけ積む。スライダーを動かしている最中の
+   * 連続更新で履歴が数十個積まれると「戻す」が実質使えなくなるため、
+   * 操作が終わった時点 (pointerup / blur) でのみ確定させる。
+   */
+  const updateSelectedTextLayer = (
+    patch: Partial<{
+      text: string;
+      orientation: "vertical" | "horizontal";
+      fontSize: number;
+      color: string;
+      fontFamily: string;
+    }>,
+    commit = false,
+  ): boolean => {
+    const liveCanvas = canvas ?? useEditor.getState().canvas;
+    if (!liveCanvas) return false;
+    const target = (liveCanvas as { getActiveObject?: () => unknown }).getActiveObject?.();
+    if (!target) return false;
+    if (!readOverlayTextValues(target)) return false;
+    updateOverlayTextLayer(liveCanvas, target, patch);
+    bumpRevision();
+    if (commit) pushHistory();
+    return true;
+  };
+
   /** キャンバスを統合PNGとして書き出す (保存先はユーザーが選ぶ)。 */
   const exportPng = async () => {
     if (!canvas) {
@@ -356,6 +471,34 @@ export function useEditorActions() {
       setMessage(`書き出しました: ${target}`);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
+    }
+  };
+
+  /**
+   * 編集結果を「作品」としてギャラリーへ合流させる (ヘッダー「作品にする」)。
+   *
+   * 保存先ダイアログは出さない。images_write_upload は
+   * `<CODEX_HOME>/generated_images/uploads/` に書き、そこはギャラリー watcher の
+   * 監視対象 (images.rs のコメント「generated_images tree also makes it visible in
+   * the gallery watcher」) なので、**新しい Rust コマンドなしで**編集結果が
+   * ギャラリー・履歴・プロジェクト保存の既存資産管理に乗る。
+   */
+  const saveAsArtwork = async (): Promise<boolean> => {
+    if (!canvas) {
+      setError("キャンバスを初期化中です。");
+      return false;
+    }
+    const base64 = exportCanvasPngBase64(canvas);
+    if (!base64) {
+      setError("書き出しデータの生成に失敗しました。");
+      return false;
+    }
+    try {
+      await images.writeUpload(`edit-${Date.now()}.png`, base64ToBytes(base64));
+      return true;
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+      return false;
     }
   };
 
@@ -495,11 +638,18 @@ export function useEditorActions() {
       );
 
       // 2) 既存のインペイント生成経路へ、元画像・マスク・赤入れ指示をそのまま渡す。
+      //    model/effort/cwd は制作タブで選ばれている値をそのまま使う。
+      //    渡さないと範囲編集だけ既定モデルに落ち、全体編集 (EditWorkspace.run) と
+      //    結果の質が食い違う (経路間のモデル不整合)。
+      const threads = useThreads.getState();
       const result = await images.generateBatch({
         prompt: instruction,
         count: 1,
+        cwd: threads.cwd,
         refImagePaths: [imagePath],
         maskPaths: [maskPath],
+        model: threads.selectedModel,
+        effort: threads.selectedEffort,
       });
       const generatedPath = result.generatedPaths[0];
       if (!generatedPath || result.failedCount > 0) {
@@ -520,7 +670,8 @@ export function useEditorActions() {
       });
       bumpRevision();
       pushHistory();
-      setMessage("指定範囲だけを修正しました。気に入らなければ ⌘Z で戻せます。");
+      // Windows には ⌘ が無い。ヘッダーの「戻す」ボタンを案内する。
+      setMessage("指定範囲だけを修正しました。気に入らなければ『戻す』で戻せます。");
       return true;
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
@@ -763,6 +914,9 @@ export function useEditorActions() {
     groupSelection,
     ungroupSelection,
     exportPng,
+    saveAsArtwork,
+    applyTextOverlay,
+    updateSelectedTextLayer,
     restyleSelectedLayer,
     chooseImage,
     openImageForEditing,

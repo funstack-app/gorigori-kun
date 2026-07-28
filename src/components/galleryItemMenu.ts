@@ -15,6 +15,8 @@ import { useMaskEditor } from "../lib/store/maskEditor";
 import { useSnsExport } from "../lib/store/snsExport";
 import { useThreads } from "../lib/store/threads";
 import { useToasts } from "../lib/store/toasts";
+import { useWorkspace } from "../lib/store/workspace";
+import { useEditor } from "./edit/editor/editorStore";
 import { sendImageToPlanForRediscuss } from "../lib/sendToPlan";
 import type { ContextMenuItem } from "./ContextMenu";
 
@@ -254,6 +256,22 @@ export function buildGalleryItemMenu(
       label: "拡大表示",
       icon: "O",
       onClick: () => useImagePreview.getState().open(item.path),
+    },
+    {
+      /*
+       * 編集タブ (編集スタジオ) への入口。ギャラリーから1手で編集へ入れる。
+       *
+       * ここで openImageForEditing を直接呼べないのは、非アクティブタブの
+       * EditWorkspace がアンマウントされている (GenerationWorkspace が activeTab で
+       * 出し分ける) ため。予約 (pendingOpenPath) を置いてタブを切り替え、
+       * マウントされた EditWorkspace 側に開かせる。
+       */
+      label: "編集スタジオで開く",
+      icon: "S",
+      onClick: () => {
+        useEditor.getState().setPendingOpenPath(item.path);
+        useWorkspace.getState().setActiveTab("edit");
+      },
     },
     {
       label: "マスクで編集",

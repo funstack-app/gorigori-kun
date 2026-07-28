@@ -5,8 +5,16 @@ import { extractDropped, fileToUploadReference, isImageDrop } from "../../lib/dr
 import { useEditMagic } from "../../lib/store/editMagic";
 import { useEditor } from "./editor/editorStore";
 import { useEditorActions } from "./editor/useEditor";
-import { convertTextImageToTextbox, fitCanvasToImage } from "./editor/magicLayerToFabric";
+import {
+  convertTextImageToTextbox,
+  fitCanvasToImage,
+  pickCanvasColorAt,
+} from "./editor/magicLayerToFabric";
 import { objectId } from "./editor/layerHelpers";
+import {
+  applyBrandCanvasSelection,
+  applyBrandSelectionDefaults,
+} from "./editor/selectionStyle";
 import { RegionSelectOverlay, type NormalizedBbox } from "./RegionSelectOverlay";
 
 type EditorCanvasProps = {
@@ -18,10 +26,20 @@ type EditorCanvasProps = {
     value: NormalizedBbox | null;
     onChange: (bbox: NormalizedBbox | null) => void;
     disabled?: boolean;
+    /** 未選択時の案内文 (AI に直させる範囲か、塗りつぶす範囲かで意味が変わる)。 */
+    hint?: string;
+  };
+  /**
+   * スポイト (「セリフ・文字を直す」の下地色を画像から拾う)。active の間だけ
+   * キャンバス上のクリックを色拾いに使い、拾ったら onPick で返す。
+   */
+  eyedropper?: {
+    active: boolean;
+    onPick: (hex: string) => void;
   };
 };
 
-export function EditorCanvas({ regionSelect }: EditorCanvasProps = {}) {
+export function EditorCanvas({ regionSelect, eyedropper }: EditorCanvasProps = {}) {
   const hostRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fabricCanvasRef = useRef<any>(null);
@@ -49,11 +67,16 @@ export function EditorCanvas({ regionSelect }: EditorCanvasProps = {}) {
     // @ts-ignore fabric is installed at runtime via package dependency
     void import("fabric").then((fabric) => {
       if (disposed || !canvasRef.current || !hostRef.current) return;
+      // 選択枠をブランド色 (ピンク) にする。オブジェクトを作る前に基底クラスの
+      // 既定値を書き換えるので、以後どこで作られたレイヤーにも効く
+      // (生成箇所ごとの指定は書き忘れるので1点に集約する)。
+      applyBrandSelectionDefaults(fabric as any);
       const canvas = new (fabric as any).Canvas(canvasRef.current, {
         backgroundColor: "#1a1a1a",
         preserveObjectStacking: true,
         selection: true,
       });
+      applyBrandCanvasSelection(canvas);
       fabricCanvasRef.current = canvas;
       setCanvas(canvas);
 
@@ -200,7 +223,34 @@ export function EditorCanvas({ regionSelect }: EditorCanvasProps = {}) {
           value={regionSelect.value}
           onChange={regionSelect.onChange}
           disabled={regionSelect.disabled}
+          hint={regionSelect.hint}
         />
+      ) : null}
+
+      {/*
+        スポイト。範囲選択オーバーレイ (z-10) より上に置き、拾う間だけクリックを奪う。
+        fabric の座標変換は RegionSelectOverlay と同じ式 (画面 → scene) を使う。
+        pickCanvasColorAt はキャンバスの実ピクセルを読むので、下地の元画像でも
+        既に置いた塗りでも「見えている色」がそのまま拾える。
+      */}
+      {eyedropper?.active && sourceImagePath && liveCanvas ? (
+        <div
+          className="absolute inset-0 z-20 cursor-crosshair"
+          role="presentation"
+          onPointerDown={(event) => {
+            const rect = event.currentTarget.getBoundingClientRect();
+            const vpt = (liveCanvas as { viewportTransform?: number[] }).viewportTransform;
+            const zoom = vpt?.[0] ?? 1;
+            const x = (event.clientX - rect.left - (vpt?.[4] ?? 0)) / zoom;
+            const y = (event.clientY - rect.top - (vpt?.[5] ?? 0)) / zoom;
+            const hex = pickCanvasColorAt(liveCanvas, { x, y });
+            if (hex) eyedropper.onPick(hex);
+          }}
+        >
+          <div className="pointer-events-none absolute left-1/2 top-4 -translate-x-1/2 rounded-full border border-pink-400/60 bg-[#101010]/95 px-3 py-1.5 text-[11px] font-bold text-pink-100 shadow-xl">
+            下地にしたい色をクリック
+          </div>
+        </div>
       ) : null}
 
       {!sourceImagePath ? (

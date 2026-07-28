@@ -90,6 +90,17 @@ type EditorState = {
   objectCountMode: ObjectCountMode;
   /** EditorCanvas がマウント中だけ set される path 取り込みハンドラ。 */
   pathIngestor: EditorPathIngestor | null;
+  /**
+   * 編集タブの外 (ギャラリー右クリック / プレビューモーダル) から
+   * 「編集スタジオで開く」を押したときの受け渡し用 path。null = 保留なし。
+   *
+   * なぜ store 経由か: 非アクティブタブの EditWorkspace はアンマウントされている
+   * (GenerationWorkspace が activeTab で出し分ける) ため、非 React モジュールである
+   * メニューから hook 由来の openImageForEditing を直接呼べない。メニューは
+   * setPendingOpenPath + setActiveTab("edit") の2行だけ実行し、マウントされた
+   * EditWorkspace 側がこの値を消費して開く (pathIngestor と同型の橋渡し)。
+   */
+  pendingOpenPath: string | null;
   /** マジックグラブの確定待ちプレビュー (クリックで生成したマスク)。null=プレビューなし。 */
   grabPreview: GrabPreview | null;
   /**
@@ -117,6 +128,8 @@ type EditorState = {
   setError: (error: string | null) => void;
   bumpRevision: () => void;
   setPathIngestor: (ingestor: EditorPathIngestor | null) => void;
+  /** 編集タブ外から「編集スタジオで開く」を予約する / 消費後に null で消す。 */
+  setPendingOpenPath: (path: string | null) => void;
   setGrabPreview: (preview: GrabPreview | null) => void;
   /** 現在のキャンバス状態を履歴に積む (操作確定時に呼ぶ)。 */
   pushHistory: () => void;
@@ -142,6 +155,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   objectLayersEnabled: true,
   objectCountMode: "auto",
   pathIngestor: null,
+  pendingOpenPath: null,
   grabPreview: null,
   history: new EditorHistory(),
   canUndo: false,
@@ -159,6 +173,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   setError: (error) => set({ error }),
   bumpRevision: () => set((state) => ({ revision: state.revision + 1 })),
   setPathIngestor: (pathIngestor) => set({ pathIngestor }),
+  setPendingOpenPath: (pendingOpenPath) => set({ pendingOpenPath }),
   setGrabPreview: (grabPreview) => set({ grabPreview }),
   pushHistory: () => {
     // 復元中 (loadFromJSON) の発火では積まない。復元は履歴の消費であって新規操作ではない。
