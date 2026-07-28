@@ -4,6 +4,7 @@ import {
   editGrab,
   editInpaint,
   editMagic,
+  editModels,
   editOcr,
   editSam2,
   editSegment,
@@ -12,8 +13,11 @@ import {
   codexVision,
   images,
 } from "../../../lib/ipc";
+import { segmentImage } from "../../../lib/segmentation";
 import { useActiveProject } from "../../../lib/store/activeProject";
+import { onEditModelProgress } from "../../../lib/edit/events";
 import { useEditMagic } from "../../../lib/store/editMagic";
+import { useEditModels } from "../../../lib/store/editModels";
 import { useProjects } from "../../../lib/store/projects";
 import { useThreads } from "../../../lib/store/threads";
 import type { EditorTool } from "./editorStore";
@@ -43,7 +47,13 @@ import {
 } from "./magicLayerToFabric";
 import { restoreCanvas } from "./history";
 import { applyAdjustToCanvas, type AdjustValues } from "./adjustFilters";
-import { cropCanvasToRegion, transformCanvas, type TransformKind } from "./canvasTransforms";
+import {
+  cropCanvasToRegion,
+  flattenCanvas,
+  replaceCanvasWithImagePath,
+  transformCanvas,
+  type TransformKind,
+} from "./canvasTransforms";
 import {
   saveExportedImage,
   type ExportFormat,
@@ -451,6 +461,143 @@ export function useEditorActions() {
     bumpRevision();
     if (commit) pushHistory();
     return true;
+  };
+
+  /**
+   * 「素材を重ねる」: 画像をレイヤーとしてキャンバス中央に追加する (AI 不使用・即時)。
+   *
+   * 休眠していた `run("image-add")` (このファイルの上の方・EditorToolbar 前提で
+   * 起動できなくなっていた) と同じ addImageLayerToCanvas に載せる。違いは3つだけ:
+   *   - path をこちらが受け取る (ファイル選択はライブラリ経由もあるため呼び出し側の責務)
+   *   - **キャンバスの 1/3 に収まるまで縮めてから置く**。元画像より大きい素材を
+   *     等倍で置くと画面外へはみ出し、掴む前に「消えた」と誤解される
+   *   - 中央に置く。左上 (旧実装の left:80 top:80) は元画像の外に出ることがある
+   *
+   * 置いた直後は選択状態で返る (addImageLayerToCanvas が setActiveObject する)。
+   * 呼び出し側は「選択・移動」へ戻すことで、置いたその場で掴める状態になる。
+   */
+  const addOverlayImage = async (imagePath: string): Promise<string | null> => {
+    const liveCanvas = canvas ?? useEditor.getState().canvas;
+    if (!liveCanvas) {
+      setError("キャンバスを初期化中です。");
+      return null;
+    }
+    try {
+      const name = imagePath.split(/[\\/]/).pop() ?? "画像";
+      const placed = await addImageLayerToCanvas(liveCanvas, imagePath, name);
+      // 置いてから測って縮める。fabric の Image は読み込み後でないと実寸が分からない
+      // ので、「先に計算してから置く」ことはできない。
+      const base = getCanvasBaseSize(liveCanvas);
+      const rawWidth = (placed as { width?: number }).width ?? 0;
+      const rawHeight = (placed as { height?: number }).height ?? 0;
+      if (base && rawWidth > 0 && rawHeight > 0) {
+        // 長辺がキャンバスの 1/3 に収まる倍率。元から小さい素材は拡大しない
+        // (勝手に引き伸ばすとぼやける)。
+        const scale = Math.min(
+          (base.width / 3) / rawWidth,
+          (base.height / 3) / rawHeight,
+          1,
+        );
+        const width = rawWidth * scale;
+        const height = rawHeight * scale;
+        (placed as { set?: (values: Record<string, unknown>) => void }).set?.({
+          scaleX: scale,
+          scaleY: scale,
+          left: (base.width - width) / 2,
+          top: (base.height - height) / 2,
+        });
+        (placed as { setCoords?: () => void }).setCoords?.();
+        (liveCanvas as { requestRenderAll?: () => void }).requestRenderAll?.();
+      }
+      const placedId = objectId(placed);
+      useEditor.getState().setSelectedLayerId(placedId);
+      bumpRevision();
+      pushHistory();
+      setMessage("素材を重ねました。そのままドラッグで動かせます。『戻す』で元に戻せます。");
+      return placedId;
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+      return null;
+    }
+  };
+
+  /**
+   * 「背景を透過」: 被写体を切り抜いて、ベース画像を透過 PNG に置き換える (AI ローカル処理)。
+   *
+   * ## OS で経路が分かれる (どちらも同じ「1クリックで透過」に見せる)
+   *
+   *   - macOS (Intel / Apple Silicon 共通): Vision API。`images_remove_background`
+   *     → 同梱の `resources/removebg.swift` を叩く。モデル DL 不要
+   *   - Windows: BiRefNet (ort/ONNX)。`segment_image` → 前景 PNG を受け取る。
+   *     ort は Windows 限定依存のため、mac ではそもそもスタブが返る
+   *     (`commands/edit_unsupported.rs`)。モデル未 DL なら呼び出し側が先に落とす
+   *
+   * 判定は `edit_platform_info()` (既存の OS 判定 API) の os で行う。ブラウザの
+   * userAgent を見ないのは、Tauri の webview がプラットフォームによって別実装で、
+   * Rust の `std::env::consts::OS` の方が実体に一致するため。
+   *
+   * ## なぜ「重ねる」ではなく「置き換える」なのか
+   *
+   * 透過は元画像そのものの加工であって、上に載せる素材ではない。重ねると
+   * 下に不透明な元画像が残り続け、書き出しても透過にならない (見た目だけ透過)。
+   *
+   * ## undo で戻る仕組み
+   *
+   * 切り抜き・回転と同じ「焼く → 置き換える」経路 (canvasTransforms) を通す。
+   * 置き換えの**前**の状態は履歴に積まれているので、『戻す』1手で透過前へ戻る。
+   * 焼いてから渡すので、調整・置いた文字・重ねた素材も込みで切り抜かれる。
+   */
+  const removeBackgroundOnCanvas = async (): Promise<boolean> => {
+    const liveCanvas = canvas ?? useEditor.getState().canvas;
+    if (!liveCanvas) {
+      setError("キャンバスを初期化中です。");
+      return false;
+    }
+    const flat = flattenCanvas(liveCanvas);
+    if (!flat) {
+      setError("透過する画像がありません。画像を開き直してください。");
+      return false;
+    }
+
+    setBusyTool("bgremove");
+    setError(null);
+    setMessage("背景を透過しています…");
+    try {
+      // 1) いまのキャンバスをファイルに落とす。どちらの経路も「path を受けて path を返す」
+      //    Rust コマンドなので、先にディスクへ出す必要がある。
+      const inputPath = await images.writeUpload(
+        `nobg-src-${Date.now()}.png`,
+        dataUrlToBytes(flat.dataUrl),
+      );
+
+      // 2) OS ごとの経路で切り抜く。返るのはどちらも透過 PNG の path。
+      const platform = await editModels.platformInfo();
+      let cutoutPath: string;
+      if (platform.os === "windows") {
+        // Windows は BiRefNet (ort)。モデルが未 DL だと Rust が
+        // "model not downloaded: birefnet-general" という初心者に手の打てない
+        // エラーを返すので、**呼ぶ前に**こちらで落として待つ。
+        await ensureSegmentModel(setMessage);
+        cutoutPath = (await segmentImage({ imagePath: inputPath, model: "u2net" }))
+          .foregroundPath;
+      } else {
+        cutoutPath = await images.removeBackground(inputPath);
+      }
+
+      // 3) 透過 PNG を新しいベースとして置き直す (切り抜き・回転と同じ replaceCanvas 経路)。
+      await replaceCanvasWithImagePath(liveCanvas, cutoutPath, flat.width, flat.height);
+      useEditor.getState().setSelectedLayerId(null);
+      setSourceImagePath(cutoutPath);
+      bumpRevision();
+      pushHistory();
+      setMessage("背景を透過しました。『戻す』で元に戻せます。");
+      return true;
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+      return false;
+    } finally {
+      setBusyTool(null);
+    }
   };
 
   /** キャンバスを統合PNGとして書き出す (保存先はユーザーが選ぶ)。 */
@@ -1039,6 +1186,8 @@ export function useEditorActions() {
     applyAdjust,
     cropToRegion,
     rotateOrFlip,
+    addOverlayImage,
+    removeBackgroundOnCanvas,
     saveAsArtwork,
     applyTextOverlay,
     updateSelectedTextLayer,
@@ -1055,6 +1204,77 @@ export function useEditorActions() {
     saveDroppedFileAndRunMagic,
     saveDroppedPathAndRunMagic,
   };
+}
+
+/** BiRefNet (Windows の背景透過で使うモデル) の registry 上の id。 */
+const SEGMENT_MODEL_ID = "birefnet-general";
+
+/**
+ * Windows の背景透過に必要なモデルを、無ければ落としてから返す。
+ *
+ * なぜフロントでやるか: Rust の `segment_image` はモデルが無いと
+ * `model not downloaded: birefnet-general` で即失敗する (edit/runtime.rs
+ * build_session)。初心者は何をすればいいか分からないので、**押しただけで
+ * 勝手に揃う**ところまでをアプリの責任にする。
+ *
+ * 進捗は既存の DL マネージャ (`edit_models_download` + 進捗イベント) にそのまま
+ * 乗る。新しい DL 経路は作らない (ハッシュ検証・再開・保存先が二重化するため)。
+ *
+ * 進捗イベントの購読を**この関数の中で張る**理由: 既存の購読者 `EditModelGate` は
+ * 封印済みパネル (LayerPanel / MagicLayerPanel 等) の中にしかおらず、編集タブでは
+ * 1つもマウントされない。store 任せにすると進捗も失敗理由もどこにも届かず、
+ * 「押したまま無言で固まる」状態になる。
+ *
+ * 完了検知はイベントではなく `edit_models_list` の再問い合わせで確定させる
+ * (イベントを取りこぼしても止まらないようにする)。
+ */
+async function ensureSegmentModel(
+  report: (message: string) => void,
+  timeoutMs = 20 * 60 * 1000,
+): Promise<void> {
+  const isReady = async () => {
+    const models = await editModels.list();
+    const target = models.find((model) => model.id === SEGMENT_MODEL_ID);
+    if (!target) throw new Error("背景透過モデルの情報が見つかりません。");
+    return target.downloaded;
+  };
+
+  if (await isReady()) return;
+
+  report("背景を透過する準備をしています…（初回だけダウンロードがあります）");
+  let failure: string | null = null;
+  // 進捗イベントを直接受ける (store の購読者が編集タブに居ないため)。
+  const unlisten = await onEditModelProgress((progress) => {
+    if (progress.modelId !== SEGMENT_MODEL_ID) return;
+    useEditModels.getState().applyProgress(progress);
+    if (progress.kind === "failed") {
+      failure = progress.reason;
+    } else if (progress.kind === "progress" && progress.totalBytes > 0) {
+      const percent = Math.round((progress.downloadedBytes / progress.totalBytes) * 100);
+      report(`背景を透過する準備をしています… ${percent}%`);
+    }
+  });
+  try {
+    await useEditModels.getState().download([SEGMENT_MODEL_ID]);
+    const startedAt = Date.now();
+    // 完了までポーリングする。edit_models_download は spawn して即 return する
+    // (待ってくれない) ので、ここで待たないとモデル未着のまま推論へ進んでしまう。
+    while (Date.now() - startedAt < timeoutMs) {
+      if (failure) {
+        throw new Error(`背景透過モデルのダウンロードに失敗しました: ${failure}`);
+      }
+      if (await isReady()) {
+        report("背景を透過しています…");
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+    throw new Error(
+      "背景透過モデルのダウンロードが終わりませんでした。通信環境を確認して、もう一度お試しください。",
+    );
+  } finally {
+    unlisten();
+  }
 }
 
 function base64ToBytes(base64: string): Uint8Array {

@@ -25,6 +25,8 @@
  * 取り返しはつく (履歴はリセットしない)。
  */
 
+import { convertFileSrc } from "@tauri-apps/api/core";
+
 import {
   exportCanvasPngBase64,
   fitCanvasToImage,
@@ -193,4 +195,32 @@ export async function transformCanvas(
     "元画像",
   );
   return true;
+}
+
+/**
+ * ディスク上の画像ファイルでキャンバスを丸ごと置き換える (背景透過の結果を受ける口)。
+ *
+ * 切り抜き・回転が dataURL を渡すのに対し、こちらは Rust コマンドが返した path を
+ * 受ける。中身は同じ `replaceCanvasWithImage` なので、
+ *   - 置き換え前の状態は履歴に残る (呼び出し側が push するので『戻す』1手で戻る)
+ *   - 新しい1枚は SOURCE_PREVIEW_ID を持つ = 以後「調整」「切り抜き」の対象になる
+ *   - __ggBaseSize が新寸法に揃う = 範囲指定・書き出しの基準もズレない
+ * という性質をそのまま引き継ぐ。
+ *
+ * width/height は呼び出し元が知っている想定寸法 (焼いた元の寸法)。透過処理は
+ * 寸法を変えない前提だが、実際に読み込んだ画像の寸法があればそちらを優先する
+ * (**「その時の値」を信じない**。将来 padding や余白トリムが入っても壊れないようにする)。
+ */
+export async function replaceCanvasWithImagePath(
+  canvas: unknown,
+  imagePath: string,
+  width: number,
+  height: number,
+  name = "元画像",
+): Promise<void> {
+  const url = convertFileSrc(imagePath);
+  const loaded = await loadImage(url);
+  const actualWidth = loaded.naturalWidth || loaded.width || width;
+  const actualHeight = loaded.naturalHeight || loaded.height || height;
+  await replaceCanvasWithImage(canvas, url, actualWidth, actualHeight, name);
 }

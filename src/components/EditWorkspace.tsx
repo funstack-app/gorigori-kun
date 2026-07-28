@@ -5,10 +5,12 @@ import { useBatches } from "../lib/store/batches";
 import { beginDirectRun } from "../lib/store/generationStatus";
 import { useThreads } from "../lib/store/threads";
 import { useToasts } from "../lib/store/toasts";
+import { ReferenceLibraryModal } from "./ReferenceLibraryModal";
 import { AdjustPanel } from "./edit/AdjustPanel";
 import { CropPanel } from "./edit/CropPanel";
 import { EditorCanvas } from "./edit/EditorCanvas";
 import { ExportDialog } from "./edit/ExportDialog";
+import { PlaceImagePanel } from "./edit/PlaceImagePanel";
 import type { NormalizedBbox } from "./edit/RegionSelectOverlay";
 import { TextOverlayPanel, type TextOverlayValues } from "./edit/TextOverlayPanel";
 import {
@@ -55,8 +57,13 @@ const DEFAULT_TEXT_VALUES: TextOverlayValues = {
  * 数学的処理だけ**で組んであり、Intel Mac / Apple Silicon / Windows で同じ結果になる
  * (待ち時間ゼロ・課金ゼロ)。中途半端に AI を混ぜると OS 差・待ち・課金が生えるため、
  * 決定論で出せる品質だけを入れる、という方針で選んでいる。
+ *
+ * 2026-07-28 追記2: 「素材を重ねる」("place") を追加した。これも AI を通さない。
+ * 「背景を透過」はチップだが道具モードを持たない (押した瞬間に走り切るので、
+ * 選び続ける状態が存在しない)。OS ごとに中の経路は違う (mac=Vision /
+ * Windows=BiRefNet) が、ユーザーから見た操作は同じ1クリック。
  */
-type EditTool = "select" | "ai" | "text" | "adjust" | "crop";
+type EditTool = "select" | "ai" | "text" | "adjust" | "crop" | "place";
 
 /**
  * 編集タブ = 「ことばで直す」だけの画面 (2026-07-26 STΛCK 指示で全面再設計)。
@@ -113,6 +120,8 @@ export function EditWorkspace() {
     applyAdjust,
     cropToRegion,
     rotateOrFlip,
+    addOverlayImage,
+    removeBackgroundOnCanvas,
     saveAsArtwork,
     applyRedlineFix,
     applyTextOverlay,
@@ -149,6 +158,14 @@ export function EditWorkspace() {
   const [adjust, setAdjust] = useState<AdjustValues>(NEUTRAL_ADJUST);
   /** 書き出しダイアログの開閉。 */
   const [exportOpen, setExportOpen] = useState(false);
+  /** 「素材を重ねる」→「ライブラリから選ぶ」のモーダル開閉。 */
+  const [libraryOpen, setLibraryOpen] = useState(false);
+  /**
+   * 「背景を透過」の実行中フラグ。
+   * チップ自身にスピナーを出すために、道具モード (tool) とは別に持つ
+   * (透過は道具ではなく1回きりの実行なので、押した状態が残らない)。
+   */
+  const [removingBg, setRemovingBg] = useState(false);
 
   const textMode = tool === "text";
   /** 囲みが要る道具かどうか (囲みオーバーレイを敷く判定を1箇所にまとめる)。 */
@@ -330,6 +347,69 @@ export function EditWorkspace() {
     }
     // 回転も焼き込みなので、調整値は焼かれた側に移る。つまみは無調整へ戻す。
     setAdjust(NEUTRAL_ADJUST);
+  };
+
+  /**
+   * 素材を1枚重ねる (PC / ライブラリ 共通の着地点)。
+   *
+   * 置いたら**「選択・移動」へ戻す**。置いた直後こそ位置と大きさを触りたい瞬間で、
+   * ここで道具モードに留まると「置いたのに掴めない」になる (文字を置いたときと
+   * 同じ動線。addOverlayImage 側が置いた素材を選択済みにして返す)。
+   */
+  const placeImage = async (path: string) => {
+    setError(null);
+    const placedId = await addOverlayImage(path);
+    if (placedId) {
+      setTool("select");
+    } else {
+      setError("素材を置けませんでした。キャンバス下のメッセージを確認してください。");
+    }
+  };
+
+  /** 「PCから選ぶ」: OS のファイル選択から1枚取り込む。 */
+  const pickImageFromDisk = async () => {
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const selected = await open({
+      multiple: false,
+      filters: [
+        { name: "画像", extensions: ["png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff"] },
+      ],
+    });
+    if (typeof selected !== "string") return;
+    await placeImage(selected);
+  };
+
+  /**
+   * 「背景を透過」: 1クリックで被写体を切り抜く。
+   *
+   * OS ごとの経路差 (mac=Vision / Windows=BiRefNet) は useEditor 側に閉じてあるので、
+   * ここは「押す → 待つ → 結果を見る」だけを担う。失敗理由はキャンバス下の
+   * エラーカードに出る (エラーログセンターにも流れる) ので、ここで二重に出さない。
+   */
+  const runRemoveBackground = async () => {
+    if (removingBg) return;
+    setRemovingBg(true);
+    setError(null);
+    try {
+      const done = await removeBackgroundOnCanvas();
+      if (done) {
+        useToasts.getState().push({
+          kind: "success",
+          text: "背景を透過しました。『戻す』で元に戻せます。",
+          ttlMs: 4000,
+        });
+        // 透過はベース画像そのものの入れ替え。焼き込み済みなので、
+        // つまみは無調整からのやり直しになる (切り抜き・回転と同じ扱い)。
+        setAdjust(NEUTRAL_ADJUST);
+        setTool("select");
+      } else {
+        setError("背景を透過できませんでした。キャンバス下のメッセージを確認してください。");
+      }
+    } catch (err) {
+      setError(`背景を透過できませんでした: ${String(err)}`);
+    } finally {
+      setRemovingBg(false);
+    }
   };
 
   /** 書き出しダイアログからの実行。成功・キャンセルどちらでもダイアログは閉じる。 */
@@ -642,7 +722,6 @@ export function EditWorkspace() {
 
       {/*
         タスクチップ列。「なにをしたい?」を先に選ばせる。道具名 (インペイント等) は出さない。
-        今は AI で直すか、AI を使わず文字を置き直すかの2択。
       */}
       {sourceImagePath ? (
         <div className="flex h-9 shrink-0 items-center gap-2 border-b border-[#2a2a2a] bg-[#1e1e1e] px-3">
@@ -655,6 +734,7 @@ export function EditWorkspace() {
             { id: "select", label: "選択・移動" },
             { id: "ai", label: "ことばで直す" },
             { id: "text", label: "セリフ・文字を直す" },
+            { id: "place", label: "素材を重ねる" },
             { id: "adjust", label: "調整" },
             { id: "crop", label: "切り抜き" },
           ] as const).map((item) => (
@@ -672,6 +752,20 @@ export function EditWorkspace() {
               {item.label}
             </button>
           ))}
+          {/*
+            「背景を透過」だけは道具モードを持たない。押した瞬間に走り切って終わるので、
+            選び続ける状態 (押されたまま) が存在しない。だから上のモード群とは別に置き、
+            実行中はチップ自身にスピナーを出す。
+          */}
+          <button
+            type="button"
+            onClick={() => void runRemoveBackground()}
+            disabled={removingBg || busy || busyTool !== null}
+            className="flex shrink-0 items-center gap-1.5 rounded-full border border-[#3a3a3a] bg-[#1a1a1a] px-3 py-1 text-[11px] font-bold text-neutral-300 hover:border-pink-400 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {removingBg ? <ChipSpinner /> : null}
+            {removingBg ? "背景を透過しています…" : "背景を透過"}
+          </button>
           <span className="ml-auto shrink-0 text-[10px] font-bold text-neutral-600">
             Esc で「選択・移動」に戻ります
           </span>
@@ -713,14 +807,25 @@ export function EditWorkspace() {
             <aside className="flex min-h-0 w-[320px] shrink-0 flex-col border-l border-[#2a2a2a] bg-[#252525]">
               {/*
                 右パネルの出し分け:
+                  - 「素材を重ねる」    → 画像の選び先2つ (AI 不使用)
                   - 文字を選んでいる → その文字の再編集フォーム (道具は問わない)
                   - 「セリフ・文字を直す」 → 新しく置くフォーム
                   - 「調整」            → 明るさ・色のパネル (AI 不使用)
                   - 「切り抜き」        → 囲んで切るパネル (AI 不使用)
                   - 「選択・移動」      → 何ができるかの案内
                   - 「ことばで直す」    → AI 指示欄
+
+                「素材を重ねる」を先頭に置く理由: 素材を置いた直後は選択が発生するので、
+                editingTextId の分岐より先に評価しないと、直前に文字を触っていた場合に
+                文字フォームへ吸われる。
               */}
-              {tool === "adjust" ? (
+              {tool === "place" ? (
+                <PlaceImagePanel
+                  onPickFromDisk={() => void pickImageFromDisk()}
+                  onPickFromLibrary={() => setLibraryOpen(true)}
+                  busy={busy || busyTool !== null}
+                />
+              ) : tool === "adjust" ? (
                 <AdjustPanel
                   values={adjust}
                   onChange={changeAdjust}
@@ -879,7 +984,37 @@ export function EditWorkspace() {
           busy={busy || busyTool !== null}
         />
       ) : null}
+
+      {/*
+        「素材を重ねる」→「ライブラリから選ぶ」。漫画のキャラ画像追加と同じ部品を
+        そのまま使う (onPick を渡すと Composer へは足さず、こちらへ path だけ返る)。
+        選ぶ画面を作り直さないので、探し方・見え方がアプリ内で1つに揃う。
+      */}
+      <ReferenceLibraryModal
+        open={libraryOpen}
+        onClose={() => setLibraryOpen(false)}
+        onPick={(path) => void placeImage(path)}
+      />
     </div>
+  );
+}
+
+/** チップ内に出す小さなスピナー (背景を透過の実行中)。 */
+function ChipSpinner() {
+  return (
+    <svg
+      width={11}
+      height={11}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={3}
+      strokeLinecap="round"
+      className="animate-spin"
+      aria-hidden
+    >
+      <path d="M12 3a9 9 0 1 0 9 9" />
+    </svg>
   );
 }
 
