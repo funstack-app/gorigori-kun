@@ -51,6 +51,10 @@ export const HISTORY_PROPERTIES = [
   "lockMovementY",
   "brightness",
   "contrast",
+  // 「調整」チップの色調補正値 (明るさ/コントラスト/彩度/色合い/粒子/モノクロ/セピア)。
+  // filters 自体は fabric が既定でシリアライズするので見た目は undo/redo で戻るが、
+  // **右パネルのスライダー表示値**はこの生値が無いと戻らない (見た目と UI がズレる)。
+  "adjust",
 ] as const;
 
 /** 履歴スタックの上限。超過分は古い方 (index 0 側) から破棄する。 */
