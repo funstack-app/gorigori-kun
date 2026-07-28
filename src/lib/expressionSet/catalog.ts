@@ -23,9 +23,11 @@ export type Expression = {
   promptFragment: string;
 };
 
-/** 全カット共通で先頭に付ける固定文言。アングルを固定し「表情のみ変更」を強制する。 */
+/** 全カット共通で先頭に付ける固定文言。アングルを固定し「表情のみ変更」を強制する。
+ * 画風保持句を含む（2026-07-29 実機FB: 「studio lighting」等の実写語彙だけで画風指示が
+ * 無かったため、アニメ調キャラが写実側へ化けていた）。 */
 export const EXPRESSION_PROMPT_PREFIX =
-  "bust close-up, eye level, straight front view, same person, identical face and hairstyle, same outfit, fixed camera angle, flat even studio lighting, plain light-gray background";
+  "bust close-up, eye level, straight front view, same person, identical face and hairstyle, same outfit, fixed camera angle, same art style as the reference image — keep the original drawing style, linework, coloring and rendering exactly, do not photorealize, flat even lighting, plain light-gray background";
 
 /**
  * 基本5種の表情。既定でチェックが入る（DEFAULT_EXPRESSION_IDS）。
