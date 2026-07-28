@@ -562,9 +562,10 @@ fn build_sheet_prompt(cut: &SheetCutSpec, aspect_ratio: &str, attributes: &str) 
          - 指定 (英語): {prompt_fragment}\n{attributes_line}\n\
          ## 厳守事項\n\
          1. 参照画像の顔・骨格・髪・肌・体型・服を厳密に保持する。別人にしない。同一人物のリファレンスシートである。\n\
+         1b. 参照画像の画風 (アートスタイル) も厳密に保持する。線・塗り・質感・頭身・デフォルメ度を参照画像と同じにする (same art style as the reference, keep the original drawing style)。アニメ調はアニメ調のまま、イラストはイラストのまま。実写化・写実化・別画風化しない (do not photorealize, do not change the art style)。\n\
          2. 上記「指定 (英語)」のショット距離・向き・表情を正確に反映する。表情を変える指定でも、顔の造作は変えず表情の筋肉だけを動かす (same face, change only the expression muscles)。\n\
          3. 顔ディテール等の寄り指定では、寄るだけで別人化しない (same identity, zoom in only)。\n\
-         4. 背景は無地の淡いグレースタジオ、均一で柔らかいライティングに揃える。シートとして並べたときに背景・光が一貫するようにする。\n\
+         4. 背景は無地の淡いグレー、フラットで均一なライティングに揃える。背景・光も参照画像と同じ画風で描き、実写のスタジオ写真風にしない。シートとして並べたときに背景・光が一貫するようにする。\n\
          5. image_gen ツールを1回だけ呼び出す。\n\
          6. アスペクト比は必ず {aspect_ratio} にする (縦長指定なら縦長で。勝手に 16:9 にしない)。high quality で生成する。\n\
          7. 画面内テキスト、ロゴ、透かし、グリッド、コラージュ、複数パネルは禁止。1枚の単独画像にする。\n\
