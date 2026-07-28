@@ -31,8 +31,8 @@ GORI GORI KUN は、ChatGPT サブスクリプション (Plus 以上) と OpenAI
 | プラットフォーム | 状態 | ダウンロードするファイル |
 |---|---|---|
 | macOS Apple Silicon (M1〜M4) | ✅ 公式サポート | `..._aarch64.dmg` |
+| macOS Intel | ✅ 公式サポート | `..._x64.dmg` |
 | Windows 10 / 11 (64bit) | ✅ 公式サポート | `..._x64-setup.exe` |
-| macOS Intel | ❌ 未対応 | — |
 | Linux | ❌ 未対応 | — |
 
 macOS は **12 (Monterey) 以降**が必要です。
@@ -42,10 +42,11 @@ macOS は **12 (Monterey) 以降**が必要です。
 **Intel Core** と書いてあれば Intel です。
 
 > **Intel Mac について**
-> 編集タブの画像解析機能 (背景の切り抜き・領域選択・文字認識) が使っている
-> AI 実行エンジンが、Intel Mac 向けの提供を終了しました。このため v2.0.0 以降は
-> Intel Mac 版を配布していません。すでにお使いの方は、お手元のバージョンが
-> そのまま動きます (自動更新の通知は届きません)。
+> v2.0.0〜v2.2.x では、編集タブの画像解析機能が使っている AI 実行エンジン (ONNX Runtime)
+> が Intel Mac 向けの提供を終了したため、Intel Mac 版を配布していませんでした。
+> v2.3.0 でこのエンジンを **Windows 版専用**に切り離したことで、Intel Mac 版の配布を
+> 再開しました。画像生成・絵コンテ・背景透過など主要機能はすべて使えます。
+> 編集タブの一部機能 (領域選択・文字認識・ことばで分離) は現在 Windows 版のみです。
 
 **必要なもの:**
 
@@ -119,3 +120,13 @@ Codex CLI や Node.js の手動インストールは不要です (アプリに�
 [MIT](LICENSE) — STΛCK によるクリエイティブ向け改変版。
 
 オリジナルフレームワークの著作権者にもリスペクトを込めて MIT License を継承しています。詳細は [LICENSE](LICENSE) を参照してください。
+
+同梱している第三者ソフトウェアのライセンス表示は `src-tauri/resources/THIRD-PARTY-NOTICES.txt` にまとめています。
+
+---
+
+## 謝辞
+
+本アプリは masao 氏の codex-image-editor (MIT License) を元に開発されました。
+
+素晴らしいフレームワークを公開してくださった masao 氏に感謝します。

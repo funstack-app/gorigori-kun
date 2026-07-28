@@ -63,6 +63,7 @@
     "resources": [
       "resources/removebg.swift",
       "resources/LICENSE.txt",
+      "resources/THIRD-PARTY-NOTICES.txt",
       "resources/skills/gori-storyboard/SKILL.md",
       "resources/skills/gori-storyboard/agents/openai.yaml",
       "resources/skills/gori-storyboard/references/cut-calculator.md",
