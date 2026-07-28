@@ -18,7 +18,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 use crate::codex::process::{enriched_path, resolve_codex_cli_binary};
-use crate::commands::gen_queue::GLOBAL_GEN_SEMAPHORE;
+use crate::commands::gen_queue::{self, GLOBAL_GEN_SEMAPHORE};
 use crate::commands::storage::{project_name_from_cwd, resolve_output_dir, StorageSettings};
 use crate::events::EVENT_IMAGE_BATCH;
 use crate::state::AppState;
@@ -58,6 +58,11 @@ pub struct BatchGenArgs {
     pub aspect: Option<String>,
     #[serde(default)]
     pub turn_id: Option<String>,
+    /// 呼び出し元スキルの親 run ID（漫画など、複数の batch を1つの run として
+    /// 束ねる direct-run 経路が渡す）。Started イベントで echo するだけで、
+    /// 生成・保存・台帳のキーには一切使わない。
+    #[serde(default)]
+    pub source_tag: Option<String>,
 }
 
 #[derive(Serialize, Default)]
@@ -70,6 +75,9 @@ pub struct BatchGenResult {
     // これを返さないと、フロントは理由ゼロ件→「アスペクト比が原因」の固定文言に
     // 丸めてしまい、真因がユーザーに届かない (2026-06-07 独立診断の根本原因)。
     pub errors: Vec<String>,
+    /// この run に中止印が付いていたか。true なら「生成0枚・失敗0件」は
+    /// 異常ではなく中止の結果。フロントはこれだけを根拠に中止と判定してよい。
+    pub cancelled: bool,
 }
 
 // `rename_all` on the enum only renames variant names, not the
@@ -88,6 +96,10 @@ enum BatchEvent {
     Started {
         batch_id: String,
         count: u32,
+        /// 呼び出し元が渡した親 run ID の echo。direct-run 経路 (漫画など) が
+        /// 「この子 batch はどの親のものか」をフロントで紐付けるためだけに使う。
+        #[serde(skip_serializing_if = "Option::is_none")]
+        source_tag: Option<String>,
     },
     WorkerStarted {
         batch_id: String,
@@ -131,6 +143,10 @@ pub async fn images_generate_batch(
         });
 
     let batch_id = format!("batch-{}", short_id());
+    gen_queue::clear_cancelled(&batch_id);
+    // 実行中 run 台帳への登録。この関数は inline await なので、guard をローカルに
+    // 持つだけで関数を抜けるとき (成功・早期 return・エラー) に必ず外れる。
+    let _active_run = gen_queue::ActiveRunGuard::begin(&batch_id);
     let storage_settings = StorageSettings::load()?;
     let project_name = project_name_from_cwd(args.cwd.as_deref());
     let out_dir = resolve_output_dir(&storage_settings, project_name.as_deref(), &batch_id);
@@ -141,6 +157,7 @@ pub async fn images_generate_batch(
         BatchEvent::Started {
             batch_id: batch_id.clone(),
             count: args.count,
+            source_tag: args.source_tag.clone(),
         },
     );
 
@@ -191,6 +208,7 @@ pub async fn images_generate_batch(
     for h in handles {
         match h.await {
             Ok(Ok(p)) => generated_paths.push(p),
+            Ok(Err(reason)) if gen_queue::is_cancelled_error(&reason) => {}
             Ok(Err(reason)) => {
                 failed_count += 1;
                 errors.push(reason);
@@ -203,21 +221,28 @@ pub async fn images_generate_batch(
         }
     }
 
-    let _ = app.emit(
-        EVENT_IMAGE_BATCH,
-        BatchEvent::Completed {
-            batch_id: batch_id.clone(),
-            generated_paths: generated_paths.clone(),
-            failed_count,
-            errors: errors.clone(),
-        },
-    );
+    let was_cancelled = gen_queue::is_cancelled(&batch_id);
+    if !was_cancelled {
+        let _ = app.emit(
+            EVENT_IMAGE_BATCH,
+            BatchEvent::Completed {
+                batch_id: batch_id.clone(),
+                generated_paths: generated_paths.clone(),
+                failed_count,
+                errors: errors.clone(),
+            },
+        );
+    }
+    gen_queue::clear_cancelled(&batch_id);
 
     Ok(BatchGenResult {
         batch_id,
         generated_paths,
         failed_count,
         errors,
+        // 208行の was_cancelled をそのまま運ぶ。clear_cancelled の後に読むと
+        // 常に false になるため、読み取り位置 (clear より前) を動かさないこと。
+        cancelled: was_cancelled,
     })
 }
 
@@ -241,6 +266,9 @@ async fn run_one_worker(
     // Ok(成功画像パス) / Err(失敗理由)。理由を呼び出し元に伝えることで、
     // フロントが真因を表示できる (握りつぶし解消)。
 ) -> Result<String, String> {
+    if gen_queue::is_cancelled(&batch_id) {
+        return Err(gen_queue::cancelled_error());
+    }
     let _ = app.emit(
         EVENT_IMAGE_BATCH,
         BatchEvent::WorkerStarted {
@@ -259,6 +287,10 @@ async fn run_one_worker(
     #[cfg(not(windows))]
     let mut attempt_path = AttemptPath::Resident;
     for attempt in 1..=MAX_ATTEMPTS {
+        if gen_queue::is_cancelled(&batch_id) {
+            result = Err(gen_queue::cancelled_error());
+            break;
+        }
         #[cfg(windows)]
         {
             // Windows は常駐 app-server を使わず、各試行を従来の exec 経路へ直行させる。
@@ -278,6 +310,7 @@ async fn run_one_worker(
                         effort.clone(),
                         aspect.clone(),
                         total_count,
+                        &batch_id,
                     )
                     .await
                 }
@@ -303,6 +336,7 @@ async fn run_one_worker(
                 total_count,
                 attempt_path,
                 &mut resident_timed_out,
+                &batch_id,
             )
             .await;
             attempt_path = next_attempt_path(resident_timed_out);
@@ -311,11 +345,18 @@ async fn run_one_worker(
             break;
         }
         if let Err(e) = &result {
+            if gen_queue::is_cancelled_error(e) {
+                break;
+            }
             tracing::warn!(
                 target: "codex.batch_gen",
                 "worker {idx} attempt {attempt}/{MAX_ATTEMPTS} failed: {e}"
             );
         }
+    }
+
+    if gen_queue::is_cancelled(&batch_id) {
+        result = Err(gen_queue::cancelled_error());
     }
 
     // DB 記録失敗で画像生成そのものを再試行しないよう、既存の生成リトライが
@@ -332,13 +373,24 @@ async fn run_one_worker(
             ));
         }
     }
+    if gen_queue::is_cancelled(&batch_id) {
+        result = Err(gen_queue::cancelled_error());
+    }
 
     // inner は Result<成功パス, 失敗理由> を返す。失敗理由は WorkerFailed
     // イベントと戻り値の Err の両方に同じ文言を載せ、フロントがどちらの経路でも
     // 真因を拾えるようにする。外部API障害(ServerError/5xx/401等)なら非エンジニア
     // 向けの文言に整形する(humanize)。
-    let normalized: Result<String, String> =
-        result.map_err(|e| crate::codex::process::humanize_generation_failure(&e));
+    let normalized: Result<String, String> = result.map_err(|e| {
+        if gen_queue::is_cancelled_error(&e) {
+            e
+        } else {
+            // 429 なら同時実行数を自動降格する (T3)。humanize より前に判定する
+            // — 整形後も429語は拾えるが、生エラーのほうが判定材料が多い。
+            crate::codex::gen_server::note_rate_limit(&app, &e);
+            crate::codex::process::humanize_generation_failure(&e)
+        }
+    });
 
     match &normalized {
         Ok(path) => {
@@ -352,6 +404,9 @@ async fn run_one_worker(
             );
         }
         Err(reason) => {
+            if gen_queue::is_cancelled_error(reason) {
+                return normalized;
+            }
             let _ = app.emit(
                 EVENT_IMAGE_BATCH,
                 BatchEvent::WorkerFailed {
@@ -384,6 +439,7 @@ async fn run_one_worker_inner(
     total_count: u32,
     attempt_path: AttemptPath,
     resident_timed_out: &mut bool,
+    run_id: &str,
 ) -> Result<String, String> {
     if attempt_path == AttemptPath::Exec {
         tracing::info!(
@@ -405,6 +461,7 @@ async fn run_one_worker_inner(
             effort,
             aspect,
             total_count,
+            run_id,
         )
         .await;
     }
@@ -424,7 +481,7 @@ async fn run_one_worker_inner(
     let final_prompt = build_final_prompt(&prompt, &slots, aspect_label, idx, total_count);
     let image_paths: Vec<String> = slots.iter().map(|(_, path)| path.clone()).collect();
 
-    match crate::codex::gen_server::generate_image(
+    match crate::codex::gen_server::generate_image_for_run(
         app,
         state,
         &final_prompt,
@@ -432,10 +489,18 @@ async fn run_one_worker_inner(
         cwd.as_deref().filter(|value| !value.is_empty()),
         model.as_deref().filter(|value| !value.is_empty()),
         effort.as_deref().filter(|value| !value.is_empty()),
+        Some(run_id),
+        // フェーズ表示はタイル1枚ごとに出すので、どの枠かを識別する idx を渡す
+        // (workerStarted/Completed と同じ番号なのでフロント側で突き合わせられる)。
+        Some(idx),
+        "batch",
     )
     .await
     {
         Ok(src_png) => {
+            if gen_queue::is_cancelled(run_id) {
+                return Err(gen_queue::cancelled_error());
+            }
             let dest = out_dir.join(format!("ig_b{idx:02}_{}.png", short_id()));
             std::fs::copy(&src_png, &dest).map_err(|error| {
                 format!(
@@ -446,6 +511,9 @@ async fn run_one_worker_inner(
             return Ok(dest.to_string_lossy().into_owned());
         }
         Err(resident_error) => {
+            if gen_queue::is_cancelled_error(&resident_error) {
+                return Err(resident_error);
+            }
             if crate::codex::gen_server::is_timeout_error(&resident_error) {
                 // この試行で exec も続けると 900秒x2 になるため、
                 // 今回は失敗とし、同じ worker の次試行だけ旧 exec 経路に切り替える。
@@ -475,12 +543,17 @@ async fn run_one_worker_inner(
                 effort,
                 aspect,
                 total_count,
+                run_id,
             )
             .await
             .map_err(|exec_error| {
-                format!(
-                    "常駐 app-server 経路: {resident_error}; codex exec フォールバック: {exec_error}"
-                )
+                if gen_queue::is_cancelled_error(&exec_error) {
+                    exec_error
+                } else {
+                    format!(
+                        "常駐 app-server 経路: {resident_error}; codex exec フォールバック: {exec_error}"
+                    )
+                }
             });
         }
     }
@@ -503,9 +576,13 @@ async fn run_one_worker_exec_inner(
     effort: Option<String>,
     aspect: Option<String>,
     total_count: u32,
+    run_id: &str,
     // Ok(成功画像パス) / Err(失敗理由)。画像が無い場合も Err に理由を載せる
     // (旧 Ok(None) は廃止。画像なし=失敗理由つき Err に統一)。
 ) -> Result<String, String> {
+    if gen_queue::is_cancelled(run_id) {
+        return Err(gen_queue::cancelled_error());
+    }
     // 1. mktemp -d で per-worker CODEX_HOME を作る
     let tmp = tempfile::Builder::new()
         .prefix(&format!("codex-batch-{idx:02}-"))
@@ -566,18 +643,30 @@ async fn run_one_worker_exec_inner(
     cmd.kill_on_drop(true);
     crate::codex::process::no_window_flag(&mut cmd);
 
-    let gen_permit = GLOBAL_GEN_SEMAPHORE
-        .acquire()
-        .await
-        .map_err(|_| "画像生成キューが閉じられました".to_string())?;
+    if gen_queue::is_cancelled(run_id) {
+        return Err(gen_queue::cancelled_error());
+    }
+    // RAII: 以降どの早期 return / `?` で抜けても Drop が債務返済を通す。
+    let gen_permit = gen_queue::GenPermit::acquire(&GLOBAL_GEN_SEMAPHORE).await?;
+    // キュー待機中にキャンセルされたworkerは、codex execを起動しない。
+    if gen_queue::is_cancelled(run_id) {
+        return Err(gen_queue::cancelled_error());
+    }
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("codex exec の spawn に失敗: {e}"))?;
     let pid = child
         .id()
         .ok_or_else(|| "codex exec の PID を取得できません".to_string())?;
-    let worker_registration =
-        crate::commands::worker_registry::WorkerPidGuard::register(app, pid, "batch")?;
+    let worker_registration = crate::commands::worker_registry::WorkerPidGuard::register(
+        app,
+        pid,
+        "batch",
+        Some(run_id),
+    )?;
+    if gen_queue::is_cancelled(run_id) {
+        return Err(gen_queue::cancelled_error());
+    }
     if let Some(mut stdin) = child.stdin.take() {
         stdin
             .write_all(final_prompt.as_bytes())
@@ -594,7 +683,13 @@ async fn run_one_worker_exec_inner(
     const WORKER_TIMEOUT: Duration = Duration::from_secs(900);
     let output = match tokio::time::timeout(WORKER_TIMEOUT, child.wait_with_output()).await {
         Ok(Ok(o)) => o,
+        Ok(Err(_)) if gen_queue::is_cancelled(run_id) => {
+            return Err(gen_queue::cancelled_error());
+        }
         Ok(Err(e)) => return Err(format!("codex exec 待機失敗: {e}")),
+        Err(_) if gen_queue::is_cancelled(run_id) => {
+            return Err(gen_queue::cancelled_error());
+        }
         Err(_elapsed) => {
             return Err(format!(
                 "画像生成がタイムアウトしました（{}秒）。プロンプトを短くするか、時間をおいて再試行してください。",
@@ -603,7 +698,11 @@ async fn run_one_worker_exec_inner(
         }
     };
     drop(worker_registration);
+    // 429降格中は permit をセマフォへ戻さず握り潰す(実効上限を下げる)。
     drop(gen_permit);
+    if gen_queue::is_cancelled(run_id) {
+        return Err(gen_queue::cancelled_error());
+    }
 
     // 終了コードが非ゼロでも、画像が生成されていれば成功扱いにする
     // (codex が最後に NG 自己申告や非ゼロ終了しても ig_*.png が残っていれば

@@ -24,7 +24,7 @@ use tokio::process::Command;
 use tokio::time::timeout;
 
 use crate::codex::process::{enriched_path, resolve_codex_cli_binary};
-use crate::commands::gen_queue::GLOBAL_GEN_SEMAPHORE;
+use crate::commands::gen_queue::{self, GLOBAL_GEN_SEMAPHORE};
 
 /// 1カットの生成が何秒でタイムアウトするか。
 pub const GENERATION_TIMEOUT_SECS: u64 = 900;
@@ -56,6 +56,41 @@ pub async fn generate_one_cut(
     cut_id: &str,
     cwd: Option<String>,
 ) -> Result<PathBuf, String> {
+    generate_one_cut_for_run(
+        app,
+        state,
+        codex_bin,
+        codex_home_orig,
+        prompt,
+        reference_images,
+        output_dir,
+        cut_id,
+        cwd,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn generate_one_cut_for_run(
+    app: &AppHandle,
+    state: &crate::state::AppState,
+    codex_bin: &Path,
+    codex_home_orig: &Path,
+    prompt: &str,
+    reference_images: &[PathBuf],
+    output_dir: &Path,
+    cut_id: &str,
+    cwd: Option<String>,
+    run_id: Option<&str>,
+) -> Result<PathBuf, String> {
+    let run_id = run_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if run_is_cancelled(run_id) {
+        return Err(gen_queue::cancelled_error());
+    }
+
     // ── 常駐 app-server 経路を先に試す (2026-07-27) ────────────────────
     //
     // なぜ: batch_gen.rs は冒頭コメントのとおり「1枚ごとの codex exec 起動コストを
@@ -69,7 +104,7 @@ pub async fn generate_one_cut(
         .iter()
         .map(|p| p.to_string_lossy().into_owned())
         .collect();
-    match crate::codex::gen_server::generate_image(
+    match crate::codex::gen_server::generate_image_for_run(
         app,
         state,
         prompt,
@@ -77,10 +112,19 @@ pub async fn generate_one_cut(
         cwd.as_deref().filter(|value| !value.is_empty()),
         Some(GENERATION_MODEL),
         Some(GENERATION_EFFORT),
+        run_id,
+        // カット系は連番でなく cut_id / take_id で識別するため、枚数のインデックスを
+        // 持たない。推測で番号を振らず None にする (誤った枠にフェーズが付くより、
+        // 付かないほうが良い)。
+        None,
+        "multiangle",
     )
     .await
     {
         Ok(src_png) => {
+            if run_is_cancelled(run_id) {
+                return Err(gen_queue::cancelled_error());
+            }
             let dest = output_dir.join(format!("cut_{cut_id}_{}.png", short_id()));
             match std::fs::copy(&src_png, &dest) {
                 Ok(_) => return Ok(dest),
@@ -95,6 +139,9 @@ pub async fn generate_one_cut(
             }
         }
         Err(resident_error) => {
+            if gen_queue::is_cancelled_error(&resident_error) {
+                return Err(resident_error);
+            }
             tracing::warn!(
                 target: "codex.gen_worker",
                 "cut {cut_id}: 常駐 app-server 経路に失敗したため codex exec へフォールバックします: {resident_error}"
@@ -104,7 +151,10 @@ pub async fn generate_one_cut(
 
     let mut last_err = String::new();
     for attempt in 1..=GENERATION_MAX_ATTEMPTS {
-        match attempt_one_cut(
+        if run_is_cancelled(run_id) {
+            return Err(gen_queue::cancelled_error());
+        }
+        match attempt_one_cut_for_run(
             app,
             codex_bin,
             codex_home_orig,
@@ -113,11 +163,18 @@ pub async fn generate_one_cut(
             output_dir,
             cut_id,
             cwd.clone(),
+            run_id,
         )
         .await
         {
             Ok(path) => return Ok(path),
             Err(e) => {
+                if gen_queue::is_cancelled_error(&e) {
+                    return Err(e);
+                }
+                // 429 なら同時実行数を自動降格する (T3)。リトライで叩き続けて
+                // 悪化させないよう、次の試行より先に上限を下げる。
+                crate::codex::gen_server::note_rate_limit(app, &e);
                 tracing::warn!(
                     "gen cut {cut_id} attempt {attempt}/{GENERATION_MAX_ATTEMPTS} failed: {e}"
                 );
@@ -142,6 +199,39 @@ pub async fn attempt_one_cut(
     cut_id: &str,
     cwd: Option<String>,
 ) -> Result<PathBuf, String> {
+    attempt_one_cut_for_run(
+        app,
+        codex_bin,
+        codex_home_orig,
+        prompt,
+        reference_images,
+        output_dir,
+        cut_id,
+        cwd,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn attempt_one_cut_for_run(
+    app: &AppHandle,
+    codex_bin: &Path,
+    codex_home_orig: &Path,
+    prompt: &str,
+    reference_images: &[PathBuf],
+    output_dir: &Path,
+    cut_id: &str,
+    cwd: Option<String>,
+    run_id: Option<&str>,
+) -> Result<PathBuf, String> {
+    let run_id = run_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if run_is_cancelled(run_id) {
+        return Err(gen_queue::cancelled_error());
+    }
+
     let tmp = tempfile::Builder::new()
         .prefix(&format!("codex-gencut-{cut_id}-"))
         .tempdir()
@@ -184,33 +274,64 @@ pub async fn attempt_one_cut(
         .stderr(Stdio::piped());
     crate::codex::process::no_window_flag(&mut cmd);
 
-    let gen_permit = GLOBAL_GEN_SEMAPHORE
-        .acquire()
-        .await
-        .map_err(|_| "画像生成キューが閉じられました".to_string())?;
+    if run_is_cancelled(run_id) {
+        return Err(gen_queue::cancelled_error());
+    }
+    // RAII: 以降どの早期 return / `?` で抜けても Drop が債務返済を通す。
+    let gen_permit = gen_queue::GenPermit::acquire(&GLOBAL_GEN_SEMAPHORE).await?;
+    // permit 待機中にキャンセルされたカットは、プロセスを一度も起動しない。
+    if run_is_cancelled(run_id) {
+        return Err(gen_queue::cancelled_error());
+    }
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("codex exec の spawn に失敗: {e}"))?;
     let pid = child
         .id()
         .ok_or_else(|| "codex exec の PID を取得できません".to_string())?;
-    let worker_registration =
-        crate::commands::worker_registry::WorkerPidGuard::register(app, pid, "multiangle")?;
+    let worker_registration = crate::commands::worker_registry::WorkerPidGuard::register(
+        app,
+        pid,
+        "multiangle",
+        run_id,
+    )?;
+    // acquire後の確認とspawnの隙間で届いたキャンセルも、ChildのDropで直ちに止める。
+    if run_is_cancelled(run_id) {
+        return Err(gen_queue::cancelled_error());
+    }
     if let Some(mut stdin) = child.stdin.take() {
         stdin
             .write_all(prompt.as_bytes())
             .await
             .map_err(|e| format!("stdin 書き込み失敗: {e}"))?;
     }
-    let output = timeout(
+    let output = match timeout(
         Duration::from_secs(GENERATION_TIMEOUT_SECS),
         child.wait_with_output(),
     )
     .await
-    .map_err(|_| format!("画像生成が {GENERATION_TIMEOUT_SECS} 秒でタイムアウトしました"))?
-    .map_err(|e| format!("codex exec 待機失敗: {e}"))?;
+    {
+        Ok(Ok(output)) => output,
+        Ok(Err(_error)) if run_is_cancelled(run_id) => {
+            return Err(gen_queue::cancelled_error());
+        }
+        Ok(Err(error)) => return Err(format!("codex exec 待機失敗: {error}")),
+        Err(_) if run_is_cancelled(run_id) => {
+            return Err(gen_queue::cancelled_error());
+        }
+        Err(_) => {
+            return Err(format!(
+                "画像生成が {GENERATION_TIMEOUT_SECS} 秒でタイムアウトしました"
+            ));
+        }
+    };
     drop(worker_registration);
+    // 429降格中は permit をセマフォへ戻さず握り潰す(実効上限を下げる)。
     drop(gen_permit);
+    if run_is_cancelled(run_id) {
+        // 終了とキャンセルが競合した場合も、キャンセル後の画像は採用しない。
+        return Err(gen_queue::cancelled_error());
+    }
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let last = stderr
@@ -250,6 +371,10 @@ pub async fn attempt_one_cut(
     let dest = output_dir.join(format!("{cut_id}.png"));
     std::fs::copy(&src_png, &dest).map_err(|e| format!("出力コピー失敗: {e}"))?;
     Ok(dest)
+}
+
+fn run_is_cancelled(run_id: Option<&str>) -> bool {
+    run_id.map(gen_queue::is_cancelled).unwrap_or(false)
 }
 
 /// 一時 CODEX_HOME に auth/config/skills を symlink し、generated_images だけを分離する。

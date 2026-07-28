@@ -3,11 +3,20 @@ import {
   GENERATION_KIND_LABEL,
   NO_RESPONSE_THRESHOLD_MS,
   describeStall,
+  isCancellableKind,
   jobPercent,
   useGenerationStatus,
   type GenerationJob,
 } from "../lib/store/generationStatus";
-import { useBatches } from "../lib/store/batches";
+import {
+  isStoppableProvider,
+  selectBatchProvider,
+  useBatches,
+} from "../lib/store/batches";
+import { cancelGeneration } from "../lib/ipc";
+import { cancelDirectRun, isDirectRunParent } from "../lib/store/directRun";
+import { useStoryboardRun } from "../lib/store/storyboardRun";
+import { useToasts } from "../lib/store/toasts";
 
 /**
  * 右上に常駐する「生成の今」パネル。
@@ -86,14 +95,167 @@ function CloseIcon({ className = "" }: { className?: string }) {
   );
 }
 
+/**
+ * 「やめる」の進行状態。
+ *
+ * 押した瞬間に「やめました」と出さないための状態機械。
+ * Rust から CancelReport が返るまでは "stopping" のままにし、
+ * 返ってきた実数 (found / terminated) を見てから文言を決める。
+ * 押したら止まったことにするのは、このアプリが避けてきた「嘘のUI」そのもの。
+ *
+ * failed が `reason` を持つのは、表示分岐を**文言の文字列一致でやらないため**。
+ * 以前は `message.includes("開始処理中")` で分岐していたが、これは
+ * 文言を直すと静かに壊れる暗黙結合だった。
+ */
+type CancelState =
+  | { phase: "idle" }
+  | { phase: "stopping" }
+  | { phase: "stopped"; terminated: number }
+  | {
+      phase: "failed";
+      /**
+       * not-found = Rust が知らない run / not-started = 仮ID / ipc-error = 例外 /
+       * partial = 一部の子の中止が失敗した (direct-run 親のみ)
+       */
+      reason: "not-found" | "not-started" | "ipc-error" | "partial";
+      message?: string;
+    };
+
 function JobRow({ job }: { job: GenerationJob }) {
   const [now, setNow] = useState(() => Date.now());
+  const [cancel, setCancel] = useState<CancelState>({ phase: "idle" });
+  // provider (文字列 or undefined) を購読する。batch オブジェクトを select すると
+  // 参照が毎回変わって不要な再描画になる。
+  const provider = useBatches((s) => selectBatchProvider(s, job.id));
+  const serverStoppable = isStoppableProvider(provider);
 
   useEffect(() => {
     if (job.finished) return;
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, [job.finished]);
+
+  const handleCancel = async () => {
+    if (cancel.phase === "stopping") return;
+
+    // direct-run (漫画など) の親ジョブ (2026-07-28 追加)。
+    //
+    // 親 run ID は Rust に存在しないので `cancel_generation(job.id)` は効かない。
+    // 代わりにレジストリが保持している**子 batchId 全部**へ中止を送る。
+    // 子は Rust の実行中 run 台帳に実在するので、これは本物の中止になる。
+    // 子のカードは作らせていないため cancelBatch は呼ばない (対象が無い)。
+    //
+    // found:false になるのは「親が台帳から解放済み」のときだけ (2026-07-28 修正)。
+    // 発射直後で子の Started がまだ1件も届いていない窓では、cancelDirectRun が
+    // 中止要求を立てて遅着した子まで確実に止め、その結果を待って found:true を返す。
+    // 以前はこの窓で「見つかりません」と出ていたが、実態は全部止まっており
+    // 表示と実態が真逆だった。
+    if (isDirectRunParent(job.id)) {
+      setCancel({ phase: "stopping" });
+      try {
+        const report = await cancelDirectRun(job.id);
+        if (!report.found) {
+          setCancel({ phase: "failed", reason: "not-found" });
+          return;
+        }
+        // 中止に失敗した子がいたら成功表示にしない (2026-07-28)。
+        //
+        // 以前は子への cancel_generation の reject / found:false を握りつぶして
+        // 常に「中止しました」と出し、ジョブも finish していた。止まっていない
+        // 生成が残っているのに成功表示になるのは、このアプリが潰そうとしている
+        // 「表示と実態の食い違い」そのもの。止まった分 (terminated) だけを
+        // running から引き、ジョブは finish せず走行中のまま残す。
+        if (report.failedChildren > 0) {
+          useToasts.getState().push({
+            kind: "error",
+            text: "中止に失敗しました。生成が続いている可能性があります。",
+            ttlMs: 6000,
+          });
+          setCancel({ phase: "failed", reason: "partial" });
+          return;
+        }
+        useGenerationStatus.getState().setRunning(job.id, 0);
+        setCancel({ phase: "stopped", terminated: report.terminated });
+        useGenerationStatus.getState().finish(job.id);
+        window.setTimeout(() => useGenerationStatus.getState().clear(job.id), 6000);
+      } catch (error) {
+        useToasts.getState().push({
+          kind: "error",
+          text: "中止に失敗しました。生成が続いている可能性があります。",
+          ttlMs: 6000,
+        });
+        setCancel({ phase: "failed", reason: "ipc-error", message: String(error) });
+      }
+      return;
+    }
+
+    // 開始直後の窓を塞ぐ (2026-07-27 / Fable 5 評価者 blocking#3)。
+    //
+    // 送信クリックから Rust の Started イベント到達までの数秒は、job.id が
+    // フロントの仮 ID (`local-...`) のまま。この状態で Rust へ渡しても
+    // 実 run (batch-...) と一致しないので**何も止まらないのに「中止しました」と出る**。
+    // 効かないと分かっている呼び出しはしない。
+    if (job.id.startsWith("local-")) {
+      setCancel({ phase: "failed", reason: "not-started" });
+      return;
+    }
+
+    setCancel({ phase: "stopping" });
+    try {
+      const report = await cancelGeneration(job.id);
+
+      // Rust が知らない run だった (すでに終了 / まだ未開始 / 管理外の ID)。
+      // 何も止めていないので、カードもパネルも一切触らない。
+      // 実態が分からないものを「止まった」表示にしない。
+      if (!report.found) {
+        setCancel({ phase: "failed", reason: "not-found" });
+        return;
+      }
+
+      // 生成タイムライン側のカードも止める (2026-07-27 実機で判明した不整合の修正)。
+      //
+      // ## なぜ要るか
+      // パネルが「やめました」と出しても、下のカードは「生成中 17秒」のまま
+      // 秒数が増え続けていた。パネルとカードは別ストア (generationStatus /
+      // batches) を見ており、キャンセルをパネル側にしか伝えていなかったため。
+      // 「やめたのに動いて見える」は、このアプリが潰そうとしている
+      // 「表示が実態と食い違う」状態そのもの。
+      //
+      // job.id は syncBatchStatus (batches.ts:342) が batchId をそのまま使うので、
+      // バッチ生成なら同じ ID で引ける。該当が無い経路 (スキル系) では何も起きない。
+      await useBatches.getState().cancelBatch(job.id);
+
+      // ストーリーカットの run も 'cancelled' に落とす (S3 issue-7 / 2026-07-28)。
+      //
+      // ## なぜ要るか
+      // Rust は中止した run のイベントを意図的に一切出さない。そのため
+      // storyboardRun の status は 'running' のまま残り、Phase 3 の画面が
+      // 止めた後も生成中に見え続ける。上の cancelBatch と同じ「パネルと
+      // 本体ストアの食い違い」を storyboard 側でも塞ぐ。
+      if (job.kind === "storyboard") {
+        useStoryboardRun.getState().markCancelled(job.id);
+      }
+
+      // パネル側の running も 0 にする。Rust は停止済みでも、
+      // 次のイベントが来るまで表示上の running が残るため。
+      useGenerationStatus.getState().setRunning(job.id, 0);
+
+      setCancel({ phase: "stopped", terminated: report.terminated });
+
+      // 結果を読める時間だけ残して自動で消す (2026-07-27)。
+      // 手動で × を押さないと残り続けると、止めたのに画面に居座って
+      // 「まだ何か動いている」ように見える。finish() で終了扱いにしてから
+      // 少し置いて片付ける。
+      useGenerationStatus.getState().finish(job.id);
+      window.setTimeout(() => {
+        useGenerationStatus.getState().clear(job.id);
+      }, 6000);
+    } catch (error) {
+      // 失敗を黙って飲まない。押したのに何も起きないのが一番不安なので、
+      // 「効かなかった」ことを明示して、生成は続いていると伝える。
+      setCancel({ phase: "failed", reason: "ipc-error", message: String(error) });
+    }
+  };
 
   // 無反応の自動検出。理由が未設定でも、黙って固まらせない。
   const silentFor = now - job.lastEventAt;
@@ -117,29 +279,99 @@ function JobRow({ job }: { job: GenerationJob }) {
         {job.finished ? null : (
           <SpinnerIcon className="h-3.5 w-3.5 shrink-0 animate-spin text-pink-400" />
         )}
-        <span className="text-[13px] font-black leading-tight text-white">
+        <span
+          className="min-w-0 flex-1 truncate text-[13px] font-black leading-tight text-white"
+          title={GENERATION_KIND_LABEL[job.kind]}
+        >
           {GENERATION_KIND_LABEL[job.kind]}
         </span>
-        {job.running > 0 && (
-          <span className="rounded-full bg-[#2a1f26] px-1.5 py-0.5 text-[10px] font-bold text-pink-300">
-            {job.running}枚 同時実行
-          </span>
-        )}
-        {/* 表示を消す。生成そのものは止められない (Rust 側に中断コマンドが無い)
-            ので、文言も「中止」ではなく実際にできることに合わせる。 */}
+        {/*
+          やめる (2026-07-27 追加)。
+
+          以前は「生成そのものは止められない (Rust 側に中断コマンドが無い)」ため
+          × の「表示を消す」だけを置いていた。cancel_generation の実装で
+          実際に止められるようになったので、本物の中止ボタンを出す。
+
+          × と分けているのは、「もう見なくていいが生成は続けたい」
+          (大量生成を裏で回す) という正当な使い方を潰さないため。
+          × を中止に置き換えると、その使い方が失われる。
+
+          表示条件は2段のゲート (2026-07-27 追加):
+            - kind 軸 (isCancellableKind): その経路が run_id を Rust の台帳へ届けるか
+            - provider 軸 (serverStoppable): そのバッチの実行主体をこちらから止められるか
+          外部サービス (Higgsfield / Magnific) はサーバ側の生成を止める手段が無いので、
+          ボタン自体を出さない。「効かないなら出さない」。説明文も添えない
+          (説明すると「では何のためのUIか」になる。ボタンが無いこと＝約束していないこと)。
+        */}
+        {!job.finished &&
+          cancel.phase !== "stopped" &&
+          isCancellableKind(job.kind) &&
+          serverStoppable && (
+            <button
+              type="button"
+              onClick={handleCancel}
+              disabled={cancel.phase === "stopping"}
+              title="この生成を中止します（順番待ちは即中止、実行中のカットも停止します）"
+              className="shrink-0 whitespace-nowrap rounded-md border border-[#3a3a3a] px-2 py-0.5 text-[10px] font-bold text-neutral-300 transition-colors hover:border-red-500/60 hover:text-red-300 disabled:opacity-50"
+            >
+              {cancel.phase === "stopping" ? "中止中…" : "中止"}
+            </button>
+          )}
+        {/* 表示を消す。生成は続行する (中止とは別物)。 */}
         <button
           type="button"
           onClick={() => dismissJob(job.id)}
-          title="この表示を消します（進行中の生成そのものは止まりません）"
+          title="この表示を消します（生成そのものは続きます）"
           aria-label={`${GENERATION_KIND_LABEL[job.kind]}の表示を消す`}
-          className="ml-auto shrink-0 rounded-md p-1 text-neutral-500 transition-colors hover:bg-[#2a2a2a] hover:text-pink-300"
+          className="shrink-0 rounded-md p-1 text-neutral-500 transition-colors hover:bg-[#2a2a2a] hover:text-pink-300"
         >
           <CloseIcon className="h-3.5 w-3.5" />
         </button>
       </div>
 
+      {/*
+        やめた結果。Rust の CancelReport をそのまま文言にする。
+        推測で「止まりました」と言わない (no-silent-gap-filling)。
+
+        terminated が 0 でも「実行中のものが無かった」とは書かない (2026-07-27 修正)。
+        常駐 app-server 経由の生成は turn/interrupt で止まり exec プロセスを殺さないため、
+        実行中でも terminated は 0 になる。プロセス数には言及せず、
+        保証できる事実 (新しい生成は始まらない・生成済みは残る) だけを言う。
+      */}
+      {cancel.phase === "stopped" && (
+        <p className="mt-1.5 text-[11px] leading-relaxed text-neutral-300">
+          {cancel.terminated > 0
+            ? `中止しました（実行中だった ${cancel.terminated} 件を停止しました。生成済みの分は残ります）`
+            : "中止しました。新しい生成は開始されません（生成済みの分は残ります）"}
+        </p>
+      )}
+      {cancel.phase === "failed" && (
+        <p className="mt-1.5 text-[11px] leading-relaxed text-amber-300">
+          {cancel.reason === "not-started"
+            ? "開始処理中です。数秒おいてからもう一度お試しください"
+            : cancel.reason === "not-found"
+              ? // 終了済みか未開始かを Rust は区別できない。分からないことは断定しない。
+                "中止できませんでした。この生成は見つかりません（すでに終了しているか、まだ開始していません）"
+              : cancel.reason === "partial"
+                ? // 一部の子だけ止まった。止まった数も止まらなかった数も断定できないので、
+                  // 「続いている可能性がある」までしか言わない (no-silent-gap-filling)。
+                  "中止に失敗しました。生成が続いている可能性があります。"
+                : `中止できませんでした。生成は続いています（${cancel.message}）`}
+        </p>
+      )}
+
       {/* 本文: 数値の内訳。見出しより小さく、色を落とす */}
-      <div className="mt-1.5 flex items-center gap-2 text-[11px] text-neutral-400">
+      <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[11px] text-neutral-400">
+        {/*
+          並列稼働数 (2026-07-28 に見出し行からここへ移設)。
+          見出し行に置くと種類名 (最長「キャラクターシート」) と中止ボタンに挟まれ、
+          パネル幅 288px では CJK が文字単位で折れて「同時実/行」になっていた。
+        */}
+        {job.running > 0 && (
+          <span className="shrink-0 whitespace-nowrap rounded-full bg-[#2a1f26] px-1.5 py-0.5 text-[10px] font-bold text-pink-300">
+            {job.running}枚 同時実行
+          </span>
+        )}
         <span className="font-mono tabular-nums text-neutral-300">
           {job.total ? `${settled} / ${job.total}` : `${settled} 枚`}
         </span>

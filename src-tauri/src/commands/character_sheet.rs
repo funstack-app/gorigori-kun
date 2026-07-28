@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 
 use crate::codex::process::resolve_codex_cli_binary;
+use crate::commands::gen_queue;
 use crate::commands::gen_worker::{generate_one_cut, short_id, timestamp_id};
 use crate::commands::storage::{project_name_from_cwd, resolve_output_dir, StorageSettings};
 use crate::events::EVENT_CHARACTER_SHEET;
@@ -180,6 +181,13 @@ pub async fn character_sheet_run(
         Some(id) if !id.trim().is_empty() => id.to_string(),
         _ => format!("{}-{}", timestamp_id(), short_id()),
     };
+    // 同じIDを明示再利用した場合、前回のキャンセル印を新runへ持ち越さない
+    // (他の run 統括コマンドと同じ扱い。ここだけ抜けていたため、一度中止すると
+    // 印が TTL 24時間残り、同じ run_id の再生成が即「キャンセルされました」で死んでいた)。
+    gen_queue::clear_cancelled(&run_id);
+    // 実行中 run 台帳への登録。invoke が返った瞬間からフロントは run_id を知るので、
+    // spawn より前に登録する。guard は task へ move し、orchestrator 終了時に外れる。
+    let active_run = gen_queue::ActiveRunGuard::begin(&run_id);
     let task_run_id = run_id.clone();
 
     let fail_run_id = run_id.clone();
@@ -190,6 +198,9 @@ pub async fn character_sheet_run(
     // 2026-07-27: 常駐 app-server 経路 (gen_worker) へ渡すため state を複製する
     let task_state = state.inner_clone();
     tokio::spawn(async move {
+        // guard を task 内へ move する。この async ブロックが終わる時点で Drop され、
+        // 実行中 run 台帳から外れる。
+        let _active_run = active_run;
         if let Err(err) = run_character_sheet_orchestrator(
             app.clone(),
             task_state,
@@ -230,6 +241,12 @@ pub async fn character_sheet_regenerate_cut(
     let codex_bin =
         resolve_codex_cli_binary().map_err(|e| format!("Codex CLI の解決に失敗: {e}"))?;
 
+    // 再生成は元 run と同じ run_id を使い回す。登録しないと「再生成中に中止 →
+    // found:false の嘘」になるので、元 run と同じく実行中 run 台帳へ載せる。
+    // 新しい生成意図は古い中止を上書きする。
+    gen_queue::clear_cancelled(&run_id);
+    let active_run = gen_queue::ActiveRunGuard::begin(&run_id);
+
     let character_path = PathBuf::from(&params.character_image);
     if !character_path.is_file() {
         return Err(format!(
@@ -267,6 +284,9 @@ pub async fn character_sheet_regenerate_cut(
     let event_run_id = run_id.clone();
 
     tokio::spawn(async move {
+        // guard を task へ move する。この 1 カット再生成が終わるまでを
+        // 「実行中 run」とみなす (中止ボタンが効く窓と一致させる)。
+        let _active_run = active_run;
         let prompt = build_sheet_prompt(&cut, &aspect_ratio, &attributes);
         let _ = task_app.emit(
             EVENT_CHARACTER_SHEET,

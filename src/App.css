@@ -338,3 +338,69 @@ button:disabled.bg-pink-500 {
 [class*="border-[#444]"] {
   border-color: var(--color-border) !important;
 }
+
+/* ────────────────────────────────────────────────────────────────
+   生成の体感演出 (設計書 S1/S3)
+
+   なぜ: 送信から完成までの数十秒が同じスピナー1枚で、動いているのか
+   止まっているのかがユーザーから区別できなかった。実データ (item/started 等)
+   で駆動する表示に、状態が変わり続けていることが分かる最小の演出を添える。
+
+   実時間は1ミリ秒も変わらない。変わるのは「無反応に見える時間」だけ。
+   ──────────────────────────────────────────────────────────────── */
+
+/* S1: 描画中のシマー。光の帯が左から右へ流れる。
+   実際に絵が描かれている区間 (item/started → item/completed) だけに出す。 */
+.gori-shimmer::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    100deg,
+    transparent 20%,
+    rgba(255, 255, 255, 0.55) 50%,
+    transparent 80%
+  );
+  transform: translateX(-100%);
+  animation: gori-shimmer-sweep 1.6s ease-in-out infinite;
+  pointer-events: none;
+}
+
+@keyframes gori-shimmer-sweep {
+  to {
+    transform: translateX(100%);
+  }
+}
+
+/* S3: 完成時のブラーアップ。ぼやけた状態から 0.6 秒でシャープに解像する。
+   「描画中 → 完成」の切り替わりを断絶でなく連続に見せる。
+   1回だけ再生する (forwards で終状態を保持し、無演出時と同じ見た目で止まる)。 */
+.gori-blur-up {
+  animation: gori-blur-up-reveal 0.6s ease-out both;
+}
+
+@keyframes gori-blur-up-reveal {
+  from {
+    filter: blur(12px);
+    opacity: 0.65;
+    transform: scale(1.02);
+  }
+  to {
+    filter: blur(0);
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* 動きを減らす設定の人には演出を出さない。
+   最終状態 (ぼかしゼロ・等倍) は同じなので、見えるものは変わらない。 */
+@media (prefers-reduced-motion: reduce) {
+  .gori-shimmer::after {
+    animation: none;
+    display: none;
+  }
+
+  .gori-blur-up {
+    animation: none;
+  }
+}

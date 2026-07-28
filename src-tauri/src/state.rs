@@ -7,8 +7,13 @@ use tokio::sync::{oneshot, Mutex, RwLock};
 
 use crate::codex::RpcClient;
 use crate::commands::storage::StorageSettings;
+// ort (ONNX Runtime) を使う編集セッション群は Windows 限定 (2026-07-28)。
+// 理由は edit/mod.rs 冒頭のコメント参照 (Intel Mac 対応の復活)。
+#[cfg(target_os = "windows")]
 use crate::edit::runtime::EditRuntime;
+#[cfg(target_os = "windows")]
 use crate::edit::sam2::Sam2Session;
+#[cfg(target_os = "windows")]
 use crate::edit::sam3_text::Sam3TextSession;
 
 type ImageWatcher = Debouncer<notify::RecommendedWatcher, FileIdMap>;
@@ -16,22 +21,9 @@ type ImageWatcher = Debouncer<notify::RecommendedWatcher, FileIdMap>;
 // 2026-06-10 段階8: CLI 版 Higgsfield のバッチキャンセル用 HiggsfieldCancellation /
 // higgsfield_cancellations は廃止。MCP 版は同期生成でキャンセル対象を持たないため不要。
 
-/// storyboard checkpoint (方向性チェック) でユーザーが選ぶ継続アクション。
-/// A-2 (2026-06 監査): 従来 checkpoint は emit するだけで生成ループを止められず、
-/// フロントの `paused` は見せかけだった。実際に Rust ループを await 停止し、
-/// フロントからのこのアクションで再開/中断する。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CheckpointAction {
-    /// 残りカットの生成を続行する。
-    Continue,
-    /// 生成を安全に中断する（生成済みカットは保持）。
-    Cancel,
-}
-
-/// run_id → checkpoint 再開シグナルの送信端。
-/// orchestrator が checkpoint 到達時に oneshot を作って登録し、Receiver を await する。
-/// `storyboard_checkpoint_resume` が受信端へアクションを送って再開させる。
-type CheckpointSenders = Arc<Mutex<HashMap<String, oneshot::Sender<CheckpointAction>>>>;
+// storyboard checkpoint (3カット目の方向性チェック) は S3 (2026-07-28) で撤去した。
+// 本生成が全カット並列になり「途中で止めて方向性を確認する」区切りが存在しなくなった
+// ため。方向性の確認はラフ (絵コンテ) 段の採用行為が引き受ける。
 
 #[derive(Clone, Default)]
 pub struct AppState {
@@ -45,13 +37,14 @@ pub struct AppState {
     /// `await` `db_pool()` and surface a clear error if init failed.
     pub db: Arc<RwLock<Option<sqlx::SqlitePool>>>,
     pub storage_settings: Arc<RwLock<Option<StorageSettings>>>,
+    #[cfg(target_os = "windows")]
     pub edit_runtime: Arc<EditRuntime>,
+    #[cfg(target_os = "windows")]
     pub sam2_session: Arc<RwLock<Option<Sam2Session>>>,
     /// ことばで分離 (SAM3) のセッション。embed キャッシュを持つため
     /// コマンド呼び出しをまたいで保持する (同じ画像への語の追加が数秒で返る)。
+    #[cfg(target_os = "windows")]
     pub sam3_text_session: Arc<RwLock<Option<Sam3TextSession>>>,
-    /// storyboard checkpoint の再開シグナル置き場 (run_id → oneshot sender)。
-    checkpoint_senders: CheckpointSenders,
 }
 
 #[derive(Default)]
@@ -101,18 +94,22 @@ impl AppState {
         self.storage_settings.read().await.clone()
     }
 
+    #[cfg(target_os = "windows")]
     pub fn edit_runtime(&self) -> &EditRuntime {
         &self.edit_runtime
     }
 
+    #[cfg(target_os = "windows")]
     pub async fn set_sam2_session(&self, session: Sam2Session) {
         *self.sam2_session.write().await = Some(session);
     }
 
+    #[cfg(target_os = "windows")]
     pub async fn clear_sam2_session(&self) {
         *self.sam2_session.write().await = None;
     }
 
+    #[cfg(target_os = "windows")]
     pub async fn clear_sam3_text_session(&self) {
         *self.sam3_text_session.write().await = None;
     }
@@ -121,36 +118,4 @@ impl AppState {
         self.clone()
     }
 
-    // ===== storyboard checkpoint 再開シグナル =====
-
-    /// checkpoint に到達した run の再開シグナルを登録し、受信端を返す。
-    /// orchestrator はこの Receiver を await して継続アクションを待つ。
-    /// 同じ run_id の古い sender が残っていれば置き換えて drop する（前の
-    /// 受信端はその時点で Err になり cleanup 扱いになる）。
-    pub async fn register_checkpoint(&self, run_id: &str) -> oneshot::Receiver<CheckpointAction> {
-        let (tx, rx) = oneshot::channel();
-        self.checkpoint_senders
-            .lock()
-            .await
-            .insert(run_id.to_string(), tx);
-        rx
-    }
-
-    /// run の checkpoint 再開シグナルを取り除いてアクションを送る。
-    /// フロントの `storyboard_checkpoint_resume` から呼ぶ。
-    /// 送信できたら true、対象 run が待機していなければ false を返す。
-    pub async fn resume_checkpoint(&self, run_id: &str, action: CheckpointAction) -> bool {
-        let sender = self.checkpoint_senders.lock().await.remove(run_id);
-        match sender {
-            Some(tx) => tx.send(action).is_ok(),
-            None => false,
-        }
-    }
-
-    /// run 終了時（正常/失敗/アプリ終了）に、待機中の checkpoint sender を破棄する。
-    /// sender を drop すると orchestrator 側の Receiver が Err になり、await が
-    /// 解けてループがリークせず終了する。二重呼び出しは無害。
-    pub async fn clear_checkpoint(&self, run_id: &str) {
-        self.checkpoint_senders.lock().await.remove(run_id);
-    }
 }

@@ -5,7 +5,16 @@ const DEFAULT_EXPECTED_SECONDS = 120;
 const MAX_HISTORY = 10;
 const TICK_MS = 1000;
 
-export type GenerationGaugeMode = "batch" | "multiangle" | "storyboard";
+export type GenerationGaugeMode =
+  | "batch"
+  | "multiangle"
+  | "storyboard"
+  // 外部 provider は codex 経路と所要時間の桁が違うため、学習バケットを分ける
+  // (2026-07-28)。codex の中央値を Magnific(数十秒級)や Higgsfield 動画(分単位)に
+  // 使うと推定の前提が崩れる。
+  | "magnific" // Magnific 画像 (単一/比較共通バケット)
+  | "higgsfield" // Higgsfield 画像
+  | "higgsfield-video"; // Higgsfield 動画 (画像と所要が桁違いのため分離)
 
 type GenerationGaugeProps = {
   startedAt: number;

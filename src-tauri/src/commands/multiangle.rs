@@ -4,28 +4,19 @@
 //! storyboard.rs と違い、ストーリー対話・絵コンテ・AI評価器・連続性契約・180度ルール・
 //! カット役割割当は持たない。各カットは独立した1枚画像で、生成された1枚をそのまま採用する。
 //!
-//! 共通ユーティリティ (codex_oneshot / extract_json_from_codex_stdout) は storyboard.rs
-//! からコピーして独立させている。
 //! 1カット生成の下部構造 (generate_one_cut / attempt_one_cut / mirror_codex_home /
 //! find_newest_generated_png / collect_generated_pngs / timestamp_id / short_id) は
 //! 段階3 (キャラシート追加) で commands/gen_worker.rs へ括り出し、両者から共用する。
 
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
-use std::time::Duration;
 
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use tauri::{AppHandle, Emitter, State};
-use tokio::io::AsyncWriteExt;
-use tokio::process::Command;
-use tokio::time::timeout;
 
-use crate::codex::process::{enriched_path, resolve_codex_cli_binary};
-use crate::commands::gen_worker::{
-    generate_one_cut, short_id, timestamp_id, GENERATION_EFFORT, GENERATION_MODEL,
-};
+use crate::codex::process::resolve_codex_cli_binary;
+use crate::commands::gen_queue;
+use crate::commands::gen_worker::{generate_one_cut_for_run, short_id, timestamp_id};
 use crate::commands::storage::{project_name_from_cwd, resolve_output_dir, StorageSettings};
 use crate::events::EVENT_MULTIANGLE;
 use crate::state::AppState;
@@ -122,16 +113,29 @@ pub async fn multiangle_run(
         Some(id) if !id.trim().is_empty() => id.to_string(),
         _ => format!("{}-{}", timestamp_id(), short_id()),
     };
+    // 同じIDを明示再利用した場合、前回のキャンセル印を新runへ持ち越さない。
+    gen_queue::clear_cancelled(&run_id);
+    // 実行中 run 台帳への登録。invoke が返った瞬間からフロントは run_id を知るので、
+    // spawn より前に登録する。guard は task へ move し、orchestrator 終了時に外れる。
+    let active_run = gen_queue::ActiveRunGuard::begin(&run_id);
     let task_run_id = run_id.clone();
     let fail_run_id = run_id.clone();
     // 2026-07-27: 常駐 app-server 経路 (gen_worker) へ渡すため state を複製する
     let task_state = state.inner_clone();
 
     tokio::spawn(async move {
-        if let Err(err) =
+        // guard を task 内へ move する。この async ブロックが終わる時点で Drop され、
+        // 実行中 run 台帳から外れる (後始末と同じ場所)。
+        let _active_run = active_run;
+        let result =
             run_multiangle_orchestrator(app.clone(), task_state, codex_bin, codex_home_orig, task_run_id, params)
-                .await
-        {
+                .await;
+        let was_cancelled = gen_queue::is_cancelled(&fail_run_id);
+        gen_queue::clear_cancelled(&fail_run_id);
+        if let Err(err) = result {
+            if was_cancelled || gen_queue::is_cancelled_error(&err) {
+                return;
+            }
             tracing::warn!(target: "codex.multiangle", "multiangle orchestrator failed: {err}");
             let _ = app.emit(
                 EVENT_MULTIANGLE,
@@ -161,6 +165,12 @@ pub async fn multiangle_regenerate_cut(
 
     let codex_bin =
         resolve_codex_cli_binary().map_err(|e| format!("Codex CLI の解決に失敗: {e}"))?;
+
+    // 再生成は元 run と同じ run_id を使い回す。登録しないと「再生成中に中止 →
+    // found:false の嘘」になるので、元 run と同じく実行中 run 台帳へ載せる。
+    // 新しい生成意図は古い中止を上書きする (multiangle_run と同じ理由)。
+    gen_queue::clear_cancelled(&run_id);
+    let active_run = gen_queue::ActiveRunGuard::begin(&run_id);
 
     let character_path = PathBuf::from(&params.character_image);
     if !character_path.is_file() {
@@ -198,6 +208,12 @@ pub async fn multiangle_regenerate_cut(
     let task_state = state.inner_clone();
 
     tokio::spawn(async move {
+        // guard を task へ move する。この 1 カット再生成が終わるまでを
+        // 「実行中 run」とみなす (中止ボタンが効く窓と一致させる)。
+        let _active_run = active_run;
+        if gen_queue::is_cancelled(&event_run_id) {
+            return;
+        }
         let prompt = build_multiangle_prompt(&cut, &aspect_ratio, &environment, subject_kind);
         let _ = task_app.emit(
             EVENT_MULTIANGLE,
@@ -208,7 +224,7 @@ pub async fn multiangle_regenerate_cut(
                 index: 0,
             },
         );
-        match generate_one_cut(
+        match generate_one_cut_for_run(
             &task_app,
             &task_state,
             &codex_bin,
@@ -218,10 +234,14 @@ pub async fn multiangle_regenerate_cut(
             &out_dir,
             &cut.cut_id,
             cwd,
+            Some(&event_run_id),
         )
         .await
         {
             Ok(image_path) => {
+                if gen_queue::is_cancelled(&event_run_id) {
+                    return;
+                }
                 let _ = task_app.emit(
                     EVENT_MULTIANGLE,
                     MultiAngleEvent::CutCompleted {
@@ -233,6 +253,9 @@ pub async fn multiangle_regenerate_cut(
                 );
             }
             Err(err) => {
+                if gen_queue::is_cancelled_error(&err) {
+                    return;
+                }
                 tracing::warn!(target: "codex.multiangle", "regenerate_cut failed: {err}");
                 let _ = task_app.emit(
                     EVENT_MULTIANGLE,
@@ -259,6 +282,9 @@ async fn run_multiangle_orchestrator(
     params: MultiAngleParams,
 ) -> Result<(), String> {
     validate_params(&params)?;
+    if gen_queue::is_cancelled(&run_id) {
+        return Err(gen_queue::cancelled_error());
+    }
 
     let storage_settings = StorageSettings::load()?;
     let project_name = project_name_from_cwd(params.cwd.as_deref());
@@ -306,7 +332,9 @@ async fn run_multiangle_orchestrator(
             // 2026-07-27: 各カットのクロージャへ渡すため複製する
             let state = state.inner_clone();
             async move {
-
+                if gen_queue::is_cancelled(&event_run_id) {
+                    return;
+                }
                 let _ = app.emit(
                     EVENT_MULTIANGLE,
                     MultiAngleEvent::CutStarted {
@@ -317,7 +345,7 @@ async fn run_multiangle_orchestrator(
                     },
                 );
                 let prompt = build_multiangle_prompt(&cut, &aspect_ratio, &environment, subject_kind);
-                match generate_one_cut(
+                match generate_one_cut_for_run(
                     &app,
                     &state,
                     &codex_bin,
@@ -327,10 +355,14 @@ async fn run_multiangle_orchestrator(
                     &out_dir,
                     &cut.cut_id,
                     cwd,
+                    Some(&event_run_id),
                 )
                 .await
                 {
                     Ok(image_path) => {
+                        if gen_queue::is_cancelled(&event_run_id) {
+                            return;
+                        }
                         let _ = app.emit(
                             EVENT_MULTIANGLE,
                             MultiAngleEvent::CutCompleted {
@@ -342,6 +374,9 @@ async fn run_multiangle_orchestrator(
                         );
                     }
                     Err(err) => {
+                        if gen_queue::is_cancelled_error(&err) {
+                            return;
+                        }
                         tracing::warn!(target: "codex.multiangle", "cut {} failed: {err}", cut.cut_id);
                         let _ = app.emit(
                             EVENT_MULTIANGLE,
@@ -358,6 +393,9 @@ async fn run_multiangle_orchestrator(
         .collect::<Vec<_>>();
     join_all(tasks).await;
 
+    if gen_queue::is_cancelled(&run_id) {
+        return Ok(());
+    }
     let _ = app.emit(
         EVENT_MULTIANGLE,
         MultiAngleEvent::Completed {
@@ -461,152 +499,4 @@ fn build_multiangle_prompt(
             aspect_ratio = aspect_ratio,
         ),
     }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// storyboard.rs からコピーした共通ユーティリティ (無変更)。
-// 1カット生成の下部構造は commands/gen_worker.rs へ括り出し済み。
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// codex exec を1回だけ叩いて stdout を返す最小ヘルパ。
-/// 現状 multiangle 本体では直接使わないが、storyboard と同じ流用基盤として持つ。
-#[allow(dead_code)]
-async fn codex_oneshot(
-    app: &AppHandle,
-    codex_bin: &Path,
-    prompt: &str,
-    image_paths: &[&Path],
-    timeout_secs: u64,
-    cwd: Option<&str>,
-) -> Result<String, String> {
-    let mut cmd = Command::new(codex_bin);
-    cmd.args([
-        "exec",
-        // Windows では --full-auto(=--sandbox workspace-write)が
-        // codex-windows-sandbox-setup.exe を要求して「見つかりません」で死ぬ。
-        // サンドボックス無効の bypass を使う(2026-06-09 Windows修正。--full-auto
-        // では workspace-write になり直らなかった)。BYO 配布はユーザー自身の
-        // PC=外部サンドボックス環境なので bypass で問題ない(書き込み権限も維持)。
-        "--dangerously-bypass-approvals-and-sandbox",
-        "--skip-git-repo-check",
-        "--color",
-        "never",
-        "-c",
-        &format!("model={GENERATION_MODEL}"),
-        "-c",
-        &format!("model_reasoning_effort={GENERATION_EFFORT}"),
-    ]);
-    if let Some(c) = cwd.filter(|s| !s.is_empty()) {
-        cmd.arg("-C").arg(c);
-    }
-    for img in image_paths {
-        cmd.arg("-i").arg(img);
-    }
-    cmd.arg("-");
-    cmd.env("PATH", enriched_path());
-    cmd.kill_on_drop(true);
-    cmd.stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    crate::codex::process::no_window_flag(&mut cmd);
-
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("codex exec の spawn に失敗: {e}"))?;
-    let pid = child
-        .id()
-        .ok_or_else(|| "codex exec の PID を取得できません".to_string())?;
-    let worker_registration =
-        crate::commands::worker_registry::WorkerPidGuard::register(app, pid, "multiangle")?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(prompt.as_bytes())
-            .await
-            .map_err(|e| format!("stdin 書き込み失敗: {e}"))?;
-    }
-
-    let output = timeout(Duration::from_secs(timeout_secs), child.wait_with_output())
-        .await
-        .map_err(|_| format!("codex exec が {timeout_secs} 秒でタイムアウトしました"))?
-        .map_err(|e| format!("codex exec 待機失敗: {e}"))?;
-    drop(worker_registration);
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let detail = stderr
-            .lines()
-            .rev()
-            .find(|line| !line.trim().is_empty())
-            .unwrap_or("(stderr 出力なし)");
-        return Err(format!(
-            "codex exec が異常終了 (code={:?}): {detail}",
-            output.status.code()
-        ));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-#[allow(dead_code)]
-fn extract_json_from_codex_stdout(stdout: &str) -> Result<Value, String> {
-    for line in stdout.lines().rev() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('{') && trimmed.ends_with('}') {
-            if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
-                return Ok(value);
-            }
-        }
-    }
-
-    let codex_marker_pos = stdout
-        .rfind("\ncodex\n")
-        .map(|idx| idx + "\ncodex\n".len())
-        .unwrap_or(0);
-    let response_section = &stdout[codex_marker_pos..];
-    if let Some(value) = extract_first_json_object(response_section) {
-        return Ok(value);
-    }
-
-    if let Some(value) = extract_first_json_object(stdout) {
-        return Ok(value);
-    }
-
-    serde_json::from_str(stdout.trim())
-        .map_err(|e| format!("JSON extract failed (all strategies): {e}"))
-}
-
-#[allow(dead_code)]
-fn extract_first_json_object(input: &str) -> Option<Value> {
-    let start = input.find('{')?;
-    let mut depth = 0i32;
-    let mut in_string = false;
-    let mut escape = false;
-    let bytes = input[start..].as_bytes();
-    for (i, &b) in bytes.iter().enumerate() {
-        if escape {
-            escape = false;
-            continue;
-        }
-        if in_string {
-            if b == b'\\' {
-                escape = true;
-            } else if b == b'"' {
-                in_string = false;
-            }
-            continue;
-        }
-        match b {
-            b'"' => in_string = true,
-            b'{' => depth += 1,
-            b'}' => {
-                depth -= 1;
-                if depth == 0 {
-                    let json_str = &input[start..start + i + 1];
-                    if let Ok(value) = serde_json::from_str::<Value>(json_str) {
-                        return Some(value);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    None
 }

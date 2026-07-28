@@ -31,12 +31,11 @@ import { useScenePromptOverride } from "../lib/store/scenePrompt";
 import { useSkillMode } from "../lib/store/skillMode";
 import { useStoryboardRun } from "../lib/store/storyboardRun";
 import { useToasts } from "../lib/store/toasts";
-import { StoryboardCheckpointDialog } from "./StoryboardCheckpointDialog";
 import { StoryboardCutCard } from "./StoryboardCutCard";
 import { SkillRunActions } from "./SkillRunActions";
 import { extractDropped, isImageDrop, setDragRef } from "../lib/dragRef";
 import { sendImageToPlanForRediscuss } from "../lib/sendToPlan";
-import { GenerationGauge } from "./GenerationGauge";
+import { GenerationGauge, type GenerationGaugeMode } from "./GenerationGauge";
 
 export function GenerationWorkspace() {
   const activeTab = useWorkspace((s) => s.activeTab);
@@ -346,7 +345,6 @@ export function Timeline() {
                 {orderedBatches.map((batch) => (
                   <BatchBlock
                     key={`${batch.startedAt}-${batch.count}`}
-                    batchId={batch.batchId}
                     workers={batch.workers}
                     count={batch.count}
                     startedAt={batch.startedAt}
@@ -755,7 +753,6 @@ function gridColsClass(size: TimelineSize): string {
 }
 
 function BatchBlock({
-  batchId,
   workers,
   count,
   startedAt,
@@ -766,7 +763,6 @@ function BatchBlock({
   compareMode,
   batchStatus,
 }: {
-  batchId: string;
   workers: BatchWorker[];
   count: number;
   startedAt?: number;
@@ -782,7 +778,9 @@ function BatchBlock({
   const total = count;
 
   let status: string;
-  if (batchStatus === "cancelled") status = "中止 (credits 消費済)";
+  // credits は外部 provider の語彙。中止できるのは codex 経路だけなので、
+  // ここで credits に言及すると codex 経路にだけ嘘をつくことになる (2026-07-28)。
+  if (batchStatus === "cancelled") status = "中止しました";
   else if (batchStatus === "cancelling") status = "中止中...";
   else if (completed === total) status = `完了 ${completed}枚`;
   else if (failed > 0 && completed + failed === total)
@@ -802,24 +800,20 @@ function BatchBlock({
           />
         </div>
         <div className="ml-auto flex shrink-0 items-center gap-2">
-          {batchStatus === "running" && provider === "higgsfield" && (
-            <button
-              type="button"
-              onClick={() => {
-                void useBatches.getState().cancelBatch(batchId).catch(console.error);
-              }}
-              className="inline-flex items-center gap-1 rounded-md border border-red-400/40 bg-red-500/10 px-1.5 py-0.5 text-[10px] font-bold text-red-300 hover:bg-red-500/20"
-              title="ローカル待機を中止します。サーバー側ジョブは完遂、credits は消費されます。"
-            >
-              中止 (credits 消費)
-            </button>
-          )}
+          {/*
+            2026-07-28: higgsfield 限定の中止ボタン (credits 消費を断り書きしていた) を削除した。
+            外部 provider の生成は止められないのに押せてしまい、押すとカードが
+            cancelled になった後で完了表示に復活する実害があった (batches.ts の
+            cancelBatch コメント参照)。パネル側の決定 (isStoppableProvider の
+            allow-list で外部 provider には中止を出さない) と揃える。
+            「もう見たくない」用途はパネルの × (dismissJob) が既に担っている。
+          */}
           {batchStatus === "cancelling" && (
             <span className="text-[10px] font-bold text-red-400">中止中...</span>
           )}
           {batchStatus === "cancelled" && (
             <span className="text-[10px] font-bold text-red-400">
-              中止 (credits 消費済)
+              中止しました
             </span>
           )}
           {startedAt && (
@@ -841,6 +835,8 @@ function BatchBlock({
             key={worker.idx}
             worker={worker}
             compareMode={compareMode}
+            provider={provider}
+            batchCancelled={batchStatus === "cancelled" || batchStatus === "cancelling"}
             siblings={workers
               .filter(
                 (w): w is Extract<BatchWorker, { status: "completed" }> =>
@@ -916,11 +912,32 @@ function WorkerTile({
   worker,
   siblings,
   compareMode,
+  batchCancelled,
+  provider,
 }: {
   worker: BatchWorker;
   siblings?: string[];
+  /**
+   * このバッチの provider (2026-07-28 追加)。ゲージの学習バケット選択にのみ使う。
+   * 外部 provider は codex 経路と所要時間の桁が違うため、同じバケットで学習させると
+   * 推定の前提が崩れる。
+   */
+  provider?: string;
   /** 比較モード (各モデル1枚) のバッチか。再生成ボタンの出し分けに使う。 */
   compareMode?: boolean;
+  /**
+   * バッチ全体が中止されたか (2026-07-27 追加)。
+   *
+   * ## なぜ要るか (実機で踏んだ不具合)
+   * 「やめる」でバッチを中止しても、タイルは worker.status しか見ていないため
+   * **「生成中 14秒」のまま秒数が増え続けていた**。バッチのヘッダーには
+   * 中止した旨が出ているのに、その下のタイルが動いて見える、
+   * という食い違いが起きる。
+   *
+   * worker 個別の status は Rust からのイベントで更新されるが、中止時は
+   * そのイベントが来ないまま止まるので、**バッチ側の状態で上書きする**必要がある。
+   */
+  batchCancelled?: boolean;
 }) {
   const caption = worker.modelDisplayName;
   const canSendToVideo = worker.mediaType !== "video";
@@ -931,7 +948,20 @@ function WorkerTile({
     worker.status === "running" || worker.status === "pending"
       ? worker.runningAt
       : undefined;
-  const isRunning = worker.status === "running" && workerStartedAt != null;
+  // 中止されたバッチのタイルは、Rust から完了イベントが来ないまま止まるので
+  // running のまま残る。バッチ側の中止状態で上書きし、秒数の進行を止める。
+  const isRunning =
+    !batchCancelled && worker.status === "running" && workerStartedAt != null;
+  // ゲージの学習バケット。外部 provider は codex 経路と所要時間の桁が違うため
+  // 分離する (2026-07-28)。Higgsfield は画像と動画でさらに桁が違うので別バケット。
+  const gaugeMode: GenerationGaugeMode =
+    provider === "magnific"
+      ? "magnific"
+      : provider === "higgsfield"
+        ? worker.mediaType === "video"
+          ? "higgsfield-video"
+          : "higgsfield"
+        : "batch";
 
   const elapsed = useElapsedSeconds(isRunning, workerStartedAt);
   if (worker.status === "completed") {
@@ -1025,19 +1055,20 @@ function WorkerTile({
           </>
         ) : (
           <>
-            {/* スピナー: 動いていることを可視化 (DEV-PLAYBOOK §6 C) */}
-            <Spinner />
+            {/* 中止済みは動いていないのでスピナーを回さない (動いて見せない) */}
+            {!batchCancelled && <Spinner />}
             {/* semaphore 待ち (pending) の worker は「待機中」、実際に走り出した
                 (running) worker は「生成中」+ 経過秒。MAX_CONCURRENT=3 で 4 枚目
-                以降は順番待ちなので、待機中に経過秒を出すと誤解を招く。 */}
-            <span>{isRunning ? "生成中" : "待機中"}</span>
+                以降は順番待ちなので、待機中に経過秒を出すと誤解を招く。
+                中止されたバッチは「中止」と出す (待機中だと再開すると誤解される)。 */}
+            <span>{batchCancelled ? "中止" : isRunning ? "生成中" : "待機中"}</span>
             {isRunning && elapsed !== null && (
               <>
                 <span className="font-mono text-[9px] font-medium text-neutral-500">
                   {formatElapsed(elapsed)}
                 </span>
                 <div className="mt-1 w-3/4">
-                  <GenerationGauge startedAt={workerStartedAt} mode="batch" />
+                  <GenerationGauge startedAt={workerStartedAt} mode={gaugeMode} />
                 </div>
               </>
             )}
@@ -1213,36 +1244,10 @@ function StoryboardRunPanel() {
   const totalCuts = run.totalCuts || run.params?.sceneConstruction?.total_cuts || cuts.length;
   const done = cuts.filter((cut) => cut.status === "confirmed").length;
   const progress = totalCuts > 0 ? Math.round((done / totalCuts) * 100) : 0;
-  const checkpointCuts = cuts.slice(0, 3);
 
   return (
     <section className="relative flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-[#2a2a2a] bg-[#181818]">
-      {run.checkpointCutId && (
-        <StoryboardCheckpointDialog
-          cuts={checkpointCuts}
-          onContinue={run.continueCheckpoint}
-          onCancel={async () => {
-            const cancelled = await run.cancelCheckpoint();
-            if (!cancelled) return;
-            pushToast({ kind: "info", text: "生成を中止しました。ここまでのカットは残ります。", ttlMs: 2800 });
-          }}
-          onReset={async () => {
-            // 停止中の Rust ループへ cancel を送ってから local を初期化する
-            // (cancel を送らないと Rust ループが await 停止したまま残る)。
-            const cancelled = await run.cancelCheckpoint();
-            if (!cancelled) return;
-            run.reset();
-            pushToast({ kind: "info", text: "方向性チェックをリセットしました。", ttlMs: 2400 });
-          }}
-          onRegenerateCut={() => {
-            // 2026-07-27: 以前は continueCheckpoint() を呼んでいた。つまり
-            // 「作り直す」を押すと再生成されないまま生成が先へ進んでいた
-            // (押した意図と逆の結果になる最悪の形)。ストアの regenerateCut が
-            // 実際の再生成を持つようになったので、そちらへ繋ぐ。
-            if (run.checkpointCutId) run.regenerateCut(run.checkpointCutId);
-          }}
-        />
-      )}
+      {/* S3 (2026-07-28): 方向性チェックのダイアログは撤去 (停止区間が消えたため) */}
 
       <div className="border-b border-[#242424] bg-[#161616] px-4 py-3">
         <div className="flex items-center justify-between gap-3">

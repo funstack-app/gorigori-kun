@@ -34,6 +34,51 @@ export type GenerationKind =
   | "video"
   | "aiEdit";
 
+/**
+ * 中止 (cancel_generation) が実際に効く種類か (2026-07-27 追加 / 2026-07-28 更新)。
+ *
+ * ## なぜ要るか (Fable 5 評価者の指摘 blocking#1)
+ *
+ * 中止ボタンを全種類のジョブ行に出していたが、**Rust の run_id 台帳に届く経路は
+ * batch / multiangle / storyboard 系だけ**。`beginDirectRun` で直接パネルへ登録する
+ * 経路 (comic / aiEdit) の ID は Rust 側に存在しない。
+ *
+ * Phase 1 時点の cancel_generation は未知IDでも marked:true / terminated:0 を返したため、
+ * UI が「中止しました（実行中のものは無く…）」と表示するのに何も止まらなかった
+ * ——「効かないボタン + 嘘の完了表示」の同型再発だった。
+ * **Phase 2 で Rust 側は found:false を返し印も付けない**ようになり、嘘の表示自体は解消済み
+ * (worker_registry.rs の claim_cancellable_run)。
+ *
+ * ## comic を足した理由 (2026-07-28)
+ *
+ * comic は 2026-07-28 の direct-run レジストリ (`store/directRun.ts`) で、
+ * **子 batch run (Rust 台帳に実在する `batch-<id>`) へ中止を橋渡しできる**ように
+ * なったため追加した。親 run ID 自体は今も Rust に存在しないが、中止は
+ * 保持している子 batchId へ届くので本物の中止になる。
+ *
+ * ここに種類を足す条件は次のいずれか:
+ *   - その経路が Rust の `run_id` を台帳へ届ける (`WorkerPidGuard::register`)
+ *   - directRun レジストリが子 batch を保持する (parent → children)
+ *
+ * aiEdit は配線が未了 (S-C) のため据え置く。
+ * 「押せるが必ず失敗するボタンを置かない」原則自体は変えていない
+ * ——本物の中止になるから出す、という判断。
+ */
+export const CANCELLABLE_KINDS: ReadonlySet<GenerationKind> = new Set<GenerationKind>([
+  "batch",
+  "multiangle",
+  "storyboard",
+  "expressionSet",
+  "comic",
+  "productSet",
+  "characterSheet",
+  "sceneRecreate",
+]);
+
+export function isCancellableKind(kind: GenerationKind): boolean {
+  return CANCELLABLE_KINDS.has(kind);
+}
+
 export const GENERATION_KIND_LABEL: Record<GenerationKind, string> = {
   batch: "画像生成",
   multiangle: "マルチアングル",
@@ -80,6 +125,16 @@ type GenerationStatusState = {
   /** 生成を開始する。同じ id なら上書きせず既存を返す。 */
   start: (input: { id: string; kind: GenerationKind; total?: number }) => void;
   /** 並列稼働数を更新する。 */
+  /**
+   * ジョブ ID を差し替える (2026-07-27 追加)。
+   *
+   * バッチ生成はフロントが先に仮 ID (`local-...`) でカードを出し、Rust から
+   * Started イベントが来た時点で本物の ID (`batch-...`) に差し替える。
+   * このときパネル側のジョブ ID を移さないと、**「やめる」で Rust に渡す ID が
+   * 仮 ID のままになり、Rust 側の run_id と一致せず1件も止まらない**
+   * (実機で踏んだ: 「やめました」と出るのにカードは生成中のまま進む)。
+   */
+  migrateId: (fromId: string, toId: string) => void;
   setRunning: (id: string, running: number) => void;
   /** 1枚完了。 */
   addCompleted: (id: string, count?: number) => void;
@@ -131,6 +186,17 @@ export const useGenerationStatus = create<GenerationStatusState>((set) => ({
           },
         },
       };
+    }),
+
+  migrateId: (fromId, toId) =>
+    set((s) => {
+      const job = s.jobs[fromId];
+      if (!job || fromId === toId) return s;
+      const next = { ...s.jobs };
+      delete next[fromId];
+      // 移行先に既にジョブがある場合は上書きしない (二重登録の保護)。
+      next[toId] = next[toId] ?? { ...job, id: toId };
+      return { jobs: next };
     }),
 
   setRunning: (id, running) =>
@@ -388,6 +454,60 @@ export function beginDirectRun(kind: GenerationKind, total: number, id?: string)
       setTimeout(() => useGenerationStatus.getState().clear(runId), 4000);
     },
   };
+}
+
+/**
+ * 全ジョブを横断した「いまの合計」。
+ *
+ * ## なぜこれが要るか (2026-07-27)
+ *
+ * ヘッダー(BoardHeader)は従来 batches / storyboardRun / multiAngleRun の
+ * **3ストアを直接見て** 実行中かどうかを判定していた。そのため
+ * 残り8スキル(表情差分・漫画・シーン再現・EC納品セット・キャラ登録・3D等)が
+ * 実行中でも「生成準備OK」と表示され、**動いているのに何もしていないと嘘をつく**
+ * 状態になっていた。実ユーザーFB「この画像のまま20分くらい動かない」
+ * 「生成中から何分かかるか分からない」の直接の原因。
+ *
+ * 集計をこの1関数に寄せ、ヘッダーも右上パネルも**ここだけを見る**ようにする。
+ * 表示箇所ごとに別々の計算をすると、同じ画面で数字が食い違う。
+ *
+ * `waiting` は「順番待ちで、まだ1枚も走り出していないジョブの残り枚数」。
+ * セマフォ上限6で30枚頼むと24枚が待つが、この事実が今までUIに一切出ていなかった。
+ */
+export type GenerationTotals = {
+  /** いま並列で走っている枚数 */
+  running: number;
+  /** 順番待ちの枚数 (total が分かっているジョブのみ数えられる) */
+  waiting: number;
+  completed: number;
+  failed: number;
+  /** 終了していないジョブがあるか。ヘッダーのバッジ表示に使う */
+  active: boolean;
+  /** 未終了ジョブの数。1件なら種類名を出す等の分岐に使う */
+  activeJobCount: number;
+};
+
+export function selectTotals(jobs: Record<string, GenerationJob>): GenerationTotals {
+  let running = 0;
+  let waiting = 0;
+  let completed = 0;
+  let failed = 0;
+  let activeJobCount = 0;
+
+  for (const job of Object.values(jobs)) {
+    completed += job.completed;
+    failed += job.failed;
+    if (job.finished) continue;
+    activeJobCount += 1;
+    running += job.running;
+    if (typeof job.total === "number") {
+      // 待ち = 予定枚数 - (決着済み + 実行中)。負にはしない。
+      const remaining = job.total - (job.completed + job.failed + job.running);
+      if (remaining > 0) waiting += remaining;
+    }
+  }
+
+  return { running, waiting, completed, failed, active: activeJobCount > 0, activeJobCount };
 }
 
 /** 進まない理由を人間の言葉にする。UI はこれを表示すればよい。 */

@@ -32,6 +32,20 @@ pub const EVENT_MULTIANGLE: &str = "codex://multiangle";
 /// payload は kind discriminator 付きの camelCase JSON。
 pub const EVENT_CHARACTER_SHEET: &str = "codex://character-sheet";
 
+/// `codex://gen-concurrency` — 画像生成の同時実行数が自動で変わったときの通知。
+/// payload: `{ kind: "genConcurrencyDegraded", from: number, to: number, message: string }`
+/// 429 を検知した降格 (9→6) をユーザーへ1度だけ知らせる。
+pub const EVENT_GEN_CONCURRENCY: &str = "codex://gen-concurrency";
+
+/// `codex://gen-phase` — 画像1枚の生成フェーズ遷移 (設計書 S1)。
+/// payload: `{ runId, imageIndex?, phase: "queued"|"thinking"|"drawing"|"done", position?: number }`
+///
+/// なぜ要るか: 送信から完成までの数十秒が UI 上では1枚の無反応なスピナーで、
+/// 「動いているのか止まっているのか」がユーザーから区別できなかった。
+/// **既に app-server が発火しているのに誰も受信していない通知** (`item/started`) を
+/// 購読して、状態が変わり続けることを見せる。枠 (サブスク quota) は消費しない。
+pub const EVENT_GEN_PHASE: &str = "codex://gen-phase";
+
 /// `codex://edit-model-progress` — 編集タブ用AIモデルDL進捗。
 pub const EVENT_EDIT_MODEL_PROGRESS: &str = "codex://edit-model-progress";
 

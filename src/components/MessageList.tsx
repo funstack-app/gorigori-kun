@@ -3,7 +3,12 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import type { ImageGenerationItem, Item, Turn } from "../lib/codex-types";
 import { useImagePreview } from "../lib/store/imagePreview";
 import { useImages } from "../lib/store/images";
-import { useBatches, type Batch, type BatchWorker } from "../lib/store/batches";
+import {
+  GEN_PHASE_LABEL,
+  useBatches,
+  type Batch,
+  type BatchWorker,
+} from "../lib/store/batches";
 import { ContextMenu } from "./ContextMenu";
 import { buildGalleryItemMenu } from "./galleryItemMenu";
 import { RegisterPresetDialog } from "./RegisterPresetDialog";
@@ -709,10 +714,30 @@ function BatchWorkerCell({
   const caption = worker.modelDisplayName;
 
   if (worker.status === "pending" || worker.status === "running") {
+    // フェーズ未受信 (外部 provider や旧経路) では従来どおりスピナーだけ出す。
+    const phase = worker.phase;
+    const label =
+      phase === "queued" && worker.queuePosition && worker.queuePosition > 0
+        ? `${worker.queuePosition + 1}番目に開始します`
+        : phase
+          ? GEN_PHASE_LABEL[phase]
+          : null;
+    // 描画中だけシマー (光の帯が流れる) を重ねる。実際に絵が描かれている区間と
+    // 1対1で対応させるので、演出が実態から離れない。
+    const drawing = phase === "drawing";
     return (
       <div className="min-w-0">
-        <div className="flex aspect-square items-center justify-center rounded-md bg-neutral-100 ring-1 ring-neutral-200">
+        <div
+          className={`relative flex aspect-square flex-col items-center justify-center gap-1.5 overflow-hidden rounded-md bg-neutral-100 px-1 text-center ring-1 ring-neutral-200 ${
+            drawing ? "gori-shimmer" : ""
+          }`}
+        >
           <Spinner silent />
+          {label && (
+            <span className="relative z-10 text-[9px] leading-tight text-neutral-500">
+              {label}
+            </span>
+          )}
         </div>
         {caption && (
           <p className="mt-1 truncate text-[10px] font-bold text-pink-700">
@@ -772,7 +797,9 @@ function BatchWorkerCell({
           alt="generated"
           loading="lazy"
           decoding="async"
-          className="h-full w-full object-cover"
+          className={`h-full w-full object-cover ${
+            worker.justCompleted ? "gori-blur-up" : ""
+          }`}
           onError={() => {
             if (retried.current) return;
             retried.current = true;

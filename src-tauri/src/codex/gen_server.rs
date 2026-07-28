@@ -12,22 +12,24 @@ use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command as TokioCommand};
-use tokio::sync::{broadcast, watch, OwnedSemaphorePermit};
+use tokio::sync::{broadcast, watch};
 use tokio::time::{interval, timeout, MissedTickBehavior};
 
 use crate::codex::process::{
     enriched_path, no_window_flag, resolve_codex_binary, AppServerProcess, StderrBuffer,
 };
 use crate::codex::rpc::{handshake, RpcClient, RpcNotification};
-use crate::commands::gen_queue::GLOBAL_GEN_SEMAPHORE;
-use crate::commands::worker_registry::WorkerPidGuard;
+use crate::commands::gen_metrics;
+use crate::commands::gen_queue::{self, GLOBAL_GEN_SEMAPHORE};
+use crate::commands::worker_registry::{
+    WorkerPidGuard, RESIDENT_GEN_SERVER_WORKER_KIND,
+};
 use crate::state::AppState;
 
 pub(crate) const GENERATION_TIMEOUT: Duration = Duration::from_secs(900);
-const GEN_SERVER_WORKER_KIND: &str = "batch-app-server";
 const WORKER_REGISTRY_FILE: &str = "worker-pids.json";
 // ディレクトリ名の正本は codex::home 側に置く (storage_cleanup の掃除対象列挙と
 // 同じ値を2箇所に持たせないため。2026-07-25: この値が掃除から漏れて 2.5GB 溜まった)
@@ -35,6 +37,85 @@ const WORKER_REGISTRY_FILE: &str = "worker-pids.json";
 use crate::codex::home::GEN_CODEX_HOME_LEAF as GEN_CODEX_HOME_DIR;
 const INTERRUPT_TIMEOUT: Duration = Duration::from_secs(5);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// 画像1枚がいまどの段階にいるか (設計書 S1)。
+///
+/// 「順番待ち → AI準備中 → 描画中 → 完成」の4段。表示文言はフロント側が持ち、
+/// ここは**状態の名前だけ**を運ぶ (Rust に日本語文言を置くと、UI 文言の変更が
+/// バックエンド改修になる)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GenPhase {
+    /// ① セマフォの空き待ち。まだ1バイトも送っていない。
+    Queued,
+    /// ② turn/start 発行済み。LLM が構図を考えている区間。
+    Thinking,
+    /// ③ `item/started`(imageGeneration) を受信。実際に絵を描き始めた。
+    Drawing,
+    /// ④ 画像の保存パスを受け取った。
+    Done,
+}
+
+impl GenPhase {
+    /// フロントの payload に載る値。TS 側 `GenPhaseName` と1対1で対応する。
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Thinking => "thinking",
+            Self::Drawing => "drawing",
+            Self::Done => "done",
+        }
+    }
+}
+
+/// 1枚ぶんのフェーズ通知の宛先。run_id が無い経路 (単発生成) では
+/// 何も emit しない — 宛先の無いイベントを投げても受け手が結び付けられないため。
+#[derive(Clone)]
+pub(crate) struct GenPhaseReporter {
+    app: AppHandle,
+    run_id: Option<String>,
+    image_index: Option<u32>,
+}
+
+impl GenPhaseReporter {
+    pub(crate) fn new(app: &AppHandle, run_id: Option<&str>, image_index: Option<u32>) -> Self {
+        Self {
+            app: app.clone(),
+            run_id: run_id.map(str::to_owned),
+            image_index,
+        }
+    }
+
+    /// フェーズ遷移を1件送る。**送信失敗は生成を失敗させない** (計測ログと同じ扱いで、
+    /// 演出のための通知が生成本体を壊してはならない)。
+    pub(crate) fn emit(&self, phase: GenPhase) {
+        self.emit_with_position(phase, None);
+    }
+
+    /// `queued` のときだけ「あと何枚待ちか」を添える。
+    pub(crate) fn emit_with_position(&self, phase: GenPhase, position: Option<u32>) {
+        let Some(run_id) = self.run_id.as_deref() else {
+            return;
+        };
+        let mut payload = Map::new();
+        payload.insert("runId".into(), Value::String(run_id.to_string()));
+        if let Some(index) = self.image_index {
+            payload.insert("imageIndex".into(), Value::Number(index.into()));
+        }
+        payload.insert("phase".into(), Value::String(phase.as_str().to_string()));
+        if let Some(position) = position {
+            payload.insert("position".into(), Value::Number(position.into()));
+        }
+        if let Err(error) = self
+            .app
+            .emit(crate::events::EVENT_GEN_PHASE, Value::Object(payload))
+        {
+            tracing::warn!(
+                target: "codex.gen_server",
+                "生成フェーズ通知を送れませんでした (生成には影響しません): {error}"
+            );
+        }
+    }
+}
 
 /// AppState に 1 本だけ保持する生成専用プロセス。
 pub(crate) struct GenServerProcess {
@@ -104,6 +185,33 @@ const MAX_TURNS_PER_SERVER: u64 = 60;
 #[allow(clippy::too_many_arguments)]
 #[cfg(windows)]
 pub(crate) async fn generate_image(
+    app: &AppHandle,
+    state: &AppState,
+    prompt: &str,
+    image_paths: &[String],
+    cwd: Option<&str>,
+    model: Option<&str>,
+    effort: Option<&str>,
+    feature: &'static str,
+) -> Result<PathBuf, String> {
+    generate_image_for_run(
+        app,
+        state,
+        prompt,
+        image_paths,
+        cwd,
+        model,
+        effort,
+        None,
+        None,
+        feature,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+#[cfg(windows)]
+pub(crate) async fn generate_image_for_run(
     _app: &AppHandle,
     _state: &AppState,
     _prompt: &str,
@@ -111,6 +219,9 @@ pub(crate) async fn generate_image(
     _cwd: Option<&str>,
     _model: Option<&str>,
     _effort: Option<&str>,
+    _run_id: Option<&str>,
+    _image_index: Option<u32>,
+    _feature: &'static str,
 ) -> Result<PathBuf, String> {
     Err("resident path disabled on windows".to_string())
 }
@@ -125,8 +236,91 @@ pub(crate) async fn generate_image(
     cwd: Option<&str>,
     model: Option<&str>,
     effort: Option<&str>,
+    feature: &'static str,
 ) -> Result<PathBuf, String> {
+    generate_image_for_run(
+        app,
+        state,
+        prompt,
+        image_paths,
+        cwd,
+        model,
+        effort,
+        None,
+        None,
+        feature,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+#[cfg(not(windows))]
+pub(crate) async fn generate_image_for_run(
+    app: &AppHandle,
+    state: &AppState,
+    prompt: &str,
+    image_paths: &[String],
+    cwd: Option<&str>,
+    model: Option<&str>,
+    effort: Option<&str>,
+    run_id: Option<&str>,
+    image_index: Option<u32>,
+    feature: &'static str,
+) -> Result<PathBuf, String> {
+    // T0: 1枚の区間タイムを jsonl へ排気する。どの脱出経路を通っても
+    // 必ず1行残るよう、成功/失敗の分岐すべてで record する。
+    // feature は呼び出し元の機能名 (batch / storyboard / multiangle)。
+    // 固定値にすると機能別の前後比較ができない。
+    let mut timer = gen_metrics::GenTimer::start("resident", feature);
+    let phase = GenPhaseReporter::new(app, run_id, image_index);
+    let result = generate_image_measured(
+        app,
+        state,
+        prompt,
+        image_paths,
+        cwd,
+        model,
+        effort,
+        run_id,
+        &phase,
+        &mut timer,
+    )
+    .await;
+    match &result {
+        Ok(_) => timer.record_ok(),
+        Err(error) => {
+            // 429 を観測したら同時実行数を自動で降格する (T3 のフェイルセーフ)。
+            note_rate_limit(app, error);
+            timer.record_err(error);
+        }
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+#[cfg(not(windows))]
+async fn generate_image_measured(
+    app: &AppHandle,
+    state: &AppState,
+    prompt: &str,
+    image_paths: &[String],
+    cwd: Option<&str>,
+    model: Option<&str>,
+    effort: Option<&str>,
+    run_id: Option<&str>,
+    phase: &GenPhaseReporter,
+    timer: &mut gen_metrics::GenTimer,
+) -> Result<PathBuf, String> {
+    let run_id = run_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if run_is_cancelled(run_id) {
+        return Err(gen_queue::cancelled_error());
+    }
+
     let server = ensure_client(app, state).await?;
+    // ② 常駐サーバーの起動 + handshake。再利用できたときはほぼ0になる。
+    timer.server_ready();
     let client = &server.client;
 
     let mut thread_params = Map::new();
@@ -162,10 +356,26 @@ pub(crate) async fn generate_image(
         turn_params.insert("effort".into(), Value::String(effort.to_string()));
     }
 
-    let permit = Arc::clone(&*GLOBAL_GEN_SEMAPHORE)
-        .acquire_owned()
-        .await
-        .map_err(|_| "画像生成キューが閉じられました".to_string())?;
+    if run_is_cancelled(run_id) {
+        return Err(gen_queue::cancelled_error());
+    }
+    // ① 順番待ちの開始を先に知らせる。ここを過ぎるまで UI は「送ったのに無反応」に
+    // 見えていた。空きがあれば下の acquire は即座に返るので、queued は一瞬で
+    // thinking に上書きされる (待ち0枚のときに嘘の待機表示を出さない)。
+    //
+    // position は「自分の前に何枚走っているか」。available_permits() から求める。
+    // 実行中でなく空き枠を見るのは、降格 (9→6) 中でも実効の待ち数になるため。
+    let position = (gen_queue::current_limit() as u32)
+        .saturating_sub(GLOBAL_GEN_SEMAPHORE.available_permits() as u32);
+    phase.emit_with_position(GenPhase::Queued, Some(position));
+    // RAII: 以降どの経路で抜けても Drop が債務返済を通す (直接 drop できない)。
+    let permit = gen_queue::OwnedGenPermit::acquire(Arc::clone(&*GLOBAL_GEN_SEMAPHORE)).await?;
+    // ① 順番待ち (セマフォ空き待ち)。
+    timer.permit_acquired();
+    // 待機中にキャンセルされた turn は共有サーバーへ発行しない。
+    if run_is_cancelled(run_id) {
+        return Err(gen_queue::cancelled_error());
+    }
     let started_at = Instant::now();
     let turn_result = client
         .request_raw("turn/start", Value::Object(turn_params))
@@ -173,9 +383,13 @@ pub(crate) async fn generate_image(
         .map_err(|error| format!("生成用 turn/start に失敗: {error}"))?;
     let turn_id = extract_turn_id(&turn_result)
         .ok_or_else(|| "生成用 turn/start の応答から turnId を取得できません".to_string())?;
+    // ② turn を発行できた = LLM が動き始めた。ここから描画開始までが「構図を考える」区間。
+    phase.emit(GenPhase::Thinking);
 
     let remaining = GENERATION_TIMEOUT.saturating_sub(started_at.elapsed());
-    match timeout(
+    // 描画開始通知の受信有無。成功でも失敗でも1行に残すので、match の外で持つ。
+    let drawing_seen = AtomicBool::new(false);
+    let wait_result = timeout(
         remaining,
         wait_for_saved_path(
             client,
@@ -183,11 +397,33 @@ pub(crate) async fn generate_image(
             &thread_id,
             &turn_id,
             &server.poisoned,
+            run_id,
+            phase,
+            &drawing_seen,
         ),
     )
-    .await
-    {
-        Ok(Ok(path)) => Ok(path),
+    .await;
+    if drawing_seen.load(Ordering::Relaxed) {
+        timer.drawing_started();
+    }
+    match wait_result {
+        Ok(Ok(path)) => {
+            // ③④⑤ turn/start から画像の保存通知まで。
+            timer.turn_done();
+            // 降格中は permit をセマフォへ戻さず握り潰す (上限を実際に下げる)。
+            drop(permit);
+            // 完了通知とキャンセルが競合した場合も、キャンセル後の成果は採用しない。
+            if run_is_cancelled(run_id) {
+                Err(gen_queue::cancelled_error())
+            } else {
+                // ⑥ 保存確認 (wait_for_saved_path 内の is_file リトライ) の完了時点。
+                timer.saved();
+                // 完成。キャンセル済みの run では出さない (上の分岐で先に抜ける) ——
+                // 中止したのに「完成」と表示するのは嘘の完了表示になる。
+                phase.emit(GenPhase::Done);
+                Ok(path)
+            }
+        }
         Ok(Err(error)) => {
             if error.hold_permit {
                 spawn_permit_watchdog(
@@ -197,8 +433,14 @@ pub(crate) async fn generate_image(
                     turn_id,
                     server.process_stopped.clone(),
                 );
+            } else {
+                drop(permit);
             }
-            Err(error.message)
+            if run_is_cancelled(run_id) {
+                Err(gen_queue::cancelled_error())
+            } else {
+                Err(error.message)
+            }
         }
         Err(_) => {
             // interrupt の RPC 成功と turn/completed の両方を確認する。
@@ -220,11 +462,17 @@ pub(crate) async fn generate_image(
                     turn_id,
                     server.process_stopped.clone(),
                 );
+            } else {
+                drop(permit);
             }
-            Err(format!(
-                "画像生成がタイムアウトしました（{}秒）。プロンプトを短くするか、時間をおいて再試行してください。",
-                GENERATION_TIMEOUT.as_secs()
-            ))
+            if run_is_cancelled(run_id) {
+                Err(gen_queue::cancelled_error())
+            } else {
+                Err(format!(
+                    "画像生成がタイムアウトしました（{}秒）。プロンプトを短くするか、時間をおいて再試行してください。",
+                    GENERATION_TIMEOUT.as_secs()
+                ))
+            }
         }
     }
 }
@@ -235,21 +483,129 @@ pub(crate) fn is_timeout_error(error: &str) -> bool {
     error.contains("画像生成がタイムアウトしました")
 }
 
+/// 生成失敗が429なら同時実行数を自動降格し、ユーザーへ1度だけ通知する (T3)。
+///
+/// 上限を9へ上げた得は確実だが、混雑時間帯の429再発リスクは残る
+/// (2026-07-17 の実測は特定時間帯のもの)。人が設定を戻す運用に頼らず、
+/// 観測したその場で6へ落とす。降格は当該プロセスが終了するまで維持する
+/// (混雑が続く間に上げ直して再発させない)。
+pub(crate) fn note_rate_limit(app: &AppHandle, error: &str) {
+    if !gen_queue::is_rate_limit_error(error) {
+        return;
+    }
+    if !gen_queue::degrade_on_rate_limit() {
+        // すでに降格済み。通知の重複は出さない。
+        return;
+    }
+    let payload = json!({
+        "kind": "genConcurrencyDegraded",
+        "from": gen_queue::NORMAL_LIMIT,
+        "to": gen_queue::DEGRADED_LIMIT,
+        "message": format!(
+            "生成サーバーが混雑しているため、同時生成数を{}枚から{}枚に自動で下げました。生成は続きます。",
+            gen_queue::NORMAL_LIMIT,
+            gen_queue::DEGRADED_LIMIT
+        ),
+    });
+    if let Err(emit_error) = app.emit(crate::events::EVENT_GEN_CONCURRENCY, payload) {
+        tracing::warn!(
+            target: "codex.gen_server",
+            "同時実行数の降格通知を送れませんでした: {emit_error}"
+        );
+    }
+}
+
+/// 常駐サーバーを先に起動しておく (計画書 T4 プリウォーム)。
+///
+/// なぜ: 常駐サーバーは初回生成時に遅延起動するため、「最初の1枚」だけ
+/// プロセス起動 + handshake (最大30秒) を待たされる。生成を発行しなければ
+/// turn は走らず枠は消費しないので、起動だけ先に済ませて先払いにする。
+///
+/// 失敗しても何もしない。次の生成時に従来どおり遅延起動されるだけで、
+/// プリウォームの失敗がアプリの起動や生成を妨げてはならない。
+#[cfg(not(windows))]
+pub fn spawn_prewarm(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let state = app.state::<AppState>();
+        let started = Instant::now();
+        match ensure_client(&app, &state).await {
+            Ok(lease) => {
+                // lease を即 drop して active_turns を戻す。turn は発行しない
+                // ため画像生成は走らず、枠 (サブスク quota) も消費しない。
+                drop(lease);
+                tracing::info!(
+                    target: "codex.gen_server",
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "生成用 app-server をプリウォームしました"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "codex.gen_server",
+                    "生成用 app-server のプリウォームに失敗 (初回生成時に遅延起動されます): {error}"
+                );
+            }
+        }
+    });
+}
+
+/// Windows は常駐経路そのものが無効なので、プリウォームも何もしない。
+#[cfg(windows)]
+pub fn spawn_prewarm(_app: &AppHandle) {}
+
 async fn wait_for_saved_path(
     client: &RpcClient,
     notifications: &mut broadcast::Receiver<RpcNotification>,
     thread_id: &str,
     turn_id: &str,
     poisoned: &AtomicBool,
+    run_id: Option<&str>,
+    phase: &GenPhaseReporter,
+    // `item/started`(imageGeneration) を1度でも受信したら true を立てる。
+    // どの経路 (成功/失敗/中止/タイムアウト) で抜けても呼び出し側が読めるよう、
+    // 戻り値ではなく外から渡された旗に書く (設計書 S1 受入(c) の記録用)。
+    drawing_seen: &AtomicBool,
 ) -> Result<PathBuf, WaitForSavedPathError> {
     let mut health_tick = interval(Duration::from_millis(250));
     health_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     loop {
+        if run_is_cancelled(run_id) {
+            // 共有プロセスを止めず、このrunの turn だけを正規RPCで中断する。
+            let interruption_confirmed =
+                interrupt_or_poison(client, notifications, thread_id, turn_id, poisoned).await;
+            return Err(if interruption_confirmed {
+                WaitForSavedPathError::release(gen_queue::cancelled_error())
+            } else {
+                WaitForSavedPathError::hold(gen_queue::cancelled_error())
+            });
+        }
+
         tokio::select! {
             notification = notifications.recv() => {
                 match notification {
                     Ok(notification) => {
+                        // ③ 描画開始。app-server は以前からこの通知を送っていたが、
+                        // GORI は item/completed しか見ておらず**受信者がいなかった**
+                        // (設計書 1-3)。ここが「LLMが考え中」と「実際に描いている」を
+                        // 区別できる唯一の実データ。
+                        if notification.method == "item/started"
+                            && notification_matches(&notification.params, thread_id, turn_id)
+                            && notification
+                                .params
+                                .get("item")
+                                .and_then(|item| item.get("type"))
+                                .and_then(Value::as_str)
+                                == Some("imageGeneration")
+                        {
+                            phase.emit(GenPhase::Drawing);
+                            // 「描画開始の通知が実際に届いた」事実を計測ログへ残す。
+                            // 届かない環境では false のまま記録され、設計書 S1 の
+                            // fallback (3フェーズへ縮退) を判断する根拠になる。
+                            drawing_seen.store(true, Ordering::Relaxed);
+                        }
+
                         if notification.method == "item/completed"
                             && notification_matches(&notification.params, thread_id, turn_id)
                         {
@@ -334,6 +690,10 @@ async fn wait_for_saved_path(
     }
 }
 
+fn run_is_cancelled(run_id: Option<&str>) -> bool {
+    run_id.map(gen_queue::is_cancelled).unwrap_or(false)
+}
+
 async fn interrupt_or_poison(
     client: &RpcClient,
     notifications: &mut broadcast::Receiver<RpcNotification>,
@@ -355,7 +715,7 @@ async fn interrupt_or_poison(
 }
 
 fn spawn_permit_watchdog(
-    permit: OwnedSemaphorePermit,
+    permit: gen_queue::OwnedGenPermit,
     notifications: broadcast::Receiver<RpcNotification>,
     thread_id: String,
     turn_id: String,
@@ -372,7 +732,7 @@ fn spawn_permit_watchdog(
 }
 
 fn spawn_permit_watchdog_with_timeout(
-    permit: OwnedSemaphorePermit,
+    permit: gen_queue::OwnedGenPermit,
     mut notifications: broadcast::Receiver<RpcNotification>,
     thread_id: String,
     turn_id: String,
@@ -380,7 +740,6 @@ fn spawn_permit_watchdog_with_timeout(
     max_hold: Duration,
 ) {
     tokio::spawn(async move {
-        let _permit = permit;
         let deadline = tokio::time::sleep(max_hold);
         tokio::pin!(deadline);
         let mut notifications_open = true;
@@ -435,6 +794,8 @@ fn spawn_permit_watchdog_with_timeout(
             release_reason,
             "生死不明 turn の番犬が画像生成 permit を解放します"
         );
+        // 降格中は握り潰して実効上限を下げる (通常時はセマフォへ戻る)。
+        drop(permit);
     });
 }
 
@@ -637,7 +998,10 @@ async fn spawn_server(app: &AppHandle) -> Result<GenServerProcess, String> {
             return Err("生成用 Codex app-server の PID を取得できません".to_string());
         }
     };
-    let registration = match WorkerPidGuard::register(app, pid, GEN_SERVER_WORKER_KIND) {
+    // 常駐サーバーは複数runで共有するため run_id を紐づけず、個別キャンセルの
+    // PID停止対象から外す。実行中turnは turn/interrupt で止める。
+    let registration =
+        match WorkerPidGuard::register(app, pid, RESIDENT_GEN_SERVER_WORKER_KIND, None) {
         Ok(registration) => registration,
         Err(error) => {
             let _ = child.kill().await;
@@ -851,7 +1215,7 @@ pub(crate) fn cleanup_stale_registered_servers(app: &AppHandle) {
 
     for entry in entries
         .into_iter()
-        .filter(|entry| entry.kind == GEN_SERVER_WORKER_KIND)
+        .filter(|entry| entry.kind == RESIDENT_GEN_SERVER_WORKER_KIND)
     {
         let Some(command_line) = command_line_for_pid(entry.pid) else {
             continue;
@@ -921,10 +1285,11 @@ fn send_terminate(_pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_thread_id, extract_turn_id, is_gen_server_command, should_replace_server,
-        spawn_permit_watchdog_with_timeout, MAX_TURNS_PER_SERVER,
+        extract_thread_id, extract_turn_id, gen_queue, is_gen_server_command,
+        notification_matches, should_replace_server, spawn_permit_watchdog_with_timeout, GenPhase,
+        MAX_TURNS_PER_SERVER,
     };
-    use serde_json::json;
+    use serde_json::{json, Value};
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::sync::{broadcast, watch, Semaphore};
@@ -945,6 +1310,67 @@ mod tests {
     }
 
     #[test]
+    fn phase_names_match_frontend_contract() {
+        // TS 側 `GEN_PHASE_ORDER` と1文字でもずれるとフェーズ表示が無反応になる。
+        assert_eq!(GenPhase::Queued.as_str(), "queued");
+        assert_eq!(GenPhase::Thinking.as_str(), "thinking");
+        assert_eq!(GenPhase::Drawing.as_str(), "drawing");
+        assert_eq!(GenPhase::Done.as_str(), "done");
+    }
+
+    /// `item/started` の判定を、実際に走らせる emit 経路と同じ条件式で切り出したもの。
+    /// wait_for_saved_path 全体は RpcClient と app-server を要求するため、
+    /// ここでは通知の形だけを対象にする。
+    fn is_drawing_start(notification: &RpcNotification, thread_id: &str, turn_id: &str) -> bool {
+        notification.method == "item/started"
+            && notification_matches(&notification.params, thread_id, turn_id)
+            && notification
+                .params
+                .get("item")
+                .and_then(|item| item.get("type"))
+                .and_then(Value::as_str)
+                == Some("imageGeneration")
+    }
+
+    #[test]
+    fn drawing_phase_fires_only_for_matching_image_generation_start() {
+        let started = RpcNotification {
+            method: "item/started".to_string(),
+            params: json!({
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "item": { "id": "item-1", "type": "imageGeneration", "status": "inProgress" }
+            }),
+        };
+        assert!(is_drawing_start(&started, "thread-1", "turn-1"));
+
+        // 別 turn の通知で他の枠のフェーズを進めない (並列9枚が混線する)。
+        assert!(!is_drawing_start(&started, "thread-1", "turn-2"));
+
+        // 画像以外の item (reasoning 等) では描画中にしない。
+        let reasoning = RpcNotification {
+            method: "item/started".to_string(),
+            params: json!({
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "item": { "id": "item-2", "type": "reasoning" }
+            }),
+        };
+        assert!(!is_drawing_start(&reasoning, "thread-1", "turn-1"));
+
+        // completed は描画開始ではない (done 側で扱う)。
+        let completed = RpcNotification {
+            method: "item/completed".to_string(),
+            params: json!({
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "item": { "id": "item-1", "type": "imageGeneration", "savedPath": "/tmp/a.png" }
+            }),
+        };
+        assert!(!is_drawing_start(&completed, "thread-1", "turn-1"));
+    }
+
+    #[test]
     fn recognizes_cli_and_native_app_server_commands() {
         assert!(is_gen_server_command("/usr/local/bin/codex app-server"));
         assert!(is_gen_server_command("/Applications/GORI/codex-app-server"));
@@ -962,7 +1388,9 @@ mod tests {
     #[tokio::test]
     async fn watchdog_releases_permit_after_matching_turn_completed() {
         let semaphore = Arc::new(Semaphore::new(1));
-        let permit = Arc::clone(&semaphore).acquire_owned().await.unwrap();
+        let permit = gen_queue::OwnedGenPermit::acquire(Arc::clone(&semaphore))
+            .await
+            .unwrap();
         let (notification_tx, notifications) = broadcast::channel(4);
         let (_process_stopped_tx, process_stopped) = watch::channel(false);
         spawn_permit_watchdog_with_timeout(
@@ -988,7 +1416,9 @@ mod tests {
     #[tokio::test]
     async fn watchdog_releases_permit_after_process_stop_confirmation() {
         let semaphore = Arc::new(Semaphore::new(1));
-        let permit = Arc::clone(&semaphore).acquire_owned().await.unwrap();
+        let permit = gen_queue::OwnedGenPermit::acquire(Arc::clone(&semaphore))
+            .await
+            .unwrap();
         let (_notification_tx, notifications) = broadcast::channel(4);
         let (process_stopped_tx, process_stopped) = watch::channel(false);
         spawn_permit_watchdog_with_timeout(
@@ -1009,7 +1439,9 @@ mod tests {
     #[tokio::test]
     async fn watchdog_releases_permit_after_maximum_hold() {
         let semaphore = Arc::new(Semaphore::new(1));
-        let permit = Arc::clone(&semaphore).acquire_owned().await.unwrap();
+        let permit = gen_queue::OwnedGenPermit::acquire(Arc::clone(&semaphore))
+            .await
+            .unwrap();
         let (_notification_tx, notifications) = broadcast::channel(4);
         let (_process_stopped_tx, process_stopped) = watch::channel(false);
         spawn_permit_watchdog_with_timeout(
