@@ -371,6 +371,13 @@ pub fn run() {
             // 前回クラッシュ時に台帳へ残った worker だけを、安全確認後に停止する。
             commands::worker_registry::cleanup_stale_workers(&app.handle());
 
+            // 生成の区間タイム計測 (T0)。保存先を確定させてから記録が有効になる。
+            commands::gen_metrics::init(&app.handle());
+            // 生成用 app-server のプリウォーム (T4)。残骸掃除の**後**に置く
+            // — 先に起動すると、直後の cleanup が今起こしたサーバーを
+            // 掃除対象と誤認しかねない。turn は発行しないので枠は消費しない。
+            crate::codex::gen_server::spawn_prewarm(&app.handle());
+
             // STΛCK 報告 (2026-05-18): Higgsfield 拡張パックの README に
             // 「app.codexframefactory/extensions/ にコピー」と書いてあるが、
             // このディレクトリは存在しない場合がある。初回起動時に強制作成して
@@ -471,14 +478,44 @@ pub fn run() {
             commands::edit_export::edit_export_psd,
             commands::edit_export::edit_export_png,
             commands::edit_fonts::edit_fonts_list,
+            // ── ort (ONNX Runtime) 依存の編集コマンド群 ──────────────────
+            // ort は Windows 限定依存に格下げした (2026-07-28、Intel Mac 対応の復活)。
+            // 非 Windows では commands/edit_unsupported.rs の同名スタブを登録し、
+            // 「この機能は現在 Windows 版のみです」を返す。未登録にしないのは、
+            // フロント (src/lib/ipc.ts) に invoke ラッパが残っており、
+            // 呼ばれた場合に "Command not found" という原因不明のエラーになるため。
+            #[cfg(target_os = "windows")]
             commands::edit_sam2::edit_sam2_embed,
+            #[cfg(target_os = "windows")]
             commands::edit_sam2::edit_sam2_predict,
+            #[cfg(target_os = "windows")]
             commands::edit_ocr::edit_ocr_detect,
+            #[cfg(target_os = "windows")]
             commands::edit_inpaint::edit_inpaint_run,
+            #[cfg(target_os = "windows")]
             commands::edit_grab::edit_grab_object,
+            #[cfg(target_os = "windows")]
             commands::edit_magic::edit_magic_run,
+            #[cfg(target_os = "windows")]
             commands::edit_words::edit_words_segment,
+            #[cfg(target_os = "windows")]
             commands::edit_segment::edit_segment_run,
+            #[cfg(not(target_os = "windows"))]
+            commands::edit_unsupported::edit_sam2_embed,
+            #[cfg(not(target_os = "windows"))]
+            commands::edit_unsupported::edit_sam2_predict,
+            #[cfg(not(target_os = "windows"))]
+            commands::edit_unsupported::edit_ocr_detect,
+            #[cfg(not(target_os = "windows"))]
+            commands::edit_unsupported::edit_inpaint_run,
+            #[cfg(not(target_os = "windows"))]
+            commands::edit_unsupported::edit_grab_object,
+            #[cfg(not(target_os = "windows"))]
+            commands::edit_unsupported::edit_magic_run,
+            #[cfg(not(target_os = "windows"))]
+            commands::edit_unsupported::edit_words_segment,
+            #[cfg(not(target_os = "windows"))]
+            commands::edit_unsupported::edit_segment_run,
             commands::storage_cleanup::storage_cleanup_run,
             commands::storage_cleanup::storage_cleanup_inspect,
             commands::auth::auth_read,
@@ -537,6 +574,7 @@ pub fn run() {
             commands::higgsfield_mcp::higgsfield_mcp_generate_cost,
             commands::higgsfield_mcp::higgsfield_mcp_account,
             commands::batch_gen::images_generate_batch,
+            commands::worker_registry::cancel_generation,
             commands::sessions::sessions_list,
             commands::sessions::session_create,
             commands::sessions::session_rename,
@@ -548,7 +586,12 @@ pub fn run() {
             commands::sessions::session_export,
             commands::sessions::turns_recent,
             commands::sessions::turn_get,
+            // BiRefNet (ort) 経路。Mac の背景透過 (Vision/removebg.swift) は
+            // images.rs 側の別経路なので、この cfg の影響を受けない。
+            #[cfg(target_os = "windows")]
             commands::segment::segment_image,
+            #[cfg(not(target_os = "windows"))]
+            commands::edit_unsupported::segment_image,
             commands::segment::is_segmentation_model_ready,
             commands::segment::download_segmentation_model,
             commands::scene3d::scene3d_export_begin,
@@ -556,7 +599,6 @@ pub fn run() {
             commands::scene3d::scene3d_encode,
             commands::scene3d::scene3d_fetch_capture_video,
             commands::storyboard::storyboard_run,
-            commands::storyboard::storyboard_checkpoint_resume,
             commands::storyboard::storyboard_regenerate_cut,
             commands::multiangle::multiangle_run,
             commands::multiangle::multiangle_regenerate_cut,

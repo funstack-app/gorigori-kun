@@ -54,9 +54,7 @@ pub async fn edit_segment_run(
     Ok(result.into())
 }
 
-pub fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or_default()
-}
+// now_secs は commands/mod.rs へ移した (2026-07-28)。
+// なぜ: このファイル自体が ort 依存で Windows 限定になったが、now_secs は
+// commands/segment.rs 等の ort 非依存モジュールからも使われるため。
+pub use crate::commands::now_secs;

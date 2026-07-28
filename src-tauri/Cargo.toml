@@ -25,14 +25,6 @@ sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio"] }
 zip = "2"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
-# load-dynamic は使わない。load-dynamic を立てると ort-sys のビルドスクリプトが
-# 早期 return し download-binaries/copy-dylibs が無効化され、実行時に dylib を
-# 探して無限ハングする (2026-06-18 フォーク調査で ort-sys build/main.rs にて確認)。
-# default features (download-binaries/copy-dylibs/api-24) で静的リンクし、
-# onnxruntime を実行ファイルに焼き込む。配布版で dylib 外部依存ゼロ・確実に動く。
-ort = { version = "2.0.0-rc.12", features = ["download-binaries", "copy-dylibs"] }
-ort-sys = { version = "2.0.0-rc.12" }
-
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
@@ -62,6 +54,28 @@ notify-debouncer-full = "0.3"
 which = "7"
 tempfile = "3"
 font-kit = "0.14"
+
+# ─────────────────────────────────────────────────────────────
+# ONNX Runtime (ort) は Windows 専用依存に格下げした (2026-07-28)。
+#
+# なぜ: ort-sys 2.0.0-rc.12 の配布表から x86_64-apple-darwin が消え、
+# Intel Mac が「prebuilt binaries が無い」でビルドできなくなった。
+# ort を使うのは封印済みの編集機能群 (SAM2/SAM3/LaMa/BiRefNet/PP-OCR) だけで、
+# Mac の背景透過は Vision (resources/removebg.swift) が担っている。
+# したがって ort を Windows 限定にすれば、Mac は arm64/x86_64 の両方が
+# ort 抜きでビルドでき、Intel Mac 対応を復活できる。
+#
+# load-dynamic は使わない。load-dynamic を立てると ort-sys のビルドスクリプトが
+# 早期 return し download-binaries/copy-dylibs が無効化され、実行時に dylib を
+# 探して無限ハングする (2026-06-18 フォーク調査で ort-sys build/main.rs にて確認)。
+# default features (download-binaries/copy-dylibs/api-24) で静的リンクし、
+# onnxruntime を実行ファイルに焼き込む。配布版で dylib 外部依存ゼロ・確実に動く。
+#
+# tokenizers は edit/sam3_text.rs (ort 依存) からのみ使うため一緒に移した。
+# ─────────────────────────────────────────────────────────────
+[target.'cfg(target_os = "windows")'.dependencies]
+ort = { version = "2.0.0-rc.12", features = ["download-binaries", "copy-dylibs"] }
+ort-sys = { version = "2.0.0-rc.12" }
 tokenizers = { version = "0.23.1", default-features = false, features = ["onig"] }
 
 [dev-dependencies]

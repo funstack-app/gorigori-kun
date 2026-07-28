@@ -5,15 +5,27 @@ pub mod codex_text;
 pub mod codex_vision;
 pub mod edit_export;
 pub mod edit_fonts;
+// ort (ONNX Runtime) を使う編集コマンド群は Windows 限定 (2026-07-28)。
+// 理由と代替スタブは commands/edit_unsupported.rs の冒頭コメント参照。
+#[cfg(target_os = "windows")]
 pub mod edit_grab;
+#[cfg(target_os = "windows")]
 pub mod edit_inpaint;
+#[cfg(target_os = "windows")]
 pub mod edit_magic;
 pub mod edit_models;
+#[cfg(target_os = "windows")]
 pub mod edit_ocr;
+#[cfg(target_os = "windows")]
 pub mod edit_sam2;
+#[cfg(not(target_os = "windows"))]
+pub mod edit_unsupported;
+#[cfg(target_os = "windows")]
 pub mod edit_words;
+#[cfg(target_os = "windows")]
 pub mod edit_segment;
 pub mod character_sheet;
+pub mod gen_metrics;
 pub mod gen_queue;
 pub mod gen_worker;
 pub mod higgsfield_mcp;
@@ -46,6 +58,18 @@ use crate::codex::server_requests::run_server_request_loop;
 use crate::codex::RpcNotification;
 use crate::events::{EVENT_APP_SERVER_STATUS, EVENT_NOTIFICATION};
 use crate::state::AppState;
+
+/// UNIX epoch 秒。出力ディレクトリ名の一意化に使う。
+///
+/// 2026-07-28 に commands/edit_segment.rs から移設した。edit_segment は ort 依存で
+/// Windows 限定になったが、この関数は commands/segment.rs 等の ort 非依存モジュール
+/// からも使われるため、cfg の影響を受けない場所に置く必要がある。
+pub fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default()
+}
 
 /// app-server が落ちた / handshake に失敗した時に、ユーザーが切り分けに使える
 /// 情報をまとめて返す。stderr の直近 200 行も付ける。

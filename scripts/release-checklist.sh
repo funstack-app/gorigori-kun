@@ -89,13 +89,15 @@ else
   else
     fail "Mac matrix に aarch64-apple-darwin (Apple Silicon) が無い"
   fi
-  # Intel は 2026-07-25 に意図的に外した (ort が prebuilt 配布を終了)。
-  # 無いこと自体は失敗ではないが、README の記載と食い違うと利用者が混乱するため
-  # 状態を明示して、README 側の整合も確認させる。
+  # Intel は 2026-07-25 に ort の prebuilt 配布終了で外したが、2026-07-28 に復活した。
+  # ort を Windows 専用依存へ格下げし (src-tauri/Cargo.toml の
+  # [target.'cfg(target_os = "windows")'.dependencies])、Mac が ort 無しで
+  # ビルドできるようになったため。以後は必須扱いにする — 落ちたことに気づかず
+  # 「Intel 対応」と書いた README のまま配布するのを防ぐ。
   if printf '%s\n' "$MAC_TARGETS" | grep -qx "x86_64-apple-darwin"; then
-    echo "ℹ️  Intel Mac (x86_64) をビルドします — README の動作要件も対応表記か確認"
+    ok "Mac matrix に x86_64-apple-darwin (Intel) がある"
   else
-    echo "ℹ️  Intel Mac (x86_64) は対象外 — README も未対応表記であることを確認済みか"
+    fail "Mac matrix に x86_64-apple-darwin (Intel) が無い — README は対応表記のはず"
   fi
 fi
 

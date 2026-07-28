@@ -93,7 +93,7 @@ pub fn edit_platform_info() -> EditPlatformInfo {
 
 #[tauri::command]
 pub async fn edit_models_delete(
-    state: State<'_, AppState>,
+    #[allow(unused_variables)] state: State<'_, AppState>,
     model_id: String,
 ) -> Result<(), String> {
     let spec = find_model(&model_id).ok_or_else(|| format!("unknown model id: {model_id}"))?;
@@ -103,6 +103,11 @@ pub async fn edit_models_delete(
             .await
             .map_err(|e| format!("delete failed: {e}"))?;
     }
+    // ort セッションキャッシュの破棄は Windows のみ。非 Windows には
+    // edit_runtime が存在しない (ort が Windows 限定依存のため。2026-07-28)。
+    // モデルファイルの削除自体はどちらでも走るので、DL 済みモデルの掃除は
+    // Mac でも機能する。
+    #[cfg(target_os = "windows")]
     state.edit_runtime.clear().await;
     Ok(())
 }
