@@ -595,6 +595,16 @@ const FAITHFUL_FINAL_CLAUSE =
 const PAGE_SIZE_CLAUSE = "portrait page, consistent page size";
 
 /**
+ * メタ情報の焼き込み禁止句。プロンプトには「page 3 of 8」「panel 1:」等の
+ * 構造記述が必要だが、モデルがそれを絵に描き込む実機FBがあった (2026-07-29 STΛCK:
+ * ページ番号・テンプレの縦横サイズ・謎の数字が出力画像に入る)。
+ * 構造記述は残しつつ「画面上に描いてよい文字はセリフと擬音だけ」を明示する。
+ * ページ経路 (buildFullPagePrompt) とコマ経路 (buildPanelImagePrompt) の両方で使う。
+ */
+const NO_META_TEXT_CLAUSE =
+  "do not render any meta text or numbers on the image — no page numbers, no panel numbers, no dimensions or measurements, no template or layout labels; page/panel numbering in this prompt is structural context only, never draw it; the only text allowed on the page is the given dialogue and sound effects";
+
+/**
  * 最終出力の画風を末尾で念押しする句（参照画像のフォト/3D調に勝たせる）。
  *
  * detail 経路（buildPanelImagePrompt）と主経路（buildFullPagePrompt）で
@@ -810,6 +820,7 @@ export function buildFullPagePrompt(
 
   // 6c. ページの形・大きさを全ページで揃える（生成サイズのバラつき対策）。
   parts.push(PAGE_SIZE_CLAUSE);
+  parts.push(NO_META_TEXT_CLAUSE);
 
   // 7. キャラ属性ブロック（登場する全キャラ分。1コマ生成の attrBlock と同じ導出）
   const appearingNames = new Set(
@@ -879,6 +890,7 @@ export function buildPanelImagePrompt(
   // 一気生成はコマ経路を通るため、ページ経路と同じ形・大きさへ揃える句を足す
   // （生成サイズのバラつき対策。aspect も同じ COMIC_PAGE_ASPECT を渡している）。
   parts.push(PAGE_SIZE_CLAUSE);
+  parts.push(NO_META_TEXT_CLAUSE);
 
   return parts.filter(Boolean).join(", ");
 }
