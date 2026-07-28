@@ -21,7 +21,9 @@ import { useStoryboardRun } from "../../../lib/store/storyboardRun";
 import { usePlanChat } from "../../../lib/store/planChat";
 import { useToasts } from "../../../lib/store/toasts";
 import { useImagePreview } from "../../../lib/store/imagePreview";
+import { useWorkspace } from "../../../lib/store/workspace";
 import { CandidatesSelect } from "./CandidatesSelect";
+import { CardSizeSlider, gridColsForAspect } from "./cardSize";
 import type {
   StoryboardCameraAngle,
   StoryboardCameraMotion,
@@ -51,6 +53,8 @@ function basename(p: string): string {
  */
 export function SketchReviewPanel() {
   const goal = useStoryboardRun((s) => s.goal);
+  // 2026-07-28: カードサイズはストーリーカット3画面で共有 (workspace ストア / localStorage 永続)
+  const storyboardCardSize = useWorkspace((s) => s.storyboardCardSize);
   const sketchVersions = useStoryboardRun((s) => s.sketchVersions);
   const activeSketchVersionId = useStoryboardRun((s) => s.activeSketchVersionId);
   const pushSketchVersion = useStoryboardRun((s) => s.pushSketchVersion);
@@ -78,6 +82,10 @@ export function SketchReviewPanel() {
   const sketchRunStartedAt = useStoryboardRun((s) => s.sketchRunStartedAt);
   const setSketchRunStartedAt = useStoryboardRun((s) => s.setSketchRunStartedAt);
   const sketchStarted = sketchRunStartedAt !== null;
+  // ラフ消失修正 (2026-07-28): 本生成 run 中はラフ再生成を止める。イベント振り分けは
+  // 現在 run の params.sketchMode で決まるため、本生成中に sketch 再生成すると
+  // take が本生成側 cuts Map に混入する。
+  const generationRunStartedAt = useStoryboardRun((s) => s.generationRunStartedAt);
 
   // ストア (cuts Map) から絵コンテ画像を読む
   // storyboard.run(sketch_mode=true) はイベントを既存ルートで流すので、
@@ -96,8 +104,12 @@ export function SketchReviewPanel() {
 
   // 初回マウントで sketch 未生成なら、planChat の sceneConstruction から組み立てる
   useEffect(() => {
-    if (sketchVersions.length > 0) return;
     if (!goal) return;
+    // ラフ消失修正 (2026-07-28): 「1つでもバージョンがあれば return」から
+    // 「現在の goal に紐づくバージョンがあれば return」へ。本生成開始で reset を
+    // 呼ばなくなったため、前ストーリーの残留は破棄ではなく表示選択で防ぐ。
+    const goalKey = goal.summary.slice(0, 200);
+    if (sketchVersions.some((v) => v.fromGoalSummary === goalKey)) return;
     if (!sceneConstruction || sceneConstruction.cuts.length === 0) return;
 
     const version: StoryboardSketchVersion = {
@@ -125,7 +137,7 @@ export function SketchReviewPanel() {
       })),
     };
     pushSketchVersion(version);
-  }, [sceneConstruction, goal, sketchVersions.length, pushSketchVersion]);
+  }, [sceneConstruction, goal, sketchVersions, pushSketchVersion]);
 
   // カーソルが範囲外になったら 0 に戻す
   useEffect(() => {
@@ -251,6 +263,36 @@ export function SketchReviewPanel() {
     }
   }, [storeCuts, storeStatus, activeVersion, sketchStarted, updateSketchCut]);
 
+  // === S3 issue-1 (2026-07-28): 採用ゲート式の本生成 ===
+  //
+  // 「採用済み」= ラフが実際に出来上がっている (sketchStatus === "done") カット。
+  // このパネルにはカット単位の採用トグルが無く、書き直し/再生成で作り直した
+  // 結果を残す = 採用、という運用になっているため、done を採用済みとして扱う。
+  const adoptedCutIds = useMemo(
+    () =>
+      (activeVersion?.cuts ?? [])
+        .filter((c) => c.sketchStatus === "done" && c.sketchImagePath)
+        .map((c) => c.cutId),
+    [activeVersion],
+  );
+
+  async function sendCutsToProduction(cutIds: string[]) {
+    if (!goal?.characterReferencePath) {
+      useToasts.getState().push({
+        kind: "error",
+        text: "生成にはキャラクターの参照画像が必要です。下の「キャラ参照」から添付してください。",
+        ttlMs: 6000,
+      });
+      return;
+    }
+    // 本生成の参照に使えるのは「確定した絵コンテ」だけ (B1)。採用ゲートから
+    // 送る場合も、現在のバージョンを確定させてから送る。
+    if (activeVersion && !activeVersion.confirmed) {
+      confirmSketchVersion(activeVersion.versionId);
+    }
+    await useStoryboardRun.getState().startProductionForCuts(cutIds);
+  }
+
   function handleRegenerate() {
     useToasts.getState().push({
       kind: "info",
@@ -360,6 +402,14 @@ export function SketchReviewPanel() {
     cut: StoryboardSketchCut,
     additionalRefs: string[] = [],
   ) {
+    if (generationRunStartedAt !== null) {
+      useToasts.getState().push({
+        kind: "warn",
+        text: "本生成が始まっているため、ラフの再生成はできません。",
+        ttlMs: 4000,
+      });
+      return;
+    }
     if (!goal?.characterReferencePath) {
       useToasts.getState().push({
         kind: "error",
@@ -612,9 +662,13 @@ export function SketchReviewPanel() {
                     ? `準備中…  0/${totalCuts}`
                     : `${doneCount}/${totalCuts}`}
             </span>
-            <span className="text-zinc-500">
-              {Math.round(allDone ? 100 : progressPercent)}%
-            </span>
+            <div className="flex items-center gap-2">
+              {/* カードサイズスライダー (大⇔小)。本生成進捗・最終確認と同じ値を共有する */}
+              <CardSizeSlider />
+              <span className="text-zinc-500">
+                {Math.round(allDone ? 100 : progressPercent)}%
+              </span>
+            </div>
           </div>
           <div className="h-1.5 w-full overflow-hidden rounded-full bg-[#0d0d0d]">
             <div
@@ -658,7 +712,9 @@ export function SketchReviewPanel() {
                   items={group.cuts.map(({ cut }) => cut.cutId)}
                   strategy={rectSortingStrategy}
                 >
-                  <ol className={`grid gap-3 ${gridColsForAspect(goal.aspectRatio)}`}>
+                  <ol
+                    className={`grid gap-3 ${gridColsForAspect(goal.aspectRatio, storyboardCardSize)}`}
+                  >
                     {group.cuts.map(({ cut: c, index: i }) => {
                       // P10: プレビュー時の兄弟リスト = activeVersion 内の全
                       //      sketchImagePath を順に並べる。
@@ -679,6 +735,7 @@ export function SketchReviewPanel() {
                           onRegenerate={() => handleRegenerateCut(c)}
                           onRegenerateWithRefs={(refs) => handleRegenerateCut(c, refs)}
                           onClearOverride={() => clearOverride(c)}
+                          onSendToProduction={() => void sendCutsToProduction([c.cutId])}
                         />
                       );
                     })}
@@ -689,6 +746,31 @@ export function SketchReviewPanel() {
           </div>
         </DndContext>
       </div>
+
+      {/* === S3 issue-1: 採用済みカットの一括送り === */}
+      <footer className="flex shrink-0 items-center justify-between gap-3 rounded-md border border-[#242424] bg-[#161616] px-4 py-2">
+        <span className="text-[11px] text-zinc-500">
+          ラフが完成したカットから順に本番へ送れます (全カット一括は上の「絵コンテを確定して本生成」)。
+        </span>
+        <button
+          type="button"
+          onClick={() => void sendCutsToProduction(adoptedCutIds)}
+          disabled={adoptedCutIds.length === 0}
+          className={[
+            "shrink-0 rounded-md px-3 py-1.5 text-xs font-semibold transition",
+            adoptedCutIds.length > 0
+              ? "bg-emerald-500 text-white hover:bg-emerald-400"
+              : "cursor-not-allowed bg-zinc-700 text-zinc-400",
+          ].join(" ")}
+          title={
+            adoptedCutIds.length > 0
+              ? "採用済みのカットだけを本番生成に送る"
+              : "採用済みのカットがまだありません"
+          }
+        >
+          採用済み{adoptedCutIds.length}枚をまとめて本番へ
+        </button>
+      </footer>
 
       {/* === 自由記述モーダル (書き直し中のカットがあれば表示) === */}
       {editing && editingCut && (
@@ -749,6 +831,7 @@ function SortableSketchCutCard(props: {
   onRegenerate: () => void;
   onRegenerateWithRefs: (refs: string[]) => void;
   onClearOverride: () => void;
+  onSendToProduction: () => void;
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
     useSortable({ id: props.cut.cutId });
@@ -776,6 +859,7 @@ function SketchCutCard({
   onRegenerate,
   onRegenerateWithRefs,
   onClearOverride,
+  onSendToProduction,
 }: {
   cut: StoryboardSketchCut;
   index: number;
@@ -785,6 +869,7 @@ function SketchCutCard({
   onRegenerate: () => void;
   onRegenerateWithRefs: (refs: string[]) => void;
   onClearOverride: () => void;
+  onSendToProduction: () => void;
 }) {
   const [dragOver, setDragOver] = useState(false);
 
@@ -894,6 +979,26 @@ function SketchCutCard({
       <div className="text-[10px] text-zinc-500">{cut.cameraNote}</div>
 
       <div className="mt-auto flex flex-wrap gap-1 pt-1">
+        {/* S3 issue-1: 採用ゲート式の本生成。このカット1枚だけ本番へ送る。
+            ラフが出来上がっている (done) カットだけ押せる。 */}
+        <button
+          type="button"
+          onClick={onSendToProduction}
+          disabled={status !== "done"}
+          className={[
+            "rounded border px-2 py-1 text-[10px] transition",
+            status === "done"
+              ? "border-emerald-500/40 bg-emerald-500/10 text-emerald-200 hover:bg-emerald-500/20"
+              : "cursor-not-allowed border-[#2a2a2a] text-zinc-600",
+          ].join(" ")}
+          title={
+            status === "done"
+              ? "このカットのラフを採用して本番生成に送る"
+              : "ラフが完成してから本番へ送れます"
+          }
+        >
+          このカットを本番へ
+        </button>
         <button
           type="button"
           onClick={onEdit}
@@ -941,23 +1046,6 @@ function aspectClass(a: string): string {
     case "16:9":
     default:
       return "aspect-video";
-  }
-}
-
-// P8 (2026-05-20): カット全体が見えるよう、アスペクト比に応じてグリッド列数を変える。
-//  - 9:16 (縦長): 4列 (xl) でも横幅が小さく済む
-//  - 1:1, 4:5: 3列
-//  - 16:9 (横長): 2列に絞ってカット全体を確実に表示
-function gridColsForAspect(a: string): string {
-  switch (a) {
-    case "9:16":
-      return "grid-cols-2 md:grid-cols-3 xl:grid-cols-4";
-    case "1:1":
-    case "4:5":
-      return "grid-cols-1 md:grid-cols-2 xl:grid-cols-3";
-    case "16:9":
-    default:
-      return "grid-cols-1 md:grid-cols-2";
   }
 }
 

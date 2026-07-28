@@ -272,14 +272,8 @@ export function GoalChatPanel() {
                     if (!ok) return;
                     resetThread();
                     setAttachedImages([]);
-                    // 走行中 run の安全中止 (2026-07-02 W3-4): checkpoint で待機中なら
-                    // reset() でストアを空にする前に cancel を送り、バックエンド orchestrator の
-                    // oneshot 待機を解く (waiter リーク防止)。生成済みカットは保持される。
-                    const run = useStoryboardRun.getState();
-                    if (run.checkpointCutId !== null) {
-                      run.cancelCheckpoint();
-                    }
-                    run.reset();
+                    // S3 (2026-07-28): checkpoint 待機の解除は撤去 (停止区間が消えたため)。
+                    useStoryboardRun.getState().reset();
                   })();
                 }}
                 disabled={sending}

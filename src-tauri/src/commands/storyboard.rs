@@ -18,10 +18,10 @@ use tokio::process::Command;
 use tokio::time::timeout;
 
 use crate::codex::process::{enriched_path, resolve_codex_cli_binary};
-use crate::commands::gen_queue::GLOBAL_GEN_SEMAPHORE;
+use crate::commands::gen_queue::{self, GLOBAL_GEN_SEMAPHORE};
 use crate::commands::storage::{project_name_from_cwd, resolve_output_dir, StorageSettings};
 use crate::events::EVENT_STORYBOARD;
-use crate::state::{AppState, CheckpointAction};
+use crate::state::AppState;
 
 // 120秒では実運用でタイムアウトした (2026-07-09 STΛCK報告、codex_vision と同型)。
 // プロンプト生成は絵コンテ生成の前段で、ここが落ちると生成全体が巻き添えになるため 300 秒にする。
@@ -80,6 +80,29 @@ pub struct StoryboardParams {
      */
     #[serde(default)]
     pub sketch_references: std::collections::HashMap<String, String>,
+
+    /**
+     * S3 (2026-07-28): **確定ラフだけ** の cutId → imagePath マップ。
+     *
+     * `sketch_references` はキービジュアル固定参照 (B2) のフォールバックでも
+     * 埋まるため、そこから前カット参照を選ぶと「キービジュアル画像」が
+     * `previous_cut_sketch` ロール (= 前カットの鉛筆ラフ、という役割宣言) で
+     * モデルに渡り、実体と宣言が食い違う。前カット参照はこのマップだけを見る。
+     *
+     * None または該当カット無しならスロット3の参照なし
+     * (`sketch_references` へフォールバックしない)。
+     */
+    #[serde(default)]
+    pub confirmed_sketch_references: Option<std::collections::HashMap<String, String>>,
+
+    /**
+     * S3 (2026-07-28): 採用ゲート式の本生成スコープ。
+     * Some(cut_ids) なら、その cutId のカットだけを本生成する (ラフを採用した
+     * カットから順に本番へ送る導線)。None は全カット (従来互換)。
+     * sketch_mode=true のときは無視する (ラフは常に全カット)。
+     */
+    #[serde(default)]
+    pub production_scope: Option<Vec<String>>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -131,11 +154,8 @@ pub enum StoryboardEvent {
         image_path: String,
         scores: ScoreBundle,
     },
-    CutCheckpoint {
-        run_id: String,
-        cut_id: String,
-        reason: String,
-    },
+    // CutCheckpoint は S3 (2026-07-28) で撤去。emit 元が消えたので変種も残さない
+    // (残すとフロントが「来るかもしれないイベント」の分岐を持ち続ける)。
     CutConfirmed {
         run_id: String,
         cut_id: String,
@@ -365,6 +385,9 @@ struct Manifest {
     character_reference_path: String,
     style_reference_path: String,
     created_at: u64,
+    /// S2 (2026-07-28): この run の Fixed Core (全カット共通の世界観・画風ブロック)。
+    /// 再現条件の保全: 後から「どのルック契約で生成したか」を辿れるようにする。
+    fixed_core: Value,
     cuts: Vec<ManifestCut>,
 }
 
@@ -375,6 +398,9 @@ struct ManifestCut {
     scene_group_id: String,
     description: String,
     duration_seconds: f64,
+    /// S2 (2026-07-28): そのカットの生成に実際に使った参照画像の実パス。
+    /// 再現条件の保全 (どの参照でこの絵が出たかを後から辿れる)。
+    reference_paths: Vec<String>,
     takes: Vec<ManifestTake>,
 }
 
@@ -391,6 +417,9 @@ struct ManifestTake {
 #[serde(rename_all = "camelCase")]
 struct DebugLog {
     run_id: String,
+    /// S2 (2026-07-28): 全カット共通の Fixed Core。各 prompt にも埋まっているが、
+    /// ここに1つだけ置くことで「run の契約」として一目で読める。
+    fixed_core: Value,
     prompts: Vec<DebugPromptEntry>,
 }
 
@@ -399,6 +428,8 @@ struct DebugLog {
 struct DebugPromptEntry {
     cut_id: String,
     structured_prompt: Value,
+    /// S2 (2026-07-28): このカットに渡した参照画像の実パス (順序込み)。
+    reference_paths: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -552,15 +583,19 @@ pub async fn storyboard_run(
         .run_id
         .clone()
         .unwrap_or_else(|| format!("{}-{}", timestamp_id(), short_id()));
+    gen_queue::clear_cancelled(&run_id);
+    // 実行中 run 台帳への登録。invoke が返った瞬間からフロントは run_id を知るので、
+    // spawn より前に登録する。guard は task へ move し、orchestrator 終了時に外れる。
+    let active_run = gen_queue::ActiveRunGuard::begin(&run_id);
     let task_run_id = run_id.clone();
-    // AppState は Arc ベースなので clone は共有ハンドル。checkpoint シグナルを
-    // spawn した orchestrator と `storyboard_checkpoint_resume` の両方から触る。
+    // AppState は Arc ベースなので clone は共有ハンドル。常駐 app-server 経路
+    // (gen_server) を orchestrator から使うために渡す。
     let task_state = state.inner_clone();
 
     tokio::spawn(async move {
-        // checkpoint シグナルがリークしないよう、orchestrator の成否に関わらず
-        // 終了時に必ず clear する。early return / panic 相当のエラーでも
-        // この後の clear_checkpoint が走る。
+        // guard を task 内へ move する。この async ブロックが終わる時点で Drop され、
+        // 実行中 run 台帳から外れる (後始末と同じ場所)。
+        let _active_run = active_run;
         let result = run_storyboard_orchestrator(
             app.clone(),
             task_state.clone(),
@@ -570,8 +605,12 @@ pub async fn storyboard_run(
             params,
         )
         .await;
-        task_state.clear_checkpoint(&task_run_id).await;
+        let was_cancelled = gen_queue::is_cancelled(&task_run_id);
+        gen_queue::clear_cancelled(&task_run_id);
         if let Err(err) = result {
+            if was_cancelled || gen_queue::is_cancelled_error(&err) {
+                return;
+            }
             tracing::warn!(target: "codex.storyboard", "storyboard orchestrator failed: {err}");
             let _ = app.emit(
                 EVENT_STORYBOARD,
@@ -587,24 +626,11 @@ pub async fn storyboard_run(
     Ok(run_id)
 }
 
-/// storyboard の方向性チェック (checkpoint) から生成ループを再開/中断する (A-2)。
-/// フロントの StoryboardCheckpointDialog の「このまま続ける」/「中止」から呼ぶ。
-/// - action="continue": 残りカットの生成を続行する
-/// - action="cancel": 生成を安全に中断する (生成済みカットは保持される)
-/// 対象 run が checkpoint で待機していない場合 (既に再開済み等) は false を返す。
-#[tauri::command]
-pub async fn storyboard_checkpoint_resume(
-    state: State<'_, AppState>,
-    run_id: String,
-    action: String,
-) -> Result<bool, String> {
-    let parsed = match action.as_str() {
-        "continue" => CheckpointAction::Continue,
-        "cancel" => CheckpointAction::Cancel,
-        other => return Err(format!("未知の checkpoint アクション: {other}")),
-    };
-    Ok(state.resume_checkpoint(&run_id, parsed).await)
-}
+// storyboard_checkpoint_resume (3カット目の方向性チェックの再開/中断コマンド) は
+// S3 (2026-07-28) で撤去した。本生成が全カット並列になり、途中で止まる区切りが
+// 存在しなくなったため。残しておくと「押しても何も起きないのに成功扱い」の
+// 死んだ経路になる (このプロジェクトが潰そうとしている型の不具合そのもの)。
+// 方向性の確認はラフ (絵コンテ) 段の採用行為が引き受ける (設計書 §2.1-3 / §4-S3-4)。
 
 /// 単一カット再生成 (P4 STΛCK 指示 2026-05-20)。
 /// 既存 run で生成済みのカットを、追加参照画像を投げて再度 1 take 生成する。
@@ -656,6 +682,12 @@ pub async fn storyboard_regenerate_cut(
     let codex_bin =
         resolve_codex_cli_binary().map_err(|e| format!("Codex CLI の解決に失敗: {e}"))?;
 
+    // 再生成は元 run と同じ run_id を使い回す。登録しないと「再生成中に中止 →
+    // found:false の嘘」になるので、元 run と同じく実行中 run 台帳へ載せる。
+    // 新しい生成意図は古い中止を上書きする (storyboard_run と同じ理由)。
+    gen_queue::clear_cancelled(&params.run_id);
+    let active_run = gen_queue::ActiveRunGuard::begin(&params.run_id);
+
     let storage_settings = StorageSettings::load()?;
     let out_dir = resolve_output_dir(
         &storage_settings,
@@ -675,6 +707,9 @@ pub async fn storyboard_regenerate_cut(
     let task_take_id = take_id.clone();
 
     tokio::spawn(async move {
+        // guard を task へ move する。この 1 カット再生成が終わるまでを
+        // 「実行中 run」とみなす (中止ボタンが効く窓と一致させる)。
+        let _active_run = active_run;
         // 参照画像配列を構築:
         //  1. character_reference_image (任意。無ければテキストのみ生成)
         //  2. style_reference_image (任意)
@@ -727,6 +762,7 @@ pub async fn storyboard_regenerate_cut(
             &prompt_obj,
             &reference_images,
             &out_dir,
+            &task_run_id,
             &params.cut_id,
             &task_take_id,
             1,
@@ -752,6 +788,9 @@ pub async fn storyboard_regenerate_cut(
                 );
             }
             Err(err) => {
+                if gen_queue::is_cancelled_error(&err) {
+                    return;
+                }
                 tracing::warn!(target: "codex.storyboard", "regenerate_cut failed: {err}");
                 let _ = task_app.emit(
                     EVENT_STORYBOARD,
@@ -768,6 +807,275 @@ pub async fn storyboard_regenerate_cut(
     Ok(take_id)
 }
 
+/// 絵コンテ並列化のために「各カットの直前までの shot_type 列」を事前計算する (S1)。
+///
+/// 直列ループでは cut N の shot_type を確定してから cut N+1 の
+/// `local_structured_prompt` に渡し、隣接カットで同じ寄り引きが続かないように
+/// していた。並列にすると「前カットの結果を待つ」ことができないので、
+/// 生成結果に依存しない決定論的な再現でこれを置き換える。
+///
+/// `local_structured_prompt` の shot_type 決定は
+/// (previous_shot_types.len(), 直前の shot_type, cut.description) だけで決まり
+/// 画像に依存しないため、ここで同じ手順を空回しすれば直列時と同じ列が得られる。
+/// 返り値の i 番目が「カット i に渡すべき previous_shot_types」。
+fn previous_shot_types_seed(cuts: &[CutPlan]) -> Vec<Vec<String>> {
+    let mut seeds: Vec<Vec<String>> = Vec::with_capacity(cuts.len());
+    let mut acc: Vec<String> = Vec::new();
+    for cut in cuts {
+        seeds.push(acc.clone());
+        // 直列ループと同じ決定手順 (local_structured_prompt 冒頭と一致させる)。
+        let role_assignment = assign_cut_role(acc.len(), acc.len() + 1, &cut.description);
+        let mut shot_type: &str = role_assignment.shot_type_hint;
+        if let Some(last) = acc.last() {
+            if last.as_str() == shot_type {
+                shot_type = swap_to_alternative_shot(shot_type);
+            }
+        }
+        let verb_shot = infer_shot_type(&cut.description);
+        if !matches!(verb_shot, "medium-wide") {
+            shot_type = verb_shot;
+        }
+        acc.push(shot_type.to_string());
+    }
+    seeds
+}
+
+/// 1カット分の生成計画 (プロンプト + 参照画像)。並列発射の前に全カット分を確定する。
+///
+/// S3 (2026-07-28) でラフ・本番の両方がこの形に揃った。並列発射できる条件は
+/// 「発射前に全カットの計画が確定していること」であり、それをこの型が表す。
+struct CutGenerationPlan {
+    structured_prompt: Value,
+    reference_images: Vec<PathBuf>,
+}
+
+/// 全カット並列ファンアウト (S1 でラフ用に新設 → S3 で本番と共用化・2026-07-28)。
+///
+/// 呼び出し側が全カット分の `CutGenerationPlan` を先に確定させ、この関数は
+/// 「一斉に発射して完了順に回収する」ことだけを行う。ラフ・本番の違いは
+/// すべて plan の作り方 (呼び出し側) に閉じている。
+///
+/// 並列化のために両経路で落としたもの:
+/// - previous_cut_image (前カット**完成画像**の参照) — 直列化の唯一の根
+///   ラフ: 参照そのものを撤去 / 本番: 前カットの確定**ラフ**に置換 (S3・設計書 §3.3)
+/// - cut_index==2 の方向性チェックポイント — ラフ採用行為が役目を引き受ける
+/// - build_structured_prompt (LLM・最大300秒/カット) — ラフのみ。本番は従来どおり使う
+#[allow(clippy::too_many_arguments)]
+async fn run_cut_fanout(
+    app: &AppHandle,
+    state: &AppState,
+    codex_bin: &Path,
+    codex_home_orig: &Path,
+    run_id: &str,
+    params: &StoryboardParams,
+    cuts: &[CutPlan],
+    plans: &[CutGenerationPlan],
+    fixed_core: &Value,
+    out_dir: &Path,
+    total_cuts: u32,
+    candidates_per_cut: u32,
+    style_ref: &str,
+    sketch_mode: bool,
+) -> Result<(), String> {
+    let debug_prompts: Vec<DebugPromptEntry> = cuts
+        .iter()
+        .zip(plans.iter())
+        .map(|(cut, plan)| DebugPromptEntry {
+            cut_id: cut.cut_id.clone(),
+            structured_prompt: plan.structured_prompt.clone(),
+            reference_paths: plan
+                .reference_images
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect(),
+        })
+        .collect();
+
+    // --- 2) 全カットを一斉に発射する ---
+    // 同時実行の絞りは generate_one_take 内の GLOBAL_GEN_SEMAPHORE に任せる。
+    let mut tasks = cuts
+        .iter()
+        .enumerate()
+        .map(|(cut_index, cut)| {
+            let structured_prompt = &plans[cut_index].structured_prompt;
+            let reference_images = plans[cut_index].reference_images.clone();
+            let take_specs = (0..candidates_per_cut)
+                .map(|idx| (take_label(idx), idx + 1))
+                .collect::<Vec<_>>();
+            async move {
+                let _ = app.emit(
+                    EVENT_STORYBOARD,
+                    StoryboardEvent::CutStarted {
+                        run_id: run_id.to_string(),
+                        cut_id: cut.cut_id.clone(),
+                        scene_group_id: cut.scene_group_id.clone(),
+                        take_count: candidates_per_cut,
+                    },
+                );
+                let generated = generate_cut_takes(
+                    app,
+                    state,
+                    codex_bin,
+                    codex_home_orig,
+                    structured_prompt,
+                    &reference_images,
+                    out_dir,
+                    run_id,
+                    &cut.cut_id,
+                    &take_specs,
+                    params.cwd.clone(),
+                    &params.aspect_ratio,
+                    sketch_mode,
+                )
+                .await;
+                (cut_index, generated)
+            }
+        })
+        .collect::<FuturesUnordered<_>>();
+
+    // --- 3) 完了順に回収し、カットごとに確定/失敗を emit する ---
+    // ManifestTake は Clone ではないので vec![None; n] が使えない。個別に積む。
+    let mut results: Vec<Option<Vec<ManifestTake>>> =
+        (0..cuts.len()).map(|_| None).collect();
+    let mut cancelled = false;
+    let mut failures = 0usize;
+
+    while let Some((cut_index, generated)) = tasks.next().await {
+        let cut = &cuts[cut_index];
+        let mut takes_for_manifest: Vec<ManifestTake> = Vec::new();
+        let mut evaluated_takes: Vec<EvaluatedTake> = Vec::new();
+        let mut last_failure = String::new();
+
+        for item in generated {
+            match item {
+                Ok((take_id, image_path)) => {
+                    let scores = ScoreBundle::default();
+                    takes_for_manifest.push(ManifestTake {
+                        take_id: take_id.clone(),
+                        image_path: image_path.to_string_lossy().into_owned(),
+                        scores: scores.clone(),
+                        status: "candidate".into(),
+                    });
+                    evaluated_takes.push(EvaluatedTake {
+                        take_id,
+                        image_path,
+                        scores,
+                    });
+                }
+                Err(err) if gen_queue::is_cancelled_error(&err) => {
+                    cancelled = true;
+                }
+                Err(err) => {
+                    last_failure = err;
+                }
+            }
+        }
+
+        // キャンセル前に完了していた take があっても、中止した run で
+        // 「確定しました」の通知は出さない (表示と実態の食い違いを作らない)。
+        if let Some(best) = select_first_take(&evaluated_takes).filter(|_| !cancelled) {
+            mark_manifest_take_status(&mut takes_for_manifest, &best.take_id, "confirmed");
+            let _ = app.emit(
+                EVENT_STORYBOARD,
+                StoryboardEvent::CutConfirmed {
+                    run_id: run_id.to_string(),
+                    cut_id: cut.cut_id.clone(),
+                    selected_take_id: best.take_id.clone(),
+                },
+            );
+            results[cut_index] = Some(takes_for_manifest);
+        } else if !cancelled {
+            // 1カットの失敗で全体を止めない (直列時は break していたが、並列では
+            // 残りが既に走っているので中断してもコストが戻らない)。
+            // 失敗カットだけ CutFailed を出し、成功分は成果として残す。
+            failures += 1;
+            let reason = if last_failure.trim().is_empty() {
+                "このカットの画像生成に失敗しました".to_string()
+            } else {
+                format!("このカットの画像生成に失敗しました: {last_failure}")
+            };
+            let _ = app.emit(
+                EVENT_STORYBOARD,
+                StoryboardEvent::CutFailed {
+                    run_id: run_id.to_string(),
+                    cut_id: cut.cut_id.clone(),
+                    reason,
+                },
+            );
+        }
+    }
+
+    // --- 4) manifest / debug-log を書く (カット順を復元) ---
+    //
+    // 中止 (cancelled) された run でもここまで来る。中止前に確定したカットの PNG は
+    // ディスクに残るので、manifest / debug-log を書かずに抜けると「どの参照・どの
+    // fixed_core で出た絵か」を後から辿れなくなる (S2 の再現条件保全が消える)。
+    // 書いてから Err を返す。Completed の emit だけは中止時に出さない。
+    let manifest_cuts: Vec<ManifestCut> = cuts
+        .iter()
+        .enumerate()
+        .filter_map(|(cut_index, cut)| {
+            results[cut_index].take().map(|takes| ManifestCut {
+                cut_id: cut.cut_id.clone(),
+                scene_group_id: cut.scene_group_id.clone(),
+                description: cut.description.clone(),
+                duration_seconds: cut.duration_seconds,
+                reference_paths: plans[cut_index]
+                    .reference_images
+                    .iter()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .collect(),
+                takes,
+            })
+        })
+        .collect();
+
+    let debug_path = out_dir.join("debug-log.json");
+    write_json_file(
+        &debug_path,
+        &DebugLog {
+            run_id: run_id.to_string(),
+            fixed_core: fixed_core.clone(),
+            prompts: debug_prompts,
+        },
+    )
+    .await?;
+
+    let manifest_path = out_dir.join("manifest.json");
+    let manifest = Manifest {
+        run_id: run_id.to_string(),
+        story_prompt: params.story_prompt.clone(),
+        aspect_ratio: params.aspect_ratio.clone(),
+        duration_seconds: params.duration_seconds,
+        tempo: params.tempo.clone(),
+        total_cuts,
+        candidates_per_cut,
+        character_reference_path: params.character_reference_image.clone(),
+        style_reference_path: style_ref.to_string(),
+        created_at: now_secs(),
+        fixed_core: fixed_core.clone(),
+        cuts: manifest_cuts,
+    };
+    write_json_file(&manifest_path, &manifest).await?;
+
+    if cancelled {
+        // 部分成果 (manifest / debug-log / PNG) は残したまま、run 自体は中止として返す。
+        return Err(gen_queue::cancelled_error());
+    }
+
+    if failures == 0 && manifest.cuts.len() == total_cuts as usize {
+        let _ = app.emit(
+            EVENT_STORYBOARD,
+            StoryboardEvent::Completed {
+                run_id: run_id.to_string(),
+                manifest_path: manifest_path.to_string_lossy().into_owned(),
+            },
+        );
+    }
+
+    Ok(())
+}
+
 async fn run_storyboard_orchestrator(
     app: AppHandle,
     state: AppState,
@@ -777,6 +1085,9 @@ async fn run_storyboard_orchestrator(
     params: StoryboardParams,
 ) -> Result<(), String> {
     validate_params(&params)?;
+    if gen_queue::is_cancelled(&run_id) {
+        return Err(gen_queue::cancelled_error());
+    }
 
     let storage_settings = StorageSettings::load()?;
     let project_name = project_name_from_cwd(params.cwd.as_deref());
@@ -811,20 +1122,24 @@ async fn run_storyboard_orchestrator(
                 );
                 planned
             }
-            _ => plan_cuts(&app, &codex_bin, &params, &skill_refs)
-                .await
-                .unwrap_or_else(|err| {
+            _ => match plan_cuts(&app, &codex_bin, &run_id, &params, &skill_refs).await {
+                Ok(planned) => planned,
+                Err(err) if gen_queue::is_cancelled_error(&err) => return Err(err),
+                Err(err) => {
                     tracing::warn!(target: "codex.storyboard", "scene planning fallback: {err}");
                     local_cut_plan(&params)
-                }),
+                }
+            },
         }
     } else {
-        plan_cuts(&app, &codex_bin, &params, &skill_refs)
-            .await
-            .unwrap_or_else(|err| {
+        match plan_cuts(&app, &codex_bin, &run_id, &params, &skill_refs).await {
+            Ok(planned) => planned,
+            Err(err) if gen_queue::is_cancelled_error(&err) => return Err(err),
+            Err(err) => {
                 tracing::warn!(target: "codex.storyboard", "scene planning fallback: {err}");
                 local_cut_plan(&params)
-            })
+            }
+        }
     };
     if cuts.is_empty() {
         cuts = local_cut_plan(&params);
@@ -863,7 +1178,40 @@ async fn run_storyboard_orchestrator(
             }
         }
     }
-    let total_cuts = cuts.len() as u32;
+    // === S3 (2026-07-28): 採用ゲート式の本生成スコープ ===
+    //
+    // production_scope が来ていれば、そのカットだけを本生成する
+    // (「ラフを採用したカットから本番へ」の導線)。連動性の計画
+    // (plan_visual_continuity / continuity contract) は **全カット** の並びから
+    // 計算する必要があるため、cuts 自体は絞らず「生成対象の添字」だけを絞る。
+    // 絞った添字で計画を引けば、隣接関係は元の並びのまま保たれる。
+    //
+    // 絵コンテ (sketch_mode) では無視する: ラフは常に全カット出す。
+    let scope_indices: Vec<usize> = match params.production_scope.as_ref() {
+        Some(scope) if !params.sketch_mode => {
+            let wanted: std::collections::HashSet<&str> =
+                scope.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+            let picked: Vec<usize> = cuts
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| wanted.contains(c.cut_id.as_str()))
+                .map(|(i, _)| i)
+                .collect();
+            if picked.is_empty() {
+                // 指定が全部はずれた場合に「黙って全カット生成」に落ちると、
+                // 1カットのつもりが12カット分の枠を消費する事故になる。
+                return Err(format!(
+                    "本生成の対象カットが見つかりません (production_scope: {:?})",
+                    scope
+                ));
+            }
+            picked
+        }
+        _ => (0..cuts.len()).collect(),
+    };
+
+    // フロントの進捗表示・完了判定は「今回生成するカット数」で数える。
+    let total_cuts = scope_indices.len() as u32;
     let candidates_per_cut = normalize_candidates(params.candidates_per_cut);
     let style_ref = params
         .style_reference_image
@@ -898,12 +1246,9 @@ async fn run_storyboard_orchestrator(
         .map(PathBuf::from)
         .filter(|p| p != &style_ref_path)
         .collect();
-    let mut previous_cut_image: Option<PathBuf> = None;
-    let mut manifest_cuts: Vec<ManifestCut> = Vec::new();
-    let mut debug_prompts: Vec<DebugPromptEntry> = Vec::new();
-    let mut previous_shot_types: Vec<String> = Vec::new();
-    let mut aborted = false;
-    let cuts_count = cuts.len();
+    // S2 (2026-07-28): Fixed Core は run に1つだけ作り、全カットへ同じ Value を配る。
+    // カット毎に作り直すと byte 同一が壊れうるので、ここで1回だけ組む。
+    let fixed_core = build_fixed_core(&params, look_analysis.as_ref());
 
     // P15 (2026-05-20): 全カットの VisualPlan を事前に算出する。
     // これにより隣接カットの shot_size / screen_direction / camera_side が
@@ -916,22 +1261,61 @@ async fn run_storyboard_orchestrator(
         tracing::warn!(target: "codex.storyboard", "[continuity] {}", w);
     }
 
-    for (cut_index, cut) in cuts.iter().enumerate() {
-        let _ = app.emit(
-            EVENT_STORYBOARD,
-            StoryboardEvent::CutStarted {
-                run_id: run_id.clone(),
-                cut_id: cut.cut_id.clone(),
-                scene_group_id: cut.scene_group_id.clone(),
-                take_count: candidates_per_cut,
-            },
-        );
+    // === S1/S3 (2026-07-28): ラフも本番も全カット並列ファンアウト ===
+    //
+    // なぜ (設計書 §1.3 / §3.3): 従来は両段とも直列 for ループで、130秒/枚 ×
+    // カット数が線形に積んで12カットで約26分かかっていた (STΛCK「絵コンテこそ
+    // すぐ出ないと使えない」)。直列だった唯一の理由は previous_cut_image
+    // (前カットの**完成画像**を参照に積む) である。
+    //
+    // 連動性の計画 (plan_visual_continuity / continuity contract) は
+    // カット割りテキストだけから決まり、前カットの生成画像に依存しない
+    // (生成前に一括計算済み)。つまり「連動性＝直列」ではなく、最後の1点
+    // だけが人質になっていた。そこを外せば両段とも並列にできる:
+    //
+    //   ラフ  : 前カット参照そのものを撤去 (同一性はキャラシート参照が担保)
+    //   本番  : 前カットの**確定ラフ**に置換 (S3)。本番開始時点で全カットの
+    //           ラフは確定済みなので、参照が事前に全部揃う = 並列発射できる
+    //
+    // 同時実行数は既存の GLOBAL_GEN_SEMAPHORE (=6) が generate_one_take 内で
+    // 絞るため、ここでは全カットを一斉投入してよい。12カットなら約2波で捌ける。
+    //
+    // 動作の完全連続が要る場面は storyboard_regenerate_cut (previous_cut_image
+    // 受領済み) による「2カット繋ぎ直し」で拾う。全体を直列に戻すモードは作らない。
 
-        // === 2026-06-06 STΛCK 指示: 企画タブで演出を前出ししてあれば、裏側の
-        //     build_structured_prompt (Codex 呼び出し 120秒/カット) を全廃し、
-        //     企画で決まったプロンプトをそのまま組み立てて即生成する。
-        //     prefilled が無い旧データ/手入力時のみ、従来の裏側設計にフォールバック。
-        let mut structured_prompt = if cut.prefilled.is_some() {
+    // --- 1) 全カット分の生成計画 (プロンプト + 参照画像) を先に確定する ---
+    // 並列発射できる条件は「発射前に全カットの計画が確定していること」。
+    // ここが直列を必要としない形になっているかが S1/S3 の成否そのもの。
+    let shot_type_seeds = previous_shot_types_seed(&cuts);
+    let empty_seed: Vec<String> = Vec::new();
+    // build_structured_prompt へ渡す「物語全体のカット数」。scope で間引いても
+    // 物語の長さは変わらないので、絞る前の総数を使う。
+    let cuts_count = cuts.len();
+    let mut plans: Vec<CutGenerationPlan> = Vec::with_capacity(scope_indices.len());
+    let mut scoped_cuts: Vec<CutPlan> = Vec::with_capacity(scope_indices.len());
+
+    for &cut_index in &scope_indices {
+        if gen_queue::is_cancelled(&run_id) {
+            return Err(gen_queue::cancelled_error());
+        }
+        let cut = &cuts[cut_index];
+        let previous_shot_types = shot_type_seeds.get(cut_index).unwrap_or(&empty_seed);
+
+        // --- プロンプト ---
+        // 絵コンテ: prefilled の有無に関わらずローカル組み立て
+        //   (build_structured_prompt = 最大300秒/カットの LLM 呼び出しに落とさない。
+        //    ラフに LLM 設計の精密さは不要)。
+        // 本番: 従来どおり prefilled → ローカル / 無ければ LLM 設計。
+        //   previous_cut は **画像パスではなく None** を渡す。前カット完成画像の
+        //   引き回しが直列の根なので、ここで断つ (narrative.previous_cut_state は
+        //   "first cut" 相当になる。連続性は continuity_contract が運ぶ)。
+        let mut structured_prompt = if params.sketch_mode {
+            if cut.prefilled.is_some() {
+                prefilled_structured_prompt(&params, cut, None, previous_shot_types, None)
+            } else {
+                local_structured_prompt(&params, cut, None, previous_shot_types)
+            }
+        } else if cut.prefilled.is_some() {
             tracing::info!(
                 target: "codex.storyboard",
                 "{}: prefilled direction を使用 (裏側 LLM 設計をスキップ)",
@@ -940,41 +1324,98 @@ async fn run_storyboard_orchestrator(
             prefilled_structured_prompt(
                 &params,
                 cut,
-                previous_cut_image.as_deref(),
-                &previous_shot_types,
+                None,
+                previous_shot_types,
                 look_analysis.as_ref(),
             )
         } else {
-            build_structured_prompt(
+            match build_structured_prompt(
                 &app,
                 &codex_bin,
+                &run_id,
                 &params,
                 &skill_refs,
                 cut,
-                previous_cut_image.as_deref(),
+                None,
                 cut_index,
                 cuts_count,
-                &previous_shot_types,
+                previous_shot_types,
             )
             .await
-            .unwrap_or_else(|err| {
-                tracing::warn!(target: "codex.storyboard", "structured prompt fallback for {}: {err}", cut.cut_id);
-                local_structured_prompt(&params, cut, previous_cut_image.as_deref(), &previous_shot_types)
-            })
+            {
+                Ok(prompt) => prompt,
+                Err(err) if gen_queue::is_cancelled_error(&err) => return Err(err),
+                Err(err) => {
+                    tracing::warn!(target: "codex.storyboard", "structured prompt fallback for {}: {err}", cut.cut_id);
+                    local_structured_prompt(&params, cut, None, previous_shot_types)
+                }
+            }
         };
 
-        // P15 (2026-05-20): Continuity Contract と Murch priority を
-        // structured_prompt に差し込む。
-        // ※ sketch_mode (絵コンテ生成) では Contract をスキップ
-        //    (絵コンテはラフスケッチなので連動性ルールは緩める)
+        // --- 参照画像 ---
+        // P12: cut_id に対応する絵コンテ画像。本番ではこれが「前カットラフ」と
+        // 並んで構図アンカーになる。
+        //
+        // 絵コンテ生成時 (sketch_mode) は積まない。絵コンテを作るのに絵コンテを
+        // 見せる意味がないうえ、キービジュアル固定参照が sketch_references を
+        // 埋めている場合に、ラフ段へ本番用の参照が紛れ込む (S1 の挙動を維持)。
+        let sketch_ref_pathbuf: Option<PathBuf> = if params.sketch_mode {
+            None
+        } else {
+            params
+                .sketch_references
+                .get(&cut.cut_id)
+                .filter(|p| !p.trim().is_empty())
+                .map(PathBuf::from)
+        };
+
+        // S3: スロット3 = 前カットの**確定ラフ** (従来は前カットの本番確定画像)。
+        // ラフは本番開始時点で全部揃っているので、待ちが発生しない。
+        // 絵コンテ生成時は積まない (絵コンテを作るのに絵コンテを見せる意味がない)。
+        //
+        // 参照元は confirmed_sketch_references (確定ラフだけのマップ) に限定する。
+        // sketch_references はキービジュアルのフォールバックを含むため、そちらを
+        // 見るとキービジュアル画像が「前カットの鉛筆ラフ」として渡る (役割宣言と
+        // 実体の食い違い)。該当が無ければスロット3は参照なしにする。
+        let previous_cut_sketch: Option<PathBuf> = if params.sketch_mode || cut_index == 0 {
+            None
+        } else {
+            params
+                .confirmed_sketch_references
+                .as_ref()
+                .and_then(|refs| refs.get(&cuts[cut_index - 1].cut_id))
+                .filter(|p| !p.trim().is_empty())
+                .map(PathBuf::from)
+        };
+
+        let reference_images = build_reference_images(
+            &char_ref_path,
+            &extra_char_refs,
+            &style_ref_path,
+            &extra_style_refs,
+            previous_cut_sketch.as_deref(),
+            sketch_ref_pathbuf.as_deref(),
+        );
+
+        // --- S2: Fixed Core を全カットへ同じ Value のまま差し込む ---
+        // clone は元 Value の複製なので、serialize 結果は全カットで byte 同一になる。
+        if let Some(obj) = structured_prompt.as_object_mut() {
+            obj.insert("fixed_core".to_string(), fixed_core.clone());
+        }
+
+        // P15 (2026-05-20): Continuity Contract と Murch priority を差し込む。
+        // ※ sketch_mode (絵コンテ) ではスキップ (ラフは連動性ルールを緩める)
         if !params.sketch_mode {
             if let Some(curr_plan) = visual_plans.get(cut_index) {
+                // 隣接は「元の並び」で取る。production_scope で間引かれていても
+                // 直前カットの計画を参照する (スコープは生成対象の絞り込みであって
+                // 物語の並びを変えるものではない)。
                 let prev_plan = if cut_index > 0 {
                     visual_plans.get(cut_index - 1)
                 } else {
                     None
                 };
-                // P18c: 現カットの scene_group の intent / primary_location を取得して渡す
+                // P18c: 現カットの scene_group の intent / primary_location を渡す
                 let curr_scene_group = scene_groups
                     .iter()
                     .find(|g| g.id == curr_plan.scene_group_id);
@@ -1028,20 +1469,32 @@ async fn run_storyboard_orchestrator(
                             "do_not_use_for": ["character_identity"]
                         }),
                     ];
-                    if previous_cut_image.is_some() {
+                    if previous_cut_sketch.is_some() {
+                        // S3 (2026-07-28): 前カットの**確定ラフ**。従来の
+                        // previous_confirmed_cut (本番完成画像) から差し替えた。
+                        // ラフはモノクロ鉛筆なので、画風・仕上がりの参照に使われると
+                        // 本番までスケッチ化する。運べるのは時間的連続・画面方向・
+                        // 画面内位置だけであることを明示する。
                         roles.push(serde_json::json!({
                             "slot": 3,
-                            "role": "previous_confirmed_cut",
-                            "use_for": ["temporal_continuity", "screen_direction_check"],
-                            "do_not_use_for": ["style_change", "character_change"]
+                            "role": "previous_cut_sketch",
+                            "use_for": [
+                                "temporal_continuity",
+                                "screen_direction_check",
+                                "position_in_frame"
+                            ],
+                            "do_not_use_for": [
+                                "art_style",
+                                "monochrome_look",
+                                "pencil_or_sketch_appearance",
+                                "low_fidelity_appearance",
+                                "style_change",
+                                "character_change"
+                            ],
+                            "note": "This is the PREVIOUS cut's pencil storyboard sketch. Use it only to keep motion/eye-line/screen direction continuous with the previous cut. The final output MUST be a photorealistic/colored frame, not a sketch."
                         }));
                     }
-                    if params
-                        .sketch_references
-                        .get(&cut.cut_id)
-                        .filter(|p| !p.trim().is_empty())
-                        .is_some()
-                    {
+                    if sketch_ref_pathbuf.is_some() {
                         roles.push(serde_json::json!({
                             "slot": "last",
                             "role": "storyboard_sketch",
@@ -1067,207 +1520,32 @@ async fn run_storyboard_orchestrator(
                 }
             }
         }
-        debug_prompts.push(DebugPromptEntry {
-            cut_id: cut.cut_id.clone(),
-            structured_prompt: structured_prompt.clone(),
+
+        plans.push(CutGenerationPlan {
+            structured_prompt,
+            reference_images,
         });
-        // Track this cut's shot_type for adjacent-diversity enforcement in the next iteration.
-        if let Some(shot_type) = structured_prompt
-            .get("framing")
-            .and_then(|f| f.get("shot_type"))
-            .and_then(|s| s.as_str())
-        {
-            previous_shot_types.push(shot_type.to_string());
-        }
-
-        let mut all_takes_for_manifest: Vec<ManifestTake> = Vec::new();
-        let mut selected: Option<EvaluatedTake> = None;
-        let mut last_failure = String::new();
-
-        // === 2026-06-06 STΛCK 指示: AI 評価ループ + リトライを完全撤去 ===
-        // 旧: for attempt in 0..=MAX_RETRIES_PER_CUT { 生成 → 評価 → しきい値未満なら再生成 }
-        // 新: 指定枚数を1回だけ生成し、全 take をそのまま流す。1枚目を即採用、
-        //     残りは候補として Phase 4 でユーザーが手動切替する。
-        //     「後ろで採点して遅くする」より「先に出してダメなら手動で再生成」が良い UX。
-        {
-            // P12: cut_id に対応する絵コンテ画像があれば参考として追加
-            let sketch_ref_pathbuf: Option<PathBuf> = params
-                .sketch_references
-                .get(&cut.cut_id)
-                .filter(|p| !p.trim().is_empty())
-                .map(PathBuf::from);
-            let reference_images = build_reference_images(
-                &char_ref_path,
-                &extra_char_refs,
-                &style_ref_path,
-                &extra_style_refs,
-                previous_cut_image.as_deref(),
-                sketch_ref_pathbuf.as_deref(),
-            );
-            // ユーザー指定枚数 (candidates_per_cut) ぶんだけ生成する。
-            let take_specs = (0..candidates_per_cut)
-                .map(|idx| (take_label(idx), idx + 1))
-                .collect::<Vec<_>>();
-
-            let generated = generate_cut_takes(
-                &app,
-                &state,
-                &codex_bin,
-                &codex_home_orig,
-                &structured_prompt,
-                &reference_images,
-                &out_dir,
-                &run_id,
-                &cut.cut_id,
-                &take_specs,
-                params.cwd.clone(),
-                &params.aspect_ratio,
-                params.sketch_mode,
-            )
-            .await;
-
-            let mut evaluated_takes = Vec::new();
-            for item in generated {
-                match item {
-                    Ok((take_id, image_path)) => {
-                        // 評価は行わない (撤去済み)。全 take をデフォルトスコアで素通し。
-                        let scores = ScoreBundle::default();
-                        let image_path_string = image_path.to_string_lossy().into_owned();
-                        all_takes_for_manifest.push(ManifestTake {
-                            take_id: take_id.clone(),
-                            image_path: image_path_string,
-                            scores: scores.clone(),
-                            status: "candidate".into(),
-                        });
-                        evaluated_takes.push(EvaluatedTake {
-                            take_id,
-                            image_path,
-                            scores,
-                        });
-                    }
-                    Err(err) => {
-                        last_failure = err;
-                    }
-                }
-            }
-
-            // 評価なしで最初の take を即採用。残りは候補として Phase 4 でユーザーが切替。
-            if let Some(best) = select_first_take(&evaluated_takes) {
-                mark_manifest_take_status(&mut all_takes_for_manifest, &best.take_id, "confirmed");
-                let _ = app.emit(
-                    EVENT_STORYBOARD,
-                    StoryboardEvent::CutConfirmed {
-                        run_id: run_id.clone(),
-                        cut_id: cut.cut_id.clone(),
-                        selected_take_id: best.take_id.clone(),
-                    },
-                );
-                previous_cut_image = Some(best.image_path.clone());
-                selected = Some(best);
-            }
-        }
-
-        if selected.is_none() {
-            let reason = if last_failure.trim().is_empty() {
-                "このカットの画像生成に失敗しました".to_string()
-            } else {
-                format!("このカットの画像生成に失敗しました: {last_failure}")
-            };
-            let _ = app.emit(
-                EVENT_STORYBOARD,
-                StoryboardEvent::CutFailed {
-                    run_id: run_id.clone(),
-                    cut_id: cut.cut_id.clone(),
-                    reason,
-                },
-            );
-            aborted = true;
-            break;
-        }
-
-        manifest_cuts.push(ManifestCut {
-            cut_id: cut.cut_id.clone(),
-            scene_group_id: cut.scene_group_id.clone(),
-            description: cut.description.clone(),
-            duration_seconds: cut.duration_seconds,
-            takes: all_takes_for_manifest,
-        });
-
-        // A-2 (2026-06 監査): 3カット目 (cut_index==2) 到達で「方向性チェック」を挟む。
-        // 従来は emit するだけでループを止められず、残りカットを全部生成し続けていた
-        // (フロントの paused は見せかけ)。ここで実際に await 停止し、フロントの
-        // storyboard_checkpoint_resume が来るまで次カットに進まない。
-        // 残りカットが無い (このカットが最後) 場合は止める意味が無いのでスキップ。
-        let has_remaining = cut_index + 1 < cuts_count;
-        if cut_index == 2 && has_remaining {
-            // 先に受信端を登録してから emit する (フロントが即 resume を返しても
-            // sender が登録済みで取りこぼさない)。
-            let resume_rx = state.register_checkpoint(&run_id).await;
-            let _ = app.emit(
-                EVENT_STORYBOARD,
-                StoryboardEvent::CutCheckpoint {
-                    run_id: run_id.clone(),
-                    cut_id: cut.cut_id.clone(),
-                    reason: "midRun review at cut 3".into(),
-                },
-            );
-            // ユーザー判断待ちは無期限 (タイムアウト無し)。resume/cancel が来るか、
-            // run 終了/アプリ終了で sender が drop される (Err) まで待つ。
-            let action = match resume_rx.await {
-                Ok(action) => action,
-                // sender が drop された = run クリーンアップ (アプリ終了等)。
-                // 安全側に倒して中断扱いにする (生成済みカットは保持)。
-                Err(_) => CheckpointAction::Cancel,
-            };
-            match action {
-                CheckpointAction::Continue => {
-                    // 続行: 何もせず次カットへ。
-                }
-                CheckpointAction::Cancel => {
-                    // 中断: 生成済みカットを保持したままループを抜ける。
-                    // aborted にはしない (Completed を出さず、部分成果を残す)。
-                    tracing::info!(
-                        target: "codex.storyboard",
-                        "storyboard run {run_id} cancelled at checkpoint (cut {cut_index})"
-                    );
-                    break;
-                }
-            }
-        }
+        scoped_cuts.push(cut.clone());
     }
 
-    let debug_path = out_dir.join("debug-log.json");
-    let debug = DebugLog {
-        run_id: run_id.clone(),
-        prompts: debug_prompts,
-    };
-    write_json_file(&debug_path, &debug).await?;
-
-    let manifest_path = out_dir.join("manifest.json");
-    let manifest = Manifest {
-        run_id: run_id.clone(),
-        story_prompt: params.story_prompt.clone(),
-        aspect_ratio: params.aspect_ratio.clone(),
-        duration_seconds: params.duration_seconds,
-        tempo: params.tempo.clone(),
+    // --- 2) 一斉発射して完了順に回収する ---
+    run_cut_fanout(
+        &app,
+        &state,
+        &codex_bin,
+        &codex_home_orig,
+        &run_id,
+        &params,
+        &scoped_cuts,
+        &plans,
+        &fixed_core,
+        &out_dir,
         total_cuts,
         candidates_per_cut,
-        character_reference_path: params.character_reference_image.clone(),
-        style_reference_path: style_ref,
-        created_at: now_secs(),
-        cuts: manifest_cuts,
-    };
-    write_json_file(&manifest_path, &manifest).await?;
-
-    if !aborted && manifest.cuts.len() == total_cuts as usize {
-        let _ = app.emit(
-            EVENT_STORYBOARD,
-            StoryboardEvent::Completed {
-                run_id,
-                manifest_path: manifest_path.to_string_lossy().into_owned(),
-            },
-        );
-    }
+        &style_ref,
+        params.sketch_mode,
+    )
+    .await?;
 
     Ok(())
 }
@@ -1356,6 +1634,7 @@ async fn read_skill_reference(refs_dir: &Path, name: &str) -> Result<String, Str
 async fn plan_cuts(
     app: &AppHandle,
     codex_bin: &Path,
+    run_id: &str,
     params: &StoryboardParams,
     refs: &SkillRefs,
 ) -> Result<Vec<CutPlan>, String> {
@@ -1394,6 +1673,7 @@ async fn plan_cuts(
         &[],
         PROMPT_TIMEOUT_SECS,
         params.cwd.as_deref(),
+        Some(run_id),
     )
     .await?;
     let json = extract_json_from_codex_stdout(&raw)?;
@@ -1524,6 +1804,7 @@ fn plan_from_scene_construction(
 async fn build_structured_prompt(
     app: &AppHandle,
     codex_bin: &Path,
+    run_id: &str,
     params: &StoryboardParams,
     refs: &SkillRefs,
     cut: &CutPlan,
@@ -1637,9 +1918,73 @@ async fn build_structured_prompt(
         &[],
         PROMPT_TIMEOUT_SECS,
         params.cwd.as_deref(),
+        Some(run_id),
     )
     .await?;
     extract_json_from_codex_stdout(&raw)
+}
+
+/// S2 (2026-07-28): Fixed Core = 全カットで一字一句同じ「世界観・光・画風」ブロック。
+///
+/// なぜ分離するか (設計書 §3.2):
+///   従来 look_analysis は prefilled_structured_prompt の中で style ブロックへ
+///   「カット毎に混ぜ込む素材」として注入されていた。混ぜ込みは各カットの
+///   組み立て手順に依存するため、カット間で微妙に違う文字列になりうる。
+///   並列ファンアウトでは前カットからの引き継ぎが無いぶん、この共通ブロックが
+///   ルック一貫性の唯一のアンカーになる。だから「封印された共通ブロック」へ昇格し、
+///   全カット byte 同一であることをテストで保証する。
+///
+/// 不変記号 (キャラの顔・体型・衣装) はここに要約だけ載せる。実体の担保は
+/// キャラクターシート参照画像が行う (STΛCK 指示: 新しい仕組みを重ねない)。
+///
+/// 重要: 引数は「run 全体で1回決まる値」だけを取る。cut / cut_index / previous_*
+/// といったカット固有の値を渡してはいけない (byte 同一が壊れる)。
+fn build_fixed_core(params: &StoryboardParams, look: Option<&Value>) -> Value {
+    let style_ref = params
+        .style_reference_image
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(&params.character_reference_image);
+
+    let look_str = |keys: &[&str]| -> Option<String> {
+        let look = look?;
+        for key in keys {
+            if let Some(v) = look.get(*key).and_then(|v| v.as_str()) {
+                if !v.trim().is_empty() {
+                    return Some(v.to_string());
+                }
+            }
+        }
+        None
+    };
+    let look_arr = |keys: &[&str]| -> Vec<Value> {
+        let Some(look) = look else {
+            return Vec::new();
+        };
+        for key in keys {
+            if let Some(v) = look.get(*key).and_then(|v| v.as_array()) {
+                if !v.is_empty() {
+                    return v.clone();
+                }
+            }
+        }
+        Vec::new()
+    };
+
+    // serde_json::json! の Map は既定で BTreeMap (preserve_order 無効) なので
+    // キー順は決定論。同じ入力からは常に同じ serialize 結果になる。
+    serde_json::json!({
+        "note": "This block is identical for every cut in this run. Treat it as the sealed world/style contract: never reinterpret it per cut.",
+        "character_reference": params.character_reference_image,
+        "style_reference": style_ref,
+        "identity_anchors": look_arr(&["identityAnchors", "identity_anchors"]),
+        "key_parts": look_arr(&["keyParts", "key_parts"]),
+        "subject_identity": look_str(&["subjectIdentity", "subject_identity"]),
+        "silhouette": look_str(&["silhouette"]),
+        "color_profile": look_str(&["colorProfile", "color_profile"]),
+        "material": look_str(&["material"]),
+        "mood": look_str(&["mood"]),
+    })
 }
 
 fn local_structured_prompt(
@@ -2744,6 +3089,7 @@ async fn generate_cut_takes(
                     structured_prompt,
                     reference_images,
                     output_dir,
+                    run_id,
                     cut_id,
                     take_id,
                     *idx,
@@ -2761,6 +3107,10 @@ async fn generate_cut_takes(
     let mut completed = Vec::with_capacity(take_specs.len());
     while let Some((order, result)) = tasks.next().await {
         if let Ok((take_id, image_path)) = &result {
+            if gen_queue::is_cancelled(run_id) {
+                completed.push((order, Err(gen_queue::cancelled_error())));
+                continue;
+            }
             let _ = app.emit(
                 EVENT_STORYBOARD,
                 StoryboardEvent::TakeCompleted {
@@ -2801,6 +3151,7 @@ async fn generate_one_take(
     structured_prompt: &Value,
     reference_images: &[PathBuf],
     output_dir: &Path,
+    run_id: &str,
     cut_id: &str,
     take_id: &str,
     candidate_index: u32,
@@ -2809,6 +3160,9 @@ async fn generate_one_take(
     aspect_ratio: &str,
     sketch_mode: bool,
 ) -> Result<(String, PathBuf), String> {
+    if gen_queue::is_cancelled(run_id) {
+        return Err(gen_queue::cancelled_error());
+    }
     // ── 常駐 app-server 経路を先に試す (2026-07-27) ────────────────────
     //
     // なぜ: batch_gen.rs は「1枚ごとの codex exec 起動コストを払わないため」に
@@ -2833,7 +3187,7 @@ async fn generate_one_take(
             .iter()
             .map(|p| p.to_string_lossy().into_owned())
             .collect();
-        match crate::codex::gen_server::generate_image(
+        match crate::codex::gen_server::generate_image_for_run(
             app,
             state,
             &final_prompt,
@@ -2841,10 +3195,18 @@ async fn generate_one_take(
             cwd.as_deref().filter(|value| !value.is_empty()),
             Some(STORYBOARD_MODEL),
             Some(STORYBOARD_EFFORT),
+            Some(run_id),
+            // 絵コンテは cut_id / take_id で識別するため枚数インデックスを持たない
+            // (gen_worker.rs と同じ理由)。
+            None,
+            "storyboard",
         )
         .await
         {
             Ok(src_png) => {
+                if gen_queue::is_cancelled(run_id) {
+                    return Err(gen_queue::cancelled_error());
+                }
                 let dest = output_dir.join(format!("{cut_id}_{take_id}.png"));
                 match std::fs::copy(&src_png, &dest) {
                     Ok(_) => return Ok((take_id.to_string(), dest)),
@@ -2857,6 +3219,9 @@ async fn generate_one_take(
                 }
             }
             Err(resident_error) => {
+                if gen_queue::is_cancelled_error(&resident_error) {
+                    return Err(resident_error);
+                }
                 tracing::warn!(
                     target: "codex.storyboard",
                     "{cut_id}/{take_id}: 常駐 app-server 経路に失敗したため codex exec へフォールバックします: {resident_error}"
@@ -2867,6 +3232,9 @@ async fn generate_one_take(
 
     let mut last_err = String::new();
     for attempt in 1..=STORYBOARD_MAX_ATTEMPTS {
+        if gen_queue::is_cancelled(run_id) {
+            return Err(gen_queue::cancelled_error());
+        }
         match attempt_one_take(
             app,
             codex_bin,
@@ -2874,6 +3242,7 @@ async fn generate_one_take(
             structured_prompt,
             reference_images,
             output_dir,
+            run_id,
             cut_id,
             take_id,
             candidate_index,
@@ -2886,6 +3255,12 @@ async fn generate_one_take(
         {
             Ok(v) => return Ok(v),
             Err(e) => {
+                if gen_queue::is_cancelled_error(&e) {
+                    return Err(e);
+                }
+                // 429 なら同時実行数を自動降格する (T3)。リトライで叩き続けて
+                // 悪化させないよう、次の試行より先に上限を下げる。
+                crate::codex::gen_server::note_rate_limit(app, &e);
                 tracing::warn!(
                     "storyboard {cut_id} {take_id} attempt {attempt}/{STORYBOARD_MAX_ATTEMPTS} failed: {e}"
                 );
@@ -2908,6 +3283,7 @@ async fn attempt_one_take(
     structured_prompt: &Value,
     reference_images: &[PathBuf],
     output_dir: &Path,
+    run_id: &str,
     cut_id: &str,
     take_id: &str,
     candidate_index: u32,
@@ -2916,6 +3292,9 @@ async fn attempt_one_take(
     aspect_ratio: &str,
     sketch_mode: bool,
 ) -> Result<(String, PathBuf), String> {
+    if gen_queue::is_cancelled(run_id) {
+        return Err(gen_queue::cancelled_error());
+    }
     let tmp = tempfile::Builder::new()
         .prefix(&format!("codex-storyboard-{cut_id}-{take_id}-"))
         .tempdir()
@@ -2966,33 +3345,62 @@ async fn attempt_one_take(
         .stderr(Stdio::piped());
     crate::codex::process::no_window_flag(&mut cmd);
 
-    let gen_permit = GLOBAL_GEN_SEMAPHORE
-        .acquire()
-        .await
-        .map_err(|_| "画像生成キューが閉じられました".to_string())?;
+    if gen_queue::is_cancelled(run_id) {
+        return Err(gen_queue::cancelled_error());
+    }
+    // RAII: 以降どの早期 return / `?` で抜けても Drop が債務返済を通す。
+    let gen_permit = gen_queue::GenPermit::acquire(&GLOBAL_GEN_SEMAPHORE).await?;
+    // 待機中にキャンセルされたtakeは、codex execを起動しない。
+    if gen_queue::is_cancelled(run_id) {
+        return Err(gen_queue::cancelled_error());
+    }
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("codex exec の spawn に失敗: {e}"))?;
     let pid = child
         .id()
         .ok_or_else(|| "codex exec の PID を取得できません".to_string())?;
-    let worker_registration =
-        crate::commands::worker_registry::WorkerPidGuard::register(app, pid, "storyboard")?;
+    let worker_registration = crate::commands::worker_registry::WorkerPidGuard::register(
+        app,
+        pid,
+        "storyboard",
+        Some(run_id),
+    )?;
+    if gen_queue::is_cancelled(run_id) {
+        return Err(gen_queue::cancelled_error());
+    }
     if let Some(mut stdin) = child.stdin.take() {
         stdin
             .write_all(final_prompt.as_bytes())
             .await
             .map_err(|e| format!("stdin 書き込み失敗: {e}"))?;
     }
-    let output = timeout(
+    let output = match timeout(
         Duration::from_secs(GENERATION_TIMEOUT_SECS),
         child.wait_with_output(),
     )
     .await
-    .map_err(|_| format!("画像生成が {GENERATION_TIMEOUT_SECS} 秒でタイムアウトしました"))?
-    .map_err(|e| format!("codex exec 待機失敗: {e}"))?;
+    {
+        Ok(Ok(output)) => output,
+        Ok(Err(_)) if gen_queue::is_cancelled(run_id) => {
+            return Err(gen_queue::cancelled_error());
+        }
+        Ok(Err(error)) => return Err(format!("codex exec 待機失敗: {error}")),
+        Err(_) if gen_queue::is_cancelled(run_id) => {
+            return Err(gen_queue::cancelled_error());
+        }
+        Err(_) => {
+            return Err(format!(
+                "画像生成が {GENERATION_TIMEOUT_SECS} 秒でタイムアウトしました"
+            ));
+        }
+    };
     drop(worker_registration);
+    // 429降格中は permit をセマフォへ戻さず握り潰す(実効上限を下げる)。
     drop(gen_permit);
+    if gen_queue::is_cancelled(run_id) {
+        return Err(gen_queue::cancelled_error());
+    }
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let last = stderr
@@ -3128,7 +3536,14 @@ async fn codex_oneshot(
     image_paths: &[&Path],
     timeout_secs: u64,
     cwd: Option<&str>,
+    run_id: Option<&str>,
 ) -> Result<String, String> {
+    let run_id = run_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if run_id.map(gen_queue::is_cancelled).unwrap_or(false) {
+        return Err(gen_queue::cancelled_error());
+    }
     let mut cmd = Command::new(codex_bin);
     cmd.args([
         "exec",
@@ -3165,8 +3580,15 @@ async fn codex_oneshot(
     let pid = child
         .id()
         .ok_or_else(|| "codex exec の PID を取得できません".to_string())?;
-    let worker_registration =
-        crate::commands::worker_registry::WorkerPidGuard::register(app, pid, "storyboard")?;
+    let worker_registration = crate::commands::worker_registry::WorkerPidGuard::register(
+        app,
+        pid,
+        "storyboard",
+        run_id,
+    )?;
+    if run_id.map(gen_queue::is_cancelled).unwrap_or(false) {
+        return Err(gen_queue::cancelled_error());
+    }
     if let Some(mut stdin) = child.stdin.take() {
         stdin
             .write_all(prompt.as_bytes())
@@ -3174,11 +3596,21 @@ async fn codex_oneshot(
             .map_err(|e| format!("stdin 書き込み失敗: {e}"))?;
     }
 
-    let output = timeout(Duration::from_secs(timeout_secs), child.wait_with_output())
-        .await
-        .map_err(|_| format!("codex exec が {timeout_secs} 秒でタイムアウトしました"))?
-        .map_err(|e| format!("codex exec 待機失敗: {e}"))?;
+    let output = match timeout(Duration::from_secs(timeout_secs), child.wait_with_output()).await {
+        Ok(Ok(output)) => output,
+        Ok(Err(_)) if run_id.map(gen_queue::is_cancelled).unwrap_or(false) => {
+            return Err(gen_queue::cancelled_error());
+        }
+        Ok(Err(error)) => return Err(format!("codex exec 待機失敗: {error}")),
+        Err(_) if run_id.map(gen_queue::is_cancelled).unwrap_or(false) => {
+            return Err(gen_queue::cancelled_error());
+        }
+        Err(_) => return Err(format!("codex exec が {timeout_secs} 秒でタイムアウトしました")),
+    };
     drop(worker_registration);
+    if run_id.map(gen_queue::is_cancelled).unwrap_or(false) {
+        return Err(gen_queue::cancelled_error());
+    }
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let detail = stderr
@@ -3723,6 +4155,8 @@ mod sketch_mode_tests {
             sketch_mode,
             manual_selection: false,
             sketch_references: std::collections::HashMap::new(),
+            confirmed_sketch_references: None,
+            production_scope: None,
         }
     }
 
@@ -3826,6 +4260,117 @@ mod sketch_mode_tests {
         }
     }
 
+    // ── S1 (2026-07-28): ラフ爆速化 = 全カット並列ファンアウトの構造検査 ──────
+    //
+    // 並列化そのもの (FuturesUnordered での一斉発射) は実際の画像生成を伴うため
+    // ユニットテストでは回せない。代わりに「並列化を成立させている前提条件」が
+    // 壊れていないかを検査する。前提が1つでも崩れると直列に戻る。
+
+    fn cut_with_id(cut_id: &str, description: &str) -> CutPlan {
+        CutPlan {
+            cut_id: cut_id.into(),
+            scene_group_id: "station".into(),
+            description: description.into(),
+            duration_seconds: 3.0,
+            prefilled: None,
+        }
+    }
+
+    /// S1-1: 絵コンテの参照配列に前カット画像が入らないこと。
+    /// これが入ると「前カットの完成を待つ」＝直列に戻る。
+    #[test]
+    fn sketch_fanout_references_exclude_previous_cut() {
+        let char_ref = PathBuf::from("/tmp/char.png");
+        let style_ref = PathBuf::from("/tmp/style.png");
+        let previous = PathBuf::from("/tmp/prev_cut.png");
+
+        // 絵コンテ経路が組む参照配列 (run_sketch_fanout と同じ引数の組み方)。
+        let sketch_refs = build_reference_images(&char_ref, &[], &style_ref, &[], None, None);
+        assert!(
+            !sketch_refs.contains(&previous),
+            "絵コンテの参照に前カット画像が含まれている。直列化の根が残っている: {sketch_refs:?}"
+        );
+        assert!(
+            sketch_refs.contains(&char_ref),
+            "キャラ参照が落ちている (同一性の担保が消える): {sketch_refs:?}"
+        );
+
+        // 逆方向の検査: 本番経路では前カット画像が積まれること。
+        // これが無いと build_reference_images が常に無視する実装でも上が通る。
+        let production_refs = build_reference_images(
+            &char_ref,
+            &[],
+            &style_ref,
+            &[],
+            Some(previous.as_path()),
+            None,
+        );
+        assert!(
+            production_refs.contains(&previous),
+            "本番経路で前カット参照が失われている (S1 は本番を変えてはいけない): {production_refs:?}"
+        );
+    }
+
+    /// S1-2: 並列化しても隣接カットの shot_type 多様化が壊れないこと。
+    ///
+    /// 直列時は「前カットの確定 shot_type」を次カットへ渡していた。並列では
+    /// previous_shot_types_seed が事前計算でこれを再現する。seed が直列の
+    /// 積み上げと一致しなければ、並列化と引き換えに構図の多様性を失う。
+    #[test]
+    fn sketch_fanout_seed_matches_serial_accumulation() {
+        let cuts = vec![
+            cut_with_id("shot_001", "ホームに立ち、遠くを見る"),
+            cut_with_id("shot_002", "ドアが開き、車内に乗り込む"),
+            cut_with_id("shot_003", "手元の切符を確かめる"),
+            cut_with_id("shot_004", "窓の外を眺める"),
+        ];
+        let seeds = previous_shot_types_seed(&cuts);
+        assert_eq!(seeds.len(), cuts.len(), "seed の件数がカット数と一致しない");
+        assert!(seeds[0].is_empty(), "先頭カットの前カット列は空であるべき");
+
+        // 直列ループと同じ手順で積み上げた列を作り、seed と突き合わせる。
+        let mut serial: Vec<String> = Vec::new();
+        for (i, cut) in cuts.iter().enumerate() {
+            assert_eq!(
+                seeds[i], serial,
+                "カット{i} に渡る previous_shot_types が直列時と食い違う"
+            );
+            let prompt = local_structured_prompt(&params(true), cut, None, &serial);
+            let shot_type = prompt
+                .get("shot_type")
+                .and_then(|s| s.as_str())
+                .unwrap_or_else(|| panic!("カット{i} の shot_type が取れない: {prompt}"));
+            serial.push(shot_type.to_string());
+        }
+    }
+
+    /// S1-3: 絵コンテのプロンプトが LLM 経路 (build_structured_prompt) に
+    /// 依存せず、prefilled の有無に関わらずローカルだけで組めること。
+    ///
+    /// build_structured_prompt は最大300秒/カットの Codex 呼び出し。絵コンテが
+    /// これに落ちると「プロンプト設計だけで数分」の事故経路が復活する。
+    #[test]
+    fn sketch_fanout_prompt_is_local_only() {
+        let cuts = vec![
+            cut_with_id("shot_001", "ホームに立ち、遠くを見る"),
+            cut_with_id("shot_002", "ドアが開き、車内に乗り込む"),
+        ];
+        let seeds = previous_shot_types_seed(&cuts);
+        for (i, cut) in cuts.iter().enumerate() {
+            // run_sketch_fanout が呼ぶのと同じ組み立て (previous_cut は常に None)。
+            let prompt = local_structured_prompt(&params(true), cut, None, &seeds[i]);
+            assert!(
+                prompt.get("shot_type").is_some() && prompt.get("action").is_some(),
+                "ローカル組み立てだけで絵コンテプロンプトが成立していない: {prompt}"
+            );
+            // 絵コンテには本番用の重い構造が乗らない (既存 S 検査と同方向)。
+            assert!(
+                prompt.get("continuity_contract").is_none(),
+                "絵コンテに continuity_contract が乗っている (絵コンテはスキップが仕様): {prompt}"
+            );
+        }
+    }
+
     #[test]
     fn sketch_mode_negative_forbids_photorealism() {
         let prompt = local_structured_prompt(&params(true), &cut(), None, &[]);
@@ -3833,6 +4378,504 @@ mod sketch_mode_tests {
         assert!(
             negative.contains("photorealistic"),
             "絵コンテの negative に photorealistic 禁止が入っていない: {negative}"
+        );
+    }
+
+    // ── S2 (2026-07-28): Fixed Core 分離の検査 ───────────────────────────────
+    //
+    // Fixed Core は「全カット byte 同一の世界観・画風ブロック」。並列ファンアウトでは
+    // 前カットからの引き継ぎが無いぶん、これがルック一貫性の唯一のアンカーになる。
+    // カット間で1バイトでも違えば、その役目を果たさない。
+
+    fn look_analysis_fixture() -> Value {
+        serde_json::json!({
+            "subjectIdentity": "小柄なヒューマノイド型キャラクター",
+            "silhouette": "丸い頭部と厚手のコート",
+            "colorProfile": "くすんだ消防服レッド。影部はレンガ色に沈む",
+            "material": "中厚のコットンツイル",
+            "keyParts": ["丸い頭部", "赤いコート"],
+            "identityAnchors": ["顔の丸み", "胸元の徽章"],
+            "mood": "赤と銅の密室的な世界",
+            "sourceImagePath": "/tmp/char.png"
+        })
+    }
+
+    /// S2-1: 同一 run 内の全カットで fixed_core が完全一致すること。
+    ///
+    /// 実装の作り (run に1回だけ build_fixed_core して clone を配る) を、
+    /// 「カット毎に組み立てても同じになるか」ではなく **配った結果が同一か** で検査する。
+    #[test]
+    fn fixed_core_is_byte_identical_across_cuts() {
+        let p = params(false);
+        let look = look_analysis_fixture();
+        let fixed_core = build_fixed_core(&p, Some(&look));
+
+        let cuts = vec![
+            cut_with_id("shot_001", "ホームに立ち、遠くを見る"),
+            cut_with_id("shot_002", "ドアが開き、車内に乗り込む"),
+            cut_with_id("shot_003", "手元の切符を確かめる"),
+        ];
+        let seeds = previous_shot_types_seed(&cuts);
+
+        // orchestrator と同じ差し込み方を再現する。
+        let mut serialized: Vec<String> = Vec::new();
+        for (i, cut) in cuts.iter().enumerate() {
+            let mut prompt = local_structured_prompt(&p, cut, None, &seeds[i]);
+            prompt
+                .as_object_mut()
+                .expect("structured_prompt はオブジェクト")
+                .insert("fixed_core".to_string(), fixed_core.clone());
+            let core = prompt.get("fixed_core").expect("fixed_core が差し込まれていない");
+            serialized.push(serde_json::to_string(core).expect("serialize 失敗"));
+        }
+
+        let first = &serialized[0];
+        for (i, s) in serialized.iter().enumerate() {
+            assert_eq!(
+                s, first,
+                "カット{i} の fixed_core が他カットと一致しない。\
+                 全カット byte 同一でなければルックの共通アンカーとして機能しない。\n\
+                 first: {first}\n  cut{i}: {s}"
+            );
+        }
+    }
+
+    /// S2-2: fixed_core が look_analysis の中身を実際に運んでいること。
+    ///
+    /// これが無いと「空の {} を全カットに配る」実装でも S2-1 が通ってしまう
+    /// (byte 同一だが中身ゼロ = ルックを何も固定していない)。
+    #[test]
+    fn fixed_core_carries_look_analysis() {
+        let look = look_analysis_fixture();
+        let core = build_fixed_core(&params(false), Some(&look));
+
+        assert_eq!(
+            core.get("color_profile").and_then(|v| v.as_str()),
+            Some("くすんだ消防服レッド。影部はレンガ色に沈む"),
+            "fixed_core が色プロファイルを運んでいない: {core}"
+        );
+        assert_eq!(
+            core.get("mood").and_then(|v| v.as_str()),
+            Some("赤と銅の密室的な世界"),
+            "fixed_core がムードを運んでいない: {core}"
+        );
+        assert_eq!(
+            core.get("identity_anchors").and_then(|v| v.as_array()).map(|a| a.len()),
+            Some(2),
+            "fixed_core が identity anchor を運んでいない: {core}"
+        );
+
+        // look_analysis が無い run でも壊れず、参照パスだけは載ること
+        // (企画タブを通らない手入力経路の後方互換)。
+        let bare = build_fixed_core(&params(false), None);
+        assert_eq!(
+            bare.get("character_reference").and_then(|v| v.as_str()),
+            Some("/tmp/char.png"),
+            "look_analysis 無しでもキャラ参照は fixed_core に載るべき: {bare}"
+        );
+    }
+
+    // ── S3 (2026-07-28): 採用ゲート式・本生成の全カット並列 ──────────────────
+
+    /// production_scope の絞り込み。orchestrator の実装と同じ手順を再現する。
+    /// (cuts 自体は絞らず「生成対象の添字」だけを絞る = 隣接関係を保つ)
+    fn scope_indices_for(cuts: &[CutPlan], scope: Option<&Vec<String>>, sketch_mode: bool) -> Vec<usize> {
+        match scope {
+            Some(scope) if !sketch_mode => {
+                let wanted: std::collections::HashSet<&str> =
+                    scope.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+                cuts.iter()
+                    .enumerate()
+                    .filter(|(_, c)| wanted.contains(c.cut_id.as_str()))
+                    .map(|(i, _)| i)
+                    .collect()
+            }
+            _ => (0..cuts.len()).collect(),
+        }
+    }
+
+    /// S3-1: production_scope 指定時、対象カットだけが生成対象になること。
+    /// 指定しなければ全カット (後方互換)。
+    #[test]
+    fn production_scope_selects_only_requested_cuts() {
+        let cuts = vec![
+            cut_with_id("shot_001", "ホームに立ち、遠くを見る"),
+            cut_with_id("shot_002", "ドアが開き、車内に乗り込む"),
+            cut_with_id("shot_003", "手元の切符を確かめる"),
+            cut_with_id("shot_004", "窓の外を眺める"),
+        ];
+
+        let scope = vec!["shot_002".to_string(), "shot_004".to_string()];
+        let picked = scope_indices_for(&cuts, Some(&scope), false);
+        assert_eq!(
+            picked,
+            vec![1, 3],
+            "production_scope で指定したカットだけが対象になっていない。\
+             全カット生成に落ちると、1カットのつもりが全カット分の枠を消費する"
+        );
+
+        // 逆方向: 未指定なら全カット (既存の一括本生成が壊れていないこと)。
+        let all = scope_indices_for(&cuts, None, false);
+        assert_eq!(all, vec![0, 1, 2, 3], "production_scope 未指定で全カットにならない");
+
+        // 絵コンテ (sketch_mode) では scope を無視して常に全カット。
+        let sketch = scope_indices_for(&cuts, Some(&scope), true);
+        assert_eq!(
+            sketch,
+            vec![0, 1, 2, 3],
+            "絵コンテでは production_scope を無視して全カット出すべき (ラフは常に全部)"
+        );
+    }
+
+    /// S3-2: 本番の参照スロット3が「前カットの確定**ラフ**」であること。
+    ///
+    /// 従来は前カットの本番**完成画像**で、これが直列化の根だった。ラフは本番開始
+    /// 時点で全部揃っているので、ここがラフである限り本番は並列発射できる。
+    #[test]
+    fn production_slot3_uses_previous_cut_sketch_not_finished_image() {
+        let cuts = vec![
+            cut_with_id("shot_001", "ホームに立ち、遠くを見る"),
+            cut_with_id("shot_002", "ドアが開き、車内に乗り込む"),
+        ];
+        let mut p = params(false);
+        p.sketch_references.insert("shot_001".into(), "/tmp/sketch_001.png".into());
+        p.sketch_references.insert("shot_002".into(), "/tmp/sketch_002.png".into());
+        // 確定ラフ専用マップ (前カット参照はここだけを見る)。
+        let mut confirmed = std::collections::HashMap::new();
+        confirmed.insert("shot_001".to_string(), "/tmp/sketch_001.png".to_string());
+        confirmed.insert("shot_002".to_string(), "/tmp/sketch_002.png".to_string());
+        p.confirmed_sketch_references = Some(confirmed);
+
+        let char_ref = PathBuf::from("/tmp/char.png");
+        let style_ref = PathBuf::from("/tmp/style.png");
+
+        // orchestrator と同じ選び方 (cut_index==0 は前カットが無いので None)。
+        let previous_for = |cut_index: usize| -> Option<PathBuf> {
+            if cut_index == 0 {
+                None
+            } else {
+                p.confirmed_sketch_references
+                    .as_ref()
+                    .and_then(|refs| refs.get(&cuts[cut_index - 1].cut_id))
+                    .filter(|s| !s.trim().is_empty())
+                    .map(PathBuf::from)
+            }
+        };
+
+        // カット2: スロット3 は「カット1 の**ラフ**」でなければならない。
+        let prev = previous_for(1).expect("カット2 の前カットラフが選ばれていない");
+        assert_eq!(
+            prev,
+            PathBuf::from("/tmp/sketch_001.png"),
+            "本番のスロット3が前カットのラフになっていない。\
+             完成画像を参照すると前カットの完了待ちが復活し、本番が直列に戻る"
+        );
+
+        let refs = build_reference_images(
+            &char_ref,
+            &[],
+            &style_ref,
+            &[],
+            Some(prev.as_path()),
+            p.sketch_references.get("shot_002").map(Path::new),
+        );
+        assert!(
+            refs.contains(&PathBuf::from("/tmp/sketch_001.png")),
+            "参照配列に前カットのラフが積まれていない: {refs:?}"
+        );
+        assert!(
+            refs.contains(&PathBuf::from("/tmp/sketch_002.png")),
+            "参照配列に自カットのラフ (構図アンカー) が積まれていない: {refs:?}"
+        );
+
+        // 先頭カットには前カットが無い。
+        assert!(
+            previous_for(0).is_none(),
+            "先頭カットに前カット参照が入っている"
+        );
+    }
+
+    /// S3-2b: スロット3 (previous_cut_sketch) が confirmed_sketch_references
+    /// **だけ** を見ること。
+    ///
+    /// sketch_references はキービジュアル固定参照 (B2) のフォールバックでも埋まる。
+    /// そこへフォールバックすると、キービジュアル画像が
+    /// 「前カットの鉛筆ラフ (previous_cut_sketch)」というロール宣言でモデルに渡り、
+    /// 実体と役割が食い違う。確定ラフが無いカットの次は参照なしが正しい。
+    #[test]
+    fn previous_cut_sketch_never_falls_back_to_key_visual() {
+        let cuts = vec![
+            cut_with_id("shot_001", "ホームに立ち、遠くを見る"),
+            cut_with_id("shot_002", "ドアが開き、車内に乗り込む"),
+        ];
+        let mut p = params(false);
+        // shot_001 のラフは未採用 → sketch_references にはキービジュアルが入る。
+        p.sketch_references.insert("shot_001".into(), "/tmp/keyvisual.png".into());
+        p.sketch_references.insert("shot_002".into(), "/tmp/keyvisual.png".into());
+        // 確定ラフは1枚も無い。
+        p.confirmed_sketch_references = Some(std::collections::HashMap::new());
+
+        // orchestrator と同じ選び方。
+        let previous_for = |cut_index: usize| -> Option<PathBuf> {
+            if p.sketch_mode || cut_index == 0 {
+                None
+            } else {
+                p.confirmed_sketch_references
+                    .as_ref()
+                    .and_then(|refs| refs.get(&cuts[cut_index - 1].cut_id))
+                    .filter(|s| !s.trim().is_empty())
+                    .map(PathBuf::from)
+            }
+        };
+
+        assert!(
+            previous_for(1).is_none(),
+            "確定ラフが無いのにスロット3へ参照が入った。キービジュアルが \
+             previous_cut_sketch ロールで渡ると、モデルはキービジュアルを \
+             『前カットの鉛筆ラフ』として扱う: {:?}",
+            previous_for(1)
+        );
+
+        // マップ自体が未指定 (None) の run でも同様に参照なし (後方互換)。
+        let mut legacy = params(false);
+        legacy.sketch_references.insert("shot_001".into(), "/tmp/keyvisual.png".into());
+        assert!(
+            legacy.confirmed_sketch_references.is_none(),
+            "テスト前提が崩れている: confirmed_sketch_references は未指定のはず"
+        );
+        let legacy_prev: Option<PathBuf> = legacy
+            .confirmed_sketch_references
+            .as_ref()
+            .and_then(|refs| refs.get(&cuts[0].cut_id))
+            .map(PathBuf::from);
+        assert!(
+            legacy_prev.is_none(),
+            "confirmed_sketch_references 未指定の run で sketch_references へ \
+             フォールバックしている: {legacy_prev:?}"
+        );
+    }
+
+    /// S2-3 (fixture): manifest の serialize 構造に fixed_core と参照パスが
+    /// 載っていること。設計契約 §4-S2 の機械受入。
+    ///
+    /// Manifest / ManifestCut のフィールド剥落 (rename / serde skip / 削除) を
+    /// 機械が拾えるようにする。実装と同じ手順 (plans の reference_images から
+    /// ManifestCut.reference_paths を詰める) を再現して照合する。
+    #[test]
+    fn manifest_carries_fixed_core_and_reference_paths() {
+        let p = params(false);
+        let look = look_analysis_fixture();
+        let fixed_core = build_fixed_core(&p, Some(&look));
+
+        let cuts = vec![
+            cut_with_id("shot_001", "ホームに立ち、遠くを見る"),
+            cut_with_id("shot_002", "ドアが開き、車内に乗り込む"),
+        ];
+
+        // 各カットの計画 (実装と同じ組み方: build_reference_images の結果を持つ)。
+        let plans: Vec<CutGenerationPlan> = cuts
+            .iter()
+            .enumerate()
+            .map(|(i, cut)| CutGenerationPlan {
+                structured_prompt: local_structured_prompt(&p, cut, None, &[]),
+                reference_images: build_reference_images(
+                    Path::new("/tmp/char.png"),
+                    &[],
+                    Path::new("/tmp/style.png"),
+                    &[],
+                    if i == 0 { None } else { Some(Path::new("/tmp/sketch_001.png")) },
+                    Some(Path::new("/tmp/sketch_own.png")),
+                ),
+            })
+            .collect();
+
+        let manifest = Manifest {
+            run_id: "test-run".into(),
+            story_prompt: p.story_prompt.clone(),
+            aspect_ratio: p.aspect_ratio.clone(),
+            duration_seconds: p.duration_seconds,
+            tempo: p.tempo.clone(),
+            total_cuts: cuts.len() as u32,
+            candidates_per_cut: p.candidates_per_cut,
+            character_reference_path: p.character_reference_image.clone(),
+            style_reference_path: "/tmp/style.png".into(),
+            created_at: 0,
+            fixed_core: fixed_core.clone(),
+            cuts: cuts
+                .iter()
+                .enumerate()
+                .map(|(i, cut)| ManifestCut {
+                    cut_id: cut.cut_id.clone(),
+                    scene_group_id: cut.scene_group_id.clone(),
+                    description: cut.description.clone(),
+                    duration_seconds: cut.duration_seconds,
+                    reference_paths: plans[i]
+                        .reference_images
+                        .iter()
+                        .map(|path| path.to_string_lossy().into_owned())
+                        .collect(),
+                    takes: vec![ManifestTake {
+                        take_id: "A".into(),
+                        image_path: format!("/tmp/{}_A.png", cut.cut_id),
+                        scores: ScoreBundle::default(),
+                        status: "confirmed".into(),
+                    }],
+                })
+                .collect(),
+        };
+
+        let value = serde_json::to_value(&manifest).expect("manifest の serialize に失敗");
+
+        // fixed_core が非 null で、中身を運んでいること
+        // (null / {} に落ちると再現条件の保全が消える)。
+        let core = value.get("fixedCore").expect("manifest に fixedCore が無い");
+        assert!(
+            !core.is_null(),
+            "manifest の fixedCore が null。ルック契約を後から辿れない: {value}"
+        );
+        assert_eq!(
+            core, &fixed_core,
+            "manifest の fixedCore が run の fixed_core と一致しない"
+        );
+
+        // cuts[i].referencePaths が plans[i] の参照パスと一致すること。
+        let manifest_cuts = value
+            .get("cuts")
+            .and_then(|c| c.as_array())
+            .expect("manifest に cuts 配列が無い");
+        assert_eq!(
+            manifest_cuts.len(),
+            plans.len(),
+            "manifest の cuts 件数が計画数と一致しない"
+        );
+        for (i, cut_value) in manifest_cuts.iter().enumerate() {
+            let expected: Vec<String> = plans[i]
+                .reference_images
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect();
+            assert!(
+                !expected.is_empty(),
+                "テスト前提が崩れている: カット{i} の計画に参照画像が1枚も無い"
+            );
+            let actual: Vec<String> = cut_value
+                .get("referencePaths")
+                .and_then(|r| r.as_array())
+                .unwrap_or_else(|| panic!("manifest cuts[{i}] に referencePaths が無い: {cut_value}"))
+                .iter()
+                .map(|v| v.as_str().unwrap_or_default().to_string())
+                .collect();
+            assert_eq!(
+                actual, expected,
+                "manifest cuts[{i}].referencePaths が計画の参照パスと一致しない \
+                 (順序込みで一致する必要がある: どの参照でこの絵が出たかを辿る情報)"
+            );
+        }
+    }
+
+    /// S3-4 (S1 保護): 絵コンテ (sketch_mode) の参照配列に、本番用の参照が
+    /// 紛れ込まないこと。
+    ///
+    /// S3 でラフ経路と本番経路を1つの関数に統合したとき、実際にこれを踏んだ:
+    /// sketch_references はキービジュアル固定参照 (B2) でも埋まるため、
+    /// 「自カットの絵コンテ参照」を無条件に積むとラフ段に本番用参照が入り込む。
+    /// S1 の「絵コンテを作るのに絵コンテを見せない」を壊さない検査。
+    #[test]
+    fn sketch_mode_reference_slots_stay_empty_of_production_refs() {
+        let cuts = vec![
+            cut_with_id("shot_001", "ホームに立ち、遠くを見る"),
+            cut_with_id("shot_002", "ドアが開き、車内に乗り込む"),
+        ];
+        let mut p = params(true); // sketch_mode = true
+        p.sketch_references.insert("shot_001".into(), "/tmp/keyvisual.png".into());
+        p.sketch_references.insert("shot_002".into(), "/tmp/keyvisual.png".into());
+
+        // orchestrator と同じ選び方を再現する。
+        for cut_index in 0..cuts.len() {
+            let sketch_ref: Option<PathBuf> = if p.sketch_mode {
+                None
+            } else {
+                p.sketch_references
+                    .get(&cuts[cut_index].cut_id)
+                    .filter(|s| !s.trim().is_empty())
+                    .map(PathBuf::from)
+            };
+            let previous: Option<PathBuf> = if p.sketch_mode || cut_index == 0 {
+                None
+            } else {
+                p.sketch_references
+                    .get(&cuts[cut_index - 1].cut_id)
+                    .filter(|s| !s.trim().is_empty())
+                    .map(PathBuf::from)
+            };
+            assert!(
+                sketch_ref.is_none() && previous.is_none(),
+                "絵コンテのカット{cut_index} に本番用の参照が積まれている \
+                 (sketch_ref={sketch_ref:?} / previous={previous:?})。\
+                 ラフは キャラ/スタイル 参照だけで組む"
+            );
+
+            let refs = build_reference_images(
+                Path::new("/tmp/char.png"),
+                &[],
+                Path::new("/tmp/style.png"),
+                &[],
+                previous.as_deref(),
+                sketch_ref.as_deref(),
+            );
+            assert!(
+                !refs.contains(&PathBuf::from("/tmp/keyvisual.png")),
+                "絵コンテの参照配列に本番用参照が混ざっている: {refs:?}"
+            );
+        }
+    }
+
+    /// S3-3: 本番のプロンプト組み立てが「前カットの完成画像」に依存しないこと。
+    ///
+    /// orchestrator は previous_cut に常に None を渡す (画像パスの引き回しを断つ)。
+    /// narrative.previous_cut_state に前カットの**画像パス**が焼かれていたら、
+    /// 前カットの完了を待つ構造が残っているサイン。
+    #[test]
+    fn production_prompt_does_not_embed_previous_cut_image_path() {
+        let cuts = vec![
+            cut_with_id("shot_001", "ホームに立ち、遠くを見る"),
+            cut_with_id("shot_002", "ドアが開き、車内に乗り込む"),
+        ];
+        let seeds = previous_shot_types_seed(&cuts);
+        let p = params(false);
+
+        for (i, cut) in cuts.iter().enumerate() {
+            // orchestrator と同じ呼び方 (previous_cut は常に None)。
+            let prompt = local_structured_prompt(&p, cut, None, &seeds[i]);
+            let state = prompt
+                .get("narrative")
+                .and_then(|n| n.get("previous_cut_state"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            assert!(
+                !state.contains(".png") && !state.contains('/'),
+                "カット{i} の narrative.previous_cut_state に前カット画像パスが焼かれている。\
+                 前カットの完成を待つ構造が残っている: {state}"
+            );
+        }
+
+        // 逆方向の検査: local_structured_prompt 自体は previous_cut を渡せば
+        // 反映する (「常に無視する」実装で上が通るのを防ぐ)。
+        let with_prev = local_structured_prompt(
+            &p,
+            &cuts[1],
+            Some(Path::new("/tmp/prev_cut.png")),
+            &seeds[1],
+        );
+        let state = with_prev
+            .get("narrative")
+            .and_then(|n| n.get("previous_cut_state"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert!(
+            state.contains("prev_cut.png"),
+            "local_structured_prompt が previous_cut を無視している。\
+             上の検査が意味を失う: {state}"
         );
     }
 }

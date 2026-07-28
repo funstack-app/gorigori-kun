@@ -27,7 +27,9 @@ export type StoryboardEvent =
       imagePath: string;
       scores: ScoreBundle;
     }
-  | { kind: "cutCheckpoint"; runId: string; cutId: string; reason: string }
+  // cutCheckpoint (3カット目の方向性チェック) は S3 (2026-07-28) で撤去した。
+  // 本生成が全カット並列になり、途中で止まる区切りが無くなったため。Rust 側の
+  // StoryboardEvent からも変種ごと消してある (来ないイベントの分岐を残さない)。
   | { kind: "cutConfirmed"; runId: string; cutId: string; selectedTakeId: string }
   | { kind: "cutFailed"; runId: string; cutId: string; reason: string }
   | { kind: "completed"; runId: string; manifestPath: string };
@@ -156,6 +158,22 @@ export type StoryboardRunParams = {
   manualSelection?: boolean;
   /** P12: 絵コンテ画像を本生成の追加参考にする (cutId → 画像パス)。 */
   sketchReferences?: Record<string, string>;
+  /**
+   * S3 issue-5 (2026-07-28): **確定ラフだけ**の map (cutId → 確定ラフ画像パス)。
+   *
+   * sketchReferences は「確定ラフが無いカットにはキービジュアル」で埋める
+   * フォールバックを含むため、そのままだと backend の previous_cut_sketch
+   * (前カットの鉛筆ラフ) ロールにキービジュアルが混入し、実体と役割宣言が
+   * 食い違う。前カット参照の選択はこちらだけを見る。
+   */
+  confirmedSketchReferences?: Record<string, string>;
+  /**
+   * S3 (2026-07-28): 採用ゲート式の本生成スコープ。
+   * 指定すると、その cutId のカットだけを本生成する (ラフを採用したカットから
+   * 順に本番へ送る導線)。省略時は全カット (従来どおり)。
+   * sketchMode=true のときは無視される (ラフは常に全カット)。
+   */
+  productionScope?: string[];
 };
 
 export type StoryboardEditMagicLayerStep = {

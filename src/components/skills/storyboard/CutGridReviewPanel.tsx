@@ -6,8 +6,10 @@ import { useImages } from "../../../lib/store/images";
 import { useProjects } from "../../../lib/store/projects";
 import { useStoryboardRun } from "../../../lib/store/storyboardRun";
 import { useToasts } from "../../../lib/store/toasts";
+import { useWorkspace } from "../../../lib/store/workspace";
 import { sendCutsBatchToVideoTab, sendCutToVideoTab } from "../../../lib/storyboard/sendCutToVideo";
 import type { StoryboardSketchCut } from "../../../lib/storyboard/types";
+import { CardSizeSlider, gridColsForAspect } from "./cardSize";
 
 /**
  * P13 (2026-05-20): i2v 用カメラワークプロンプトを構築する。
@@ -92,6 +94,8 @@ function buildI2vPrompt(
  */
 export function CutGridReviewPanel() {
   const goal = useStoryboardRun((s) => s.goal);
+  // 2026-07-28: カードサイズはストーリーカット3画面で共有 (workspace ストア / localStorage 永続)
+  const storyboardCardSize = useWorkspace((s) => s.storyboardCardSize);
   const cuts = useStoryboardRun((s) => s.cuts);
   const adoptTake = useStoryboardRun((s) => s.adoptTake);
   const selectTake = useStoryboardRun((s) => s.selectTake);
@@ -347,6 +351,8 @@ export function CutGridReviewPanel() {
           >
             i2v プロンプト一括コピー
           </button>
+          {/* カードサイズスライダー (大⇔小)。絵コンテレビュー・本生成進捗と同じ値を共有する */}
+          <CardSizeSlider />
           {/* B5: 確定カットを一括で動画タブへ送る */}
           <button
             type="button"
@@ -369,7 +375,9 @@ export function CutGridReviewPanel() {
       </header>
 
       <div className="min-h-0 flex-1 overflow-y-auto rounded-md border border-[#242424] bg-[#101010] p-4">
-        <ol className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+        <ol
+          className={`grid gap-3 ${gridColsForAspect(goal?.aspectRatio ?? "16:9", storyboardCardSize)}`}
+        >
           {orderedCuts.map((c, i) => {
             const adopted = c.takes.find((t) => t.takeId === c.selectedTakeId) ?? c.takes[0];
             if (!adopted) return null;

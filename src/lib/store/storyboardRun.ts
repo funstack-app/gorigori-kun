@@ -12,6 +12,7 @@ import type {
   StoryboardSketchCut,
   StoryboardSketchVersion,
 } from "../storyboard/types";
+import { buildProductionParams } from "../storyboard/productionParams";
 import { useActiveProject } from "./activeProject";
 import {
   stallFromFailure,
@@ -45,7 +46,7 @@ type StoryboardRunStatus =
   | "paused"
   | "completed"
   | "failed"
-  // A-2: 方向性チェック (checkpoint) でユーザーが「中止」を選んだ状態。
+  // ユーザーが生成中止 (cancel_generation) を実行した状態。
   // failed とは区別する (エラーではなくユーザー意思。生成済みカットは保持)。
   | "cancelled";
 
@@ -78,7 +79,6 @@ type StoryboardRunState = {
   status: StoryboardRunStatus;
   totalCuts: number;
   manifestPath: string | null;
-  checkpointCutId: string | null;
   lastError: string | null;
   params: StoryboardRunParams | null;
   debugLog: StoryboardEvent[];
@@ -104,10 +104,14 @@ type StoryboardRunState = {
   /** 現在表示中のスケッチ versionId。null なら最新を使う。 */
   activeSketchVersionId: string | null;
   /**
-   * B1' 補完 (2026-06-06): reset() で sketchVersions を破棄しても、Phase 4 の
-   * i2v プロンプト生成がカメラワーク等のスケッチメタを失わないよう、本生成開始時に
-   * cutId → SketchCut のスナップショットを撮っておく。これは「今の run に紐づく確定
-   * 絵コンテ」だけを保持し、reset() では破棄して次のストーリーに残さない。
+   * B1' 補完 (2026-06-06): Phase 4 の i2v プロンプト生成がカメラワーク等のスケッチメタを
+   * 失わないよう、本生成開始時に cutId → SketchCut のスナップショットを撮っておく。
+   * これは「今の run に紐づく確定絵コンテ」だけを保持し、reset() では破棄して次の
+   * ストーリーに残さない。
+   *
+   * ラフ消失修正 (2026-07-28): reset() は startGeneration から呼ばれなくなった
+   * (ストーリー境界専用)。本スナップショットは Phase 3 のラフ下敷き表示のデータ源
+   * でもある。全量上書きなので前 run のメタは残らない。
    */
   generationCutSketchMeta: Record<string, StoryboardSketchCut>;
   /** B1': 本生成開始時に確定絵コンテのメタを run スナップショットへ格納する。 */
@@ -116,18 +120,37 @@ type StoryboardRunState = {
   beginRun: (runId: string, params: StoryboardRunParams) => void;
   applyEvent: (e: StoryboardEvent) => void;
   setStatus: (status: StoryboardRunStatus) => void;
-  dismissCheckpoint: () => void;
+  // dismissCheckpoint / continueCheckpoint / cancelCheckpoint は S3 (2026-07-28)
+  // で撤去。本生成が全カット並列になり方向性チェックの停止区間が消えたため。
   /**
-   * A-2: 方向性チェックで「このまま続ける」。Rust 側の停止ループへ continue を
-   * 送り、ローカル状態を running に戻す。Rust が実際に await 停止しているので、
-   * これを呼ぶまで残りカットは生成されない。
+   * S3 (2026-07-28): 採用ゲート式の本生成。指定した cutId のカットだけを
+   * 本番へ送る (productionScope 付きで storyboard.run を呼ぶ)。
+   *
+   * 全カット一括の導線 (GenerationProgressPanel の「本生成を開始」) は従来のまま
+   * 残す。こちらは「ラフを採用したカットから順に本番へ」を可能にする追加経路。
+   *
+   * 直前の本生成 run の params があればそれを土台にし、無ければ
+   * buildProductionParams で goal + 確定ラフから組み立てる。
+   * (「一括を1回走らせないと採用ゲートが使えない」= 枠の節約という目的と
+   *  矛盾する前提を潰すため。issue-2)
+   *
+   * 本生成 run が走行中の場合は cutIds を pendingProductionCuts へ積み、
+   * その run の完了/失敗を受けてから自動で発射する (issue-3: activeRunId を
+   * 差し替えると走行中 run のイベントが applyEvent の別 run ガードで全部
+   * 捨てられ、生成結果が画面から消えるため)。
    */
-  continueCheckpoint: () => Promise<boolean>;
+  startProductionForCuts: (cutIds: string[]) => Promise<boolean>;
   /**
-   * A-2: 方向性チェックで「中止」。Rust 側の停止ループへ cancel を送り、ローカル
-   * 状態を cancelled にする。生成済みカットは保持される。
+   * S3 issue-3 (2026-07-28): 走行中の本生成が終わるのを待っている cutId。
+   * 走行中 run の completed/failed 受信時に自動発射して空になる。
    */
-  cancelCheckpoint: () => Promise<boolean>;
+  pendingProductionCuts: string[];
+  /**
+   * S3 issue-7 (2026-07-28): 中止 (cancel_generation) が実際に効いた run の
+   * フロント状態を 'cancelled' に落とす。backend は中止 run のイベントを
+   * 一切出さないため、これが無いと Phase 3 の表示が 'running' のまま残る。
+   */
+  markCancelled: (runId: string) => void;
   /** run 関連だけリセット (phase/goal/sketchVersions/chatMessages は保持) */
   reset: () => void;
   /** Phase ワークフロー (phase/goal/sketchVersions/chatMessages) もリセット */
@@ -239,7 +262,6 @@ const runEmptyState = {
   status: "idle" as const,
   totalCuts: 0,
   manifestPath: null,
-  checkpointCutId: null,
   lastError: null,
   params: null,
   debugLog: [],
@@ -276,7 +298,114 @@ function ensureCut(cuts: Map<string, CutState>, cutId: string): CutState {
   return created;
 }
 
-export const useStoryboardRun = create<StoryboardRunState>((set, get) => ({
+/**
+ * r2-2 (2026-07-28): 部分失敗 run の自力終端検知。
+ * backend は failures>0 のとき Completed を出さず (storyboard.rs:1066)、
+ * run レベルの Failed イベントも存在しない (StoryboardEvent は
+ * started/cutStarted/takeCompleted/cutConfirmed/cutFailed/completed の6種)。
+ * 旧直列実装では失敗=break で cutFailed が最終イベントになり status が
+ * 'failed' で止まったが、並列では失敗カットの後に他カットの
+ * takeCompleted/cutConfirmed が届いて status が 'running' へ戻り、以後
+ * 終端イベントが来ない → 表示が永久に生成中 + キューが永久待機になる。
+ * そこで「全カットが確定か失敗で、その件数が run の totalCuts と一致」した
+ * 時点をフロント側で終端とみなす。
+ * 件数は run の totalCuts (started イベント値 / scoped run なら scope 数) を
+ * 使い、実行時の値を決め打ちしない。
+ *
+ * r3-1 (2026-07-28): 'failed' 専用に戻した。全 confirmed のときは null を返し、
+ * 成功終端の確定は backend の Completed イベントに任せる。
+ * 自力で 'completed' を確定すると、キュー非空の全成功 run で backend Completed
+ * 到達前に発射 → beginRun が activeRunId を差し替え → 直後に届く Completed が
+ * 別 run ガードで破棄され、プロジェクト自動追加・manifestPath 記録・gs.finish が
+ * すべて失われる (issue-3 が防ごうとした「生成結果が画面から消える」の再導入)。
+ * backend は failures==0 のとき必ず Completed を emit する (storyboard.rs:1066)
+ * ため、成功終端をイベント側に任せても取りこぼしはない。
+ */
+const terminalStatusFor = (
+  map: Map<string, CutState>,
+  totalCuts: number,
+): "failed" | null => {
+  if (totalCuts <= 0) return null;
+  const settled = Array.from(map.values()).filter(
+    (c) => c.status === "confirmed" || c.status === "failed",
+  );
+  if (settled.length !== totalCuts || map.size !== totalCuts) return null;
+  return settled.some((c) => c.status === "failed") ? ("failed" as const) : null;
+};
+
+/**
+ * r3-4 (2026-07-28): 自力終端を右上の生成状況パネルへ橋渡しする。
+ *
+ * 部分失敗 run は backend が Completed を出さない (storyboard.rs:1066 は
+ * failures==0 のときのみ) ため、completed ハンドラの gs.finish が呼ばれず、
+ * Phase 3 の status が 'failed' に確定してもパネルのジョブだけ走行中表示の
+ * まま残る。残留ジョブの中止ボタンを押しても backend は該当 run を発見できず
+ * (found=false) markCancelled も呼ばれないため、× で手動クローズするしか
+ * なくなる。completed ハンドラと同じ処置 (finish + 4秒後 clear) を行う。
+ */
+const notifySelfTerminal = (runId: string) => {
+  useGenerationStatus.getState().finish(runId);
+  setTimeout(() => useGenerationStatus.getState().clear(runId), 4000);
+};
+
+export const useStoryboardRun = create<StoryboardRunState>((set, get) => {
+  /**
+   * r3-3 (2026-07-28): 終端再判定 + 待機キューの自動発射。
+   *
+   * 元は applyEvent の post-set にだけ置かれていたため、backend イベントを
+   * 伴わない決着 (adoptTake / skipCut。regenerateCut 後は backend が
+   * TakeCompleted しか emit せず、確定はフロント側で行う設計:
+   * storyboard.rs:640-641) では発射契機が永久に来ず、
+   * 「走行中の生成が終わり次第、自動で開始します」と約束したまま静かに
+   * 詰まっていた。共有ヘルパーに切り出し、決着を起こす全経路から呼ぶ。
+   *
+   * 判定条件は従来の post-set 実装と同一:
+   *  - completed: run 全体の終了 (唯一の run 終端イベント)
+   *  - failed:    全カットが走り終えて1枚も running が残っていない場合のみ。
+   *               cutFailed は1カットの失敗でも status を failed にするが、
+   *               他カットはまだ走っているので、そこで発射すると
+   *               issue-3 で塞いだはずの run 差し替えを自分で踏む。
+   * 二重発射は terminal 判定 (全カット非running) + 発射前のキュー空化で防ぐ。
+   */
+  const settleAndFlushQueue = (opts: { wasSketchRun: boolean }) => {
+    const after = get();
+    if (after.pendingProductionCuts.length === 0) return;
+    // r3-B1: 終端判定に使う Map は run 種別で切り替える (ラフ run のカットは
+    // sketchCuts 側に入るため、cuts を見ると常に「全カット非running」となり
+    // 誤発射しうる)。
+    const afterCuts = opts.wasSketchRun ? after.sketchCuts : after.cuts;
+    const terminal =
+      after.status === "completed" ||
+      (after.status === "failed" &&
+        Array.from(afterCuts.values()).every((c) => c.status !== "running"));
+    if (!terminal) return;
+    const queued = after.pendingProductionCuts;
+    set({ pendingProductionCuts: [] });
+    void get().startProductionForCuts(queued);
+  };
+
+  /**
+   * r3-3 (2026-07-28): backend イベントを伴わない決着 (adoptTake / skipCut) の
+   * あとに、自力終端の確定とキュー発射を行う。
+   *
+   * 本生成 run の cuts 側だけを見る (両者とも cuts を更新するため)。
+   * terminalStatusFor は 'failed' しか返さない (r3-1) ので、全カット成功で
+   * 決着した場合は status を触らず backend の Completed に任せる。
+   */
+  const settleLocalAdoption = () => {
+    const before = get();
+    if (before.activeRunId === null) return;
+    if (before.params?.sketchMode === true) return;
+    if (before.status !== "running" && before.status !== "failed") return;
+    const settledStatus = terminalStatusFor(before.cuts, before.totalCuts);
+    if (settledStatus !== null && before.status !== settledStatus) {
+      set({ status: settledStatus });
+      notifySelfTerminal(before.activeRunId);
+    }
+    settleAndFlushQueue({ wasSketchRun: false });
+  };
+
+  return {
   ...emptyState,
   pastRuns: [],
   // B1' 補完: 本生成開始時に撮る確定絵コンテメタのスナップショット。
@@ -327,10 +456,252 @@ export const useStoryboardRun = create<StoryboardRunState>((set, get) => ({
         activeRunId: runId,
         params,
         status: "running" as const,
+        // r3-5 (2026-07-28): 待機キューを次 run へ持ち越さない。
+        // 自動発射経路は呼び出し前にキューを空化済みなので副作用はない。
+        // 万一 perma-queue 状態から別経路で beginRun に到達しても、古いキューが
+        // 次 run の終端で突然発射される持ち越し誤発射を防ぐ防御的クリア。
+        pendingProductionCuts: [],
       };
     }),
 
+  pendingProductionCuts: [],
+
+  markCancelled: (runId) => {
+    // r2-1 (2026-07-28): 中止時に待機キューを放置しない。
+    // キューへ積んだ時点でユーザーには「走行中の本生成が終わり次第、自動で
+    // 開始します」と約束しているが、その run を中止すると status='cancelled'
+    // になり、キューの自動発射 (applyEvent の終端検知) は永久に発火しない。
+    // さらに残したままだと、次の別 run が完走したときに古いキューが突然
+    // 発射される持ち越し誤発射の経路にもなる。
+    // 中止直後に別 run が勝手に走り出すのは意外性が高いので、自動発射では
+    // なくクリア + 明示通知にする。
+    // r3-NB1 (2026-07-28): ガードを B1/r2-3 と同じ「走行中判定」に揃える。
+    // status === 'running' 限定だと、1カット失敗後で status='failed' だが
+    // 他カットはまだ走っている窓で中止しても cancelled に落ちず、表示が
+    // 'failed' のまま残り待機キューも破棄されない。
+    const isRunActive = (s: StoryboardRunState) =>
+      s.activeRunId === runId &&
+      (s.status === "running" ||
+        Array.from(s.cuts.values()).some((c) => c.status === "running") ||
+        Array.from(s.sketchCuts.values()).some((c) => c.status === "running"));
+
+    const before = get();
+    const willCancel = isRunActive(before);
+    const droppedCount = willCancel ? before.pendingProductionCuts.length : 0;
+
+    // r3-2 (2026-07-28): 中止時に走行中カットを決着させる。
+    // backend は中止 run のイベントを一切出さない (storyboard.rs:965-967 で
+    // cancelled 検知後、976 の filter と 987 の else-if で CutConfirmed/CutFailed を
+    // 抑止、1061-1064 で Completed 前に Err return) ため、放置すると running の
+    // まま永久に残る。すると anyRunActive / productionRunActive / isRunActive の
+    // cut-level 走行中判定が stale running を拾い続け、以後の
+    // startProductionForCuts が常にキュー行きになるのに発射契機が二度と来ない
+    // = 採用ゲートの恒久封鎖になる。Phase 3 カードのスピナー残留も同根。
+    const settleRunningCuts = (map: Map<string, CutState>) => {
+      if (!Array.from(map.values()).some((c) => c.status === "running")) {
+        return map;
+      }
+      const next = new Map(map);
+      next.forEach((cut, cutId) => {
+        if (cut.status === "running") {
+          next.set(cutId, {
+            ...cut,
+            status: "failed",
+            error: "ユーザーが生成を中止しました",
+          });
+        }
+      });
+      return next;
+    };
+
+    set((s) =>
+      isRunActive(s)
+        ? {
+            ...s,
+            status: "cancelled" as const,
+            cuts: settleRunningCuts(s.cuts),
+            sketchCuts: settleRunningCuts(s.sketchCuts),
+            pendingProductionCuts: [],
+            uiDebugLog: [
+              ...s.uiDebugLog,
+              {
+                ts: Date.now(),
+                level: "info" as const,
+                message: `markCancelled: ${runId} (待機キュー ${droppedCount} 件を破棄)`,
+              },
+            ].slice(-500),
+          }
+        : s,
+    );
+
+    if (droppedCount > 0) {
+      useToasts.getState().push({
+        kind: "warn",
+        text: `順番待ちだった本生成 ${droppedCount} 件を取り消しました`,
+        ttlMs: 6000,
+      });
+    }
+  },
+
+  // S3 (2026-07-28): 採用したラフのカットだけを本番へ送る。
+  startProductionForCuts: async (cutIds) => {
+    const wanted = Array.from(new Set(cutIds.map((id) => id.trim()).filter(Boolean)));
+    if (wanted.length === 0) {
+      useToasts.getState().push({
+        kind: "error",
+        text: "本生成に送るカットが選ばれていません。",
+      });
+      return false;
+    }
+
+    const current = get();
+
+    // r3-B3 (2026-07-28): 同じカットの二重生成を入口で塞ぐ。
+    // 従来の重複除去は待機配列内 (Set) だけで、「走行中の本生成 run の
+    // productionScope に既に入っているカット」を見ていなかった。そのため
+    // 連打すると2本目が同じカットを本番へ送り、生成枠を二重に焼いていた。
+    //  (a) 走行中の本生成 run の productionScope に含まれるカット
+    //  (b) 既に pendingProductionCuts に積まれているカット
+    // を除外する。productionScope が undefined の走行中本生成 run は
+    // 「全カット一括」なので、全カットが走行中とみなして全部除外する。
+    const productionRunActive =
+      current.activeRunId !== null &&
+      current.params?.sketchMode !== true &&
+      (current.status === "running" ||
+        Array.from(current.cuts.values()).some((c) => c.status === "running"));
+    const inFlightScope: Set<string> | null = productionRunActive
+      ? current.params?.productionScope &&
+        current.params.productionScope.length > 0
+        ? new Set(current.params.productionScope)
+        : null // null = 全カット一括が走行中 (= 全部除外)
+      : new Set<string>(); // 本生成が走っていない = 除外対象なし
+    const queuedSet = new Set(current.pendingProductionCuts);
+    const targets = wanted.filter((id) => {
+      if (queuedSet.has(id)) return false;
+      if (inFlightScope === null) return false;
+      return !inFlightScope.has(id);
+    });
+    if (targets.length === 0) {
+      useToasts.getState().push({
+        kind: "warn",
+        text: "選択したカットは既に本番へ送信済みです",
+        ttlMs: 4000,
+      });
+      return false;
+    }
+
+    // issue-3: 走行中の run があるなら差し替えず、キューに積んで待つ。
+    // ここで beginRun してしまうと activeRunId が変わり、走行中 run の
+    // イベントが applyEvent の別 run ガードで全部捨てられる。
+    // r2-3 (2026-07-28): 判定を自動発射側の終端検知と対称にする。
+    // status==='running' だけを見ていると、cutFailed 直後の
+    // 「status='failed' だが他カットはまだ走行中」の窓 (次イベントまで
+    // 数十秒〜数分) で手動押下されたときにキューを素通りし、beginRun が
+    // 走行中 run を差し替えて issue-3 の「走行中 run のイベント全破棄」を
+    // 踏む。cuts に running が1枚でも残っていれば走行中とみなす。
+    // r3-B1 (2026-07-28): sketchMode の除外をやめ、**走行中の run が何であれ**
+    // 順番待ちにする。ラフ生成中に「このカットを本番へ」を押すと beginRun が
+    // activeRunId を上書きし、残りのラフイベントが applyEvent の別 run ガードで
+    // 破棄される (ラフ run 乗っ取り) ためで、issue-3 と同じ故障を絵コンテ側で
+    // 踏んでいた。ラフが終わってから本番が動き出すのが意図どおりの挙動。
+    const anyRunActive =
+      current.activeRunId !== null &&
+      (current.status === "running" ||
+        Array.from(current.cuts.values()).some((c) => c.status === "running") ||
+        Array.from(current.sketchCuts.values()).some(
+          (c) => c.status === "running",
+        ));
+    if (anyRunActive) {
+      set((s) => ({
+        pendingProductionCuts: Array.from(
+          new Set([...s.pendingProductionCuts, ...targets]),
+        ),
+      }));
+      useToasts.getState().push({
+        kind: "info",
+        text: "走行中の生成が終わり次第、自動で開始します",
+        ttlMs: 4000,
+      });
+      return true;
+    }
+
+    // 直前の本生成 run のパラメータがあればそれを土台にする (参照画像・
+    // アスペクト比・sceneConstruction などを作り直さないため)。
+    // 無い場合 (絵コンテ run の params / run 未起動) は goal + 確定ラフから
+    // 組み立てる。issue-2: 「先に一括本生成を1回」という前提は、枠を節約する
+    // という採用ゲートの目的と矛盾するため撤去した。
+    const base = current.params;
+    const runId = crypto.randomUUID();
+    let params: StoryboardRunParams;
+    if (base && base.sketchMode !== true) {
+      params = {
+        ...base,
+        runId,
+        sketchMode: false,
+        productionScope: targets,
+      };
+    } else {
+      const goal = current.goal;
+      const sceneConstruction = usePlanChat.getState().sceneConstruction;
+      if (!goal || !sceneConstruction || sceneConstruction.cuts.length === 0) {
+        useToasts.getState().push({
+          kind: "error",
+          text: "本生成に必要なゴール・カット構成が揃っていません。",
+        });
+        return false;
+      }
+      const built = buildProductionParams({
+        runId,
+        goal,
+        sceneConstruction,
+        run: current,
+        productionScope: targets,
+      });
+      params = built.params;
+      // B1' 補完: i2v プロンプトが参照する確定絵コンテメタを退避しておく
+      // (一括経路と同じ扱い。ここでは reset を挟まないので上書きのみ)。
+      if (Object.keys(built.cutSketchMeta).length > 0) {
+        set({ generationCutSketchMeta: built.cutSketchMeta });
+      }
+    }
+    try {
+      get().beginRun(runId, params);
+      await storyboard.run(params);
+      return true;
+    } catch (e) {
+      const msg = (e as Error)?.message ?? String(e);
+      set((s) =>
+        s.activeRunId === runId
+          ? { ...s, activeRunId: null, status: "failed" as const, lastError: msg }
+          : s,
+      );
+      // r3-6 (2026-07-28): 自動発射経路では呼び出し前にキューを空化している
+      // (発射側で set({ pendingProductionCuts: [] }))。起動に失敗してもキューは
+      // 復元しないので、待機していたカットが静かに消えたことが分かるよう
+      // 対象カット数をトーストに含める (自動再キューは無限リトライの危険が
+      // あるため行わない)。
+      useToasts.getState().push({
+        kind: "error",
+        text: `本生成の起動に失敗しました (自動開始待ちだった${params.productionScope?.length ?? 0}件を含む): ${msg}`,
+        ttlMs: 6000,
+      });
+      return false;
+    }
+  },
+
   applyEvent: (e) => {
+    // issue-3: 走行中だった run が終わったら、待たせていた採用ゲートのカットを
+    // 自動発射する。set() の内側から startProductionForCuts を呼ぶと beginRun の
+    // set が入れ子になるため、reducer の外で「running → 非running」の遷移だけを
+    // 見て発射する。
+    // r3-B1 (2026-07-28): 起点 run を本生成に限定しない。ラフ生成中の押下も
+    // キューに積むようにした (startProductionForCuts の anyRunActive) ため、
+    // ラフ run の終端 (completed / 全カット決着) でも発射しないとキューが
+    // 永久待機になる。
+    const beforeStatus = get().status;
+    const wasSketchRun = get().params?.sketchMode === true;
+    const wasActiveRun = get().activeRunId === e.runId;
+
     set((s) => {
       // 別 run の遅延イベントを現在の画面へ混ぜない。
       // run 未開始時も受け入れず、beginRun() で activeRunId が確定してから処理する。
@@ -353,9 +724,7 @@ export const useStoryboardRun = create<StoryboardRunState>((set, get) => ({
           : ({ ...s, cuts: targetMap, debugLog, lastEventAt, ...patch } as typeof s);
 
       // 右上の生成状況パネルへ橋渡し (2026-07-25 STΛCK指示)。
-      // 絵コンテは他スキルとイベント名が違い(takeCompleted / cutConfirmed /
-      // cutCheckpoint)、さらに「人間の確認待ち」で意図的に止まる区間があるため専用に扱う。
-      // 待ちであることを理由として出すのが要点 — 出さないと固まったと誤解される。
+      // 絵コンテは他スキルとイベント名が違う(takeCompleted / cutConfirmed)ため専用に扱う。
       {
         const gs = useGenerationStatus.getState();
         const kind: GenerationKind = "storyboard";
@@ -367,13 +736,6 @@ export const useStoryboardRun = create<StoryboardRunState>((set, get) => ({
         } else if (e.kind === "cutConfirmed") {
           gs.addCompleted(e.runId);
           gs.setRunning(e.runId, 0);
-        } else if (e.kind === "cutCheckpoint") {
-          // 仕様上の停止。原因を明示して「待っている」と分かるようにする。
-          gs.setRunning(e.runId, 0);
-          gs.setStall(e.runId, {
-            type: "waiting-user",
-            message: "方向性の確認待ちです。画面で続けるか選んでください",
-          });
         } else if (e.kind === "cutFailed") {
           gs.addFailed(e.runId);
           gs.setRunning(e.runId, 0);
@@ -414,20 +776,16 @@ export const useStoryboardRun = create<StoryboardRunState>((set, get) => ({
           { takeId: e.takeId, imagePath: e.imagePath, scores: e.scores },
         ];
         targetMap.set(e.cutId, { ...cut, status: "review", takes });
-        // 2026-07-27: チェックポイントで止まっている間に「このカットだけ作り直す」を
-        // 使った場合、Rust 側は resume 待ちで止まったままなのに、ここで全体を running
-        // に上書きすると画面だけ「実行中」になり、1カットも進まない嘘の表示になる。
-        // 停止中は全体ステータスを触らない。
-        return applyMap(s.checkpointCutId ? {} : { status: "running" as const });
-      }
-
-      if (e.kind === "cutCheckpoint") {
-        const cut = ensureCut(targetMap, e.cutId);
-        targetMap.set(e.cutId, {
-          ...cut,
-          status: cut.status === "pending" ? "review" : cut.status,
-        });
-        return applyMap({ checkpointCutId: e.cutId, status: "paused" as const });
+        // r3-3 (2026-07-28): 既に決着した run の status を running に巻き戻さない。
+        // regenerateCut は backend が TakeCompleted しか emit しない設計
+        // (storyboard.rs:640-641) なので、終端後の作り直しでここに来たときに
+        // 無条件で 'running' に戻すと、run が二度と終端に到達しなくなる
+        // (決着は adoptTake/skipCut のローカル set で行われるため)。
+        const settledRun =
+          s.status === "completed" ||
+          s.status === "failed" ||
+          s.status === "cancelled";
+        return applyMap(settledRun ? {} : { status: "running" as const });
       }
 
       if (e.kind === "cutConfirmed") {
@@ -437,12 +795,16 @@ export const useStoryboardRun = create<StoryboardRunState>((set, get) => ({
           status: "confirmed",
           selectedTakeId: e.selectedTakeId,
         });
-        return applyMap({ status: "running" as const });
+        const settledStatus = terminalStatusFor(targetMap, s.totalCuts);
+        return applyMap({ status: settledStatus ?? ("running" as const) });
       }
 
       if (e.kind === "cutFailed") {
         const cut = ensureCut(targetMap, e.cutId);
         targetMap.set(e.cutId, { ...cut, status: "failed", error: e.reason });
+        // 全カットが決着済みなら 'failed' で終端確定。まだ走行中カットがある
+        // 途中経過でも、既存挙動どおり status は 'failed' を出す
+        // (キュー発射側は「全カット非running」を別途要求するので誤発射しない)。
         return applyMap({ status: "failed" as const, lastError: e.reason });
       }
 
@@ -476,93 +838,35 @@ export const useStoryboardRun = create<StoryboardRunState>((set, get) => ({
 
       return { ...s, debugLog, lastEventAt };
     });
+
+    if (!wasActiveRun) return;
+
+    // r3-4 (2026-07-28): 自力終端 ('failed' への確定遷移) を右上の生成状況
+    // パネルへ橋渡しする。backend は部分失敗 run に Completed を出さないため、
+    // これが無いとパネルのジョブが走行中表示のまま残る。
+    // completed イベント経由の終端は set 内の gs.finish (橋渡しブロック) が
+    // 既に処理しているので、ここでは 'failed' 確定だけを見る。
+    {
+      const afterStatus = get().status;
+      if (beforeStatus !== "failed" && afterStatus === "failed") {
+        const settledCuts = wasSketchRun ? get().sketchCuts : get().cuts;
+        const allSettled =
+          get().totalCuts > 0 &&
+          Array.from(settledCuts.values()).every((c) => c.status !== "running") &&
+          settledCuts.size === get().totalCuts;
+        if (allSettled) notifySelfTerminal(e.runId);
+      }
+    }
+
+    // --- issue-3: キューの自動発射 ---
+    // r3-3 (2026-07-28): 終端再判定+発射は共有ヘルパー settleAndFlushQueue に
+    // 切り出した。applyEvent 以外 (adoptTake / skipCut) からも同じ判定に
+    // 到達させるため。判定条件そのものは従来と同一。
+    if (beforeStatus !== "running" && beforeStatus !== "failed") return;
+    settleAndFlushQueue({ wasSketchRun });
   },
 
   setStatus: (status) => set({ status }),
-  dismissCheckpoint: () => set({ checkpointCutId: null, status: "running" }),
-
-  // A-2: backend が続行を受理した場合だけ、画面を running に戻す。
-  continueCheckpoint: async () => {
-    const { activeRunId, checkpointCutId } = get();
-    if (!activeRunId || !checkpointCutId) {
-      useToasts.getState().push({
-        kind: "error",
-        text: "続行できる停止中の生成がありません。",
-      });
-      return false;
-    }
-    try {
-      const delivered = await storyboard.checkpointResume(activeRunId, "continue");
-      if (!delivered) {
-        useToasts.getState().push({
-          kind: "error",
-          text: "生成を続行できませんでした。画面の状態は変更していません。",
-        });
-        return false;
-      }
-      set((s) =>
-        s.activeRunId === activeRunId && s.checkpointCutId === checkpointCutId
-          ? {
-              checkpointCutId: null,
-              status: "running" as const,
-              uiDebugLog: [
-                ...s.uiDebugLog,
-                { ts: Date.now(), level: "info" as const, message: "checkpoint: continue" },
-              ].slice(-500),
-            }
-          : s,
-      );
-      return true;
-    } catch {
-      useToasts.getState().push({
-        kind: "error",
-        text: "生成を続行できませんでした。画面の状態は変更していません。",
-      });
-      return false;
-    }
-  },
-
-  // A-2: backend が安全中断を受理した場合だけ cancelled にする。
-  // 生成済みカットは Map に残るので、そのまま確認・採用できる。
-  cancelCheckpoint: async () => {
-    const { activeRunId, checkpointCutId } = get();
-    if (!activeRunId || !checkpointCutId) {
-      useToasts.getState().push({
-        kind: "error",
-        text: "中断できる停止中の生成がありません。",
-      });
-      return false;
-    }
-    try {
-      const delivered = await storyboard.checkpointResume(activeRunId, "cancel");
-      if (!delivered) {
-        useToasts.getState().push({
-          kind: "error",
-          text: "生成を中断できませんでした。画面の状態は変更していません。",
-        });
-        return false;
-      }
-      set((s) =>
-        s.activeRunId === activeRunId && s.checkpointCutId === checkpointCutId
-          ? {
-              checkpointCutId: null,
-              status: "cancelled" as const,
-              uiDebugLog: [
-                ...s.uiDebugLog,
-                { ts: Date.now(), level: "info" as const, message: "checkpoint: cancel" },
-              ].slice(-500),
-            }
-          : s,
-      );
-      return true;
-    } catch {
-      useToasts.getState().push({
-        kind: "error",
-        text: "生成を中断できませんでした。画面の状態は変更していません。",
-      });
-      return false;
-    }
-  },
 
   // ===== Phase 操作 =====
   setPhase: (phase) =>
@@ -630,9 +934,12 @@ export const useStoryboardRun = create<StoryboardRunState>((set, get) => ({
   // 残る)。reset 時に絵コンテ版も破棄し、今の goal/run に紐づく確定絵コンテだけが
   // 使われる状態にする。
   //
-  // 注意: Phase 2 で確定 → Phase 3 へ進む正規フローでは、本生成側 (startGeneration)
-  // が reset を呼ぶ前に confirmed=true の sketchReferences を捕捉してから reset する。
-  // よって reset で sketchVersions を消しても、その回の確定絵コンテ参照は失われない。
+  // ラフ消失修正 (2026-07-28): reset() は startGeneration から呼ばれない。
+  // ストーリー境界専用 (GoalChat の「↺ リセット」/ resetAll / skillReset)。
+  // 本生成開始でラフを破棄するとユーザーが生成枠を消費した資産を失うため、
+  // 「前ストーリーの Phase 2 表示残留」は破棄ではなく SketchReviewPanel の
+  // goal キーガード (表示選択) で防ぐ。本生成参照への流入防止は B1 の goal
+  // バインディング検査 (buildProductionParams) が独立に担保している。
   reset: () =>
     set((s) => ({
       ...runEmptyState,
@@ -641,6 +948,9 @@ export const useStoryboardRun = create<StoryboardRunState>((set, get) => ({
       sketchVersions: [],
       activeSketchVersionId: null,
       generationCutSketchMeta: {},
+      // S3 issue-3: 待機中の採用ゲート行きカットも破棄する。次のストーリーに
+      // 前のストーリーの cutId が持ち越されて誤発射するのを防ぐ。
+      pendingProductionCuts: [],
       debugLog: [],
       uiDebugLog: [],
       pastRuns: s.pastRuns, // 過去 run のサマリーは保持
@@ -660,7 +970,7 @@ export const useStoryboardRun = create<StoryboardRunState>((set, get) => ({
   appendDebug: (entry) =>
     set((s) => ({ uiDebugLog: [...s.uiDebugLog, entry].slice(-500) })),
 
-  adoptTake: (cutId, takeId) =>
+  adoptTake: (cutId, takeId) => {
     set((s) => {
       const cut = s.cuts.get(cutId);
       if (!cut) return s;
@@ -693,7 +1003,10 @@ export const useStoryboardRun = create<StoryboardRunState>((set, get) => ({
           });
       }
       return { ...s, cuts: next, uiDebugLog: log.slice(-500) };
-    }),
+    });
+    // r3-3: 決着後に終端再判定 + 待機キューの発射を行う。
+    settleLocalAdoption();
+  },
 
   revertCut: (cutId) =>
     set((s) => {
@@ -795,7 +1108,7 @@ export const useStoryboardRun = create<StoryboardRunState>((set, get) => ({
       });
   },
 
-  skipCut: (cutId) =>
+  skipCut: (cutId) => {
     set((s) => {
       const cut = s.cuts.get(cutId);
       if (!cut) return s;
@@ -813,5 +1126,9 @@ export const useStoryboardRun = create<StoryboardRunState>((set, get) => ({
           },
         ].slice(-500),
       };
-    }),
-}));
+    });
+    // r3-3: 決着後に終端再判定 + 待機キューの発射を行う。
+    settleLocalAdoption();
+  },
+  };
+});

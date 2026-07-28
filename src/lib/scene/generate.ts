@@ -24,6 +24,11 @@ export type SceneGenerationResult = {
    * どちらも理由を載せて返す (codex経路は 2026-06-07 修正で対応)。
    */
   errors: string[];
+  /**
+   * Rust の中止印の実値。外部 provider (higgsfield/magnific) 経路は
+   * サーバ側キャンセルが存在しないため常に false を明示する。
+   */
+  cancelled: boolean;
 };
 
 export type SceneGenerationOptions = {
@@ -49,6 +54,13 @@ export type SceneGenerationOptions = {
     model: string;
   };
   magnificModels?: string[];
+  /**
+   * 外部 provider (magnific/higgsfield) の生成リクエストを IPC へ発行する直前に、
+   * その呼び出しが担う worker idx (1始まり) ごとに呼ばれる。
+   * codex 経路では呼ばれない (Rust の WorkerStarted が正)。
+   * 呼び出し側はこれで workerStarted を合成し、タイルを「生成中」に遷移させる。
+   */
+  onWorkerDispatched?: (idx: number) => void;
 };
 
 type SceneReferenceImage = {
@@ -106,6 +118,9 @@ export async function generateFromScene(
         const i = cursor++;
         if (i >= models.length) return;
         try {
+          // 比較生成は 1リクエスト=1モデル=1タイル。発行直前にそのタイルだけを
+          // 「生成中」へ遷移させる (同時実行数に絞られている実態と一致する)。
+          options.onWorkerDispatched?.(i + 1);
           const r = await higgsfieldMcp.generateBatch({
             prompt,
             model: models[i].jobSetType,
@@ -141,10 +156,17 @@ export async function generateFromScene(
       generatedPaths: perModel.map((m) => m.path),
       failedCount: perModel.filter((m) => m.failed).length,
       errors: perModel.filter((m) => m.error).map((m) => m.error as string),
+      // 外部 provider にはサーバ側キャンセルが無い (中止ボタンも出さない)。
+      cancelled: false,
     };
   }
 
   if (options.higgsfield) {
+    // 単一生成は 1リクエストが全枚数を担うため、発行の瞬間に全タイルが同時に
+    // 「生成中」になるのが実態。
+    for (let idx = 1; idx <= options.count; idx++) {
+      options.onWorkerDispatched?.(idx);
+    }
     const r = await higgsfieldMcp.generateBatch({
       prompt,
       model: options.higgsfield.jobSetType,
@@ -157,6 +179,8 @@ export async function generateFromScene(
       generatedPaths: r.generatedPaths,
       failedCount: r.failedCount,
       errors: r.errors ?? [],
+      // 外部 provider にはサーバ側キャンセルが無い (中止ボタンも出さない)。
+      cancelled: false,
     };
   }
 
@@ -191,6 +215,9 @@ export async function generateFromScene(
         const i = cursor++;
         if (i >= models.length) return;
         try {
+          // 比較生成は 1リクエスト=1モデル=1タイル。発行直前にそのタイルだけを
+          // 「生成中」へ遷移させる (同時実行数に絞られている実態と一致する)。
+          options.onWorkerDispatched?.(i + 1);
           const r = await magnific.generateBatch({
             prompt,
             model: models[i],
@@ -228,12 +255,19 @@ export async function generateFromScene(
       generatedPaths: perModel.map((m) => m.path),
       failedCount: perModel.filter((m) => m.failed).length,
       errors: perModel.filter((m) => m.error).map((m) => m.error as string),
+      // 外部 provider にはサーバ側キャンセルが無い (中止ボタンも出さない)。
+      cancelled: false,
     };
   }
 
   // Magnific 単一生成 (2026-06-08)。Magnificモデルが1つ選ばれたときだけこの経路。
   // コア(下の codex/image_gen) には一切影響しない。MCP経由生成→URL DL→保存。
   if (options.magnific) {
+    // 単一生成は 1リクエストが全枚数を担うため、発行の瞬間に全タイルが同時に
+    // 「生成中」になるのが実態。
+    for (let idx = 1; idx <= options.count; idx++) {
+      options.onWorkerDispatched?.(idx);
+    }
     const r = await magnific.generateBatch({
       prompt,
       model: options.magnific.model,
@@ -246,6 +280,8 @@ export async function generateFromScene(
       generatedPaths: r.generatedPaths,
       failedCount: r.failedCount,
       errors: r.errors ?? [],
+      // 外部 provider にはサーバ側キャンセルが無い (中止ボタンも出さない)。
+      cancelled: false,
     };
   }
 
@@ -262,5 +298,6 @@ export async function generateFromScene(
     aspect,
     turnId: options.turnId,
   });
-  return { ...r, errors: r.errors ?? [] };
+  // `?? false` は errors と同じ「旧バイナリ互換の正規化」。undefined を型に混ぜない。
+  return { ...r, errors: r.errors ?? [], cancelled: r.cancelled ?? false };
 }

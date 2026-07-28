@@ -6,8 +6,10 @@ import { useImagePreview } from "../../../lib/store/imagePreview";
 import { usePlanChat } from "../../../lib/store/planChat";
 import { useStoryboardRun } from "../../../lib/store/storyboardRun";
 import { useToasts } from "../../../lib/store/toasts";
-import type { StoryboardSketchCut } from "../../../lib/storyboard/types";
+import { useWorkspace } from "../../../lib/store/workspace";
+import { buildProductionParams } from "../../../lib/storyboard/productionParams";
 import { GenerationGauge, recordGenerationDuration } from "../../GenerationGauge";
+import { CardSizeSlider, gridColsForAspect } from "./cardSize";
 
 /**
  * Phase 3: GenerationProgress
@@ -28,11 +30,11 @@ export function GenerationProgressPanel() {
   const totalCuts = useStoryboardRun((s) => s.totalCuts);
   const status = useStoryboardRun((s) => s.status);
   const activeRunId = useStoryboardRun((s) => s.activeRunId);
-  const checkpointCutId = useStoryboardRun((s) => s.checkpointCutId);
   const beginRun = useStoryboardRun((s) => s.beginRun);
   const setPhase = useStoryboardRun((s) => s.setPhase);
-  const cancelCheckpoint = useStoryboardRun((s) => s.cancelCheckpoint);
   const adoptTake = useStoryboardRun((s) => s.adoptTake);
+  // ラフ消失修正 (2026-07-28): take が届くまでの間、そのカットのラフを下敷きに表示する。
+  const generationCutSketchMeta = useStoryboardRun((s) => s.generationCutSketchMeta);
   // B2: キービジュアル固定参照 (全カット共通の基準画像)
   const keyVisualPath = useStoryboardRun((s) => s.keyVisualPath);
   const setKeyVisualPath = useStoryboardRun((s) => s.setKeyVisualPath);
@@ -40,7 +42,8 @@ export function GenerationProgressPanel() {
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
   // STΛCK指示(2026-06-07): カードサイズ。1=大きく/2=既定/3=小さく。
-  const [sizeLevel, setSizeLevel] = useState(2);
+  // 2026-07-28: ローカル useState から workspace ストアへ移行 (永続 + 他2画面と共有)。
+  const storyboardCardSize = useWorkspace((s) => s.storyboardCardSize);
 
   // P1 修正 (2026-05-20): ローカル useState で起動済み判定すると、Phase 切替で
   // アンマウントされた瞬間にフラグが false に戻り重複 run が走ってしまうため、
@@ -134,102 +137,26 @@ export function GenerationProgressPanel() {
     setStartError(null);
     let issuedRunId: string | null = null;
     try {
-      // === B1 修正 (2026-06-06): 絵コンテ混在の根絶 ===
-      // 本生成で参照する絵コンテは「(a) 確定 (confirmed===true) かつ
-      // (b) 今の goal に紐づくもの」だけに厳格化する。条件を満たさなければ
-      // sketchReferences は空のまま = プロンプトのみで普通に生成する。
+      // S3 (2026-07-28): params 組み立ては buildProductionParams に集約した
+      // (採用ゲート式の startProductionForCuts と同じ手順を共有するため)。
       //
-      // 重要: reset() は sketchVersions を破棄するため (B1' 修正)、参照の捕捉を
-      // reset の「前」に行う。これで「絵コンテを確定 → 本生成」の正規フローは
-      // その回の確定絵コンテを失わず、かつ前のストーリーの絵コンテは残らない。
-      const sketchVersionsBefore = useStoryboardRun.getState().sketchVersions;
-      const activeSketchVersionId = useStoryboardRun.getState().activeSketchVersionId;
-      const candidate =
-        sketchVersionsBefore.find((v) => v.versionId === activeSketchVersionId) ??
-        sketchVersionsBefore[sketchVersionsBefore.length - 1] ??
-        null;
-      // (b) goal バインディング検査: 絵コンテ生成時の goal 要約と現在の goal 要約の
-      //     先頭が一致するときだけ採用する。前ストーリーの確定絵コンテが
-      //     activeSketchVersionId 経由で残っていても、goal が変わっていれば弾く。
-      const currentGoalKey = (goal.summary ?? "").slice(0, 200);
-      const sketchBelongsToCurrentGoal =
-        candidate != null && candidate.fromGoalSummary === currentGoalKey;
-      const activeSketch =
-        candidate?.confirmed === true && sketchBelongsToCurrentGoal ? candidate : null;
-      const sketchReferences: Record<string, string> = {};
-      if (activeSketch) {
-        for (const c of activeSketch.cuts) {
-          // 確定済みかつ実際に done で画像が出ているカットのみ参照する。
-          // 未生成 (sketchImagePath なし) のカットは混ぜない。
-          if (c.sketchImagePath && c.sketchStatus === "done") {
-            sketchReferences[c.cutId] = c.sketchImagePath;
-          }
-        }
-      }
-
-      // === B2: キービジュアル固定参照 (NOCTURNE @img1 移植) ===
-      // キービジュアルが設定されていれば、確定絵コンテ参照を持たない全カットに
-      // 共通の基準画像を固定で渡す。確定絵コンテがあるカットはその絵コンテを優先。
-      const keyVisualPath = useStoryboardRun.getState().keyVisualPath;
-      if (keyVisualPath) {
-        for (const c of sceneConstruction.cuts) {
-          if (!sketchReferences[c.cut_id]) {
-            sketchReferences[c.cut_id] = keyVisualPath;
-          }
-        }
-      }
-
-      // B1' 補完: Phase 4 の i2v プロンプトがカメラワーク等のスケッチメタを
-      // 失わないよう、確定絵コンテのメタを run スナップショットに退避してから
-      // reset する。今の goal/run に紐づくものだけを撮るので次ストーリーに残らない。
-      const cutSketchMeta: Record<string, StoryboardSketchCut> = {};
-      if (activeSketch) {
-        for (const c of activeSketch.cuts) {
-          cutSketchMeta[c.cutId] = c;
-        }
-      }
-
-      // 絵コンテ run の残骸をクリア (chatMessages / goal / keyVisualPath は保持される)。
-      // sketchVersions は B1' 修正で破棄されるので、参照は上で捕捉済み。
-      useStoryboardRun.getState().reset();
-      // reset の後にスナップショットを格納 (reset が初期化するため順序が重要)。
-      useStoryboardRun.getState().setGenerationCutSketchMeta(cutSketchMeta);
-
-      // P3b: ユーザーが D&D で並べ替えていた場合は sceneConstruction.cuts を
-      // その順序にして本番に渡す。
-      const displayOrder = useStoryboardRun.getState().cutDisplayOrder;
-      const orderedScene = (() => {
-        if (!displayOrder || displayOrder.length === 0) return sceneConstruction;
-        const byCutId = new Map(sceneConstruction.cuts.map((c) => [c.cut_id, c]));
-        const reordered = displayOrder
-          .map((id) => byCutId.get(id))
-          .filter((c): c is NonNullable<typeof c> => Boolean(c));
-        if (reordered.length !== sceneConstruction.cuts.length) {
-          return sceneConstruction;
-        }
-        return { ...sceneConstruction, cuts: reordered };
-      })();
-
+      // ラフ消失修正 (2026-07-28): ここで reset() を呼ぶのをやめた。ラフは生成枠を
+      // 消費した資産なので、本生成を始めても破棄しない。run 状態の初期化は beginRun が
+      // 担う。前ストーリーの絵コンテ流入防止は B1 の goal バインディング検査
+      // (buildProductionParams 内) と SketchReviewPanel の goal キーガードが担保する。
       const runId = crypto.randomUUID();
       issuedRunId = runId;
-      const params = {
+      const { params, cutSketchMeta } = buildProductionParams({
         runId,
-        storyPrompt: goal.summary || "ストーリーカット",
-        characterReferenceImage: goal.characterReferencePath,
-        styleReferenceImage: goal.styleReferencePath,
-        // FB#3 (2026-06-06): 複数キャラ/スタイル参照 (後方互換: 単数も維持)。
-        characterReferenceImages: goal.characterReferencePaths,
-        styleReferenceImages: goal.styleReferencePaths,
-        aspectRatio: goal.aspectRatio,
-        durationSeconds: goal.durationSeconds,
-        tempo: goal.tempo,
-        candidatesPerCut: useStoryboardRun.getState().generationCandidatesPerCut,
-        cwd: undefined,
-        sceneConstruction: orderedScene,
-        sketchMode: false,
-        manualSelection: true,
-        sketchReferences,
-      };
+        goal,
+        sceneConstruction,
+        run: useStoryboardRun.getState(),
+      });
+
+      // 確定絵コンテのスナップショット (Phase 4 の i2v メタ + Phase 3 のラフ下敷きの
+      // データ源)。全量上書きなので reset を挟まなくても前 run のメタは残らない。
+      useStoryboardRun.getState().setGenerationCutSketchMeta(cutSketchMeta);
+
       beginRun(runId, params);
       await storyboard.run(params);
       setGenerationRunStartedAt(Date.now());
@@ -381,29 +308,8 @@ export function GenerationProgressPanel() {
                 >
                   最終確認へ →
                 </button>
-                {/* backend に実在する安全中断だけを表示。一時停止は未対応なので出さない。 */}
-                {!allDoneGen && (
-                  <div className="flex gap-2">
-                    <button
-                      type="button"
-                      onClick={() => void cancelCheckpoint()}
-                      disabled={!checkpointCutId}
-                      className={[
-                        "rounded-md border px-3 py-1.5 text-xs",
-                        checkpointCutId
-                          ? "border-red-400/40 text-red-200 hover:bg-red-500/10"
-                          : "cursor-not-allowed border-[#2a2a2a] text-zinc-600",
-                      ].join(" ")}
-                      title={
-                        checkpointCutId
-                          ? "生成を安全に中断する（生成済みカットは残ります）"
-                          : "方向性確認で停止中のときだけ中断できます"
-                      }
-                    >
-                      中断
-                    </button>
-                  </div>
-                )}
+                {/* S3 (2026-07-28): checkpoint 依存の「中断」ボタンは撤去。停止区間が消え、
+                    押しても何も起きないボタンになるため (右上の生成状況パネルの中止を使う) */}
               </>
             )}
           </div>
@@ -473,20 +379,7 @@ export function GenerationProgressPanel() {
             </span>
             <div className="flex items-center gap-2">
               {/* STΛCK指示(2026-06-07): カードサイズスライダー (大⇔小) */}
-              <label className="inline-flex items-center gap-1" title="カードを大きく ⇔ 小さく">
-                <span className="text-[10px] font-bold text-neutral-500">大</span>
-                <input
-                  type="range"
-                  min={1}
-                  max={3}
-                  step={1}
-                  value={sizeLevel}
-                  onChange={(e) => setSizeLevel(Number(e.target.value))}
-                  className="h-1 w-16 cursor-pointer accent-pink-500"
-                  aria-label="カードサイズ"
-                />
-                <span className="text-[10px] font-bold text-neutral-500">小</span>
-              </label>
+              <CardSizeSlider />
               <span className="text-zinc-500">{Math.round(allDoneGen ? 100 : progressPercent)}%</span>
             </div>
           </div>
@@ -512,7 +405,9 @@ export function GenerationProgressPanel() {
                 </h3>
                 <span className="text-[10px] text-zinc-500">{group.items.length} カット</span>
               </div>
-              <ol className={`grid gap-3 ${gridColsForAspect(goal?.aspectRatio ?? "16:9", sizeLevel)}`}>
+              <ol
+                className={`grid gap-3 ${gridColsForAspect(goal?.aspectRatio ?? "16:9", storyboardCardSize)}`}
+              >
                 {group.items.map((o) => {
                   const i = o.displayIndex;
                   const s = o.state;
@@ -543,6 +438,10 @@ export function GenerationProgressPanel() {
                             : "text-zinc-500";
                   const takes = s?.takes ?? [];
                   const adoptedTakeId = s?.selectedTakeId;
+                  // ラフ消失修正 (2026-07-28): take 未着スロットの下敷きに使うラフ画像。
+                  // 絵コンテをスキップした直行フローではメタが無いので従来の Spinner。
+                  const sketchUnderlayPath =
+                    generationCutSketchMeta[o.cutId]?.sketchImagePath ?? null;
                   return (
                     <li
                       key={o.cutId}
@@ -612,6 +511,21 @@ export function GenerationProgressPanel() {
                                     </div>
                                   )}
                                 </>
+                              ) : sketchUnderlayPath ? (
+                                <>
+                                  <img
+                                    src={convertFileSrc(sketchUnderlayPath)}
+                                    alt={`sketch-${i + 1}`}
+                                    title="絵コンテのラフ（この構図で本生成中）"
+                                    className="h-full w-full object-cover opacity-40 grayscale"
+                                  />
+                                  <div className="absolute inset-0 flex items-center justify-center">
+                                    <Spinner running={s?.status === "running"} />
+                                  </div>
+                                  <div className="absolute left-1 top-1 rounded bg-black/70 px-1 py-0.5 text-[9px] font-semibold text-zinc-300">
+                                    ラフ
+                                  </div>
+                                </>
                               ) : (
                                 <Spinner running={s?.status === "running"} />
                               )}
@@ -674,35 +588,4 @@ function aspectClass(a: string): string {
     default:
       return "aspect-video";
   }
-}
-
-/** アスペクト比 + サイズレベル(1=大きく少列 〜 3=小さく多列)に応じてカードの列数を返す。
- *  STΛCK指示(2026-06-07): 他タブ同様スライダーでサイズを選べるように。
- *  level 2 が既定 (絵コンテ SketchReviewPanel と同じ並べ方)。level 1=大きく、level 3=小さく。 */
-function gridColsForAspect(a: string, level: number = 2): string {
-  const table: Record<string, [string, string, string]> = {
-    "9:16": [
-      "grid-cols-1 md:grid-cols-2 xl:grid-cols-3",
-      "grid-cols-2 md:grid-cols-3 xl:grid-cols-4",
-      "grid-cols-3 md:grid-cols-4 xl:grid-cols-6",
-    ],
-    "1:1": [
-      "grid-cols-1 md:grid-cols-1 xl:grid-cols-2",
-      "grid-cols-1 md:grid-cols-2 xl:grid-cols-3",
-      "grid-cols-2 md:grid-cols-3 xl:grid-cols-4",
-    ],
-    "4:5": [
-      "grid-cols-1 md:grid-cols-1 xl:grid-cols-2",
-      "grid-cols-1 md:grid-cols-2 xl:grid-cols-3",
-      "grid-cols-2 md:grid-cols-3 xl:grid-cols-4",
-    ],
-    "16:9": [
-      "grid-cols-1 md:grid-cols-1",
-      "grid-cols-1 md:grid-cols-2",
-      "grid-cols-2 md:grid-cols-3",
-    ],
-  };
-  const cols = table[a] ?? table["16:9"];
-  const idx = Math.min(2, Math.max(0, level - 1));
-  return cols[idx];
 }

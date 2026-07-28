@@ -7,7 +7,6 @@ import { ActiveProjectSelector } from "../../ActiveProjectSelector";
 import { EditWorkspace } from "../../EditWorkspace";
 import { Timeline } from "../../GenerationWorkspace";
 import { PlanWorkspace } from "../../PlanWorkspace";
-import { StoryboardCheckpointDialog } from "../../StoryboardCheckpointDialog";
 import { VideoGenerationWorkspace } from "../../VideoGenerationWorkspace";
 import { WorkspaceTabs } from "../../WorkspaceTabs";
 import { CutGridReviewPanel } from "./CutGridReviewPanel";
@@ -43,30 +42,10 @@ import { SketchReviewPanel } from "./SketchReviewPanel";
  */
 export function StoryboardWorkspace() {
   const phase = useStoryboardRun((s) => s.phase);
-  const cuts = useStoryboardRun((s) => s.cuts);
-  const checkpointCutId = useStoryboardRun((s) => s.checkpointCutId);
-  const continueCheckpoint = useStoryboardRun((s) => s.continueCheckpoint);
-  const cancelCheckpoint = useStoryboardRun((s) => s.cancelCheckpoint);
-  const reset = useStoryboardRun((s) => s.reset);
   const activeTab = useWorkspace((s) => s.activeTab);
-  const checkpointCuts = Array.from(cuts.values()).slice(0, 3);
-
-  const checkpointDialog = checkpointCutId ? (
-    <StoryboardCheckpointDialog
-      cuts={checkpointCuts}
-      onContinue={continueCheckpoint}
-      onCancel={cancelCheckpoint}
-      onReset={async () => {
-        const cancelled = await cancelCheckpoint();
-        if (cancelled) reset();
-      }}
-      onRegenerateCut={() => {
-        // 2026-07-27: ストアの regenerateCut が実際の再生成 (storyboard_regenerate_cut)
-        // を持つようになったため、この呼び出しでそのまま作り直しが走る。
-        useStoryboardRun.getState().regenerateCut(checkpointCutId);
-      }}
-    />
-  ) : null;
+  // S3 (2026-07-28): 方向性チェックのダイアログは撤去。本生成が全カット並列になり
+  // 「3カット目で止めて方向を確認する」区切りが無くなったため (設計書 §4-S3-4)。
+  // 方向性の確認はラフ段の採用行為が引き受ける。
 
   useEffect(() => {
     void ensureStoryboardEventListener().catch((error) => {
@@ -88,7 +67,6 @@ export function StoryboardWorkspace() {
   if (activeTab !== "generate") {
     return (
       <section className="relative flex min-h-0 flex-1 flex-col overflow-hidden bg-[#121212]">
-        {checkpointDialog}
         <div className="border-b border-[#242424] bg-[#121212] px-4 py-3">
           <div className="flex items-center gap-3">
             <WorkspaceTabs />
@@ -106,7 +84,6 @@ export function StoryboardWorkspace() {
 
   return (
     <section className="relative flex min-h-0 flex-1 flex-col overflow-hidden bg-[#121212]">
-      {checkpointDialog}
       <div className="border-b border-[#242424] bg-[#121212] px-4 py-3">
         <div className="flex items-center gap-3">
           <WorkspaceTabs />

@@ -288,6 +288,14 @@ export function useVideoSceneGeneration(): UseVideoSceneGenerationReturn {
             const i = cursor++;
             if (i >= models.length) return;
             try {
+              // 外部 provider は Rust からイベントが出ないため、リクエスト発行の
+              // 直前にフロントで開始イベントを合成し、タイルを「生成中」にする
+              // (2026-07-28)。比較は 1リクエスト=1モデル=1タイル。
+              useBatches.getState().applyEvent({
+                kind: "workerStarted",
+                batchId,
+                idx: i + 1,
+              });
               const r = await higgsfieldMcp.generateBatch({
                 prompt,
                 model: models[i].jobSetType,
@@ -338,6 +346,15 @@ export function useVideoSceneGeneration(): UseVideoSceneGenerationReturn {
         );
         void _q;
         void _i;
+        // 単一生成は 1リクエストが全本数を担うため、発行の瞬間に全タイルが同時に
+        // 「生成中」になるのが実態 (2026-07-28)。
+        for (let idx = 1; idx <= count; idx++) {
+          useBatches.getState().applyEvent({
+            kind: "workerStarted",
+            batchId,
+            idx,
+          });
+        }
         const r = await higgsfieldMcp.generateBatch({
           prompt,
           model: model.jobSetType,

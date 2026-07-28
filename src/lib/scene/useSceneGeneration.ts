@@ -61,6 +61,44 @@ function isTotalFailure(result: SceneGenerationResult): boolean {
   return result.generatedPaths.filter(Boolean).length === 0;
 }
 
+/**
+ * ユーザーが「やめる」を押した結果かどうか (2026-07-27 追加 / 同日フラグ化)。
+ *
+ * ## なぜ要るか (実機で踏んだ不具合)
+ *
+ * キャンセル実装の初回検証で、「やめる」を押したのに
+ * **「画像生成に失敗しました（4件すべて失敗）。原因を特定できませんでした」**
+ * という誤ったエラーが出た。さらに悪いことに、この画面は全件失敗を
+ * 一時的失敗とみなして**自動リトライ**するため、止めたはずの生成が
+ * 再び走り出す動線になっていた。
+ *
+ * 「やめたのに失敗と言われる」は、まさに今回の改修が潰そうとしている
+ * 「アプリが嘘をつく」状態そのものなので、失敗扱いにもリトライ対象にもしない。
+ *
+ * ## なぜ形の推測をやめたか
+ *
+ * 初版は「生成0枚 かつ 失敗0件 かつ エラー0件」という**形**で中止を推測していた。
+ * Rust がキャンセルされたカットを failed_count にも errors にも載せないためだが、
+ * この推測は2方向に外れる:
+ *
+ * - **実失敗との混在で外れる**: 4枚中1枚が本物の失敗、3枚が中止だと failedCount=1 に
+ *   なり中止と認識できず、「失敗」として自動リトライが走る
+ * - **本物の異常を隠す**: 「生成0枚・失敗報告0件」は「何も起きなかった異常」でも
+ *   起きうる。形で判定すると、その異常を中止と偽装して黙らせてしまう
+ *
+ * 今は Rust が `cancelled` (batch_gen.rs の was_cancelled) を実値で返すので、
+ * **推測せず事実だけを見る**。上記の異常は isTotalFailure 側で全件失敗として
+ * 正直に扱われる (それが実態)。
+ */
+const CANCELLED_MARKER = "キャンセルされました";
+
+function isCancelled(result: SceneGenerationResult): boolean {
+  // Rust のキャンセル台帳の実値が第一根拠 (batch_gen.rs の was_cancelled)。
+  if (result.cancelled) return true;
+  // 外部 provider の errors に将来キャンセル文言が載った場合の受け口 (コスト0で維持)。
+  return result.errors.some((error) => error.includes(CANCELLED_MARKER));
+}
+
 function basename(path: string): string {
   return path.split(/[\\/]/).pop() ?? path;
 }
@@ -331,6 +369,24 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
             magnificActive || !compareMode
               ? undefined
               : selectedHiggsfieldModels,
+          // 外部 provider は Rust からイベントが出ないため、リクエストを発行した
+          // 瞬間にフロントで workerStarted を合成してタイルを「生成中」にする
+          // (2026-07-28)。認証失敗時の workerFailed 合成と同型で、正規の状態機械を通る。
+          // tempId は attempt ごとに変わるので、この runOneAttempt の引数を束縛する。
+          //
+          // codex 経路には渡さない: Rust が本物の workerStarted を流すので合成は不要
+          // (渡しても generate.ts 側で呼ばれず不活性だが、設計と字面を一致させる)。
+          // 条件は下の syncProvider (= 同期 provider 判定) と同じ集合。
+          onWorkerDispatched:
+            magnificActive || selectedHiggsfield || compareMode
+              ? (idx) => {
+                  useBatches.getState().applyEvent({
+                    kind: "workerStarted",
+                    batchId: tempId,
+                    idx,
+                  });
+                }
+              : undefined,
         });
         // Magnific と Higgsfield(MCP移行後) は同期的に結果が返る(コアのような生成中
         // イベントが無い)ため、完了を手動で applyEvent して生成カードを埋める。これが無いと
@@ -452,6 +508,19 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
         // Magnific 比較生成は generatedPaths に失敗枠の空文字が混じるため、
         // 空文字を除いた実数で成功枚数を数える(嘘の枚数を出さない)。
         const okCount = result.generatedPaths.filter(Boolean).length;
+
+        // ユーザーが「やめる」を押した = 失敗ではない。
+        // リトライもしない (止めたのに再開したら「やめる」が効かないのと同じ)。
+        if (isCancelled(result)) {
+          setStatus({
+            kind: "success",
+            message:
+              okCount > 0
+                ? `中止しました（${okCount}枚は生成済みです）`
+                : "中止しました",
+          });
+          return result;
+        }
 
         // 1 枚でも生成できた = 部分成功以上。リトライせず結果を返す。
         if (!isTotalFailure(result)) {
