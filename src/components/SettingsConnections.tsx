@@ -76,71 +76,11 @@ const SERVICE_CATEGORIES: ServiceCategory[] = [
  */
 
 /*
- * 対応予定リスト (Roadmap).
- *
- * 「実装まだ無いが今後 BYO 対応を検討しているサービス」を、
- * カードで読み物として並べる。キー入力ボタンは出さず、
- * 公式ページへのリンクのみで「契約検討の支援」に止める。
- *
- * 実装の進め方:
- *   - STΛCK がそのサブスク/キーを取得した時に、Worker 委譲で順次実装
- *   - 動作確認できないものは作らない (BYO の精神)
- *   - 実装したらこのリストから SERVICE_CATEGORIES に昇格
+ * Roadmap セクションは UI から撤去 (STΛCK 指示 2026-07-28)。
+ * 未実装サービスのカードを並べる読み物枠は削除し、接続先ページは
+ * 「実際に GORI GORI KUN から使えるサービスだけ」を表示する。
+ * 将来 BYO 対応を実装したら SERVICE_CATEGORIES に追加する。
  */
-type RoadmapService = {
-  icon: string;
-  name: string;
-  description: string;
-  badge: "サブスク内完結" | "API 課金" | "MCP";
-  detailUrl: string;
-};
-const ROADMAP: { title: string; services: RoadmapService[] }[] = [
-  {
-    title: "AI 生成 (連携予定)",
-    services: [
-      { icon: "S", name: "Splash", description: "AI 動画/画像生成 (近日対応予定)", badge: "サブスク内完結", detailUrl: "https://splash.so/" },
-    ],
-  },
-  {
-    title: "サブスク内完結 (BYO 推奨)",
-    services: [
-      { icon: "K", name: "Krea AI", description: "40+ モデル (Flux/Imagen/Runway/Kling/Hailuo)、Web と API で同じ compute units を共有", badge: "サブスク内完結", detailUrl: "https://www.krea.ai/pricing" },
-      { icon: "P", name: "Picsart GenAI", description: "130+ モデル (Sora/Veo/Kling/Flux/Recraft/ElevenLabs)、OAuth サブスクログイン", badge: "サブスク内完結", detailUrl: "https://picsart.com/genai-cli" },
-      { icon: "A", name: "Adobe Firefly", description: "Creative Cloud に同梱の generative credits を画像/動画/音声で利用", badge: "サブスク内完結", detailUrl: "https://www.adobe.com/products/firefly.html" },
-    ],
-  },
-  {
-    title: "API 課金 (安く繋ぎたい人向け)",
-    services: [
-      { icon: "R", name: "Replicate", description: "100+ OSS モデル統一 API (FLUX/SDXL/Imagen 等)、$0.008〜$0.04/画像", badge: "API 課金", detailUrl: "https://replicate.com/pricing" },
-      { icon: "F", name: "fal.ai", description: "高速版モデル特化 (FLUX/SD/動画)、リアルタイム生成向き", badge: "API 課金", detailUrl: "https://fal.ai/pricing" },
-      { icon: "T", name: "Together AI", description: "最安級 API (FLUX/SDXL/SD 系)、$0.008/画像〜", badge: "API 課金", detailUrl: "https://www.together.ai/pricing" },
-    ],
-  },
-  {
-    title: "個別 API",
-    services: [
-      { icon: "O", name: "OpenAI Images API", description: "DALL-E 3 / GPT Image を API 直叩きで生成 (Codex CLI 不要、Free アカウントでも使える)", badge: "API 課金", detailUrl: "https://platform.openai.com/docs/api-reference/images" },
-      { icon: "S", name: "Stability AI", description: "Stable Image / SD 3.5 系 API", badge: "API 課金", detailUrl: "https://platform.stability.ai/" },
-      { icon: "G", name: "Google Gemini", description: "Imagen 4 / Gemini 系", badge: "API 課金", detailUrl: "https://ai.google.dev/" },
-      { icon: "B", name: "Black Forest Labs", description: "FLUX 公式プロバイダ", badge: "API 課金", detailUrl: "https://api.bfl.ai/" },
-      { icon: "I", name: "Ideogram", description: "文字入りデザインに強い画像生成", badge: "API 課金", detailUrl: "https://ideogram.ai/manage-api" },
-      { icon: "R", name: "Recraft", description: "ブランド素材・ベクター向け", badge: "API 課金", detailUrl: "https://www.recraft.ai/" },
-      { icon: "R", name: "Runway", description: "Gen-4 動画", badge: "API 課金", detailUrl: "https://runwayml.com/pricing" },
-      { icon: "L", name: "Luma AI", description: "Dream Machine 動画", badge: "API 課金", detailUrl: "https://lumalabs.ai/dream-machine" },
-      { icon: "P", name: "Pika", description: "Pika 2.x 動画", badge: "API 課金", detailUrl: "https://pika.art/" },
-      { icon: "E", name: "ElevenLabs", description: "音声合成・ナレーション (将来実装予定)", badge: "API 課金", detailUrl: "https://elevenlabs.io/" },
-      { icon: "M", name: "Magnific / Freepik", description: "高精細アップスケール", badge: "API 課金", detailUrl: "https://www.magnific.com/api" },
-      { icon: "3D", name: "Tripo / Meshy", description: "画像→3D モデル", badge: "API 課金", detailUrl: "https://platform.tripo3d.ai/" },
-    ],
-  },
-  {
-    title: "MCP サーバー (経路定義後に実装)",
-    services: [
-      { icon: "M", name: "Notion / Figma / Drive 等", description: "MCP プリセットあり、画像制作との具体経路 (参照画像取得 等) を定義したら実装", badge: "MCP", detailUrl: "https://modelcontextprotocol.io/" },
-    ],
-  },
-];
 
 type McpPreset = {
   name: string; label: string; command: string; args: string[];
@@ -372,68 +312,6 @@ export function SettingsConnections() {
           })}
         </ConnectionSection>
       ))}
-
-      {/*
-        対応予定 (Roadmap) セクション。
-        実装まだ無いサービスを、「動かない接続ボタン」ではなく
-        「読み物 + 公式ページへのリンク」として並べる。
-        STΛCK が該当サブスクを取得した時点で順次実装、SERVICE_CATEGORIES へ昇格。
-      */}
-      <div className="space-y-4 pt-4">
-        <div>
-          <h3 className="text-sm font-semibold text-white">対応予定</h3>
-          <p className="mt-1 text-[11px] text-neutral-500">
-            今後 BYO 対応を検討しているサービス。動作確認ができないものは作らない方針なので、
-            まずは公式ページで内容を確認できます。
-          </p>
-        </div>
-        {ROADMAP.map((category) => (
-          <div key={category.title} className="space-y-2">
-            <h4 className="text-xs font-semibold uppercase tracking-wide text-neutral-500">
-              {category.title}
-            </h4>
-            <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
-              {category.services.map((service) => (
-                <a
-                  key={service.name}
-                  href={service.detailUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="group flex flex-col gap-1 rounded-lg border border-[#262626] bg-[#141414] p-3 transition hover:border-[#3a3a3a] hover:bg-[#1a1a1a]"
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="flex min-w-0 items-center gap-2">
-                      <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-[#262626] bg-[#0d0d0d] text-xs font-semibold text-neutral-300">
-                        {service.icon}
-                      </span>
-                      <span className="truncate text-xs font-semibold text-neutral-200">
-                        {service.name}
-                      </span>
-                    </div>
-                    <span
-                      className={`shrink-0 rounded-full px-1.5 py-0.5 text-[9px] font-bold ${
-                        service.badge === "サブスク内完結"
-                          ? "bg-lime-300/15 text-lime-300"
-                          : service.badge === "API 課金"
-                            ? "bg-pink-500/15 text-pink-300"
-                            : "bg-neutral-500/15 text-neutral-400"
-                      }`}
-                    >
-                      {service.badge}
-                    </span>
-                  </div>
-                  <p className="line-clamp-2 text-[10px] leading-snug text-neutral-500 group-hover:text-neutral-400">
-                    {service.description}
-                  </p>
-                  <span className="mt-0.5 text-[10px] text-neutral-600 group-hover:text-neutral-300">
-                    詳細を見る ↗
-                  </span>
-                </a>
-              ))}
-            </div>
-          </div>
-        ))}
-      </div>
 
       {/*
         MCP セクションは UI から非表示化。
@@ -869,6 +747,12 @@ function MagnificConnectionCard() {
   // account_balance 由来の残高表示 (接続済みのときだけ取得)。取得失敗しても
   // カード自体は degrade させない (残高ピルが出ないだけ)。
   const [account, setAccount] = useState<MagnificAccount | null>(null);
+  // 残高取得の失敗理由。console.error に握りつぶすと「0クレジット」と
+  // 「取得できなかった」がユーザーから区別できないため UI に出す。
+  const [accountError, setAccountError] = useState<string | null>(null);
+  const [accountLoading, setAccountLoading] = useState(false);
+  // 「再試行」ボタンで再取得するためのトリガ。
+  const [accountReloadKey, setAccountReloadKey] = useState(0);
 
   const authed = status.authenticated;
 
@@ -876,20 +760,37 @@ function MagnificConnectionCard() {
     let cancelled = false;
     if (!authed) {
       setAccount(null);
+      setAccountError(null);
+      setAccountLoading(false);
       return;
     }
+    setAccountLoading(true);
     magnific
       .account()
       .then((acc) => {
-        if (!cancelled) setAccount(acc);
+        if (cancelled) return;
+        setAccount(acc);
+        setAccountError(null);
       })
       .catch((err) => {
+        if (cancelled) return;
+        const detail = String(err);
         console.error("[MagnificConnectionCard] account fetch failed:", err);
+        setAccount(null);
+        setAccountError(detail);
+        // エラーログセンターに乗せる (kind: "error" は ttl 0 で残る)。
+        useToasts.getState().push({
+          kind: "error",
+          text: `Magnific クレジット残高を取得できませんでした: ${detail}`,
+        });
+      })
+      .finally(() => {
+        if (!cancelled) setAccountLoading(false);
       });
     return () => {
       cancelled = true;
     };
-  }, [authed]);
+  }, [authed, accountReloadKey]);
 
   const connect = async () => {
     setBusy(true);
@@ -946,6 +847,23 @@ function MagnificConnectionCard() {
                 {account.unlimited
                   ? `${account.plan ?? "Unlimited"} (無制限)`
                   : `${Math.floor(account.credits).toLocaleString()} クレジット`}
+              </span>
+            )}
+            {authed && !account && accountLoading && (
+              <span className="rounded-full bg-neutral-500/15 px-2 py-0.5 text-[10px] font-black text-neutral-300">
+                クレジット確認中…
+              </span>
+            )}
+            {authed && !account && !accountLoading && accountError && (
+              <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-black text-amber-200">
+                <span title={accountError}>クレジットを取得できませんでした</span>
+                <button
+                  type="button"
+                  onClick={() => setAccountReloadKey((n) => n + 1)}
+                  className="rounded-full bg-amber-400/20 px-1.5 py-0.5 text-[10px] font-black text-amber-100 transition hover:bg-amber-400/40"
+                >
+                  再試行
+                </button>
               </span>
             )}
           </div>

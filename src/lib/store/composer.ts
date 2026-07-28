@@ -15,7 +15,9 @@ function readPersistedCount(): number {
     if (!raw) return 1;
     const n = parseInt(raw, 10);
     if (!Number.isFinite(n)) return 1;
-    return Math.min(24, Math.max(1, n));
+    // 枚数の上限は撤廃（2026-07-28 STΛCK指示）。並列発行＋Rust の
+    // GLOBAL_GEN_SEMAPHORE の順番待ちが安全弁なので、フロントで枚数を切らない。
+    return Math.max(1, n);
   } catch {
     return 1;
   }
@@ -170,7 +172,9 @@ export const useComposer = create<ComposerState>((set, get) => ({
     set({ lastSentText: trimmed });
   },
   setCount: (count) => {
-    const clamped = Math.min(24, Math.max(1, count));
+    // 上限なし（2026-07-28 STΛCK指示）。安全弁は Rust の GLOBAL_GEN_SEMAPHORE
+    // による同時実行の絞りと順番待ちで、フロントは 1 未満だけを弾く。
+    const clamped = Math.max(1, Math.floor(count));
     persistCount(clamped);
     set({ count: clamped });
   },

@@ -540,29 +540,173 @@ pub struct MagnificAccount {
     pub unlimited: bool,
 }
 
+/// JSON 値からクレジット数を取り出す (higgsfield_mcp.rs の `json_to_number` と同方針)。
+///
+/// MCP 側のレスポンス構造が変わっても静かに 0 にならないよう、数値直・文字列数値・
+/// オブジェクトの代表キーを順に試す。見つからなければ `None` を返し、呼び出し側で
+/// エラーにする (`unwrap_or(0.0)` による無言 degrade を禁止する)。
+fn magnific_json_to_number(value: &Value) -> Option<f64> {
+    if let Some(n) = value.as_f64() {
+        return Some(n);
+    }
+    if let Some(s) = value.as_str() {
+        if let Ok(n) = s.trim().parse::<f64>() {
+            return Some(n);
+        }
+    }
+    if let Some(obj) = value.as_object() {
+        for key in [
+            "available",
+            "remaining",
+            "balance",
+            "credits_available",
+            "creditsAvailable",
+            "credits_remaining",
+            "creditsRemaining",
+            "credits",
+            "amount",
+            "value",
+            "total",
+        ] {
+            if let Some(found) = obj.get(key).and_then(magnific_json_to_number) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+/// テキスト全体から最初の数値トークンを拾うフォールバック
+/// (structuredContent が無い版で text "Credits: 445.77 ..." だけ返る場合に備える)。
+fn magnific_extract_first_number(text: &str) -> Option<f64> {
+    let mut buf = String::new();
+    for c in text.chars() {
+        if c.is_ascii_digit() || c == '.' || (buf.is_empty() && c == '-') {
+            buf.push(c);
+        } else if !buf.is_empty() {
+            if let Ok(n) = buf.parse::<f64>() {
+                return Some(n);
+            }
+            buf.clear();
+        }
+    }
+    if !buf.is_empty() {
+        if let Ok(n) = buf.parse::<f64>() {
+            return Some(n);
+        }
+    }
+    None
+}
+
+/// `account_balance` の structuredContent からクレジット数を解釈する。
+///
+/// 想定する形 (どれでも読める):
+/// - `{credits: {available: 100}}` (PoC 2026-06-10 実測の形)
+/// - `{credits: {remaining: 100}}` / `{credits: {balance: 100}}` 等のキー名変更
+/// - `{credits: 100}` (数値直置き)
+/// - `{credits: "100"}` (文字列数値)
+/// - `{available: 100}` / `{balance: 100}` (トップレベル直)
+///
+/// どれにも当てはまらなければ `None`。呼び出し側は 0 で埋めずエラーにする。
+fn parse_magnific_credits(structured: &Value) -> Option<f64> {
+    // credits サブオブジェクト/数値を最優先で見る (トップレベルの無関係な数値を
+    // 誤って残高と解釈しないため)。
+    if let Some(found) = structured.get("credits").and_then(magnific_json_to_number) {
+        return Some(found);
+    }
+    // credits キー自体が無い形 (トップレベルに available / balance 等) に対応。
+    magnific_json_to_number(structured)
+}
+
+/// 解釈に失敗したときの調査用に、受信 JSON の**キー名だけ**を列挙する (値は含めない)。
+/// 残高や個人情報をログ・UI に出さないための制約。
+fn magnific_describe_shape(structured: &Value) -> String {
+    match structured {
+        Value::Object(map) => {
+            let mut parts: Vec<String> = map
+                .iter()
+                .map(|(k, v)| match v {
+                    Value::Object(inner) => {
+                        let mut inner_keys: Vec<&str> =
+                            inner.keys().map(|s| s.as_str()).collect();
+                        inner_keys.sort_unstable();
+                        format!("{k}{{{}}}", inner_keys.join(","))
+                    }
+                    Value::Array(_) => format!("{k}[]"),
+                    Value::Null => format!("{k}:null"),
+                    Value::Bool(_) => format!("{k}:bool"),
+                    Value::Number(_) => format!("{k}:number"),
+                    Value::String(_) => format!("{k}:string"),
+                })
+                .collect();
+            parts.sort();
+            parts.join(", ")
+        }
+        Value::Array(_) => "(トップレベルが配列)".to_string(),
+        Value::Null => "(null)".to_string(),
+        other => format!("(トップレベルが {} 型)", match other {
+            Value::Bool(_) => "bool",
+            Value::Number(_) => "number",
+            Value::String(_) => "string",
+            _ => "unknown",
+        }),
+    }
+}
+
 /// Magnific MCP の `account_balance` で残高 + プランを取得する (実測 1 秒前後)。
+///
+/// 2026-07-28: 固定パス `credits.available` + `unwrap_or(0.0)` を廃止した。
+/// MCP 側のレスポンス構造が変わると**無言で 0 クレジット表示**になり、「本当に残高が
+/// 無い」と区別できなかったため。多キー・多形状のフォールバックで読み、どれでも
+/// 解釈できなければ 0 を返さずエラーにして UI に理由を出す。
 #[tauri::command]
 pub async fn magnific_account(state: State<'_, AppState>) -> Result<MagnificAccount, String> {
     let out = call_tool(&state, MAGNIFIC_MCP_NAME, "account_balance", json!({})).await?;
     if out.is_error {
         return Err(format!("Magnific 残高の取得に失敗しました: {}", out.text));
     }
-    let structured = out
-        .structured
-        .ok_or_else(|| "Magnific 残高の応答を取得できませんでした".to_string())?;
-    let credits = structured
-        .get("credits")
-        .and_then(|c| c.get("available"))
-        .and_then(|v| v.as_f64())
-        .unwrap_or(0.0);
+    let Some(structured) = out.structured.as_ref() else {
+        // structuredContent が無いバージョン差に備え、text の数値だけでも拾う。
+        let credits = magnific_extract_first_number(&out.text).ok_or_else(|| {
+            "Magnific 残高の形式を解釈できませんでした (structuredContent なし)".to_string()
+        })?;
+        return Ok(MagnificAccount {
+            credits,
+            plan: None,
+            unlimited: false,
+        });
+    };
+
+    let credits = match parse_magnific_credits(structured) {
+        Some(n) => n,
+        // 最後の砦: text 側 ("Credits: 123 ...") からの数値抽出。
+        None => magnific_extract_first_number(&out.text).ok_or_else(|| {
+            format!(
+                "Magnific 残高の形式を解釈できませんでした。受信したキー構成: {}",
+                magnific_describe_shape(structured)
+            )
+        })?,
+    };
+
     let plan = structured
         .get("plan")
-        .and_then(|p| p.get("productName").or_else(|| p.get("tier")))
+        .and_then(|p| {
+            p.get("productName")
+                .or_else(|| p.get("tier"))
+                .or_else(|| p.get("name"))
+                .or_else(|| p.get("planName"))
+                // plan が文字列直置きの形にも対応。
+                .or(Some(p))
+        })
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
     let unlimited = structured
         .get("plan")
-        .and_then(|p| p.get("isUnlimitedMode"))
+        .and_then(|p| {
+            p.get("isUnlimitedMode")
+                .or_else(|| p.get("unlimited"))
+                .or_else(|| p.get("is_unlimited_mode"))
+        })
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     Ok(MagnificAccount {
@@ -609,5 +753,85 @@ mod tests {
         assert_eq!(magnific_mime_for_path("/a/b.jpeg"), Some("image/jpeg"));
         assert_eq!(magnific_mime_for_path("/a/b.webp"), Some("image/webp"));
         assert_eq!(magnific_mime_for_path("/a/b.gif"), None);
+    }
+
+    #[test]
+    fn parse_credits_reads_multiple_shapes() {
+        // PoC 2026-06-10 実測の形 (現行)。
+        assert_eq!(
+            parse_magnific_credits(&json!({"credits": {"available": 445.77}})),
+            Some(445.77)
+        );
+        // キー名変更 (available → remaining / balance)。
+        assert_eq!(
+            parse_magnific_credits(&json!({"credits": {"remaining": 100}})),
+            Some(100.0)
+        );
+        assert_eq!(
+            parse_magnific_credits(&json!({"credits": {"balance": 12.5}})),
+            Some(12.5)
+        );
+        // credits に数値直置き。
+        assert_eq!(parse_magnific_credits(&json!({"credits": 88})), Some(88.0));
+        // 文字列数値。
+        assert_eq!(
+            parse_magnific_credits(&json!({"credits": "77.5"})),
+            Some(77.5)
+        );
+        assert_eq!(
+            parse_magnific_credits(&json!({"credits": {"available": "64"}})),
+            Some(64.0)
+        );
+        // トップレベル直 (credits キーが無い形)。
+        assert_eq!(parse_magnific_credits(&json!({"available": 5})), Some(5.0));
+        assert_eq!(parse_magnific_credits(&json!({"balance": 9})), Some(9.0));
+        assert_eq!(
+            parse_magnific_credits(&json!({"creditsRemaining": 3})),
+            Some(3.0)
+        );
+        // 0 は「取れなかった」ではなく「本当に 0」として通す。
+        assert_eq!(
+            parse_magnific_credits(&json!({"credits": {"available": 0}})),
+            Some(0.0)
+        );
+    }
+
+    #[test]
+    fn parse_credits_returns_none_for_unknown_shape() {
+        // 数値がどこにも無い形は None (呼び出し側が Err にする。0 で埋めない)。
+        assert_eq!(
+            parse_magnific_credits(&json!({"plan": {"tier": "business"}})),
+            None
+        );
+        assert_eq!(parse_magnific_credits(&json!({})), None);
+        assert_eq!(
+            parse_magnific_credits(&json!({"credits": {"unit": "usd"}})),
+            None
+        );
+        assert_eq!(parse_magnific_credits(&json!("no numbers here")), None);
+    }
+
+    #[test]
+    fn describe_shape_lists_keys_without_values() {
+        let shape = magnific_describe_shape(&json!({
+            "credits": {"unit": "usd", "note": "x"},
+            "plan": {"tier": "business"},
+            "token": "secret-value-must-not-leak"
+        }));
+        // キー名と型だけが出る。値そのものは含まれない。
+        assert!(shape.contains("credits{note,unit}"), "got: {shape}");
+        assert!(shape.contains("plan{tier}"), "got: {shape}");
+        assert!(shape.contains("token:string"), "got: {shape}");
+        assert!(!shape.contains("secret-value-must-not-leak"), "got: {shape}");
+        assert!(!shape.contains("business"), "got: {shape}");
+    }
+
+    #[test]
+    fn extract_first_number_reads_text_fallback() {
+        assert_eq!(
+            magnific_extract_first_number("Credits: 445.77 | Plan: creator"),
+            Some(445.77)
+        );
+        assert_eq!(magnific_extract_first_number("no digits"), None);
     }
 }

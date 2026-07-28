@@ -758,10 +758,11 @@ export function PromptComposer({
           </label>
           <label className={`flex items-center gap-1.5 whitespace-nowrap text-xs font-medium ${dark ? "text-neutral-300" : "text-neutral-600"}`}>
             フレーム
+            {/* 枚数の上限は撤廃（2026-07-28 STΛCK指示）。並列で発行し、Rust の
+                GLOBAL_GEN_SEMAPHORE が同時実行数を絞って順番に消化する。 */}
             <input
               type="number"
               min={1}
-              max={24}
               value={count}
               onChange={(e) => setCount(Number(e.target.value) || 1)}
               className={`w-12 rounded border px-1 py-0.5 text-center text-sm ${
