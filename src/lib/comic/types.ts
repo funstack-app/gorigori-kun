@@ -1,29 +1,101 @@
 /**
  * 漫画制作スキル（スキル一覧v2.1 #9）の型定義。
  *
- * MVP のデータフロー:
- *   話（あらすじ）+ 形式 + 登場キャラ
- *     → ネーム生成（AI が JSON でコマ割り+セリフを返す）
- *     → ネーム確認（人がコマごとに構図・セリフ・プロンプトを直す。工程設計の要）
- *     → コマ生成（各コマのプロンプト＋キャラ参照画像で既存の画像生成経路を発火）
- *     → ページプレビュー（縦組みで並べる。吹き出し合成は将来課題）
+ * データフロー（おまかせ一括・唯一の経路）:
+ *   話 + キャラ + ページ数 + 参考テンプレ(任意)
+ *     → 構成生成（AI が JSON でページ割り+コマ割り+セリフを返す）
+ *     → 構成確認（人がページ/コマ単位で直す）
+ *     → ページ並列生成（1ページ=1枚。吹き出し・擬音は絵として描かれる）
+ *     → ページ一覧（再生成・保存・一括保存）
  *
- * 写植・吹き出し合成は MVP 対象外（表示のみ・将来課題）。
+ * 旧「詳細編集（コマ別）」経路（ネーム → コマ生成 → CSS合成ページ確認 →
+ * Canvas 1枚書き出し）は 2026-07-28 に撤去した（STΛCK指示）。
+ * つくり方の選択自体を無くし、上の一気生成だけを残している。
+ *
+ * コマ数の正本は layoutTemplates.ts の `panelCount`（旧・形式(4|8)型は 2026-07-28 に廃止）。
+ * 吹き出しの画像への焼き込み（書き出し）は将来課題（表示は CSS で成立させる）。
  */
 
-/** コマ数の形式。MVP は 4コマ / 8コマ の2種のみ。 */
-export type ComicFormat = 4 | 8;
+/** ページ数の指定。"auto"=AI が決める（目安 MAX_STORY_PAGES）／数値=そのページ数（上限なし）。 */
+export type PageCountChoice = "auto" | number;
 
-/** 選択された登場キャラ（プリセット由来）の最小情報。 */
+/** 選択された登場キャラ（プリセット由来 or 画像から追加）の最小情報。 */
 export type ComicCharacter = {
-  /** 元プリセット ID。 */
-  presetId: string;
+  /** 元プリセット ID。画像から追加したキャラは undefined。 */
+  presetId?: string;
   /** 表示名（プリセット名）。ネームの登場キャラ指定と突き合わせる。 */
   name: string;
   /** 属性テキスト（髪色・服装など）。生成プロンプトに合成する。 */
   attributes?: string;
   /** 正本画像パス（3面図・表情など）。生成時の参照画像に流す。 */
   referenceImagePaths: string[];
+};
+
+/**
+ * 画像から追加した登場キャラ（PC 添付 / ライブラリ選択）。
+ * ComicFlow のセッション内 state 専用（ディスク保存しない。新規保存領域を作らない）。
+ * name は編集可能で、ComicCharacter.name → ネーム配役・参照解決にそのまま流れる。
+ */
+export type ComicImageCharacter = {
+  /** セッション内一意 ID（crypto.randomUUID()）。削除・名前編集のキー。 */
+  id: string;
+  /** 表示名。既定は「キャラN」（セッション通し連番）。空にはさせない。 */
+  name: string;
+  /** 参照画像の絶対パス。 */
+  imagePath: string;
+  /** 入力元（チップのラベル表示用）。 */
+  source: "file" | "library";
+};
+
+/**
+ * コマ絵の画風。生成プロンプトのベース句を切り替える（セッション内のみ・保存しない）。
+ * 既定は "mono"（従来どおりの白黒漫画）。
+ *
+ * "faithful"（キャラ忠実）はリファレンス画像の画風・質感をそのまま保つモード。
+ * mono/color が「参照の写真調・3D調を無視して漫画へ変換する」のに対し、
+ * faithful は変換をせず参照の描画スタイルを維持する（狙いが正反対）。
+ */
+export type ComicColorMode = "mono" | "color" | "faithful";
+
+/** 保存形式（セッション内のみ・保存しない）。 */
+export type ComicSaveFormat = "png" | "jpeg";
+
+export type ComicBalloonKind = "normal" | "shout" | "monologue" | "narration";
+
+/** ネームの吹き出し1個。AI が生成し、ネーム確認とページ編集で人が直す。 */
+export type ComicBalloon = {
+  /** セッション内一意 ID（crypto.randomUUID()）。編集・描画キー。 */
+  id: string;
+  /** 話者名（表示補助。narration は空文字）。生成参照の解決には使わない。 */
+  speaker: string;
+  /** セリフ本文（改行可）。 */
+  text: string;
+  kind: ComicBalloonKind;
+  /**
+   * コマ bbox 内の位置（percent・吹き出し左上）。null = 自動初期配置
+   * （読み順スロット: 1個目=右上 / 2個目=左下。balloonLayout.ts が決める）。
+   * ユーザーがドラッグしたときだけ数値が入る。
+   */
+  pos: { x: number; y: number } | null;
+  /** ページ表示・書き出しに含めるか。 */
+  visible: boolean;
+};
+
+export type ComicSfxIntent = "impact" | "motion" | "quiet" | "emotion";
+
+/** 擬音（オノマトペ）1個。 */
+export type ComicSfx = {
+  id: string;
+  /** 擬音テキスト（カタカナ中心・2〜6文字目安）。 */
+  text: string;
+  intent: ComicSfxIntent;
+  /** コマ bbox 内 percent。null = 自動初期配置。 */
+  pos: { x: number; y: number } | null;
+  /** 回転（deg）。intent から初期決定。 */
+  rotation: number;
+  /** 大きさ倍率。intent から初期決定。 */
+  scale: number;
+  visible: boolean;
 };
 
 /**
@@ -39,16 +111,12 @@ export type ComicPanel = {
   characters: string[];
   /** 演技・表情の説明（例: 「驚いて目を見開く」）。 */
   acting: string;
-  /** セリフ（複数行可。空なら無言コマ）。 */
-  dialogue: string;
+  /** 吹き出し（最大2個。空配列=無言コマ）。配列順=発話順=配置順。 */
+  balloons: ComicBalloon[];
+  /** 擬音（最大2個。無ければ空配列）。 */
+  sfx: ComicSfx[];
   /** 画像生成用プロンプト（英語/日本語混在可）。人が編集できる。 */
   prompt: string;
-};
-
-/** ネーム全体（コマの配列＋メタ）。 */
-export type ComicName = {
-  format: ComicFormat;
-  panels: ComicPanel[];
 };
 
 /** 1コマの生成結果。 */
@@ -65,5 +133,39 @@ export type ComicPanelResult = {
   error?: string;
 };
 
-/** ワークスペースの工程フェーズ。 */
-export type ComicPhase = "input" | "name" | "panels" | "preview";
+/**
+ * 構成フェーズが確定させる1ページ分。panels は既存 ComicPanel をそのまま使う
+ * （balloons/sfx スキーマ・編集 UI・toBalloons/toSfx の検証を全部流用するため）。
+ */
+export type ComicStoryPage = {
+  /** ページ番号（1始まり・連番）。 */
+  page: number;
+  /** このページで起きること（40字目安・編集可）。前後ページの連続性コンテキストに使う。 */
+  synopsis: string;
+  /** コマ割り方針（英語1文・編集可・空可）。テンプレ未選択時のレイアウト指示に使う。 */
+  layoutHint: string;
+  /**
+   * このページに登場する登場キャラ名（ページ=参照紐付けの単位の正本）。
+   * parseComicStory が panels[].characters の和集合を必ず含む形に正規化する
+   * （trim 済み・重複なし）。モブは含めない。
+   */
+  cast: string[];
+  /** このページのコマ数。panels.length と常に一致（isValidStory が保証）。 */
+  panelCount: number;
+  panels: ComicPanel[];
+};
+
+/** 1ページの生成結果。ComicPanelResult のページ版（構造を揃えて実装を写経可能にする）。 */
+export type ComicPageResult = {
+  page: number;
+  imagePath?: string;
+  generating: boolean;
+  startedAt?: number;
+  error?: string;
+};
+
+/**
+ * ワークスペースの工程フェーズ。
+ * 旧・詳細編集の "name" / "panels" / "preview" は経路ごと撤去した (2026-07-28)。
+ */
+export type ComicPhase = "input" | "plan" | "pages";

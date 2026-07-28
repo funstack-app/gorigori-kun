@@ -5,6 +5,7 @@ import { ApprovalDialog } from "./components/ApprovalDialog";
 import { AuthGate } from "./components/AuthGate";
 import { FirstRunStorageNotice } from "./components/FirstRunStorageNotice";
 import { ContextMenu, type ContextMenuItem } from "./components/ContextMenu";
+import { ErrorLogPanel } from "./components/ErrorLogPanel";
 import { buildGalleryItemMenu, deleteGalleryImages } from "./components/galleryItemMenu";
 import { RegisterPresetDialog } from "./components/RegisterPresetDialog";
 import { ImagePreviewModal } from "./components/ImagePreviewModal";
@@ -22,7 +23,13 @@ import { Toaster } from "./components/Toaster";
 import { GenerationStatusPanel } from "./components/GenerationStatusPanel";
 import { Badge, Button, EmptyState, SegmentedTabs } from "./components/ui";
 import { attachWindowDragDrop } from "./lib/dragDrop";
-import { type AuthAccount, images as imagesIpc, onImageBatch, onImageGenerated } from "./lib/ipc";
+import {
+  type AuthAccount,
+  images as imagesIpc,
+  onGenPhase,
+  onImageBatch,
+  onImageGenerated,
+} from "./lib/ipc";
 import { ensureMultiAngleEventListener } from "./lib/multiangle/events";
 import { useAccounts } from "./lib/store/accounts";
 import { useActiveProject } from "./lib/store/activeProject";
@@ -35,6 +42,7 @@ import {
   type ReferenceRole,
   useComposer,
 } from "./lib/store/composer";
+import { routeDirectRunBatchEvent } from "./lib/store/directRun";
 import { useDragHover } from "./lib/store/dragHover";
 import { useImagePreview } from "./lib/store/imagePreview";
 import { type GalleryItem, useImages } from "./lib/store/images";
@@ -50,6 +58,7 @@ import { useSettings } from "./lib/store/settings";
 import { useSnsExport } from "./lib/store/snsExport";
 import { useStoryboardRun } from "./lib/store/storyboardRun";
 import { useThreads } from "./lib/store/threads";
+import { useErrorLog } from "./lib/store/errorLog";
 import { useToasts } from "./lib/store/toasts";
 import {
   type ImageMode,
@@ -240,10 +249,26 @@ function App() {
       <MaskEditorModal />
       <SnsExportModalMount />
       <Toaster />
+      <ErrorLogPanelMount />
       <GenerationStatusPanel />
       <FirstRunStorageNotice />
     </main>
   );
+}
+
+/**
+ * エラーログパネルの常設マウント。
+ * 開閉は useErrorLog の panelOpen が持つ (サイドバーのボタンから開く)。
+ * 起動時に1回だけディスクの過去ログを読み込む。
+ */
+function ErrorLogPanelMount() {
+  const open = useErrorLog((s) => s.panelOpen);
+  const closePanel = useErrorLog((s) => s.closePanel);
+  const load = useErrorLog((s) => s.load);
+  useEffect(() => {
+    void load();
+  }, [load]);
+  return <ErrorLogPanel open={open} onClose={closePanel} />;
 }
 
 /**
@@ -398,9 +423,19 @@ function SignedInScaffold() {
         onHoverChange: (active) => useDragHover.getState().setActive(active),
       }),
     );
+    // 生成フェーズ (順番待ち→AI準備中→描画中→完成)。既に app-server が
+    // 送っていたのに受信者がいなかった通知を、ここで初めて拾う (設計書 S1)。
+    arm(
+      onGenPhase((e) => {
+        useBatches.getState().applyPhase(e);
+      }),
+    );
     arm(
       onImageBatch((e) => {
-        useBatches.getState().applyEvent(e);
+        // direct-run（漫画など）の子 batch はレジストリが親ジョブへ橋渡しし、
+        // カード/幽霊ジョブを作らない（消費したら applyEvent に渡さない）。
+        const consumed = routeDirectRunBatchEvent(e);
+        if (!consumed) useBatches.getState().applyEvent(e);
         const sess = useSessions.getState();
         if (e.kind === "started") sess.bindBatch(e.batchId);
         if (e.kind === "workerCompleted") {
@@ -898,6 +933,65 @@ function NavIconChat() {
     </svg>
   );
 }
+function NavIconErrorLog() {
+  // 三角の警告 + 履歴を示す下線 (エラーが残るログ)
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <path
+        d="M8 2.5L14 12.5H2L8 2.5Z"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M8 6.5V9"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+      />
+      <circle cx="8" cy="10.8" r="0.7" fill="currentColor" />
+    </svg>
+  );
+}
+
+/**
+ * サイドバーの「エラーログ」項目。
+ * ドロワー (drawer) ではなくモーダルパネルを開くので nav() とは別実装にする。
+ * 未読があればピンクの件数バッジを出す。
+ */
+function NavErrorLogButton({ collapsed }: { collapsed: boolean }) {
+  const unreadCount = useErrorLog((s) => s.unreadCount);
+  const openPanel = useErrorLog((s) => s.openPanel);
+  const badge = unreadCount > 99 ? "99+" : String(unreadCount);
+  return (
+    <button
+      type="button"
+      onClick={openPanel}
+      title="エラーログ"
+      className="flex h-10 w-full items-center gap-3 rounded-lg px-3 text-left text-sm font-medium text-neutral-300 transition hover:bg-[#242424] hover:text-white"
+    >
+      <span className="relative flex h-5 w-5 flex-shrink-0 items-center justify-center">
+        <NavIconErrorLog />
+        {collapsed && unreadCount > 0 && (
+          <span className="absolute -right-1.5 -top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-pink-500 px-1 text-[9px] font-bold leading-none text-white">
+            {badge}
+          </span>
+        )}
+      </span>
+      {!collapsed && (
+        <>
+          <span className="whitespace-nowrap">エラーログ</span>
+          {unreadCount > 0 && (
+            <span className="ml-auto flex h-4 min-w-4 items-center justify-center rounded-full bg-pink-500 px-1.5 text-[10px] font-bold leading-none text-white">
+              {badge}
+            </span>
+          )}
+        </>
+      )}
+    </button>
+  );
+}
+
 function NavIconSettings() {
   // 標準的な歯車アイコン (8歯、中央に円)
   return (
@@ -1122,9 +1216,10 @@ function NavAccountFooter({
 }) {
   return (
     <div className="mt-auto space-y-2 border-t border-[#242424] pt-3">
-      {/* チャット履歴・設定はサイドバー最下部、フッター情報の上に配置 */}
+      {/* チャット履歴・エラーログ・設定はサイドバー最下部、フッター情報の上に配置 */}
       <div className="space-y-1">
         {chatNav}
+        <NavErrorLogButton collapsed={collapsed} />
         {settingsNav}
       </div>
       {!collapsed && (

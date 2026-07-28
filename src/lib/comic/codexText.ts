@@ -27,14 +27,43 @@ function extractTextDelta(params: any): string | undefined {
 }
 
 /**
+ * この関数を呼んでいる工程の名前。エラー文言に使う。
+ *
+ * 固定文言だと、構成生成のタイムアウトで
+ * 「構成の生成に失敗しました: ネーム生成がタイムアウトしました」という
+ * 混成トーストになる（2026-07-28 修正）。呼び出し側がラベルを渡す。
+ */
+export type ComicTextTurnLabel = "ネーム" | "構成";
+
+/**
+ * タイムアウト専用のエラー。
+ *
+ * 呼び出し側は「〜に失敗しました: {message}」でくるまず、message をそのまま
+ * 出す（くるむと「構成の生成に失敗しました: 構成の生成がタイムアウトしました」と
+ * 二重になる）。判別を instanceof でできるようにクラスで分ける。
+ */
+export class ComicTextTurnTimeoutError extends Error {
+  constructor(label: ComicTextTurnLabel) {
+    super(
+      label === "構成"
+        ? "構成の生成がタイムアウトしました。もう一度お試しください。"
+        : "ネームの生成がタイムアウトしました。もう一度お試しください。",
+    );
+    this.name = "ComicTextTurnTimeoutError";
+  }
+}
+
+/**
  * 1ターンだけ codex にテキストを送り、assistant の応答テキスト全文を返す。
  *
  * @param prompt 送信するプロンプト本文
  * @param timeoutMs タイムアウト（既定 90 秒）。超過時は reject
+ * @param label エラー文言に使う工程名（既定「ネーム」）
  */
 export async function runComicTextTurn(
   prompt: string,
   timeoutMs = 90_000,
+  label: ComicTextTurnLabel = "ネーム",
 ): Promise<string> {
   const startParams: ThreadStartParams = {
     model: COMIC_MODEL,
@@ -59,7 +88,7 @@ export async function runComicTextTurn(
     };
 
     const timer = setTimeout(() => {
-      finish(() => reject(new Error("ネーム生成がタイムアウトしました")));
+      finish(() => reject(new ComicTextTurnTimeoutError(label)));
     }, timeoutMs);
 
     const handleNotification = (n: RpcNotification) => {
@@ -84,7 +113,7 @@ export async function runComicTextTurn(
       } else if (n.method === "turn/completed") {
         const status = params?.turn?.status;
         if (status === "failed") {
-          const msg = params?.turn?.error?.message ?? "ネーム生成でエラーが発生しました";
+          const msg = params?.turn?.error?.message ?? `${label}生成でエラーが発生しました`;
           finish(() => reject(new Error(msg)));
         } else {
           finish(() => resolve(buffer));

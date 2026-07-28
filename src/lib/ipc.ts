@@ -342,14 +342,52 @@ export const images = {
     effort?: string;
     aspect?: string;
     turnId?: string;
+    /** direct-run 親 run ID。Started イベントで echo される。生成には影響しない。 */
+    sourceTag?: string;
   }) =>
     invoke<{
       batchId: string;
       generatedPaths: string[];
       failedCount: number;
       errors: string[];
+      /** Rust のキャンセル台帳の実値。true = ユーザーが中止した run。 */
+      cancelled: boolean;
     }>("images_generate_batch", { args }),
 };
+
+/**
+ * 走っている生成をやめる (2026-07-27 STΛCK指示で実装)。
+ *
+ * ## 何が止まって、何が止まらないか
+ *
+ * - **順番待ちのカット**: 止まる。セマフォ(同時6枚)の順番が来た時点で
+ *   キャンセル印を見て、プロセスを起動せずに抜ける
+ * - **走っているカット**: 止まる。PID台帳から run_id に紐づくプロセスだけを終了する
+ * - **常駐 app-server**: **止めない**。1プロセスが複数 run のカットを担当しているため、
+ *   これを殺すと無関係な生成まで巻き添えになる (worker_registry.rs の
+ *   is_cancellable_entry が構造的に除外し、テストで固定してある)
+ *
+ * ## 返り値の読み方
+ *
+ * - `found`: その run が Rust の**実行中 run 台帳**にいたか。
+ *   `false` は「すでに終了している / まだ開始していない / Rust が管理していない ID」で、
+ *   **何も中止していない**。UI はこのとき「止まりました」と言ってはいけない。
+ *   Rust は終了済みと未開始を区別できないので、原因は断定しない
+ * - `terminated`: 実際に終了させた codex exec プロセス数。
+ *   常駐 app-server 経由の生成は interrupt で止まり kill しないためここには数えない。
+ *   つまり `0` は「実行中のものが無かった」ではなく「プロセスは殺していない」の意味
+ *
+ * **UI は押した瞬間に「やめました」と言わず、この結果を見てから文言を決める**
+ * (押したら止まったことにするのは、このアプリが避けてきた嘘のUI)。
+ */
+export async function cancelGeneration(runId: string): Promise<{
+  terminated: number;
+  found: boolean;
+}> {
+  return invoke<{ terminated: number; found: boolean }>("cancel_generation", {
+    runId,
+  });
+}
 
 export const editExport = {
   psd: (composition: PsdComposition, outputPath: string) =>
@@ -527,6 +565,8 @@ export type ImageBatchEvent =
       modelJobSetType?: string;
       modelDisplayName?: string;
       mediaType?: MediaType;
+      /** direct-run 親 run ID。Started イベントで echo される。生成には影響しない。 */
+      sourceTag?: string;
     }
   | {
       kind: "workerStarted";
@@ -575,6 +615,26 @@ export function onImageBatch(cb: (e: ImageBatchEvent) => void): Promise<Unlisten
   return listen<ImageBatchEvent>("codex://image-batch", (e) => cb(e.payload));
 }
 
+/**
+ * `codex://gen-phase` — 画像1枚が「順番待ち→AI準備中→描画中→完成」の
+ * どこにいるか (設計書 S1)。Rust の `GenPhase::as_str` と1対1で対応する。
+ */
+export type GenPhaseName = "queued" | "thinking" | "drawing" | "done";
+
+export type GenPhaseEvent = {
+  /** バッチ ID (Rust の run_id)。どの生成に属するか。 */
+  runId: string;
+  /** バッチ内の何枚目か (1始まり)。カット系 (絵コンテ等) では付かない。 */
+  imageIndex?: number;
+  phase: GenPhaseName;
+  /** queued のときだけ。自分の前に走っている枚数。 */
+  position?: number;
+};
+
+export function onGenPhase(cb: (e: GenPhaseEvent) => void): Promise<UnlistenFn> {
+  return listen<GenPhaseEvent>("codex://gen-phase", (e) => cb(e.payload));
+}
+
 export function onImageGenerated(cb: (e: ImageEvent) => void): Promise<UnlistenFn> {
   return listen<ImageEvent>(EVENT_IMAGE_GENERATED, (e) => cb(e.payload));
 }
@@ -605,13 +665,8 @@ export type RegenerateCutParams = {
 
 export const storyboard = {
   run: (params: StoryboardRunParams) => invoke<string>("storyboard_run", { params }),
-  /**
-   * A-2: 方向性チェック (checkpoint) で停止中の生成ループを再開/中断する。
-   * action="continue" で残りカット続行、"cancel" で安全中断 (生成済みは保持)。
-   * 戻り値 true = 停止中の run にシグナルを届けた / false = 既に再開済み等で対象なし。
-   */
-  checkpointResume: (runId: string, action: "continue" | "cancel") =>
-    invoke<boolean>("storyboard_checkpoint_resume", { runId, action }),
+  // checkpointResume は S3 (2026-07-28) で撤去。Rust 側のコマンドごと消してある。
+  // 残すと「押しても何も起きないのに成功扱い」の死んだ経路になる。
   /** 単一カットを追加参照画像で再生成 (新 take として TakeCompleted が来る)。 */
   regenerateCut: (params: RegenerateCutParams) =>
     invoke<string>("storyboard_regenerate_cut", { params }),
