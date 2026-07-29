@@ -10,8 +10,8 @@ import { useEffect, useRef, useState } from "react";
  * ポップアップで出てくる方がいい」。常時展開だと画面上部を恒久的に占有し、
  * 一度読んだ後はただの邪魔になる。そこで:
  *   - 既定は「? ヘルプ」の小さいボタン1つだけ (占有はボタン分のみ)
- *   - そのスキルを初めて開いたときだけ自動で開く (初見で何も分からない状態は作らない)
- *   - 一度開いたら記憶し、次回以降は畳んだまま (localStorage)
+ *   - 既定は常に畳んだ状態。開くのは「? ヘルプ」を押したときだけ
+ *     (STΛCK指示 2026-07-29: 初回の自動全開も廃止)
  *
  * 書く内容は2つだけ:
  *   what — 何を渡すと何が手に入るか (1文)
@@ -23,17 +23,6 @@ import { useEffect, useRef, useState } from "react";
  * 漫画の吹き出し焼き込みは、いずれも未実装)。
  */
 
-const SEEN_KEY_PREFIX = "gori.skillIntro.seen.";
-
-/** what の文面から安定したキーを作る (スキルごとに別々に「読んだ」を覚えるため)。 */
-function introKey(what: string): string {
-  let hash = 0;
-  for (let i = 0; i < what.length; i += 1) {
-    hash = (hash * 31 + what.charCodeAt(i)) | 0;
-  }
-  return `${SEEN_KEY_PREFIX}${hash}`;
-}
-
 export function SkillIntro({
   what,
   first,
@@ -43,26 +32,8 @@ export function SkillIntro({
   first: string;
   note?: string;
 }) {
-  const key = introKey(what);
-  // 初回だけ開いた状態で始める。2回目以降は畳んだまま。
-  const [open, setOpen] = useState(() => {
-    try {
-      return localStorage.getItem(key) === null;
-    } catch {
-      return true;
-    }
-  });
+  const [open, setOpen] = useState(false);
   const popRef = useRef<HTMLDivElement | null>(null);
-
-  // 開いたことを記録する (次回から畳んだ状態で始まる)
-  useEffect(() => {
-    if (!open) return;
-    try {
-      localStorage.setItem(key, "1");
-    } catch {
-      // 保存できなくても動作には影響しない (毎回開くだけ)
-    }
-  }, [open, key]);
 
   // 外側クリック / Escape で閉じる
   useEffect(() => {
