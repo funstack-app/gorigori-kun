@@ -7,7 +7,7 @@ import type {
   ThreadStartResult,
 } from "../codex-types";
 import { useToasts } from "../store/toasts";
-import { REDLINE_INTERPRET_PROMPT, parseRedlineResult } from "./prompts";
+import { buildRedlineInterpretPrompt, parseRedlineResult } from "./prompts";
 import type { RedlineResult } from "./types";
 
 /**
@@ -209,8 +209,9 @@ export const useRedline = create<RedlineState>((set, get) => ({
       const imagePaths = [originalPath, redlinePath].filter(
         (p): p is string => Boolean(p),
       );
+      // 元画像の有無でプロンプトを切り替える（差分モード / 縮退モード）。
       const input: InputItem[] = [
-        { type: "text", text: REDLINE_INTERPRET_PROMPT },
+        { type: "text", text: buildRedlineInterpretPrompt(Boolean(originalPath)) },
         ...imagePaths.map((path) => ({ type: "localImage" as const, path })),
       ];
       await rpcRequest("turn/start", { threadId: tid, input, model: REDLINE_MODEL });

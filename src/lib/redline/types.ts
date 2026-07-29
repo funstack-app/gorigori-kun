@@ -39,6 +39,41 @@ export function isRedlineFixKind(value: unknown): value is RedlineFixKind {
 }
 
 /**
+ * 曖昧さの種別。ambiguous=true のときの下位分類。
+ *
+ * 「要確認」で終わらせず「何が分からないのか」まで型で持つことで、
+ * UI がクライアントへの聞き返し文を組み立てられるようにする。
+ */
+export type RedlineAmbiguityType =
+  | "illegible" // 字が読めない
+  | "target-unclear" // どこを指すか不明
+  | "intent-unclear" // 何をしたいか不明
+  | "conflict" // 他の指示と矛盾
+  | "missing-in-original"; // 元画像に対応物が見つからない
+
+/** 曖昧さ種別の日本語ラベル（UI 表示用）。 */
+export const REDLINE_AMBIGUITY_LABEL: Record<RedlineAmbiguityType, string> = {
+  illegible: "字が読めない",
+  "target-unclear": "どこを指すか不明",
+  "intent-unclear": "何をしたいか不明",
+  conflict: "他の指示と矛盾",
+  "missing-in-original": "元画像に対応物なし",
+};
+
+/** 有効な曖昧さ種別かを判定する（AI 出力の正規化に使う）。 */
+export function isRedlineAmbiguityType(
+  value: unknown,
+): value is RedlineAmbiguityType {
+  return (
+    value === "illegible" ||
+    value === "target-unclear" ||
+    value === "intent-unclear" ||
+    value === "conflict" ||
+    value === "missing-in-original"
+  );
+}
+
+/**
  * 1件の修正指示。
  *
  * no-silent-gap-filling の原則に従い、AI が指示を確信できない場合は
@@ -62,6 +97,18 @@ export type RedlineInstruction = {
   ambiguous: boolean;
   /** 曖昧な理由（ambiguous=true のとき AI が付す。任意）。 */
   ambiguityReason?: string;
+  /**
+   * 元画像での現状（例:「現状のコピーは『夏の新作』」）。
+   * 元画像があるときだけ AI に要求する（無いと推測になるため）。
+   */
+  currentState?: string;
+  /**
+   * 赤入れが要求する完成状態（例:「『春の新作』に変わっている」）。
+   * そのまま検品条件の言葉になる。
+   */
+  expectedState?: string;
+  /** 曖昧さの種別（ambiguous=true のときだけ採用する）。 */
+  ambiguityType?: RedlineAmbiguityType;
 };
 
 /** AI 解釈の結果セット。 */
@@ -73,4 +120,9 @@ export type RedlineResult = {
    * 「赤入れが薄くて読めない箇所がある」等のメタ情報。
    */
   overallNote?: string;
+  /**
+   * 書き込みとして認識したが指示化できなかったもの一覧。
+   * 黙って捨てず可視化する（work-discipline「可視化」と同方向）。
+   */
+  unaddressedMarks?: string[];
 };
