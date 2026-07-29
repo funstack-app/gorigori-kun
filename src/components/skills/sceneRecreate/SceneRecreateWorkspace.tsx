@@ -12,6 +12,11 @@ import { usePresets, presetKind, type Preset } from "../../../lib/store/presets"
 import { composePresetPrompt } from "../../../lib/presets/character";
 import { analyzeScene } from "../../../lib/sceneRecreate/analyze";
 import {
+  MAX_KEYFRAMES,
+  MAX_VIDEO_SECONDS,
+  extractKeyframes,
+} from "../../../lib/sceneRecreate/videoFrameExtract";
+import {
   buildRecreateShotPrompt,
 } from "../../../lib/sceneRecreate/prompts";
 import {
@@ -25,6 +30,7 @@ import {
 } from "../../../lib/sceneRecreate/types";
 
 const IMAGE_EXTS = ["png", "jpg", "jpeg", "webp", "gif", "bmp"];
+const VIDEO_EXTS = ["mp4", "mov", "webm"];
 
 let keyframeSeq = 0;
 function nextKeyframeId(): string {
@@ -119,6 +125,13 @@ export function SceneRecreateWorkspace() {
   // (解析はこのコンポーネントのローカル state で完結する) ため、
   // 分析開始時に Date.now() をここへ入れる。
   const [startedAt, setStartedAt] = useState<number | null>(null);
+  // 動画取り込みの進捗（null = 取り込んでいない）。分析中ゲージとは別軸。
+  const [extractMsg, setExtractMsg] = useState<string | null>(null);
+  // 動画の選択は Tauri ダイアログ（パスを返す）でなく input[type=file] を使う。
+  // ダイアログのパスを readFile するには fs スコープに全ドライブの許可が要り、
+  // ユーザーが任意の場所に置いた動画で失敗する。Scene 3D の動画取り込みも
+  // 同じ理由で input[type=file] を使っており、そちらは配布実績がある。
+  const videoInputRef = useRef<HTMLInputElement>(null);
   const runTokenRef = useRef(0);
 
   useEffect(
@@ -128,7 +141,8 @@ export function SceneRecreateWorkspace() {
     [],
   );
 
-  const running = status === "describing" || status === "analyzing";
+  const extracting = extractMsg !== null;
+  const running = status === "describing" || status === "analyzing" || extracting;
   const allPaths = useMemo(() => keyframes.map((k) => k.path), [keyframes]);
 
   async function pickKeyframes() {
@@ -155,6 +169,71 @@ export function SceneRecreateWorkspace() {
         text: `画像の選択に失敗しました: ${(err as Error)?.message ?? err}`,
         ttlMs: 5000,
       });
+    }
+  }
+
+  /**
+   * ローカル動画ファイルからキーフレームを自動抽出して列へ合流させる。
+   *
+   * URL 直接入力は持たない（設計 §2.1: 外部バイナリ同梱が配布ブロッカー）。
+   * ユーザーには SkillIntro の note で「いったんファイルとして保存してから」と案内する。
+   */
+  async function importFromVideo(file: File) {
+    try {
+      setExtractMsg("動画を読み込み中…");
+      const runId = `${fileTimestamp()}-${Date.now()}`;
+      const result = await extractKeyframes(file, runId, (message) => {
+        setExtractMsg(message);
+      });
+
+      if (result.keyframes.length === 0) {
+        pushToast({
+          kind: "error",
+          text: "この動画からキーフレームを取り出せませんでした。",
+          ttlMs: 5000,
+        });
+        return;
+      }
+
+      setKeyframes((prev) => [
+        ...prev,
+        ...result.keyframes.map((kf) => ({
+          id: nextKeyframeId(),
+          path: kf.path,
+          timeSec: kf.timeSec,
+          shotIndex: kf.shotIndex,
+        })),
+      ]);
+      pushToast({
+        kind: "success",
+        text: `${result.shotCount} ショットを検出し、${result.keyframes.length} 枚のキーフレームを取り込みました。`,
+        ttlMs: 4000,
+      });
+
+      // クランプは黙って行わない。何を切ったかを別トーストで明示する
+      // （no-silent-gap-filling）。
+      const clampNotes: string[] = [];
+      if (result.durationClamped) {
+        clampNotes.push(
+          `動画が ${Math.round(result.durationSec)} 秒あるため、先頭 ${MAX_VIDEO_SECONDS} 秒だけを取り込みました`,
+        );
+      }
+      if (result.frameClamped) {
+        clampNotes.push(
+          `キーフレームが上限 ${MAX_KEYFRAMES} 枚を超えたため、尺の長いショットを優先して間引きました`,
+        );
+      }
+      if (clampNotes.length > 0) {
+        pushToast({ kind: "warn", text: `${clampNotes.join("。")}。`, ttlMs: 7000 });
+      }
+    } catch (err) {
+      pushToast({
+        kind: "error",
+        text: `動画の取り込みに失敗しました: ${(err as Error)?.message ?? err}`,
+        ttlMs: 6000,
+      });
+    } finally {
+      setExtractMsg(null);
     }
   }
 
@@ -236,8 +315,21 @@ export function SceneRecreateWorkspace() {
         <aside className="flex w-96 shrink-0 flex-col gap-4 overflow-y-auto border-r border-[#242424] bg-[#141414] px-4 py-4">
           <SkillIntro
             what="気になった映像のスクショを数枚渡すと、構図・光・被写体の置き方を読み解いて言葉にし、自分のキャラや商品で同じ画作りをするための指示文を出します。"
-            first="まずは下から、真似したい場面のスクショを時系列の順に数枚選んでください。"
-            note="動画URLからの取り込みには未対応です。静止画からはカメラが動く速さやカットのテンポは読み取れません。"
+            first="まずは下から、真似したい場面のスクショを時系列の順に数枚選んでください。動画ファイルがあれば「動画から取り込む」で自動的に切り出せます。"
+            note="YouTube等のURLは直接読み込めません。いったん動画ファイルとしてPCに保存してから「動画から取り込む」を使ってください。"
+          />
+
+          <input
+            ref={videoInputRef}
+            type="file"
+            accept={VIDEO_EXTS.map((ext) => `.${ext}`).join(",")}
+            className="hidden"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              // 同じファイルを続けて選び直せるよう value を空にする。
+              e.target.value = "";
+              if (file) void importFromVideo(file);
+            }}
           />
 
           <div>
@@ -245,26 +337,55 @@ export function SceneRecreateWorkspace() {
               <span className="text-[11px] font-black uppercase tracking-wider text-neutral-500">
                 キーフレーム({keyframes.length})
               </span>
-              <button
-                type="button"
-                onClick={() => void pickKeyframes()}
-                disabled={running}
-                className="rounded-md border border-[#343434] px-2 py-0.5 text-[10px] font-bold text-neutral-300 hover:border-pink-400/60 hover:text-white disabled:opacity-40"
-              >
-                ＋ 画像を追加
-              </button>
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => videoInputRef.current?.click()}
+                  disabled={running}
+                  className="rounded-md border border-[#343434] px-2 py-0.5 text-[10px] font-bold text-neutral-300 hover:border-pink-400/60 hover:text-white disabled:opacity-40"
+                >
+                  ＋ 動画から取り込む
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void pickKeyframes()}
+                  disabled={running}
+                  className="rounded-md border border-[#343434] px-2 py-0.5 text-[10px] font-bold text-neutral-300 hover:border-pink-400/60 hover:text-white disabled:opacity-40"
+                >
+                  ＋ 画像を追加
+                </button>
+              </div>
             </div>
 
+            {extractMsg && (
+              <div className="mb-2 flex items-center gap-2 rounded-lg border border-pink-400/30 bg-[#1a1214] px-3 py-2">
+                <span className="h-3.5 w-3.5 shrink-0 animate-spin rounded-full border-2 border-pink-300 border-t-transparent" />
+                <span className="text-[11px] font-bold text-pink-200">{extractMsg}</span>
+              </div>
+            )}
+
             {keyframes.length === 0 ? (
-              <button
-                type="button"
-                onClick={() => void pickKeyframes()}
-                disabled={running}
-                className="flex aspect-video w-full flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-[#3a3a3a] bg-[#0d0d0d] text-neutral-500 hover:border-pink-400/60 hover:text-neutral-300 disabled:opacity-40"
-              >
+              <div className="flex aspect-video w-full flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-[#3a3a3a] bg-[#0d0d0d] text-neutral-500">
                 <ClapperIcon className="h-6 w-6" />
-                <span className="text-[12px] font-bold">キーフレームを選ぶ</span>
-              </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => videoInputRef.current?.click()}
+                    disabled={running}
+                    className="rounded-md bg-pink-500 px-3 py-1.5 text-[12px] font-bold text-white hover:bg-pink-400 disabled:opacity-40"
+                  >
+                    動画から取り込む
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void pickKeyframes()}
+                    disabled={running}
+                    className="rounded-md border border-[#343434] px-3 py-1.5 text-[12px] font-bold text-neutral-300 hover:border-pink-400/60 hover:text-white disabled:opacity-40"
+                  >
+                    画像を選ぶ
+                  </button>
+                </div>
+              </div>
             ) : (
               <ul className="space-y-2">
                 {keyframes.map((kf, i) => (
@@ -281,6 +402,13 @@ export function SceneRecreateWorkspace() {
                       className="h-12 w-16 shrink-0 cursor-pointer rounded object-cover"
                       onClick={() => openPreview(kf.path, allPaths)}
                     />
+                    {/* 時刻バッジは動画取り込み由来のみ。手動投入では時刻が
+                        存在しないので出さない（推測で埋めない）。 */}
+                    {kf.timeSec !== undefined && (
+                      <span className="shrink-0 rounded bg-[#1f1f1f] px-1.5 py-0.5 font-mono text-[10px] font-bold text-neutral-400">
+                        t={kf.timeSec.toFixed(1)}s
+                      </span>
+                    )}
                     <div className="ml-auto flex shrink-0 items-center gap-1">
                       <button
                         type="button"
@@ -342,11 +470,13 @@ export function SceneRecreateWorkspace() {
             {running && (
               <span className="h-4 w-4 animate-spin rounded-full border-2 border-pink-200 border-t-transparent" />
             )}
-            {status === "describing"
-              ? `フレーム解析中… (${describeDone}/${keyframes.length})`
-              : status === "analyzing"
-                ? "ショット割りを分析中…"
-                : "映像文法で分析する"}
+            {extracting
+              ? "動画を取り込み中…"
+              : status === "describing"
+                ? `フレーム解析中… (${describeDone}/${keyframes.length})`
+                : status === "analyzing"
+                  ? "ショット割りを分析中…"
+                  : "映像文法で分析する"}
           </button>
         </aside>
 
@@ -354,7 +484,7 @@ export function SceneRecreateWorkspace() {
         <div className="min-h-0 flex-1 overflow-y-auto">
           {analysis ? (
             <AnalysisResult analysis={analysis} />
-          ) : running ? (
+          ) : status === "describing" || status === "analyzing" ? (
             /*
               2026-07-27: 解析中の待ち表示を、通常の画像生成と同じ
               「ぐるぐる + 進捗ゲージ」に揃えた (STΛCK 要望)。

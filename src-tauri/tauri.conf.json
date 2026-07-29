@@ -28,6 +28,7 @@
           "$HOME/.codex/**",
           "$HOME/.codex/generated_images/**",
           "$APPDATA/segmentation_results/**",
+          "$APPDATA/scene_recreate_frames/**",
           "/Volumes/**",
           "/tmp/**"
         ]

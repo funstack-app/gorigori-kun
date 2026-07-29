@@ -27,7 +27,9 @@
         { "path": "$HOME/.codex/**" },
         { "path": "$HOME/Documents/**" },
         { "path": "$HOME/Desktop/**" },
-        { "path": "$HOME/Downloads/**" }
+        { "path": "$HOME/Downloads/**" },
+        { "path": "$APPDATA/scene_recreate_frames" },
+        { "path": "$APPDATA/scene_recreate_frames/**" }
       ]
     }
   ]
