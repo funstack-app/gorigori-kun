@@ -38,7 +38,20 @@ export function registerClipSpeed(clipId: string, speed: number): void {
   REGISTERED_SPEEDS.set(clipId, Math.min(6, Math.max(0, speed)));
 }
 
-/** クリップの移動速度(m/s)を返す。0 = その場再生 */
+/**
+ * クリップの移動速度(m/s)を返す。0 = その場再生。
+ *
+ * **画像/動画から起こしたクリップ(`gen-*`)は常に 0 になる**。これは不具合ではない:
+ *   - `builtin-` 前缀を持たないので BUILTIN_SPEEDS を引けない
+ *   - 名前が「ポーズ(画像 03:49)」「堂々立ち」等で NAME_HEURISTICS にも当たらない
+ *   - poseSolver は平行移動を捨てる(`moveSpeed: 0`。軌跡は別レイヤーの責務)
+ *
+ * ここに `gen-*` 用のフォールバックを**足さないこと**。名前から歩行を推定して
+ * 勝手に前進させるのは、その場で踊るモーションまで滑走させる誤動作になる。
+ * 「動かない」がユーザーに不可解に見える問題は、速度を捏造するのではなく
+ * **UI で「このクリップはその場再生です」と明示する**ことで閉じる
+ * (Scene3dWorkspace の移動速度表示)。
+ */
 export function resolveClipSpeed(clipId: string, name?: string): number {
   const registered = REGISTERED_SPEEDS.get(clipId);
   if (registered !== undefined) return registered;

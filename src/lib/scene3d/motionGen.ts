@@ -8,7 +8,8 @@
  *   - 回転は「レストポーズからの差分」のオイラー角(度)。Codexは絶対姿勢を知らないため
  *   - 体全体の向き(ターン・スピン)は rootYaw(累積度)で自己申告し、腰ボーンに前置乗算で焼き込む
  *   - 指ボーンは使わせない(53本中20本の主要ボーンに制限。破綻の主因を減らす)
- *   - 仕様JSONを localStorage に保存し、起動時に再構築する(GLBは保存しない)
+ *   - 仕様JSONを motions.json(ファイル正本) + localStorage(冗長バックアップ)に保存し、
+ *     起動時に再構築する(GLBは保存しない)。保存機構は ./motionStore.ts
  */
 
 import { AnimationClip, Euler, Quaternion, QuaternionKeyframeTrack, Vector3, VectorKeyframeTrack } from "three";
@@ -107,6 +108,13 @@ export type GeneratedMotionSpec = {
   }[];
   /** 足の接地スパン(任意。動画取り込みのみが出力し、再生側の足IKが消費する) */
   plants?: PlantSpan[];
+  /**
+   * 読み取れず**推定で埋めた**部位のラベル(「右腕」「両脚」等。任意)。
+   * 画像1枚からのポーズ化で、隠れていて検出できなかった部位を自然な立ちポーズで
+   * 埋めたときに入る(imageToPose.ts:fillMissingBones)。
+   * 埋めた事実を握り潰さずUIで告知するための記録で、再生には影響しない。
+   */
+  estimatedParts?: string[];
 };
 
 /** Codexへ渡すプロンプトを組み立てる。rigごとにボーン語彙と軸の目安を差し替える */
@@ -437,33 +445,7 @@ export function buildGeneratedClip(
   return clip;
 }
 
-/* ---------------- 保存(localStorage、仕様JSONのみ) ---------------- */
-
-const GEN_KEY = "scene3d.generatedMotions.v1";
-
-export type StoredGeneratedMotion = { id: string; spec: GeneratedMotionSpec };
-
-export function loadGeneratedSpecs(): StoredGeneratedMotion[] {
-  try {
-    const raw = localStorage.getItem(GEN_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as unknown;
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter(
-      (x): x is StoredGeneratedMotion =>
-        x != null && typeof x === "object" && typeof (x as StoredGeneratedMotion).id === "string",
-    );
-  } catch {
-    return [];
-  }
-}
-
-export function saveGeneratedSpec(id: string, spec: GeneratedMotionSpec): void {
-  const list = loadGeneratedSpecs().filter((x) => x.id !== id);
-  list.push({ id, spec });
-  localStorage.setItem(GEN_KEY, JSON.stringify(list));
-}
-
-export function removeGeneratedSpec(id: string): void {
-  localStorage.setItem(GEN_KEY, JSON.stringify(loadGeneratedSpecs().filter((x) => x.id !== id)));
-}
+/* ---------------- 保存 ---------------- */
+// 仕様JSONの保存・読み出しは ./motionStore.ts へ移した (2026-08-03 gj7)。
+// localStorage 単独だとビルドID跨ぎ / WebView データ消去で全損し、参照元の
+// scene3d.json (ファイル正本) に残った clipId だけが宙に浮くため。

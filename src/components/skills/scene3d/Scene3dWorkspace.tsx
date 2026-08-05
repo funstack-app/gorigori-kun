@@ -26,7 +26,9 @@ import { SortableContext, useSortable, verticalListSortingStrategy } from "@dnd-
 import { CSS } from "@dnd-kit/utilities";
 
 import { ActiveProjectSelector } from "../../ActiveProjectSelector";
+import { useSkillVisible } from "../../SkillWorkspaceRouter";
 import { WorkspaceTabs } from "../../WorkspaceTabs";
+import { PageHelp } from "../../PageHelp";
 import { getShotMove, totalDurationFrames } from "../../../lib/scene3d/evaluateScene";
 import {
   getBuiltinTemplate,
@@ -39,11 +41,15 @@ import {
 import {
   buildGeneratedClip,
   buildMotionPrompt,
+  validateGeneratedSpec,
+} from "../../../lib/scene3d/motionGen";
+// 仕様の保存・読み出しは motionStore (motions.json 正本) 側 (2026-08-03 gj7)。
+import {
+  initializeGeneratedMotions,
   loadGeneratedSpecs,
   removeGeneratedSpec,
   saveGeneratedSpec,
-  validateGeneratedSpec,
-} from "../../../lib/scene3d/motionGen";
+} from "../../../lib/scene3d/motionStore";
 import { codexTextQuery } from "../../../lib/agents/codexQuery";
 import {
   applyDirectorPlan,
@@ -81,6 +87,8 @@ import type { StoryboardSketchCut } from "../../../lib/storyboard/types";
 import { sendCutToVideoTab } from "../../../lib/storyboard/sendCutToVideo";
 import { requestViewPreset, Scene3dViewport } from "./Scene3dViewport";
 import { GenerationGauge } from "../../GenerationGauge";
+import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
+import { SceneFromImageDialog } from "./SceneFromImageDialog";
 
 const PRESET_ORDER: CameraPresetId[] = [
   "fixed",
@@ -741,6 +749,16 @@ function ShelfPanel() {
   const selectedCameraId = getSelectedShot({ project, selectedShotId }).cameraId;
   const [pickerOpen, setPickerOpen] = useState(false);
   const [ctxMenu, setCtxMenu] = useState<{ id: string; x: number; y: number } | null>(null);
+  // 画像からシーンを起こす (Slice D)。ファイル選択入口
+  const [sceneImagePath, setSceneImagePath] = useState<string | null>(null);
+  const pickSceneImage = async () => {
+    const selected = await openFileDialog({
+      multiple: false,
+      filters: [{ name: "画像", extensions: ["png", "jpg", "jpeg", "webp", "bmp"] }],
+    });
+    if (typeof selected !== "string") return;
+    setSceneImagePath(selected);
+  };
   // 5px 動かすまでドラッグ扱いにしない(クリック選択と共存させる)
   const dndSensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }));
   const onEntityDragEnd = (ev: DragEndEvent) => {
@@ -758,6 +776,20 @@ function ShelfPanel() {
       >
         + シーンに置く
       </button>
+
+      <button
+        className="rounded-lg border border-[#2a2a2a] bg-[#101010] px-3 py-2 text-sm text-neutral-200 hover:border-amber-500/60"
+        onClick={() => void pickSceneImage()}
+        title="写真や絵を読み込んで、人物と小物とカメラを3Dシーンに起こします"
+      >
+        画像からシーンを起こす…
+      </button>
+
+      <SceneFromImageDialog
+        open={sceneImagePath !== null}
+        imagePath={sceneImagePath}
+        onClose={() => setSceneImagePath(null)}
+      />
 
       <div className="min-h-0 flex-1 overflow-y-auto">
         <p className="mb-2 text-[11px] font-bold tracking-wide text-neutral-500">シーン内</p>
@@ -1327,28 +1359,39 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
       {imported.length > 0 && (
         <>
           <p className="mb-1.5 text-[11px] font-bold tracking-wide text-neutral-500">
-            読み込んだモーション({imported.length})
+            読み込んだモーション({imported.length}) —{" "}
+            <span className="text-neutral-400">その場</span> 付きは旗を立てても移動しません
           </p>
           <div className="grid max-h-40 grid-cols-2 gap-1.5 overflow-y-auto">
-            {imported.map((m) => (
-              <button
-                key={m.id}
-                className={motionBtnCls(activeClipId === m.id)}
-                onClick={() => setEntityMotionClip(entityId, m.id)}
-                title={
-                  resolveClipSpeed(m.id, m.name) > 0
-                    ? `${m.name} を割り当てる(旗の行き先まで移動)`
-                    : `${m.name} を割り当てる`
-                }
-              >
-                {resolveClipSpeed(m.id, m.name) > 0 && (
-                  <span className="mr-1 rounded bg-sky-400/15 px-1 text-[9px] text-sky-300">
-                    移動
-                  </span>
-                )}
-                {m.name}
-              </button>
-            ))}
+            {imported.map((m) => {
+              // 写真・動画から起こしたクリップは平行移動を持たない(resolveClipSpeed が
+              // 必ず0)。バッジが「無い」だけだと「動くはずなのに動かない」に見えるので、
+              // その場再生であることを明示する(速度を捏造して歩かせるのは誤動作)
+              const moves = resolveClipSpeed(m.id, m.name) > 0;
+              return (
+                <button
+                  key={m.id}
+                  className={motionBtnCls(activeClipId === m.id)}
+                  onClick={() => setEntityMotionClip(entityId, m.id)}
+                  title={
+                    moves
+                      ? `${m.name} を割り当てる(旗の行き先まで移動)`
+                      : `${m.name} を割り当てる(その場で再生。旗を立てても移動しません)`
+                  }
+                >
+                  {moves ? (
+                    <span className="mr-1 rounded bg-sky-400/15 px-1 text-[9px] text-sky-300">
+                      移動
+                    </span>
+                  ) : (
+                    <span className="mr-1 rounded bg-neutral-500/15 px-1 text-[9px] text-neutral-400">
+                      その場
+                    </span>
+                  )}
+                  {m.name}
+                </button>
+              );
+            })}
           </div>
         </>
       )}
@@ -2764,7 +2807,21 @@ function ShotTimeline() {
 let copiedEntityId: string | null = null;
 
 function useKeyboardShortcuts() {
+  // S2 mount-pool 対応 (Sol 評価 blocking#1 / 2026-08-04)。
+  //
+  // 裏に回った 3D 画面も unmount されず残るため、この window keydown も生き残る。
+  // すると別スキルやライブラリを操作している最中の Space / 矢印 / Cmd+Z が
+  // **見えていない 3D シーンを動かす**（再生が始まる・フレームが飛ぶ・Undo が
+  // 3D 側に入る）。描画ループ(Scene3dViewport の frameloop)を止めても
+  // キー監視は別経路なので残る、というのが指摘の骨子。
+  //
+  // 直し方は listener を張らないこと（登録したうえで早期 return にしない）。
+  // visible が false の間は addEventListener 自体を行わないので、
+  // 非表示中にキーを叩いても onKey は**呼ばれず** useScene3d の状態は変化しない。
+  // 表示に戻ると effect が再実行されて登録し直すので、操作性は元どおり。
+  const visible = useSkillVisible();
   useEffect(() => {
+    if (!visible) return;
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
       const tag = target.tagName;
@@ -2820,7 +2877,7 @@ function useKeyboardShortcuts() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [visible]);
 }
 
 /* ---------------------------------- フレーム枠(アスペクト比) ---------------------------------- */
@@ -3473,6 +3530,12 @@ export function Scene3dWorkspace() {
         useScene3d.getState().registerImportedMotions(items);
         const template = getBuiltinTemplate();
         if (!template) return;
+        // motions.json (正本) の読み込み完了を待ってから spec を引く。
+        // 待たないと localStorage 由来の暫定キャッシュだけで復元してしまい、
+        // ファイルにしか無いモーションが「起動直後だけ人形に戻る」。
+        // initializeGeneratedMotions は Promise を共有するので、App.tsx 側の
+        // 呼び出しと重なってもファイルを二重に読まない。
+        await initializeGeneratedMotions();
         const specs = loadGeneratedSpecs().filter((sp) => sp.spec != null);
         // Mixamo規格(Y Bot)のspecが1つでもあれば取り込みマネキンも読み込む。
         // Y Bot読込失敗は局所化する(失敗が旧規格specの復元まで巻き添えにしない。Codex Verifier指摘)
@@ -3535,6 +3598,11 @@ export function Scene3dWorkspace() {
         <div className="flex items-center gap-3">
           <WorkspaceTabs />
           <ActiveProjectSelector />
+          <PageHelp
+            what="人物や小物を3D空間に置き、カメラの動きを付けて、そのまま画像・動画生成の下絵にします。"
+            first="まずは「+ シーンに置く」で人物か小物を置いてください。"
+            note="写真や絵から「画像からシーンを起こす…」で自動配置もできます。"
+          />
         </div>
       </div>
 

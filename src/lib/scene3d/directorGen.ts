@@ -14,10 +14,10 @@ import {
   buildGeneratedClip,
   buildMotionPrompt,
   buildMotionRevisePrompt,
-  loadGeneratedSpecs,
-  saveGeneratedSpec,
   validateGeneratedSpec,
 } from "./motionGen";
+// 仕様の保存・読み出しは motionStore (motions.json 正本) 側 (2026-08-03 gj7)。
+import { loadGeneratedSpecs, saveGeneratedSpec } from "./motionStore";
 import { getBuiltinTemplate, loadCaptureRig, registerGeneratedClip } from "./motionLibrary";
 import { CAMERA_PRESET_LABELS } from "./types";
 import type { CameraPresetId, SceneProject, Vec3 } from "./types";

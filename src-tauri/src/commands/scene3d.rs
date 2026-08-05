@@ -36,7 +36,7 @@ fn validate_export_dir(export_dir: &str) -> Result<PathBuf, String> {
 /// 配布版の PATH は GUI 起動だと最小構成のため、Homebrew 等の標準的な
 /// システム位置もフォールバックとして見る(ユーザー固有パスは含めない)。
 /// TODO(Phase 2): sidecar 同梱 or 設定画面でのパス上書きに置き換える
-fn resolve_ffmpeg() -> Option<PathBuf> {
+pub(crate) fn resolve_ffmpeg() -> Option<PathBuf> {
     let candidates = [
         "ffmpeg",
         "/opt/homebrew/bin/ffmpeg",
@@ -267,7 +267,10 @@ async fn fetch_via_page(url: String) -> Result<Vec<u8>, String> {
     std::fs::create_dir_all(&dir).map_err(|e| format!("一時フォルダ作成失敗: {e}"))?;
     // pid+時刻で一意化(複数インスタンス同時実行での衝突対策)
     let stem = format!("cap_{}_{}", std::process::id(), now_millis());
-    let outtmpl = dir.join(format!("{stem}.%(ext)s")).to_string_lossy().into_owned();
+    let outtmpl = dir
+        .join(format!("{stem}.%(ext)s"))
+        .to_string_lossy()
+        .into_owned();
     let has_ffmpeg = resolve_ffmpeg().is_some();
 
     // 失敗経路の残骸を掃除するヘルパ(成功時も最後に呼ぶ)
@@ -326,7 +329,14 @@ async fn fetch_via_page(url: String) -> Result<Vec<u8>, String> {
             .rev()
             .find(|l| l.contains("ERROR"))
             .map(|l| l.trim().to_string())
-            .unwrap_or_else(|| stderr.lines().last().unwrap_or("原因不明").trim().to_string());
+            .unwrap_or_else(|| {
+                stderr
+                    .lines()
+                    .last()
+                    .unwrap_or("原因不明")
+                    .trim()
+                    .to_string()
+            });
         let msg: String = msg.chars().take(240).collect();
         return Err(format!("このページから動画を取り出せませんでした: {msg}"));
     }
@@ -344,7 +354,9 @@ async fn fetch_via_page(url: String) -> Result<Vec<u8>, String> {
             "動画ファイルが生成されませんでした".to_string()
         })?;
     // メモリへ読む前にサイズで弾く(--max-filesizeは分割取得・結合では厳密上限にならない)
-    let size = std::fs::metadata(produced.path()).map(|m| m.len()).unwrap_or(u64::MAX);
+    let size = std::fs::metadata(produced.path())
+        .map(|m| m.len())
+        .unwrap_or(u64::MAX);
     if size > CAPTURE_FETCH_MAX_BYTES {
         cleanup(&dir, &stem);
         return Err("動画が大きすぎます(150MBまで)。短い動画で試してください".into());

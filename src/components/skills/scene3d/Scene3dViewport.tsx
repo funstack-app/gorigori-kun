@@ -38,6 +38,8 @@ import type { SceneAspectRatio, SceneCamera, SceneEntity, SceneProject, Vec3 } f
 import { getSelectedShot, useScene3d } from "../../../lib/store/scene3d";
 import { useActiveProject } from "../../../lib/store/activeProject";
 import { useProjects } from "../../../lib/store/projects";
+import { useToasts } from "../../../lib/store/toasts";
+import { useSkillVisible } from "../../SkillWorkspaceRouter";
 
 /**
  * フレーム適用レジストリ: アニメーションする要素が「このフレームの姿勢にせよ」
@@ -64,6 +66,12 @@ function rayToPlaneY(ray: Ray, y: number): Vec3 | null {
 /**
  * 押下中キーの追跡(X/Y/Zキーの軸拘束ドラッグ用)。
  * 参照されるのはエンティティのドラッグ中だけなので、入力欄のタイプとは干渉しない
+ *
+ * 非表示ゲートを掛けていない理由 (Sol 評価 blocking#1 の検討結果 / 2026-08-04):
+ * このリスナーがするのは Set への出し入れだけで、useScene3d の状態を一切変えない。
+ * 読み手はビューポート内のドラッグ中コードだけで、裏に回っている間はドラッグ自体が
+ * 起きない。つまり「隠れた 3D 状態が変わる」経路にはならないので、
+ * module スコープのまま残す (visible を参照できる場所でもない)。
  */
 const heldKeys = new Set<string>();
 if (typeof window !== "undefined") {
@@ -529,7 +537,105 @@ const _lookQx = new Quaternion();
 const _axisY = new Vector3(0, 1, 0);
 const _axisX = new Vector3(1, 0, 0);
 
-function EntityMesh({ entity }: { entity: SceneEntity }) {
+/**
+ * 人物の当たり判定カプセル(見えない)。実寸の人体に合わせた定数。
+ *
+ * 半径 0.35m(肩幅の実効半径)× 全高 1.7m。capsuleGeometry の第2引数は
+ * **円筒部の長さ**で、全高 = 長さ + 2*半径 なので 1.7 - 0.7 = 1.0m。
+ * ジオメトリの原点は中心なので、足元(y=0)基準では全高の半分だけ持ち上げる。
+ * scale はルート <group> の scale が乗るため、ここでは等倍で書く(自動連動)。
+ */
+const HIT_CAPSULE_RADIUS = 0.35;
+const HIT_CAPSULE_HEIGHT = 1.7;
+const HIT_CAPSULE_BODY_HEIGHT = HIT_CAPSULE_HEIGHT - HIT_CAPSULE_RADIUS * 2;
+const HIT_CAPSULE_CENTER_Y = HIT_CAPSULE_HEIGHT / 2;
+
+/**
+ * スキンモデルを当たり判定から外す(判定は専用カプセルが担う)。
+ *
+ * three の raycast は SkinnedMesh を**バインドポーズの**バウンディングボリュームで
+ * 粗判定するため、実姿勢とズレたまま広い矩形が反応してしまう。空実装へ差し替えて
+ * ヒットを一切返さないようにする(bounds の再計算はスキニング後の頂点走査が要り、
+ * 毎フレームでは割に合わない)。
+ */
+function disableRaycast(obj: Group): void {
+  obj.traverse((child) => {
+    (child as { raycast?: unknown }).raycast = () => {};
+  });
+}
+
+/**
+ * 標準マネキン(AnimationLibrary_Godot_Standard)の実測色。GLBの baseColorFactor
+ * (リニア)を sRGB へ変換した値。**リニア値をそのまま16進にしない**こと
+ * (three の Color#setHex は sRGB 入力として解釈し、内部でリニアへ戻すため。
+ *  変換: 1.055*c^(1/2.4)-0.055)。
+ *
+ *   M_Main   [0.7991, 0.4020, 0.0423] → 0xE7AA3A(体・オレンジ)
+ *   M_Joints [0.4020, 0.1329, 0.7084] → 0xAA66DB(関節・紫)
+ *
+ * **体と関節は分けて移す**。Y Bot も2マテリアル構成(Alpha_Body_MAT / Alpha_Joints_MAT)
+ * なので、全部を体色で塗ると関節の見分けが消えてのっぺりした別物になる。
+ */
+const MANNEQUIN_BODY_COLOR = 0xe7aa3a;
+const MANNEQUIN_JOINT_COLOR = 0xaa66db;
+
+/**
+ * 取り込みマネキン(Y Bot)の色を標準マネキンへ揃える。
+ *
+ * scene3d には骨格テンプレートが2系統ある:
+ *   - 標準ライブラリ(builtin-*): M_Main = オレンジ / M_Joints = 紫
+ *   - 取り込み(rig:"mixamo" = 画像/動画由来): Alpha_Body_MAT = **青緑** / Alpha_Joints_MAT = 濃灰
+ * どちらも同じ kind:"mannequin" なのに、モーションの出自だけで色が変わっていた
+ * (2026-07-21 に「配置用と再生用が別人に見える問題」として一度直したが、
+ * 翌日の Y Bot 導入で復活した退行)。
+ *
+ * **必ず cloneSkeleton の後に呼ぶ**。SkeletonUtils.clone はマテリアルを
+ * 複製せずテンプレートと共有するため、material 自体も複製してから色を差し替える
+ * (共有インスタンスを書き換えると元テンプレ = ライブラリ全体を汚す)。
+ * 標準マネキン側に適用しても同じ色が入るだけで無害(分岐を増やさない)。
+ */
+function unifyMannequinColor(obj: Group): void {
+  obj.traverse((child) => {
+    const mesh = child as { material?: unknown };
+    if (!mesh.material) return;
+    const list = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    const cloned = list.map((mat) => {
+      const m = mat as {
+        name?: string;
+        clone?: () => unknown;
+      };
+      if (typeof m.clone !== "function") return mat;
+      const copy = m.clone() as { color?: { setHex: (h: number) => void } };
+      // 関節マテリアルは関節色へ。名前で判別する(両モデルとも "Joints" を含む)
+      const isJoint = /joint/i.test(m.name ?? "");
+      copy.color?.setHex(isJoint ? MANNEQUIN_JOINT_COLOR : MANNEQUIN_BODY_COLOR);
+      return copy;
+    });
+    mesh.material = Array.isArray(mesh.material) ? cloned : cloned[0];
+  });
+}
+
+/**
+ * unifyMannequinColor が複製したマテリアルを破棄する。
+ *
+ * SkeletonUtils.clone はマテリアルをテンプレートと**共有**するので、複製前の
+ * obj を dispose すると元テンプレ(ライブラリ全体)を壊す。unifyMannequinColor を
+ * 通した後の obj だけが「この rig 専用の複製マテリアル」を持つため、そこだけを
+ * 破棄する。ジオメトリ・テクスチャはテンプレート共有のままなので触らない。
+ */
+function disposeMannequinColor(obj: Group): void {
+  obj.traverse((child) => {
+    const mesh = child as { material?: unknown };
+    if (!mesh.material) return;
+    const list = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    for (const mat of list) {
+      const m = mat as { dispose?: () => void };
+      if (typeof m.dispose === "function") m.dispose();
+    }
+  });
+}
+
+function EntityMesh({ entity, showHelpers }: { entity: SceneEntity; showHelpers: boolean }) {
   const controls = useThree((state) => state.controls);
   const rootRef = useRef<Group>(null);
   const rig = useRef<MannequinRig>({ body: null, head: null, arms: [null, null], legs: [null, null] });
@@ -562,6 +668,8 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
     obj.traverse((child) => {
       child.castShadow = true;
     });
+    unifyMannequinColor(obj);
+    disableRaycast(obj);
     const mixer = new AnimationMixer(obj);
     // 並列レイヤー(上半身): overlay使用時は本体・連結列から上半身トラックを抜き、
     // overlayが腕・手・首・頭を専有する(重み二重掛けによる姿勢崩れの防止)
@@ -601,9 +709,17 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
           : [];
     const steps: { action: AnimationAction; duration: number; loops: boolean; seconds?: number }[] =
       [];
+    // 骨格違いで適用できなかった到着後アクション。黙って捨てず呼び出し側で告知する
+    // (画像/動画由来のポーズclip = Y Bot に、標準ライブラリのアクションを足すと
+    //  ここで落ちる。以前はエラーも警告も出ず「付けたのに何も起きない」に見えた)
+    const skipped: string[] = [];
     for (const spec of stepSpecs) {
       const am = getImportedMotion(spec.clipId);
-      if (!am || am.template !== m.template) continue;
+      if (!am) continue;
+      if (am.template !== m.template) {
+        skipped.push(am.name ?? spec.clipId);
+        continue;
+      }
       const action = mixer.clipAction(stripUpper(am.clip.clone()));
       action.play();
       action.weight = 0;
@@ -638,8 +754,34 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
       // 足の接地ロック(動画取り込みクリップのみ plants を持つ)
       plants: m.plants,
       footIK: buildFootChains(obj),
+      // 骨格違いで適用できなかった到着後アクション名(下の effect が告知する)
+      skipped,
     };
   }, [clipId, arrivalClipId, arrivalSeqKey, overlayClipId, motionCount, clipMotion?.arrivalSequence]);
+
+  // モーションを差し替えると clipRig は作り直される。旧 rig の複製マテリアルは
+  // 誰も参照しなくなるが GPU 側は解放されないため、切り替えを繰り返す長時間利用で
+  // 積み上がる。この rig 専用の複製だけを破棄する(テンプレ共有のジオメトリ・
+  // テクスチャは触らない = ライブラリを壊さない)
+  useEffect(() => {
+    if (!clipRig) return;
+    const obj = clipRig.obj;
+    return () => {
+      disposeMannequinColor(obj);
+    };
+  }, [clipRig]);
+
+  // 骨格違いで無視された到着後アクションを告知する(静かに失敗させない)。
+  // clipRig の組み直し時にだけ出す(毎フレームではない)ので通知は氾濫しない
+  const skippedKey = clipRig?.skipped.join("／") ?? "";
+  useEffect(() => {
+    if (!skippedKey) return;
+    useToasts.getState().push({
+      kind: "error",
+      text: `「${skippedKey}」は骨格が違うため、この人物には付けられませんでした。写真・動画から起こした人物には、同じく写真・動画から起こした動きだけを組み合わせられます。`,
+      ttlMs: 7000,
+    });
+  }, [skippedKey, entity.id]);
 
   // 統一マネキン(2026-07-21): クリップ未適用時も標準骨格のスキンモデルで表示する。
   // 「配置用の簡易マネキン」と「モーション再生用モデル」が別人に見える問題の解消。
@@ -659,6 +801,8 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
     obj.traverse((child) => {
       child.castShadow = true;
     });
+    // 当たり判定は専用カプセルが担う(スキンのバインドポーズ判定は実姿勢とズレる)
+    disableRaycast(obj);
     const mixer = new AnimationMixer(obj);
     const idleAction = mixer.clipAction(idleM.clip);
     idleAction.play();
@@ -1009,21 +1153,41 @@ function EntityMesh({ entity }: { entity: SceneEntity }) {
       onPointerUp={onPointerUp}
       onDoubleClick={onDoubleClick}
     >
-      {entity.kind === "mannequin" &&
-        (clipRig ? (
-          <primitive object={clipRig.obj} />
-        ) : idleRig ? (
-          <>
+      {entity.kind === "mannequin" && (
+        <>
+          {clipRig ? (
+            <primitive object={clipRig.obj} />
+          ) : idleRig ? (
             <primitive object={idleRig.obj} />
-            {/* 個体識別リング: 統一モデル化で失われた色分け・選択表示の代替 */}
+          ) : (
+            <Mannequin color={color} selected={selected} rig={rig} />
+          )}
+          {/* 個体識別リング: 統一モデル化で失われた色分け・選択表示の代替。
+              以前は idleRig 分岐にしか無く、clipRig(画像/動画由来)では選択の
+              手応えが消えていた。両系統に出す。
+              ただし**編集画面限定**の補助表示なので、書き出し中とカメラペインでは
+              出さない(グリッド・軌道線と同じ `!exporting && !isCameraPane` を
+              呼び出し側から showHelpers で受ける。書き出される画と一致させる) */}
+          {showHelpers && (clipRig || idleRig) && (
             <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.02, 0]}>
               <ringGeometry args={[0.42, 0.5, 32]} />
               <meshBasicMaterial color={color} transparent opacity={selected ? 0.9 : 0.3} />
             </mesh>
-          </>
-        ) : (
-          <Mannequin color={color} selected={selected} rig={rig} />
-        ))}
+          )}
+          {/* 当たり判定カプセル(見えない)。
+              スキンモデルの raycast は **バインドポーズ(Tポーズ)のバウンディング
+              ボリューム**で粗判定するため、腕を下ろした実姿勢と判定がズレる
+              (Y Bot 実測: 横幅1.95m・奥行0.36m → 0.8m離れた人物同士で判定が
+              完全に重なり、掴みたい方を掴めない)。実体に合う人型カプセルへ
+              置き換え、スキン側の raycast は無効化する(既存の「見えない当たり
+              判定mesh」パターンと同じ作り) */}
+          {(clipRig || idleRig) && (
+            <mesh visible={false} position={[0, HIT_CAPSULE_CENTER_Y, 0]}>
+              <capsuleGeometry args={[HIT_CAPSULE_RADIUS, HIT_CAPSULE_BODY_HEIGHT, 4, 8]} />
+            </mesh>
+          )}
+        </>
+      )}
       {entity.kind === "sphere" && (
         <mesh position={[0, 0.5, 0]} castShadow>
           <sphereGeometry args={[0.5, 32, 24]} />
@@ -2228,9 +2392,13 @@ function PathDrawOverlay() {
   const [stroke, setStroke] = useState<Vec3[]>([]);
   const drawing = useRef(false);
 
-  // Escで中止
+  // Escで中止。
+  // 非表示中は登録しない (Sol 評価 blocking#1 / 2026-08-04)。mount-pool で裏に
+  // 残った 3D 画面が、別スキルのモーダルを閉じる Esc を巻き込んで pathDrawMode を
+  // 解除してしまうのを防ぐ。
+  const visible = useSkillVisible();
   useEffect(() => {
-    if (!pathDrawMode) return;
+    if (!pathDrawMode || !visible) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         drawing.current = false;
@@ -2240,7 +2408,7 @@ function PathDrawOverlay() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [pathDrawMode, setPathDrawMode]);
+  }, [pathDrawMode, visible, setPathDrawMode]);
 
   if (!pathDrawMode) return null;
   const shot = getSelectedShot({ project, selectedShotId });
@@ -2410,10 +2578,25 @@ export function Scene3dViewport({
   );
   const isCameraPane = mode === "camera";
 
+  // S2 の mount-pool 化で、裏に回った scene3d も unmount されず残り続ける(設計書 §2 S2-4)。
+  // 描画ループ(CameraRig の useFrame)を回したままだと、他スキルを操作している間ずっと
+  // three.js が RAF を食い続けてフレーム低下の原因になる。裏にいる間は frameloop を
+  // 止め、表示に戻ったら "always" へ復帰させる。
+  //
+  // three.js のリソース(シーン・GPU バッファ)は保持したまま。破棄すると再入場時の
+  // 再 init バグを招くため、止めるのはループだけにする(設計書 論点1 の方針)。
+  //
+  // 書き出し中(exporting)は visible でなくても回す。ExportDriver は自前の
+  // gl.render ループだが、開始直前に requestAnimationFrame を2回待って補助表示の
+  // 非表示を反映させる(1092行付近)ため、書き出し中にループを殺す設計にはしない。
+  const visible = useSkillVisible();
+  const frameloop: "always" | "never" = visible || exporting ? "always" : "never";
+
   return (
     <Canvas
       shadows
       camera={{ position: [4, 3, 6], fov: 50 }}
+      frameloop={frameloop}
       // toBlob でフレームを回収するため描画バッファを保持する
       gl={{ preserveDrawingBuffer: true }}
       style={isCameraPane ? { pointerEvents: "none" } : undefined}
@@ -2462,7 +2645,7 @@ export function Scene3dViewport({
         <meshStandardMaterial color="#818387" />
       </mesh>
       {entities.map((e) => (
-        <EntityMesh key={e.id} entity={e} />
+        <EntityMesh key={e.id} entity={e} showHelpers={!exporting && !isCameraPane} />
       ))}
       {/* 軌道線・終点/中間ハンドルは「カメラを選んでいる間だけ」出す(触った物だけが語る) */}
       {!exporting && !isCameraPane && cameraSelected && <CameraPathLine />}
