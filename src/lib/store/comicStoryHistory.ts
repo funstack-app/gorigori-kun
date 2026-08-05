@@ -1,5 +1,7 @@
 import { create } from "zustand";
 
+import { createPersistGuard, describeOutcome } from "./persistGuard";
+
 /**
  * 漫画「話（あらすじ）」の自動履歴 (B-3 2026-07-30)。
  *
@@ -30,31 +32,52 @@ type State = {
   remove: (id: string) => Promise<void>;
 };
 
-let storePromise: Promise<Awaited<ReturnType<typeof loadStoreOnce>> | null> | null = null;
-
-async function loadStoreOnce() {
-  const { load } = await import("@tauri-apps/plugin-store");
-  return await load(STORE_FILE, { defaults: {}, autoSave: true });
-}
-
-async function loadStore() {
-  if (storePromise) return storePromise;
-  storePromise = loadStoreOnce().catch((err) => {
-    console.warn("comicStoryHistory loadStore failed", err);
-    return null;
-  });
-  return storePromise;
-}
-
-async function persist(items: ComicStoryHistoryItem[]): Promise<void> {
-  const store = await loadStore();
-  if (!store) return;
-  try {
-    await store.set(STORE_KEY, items);
-    await store.save();
-  } catch (err) {
-    console.warn("comicStoryHistory persist failed", err);
+/**
+ * 履歴を検証する (persistGuard の parse)。
+ *
+ * **壊れた要素を黙って捨てない** (2026-08-06 / DL-14)。捨てた状態が次の保存で
+ * 正本になると、手編集の事故で消えたあらすじが永久に戻らない。1 件でも壊れて
+ * いたら invalid にして書き込みごと封鎖する。
+ */
+function parseHistory(
+  raw: unknown,
+): { ok: true; value: ComicStoryHistoryItem[] } | { ok: false; reason: string } {
+  if (!Array.isArray(raw)) return { ok: false, reason: "配列ではありません" };
+  const seen = new Set<string>();
+  const items: ComicStoryHistoryItem[] = [];
+  for (const it of raw as ComicStoryHistoryItem[]) {
+    if (!it || typeof it.id !== "string" || !it.id) {
+      return { ok: false, reason: "id を持たない要素があります" };
+    }
+    if (typeof it.text !== "string") {
+      return { ok: false, reason: "text が文字列でない要素があります" };
+    }
+    // 空文字・重複は「壊れている」とまでは言えないので畳んでよい (痕跡は残す)。
+    if (!it.text.trim() || seen.has(it.id)) continue;
+    seen.add(it.id);
+    items.push({
+      id: it.id,
+      text: it.text,
+      createdAt: typeof it.createdAt === "number" ? it.createdAt : Date.now(),
+    });
   }
+  return { ok: true, value: items };
+}
+
+/** 「読めなければ書かない」を担保する共有ガード (W0)。 */
+const guard = createPersistGuard<ComicStoryHistoryItem[]>({
+  name: "comicStoryHistory",
+  file: STORE_FILE,
+  key: STORE_KEY,
+  parse: parseHistory,
+});
+
+/**
+ * 保存する。読込が未確定 / 失敗中なら **書かずに false** を返す
+ * (自動保存なのでトーストは出さない。console.warn は guard 側で出る)。
+ */
+async function persist(items: ComicStoryHistoryItem[]): Promise<boolean> {
+  return guard.save(items);
 }
 
 function uid(): string {
@@ -69,31 +92,17 @@ export const useComicStoryHistory = create<State>((set, get) => ({
 
   load: async () => {
     if (get().loaded) return;
-    const store = await loadStore();
-    if (!store) {
-      set({ loaded: true });
+    const outcome = await guard.load();
+    if (outcome.status === "ok") {
+      set({ items: outcome.value.slice(0, MAX_ITEMS), loaded: true });
       return;
     }
-    try {
-      const raw = (await store.get<ComicStoryHistoryItem[]>(STORE_KEY)) ?? [];
-      const seen = new Set<string>();
-      const items: ComicStoryHistoryItem[] = [];
-      for (const it of raw) {
-        if (!it || typeof it.id !== "string" || !it.id) continue;
-        if (typeof it.text !== "string" || !it.text.trim()) continue;
-        if (seen.has(it.id)) continue;
-        seen.add(it.id);
-        items.push({
-          id: it.id,
-          text: it.text,
-          createdAt: typeof it.createdAt === "number" ? it.createdAt : Date.now(),
-        });
-      }
-      set({ items: items.slice(0, MAX_ITEMS), loaded: true });
-    } catch (err) {
-      console.warn("comicStoryHistory load failed", err);
-      set({ loaded: true });
+    if (outcome.status !== "absent") {
+      // 読めなかった。画面は空のままだが、guard が書き込みを封鎖しているので
+      // この空が次の add で既存履歴を潰すことはない (DL-14 の核心)。
+      console.warn(`[comicStoryHistory] ${describeOutcome(outcome)}`);
     }
+    set({ loaded: true });
   },
 
   add: async (text) => {

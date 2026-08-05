@@ -1,5 +1,6 @@
 import { create } from "zustand";
 
+import { createPersistGuard, describeOutcome } from "./persistGuard";
 import type { ProjectChatMessage } from "./projects";
 
 /**
@@ -55,31 +56,20 @@ type State = {
   remove: (id: string) => Promise<void>;
 };
 
-let storePromise: Promise<Awaited<ReturnType<typeof loadStoreOnce>> | null> | null = null;
+/** 「読めなければ書かない」を担保する共有ガード (W0)。parse は normalize が担う。 */
+const guard = createPersistGuard<UnsavedPlanChat[]>({
+  name: "unsavedPlanChats",
+  file: STORE_FILE,
+  key: STORE_KEY,
+  parse: (raw) => parseChats(raw),
+});
 
-async function loadStoreOnce() {
-  const { load } = await import("@tauri-apps/plugin-store");
-  return await load(STORE_FILE, { defaults: {}, autoSave: true });
-}
-
-async function loadStore() {
-  if (storePromise) return storePromise;
-  storePromise = loadStoreOnce().catch((err) => {
-    console.warn("unsavedPlanChats loadStore failed", err);
-    return null;
-  });
-  return storePromise;
-}
-
-async function persist(items: UnsavedPlanChat[]): Promise<void> {
-  const store = await loadStore();
-  if (!store) return;
-  try {
-    await store.set(STORE_KEY, items);
-    await store.save();
-  } catch (err) {
-    console.warn("unsavedPlanChats persist failed", err);
-  }
+/**
+ * 保存する。読込が未確定 / 失敗中なら **書かずに false** を返す
+ * (自動退避なのでトーストは出さない。console.warn は guard 側で出る)。
+ */
+async function persist(items: UnsavedPlanChat[]): Promise<boolean> {
+  return guard.save(items);
 }
 
 function uid(): string {
@@ -114,13 +104,29 @@ function prune(items: UnsavedPlanChat[]): UnsavedPlanChat[] {
     .slice(0, MAX_ITEMS);
 }
 
-/** 保存済み JSON を型に合わせて検証する (壊れたエントリは捨てる)。 */
-function normalize(raw: unknown): UnsavedPlanChat[] {
-  if (!Array.isArray(raw)) return [];
+/**
+ * 保存済み JSON を型に合わせて検証する (persistGuard の parse)。
+ *
+ * **形が壊れていたら捨てずに invalid を返す** (2026-08-06 / DL-14)。
+ * 未保存チャットは「保存しない」を選んだ作業の唯一の安全網なので、読めない
+ * ものを黙って捨てた状態を次の upsert で正本にしてはいけない。
+ *
+ * ただし「id はあるが messages が空」等の**内容として空**のエントリは、
+ * 壊れているのではなく単に無価値なので従来どおり畳む (書き込み封鎖はしない)。
+ */
+function parseChats(
+  raw: unknown,
+): { ok: true; value: UnsavedPlanChat[] } | { ok: false; reason: string } {
+  if (!Array.isArray(raw)) return { ok: false, reason: "配列ではありません" };
   const seen = new Set<string>();
   const items: UnsavedPlanChat[] = [];
   for (const it of raw as UnsavedPlanChat[]) {
-    if (!it || typeof it.id !== "string" || !it.id) continue;
+    if (!it || typeof it.id !== "string" || !it.id) {
+      return { ok: false, reason: "id を持たない要素があります" };
+    }
+    if (it.messages !== undefined && !Array.isArray(it.messages)) {
+      return { ok: false, reason: "messages が配列でない要素があります" };
+    }
     if (seen.has(it.id)) continue;
     if (!Array.isArray(it.messages) || it.messages.length === 0) continue;
     seen.add(it.id);
@@ -138,7 +144,7 @@ function normalize(raw: unknown): UnsavedPlanChat[] {
       updatedAt,
     });
   }
-  return items;
+  return { ok: true, value: items };
 }
 
 export const useUnsavedPlanChats = create<State>((set, get) => ({
@@ -147,22 +153,21 @@ export const useUnsavedPlanChats = create<State>((set, get) => ({
 
   load: async () => {
     if (get().loaded) return;
-    const store = await loadStore();
-    if (!store) {
-      set({ loaded: true });
-      return;
-    }
-    try {
-      const raw = await store.get<UnsavedPlanChat[]>(STORE_KEY);
-      const normalized = normalize(raw);
+    const outcome = await guard.load();
+    if (outcome.status === "ok") {
+      const normalized = outcome.value;
       const items = prune(normalized);
       set({ items, loaded: true });
       // TTL/件数で落ちた分をディスクにも反映する (次回起動で復活させない)。
       if (items.length !== normalized.length) await persist(items);
-    } catch (err) {
-      console.warn("unsavedPlanChats load failed", err);
-      set({ loaded: true });
+      return;
     }
+    if (outcome.status !== "absent") {
+      // 読めなかった。画面は空のままだが、guard が書き込みを封鎖しているので
+      // この空が次の upsert で既存の退避を潰すことはない (DL-14 の核心)。
+      console.warn(`[unsavedPlanChats] ${describeOutcome(outcome)}`);
+    }
+    set({ loaded: true });
   },
 
   upsert: async (id, messages) => {

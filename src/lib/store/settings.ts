@@ -1,5 +1,6 @@
 import { create } from "zustand";
-import type { Store } from "@tauri-apps/plugin-store";
+
+import { createPersistGuard, describeOutcome } from "./persistGuard";
 
 /**
  * ## 設定の永続化先マップ (SET-04 / 2026-07-25 現況の記録)
@@ -125,49 +126,55 @@ type SettingsState = {
   save: (patch: Partial<AppSettings>) => Promise<void>;
 };
 
-let storeHandle: Store | null = null;
-
-async function getStore(): Promise<Store | null> {
-  if (storeHandle) return storeHandle;
-  try {
-    const { load: loadStore } = await import("@tauri-apps/plugin-store");
-    storeHandle = await loadStore(STORE_FILE, { defaults: {}, autoSave: true });
-    return storeHandle;
-  } catch (err) {
-    console.warn("settings store unavailable", err);
-    return null;
+/**
+ * 設定を検証する (persistGuard の parse)。
+ *
+ * 設定はすべて optional なので「object であること」だけを要求する。
+ * 配列・文字列・数値が入っていたら壊れているとみなし、**書き込みを封鎖する**
+ * (2026-08-06 / DL-14: 読めない設定ファイルを空の設定で上書きしない)。
+ */
+function parseSettings(
+  raw: unknown,
+): { ok: true; value: AppSettings } | { ok: false; reason: string } {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    return { ok: false, reason: "オブジェクトではありません" };
   }
+  return { ok: true, value: raw as AppSettings };
 }
+
+/** 「読めなければ書かない」を担保する共有ガード (W0)。 */
+const guard = createPersistGuard<AppSettings>({
+  name: "settings",
+  file: STORE_FILE,
+  key: STORE_KEY,
+  parse: parseSettings,
+});
 
 export const useSettings = create<SettingsState>((set, get) => ({
   settings: {},
   loaded: false,
   load: async () => {
     if (get().loaded) return;
-    const store = await getStore();
-    if (!store) {
-      set({ loaded: true });
+    const outcome = await guard.load();
+    if (outcome.status === "ok") {
+      set({ settings: outcome.value, loaded: true });
       return;
     }
-    try {
-      const data = (await store.get<AppSettings>(STORE_KEY)) ?? {};
-      set({ settings: data, loaded: true });
-    } catch (err) {
-      console.warn("settings load failed", err);
-      set({ loaded: true });
+    if (outcome.status !== "absent") {
+      // 読めなかった。画面は既定値のままだが、guard が書き込みを封鎖しているので
+      // その既定値が次の save で既存設定を潰すことはない (DL-14 の核心)。
+      console.warn(`[settings] ${describeOutcome(outcome)}`);
     }
+    set({ loaded: true });
   },
   save: async (patch) => {
+    // 起動直後 (load 未完了) の保存でディスクの既存設定を既定値基準で上書きしない。
+    if (!get().loaded) await get().load();
     const next = { ...get().settings, ...patch };
     set({ settings: next });
-    const store = await getStore();
-    if (!store) return;
-    try {
-      await store.set(STORE_KEY, next);
-      await store.save();
-    } catch (err) {
-      console.warn("settings save failed", err);
-    }
+    // 封鎖中は書かずに false が返る。設定は再指定コストが小さく、ここでトーストを
+    // 足すと起動直後に鳴りうるので console (guard 側) に留める。
+    await guard.save(next);
   },
 }));
 

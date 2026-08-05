@@ -1,5 +1,7 @@
 import { create } from "zustand";
 
+import { createPersistGuard, describeOutcome } from "./persistGuard";
+
 /**
  * エラーログセンター。
  *
@@ -70,45 +72,40 @@ function uid(): string {
  * plugin-store インスタンスは使い回す。毎回 import + load すると
  * 同時書き込みが競合する (savedPrompts と同じ理由)。
  */
-let storePromise: Promise<Awaited<ReturnType<typeof loadStoreOnce>> | null> | null =
-  null;
-
-async function loadStoreOnce() {
-  const { load } = await import("@tauri-apps/plugin-store");
-  return await load(STORE_FILE, { defaults: {}, autoSave: true });
-}
-
-async function loadStore() {
-  if (storePromise) return storePromise;
-  storePromise = loadStoreOnce().catch((err) => {
-    // ここで useToasts.push を呼ばないこと。
-    // push(kind:"error") → log() → persist() → 失敗 → push(...) の
-    // 無限ループになる。エラーログの失敗は console だけに出す。
-    console.warn("[errorLog] ストアを開けませんでした", err);
-    return null;
-  });
-  return storePromise;
-}
+/**
+ * 「読めなければ書かない」を担保する共有ガード (W0)。
+ *
+ * ここで useToasts.push を呼ばないこと。push(kind:"error") → log() → persist()
+ * → 失敗 → push(...) の無限ループになる。エラーログの失敗は console だけに出す
+ * (guard 側も console.warn しか出さない)。
+ */
+const guard = createPersistGuard<ErrorLogEntry[]>({
+  name: "errorLog",
+  file: STORE_FILE,
+  key: STORE_KEY,
+  parse: parseEntries,
+});
 
 /**
  * 追記後の全件を書き戻す (直近 ERROR_LOG_LIMIT 件のみ)。
- * best-effort: 失敗しても呼び出し元へは伝えない (console.warn のみ)。
+ * 読込が未確定 / 失敗中なら **書かずに false** を返す (DL-14)。
  */
-async function persist(entries: ErrorLogEntry[]): Promise<void> {
-  const store = await loadStore();
-  if (!store) return;
-  try {
-    await store.set(STORE_KEY, entries);
-    await store.save();
-  } catch (err) {
-    // 同上。トーストを出すと無限ループになるので console のみ。
-    console.warn("[errorLog] 保存に失敗しました", err);
-  }
+async function persist(entries: ErrorLogEntry[]): Promise<boolean> {
+  return guard.save(entries);
 }
 
-/** 読み込んだ生データを検証して ErrorLogEntry[] にする。壊れた要素は捨てる。 */
-function sanitize(raw: unknown): ErrorLogEntry[] {
-  if (!Array.isArray(raw)) return [];
+/**
+ * 読み込んだ生データを検証する (persistGuard の parse)。
+ *
+ * **形そのものが壊れていたら invalid** (配列でない = 別物が書かれている)。
+ * 一方、個々のエントリの欠損 (message 無し等) は「壊れたログ 1 行」であって
+ * 台帳全体の破損ではないので、従来どおり畳む。エラーログは記録の付帯物であり、
+ * 1 行の欠損で以後の記録を止める方が損失が大きい (2026-08-06 / DL-14)。
+ */
+function parseEntries(
+  raw: unknown,
+): { ok: true; value: ErrorLogEntry[] } | { ok: false; reason: string } {
+  if (!Array.isArray(raw)) return { ok: false, reason: "配列ではありません" };
   const out: ErrorLogEntry[] = [];
   for (const item of raw) {
     if (!item || typeof item !== "object") continue;
@@ -124,7 +121,7 @@ function sanitize(raw: unknown): ErrorLogEntry[] {
       detail: typeof rec.detail === "string" ? rec.detail : undefined,
     });
   }
-  return out.slice(-ERROR_LOG_LIMIT);
+  return { ok: true, value: out.slice(-ERROR_LOG_LIMIT) };
 }
 
 export const useErrorLog = create<ErrorLogState>((set, get) => ({
@@ -153,29 +150,37 @@ export const useErrorLog = create<ErrorLogState>((set, get) => ({
 
   load: async () => {
     if (get().loaded) return;
-    const store = await loadStore();
-    if (!store) {
-      set({ loaded: true });
-      return;
-    }
-    try {
-      const raw = await store.get(STORE_KEY);
-      const restored = sanitize(raw);
+    const outcome = await guard.load();
+    if (outcome.status === "ok") {
       // 読み込み中に発生したエラー (log 呼び出し) を取りこぼさないため、
       // 復元分を「前」に置いて現在の entries と連結する。
-      const merged = [...restored, ...get().entries].slice(-ERROR_LOG_LIMIT);
+      const merged = [...outcome.value, ...get().entries].slice(-ERROR_LOG_LIMIT);
       // 復元分は既読扱い。未読は「今回の起動で出たエラー」だけを指す。
       set({ entries: merged, loaded: true });
-    } catch (err) {
-      console.warn("[errorLog] 読み込みに失敗しました", err);
-      set({ loaded: true });
+      return;
     }
+    if (outcome.status !== "absent") {
+      // 読めなかった。以後の log() は画面には出るがディスクへは書かない
+      // (guard が封鎖する)。過去ログを今回分で潰すよりは記録を諦める方が安全。
+      console.warn(`[errorLog] ${describeOutcome(outcome)}`);
+    }
+    set({ loaded: true });
   },
 
   markRead: () => set({ unreadCount: 0 }),
 
+  /**
+   * 全消去 (ディスクも空にする)。
+   *
+   * **ユーザーが明示的に「消す」と決めた操作**なので、読込が失敗していても
+   * (guard が封鎖中でも) 実行できるようにする。ここを封鎖したままにすると
+   * 「消したのに再起動で戻る」になり、ユーザーの意思が通らない。
+   * ただし読込が決着する前は解禁しない (unlockForExplicitOverwrite の契約)。
+   */
   clear: async () => {
+    if (!get().loaded) await get().load();
     set({ entries: [], unreadCount: 0 });
+    guard.unlockForExplicitOverwrite();
     await persist([]);
   },
 }));

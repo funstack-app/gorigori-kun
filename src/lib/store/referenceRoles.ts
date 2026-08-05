@@ -120,21 +120,33 @@ function isRoleKind(v: unknown): v is ReferenceRoleKind {
   return (REFERENCE_ROLE_KINDS as readonly string[]).includes(v as string);
 }
 
-/** 未検証の map (localStorage / ファイル由来) を 1 件ずつ検証して取り込む。 */
-function sanitizeRoles(parsed: unknown): RolesMap {
-  if (!parsed || typeof parsed !== "object") return {};
+/**
+ * 未検証の map (localStorage / ファイル由来) を 1 件ずつ検証して取り込む。
+ *
+ * **捨てた件数を返す** (2026-08-06 / DL-12)。以前は無通知で捨てていたため、
+ * 未知のロール値を持つ新バージョンで一度起動すると、その値が黙って消えた状態が
+ * 正本として書き戻されていた。捨てた事実をログに残し、呼び出し側が
+ * 「書き戻してよいか」を判断できるようにする。
+ */
+function sanitizeRoles(parsed: unknown): { roles: RolesMap; dropped: number } {
+  if (!parsed || typeof parsed !== "object") return { roles: {}, dropped: 0 };
   const out: RolesMap = {};
+  let dropped = 0;
   for (const [path, role] of Object.entries(parsed as Record<string, unknown>)) {
     if (typeof path === "string" && isRoleKind(role)) out[path] = role;
+    else dropped++;
   }
-  return out;
+  if (dropped > 0) {
+    console.warn(`[referenceRoles] 認識できないロール ${dropped} 件を除外しました`);
+  }
+  return { roles: out, dropped };
 }
 
 function readPersisted(): RolesMap {
   try {
     const raw = localStorage.getItem(ROLES_LS_KEY);
     if (!raw) return {};
-    return sanitizeRoles(JSON.parse(raw));
+    return sanitizeRoles(JSON.parse(raw)).roles;
   } catch {
     return {};
   }
@@ -168,16 +180,24 @@ let fileWriteUnlocked = false;
 /** 解禁前に mutate した path (解禁時にファイル側へ再適用する)。 */
 const mutatedPaths = new Set<string>();
 
-/** plugin-store へ書く (fire-and-forget)。失敗は warn のみ。 */
-async function persistToStore(value: RolesMap): Promise<void> {
+/**
+ * plugin-store へ書く。**成否を返す** (2026-08-06 / DL-12)。
+ *
+ * 以前は失敗を内部で握り潰して void を返していたため、初回移行が失敗しても
+ * 呼び出し側は成功として書き込みを解禁していた。「ファイルには何も無いのに
+ * 書けている前提で動く」= presets が 2026-08-06 に踏んだのと同じ穴。
+ */
+async function persistToStore(value: RolesMap): Promise<boolean> {
   const store = await loadStore();
-  if (!store) return; // ファイルへは書かない (localStorage のみ継続)
+  if (!store) return false; // ファイルへは書かない (localStorage のみ継続)
   try {
     await store.set(ROLES_STORE_KEY, value);
     await store.save();
+    return true;
   } catch (err) {
     // ロールは再指定可能な軽資産なのでトーストまでは出さない (ログのみ)。
     console.warn("[referenceRoles] persist failed", err);
+    return false;
   }
 }
 
@@ -330,7 +350,18 @@ export const useReferenceRoles = create<ReferenceRolesState>((set, get) => ({
     if (fileRoles != null && typeof fileRoles === "object") {
       // ファイル有 = 正本。ただし起動〜解禁の間に触った path はセッション中の値を勝たせる
       // (この窓で付けたロールを黙って捨てない)。
-      const next = sanitizeRoles(fileRoles);
+      const { roles: next, dropped } = sanitizeRoles(fileRoles);
+      if (dropped > 0) {
+        // 認識できない値が混じっている = 新しいバージョンが書いた台帳を、
+        // 古い自分が読んでいる可能性がある。**解禁しない** (2026-08-06 / DL-12)。
+        // 解禁すると、除外した状態を次の mutate で正本として書き戻し、
+        // 新バージョンで付けたロールを恒久的に失う。
+        console.warn(
+          "[referenceRoles] 認識できないロールを含むため、ファイルへの書き込みを封鎖します",
+        );
+        set({ roles: next });
+        return;
+      }
       const current = get().roles;
       for (const path of mutatedPaths) {
         const role = current[path];
@@ -351,12 +382,22 @@ export const useReferenceRoles = create<ReferenceRolesState>((set, get) => ({
 
     // ファイル未作成 = localStorage からの移行 or 新規ユーザー。
     // 現在の state (localStorage 由来) を正とする。
-    mutatedPaths.clear();
-    fileWriteUnlocked = true;
     const current = get().roles;
     if (Object.keys(current).length > 0) {
       console.info("[referenceRoles] localStorage から参照ロールをファイルへ移行");
-      await persistToStore(current);
+      // **移行の成否を見てから解禁する** (2026-08-06 / DL-12)。
+      // 失敗したまま解禁すると「ファイルには何も無いのに書けている前提」で動き、
+      // localStorage だけが唯一の実体である事実が見えなくなる
+      // (presets が 2026-08-06 に踏んだ穴と同型)。
+      const ok = await persistToStore(current);
+      if (!ok) {
+        console.error(
+          "[referenceRoles] ファイルへの移行に失敗。localStorage を正のまま維持する",
+        );
+        return; // 解禁しない。mutatedPaths も保持し、次回起動で再試行する
+      }
     }
+    mutatedPaths.clear();
+    fileWriteUnlocked = true;
   },
 }));

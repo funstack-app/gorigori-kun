@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { createPersistGuard, describeOutcome, type KeyValueStore } from "./persistGuard";
 import { useSettings } from "./settings";
 import { useToasts } from "./toasts";
 
@@ -58,15 +59,14 @@ type State = {
 
 // Store インスタンスはキャッシュする (savedPrompts と同じ理由: 変更のたびに
 // plugin import + load を回すのは無駄で、並行書き込みのレースも招く)。
-let storePromise: Promise<Awaited<ReturnType<typeof loadStoreOnce>> | null> | null =
-  null;
+let storePromise: Promise<KeyValueStore | null> | null = null;
 
-async function loadStoreOnce() {
+async function loadStoreOnce(): Promise<KeyValueStore> {
   const { load } = await import("@tauri-apps/plugin-store");
-  return await load(STORE_FILE, { defaults: {}, autoSave: true });
+  return (await load(STORE_FILE, { defaults: {}, autoSave: true })) as KeyValueStore;
 }
 
-async function loadStore() {
+async function loadStore(): Promise<KeyValueStore | null> {
   if (storePromise) return storePromise;
   storePromise = loadStoreOnce().catch((err) => {
     console.warn("worldContexts loadStore failed", err);
@@ -75,20 +75,82 @@ async function loadStore() {
   return storePromise;
 }
 
-/** 書き込み成功なら true。失敗時は呼び出し側がトーストで知らせる。 */
+/**
+ * エントリを正規化する (persistGuard の parse)。
+ *
+ * **壊れた要素を黙って捨てない** (2026-08-06 / DL-13)。捨てた状態を次の保存で
+ * 正本にすると、手編集の事故で消えた世界観が永久に戻らない。1 件でも壊れていたら
+ * invalid にして書き込みごと封鎖する。
+ */
+function parseEntries(
+  raw: unknown,
+): { ok: true; value: WorldContextEntry[] } | { ok: false; reason: string } {
+  if (!Array.isArray(raw)) return { ok: false, reason: "配列ではありません" };
+  const seen = new Set<string>();
+  const items: WorldContextEntry[] = [];
+  for (const e of raw as WorldContextEntry[]) {
+    if (!e || typeof e.id !== "string" || !e.id) {
+      return { ok: false, reason: "id を持たない要素があります" };
+    }
+    if (seen.has(e.id)) {
+      console.warn("[worldContexts] 重複 id を畳みました:", e.id);
+      continue;
+    }
+    seen.add(e.id);
+    items.push({
+      id: e.id,
+      name: typeof e.name === "string" ? e.name : "",
+      content: typeof e.content === "string" ? e.content : "",
+      sourceFile: typeof e.sourceFile === "string" ? e.sourceFile : undefined,
+      archived: !!e.archived,
+      createdAt: typeof e.createdAt === "number" ? e.createdAt : Date.now(),
+      updatedAt:
+        typeof e.updatedAt === "number"
+          ? e.updatedAt
+          : typeof e.createdAt === "number"
+            ? e.createdAt
+            : Date.now(),
+    });
+  }
+  return { ok: true, value: items };
+}
+
+/**
+ * 「読めなければ書かない」を担保する共有ガード (W0)。
+ *
+ * 本ストアは items / activeId の 2 キーを持つが、**guard は items だけを見る**。
+ * activeId は items から復元できる派生値 (存在しない id を指していたら null に
+ * 落とす) なので、正本の生死を決めるのは items の可読性で足りる。
+ */
+const guard = createPersistGuard<WorldContextEntry[]>({
+  name: "worldContexts",
+  file: STORE_FILE,
+  key: ITEMS_KEY,
+  parse: parseEntries,
+  loadStore,
+});
+
+/**
+ * 書き込み成功なら true。失敗・封鎖時は false (呼び出し側がトーストで知らせる)。
+ *
+ * activeId は guard の管轄外なので、**items の書き込みが通ってからだけ**書く。
+ * items が封鎖されている状況で activeId だけ進めると、次回起動で
+ * 「存在しないエントリを指す activeId」が残る。
+ */
 async function persist(
   items: WorldContextEntry[],
   activeId: string | null,
 ): Promise<boolean> {
+  const ok = await guard.save(items);
+  if (!ok) return false;
   const store = await loadStore();
   if (!store) return false;
   try {
-    await store.set(ITEMS_KEY, items);
     await store.set(ACTIVE_KEY, activeId);
     await store.save();
     return true;
   } catch (err) {
-    console.warn("worldContexts persist failed", err);
+    console.warn("worldContexts persist(activeId) failed", err);
     return false;
   }
 }
@@ -104,9 +166,14 @@ async function persistOrToast(
 ): Promise<boolean> {
   const ok = await persist(items, activeId);
   if (!ok) {
+    // 封鎖 (読めていない) と書き込み失敗を区別する。前者は「保存先を読めないので
+    // 既存データを守るために保存を止めた」であって、単なる失敗ではない。
+    const blocked = !guard.canWrite();
     useToasts.getState().push({
       kind: "error",
-      text: "「世界観 / コンテキスト」の保存に失敗しました。アプリを再起動すると元に戻ります。",
+      text: blocked
+        ? "「世界観 / コンテキスト」を保存できませんでした。保存先を読み取れないため、既存データを壊さないよう保存を中止しています。アプリを再起動すると再試行します。"
+        : "「世界観 / コンテキスト」の保存に失敗しました。アプリを再起動すると元に戻ります。",
       ttlMs: 8000,
     });
   }
@@ -134,74 +201,64 @@ export const useWorldContexts = create<State>((set, get) => ({
     if (get().loaded) return;
     // 移行判定に settings.worldContext が要る。settings.load は冪等。
     await useSettings.getState().load();
-    const store = await loadStore();
-    if (!store) {
+
+    const outcome = await guard.load();
+
+    // --- 移行: `items` キーが未作成 (absent) のときだけ 1 回だけ走る ---
+    // 読込失敗 (invalid / ioError) をここへ流してはいけない。流すと
+    // 「読めないから空 → レガシーを移行 → 既存の世界観を上書き」になる (DL-13)。
+    if (outcome.status === "absent") {
+      const legacy = useSettings.getState().settings.worldContext ?? "";
+      const now = Date.now();
+      if (legacy.trim()) {
+        const migrated: WorldContextEntry = {
+          id: uid(),
+          name: "既定のコンテキスト",
+          content: legacy,
+          createdAt: now,
+          updatedAt: now,
+        };
+        // settings.worldContext は消さない・書き換えない (レガシー残置)。
+        set({ items: [migrated], activeId: migrated.id, loaded: true });
+        await persistOrToast([migrated], migrated.id);
+      } else {
+        // 空配列でもキーを書くことで、次回以降の移行判定を止める。
+        set({ items: [], activeId: null, loaded: true });
+        await persistOrToast([], null);
+      }
+      return;
+    }
+
+    if (outcome.status !== "ok") {
+      // 読めなかった。画面は空のままだが、guard が書き込みを封鎖しているので
+      // この空が保存でディスクへ焼き付くことはない。
+      console.warn(`[worldContexts] ${describeOutcome(outcome)}`);
       set({ loaded: true });
       return;
     }
+
+    const items = outcome.value;
+    const store = await loadStore();
+    let storedActive: string | null | undefined;
     try {
-      const raw = await store.get<WorldContextEntry[]>(ITEMS_KEY);
-
-      // --- 移行: `items` キーが未作成のときだけ 1 回だけ走る ---
-      if (raw === undefined) {
-        const legacy = useSettings.getState().settings.worldContext ?? "";
-        const now = Date.now();
-        if (legacy.trim()) {
-          const migrated: WorldContextEntry = {
-            id: uid(),
-            name: "既定のコンテキスト",
-            content: legacy,
-            createdAt: now,
-            updatedAt: now,
-          };
-          // settings.worldContext は消さない・書き換えない (レガシー残置)。
-          set({ items: [migrated], activeId: migrated.id, loaded: true });
-          await persistOrToast([migrated], migrated.id);
-        } else {
-          // 空配列でもキーを書くことで、次回以降の移行判定を止める。
-          set({ items: [], activeId: null, loaded: true });
-          await persistOrToast([], null);
-        }
-        return;
-      }
-
-      // --- 通常ロード: 手編集で壊れた形を捨てる防御的正規化 ---
-      const seen = new Set<string>();
-      const items: WorldContextEntry[] = [];
-      for (const e of Array.isArray(raw) ? raw : []) {
-        if (!e || typeof e.id !== "string" || !e.id) continue;
-        if (seen.has(e.id)) continue;
-        seen.add(e.id);
-        items.push({
-          id: e.id,
-          name: typeof e.name === "string" ? e.name : "",
-          content: typeof e.content === "string" ? e.content : "",
-          sourceFile: typeof e.sourceFile === "string" ? e.sourceFile : undefined,
-          archived: !!e.archived,
-          createdAt: typeof e.createdAt === "number" ? e.createdAt : Date.now(),
-          updatedAt:
-            typeof e.updatedAt === "number"
-              ? e.updatedAt
-              : typeof e.createdAt === "number"
-                ? e.createdAt
-                : Date.now(),
-        });
-      }
-      const storedActive = await store.get<string | null>(ACTIVE_KEY);
-      // 存在しない / archived を指していたら「なし」に落とす。
-      const activeId =
-        typeof storedActive === "string" &&
-        items.some((e) => e.id === storedActive && !e.archived)
-          ? storedActive
-          : null;
-      set({ items, activeId, loaded: true });
+      storedActive = await store?.get<string | null>(ACTIVE_KEY);
     } catch (err) {
-      console.warn("worldContexts load failed", err);
-      set({ loaded: true });
+      // activeId は items から復元できる派生値なので、読めなければ「なし」でよい
+      // (items 本体は読めているため、封鎖はしない)。
+      console.warn("worldContexts activeId load failed", err);
     }
+    // 存在しない / archived を指していたら「なし」に落とす。
+    const activeId =
+      typeof storedActive === "string" &&
+      items.some((e) => e.id === storedActive && !e.archived)
+        ? storedActive
+        : null;
+    set({ items, activeId, loaded: true });
   },
 
   create: async (name) => {
+    // 起動直後 (load 未完了) の追加でディスクの既存台帳を空基準で上書きしない。
+    if (!get().loaded) await get().load();
     const now = Date.now();
     const entry: WorldContextEntry = {
       id: uid(),
@@ -221,6 +278,7 @@ export const useWorldContexts = create<State>((set, get) => ({
   },
 
   update: async (id, patch) => {
+    if (!get().loaded) await get().load();
     const now = Date.now();
     let nextItems: WorldContextEntry[] = [];
     let activeId: string | null = null;
@@ -242,6 +300,7 @@ export const useWorldContexts = create<State>((set, get) => ({
   },
 
   importFromFile: async (fileName, content) => {
+    if (!get().loaded) await get().load();
     const now = Date.now();
     const entry: WorldContextEntry = {
       id: uid(),
@@ -261,6 +320,7 @@ export const useWorldContexts = create<State>((set, get) => ({
   },
 
   archive: async (id) => {
+    if (!get().loaded) await get().load();
     const now = Date.now();
     let nextItems: WorldContextEntry[] = [];
     let nextActive: string | null = null;
@@ -275,6 +335,7 @@ export const useWorldContexts = create<State>((set, get) => ({
   },
 
   setActive: async (id) => {
+    if (!get().loaded) await get().load();
     let nextItems: WorldContextEntry[] = [];
     set((s) => {
       nextItems = s.items;

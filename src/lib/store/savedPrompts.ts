@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { createPersistGuard, describeOutcome } from "./persistGuard";
 import { useToasts } from "./toasts";
 
 const STORE_FILE = "prompts.json";
@@ -41,37 +42,61 @@ type State = {
   setTag: (t: string | null) => void;
 };
 
-// Cache the Store instance — re-running plugin import + load on every
-// mutation is wasteful and risks racing concurrent writes.
-let storePromise: Promise<Awaited<ReturnType<typeof loadStoreOnce>> | null> | null = null;
-
-async function loadStoreOnce() {
-  const { load } = await import("@tauri-apps/plugin-store");
-  return await load(STORE_FILE, { defaults: {}, autoSave: true });
-}
-
-async function loadStore() {
-  if (storePromise) return storePromise;
-  storePromise = loadStoreOnce().catch((err) => {
-    console.warn("savedPrompts loadStore failed", err);
-    return null;
-  });
-  return storePromise;
-}
-
-/** Returns true on success, false if the write failed. Callers can
- *  surface a toast so the user knows the change won't survive restart. */
-async function persist(items: SavedPrompt[]): Promise<boolean> {
-  const store = await loadStore();
-  if (!store) return false;
-  try {
-    await store.set(STORE_KEY, items);
-    await store.save();
-    return true;
-  } catch (err) {
-    console.warn("savedPrompts persist failed", err);
-    return false;
+/**
+ * 保存済みプロンプトを正規化する (persistGuard の parse)。
+ *
+ * **壊れた要素を黙って捨てない** (2026-08-06 / DL-13)。以前は id 欠落等を
+ * その場で filter して残りを返していたが、それだと「捨てたあとの状態」が次の
+ * 保存で正本になり、手編集の事故で消えたプロンプトが永久に戻らなくなる。
+ * 1 件でも壊れていたら invalid にして、persistGuard 側で書き込みごと封鎖する。
+ */
+function parsePrompts(
+  raw: unknown,
+): { ok: true; value: SavedPrompt[] } | { ok: false; reason: string } {
+  if (!Array.isArray(raw)) return { ok: false, reason: "配列ではありません" };
+  const seen = new Set<string>();
+  const items: SavedPrompt[] = [];
+  for (const p of raw as SavedPrompt[]) {
+    if (!p || typeof p.id !== "string" || !p.id) {
+      return { ok: false, reason: "id を持たない要素があります" };
+    }
+    // 重複 id は「壊れている」とまでは言えない (旧バージョンの複製バグの痕跡)。
+    // 先勝ちで畳んでよいが、捨てた事実はログに残す。
+    if (seen.has(p.id)) {
+      console.warn("[savedPrompts] 重複 id を畳みました:", p.id);
+      continue;
+    }
+    seen.add(p.id);
+    items.push({
+      id: p.id,
+      title: typeof p.title === "string" ? p.title : "",
+      body: typeof p.body === "string" ? p.body : "",
+      tags: Array.isArray(p.tags)
+        ? p.tags.filter((t): t is string => typeof t === "string")
+        : [],
+      pinned: !!p.pinned,
+      useCount: typeof p.useCount === "number" ? p.useCount : 0,
+      createdAt: p.createdAt ?? Date.now(),
+      updatedAt: p.updatedAt ?? p.createdAt ?? Date.now(),
+    });
   }
+  return { ok: true, value: items };
+}
+
+/**
+ * 「読めなければ書かない」を担保する共有ガード (W0)。
+ * 読込が invalid / ioError の間、`guard.save` は 1 バイトも書かずに false を返す。
+ */
+const guard = createPersistGuard<SavedPrompt[]>({
+  name: "savedPrompts",
+  file: STORE_FILE,
+  key: STORE_KEY,
+  parse: parsePrompts,
+});
+
+/** Returns true on success, false if the write failed or is blocked. */
+async function persist(items: SavedPrompt[]): Promise<boolean> {
+  return guard.save(items);
 }
 
 function uid(): string {
@@ -85,9 +110,14 @@ function uid(): string {
 async function persistOrToast(items: SavedPrompt[], action: string) {
   const ok = await persist(items);
   if (!ok) {
+    // 封鎖 (読めていない) と書き込み失敗を区別して伝える。前者は「保存先が
+    // 読めないので、上書きを防ぐために保存を止めた」であって、単なる失敗ではない。
+    const blocked = !guard.canWrite();
     useToasts.getState().push({
       kind: "error",
-      text: `${action}の保存に失敗しました。アプリを再起動すると元に戻ります。`,
+      text: blocked
+        ? `${action}を保存できませんでした。保存先のプロンプト帳を読み取れないため、既存データを壊さないよう保存を中止しています。アプリを再起動すると再試行します。`
+        : `${action}の保存に失敗しました。アプリを再起動すると元に戻ります。`,
       ttlMs: 8000,
     });
   }
@@ -118,44 +148,32 @@ export const useSavedPrompts = create<State>((set, get) => ({
   query: "",
   tag: null,
 
+  /**
+   * 起動時に 1 回読む。
+   *
+   * **読めなかった場合も `loaded: true` にする** (「まだ読み込み中」と
+   * 「読めなかった」を UI では区別しない = 従来どおりの見え方)。ただし
+   * persistGuard 側で書き込みが封鎖されるので、その空表示が保存でディスクへ
+   * 焼き付くことはない (DL-13 の核心)。
+   */
   load: async () => {
     if (get().loaded) return;
-    const store = await loadStore();
-    if (!store) {
-      set({ loaded: true });
+    const outcome = await guard.load();
+    if (outcome.status === "ok") {
+      set({ items: outcome.value, loaded: true });
       return;
     }
-    try {
-      const raw = (await store.get<SavedPrompt[]>(STORE_KEY)) ?? [];
-      // Normalize legacy shapes + drop entries that survived a
-      // hand-edit gone wrong (missing/duplicate id, non-string title…).
-      const seen = new Set<string>();
-      const items: SavedPrompt[] = [];
-      for (const p of raw) {
-        if (!p || typeof p.id !== "string" || !p.id) continue;
-        if (seen.has(p.id)) continue;
-        seen.add(p.id);
-        items.push({
-          id: p.id,
-          title: typeof p.title === "string" ? p.title : "",
-          body: typeof p.body === "string" ? p.body : "",
-          tags: Array.isArray(p.tags)
-            ? p.tags.filter((t): t is string => typeof t === "string")
-            : [],
-          pinned: !!p.pinned,
-          useCount: typeof p.useCount === "number" ? p.useCount : 0,
-          createdAt: p.createdAt ?? Date.now(),
-          updatedAt: p.updatedAt ?? p.createdAt ?? Date.now(),
-        });
-      }
-      set({ items, loaded: true });
-    } catch (err) {
-      console.warn("savedPrompts load failed", err);
-      set({ loaded: true });
+    if (outcome.status !== "absent") {
+      console.warn(`[savedPrompts] ${describeOutcome(outcome)}`);
     }
+    // absent = 新規ユーザー。invalid / ioError = 読めない (書き込みは封鎖済み)。
+    set({ loaded: true });
   },
 
   save: async (draft) => {
+    // 起動直後 (load 未完了) の保存でディスクの既存台帳を空基準で上書きしない。
+    // load は loaded ガード付きで冪等 (comicStoryHistory / unsavedPlanChats と同型)。
+    if (!get().loaded) await get().load();
     const now = Date.now();
     let saved!: SavedPrompt;
     let nextItems: SavedPrompt[] = [];
@@ -196,6 +214,7 @@ export const useSavedPrompts = create<State>((set, get) => ({
   },
 
   remove: async (id) => {
+    if (!get().loaded) await get().load();
     let nextItems: SavedPrompt[] = [];
     set((s) => {
       nextItems = s.items.filter((p) => p.id !== id);
@@ -205,6 +224,7 @@ export const useSavedPrompts = create<State>((set, get) => ({
   },
 
   togglePin: async (id) => {
+    if (!get().loaded) await get().load();
     const now = Date.now();
     let nextItems: SavedPrompt[] = [];
     set((s) => {
@@ -217,6 +237,7 @@ export const useSavedPrompts = create<State>((set, get) => ({
   },
 
   duplicate: async (id) => {
+    if (!get().loaded) await get().load();
     const src = get().items.find((p) => p.id === id);
     if (!src) return;
     const now = Date.now();
@@ -238,6 +259,7 @@ export const useSavedPrompts = create<State>((set, get) => ({
   },
 
   bumpUseCount: async (id) => {
+    if (!get().loaded) await get().load();
     let nextItems: SavedPrompt[] = [];
     set((s) => {
       nextItems = s.items.map((p) =>

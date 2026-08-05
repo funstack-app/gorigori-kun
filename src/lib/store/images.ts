@@ -4,6 +4,7 @@ import {
   onImageGenerated,
   type ImageEvent,
 } from "../ipc";
+import { createPersistGuard, describeOutcome } from "./persistGuard";
 import { usePresets } from "./presets";
 import { useProjects } from "./projects";
 import { useReferenceRoles } from "./referenceRoles";
@@ -148,55 +149,64 @@ let judgementsLoading: Promise<void> | undefined;
 const FAVORITES_STORE_FILE = "favorites.json";
 const FAVORITES_KEY = "paths";
 
-async function favoritesStore() {
-  try {
-    const { load: loadStore } = await import("@tauri-apps/plugin-store");
-    return await loadStore(FAVORITES_STORE_FILE, {
-      defaults: {},
-      autoSave: true,
-    });
-  } catch {
-    return null;
-  }
-}
-
 const JUDGEMENTS_STORE_FILE = "judgements.json";
 const JUDGEMENTS_KEY = "map";
 
-async function judgementsStore() {
-  try {
-    const { load: loadStore } = await import("@tauri-apps/plugin-store");
-    return await loadStore(JUDGEMENTS_STORE_FILE, {
-      defaults: {},
-      autoSave: true,
-    });
-  } catch {
-    return null;
-  }
+/**
+ * お気に入り・採否は **パスをキーにした作品メタ** (2026-08-06 / DL-15)。
+ *
+ * 以前は読込失敗を「空の正常状態」として確定し、次の toggle が既存メタを空基準で
+ * 上書きしていた。favorites/judgements は画像そのものではないが、数百枚に付けた
+ * 印は手作業でしか復元できないので、正本と同じ扱いで守る。
+ *
+ * parse は「形が壊れていたら invalid」。要素単位の不正 (未知の judgement 値) は
+ * 従来どおり畳む — 値の追加は将来のバージョンで起きうる正常な差分であり、
+ * それで書き込み全体を止めると新旧バージョンの往復で保存できなくなる。
+ */
+const favoritesGuard = createPersistGuard<string[]>({
+  name: "favorites",
+  file: FAVORITES_STORE_FILE,
+  key: FAVORITES_KEY,
+  parse: (raw) => {
+    if (!Array.isArray(raw)) return { ok: false, reason: "配列ではありません" };
+    for (const p of raw) {
+      if (typeof p !== "string") {
+        return { ok: false, reason: "パスが文字列でない要素があります" };
+      }
+    }
+    return { ok: true, value: raw as string[] };
+  },
+});
+
+const judgementsGuard = createPersistGuard<Record<string, Judgement>>({
+  name: "judgements",
+  file: JUDGEMENTS_STORE_FILE,
+  key: JUDGEMENTS_KEY,
+  parse: (raw) => {
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+      return { ok: false, reason: "オブジェクトではありません" };
+    }
+    const out: Record<string, Judgement> = {};
+    for (const [path, value] of Object.entries(raw as Record<string, unknown>)) {
+      // 未知の値は畳む (将来バージョンの新しい判定値との後方互換)。
+      if (value !== "adopted" && value !== "rejected") continue;
+      out[path] = value;
+    }
+    return { ok: true, value: out };
+  },
+});
+
+/**
+ * judgements Map を永続化する。読込が未確定 / 失敗中なら **書かずに false**。
+ * 返り値は呼び出し側の判断用 (現状は fire-and-forget が主)。
+ */
+async function persistJudgements(map: Map<string, Judgement>): Promise<boolean> {
+  return judgementsGuard.save(Object.fromEntries(map));
 }
 
-/** judgements Map を永続化する (favorites と同じ plugin-store 機構)。best-effort。 */
-async function persistJudgements(map: Map<string, Judgement>) {
-  const store = await judgementsStore();
-  if (!store) return;
-  try {
-    await store.set(JUDGEMENTS_KEY, Object.fromEntries(map));
-    await store.save();
-  } catch (err) {
-    console.warn("judgements save failed", err);
-  }
-}
-
-/** favorites Set を永続化する (toggleFavorite の書き込みと同じ機構・同じキー)。best-effort。 */
-async function persistFavorites(favorites: Set<string>) {
-  const store = await favoritesStore();
-  if (!store) return;
-  try {
-    await store.set(FAVORITES_KEY, Array.from(favorites));
-    await store.save();
-  } catch (err) {
-    console.warn("favorites save failed", err);
-  }
+/** favorites Set を永続化する。読込が未確定 / 失敗中なら **書かずに false**。 */
+async function persistFavorites(favorites: Set<string>): Promise<boolean> {
+  return favoritesGuard.save(Array.from(favorites));
 }
 
 export const useImages = create<ImagesState>((set, get) => ({
@@ -299,25 +309,25 @@ export const useImages = create<ImagesState>((set, get) => ({
     if (get().favoritesLoaded) return Promise.resolve();
     if (favoritesLoading) return favoritesLoading;
     favoritesLoading = (async () => {
-      const store = await favoritesStore();
-      if (!store) {
+      const outcome = await favoritesGuard.load();
+      if (outcome.status !== "ok") {
+        if (outcome.status !== "absent") {
+          // 読めなかった。画面は空だが favoritesGuard が書き込みを封鎖するので、
+          // その空が次の toggleFavorite で既存のお気に入りを潰すことはない。
+          console.warn(`[favorites] ${describeOutcome(outcome)}`);
+        }
         set({ favoritesLoaded: true });
         return;
       }
-      try {
-        const paths = (await store.get<string[]>(FAVORITES_KEY)) ?? [];
-        // 読込中に relink が走っていた場合、ファイル上の旧パスを現在パスへ
-        // 直してから set する (張り替え済み state の巻き戻しを防ぐ)。
-        const mapped = paths.map(currentPathFor);
-        const changed = mapped.some((p, i) => p !== paths[i]);
-        set({ favorites: new Set(mapped), favoritesLoaded: true });
-        // 張り替えが起きたならファイル側も現在パスへ揃えておく
-        // (次回起動で再び旧パスを読み直さないように)。
-        if (changed) void persistFavorites(get().favorites);
-      } catch (err) {
-        console.warn("favorites load failed", err);
-        set({ favoritesLoaded: true });
-      }
+      const paths = outcome.value;
+      // 読込中に relink が走っていた場合、ファイル上の旧パスを現在パスへ
+      // 直してから set する (張り替え済み state の巻き戻しを防ぐ)。
+      const mapped = paths.map(currentPathFor);
+      const changed = mapped.some((p, i) => p !== paths[i]);
+      set({ favorites: new Set(mapped), favoritesLoaded: true });
+      // 張り替えが起きたならファイル側も現在パスへ揃えておく
+      // (次回起動で再び旧パスを読み直さないように)。
+      if (changed) void persistFavorites(get().favorites);
     })().finally(() => {
       favoritesLoading = undefined;
     });
@@ -325,18 +335,14 @@ export const useImages = create<ImagesState>((set, get) => ({
   },
 
   toggleFavorite: async (path) => {
+    // 起動直後 (読込未完了) の toggle でディスクの既存お気に入りを空基準で
+    // 上書きしない。loadFavorites は favoritesLoaded ガード付きで冪等。
+    if (!get().favoritesLoaded) await get().loadFavorites();
     const next = new Set(get().favorites);
     if (next.has(path)) next.delete(path);
     else next.add(path);
     set({ favorites: next });
-    const store = await favoritesStore();
-    if (!store) return;
-    try {
-      await store.set(FAVORITES_KEY, Array.from(next));
-      await store.save();
-    } catch (err) {
-      console.warn("favorites save failed", err);
-    }
+    await persistFavorites(next);
   },
 
   // B-01: favorites と同型 (単一実行化 + 読込結果への relink リプレイ)。
@@ -344,28 +350,25 @@ export const useImages = create<ImagesState>((set, get) => ({
     if (get().judgementsLoaded) return Promise.resolve();
     if (judgementsLoading) return judgementsLoading;
     judgementsLoading = (async () => {
-      const store = await judgementsStore();
-      if (!store) {
+      const outcome = await judgementsGuard.load();
+      if (outcome.status !== "ok") {
+        if (outcome.status !== "absent") {
+          // 読めなかった。judgementsGuard が書き込みを封鎖するので、この空が
+          // 次の setJudgement で既存の採否を潰すことはない。
+          console.warn(`[judgements] ${describeOutcome(outcome)}`);
+        }
         set({ judgementsLoaded: true });
         return;
       }
-      try {
-        const raw =
-          (await store.get<Record<string, Judgement>>(JUDGEMENTS_KEY)) ?? {};
-        const map = new Map<string, Judgement>();
-        let changed = false;
-        for (const [path, value] of Object.entries(raw)) {
-          if (value !== "adopted" && value !== "rejected") continue;
-          const cur = currentPathFor(path);
-          if (cur !== path) changed = true;
-          map.set(cur, value);
-        }
-        set({ judgements: map, judgementsLoaded: true });
-        if (changed) void persistJudgements(get().judgements);
-      } catch (err) {
-        console.warn("judgements load failed", err);
-        set({ judgementsLoaded: true });
+      const map = new Map<string, Judgement>();
+      let changed = false;
+      for (const [path, value] of Object.entries(outcome.value)) {
+        const cur = currentPathFor(path);
+        if (cur !== path) changed = true;
+        map.set(cur, value);
       }
+      set({ judgements: map, judgementsLoaded: true });
+      if (changed) void persistJudgements(get().judgements);
     })().finally(() => {
       judgementsLoading = undefined;
     });
@@ -373,6 +376,8 @@ export const useImages = create<ImagesState>((set, get) => ({
   },
 
   setJudgement: async (path, value) => {
+    // toggleFavorite と同じ理由。読込前の変更でディスクの採否を潰さない。
+    if (!get().judgementsLoaded) await get().loadJudgements();
     const next = new Map(get().judgements);
     if (value === null) next.delete(path);
     else next.set(path, value);
@@ -415,16 +420,8 @@ export const useImages = create<ImagesState>((set, get) => ({
             state.selectedPath === path ? dest : state.selectedPath,
         };
       });
-      // Persist favorites if path changed
-      const store = await favoritesStore();
-      if (store) {
-        try {
-          await store.set(FAVORITES_KEY, Array.from(get().favorites));
-          await store.save();
-        } catch {
-          /* best effort */
-        }
-      }
+      // Persist favorites if path changed (封鎖中なら書かずに false が返る)
+      await persistFavorites(get().favorites);
       // Persist judgements if path changed (best effort)
       await persistJudgements(get().judgements);
       // biy: 移動もリネーム (renameLocal) と同じ追従面に揃える。
