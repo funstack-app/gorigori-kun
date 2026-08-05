@@ -52,11 +52,19 @@ export function SkillsWorkspace({ onUseSkill }: { onUseSkill?: () => void }) {
   }, [refreshTick]);
 
   const builtinIds = useMemo(() => new Set(GORI_SKILLS.map((s) => s.id)), []);
-  /** 組み込みに無い id = ユーザーがインポートしたカスタムスキル。 */
-  const customSkills = useMemo(
-    () => installed.filter((s) => !builtinIds.has(s.id as GoriSkill["id"])),
-    [installed, builtinIds],
-  );
+  /**
+   * 組み込みに無い id = ユーザーがインポートしたカスタムスキル。
+   *
+   * 2026-08-05 STΛCK 実機指示で **一覧に出さない**。`~/.codex/skills/` は
+   * 開発用スキル置き場と共用のため、そこに置いた作業用スキル
+   * (hatch-pet / migrate-to-codex 等) がそのまま配布版の画面に並んでいた。
+   * ユーザーには意味が無く、パスに個人のホームディレクトリまで出る。
+   *
+   * 読み取り自体は残す (組み込みカードの実パス表示 `installedPathById` が
+   * 同じ `installed` を使う)。消したのは表示だけ。
+   */
+  const customSkills = useMemo<InstalledSkill[]>(() => [], []);
+  void builtinIds;
   /** 組み込みカードのパス表示用 (実在するものだけ実パスを出す)。 */
   const installedPathById = useMemo(
     () => new Map(installed.map((s) => [s.id, s.path])),
