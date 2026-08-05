@@ -62,9 +62,8 @@ pub async fn grab_object(
     };
 
     // マスクの bounding box を求める (白=対象がどこにあるか)。
-    let bbox = mask_bbox(&mask).ok_or_else(|| {
-        "マスクが空です。対象をもう一度クリックしてください。".to_string()
-    })?;
+    let bbox = mask_bbox(&mask)
+        .ok_or_else(|| "マスクが空です。対象をもう一度クリックしてください。".to_string())?;
     let [bx, by, bw, bh] = bbox;
 
     // オブジェクト透過PNG: bbox にクロップし、マスクの alpha を焼く。
@@ -97,7 +96,13 @@ pub async fn grab_object(
         .map_err(|e| format!("save dilated mask: {e}"))?;
 
     let filled_background_path = output_dir.join("filled-background.png");
-    inpaint_image(runtime, input_path, &dilated_mask_path, &filled_background_path).await?;
+    inpaint_image(
+        runtime,
+        input_path,
+        &dilated_mask_path,
+        &filled_background_path,
+    )
+    .await?;
 
     Ok(GrabResult {
         object_png_path,

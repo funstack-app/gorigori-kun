@@ -36,11 +36,29 @@ export function EditModeSelector({ activeMode, onSelectMode }: EditModeSelectorP
         // platform 解決前は availability を判定できない。standard は常に ok なので
         // 利用可、それ以外 (環境依存判定が必要なモード) はロード完了まで選択不可にする。
         // 「ロード中の一瞬だけ選べてしまう」チラつきを防ぐため。
-        const availability = platform
+        const baseAvailability = platform
           ? mode.availability(platform)
           : mode.id === "standard"
             ? { ok: true as const }
             : { ok: false as const, reason: "対応環境を確認中…" };
+
+        // ort (ONNX Runtime) が入っていないビルドでは、どのモードも推論できない
+        // (実行すると edit_unsupported スタブがエラーを返すだけ)。モード個別の
+        // availability より優先して塞ぐ (2026-08-02)。
+        //
+        // os では判定しないこと — 互換版も os は "windows" のまま。
+        // 該当するのは (1) Windows 互換版 (旧CPU向け・ort 抜き) と (2) Mac。
+        // Mac は元々この経路が動かず、押してから英語エラーが出る状態だった。
+        const availability =
+          platform && !platform.editAiAvailable
+            ? {
+                ok: false as const,
+                reason:
+                  platform.os === "windows"
+                    ? "お使いの構成（互換版）ではAI編集機能を利用できません"
+                    : "この機能はこの構成では利用できません",
+              }
+            : baseAvailability;
         const isActive = activeMode === mode.id;
 
         // このモードが要求するカテゴリのうち、未DLのモデル。

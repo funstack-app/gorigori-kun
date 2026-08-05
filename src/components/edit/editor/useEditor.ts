@@ -573,15 +573,20 @@ export function useEditorActions() {
       // 2) OS ごとの経路で切り抜く。返るのはどちらも透過 PNG の path。
       const platform = await editModels.platformInfo();
       let cutoutPath: string;
-      if (platform.os === "windows") {
+      if (platform.os === "windows" && platform.editAiAvailable) {
         // Windows は BiRefNet (ort)。モデルが未 DL だと Rust が
         // "model not downloaded: birefnet-general" という初心者に手の打てない
         // エラーを返すので、**呼ぶ前に**こちらで落として待つ。
         await ensureSegmentModel(setMessage);
         cutoutPath = (await segmentImage({ imagePath: inputPath, model: "u2net" }))
           .foregroundPath;
-      } else {
+      } else if (platform.os === "macos") {
         cutoutPath = await images.removeBackground(inputPath);
+      } else {
+        // Windows 互換版 (旧CPU向け・ort 抜き)。BiRefNet が無く Vision も無い。
+        // 例外を投げると生の英語エラーが出るので、ユーザー向け文言で静かに止める。
+        setError("お使いの構成（互換版）では背景透過を利用できません");
+        return false;
       }
 
       // 3) 透過 PNG を新しいベースとして置き直す (切り抜き・回転と同じ replaceCanvas 経路)。

@@ -66,7 +66,6 @@ fn synth_image() -> ImageBuffer<Rgb<u8>, Vec<u8>> {
     img
 }
 
-
 /// テストでも tracing を見えるようにする (購読者が無いと debug/info が全て闇に消える)。
 fn init_test_tracing() {
     let _ = tracing_subscriber::fmt()
@@ -505,7 +504,8 @@ async fn magic_layer_real_image_probe() {
     eprintln!("[probe] 被写体の離れ小島={}件", split.satellites.len());
     for (i, satellite) in split.satellites.iter().enumerate() {
         let p = out.join(format!("satellite-{i}.png"));
-        let bbox = crate::edit::grab::crop_object_png(&rgba, satellite, &p).expect("crop satellite");
+        let bbox =
+            crate::edit::grab::crop_object_png(&rgba, satellite, &p).expect("crop satellite");
         eprintln!("[probe] satellite[{i}] bbox={:?} -> {}", bbox, p.display());
     }
 
@@ -522,8 +522,7 @@ async fn magic_layer_real_image_probe() {
     }
     for (i, m) in masks.iter().enumerate() {
         let p = out.join(format!("object-{i}.png"));
-        let bbox =
-            crate::edit::grab::crop_object_png(&rgba, &m.mask, &p).expect("crop object");
+        let bbox = crate::edit::grab::crop_object_png(&rgba, &m.mask, &p).expect("crop object");
         eprintln!(
             "[probe] object[{i}] area={} score={:.3} bbox={:?} -> {}",
             m.area,
@@ -546,7 +545,10 @@ async fn magic_layer_real_image_probe() {
         .await
         .expect("inpaint");
     let bg_white = white_ratio_rgb(&background);
-    eprintln!("[probe] 背景補完 白率={bg_white:.1}% -> {}", background.display());
+    eprintln!(
+        "[probe] 背景補完 白率={bg_white:.1}% -> {}",
+        background.display()
+    );
     assert!(bg_white < 50.0, "背景補完が白化け ({bg_white:.1}%)");
     eprintln!("[probe] 完了: {}", out.display());
 }
@@ -600,7 +602,9 @@ async fn text_mask_stroke_smaller_than_bbox_real_ocr() {
         prob_map.is_some()
     );
     if raw_regions.is_empty() {
-        eprintln!("[skip] DB 検出器が疑似文字を拾わなかった (モデル差)。この機のモデルでは検証不能。");
+        eprintln!(
+            "[skip] DB 検出器が疑似文字を拾わなかった (モデル差)。この機のモデルでは検証不能。"
+        );
         return;
     }
     assert!(
@@ -622,8 +626,7 @@ async fn text_mask_stroke_smaller_than_bbox_real_ocr() {
 
     // ストローク方式 (確率マップ有り)。
     let stroke_path = dir.join("stroke-mask.png");
-    generate_text_mask(&input, &regions, prob_map.as_ref(), &stroke_path)
-        .expect("stroke mask");
+    generate_text_mask(&input, &regions, prob_map.as_ref(), &stroke_path).expect("stroke mask");
     let stroke_area = count_white(&stroke_path);
 
     // bbox 矩形フォールバック (確率マップ無し = 挙動退行ゼロの確認)。
@@ -705,13 +708,21 @@ async fn words_segment_real_image_probe() {
         eprintln!(
             "[probe] '{word}' → {}件 {:?} ({}ms)",
             detections.len(),
-            detections.iter().map(|d| (d.score * 1000.0).round() / 1000.0).collect::<Vec<_>>(),
+            detections
+                .iter()
+                .map(|d| (d.score * 1000.0).round() / 1000.0)
+                .collect::<Vec<_>>(),
             t0.elapsed().as_millis()
         );
         for (i, det) in detections.iter().enumerate() {
             let p = out.join(format!("word-{word}-{i}.png"));
             let bbox = crate::edit::grab::crop_object_png(&rgba, &det.mask, &p).expect("crop");
-            eprintln!("[probe]   [{i}] score={:.3} bbox={:?} -> {}", det.score, bbox, p.display());
+            eprintln!(
+                "[probe]   [{i}] score={:.3} bbox={:?} -> {}",
+                det.score,
+                bbox,
+                p.display()
+            );
         }
     }
     eprintln!("[probe] 完了: {}", out.display());
@@ -745,7 +756,11 @@ async fn text_remove_real_image_probe() {
     let (regions, prob_map) = ocr_image_with_probmap(&runtime, &input)
         .await
         .expect("ocr failed");
-    eprintln!("[probe] regions={} probmap={}", regions.len(), prob_map.is_some());
+    eprintln!(
+        "[probe] regions={} probmap={}",
+        regions.len(),
+        prob_map.is_some()
+    );
     let mask_path = out.join("text-mask.png");
     let _ = prob_map; // 消去は本番同様 bbox 全面マスク (prob_map はレイヤー色抽出専用)。
     crate::edit::magic_layer::generate_text_erase_mask(&input, &regions, &mask_path)
@@ -825,7 +840,11 @@ async fn ocr_icon_text_mix_fixture_probe() {
     }
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../tests-quality/fixtures/g-icon-text-mix/image.png");
-    assert!(fixture.exists(), "fixture が存在する: {}", fixture.display());
+    assert!(
+        fixture.exists(),
+        "fixture が存在する: {}",
+        fixture.display()
+    );
     let runtime = EditRuntime::new();
     let (regions, _prob) = ocr_image_with_probmap(&runtime, &fixture)
         .await
@@ -845,7 +864,10 @@ async fn ocr_icon_text_mix_fixture_probe() {
         joined.iter().any(|t| t.contains("お取扱いしております")),
         "日本語文が『し』を失わず連結で残るべき (粉砕の退行): {joined:?}"
     );
-    eprintln!("=== OK: アイコン混入なし + 文章粉砕なし ({} regions) ===", regions.len());
+    eprintln!(
+        "=== OK: アイコン混入なし + 文章粉砕なし ({} regions) ===",
+        regions.len()
+    );
 }
 
 /// 文字レイヤー切り出しの実画像プローブ (色距離マット検証用)。
@@ -860,10 +882,12 @@ async fn text_crop_real_image_probe() {
         eprintln!("[skip] ppocrv6 モデル未DL");
         return;
     }
-    let input = std::env::var("GORI_E2E_IMAGE").map(PathBuf::from).unwrap_or_else(|_| {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../tests-quality/fixtures/g-icon-text-mix/image.png")
-    });
+    let input = std::env::var("GORI_E2E_IMAGE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../tests-quality/fixtures/g-icon-text-mix/image.png")
+        });
     let out = std::env::var("GORI_E2E_OUT")
         .map(PathBuf::from)
         .unwrap_or_else(|_| tmp_dir("text-crop"));
@@ -872,9 +896,13 @@ async fn text_crop_real_image_probe() {
     let (regions, prob_map) = ocr_image_with_probmap(&runtime, &input)
         .await
         .expect("ocr failed");
-    let layers =
-        crate::edit::magic_layer::build_text_layers(&regions, &input, prob_map.as_ref(), Some(&out))
-            .expect("build_text_layers failed");
+    let layers = crate::edit::magic_layer::build_text_layers(
+        &regions,
+        &input,
+        prob_map.as_ref(),
+        Some(&out),
+    )
+    .expect("build_text_layers failed");
     for l in &layers {
         eprintln!(
             "[probe] {} text={:?} crop={:?}",
@@ -936,10 +964,12 @@ async fn ocr_medium_vs_small_ab_probe() {
         eprintln!("[skip] medium モデル未配置 (ppocrv6-medium-{{det,rec}}.onnx)");
         return;
     }
-    let input = std::env::var("GORI_E2E_IMAGE").map(PathBuf::from).unwrap_or_else(|_| {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../tests-quality/fixtures/g-icon-text-mix/image.png")
-    });
+    let input = std::env::var("GORI_E2E_IMAGE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../tests-quality/fixtures/g-icon-text-mix/image.png")
+        });
 
     let runtime = EditRuntime::new();
     let det_small = find_model("ppocrv6-small-det").unwrap();
@@ -958,12 +988,26 @@ async fn ocr_medium_vs_small_ab_probe() {
             .expect("medium pipeline failed");
     let medium_elapsed = t1.elapsed();
 
-    eprintln!("=== A/B: small ({} regions, {:.2}s) ===", small_regions.len(), small_elapsed.as_secs_f32());
+    eprintln!(
+        "=== A/B: small ({} regions, {:.2}s) ===",
+        small_regions.len(),
+        small_elapsed.as_secs_f32()
+    );
     for r in &small_regions {
-        eprintln!("  conf={:.3} bbox={:?} text={:?}", r.confidence, r.bbox, r.text);
+        eprintln!(
+            "  conf={:.3} bbox={:?} text={:?}",
+            r.confidence, r.bbox, r.text
+        );
     }
-    eprintln!("=== A/B: medium ({} regions, {:.2}s) ===", medium_regions.len(), medium_elapsed.as_secs_f32());
+    eprintln!(
+        "=== A/B: medium ({} regions, {:.2}s) ===",
+        medium_regions.len(),
+        medium_elapsed.as_secs_f32()
+    );
     for r in &medium_regions {
-        eprintln!("  conf={:.3} bbox={:?} text={:?}", r.confidence, r.bbox, r.text);
+        eprintln!(
+            "  conf={:.3} bbox={:?} text={:?}",
+            r.confidence, r.bbox, r.text
+        );
     }
 }

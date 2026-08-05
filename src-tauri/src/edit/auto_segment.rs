@@ -184,8 +184,7 @@ pub async fn run_auto_object_masks(
                 continue;
             }
 
-            let tp = *total_pixels
-                .get_or_insert_with(|| raw.width as u64 * raw.height as u64);
+            let tp = *total_pixels.get_or_insert_with(|| raw.width as u64 * raw.height as u64);
             let area = count_white(&raw.mask);
             let min_area = (tp as f64 * MIN_AREA_RATIO) as u64;
             let max_area = (tp as f64 * MAX_AREA_RATIO) as u64;
@@ -293,7 +292,10 @@ fn border_cover(mask: &ImageBuffer<Luma<u8>, Vec<u8>>) -> (f64, f64) {
     if w < 2 || h < 2 {
         return (0.0, 0.0);
     }
-    let band = ((w.min(h) as u64 * 3 / 200) as u32).clamp(4, 16).min(h).min(w);
+    let band = ((w.min(h) as u64 * 3 / 200) as u32)
+        .clamp(4, 16)
+        .min(h)
+        .min(w);
     // 横バンド (上/下): x 位置ごとに「バンド内のどこかの行が白か」。
     let row_cover = |y0: u32, y1: u32| -> u64 {
         (0..w)
@@ -423,7 +425,14 @@ mod tests {
     use std::sync::Arc;
     use tokio::sync::Mutex;
 
-    fn filled(w: u32, h: u32, x0: u32, y0: u32, x1: u32, y1: u32) -> ImageBuffer<Luma<u8>, Vec<u8>> {
+    fn filled(
+        w: u32,
+        h: u32,
+        x0: u32,
+        y0: u32,
+        x1: u32,
+        y1: u32,
+    ) -> ImageBuffer<Luma<u8>, Vec<u8>> {
         ImageBuffer::from_fn(w, h, |x, y| {
             if x >= x0 && x < x1 && y >= y0 && y < y1 {
                 Luma([255u8])

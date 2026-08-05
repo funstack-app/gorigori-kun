@@ -1,7 +1,7 @@
-import { convertFileSrc } from "@tauri-apps/api/core";
 import { useMemo, useState } from "react";
 
 import type { EditLayer } from "../../lib/edit/types";
+import { SafeImage } from "../SafeImage";
 
 type EditCanvasProps = {
   sourceImagePath: string | null;
@@ -106,9 +106,9 @@ export function EditCanvas({
         <div className="relative h-full max-h-full w-full max-w-full overflow-hidden rounded-lg border border-[#303030] bg-[#0b0b0b]">
           {visibleLayers.length > 0 ? (
             visibleLayers.map((layer, index) => (
-              <img
+              <SafeImage
                 key={layer.id}
-                src={convertFileSrc(layer.imagePath)}
+                path={layer.imagePath}
                 alt=""
                 style={{ zIndex: visibleLayers.length - index }}
                 className={[
@@ -120,8 +120,8 @@ export function EditCanvas({
               />
             ))
           ) : (
-            <img
-              src={convertFileSrc(sourceImagePath)}
+            <SafeImage
+              path={sourceImagePath}
               alt=""
               className="absolute inset-0 h-full w-full object-contain"
             />

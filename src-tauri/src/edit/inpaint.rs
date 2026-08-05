@@ -98,9 +98,8 @@ pub async fn inpaint_image(
                 bbox,
                 context_std
             );
-            let sm = smooth_mask.get_or_insert_with(|| {
-                ImageBuffer::from_pixel(orig_w, orig_h, Luma([0u8]))
-            });
+            let sm = smooth_mask
+                .get_or_insert_with(|| ImageBuffer::from_pixel(orig_w, orig_h, Luma([0u8])));
             let [bx, by, bw, bh] = *bbox;
             for y in by..(by + bh).min(orig_h) {
                 for x in bx..(bx + bw).min(orig_w) {
@@ -173,8 +172,7 @@ pub async fn inpaint_image(
     // その画素だけ1回再修復する。2回目は幻覚の種 (文字のグロー等) がもう存在しない
     // ため、周辺のきれいな背景から埋まる。対象は細長い帯クラスタのみ (物体跡地の
     // 正当なハイライト補完を巻き込まない)。
-    let mut residue =
-        ImageBuffer::<Luma<u8>, Vec<u8>>::from_pixel(orig_w, orig_h, Luma([0u8]));
+    let mut residue = ImageBuffer::<Luma<u8>, Vec<u8>>::from_pixel(orig_w, orig_h, Luma([0u8]));
     let mut residue_area = 0u64;
     for bbox in &lama_thin_clusters {
         residue_area += mark_residue(&work, &mask, *bbox, orig_w, orig_h, &mut residue);
@@ -249,9 +247,8 @@ fn mark_residue(
     residue: &mut ImageBuffer<Luma<u8>, Vec<u8>>,
 ) -> u64 {
     let [cx, cy, cw, ch] = context_crop(bbox, orig_w, orig_h);
-    let luma = |p: &Rgb<u8>| -> i32 {
-        (299 * p[0] as i32 + 587 * p[1] as i32 + 114 * p[2] as i32) / 1000
-    };
+    let luma =
+        |p: &Rgb<u8>| -> i32 { (299 * p[0] as i32 + 587 * p[1] as i32 + 114 * p[2] as i32) / 1000 };
 
     // 無傷画素の輝度ヒストグラムから p5/p95 を取る。
     let mut hist = [0u64; 256];
@@ -393,12 +390,7 @@ async fn inpaint_crop(
     };
 
     // クロップ寸法へ戻し、マスク画素だけ合成する (マスク外は原画素のまま)。
-    let out_crop = image::imageops::resize(
-        &out_512,
-        cw,
-        ch,
-        image::imageops::FilterType::Lanczos3,
-    );
+    let out_crop = image::imageops::resize(&out_512, cw, ch, image::imageops::FilterType::Lanczos3);
     for yy in 0..ch {
         for xx in 0..cw {
             if crop_mask.get_pixel(xx, yy)[0] > 127 {
@@ -763,7 +755,10 @@ mod tests {
         ] {
             let crop = context_crop(bbox, w, h);
             assert!(contains(crop, bbox), "bbox={bbox:?} crop={crop:?}");
-            assert!(crop[0] + crop[2] <= w && crop[1] + crop[3] <= h, "crop={crop:?}");
+            assert!(
+                crop[0] + crop[2] <= w && crop[1] + crop[3] <= h,
+                "crop={crop:?}"
+            );
             assert!(crop[2] >= MIN_CROP_SIDE.min(w) || crop[2] >= bbox[2]);
         }
     }

@@ -1,9 +1,9 @@
-import { convertFileSrc } from "@tauri-apps/api/core";
 import { useEffect, useState, type MouseEvent } from "react";
 
 import { editSam2, images } from "../../lib/ipc";
 import { useEditTab } from "../../lib/store/editTab";
 import { EditModelGate } from "../EditModelGate";
+import { SafeImage } from "../SafeImage";
 
 export function ClickSegmentTool() {
   const inputPath = useEditTab((state) => state.selectedImagePath);
@@ -104,8 +104,8 @@ export function ClickSegmentTool() {
           {inputPath && embedded ? (
             <div className="rounded-lg border border-[#303030] bg-[#101010] p-2">
               <div className="relative inline-block max-h-[360px] max-w-full overflow-hidden rounded-md align-top">
-                <img
-                  src={convertFileSrc(inputPath)}
+                <SafeImage
+                  path={inputPath}
                   alt="クリック切り抜き対象"
                   onClick={onClick}
                   className="block max-h-[360px] max-w-full cursor-crosshair object-contain"

@@ -14,24 +14,24 @@ const NUM_CLASSES: usize = 18;
 /// ATR 18 クラスの日本語ラベル (preprocessor_config / model card の id2label と対応)。
 /// index = クラスID。背景(0)はレイヤー化しない。
 const ATR_LABELS_JA: [&str; NUM_CLASSES] = [
-    "背景",      // 0 Background
-    "帽子",      // 1 Hat
-    "髪",        // 2 Hair
+    "背景",       // 0 Background
+    "帽子",       // 1 Hat
+    "髪",         // 2 Hair
     "サングラス", // 3 Sunglasses
-    "上衣",      // 4 Upper-clothes
-    "スカート",  // 5 Skirt
-    "パンツ",    // 6 Pants
+    "上衣",       // 4 Upper-clothes
+    "スカート",   // 5 Skirt
+    "パンツ",     // 6 Pants
     "ワンピース", // 7 Dress
-    "ベルト",    // 8 Belt
-    "左の靴",    // 9 Left-shoe
-    "右の靴",    // 10 Right-shoe
-    "顔",        // 11 Face
-    "左脚",      // 12 Left-leg
-    "右脚",      // 13 Right-leg
-    "左腕",      // 14 Left-arm
-    "右腕",      // 15 Right-arm
-    "バッグ",    // 16 Bag
-    "スカーフ",  // 17 Scarf
+    "ベルト",     // 8 Belt
+    "左の靴",     // 9 Left-shoe
+    "右の靴",     // 10 Right-shoe
+    "顔",         // 11 Face
+    "左脚",       // 12 Left-leg
+    "右脚",       // 13 Right-leg
+    "左腕",       // 14 Left-arm
+    "右腕",       // 15 Right-arm
+    "バッグ",     // 16 Bag
+    "スカーフ",   // 17 Scarf
 ];
 
 /// 認識された 1 パーツ = 1 レイヤー分。元解像度の透過 PNG を書き出す。

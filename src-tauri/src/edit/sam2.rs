@@ -182,10 +182,7 @@ impl Sam2Session {
     /// predict_mask との違い: グリッド走査で数百回呼ぶため PNG 符号化を挟まず、
     /// フィルタ/NMS に必要な Luma バッファと score をそのまま返す。encoder は
     /// 呼ばない (embed_image を 1 回だけ流用する前提)。
-    pub async fn predict_raw_mask(
-        &self,
-        click_point: (f32, f32),
-    ) -> Result<Sam2RawMask, String> {
+    pub async fn predict_raw_mask(&self, click_point: (f32, f32)) -> Result<Sam2RawMask, String> {
         let embedding = self
             .cached_image_embedding
             .as_ref()

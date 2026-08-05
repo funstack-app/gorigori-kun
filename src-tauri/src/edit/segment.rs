@@ -234,7 +234,9 @@ mod tests {
         let src = ImageBuffer::<Rgba<u8>, Vec<u8>>::from_pixel(4, 4, Rgba([10, 20, 30, 255]));
         let mask = ImageBuffer::<Luma<u8>, Vec<u8>>::from_pixel(4, 4, Luma([255u8]));
         let fg = composite_foreground(&src, &mask);
-        let all_white = fg.pixels().all(|p| p[0] == 255 && p[1] == 255 && p[2] == 255);
+        let all_white = fg
+            .pixels()
+            .all(|p| p[0] == 255 && p[1] == 255 && p[2] == 255);
         assert!(!all_white, "前景が白ベタになった (破綻画像を焼いている)");
     }
 }

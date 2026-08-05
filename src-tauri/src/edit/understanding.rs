@@ -79,8 +79,8 @@ pub fn parse_design_understanding(
     if end <= start {
         return Err("JSONが壊れている".to_string());
     }
-    let parsed: RawUnderstanding = serde_json::from_str(&raw[start..=end])
-        .map_err(|e| format!("JSON解析失敗: {e}"))?;
+    let parsed: RawUnderstanding =
+        serde_json::from_str(&raw[start..=end]).map_err(|e| format!("JSON解析失敗: {e}"))?;
 
     let mut out = DesignUnderstanding::default();
     let mut dropped = 0usize;
@@ -134,13 +134,21 @@ fn normalize_bbox(raw: &[f64], img_w: u32, img_h: u32) -> Option<[i32; 4]> {
     }
     let (iw, ih) = (img_w as f64, img_h as f64);
     let scale = raw.iter().all(|v| *v <= 1000.0 + 8.0);
-    let (sx, sy) = if scale { (iw / 1000.0, ih / 1000.0) } else { (1.0, 1.0) };
+    let (sx, sy) = if scale {
+        (iw / 1000.0, ih / 1000.0)
+    } else {
+        (1.0, 1.0)
+    };
     let raw = [raw[0] * sx, raw[1] * sy, raw[2] * sx, raw[3] * sy];
     let [a, b, c, d] = raw;
     // 少しの座標誤差は許す (実測: 右上バッジで x2=1204 等、数px の食み出し)。
     let margin = 8.0;
-    let xywh_fits =
-        c > 0.0 && d > 0.0 && a >= -margin && b >= -margin && a + c <= iw + margin && b + d <= ih + margin;
+    let xywh_fits = c > 0.0
+        && d > 0.0
+        && a >= -margin
+        && b >= -margin
+        && a + c <= iw + margin
+        && b + d <= ih + margin;
     let xyxy_fits =
         c > a && d > b && a >= -margin && b >= -margin && c <= iw + margin && d <= ih + margin;
     let (x, y, w, h) = if xywh_fits {
@@ -163,9 +171,7 @@ fn normalize_bbox(raw: &[f64], img_w: u32, img_h: u32) -> Option<[i32; 4]> {
 
 fn is_valid_hex(c: &str) -> bool {
     let c = c.trim();
-    c.len() == 7
-        && c.starts_with('#')
-        && c[1..].chars().all(|ch| ch.is_ascii_hexdigit())
+    c.len() == 7 && c.starts_with('#') && c[1..].chars().all(|ch| ch.is_ascii_hexdigit())
 }
 
 /// 矩形 IoU。SAM3 物体レイヤーと graphics の照合 (リネーム) に使う。
@@ -201,19 +207,32 @@ mod tests {
         ]} 後置き"##;
         let u = parse_design_understanding(raw, 1200, 1200).unwrap();
         assert_eq!(u.text_blocks.len(), 1, "空/unreadable は捨てる");
-        assert_eq!(u.text_blocks[0].bbox, [61, 477, 753, 170], "0-1000正規化→1200pxへスケール");
+        assert_eq!(
+            u.text_blocks[0].bbox,
+            [61, 477, 753, 170],
+            "0-1000正規化→1200pxへスケール"
+        );
         assert_eq!(u.text_blocks[0].color.as_deref(), Some("#003F6F"));
         assert_eq!(u.graphics.len(), 1, "bbox破損は捨てる");
         // [821,36,932,145] (0-1000): xywh だと x+w=1753 が範囲外 → x1y1x2y2 解釈 → 1200pxスケール。
-        assert_eq!(u.graphics[0].bbox, [985, 43, 133, 130], "x1y1x2y2 解釈 + スケール");
+        assert_eq!(
+            u.graphics[0].bbox,
+            [985, 43, 133, 130],
+            "x1y1x2y2 解釈 + スケール"
+        );
     }
 
     #[test]
     fn parse_rejects_garbage_and_clamps() {
         assert!(parse_design_understanding("JSONなし", 100, 100).is_err());
-        let raw = r#"{"text_blocks":[{"text":"はみ出し","bbox":[-200,-200,800,800]}],"graphics":[]}"#;
+        let raw =
+            r#"{"text_blocks":[{"text":"はみ出し","bbox":[-200,-200,800,800]}],"graphics":[]}"#;
         let u = parse_design_understanding(raw, 100, 100).unwrap();
-        assert_eq!(u.text_blocks[0].bbox, [0, 0, 60, 60], "0-1000→100pxスケール後にクランプ");
+        assert_eq!(
+            u.text_blocks[0].bbox,
+            [0, 0, 60, 60],
+            "0-1000→100pxスケール後にクランプ"
+        );
         // 不正な色は None に落とす。
         let raw2 = r#"{"text_blocks":[{"text":"色壊れ","bbox":[0,0,100,100],"color":"blue"}],"graphics":[]}"#;
         let u2 = parse_design_understanding(raw2, 100, 100).unwrap();

@@ -338,9 +338,14 @@ async fn run_magic_layer_inner(
         // inpaint 元は text-removed (オーバーレイ文字消去済み)。元画像を使うと背景レイヤーに
         // 文字が焼き残り、テキストレイヤーを動かしたとき二重表示になる (実測 2026-07-03)。
         if dilated.save(&union_mask_path).is_ok()
-            && inpaint_image(runtime, &text_removed_path, &union_mask_path, &background_path)
-                .await
-                .is_ok()
+            && inpaint_image(
+                runtime,
+                &text_removed_path,
+                &union_mask_path,
+                &background_path,
+            )
+            .await
+            .is_ok()
         {
             background_ready = true;
         }
@@ -781,8 +786,7 @@ fn crop_text_region_png(
             // (2026-07-09 実機報告)。フラット配色なら元画像の色から元解像度の
             // アンチエイリアス付き alpha を作れる。色が割れない画像 (写真背景等) では
             // None が返り、従来のストロークマスク方式へフォールバックする。
-            if let Some(bbox) =
-                crop_with_color_matte(rgba, &mask, gate, region.bbox, output_path)?
+            if let Some(bbox) = crop_with_color_matte(rgba, &mask, gate, region.bbox, output_path)?
             {
                 return Ok(bbox);
             }
@@ -934,8 +938,8 @@ pub(crate) fn crop_with_color_matte(
                 p[1] as f32 - bg_rgb[1],
                 p[2] as f32 - bg_rgb[2],
             ];
-            let t = ((d[0] * axis[0] + d[1] * axis[1] + d[2] * axis[2]) / axis_len_sq)
-                .clamp(0.0, 1.0);
+            let t =
+                ((d[0] * axis[0] + d[1] * axis[1] + d[2] * axis[2]) / axis_len_sq).clamp(0.0, 1.0);
             let a = (t * 255.0).round() as u8;
             if a > 0 {
                 alpha[(yy - gy0) as usize * gw + (xx - gx0) as usize] = a;
@@ -1212,9 +1216,9 @@ pub(crate) fn estimate_serif(
     };
     let hw = median(&mut h_runs).max(1.0); // 横ストローク太さ ≒ 縦線の幅（行を横断すると縦線を横切る）
     let vw = median(&mut v_runs).max(1.0); // 縦ストローク太さ ≒ 横線の幅（列を縦断すると横線を横切る）
-    // コントラスト比: 縦線の太さ / 横線の太さ。明朝は縦太・横細でこの比が大きい。
-    // 実画像で明朝は概ね 1.6+、ゴシックは 1.3 未満に収まる経験値。
-    // 境界（1.3〜1.6）は不明として null に倒す（誤って明朝を強制しない安全側）。
+                                           // コントラスト比: 縦線の太さ / 横線の太さ。明朝は縦太・横細でこの比が大きい。
+                                           // 実画像で明朝は概ね 1.6+、ゴシックは 1.3 未満に収まる経験値。
+                                           // 境界（1.3〜1.6）は不明として null に倒す（誤って明朝を強制しない安全側）。
     let contrast = hw / vw;
     if contrast >= 1.6 {
         Some(true) // serif / 明朝
@@ -1535,28 +1539,42 @@ mod tests {
                 pm_data[y * 60 + x] = 255;
             }
         }
-        let pm = TextProbMap { width: 60, height: 30, data: pm_data };
+        let pm = TextProbMap {
+            width: 60,
+            height: 30,
+            data: pm_data,
+        };
         let dir = std::env::temp_dir().join("gori-matte-test");
         std::fs::create_dir_all(&dir).unwrap();
         let out = dir.join("matte.png");
-        let bbox = crop_with_color_matte(
-            &rgba,
-            &roi,
-            [6, 4, 50, 22],
-            [10, 8, 40, 14],
-            &out,
-        )
-        .unwrap()
-        .expect("フラット配色ではマットが適用されるべき");
+        let bbox = crop_with_color_matte(&rgba, &roi, [6, 4, 50, 22], [10, 8, 40, 14], &out)
+            .unwrap()
+            .expect("フラット配色ではマットが適用されるべき");
         let crop = image::open(&out).unwrap().to_rgba8();
-        let at = |ix: i32, iy: i32| crop.get_pixel((ix - bbox[0]) as u32, (iy - bbox[1]) as u32).0[3];
+        let at = |ix: i32, iy: i32| {
+            crop.get_pixel((ix - bbox[0]) as u32, (iy - bbox[1]) as u32)
+                .0[3]
+        };
         assert_eq!(at(15, 10), 255, "文字コアは不透明");
-        assert_eq!(at(30, 15), 0, "グリフの穴 (背景色) は透明になるべき (白い塊の再発防止)");
+        assert_eq!(
+            at(30, 15),
+            0,
+            "グリフの穴 (背景色) は透明になるべき (白い塊の再発防止)"
+        );
         let aa = at(50, 10);
-        assert!((80..=180).contains(&aa), "AA画素は中間alphaになるべき: {aa}");
+        assert!(
+            (80..=180).contains(&aa),
+            "AA画素は中間alphaになるべき: {aa}"
+        );
         // 返る bbox が文字にタイト = ROI 内の背景 (モヤ) が切り出しに含まれない。
-        assert!(bbox[0] >= 10 && bbox[1] >= 8, "背景モヤを含まないタイトな切り出しになるべき: {bbox:?}");
-        assert!(bbox[0] + bbox[2] <= 51 && bbox[1] + bbox[3] <= 22, "背景側へ広がらない: {bbox:?}");
+        assert!(
+            bbox[0] >= 10 && bbox[1] >= 8,
+            "背景モヤを含まないタイトな切り出しになるべき: {bbox:?}"
+        );
+        assert!(
+            bbox[0] + bbox[2] <= 51 && bbox[1] + bbox[3] <= 22,
+            "背景側へ広がらない: {bbox:?}"
+        );
     }
 
     /// 文字色と背景色が近い (写真/グラデ背景相当) ときはマットを適用せず None を返す。
@@ -1564,13 +1582,19 @@ mod tests {
     fn color_matte_falls_back_on_low_separation() {
         let rgba = image::RgbaImage::from_pixel(40, 20, image::Rgba([120, 120, 120, 255]));
         let roi = ImageBuffer::<Luma<u8>, Vec<u8>>::from_pixel(40, 20, Luma([255u8]));
-        let pm = TextProbMap { width: 40, height: 20, data: vec![255u8; 40 * 20] };
+        let pm = TextProbMap {
+            width: 40,
+            height: 20,
+            data: vec![255u8; 40 * 20],
+        };
         let dir = std::env::temp_dir().join("gori-matte-test");
         std::fs::create_dir_all(&dir).unwrap();
         let out = dir.join("matte-fallback.png");
-        let got = crop_with_color_matte(&rgba, &roi, [0, 0, 40, 20], [5, 5, 30, 10], &out)
-            .unwrap();
-        assert!(got.is_none(), "色が割れない画像では従来方式へフォールバックすべき");
+        let got = crop_with_color_matte(&rgba, &roi, [0, 0, 40, 20], [5, 5, 30, 10], &out).unwrap();
+        assert!(
+            got.is_none(),
+            "色が割れない画像では従来方式へフォールバックすべき"
+        );
     }
 
     /// 消去マスクは region ごとに「自分の高さ×0.4」で拡張される (2026-07-08 ゴースト実測対応)。
@@ -1604,11 +1628,23 @@ mod tests {
         let mask = image::open(&mask_path).unwrap().to_luma8();
         let white = |x: u32, y: u32| mask.get_pixel(x, y).0[0] == 255;
         // 大文字: 期待拡張 = 105*0.4 = 42px。旧実装の上限16pxでは届かない位置 (bbox上端-30px) が白い。
-        assert!(white(400, (514 - 30) as u32), "大文字の縁30px上がマスクされるべき (旧16px上限の退行)");
-        assert!(!white(400, (514 - 42 - 4 - 8) as u32), "拡張は高さの40%+padで頭打ち (無限に広げない)");
+        assert!(
+            white(400, (514 - 30) as u32),
+            "大文字の縁30px上がマスクされるべき (旧16px上限の退行)"
+        );
+        assert!(
+            !white(400, (514 - 42 - 4 - 8) as u32),
+            "拡張は高さの40%+padで頭打ち (無限に広げない)"
+        );
         // 小文字: 期待拡張 = max(24*0.4=10, 6) = 10px。40px も上に広がっていない (塗り過ぎ防止)。
-        assert!(white(500, (990 - 8) as u32), "小文字も自分の高さ比で拡張される");
-        assert!(!white(500, (990 - 40) as u32), "小文字が大文字の拡張量に引きずられない");
+        assert!(
+            white(500, (990 - 8) as u32),
+            "小文字も自分の高さ比で拡張される"
+        );
+        assert!(
+            !white(500, (990 - 40) as u32),
+            "小文字が大文字の拡張量に引きずられない"
+        );
     }
 
     #[test]
@@ -1628,7 +1664,11 @@ mod tests {
         for d in data.iter_mut().take(ink) {
             *d = 255; // prob=1.0 → しきい値超え = インク
         }
-        TextProbMap { width: w, height: h, data }
+        TextProbMap {
+            width: w,
+            height: h,
+            data,
+        }
     }
 
     #[test]
@@ -1677,7 +1717,11 @@ mod tests {
                 data[(yy as usize) * wu + (xx as usize)] = 255; // prob=1.0 → しきい値超え = インク
             }
         }
-        TextProbMap { width: w, height: h, data }
+        TextProbMap {
+            width: w,
+            height: h,
+            data,
+        }
     }
 
     #[test]
@@ -1716,7 +1760,10 @@ mod tests {
     #[test]
     fn font_size_none_without_probmap() {
         // prob_map 無し → None（呼び出し側で bbox 比例式にフォールバック）
-        assert_eq!(estimate_font_size([0, 0, 40, 60], None, (40, 60), true), None);
+        assert_eq!(
+            estimate_font_size([0, 0, 40, 60], None, (40, 60), true),
+            None
+        );
     }
 
     #[test]
@@ -1730,13 +1777,7 @@ mod tests {
 
     /// 縦線 vstroke px・横線 hstroke px の十字「＋」を格子状に敷いた prob_map を作る。
     /// 明朝(縦太・横細)/ゴシック(均一)のストローク・コントラストを模す。
-    fn probmap_cross_grid(
-        w: u32,
-        h: u32,
-        v_stroke: u32,
-        h_stroke: u32,
-        cell: u32,
-    ) -> TextProbMap {
+    fn probmap_cross_grid(w: u32, h: u32, v_stroke: u32, h_stroke: u32, cell: u32) -> TextProbMap {
         let (wu, hu) = (w as usize, h as usize);
         let mut data = vec![0u8; wu * hu];
         // 各セルの中央に縦線(幅v_stroke)と横線(高h_stroke)の十字を置く。
@@ -1768,7 +1809,11 @@ mod tests {
             }
             cx += cell;
         }
-        TextProbMap { width: w, height: h, data }
+        TextProbMap {
+            width: w,
+            height: h,
+            data,
+        }
     }
 
     #[test]
@@ -1799,10 +1844,16 @@ mod tests {
     #[test]
     fn initial_font_family_reflects_serif() {
         // 明朝推定 → 明朝系、ゴシック/不明 → ゴシック系。言語で和欧を切り替える。
-        assert_eq!(pick_initial_font_family(true, Some(true)), "Hiragino Mincho ProN");
+        assert_eq!(
+            pick_initial_font_family(true, Some(true)),
+            "Hiragino Mincho ProN"
+        );
         assert_eq!(pick_initial_font_family(true, Some(false)), "Hiragino Sans");
         assert_eq!(pick_initial_font_family(true, None), "Hiragino Sans");
-        assert_eq!(pick_initial_font_family(false, Some(true)), "Times New Roman");
+        assert_eq!(
+            pick_initial_font_family(false, Some(true)),
+            "Times New Roman"
+        );
         assert_eq!(pick_initial_font_family(false, Some(false)), "Helvetica");
         assert_eq!(pick_initial_font_family(false, None), "Helvetica");
     }
@@ -1810,10 +1861,7 @@ mod tests {
     #[test]
     fn serif_none_on_dimension_mismatch() {
         let pm = probmap_cross_grid(80, 80, 6, 2, 16);
-        assert_eq!(
-            estimate_serif([0, 0, 80, 80], Some(&pm), (160, 160)),
-            None
-        );
+        assert_eq!(estimate_serif([0, 0, 80, 80], Some(&pm), (160, 160)), None);
     }
 
     #[test]
@@ -1960,7 +2008,10 @@ mod tests {
                 let is_stroke =
                     xx >= bx && xx < bx + bw && yy >= by && yy < by + bh && (xx - bx) % 8 < 2;
                 if is_stroke {
-                    assert!(painted, "ストローク画素 ({xx},{yy}) が未被覆 (消し残しになる)");
+                    assert!(
+                        painted,
+                        "ストローク画素 ({xx},{yy}) が未被覆 (消し残しになる)"
+                    );
                 }
                 let in_bound = xx + bound >= bx
                     && xx < bx + bw + bound

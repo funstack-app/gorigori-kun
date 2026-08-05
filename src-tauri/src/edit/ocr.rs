@@ -674,9 +674,7 @@ fn should_keep_text_region(text: &str, rec_conf: f32) -> bool {
         return false;
     }
     // 有意な文字 (letter or number) の有無。□ (復号不能マーカー) や記号は含めない。
-    let has_meaningful_char = trimmed
-        .chars()
-        .any(|c| c.is_alphanumeric() && c != '□');
+    let has_meaningful_char = trimmed.chars().any(|c| c.is_alphanumeric() && c != '□');
     // 3. 信頼度が下限未満なら、有意な文字があっても弾く (化け候補)。
     if rec_conf < REC_CONF_FLOOR {
         return false;
@@ -864,8 +862,7 @@ fn icon_split_candidate(img: &DynamicImage, bbox: [i32; 4]) -> Option<IconSplitC
         for dx in 0..w {
             let px = img.get_pixel((bx + dx as i32) as u32, (by + dy as i32) as u32);
             let [r, g, b, _] = px.0;
-            luma[dy * w + dx] =
-                ((r as u32 * 299 + g as u32 * 587 + b as u32 * 114) / 1000) as u8;
+            luma[dy * w + dx] = ((r as u32 * 299 + g as u32 * 587 + b as u32 * 114) / 1000) as u8;
         }
     }
     let threshold = otsu_threshold(&luma);
@@ -944,11 +941,7 @@ pub(crate) fn otsu_threshold(luma: &[u8]) -> u8 {
     if total == 0 {
         return 128;
     }
-    let sum_all: u64 = hist
-        .iter()
-        .enumerate()
-        .map(|(v, &c)| v as u64 * c)
-        .sum();
+    let sum_all: u64 = hist.iter().enumerate().map(|(v, &c)| v as u64 * c).sum();
     let mut best_t = 128u8;
     let mut best_var = -1.0f64;
     let mut w0 = 0u64;
@@ -1059,7 +1052,11 @@ mod tests {
             }
         }
         let segs = split_row_into_cols(row_bbox, &pixels);
-        assert_eq!(segs.len(), 2, "アイコンと文字塊は広いギャップで2分割されるべき");
+        assert_eq!(
+            segs.len(),
+            2,
+            "アイコンと文字塊は広いギャップで2分割されるべき"
+        );
         // 左=アイコン塊、右=文字塊。
         assert_eq!(segs[0][0], 0, "左セグは x=0 から");
         assert!(segs[1][0] >= 20, "右セグは文字塊 (x>=20) から始まる");
@@ -1084,7 +1081,11 @@ mod tests {
             }
         }
         let segs = split_row_into_cols(row_bbox, &pixels);
-        assert_eq!(segs.len(), 1, "狭いギャップ (語間) では分割せず1件のままにすべき");
+        assert_eq!(
+            segs.len(),
+            1,
+            "狭いギャップ (語間) では分割せず1件のままにすべき"
+        );
         assert_eq!(segs[0], row_bbox);
     }
 

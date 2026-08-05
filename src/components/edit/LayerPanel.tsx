@@ -1,8 +1,7 @@
-import { convertFileSrc } from "@tauri-apps/api/core";
-
 import type { EditLayer } from "../../lib/edit/types";
 import { type SegmentationModel } from "../../lib/segmentation";
 import { EditModelGate } from "../EditModelGate";
+import { SafeImage } from "../SafeImage";
 import { InpaintTool } from "./InpaintTool";
 import { TextEditTab } from "./TextEditTab";
 
@@ -119,8 +118,8 @@ function PreviewCard({ label, path }: { label: string; path?: string }) {
     <div className="rounded-lg border border-[#303030] bg-[#101010] p-2">
       <div className="mb-2 text-[11px] font-black text-neutral-300">{label}</div>
       {path ? (
-        <img
-          src={convertFileSrc(path)}
+        <SafeImage
+          path={path}
           alt={label}
           className="h-28 w-full rounded border border-[#343434] bg-[#0b0b0b] object-contain"
         />
@@ -158,8 +157,8 @@ function LayerRow({
         onClick={onSelect}
         className="h-12 w-12 overflow-hidden rounded border border-[#343434] bg-[#0b0b0b]"
       >
-        <img
-          src={convertFileSrc(layer.imagePath)}
+        <SafeImage
+          path={layer.imagePath}
           alt=""
           className="h-full w-full object-contain"
         />

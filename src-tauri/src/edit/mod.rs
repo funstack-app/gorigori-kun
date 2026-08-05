@@ -9,31 +9,31 @@
 // 非 Windows では該当コマンドが「Windows 版のみ」を返すスタブに差し替わる
 // (commands/edit_unsupported.rs)。
 
-#[cfg(target_os = "windows")]
+#[cfg(edit_ai)]
 pub mod auto_segment;
 pub mod download;
-#[cfg(target_os = "windows")]
+#[cfg(edit_ai)]
 pub mod grab;
-#[cfg(target_os = "windows")]
+#[cfg(edit_ai)]
 pub mod human_parse;
-#[cfg(target_os = "windows")]
+#[cfg(edit_ai)]
 pub mod inpaint;
-#[cfg(target_os = "windows")]
+#[cfg(edit_ai)]
 pub mod magic_layer;
-#[cfg(all(test, target_os = "windows"))]
+#[cfg(all(test, edit_ai))]
 mod magic_layer_e2e;
-#[cfg(target_os = "windows")]
+#[cfg(edit_ai)]
 pub mod ocr;
 pub mod registry;
-#[cfg(target_os = "windows")]
+#[cfg(edit_ai)]
 pub mod runtime;
-#[cfg(target_os = "windows")]
+#[cfg(edit_ai)]
 pub mod sam2;
-#[cfg(target_os = "windows")]
+#[cfg(edit_ai)]
 pub mod sam3_text;
-#[cfg(target_os = "windows")]
+#[cfg(edit_ai)]
 pub mod segment;
 // subject_split は edit::grab::dilate_mask_pub に依存し、消費側も magic_layer だけ。
-#[cfg(target_os = "windows")]
+#[cfg(edit_ai)]
 pub mod subject_split;
 pub mod understanding;

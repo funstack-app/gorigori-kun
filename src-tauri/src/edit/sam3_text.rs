@@ -70,8 +70,8 @@ impl Sam3TextSession {
         if !tokenizer_path.exists() {
             return Err("model not downloaded: sam3-tokenizer".to_string());
         }
-        let tokenizer = Tokenizer::from_file(&tokenizer_path)
-            .map_err(|e| format!("tokenizer load: {e}"))?;
+        let tokenizer =
+            Tokenizer::from_file(&tokenizer_path).map_err(|e| format!("tokenizer load: {e}"))?;
 
         Ok(Self {
             vision: runtime.get_session(&vision_spec).await?,
@@ -173,8 +173,11 @@ impl Sam3TextSession {
             .map_err(|e| format!("attn tensor2: {e}"))?;
         let (pred_masks, pred_logits) = {
             let mut decoder = self.decoder.lock().await;
-            let expected: Vec<String> =
-                decoder.inputs().iter().map(|i| i.name().to_string()).collect();
+            let expected: Vec<String> = decoder
+                .inputs()
+                .iter()
+                .map(|i| i.name().to_string())
+                .collect();
             let mut feed: Vec<(String, ort::value::Value)> = Vec::new();
             for (name, idx) in [
                 ("fpn_hidden_state_0", 0usize),
@@ -194,9 +197,7 @@ impl Sam3TextSession {
             if expected.iter().any(|n| n == "attention_mask") {
                 feed.push(("attention_mask".to_string(), attn_tensor.into()));
             }
-            let outputs = decoder
-                .run(feed)
-                .map_err(|e| format!("decoder run: {e}"))?;
+            let outputs = decoder.run(feed).map_err(|e| format!("decoder run: {e}"))?;
             // 出力順: pred_masks [1,200,288,288] / pred_boxes [1,200,4] / pred_logits [1,200]
             let (mask_shape, mask_data) = outputs[0]
                 .try_extract_tensor::<f32>()
@@ -222,10 +223,7 @@ impl Sam3TextSession {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        let (mh, mw) = (
-            pred_masks.shape[2] as u32,
-            pred_masks.shape[3] as u32,
-        );
+        let (mh, mw) = (pred_masks.shape[2] as u32, pred_masks.shape[3] as u32);
         let plane = (mh * mw) as usize;
         let mut detections = Vec::new();
         for &qi in order.iter().take(MAX_INSTANCES_PER_WORD) {
@@ -290,7 +288,11 @@ impl Sam3TextSession {
 /// Sam3ImageProcessor 準拠の前処理: 1008x1008 bilinear + (x/255 - 0.5)/0.5、CHW。
 fn preprocess(img: &image::DynamicImage) -> Vec<f32> {
     let resized = img
-        .resize_exact(INPUT_SIZE, INPUT_SIZE, image::imageops::FilterType::Triangle)
+        .resize_exact(
+            INPUT_SIZE,
+            INPUT_SIZE,
+            image::imageops::FilterType::Triangle,
+        )
         .to_rgb8();
     let plane = (INPUT_SIZE * INPUT_SIZE) as usize;
     let mut out = vec![0f32; plane * 3];
