@@ -78,7 +78,9 @@ jobs:
           def find_one(pat, anti=None):
               xs = [x for x in sorted(glob.glob(str(p / pat))) if not (anti and anti in x)]
               assert len(xs) == 1, f"{pat}: {xs}"
-              return os.path.basename(xs[0])
+              # GitHub はアップロード時に空白をドットへ正規化する。手元名のまま manifest に
+              # 書くと URL が 404 になる (2026-08-05/06 に二夜連続で実害)。生成時点で合わせる。
+              return os.path.basename(xs[0]).replace("GORI GORI_", "GORI.GORI_")
           win = find_one("*setup*.exe", anti="compat")
           winc = find_one("*compat*.exe")
           d = {"version": VER, "notes": f"GORI GORI KUN v{VER}", "pub_date": pub, "platforms": {
