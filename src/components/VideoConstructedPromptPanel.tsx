@@ -5,11 +5,13 @@ import { higgsfieldMcp, type HiggsfieldMcpCostArgs } from "../lib/ipc";
 import { paramsToVideoArgs, useVideoSceneGeneration } from "../lib/scene/useVideoSceneGeneration";
 import { resolveImageMentions } from "../lib/scene/resolveImageMentions";
 import { buildVideoScenePromptJson } from "../lib/scene/buildVideoScenePrompt";
+import type { VideoPromptJson } from "../lib/scene/buildPromptJson";
 import {
-  countPromptJsonElements,
-  stringifyPromptJson,
-} from "../lib/scene/buildPromptJson";
-import { refineVideoPrompt } from "../lib/scene/refinePrompt";
+  stringifyPromptByFormat,
+  type PromptFormat,
+} from "../lib/scene/promptFormat";
+import { refineVideoInput } from "../lib/scene/refinePrompt";
+import { useRefineFormat } from "../lib/store/refineFormat";
 import { useToasts } from "../lib/store/toasts";
 import { useAccounts } from "../lib/store/accounts";
 import { useComposer, type Reference } from "../lib/store/composer";
@@ -23,6 +25,7 @@ import {
   ALL_VIDEO_ASPECT_RATIOS,
   VIDEO_MODELS,
   modelSupportsAspect,
+  videoModelSpecItems,
   type VideoModelDefinition,
   type VideoModelParam,
 } from "../lib/videoModels";
@@ -136,6 +139,9 @@ export function VideoConstructedPromptPanel() {
   const setDuration = useVideoGen((s) => s.setDuration);
   const aspectRatio = useVideoGen((s) => s.aspectRatio);
   const pushToast = useToasts((s) => s.push);
+  /** 「AIで整える」の出力形式。画像と動画で独立に記憶する。 */
+  const format = useRefineFormat((s) => s.video);
+  const setFormat = useRefineFormat((s) => s.setVideo);
   const setAspectRatio = useVideoGen((s) => s.setAspectRatio);
   const count = useVideoGen((s) => s.count);
   const setCount = useVideoGen((s) => s.setCount);
@@ -220,31 +226,82 @@ export function VideoConstructedPromptPanel() {
     () => buildVideoScenePromptJson(scene, { aspectRatio, durationSeconds: duration }),
     [scene, aspectRatio, duration],
   );
-  const videoElementCount = countPromptJsonElements(videoPromptJson);
+  /** 表示中のテキスト。これが「整える対象」の正 (override 設計と一致させる)。 */
+  const displayed = (isOverriding ? draft : generatedPrompt).trim();
 
   /**
-   * 「AIで整える」— 動画用のJSONへ整えて textarea に入れる。
-   * 画像とは別スキーマ (subject_motion / camera_motion / duration_seconds 等)。
+   * 直前の整形結果。形式だけ切り替えたいときに LLM を呼ばず再シリアライズする。
+   * 永続化しない (タブ離脱で消えてよい)。
+   */
+  const lastRefinedRef = useRef<{
+    json: VideoPromptJson;
+    texts: Record<PromptFormat, string>;
+  } | null>(null);
+
+  /**
+   * 「AIで整える」— 動画用の構造化テキストへ整えて textarea に入れる。
+   * 画像とは別スキーマ (subject_motion / camera_motion / duration_seconds /
+   * timeline 等)。入力ソースは問わない (手入力・企画由来も整う)。
    * override として入るので「自動に戻す」で元に戻せる。
    */
   const refineVideoPromptWithAi = async () => {
-    if (refining || videoElementCount === 0) return;
+    if (refining) return;
+    if (!displayed) {
+      pushToast({
+        kind: "info",
+        text: "整える内容がありません。左で要素を選ぶか、プロンプトを入力してください。",
+        ttlMs: 3000,
+      });
+      return;
+    }
+
+    // 直前の整形結果がそのまま表示されているなら、形式変換だけで済ませる。
+    const last = lastRefinedRef.current;
+    if (
+      last &&
+      (displayed === last.texts.json.trim() || displayed === last.texts.yaml.trim())
+    ) {
+      onChangeDraft(last.texts[format]);
+      pushToast({ kind: "info", text: "形式を変換しました。", ttlMs: 3000 });
+      return;
+    }
+
     setRefining(true);
     try {
-      const result = await refineVideoPrompt(videoPromptJson);
-      const text = stringifyPromptJson(result.json);
-      if (!text) {
+      const result = await refineVideoInput(
+        isOverriding
+          ? { kind: "text", text: draft }
+          : { kind: "structured", json: videoPromptJson },
+      );
+      if (result.json === null) {
+        pushToast({
+          kind: "error",
+          text: `AIの整形は使えませんでした（プロンプトはそのままです）: ${result.error ?? ""}`,
+          ttlMs: 5000,
+        });
+        return;
+      }
+      const texts: Record<PromptFormat, string> = {
+        json: stringifyPromptByFormat(result.json, "json"),
+        yaml: stringifyPromptByFormat(result.json, "yaml"),
+      };
+      if (!texts[format]) {
         pushToast({ kind: "info", text: "整える要素がありません。", ttlMs: 3000 });
         return;
       }
-      onChangeDraft(text);
-      pushToast({
-        kind: result.refined ? "success" : "info",
-        text: result.refined
-          ? "プロンプトを整えました。"
-          : `AIの整形は使えませんでした（選んだ内容をJSONにしました）: ${result.error ?? ""}`,
-        ttlMs: result.refined ? 3000 : 5000,
-      });
+      lastRefinedRef.current = { json: result.json, texts };
+      onChangeDraft(texts[format]);
+      if (result.refined) {
+        pushToast({ kind: "success", text: "プロンプトを整えました。", ttlMs: 3000 });
+      } else if (result.converted) {
+        pushToast({ kind: "info", text: "形式を変換しました。", ttlMs: 3000 });
+      } else {
+        pushToast({
+          kind: "info",
+          text: `AIの整形は使えませんでした（選んだ内容を${format === "yaml" ? "YAML" : "JSON"}にしました）: ${result.error ?? ""}`,
+          ttlMs: 5000,
+        });
+      }
     } catch (err) {
       pushToast({
         kind: "error",
@@ -367,12 +424,22 @@ export function VideoConstructedPromptPanel() {
             「AIで整える」— 要素別編集の左 (STΛCK指示 2026-07-25)。
             動画は画像と別スキーマ (時間軸の軸を持つ) の JSON へ整える。
           */}
+          <select
+            value={format}
+            onChange={(e) => setFormat(e.target.value as PromptFormat)}
+            title="「AIで整える」の出力形式を選びます"
+            aria-label="整形の出力形式"
+            className="h-[26px] rounded border border-[#343434] bg-[#101010] px-1.5 text-[10px] font-bold text-neutral-400 outline-none transition hover:border-pink-400 focus:border-pink-500"
+          >
+            <option value="json">JSON</option>
+            <option value="yaml">YAML</option>
+          </select>
           <button
             type="button"
             onClick={() => void refineVideoPromptWithAi()}
-            disabled={refining || videoElementCount === 0}
+            disabled={refining || displayed.length === 0}
             className="flex items-center gap-1.5 rounded border border-[#343434] bg-[#101010] px-2 py-1 text-[10px] font-bold text-neutral-400 transition hover:border-pink-400 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
-            title="選んだ要素を、動画生成AIが読みやすい構造化プロンプト(JSON)に整えます。要素は足しません"
+            title="選んだ要素や入力したプロンプトを、動画生成AIが読みやすい構造化プロンプト（JSON / YAML）に整えます。動画は時間軸に沿って整えます。要素は足しません"
           >
             <SparkleIcon />
             <span>{refining ? "整えています…" : "AIで整える"}</span>
@@ -790,6 +857,34 @@ function VideoSettingsModal({
   onToggleCompareModel: (id: VideoModelDefinition["id"]) => void;
 }) {
   const compareMode = compareModelIds.length >= 2;
+  const pushToast = useToasts((s) => s.push);
+
+  /**
+   * B-7 (2026-07-30): モデル追加の要望テンプレをコピーする。アプリ内に要望
+   * フォーム/外部 URL が無いため、送り先は「ユーザーがアプリを受け取った窓口」
+   * に委ねる (存在しない URL を作らない)。
+   */
+  function copyModelRequestTemplate() {
+    const text = [
+      "【GORI GORI KUN 動画モデルの要望】",
+      "使いたいモデル: ",
+      "作りたいもの・用途: ",
+      `いま使えるモデル: ${VIDEO_MODELS.map((m) => m.label).join(" / ")}`,
+    ].join("\n");
+    void navigator.clipboard.writeText(text).then(
+      () => {
+        pushToast({
+          kind: "success",
+          text: "要望テンプレをコピーしました。いつもの窓口に貼って送ってください。",
+          ttlMs: 4000,
+        });
+      },
+      () => {
+        pushToast({ kind: "error", text: "コピーに失敗しました。", ttlMs: 4000 });
+      },
+    );
+  }
+
   // モデル変更でアスペクト比が自動補正されたときの通知 (store 由来)。
   // モーダルを閉じたら通知を消す (次に開いたとき古い通知が残らないように)。
   const aspectAdjustment = useVideoGen((s) => s.lastAspectAdjustment);
@@ -889,6 +984,37 @@ function VideoSettingsModal({
                 </option>
               ))}
             </select>
+          </div>
+
+          {/* B-7 (2026-07-30): 説明はツールチップだけだと気づかれないため常時表示。
+              モデルの追加方針も見える化する (裏付けのない「近日追加」は書かない)。 */}
+          <p className="text-[10px] leading-relaxed text-neutral-500">
+            {model.description}
+          </p>
+          {/* 6cn (B-7 追補): 対応状況は VIDEO_MODELS 定義から決定論で表示 (手書きと二重管理しない) */}
+          <div className="space-y-1 rounded-md border border-[#262626] bg-[#101010] p-2">
+            {videoModelSpecItems(model).map((item) => (
+              <div key={item.label} className="flex items-baseline gap-2">
+                <span className="w-[72px] shrink-0 text-[9px] font-black tracking-wide text-neutral-600">
+                  {item.label}
+                </span>
+                <span className="text-[10px] font-bold leading-snug text-neutral-300">
+                  {item.value}
+                </span>
+              </div>
+            ))}
+          </div>
+          <div className="space-y-1 rounded-md border border-[#262626] bg-[#101010] p-2">
+            <p className="text-[10px] leading-relaxed text-neutral-500">
+              使えるモデルはアプリの更新で追加されます。使いたいモデルがあれば、下のボタンで要望テンプレをコピーして、いつもの窓口（コミュニティや配布元）に貼ってください。
+            </p>
+            <button
+              type="button"
+              onClick={copyModelRequestTemplate}
+              className="rounded-md border border-[#343434] bg-[#181818] px-2 py-1 text-[10px] font-bold text-neutral-300 transition hover:border-pink-500/40 hover:text-pink-200"
+            >
+              モデルの要望をコピー
+            </button>
           </div>
 
           {/* 比較生成 (A案: 各モデルをデフォルト設定で1本ずつ並べる) */}

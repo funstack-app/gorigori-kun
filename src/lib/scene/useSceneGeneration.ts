@@ -5,6 +5,7 @@ import {
   type SceneGenerationCount,
   type SceneGenerationResult,
 } from "./generate";
+import { resolveImageMentions } from "./resolveImageMentions";
 import { classifyFailures } from "./retryClassify";
 import type { SceneState } from "./types";
 import { useActiveProject } from "../store/activeProject";
@@ -199,7 +200,22 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
   ): Promise<SceneGenerationResult | null> => {
     if (generationLockRef.current) return null;
 
-    const prompt = effectivePrompt.trim();
+    // @imgN メンションを解決する。動画側 (useVideoSceneGeneration) と同じ扱いに
+    // 揃える: 本文から @imgN を取り除き、指定された参照画像 (登場順・重複排除) を
+    // 入力として優先採用する。メンションが無ければ参照ラック全部にフォールバック。
+    //
+    // 旧実装は画像側だけ除去しておらず、`@img1 の服装で` がそのままモデルへ
+    // 届いていた (動画側は除去済み)。@imgN は参照画像を指す UI 記法であって
+    // モデルへ送る文字ではないため、動画側の挙動が正しい (2026-08-05)。
+    const mentionResult = resolveImageMentions(
+      effectivePrompt,
+      composerReferences,
+    );
+    const prompt = mentionResult.cleanedPrompt.trim();
+    const effectiveRefPaths =
+      mentionResult.mentioned.length > 0
+        ? mentionResult.mentioned.map((m) => m.path)
+        : refImagePaths;
     if (!prompt) {
       setStatus({ kind: "error", message: "プロンプトが空です" });
       return null;
@@ -224,7 +240,7 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
       useBatches.getState().startBatch({
         batchId: tempId,
         prompt,
-        references: refImagePaths.map((path) => ({
+        references: effectiveRefPaths.map((path) => ({
           path,
           name: basename(path),
         })),
@@ -286,7 +302,7 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
             : compareMode
               ? `${selectedHiggsfieldModels.length} models compared`
               : (selectedHiggsfield?.displayName ?? "image_gen"),
-          refImagePaths,
+          refImagePaths: effectiveRefPaths,
           count: effectiveCount,
           kind: "batch",
         })
@@ -351,8 +367,8 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
           model: selectedModel,
           effort: selectedEffort,
           promptOverride: prompt,
-          refImagePaths,
-          maskPaths: refImagePaths.map(() => ""),
+          refImagePaths: effectiveRefPaths,
+          maskPaths: effectiveRefPaths.map(() => ""),
           turnId: batchDbTurnId ?? undefined,
           // Magnific が選ばれていたら最優先 (higgsfield/codex は使わない)。
           // 1件=単一生成、2件以上=比較生成。
@@ -584,6 +600,7 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
   }, [
     effectivePrompt,
     refImagePaths,
+    composerReferences,
     count,
     scene,
     cwd,

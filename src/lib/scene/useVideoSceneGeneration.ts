@@ -1,7 +1,13 @@
 import { useCallback, useMemo, useState } from "react";
 import { buildVideoScenePrompt } from "./buildVideoScenePrompt";
 import { resolveImageMentions } from "./resolveImageMentions";
+import { resolveVideoRefPaths } from "./resolveVideoRefPaths";
 import { higgsfieldMcp, type HiggsfieldVideoParams } from "../ipc";
+import {
+  HIGGSFIELD_REAUTH_MESSAGE,
+  isHiggsfieldAuthError,
+  toHiggsfieldAuthMessage,
+} from "../higgsfieldAuthError";
 import { useActiveProject } from "../store/activeProject";
 import { useAuth } from "../store/auth";
 import { useBatches } from "../store/batches";
@@ -173,12 +179,20 @@ export function useVideoSceneGeneration(): UseVideoSceneGenerationReturn {
   );
   const compareMode = compareModels.length >= 2;
 
-  // i2v 元画像: 動画タブの sourceImagePath を優先。無ければ参照ラックの先頭。
+  // i2v 元画像 + 参照ラックの両方を渡す。元画像は「動きの起点」、参照ラックは
+  // 「同一性の指定 (キャラ)」で役割が違うため、どちらかを捨てるのは誤り。
+  // 旧実装は sourceImagePath があると参照ラックを丸ごと捨てており、キャラ参照が
+  // 属性テキストでしか効かなくなっていた (詳細と MCP 側の無制限の根拠は
+  // resolveVideoRefPaths.ts のドキュメントコメント)。
   const composerReferences = useComposer((s) => s.references);
-  const refImagePaths = useMemo(() => {
-    if (sourceImagePath) return [sourceImagePath];
-    return composerReferences.map((r) => r.path);
-  }, [sourceImagePath, composerReferences]);
+  const refImagePaths = useMemo(
+    () =>
+      resolveVideoRefPaths({
+        sourceImagePath,
+        referencePaths: composerReferences.map((r) => r.path),
+      }).paths,
+    [sourceImagePath, composerReferences],
+  );
 
   const promptOverride = useScenePromptOverride((s) => s.value);
   const setPromptOverride = useScenePromptOverride((s) => s.set);
@@ -377,8 +391,13 @@ export function useVideoSceneGeneration(): UseVideoSceneGenerationReturn {
         // 理由が取れない時だけ一般的な再試行ガイドにフォールバックする。
         const reasons = (result.errors ?? []).filter((r) => r && r.trim().length > 0);
         const uniqueReasons = Array.from(new Set(reasons));
-        const message =
-          uniqueReasons.length > 0
+        // p20 (2026-08-04): Higgsfield の認証切れ (invalid_grant 等) は生 RPC 文字列を
+        // 出さず、再接続導線つきの日本語に差し替える。プロンプトを変えても直らない
+        // ので、他の失敗と同じ再試行ガイドを出すのは誤り。認証切れ以外は従来どおり。
+        const authCheck = toHiggsfieldAuthMessage(uniqueReasons);
+        const message = authCheck.isAuthError
+          ? (authCheck.message as string)
+          : uniqueReasons.length > 0
             ? "動画生成に失敗しました。\n\n理由:\n" + uniqueReasons.join("\n\n")
             : "動画生成に失敗しました。\n" +
               "・モデル・尺・アスペクト比を変えて再試行してください\n" +
@@ -416,10 +435,15 @@ export function useVideoSceneGeneration(): UseVideoSceneGenerationReturn {
     } catch (error) {
       useBatches.getState().removeBatch(batchId);
       const errorMessage = String(error);
-      setStatus({ kind: "error", message: `動画生成に失敗しました: ${errorMessage}` });
+      // p20 (2026-08-04): 例外経路でも認証切れは生文字列を出さない (上の失敗理由
+      // 経路と同じ扱い)。トークン更新は MCP 呼び出し中に例外として上がることもある。
+      const message = isHiggsfieldAuthError(errorMessage)
+        ? HIGGSFIELD_REAUTH_MESSAGE
+        : `動画生成に失敗しました: ${errorMessage}`;
+      setStatus({ kind: "error", message });
       useToasts.getState().push({
         kind: "error",
-        text: `動画生成に失敗しました\n${errorMessage}`,
+        text: message,
         ttlMs: 12000,
       });
       console.error("[useVideoSceneGeneration] generate failed:", error);
