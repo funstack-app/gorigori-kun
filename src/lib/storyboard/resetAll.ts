@@ -3,6 +3,7 @@ import { useSceneStore } from "../store/scene";
 import { useScenePromptOverride } from "../store/scenePrompt";
 import { useSkillMode } from "../store/skillMode";
 import { useStoryboardRun } from "../store/storyboardRun";
+import { useVideoStory } from "../store/videoStory";
 
 /**
  * ストーリーカット関連の状態を全てリセットする。
@@ -41,4 +42,17 @@ export function resetStoryboardSession(): void {
   //  案件を移るだけで動画作業を捨てる意図がないため。区別は意図的。)
   useSceneStore.getState().resetScene();
   useScenePromptOverride.getState().clear();
+
+  // ストーリー動画キューも畳む (2026-08-05)。
+  //
+  // キューのカットは「この絵コンテのカット」そのもの。絵コンテを丸ごと捨てた後に
+  // キューだけ残ると、元データが存在しないカットが動画タブに居座り、しかも
+  // 絵コンテ側からは消す手段が無くなる (実機報告「シーンから消せないでずっと残る」)。
+  //
+  // これは STΛCK 確定の「スキル切替では消さない」とは別物。あちらは素材を足しに
+  // 行って戻る往復のための保持で、こちらはユーザーが明示的に元データを捨てた場合。
+  // 暗黙には消さない / 明示のリセットにだけ追従する、が境界。
+  //
+  // 走行中の MCP コールは中断できないので abortAndClear で投入だけ止める。
+  useVideoStory.getState().abortAndClear();
 }

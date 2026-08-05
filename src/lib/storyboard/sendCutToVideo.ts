@@ -1,6 +1,7 @@
 import { useScenePromptOverride } from "../store/scenePrompt";
 import { useToasts } from "../store/toasts";
 import { useVideoGen } from "../store/videoGen";
+import { hasGeneratedWork, useVideoStory } from "../store/videoStory";
 import { useWorkspace } from "../store/workspace";
 
 /**
@@ -52,19 +53,26 @@ export function sendCutToVideoTab(input: SendCutToVideoInput): void {
 }
 
 export type SendCutsBatchInput = {
-  /** 動画化するカット (確定順)。先頭が i2v 元画像にセットされる。 */
-  cuts: Array<{ imagePath: string; prompt: string; label: string }>;
+  /** 動画化するカット (確定順)。この順序がそのまま結合順になる。 */
+  cuts: Array<{
+    cutId: string;
+    imagePath: string;
+    prompt: string;
+    label: string;
+    durationSeconds: number;
+  }>;
 };
 
 /**
- * 確定カットを一括で動画タブへ送る (B5)。
+ * 確定カットを一括でストーリー動画キューへ積む (B5 → uy6 Wave 3)。
  *
- * 動画タブの i2v 元画像は 1 枚なので、先頭カットを元画像にセットしつつ、
- * 全カット分の i2v プロンプトをクリップボードへコピーする。ユーザーは
- * 動画タブで 1 カットずつ画像を差し替えながら、コピーしたプロンプトを
- * 貼り付けて生成できる (プロンプトは自動設定 + 手動コピペの両対応)。
+ * 旧実装は「先頭カットだけ i2v 元画像にセット + 全カットのプロンプトを
+ * クリップボードへコピー」で、ユーザーが 1 カットずつ画像を差し替えながら
+ * 手動生成する前提だった。uy6 でキュー方式 (カットごとに自動 i2v 生成 →
+ * ffmpeg で 1 本に結合) に置き換えたため、クリップボード導線は廃止した
+ * (design-video-story.md §1-B)。
  *
- * 返り値: クリップボードへコピーしたカット数。
+ * 返り値: キューへ積んだカット数。積まなかった (ユーザーが取り消した) 場合は 0。
  */
 export async function sendCutsBatchToVideoTab(input: SendCutsBatchInput): Promise<number> {
   const cuts = input.cuts.filter((c) => c.imagePath);
@@ -77,28 +85,50 @@ export async function sendCutsBatchToVideoTab(input: SendCutsBatchInput): Promis
     return 0;
   }
 
-  const first = cuts[0];
-  const video = useVideoGen.getState();
-  video.setSourceImage(first.imagePath);
-  if (first.prompt.trim().length > 0) {
-    // 出自 "i2v" で別スキル切替時の clear から保護 (R-1)。
-    useScenePromptOverride.getState().set(first.prompt.trim(), "i2v");
+  // setQueue は全置換なので、生成済みのカット動画・結合済み動画があると
+  // 黙って捨てることになる (再生成は有料枠を再消費する)。捨てる前に必ず聞く。
+  // 新しいモーダルは足さず、既存の破壊的操作と同じ window.confirm に揃える
+  // (ActiveProjectSelector / PresetsDrawer / projects.ts と同型)。
+  const story = useVideoStory.getState();
+  if (hasGeneratedWork(story)) {
+    const doneCount = story.cuts.filter((c) => c.status === "done").length;
+    const message =
+      `ストーリー動画キューに生成済みの動画が ${doneCount} 本あります。\n` +
+      "積み直すとこの生成結果は失われ、作り直すには再度生成が必要です。\n\n" +
+      "積み直しますか？";
+    let ok = false;
+    try {
+      ok = window.confirm(message);
+    } catch {
+      // confirm が使えない環境 (jsdom 等) では捨てない側に倒す。
+      ok = false;
+    }
+    if (!ok) {
+      useToasts.getState().push({
+        kind: "info",
+        text: "積み直しをやめました。今のキューはそのままです。",
+        ttlMs: 4000,
+      });
+      return 0;
+    }
   }
 
-  // 全カット分の i2v プロンプトをクリップボードへ (手動コピペ用)。
-  const clipboardText = cuts.map((c) => `# ${c.label}\n${c.prompt}`).join("\n\n");
-  try {
-    await navigator.clipboard.writeText(clipboardText);
-  } catch (err) {
-    console.warn("[sendCutsBatchToVideoTab] clipboard write failed:", err);
-  }
+  useVideoStory.getState().setQueue(
+    cuts.map((c, i) => ({
+      cutId: c.cutId,
+      order: i + 1,
+      imagePath: c.imagePath,
+      prompt: c.prompt,
+      requestedSeconds: c.durationSeconds,
+    })),
+  );
 
   // FB#1 修正: スキルモードは抜けず、ストーリーモード内の動画タブへ切り替える。
   useWorkspace.getState().setActiveTab("video");
 
   useToasts.getState().push({
     kind: "success",
-    text: `${cuts.length} カットを動画タブへ送りました (先頭を元画像にセット、全カットのプロンプトをコピー済み)。`,
+    text: `${cuts.length} カットをストーリー動画キューにセットしました。`,
     ttlMs: 4500,
   });
   return cuts.length;
