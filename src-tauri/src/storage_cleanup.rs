@@ -17,6 +17,10 @@
 //! 画像ペイロードのみ除去し、会話・プロンプトは永久保存する。
 //!
 //! 絶対に触らないもの:
+//! - **~/Library/WebKit/<id>/WebsiteData/ (localStorage の実体)**
+//!   2026-08-06: ここを消していたため実ユーザーのプリセット30体が消えた。
+//!   localStorage は presets/scene3d/motions の冗長バックアップで、ファイル正本の
+//!   作成に失敗したときの唯一の生き残りになる。掃除が消してよいものではない。
 //! - ~/Pictures/GORI GORI/ (ユーザーの作品データ)
 //! - ~/Desktop/ (ユーザーデータ)
 //! - sessions のファイル・会話・プロンプト (画像ペイロード以外は**消さない**)
@@ -42,6 +46,21 @@ const SWEEP_INTERVAL_HOURS: u64 = 24;
 const DATA_IMAGE_PREFIX: &[u8] = b"data:image/";
 const BASE64_MARKER: &[u8] = b";base64,";
 const STRIPPED_PAYLOAD: &[u8] = b"[stripped]";
+
+/// 画像ペイロード専用フィールドの名前 (2026-08-06 監査指摘)。
+///
+/// **なぜ限定が要るか**: 従来は「JSON文字列の中にある `data:image/...;base64,`」を
+/// 位置だけで判定しており、**どのフィールドに入っているかを見ていなかった**。
+/// そのため会話ログ本文 (`text` 等) がたまたま画像URLを含んでいると、
+/// ユーザーの発言やツール出力の中身まで `[stripped]` に書き換わる。
+///
+/// 実測 (2026-08-06、実 rollout 1666ファイル走査): `data:image/` を含む文字列 909 件のうち
+/// 908 件は `image_url`、**1 件は `text`** (ツール出力の本文が `{"image_url":"data:image/..."}`
+/// という文字列を引用していたケース) だった。後者は掃除対象ではない = 本文の改変にあたる。
+///
+/// ここに載せるのは「その値が画像ペイロードそのもの」であるフィールドだけ。
+/// 本文・説明・ログを載せてはいけない。
+const IMAGE_PAYLOAD_FIELDS: &[&[u8]] = &[b"image_url", b"imageUrl"];
 const STRIP_STATE_FILE: &str = "rollout-image-strip-v1.json";
 
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -151,14 +170,15 @@ pub async fn run_cleanup() -> Result<CleanupReport, String> {
         // 掃除も容量表示も常に空振りしていた (実体 WebKit/app.codexframefactory は 4.3MB)。
         // identifier を正本 (secrets::SERVICE_NAME) から組み立てて再発を防ぐ。
         // 旧名は空ディレクトリとして残っている環境があるため候補に残す (無害)。
-        let service = crate::secrets::SERVICE_NAME;
-        for rel in [
-            format!("Library/Caches/{service}"),
-            format!("Library/WebKit/{service}"),
-            "Library/Caches/gori-gori-kun".to_string(),
-            "Library/WebKit/gori-gori-kun".to_string(),
-        ] {
-            let dir = home.join(rel);
+        //
+        // 2026-08-06 重大修正 (実ユーザーのプリセット30体消失): `Library/WebKit/<id>` を
+        // 丸ごと remove_dir_contents していたため、**localStorage の実体を掃除が消していた**。
+        // localStorage は presets / scene3d / motions の冗長バックアップであり、
+        // ファイル正本の作成に失敗した初回移行時の**唯一の生き残り**になる。
+        // 掃除がそのバックアップを消す = 自分のバックアップを自分で消す構造だった。
+        // したがって WebKit 配下は「キャッシュだけ」を名指しで対象にし、
+        // LocalStorage / WebsiteData には**絶対に触らない** (webkit_cache_candidates 参照)。
+        for dir in webkit_cache_candidates(&home) {
             if dir.exists() {
                 match remove_dir_contents(&dir).await {
                     Ok((_, bytes)) => report.cache_bytes_freed += bytes,
@@ -194,6 +214,54 @@ async fn remove_file_if_exists(path: &std::path::Path) -> u64 {
     } else {
         0
     }
+}
+
+/// WebView 領域のうち、**掃除してよいディレクトリ名**のホワイトリスト。
+///
+/// ここに挙げた名前だけを消す。`Library/WebKit/<id>` を丸ごと消してはならない。
+/// 直下には `WebsiteData/` (localStorage / IndexedDB の実体) が同居しており、
+/// 2026-08-06 の実ユーザー被害 (プリセット30体消失) はこれを消したことが原因。
+const WEBKIT_CACHE_SUBDIRS: &[&str] = &["NetworkCache", "MediaCache", "ResourceLoadStatistics"];
+
+/// 掃除対象から**恒久的に除外**するディレクトリ名 (localStorage の実体)。
+///
+/// なぜ定数として持つか: 「WebsiteData を消さない」は実装の暗黙知にすると
+/// 次の改修で再び消える (実際 b1371c5 でそうなった)。名前で持ち、テストで固定する。
+const WEBKIT_PROTECTED_SUBDIRS: &[&str] = &["WebsiteData", "LocalStorage", "Databases", "IndexedDB"];
+
+/// 掃除対象の WebView キャッシュディレクトリ候補を返す。
+///
+/// 契約: 返すパスは必ず `WEBKIT_CACHE_SUBDIRS` のいずれかで終わるか、
+/// `Library/Caches/` 配下 (OS が再生成する純キャッシュ) のどちらかであり、
+/// `WEBKIT_PROTECTED_SUBDIRS` を含むパスは**絶対に返さない**。
+/// この契約は `webkit_candidates_never_include_localstorage` テストが固定する。
+fn webkit_cache_candidates(home: &std::path::Path) -> Vec<PathBuf> {
+    let service = crate::secrets::SERVICE_NAME;
+    let mut out: Vec<PathBuf> = Vec::new();
+
+    // Library/Caches 配下は OS が再生成する純キャッシュなので丸ごとでよい
+    // (localStorage はここには無い。実体は Library/WebKit/<id>/WebsiteData)。
+    for id in [service, "gori-gori-kun"] {
+        out.push(home.join("Library/Caches").join(id));
+    }
+
+    // Library/WebKit 配下は localStorage と同居するため、キャッシュ名を名指しする。
+    for id in [service, "gori-gori-kun"] {
+        let webkit_root = home.join("Library/WebKit").join(id);
+        for sub in WEBKIT_CACHE_SUBDIRS {
+            out.push(webkit_root.join(sub));
+        }
+    }
+
+    // 二重の安全弁: 万一上の組み立てが将来壊れても、保護名を含むパスは落とす。
+    out.retain(|p| {
+        !p.components().any(|c| {
+            WEBKIT_PROTECTED_SUBDIRS
+                .iter()
+                .any(|protected| c.as_os_str() == *protected)
+        })
+    });
+    out
 }
 
 /// 旧 ambient `~/.codex`。sessions の後方互換軽量化とログ掃除に使う。
@@ -492,6 +560,13 @@ fn strip_image_payloads_from_line(line: &[u8]) -> Option<(Vec<u8>, u64)> {
             search_from = mime_start;
             continue;
         }
+        // **画像ペイロード専用フィールドの値でなければ触らない** (2026-08-06 / V6)。
+        // 会話ログ本文が画像URLを含むだけの行を書き換えると、ユーザーの発言や
+        // ツール出力そのものを改変することになる (実測で 1 件該当。定数の doc 参照)。
+        if !is_image_payload_field_value(line, prefix_start) {
+            search_from = mime_start;
+            continue;
+        }
         let mut marker_start = mime_start;
         while marker_start < line.len() && is_safe_mime_byte(line[marker_start]) {
             marker_start += 1;
@@ -535,6 +610,69 @@ fn is_valid_json_line(line: &[u8]) -> bool {
 
 fn is_safe_mime_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'+' | b'_' | b'-')
+}
+
+/// `prefix_start` (= `data:image/` の開始位置) が、**画像ペイロード専用フィールドの
+/// 値の先頭**にあるかを判定する (2026-08-06 監査指摘 / V6)。
+///
+/// 満たすべき形: `"<whitelisted key>"` `:` (空白可) `"` `data:image/...`
+/// つまり `data:image/` はその文字列値の**先頭**でなければならない。
+///
+/// これにより次を弾く:
+///   - 会話ログ本文 (`"text":"... data:image/... ..."`) — 値の途中に現れるため不一致
+///   - 本文が画像URLを引用した JSON 断片 (`"text":"{\"image_url\":\"data:image/...\"}"`)
+///     — 直前の引用符がエスケープ済み (`\"`) なので、キーの終端引用符として認めない
+///   - ホワイトリスト外のフィールド (`url` / `note` 等)
+fn is_image_payload_field_value(line: &[u8], prefix_start: usize) -> bool {
+    // 値の開始引用符は data:image/ の直前でなければならない。
+    if prefix_start == 0 {
+        return false;
+    }
+    let quote_pos = prefix_start - 1;
+    if line[quote_pos] != b'"' {
+        return false;
+    }
+    // その引用符自体がエスケープされていないこと (本文中に引用された JSON 断片を弾く)。
+    let mut backslashes = 0usize;
+    let mut i = quote_pos;
+    while i > 0 && line[i - 1] == b'\\' {
+        backslashes += 1;
+        i -= 1;
+    }
+    if backslashes % 2 != 0 {
+        return false;
+    }
+
+    // 開始引用符の手前を遡り、`:` と空白を読み飛ばしてキーの終端引用符に到達する。
+    let mut cursor = quote_pos;
+    // 空白
+    while cursor > 0 && line[cursor - 1].is_ascii_whitespace() {
+        cursor -= 1;
+    }
+    // コロン
+    if cursor == 0 || line[cursor - 1] != b':' {
+        return false;
+    }
+    cursor -= 1;
+    // 空白
+    while cursor > 0 && line[cursor - 1].is_ascii_whitespace() {
+        cursor -= 1;
+    }
+    // キーの終端引用符
+    if cursor == 0 || line[cursor - 1] != b'"' {
+        return false;
+    }
+    let key_end = cursor - 1;
+
+    IMAGE_PAYLOAD_FIELDS.iter().any(|field| {
+        let need = field.len();
+        // `"<field>"` の形で終端引用符の直前に一致するか。
+        if key_end < need + 1 {
+            return false;
+        }
+        let key_start = key_end - need;
+        &line[key_start..key_end] == *field && line[key_start - 1] == b'"'
+    })
 }
 
 fn is_inside_json_string(line: &[u8], position: usize) -> bool {
@@ -743,6 +881,50 @@ async fn dir_size_recursive(path: &std::path::Path) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::strip_image_payloads_from_line;
+    use super::{webkit_cache_candidates, WEBKIT_PROTECTED_SUBDIRS};
+    use std::path::PathBuf;
+
+    /// S1 の牙: 掃除候補に localStorage の実体が**一度も**現れないことを固定する。
+    ///
+    /// 壊し方の実証 (2026-08-06 実施): webkit_cache_candidates の retain による
+    /// 除外を消し、WEBKIT_CACHE_SUBDIRS に "WebsiteData" を足すと、このテストは
+    /// `掃除候補に localStorage の実体が含まれている` で落ちる。
+    #[test]
+    fn webkit_candidates_never_include_localstorage() {
+        let home = PathBuf::from("/tmp/test-home");
+        let candidates = webkit_cache_candidates(&home);
+        assert!(
+            !candidates.is_empty(),
+            "候補が空だと本テストが素通りしてしまう (掃除自体が死んでいる兆候)"
+        );
+        for path in &candidates {
+            for protected in WEBKIT_PROTECTED_SUBDIRS {
+                assert!(
+                    !path.components().any(|c| c.as_os_str() == *protected),
+                    "掃除候補に localStorage の実体が含まれている: {} (保護名: {protected})",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    /// `Library/WebKit/<id>` そのもの (= 直下を丸ごと消す形) が候補に無いこと。
+    /// b1371c5 で入った故障そのものの再発検知。ディレクトリ名の追加では守れないので
+    /// 「WebKit 配下は必ずサブディレクトリまで指定されている」を直接検査する。
+    #[test]
+    fn webkit_root_itself_is_never_a_cleanup_target() {
+        let home = PathBuf::from("/tmp/test-home");
+        let webkit_root = home.join("Library/WebKit");
+        for path in webkit_cache_candidates(&home) {
+            if let Ok(rel) = path.strip_prefix(&webkit_root) {
+                assert!(
+                    rel.components().count() >= 2,
+                    "WebKit 配下は <id>/<キャッシュ名> まで指定が必要 (丸ごと削除は禁止): {}",
+                    path.display()
+                );
+            }
+        }
+    }
 
     #[test]
     fn normal_line_is_unchanged() {
@@ -750,10 +932,13 @@ mod tests {
         assert!(strip_image_payloads_from_line(line).is_none());
     }
 
+    // 以下のフィクスチャは実 rollout の形 (`image_url`) を使う。
+    // 2026-08-06 以前は架空の `"image"` キーを使っていたが、実データに存在しない形
+    // だったため「フィールドを見ずに位置だけで書き換える」不具合をテストが素通ししていた。
     #[test]
     fn strips_only_image_payload() {
-        let line = br#"{"image":"data:image/png;base64,QUJDRA==","text":"keep me"}"#;
-        let expected = br#"{"image":"data:image/png;base64,[stripped]","text":"keep me"}"#;
+        let line = br#"{"image_url":"data:image/png;base64,QUJDRA==","text":"keep me"}"#;
+        let expected = br#"{"image_url":"data:image/png;base64,[stripped]","text":"keep me"}"#;
         let (actual, count) = strip_image_payloads_from_line(line).expect("画像を検出");
         assert_eq!(actual, expected);
         assert_eq!(count, 1);
@@ -761,8 +946,8 @@ mod tests {
 
     #[test]
     fn escaped_quote_does_not_end_payload() {
-        let line = br#"{"image":"data:image/webp;base64,AAAA\"BBBB","text":"keep"}"#;
-        let expected = br#"{"image":"data:image/webp;base64,[stripped]","text":"keep"}"#;
+        let line = br#"{"image_url":"data:image/webp;base64,AAAA\"BBBB","text":"keep"}"#;
+        let expected = br#"{"image_url":"data:image/webp;base64,[stripped]","text":"keep"}"#;
         let (actual, count) = strip_image_payloads_from_line(line).expect("画像を検出");
         assert_eq!(actual, expected);
         assert_eq!(count, 1);
@@ -770,19 +955,66 @@ mod tests {
 
     #[test]
     fn malformed_line_without_closing_quote_is_unchanged() {
-        let line = br#"{"image":"data:image/png;base64,QUJDRA==}"#;
+        let line = br#"{"image_url":"data:image/png;base64,QUJDRA==}"#;
         assert!(strip_image_payloads_from_line(line).is_none());
     }
 
     #[test]
     fn malformed_json_with_closing_quote_is_unchanged() {
-        let line = br#"{"image":"data:image/png;base64,QUJDRA==""#;
+        let line = br#"{"image_url":"data:image/png;base64,QUJDRA==""#;
         assert!(strip_image_payloads_from_line(line).is_none());
     }
 
     #[test]
     fn already_stripped_payload_is_unchanged() {
-        let line = br#"{"image":"data:image/jpeg;base64,[stripped]"}"#;
+        let line = br#"{"image_url":"data:image/jpeg;base64,[stripped]"}"#;
         assert!(strip_image_payloads_from_line(line).is_none());
+    }
+
+    /// V6: 会話ログ本文 (`text`) に含まれる画像URLは**書き換えない**。
+    ///
+    /// なぜ要るか (実測 2026-08-06): 実 rollout 1666 ファイルを走査したところ、
+    /// `data:image/` を含む文字列 909 件のうち 1 件が `text` フィールドだった
+    /// (ツール出力の本文が `{"image_url":"data:image/..."}` を引用していた)。
+    /// 従来は「JSON文字列の中にあるか」だけを見ていたため、この本文まで
+    /// `[stripped]` に書き換わっていた = ユーザーの成果物であるログの改変。
+    #[test]
+    fn text_field_containing_image_url_is_not_rewritten() {
+        // 本文の途中に画像URLが現れるケース (値の先頭ではない)。
+        let line = br#"{"type":"message","text":"see data:image/png;base64,QUJDRA== here"}"#;
+        assert!(
+            strip_image_payloads_from_line(line).is_none(),
+            "会話ログ本文が書き換えられた"
+        );
+    }
+
+    /// V6: 本文が JSON 断片を引用しているケース (エスケープ済み引用符) も触らない。
+    /// 実測で見つかった実物に最も近い形。
+    #[test]
+    fn quoted_json_fragment_inside_text_is_not_rewritten() {
+        let line = br#"{"payload":{"text":"Total output lines: 1\n{\"image_url\":\"data:image/png;base64,QUJDRA==\"}"}}"#;
+        assert!(
+            strip_image_payloads_from_line(line).is_none(),
+            "本文中に引用された JSON 断片が書き換えられた"
+        );
+    }
+
+    /// V6: ホワイトリスト外のフィールドは触らない (`url` は画像ペイロード専用ではない)。
+    #[test]
+    fn non_whitelisted_field_is_not_rewritten() {
+        let line = br#"{"url":"data:image/png;base64,QUJDRA=="}"#;
+        assert!(strip_image_payloads_from_line(line).is_none());
+    }
+
+    /// V6: 同じ行に「本文の画像URL」と「本物のペイロード」が混在しても、
+    /// 剥がすのはペイロード側だけで本文は 1 バイトも変えない。
+    #[test]
+    fn mixed_line_strips_payload_but_preserves_text() {
+        let line = br#"{"text":"data:image/png;base64,KEEPME==","image_url":"data:image/png;base64,QUJDRA=="}"#;
+        let expected =
+            br#"{"text":"data:image/png;base64,KEEPME==","image_url":"data:image/png;base64,[stripped]"}"#;
+        let (actual, count) = strip_image_payloads_from_line(line).expect("画像を検出");
+        assert_eq!(actual, expected);
+        assert_eq!(count, 1);
     }
 }
