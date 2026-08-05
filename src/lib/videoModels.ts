@@ -50,7 +50,7 @@ export const VIDEO_MODELS: VideoModelDefinition[] = [
     // duration integer 2-10 / medias(i2v) / mode[pro,std,4k] / sound[on,off].
     label: "Kling 3.0",
     jobSetType: "kling3_0",
-    description: "コスパ最強。3アスペクト対応、duration 2〜10秒。",
+    description: "コスパ最強の定番。迷ったらこれ。",
     aspectRatios: ["16:9", "9:16", "1:1"],
     defaultAspectRatio: "16:9",
     duration: { kind: "integer", default: 5, min: 2, max: 10 },
@@ -69,7 +69,7 @@ export const VIDEO_MODELS: VideoModelDefinition[] = [
     // medias(i2v) / genre 7種 / mode[std,fast] / resolution[480p,720p,1080p]。
     label: "Seedance 2.0",
     jobSetType: "seedance_2_0",
-    description: "7アスペクト対応、genre/mode/resolution 豊富。最長15秒。",
+    description: "対応比率が最も多く、長めの動画やジャンル・解像度の調整に強い。",
     aspectRatios: ["auto", "16:9", "9:16", "4:3", "3:4", "1:1", "21:9"],
     defaultAspectRatio: "16:9",
     // CLI 実測 (2026-06-06): duration=15 まで通る (15秒=67.5cr)。SHOTLIST も15秒前提。
@@ -103,7 +103,7 @@ export const VIDEO_MODELS: VideoModelDefinition[] = [
     // model[veo-3-1-preview,veo-3-1-fast] / quality[basic,high,ultra]。
     label: "Google Veo 3.1",
     jobSetType: "veo3_1",
-    description: "Google品質。quality 3段階、duration は 4/6/8秒。",
+    description: "Google品質。クオリティ重視の生成向けで、品質を3段階から選べる。",
     aspectRatios: ["16:9", "9:16"],
     defaultAspectRatio: "16:9",
     // 実測修正 (2026-06-06): API spec は string enum ["4","6","8"] default "8"。
@@ -128,6 +128,45 @@ export const VIDEO_MODELS: VideoModelDefinition[] = [
 
 export function findVideoModel(id: VideoModelId | string): VideoModelDefinition | undefined {
   return VIDEO_MODELS.find((m) => m.id === id);
+}
+
+/**
+ * 尺 (秒) をモデルの制約に丸める。
+ *
+ * uy6 (2026-08-03): videoGen ストアの私的関数だったものを正本としてここへ移した。
+ * ストーリー動画キューは絵コンテの尺 (2.5 秒等) をカットごとにモデル制約へ
+ * 丸める必要があり、ストアの外から同じ規則を使えないと丸め方が二重定義になるため。
+ *
+ * enum duration (veo3_1 の 4/6/8) は **最近傍の許容値** を選ぶ。旧実装は
+ * 「許容値に含まれなければ default」だったため、絵コンテの 2.5 秒カットが
+ * 8 秒 (default) へ飛んでいた。同値距離のときはより短い方を採る
+ * (総尺が絵コンテより伸びる側に倒さない)。
+ */
+export function clampDurationForModel(id: VideoModelId, value: number): number {
+  const model = findVideoModel(id);
+  if (!model) return Math.max(1, Math.round(value));
+  if (model.duration.kind === "enum") {
+    const values = model.duration.values;
+    if (values.length === 0) return model.duration.default;
+    if (values.includes(value)) return value;
+    let best = values[0];
+    for (const candidate of values) {
+      const d = Math.abs(candidate - value);
+      const bestD = Math.abs(best - value);
+      // 同値距離は短い方を採用する
+      if (d < bestD || (d === bestD && candidate < best)) best = candidate;
+    }
+    return best;
+  }
+  const rounded = Math.round(value);
+  return Math.min(model.duration.max, Math.max(model.duration.min, rounded));
+}
+
+/** モデルが対応する比率に収まらなければモデルのデフォルト比率へ寄せる */
+export function clampAspectForModel(id: VideoModelId, value: string): string {
+  const model = findVideoModel(id);
+  if (!model) return value;
+  return model.aspectRatios.includes(value) ? value : model.defaultAspectRatio;
 }
 
 /**
@@ -158,4 +197,29 @@ export const ALL_VIDEO_ASPECT_RATIOS: string[] = (() => {
 /** モデルがその比率に対応しているか。未対応ならセレクタで disabled 表示する。 */
 export function modelSupportsAspect(model: VideoModelDefinition, ratio: string): boolean {
   return model.aspectRatios.includes(ratio);
+}
+
+/**
+ * 6cn (B-7 追補): モデルの対応状況を UI 表示用に決定論で導出する。
+ * 手書き description に仕様値を書かない (定義とズレて嘘になるため)。
+ */
+export function videoModelSpecItems(
+  model: VideoModelDefinition,
+): { label: string; value: string }[] {
+  const i2v =
+    model.inputMode === "both"
+      ? "対応（画像なしでも生成可）"
+      : model.inputMode === "i2v"
+        ? "対応（元画像が必要）"
+        : "未対応（テキストのみ）";
+  const ratios = model.aspectRatios.map((r) => (r === "auto" ? "自動" : r)).join(" / ");
+  const duration =
+    model.duration.kind === "enum"
+      ? `${model.duration.values.join(" / ")}秒`
+      : `${model.duration.min}〜${model.duration.max}秒`;
+  return [
+    { label: "画像から動画", value: i2v },
+    { label: "対応比率", value: ratios },
+    { label: "尺", value: duration },
+  ];
 }

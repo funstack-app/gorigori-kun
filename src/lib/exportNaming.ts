@@ -26,7 +26,15 @@ export type NamingStyle =
   /** 名前+役割+版。キャラIP向け (`yuki_front_v2.png`) */
   | "asset"
   /** 素の名前だけ。従来互換 */
-  | "plain";
+  | "plain"
+  /**
+   * LINEスタンプ向け。ゼロ埋め2桁の連番のみ (`01.png`)。
+   *
+   * 他の style と違い **prefix / role / version を一切付けない**。LINE Creators Market へ
+   * 入稿する `01.png`〜`NN.png` は連番の完全性そのものが要件で、余計な要素が混ざると
+   * 「01〜NNの欠番なし」の検査(層A D11)が通らなくなるため。
+   */
+  | "sticker";
 
 export type NamingOptions = {
   style: NamingStyle;
@@ -180,9 +188,15 @@ export function buildExportFileName(opts: NamingOptions): string {
       if (role) parts.push(role);
       if (opts.index !== undefined) parts.push(padIndex(opts.index, digits));
       break;
+    case "sticker":
+      // 連番だけ。prefix / role / version は意図的に無視する（型注釈参照）。
+      // 既定2桁。digits を明示されたらそれに従う（40枚超の将来拡張のため）。
+      if (opts.index !== undefined) parts.push(padIndex(opts.index, opts.digits ?? 2));
+      break;
   }
 
-  if (opts.version !== undefined && opts.version > 1) {
+  // sticker は連番の完全性が要件なので版番号を付けない。
+  if (opts.style !== "sticker" && opts.version !== undefined && opts.version > 1) {
     parts.push(`v${opts.version}`);
   }
 

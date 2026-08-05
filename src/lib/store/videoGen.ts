@@ -1,5 +1,10 @@
 import { create } from "zustand";
-import { findVideoModel, type VideoModelId } from "../videoModels";
+import {
+  clampAspectForModel,
+  clampDurationForModel,
+  findVideoModel,
+  type VideoModelId,
+} from "../videoModels";
 
 export type VideoGenState = {
   /** i2v 元画像。null なら t2v */
@@ -89,22 +94,10 @@ function normalizeCompareModelIds(ids: VideoModelId[]): VideoModelId[] {
   return next;
 }
 
-function clampDuration(modelId: VideoModelId, value: number): number {
-  const model = findVideoModel(modelId);
-  if (!model) return Math.max(1, Math.round(value));
-  if (model.duration.kind === "enum") {
-    return model.duration.values.includes(value) ? value : model.duration.default;
-  }
-  const rounded = Math.round(value);
-  return Math.min(model.duration.max, Math.max(model.duration.min, rounded));
-}
-
-/** モデルが対応する比率に収まらなければモデルのデフォルト比率へ寄せる */
-function clampAspect(modelId: VideoModelId, value: string): string {
-  const model = findVideoModel(modelId);
-  if (!model) return value;
-  return model.aspectRatios.includes(value) ? value : model.defaultAspectRatio;
-}
+// uy6 (2026-08-03): 丸め規則の正本は videoModels.ts へ移した。ストーリー動画キューが
+// ストアの外から同じ規則で丸める必要があるため (二重定義を作らない)。
+const clampDuration = clampDurationForModel;
+const clampAspect = clampAspectForModel;
 
 function clampCount(value: number): number {
   const rounded = Math.round(value);

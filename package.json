@@ -8,6 +8,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "test:quality": "playwright test --config playwright.quality.config.ts",
+    "test:unit": "vitest run",
     "tauri": "tauri"
   },
   "dependencies": {
@@ -44,10 +45,12 @@
     "@types/three": "^0.185.1",
     "@vitejs/plugin-react": "^4.6.0",
     "autoprefixer": "^10.5.0",
+    "jsdom": "^29.1.1",
     "postcss": "^8.5.14",
     "tailwindcss": "^3.4.19",
     "terser": "^5.47.1",
     "typescript": "~5.8.3",
-    "vite": "^7.0.4"
+    "vite": "^7.0.4",
+    "vitest": "^4.1.10"
   }
 }

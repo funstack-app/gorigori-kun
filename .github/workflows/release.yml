@@ -121,7 +121,11 @@ jobs:
           # 「Codex を更新した人だけが動かない」という分かりにくい形で発症した
           # (ユーザー報告 2026-07-26 で切り分け済み。手元で 0.145.0 なら通ることを実測)。
           # alpha は配布物に焼かない (prerelease=false の最新を選ぶ)。
-          codexVer="rust-v0.145.0"
+          #
+          # 2026-08-03: Magnific MCP の OAuth (issuer 検証) 不具合対応で
+          # 0.146.0 (安定版・2026-07-29 公開) へ更新。実機での Magnific 接続確認を
+          # リリースゲートとする。
+          codexVer="rust-v0.146.0"
           base="https://github.com/openai/codex/releases/download/$codexVer"
           # matrix.target からファイル名を逆引き
           codex_arch="${{ matrix.target }}"
@@ -156,6 +160,56 @@ jobs:
           # 確認
           ls -lh src-tauri/resources/codex src-tauri/resources/codex-app-server
 
+      # 2026-08-03: MCP 認可 (mcp add / mcp login) 専用の補助バイナリを同梱する。
+      # 同梱 0.146.0 は OAuth コールバックの iss を捨てるバグ (rmcp 1.8.0 の
+      # RFC 9207 検証と不整合) があり、Magnific の認可が missing required issuer で
+      # 必ず失敗する。修正 (openai/codex PR #35720) は 0.147.0-alpha.4 にのみ入る。
+      # トークン取得後の利用・リフレッシュは 0.146.0 で動くため、alpha の実行面は
+      # 認可 2 操作に閉じ込める (日常実行は上の 0.146.0 のまま)。
+      # 0.147.0 安定版が出たら本ステップごと撤去して一本化する。
+      - name: Fetch Codex auth helper (rust-v0.147.0-alpha.4)
+        run: |
+          set -e
+          # 変数名に連続文字列 "codexVer" を含めないこと。
+          # scripts/check-model-cli-match.py の正規表現 codexVer\s*=\s*"..." が
+          # 誤検出し、検査 E (platform 間一致) が偽陽性で落ちる。
+          codexAuthVer="rust-v0.147.0-alpha.4"
+          authBase="https://github.com/openai/codex/releases/download/$codexAuthVer"
+          codex_arch="${{ matrix.target }}"
+          mkdir -p src-tauri/resources
+
+          curl -L -o codex-auth.tar.gz "$authBase/codex-${codex_arch}.tar.gz"
+          mkdir -p tmp-codex-auth
+          tar -xzf codex-auth.tar.gz -C tmp-codex-auth
+          find tmp-codex-auth -type f -name "codex-${codex_arch}" -exec mv {} src-tauri/resources/codex-auth \;
+          if [ ! -f "src-tauri/resources/codex-auth" ]; then
+            echo "Failed to find codex-${codex_arch} in extracted auth helper tar"
+            ls -la tmp-codex-auth/
+            exit 1
+          fi
+          chmod +x src-tauri/resources/codex-auth
+          rm -rf codex-auth.tar.gz tmp-codex-auth
+
+          # 壊れ DL 検出 (codex CLI は 100MB 級。10MB 未満なら中身が違う)
+          authSize=$(wc -c < src-tauri/resources/codex-auth)
+          if [ "$authSize" -lt 10485760 ]; then
+            echo "codex-auth is suspiciously small: ${authSize} bytes"
+            exit 1
+          fi
+
+          # ランナーは arm64 なので aarch64 leg だけ実行検査できる。
+          # x86_64 leg では実行不能なのでサイズ検査のみ。
+          if [ "$codex_arch" = "aarch64-apple-darwin" ]; then
+            authVersionOut=$(./src-tauri/resources/codex-auth --version)
+            echo "codex-auth --version: $authVersionOut"
+            case "$authVersionOut" in
+              *0.147.0-alpha.4*) ;;
+              *) echo "codex-auth is not 0.147.0-alpha.4"; exit 1 ;;
+            esac
+          fi
+
+          ls -lh src-tauri/resources/codex-auth
+
       # tauri.conf.json の resources 配列に macOS 用 codex バイナリを追記
       - name: Patch tauri.conf.json for macOS bundle
         run: |
@@ -166,7 +220,7 @@ jobs:
           with open(path) as f:
               conf = json.load(f)
           existing = conf["bundle"].get("resources", [])
-          additions = ["resources/codex", "resources/codex-app-server"]
+          additions = ["resources/codex", "resources/codex-app-server", "resources/codex-auth"]
           for a in additions:
               if a not in existing:
                   existing.append(a)
@@ -240,7 +294,11 @@ jobs:
         shell: pwsh
         run: |
           # macOS 側と同じ理由で更新 (2026-07-26)。両方を同じバージョンに保つ。
-          $codexVer = "rust-v0.145.0"
+          #
+          # 2026-08-03: Magnific MCP の OAuth (issuer 検証) 不具合対応で
+          # 0.146.0 (安定版・2026-07-29 公開) へ更新。実機での Magnific 接続確認を
+          # リリースゲートとする。
+          $codexVer = "rust-v0.146.0"
           $base = "https://github.com/openai/codex/releases/download/$codexVer"
 
           New-Item -ItemType Directory -Force -Path "src-tauri/resources" | Out-Null
@@ -283,6 +341,50 @@ jobs:
           Write-Host "✓ Codex binaries staged in src-tauri/resources/"
           Get-ChildItem "src-tauri/resources" | Format-Table Name, Length
 
+      # 2026-08-03: MCP 認可 (mcp add / mcp login) 専用の補助バイナリ。理由は
+      # macOS ジョブの同名ステップのコメント参照 (0.146.0 の iss 破棄バグ回避)。
+      - name: Fetch Codex auth helper (rust-v0.147.0-alpha.4)
+        shell: pwsh
+        run: |
+          # 変数名に連続文字列 "codexVer" を含めないこと
+          # (scripts/check-model-cli-match.py の検査 E が誤検出する)。
+          $codexAuthVer = "rust-v0.147.0-alpha.4"
+          $authBase = "https://github.com/openai/codex/releases/download/$codexAuthVer"
+
+          New-Item -ItemType Directory -Force -Path "src-tauri/resources" | Out-Null
+
+          Invoke-WebRequest -Uri "$authBase/codex-x86_64-pc-windows-msvc.exe.zip" -OutFile "codex-auth.zip"
+          Expand-Archive -Path "codex-auth.zip" -DestinationPath "tmp-codex-auth" -Force
+          Get-ChildItem "tmp-codex-auth" -Recurse |
+            Where-Object { $_.Name -eq "codex-x86_64-pc-windows-msvc.exe" } |
+            Select-Object -First 1 |
+            ForEach-Object {
+              Move-Item -Path $_.FullName -Destination "src-tauri/resources/codex-auth.exe" -Force
+            }
+          if (-not (Test-Path "src-tauri/resources/codex-auth.exe")) {
+            Write-Error "Failed to find codex-x86_64-pc-windows-msvc.exe in extracted auth helper zip"
+            exit 1
+          }
+          Remove-Item "codex-auth.zip"
+          Remove-Item "tmp-codex-auth" -Recurse -Force
+
+          # 壊れ DL 検出 (codex CLI は 100MB 級)
+          $authSize = (Get-Item "src-tauri/resources/codex-auth.exe").Length
+          if ($authSize -lt 10485760) {
+            Write-Error "codex-auth.exe is suspiciously small: $authSize bytes"
+            exit 1
+          }
+
+          # ランナーは x64 なので実行検査できる
+          $authVersionOut = & "src-tauri/resources/codex-auth.exe" --version
+          Write-Host "codex-auth --version: $authVersionOut"
+          if ("$authVersionOut" -notlike "*0.147.0-alpha.4*") {
+            Write-Error "codex-auth.exe is not 0.147.0-alpha.4"
+            exit 1
+          }
+
+          Get-ChildItem "src-tauri/resources" | Format-Table Name, Length
+
       # tauri.conf.json の resources 配列に Windows 用 codex バイナリを追記
       - name: Patch tauri.conf.json for Windows bundle
         shell: pwsh
@@ -290,7 +392,7 @@ jobs:
           $confPath = "src-tauri/tauri.conf.json"
           $conf = Get-Content $confPath -Raw | ConvertFrom-Json
           $existing = @($conf.bundle.resources)
-          $additions = @("resources/codex.exe", "resources/codex-app-server.exe")
+          $additions = @("resources/codex.exe", "resources/codex-app-server.exe", "resources/codex-auth.exe")
           $conf.bundle.resources = $existing + $additions
           $conf | ConvertTo-Json -Depth 50 | Set-Content $confPath -Encoding UTF8
           Write-Host "✓ tauri.conf.json updated:"
@@ -320,6 +422,239 @@ jobs:
             src-tauri/target/x86_64-pc-windows-msvc/release/bundle/**/*.sig
 
   # ─────────────────────────────────────────────────────────────
+  # Windows 互換版 (compat) — 旧 CPU (BMI2 非対応) 向け
+  #
+  # なぜ 2 本目を建てるか (2026-08-02):
+  #   BMI2 命令を持たない古い CPU (目安 2013 年より前) の Windows 機で、
+  #   v2.4.0 が起動した瞬間に 0xc000001d (不正命令) で落ちる。原因は静的リンク
+  #   された onnxruntime の初期化コードで、プロセス起動時に走るため CPU 検査や
+  #   遅延ロードでは原理的に防げない。--no-default-features で edit-ai を切り、
+  #   ort をバイナリから丸ごと抜いた版を別ファイル名で配る。
+  #
+  # 上の windows ジョブとの差分は 4 点だけ (それ以外は意図的に同一):
+  #   1. ビルドに --no-default-features を付ける
+  #   2. updater endpoint を latest-compat.json に差し替える
+  #   3. 成果物に -compat サフィックスを付ける
+  #   4. artifact 名を windows-x86_64-compat にする
+  #
+  # identifier と productName は通常版と完全に同一に保つ (設計 §2-8)。
+  # 変えるとデータディレクトリが変わり、既存ユーザーの作品が「消えた」ように
+  # 見える事故になる。区別はファイル名と updater endpoint だけで行う。
+  # ─────────────────────────────────────────────────────────────
+  windows-compat:
+    needs: preflight
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+          # 通常版と feature セットが違うため、キャッシュを分ける。
+          key: compat
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Fetch Codex CLI binaries (Windows x86_64)
+        shell: pwsh
+        run: |
+          # 通常の windows ジョブと同じ版を使う (同梱 CLI は ort と無関係)。
+          $codexVer = "rust-v0.146.0"
+          $base = "https://github.com/openai/codex/releases/download/$codexVer"
+
+          New-Item -ItemType Directory -Force -Path "src-tauri/resources" | Out-Null
+
+          Invoke-WebRequest -Uri "$base/codex-x86_64-pc-windows-msvc.exe.zip" -OutFile "codex.zip"
+          Expand-Archive -Path "codex.zip" -DestinationPath "tmp-codex" -Force
+          Get-ChildItem "tmp-codex" -Recurse |
+            Where-Object { $_.Name -eq "codex-x86_64-pc-windows-msvc.exe" } |
+            Select-Object -First 1 |
+            ForEach-Object {
+              Move-Item -Path $_.FullName -Destination "src-tauri/resources/codex.exe" -Force
+            }
+          if (-not (Test-Path "src-tauri/resources/codex.exe")) {
+            Write-Error "Failed to find codex-x86_64-pc-windows-msvc.exe in extracted zip"
+            exit 1
+          }
+          Remove-Item "codex.zip"
+          Remove-Item "tmp-codex" -Recurse -Force
+
+          Invoke-WebRequest -Uri "$base/codex-app-server-x86_64-pc-windows-msvc.exe.zip" -OutFile "codex-app-server.zip"
+          Expand-Archive -Path "codex-app-server.zip" -DestinationPath "tmp-app-server" -Force
+          Get-ChildItem "tmp-app-server" -Recurse |
+            Where-Object { $_.Name -eq "codex-app-server-x86_64-pc-windows-msvc.exe" } |
+            Select-Object -First 1 |
+            ForEach-Object {
+              Move-Item -Path $_.FullName -Destination "src-tauri/resources/codex-app-server.exe" -Force
+            }
+          if (-not (Test-Path "src-tauri/resources/codex-app-server.exe")) {
+            Write-Error "Failed to find codex-app-server-x86_64-pc-windows-msvc.exe in extracted zip"
+            exit 1
+          }
+          Remove-Item "codex-app-server.zip"
+          Remove-Item "tmp-app-server" -Recurse -Force
+
+          Write-Host "✓ Codex binaries staged in src-tauri/resources/"
+          Get-ChildItem "src-tauri/resources" | Format-Table Name, Length
+
+      # 2026-08-03: MCP 認可 (mcp add / mcp login) 専用の補助バイナリ。理由は
+      # macOS ジョブの同名ステップのコメント参照 (0.146.0 の iss 破棄バグ回避)。
+      # 互換版でも認可経路は同一なので通常 windows ジョブと同文にする。
+      - name: Fetch Codex auth helper (rust-v0.147.0-alpha.4)
+        shell: pwsh
+        run: |
+          # 変数名に連続文字列 "codexVer" を含めないこと
+          # (scripts/check-model-cli-match.py の検査 E が誤検出する)。
+          $codexAuthVer = "rust-v0.147.0-alpha.4"
+          $authBase = "https://github.com/openai/codex/releases/download/$codexAuthVer"
+
+          New-Item -ItemType Directory -Force -Path "src-tauri/resources" | Out-Null
+
+          Invoke-WebRequest -Uri "$authBase/codex-x86_64-pc-windows-msvc.exe.zip" -OutFile "codex-auth.zip"
+          Expand-Archive -Path "codex-auth.zip" -DestinationPath "tmp-codex-auth" -Force
+          Get-ChildItem "tmp-codex-auth" -Recurse |
+            Where-Object { $_.Name -eq "codex-x86_64-pc-windows-msvc.exe" } |
+            Select-Object -First 1 |
+            ForEach-Object {
+              Move-Item -Path $_.FullName -Destination "src-tauri/resources/codex-auth.exe" -Force
+            }
+          if (-not (Test-Path "src-tauri/resources/codex-auth.exe")) {
+            Write-Error "Failed to find codex-x86_64-pc-windows-msvc.exe in extracted auth helper zip"
+            exit 1
+          }
+          Remove-Item "codex-auth.zip"
+          Remove-Item "tmp-codex-auth" -Recurse -Force
+
+          # 壊れ DL 検出 (codex CLI は 100MB 級)
+          $authSize = (Get-Item "src-tauri/resources/codex-auth.exe").Length
+          if ($authSize -lt 10485760) {
+            Write-Error "codex-auth.exe is suspiciously small: $authSize bytes"
+            exit 1
+          }
+
+          # ランナーは x64 なので実行検査できる
+          $authVersionOut = & "src-tauri/resources/codex-auth.exe" --version
+          Write-Host "codex-auth --version: $authVersionOut"
+          if ("$authVersionOut" -notlike "*0.147.0-alpha.4*") {
+            Write-Error "codex-auth.exe is not 0.147.0-alpha.4"
+            exit 1
+          }
+
+          Get-ChildItem "src-tauri/resources" | Format-Table Name, Length
+
+      # 通常版のパッチに加えて、updater endpoint を compat 用に差し替える。
+      # identifier / productName は触らない (設計 §2-8)。
+      - name: Patch tauri.conf.json for Windows compat bundle
+        shell: pwsh
+        run: |
+          $confPath = "src-tauri/tauri.conf.json"
+          $conf = Get-Content $confPath -Raw | ConvertFrom-Json
+          $existing = @($conf.bundle.resources)
+          $additions = @("resources/codex.exe", "resources/codex-app-server.exe", "resources/codex-auth.exe")
+          $conf.bundle.resources = $existing + $additions
+
+          # 互換版は専用チャンネルを見る。通常版の latest.json を読ませると、
+          # 更新のたびに ort 入りの通常版に戻され再びクラッシュする。
+          $compatEndpoint = "https://github.com/${{ github.repository }}/releases/latest/download/latest-compat.json"
+          $conf.plugins.updater.endpoints = @($compatEndpoint)
+
+          $conf | ConvertTo-Json -Depth 50 | Set-Content $confPath -Encoding UTF8
+          Write-Host "✓ tauri.conf.json updated (compat):"
+          Write-Host "  updater endpoint = $compatEndpoint"
+
+      - name: Build (Windows compat, no edit-ai)
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+        # `--` が 2 段必要 (2026-08-03 実測):
+        #   1 段目は npm → tauri CLI、2 段目は tauri CLI → cargo。
+        #   1 段だけだと tauri-cli 2.11.0 が --no-default-features を自分の引数と
+        #   解釈し `unexpected argument` で exit 2 になり、compat ビルドが必ず落ちる。
+        run: npm run tauri build -- --target x86_64-pc-windows-msvc -- --no-default-features
+
+      # 互換版に onnxruntime が本当に入っていないことをここで確かめる。
+      # これが本方式の最終防衛線 — シンボルが残っていれば旧 CPU では落ちる。
+      # --no-default-features が tauri CLI から cargo へ転送されなかった場合も
+      # ここで検出できる (設計 §5 のリスク項目)。
+      - name: Verify onnxruntime is absent from compat binary
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem "src-tauri/target/x86_64-pc-windows-msvc/release" -Filter "*.exe" |
+            Where-Object { $_.Name -notlike "*setup*" } |
+            Select-Object -First 1
+          if (-not $exe) {
+            Write-Error "compat の実行ファイルが見つかりません"
+            exit 1
+          }
+          Write-Host "checking: $($exe.FullName) ($([math]::Round($exe.Length/1MB,1)) MB)"
+
+          # バイナリを文字列として走査し onnxruntime の痕跡を探す。
+          $bytes = [System.IO.File]::ReadAllBytes($exe.FullName)
+          $text = [System.Text.Encoding]::ASCII.GetString($bytes)
+          if ($text -match "onnxruntime") {
+            Write-Error "::error::compat バイナリに onnxruntime が含まれています (--no-default-features が効いていない可能性)"
+            exit 1
+          }
+          Write-Host "✓ onnxruntime シンボルなし — 旧 CPU でも起動する構成"
+
+      # 通常版と同じ名前で出るので、ここで -compat を差し込む。
+      # 例: GORI.GORI_2.4.0_x64-setup.exe → GORI.GORI_2.4.0_x64-setup-compat.exe
+      - name: Rename artifacts with -compat suffix
+        shell: pwsh
+        run: |
+          $bundle = "src-tauri/target/x86_64-pc-windows-msvc/release/bundle"
+          # .sig は元ファイル名 + .sig なので、先に本体を替えると対応が崩れる。
+          # 拡張子ごとに「本体 → その .sig」の順で処理する。
+          Get-ChildItem $bundle -Recurse -Include *.exe, *.msi, *.zip |
+            Where-Object { $_.Name -notlike "*-compat*" } |
+            ForEach-Object {
+              $dir = $_.DirectoryName
+              $ext = $_.Extension
+              $stem = $_.BaseName
+              # .nsis.zip のような二重拡張子を保つ
+              if ($stem -like "*.nsis") {
+                $stem = $stem -replace "\.nsis$", ""
+                $ext = ".nsis" + $ext
+              }
+              $newName = "$stem-compat$ext"
+              $sig = Join-Path $dir ($_.Name + ".sig")
+              Rename-Item -Path $_.FullName -NewName $newName
+              if (Test-Path $sig) {
+                Rename-Item -Path $sig -NewName ($newName + ".sig")
+              }
+              Write-Host "renamed: $($_.Name) -> $newName"
+            }
+          Write-Host "== compat bundle =="
+          Get-ChildItem $bundle -Recurse -Include *.exe, *.msi, *.zip, *.sig |
+            Format-Table Name, Length
+
+      - name: Upload build artifacts (Windows compat)
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x86_64-compat
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/**/*.exe
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/**/*.msi
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/**/*.zip
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/**/*.sig
+
+  # ─────────────────────────────────────────────────────────────
   # Higgsfield 拡張パックは廃止 (MCP 方式へ移行済み)。
   # CLI バイナリ + Node 同梱の拡張パック配布は不要になったため、
   # higgsfield-extension-mac / higgsfield-extension-windows ジョブを削除した。
@@ -336,6 +671,10 @@ jobs:
   # 対策: 全 platform 完了後、リリースアセットから .sig を 1 個ずつ取得して
   # 統合 latest.json を生成・上書きする。これで全 platform の updater が動く。
   # ─────────────────────────────────────────────────────────────
+  # compat (windows-compat) を needs に入れないこと (2026-08-03)。
+  # 入れると互換版ビルドが落ちた瞬間にこのジョブが skip され、通常版ユーザーの
+  # latest.json まで更新されなくなる。互換版は latest-compat.json 専用の
+  # updater-manifest-compat ジョブに分離してある。
   updater-manifest:
     needs: [macos, windows]
     runs-on: ubuntu-latest
@@ -492,6 +831,9 @@ jobs:
             | Mac (Apple Silicon / M1〜M4) | `..._aarch64.dmg` |
             | Mac (Intel) | `..._x64.dmg` |
             | Windows 10 / 11 | `..._x64-setup.exe` |
+            | Windows 10 / 11 (GORI GORI 互換版（旧CPU向け）) | `..._x64-setup-compat.exe` |
+
+            v2.4.0 以降、起動した瞬間にアプリが終了してしまう場合（目安: 2013 年頃より前の古い CPU をお使いの場合）は、互換版インストーラー `GORI GORI 互換版（旧CPU向け）` をお使いください。互換版では AI 編集機能（背景透過・部分選択・消しゴム・文字認識）が使えませんが、画像生成などその他の機能はすべて使えます。
 
             Mac がどちらか分からない場合: アップルマーク → 「このMacについて」 → 「チップ」を確認。
             **Apple M1〜M4** なら Apple Silicon、**Intel Core** なら Intel です。
@@ -530,5 +872,113 @@ jobs:
             既にお使いの方は、アプリ内の **設定 → 基本 → アップデート** から
             「更新を確認」を押すだけで最新版になります。
             作品データ・プリセット・設定は引き継がれます。
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # 通常版の latest.json が compat に汚染されていないことを機械で確かめる
+      # (設計 DoD の本丸)。既存の集約は固定アセット名で照合しているため構造的に
+      # 混ざらないはずだが、「はず」を検査に変えておく。
+      - name: Verify latest.json is not contaminated by compat
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -e
+          gh release download "$TAG" -p "latest.json" -O /tmp/published-latest.json --clobber
+          python3 - <<'PY'
+          import json, sys
+          raw = open('/tmp/published-latest.json').read()
+          d = json.loads(raw)
+          plats = sorted(d['platforms'])
+          expected = ['darwin-aarch64', 'darwin-x86_64', 'windows-x86_64']
+          ok = True
+          if plats != expected:
+              print(f"::error::latest.json の platforms が想定外: {plats} != {expected}")
+              ok = False
+          if 'compat' in raw:
+              print("::error::latest.json に 'compat' の文字列が混入しています")
+              ok = False
+          print("platforms:", ', '.join(plats))
+          sys.exit(0 if ok else 1)
+          PY
+          echo "✓ latest.json は非汚染"
+
+  # ─────────────────────────────────────────────────────────────
+  # 互換版 (compat) 専用の updater マニフェスト
+  #
+  # 通常版の updater-manifest とは別ジョブにしてある (2026-08-03)。
+  # 同じジョブに同居させると、互換版ビルド (windows-compat) が落ちたときに
+  # needs 経由で通常版の latest.json 生成まで丸ごと skip され、
+  # 「旧CPU向けの追加配布が失敗したせいで全ユーザーの自動更新が止まる」
+  # という、影響範囲が原因より大きい事故になる。
+  #
+  # このジョブは windows-compat にだけ依存する。落ちても通常版は無傷。
+  # ─────────────────────────────────────────────────────────────
+  updater-manifest-compat:
+    needs: [windows-compat]
+    runs-on: ubuntu-latest
+    # 通常版と同じ理由でタグ push では走らせない (リリース実体が要るため)。
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build latest-compat.json
+        id: compat_manifest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -e
+          TAG_NO_V="${TAG#v}"
+          TAG_NUM="${TAG_NO_V%%-*}"
+          PUB_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          # compat は Windows だけ。通常版の PLATFORMS 配列とは独立に定義する
+          # (共有すると片方の変更がもう片方に漏れる)。
+          COMPAT_ASSET="GORI.GORI_${TAG_NUM}_x64-setup-compat.exe"
+          SIG="$(gh release download "$TAG" -p "${COMPAT_ASSET}.sig" -O - 2>/dev/null | tr -d '\n' || echo "")"
+
+          echo "compat asset: ${COMPAT_ASSET}"
+          echo "compat sig  : ${#SIG} bytes"
+
+          MIN_SIG_BYTES=200
+          if [ -z "$SIG" ] || [ "${#SIG}" -lt "$MIN_SIG_BYTES" ]; then
+            echo "::error::compat の .sig が取得できない/短すぎるため latest-compat.json を publish しません"
+            echo "::error::(通常版の latest.json は既に publish 済みで影響を受けません)"
+            exit 1
+          fi
+
+          URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/${COMPAT_ASSET}"
+
+          cat > /tmp/latest-compat.json <<JSON
+          {
+            "version": "${TAG_NUM}",
+            "notes": "GORI GORI KUN ${TAG} (互換版 / 旧CPU向け)",
+            "pub_date": "${PUB_DATE}",
+            "platforms": {
+              "windows-x86_64": {
+                "signature": "${SIG}",
+                "url": "${URL}"
+              }
+            }
+          }
+          JSON
+
+          echo "== latest-compat.json =="
+          cat /tmp/latest-compat.json
+
+          python3 -c "import json,sys; d=json.load(open('/tmp/latest-compat.json')); \
+            ps=d['platforms']; \
+            sys.exit(0 if list(ps) == ['windows-x86_64'] else 1)"
+
+      - name: Upload latest-compat.json to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: /tmp/latest-compat.json
+          draft: false
+          prerelease: false
+          fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -13,6 +13,24 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+# ─────────────────────────────────────────────────────────────
+# edit-ai: ONNX Runtime (ort) を使う編集AI機能群のオン/オフ。
+#
+# なぜ feature にしたか (2026-08-02):
+# BMI2 命令を持たない古い CPU (目安 2013 年より前) の Windows 機で、
+# v2.4.0 が起動した瞬間に 0xc000001d (不正命令) で落ちる。原因は静的リンク
+# された onnxruntime の初期化コードで、プロセス起動時に走るため
+# 「実行を避ける」方式 (CPU 検査・遅延 Session 生成) では原理的に防げない。
+# → ort を丸ごとバイナリから抜いた「互換版 (compat)」を二本目として配る。
+#
+# default に edit-ai を残す理由: 通常ビルド (ローカル dev / CI の既存 windows
+# ジョブ / Mac) のコマンドを一切変えないため。変更が入るのは compat ジョブだけ、
+# という事故面の非対称にする。互換版は --no-default-features でビルドする。
+# ─────────────────────────────────────────────────────────────
+[features]
+default = ["edit-ai"]
+edit-ai = ["dep:ort", "dep:ort-sys", "dep:tokenizers"]
+
 [dependencies]
 tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-opener = "2"
@@ -21,9 +39,14 @@ tauri-plugin-fs = "2"
 tauri-plugin-store = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+tauri-plugin-single-instance = "2"
 sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio"] }
 zip = "2"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# `image` 0.25 の PngEncoder は sRGB チャンク・pHYs チャンクを書く API を持たない
+# （S9: LINE スタンプの「解像度 72dpi以上 / カラーモード RGB」対応）。png は既に
+# image の推移依存として lock に居る（0.18.1）ので、直接依存にしても依存木は増えない。
+png = "0.18"
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -55,6 +78,12 @@ which = "7"
 tempfile = "3"
 font-kit = "0.14"
 
+# 音源メタデータ (尺 / サンプルレート / タグ) 抽出。pure Rust・ヘッダ読みのみで
+# ネイティブ依存を持たないため配布ゲート (#1 ハードコードパス / #2 同梱漏れ /
+# #3 リソース解決) に抵触しない。音声データ本体は codex に渡さず、
+# ここで得た文字情報だけをプロンプトへ供給する (go4 設計)。
+lofty = "0.22"
+
 # ─────────────────────────────────────────────────────────────
 # ONNX Runtime (ort) は Windows 専用依存に格下げした (2026-07-28)。
 #
@@ -72,11 +101,16 @@ font-kit = "0.14"
 # onnxruntime を実行ファイルに焼き込む。配布版で dylib 外部依存ゼロ・確実に動く。
 #
 # tokenizers は edit/sam3_text.rs (ort 依存) からのみ使うため一緒に移した。
+#
+# optional = true は互換版 (compat) ビルド用 (2026-08-02)。上の [features] の
+# edit-ai を切ると 3 クレートごと依存ツリーから消え、onnxruntime のコードが
+# バイナリに存在しなくなる = 旧 CPU の起動クラッシュ源そのものが無くなる。
+# ソース側の条件は build.rs が発行する cfg(edit_ai) 1 語に集約している。
 # ─────────────────────────────────────────────────────────────
 [target.'cfg(target_os = "windows")'.dependencies]
-ort = { version = "2.0.0-rc.12", features = ["download-binaries", "copy-dylibs"] }
-ort-sys = { version = "2.0.0-rc.12" }
-tokenizers = { version = "0.23.1", default-features = false, features = ["onig"] }
+ort = { version = "2.0.0-rc.12", features = ["download-binaries", "copy-dylibs"], optional = true }
+ort-sys = { version = "2.0.0-rc.12", optional = true }
+tokenizers = { version = "0.23.1", default-features = false, features = ["onig"], optional = true }
 
 [dev-dependencies]
 tempfile = "3"

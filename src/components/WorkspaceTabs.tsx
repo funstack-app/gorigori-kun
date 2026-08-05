@@ -1,4 +1,5 @@
 import { useEffect, useRef } from "react";
+import { useSkillVisible } from "./SkillWorkspaceRouter";
 import { useWorkspace, type WorkspaceTab } from "../lib/store/workspace";
 import { useSkillMode } from "../lib/store/skillMode";
 import { getGoriSkill } from "../lib/skills/catalog";
@@ -86,7 +87,21 @@ export function WorkspaceTabs() {
     return undefined;
   }, []);
 
+  /*
+   * 非表示中はホイール監視を張らない (Sol 評価 blocking#2 / 2026-08-04)。
+   *
+   * WorkspaceTabs は各スキル画面が1つずつ描画する (13箇所)。S2 の mount-pool 化で
+   * 訪問済みスキルが unmount されなくなったため、**訪問数と同じ数のインスタンスが
+   * 同時に window の wheel を監視する**状態になっていた。1回の横スワイプで
+   * cycle() が同時に N 回走り、タブが一気に N 段飛ぶ。
+   *
+   * cooldownRef はインスタンスごとに別なので多重発火を止められない (各自が
+   * 「自分は初回」と判断する)。可視インスタンスだけが監視する形にすれば、
+   * 常に1つしか登録されないので1スワイプ=1段に戻る。
+   */
+  const visible = useSkillVisible();
   useEffect(() => {
+    if (!visible) return;
     const cycle = (dir: 1 | -1) => {
       const idx = NAVIGABLE_TABS.indexOf(useWorkspace.getState().activeTab);
       // 現在が disabled タブ等で見つからない場合は先頭にフォールバック。
@@ -111,7 +126,7 @@ export function WorkspaceTabs() {
 
     window.addEventListener("wheel", onWheel, { passive: true });
     return () => window.removeEventListener("wheel", onWheel);
-  }, [setActiveTab]);
+  }, [visible, setActiveTab]);
 
   return (
     <div className="flex items-center gap-2">

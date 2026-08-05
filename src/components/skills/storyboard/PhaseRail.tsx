@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 
-import { usePlanChat } from "../../../lib/store/planChat";
+import { useSceneConstruction } from "../../../lib/storyboard/useSceneConstruction";
 import { useStoryboardRun } from "../../../lib/store/storyboardRun";
 import type { StoryboardPhase } from "../../../lib/storyboard/types";
 
@@ -32,7 +32,8 @@ export function PhaseRail() {
   // (B1 修正のコメント参照)。つまり sketchVersions.length > 0 を要求していたのは
   // 実装上の必要条件ではなく、絵コンテ経路だけを通す UI 上の縛りだった。
   // ここを緩めても生成側は無改造で成立する。
-  const sceneConstruction = usePlanChat((s) => s.sceneConstruction);
+  // 共有 planChat が消えていても storyboard 側の控えから読む (Sol 評価 blocking#3)。
+  const sceneConstruction = useSceneConstruction();
   const totalCuts = useStoryboardRun((s) => s.totalCuts);
   const cuts = useStoryboardRun((s) => s.cuts);
   const runStatus = useStoryboardRun((s) => s.status);

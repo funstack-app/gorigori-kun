@@ -1,9 +1,9 @@
-import { convertFileSrc } from "@tauri-apps/api/core";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { ActiveProjectSelector } from "../../ActiveProjectSelector";
 import { WorkspaceTabs } from "../../WorkspaceTabs";
-import { SkillIntro } from "../SkillIntro";
+import { PageHelp } from "../../PageHelp";
+import { SafeImage } from "../../SafeImage";
 import { useToasts } from "../../../lib/store/toasts";
 import {
   checkImage,
@@ -265,7 +265,7 @@ export function RegulationCheckWorkspace() {
       <div className="flex min-h-0 flex-1 overflow-hidden">
         {/* 左: 設定パネル */}
         <div className="flex w-[340px] shrink-0 flex-col gap-4 overflow-y-auto border-r border-[#242424] p-4">
-          <SkillIntro
+          <PageHelp
             what="入稿前のクリエイティブを渡すと、文字の占める割合・入れ忘れてはいけない表記・ロゴの扱い・使ってはいけない表現を見て、引っかかる箇所を理由つきで指摘します。"
             first="まずは出す先の媒体を下から選び、検査したい画像を入れてください。"
           />
@@ -354,8 +354,8 @@ export function RegulationCheckWorkspace() {
                   key={p}
                   className="group relative aspect-square overflow-hidden rounded border border-[#242424] bg-[#0d0d0d]"
                 >
-                  <img
-                    src={convertFileSrc(p)}
+                  <SafeImage
+                    path={p}
                     alt={basename(p)}
                     className="h-full w-full object-cover"
                   />
@@ -457,8 +457,8 @@ function ResultCard({
   return (
     <div className="rounded-lg border border-[#242424] bg-[#161616] p-3">
       <div className="flex items-start gap-3">
-        <img
-          src={convertFileSrc(result.imagePath)}
+        <SafeImage
+          path={result.imagePath}
           alt={basename(result.imagePath)}
           className="h-16 w-16 shrink-0 rounded border border-[#2a2a2a] object-cover"
         />

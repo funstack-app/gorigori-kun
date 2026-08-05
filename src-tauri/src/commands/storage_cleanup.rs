@@ -80,7 +80,10 @@ async fn dir_size(path: &std::path::Path) -> u64 {
 }
 
 async fn file_size(path: &std::path::Path) -> u64 {
-    tokio::fs::metadata(path).await.map(|m| m.len()).unwrap_or(0)
+    tokio::fs::metadata(path)
+        .await
+        .map(|m| m.len())
+        .unwrap_or(0)
 }
 
 // 2026-07-25 修正: ディレクトリ名は bundle identifier (app.codexframefactory)。

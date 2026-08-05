@@ -55,8 +55,14 @@ export type RegulationImageResult = {
 
 const VALID_SEVERITIES: readonly RegulationSeverity[] = ["high", "mid", "low"];
 
-/** Codex 応答の未検証 issue を検査し、正規の RegulationIssue に整える（未信頼入力の検証）。 */
-function normalizeIssues(
+/**
+ * Codex 応答の未検証 issue を検査し、正規の RegulationIssue に整える（未信頼入力の検証）。
+ *
+ * export している理由: LINEスタンプの審査セルフチェック（`sticker/check.ts`・層B）が
+ * 同じ検証を必要とする。**コピーせず共有する**。ここは「壊れ出力を問題なしで握り潰さない」
+ * という安全性の芯であり、2箇所に増やすと必ず片方だけ直されて静かに腐る。
+ */
+export function normalizeIssues(
   raw: unknown,
   imagePath: string,
   validRuleIds: ReadonlySet<string>,
@@ -94,8 +100,11 @@ function normalizeIssues(
   return out;
 }
 
-/** ルールセットを Codex への判定基準テキストへ整形する。 */
-function formatRulesForPrompt(rules: readonly RegulationRule[]): string {
+/**
+ * ルールセットを Codex への判定基準テキストへ整形する。
+ * `sticker/check.ts`（層B）と共有する（ruleId の埋め込み形式を1箇所に保つため）。
+ */
+export function formatRulesForPrompt(rules: readonly RegulationRule[]): string {
   return rules
     .map(
       (r) =>

@@ -192,14 +192,38 @@ export function ImageGallery({
             const targets = items.filter(
               (it) => selection.has(it.path) && !it.savedTo,
             );
-            for (const it of targets) {
-              await saveToProject(it.path, cwd);
+            if (targets.length === 0) {
+              pushToast({
+                kind: "info",
+                text: "選択した画像はすべて保存済みです",
+                ttlMs: 3500,
+              });
+              clearSelection();
+              return;
             }
-            pushToast({
-              kind: "success",
-              text: `${targets.length} 枚をプロジェクトへ保存しました`,
-              ttlMs: 3500,
-            });
+            let ok = 0;
+            for (const it of targets) {
+              if (await saveToProject(it.path, cwd)) ok += 1;
+            }
+            const fail = targets.length - ok;
+            if (fail === 0) {
+              pushToast({
+                kind: "success",
+                text: `${ok} 枚をプロジェクトへ保存しました`,
+                ttlMs: 3500,
+              });
+            } else if (ok > 0) {
+              pushToast({
+                kind: "warn",
+                text: `${ok} / ${targets.length} 枚をプロジェクトへ保存しました（${fail} 枚は失敗。失敗分は元の場所に残っています）`,
+                ttlMs: 6000,
+              });
+            } else {
+              pushToast({
+                kind: "error",
+                text: `プロジェクトへの保存に失敗しました（${targets.length} 枚）。画像は元の場所に残っています`,
+              });
+            }
             clearSelection();
           }}
           onFavoriteAll={async () => {
@@ -258,7 +282,15 @@ export function ImageGallery({
             </button>
             {cwd && !selected.savedTo && (
               <button
-                onClick={() => saveToProject(selected.path, cwd)}
+                onClick={() =>
+                  void saveToProject(selected.path, cwd).then((ok) => {
+                    if (!ok)
+                      pushToast({
+                        kind: "error",
+                        text: "プロジェクトへの保存に失敗しました。画像は元の場所に残っています",
+                      });
+                  })
+                }
                 className="flex-1 rounded-md border border-neutral-300 px-2 py-1 text-xs font-medium text-neutral-700 hover:border-lime-500 hover:text-neutral-950"
                 title={`${cwd} へ移動`}
               >

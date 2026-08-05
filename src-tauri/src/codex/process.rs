@@ -56,7 +56,11 @@ impl StderrBuffer {
         }
     }
     pub fn snapshot(&self) -> Vec<String> {
-        self.inner.lock().ok().map(|b| b.clone()).unwrap_or_default()
+        self.inner
+            .lock()
+            .ok()
+            .map(|b| b.clone())
+            .unwrap_or_default()
     }
 }
 
@@ -112,18 +116,18 @@ pub fn enriched_path() -> OsString {
 
     ENRICHED_PATH
         .get_or_init(|| {
-                let mut seen: HashSet<PathBuf> = HashSet::new();
-                let mut parts: Vec<PathBuf> = Vec::new();
-                for src in [std::env::var_os("PATH"), login_shell_path()]
-                    .into_iter()
-                    .flatten()
-                {
-                    for p in std::env::split_paths(&src) {
-                        if !p.as_os_str().is_empty() && seen.insert(p.clone()) {
-                            parts.push(p);
-                        }
+            let mut seen: HashSet<PathBuf> = HashSet::new();
+            let mut parts: Vec<PathBuf> = Vec::new();
+            for src in [std::env::var_os("PATH"), login_shell_path()]
+                .into_iter()
+                .flatten()
+            {
+                for p in std::env::split_paths(&src) {
+                    if !p.as_os_str().is_empty() && seen.insert(p.clone()) {
+                        parts.push(p);
                     }
                 }
+            }
             std::env::join_paths(parts)
                 .unwrap_or_else(|_| std::env::var_os("PATH").unwrap_or_default())
         })
@@ -140,6 +144,57 @@ pub fn enriched_path() -> OsString {
 /// resolve_codex_binary は app-server を最優先で返すので、画像生成バッチで
 /// それを使うと `codex-app-server exec ...` になって即失敗する (Codex 指摘
 /// 2026-05-17)。バッチでは必ずこちらを使う。
+/// バージョンディレクトリ名を決定論的な比較キーへ写像する。
+///
+/// セグメント (`.` 区切り) ごとに `(先頭数字列の u64, 純数字か, 生文字列)` のタプルを作る。
+/// 数値が無いセグメントは 0 として扱う。
+///
+/// - 数値優先で比較するので `0.146.0 > 0.9.9` になる (文字列比較の逆転事故を排除)
+/// - 同数値なら「純数字」が上位なので `0.150.0 > 0.150.0-alpha.4`
+///   (プレリリースを安定版より下位に置く)
+fn version_sort_key(name: &str) -> Vec<(u64, bool, String)> {
+    name.split('.')
+        .map(|seg| {
+            let digits: String = seg.chars().take_while(|c| c.is_ascii_digit()).collect();
+            let num = digits.parse::<u64>().unwrap_or(0);
+            let pure = !seg.is_empty() && seg.chars().all(|c| c.is_ascii_digit());
+            (num, pure, seg.to_string())
+        })
+        .collect()
+}
+
+/// `releases_dir` 直下から `bin/{bin_name}` が実在する最大バージョンの実体パスを返す。
+///
+/// 候補がゼロ (releases 不在・空・bin 欠落のみ) なら None を返し、呼び出し側は
+/// 従来の探索順へフォールバックする。
+fn pick_latest_standalone_codex(releases_dir: &Path, bin_name: &str) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(releases_dir).ok()?;
+    let mut best: Option<(Vec<(u64, bool, String)>, PathBuf)> = None;
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let cand = dir.join("bin").join(bin_name);
+        if !cand.is_file() {
+            continue;
+        }
+        let name = match entry.file_name().into_string() {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+        let key = version_sort_key(&name);
+        let better = match &best {
+            None => true,
+            Some((best_key, _)) => key > *best_key,
+        };
+        if better {
+            best = Some((key, cand));
+        }
+    }
+    best.map(|(_, p)| p)
+}
+
 pub fn resolve_codex_cli_binary() -> Result<PathBuf> {
     // ① アプリと同階層 / resources の codex(.exe) を最優先
     if let Ok(exe_path) = std::env::current_exe() {
@@ -158,8 +213,8 @@ pub fn resolve_codex_cli_binary() -> Result<PathBuf> {
             // に配置される (Contents/Resources/codex ではない)。
             // Mac で codex バイナリが見つからない真の原因はここ。
             for rel in [
-                "resources",            // exe_dir(=MacOS)/resources/ ← 古いパス、未使用
-                "../Resources",         // Contents/Resources/        ← 旧期待先(空)
+                "resources",              // exe_dir(=MacOS)/resources/ ← 古いパス、未使用
+                "../Resources",           // Contents/Resources/        ← 旧期待先(空)
                 "../Resources/resources", // Contents/Resources/resources/ ← 実際の配置
             ] {
                 let cand = exe_dir.join(rel).join(cli_bin);
@@ -191,6 +246,24 @@ pub fn resolve_codex_cli_binary() -> Result<PathBuf> {
         ] {
             let p = PathBuf::from(cand);
             if p.is_file() {
+                return Ok(p);
+            }
+        }
+    }
+
+    // ①.7 Windows: codex standalone インストーラの実体を PATH より先に解決する。
+    // PATH 上の %LOCALAPPDATA%\...\bin\codex.exe はランチャー(シム)で、隣に
+    // codex-windows-sandbox-setup.exe を持たず sandbox 準備で「見つかりません」死する
+    // (openai/codex #30829 / ASm 報告 DA7 / bd 70r)。実体の bin\ には sandbox-setup が
+    // 同居するため、releases\<最新ver>\bin\codex.exe を直接起動して回避する。
+    if cfg!(windows) {
+        if let Some(home) = dirs::home_dir() {
+            let releases = home
+                .join(".codex")
+                .join("packages")
+                .join("standalone")
+                .join("releases");
+            if let Some(p) = pick_latest_standalone_codex(&releases, "codex.exe") {
                 return Ok(p);
             }
         }
@@ -240,10 +313,67 @@ pub fn resolve_codex_cli_binary() -> Result<PathBuf> {
     Err(anyhow!(
         "Codex CLI (codex exec を実行できるバイナリ) が見つかりませんでした\n\
          画像生成バッチには app-server ではなく `codex exec` が必要です。\n\
+         Windows の場合は %USERPROFILE%\\.codex\\packages\\standalone\\releases 配下も探索しました。\n\
          OS: {} / {}",
         std::env::consts::OS,
         std::env::consts::ARCH,
     ))
+}
+
+/// MCP の **認可 2 操作 (`mcp add` / `mcp login`) 専用** の補助 codex バイナリを解決する。
+///
+/// ## なぜ別バイナリが要るか (2026-08-03 実測)
+///
+/// codex CLI 0.143〜0.146.0 は OAuth コールバックの `iss` パラメータを捨てるバグを持ち、
+/// rmcp 1.8.0 の RFC 9207 検証に引っかかって Magnific の認可が
+/// `missing required issuer` で必ず失敗する。修正は openai/codex PR #35720 で、
+/// `rust-v0.147.0-alpha.4` に含まれる (0.146.0 安定版には無い)。
+///
+/// 一方 **トークン取得後の利用・リフレッシュは 0.146.0 で正常に動く** (実機実証済み。
+/// トークンは同一 CODEX_HOME / 同一サーバ URL に紐づき世代間で共用できる)。
+/// そこで「認可だけ修正版 (codex-auth) / 日常実行は同梱 0.146.0」の二段構えにする。
+///
+/// ## 解決順序
+/// 1. `GORI_CODEX_AUTH_BIN` (dev / 障害時の明示上書きは常に勝つ)
+/// 2. アプリ同梱の `codex-auth`(.exe) — resolve_codex_cli_binary と同じ 4 相対パス
+/// 3. `resolve_codex_cli_binary()` へフォールバック
+///    (dev 環境・0.147 安定版一本化後はこちらが正常経路になる)
+///
+/// `/Applications/Codex.app/...` の優先探索は **含めない**。あちらの世代は不定で、
+/// iss バグ持ちの可能性があるため (修正版であることを保証できない)。
+pub fn resolve_codex_auth_binary() -> Result<PathBuf> {
+    // ① 明示上書き (dev で alpha を試す唯一の経路。dev ビルドは resources を同梱しない)
+    if let Some(p) = std::env::var_os("GORI_CODEX_AUTH_BIN") {
+        let cand = PathBuf::from(p);
+        if cand.is_file() {
+            return Ok(cand);
+        }
+    }
+
+    // ② アプリ同梱の codex-auth。配置規則は codex 本体と同じ (bundle.resources の
+    //    "resources/codex-auth" は Contents/Resources/resources/codex-auth に置かれる)。
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(exe_dir) = exe_path.parent() {
+            let auth_bin = if cfg!(windows) {
+                "codex-auth.exe"
+            } else {
+                "codex-auth"
+            };
+            let cand = exe_dir.join(auth_bin);
+            if cand.is_file() {
+                return Ok(cand);
+            }
+            for rel in ["resources", "../Resources", "../Resources/resources"] {
+                let cand = exe_dir.join(rel).join(auth_bin);
+                if cand.is_file() {
+                    return Ok(cand);
+                }
+            }
+        }
+    }
+
+    // ③ 見つからなければ従来バイナリ (dev では常にここ。挙動不変)
+    resolve_codex_cli_binary()
 }
 
 pub fn resolve_codex_binary(override_path: Option<&Path>) -> Result<PathBuf> {
@@ -278,11 +408,7 @@ pub fn resolve_codex_binary(override_path: Option<&Path>) -> Result<PathBuf> {
             // v0.6.16: Tauri は bundle.resources の "resources/codex-app-server" を
             // Contents/Resources/resources/codex-app-server に配置するため、
             // ../Resources/resources も探索対象に加える。
-            for rel in [
-                "resources",
-                "../Resources",
-                "../Resources/resources",
-            ] {
+            for rel in ["resources", "../Resources", "../Resources/resources"] {
                 let cand = exe_dir.join(rel).join(server_bin);
                 if cand.is_file() {
                     return Ok(cand);
@@ -489,16 +615,106 @@ pub fn humanize_generation_failure(raw: &str) -> String {
         return "画像生成サービスの認証が切れている可能性があります。設定 → アカウントから再ログインしてください。".to_string();
     }
     // レート制限(429)。少し待てば直る。
-    if lower.contains("http 429") || lower.contains("rate limit") || lower.contains("too many requests")
+    if lower.contains("http 429")
+        || lower.contains("rate limit")
+        || lower.contains("too many requests")
     {
         return "短時間に生成しすぎてサーバーから一時的に制限されています。1〜2分おいてから再生成してください。".to_string();
     }
     // タイムアウト。
-    if lower.contains("タイムアウト") || lower.contains("timed out") || lower.contains("timeout") {
+    if lower.contains("タイムアウト") || lower.contains("timed out") || lower.contains("timeout")
+    {
         return "画像生成がタイムアウトしました。サーバーが混雑している可能性があります。少し時間をおいて再生成してください。".to_string();
     }
     // 判別できない失敗は元のメッセージを残す(原因究明のため)。
     raw.to_string()
+}
+
+#[cfg(test)]
+mod standalone_codex_tests {
+    use super::{pick_latest_standalone_codex, version_sort_key};
+    use std::path::Path;
+
+    /// releases/<ver>/bin/<bin_name> を作る。`with_bin=false` なら bin ディレクトリだけ作る。
+    fn make_release(root: &Path, ver: &str, bin_name: &str, with_bin: bool) {
+        let bin_dir = root.join(ver).join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        if with_bin {
+            std::fs::write(bin_dir.join(bin_name), b"stub").unwrap();
+        }
+    }
+
+    #[test]
+    fn picks_higher_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        make_release(tmp.path(), "0.146.0", "codex.exe", true);
+        make_release(tmp.path(), "0.150.1", "codex.exe", true);
+        let got = pick_latest_standalone_codex(tmp.path(), "codex.exe").unwrap();
+        assert!(got.to_string_lossy().contains("0.150.1"), "got {got:?}");
+    }
+
+    /// 文字列比較なら "0.9.9" > "0.146.0" になってしまう。数値比較であることの証明。
+    #[test]
+    fn numeric_comparison_not_lexicographic() {
+        let tmp = tempfile::tempdir().unwrap();
+        make_release(tmp.path(), "0.9.9", "codex.exe", true);
+        make_release(tmp.path(), "0.146.0", "codex.exe", true);
+        let got = pick_latest_standalone_codex(tmp.path(), "codex.exe").unwrap();
+        assert!(got.to_string_lossy().contains("0.146.0"), "got {got:?}");
+        assert!(version_sort_key("0.146.0") > version_sort_key("0.9.9"));
+    }
+
+    /// プレリリース (非純数字セグメント) は同数値の安定版より下位。
+    #[test]
+    fn stable_beats_prerelease() {
+        let tmp = tempfile::tempdir().unwrap();
+        make_release(tmp.path(), "0.150.0", "codex.exe", true);
+        make_release(tmp.path(), "0.150.0-alpha.4", "codex.exe", true);
+        let got = pick_latest_standalone_codex(tmp.path(), "codex.exe").unwrap();
+        let s = got.to_string_lossy().to_string();
+        assert!(s.contains("0.150.0"), "got {s}");
+        assert!(!s.contains("alpha"), "prerelease should lose: {s}");
+        assert!(version_sort_key("0.150.0") > version_sort_key("0.150.0-alpha.4"));
+    }
+
+    #[test]
+    fn skips_version_without_bin() {
+        let tmp = tempfile::tempdir().unwrap();
+        make_release(tmp.path(), "0.146.0", "codex.exe", true);
+        make_release(tmp.path(), "0.999.0", "codex.exe", false); // bin 欠落
+        let got = pick_latest_standalone_codex(tmp.path(), "codex.exe").unwrap();
+        assert!(got.to_string_lossy().contains("0.146.0"), "got {got:?}");
+    }
+
+    #[test]
+    fn none_when_missing_or_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        // releases 不在
+        let absent = tmp.path().join("no-such-dir");
+        assert!(pick_latest_standalone_codex(&absent, "codex.exe").is_none());
+        // 空ディレクトリ
+        let empty = tmp.path().join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        assert!(pick_latest_standalone_codex(&empty, "codex.exe").is_none());
+    }
+
+    /// 同一のディレクトリ集合に対し常に同一の結果 (決定論)。
+    #[test]
+    fn deterministic_across_runs() {
+        let tmp = tempfile::tempdir().unwrap();
+        for ver in ["0.146.0", "0.150.0", "0.150.0-alpha.4", "0.9.9"] {
+            make_release(tmp.path(), ver, "codex.exe", true);
+        }
+        let first = pick_latest_standalone_codex(tmp.path(), "codex.exe").unwrap();
+        for _ in 0..5 {
+            assert_eq!(
+                pick_latest_standalone_codex(tmp.path(), "codex.exe").unwrap(),
+                first
+            );
+        }
+        assert!(first.to_string_lossy().contains("0.150.0"));
+        assert!(!first.to_string_lossy().contains("alpha"));
+    }
 }
 
 #[cfg(test)]
@@ -514,7 +730,10 @@ mod humanize_tests {
 
     #[test]
     fn http_502_is_humanized() {
-        assert!(humanize_generation_failure("Higgsfield API error (HTTP 502)").contains("混雑または一時的に不安定"));
+        assert!(
+            humanize_generation_failure("Higgsfield API error (HTTP 502)")
+                .contains("混雑または一時的に不安定")
+        );
     }
 
     #[test]

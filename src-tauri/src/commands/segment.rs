@@ -1,21 +1,21 @@
-#[cfg(target_os = "windows")]
+#[cfg(edit_ai)]
 use std::path::Path;
 
-#[cfg(target_os = "windows")]
+#[cfg(edit_ai)]
 use crate::commands::now_secs;
-#[cfg(target_os = "windows")]
+#[cfg(edit_ai)]
 use crate::commands::storage::{resolve_output_dir, StorageSettings};
 use crate::edit::download::download_model as download_edit_model;
 use crate::edit::registry::{find_model, model_path};
-#[cfg(target_os = "windows")]
+#[cfg(edit_ai)]
 use crate::edit::segment::segment_image as run_birefnet_segment;
-use crate::segmentation::{SegmentationModel, SegmentationModelStatus};
-#[cfg(target_os = "windows")]
+#[cfg(edit_ai)]
 use crate::segmentation::SegmentationResult;
-#[cfg(target_os = "windows")]
+use crate::segmentation::{SegmentationModel, SegmentationModelStatus};
+#[cfg(edit_ai)]
 use crate::state::AppState;
 use tauri::AppHandle;
-#[cfg(target_os = "windows")]
+#[cfg(edit_ai)]
 use tauri::State;
 
 const BIREFNET_ID: &str = "birefnet-general";
@@ -25,7 +25,7 @@ const BIREFNET_ID: &str = "birefnet-general";
 ///
 /// 注意: Mac の背景透過は Vision (resources/removebg.swift) 経由の別経路で、
 /// commands/images.rs にある。この cfg の影響を受けない。
-#[cfg(target_os = "windows")]
+#[cfg(edit_ai)]
 #[tauri::command]
 pub async fn segment_image(
     state: State<'_, AppState>,

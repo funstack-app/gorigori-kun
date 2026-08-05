@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use tokio::process::Command;
 
-use crate::codex::process::{enriched_path, resolve_codex_cli_binary};
+use crate::codex::process::{enriched_path, resolve_codex_auth_binary, resolve_codex_cli_binary};
 
 /// GORI 専用 CODEX_HOME を環境に設定した codex `Command` を作る。
 /// MCP 設定は専用 HOME の config.toml を読むため、必ずこの HOME を渡す。
@@ -30,14 +30,41 @@ use crate::codex::process::{enriched_path, resolve_codex_cli_binary};
 /// 子プロセスを打ち切れる。`mcp login` の OAuth は完了までブロックしうるため、
 /// 同期 `std::process::Command::output()` だと UI が固まる。
 pub fn gori_codex_command() -> Result<Command, String> {
-    let binary = resolve_codex_cli_binary()
-        .map_err(|e| format!("codex CLI が見つかりません: {e}"))?;
+    let binary =
+        resolve_codex_cli_binary().map_err(|e| format!("codex CLI が見つかりません: {e}"))?;
     let mut cmd = Command::new(binary);
     cmd.env("PATH", enriched_path());
     if let Some(home) = crate::codex::home::gori_codex_home_path() {
         cmd.env("CODEX_HOME", home);
     }
     // Windows での黒い console window 抑制 (process.rs の no_window_flag と同等)。
+    crate::codex::process::no_window_flag(&mut cmd);
+    cmd.kill_on_drop(true);
+    Ok(cmd)
+}
+
+/// MCP の **認可 2 操作 (`mcp add` / `mcp login`) 専用** の codex `Command` を作る。
+///
+/// env 設定 (PATH enrich / GORI 専用 CODEX_HOME / no_window_flag / kill_on_drop) は
+/// `gori_codex_command` と完全に同一で、**解決するバイナリだけ** が
+/// `resolve_codex_auth_binary()` (= 同梱 codex-auth を優先、無ければ従来 CLI) になる。
+/// 同一 CODEX_HOME を使うので、認可で得たトークンは日常実行側 (0.146.0) と共用される。
+///
+/// 配布先での切り分けのため、使用バイナリの絶対パスを必ずログに残す
+/// (`resources/codex-auth` を指していなければフォールバック＝ issuer バグ経路)。
+pub fn gori_codex_auth_command() -> Result<Command, String> {
+    let binary =
+        resolve_codex_auth_binary().map_err(|e| format!("codex CLI が見つかりません: {e}"))?;
+    tracing::info!(
+        target: "mcp.auth",
+        binary = %binary.display(),
+        "MCP 認可に使用するバイナリ"
+    );
+    let mut cmd = Command::new(binary);
+    cmd.env("PATH", enriched_path());
+    if let Some(home) = crate::codex::home::gori_codex_home_path() {
+        cmd.env("CODEX_HOME", home);
+    }
     crate::codex::process::no_window_flag(&mut cmd);
     cmd.kill_on_drop(true);
     Ok(cmd)
@@ -52,7 +79,25 @@ pub async fn run_codex_capture(
     args: &[&str],
     timeout: Duration,
 ) -> Result<(bool, String, String), String> {
-    let mut cmd = gori_codex_command()?;
+    run_capture_with(gori_codex_command()?, args, timeout).await
+}
+
+/// `run_codex_capture` の **認可専用** 版。バイナリ解決が codex-auth になるだけで、
+/// spawn / timeout / 出力整形の挙動は完全に同一。
+pub async fn run_codex_auth_capture(
+    args: &[&str],
+    timeout: Duration,
+) -> Result<(bool, String, String), String> {
+    run_capture_with(gori_codex_auth_command()?, args, timeout).await
+}
+
+/// spawn〜timeout〜出力整形の共通処理。`run_codex_capture` と
+/// `run_codex_auth_capture` が渡す `Command` だけが異なる (重複実装を作らない)。
+async fn run_capture_with(
+    mut cmd: Command,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<(bool, String, String), String> {
     cmd.args(args);
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
@@ -65,7 +110,10 @@ pub async fn run_codex_capture(
     let output = match tokio::time::timeout(timeout, child.wait_with_output()).await {
         Ok(Ok(o)) => o,
         Ok(Err(e)) => {
-            return Err(format!("codex {} の待機に失敗しました: {e}", args.join(" ")))
+            return Err(format!(
+                "codex {} の待機に失敗しました: {e}",
+                args.join(" ")
+            ))
         }
         Err(_elapsed) => {
             // kill_on_drop(true) なので child を drop すれば子も殺される。

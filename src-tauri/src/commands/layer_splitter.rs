@@ -181,9 +181,7 @@ fn default_output_path(input: &Path) -> Result<PathBuf, String> {
         .and_then(|s| s.to_str())
         .filter(|s| !s.is_empty())
         .unwrap_or("image");
-    Ok(base
-        .join("_layers")
-        .join(format!("{stem}_layered.psd")))
+    Ok(base.join("_layers").join(format!("{stem}_layered.psd")))
 }
 
 fn normalize_path(path: PathBuf) -> PathBuf {

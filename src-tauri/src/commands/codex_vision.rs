@@ -15,6 +15,15 @@ const CODEX_VISION_TIMEOUT_SECS: u64 = 300;
 const VISION_MODEL: &str = "gpt-5.6-terra";
 const VISION_EFFORT: &str = "low";
 
+/// 審査セルフチェック経路 (`codex_review_facts`) 専用の effort。
+///
+/// 既存経路 (`VISION_EFFORT = "low"`) を上げない理由: describe/analyze は
+/// 「絵として何が写っているか」を書く用途で low で足りており、生成の前段に挟まるため
+/// 遅くすると生成全体が遅くなる。一方この経路は **ブランド名・作品名を名指しさせる**
+/// タスクで、low では固有名詞が出にくい。審査観点の見落としは
+/// 「速い正解」より高くつくので、ここだけ medium にする。
+const REVIEW_FACTS_EFFORT: &str = "medium";
+
 #[tauri::command]
 pub async fn codex_describe_image(image_path: String) -> Result<String, String> {
     let prompt = [
@@ -85,8 +94,111 @@ pub async fn codex_list_image_objects(image_path: String) -> Result<Vec<ImageObj
 /// 返り値は `codex_analyze_design` の生出力 (未検証の JSON 文字列)。パースと検証は
 /// 呼び出し側が行う (未信頼入力の検証を呼び出し側1箇所に集約する)。
 #[tauri::command]
-pub async fn codex_extract_text_blocks(image_path: String, img_w: u32, img_h: u32) -> Result<String, String> {
+pub async fn codex_extract_text_blocks(
+    image_path: String,
+    img_w: u32,
+    img_h: u32,
+) -> Result<String, String> {
     codex_analyze_design(&image_path, img_w, img_h).await
+}
+
+/// 審査セルフチェック用: 画像から「審査観点の事実」だけを列挙して JSON 文字列で返す。
+///
+/// なぜ独立コマンドにするか (2026-08-05):
+///   審査観点の判定材料に `codex_describe_image` を流用できない。あれのプロンプトは
+///   「この画像をAI画像生成で再現するための英語プロンプトを1行で」(:19-24) であり、
+///   **固有名詞を出さないよう最適化された出力**になる ("a red sports car" であって
+///   "a Ferrari" ではない)。ブランド名・実在人物名・作品名は構造的に出てこないため、
+///   権利・肖像まわりのルールが材料不足で空振りする。
+///   これは `codex_extract_text_blocks` を新設した時 (:74-86) と同型の問題で、
+///   `regulationCheck/check.ts` 冒頭が「ルール定義は数値基準で要求しているのに、
+///   材料が入力に無かった」と記録している事故の再演にあたる。
+///
+/// **判断ではなく事実の列挙に徹する**: 「審査に通るか」は LINE の裁量であり、ここで
+/// 可否を推定させない。出すのは「何が見えるか」だけで、ルールへの当てはめは
+/// 呼び出し側 (`sticker/check.ts` の `LINE_STICKER_REVIEW`) が行う。
+///
+/// 返り値は **未検証の生 JSON 文字列**。パースと検証は呼び出し側が行う
+/// (`codex_extract_text_blocks` / `codex_analyze_scene_layout` と同じく、
+/// 未信頼入力の検証を呼び出し側1箇所に集約する)。
+#[tauri::command]
+pub async fn codex_review_facts(image_path: String) -> Result<String, String> {
+    run_codex_vision_with_effort(&image_path, &review_facts_prompt(), REVIEW_FACTS_EFFORT).await
+}
+
+/// `codex_review_facts` のプロンプト本文。テストから中身を検証できるよう関数に切ってある
+/// (「可否を判定させない」「不確かなら uncertain」がこのコマンドの契約そのもののため)。
+fn review_facts_prompt() -> String {
+    [
+        "添付画像について以下だけを JSON で答えてください (説明文・コードフェンス不要)。",
+        "あなたは事実の列挙だけを行います。**評価・判断・可否の推定はしません**。",
+        "",
+        "{",
+        "  \"brandMarks\": [\"識別できる実在の企業ロゴ・商標・製品意匠の名称\"],",
+        "  \"realPersons\": {\"present\": true, \"reason\": \"実在人物と識別できる理由\"},",
+        "  \"knownCharacters\": [\"既存の商用キャラクター・作品由来と識別できるものの名称\"],",
+        "  \"textStrings\": [\"画像内の文字 (URL・電話番号を含む)\"],",
+        "  \"hasPictorialContent\": true,",
+        "  \"skinExposure\": {\"present\": false, \"reason\": \"\"},",
+        "  \"violence\": {\"present\": false, \"reason\": \"\"},",
+        "  \"politicalReligious\": {\"present\": false, \"reason\": \"\"},",
+        "  \"discrimination\": {\"present\": false, \"reason\": \"\"},",
+        "  \"gambling\": {\"present\": false, \"reason\": \"\"}",
+        "}",
+        "",
+        "規則:",
+        "- 該当が無い項目は空配列、または present: false にする。省略しない。",
+        "- **確信が持てない場合は present の代わりに文字列 \"uncertain\" を書く**。",
+        "  推測で断定しない。分からないものを分かったことにしない。",
+        "- brandMarks / knownCharacters は「〜風」「〜に似ている」ではなく、",
+        "  **その名称だと識別できる場合にだけ**名前を書く。断定できないなら空配列。",
+        "- textStrings は読める文字をそのまま書く。1文字も創作しない (読めなければ出さない)。",
+        "- hasPictorialContent は「文字以外の絵の要素 (人物・動物・物・背景) が描かれているか」。",
+        "  文字だけの画像なら false。",
+        "- reason は日本語で簡潔に。該当なしなら空文字でよい。",
+        "- **この画像が審査に通るかどうかは書かないでください**。見えるものだけを答えます。",
+    ]
+    .join("\n")
+}
+
+/// 画像→3Dシーン再構成用: 画像を Blender 風ブロックアウトとして解析し、
+/// 床平面上の配置図・カメラを構造化 JSON で返す。
+///
+/// 返り値は **未検証の生 JSON 文字列**。kind ホワイトリスト照合・数値 clamp・
+/// lensMm のプリセット丸めはフロント (`src/lib/scene3d/layoutAnalysis.ts`) が行う
+/// (`codex_extract_text_blocks` と同じく、未信頼入力の検証を呼び出し側1箇所に集約する)。
+///
+/// 座標系は 0〜1000 正規化ではなくメートル実寸 (人物身長 1.7m 基準)。
+/// `codex_analyze_design` が bbox を正規化スケールで出させるのと同じ意図
+/// (モデルに絶対値を推測させず、既知の基準からの相対で答えさせる) を、
+/// 3D 空間では「人物身長 1.7m を物差しにする」形で満たしている。
+#[tauri::command]
+pub async fn codex_analyze_scene_layout(image_path: String) -> Result<String, String> {
+    let prompt = [
+        "あなたは3Dレイアウトの分解エンジンです。添付画像を Blender 風ブロックアウトとして解析し、",
+        "以下の JSON だけを出力してください (説明文・コードフェンス不要)。",
+        "",
+        "{",
+        "  \"person\": {\"floorX\": 0.0, \"floorZ\": 0.0, \"rotationYDeg\": 0} または null,",
+        "  \"objects\": [{\"kind\": \"box\", \"label\": \"机\", \"floorX\": 1.2, \"floorZ\": -0.5,",
+        "               \"rotationYDeg\": 30, \"width\": 1.4, \"height\": 0.8, \"depth\": 0.7}],",
+        "  \"camera\": {\"azimuthDeg\": 15, \"distanceM\": 4.0, \"heightM\": 1.5, \"lensMm\": 35}",
+        "}",
+        "",
+        "座標系の規約:",
+        "- 床平面を真上から見た配置図として答える。主要人物 (いなければ主要被写体) の足元を原点 (0,0)。",
+        "- カメラはおおむね +Z 側から原点方向を見る。X=画像の右方向、Z=カメラに近づく方向。単位はメートル。",
+        "- 人物の身長を 1.7m として全体のスケールを推定する。",
+        "規則:",
+        "- kind は次のみ: box / wall / column / table / chair / sofa / bed / shelf / pedestal /",
+        "  car / tree / streetlight / building / sphere。当てはまらない物は box にして寸法で表現。",
+        "- 人物は person に1人だけ (最も主要な1人)。他の人型は objects に入れない。",
+        "- rotationYDeg は反時計回り。camera.azimuthDeg は真正面=0、右回り込みが正。",
+        "- lensMm は 18/24/35/50/85/135 のいずれかに丸める。",
+        "- 床・背景・グリッド・影は列挙しない。objects は最大12個、主要な物から。",
+    ]
+    .join("\n");
+    run_codex_vision(&image_path, &prompt).await
 }
 
 /// 理解層 (工程0): 画像をグラフィックデザインとして分解した構造化 JSON を返す。
@@ -115,8 +227,30 @@ pub async fn codex_analyze_design(
     run_codex_vision(image_path, &prompt).await
 }
 
+/// `codex exec` に渡す `-c key=value` 2本を組み立てる。
+/// effort が経路ごとに分岐する唯一の箇所なので、テストから直接検証できるよう関数に切ってある
+/// (プロセス起動を伴わずに「審査経路だけ effort が上がっている」を確かめるため)。
+fn vision_config_args(effort: &str) -> (String, String) {
+    (
+        format!("model={VISION_MODEL}"),
+        format!("model_reasoning_effort={effort}"),
+    )
+}
+
 /// Codex CLI (`codex exec -i <image>`) で画像付きプロンプトを実行し stdout を返す共通経路。
+/// effort は既存経路の既定値 (`VISION_EFFORT`)。上げたい経路は
+/// `run_codex_vision_with_effort` を直接呼ぶ。
 async fn run_codex_vision(image_path: &str, prompt: &str) -> Result<String, String> {
+    run_codex_vision_with_effort(image_path, prompt, VISION_EFFORT).await
+}
+
+/// `run_codex_vision` の effort 可変版。審査セルフチェックのように固有名詞の想起が要る
+/// 経路だけ effort を上げるために分けてある (既存経路の速度を巻き添えにしないため)。
+async fn run_codex_vision_with_effort(
+    image_path: &str,
+    prompt: &str,
+    effort: &str,
+) -> Result<String, String> {
     let image_path = image_path.trim();
     if image_path.is_empty() {
         return Err("image_path must not be empty".to_string());
@@ -135,8 +269,7 @@ async fn run_codex_vision(image_path: &str, prompt: &str) -> Result<String, Stri
     //   -c key=value          : config 上書き
     //   -i, --image <FILE>    : 画像添付
     //   PROMPT は省略すると stdin から読む (末尾の `-` は不要)
-    let model_arg = format!("model={VISION_MODEL}");
-    let effort_arg = format!("model_reasoning_effort={VISION_EFFORT}");
+    let (model_arg, effort_arg) = vision_config_args(effort);
     let mut cmd = Command::new(&codex_bin);
     cmd.args([
         "exec",
@@ -254,6 +387,81 @@ fn parse_object_words(raw: &str) -> Result<Vec<ImageObjectWord>, String> {
 #[cfg(test)]
 mod tests {
     use super::parse_object_words;
+    use super::{review_facts_prompt, vision_config_args, REVIEW_FACTS_EFFORT, VISION_EFFORT};
+
+    #[test]
+    fn review_facts_prompt_asks_for_all_review_material_keys() {
+        // S7 (sticker/check.ts) の LINE_STICKER_REVIEW が材料として要求するキー。
+        // どれか1つでもプロンプトから落ちると、対応するルールが材料不足で静かに空振りする
+        // (codex_extract_text_blocks 新設のきっかけになった事故と同型)。
+        let prompt = review_facts_prompt();
+        for key in [
+            "brandMarks",
+            "realPersons",
+            "knownCharacters",
+            "textStrings",
+            "hasPictorialContent",
+            "skinExposure",
+            "violence",
+            "politicalReligious",
+            "discrimination",
+            "gambling",
+        ] {
+            assert!(
+                prompt.contains(key),
+                "材料キー {key} がプロンプトから欠落している"
+            );
+        }
+    }
+
+    #[test]
+    fn review_facts_prompt_forbids_verdicts_and_guessing() {
+        // このコマンドの契約: 事実の列挙に徹し、可否を判定しない (承認可否は LINE の裁量)。
+        // 不確かなものを推測で断定させない (no-silent-gap-filling と同じ思想)。
+        let prompt = review_facts_prompt();
+        assert!(
+            prompt.contains("審査に通るかどうかは書かないでください"),
+            "可否を判定させない指示が消えている"
+        );
+        assert!(
+            prompt.contains("uncertain"),
+            "確信が持てない場合の逃げ道が消えている"
+        );
+        assert!(
+            prompt.contains("推測で断定しない"),
+            "推測禁止の指示が消えている"
+        );
+        assert!(
+            prompt.contains("1文字も創作しない"),
+            "文字の創作禁止 (codex_analyze_design と同じ規律) が消えている"
+        );
+    }
+
+    #[test]
+    fn review_facts_uses_higher_effort_than_existing_vision_paths() {
+        // 審査経路だけ effort を上げるのがこのスライスの要点。
+        // 既存経路 (describe/analyze) を巻き添えで遅くしていないことも同時に固定する。
+        assert_eq!(VISION_EFFORT, "low", "既存経路の effort は据え置き");
+        assert_ne!(
+            REVIEW_FACTS_EFFORT, VISION_EFFORT,
+            "審査経路が既存経路と同じ effort なら、低 effort ではブランド名が出ないという\
+             このコマンドの存在理由が消える"
+        );
+
+        let (_, existing) = vision_config_args(VISION_EFFORT);
+        let (_, review) = vision_config_args(REVIEW_FACTS_EFFORT);
+        assert_eq!(existing, "model_reasoning_effort=low");
+        assert_eq!(review, "model_reasoning_effort=medium");
+    }
+
+    #[test]
+    fn review_facts_config_keeps_shared_vision_model() {
+        // effort だけを分岐させる設計 (モデルは既存経路と同じ) を固定する。
+        let (model_default, _) = vision_config_args(VISION_EFFORT);
+        let (model_review, _) = vision_config_args(REVIEW_FACTS_EFFORT);
+        assert_eq!(model_default, model_review);
+        assert_eq!(model_default, "model=gpt-5.6-terra");
+    }
 
     #[test]
     fn parses_category_and_normalizes_invalid_values() {
@@ -296,7 +504,9 @@ mod tests {
     fn dedupes_and_caps_at_ten_entries() {
         let mut entries = Vec::new();
         for i in 0..12 {
-            entries.push(format!(r#"{{"en":"item {i}","ja":"物 {i}","category":"prop"}}"#));
+            entries.push(format!(
+                r#"{{"en":"item {i}","ja":"物 {i}","category":"prop"}}"#
+            ));
         }
         entries.push(r#"{"en":"item 0","ja":"重複","category":"prop"}"#.to_string());
         let raw = format!("[{}]", entries.join(","));

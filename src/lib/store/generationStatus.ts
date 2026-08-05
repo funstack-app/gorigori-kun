@@ -1,4 +1,7 @@
 import { create } from "zustand";
+import { SKILL_UI_MODE_MAP, useSkillUiMode, type UiMode } from "./skillUiMode";
+import { useToasts } from "./toasts";
+import { useWorkspace, type WorkspaceTab } from "./workspace";
 
 /**
  * 生成の「今どうなっているか」を1箇所に集約するストア。
@@ -92,17 +95,167 @@ export const GENERATION_KIND_LABEL: Record<GenerationKind, string> = {
   aiEdit: "AI編集",
 };
 
+/**
+ * 生成の種類 → そのスキルの UiMode (cne / 2026-08-04)。
+ *
+ * ## なぜ「新しい対応表」ではなく UiMode 経由か
+ *
+ * skillId の正本は `SKILL_UI_MODE_MAP` (skillUiMode.ts) の
+ * skillId → UiMode 一方向マップ。ここで skillId を直接持つと
+ * **同じ対応関係が2箇所に増える**（スキル ID を変えたときに片方だけ腐る）。
+ * そこで持つのは kind → UiMode だけにし、skillId は実行時に
+ * `SKILL_UI_MODE_MAP` の逆引きで求める。対応表の正本は1つのまま。
+ *
+ * null は「専用スキル画面を持たない種類」= 作品モード (default) の生成。
+ * batch / video / aiEdit がこれに当たり、遷移先は作品モードになる。
+ */
+const GENERATION_KIND_UI_MODE: Record<GenerationKind, UiMode | null> = {
+  batch: null,
+  video: null,
+  aiEdit: null,
+  multiangle: "multiAngle",
+  storyboard: "storyboard",
+  expressionSet: "expressionSet",
+  comic: "comic",
+  productSet: "productSet",
+  sceneRecreate: "sceneRecreate",
+  characterSheet: "characterRegister",
+};
+
+/**
+ * その生成の種類が属するスキル ID。作品モードの生成なら null。
+ *
+ * `SKILL_UI_MODE_MAP` の逆引き。UiMode → skillId はほぼ 1:1 で、
+ * 複数の skillId が同じ UiMode を指す場合は最初の1件を採る
+ * (現状そのような重複は無い)。
+ */
+export function skillIdForKind(kind: GenerationKind): string | null {
+  const uiMode = GENERATION_KIND_UI_MODE[kind];
+  if (!uiMode) return null;
+  const hit = Object.entries(SKILL_UI_MODE_MAP).find(([, mode]) => mode === uiMode);
+  return hit?.[0] ?? null;
+}
+
+/**
+ * 生成の種類 → その結果が実際に映るタブ (Sol 評価 blocking#5 / 2026-08-04)。
+ *
+ * ## なぜ種類別に要るか
+ *
+ * 専用スキル画面 (漫画・マルチアングル等) は「画像生成」タブの中に描かれるので、
+ * 遷移時に generate へ揃えるのが正しい。しかし **作品モード扱いの3種は行き先が
+ * それぞれ違う**:
+ *
+ *   - aiEdit … UiMode は default (専用スキル画面が無い) だが、実画面は「編集」タブ。
+ *     全部 generate へ送っていたため、AI 編集のジョブ行を押すと編集結果ではなく
+ *     画像生成タブが開いて「押したのに何も起きない」ように見えていた。
+ *   - video … 実画面は「動画生成」タブ。
+ *   - batch … 画像生成タブの生成タイムライン。
+ *
+ * UiMode (どのスキル画面か) とタブ (どの枠に描かれるか) は別の軸なので、
+ * `GENERATION_KIND_UI_MODE` に相乗りさせず独立した表として持つ。
+ */
+const GENERATION_KIND_TAB: Record<GenerationKind, WorkspaceTab> = {
+  // 作品モードの3種は行き先がそれぞれ違う (上のコメント)。
+  aiEdit: "edit",
+  video: "video",
+  batch: "generate",
+  // 専用スキル画面を持つ種類は、その画面が乗る「画像生成」タブ。
+  multiangle: "generate",
+  storyboard: "generate",
+  expressionSet: "generate",
+  comic: "generate",
+  productSet: "generate",
+  sceneRecreate: "generate",
+  characterSheet: "generate",
+};
+
+/** その生成の結果が映るタブ。 */
+export function tabForKind(kind: GenerationKind): WorkspaceTab {
+  return GENERATION_KIND_TAB[kind];
+}
+
+/**
+ * そのジョブが「いま画面に映っていないスキル」のものか (cne / 2026-08-04)。
+ *
+ * 完了通知を出すかどうかの判定に使う。表示中のスキルの完了は、その画面自身が
+ * 結果を出すので**トーストを重ねない**（同じ完了を二重に知らせない）。
+ *
+ * drawer (ライブラリ等) を開いている間はスキル画面が隠れている (S1 の keep-alive で
+ * マウントは維持されるが見えていない) ので、たとえ kind が現在のスキルと一致していても
+ * バックグラウンド扱いにする。drawer の開閉は App.tsx が `setDrawerOpen` で伝える。
+ */
+function isBackgroundJob(kind: GenerationKind): boolean {
+  // drawer (ライブラリ等) が被さっていればスキル画面は見えていない。
+  if (drawerOpen) return true;
+  // その生成の結果が映るタブを開いていなければ、画面には出ていない。
+  // 種類別に見る (Sol 評価 blocking#5): スキル画面は「画像生成」タブの中だが、
+  // AI 編集は「編集」タブ、動画は「動画生成」タブが定位置。
+  if (useWorkspace.getState().activeTab !== tabForKind(kind)) return true;
+  const uiMode = GENERATION_KIND_UI_MODE[kind];
+  return useSkillUiMode.getState().activeUiMode !== (uiMode ?? "default");
+}
+
+/**
+ * drawer (ライブラリ/プロジェクト/設定等) が開いているか。
+ *
+ * App.tsx の `useState` が正本で、ここはその写し。ストアに持ち上げないのは、
+ * drawer の状態管理は S1 (keep-alive) が持つ責務で、こちらは
+ * 「隠れているか」の一点だけを知りたいため。
+ */
+let drawerOpen = false;
+
+export function setDrawerOpen(open: boolean) {
+  drawerOpen = open;
+}
+
+/**
+ * このジョブのスキル画面へ移動する (cne / 2026-08-04)。
+ *
+ * 遷移そのものは App.tsx が持つ (drawer を閉じる操作が App の useState だから)。
+ * ここは「どこへ行きたいか」だけを CustomEvent で伝える。
+ * `gori:open-settings` / `gori:open-skills` と同じ既存パターン。
+ *
+ * skillId が null (作品モードの生成) のときも発火する。App 側が
+ * 「スキルを抜けて作品モードへ戻す」を担当する。
+ */
+export function focusGenerationKind(kind: GenerationKind) {
+  window.dispatchEvent(
+    new CustomEvent<FocusSkillDetail>("gori:focus-skill", {
+      // タブは種類で変わる (Sol 評価 blocking#5)。App 側で決め打ちにせず、
+      // 対応表を持つこちらから渡す。
+      detail: { skillId: skillIdForKind(kind), tab: tabForKind(kind) },
+    }),
+  );
+}
+
+/** `gori:focus-skill` の payload。App.tsx の受け手と型を共有する。 */
+export type FocusSkillDetail = {
+  /** 移動先スキル。null は作品モード (専用スキル画面を持たない生成)。 */
+  skillId: string | null;
+  /** 移動先タブ。結果が実際に映る枠。 */
+  tab: WorkspaceTab;
+};
+
 /** 進まない理由。UI がそのまま文言にできる粒度で持つ。 */
 export type StallReason =
   | { type: "waiting-slot"; ahead: number } // 並列上限で順番待ち
   | { type: "waiting-user"; message: string } // 仕様上の停止 (人間の確認待ち)。異常ではない
   | { type: "auth-required"; service: string } // 認証切れ・未接続
   | { type: "no-response"; sinceMs: number } // 応答が来ない
+  | { type: "stuck"; sinceMs: number } // イベント途絶。止まっている可能性が高い
   | { type: "error"; message: string; code?: string }; // 明示的な失敗
 
 export type GenerationJob = {
   id: string;
   kind: GenerationKind;
+  /**
+   * 行の表示名。省略時は種別名 (GENERATION_KIND_LABEL) をそのまま使う。
+   *
+   * 同じ種別の生成を何本も並べられるようになると (SQ2 / 2026-08-04)、
+   * 種別名だけでは行が全部同名になり、どれがどのキャラか区別できなくなる。
+   * 「キャラクターシート: アリス」のように、その run が何を作っているかを入れる。
+   */
+  label?: string;
   /** 全体で何枚作る予定か。不明なら undefined。 */
   total?: number;
   /** 実際に完了した枚数 (実イベント由来。推定しない)。 */
@@ -123,7 +276,13 @@ export type GenerationJob = {
 type GenerationStatusState = {
   jobs: Record<string, GenerationJob>;
   /** 生成を開始する。同じ id なら上書きせず既存を返す。 */
-  start: (input: { id: string; kind: GenerationKind; total?: number }) => void;
+  start: (input: {
+    id: string;
+    kind: GenerationKind;
+    total?: number;
+    /** 行の表示名。同種の生成を並べる画面 (キャラ登録) で「どれか」を出すために使う。 */
+    label?: string;
+  }) => void;
   /** 並列稼働数を更新する。 */
   /**
    * ジョブ ID を差し替える (2026-07-27 追加)。
@@ -142,8 +301,15 @@ type GenerationStatusState = {
   addFailed: (id: string, count?: number) => void;
   /** 進まない理由を設定/解除する。 */
   setStall: (id: string, stall: StallReason | null) => void;
-  /** 終了させる。 */
-  finish: (id: string) => void;
+  /**
+   * 終了させる。
+   *
+   * `reason` は完了通知を出すかの判定に使う (cne / 2026-08-04)。既定の "completed" は
+   * 生成が最後まで走り切った場合で、裏で終わったならトーストで知らせる。
+   * 中止・破棄の経路は "cancelled" を渡す —— 止めたのに「完成しました」と
+   * 出すのは、このアプリが潰してきた「表示と実態の食い違い」そのものだから。
+   */
+  finish: (id: string, reason?: "completed" | "cancelled") => void;
   /** 片付け。 */
   clear: (id: string) => void;
   /**
@@ -162,10 +328,37 @@ type GenerationStatusState = {
   dismiss: (id: string) => void;
 };
 
+/**
+ * 裏で終わった生成だけをトーストで知らせる (cne / 2026-08-04)。
+ *
+ * ## なぜ「裏だけ」なのか
+ *
+ * 表示中のスキル画面は、完了を自分の画面で示す (漫画ならページが並ぶ)。
+ * そこへトーストを重ねると、同じ完了を2回知らせることになる。
+ * 通知が本当に要るのは **その画面を見ていないとき** ——
+ * 別スキルで作業中、あるいはライブラリを見ている間に終わった場合だけ。
+ *
+ * 失敗が混じっていたら「完成」と言い切らない (件数をそのまま出す)。
+ */
+function notifyIfBackgroundFinish(job: GenerationJob) {
+  if (!isBackgroundJob(job.kind)) return;
+  const label = GENERATION_KIND_LABEL[job.kind];
+  const text =
+    job.failed > 0
+      ? `${label}: ${job.completed}件 完成 / ${job.failed}件 失敗`
+      : `${label}: ${job.completed}件 完成しました`;
+  useToasts.getState().push({
+    kind: job.failed > 0 ? "warn" : "success",
+    text,
+    ttlMs: 8000,
+    action: { label: "開く", run: () => focusGenerationKind(job.kind) },
+  });
+}
+
 export const useGenerationStatus = create<GenerationStatusState>((set) => ({
   jobs: {},
 
-  start: ({ id, kind, total }) =>
+  start: ({ id, kind, total, label }) =>
     set((s) => {
       if (s.jobs[id]) return s;
       const now = Date.now();
@@ -175,6 +368,7 @@ export const useGenerationStatus = create<GenerationStatusState>((set) => ({
           [id]: {
             id,
             kind,
+            label,
             total,
             completed: 0,
             failed: 0,
@@ -247,10 +441,14 @@ export const useGenerationStatus = create<GenerationStatusState>((set) => ({
       return { jobs: { ...s.jobs, [id]: { ...job, stall } } };
     }),
 
-  finish: (id) =>
+  finish: (id, reason = "completed") =>
     set((s) => {
       const job = s.jobs[id];
       if (!job) return s;
+      // 二重 finish で通知が二度出ないようにする (既に finished なら何もしない)。
+      // storyboard 系は completed イベントと中止経路の両方から finish が来る。
+      if (job.finished) return s;
+      if (reason === "completed") notifyIfBackgroundFinish(job);
       return {
         jobs: {
           ...s.jobs,
@@ -318,6 +516,77 @@ export function jobPercent(job: GenerationJob, expectedSeconds: number): number 
  * 変えるのは「いつ出すか」と「どう言うか」だけ (describeStall 参照)。
  */
 export const NO_RESPONSE_THRESHOLD_MS = 360_000;
+
+/**
+ * 待機のみ (running=0) のジョブ用。**全ジョブ横断で** イベント無しがこの時間を
+ * 超えたら stuck。ジョブ単体の沈黙で判定してはいけない: 別ジョブが全スロットを
+ * 占有している間、後続ジョブは自分のイベントがゼロのまま何十分も正常に待つ
+ * (セマフォ6は全ジョブ共有)。「どのジョブも進んでいない」ときだけ異常。
+ */
+export const WAITING_STUCK_THRESHOLD_MS = 600_000; // 10分
+
+/**
+ * 実行中 (running>0) のジョブがイベント無しでこの時間を超えたら stuck。
+ * gen server の GENERATION timeout は 900秒 (gen_server.rs:32) なので、
+ * イベント経路が生きていれば 15分以内に必ず何かが届く。20分無イベント=経路死。
+ */
+export const RUNNING_STUCK_THRESHOLD_MS = 1_200_000; // 20分
+
+/**
+ * 未終了ジョブ全体で最後にイベントが届いた時刻。未終了ジョブが無ければ null。
+ * 待機のみジョブは「キュー全体が流れているか」で健全性を判定するために使う。
+ */
+export function globalLastEventAt(jobs: Record<string, GenerationJob>): number | null {
+  let latest: number | null = null;
+  for (const job of Object.values(jobs)) {
+    if (job.finished) continue;
+    if (latest === null || job.lastEventAt > latest) latest = job.lastEventAt;
+  }
+  return latest;
+}
+
+/**
+ * 表示すべき stall を状態から導出する (23g / 2026-08-03)。
+ *
+ * ## なぜコンポーネントから出したか
+ *
+ * 従来この判定は GenerationStatusPanel の JobRow にインラインで書かれており、
+ * (a) `running > 0` が必須だったため **待機のみのジョブは永遠に無警告** になり、
+ * (b) `waiting-slot` はどこからも set されない死にコードだった。
+ * 純関数へ出して、待機ジョブの番犬と waiting-slot の導出配線をここに集約する。
+ *
+ * `globalLast` は `globalLastEventAt(jobs)` の値 (呼び出し側で1回計算して渡す)。
+ */
+export function deriveEffectiveStall(
+  job: GenerationJob,
+  now: number,
+  globalLast: number | null,
+): StallReason | null {
+  if (job.finished) return null;
+  // 明示 stall のうち、行動が決まっているもの (エラー/認証) は最優先で残す
+  if (job.stall?.type === "error" || job.stall?.type === "auth-required") return job.stall;
+  const silentFor = now - job.lastEventAt;
+  if (job.running > 0) {
+    // 実行中: このジョブ自身の沈黙で判定してよい (実行中なら自分のイベントが来るはず)
+    if (silentFor > RUNNING_STUCK_THRESHOLD_MS) return { type: "stuck", sinceMs: silentFor };
+  } else {
+    // 待機のみ: 全体の沈黙で判定 (他ジョブが進んでいる間の順番待ちは正常)
+    const globalSilentFor = now - (globalLast ?? job.lastEventAt);
+    if (globalSilentFor > WAITING_STUCK_THRESHOLD_MS) {
+      return { type: "stuck", sinceMs: globalSilentFor };
+    }
+  }
+  if (job.stall) return job.stall; // waiting-user 等
+  if (job.running > 0 && silentFor > NO_RESPONSE_THRESHOLD_MS) {
+    return { type: "no-response", sinceMs: silentFor };
+  }
+  // 死にコードだった waiting-slot をここで初めて配線する (導出)
+  const settled = job.completed + job.failed;
+  const waiting =
+    typeof job.total === "number" ? Math.max(0, job.total - settled - job.running) : 0;
+  if (job.running === 0 && waiting > 0) return { type: "waiting-slot", ahead: waiting };
+  return null;
+}
 
 /**
  * 失敗理由の文字列から、UI に出す stall を組み立てる。
@@ -514,9 +783,7 @@ export function selectTotals(jobs: Record<string, GenerationJob>): GenerationTot
 export function describeStall(stall: StallReason): string {
   switch (stall.type) {
     case "waiting-slot":
-      return stall.ahead > 0
-        ? `順番待ち (前に ${stall.ahead} 件)`
-        : "順番待ち";
+      return stall.ahead > 0 ? `順番待ち（残り ${stall.ahead} 件）` : "順番待ち";
     case "waiting-user":
       return stall.message;
     case "auth-required":
@@ -529,6 +796,12 @@ export function describeStall(stall: StallReason): string {
       // 不安を煽るため。
       const minutes = Math.max(1, Math.round(stall.sinceMs / 60_000));
       return `${minutes}分ほど時間がかかっています（生成は続いています）`;
+    }
+    case "stuck": {
+      // no-response と違い、こちらは「進捗の連絡が来ていない」= 経路が死んでいる
+      // 可能性を伝える。断定はしない (生きている長時間生成を殺さないため)。
+      const minutes = Math.max(1, Math.round(stall.sinceMs / 60_000));
+      return `${minutes}分以上、進捗の連絡がありません。生成が止まっている可能性があります`;
     }
     case "error":
       return stall.code ? `エラー ${stall.code}: ${stall.message}` : `エラー: ${stall.message}`;

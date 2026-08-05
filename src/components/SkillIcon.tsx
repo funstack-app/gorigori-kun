@@ -106,6 +106,14 @@ const ICONS: Record<GoriSkillId, (props: IconProps) => ReactElement> = {
       <path d="M3 8l9 5 9-5M12 13v9" />
     </Box>
   ),
+  // LINEスタンプ: 角を折ったシール + 顔
+  "gori-sticker": ({ className }) => (
+    <Box className={className}>
+      <path d="M4 4h11l5 5v11H4V4z" />
+      <path d="M15 4v5h5" />
+      <path d="M9 12h.01M13 12h.01M9.5 15.5a3 3 0 004 0" />
+    </Box>
+  ),
 };
 
 /**

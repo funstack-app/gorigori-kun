@@ -63,13 +63,17 @@ pub enum WordsProgress {
     /// vision encoder 実行中 (画像ごと1回、数秒〜数十秒)。
     Embedding,
     /// 1語の推論中。
-    Word { label: String },
+    Word {
+        label: String,
+    },
     /// full モード: 文字の検出・消去中。
     DetectingText,
     /// full モード: 切り出し跡地の背景補完中。
     FillingBackground,
     Completed,
-    Failed { reason: String },
+    Failed {
+        reason: String,
+    },
 }
 
 #[tauri::command]
@@ -128,7 +132,9 @@ async fn run_words_segment(
     if words.is_empty() {
         return Err("words is empty".to_string());
     }
-    let threshold = score_threshold.unwrap_or(DEFAULT_SCORE_THRESHOLD).clamp(0.05, 0.95);
+    let threshold = score_threshold
+        .unwrap_or(DEFAULT_SCORE_THRESHOLD)
+        .clamp(0.05, 0.95);
 
     // セッションを確保 (初回はモデルロード)。embed キャッシュを活かすため AppState に保持。
     {
@@ -215,9 +221,11 @@ async fn run_words_segment(
     });
     // 面積降順で走査: 親 (大きい物体) から確定させ、部品を後から弾く。
     pending.sort_by(|a, b| {
-        mask_area(&b.mask)
-            .cmp(&mask_area(&a.mask))
-            .then(b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal))
+        mask_area(&b.mask).cmp(&mask_area(&a.mask)).then(
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal),
+        )
     });
     let mut kept: Vec<Pending> = Vec::new();
     for candidate in pending {
@@ -256,8 +264,11 @@ async fn run_words_segment(
         let runtime = state.edit_runtime();
 
         // 物体 union マスク (テキスト保護の「被写体」判定と跡地補完の両方に使う)。
-        let mut union =
-            image::ImageBuffer::<image::Luma<u8>, Vec<u8>>::from_pixel(width, height, image::Luma([0u8]));
+        let mut union = image::ImageBuffer::<image::Luma<u8>, Vec<u8>>::from_pixel(
+            width,
+            height,
+            image::Luma([0u8]),
+        );
         for k in &kept {
             if k.mask.dimensions() == (width, height) {
                 for (dst, src) in union.pixels_mut().zip(k.mask.pixels()) {
@@ -337,8 +348,7 @@ async fn run_words_segment(
         .await
         {
             Ok(raw) => {
-                match crate::edit::understanding::parse_design_understanding(&raw, width, height)
-                {
+                match crate::edit::understanding::parse_design_understanding(&raw, width, height) {
                     Ok(u) if !u.text_blocks.is_empty() => {
                         tracing::info!(
                             target: "codex.edit",
@@ -456,11 +466,8 @@ async fn run_words_segment(
                 first_bbox[2].max(1) as u32,
                 first_bbox[3].max(1) as u32,
             ];
-            let color = crate::edit::magic_layer::text_color(
-                &rgb_for_color,
-                color_bbox,
-                prob_map.as_ref(),
-            );
+            let color =
+                crate::edit::magic_layer::text_color(&rgb_for_color, color_bbox, prob_map.as_ref());
             let font_size = linked
                 .first()
                 .map(|region| (region.bbox[3] as f32 * 0.8).clamp(8.0, 240.0))
@@ -562,9 +569,10 @@ async fn run_words_segment(
                     bw.max(1) as u32,
                     bh.max(1) as u32,
                 ];
-                let is_ja = block.text.chars().any(|c| {
-                    matches!(c, '\u{3040}'..='\u{30FF}' | '\u{4E00}'..='\u{9FFF}')
-                });
+                let is_ja = block
+                    .text
+                    .chars()
+                    .any(|c| matches!(c, '\u{3040}'..='\u{30FF}' | '\u{4E00}'..='\u{9FFF}'));
                 let serif = crate::edit::magic_layer::estimate_serif(
                     bbox_u,
                     prob_map.as_ref(),
@@ -770,7 +778,8 @@ fn merge_text_instances(
         }
     }
     // クラスタごとに union マスク + 最大 score。
-    let mut merged: std::collections::HashMap<usize, Sam3Detection> = std::collections::HashMap::new();
+    let mut merged: std::collections::HashMap<usize, Sam3Detection> =
+        std::collections::HashMap::new();
     for (i, det) in instances.into_iter().enumerate() {
         let root = find(&mut parent, i);
         match merged.get_mut(&root) {
@@ -783,12 +792,21 @@ fn merge_text_instances(
                 }
             }
             None => {
-                let mut mask =
-                    image::ImageBuffer::<image::Luma<u8>, Vec<u8>>::from_pixel(width, height, image::Luma([0u8]));
+                let mut mask = image::ImageBuffer::<image::Luma<u8>, Vec<u8>>::from_pixel(
+                    width,
+                    height,
+                    image::Luma([0u8]),
+                );
                 for (dst, src) in mask.pixels_mut().zip(det.mask.pixels()) {
                     *dst = *src;
                 }
-                merged.insert(root, Sam3Detection { score: det.score, mask });
+                merged.insert(
+                    root,
+                    Sam3Detection {
+                        score: det.score,
+                        mask,
+                    },
+                );
             }
         }
     }

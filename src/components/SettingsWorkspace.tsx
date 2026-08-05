@@ -6,11 +6,20 @@ import {
   type StorageSettings,
   storage,
 } from "../lib/ipc";
+import {
+  beginStorageRootSwitch,
+  ensureStorageRootSwitchClosed,
+  initializeGeneratedMotions,
+} from "../lib/scene3d/motionStore";
+import { applyRelinkResult } from "../lib/relinkApply";
 import { type CodexPlan, useAccounts } from "../lib/store/accounts";
+import { usePresets } from "../lib/store/presets";
+import { initializeScene3d } from "../lib/store/scene3d";
 import { useProjects } from "../lib/store/projects";
 import { useSettings } from "../lib/store/settings";
 import { useThreads } from "../lib/store/threads";
 import { useToasts } from "../lib/store/toasts";
+import { useWorldContexts } from "../lib/store/worldContexts";
 // SettingsCloudSection は v0.6.13 でα版非表示。β以降で復活予定。
 // import { SettingsCloudSection } from "./SettingsCloudSection";
 import { SettingsConnections } from "./SettingsConnections";
@@ -246,28 +255,70 @@ function BasicSettings() {
 }
 
 /**
- * FB#16: 作品の世界観 / コンテキスト登録欄。
+ * FB#16 → v29: 作品の世界観 / コンテキスト登録欄。
  *
  * ここに登録した自由文 (Markdown 等) は、企画タブ (PlanWorkspace) の
  * 初回ターンでシステムプロンプトに注入される。AI が作品設定を前提に
  * 対話を始められるようにするのが狙い。
  *
+ * v29 で **複数保持 + プルダウン切替** に変更した。案件・作品ごとにコンテキストを
+ * 使い分けたいという要望を受けたもの。実体は `world-contexts.json`
+ * (lib/store/worldContexts.ts)。旧 `settings.worldContext` は初回ロード時に
+ * 1 エントリへ移行され、以後は読まない (値自体は残置)。
+ *
  * - 直接テキスト入力 / .md などのテキストファイル読み込みの両方に対応。
  * - 保存しないと反映されないので、明示的な「保存」ボタンを置く。
+ * - 選択が変わる操作の前に、未保存なら確認ダイアログを挟む。
  */
 function WorldContextSettings() {
-  const { settings, save, load, loaded } = useSettings();
+  const { items, activeId, loaded, load, create, update, importFromFile, archive, setActive } =
+    useWorldContexts();
   const push = useToasts((s) => s.push);
-  const [draft, setDraft] = useState(settings.worldContext ?? "");
+  const [nameDraft, setNameDraft] = useState("");
+  const [contentDraft, setContentDraft] = useState("");
 
   useEffect(() => {
     if (!loaded) void load();
   }, [loaded, load]);
-  useEffect(() => setDraft(settings.worldContext ?? ""), [settings.worldContext]);
 
-  const dirty = draft !== (settings.worldContext ?? "");
+  const active = activeId ? (items.find((e) => e.id === activeId) ?? null) : null;
+  // プルダウンに出すのは非 archived のみ。順序は作成順で固定する
+  // (更新のたびに並びが動くと選びにくい)。
+  const visible = items.filter((e) => !e.archived).sort((a, b) => a.createdAt - b.createdAt);
+
+  // 選択が変わったら編集中の下書きを選択中エントリの保存値に合わせる。
+  useEffect(() => {
+    setNameDraft(active?.name ?? "");
+    setContentDraft(active?.content ?? "");
+  }, [active?.id, active?.name, active?.content]);
+
+  const dirty =
+    !!active && (nameDraft !== active.name || contentDraft !== active.content);
+
+  /** 選択が変わる操作の前に、未保存の変更を破棄してよいか確認する。 */
+  const confirmDiscard = async (): Promise<boolean> => {
+    if (!dirty) return true;
+    const message = "保存されていない変更があります。破棄して切り替えますか？";
+    try {
+      const { ask } = await import("@tauri-apps/plugin-dialog");
+      return await ask(message, { title: "世界観 / コンテキスト" });
+    } catch {
+      return window.confirm(message);
+    }
+  };
+
+  const onSelect = async (id: string | null) => {
+    if (!(await confirmDiscard())) return;
+    await setActive(id);
+  };
+
+  const onCreate = async () => {
+    if (!(await confirmDiscard())) return;
+    await create("新しいコンテキスト");
+  };
 
   const importFile = async () => {
+    if (!(await confirmDiscard())) return;
     try {
       const { open: openDialog } = await import("@tauri-apps/plugin-dialog");
       const picked = await openDialog({
@@ -278,10 +329,16 @@ function WorldContextSettings() {
       if (typeof picked !== "string") return;
       const { readTextFile } = await import("@tauri-apps/plugin-fs");
       const content = await readTextFile(picked);
-      setDraft(content);
+      // 選択中への上書きではなく、新規エントリとして追加する
+      // (既存のコンテキストを踏み潰さない)。
+      const fileName = picked.split(/[\\/]/).pop() ?? picked;
+      const entry = await importFromFile(fileName, content);
+      // 永続化に失敗していたら importFromFile 側がエラートーストを出している。
+      // 「追加しました」を重ねない（再起動で消えるものを成功と言わない）。
+      if (!entry.persisted) return;
       push({
         kind: "success",
-        text: "ファイルを読み込みました。保存で反映されます。",
+        text: `ファイルを「${entry.name}」として追加しました`,
         ttlMs: 2800,
       });
     } catch (err) {
@@ -290,25 +347,67 @@ function WorldContextSettings() {
   };
 
   const onSave = async () => {
-    const value = draft.trim();
-    await save({ worldContext: value || undefined });
+    if (!active) return;
+    // 名前が空でも保存はブロックせず、既定名を当てる。
+    const name = nameDraft.trim() || "無題のコンテキスト";
+    // 保存に失敗したときは persistOrToast がエラートーストを出す。ここで
+    // 成功トーストを重ねると「保存しました」と嘘をつくことになるので出さない。
+    const ok = await update(active.id, { name, content: contentDraft });
+    if (!ok) return;
     push({
       kind: "success",
-      text: value ? "世界観 / コンテキストを保存しました" : "世界観 / コンテキストをクリアしました",
+      text: `世界観 / コンテキスト「${name}」を保存しました`,
       ttlMs: 2400,
     });
+  };
+
+  const onDelete = async () => {
+    if (!active) return;
+    const message = `「${active.name}」を削除しますか？`;
+    let ok = false;
+    try {
+      const { ask } = await import("@tauri-apps/plugin-dialog");
+      ok = await ask(message, { title: "コンテキストの削除", kind: "warning" });
+    } catch {
+      ok = window.confirm(message);
+    }
+    if (!ok) return;
+    const name = active.name;
+    const ok2 = await archive(active.id);
+    if (!ok2) return; // 失敗時は archive 側のエラートーストだけを見せる
+    push({ kind: "success", text: `「${name}」を削除しました`, ttlMs: 2400 });
   };
 
   return (
     <Panel title="世界観 / コンテキスト">
       <p className="text-xs leading-relaxed text-neutral-400">
-        作品の世界観・キャラ設定・トーンなどをここに書いておくと、企画タブの AI
-        がこの設定を踏まえて会話を始めます。Markdown / テキストファイルの読み込みも可能です。
+        作品ごとの世界観・キャラ設定・トーンを複数登録し、プルダウンで切り替えられます。選択中のコンテキストを企画タブの
+        AI が踏まえて会話を始めます。
       </p>
-      <Field label="作品の世界観・コンテキスト (Markdown 可)">
+      <Field label="使用するコンテキスト">
+        <select
+          value={activeId ?? ""}
+          onChange={(e) => void onSelect(e.target.value || null)}
+          className="h-9 w-full rounded-md border border-[#343434] bg-[#101010] px-2 text-xs text-neutral-100"
+        >
+          <option value="">なし（AI に渡さない）</option>
+          {visible.map((entry) => (
+            <option key={entry.id} value={entry.id}>
+              {entry.name}
+            </option>
+          ))}
+        </select>
+      </Field>
+      {active && (
+        <Field label="名前">
+          <TextInput value={nameDraft} onChange={setNameDraft} />
+        </Field>
+      )}
+      <Field label="内容 (Markdown 可)">
         <textarea
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
+          value={active ? contentDraft : ""}
+          onChange={(e) => setContentDraft(e.target.value)}
+          disabled={!active}
           spellCheck={false}
           rows={10}
           placeholder={
@@ -321,9 +420,17 @@ function WorldContextSettings() {
         <button
           type="button"
           onClick={() => void onSave()}
-          className={`${PRIMARY_BUTTON} h-9 px-4 text-xs`}
+          disabled={!dirty}
+          className={`${PRIMARY_BUTTON} h-9 px-4 text-xs disabled:opacity-50`}
         >
           {dirty ? "保存" : "保存済み"}
+        </button>
+        <button
+          type="button"
+          onClick={() => void onCreate()}
+          className={`${MUTED_BUTTON} h-9 px-3 text-xs`}
+        >
+          新規作成
         </button>
         <button
           type="button"
@@ -332,14 +439,13 @@ function WorldContextSettings() {
         >
           ファイルから読み込む
         </button>
-        {draft.length > 0 && (
+        {active && (
           <button
             type="button"
-            onClick={() => setDraft("")}
+            onClick={() => void onDelete()}
             className={`${MUTED_BUTTON} h-9 px-3 text-xs`}
-            title="入力欄を空にする（保存するとクリアされます）"
           >
-            クリア
+            削除
           </button>
         )}
       </div>
@@ -363,6 +469,20 @@ function StorageSettingsTab() {
   >([]);
   const [backupsOpen, setBackupsOpen] = useState(false);
   const [restoring, setRestoring] = useState(false);
+  // プリセット（キャラクター含む）のバックアップから復元 UI 用。
+  // projects 側と state を分ける（片方を開いても他方の一覧が出ない）。
+  const [presetBackups, setPresetBackups] = useState<
+    { path: string; at: number; count: number }[]
+  >([]);
+  const [presetBackupsOpen, setPresetBackupsOpen] = useState(false);
+  const [presetRestoring, setPresetRestoring] = useState(false);
+  // 3Dシーンのバックアップから復元 UI 用。
+  // presets / projects と state を分ける（片方を開いても他方の一覧が出ない）。
+  const [scene3dBackups, setScene3dBackups] = useState<
+    { path: string; at: number; shots: number }[]
+  >([]);
+  const [scene3dBackupsOpen, setScene3dBackupsOpen] = useState(false);
+  const [scene3dRestoring, setScene3dRestoring] = useState(false);
 
   // 初回マウント時に現在の設定 / レガシー画像 / ホームディレクトリを取得。
   // home は Rust から正しい絶対パスを取得（パス逆算によるバグを避けるため）。
@@ -437,17 +557,61 @@ function StorageSettingsTab() {
   // 「自分の好きな場所 (外付けSSD/Google Drive) に全部入れたい」を叶える。
   // 既存ユーザーが別々に設定していた場合も壊さない (両方を同じ root に揃えるだけ)。
   const applyUnifiedRoot = async (root: string) => {
-    setSaving(true);
+    // 保存先を変えても既存画像は移動しない（巨大で失敗リスクが高いため）。
+    // 「変えたら過去の画像が消えた」と誤解されないよう、事前に正直に伝える。
+    // 実際には旧保存先も読み続けるので画像は見えたままになる
+    // （watcher_dirs が previous_storage_roots を含む。2026-07-30）。
+    const message =
+      "新しい保存先に切り替えます。\n\n" +
+      "・キャラクター、プリセット、プロジェクト、3Dシーン、3Dモーションは新しい場所にコピーされます\n" +
+      "・これまでに作った画像は元の場所に残ります（動かしません）\n" +
+      "・元の場所の画像もこれまでどおり表示されます\n\n" +
+      "続けますか？";
+    let ok = false;
     try {
+      const { ask } = await import("@tauri-apps/plugin-dialog");
+      ok = await ask(message, { title: "保存先の変更", kind: "info" });
+    } catch {
+      ok = window.confirm(message);
+    }
+    if (!ok) {
+      return;
+    }
+    setSaving(true);
+    // B1-A-03: finally から参照するため try の外で宣言 (const in try は finally から不可視)。
+    let switchToken = -1;
+    try {
+      // 0. モーションのファイル書き込みをロックし、進行中の書き込みを
+      //    **旧保存先で決着させてから** 保存先を切り替える (B1 2026-08-03)。
+      //    ここを抜くと、切替直前に始まった motions_write が新しい保存先へ
+      //    古い内容を書き、移行してきた正本を潰す。
+      switchToken = await beginStorageRootSwitch();
       // 1. 画像保存先 (storageRoot) を更新。
       const next = { ...settings, storageRoot: root };
-      await storage.setSettings(next);
+      // l99 4-2: root が変わると Rust 側が再リンクを走らせ、旧→新パスマップを返す。
+      // 適用は下の initialize 群が終わってから (先に当てるとファイル読込で消える)。
+      const relink = await storage.setSettings(next);
       // 2. プロジェクトデータも同じ root へ (既存の安全移行ロジックを再利用)。
       await storage.setProjectsDataRoot(root);
       const merged = await storage.getSettings();
       setSettings(merged);
       // 3. 新しい場所の projects.json から読み直す (移行済みデータを反映)。
       await useProjects.getState().initialize();
+      // presets.json も新 root から読み直す。未作成なら initialize の移行パスが
+      // 現 in-memory 状態 (= 変更前の全データ) を新 root へ書くので移行も成立する。
+      await usePresets.getState().initialize();
+      // 3Dシーンも新 root から読み直す（未作成なら現 in-memory 状態を新 root へ移行）。
+      await initializeScene3d();
+      // 3Dモーション (motions.json) も同じ root に置かれる。ここを抜くと
+      // シーンの clipId だけ新 root に移り、モーション実体は旧 root の
+      // キャッシュのまま残る（次回起動まで参照が宙に浮く）。
+      // force=true: 起動時の読み込みが未完了でも、それは旧 root を読んでいるので
+      // 相乗りせず新 root を読み直す。
+      await initializeGeneratedMotions(true);
+      // 4. 保存先変更で走った再リンクの結果を、読み直し後の state へ適用する。
+      //    ここを欠くと projects / presets / favorites / judgements /
+      //    referenceRoles が旧パスを握ったままで、次回起動まで stale になる。
+      if (relink) applyRelinkResult(relink);
       push({
         kind: "success",
         text: "保存先を更新しました（画像・作品データを集約）",
@@ -456,6 +620,10 @@ function StorageSettingsTab() {
     } catch (err) {
       push({ kind: "error", text: `保存先の更新に失敗: ${String(err)}` });
     } finally {
+      // B1-A案: 途中で例外が出て force 初期化に到達しなかった場合でも、
+      // モーション保存のブロックを再初期化経由で必ず解除する (張り付き防止)。
+      // B1-A-03: 自分の切替トークンを渡す (古い finally が新しい切替を触らない)。
+      ensureStorageRootSwitchClosed(switchToken);
       setSaving(false);
     }
   };
@@ -463,8 +631,11 @@ function StorageSettingsTab() {
   const applySettings = async (next: StorageSettings) => {
     setSaving(true);
     try {
-      await storage.setSettings(next);
+      // l99 4-2: storageRoot が変わっていれば再リンク結果が返る。
+      // この経路は store の読み直しを伴わないため、受け取り次第すぐ適用してよい。
+      const relink = await storage.setSettings(next);
       setSettings(next);
+      if (relink) applyRelinkResult(relink);
       push({ kind: "success", text: "保存先を更新しました", ttlMs: 2400 });
     } catch (err) {
       push({ kind: "error", text: `保存に失敗: ${String(err)}` });
@@ -487,12 +658,23 @@ function StorageSettingsTab() {
   // フロント側は projects ストアを再初期化して新ファイルから読み直す。
   const applyProjectsDataRoot = async (newRoot: string | null) => {
     setSaving(true);
+    // B1-A-03: finally から参照するため try の外で宣言する。
+    let switchToken = -1;
     try {
+      // applyUnifiedRoot と同じ理由でモーション書き込みを先に決着させる (B1)。
+      switchToken = await beginStorageRootSwitch();
       await storage.setProjectsDataRoot(newRoot);
       const next = await storage.getSettings();
       setSettings(next);
       // 新しい保存先のファイルから projects を読み直す（移行済みデータを反映）。
       await useProjects.getState().initialize();
+      // presets も同じ保存先に置かれるため、同じタイミングで読み直す
+      // （ここを抜くと保存先変更後に古いキャラ一覧が残り、次回起動まで直らない）。
+      await usePresets.getState().initialize();
+      // 3Dシーンも新 root から読み直す（未作成なら現 in-memory 状態を新 root へ移行）。
+      await initializeScene3d();
+      // 3Dモーションも同様（applyUnifiedRoot と同じ理由。抜くと clipId が宙に浮く）。
+      await initializeGeneratedMotions(true);
       push({
         kind: "success",
         text: newRoot
@@ -503,6 +685,9 @@ function StorageSettingsTab() {
     } catch (err) {
       push({ kind: "error", text: `保存先の変更に失敗: ${String(err)}` });
     } finally {
+      // B1-A案: applyUnifiedRoot と同じ張り付き防止 (再初期化経由の解除)。
+      // B1-A-03: 自分の切替トークンを渡す。
+      ensureStorageRootSwitchClosed(switchToken);
       setSaving(false);
     }
   };
@@ -550,6 +735,68 @@ function StorageSettingsTab() {
       push({ kind: "error", text: `復元に失敗: ${String(err)}` });
     } finally {
       setRestoring(false);
+    }
+  };
+
+  // プリセットのバックアップ一覧を開く（取得して展開）。
+  const openPresetBackups = async () => {
+    try {
+      const list = await usePresets.getState().listBackups();
+      setPresetBackups(list);
+      setPresetBackupsOpen(true);
+      if (list.length === 0) {
+        push({
+          kind: "info",
+          text: "まだバックアップがありません（保存のたびに自動で作られます）。",
+          ttlMs: 3500,
+        });
+      }
+    } catch (err) {
+      push({ kind: "error", text: `バックアップ取得に失敗: ${String(err)}` });
+    }
+  };
+
+  // 選んだバックアップでプリセット・キャラクターを置き換える（復元）。
+  const restorePresetBackup = async (backupPath: string) => {
+    setPresetRestoring(true);
+    try {
+      const restored = await usePresets.getState().restoreFromBackup(backupPath);
+      push({
+        kind: "success",
+        text: `バックアップから ${restored} 件のプリセット・キャラクターを復元しました。`,
+        ttlMs: 3500,
+      });
+      setPresetBackupsOpen(false);
+    } catch (err) {
+      push({ kind: "error", text: `復元に失敗: ${String(err)}` });
+    } finally {
+      setPresetRestoring(false);
+    }
+  };
+
+  // 3Dシーンのバックアップ一覧を開く（取得して展開）。
+  // 0件でも一覧を開く（presets 側のトースト方式と違い、空であることを枠内に出す）。
+  const openScene3dBackups = async () => {
+    try {
+      const { listScene3dBackups } = await import("../lib/store/scene3d");
+      setScene3dBackups(await listScene3dBackups());
+      setScene3dBackupsOpen(true);
+    } catch (err) {
+      push({ kind: "error", text: `バックアップ取得に失敗: ${String(err)}` });
+    }
+  };
+
+  // 選んだバックアップで3Dシーンを置き換える（復元）。
+  // 成否のトーストは store 側（scene3d.ts）が出すので、ここでは出さない
+  // （文言の正本を1箇所に保つ）。
+  const restoreScene3dBackup = async (backupPath: string) => {
+    setScene3dRestoring(true);
+    try {
+      const { restoreScene3dFromBackupWithToast } = await import("../lib/store/scene3d");
+      const restored = await restoreScene3dFromBackupWithToast(backupPath);
+      if (restored !== null) setScene3dBackupsOpen(false);
+    } finally {
+      setScene3dRestoring(false);
     }
   };
 
@@ -760,6 +1007,139 @@ function StorageSettingsTab() {
             <p className="mt-1.5 px-1 text-[10px] text-neutral-500">
               復元しても、その直前の状態もバックアップされるので、間違えてもまた戻せます。
             </p>
+          </div>
+        ) : null}
+      </Field>
+
+      {/*
+        プリセット・キャラクターのバックアップから復元。
+        presets.json も保存のたびに自動で世代バックアップされる（最大10世代、
+        backup_projects_file がパス汎用のため projects と同じ仕組みが効いている）。
+        バックアップは前から作られていたのに到達導線が無く、開発者しか戻せなかった。
+        （2026-07-30 全ユーザーデータ生存監査 §5）
+      */}
+      <Field label="プリセット・キャラクターのバックアップ（消えたとき・戻したいとき）">
+        <p className="mb-1.5 text-[11px] leading-relaxed text-neutral-400">
+          登録したキャラクターやプリセットは、保存のたびに自動でバックアップされています。
+          もしキャラクターやプリセットが消えた・おかしくなった場合は、ここから過去の状態に戻せます。
+        </p>
+        <button
+          type="button"
+          disabled={presetRestoring}
+          onClick={() => void openPresetBackups()}
+          className={`${MUTED_BUTTON} h-9 px-3 text-xs disabled:opacity-40`}
+        >
+          バックアップから復元…
+        </button>
+
+        {presetBackupsOpen && presetBackups.length > 0 ? (
+          <div className="mt-2 max-h-60 overflow-y-auto rounded-md border border-[#2a2a2a] bg-[#0b0b0b] p-2">
+            <div className="mb-1.5 flex items-center justify-between px-1">
+              <span className="text-[11px] font-bold text-neutral-300">
+                復元する時点を選ぶ（新しい順）
+              </span>
+              <button
+                type="button"
+                onClick={() => setPresetBackupsOpen(false)}
+                className="text-[11px] text-neutral-500 hover:text-neutral-200"
+              >
+                閉じる
+              </button>
+            </div>
+            <ul className="space-y-1">
+              {presetBackups.map((b) => (
+                <li
+                  key={b.path}
+                  className="flex items-center justify-between rounded-md bg-[#141414] px-2.5 py-1.5"
+                >
+                  <span className="text-[12px] text-neutral-200">
+                    {new Date(b.at).toLocaleString("ja-JP")}{" "}
+                    <span className="text-neutral-500">— {b.count} 件</span>
+                  </span>
+                  <button
+                    type="button"
+                    disabled={presetRestoring}
+                    onClick={() => void restorePresetBackup(b.path)}
+                    className={`${MUTED_BUTTON} h-7 px-2.5 text-[11px] disabled:opacity-40`}
+                  >
+                    {presetRestoring ? "復元中…" : "これで復元"}
+                  </button>
+                </li>
+              ))}
+            </ul>
+            <p className="mt-1.5 px-1 text-[10px] text-neutral-500">
+              復元しても、その直前の状態もバックアップされるので、間違えてもまた戻せます。
+            </p>
+          </div>
+        ) : null}
+      </Field>
+
+      {/*
+        3Dシーンのバックアップから復元。
+        scene3d.json も保存のたびに自動で世代バックアップされていた（最大10世代）のに、
+        presets と同じく到達導線が無く、開発者しか戻せない状態だった。
+        （2026-07-30 独立評価 H-2）
+      */}
+      <Field label="3Dシーンのバックアップ（消えたとき・戻したいとき）">
+        <p className="mb-1.5 text-[11px] leading-relaxed text-neutral-400">
+          3Dシーンは編集のたびに自動でバックアップされています。
+          おかしくなった・前の状態に戻したい場合は、ここから過去の状態に戻せます。
+        </p>
+        <button
+          type="button"
+          disabled={scene3dRestoring}
+          onClick={() => void openScene3dBackups()}
+          className={`${MUTED_BUTTON} h-9 px-3 text-xs disabled:opacity-40`}
+        >
+          バックアップから復元…
+        </button>
+
+        {scene3dBackupsOpen ? (
+          <div className="mt-2 max-h-60 overflow-y-auto rounded-md border border-[#2a2a2a] bg-[#0b0b0b] p-2">
+            <div className="mb-1.5 flex items-center justify-between px-1">
+              <span className="text-[11px] font-bold text-neutral-300">
+                復元する時点を選ぶ（新しい順）
+              </span>
+              <button
+                type="button"
+                onClick={() => setScene3dBackupsOpen(false)}
+                className="text-[11px] text-neutral-500 hover:text-neutral-200"
+              >
+                閉じる
+              </button>
+            </div>
+            {scene3dBackups.length === 0 ? (
+              <p className="px-1 py-1 text-[11px] text-neutral-500">
+                まだバックアップがありません。3Dシーンを編集すると自動で作られます。
+              </p>
+            ) : (
+              <>
+                <ul className="space-y-1">
+                  {scene3dBackups.map((b) => (
+                    <li
+                      key={b.path}
+                      className="flex items-center justify-between rounded-md bg-[#141414] px-2.5 py-1.5"
+                    >
+                      <span className="text-[12px] text-neutral-200">
+                        {new Date(b.at).toLocaleString("ja-JP")}{" "}
+                        <span className="text-neutral-500">— {b.shots} カット</span>
+                      </span>
+                      <button
+                        type="button"
+                        disabled={scene3dRestoring}
+                        onClick={() => void restoreScene3dBackup(b.path)}
+                        className={`${MUTED_BUTTON} h-7 px-2.5 text-[11px] disabled:opacity-40`}
+                      >
+                        {scene3dRestoring ? "復元中…" : "これで復元"}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+                <p className="mt-1.5 px-1 text-[10px] text-neutral-500">
+                  復元しても、その直前の状態もバックアップされるので、間違えてもまた戻せます。
+                </p>
+              </>
+            )}
           </div>
         ) : null}
       </Field>

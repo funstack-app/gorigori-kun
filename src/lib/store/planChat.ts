@@ -8,16 +8,26 @@ import type {
 } from "../codex-types";
 import type { SceneConstruction, StoryboardParams } from "../storyboard/types";
 import { buildWorldContextBlock } from "../agents/systemPrompts";
+import { buildAudioNote, type AudioAttachment } from "../audio/attach";
+import {
+  guardImagePayloadForSend,
+  warnImagePayloadInBackground,
+} from "../imagePayloadGuard";
 import { useActiveProject } from "./activeProject";
+import { logError } from "./errorLog";
 import { useProjects, type ProjectChatMessage } from "./projects";
 import {
   useReferenceRoles,
   REFERENCE_ROLE_KINDS,
   REFERENCE_ROLE_META,
 } from "./referenceRoles";
-import { useSettings } from "./settings";
+import { useWorldContexts } from "./worldContexts";
 import { useSkillMode } from "./skillMode";
+// 構成の出所 (activeSkillId) を記録するため (blocking#2)。skillUiMode は zustand しか
+// import しない葉ストアなので循環にならない。
+import { useSkillUiMode } from "./skillUiMode";
 import { useToasts } from "./toasts";
+import { useUnsavedPlanChats } from "./unsavedPlanChats";
 
 /**
  * 企画タブ専用のチャット状態。
@@ -42,6 +52,8 @@ export type PlanMessage = {
   /** ストリーミング中は true、完了で false。assistant のみ意味を持つ。 */
   streaming?: boolean;
   attachedImages?: string[];
+  /** go4: 添付した音源 1 件。音声データは codex に渡らず、文字情報だけが送られる。 */
+  attachedAudio?: AudioAttachment;
   createdAt: number;
 };
 
@@ -103,7 +115,7 @@ const STORYBOARD_ROLE_PREFIX = [
   "- 相手がたくさん話してくれたら、まとめて受け止めて先に進む。逆に一言だけなら、こちらから具体例を出して広げる。",
   "- カット数・構図・シーン分割・カメラワークは AI 側で設計する。ユーザーに「何カット作りたい?」「どんな構図?」とは聞かない。",
   "- 主人公が複数いるとわかったら、その場で「主人公全員の参照画像をアップロードしてください」と自然に案内する。",
-  "- ユーザーが「OK」「いいね」と言っても勝手に確定しない。「いい感じですね。よければ右上の確定ボタンを押してください」と案内する。",
+  "- ユーザーが「OK」「いいね」と言っても勝手に確定しない。「いい感じですね。よければチャット入力欄の上にある確定ボタンを押してください」と案内する。",
   "",
   "【会話の中で最終的に把握したいこと（順番は問わない・自然に拾う）】",
   "  - 何を伝えたいか / 見た人にどんな気持ちになってほしいか ★これが全構成判断の軸。必ず引き出す★",
@@ -167,7 +179,7 @@ const STORYBOARD_ROLE_PREFIX = [
   "",
   "【ブラッシュアップ】",
   "ユーザーが何か修正を伝えたら、構成全体を更新して再提示する（シーン分けは維持する）。",
-  "ユーザーが「OK」と言っても **勝手に確定せず**、「右上の確定ボタンを押してください」と案内する。",
+  "ユーザーが「OK」と言っても **勝手に確定せず**、「チャット入力欄の上にある確定ボタンを押してください」と案内する。",
   "",
   "【確定時のJSON出力】",
   "ユーザーが確定ボタンを押すと、UI側から「[FINALIZE_STORYBOARD] 今までの内容を確定形式のJSONで出してください」というメッセージが届きます。",
@@ -266,7 +278,9 @@ const STORYBOARD_ROLE_PREFIX = [
  * STΛCK 指示 (2026-06-07): 「対話をもっと重視したい」。
  *  - 確定ボタンを押すまで、AI は **プロンプト案 (``` コードブロック) を出さない**。
  *  - それまではヒアリングと提案の言語化に徹し、対話で解像度を上げる。
- *  - ユーザーが右上の「確定」ボタンを押すと、UI から PLAN_FINALIZE_PREFIX 付きの
+ *  - ユーザーがチャット入力欄の上の「確定」ボタンを押すと、UI から PLAN_FINALIZE_PREFIX 付きの
+ *    (実ボタンは PlanWorkspace.tsx の入力欄直上のピンク帯。案内文言を変えるときは
+ *     実位置と矛盾しないよう本ファイル内の「チャット入力欄の上」を全て揃えること)
  *    メッセージが届く。そのときだけプロンプト案をコードブロックで出力する。
  */
 const ROLE_PREFIX = [
@@ -286,11 +300,11 @@ const ROLE_PREFIX = [
   "- 堅苦しいヒアリングにしない。質問は会話の流れで必要なときだけ、軽く。",
   "",
   "【最重要・確定までプロンプトは出さない】",
-  "- ユーザーが画面右上の「確定」ボタンを押すまでは、**プロンプト案を絶対に出さないでください**。",
+  "- ユーザーがチャット入力欄の上にある「確定」ボタンを押すまでは、**プロンプト案を絶対に出さないでください**。",
   "  具体的には ``` で囲んだコードブロックや、英語タグ列の最終プロンプトを出さないこと。",
   "- 確定前は日本語の会話で方向性を一緒に固めるところまで。最終的な英語プロンプトはまだ出しません。",
   "- ユーザーが「これでいい」「プロンプト出して」と言っても、勝手に確定しないでください。",
-  "  「いい感じですね。よければ画面右上の『確定』ボタンを押してください」と案内します。",
+  "  「いい感じですね。よければチャット入力欄の上にある『確定』ボタンを押してください」と案内します。",
   "",
   // 2026-07-26 STΛCK 報告: 企画タブで構図の話をしているだけなのに image_gen が
   // 呼ばれて生成が始まる事故がある。この画面は相談専用で、生成は別タブの仕事。
@@ -359,6 +373,17 @@ const PLAN_FINALIZE_PREFIX = [
   "",
 ].join("\n");
 
+/**
+ * 昇格 (promoteToProject) の結果 (g8t 2026-08-04)。
+ *
+ * 失敗を握り潰さず呼び出し側 (UI) へ返すための型 (Sol指摘 B-2)。
+ * "save-failed" のときも会話は未保存台帳に残っているので、UI はその旨を伝えて
+ * 再試行できる状態に戻す。
+ */
+export type PromoteResult =
+  | { ok: true; projectId: string; projectName: string; carried: number }
+  | { ok: false; reason: "guard" | "save-failed" };
+
 type PlanChatState = {
   threadId?: string;
   /** thread/start 進行中フラグ */
@@ -370,19 +395,62 @@ type PlanChatState = {
   /** ストリーミング中の assistant メッセージ id（item id をそのまま使う）。
    *  notification の delta はこの id 宛に積む。 */
   streamingItemId?: string;
+  /**
+   * 未保存チャット台帳 (unsavedPlanChats) 上のエントリ id (29z 2026-08-03)。
+   * プロジェクト未選択のまま進めた会話の退避先を指す。プロジェクトへ引き継いだら
+   * 台帳から消して undefined に戻す。
+   */
+  unsavedChatId?: string;
+  /**
+   * 案件昇格 (promoteToProject) の実行中フラグ (g8t 2026-08-04)。
+   * 保存完了を await するあいだ activeProjectId はまだ null なので、
+   * 二重クリックが既存ガードをすり抜ける。UI のボタン無効化にも使う。
+   */
+  promoting: boolean;
 
   attached: boolean;
   storyboardParams: StoryboardParams | null;
   sceneConstruction: SceneConstruction | null;
+  /**
+   * 上の sceneConstruction / storyboardParams を書いたときの activeSkillId
+   * (Sol 評価 2周目 blocking#2 / 2026-08-04)。
+   *
+   * planChat は全スキル共有の 1 本で、書き手 (AI 応答パーサ) は自分がどのスキルに
+   * いるかを名乗っていなかった。一方 skillReset は「storyboard に作業が残っていれば
+   * planChat を保護する」ので、**別スキルで作った構成が保護されたまま storyboard へ
+   * 持ち込まれる**経路があった (Sol の Node プローブで再現)。
+   * 出所を書き手が名乗れば、読み手 (useSceneConstruction) が
+   * 「これは自分のものか」を判定できる。null は出所不明 = 自分のものでない扱い。
+   */
+  sceneConstructionOwner: string | null;
   pendingImages: string[];
   addPendingImages: (paths: string[]) => void;
   removePendingImage: (path: string) => void;
   clearPendingImages: () => void;
+  /**
+   * go4: 添付中の音源 (MV 用途なので 1 曲まで。2 曲目は差し替え)。
+   * 送信時は buildAudioNote() の文字情報だけが submitText に載る。
+   * **音声パスを turn 入力の localImage に入れてはいけない。**
+   */
+  pendingAudio: AudioAttachment | null;
+  setPendingAudio: (audio: AudioAttachment) => void;
+  clearPendingAudio: () => void;
   setStoryboardParams: (params: StoryboardParams | null) => void;
   setSceneConstruction: (scene: SceneConstruction | null) => void;
   attach: () => Promise<void>;
   ensureThread: () => Promise<string>;
-  send: (text: string, attachedImages?: string[]) => Promise<void>;
+  /**
+   * B-02 (Wave 2 REVISE): 送信を受け付けたかを返す契約。
+   *
+   * true  = ターンとして受け付けた (呼び出し元は入力文・添付を消してよい)
+   * false = 受け付けずに戻った (空文字 / 送信中 / 380MB ガードのブロック)。
+   *         呼び出し元は入力文・添付を**消してはいけない**。特に容量超過では
+   *         添付を減らして再送する必要があり、消すとやり直せなくなる。
+   *
+   * 送信を受け付けた後の RPC 失敗は true のまま (トーストで伝え、チャット履歴には
+   * user メッセージが残る)。ここで返す false は「送信そのものが始まらなかった」だけ。
+   */
+  send: (text: string, attachedImages?: string[]) => Promise<boolean>;
   /** 通常企画タブの「確定」: これまでの対話を踏まえてプロンプト案を出させる。 */
   finalizePlan: () => Promise<void>;
   resetThread: () => void;
@@ -403,10 +471,122 @@ type PlanChatState = {
     prevProjectId: string | null,
     nextProjectId: string | null,
   ) => void;
+  /**
+   * 未保存チャット引き継ぎ (2026-07-30)。
+   * プロジェクト未選択 (保存しない) のまま進めた企画チャットを、指定プロジェクトの
+   * planChat として全量保存する。新規プロジェクト作成の直後、switchToProject を
+   * 呼ぶ **前** に使う。先に書いておけば switchToProject の Step2 (切替先ロード) が
+   * この会話をそのまま読み戻すため、「作成した瞬間に会話が消える」事故が構造的に消える。
+   * 保存形式・経路は turn/completed のスナップショット保存 (useProjects.setPlanChat)
+   * と同一。保存できたメッセージ件数を返す (0 = 引き継ぐ会話が無い / 対象不在)。
+   */
+  carryOverToProject: (projectId: string) => number;
+  /**
+   * 未保存企画チャットの案件昇格 (g8t 2026-08-04)。プロジェクト未選択のまま進めた
+   * 会話を、その場で新規案件に確定する。carryOverToProject と違い switchToProject を
+   * 通らない: 同一会話の継続なので threadId (AI文脈)・pending 添付・シーン構築値を
+   * 破壊しない。
+   *
+   * **非同期なのは「ディスク保存の完了を待ってから未保存台帳を消す」ため**
+   * (Sol指摘 B-1)。会話は常に「未保存台帳」か「案件ファイル」の少なくとも一方に
+   * 存在する。保存に失敗したら台帳を残したまま失敗を返す (消失窓ゼロ)。
+   *
+   * 戻り値:
+   *   - `{ ok: true, projectId, projectName, carried }` — 保存まで完了
+   *   - `{ ok: false, reason: "guard" }` — 選択中 / 会話ゼロで何もしなかった
+   *   - `{ ok: false, reason: "save-failed" }` — 保存に失敗。台帳は残っている
+   */
+  promoteToProject: (name: string) => Promise<PromoteResult>;
+  /**
+   * 未保存チャット台帳のエントリを企画タブへ復元する (29z 2026-08-03)。
+   * switchToProject の Step2 と同じリセットをかけたうえで、台帳の会話を
+   * メモリへ載せ、以後の turn/completed が同じエントリを更新するよう
+   * unsavedChatId を紐づける。呼び出し側 (App.tsx openUnsavedChat) が
+   * activeProject を「（保存しない）」へ戻してから呼ぶ。
+   */
+  restoreUnsaved: (entry: { id: string; messages: ProjectChatMessage[] }) => void;
 };
 
 let listenerHandle: undefined | (() => void);
 let threadStartPromise: Promise<string> | undefined;
+
+/**
+ * 未保存チャット台帳 (unsavedPlanChats) の世代印 (29z 追補 2026-08-03)。
+ *
+ * upsert は非同期なので、「応答完了 → 台帳へ退避」の await 中にユーザーが
+ * プロジェクトへ引き継ぐ / 会話をリセットする / 別の未保存チャットを開く、が
+ * 起こりうる。世代を上げずに完了だけ待つと、遅れて返ってきた古い upsert の id が
+ * unsavedChatId に再設定され、(a) 引き継ぎ済みの会話が「未保存」として履歴に
+ * 二重に残る (b) その id は carryOverToProject の remove を通り過ぎた後なので
+ * 誰も消せない、という取り残しが起きる。
+ *
+ * 世代が変わっていたら unsavedChatId は触らない。**エントリを消すかどうかは
+ * 遷移理由 (下記) で決める**。
+ */
+/**
+ * 世代を進めた理由 (B2 2026-08-03)。
+ *
+ * 遅延 upsert の後始末は経路ごとに正解が違う。以前は理由を区別せず一律に
+ * remove していたため、reset/switch でも既存エントリが消え、
+ * 「7日間は履歴から開き直せる」という安全網が壊れていた:
+ *
+ * | 遷移              | 会話の行き先        | 台帳エントリの扱い |
+ * |-------------------|---------------------|--------------------|
+ * | carry-over        | プロジェクト正本へ  | **消す** (正本へ移ったので二重に出さない) |
+ * | reset / switch    | どこにも無い        | **残す** (7日間の安全網。消したら会話が消える) |
+ * | restore           | 別エントリを表示中  | **残す** (復元先も他のエントリも消さない) |
+ *
+ * ただし carry-over でも「遅れて *新規に作られた* エントリ」だけを消す。
+ * 既存エントリの更新だった場合は carryOverToProject 本体が
+ * unsavedChatId 経由で消しているので、ここで二重に消す必要はない。
+ */
+type LedgerTransition = "carry-over" | "reset" | "switch" | "restore";
+
+/**
+ * 未保存チャット台帳 (unsavedPlanChats) の世代オブジェクト (B2 r3 2026-08-03)。
+ *
+ * **理由をグローバル変数で持たない**のが要点。r2 までは「最新の遷移理由」を
+ * 1つのモジュール変数に置き、遅延 upsert の完了時にそれを読んでいた。
+ * すると reset で無効化された upsert が、さらに後の carry-over の**後**に
+ * 完了したとき、自分を無効化したのは reset なのに carry-over と誤認して
+ * reset の退避分 (created=true) を消してしまう。
+ *
+ * 代わりに世代を **object にして、upsert 予約時にその object をクロージャで
+ * 捕獲**する。「この世代を最初に無効化した理由」だけを object 自身に記録する
+ * (`invalidatedBy`)。完了時はグローバルを一切読まず、捕獲した object を見る。
+ * 後続の遷移がいくつ重なっても、捕獲済み世代の判定は変わらない。
+ */
+type UnsavedLedgerGeneration = {
+  /** この世代を最初に無効化した理由。まだ現役なら null。 */
+  invalidatedBy: LedgerTransition | null;
+};
+
+/**
+ * 現役の世代 (29z 追補 2026-08-03)。
+ *
+ * upsert は非同期なので、「応答完了 → 台帳へ退避」の await 中にユーザーが
+ * プロジェクトへ引き継ぐ / 会話をリセットする / 別の未保存チャットを開く、が
+ * 起こりうる。世代を上げずに完了だけ待つと、遅れて返ってきた古い upsert の id が
+ * unsavedChatId に再設定され、(a) 引き継ぎ済みの会話が「未保存」として履歴に
+ * 二重に残る (b) その id は carryOverToProject の remove を通り過ぎた後なので
+ * 誰も消せない、という取り残しが起きる。
+ *
+ * 世代が無効化されていたら unsavedChatId は触らない。**エントリを消すかどうかは
+ * その世代を無効化した理由 (invalidatedBy) で決める**。
+ */
+let unsavedLedgerGeneration: UnsavedLedgerGeneration = { invalidatedBy: null };
+
+/**
+ * unsavedChatId の紐づけを切り替える全経路から呼ぶ。
+ * 現行世代に「何が無効化したか」を刻んでから、新しい世代へ差し替える。
+ * 既に無効化済みの世代は上書きしない (最初の理由が正)。
+ */
+function bumpUnsavedLedgerGeneration(reason: LedgerTransition): void {
+  if (unsavedLedgerGeneration.invalidatedBy === null) {
+    unsavedLedgerGeneration.invalidatedBy = reason;
+  }
+  unsavedLedgerGeneration = { invalidatedBy: null };
+}
 
 function generateId(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -453,11 +633,38 @@ function normalizeTempo(value: unknown): StoryboardParams["tempo"] | null {
   return null;
 }
 
-function jsonAfterMarker(text: string, marker: string): unknown | null {
+/**
+ * 確定 JSON 抽出の失敗理由 (6wa / 2026-08-03)。
+ *
+ * 従来は bare null で返しており、UI は「AI が具体的な構成を返していません」の
+ * 一律文言しか出せなかった。マーカーが無いのか・JSON が壊れているのか・
+ * 値が不正なのかで**ユーザーの次の行動が違う**ので、理由を判別可能にする。
+ */
+export type StoryboardExtractFailure =
+  | { kind: "no-marker" }
+  | { kind: "invalid-json" }
+  | {
+      kind: "invalid-fields";
+      fields: { name: "duration_seconds" | "aspect_ratio" | "tempo"; got: string }[];
+    }
+  | { kind: "no-scene" };
+
+export type StoryboardExtractResult =
+  | { ok: true; params: StoryboardParams; scene: SceneConstruction }
+  | { ok: false; reason: StoryboardExtractFailure };
+
+/**
+ * マーカー不在と JSON 破損を判別できる形で返す (6wa)。
+ * `found: true, value: null` = マーカーはあったが JSON が取れなかった。
+ */
+function jsonAfterMarker(
+  text: string,
+  marker: string,
+): { found: false } | { found: true; value: unknown | null } {
   const markerIndex = text.lastIndexOf(marker);
-  if (markerIndex < 0) return null;
+  if (markerIndex < 0) return { found: false };
   const start = text.indexOf("{", markerIndex + marker.length);
-  if (start < 0) return null;
+  if (start < 0) return { found: true, value: null };
   let depth = 0;
   let inString = false;
   let escaped = false;
@@ -481,14 +688,15 @@ function jsonAfterMarker(text: string, marker: string): unknown | null {
       depth -= 1;
       if (depth === 0) {
         try {
-          return JSON.parse(text.slice(start, i + 1));
+          return { found: true, value: JSON.parse(text.slice(start, i + 1)) };
         } catch {
-          return null;
+          return { found: true, value: null };
         }
       }
     }
   }
-  return null;
+  // 括弧が閉じないまま終端 = 壊れた JSON
+  return { found: true, value: null };
 }
 
 function latestAttachedImages(messages: PlanMessage[]): string[] {
@@ -562,9 +770,25 @@ function normalizeSceneConstruction(value: unknown): SceneConstruction | null {
   return { total_cuts: totalCuts, cuts, look_analysis };
 }
 
-function extractStructuredStoryboard(text: string, messages: PlanMessage[]): { params: StoryboardParams; scene: SceneConstruction } | null {
-  const payload = jsonAfterMarker(text, "[STORYBOARD_PARAMS]");
-  if (!payload || typeof payload !== "object") return null;
+/** invalid-fields の `got` 表示用。生値を1行・40字に丸める (6wa)。 */
+function describeGotValue(value: unknown): string {
+  if (value === undefined) return "(未指定)";
+  const raw = typeof value === "string" ? value : JSON.stringify(value) ?? String(value);
+  const flat = String(raw).replace(/\s*[\r\n]+\s*/g, " ").trim();
+  if (!flat) return "(空)";
+  return flat.length > 40 ? `${flat.slice(0, 40)}…` : flat;
+}
+
+function extractStructuredStoryboard(
+  text: string,
+  messages: PlanMessage[],
+): StoryboardExtractResult {
+  const marker = jsonAfterMarker(text, "[STORYBOARD_PARAMS]");
+  if (!marker.found) return { ok: false, reason: { kind: "no-marker" } };
+  const payload = marker.value;
+  if (!payload || typeof payload !== "object") {
+    return { ok: false, reason: { kind: "invalid-json" } };
+  }
   const root = payload as Record<string, unknown>;
   const source = (root.storyboardParams && typeof root.storyboardParams === "object")
     ? (root.storyboardParams as Record<string, unknown>)
@@ -611,14 +835,32 @@ function extractStructuredStoryboard(text: string, messages: PlanMessage[]): { p
   // STΛCK 指示 (2026-05-20): Phase 1 ゴール深掘りでは画像必須にしない。
   // characterPath は Phase 2 絵コンテレビュー後 / Phase 3 生成開始時に
   // 後付けで確定する。ここでは duration/aspect/tempo が揃えば params を作る。
-  if (!Number.isFinite(duration) || duration <= 0 || !isAspectRatio(aspect) || !tempo) {
-    return null;
+  //
+  // 6wa (2026-08-03): 1個目で打ち切らず不正フィールドを全件集める。
+  // 「尺だけ直したらアスペクト比でまた落ちた」の往復をなくすため。
+  const invalidFields: { name: "duration_seconds" | "aspect_ratio" | "tempo"; got: string }[] = [];
+  if (!Number.isFinite(duration) || duration <= 0) {
+    invalidFields.push({
+      name: "duration_seconds",
+      got: describeGotValue(source.duration_seconds ?? source.durationSeconds),
+    });
+  }
+  if (!isAspectRatio(aspect)) {
+    invalidFields.push({ name: "aspect_ratio", got: describeGotValue(aspect) });
+  }
+  if (!tempo) {
+    invalidFields.push({ name: "tempo", got: describeGotValue(source.tempo) });
+  }
+  if (invalidFields.length > 0) {
+    return { ok: false, reason: { kind: "invalid-fields", fields: invalidFields } };
   }
 
+  // 上の invalidFields ゲートを通過した時点で3つとも妥当だが、TS の絞り込みは
+  // push 経由の分岐を追えないため型を明示する。
   const params: StoryboardParams = {
     duration_seconds: duration,
-    aspect_ratio: aspect,
-    tempo,
+    aspect_ratio: aspect as StoryboardParams["aspect_ratio"],
+    tempo: tempo as StoryboardParams["tempo"],
     character_reference_path: characterPath,
     style_reference_path: stylePath || undefined,
     // FB#3 (2026-06-06): 複数キャラ/スタイル参照。後方互換の単数フィールドは残しつつ、
@@ -635,18 +877,52 @@ function extractStructuredStoryboard(text: string, messages: PlanMessage[]): { p
   const rawScene = root.scene_construction ?? root.sceneConstruction ?? source.scene_construction ?? source.sceneConstruction;
   const scene = normalizeSceneConstruction(rawScene);
   // STΛCK 指示 (2026-05-15): AI が scene_construction.cuts を返さなかった/不完全だった場合、
-  // テンプレで仮構成を作るフォールバックは廃止。null を返して UI 側でエラー扱いにする。
-  if (!scene) return null;
-  return { params, scene };
+  // テンプレで仮構成を作るフォールバックは廃止。理由付きで UI 側にエラー扱いさせる。
+  if (!scene) return { ok: false, reason: { kind: "no-scene" } };
+  return { ok: true, params, scene };
+}
+
+/**
+ * 失敗理由 → ユーザーに出す文言 (6wa / 2026-08-03)。
+ *
+ * 一律の「AI が具体的な構成を返していません」は、原因も次の行動も伝えていなかった。
+ * 理由ごとに「何が起きたか」と「次に何をすればいいか」をセットで書く。
+ */
+function describeStoryboardExtractFailure(reason: StoryboardExtractFailure): string {
+  switch (reason.kind) {
+    case "no-marker":
+      return "確定用の構成データ（[STORYBOARD_PARAMS]）が返ってきませんでした。もう一度「確定」ボタンを押すか、チャットで「先ほどの構成を JSON で出してください」と伝えてください。";
+    case "invalid-json":
+      return "構成データの形式が壊れていて読み取れませんでした（JSON 解析エラー）。もう一度「確定」ボタンを押してください。繰り返し失敗する場合は、チャットで「構成 JSON を出し直してください」と伝えてください。";
+    case "invalid-fields": {
+      const details = reason.fields
+        .map((f) => {
+          switch (f.name) {
+            case "duration_seconds":
+              return `尺が不正（受信値: ${f.got}）`;
+            case "aspect_ratio":
+              return `アスペクト比「${f.got}」は未対応（対応: 21:9 / 16:9 / 3:2 / 4:3 / 5:4 / 1:1 / 4:5 / 3:4 / 2:3 / 9:16）`;
+            case "tempo":
+              return `テンポ「${f.got}」が不正（fast / standard / slow のいずれか）`;
+          }
+        })
+        .join(" / ");
+      return `構成データの一部が不正です: ${details}。チャットで修正を伝えてから、もう一度「確定」を押してください。`;
+    }
+    case "no-scene":
+      return "カット構成（scene_construction）が空か、含まれていませんでした。チャットで「全カット分の scene_construction を含めて JSON を出し直してください」と伝えてから、もう一度「確定」を押してください。";
+  }
 }
 
 export const usePlanChat = create<PlanChatState>((set, get) => ({
   starting: false,
   sending: false,
+  promoting: false,
   messages: [],
   attached: false,
   storyboardParams: null,
   sceneConstruction: null,
+  sceneConstructionOwner: null,
   pendingImages: [],
   addPendingImages: (paths) =>
     set((state) => {
@@ -654,13 +930,39 @@ export const usePlanChat = create<PlanChatState>((set, get) => ({
       for (const path of paths) {
         if (path && !next.includes(path)) next.push(path);
       }
+      // 7zf: 添付の時点で「このままだと送れない」を予告する (非ブロック)。
+      // 企画タブの全添付入口 (dialog / D&D / プリセット / 企画で再検討) がここに合流する。
+      warnImagePayloadInBackground(next);
       return { pendingImages: next };
     }),
+  // N-01 (Wave 2 REVISE): 減らす側からも警告去重をリセットする。
+  // warnImagePayloadInBackground は空配列なら去重状態 (lastWarnedMb) を消して戻る。
+  // 添付を全部外した後にもう一度同じ枚数を付け直すと、同じ MB 値のため去重に
+  // 引っかかって警告が出ない、という取りこぼしを防ぐ。0 件でも必ず呼ぶ。
   removePendingImage: (path) =>
-    set((state) => ({ pendingImages: state.pendingImages.filter((item) => item !== path) })),
-  clearPendingImages: () => set({ pendingImages: [] }),
+    set((state) => {
+      const next = state.pendingImages.filter((item) => item !== path);
+      warnImagePayloadInBackground(next);
+      return { pendingImages: next };
+    }),
+  clearPendingImages: () => {
+    warnImagePayloadInBackground([]);
+    set({ pendingImages: [] });
+  },
+  // go4: 音源は turn 入力に載らない (文字情報だけ) ので 380MB 画像ガードの対象外。
+  // サイズ上限は添付時の 200MB チェック (fileToAudioPath 呼び出し側) が担保する。
+  pendingAudio: null,
+  setPendingAudio: (pendingAudio) => set({ pendingAudio }),
+  clearPendingAudio: () => set({ pendingAudio: null }),
   setStoryboardParams: (storyboardParams) => set({ storyboardParams }),
-  setSceneConstruction: (sceneConstruction) => set({ sceneConstruction }),
+  // 出所は「今どのスキルにいるか」で決まる。null を入れる (破棄) ときは出所も落とす。
+  setSceneConstruction: (sceneConstruction) =>
+    set({
+      sceneConstruction,
+      sceneConstructionOwner: sceneConstruction
+        ? useSkillUiMode.getState().activeSkillId
+        : null,
+    }),
 
   attach: async () => {
     if (get().attached) return;
@@ -722,8 +1024,14 @@ export const usePlanChat = create<PlanChatState>((set, get) => ({
             get().messages.find((m) => m.id === item.id)?.text ??
             "";
           const parsed = extractStructuredStoryboard(responseText, get().messages);
-          if (parsed) {
-            set({ storyboardParams: parsed.params, sceneConstruction: parsed.scene });
+          if (parsed.ok) {
+            set({
+              storyboardParams: parsed.params,
+              sceneConstruction: parsed.scene,
+              // 出所を名乗る (blocking#2)。この応答を受け取った時点でユーザーが
+              // いるスキルが、この構成の持ち主。
+              sceneConstructionOwner: useSkillUiMode.getState().activeSkillId,
+            });
           } else {
             // ★★★ STΛCK 指示 (2026-05-15) ★★★
             // 直前のユーザー入力が FINALIZE 要求だったのに、応答に有効な
@@ -740,12 +1048,15 @@ export const usePlanChat = create<PlanChatState>((set, get) => ({
               "[FINALIZE_STORYBOARD]",
             );
             if (wasFinalizeRequest) {
-              useToasts.getState().push({
-                kind: "error",
-                text:
-                  "確定 JSON の取得に失敗しました。AI が具体的な構成を返していません。\nもう一度「確定」ボタンを押すか、企画チャットで「先ほどの構成を JSON で出してください」と伝えてください。",
-                ttlMs: 8000,
-              });
+              // 6wa (2026-08-03): 理由別の文言 + サポート調査用のログ。
+              // FINALIZE 以外のターンは沈黙のまま (通常会話でマーカーが無いのは正常)。
+              const message = describeStoryboardExtractFailure(parsed.reason);
+              useToasts.getState().push({ kind: "error", text: message, ttlMs: 8000 });
+              logError(
+                "plan-finalize",
+                message,
+                `reason=${parsed.reason.kind} tail=${responseText.slice(-400)}`,
+              );
             }
           }
         }
@@ -767,15 +1078,56 @@ export const usePlanChat = create<PlanChatState>((set, get) => ({
         // 「会話 1 ターンごとにスナップショット保存」の動き。
         // streaming は保存しないので一度フラグ整理した後の messages を渡す。
         const activeProjectId = useActiveProject.getState().activeProjectId;
+        const snapshot: ProjectChatMessage[] = get().messages.map((m) => ({
+          id: m.id,
+          role: m.role,
+          text: m.text,
+          attachedImages: m.attachedImages,
+          attachedAudio: m.attachedAudio,
+          createdAt: m.createdAt,
+        }));
         if (activeProjectId) {
-          const snapshot: ProjectChatMessage[] = get().messages.map((m) => ({
-            id: m.id,
-            role: m.role,
-            text: m.text,
-            attachedImages: m.attachedImages,
-            createdAt: m.createdAt,
-          }));
           useProjects.getState().setPlanChat(activeProjectId, snapshot);
+        } else if (snapshot.length > 0) {
+          // 29z (2026-08-03): プロジェクト未選択 (保存しない) の会話も、
+          // 再起動で全損しないよう未保存チャット台帳へ自動退避する
+          // (最新5件・7日。プロジェクト正本には書かない)。
+          // 予約時点の世代 object を捕獲する (B2 r3)。完了時にグローバルを
+          // 読まないので、この upsert の運命は「自分の世代を最初に無効化した
+          // 理由」だけで決まる。後続の遷移が何回重なっても影響を受けない。
+          const ledgerGeneration = unsavedLedgerGeneration;
+          void useUnsavedPlanChats
+            .getState()
+            .upsert(get().unsavedChatId, snapshot)
+            .then(({ id, created }) => {
+              if (!id) return;
+              const invalidatedBy = ledgerGeneration.invalidatedBy;
+              if (invalidatedBy !== null) {
+                // await 中に引き継ぎ / リセット / 別チャット復元が走った。
+                // unsavedChatId は再設定しない (古い id を復活させると
+                // 引き継ぎ済みの会話が「未保存」として履歴に二重に残る)。
+                //
+                // エントリを消すのは **引き継ぎ (carry-over) で、かつ
+                // この upsert が新規に作ったエントリだったとき** だけ (B2)。
+                //   ・carry-over 以外 (reset / switch / restore) では会話は
+                //     どこにも保存されていない。ここで消すと 7 日間の安全網が
+                //     消え、ユーザーから見て「会話が消えた」になる。
+                //   ・created=false (既存エントリの更新) なら、carryOverToProject
+                //     本体が unsavedChatId 経由で既に消している。ここで消すと
+                //     無関係な既存エントリまで巻き添えにしうる。
+                if (invalidatedBy === "carry-over" && created) {
+                  void useUnsavedPlanChats
+                    .getState()
+                    .remove(id)
+                    .catch((err) =>
+                      console.warn("stale unsaved plan chat remove failed", err),
+                    );
+                }
+                return;
+              }
+              set({ unsavedChatId: id });
+            })
+            .catch((err) => console.warn("unsaved plan chat upsert failed", err));
         }
       }
     });
@@ -818,8 +1170,9 @@ export const usePlanChat = create<PlanChatState>((set, get) => ({
 
   send: async (text: string, attachedImages?: string[]) => {
     const trimmed = text.trim();
-    if (!trimmed) return;
-    if (get().sending) return;
+    // B-02: 受け付けずに戻る経路はすべて false を返す (呼び出し元が入力を保持する)。
+    if (!trimmed) return false;
+    if (get().sending) return false;
     // 初回ターンだけ ROLE_PREFIX を混ぜて assistant の振る舞いを誘導する。
     // UI には trimmed のままを表示し、codex に送る input だけ拡張する。
     //
@@ -832,10 +1185,20 @@ export const usePlanChat = create<PlanChatState>((set, get) => ({
     const rolePrefix = isStoryboardSkill ? STORYBOARD_ROLE_PREFIX : ROLE_PREFIX;
     // FB#16: 設定で登録した世界観 / コンテキストを初回ターンだけ前置きする。
     // ROLE_PREFIX より前に置き、AI が作品設定を踏まえて役割を理解できるようにする。
+    // v29: 読み出し元を settings.worldContext から worldContexts ストア (選択中
+    // エントリ) に変更。設定タブを一度も開いていなくても注入されるよう、ここで
+    // load を待つ (冪等)。
+    await useWorldContexts.getState().load();
     const worldContext = isFirstTurn
-      ? buildWorldContextBlock(useSettings.getState().settings.worldContext)
+      ? buildWorldContextBlock(useWorldContexts.getState().activeContent())
       : "";
     const imagesForTurn = attachedImages ?? get().pendingImages;
+    // 7zf (2026-08-03): 入力サイズの事前ガード。企画タブもゴールチャットも
+    // この送信ファネルへ合流するので、ここ1点で全経路を塞ぐ。
+    // チャット履歴・pendingImages・sending を一切変えずに戻る (添付を減らして再送できる)。
+    // B-02: false を返して呼び出し元にも「入力文・添付を消すな」と伝える。
+    if (imagesForTurn.length > 0 && !(await guardImagePayloadForSend(imagesForTurn)))
+      return false;
     // FB#3 (2026-06-06) / N-2 (2026-06-16): 添付画像の役割をユーザーが明示指定して
     // いれば、そのまま AI に伝える。AI の文脈推測に任せず、登場キャラが複数いる
     // ケースで「勝手にスタイル参照になる」事故を防ぐ。役割は referenceRoles ストア
@@ -857,13 +1220,20 @@ export const usePlanChat = create<PlanChatState>((set, get) => ({
         }).join("") +
         "上記の役割指定に従ってください。キャラ参照=人物の同一性維持、スタイル参照=タッチ/質感、ロケーション参照=背景・環境をその画像に合わせる、アイテム参照=その商品/オブジェクトを登場させ形状・質感を維持、と使い分けてください。役割をAIが勝手に入れ替えないでください。"
       : "";
-    const submitText = `${isFirstTurn ? worldContext : ""}${isFirstTurn ? rolePrefix : ""}${trimmed}${imageNote}`;
+    // go4: 音源は「尺・形式・タグの文字情報」だけを imageNote の後ろに連結する。
+    // 音声パスは下の input (localImage) に**絶対に足さない** — codex は音声モダリティを
+    // 持たず、localImage として渡すとシェル実行を試みて Windows で sandbox-setup
+    // エラーに化ける (audio/attach.ts 冒頭の不変条件)。
+    const audioForTurn = get().pendingAudio;
+    const audioNote = audioForTurn ? `\n\n${buildAudioNote(audioForTurn)}\n` : "";
+    const submitText = `${isFirstTurn ? worldContext : ""}${isFirstTurn ? rolePrefix : ""}${trimmed}${imageNote}${audioNote}`;
     // user メッセージは楽観的に「ユーザーが書いたまま」を表示する
     const userMsg: PlanMessage = {
       id: generateId(),
       role: "user",
       text: trimmed,
       attachedImages: imagesForTurn.length > 0 ? imagesForTurn : undefined,
+      attachedAudio: audioForTurn ?? undefined,
       createdAt: Date.now(),
     };
     set((s) => ({ messages: [...s.messages, userMsg], sending: true }));
@@ -878,7 +1248,9 @@ export const usePlanChat = create<PlanChatState>((set, get) => ({
         input,
         model: PLAN_MODEL,
       });
-      set({ pendingImages: [] });
+      // B-02: 受理した時だけ消す。ガードで false を返す経路 (上の early return) では
+      // 音源も残したまま戻る。
+      set({ pendingImages: [], pendingAudio: null });
       // sending=false は turn/completed 通知で下ろす
     } catch (err) {
       useToasts.getState().push({
@@ -888,16 +1260,32 @@ export const usePlanChat = create<PlanChatState>((set, get) => ({
       });
       set({ sending: false });
     }
+    // B-02: ここまで来た時点で user メッセージは履歴に積まれている。RPC が失敗しても
+    // 「送信は受け付けた」ので true (入力欄をもう一度埋め直させない)。
+    return true;
   },
 
   finalizePlan: async () => {
     // 通常企画タブ専用。対話が無い状態では確定しても意味が無いので何もしない。
     if (get().sending || get().starting) return;
     if (get().messages.length === 0) return;
-    await get().send(PLAN_FINALIZE_PREFIX);
+    // B-02: attachedImages を渡さないので send 側は pendingImages を使う。つまり
+    // 380MB ガードはこの経路でも発火しうる。ブロック時は pendingImages を残したまま
+    // 戻る (ガード自身がトーストで理由を出す) ので、ここで消す操作は一切しない。
+    // 返り値は裸で捨てず、受け付けられなかった事実をログに残す。
+    const accepted = await get().send(PLAN_FINALIZE_PREFIX);
+    if (!accepted) {
+      console.warn(
+        "[planChat] finalizePlan: 送信が受け付けられませんでした (送信中 / 添付が容量超過)",
+      );
+    }
   },
 
   resetThread: () => {
+    // 進行中の upsert が古い id を書き戻さないよう世代を進める。
+    // reason="reset": 会話はどこにも保存されていないので、遅れて出来た
+    // 台帳エントリも **消さない** (7日間の安全網として残す)。
+    bumpUnsavedLedgerGeneration("reset");
     set({
       threadId: undefined,
       messages: [],
@@ -905,12 +1293,23 @@ export const usePlanChat = create<PlanChatState>((set, get) => ({
       streamingItemId: undefined,
       storyboardParams: null,
       sceneConstruction: null,
+      // 構成を捨てるときは出所も一緒に捨てる (残すと next の構成に前の持ち主が付く)。
+      sceneConstructionOwner: null,
       pendingImages: [],
+      // pendingImages と同じ理由で音源も落とす (Sol指摘 G-1)。残すと新しい会話に
+      // 前の会話の曲が添付されたままになり、意図しない曲を前提に企画が進む。
+      pendingAudio: null,
+      // 画面上の会話とエントリの紐づけだけ切る。台帳のエントリ自体は
+      // 7日間の安全網として残す (29z 2026-08-03)。
+      unsavedChatId: undefined,
     });
   },
 
   switchToProject: (prevProjectId, nextProjectId) => {
     if (prevProjectId === nextProjectId) return;
+    // 進行中の upsert が古い id を書き戻さないよう世代を進める。
+    // reason="switch": resetThread と同じ。台帳のエントリは残す。
+    bumpUnsavedLedgerGeneration("switch");
     // 1. 切替前プロジェクトへ現在の会話を保存 (会話消失防止)。
     //    turn/completed のスナップショット保存と同形式。streaming は保存しない。
     if (prevProjectId) {
@@ -919,6 +1318,7 @@ export const usePlanChat = create<PlanChatState>((set, get) => ({
         role: m.role,
         text: m.text,
         attachedImages: m.attachedImages,
+        attachedAudio: m.attachedAudio,
         createdAt: m.createdAt,
       }));
       useProjects.getState().setPlanChat(prevProjectId, snapshot);
@@ -931,6 +1331,7 @@ export const usePlanChat = create<PlanChatState>((set, get) => ({
           role: m.role,
           text: m.text,
           attachedImages: m.attachedImages,
+          attachedAudio: m.attachedAudio,
           createdAt: m.createdAt,
         }))
       : [];
@@ -943,7 +1344,155 @@ export const usePlanChat = create<PlanChatState>((set, get) => ({
       streamingItemId: undefined,
       storyboardParams: null,
       sceneConstruction: null,
+      // 構成を捨てるときは出所も一緒に捨てる (残すと next の構成に前の持ち主が付く)。
+      sceneConstructionOwner: null,
       pendingImages: [],
+      // Sol指摘 G-1: 未送信の音源をプロジェクトをまたいで持ち越さない
+      // (別プロジェクトで前の曲を添付したまま送ってしまう事故を塞ぐ)。
+      pendingAudio: null,
+      // resetThread と同じ理由。台帳のエントリは消さない (29z 2026-08-03)。
+      unsavedChatId: undefined,
+    });
+  },
+
+  carryOverToProject: (projectId) => {
+    // turn/completed のスナップショット (planChat.ts の snapshot) と同形式。
+    // streaming フラグは保存しない。
+    const snapshot: ProjectChatMessage[] = get().messages.map((m) => ({
+      id: m.id,
+      role: m.role,
+      text: m.text,
+      attachedImages: m.attachedImages,
+      attachedAudio: m.attachedAudio,
+      createdAt: m.createdAt,
+    }));
+    if (snapshot.length === 0) return 0;
+    // 対象プロジェクトが store に居ることを確認してから書く。居ないのに 0 以外を
+    // 返すと、呼び出し側が「引き継げた」と誤認したまま switchToProject で会話を
+    // 消してしまうため (消失より二重残りを選ぶ方針)。
+    const exists = useProjects.getState().projects.some((p) => p.id === projectId);
+    if (!exists) return 0;
+    useProjects.getState().setPlanChat(projectId, snapshot);
+    // 29z (2026-08-03): プロジェクト正本へ移せたので、未保存台帳の当該エントリは
+    // 用済み。履歴ページに「未保存」として二重に出し続けない。
+    //
+    // 世代を進めるのは **unsavedChatId の有無に関わらず必須**。応答完了直後に
+    // 引き継ぐと upsert がまだ解決しておらず unsavedChatId は undefined のままで、
+    // 世代を上げないと後から古い id が書き戻されて取り残しになる (upsert 側の
+    // 世代チェックが、遅れて *新規に作られた* エントリを削除してくれる)。
+    // reason="carry-over": 会話はプロジェクト正本へ移ったので、遅れて出来た
+    // 新規エントリは消してよい (履歴に「未保存」として二重に出さない)。
+    bumpUnsavedLedgerGeneration("carry-over");
+    const unsavedChatId = get().unsavedChatId;
+    if (unsavedChatId) {
+      void useUnsavedPlanChats
+        .getState()
+        .remove(unsavedChatId)
+        .catch((err) => console.warn("unsaved plan chat remove failed", err));
+      set({ unsavedChatId: undefined });
+    }
+    return snapshot.length;
+  },
+
+  promoteToProject: async (name) => {
+    // 昇格は「保存しない」状態専用。選択中の案件があるなら既存の移動/コピー
+    // (projects.movePlanChat / copyPlanChat) の領分なので何もしない。
+    if (useActiveProject.getState().activeProjectId !== null) {
+      return { ok: false, reason: "guard" };
+    }
+    if (get().messages.length === 0) return { ok: false, reason: "guard" };
+    // 二重実行ガード (Sol指摘)。await を挟むので「1回目の保存を待っている間に
+    // 2 回目のクリックが来る」窓が実在する。activeProjectId はまだ立っていないため
+    // 上のガードでは止まらない。専用フラグで塞ぐ。
+    if (get().promoting) return { ok: false, reason: "guard" };
+    set({ promoting: true });
+    try {
+      const snapshot: ProjectChatMessage[] = get().messages.map((m) => ({
+        id: m.id,
+        role: m.role,
+        text: m.text,
+        attachedImages: m.attachedImages,
+        attachedAudio: m.attachedAudio,
+        createdAt: m.createdAt,
+      }));
+      const created = useProjects.getState().createProject(name);
+
+      // --- 保存フェーズ ---------------------------------------------------
+      // 会話入りの案件をディスクへ書き、**完了を待つ** (Sol指摘 B-1)。
+      // ここを待たずに台帳を消すと、空の案件だけがディスクに載った状態で
+      // 終了した場合に会話が両方から消える窓が開く。
+      // status も先に確定させておく (draft のまま保存されると、保存成功後に
+      // クラッシュしたとき「中身入りなのに下書きバッジ」の中途半端な状態になる)。
+      useProjects.getState().confirmProject(created.id);
+      const saved = await useProjects.getState().setPlanChat(created.id, snapshot);
+
+      if (!saved) {
+        // 保存できていない。**台帳は消さない** (会話は台帳に残る = 消失窓ゼロ)。
+        // 作りかけの空箱だけ片付けて、呼び出し側へ失敗を返す。
+        useProjects.getState().removeProject(created.id);
+        return { ok: false, reason: "save-failed" };
+      }
+
+      // --- 確定フェーズ (ここから先は会話がディスクに載っている) -----------
+      // 進行中の upsert が古い id を書き戻さないよう世代を進める。
+      // reason="carry-over": 会話はプロジェクト正本へ移ったので、遅れて出来た
+      // 新規エントリは消してよい (履歴に「未保存」として二重に出さない)。
+      bumpUnsavedLedgerGeneration("carry-over");
+      const unsavedChatId = get().unsavedChatId;
+      if (unsavedChatId) {
+        // 台帳削除の失敗は昇格の失敗ではない (会話は案件側に保存済み)。
+        // 最悪でも履歴に「未保存」が二重に残るだけで、消失はしない。
+        await useUnsavedPlanChats
+          .getState()
+          .remove(unsavedChatId)
+          .catch((err) => console.warn("unsaved plan chat remove failed", err));
+        set({ unsavedChatId: undefined });
+      }
+      // 以後の turn/completed は台帳でなくこの案件へ保存される。
+      // switchToProject は呼ばない: メモリの会話 = いま書いた snapshot なので
+      // ロードし直し不要で、threadId / pending 添付 / シーン構築値を壊さない。
+      useActiveProject.getState().setActive(created.id);
+      return {
+        ok: true,
+        projectId: created.id,
+        projectName: created.name,
+        carried: snapshot.length,
+      };
+    } finally {
+      set({ promoting: false });
+    }
+  },
+
+  restoreUnsaved: (entry) => {
+    // 進行中の upsert が、復元したエントリの id を別の id で塗り替えないよう
+    // 世代を進める。
+    // reason="restore": 復元先エントリも、遅れて出来たエントリも消さない
+    // (どちらもユーザーの会話であり、正本へ移った訳ではない)。
+    bumpUnsavedLedgerGeneration("restore");
+    const messages: PlanMessage[] = entry.messages.map((m) => ({
+      id: m.id,
+      role: m.role,
+      text: m.text,
+      attachedImages: m.attachedImages,
+      attachedAudio: m.attachedAudio,
+      createdAt: m.createdAt,
+    }));
+    // switchToProject の Step2 と同じリセット内容 (thread は会話と一対なので
+    // 作り直し、構成は会話に紐づくので破棄)。
+    set({
+      threadId: undefined,
+      messages,
+      sending: false,
+      streamingItemId: undefined,
+      storyboardParams: null,
+      sceneConstruction: null,
+      // 構成を捨てるときは出所も一緒に捨てる (残すと next の構成に前の持ち主が付く)。
+      sceneConstructionOwner: null,
+      pendingImages: [],
+      // Sol指摘 G-1: 復元は「別の会話へ移る」操作なので、復元前の未送信音源は
+      // 持ち越さない (pendingImages と同じ扱い)。
+      pendingAudio: null,
+      unsavedChatId: entry.id,
     });
   },
 }));

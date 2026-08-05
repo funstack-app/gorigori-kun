@@ -33,7 +33,10 @@ use serde_json::{json, Value};
 use tauri::State;
 
 use crate::codex::mcp_direct::{call_tool, reload_mcp_servers};
-use crate::codex::mcp_shared::{entry_is_authenticated, find_mcp_entry, gori_codex_command, run_codex_capture};
+use crate::codex::mcp_shared::{
+    entry_is_authenticated, find_mcp_entry, gori_codex_command, run_codex_auth_capture,
+    run_codex_capture,
+};
 use crate::state::AppState;
 
 const MAGNIFIC_MCP_NAME: &str = "magnific";
@@ -91,16 +94,14 @@ pub async fn magnific_status() -> Result<MagnificStatus, String> {
         Err(_) => return Ok(magnific_status_unavailable()),
     };
     // `mcp list` はローカル config を読むだけなので速いが、念のため上限を設ける。
-    let output = match tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        child.wait_with_output(),
-    )
-    .await
-    {
-        Ok(Ok(o)) => o,
-        // 実行失敗・タイムアウトとも未接続として degrade。
-        _ => return Ok(magnific_status_unavailable()),
-    };
+    let output =
+        match tokio::time::timeout(std::time::Duration::from_secs(30), child.wait_with_output())
+            .await
+        {
+            Ok(Ok(o)) => o,
+            // 実行失敗・タイムアウトとも未接続として degrade。
+            _ => return Ok(magnific_status_unavailable()),
+        };
 
     Ok(parse_magnific_status(&output.stdout))
 }
@@ -117,7 +118,11 @@ const MAGNIFIC_LOGIN_TIMEOUT_SECS: u64 = 180;
 pub async fn magnific_login(state: State<'_, AppState>) -> Result<String, String> {
     // ① 登録 (mcp add)。既に登録済みだと codex が非ゼロ終了することがあるが、
     //    それはエラーにせず login に進む (冪等性)。
-    let add = run_codex_capture(
+    //
+    //    認可 2 操作 (add / login) だけ codex-auth (0.147.0-alpha.4) で実行する。
+    //    同梱 0.146.0 は OAuth コールバックの iss を捨てるため必ず失敗する
+    //    (mcp remove / list / 生成・残高は従来どおり 0.146.0)。
+    let add = run_codex_auth_capture(
         &["mcp", "add", MAGNIFIC_MCP_NAME, "--url", MAGNIFIC_MCP_URL],
         std::time::Duration::from_secs(30),
     )
@@ -131,8 +136,9 @@ pub async fn magnific_login(state: State<'_, AppState>) -> Result<String, String
         }
     }
 
-    // ② OAuth 認証 (mcp login)。ブラウザが開き、ユーザーがログインする。
-    let login = run_codex_capture(
+    // ② OAuth 認証 (mcp login)。ブラウザが開き、ユーザーがログインする。add と同じく
+    //    codex-auth で実行する (iss 検証の修正が入っているのはこちらだけ)。
+    let login = run_codex_auth_capture(
         &["mcp", "login", MAGNIFIC_MCP_NAME],
         std::time::Duration::from_secs(MAGNIFIC_LOGIN_TIMEOUT_SECS),
     )
@@ -146,9 +152,15 @@ pub async fn magnific_login(state: State<'_, AppState>) -> Result<String, String
         } else {
             login.1
         })
+    } else if login.2.contains("missing required issuer") {
+        // 配布版で codex-auth (0.147.0-alpha.4) が bundle から欠落し、
+        // フォールバックで 0.146.0 が使われた場合の唯一の症状。
+        // ユーザーには「アプリを更新する」という次の一手を示す。
+        Err("Magnific の認証に失敗しました。アプリ内の接続コンポーネントが見つからないか古い可能性があります。アプリを最新版に更新してから、もう一度お試しください。".to_string())
     } else {
         Err(if login.2.is_empty() {
-            "Magnific の認証に失敗しました。ブラウザでのログインを完了したか確認してください。".to_string()
+            "Magnific の認証に失敗しました。ブラウザでのログインを完了したか確認してください。"
+                .to_string()
         } else {
             login.2
         })
@@ -220,9 +232,8 @@ async fn upload_magnific_reference(
     http: &reqwest::Client,
     path: &str,
 ) -> Result<String, String> {
-    let mime = magnific_mime_for_path(path).ok_or_else(|| {
-        format!("Magnific の参照画像は PNG / JPEG / WebP のみ対応です ({path})")
-    })?;
+    let mime = magnific_mime_for_path(path)
+        .ok_or_else(|| format!("Magnific の参照画像は PNG / JPEG / WebP のみ対応です ({path})"))?;
     let bytes = tokio::fs::read(path)
         .await
         .map_err(|e| format!("参照画像を読み込めませんでした ({path}): {e}"))?;
@@ -236,13 +247,18 @@ async fn upload_magnific_reference(
     )
     .await?;
     if out.is_error {
-        return Err(format!("参照画像のアップロード準備に失敗しました: {}", out.text));
+        return Err(format!(
+            "参照画像のアップロード準備に失敗しました: {}",
+            out.text
+        ));
     }
     let structured = out.structured.unwrap_or(Value::Null);
     let upload_url = structured
         .get("directUploadUrl")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| "creations_request_upload の応答に directUploadUrl がありません".to_string())?
+        .ok_or_else(|| {
+            "creations_request_upload の応答に directUploadUrl がありません".to_string()
+        })?
         .to_string();
     let upload_path = structured
         .get("path")
@@ -373,7 +389,9 @@ pub async fn magnific_generate_batch(
     args: MagnificGenArgs,
 ) -> Result<MagnificGenResult, String> {
     if args.model.trim().is_empty() {
-        return Err("Magnific のモデルが未選択です。モデルを選んでから生成してください。".to_string());
+        return Err(
+            "Magnific のモデルが未選択です。モデルを選んでから生成してください。".to_string(),
+        );
     }
     // images_generate は 1 コールで最大 8 枚。フロントは従来どおり最大 4 を渡す。
     let count = args.count.unwrap_or(1).clamp(1, 8);
@@ -403,9 +421,7 @@ pub async fn magnific_generate_batch(
     let mut references: Vec<Value> = Vec::new();
     for path in &ref_paths {
         match upload_magnific_reference(&state, &http, path).await {
-            Ok(identifier) => {
-                references.push(json!({ "type": "image", "identifier": identifier }))
-            }
+            Ok(identifier) => references.push(json!({ "type": "image", "identifier": identifier })),
             Err(e) => {
                 // 参照画像が使えないまま生成すると意図と違う絵になるため即返す。
                 return Ok(MagnificGenResult {
@@ -437,7 +453,10 @@ pub async fn magnific_generate_batch(
         return Ok(MagnificGenResult {
             generated_paths,
             failed_count: count,
-            errors: vec![format!("Magnific 画像生成の投入に失敗しました: {}", out.text)],
+            errors: vec![format!(
+                "Magnific 画像生成の投入に失敗しました: {}",
+                out.text
+            )],
         });
     }
     let creation_ids = extract_creation_ids(out.structured.as_ref());
@@ -471,7 +490,10 @@ pub async fn magnific_generate_batch(
         )
         .await?;
         if out.is_error {
-            errors.push(format!("Magnific 生成の完了待ちに失敗しました: {}", out.text));
+            errors.push(format!(
+                "Magnific 生成の完了待ちに失敗しました: {}",
+                out.text
+            ));
             break;
         }
         let entries = parse_wait_results(out.structured.as_ref());
@@ -627,8 +649,7 @@ fn magnific_describe_shape(structured: &Value) -> String {
                 .iter()
                 .map(|(k, v)| match v {
                     Value::Object(inner) => {
-                        let mut inner_keys: Vec<&str> =
-                            inner.keys().map(|s| s.as_str()).collect();
+                        let mut inner_keys: Vec<&str> = inner.keys().map(|s| s.as_str()).collect();
                         inner_keys.sort_unstable();
                         format!("{k}{{{}}}", inner_keys.join(","))
                     }
@@ -644,12 +665,15 @@ fn magnific_describe_shape(structured: &Value) -> String {
         }
         Value::Array(_) => "(トップレベルが配列)".to_string(),
         Value::Null => "(null)".to_string(),
-        other => format!("(トップレベルが {} 型)", match other {
-            Value::Bool(_) => "bool",
-            Value::Number(_) => "number",
-            Value::String(_) => "string",
-            _ => "unknown",
-        }),
+        other => format!(
+            "(トップレベルが {} 型)",
+            match other {
+                Value::Bool(_) => "bool",
+                Value::Number(_) => "number",
+                Value::String(_) => "string",
+                _ => "unknown",
+            }
+        ),
     }
 }
 
@@ -822,7 +846,10 @@ mod tests {
         assert!(shape.contains("credits{note,unit}"), "got: {shape}");
         assert!(shape.contains("plan{tier}"), "got: {shape}");
         assert!(shape.contains("token:string"), "got: {shape}");
-        assert!(!shape.contains("secret-value-must-not-leak"), "got: {shape}");
+        assert!(
+            !shape.contains("secret-value-must-not-leak"),
+            "got: {shape}"
+        );
         assert!(!shape.contains("business"), "got: {shape}");
     }
 

@@ -171,8 +171,7 @@ fn terminate_workers_for_run(app: &AppHandle, run_id: &str) -> Result<usize, Str
 }
 
 fn is_cancellable_entry(entry: &WorkerPidEntry, run_id: &str) -> bool {
-    entry.run_id.as_deref() == Some(run_id)
-        && entry.kind != RESIDENT_GEN_SERVER_WORKER_KIND
+    entry.run_id.as_deref() == Some(run_id) && entry.kind != RESIDENT_GEN_SERVER_WORKER_KIND
 }
 
 fn unregister_worker(app: &AppHandle, pid: u32) -> Result<(), String> {
@@ -382,8 +381,6 @@ mod tests {
     #[test]
     fn command_verification_accepts_exec_only() {
         assert!(is_codex_exec_command("/usr/local/bin/codex exec -"));
-        assert!(!is_codex_exec_command(
-            "/usr/local/bin/codex app-server"
-        ));
+        assert!(!is_codex_exec_command("/usr/local/bin/codex app-server"));
     }
 }

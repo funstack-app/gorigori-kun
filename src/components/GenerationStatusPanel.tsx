@@ -1,10 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import {
   GENERATION_KIND_LABEL,
-  NO_RESPONSE_THRESHOLD_MS,
+  WAITING_STUCK_THRESHOLD_MS,
   describeStall,
+  deriveEffectiveStall,
+  focusGenerationKind,
+  globalLastEventAt,
   isCancellableKind,
   jobPercent,
+  selectTotals,
   useGenerationStatus,
   type GenerationJob,
 } from "../lib/store/generationStatus";
@@ -13,7 +17,7 @@ import {
   selectBatchProvider,
   useBatches,
 } from "../lib/store/batches";
-import { cancelGeneration } from "../lib/ipc";
+import { cancelGeneration, genCapacity } from "../lib/ipc";
 import { cancelDirectRun, isDirectRunParent } from "../lib/store/directRun";
 import { useStoryboardRun } from "../lib/store/storyboardRun";
 import { useToasts } from "../lib/store/toasts";
@@ -121,7 +125,43 @@ type CancelState =
       message?: string;
     };
 
-function JobRow({ job }: { job: GenerationJob }) {
+/**
+ * 進捗が途絶えたときの自己診断案内 (23g / 2026-08-03)。
+ *
+ * 実ユーザー報告の「4時間順番待ち」は、アプリ外で Codex を使ったことによる
+ * 認証競合が主因だった。自動リカバリはしない (生きている生成を誤殺しないため)。
+ * 事実と次にやれることだけを出し、行動はユーザーに委ねる。
+ */
+function StuckGuidance() {
+  return (
+    <div className="mt-1.5 rounded-md bg-[#1e1e1e] px-2 py-1.5 text-[11px] leading-snug text-amber-200/90">
+      <p>
+        アプリの外で Codex（ChatGPT / Codex CLI）を使っていると、認証が競合して止まることがあります。
+        設定 → アカウントで Codex を再ログインすると直ることがあります。
+        改善しない場合は「中止」してから、もう一度お試しください。
+      </p>
+      <button
+        type="button"
+        onClick={() => window.dispatchEvent(new CustomEvent("gori:open-settings"))}
+        className="mt-1.5 rounded-md border border-[#3a3a3a] px-2 py-0.5 text-[10px] font-bold text-neutral-300 transition-colors hover:border-pink-500/60 hover:text-pink-300"
+      >
+        設定を開く
+      </button>
+    </div>
+  );
+}
+
+function JobRow({
+  job,
+  globalLast,
+  onFocus,
+}: {
+  job: GenerationJob;
+  /** globalLastEventAt(jobs) の値。待機のみジョブの番犬判定に使う。 */
+  globalLast: number | null;
+  /** 行本体クリックで、このジョブのスキル画面へ移動する (cne)。 */
+  onFocus: () => void;
+}) {
   const [now, setNow] = useState(() => Date.now());
   const [cancel, setCancel] = useState<CancelState>({ phase: "idle" });
   // provider (文字列 or undefined) を購読する。batch オブジェクトを select すると
@@ -176,7 +216,8 @@ function JobRow({ job }: { job: GenerationJob }) {
         }
         useGenerationStatus.getState().setRunning(job.id, 0);
         setCancel({ phase: "stopped", terminated: report.terminated });
-        useGenerationStatus.getState().finish(job.id);
+        // "cancelled" を渡す: 止めたジョブに「完成しました」の通知を出さない (cne)。
+        useGenerationStatus.getState().finish(job.id, "cancelled");
         window.setTimeout(() => useGenerationStatus.getState().clear(job.id), 6000);
       } catch (error) {
         useToasts.getState().push({
@@ -246,7 +287,8 @@ function JobRow({ job }: { job: GenerationJob }) {
       // 手動で × を押さないと残り続けると、止めたのに画面に居座って
       // 「まだ何か動いている」ように見える。finish() で終了扱いにしてから
       // 少し置いて片付ける。
-      useGenerationStatus.getState().finish(job.id);
+      // "cancelled" を渡す: 止めたジョブに「完成しました」の通知を出さない (cne)。
+      useGenerationStatus.getState().finish(job.id, "cancelled");
       window.setTimeout(() => {
         useGenerationStatus.getState().clear(job.id);
       }, 6000);
@@ -258,32 +300,55 @@ function JobRow({ job }: { job: GenerationJob }) {
   };
 
   // 無反応の自動検出。理由が未設定でも、黙って固まらせない。
-  const silentFor = now - job.lastEventAt;
-  const effectiveStall =
-    job.stall ??
-    (!job.finished && job.running > 0 && silentFor > NO_RESPONSE_THRESHOLD_MS
-      ? ({ type: "no-response", sinceMs: silentFor } as const)
-      : null);
+  // 判定本体は generationStatus.deriveEffectiveStall (23g で純関数へ分離)。
+  const effectiveStall = deriveEffectiveStall(job, now, globalLast);
 
   const percent = jobPercent(job, 120);
   const settled = job.completed + job.failed;
   // 「待ち」は異常ではないので赤くしない (仕様上の停止をエラーに見せない)
-  const isError = effectiveStall?.type === "error" || effectiveStall?.type === "auth-required";
+  const isError =
+    effectiveStall?.type === "error" ||
+    effectiveStall?.type === "auth-required" ||
+    effectiveStall?.type === "stuck";
   const isWaiting =
     effectiveStall?.type === "waiting-user" || effectiveStall?.type === "waiting-slot";
 
   return (
-    <div className="rounded-lg border border-[#2a2a2a] bg-[#141414]/95 px-3 py-2.5 shadow-lg backdrop-blur">
+    /*
+      行クリックで当該スキルへ移動する (cne / 2026-08-04)。
+      パネル全体がドラッグ可能なので、掴んで動かしただけの操作を遷移にしない
+      (親の onPointerDown が押下位置を記録し、動いていなければ click を通す)。
+      role="button" は付けない: 中に中止/× の本物のボタンが入るため
+      (button の入れ子は不正なマークアップになる)。キーボード操作は
+      末尾の「開く」ボタンが担当する。
+    */
+    <div
+      onClick={(event) => {
+        // 行内のボタン (中止 / × / 設定を開く) は自分の仕事をする。
+        // 個々のボタンに stopPropagation を書くと、ボタンを足すたびに
+        // 書き忘れて「押したら画面が飛ぶ」事故が起きるので、入口で1回だけ判定する。
+        if ((event.target as HTMLElement).closest("button")) return;
+        onFocus();
+      }}
+      className="cursor-pointer rounded-lg border border-[#2a2a2a] bg-[#141414]/95 px-3 py-2.5 shadow-lg backdrop-blur transition-colors hover:border-pink-500/40"
+      title="クリックすると、この生成のスキル画面へ移動します"
+    >
       {/* 見出し: 種類 + 並列稼働数。本文より一段大きく太く（情報階層） */}
       <div className="flex items-center gap-2">
         {job.finished ? null : (
           <SpinnerIcon className="h-3.5 w-3.5 shrink-0 animate-spin text-pink-400" />
         )}
+        {/*
+          行名は job.label があればそれを出す (SQ2 / 2026-08-04)。
+          キャラ登録は同じ種別の生成を何本も並べられるので、種別名だけだと
+          「キャラクターシート」が3行並んでどれがどのキャラか分からなくなる。
+          label を持たない既存の経路は今までどおり種別名で出る。
+        */}
         <span
           className="min-w-0 flex-1 truncate text-[13px] font-black leading-tight text-white"
-          title={GENERATION_KIND_LABEL[job.kind]}
+          title={job.label ?? GENERATION_KIND_LABEL[job.kind]}
         >
-          {GENERATION_KIND_LABEL[job.kind]}
+          {job.label ?? GENERATION_KIND_LABEL[job.kind]}
         </span>
         {/*
           やめる (2026-07-27 追加)。
@@ -416,6 +481,79 @@ function JobRow({ job }: { job: GenerationJob }) {
           <span>{describeStall(effectiveStall)}</span>
         </div>
       )}
+      {effectiveStall?.type === "stuck" && <StuckGuidance />}
+    </div>
+  );
+}
+
+/**
+ * 採用ゲートの待機キュー (pendingProductionCuts) の擬似行 (23g / 2026-08-03)。
+ *
+ * このキューはジョブではないのでパネルに一切出ておらず、走行中 run のイベントが
+ * 途絶えると発射契機を失ったまま無期限に沈黙していた。常時見せた上で、
+ * 「全体のイベントが途絶えている」ときだけエスカレーションする。
+ * **キューの滞留時間では判定しない** — 走行中 run が健全に長いだけのケースを
+ * 誤って異常と呼ぶため。
+ */
+function PendingProductionRow({
+  count,
+  globalLast,
+  onClear,
+}: {
+  count: number;
+  globalLast: number | null;
+  onClear: () => void;
+}) {
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  // globalLast === null は未終了ジョブが1件も無いのにキューだけ残っている状態
+  // (イベント喪失後に × で表示を消した等)。発射契機が既に失われているので即エスカレーション。
+  const stalled = globalLast === null || now - globalLast > WAITING_STUCK_THRESHOLD_MS;
+
+  return (
+    <div className="rounded-lg border border-[#2a2a2a] bg-[#141414]/95 px-3 py-2.5 shadow-lg backdrop-blur">
+      <div
+        className={
+          "flex items-start gap-1.5 rounded-md px-2 py-1.5 text-[11px] leading-snug " +
+          (stalled ? "bg-[#1e1e1e] text-amber-300" : "bg-[#18202a] text-sky-300")
+        }
+      >
+        {stalled ? (
+          <AlertIcon className="mt-[1px] h-3.5 w-3.5 shrink-0" />
+        ) : (
+          <ClockIcon className="mt-[1px] h-3.5 w-3.5 shrink-0" />
+        )}
+        <div className="min-w-0">
+          <p className="font-bold">本生成の順番待ち: {count} カット</p>
+          <p className="mt-0.5">
+            {stalled
+              ? "生成の進捗が止まっているため、この順番待ちが開始されない可能性があります。走行中の生成を「中止」すると、この順番待ちは取り消されます。取り消した場合は、絵コンテ画面からもう一度「本生成」を実行してください。"
+              : "走行中の生成が終わり次第、自動で開始します"}
+          </p>
+        </div>
+      </div>
+      {stalled && (
+        <>
+          <StuckGuidance />
+          {/*
+            袋小路の脱出口 (23g)。走行中ジョブの表示を × で消した後にイベントが
+            喪失すると、パネルに「中止」ボタンを持つ行が存在せずキューだけが残り、
+            上の案内文の「中止」が押せなくなる。破壊的操作なので自動では呼ばない。
+          */}
+          <button
+            type="button"
+            onClick={onClear}
+            className="mt-1.5 rounded-md border border-[#3a3a3a] px-2 py-0.5 text-[10px] font-bold text-neutral-300 transition-colors hover:border-red-500/60 hover:text-red-300"
+          >
+            順番待ちを取り消す
+          </button>
+        </>
+      )}
     </div>
   );
 }
@@ -436,6 +574,50 @@ function dismissJob(id: string) {
 /** パネル位置の保存キー。次回起動時も同じ場所に出す。 */
 const PANEL_POS_KEY = "gori.generationStatusPanel.pos";
 const PANEL_WIDTH = 288; // w-72
+
+/** これ以上動いたらドラッグと見なし、行クリックの遷移を起こさない (cne)。 */
+const DRAG_THRESHOLD_PX = 4;
+
+/**
+ * 生成枠の使用状況ヘッダ (cne / 2026-08-04)。
+ *
+ * ## なぜ要るか
+ *
+ * 複数スキルを並走させられるようにすると、次は「あと何本頼めるのか」が
+ * 見えないまま詰まる。バックエンドは全機能共通のセマフォで動いており
+ * (gen_queue.rs)、上限に達した分は順番待ちになる。使用中と上限を並べて
+ * 出せば、待ちが発生していることが数字で分かる。
+ *
+ * 上限 (limit) は Rust の現在値。429 を検知すると 9 → 6 へ自動降格するので、
+ * その場合は理由も添える。取得できていない間は上限を出さない (推測しない)。
+ */
+function CapacityHeader({
+  running,
+  capacity,
+}: {
+  running: number;
+  capacity: { limit: number; degraded: boolean } | null;
+}) {
+  return (
+    <div className="rounded-lg border border-[#2a2a2a] bg-[#141414]/95 px-3 py-1.5 shadow-lg backdrop-blur">
+      <div className="flex items-center gap-2 text-[11px]">
+        <span className="font-bold text-neutral-300">生成枠</span>
+        <span className="font-mono tabular-nums text-neutral-400">
+          使用中 {running}
+          {capacity ? ` / ${capacity.limit}` : ""}
+        </span>
+        {capacity?.degraded && (
+          <span
+            className="ml-auto shrink-0 whitespace-nowrap rounded-full bg-[#2a2318] px-1.5 py-0.5 text-[10px] font-bold text-amber-300"
+            title="短時間に生成が集中したため、同時に走らせる本数を一時的に減らしています"
+          >
+            混雑のため縮小中
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
 
 type PanelPos = { x: number; y: number };
 
@@ -464,13 +646,34 @@ function clampToViewport(pos: PanelPos): PanelPos {
 export function GenerationStatusPanel() {
   const jobs = useGenerationStatus((s) => s.jobs);
   const active = Object.values(jobs).filter((job) => !job.finished);
+  // 待機のみジョブ・待機キューの番犬はここを共通の入力にする (23g)。
+  const globalLast = globalLastEventAt(jobs);
+  const pendingCuts = useStoryboardRun((s) => s.pendingProductionCuts);
+  const clearPendingProduction = useStoryboardRun((s) => s.clearPendingProduction);
 
   // 2026-07-27: パネルをドラッグで動かせるようにした (STΛCK 指摘)。
   // 以前は right-4 top-32 の固定で、生成中は右上のボタン (Magnific / 生成準備OK /
   // プロジェクト選択) が隠れて押せなかった。全スキル画面で同じ場所に出るため、
   // どの画面でも同じ問題が起きていた。
   const [pos, setPos] = useState<PanelPos | null>(() => loadPanelPos());
-  const dragRef = useRef<{ dx: number; dy: number } | null>(null);
+  const dragRef = useRef<{
+    dx: number;
+    dy: number;
+    startX: number;
+    startY: number;
+  } | null>(null);
+  /**
+   * このポインタ操作でパネルを実際に動かしたか (cne / 2026-08-04)。
+   *
+   * 行クリックで画面遷移するようにしたので、**掴んで動かしただけの操作が
+   * 遷移になってはいけない**。ドラッグ終了時に click も飛ぶため、
+   * 移動が起きたかを覚えておいて遷移側で弾く。
+   */
+  const draggedRef = useRef(false);
+
+  // 生成枠の上限 (cne)。Rust の現在値を取る。定数をここにミラーすると
+  // 429 で 9 → 6 へ降格したときに UI だけが 9 と言い続ける (嘘の上限)。
+  const [capacity, setCapacity] = useState<{ limit: number; degraded: boolean } | null>(null);
 
   // ウィンドウリサイズで画面外に出たら引き戻す
   useEffect(() => {
@@ -489,19 +692,66 @@ export function GenerationStatusPanel() {
     }
   }, [pos]);
 
-  if (active.length === 0) return null;
+  /*
+    生成枠の上限を取り直す (cne)。
+    走行中ジョブがある間だけ、少し間を置いて取り直す: 429 による降格は
+    生成中にしか起きず、上限が変わったのに 9 と言い続けるのを避けたい。
+    生成が無いときは問い合わせない (常時ポーリングしない)。
+  */
+  const hasActive = active.length > 0;
+  useEffect(() => {
+    if (!hasActive) return;
+    let alive = true;
+    const load = () => {
+      genCapacity()
+        .then((value) => {
+          if (alive) setCapacity(value);
+        })
+        .catch(() => {
+          // 取れなければヘッダの上限表示を出さないだけ (推測値を出さない)。
+        });
+    };
+    load();
+    const id = setInterval(load, 15_000);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, [hasActive]);
+
+  if (active.length === 0 && pendingCuts.length === 0) return null;
+
+  // ヘッダに出す「使用中 k」。k は実イベント由来の running 合計 (推定しない)。
+  const totals = selectTotals(jobs);
 
   const onPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
     // ボタン類の上では掴まない (中止ボタンが押せなくなる)
     if ((event.target as HTMLElement).closest("button")) return;
     const rect = event.currentTarget.getBoundingClientRect();
-    dragRef.current = { dx: event.clientX - rect.left, dy: event.clientY - rect.top };
+    dragRef.current = {
+      dx: event.clientX - rect.left,
+      dy: event.clientY - rect.top,
+      startX: event.clientX,
+      startY: event.clientY,
+    };
+    // 新しい操作の始まり。まだ動かしていない (cne)。
+    draggedRef.current = false;
     event.currentTarget.setPointerCapture(event.pointerId);
   };
 
   const onPointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
     const d = dragRef.current;
     if (!d) return;
+    // 押した位置から DRAG_THRESHOLD_PX 以上離れたら「動かした」と見なす (cne)。
+    // 1px でも動いたら遷移を止める作りにすると、クリック時の手の微動で
+    // 「押しても何も起きない」ようになる。逆に閾値が無いと、動かした後に
+    // 意図しない画面遷移が起きる。
+    if (
+      Math.abs(event.clientX - d.startX) > DRAG_THRESHOLD_PX ||
+      Math.abs(event.clientY - d.startY) > DRAG_THRESHOLD_PX
+    ) {
+      draggedRef.current = true;
+    }
     setPos(clampToViewport({ x: event.clientX - d.dx, y: event.clientY - d.dy }));
   };
 
@@ -527,8 +777,27 @@ export function GenerationStatusPanel() {
       onPointerCancel={endDrag}
       title="ドラッグで移動できます"
     >
+      {active.length > 0 && (
+        <CapacityHeader running={totals.running} capacity={capacity} />
+      )}
+      {pendingCuts.length > 0 && (
+        <PendingProductionRow
+          count={pendingCuts.length}
+          globalLast={globalLast}
+          onClear={clearPendingProduction}
+        />
+      )}
       {active.map((job) => (
-        <JobRow key={job.id} job={job} />
+        <JobRow
+          key={job.id}
+          job={job}
+          globalLast={globalLast}
+          onFocus={() => {
+            // 掴んで動かしただけの操作は遷移にしない (cne)。
+            if (draggedRef.current) return;
+            focusGenerationKind(job.kind);
+          }}
+        />
       ))}
     </div>
   );

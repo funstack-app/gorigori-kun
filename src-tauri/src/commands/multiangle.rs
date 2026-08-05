@@ -67,7 +67,11 @@ pub struct MultiAngleParams {
 /// この run を識別するトークン。共有イベントチャンネル上で別スキルの通知を
 /// フロントが確実に除外できるよう、全バリアントに載せる。
 #[derive(Serialize, Clone)]
-#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum MultiAngleEvent {
     Started {
         run_id: String,
@@ -127,9 +131,15 @@ pub async fn multiangle_run(
         // guard を task 内へ move する。この async ブロックが終わる時点で Drop され、
         // 実行中 run 台帳から外れる (後始末と同じ場所)。
         let _active_run = active_run;
-        let result =
-            run_multiangle_orchestrator(app.clone(), task_state, codex_bin, codex_home_orig, task_run_id, params)
-                .await;
+        let result = run_multiangle_orchestrator(
+            app.clone(),
+            task_state,
+            codex_bin,
+            codex_home_orig,
+            task_run_id,
+            params,
+        )
+        .await;
         let was_cancelled = gen_queue::is_cancelled(&fail_run_id);
         gen_queue::clear_cancelled(&fail_run_id);
         if let Err(err) = result {
@@ -242,15 +252,36 @@ pub async fn multiangle_regenerate_cut(
                 if gen_queue::is_cancelled(&event_run_id) {
                     return;
                 }
-                let _ = task_app.emit(
-                    EVENT_MULTIANGLE,
-                    MultiAngleEvent::CutCompleted {
-                        run_id: event_run_id,
-                        cut_id: cut.cut_id,
-                        label: cut.label,
-                        image_path: image_path.to_string_lossy().into_owned(),
-                    },
-                );
+                // S1b: 受領時の軽量検品。生成側は fs::copy でパスを返すだけで中身を
+                // 一度もデコードしないため、0バイト・切り詰めでも「成功」で UI へ出てしまう。
+                // character_sheet 側と同じゲートを通す（片方だけ検品する理由が無い）。
+                match crate::images::receipt_check::ensure_decodable(&image_path) {
+                    Ok(()) => {
+                        let _ = task_app.emit(
+                            EVENT_MULTIANGLE,
+                            MultiAngleEvent::CutCompleted {
+                                run_id: event_run_id,
+                                cut_id: cut.cut_id,
+                                label: cut.label,
+                                image_path: image_path.to_string_lossy().into_owned(),
+                            },
+                        );
+                    }
+                    Err(reason) => {
+                        tracing::warn!(
+                            target: "codex.multiangle",
+                            "regenerate_cut receipt check failed: {reason}"
+                        );
+                        let _ = task_app.emit(
+                            EVENT_MULTIANGLE,
+                            MultiAngleEvent::CutFailed {
+                                run_id: event_run_id,
+                                cut_id: cut.cut_id,
+                                reason,
+                            },
+                        );
+                    }
+                }
             }
             Err(err) => {
                 if gen_queue::is_cancelled_error(&err) {
@@ -363,15 +394,35 @@ async fn run_multiangle_orchestrator(
                         if gen_queue::is_cancelled(&event_run_id) {
                             return;
                         }
-                        let _ = app.emit(
-                            EVENT_MULTIANGLE,
-                            MultiAngleEvent::CutCompleted {
-                                run_id: event_run_id.clone(),
-                                cut_id: cut.cut_id.clone(),
-                                label: cut.label.clone(),
-                                image_path: image_path.to_string_lossy().into_owned(),
-                            },
-                        );
+                        // S1b: 受領時の軽量検品（上の regenerate 経路と同じゲート）。
+                        match crate::images::receipt_check::ensure_decodable(&image_path) {
+                            Ok(()) => {
+                                let _ = app.emit(
+                                    EVENT_MULTIANGLE,
+                                    MultiAngleEvent::CutCompleted {
+                                        run_id: event_run_id.clone(),
+                                        cut_id: cut.cut_id.clone(),
+                                        label: cut.label.clone(),
+                                        image_path: image_path.to_string_lossy().into_owned(),
+                                    },
+                                );
+                            }
+                            Err(reason) => {
+                                tracing::warn!(
+                                    target: "codex.multiangle",
+                                    "cut {} receipt check failed: {reason}",
+                                    cut.cut_id
+                                );
+                                let _ = app.emit(
+                                    EVENT_MULTIANGLE,
+                                    MultiAngleEvent::CutFailed {
+                                        run_id: event_run_id.clone(),
+                                        cut_id: cut.cut_id.clone(),
+                                        reason,
+                                    },
+                                );
+                            }
+                        }
                     }
                     Err(err) => {
                         if gen_queue::is_cancelled_error(&err) {
@@ -459,7 +510,10 @@ fn build_multiangle_prompt(
     let environment_line = if environment.trim().is_empty() {
         String::new()
     } else {
-        format!("\n- 環境・背景・ライティングは次の指示で固定する: {}\n", environment.trim())
+        format!(
+            "\n- 環境・背景・ライティングは次の指示で固定する: {}\n",
+            environment.trim()
+        )
     };
     match subject_kind {
         SubjectKind::Character => format!(

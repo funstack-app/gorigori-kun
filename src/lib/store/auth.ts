@@ -51,7 +51,12 @@ export const useAuth = create<AuthState>((set, get) => ({
         n.method === "account/login/completed" ||
         n.method === "account/logout/completed"
       ) {
-        get().refresh();
+        // 通知起点の再取得は silent (2026-07-30)。loading を立てると AuthGate が
+        // Splash に切り替わり、スキャフォールド全体が unmount→remount して起動時
+        // effect カスケードが再演される (Maximum update depth の増幅経路)。
+        // silent でも account は更新されるので、login/logout 完了時の画面遷移
+        // (LoginPanel 表示/解除) は account の変化だけで成立する。
+        get().refresh({ silent: true });
       }
       if (n.method === "account/rateLimits/updated") {
         const r = (n.params as any)?.rateLimits ?? {};

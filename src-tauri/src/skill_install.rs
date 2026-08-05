@@ -104,8 +104,7 @@ fn ensure_one_skill(app: &AppHandle, dest_root: &Path, skill: &str) -> Result<()
         return Ok(());
     }
 
-    std::fs::create_dir_all(&dest)
-        .map_err(|e| format!("{} の作成失敗: {e}", dest.display()))?;
+    std::fs::create_dir_all(&dest).map_err(|e| format!("{} の作成失敗: {e}", dest.display()))?;
 
     copy_dir_recursive(&bundle_root, &dest)
         .map_err(|e| format!("スキル {skill} のコピー失敗: {e}"))?;

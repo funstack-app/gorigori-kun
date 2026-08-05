@@ -24,6 +24,15 @@ type CellProps = {
   ) => void;
   onToggleFavorite: (path: string) => void;
   onSetJudgement: (path: string, value: Judgement | null) => void;
+  /** 拡大プレビューの矢印キー巡回をこのリスト内に限定する（プロジェクト詳細用）。
+   *  未指定なら従来通り open(path) のみ = ライブラリ全体 fallback。 */
+  previewSiblings?: string[];
+  /** プロジェクト詳細から使うとき指定。右クリックメニューが
+   *  「プロジェクトへ移動」の代わりに「このプロジェクトから外す」を出す。 */
+  projectScope?: { onRemoveFromProject: (path: string) => void };
+  /** セルの最小幅(px)。指定時は列数を floor(内寸/minCellWidth) で可変にする
+   *  (下限1列)。未指定なら従来の3列固定。 */
+  minCellWidth?: number;
 };
 
 /**
@@ -58,12 +67,20 @@ export function VirtualGalleryGrid(props: CellProps) {
     return () => observer.disconnect();
   }, []);
 
+  // minCellWidth 指定時のみ列数可変 (下限1列)。未指定なら従来の 3 列固定。
+  const columns = props.minCellWidth
+    ? Math.max(
+        1,
+        Math.floor((size.width - PADDING * 2) / props.minCellWidth) || 1,
+      )
+    : COLUMNS;
   const cellSize =
-    size.width > 0 ? Math.floor((size.width - PADDING * 2) / COLUMNS) : 100;
-  const rowCount = Math.ceil(props.items.length / COLUMNS);
+    size.width > 0 ? Math.floor((size.width - PADDING * 2) / columns) : 100;
+  const rowCount = Math.ceil(props.items.length / columns);
 
   const cellPropsWithMenu: CellPropsInternal = {
     ...props,
+    columns,
     onContextMenu: (item, x, y) => setMenu({ item, x, y }),
   };
 
@@ -71,7 +88,7 @@ export function VirtualGalleryGrid(props: CellProps) {
     <div ref={containerRef} className="min-h-0 flex-1 overflow-hidden">
       {size.width > 0 && size.height > 0 && (
         <Grid<CellPropsInternal>
-          columnCount={COLUMNS}
+          columnCount={columns}
           columnWidth={cellSize}
           rowCount={rowCount}
           rowHeight={cellSize}
@@ -94,6 +111,8 @@ export function VirtualGalleryGrid(props: CellProps) {
             onRegisterPreset: (path) => setPresetTarget(path),
             judgement: props.judgements.get(menu.item.path),
             onSetJudgement: props.onSetJudgement,
+            projectScope: props.projectScope,
+            previewSiblings: props.projectScope ? props.previewSiblings : undefined,
           })}
           onClose={() => setMenu(null)}
         />
@@ -109,6 +128,8 @@ export function VirtualGalleryGrid(props: CellProps) {
 }
 
 type CellPropsInternal = CellProps & {
+  /** 実際に描画に使う列数 (minCellWidth 指定時は可変、未指定なら COLUMNS)。 */
+  columns: number;
   onContextMenu: (item: GalleryItem, x: number, y: number) => void;
 };
 
@@ -121,11 +142,13 @@ function Cell({
   selection,
   favorites,
   judgements,
+  columns,
+  previewSiblings,
   onSelectClick,
   onToggleFavorite,
   onContextMenu,
 }: CellComponentProps<CellPropsInternal>) {
-  const i = rowIndex * COLUMNS + columnIndex;
+  const i = rowIndex * columns + columnIndex;
   const it = items[i];
   if (!it) return <div style={style} />;
   const isFav = favorites.has(it.path);
@@ -164,7 +187,9 @@ function Cell({
               shift: e.shiftKey,
             })
           }
-          onDoubleClick={() => useImagePreview.getState().open(it.path)}
+          onDoubleClick={() =>
+            useImagePreview.getState().open(it.path, previewSiblings)
+          }
           onContextMenu={(e) => {
             e.preventDefault();
             onContextMenu(it, e.clientX, e.clientY);
@@ -226,7 +251,7 @@ function Cell({
         <button
           onClick={(e) => {
             e.stopPropagation();
-            useImagePreview.getState().open(it.path);
+            useImagePreview.getState().open(it.path, previewSiblings);
           }}
           aria-label="拡大表示"
           title="クリックで拡大表示"

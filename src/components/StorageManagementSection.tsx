@@ -9,7 +9,7 @@ import {
   type CleanupReport,
 } from "../lib/ipc";
 import type { ModelStatus } from "../lib/edit/types";
-import { useProjects } from "../lib/store/projects";
+import { applyRelinkResult } from "../lib/relinkApply";
 import { useToasts } from "../lib/store/toasts";
 
 /**
@@ -147,9 +147,11 @@ export function StorageManagementSection() {
     if (relinking) return;
     setRelinking(true);
     try {
-      // history.db は Rust が張り替える。projects.json は返ってきた旧→新マップで適用。
+      // history.db は Rust が張り替える。フロント側 (projects / presets /
+      // favorites / judgements / referenceRoles) は共有ヘルパーで一括適用する。
+      // rr2 以前はここが projects しか張り替えず、起動時経路とも非対称だった。
       const result = await images.relinkMissing();
-      useProjects.getState().relinkItemPaths(result.pathMap);
+      applyRelinkResult(result);
       const fixed = result.dbUpdated + Object.keys(result.pathMap).length;
       if (fixed > 0) {
         pushToast({

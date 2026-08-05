@@ -1,4 +1,4 @@
-import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useRef, useState } from "react";
 
 import { useProductSetRun } from "../../../lib/productSet/store";
@@ -18,6 +18,7 @@ import {
 } from "../../../lib/store/workspace";
 import type { CutState, MultiAngleParams } from "../../../lib/multiangle/types";
 import { GenerationGauge, recordGenerationDuration } from "../../GenerationGauge";
+import { SafeImage } from "../../SafeImage";
 
 function aspectRatioCss(ratio: string): string {
   const [w, h] = ratio.split(":").map((s) => parseInt(s, 10));
@@ -454,8 +455,8 @@ export function ProductSetGridPanel({
                   </button>
                 )}
                 {cut.status === "completed" && cut.imagePath ? (
-                  <img
-                    src={convertFileSrc(cut.imagePath)}
+                  <SafeImage
+                    path={cut.imagePath}
                     alt={cut.label}
                     className="h-full w-full cursor-pointer object-contain"
                     onClick={() =>

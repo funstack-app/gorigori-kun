@@ -63,6 +63,67 @@ pub struct BatchGenArgs {
     /// 生成・保存・台帳のキーには一切使わない。
     #[serde(default)]
     pub source_tag: Option<String>,
+    /// 生成画像を `aspect` の規格寸法へ正規化するか（通常生成専用の明示オプトイン）。
+    /// 既定 false のため、comic・マスク編集・img2img など既存呼び出し元の挙動は不変。
+    /// 表は `crate::images::normalize::canonical_size`。
+    #[serde(default)]
+    pub enforce_aspect: bool,
+    /// 1 worker あたりの生成試行回数の上限（1..=`DEFAULT_MAX_ATTEMPTS`）。
+    ///
+    /// 未指定なら従来どおり `DEFAULT_MAX_ATTEMPTS`（=3）。
+    /// ブロックアウト生成のように「1操作 = 最大1生成」を守る必要がある呼び出し元
+    /// （生成枠を燃やさない。設計 r3 追補1）が `1` を渡して自動リトライを止める。
+    #[serde(default)]
+    pub max_attempts: Option<u32>,
+}
+
+/// 1 worker あたりの生成試行回数の既定上限。
+///
+/// マルチアングル/storyboard と同じく、失敗したら自動でやり直す。gpt-image-2 の
+/// ServerError や image_gen 呼び忘れは一時的なことが多く、2 回目以降で成功する
+/// ことがある(2026-06-09 通常生成にもリトライを横展開)。
+const DEFAULT_MAX_ATTEMPTS: u32 = 3;
+
+/// 呼び出し元指定の `max_attempts` を有効範囲へ丸める。
+///
+/// 0 や巨大値を素通しすると「1回も試さない」「生成枠を延々燃やす」の両方が起きるため、
+/// 1..=`DEFAULT_MAX_ATTEMPTS` に clamp する。未指定は既定値（従来挙動）。
+fn resolve_max_attempts(requested: Option<u32>) -> u32 {
+    match requested {
+        Some(n) => n.clamp(1, DEFAULT_MAX_ATTEMPTS),
+        None => DEFAULT_MAX_ATTEMPTS,
+    }
+}
+
+/// 常駐経路の失敗時に、**同じ周回のうちに** codex exec 経路へ切り替えてよいか。
+///
+/// `max_attempts == 1` の呼び出し元（ブロックアウト等の「1操作 = 最大1生成」）では
+/// false を返す。ループ上限を1にしただけでは、常駐失敗→exec フォールバックが1周の
+/// 中で連続して走り、生成が計2回発火してしまうため（設計 r3 追補1）。
+/// 2回以上の呼び出し元は従来どおりフォールバックする（挙動不変）。
+fn allows_exec_fallback(max_attempts: u32) -> bool {
+    max_attempts > 1
+}
+
+/// リトライループを打ち切るべきエラーか。
+///
+/// 中止（ユーザー操作）とサイズ不一致は、同じ条件で再実行しても結果が変わらない
+/// 確定的失敗。特にサイズ不一致で再生成すると生成枠を無駄に燃やすため即 break する。
+fn should_abort_attempts(error: &str) -> bool {
+    gen_queue::is_cancelled_error(error) || crate::images::normalize::is_size_mismatch_error(error)
+}
+
+/// 常駐経路が失敗して codex exec へフォールバックしたときの、最終エラー文言を作る。
+///
+/// 通常は両方の理由を並べて真因を追えるようにするが、`should_abort_attempts` が
+/// 見る確定的失敗（中止・サイズ不一致）は**包まずに素通しする**。包むと接頭辞判定が
+/// 外れ、再生成しても直らないのにリトライループが最大 MAX_ATTEMPTS 回まわり、
+/// 生成枠を無駄に燃やす。
+fn merge_fallback_error(resident_error: &str, exec_error: String) -> String {
+    if should_abort_attempts(&exec_error) {
+        return exec_error;
+    }
+    format!("常駐 app-server 経路: {resident_error}; codex exec フォールバック: {exec_error}")
 }
 
 #[derive(Serialize, Default)]
@@ -180,6 +241,8 @@ pub async fn images_generate_batch(
         let aspect = args.aspect.clone();
         let turn_id = args.turn_id.clone();
         let total_count = args.count;
+        let enforce_aspect = args.enforce_aspect;
+        let max_attempts = resolve_max_attempts(args.max_attempts);
         handles.push(tokio::spawn(async move {
             run_one_worker(
                 app,
@@ -197,6 +260,8 @@ pub async fn images_generate_batch(
                 aspect,
                 total_count,
                 turn_id,
+                enforce_aspect,
+                max_attempts,
             )
             .await
         }));
@@ -263,6 +328,10 @@ async fn run_one_worker(
     aspect: Option<String>,
     total_count: u32,
     turn_id: Option<String>,
+    // true なら回収点で規格寸法へ正規化する (通常生成のみ)。
+    enforce_aspect: bool,
+    // 試行回数の上限 (呼び出し元指定。`resolve_max_attempts` で clamp 済み)。
+    max_attempts: u32,
     // Ok(成功画像パス) / Err(失敗理由)。理由を呼び出し元に伝えることで、
     // フロントが真因を表示できる (握りつぶし解消)。
 ) -> Result<String, String> {
@@ -277,16 +346,21 @@ async fn run_one_worker(
         },
     );
 
-    // マルチアングル/storyboard と同じく、失敗したら最大 MAX_ATTEMPTS 回まで自動で
-    // やり直す。gpt-image-2 の ServerError や image_gen 呼び忘れは一時的なことが多く、
-    // 2 回目以降で成功することがある(2026-06-09 通常生成にもリトライを横展開)。
+    // 失敗したら最大 max_attempts 回まで自動でやり直す（既定 DEFAULT_MAX_ATTEMPTS=3。
+    // 由来は同定数のドキュメント参照）。呼び出し元が 1 を渡した場合はループが1周で
+    // 終わるため、自動リトライは**構造的に発生しない**（設計 r3 追補1）。
     // 注意: WorkerStarted/Completed/Failed イベントは1回だけ発火させたいので、
     // リトライは inner 呼び出しだけをループする。
-    const MAX_ATTEMPTS: u32 = 3;
+    let max_attempts = max_attempts.max(1);
+    // 上限1周の呼び出し元は「1操作 = 最大1生成」を求めている。ループ上限だけでは
+    // 常駐失敗時の exec フォールバックが**同じ周回の中で**走り、生成が計2回発火する。
+    // 生成経路の実呼び出しを構造的に最大1回へ抑えるため、フォールバック自体を止める。
+    #[cfg(not(windows))]
+    let allow_exec_fallback = allows_exec_fallback(max_attempts);
     let mut result: Result<String, String> = Err("未実行".to_string());
     #[cfg(not(windows))]
     let mut attempt_path = AttemptPath::Resident;
-    for attempt in 1..=MAX_ATTEMPTS {
+    for attempt in 1..=max_attempts {
         if gen_queue::is_cancelled(&batch_id) {
             result = Err(gen_queue::cancelled_error());
             break;
@@ -311,6 +385,7 @@ async fn run_one_worker(
                         aspect.clone(),
                         total_count,
                         &batch_id,
+                        enforce_aspect,
                     )
                     .await
                 }
@@ -337,6 +412,8 @@ async fn run_one_worker(
                 attempt_path,
                 &mut resident_timed_out,
                 &batch_id,
+                enforce_aspect,
+                allow_exec_fallback,
             )
             .await;
             attempt_path = next_attempt_path(resident_timed_out);
@@ -345,12 +422,13 @@ async fn run_one_worker(
             break;
         }
         if let Err(e) = &result {
-            if gen_queue::is_cancelled_error(e) {
+            // 中止・サイズ不一致は再試行しても同じ結果になるため、枠を燃やさず即中断する。
+            if should_abort_attempts(e) {
                 break;
             }
             tracing::warn!(
                 target: "codex.batch_gen",
-                "worker {idx} attempt {attempt}/{MAX_ATTEMPTS} failed: {e}"
+                "worker {idx} attempt {attempt}/{max_attempts} failed: {e}"
             );
         }
     }
@@ -382,7 +460,10 @@ async fn run_one_worker(
     // 真因を拾えるようにする。外部API障害(ServerError/5xx/401等)なら非エンジニア
     // 向けの文言に整形する(humanize)。
     let normalized: Result<String, String> = result.map_err(|e| {
-        if gen_queue::is_cancelled_error(&e) {
+        // サイズ不一致は cancelled と同列で humanize を通さない。整形すると
+        // 「実測 W×H」「素材は _raw.png に残しています」という真因が上書きされる。
+        if gen_queue::is_cancelled_error(&e) || crate::images::normalize::is_size_mismatch_error(&e)
+        {
             e
         } else {
             // 429 なら同時実行数を自動降格する (T3)。humanize より前に判定する
@@ -440,6 +521,12 @@ async fn run_one_worker_inner(
     attempt_path: AttemptPath,
     resident_timed_out: &mut bool,
     run_id: &str,
+    enforce_aspect: bool,
+    // false なら、常駐経路が失敗しても**同じ周回のうちに** codex exec へ切り替えない。
+    // 呼び出し元が `max_attempts = 1`（1操作 = 最大1生成）を指定したときに立つ。
+    // ループ上限だけでは exec フォールバックが同一周回で走り、生成が2回発火しうる
+    // （設計 r3 追補1 の「生成枠を燃やさない」に反する）ため、ここで塞ぐ。
+    allow_exec_fallback: bool,
 ) -> Result<String, String> {
     if attempt_path == AttemptPath::Exec {
         tracing::info!(
@@ -462,6 +549,7 @@ async fn run_one_worker_inner(
             aspect,
             total_count,
             run_id,
+            enforce_aspect,
         )
         .await;
     }
@@ -501,13 +589,24 @@ async fn run_one_worker_inner(
             if gen_queue::is_cancelled(run_id) {
                 return Err(gen_queue::cancelled_error());
             }
-            let dest = out_dir.join(format!("ig_b{idx:02}_{}.png", short_id()));
-            std::fs::copy(&src_png, &dest).map_err(|error| {
-                format!(
-                    "app-server 生成画像の出力コピー失敗 ({}): {error}",
-                    src_png.display()
-                )
-            })?;
+            let stem = short_id();
+            let dest = out_dir.join(format!("ig_b{idx:02}_{stem}.png"));
+            if enforce_normalization(enforce_aspect, &slots) {
+                let raw_dest = out_dir.join(format!("ig_b{idx:02}_{stem}_raw.png"));
+                crate::images::normalize::normalize_or_salvage(
+                    &src_png,
+                    &dest,
+                    &raw_dest,
+                    aspect_label,
+                )?;
+            } else {
+                std::fs::copy(&src_png, &dest).map_err(|error| {
+                    format!(
+                        "app-server 生成画像の出力コピー失敗 ({}): {error}",
+                        src_png.display()
+                    )
+                })?;
+            }
             return Ok(dest.to_string_lossy().into_owned());
         }
         Err(resident_error) => {
@@ -518,6 +617,15 @@ async fn run_one_worker_inner(
                 // この試行で exec も続けると 900秒x2 になるため、
                 // 今回は失敗とし、同じ worker の次試行だけ旧 exec 経路に切り替える。
                 *resident_timed_out = true;
+                return Err(resident_error);
+            }
+            if !allow_exec_fallback {
+                // 「1操作 = 最大1生成」の呼び出し元。正直に失敗を返し、再実行は
+                // ユーザーの明示操作に委ねる（黙って2回目を焼かない）。
+                tracing::warn!(
+                    target: "codex.batch_gen",
+                    "worker {idx}: 常駐 app-server 経路に失敗しましたが max_attempts=1 のため codex exec へフォールバックしません: {resident_error}"
+                );
                 return Err(resident_error);
             }
             tracing::warn!(
@@ -544,17 +652,10 @@ async fn run_one_worker_inner(
                 aspect,
                 total_count,
                 run_id,
+                enforce_aspect,
             )
             .await
-            .map_err(|exec_error| {
-                if gen_queue::is_cancelled_error(&exec_error) {
-                    exec_error
-                } else {
-                    format!(
-                        "常駐 app-server 経路: {resident_error}; codex exec フォールバック: {exec_error}"
-                    )
-                }
-            });
+            .map_err(|exec_error| merge_fallback_error(&resident_error, exec_error));
         }
     }
 }
@@ -577,6 +678,7 @@ async fn run_one_worker_exec_inner(
     aspect: Option<String>,
     total_count: u32,
     run_id: &str,
+    enforce_aspect: bool,
     // Ok(成功画像パス) / Err(失敗理由)。画像が無い場合も Err に理由を載せる
     // (旧 Ok(None) は廃止。画像なし=失敗理由つき Err に統一)。
 ) -> Result<String, String> {
@@ -782,16 +884,31 @@ async fn run_one_worker_exec_inner(
     };
 
     // 6. configured storage root / batch-<id> / ig_<idx>_<short>.png にコピー
-    let dest = out_dir.join(format!("ig_b{idx:02}_{}.png", short_id()));
-    std::fs::copy(&src_png, &dest).map_err(|e| format!("出力コピー失敗: {e}"))?;
+    let stem = short_id();
+    let dest = out_dir.join(format!("ig_b{idx:02}_{stem}.png"));
+    if enforce_normalization(enforce_aspect, &slots) {
+        let raw_dest = out_dir.join(format!("ig_b{idx:02}_{stem}_raw.png"));
+        crate::images::normalize::normalize_or_salvage(&src_png, &dest, &raw_dest, aspect_label)?;
+    } else {
+        std::fs::copy(&src_png, &dest).map_err(|e| format!("出力コピー失敗: {e}"))?;
+    }
 
     Ok(dest.to_string_lossy().into_owned())
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum SlotKind {
     Source,
     Mask,
+}
+
+/// 回収点で規格寸法への正規化を実行するか。
+///
+/// フロントのオプトインに加えて、マスクが1枚でもあれば Rust 側でも機械的に
+/// 除外する（二重の柵）。マスク編集は「出力＝元画像と同じ解像度」が正であり
+/// （`build_final_prompt` の inpainting テンプレ）、固定表に嵌めるのは誤り。
+fn enforce_normalization(enforce_aspect: bool, slots: &[(SlotKind, String)]) -> bool {
+    enforce_aspect && !slots.iter().any(|(kind, _)| *kind == SlotKind::Mask)
 }
 
 /// codex exec に流す prompt を組み立てる。マスクが含まれるときは
@@ -970,5 +1087,186 @@ mod tests {
     fn resident_timeout_switches_only_the_next_attempt_to_exec() {
         assert_eq!(next_attempt_path(true), AttemptPath::Exec);
         assert_eq!(next_attempt_path(false), AttemptPath::Resident);
+    }
+}
+
+#[cfg(test)]
+mod normalize_gate_tests {
+    use super::{
+        enforce_normalization, merge_fallback_error, should_abort_attempts, BatchGenArgs, SlotKind,
+    };
+    use crate::images::normalize::SIZE_MISMATCH_PREFIX;
+
+    fn slot(kind: SlotKind) -> (SlotKind, String) {
+        (kind, "/tmp/x.png".to_string())
+    }
+
+    /// DoD-7: リトライ中断の真偽表。一時故障は従来どおりリトライを続ける。
+    #[test]
+    fn abort_only_on_cancel_or_size_mismatch() {
+        assert!(should_abort_attempts(&format!(
+            "{SIZE_MISMATCH_PREFIX}生成画像（実測 1024×1536）が…"
+        )));
+        assert!(should_abort_attempts(
+            &crate::commands::gen_queue::cancelled_error()
+        ));
+        assert!(!should_abort_attempts("ServerError: 500"));
+        assert!(!should_abort_attempts("タイムアウトしました"));
+    }
+
+    /// A-1: exec フォールバック経由のサイズ不一致が、包まれずに 1 回で停止する。
+    ///
+    /// 常駐経路が落ちて exec へ回った先でサイズ不一致になったとき、両方の理由を
+    /// 連結すると先頭が「常駐 app-server 経路:」になり接頭辞判定をすり抜ける。
+    /// すると確定的失敗なのに最大 3 回まで再生成され、生成枠を燃やす。
+    #[test]
+    fn size_mismatch_through_exec_fallback_still_aborts_attempts() {
+        let resident = "ServerError: 500";
+        let size_mismatch = format!("{SIZE_MISMATCH_PREFIX}生成画像（実測 1024×1536）が…");
+
+        let merged = merge_fallback_error(resident, size_mismatch.clone());
+
+        assert_eq!(merged, size_mismatch, "サイズ不一致は包まず素通しする");
+        assert!(
+            should_abort_attempts(&merged),
+            "リトライループが 1 回で止まる: {merged}"
+        );
+
+        // 中止も同様に素通しする（従来の挙動を維持していること）。
+        let cancelled = crate::commands::gen_queue::cancelled_error();
+        let merged_cancel = merge_fallback_error(resident, cancelled.clone());
+        assert_eq!(merged_cancel, cancelled);
+        assert!(should_abort_attempts(&merged_cancel));
+
+        // 一時故障は従来どおり両方の理由を並べ、リトライを続ける。
+        let merged_transient = merge_fallback_error(resident, "タイムアウトしました".to_string());
+        assert!(merged_transient.contains(resident), "真因を追える");
+        assert!(merged_transient.contains("タイムアウトしました"));
+        assert!(
+            !should_abort_attempts(&merged_transient),
+            "リトライは継続する"
+        );
+    }
+
+    /// マスクが1枚でもあれば、フロントが enforce を立てていても正規化しない。
+    #[test]
+    fn mask_slots_disable_normalization_even_when_opted_in() {
+        let no_mask = vec![slot(SlotKind::Source), slot(SlotKind::Source)];
+        let with_mask = vec![slot(SlotKind::Source), slot(SlotKind::Mask)];
+
+        assert!(enforce_normalization(true, &no_mask));
+        assert!(enforce_normalization(true, &[]));
+        assert!(!enforce_normalization(true, &with_mask), "マスク混在は除外");
+        assert!(!enforce_normalization(false, &no_mask), "既定は OFF");
+        assert!(!enforce_normalization(false, &with_mask));
+    }
+
+    /// r3 追補1: `maxAttempts:1` を渡した呼び出し元では 2 回目の試行が起きない。
+    ///
+    /// リトライは `for attempt in 1..=max_attempts` の1本だけなので、上限が 1 に
+    /// なった時点で「2周目が存在しない」＝自動リトライが構造的に発生しない。
+    /// ここではその上限計算（clamp）と、上限が生むループ周回数を突き合わせる。
+    #[test]
+    fn max_attempts_one_prevents_a_second_generation_attempt() {
+        use super::{resolve_max_attempts, DEFAULT_MAX_ATTEMPTS};
+
+        // 実際のループと同じ形で周回数を数える（本体は inner 呼び出しだけをループする）。
+        fn attempts_executed(max_attempts: u32) -> u32 {
+            let max_attempts = max_attempts.max(1);
+            let mut ran = 0;
+            for _attempt in 1..=max_attempts {
+                ran += 1;
+                // 失敗し続ける worker を模す（result.is_ok() の break を通らない）。
+            }
+            ran
+        }
+
+        // ブロックアウト生成の2呼び出しが渡す値。1回で打ち止め。
+        assert_eq!(resolve_max_attempts(Some(1)), 1);
+        assert_eq!(
+            attempts_executed(resolve_max_attempts(Some(1))),
+            1,
+            "maxAttempts:1 では失敗しても2回目の生成試行が起きない"
+        );
+
+        // 未指定（既存呼び出し元）は従来どおり最大3回。挙動不変。
+        assert_eq!(resolve_max_attempts(None), DEFAULT_MAX_ATTEMPTS);
+        assert_eq!(attempts_executed(resolve_max_attempts(None)), 3);
+
+        // 範囲外は clamp する: 0 は「1回も試さない」を防ぎ、過大値は枠を燃やさない。
+        assert_eq!(resolve_max_attempts(Some(0)), 1);
+        assert_eq!(resolve_max_attempts(Some(99)), DEFAULT_MAX_ATTEMPTS);
+    }
+
+    /// r3 追補1（B-1）: `maxAttempts:1` では常駐失敗時に exec 経路へ落ちない。
+    ///
+    /// ループ上限が1でも、`run_one_worker_inner` の常駐失敗ハンドラが同じ周回の中で
+    /// `run_one_worker_exec_inner` を呼ぶため、上限だけでは生成が2回発火しうる。
+    /// 本番の分岐条件そのもの（`allows_exec_fallback`）を検査して、その経路が
+    /// 塞がっていることを確かめる。
+    #[test]
+    fn max_attempts_one_disables_same_round_exec_fallback() {
+        use super::{allows_exec_fallback, resolve_max_attempts, DEFAULT_MAX_ATTEMPTS};
+
+        // 1操作=最大1生成の呼び出し元。常駐が失敗しても exec を焼かない。
+        assert!(
+            !allows_exec_fallback(resolve_max_attempts(Some(1))),
+            "maxAttempts:1 では同一周回の exec フォールバックが発動しない"
+        );
+        // clamp 経由で 1 になる値も同じ扱い。
+        assert!(!allows_exec_fallback(resolve_max_attempts(Some(0))));
+
+        // 既存呼び出し元（未指定=3・明示2）は従来どおりフォールバックする。挙動不変。
+        assert!(allows_exec_fallback(resolve_max_attempts(None)));
+        assert!(allows_exec_fallback(DEFAULT_MAX_ATTEMPTS));
+        assert!(allows_exec_fallback(resolve_max_attempts(Some(2))));
+
+        // 生成経路の実呼び出し回数: 常駐1回のみ（フォールバック分が加算されない）。
+        fn generation_calls(max_attempts: u32) -> u32 {
+            let max_attempts = max_attempts.max(1);
+            let allow = allows_exec_fallback(max_attempts);
+            let mut calls = 0;
+            for _attempt in 1..=max_attempts {
+                calls += 1; // 常駐経路の呼び出し（失敗すると仮定）
+                if allow {
+                    calls += 1; // 同一周回の exec フォールバック
+                }
+            }
+            calls
+        }
+        assert_eq!(
+            generation_calls(resolve_max_attempts(Some(1))),
+            1,
+            "1操作あたりの生成 API 実呼び出しは最大1回"
+        );
+        assert_eq!(generation_calls(resolve_max_attempts(None)), 6);
+    }
+
+    /// serde 後方互換: `maxAttempts` 未指定は None（=既定3回）になり挙動が変わらない。
+    #[test]
+    fn max_attempts_defaults_to_none_for_existing_callers() {
+        let legacy: BatchGenArgs = serde_json::from_str(r#"{"prompt":"p","count":1}"#).unwrap();
+        assert_eq!(legacy.max_attempts, None);
+
+        let capped: BatchGenArgs =
+            serde_json::from_str(r#"{"prompt":"p","count":1,"maxAttempts":1}"#).unwrap();
+        assert_eq!(capped.max_attempts, Some(1));
+    }
+
+    /// DoD-8: serde 後方互換。既存呼び出し元（comic・edit）は enforceAspect を
+    /// 渡さないため false になり、挙動が変わらない。
+    #[test]
+    fn enforce_aspect_defaults_to_false_for_existing_callers() {
+        let legacy: BatchGenArgs =
+            serde_json::from_str(r#"{"prompt":"p","count":1,"aspect":"3:4"}"#).unwrap();
+        assert!(!legacy.enforce_aspect);
+
+        let opted_in: BatchGenArgs =
+            serde_json::from_str(r#"{"prompt":"p","count":1,"enforceAspect":true}"#).unwrap();
+        assert!(opted_in.enforce_aspect);
+
+        let explicit_off: BatchGenArgs =
+            serde_json::from_str(r#"{"prompt":"p","count":1,"enforceAspect":false}"#).unwrap();
+        assert!(!explicit_off.enforce_aspect);
     }
 }

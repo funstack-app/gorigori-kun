@@ -92,6 +92,17 @@ def read_codex_versions(src: str) -> list[str]:
     return re.findall(r'codexVer\s*=\s*"([^"]+)"', src)
 
 
+def read_codex_auth_versions(src: str) -> list[str]:
+    """CI 内の codexAuthVer 代入をすべて拾う（macos/windows/windows-compat の3箇所）。
+
+    codexAuthVer は MCP 認可専用の補助バイナリ（codex-auth）の版。日常実行の
+    codexVer とは別物で、3ジョブのうち1つだけ版がズレる/追記漏れするのを防ぐ。
+    変数名が "codexVer" を部分文字列として含まないのは意図的（含めると
+    read_codex_versions が誤検出して検査 E が偽陽性で落ちる）。
+    """
+    return re.findall(r'codexAuthVer\s*=\s*"([^"]+)"', src)
+
+
 def main() -> int:
     problems = 0
 
@@ -130,6 +141,23 @@ def main() -> int:
         ok(f"同梱 codex CLI: {uniq[0]}（{len(codex_vers)}箇所すべて一致）")
 
     bundled = uniq[0]
+
+    # G. MCP 認可用の補助バイナリ（codex-auth）の版が3ジョブで揃っているか。
+    #    0件は「0.147.0 安定版に一本化して撤去済み」の正常状態なので合格にする
+    #    （撤去後にこの検査が偽陽性で落ちてはならない）。
+    auth_vers = read_codex_auth_versions(yml)
+    if not auth_vers:
+        ok("MCP 認可用 codex-auth: 未同梱（0.147 一本化済みとみなす）")
+    elif len(set(auth_vers)) != 1:
+        fail(f"codex-auth の版がジョブ間で不一致: {', '.join(sorted(set(auth_vers)))}")
+        print("   → macos / windows / windows-compat の codexAuthVer を同じ値にしてください")
+        problems += 1
+    elif len(auth_vers) != 3:
+        fail(f"codexAuthVer の記載が {len(auth_vers)} 箇所です（macos / windows / windows-compat の3箇所必要）")
+        print("   → 追記漏れのジョブでは認可が古い CLI で走り、Magnific 接続が失敗します")
+        problems += 1
+    else:
+        ok(f"MCP 認可用 codex-auth: {auth_vers[0]}（3箇所すべて一致）")
 
     # F. ホワイトリストの全モデルが表に載っているか
     missing = [m for m in whitelist if m not in min_cli]

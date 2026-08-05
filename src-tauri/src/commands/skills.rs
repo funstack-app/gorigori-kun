@@ -43,12 +43,8 @@ fn skills_root() -> Result<PathBuf> {
         .or_else(crate::codex::home::legacy_codex_home)
         .ok_or_else(|| anyhow!("$HOME が解決できません"))?;
     let root = home.join("skills");
-    std::fs::create_dir_all(&root).with_context(|| {
-        format!(
-            "スキルディレクトリの作成に失敗: {}",
-            root.display()
-        )
-    })?;
+    std::fs::create_dir_all(&root)
+        .with_context(|| format!("スキルディレクトリの作成に失敗: {}", root.display()))?;
     Ok(root)
 }
 
@@ -56,9 +52,9 @@ fn skills_root() -> Result<PathBuf> {
 /// 簡素な実装: 完全な YAML パーサは使わず、文字列ベースで `name: xxx` を拾う。
 fn extract_skill_name(markdown: &str) -> Result<String> {
     let trimmed = markdown.trim_start();
-    let after_open = trimmed
-        .strip_prefix("---")
-        .ok_or_else(|| anyhow!("SKILL.md に frontmatter が見つかりません (--- で始まる必要があります)"))?;
+    let after_open = trimmed.strip_prefix("---").ok_or_else(|| {
+        anyhow!("SKILL.md に frontmatter が見つかりません (--- で始まる必要があります)")
+    })?;
     let end = after_open
         .find("\n---")
         .ok_or_else(|| anyhow!("SKILL.md の frontmatter 終端 (---) が見つかりません"))?;
@@ -67,7 +63,11 @@ fn extract_skill_name(markdown: &str) -> Result<String> {
     for line in frontmatter.lines() {
         let line = line.trim();
         if let Some(value) = line.strip_prefix("name:") {
-            let name = value.trim().trim_matches('"').trim_matches('\'').to_string();
+            let name = value
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'')
+                .to_string();
             if name.is_empty() {
                 return Err(anyhow!("SKILL.md の name: フィールドが空です"));
             }
@@ -85,11 +85,13 @@ fn extract_skill_name(markdown: &str) -> Result<String> {
 pub async fn skill_import(source_path: String) -> Result<SkillImportResult, String> {
     let src = PathBuf::from(&source_path);
     if !src.is_file() {
-        return Err(format!("インポート元ファイルが見つかりません: {source_path}"));
+        return Err(format!(
+            "インポート元ファイルが見つかりません: {source_path}"
+        ));
     }
 
-    let content = std::fs::read_to_string(&src)
-        .map_err(|e| format!("ファイル読み込みに失敗: {e}"))?;
+    let content =
+        std::fs::read_to_string(&src).map_err(|e| format!("ファイル読み込みに失敗: {e}"))?;
     let name = extract_skill_name(&content).map_err(|e| format!("{e}"))?;
 
     // name のバリデーション: 危険な文字列を弾く (パストラバーサル防止)
@@ -103,8 +105,7 @@ pub async fn skill_import(source_path: String) -> Result<SkillImportResult, Stri
         .map_err(|e| format!("スキルディレクトリ作成に失敗: {e}"))?;
 
     let dest = skill_dir.join("SKILL.md");
-    std::fs::write(&dest, content)
-        .map_err(|e| format!("SKILL.md の書き込みに失敗: {e}"))?;
+    std::fs::write(&dest, content).map_err(|e| format!("SKILL.md の書き込みに失敗: {e}"))?;
 
     Ok(SkillImportResult {
         id: name.clone(),
@@ -137,7 +138,9 @@ fn sanitize_zip_entry_path(raw_name: &str) -> Result<PathBuf> {
     }
     // Windows ドライブレター (`C:...`) を拒否。
     if normalized.len() >= 2 && normalized.as_bytes()[1] == b':' {
-        return Err(anyhow!("zip 内にドライブ指定のエントリがあります: {raw_name}"));
+        return Err(anyhow!(
+            "zip 内にドライブ指定のエントリがあります: {raw_name}"
+        ));
     }
 
     let candidate = Path::new(&normalized);
@@ -159,7 +162,9 @@ fn sanitize_zip_entry_path(raw_name: &str) -> Result<PathBuf> {
         }
     }
     if safe.as_os_str().is_empty() {
-        return Err(anyhow!("zip 内に解決不能なエントリ名があります: {raw_name}"));
+        return Err(anyhow!(
+            "zip 内に解決不能なエントリ名があります: {raw_name}"
+        ));
     }
     Ok(safe)
 }
@@ -272,8 +277,8 @@ pub async fn skill_import_zip(source_path: String) -> Result<SkillImportResult, 
     }
 
     // ④ SKILL.md がルートに存在することを検証。
-    let skill_md = skill_md_content
-        .ok_or_else(|| "zip のルートに SKILL.md がありません".to_string())?;
+    let skill_md =
+        skill_md_content.ok_or_else(|| "zip のルートに SKILL.md がありません".to_string())?;
     let name = extract_skill_name(&skill_md).map_err(|e| format!("{e}"))?;
 
     // name のバリデーション (skill_import と同一): 保存先ディレクトリ名の安全化。
@@ -323,13 +328,12 @@ pub async fn skill_import_zip(source_path: String) -> Result<SkillImportResult, 
 /// (SKILL.md / references/ / agents/ 等) を再帰的に集めて zip 化する。
 /// `dest_zip_path` はフロントの保存ダイアログで得た絶対パス。
 #[tauri::command]
-pub async fn skill_export_zip(
-    skill_id: String,
-    dest_zip_path: String,
-) -> Result<usize, String> {
+pub async fn skill_export_zip(skill_id: String, dest_zip_path: String) -> Result<usize, String> {
     // ID は ".." や "/" を含めない (skill_export_read と同一ガード)。
     if skill_id.contains('/') || skill_id.contains('\\') || skill_id.contains("..") {
-        return Err(format!("スキル ID に不正な文字が含まれています: {skill_id}"));
+        return Err(format!(
+            "スキル ID に不正な文字が含まれています: {skill_id}"
+        ));
     }
 
     let root = skills_root().map_err(|e| format!("{e}"))?;
@@ -388,8 +392,7 @@ pub async fn skill_export_zip(
     let tmp_path = dest_path.with_extension("zip.tmp");
     let count = files.len();
 
-    let out_file =
-        std::fs::File::create(&tmp_path).map_err(|e| format!("zip 作成失敗: {e}"))?;
+    let out_file = std::fs::File::create(&tmp_path).map_err(|e| format!("zip 作成失敗: {e}"))?;
     let mut zip = zip::ZipWriter::new(out_file);
     let opts = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
@@ -403,7 +406,9 @@ pub async fn skill_export_zip(
             .map_err(|e| format!("zip write 失敗: {e}"))?;
     }
     let finished = zip.finish().map_err(|e| format!("zip finish 失敗: {e}"))?;
-    finished.sync_all().map_err(|e| format!("zip fsync 失敗: {e}"))?;
+    finished
+        .sync_all()
+        .map_err(|e| format!("zip fsync 失敗: {e}"))?;
     drop(finished);
 
     std::fs::rename(&tmp_path, &dest_path).map_err(|e| format!("zip rename 失敗: {e}"))?;
@@ -419,7 +424,9 @@ pub async fn skill_export_read(skill_id: String) -> Result<(String, String), Str
 
     // ID は ".." や "/" を含めない
     if skill_id.contains('/') || skill_id.contains('\\') || skill_id.contains("..") {
-        return Err(format!("スキル ID に不正な文字が含まれています: {skill_id}"));
+        return Err(format!(
+            "スキル ID に不正な文字が含まれています: {skill_id}"
+        ));
     }
 
     let skill_md = root.join(&skill_id).join("SKILL.md");
@@ -427,17 +434,30 @@ pub async fn skill_export_read(skill_id: String) -> Result<(String, String), Str
         return Err(format!("スキル {skill_id} の SKILL.md が見つかりません"));
     }
 
-    let content = std::fs::read_to_string(&skill_md)
-        .map_err(|e| format!("SKILL.md 読み込みに失敗: {e}"))?;
+    let content =
+        std::fs::read_to_string(&skill_md).map_err(|e| format!("SKILL.md 読み込みに失敗: {e}"))?;
     Ok((content, skill_id))
 }
 
-/// インストール済みスキルの一覧を返す (id だけ)。
+/// インストール済みスキル 1 件。フロントはパスを自分で組み立てず、この値を使う。
+///
+/// ygn (2026-08-03): フロントが `~/.codex/skills` を前提にパスを計算していたため、
+/// 専用 CODEX_HOME に書かれた実体と食い違い、インポート直後から「未検出」になって
+/// いた。パス解決は Rust (skills_root) に一本化する。
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct InstalledSkill {
+    pub id: String,
+    /// 実際にインストールされている絶対パス (skills_root().join(id))。
+    pub path: String,
+}
+
+/// インストール済みスキルの一覧を返す (id + 実パス)。
 #[tauri::command]
-pub async fn skill_list_installed() -> Result<Vec<String>, String> {
+pub async fn skill_list_installed() -> Result<Vec<InstalledSkill>, String> {
     let root = skills_root().map_err(|e| format!("{e}"))?;
 
-    let mut ids = Vec::new();
+    let mut items = Vec::new();
     let entries =
         std::fs::read_dir(&root).map_err(|e| format!("スキルディレクトリ読み込み失敗: {e}"))?;
     for entry in entries.flatten() {
@@ -445,11 +465,14 @@ pub async fn skill_list_installed() -> Result<Vec<String>, String> {
         if path.is_dir() {
             if path.join("SKILL.md").is_file() {
                 if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    ids.push(name.to_string());
+                    items.push(InstalledSkill {
+                        id: name.to_string(),
+                        path: path.display().to_string(),
+                    });
                 }
             }
         }
     }
-    ids.sort();
-    Ok(ids)
+    items.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(items)
 }

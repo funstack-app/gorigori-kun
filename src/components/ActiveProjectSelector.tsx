@@ -22,12 +22,44 @@ import { ProjectIcon } from "./SkillIcon";
  *    プロジェクト切替で無理に消さなくても #5 の主症状(シーン構築値の残留)は
  *    resetScene() だけで解消する。
  */
-function switchActiveProject(
+export async function switchActiveProject(
   setActive: (id: string | null) => void,
   id: string | null,
   currentId: string | null,
-): void {
+  opts?: {
+    /** 新規プロジェクト作成経路 (handleCreate) 用。会話は carryOverToProject で
+     *  引き継ぎ済みなので、未保存チャットの破棄確認をスキップする。 */
+    skipUnsavedChatGuard?: boolean;
+  },
+): Promise<void> {
   if (id === currentId) return; // 同一プロジェクト再選択は無操作
+  // 未保存チャット破棄ガード (2026-07-30): プロジェクト未選択 (保存しない) のまま
+  // 進めた企画チャットがある状態で既存プロジェクトへ切り替えると、switchToProject が
+  // 唯一の写しを切替先ログで置換して会話が完全消失する。引き継ぐと相手プロジェクトの
+  // 履歴と混ざるため、ここは自動引き継ぎではなく破棄の事前確認にする
+  // (新規作成経路は自動引き継ぎ = handleCreate 側)。
+  if (
+    !opts?.skipUnsavedChatGuard &&
+    currentId === null &&
+    id !== null &&
+    usePlanChat.getState().messages.length > 0
+  ) {
+    const targetName =
+      useProjects.getState().projects.find((p) => p.id === id)?.name ??
+      "選択したプロジェクト";
+    const message = `保存していない企画チャットがあります。\n「${targetName}」へ切り替えると、この会話は画面から外れます（チャット履歴の「未保存の企画チャット」に7日間残ります）。\n案件として残したい場合はキャンセルし、企画タブの「案件にする」から保存してください。`;
+    let ok = false;
+    try {
+      const { ask } = await import("@tauri-apps/plugin-dialog");
+      ok = await ask(message, {
+        title: "未保存の企画チャット",
+        kind: "warning",
+      });
+    } catch {
+      ok = window.confirm(message);
+    }
+    if (!ok) return; // キャンセル = 切り替えない。会話はそのまま残る
+  }
   useSceneStore.getState().resetScene();
   // FB#A6 (2026-06-08): 企画チャットをプロジェクトに紐づける。切替前に現在の会話を
   // 旧プロジェクトへ保存し、切替先プロジェクトの企画チャットをロードする
@@ -94,9 +126,27 @@ export function ActiveProjectSelector() {
     const name = draftName.trim();
     if (!name) return;
     const created = createProject(name);
+    // 未保存チャット引き継ぎ (2026-07-30): プロジェクト未選択 (保存しない) のまま
+    // 進めた企画チャットは、新規作成 = 「この会話を残したい」の意思表示なので、
+    // switchToProject が走る前に新プロジェクトへ全量保存する。先に書いておけば
+    // 切替時のロードでそのまま読み戻され、会話は消えない。
+    const carried =
+      activeId === null
+        ? usePlanChat.getState().carryOverToProject(created.id)
+        : 0;
     // 新規プロジェクト作成も「別案件を始める」= 切替なので switchActiveProject
     // 経由にして前案件のシーン構築値をクリアする (#5/R-2 残留対策 2026-06-07)。
-    switchActiveProject(setActive, created.id, activeId);
+    // 会話は引き継ぎ済みなので未保存チャットの破棄確認はスキップする。
+    void switchActiveProject(setActive, created.id, activeId, {
+      skipUnsavedChatGuard: true,
+    });
+    if (carried > 0) {
+      pushToast({
+        kind: "success",
+        text: `企画チャットを「${created.name}」へ引き継ぎました`,
+        ttlMs: 3000,
+      });
+    }
     setDraftName("");
     setOpen(false);
   };
@@ -168,7 +218,7 @@ export function ActiveProjectSelector() {
             <button
               type="button"
               onClick={() => {
-                switchActiveProject(setActive, null, activeId);
+                void switchActiveProject(setActive, null, activeId);
                 setOpen(false);
               }}
               className={[
@@ -202,7 +252,7 @@ export function ActiveProjectSelector() {
                     <button
                       type="button"
                       onClick={() => {
-                        switchActiveProject(setActive, project.id, activeId);
+                        void switchActiveProject(setActive, project.id, activeId);
                         setOpen(false);
                       }}
                       className="flex min-w-0 flex-1 items-center gap-1.5 text-left hover:text-white"

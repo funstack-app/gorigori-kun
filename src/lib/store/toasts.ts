@@ -31,6 +31,14 @@ export type Toast = {
   text: string;
   /** Auto-dismiss delay in ms. 0 / undefined = sticky. */
   ttlMs?: number;
+  /**
+   * 押せる操作を1つだけ添える (cne / 2026-08-04)。
+   *
+   * 生成完了通知の「開く」用。押すとその場でトーストは閉じる
+   * (行き先へ移動した後も通知が残ると、まだ何か残っているように見える)。
+   * 文字列で「開く」と書いても押せないなら、それは嘘のUIになる。
+   */
+  action?: { label: string; run: () => void };
 };
 
 type ToastsState = {

@@ -1,6 +1,4 @@
-use crate::secrets::{
-    self, SUPABASE_ANON_KEY, SUPABASE_BUCKET, SUPABASE_PROJECT_URL,
-};
+use crate::secrets::{self, SUPABASE_ANON_KEY, SUPABASE_BUCKET, SUPABASE_PROJECT_URL};
 
 #[tauri::command]
 pub fn secret_set(key: String, value: String) -> Result<(), String> {

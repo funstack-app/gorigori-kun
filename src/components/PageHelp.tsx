@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 /**
- * スキル画面の冒頭に置く共通の案内。
+ * 各ページの見出し行に1個だけ置く共通の案内。
  *
  * STΛCK 指摘 (2026-07-26): 「スキルを開いても、この画面で何をすればいいか分からない」。
  * 各 Workspace がバラバラに書くと見た目が揃わないので、1つの部品に寄せる。
@@ -13,6 +13,11 @@ import { useEffect, useRef, useState } from "react";
  *   - 既定は常に畳んだ状態。開くのは「? ヘルプ」を押したときだけ
  *     (STΛCK指示 2026-07-29: 初回の自動全開も廃止)
  *
+ * STΛCK 指示 (2026-08-04, kk5): スキル画面以外 (画像生成 / 動画生成 / 企画 /
+ * 編集 / 3Dカメラワーク / マルチアングル) にも置くため、全ページ共通の部品として
+ * components/ 直下に置く。
+ * 常時表示の説明文は禁止し、説明は必ずこの部品へ逃がす (ui-placement-grammar §4)。
+ *
  * 書く内容は2つだけ:
  *   what — 何を渡すと何が手に入るか (1文)
  *   first — まず何をすればいいか (1文。「まず〜」で始める)
@@ -23,7 +28,7 @@ import { useEffect, useRef, useState } from "react";
  * 漫画の吹き出し焼き込みは、いずれも未実装)。
  */
 
-export function SkillIntro({
+export function PageHelp({
   what,
   first,
   note,

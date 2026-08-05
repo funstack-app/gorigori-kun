@@ -192,6 +192,30 @@ pub fn is_degraded() -> bool {
     DEGRADED.load(Ordering::Acquire)
 }
 
+/// 生成枠の現在値。UI の「使用中 k / 上限 N」表示用 (cne / 2026-08-04)。
+///
+/// `limit` はその時点の実効上限で、429 による自動降格後は DEGRADED_LIMIT になる。
+/// **フロントに定数をミラーしない**ためのコマンド: NORMAL 9 / DEGRADED 6 を
+/// TypeScript 側にも書くと、降格したときに UI だけが 9 と言い続けて
+/// 「嘘の上限」を出す。上限の正本はここ1箇所に保つ。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenCapacity {
+    /// いま有効な同時実行上限。
+    pub limit: usize,
+    /// 429 を検知して降格済みか。UI が理由を添えられるようにする。
+    pub degraded: bool,
+}
+
+/// 読み取り専用。生成枠の上限を返すだけで、キューの状態は一切変えない。
+#[tauri::command]
+pub fn gen_capacity() -> GenCapacity {
+    GenCapacity {
+        limit: current_limit(),
+        degraded: is_degraded(),
+    }
+}
+
 /// RAII: 画像生成 permit の保持者。**Drop が唯一の解放経路**。
 ///
 /// permit を素の `drop` で手放すと必ずセマフォへ1枚戻るため、降格の借金
@@ -339,7 +363,9 @@ mod tests {
 
     #[test]
     fn rate_limit_error_is_detected_in_raw_and_humanized_forms() {
-        assert!(is_rate_limit_error("codex exec failed: HTTP 429 Too Many Requests"));
+        assert!(is_rate_limit_error(
+            "codex exec failed: HTTP 429 Too Many Requests"
+        ));
         assert!(is_rate_limit_error("Error: rate limit exceeded"));
         assert!(is_rate_limit_error("openai rate_limit_exceeded"));
         assert!(is_rate_limit_error(
@@ -347,7 +373,9 @@ mod tests {
         ));
         // 429 以外の失敗で降格させない (誤発火は同時実行数を無用に落とす)。
         assert!(!is_rate_limit_error("生成画像が見つかりませんでした"));
-        assert!(!is_rate_limit_error("画像生成サーバーが混雑または一時的に不安定です"));
+        assert!(!is_rate_limit_error(
+            "画像生成サーバーが混雑または一時的に不安定です"
+        ));
         assert!(!is_rate_limit_error("Higgsfield API error (HTTP 502)"));
     }
 
@@ -451,7 +479,11 @@ mod tests {
         let debt = AtomicUsize::new(1);
         assert!(take_debt_from(&debt));
         assert!(!take_debt_from(&debt));
-        assert_eq!(debt.load(Ordering::Acquire), 0, "借金がマイナスへ回り込んだ");
+        assert_eq!(
+            debt.load(Ordering::Acquire),
+            0,
+            "借金がマイナスへ回り込んだ"
+        );
     }
 
     /// 修正1のラッパーの Drop 経路。早期 return を模した早すぎるスコープ離脱でも、

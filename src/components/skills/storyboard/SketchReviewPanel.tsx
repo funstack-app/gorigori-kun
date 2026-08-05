@@ -1,4 +1,3 @@
-import { convertFileSrc } from "@tauri-apps/api/core";
 import { useEffect, useMemo, useState, type DragEvent } from "react";
 import {
   DndContext,
@@ -18,10 +17,11 @@ import { CSS } from "@dnd-kit/utilities";
 
 import { storyboard, type RegenerateCutParams } from "../../../lib/ipc";
 import { useStoryboardRun } from "../../../lib/store/storyboardRun";
-import { usePlanChat } from "../../../lib/store/planChat";
+import { useSceneConstruction } from "../../../lib/storyboard/useSceneConstruction";
 import { useToasts } from "../../../lib/store/toasts";
 import { useImagePreview } from "../../../lib/store/imagePreview";
 import { useWorkspace } from "../../../lib/store/workspace";
+import { SafeImage } from "../../SafeImage";
 import { CandidatesSelect } from "./CandidatesSelect";
 import { CardSizeSlider, gridColsForAspect } from "./cardSize";
 import type {
@@ -70,7 +70,8 @@ export function SketchReviewPanel() {
   const setGenerationCandidatesPerCut = useStoryboardRun((s) => s.setGenerationCandidatesPerCut);
   const setPhase = useStoryboardRun((s) => s.setPhase);
   const setGoal = useStoryboardRun((s) => s.setGoal);
-  const sceneConstruction = usePlanChat((s) => s.sceneConstruction);
+  // 共有 planChat が消えていても storyboard 側の控えから読む (Sol 評価 blocking#3)。
+  const sceneConstruction = useSceneConstruction();
 
   const [cursor, setCursor] = useState(0);
   const [editing, setEditing] = useState(false);
@@ -1066,8 +1067,8 @@ function SketchImageBox({
   if (path && status === "done") {
     return (
       <div className="w-full">
-        <img
-          src={convertFileSrc(path)}
+        <SafeImage
+          path={path}
           alt={`sketch cut ${cut.order}`}
           onDoubleClick={onDoubleClick}
           className={`${aspectClass(aspectRatio)} w-full cursor-zoom-in rounded-md border border-[#2a2a2a] bg-[#fcfbf5] object-cover`}
@@ -1141,8 +1142,8 @@ function ReferenceSlot({
         }
       >
         {path ? (
-          <img
-            src={convertFileSrc(path)}
+          <SafeImage
+            path={path}
             alt={label}
             className="h-full w-full object-cover"
           />

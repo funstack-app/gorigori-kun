@@ -2,8 +2,9 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { ActiveProjectSelector } from "../../ActiveProjectSelector";
+import { useSkillVisible } from "../../SkillWorkspaceRouter";
 import { WorkspaceTabs } from "../../WorkspaceTabs";
-import { SkillIntro } from "../SkillIntro";
+import { PageHelp } from "../../PageHelp";
 import { CharacterIcon, FaceIcon } from "../../SkillIcon";
 import { useActiveProject } from "../../../lib/store/activeProject";
 import { useImagePreview } from "../../../lib/store/imagePreview";
@@ -11,8 +12,14 @@ import { useImages } from "../../../lib/store/images";
 import { buildExportFileName } from "../../../lib/exportNaming";
 import { useProjects } from "../../../lib/store/projects";
 import { useToasts } from "../../../lib/store/toasts";
-import { useCharacterSheetRun } from "../../../lib/store/characterSheetRun";
+import {
+  ensureSheetSlotPhaseListener,
+  selectModeJobs,
+  useCharacterSheetRun,
+  useFocusedSheetJob,
+} from "../../../lib/store/characterSheetRun";
 import { GenerationGauge, recordGenerationDuration } from "../../GenerationGauge";
+import { SafeImage } from "../../SafeImage";
 import { ensureCharacterSheetEventListener } from "../../../lib/character/events";
 import type {
   CharacterSheetParams,
@@ -51,7 +58,12 @@ export function ExpressionSetWorkspace() {
 
   // 登録ワークスペースと run ストアを共有するため、入場時に「他スキルの mode を
   // 引き継いでいれば」初期化する。自分(expression)の実行中 run は保持する。
+  //
+  // マウント時ではなく「表示になった時」に呼ぶ (Sol 評価 blocking#4 / 2026-08-04)。
+  // 理由と冪等性の根拠は CharacterRegisterWorkspace 側のコメントと同じ。
+  const visible = useSkillVisible();
   useEffect(() => {
+    if (!visible) return;
     let cancelled = false;
     enterMode("expression");
     async function registerEventListener() {
@@ -68,10 +80,12 @@ export function ExpressionSetWorkspace() {
       }
     }
     void registerEventListener();
+    // 生成枠のフェーズ通知 (キャラ登録側と同じ。張れなくても生成は動く)。
+    void ensureSheetSlotPhaseListener().catch(() => {});
     return () => {
       cancelled = true;
     };
-  }, [enterMode, pushToast]);
+  }, [visible, enterMode, pushToast]);
 
   return (
     <section className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#121212]">
@@ -85,7 +99,7 @@ export function ExpressionSetWorkspace() {
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
         <StepIndicator />
         <div className="px-4 pt-3">
-          <SkillIntro
+          <PageHelp
             what="登録済みのキャラを1体選ぶと、その顔のまま表情だけを変えたカットをまとめて作ります。"
             first="まずは下から、表情を作りたいキャラを選んでください。先にキャラクター登録を済ませておく必要があります。"
             note="似ているかどうかの最終判断は人の目で行います。自動での作り直しはしません。"
@@ -171,7 +185,9 @@ function StepSelect() {
   const setCharacterName = useCharacterSheetRun((s) => s.setCharacterName);
   const setCharacterImage = useCharacterSheetRun((s) => s.setCharacterImage);
   const setAttributes = useCharacterSheetRun((s) => s.setAttributes);
-  const status = useCharacterSheetRun((s) => s.status);
+  // SQ1: 単数 status は廃止。表情差分は単発運用のままなので、フォーカス中ジョブの
+  // 状態をそのまま「走行中か」の判定に使う (従来の再実行ガードを維持する)。
+  const status = useFocusedSheetJob().status;
   const pushToast = useToasts((s) => s.push);
 
   const [selectedCharacterId, setSelectedCharacterId] = useState<string | null>(null);
@@ -243,8 +259,21 @@ function StepSelect() {
       runId,
     };
 
+    // 前回の表情差分ジョブを台帳から外してから新しい 1 本を建てる
+    // (Sol 評価 / 2026-08-04)。表情差分はレールを持たない単発運用なので、
+    // 画面に出るのは常に focus 中の 1 本だけ。片付けないと実行のたびに
+    // 見えないジョブと runIndex が積み上がり、後着イベントの行き先も残り続ける。
+    // 決着済み (completed / failed) だけを外す —— 走行中は残らないはず
+    // (canRun が running を弾く) だが、万一残っていたら中止扱いで消さない。
+    const staleJobs = selectModeJobs(useCharacterSheetRun.getState()).filter(
+      (job) => job.jobMode === "expression" && job.status !== "running",
+    );
+    for (const stale of staleJobs) {
+      useCharacterSheetRun.getState().completeJob(stale.jobId);
+    }
+
     // 先に pending スケルトンを建てて listener を確実に間に合わせる（characterRegister と同じ思想）。
-    beginRun(
+    const jobId = beginRun(
       "expression",
       runId,
       cutSpecs.map((c) => ({
@@ -262,7 +291,10 @@ function StepSelect() {
         ttlMs: 3000,
       });
     } catch (err) {
-      useCharacterSheetRun.getState().reset();
+      // 起動に失敗したジョブを台帳から外し、キャラ選択へ戻す (SQ1: reset は
+      // 表示初期化だけになったため、ジョブの後始末は dismissJob が担う)。
+      useCharacterSheetRun.getState().dismissJob(jobId);
+      useCharacterSheetRun.getState().setStep(1);
       pushToast({
         kind: "error",
         text: `生成の開始に失敗しました: ${(err as Error)?.message ?? err}`,
@@ -430,15 +462,20 @@ function StepGenerate({
 }: {
   onPreview: (path: string, all: string[]) => void;
 }) {
-  const status = useCharacterSheetRun((s) => s.status);
-  const cuts = useCharacterSheetRun((s) => s.cuts);
-  const cutOrder = useCharacterSheetRun((s) => s.cutOrder);
-  const cutStartedAt = useCharacterSheetRun((s) => s.cutStartedAt);
-  const runId = useCharacterSheetRun((s) => s.runId);
-  const characterName = useCharacterSheetRun((s) => s.characterName);
-  const characterImagePath = useCharacterSheetRun((s) => s.characterImagePath);
-  const attributes = useCharacterSheetRun((s) => s.attributes);
-  const aspectRatio = useCharacterSheetRun((s) => s.aspectRatio);
+  // SQ1: 単数 run フィールドは廃止。表示・再生成はフォーカス中ジョブの
+  // 凍結スナップショットから読む (表情差分は常に最大 1 件なので挙動は従来どおり)。
+  const job = useFocusedSheetJob();
+  const status = job.status;
+  const cuts = job.cuts;
+  const cutOrder = job.cutOrder;
+  const cutStartedAt = job.cutStartedAt;
+  const runId = job.activeRunId || null;
+  const characterName = job.input.characterName;
+  // 表情差分は参照 1 枚のまま (複数参照はキャラ登録スキルのみ)。store が配列化された
+  // ので先頭を単数として読む。setCharacterImage 側は互換ラッパのまま使う。
+  const characterImagePath = job.input.characterImagePaths[0] ?? null;
+  const attributes = job.input.attributes;
+  const aspectRatio = job.input.aspectRatio;
   const setStep = useCharacterSheetRun((s) => s.setStep);
   const activeProjectId = useActiveProject((s) => s.activeProjectId);
   const projects = useProjects((s) => s.projects);
@@ -644,8 +681,8 @@ function StepGenerate({
             >
               <div className="relative aspect-square w-full bg-[#0d0d0d]">
                 {cut.status === "completed" && cut.imagePath ? (
-                  <img
-                    src={convertFileSrc(cut.imagePath)}
+                  <SafeImage
+                    path={cut.imagePath}
                     alt={cut.label}
                     className="h-full w-full cursor-pointer object-contain"
                     onClick={() =>

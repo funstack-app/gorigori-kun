@@ -63,6 +63,7 @@ pub async fn images_start_watcher(
 /// gallery in place.
 #[tauri::command]
 pub async fn images_save_to_project(
+    app: AppHandle,
     src: String,
     project_dir: String,
     new_name: Option<String>,
@@ -96,7 +97,34 @@ pub async fn images_save_to_project(
             );
         }
     }
-    Ok(dest.to_string_lossy().into_owned())
+
+    let dest_string = dest.to_string_lossy().into_owned();
+
+    // 移動もリネームと対称に history.db の images.path を UPDATE する (biy)。
+    // これを欠くと、watcher 外の保存先では次回起動の relink(allow_prune=true) が
+    // 「実体なし」と誤判定してレコードを削除する (履歴・サムネから消える)。
+    // relink は既に実在するパスには触らない (Path::is_file 判定) ため、
+    // 新パスへ更新しておけば watcher 外でも prune されない。
+    // pool が無くても移動自体は成功扱い (rename と同じ方針)。
+    if let Some(state) = app.try_state::<AppState>() {
+        if let Some(pool) = state.db_pool().await {
+            if let Err(e) = sqlx::query("UPDATE images SET path = ?1 WHERE path = ?2")
+                .bind(&dest_string)
+                .bind(&src)
+                .execute(&pool)
+                .await
+            {
+                tracing::warn!(
+                    error = ?e,
+                    old_path = %src,
+                    new_path = %dest_string,
+                    "images_save_to_project: history.db の path 更新に失敗 (移動自体は成功)"
+                );
+            }
+        }
+    }
+
+    Ok(dest_string)
 }
 
 fn pick_unique(project: &Path, file_name: &str) -> Option<PathBuf> {
@@ -198,12 +226,11 @@ pub async fn images_rename(
     // history.db の images.path を更新。pool が無くても rename 自体は成功扱い。
     if let Some(state) = app.try_state::<AppState>() {
         if let Some(pool) = state.db_pool().await {
-            let update_result =
-                sqlx::query("UPDATE images SET path = ?1 WHERE path = ?2")
-                    .bind(&dest_string)
-                    .bind(&src)
-                    .execute(&pool)
-                    .await;
+            let update_result = sqlx::query("UPDATE images SET path = ?1 WHERE path = ?2")
+                .bind(&dest_string)
+                .bind(&src)
+                .execute(&pool)
+                .await;
             if let Err(e) = update_result {
                 tracing::warn!(
                     error = ?e,
@@ -463,8 +490,7 @@ fn remove_media_file(path: &str) -> Result<(), String> {
             return Err(format!("refusing to delete non-media file: {path}"));
         }
 
-        std::fs::remove_file(&target)
-            .map_err(|e| format!("削除に失敗しました ({path}): {e}"))?;
+        std::fs::remove_file(&target).map_err(|e| format!("削除に失敗しました ({path}): {e}"))?;
     }
 
     Ok(())
@@ -696,6 +722,34 @@ async fn relink_missing_inner(
         allow_prune
     };
 
+    // 旧保存先が1つでも読めないときも prune を禁止する (2026-07-30 Codex 検分)。
+    //
+    // 上のサーキットブレーカーは「索引が丸ごと空」しか見ていないため、
+    // 「現行 root は読めるが、旧 root (外付けHDD/クラウド同期フォルダ) が未接続」
+    // だと素通りする。そのとき旧 root にしか実体が無い画像は「どこにも無い」と
+    // 判定され、繋ぎ直しても戻らない形で history.db から消える。
+    // 設定に載っている旧 root は「そこに画像がある前提」なので、読めない間は消さない。
+    let missing_previous: Vec<&String> = settings
+        .as_ref()
+        .map(|s| {
+            s.previous_storage_roots
+                .iter()
+                .filter(|r| !std::path::Path::new(r).exists())
+                .collect()
+        })
+        .unwrap_or_default();
+    let allow_prune = if allow_prune && !missing_previous.is_empty() {
+        tracing::warn!(
+            target: "codex.images",
+            missing = ?missing_previous,
+            "images_relink_missing: 以前の保存先が読めません (未接続の可能性)。\
+             history.db の削除をスキップします (レコードは保持)"
+        );
+        false
+    } else {
+        allow_prune
+    };
+
     let mut result = RelinkResult {
         db_updated: 0,
         db_unresolved: 0,
@@ -868,15 +922,20 @@ fn resize_one(
     let th = target.height;
     let mode = target.mode.trim().to_ascii_lowercase();
 
-    // 出力は常に RGBA8 の width×height キャンバス。
-    let mut canvas: image::RgbaImage = image::ImageBuffer::from_pixel(tw, th, image::Rgba([0, 0, 0, 255]));
+    // 出力は常に RGBA8 の width×height キャンバス。**必ず透過で初期化する**。
+    //
+    // ここを不透明黒 (`[0,0,0,255]`) で初期化してはならない。`imageops::overlay` は
+    // 置換ではなく**アルファ合成**なので、透過 PNG を貼ると「不透明黒の上に透明を重ねる」
+    // 計算になり、透過画素が**黒**として焼き付く (透過破壊バグ)。cover は
+    // `resize_to_fill` が枠ちょうどを返すためキャンバスは露出しないが、
+    // 露出の有無と関係なく合成の時点で潰れる。
+    let mut canvas: image::RgbaImage =
+        image::ImageBuffer::from_pixel(tw, th, image::Rgba(CONTAIN_PAD_RGBA));
 
     if mode == "contain" {
         // 枠内に収まるよう縮小 (アスペクト維持)。resize は「枠を超えない」最大サイズにする。
         let scaled = img.resize(tw, th, FilterType::Lanczos3).to_rgba8();
         let (sw, sh) = scaled.dimensions();
-        // 透過背景で埋め直してから中央に貼る。
-        canvas = image::ImageBuffer::from_pixel(tw, th, image::Rgba(CONTAIN_PAD_RGBA));
         let ox = ((tw - sw) / 2) as i64;
         let oy = ((th - sh) / 2) as i64;
         image::imageops::overlay(&mut canvas, &scaled, ox, oy);
@@ -982,6 +1041,26 @@ pub async fn images_export_resized(
     }
 
     Ok(ResizeResult { outputs, failed })
+}
+
+#[derive(serde::Serialize)]
+pub struct FileSizeEntry {
+    pub path: String,
+    /// バイト数。取得できない (存在しない/権限) 場合は None
+    pub size: Option<u64>,
+}
+
+/// 添付画像の事前サイズ検査用 (7zf)。metadata が取れないパスはエラーにせず None で返す
+/// (1枚の失敗で全体の検査を落とさない。ガードは fail-open が方針)。
+#[tauri::command]
+pub fn images_file_sizes(paths: Vec<String>) -> Vec<FileSizeEntry> {
+    paths
+        .into_iter()
+        .map(|p| {
+            let size = std::fs::metadata(&p).ok().map(|m| m.len());
+            FileSizeEntry { path: p, size }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -1101,8 +1180,7 @@ mod tests {
         std::fs::write(&b, b"b").unwrap();
 
         // dir_a を先に渡すと dir_a 側が勝つ (走査順を尊重)。
-        let index =
-            build_filename_index(&[dir_a.path().to_path_buf(), dir_b.path().to_path_buf()]);
+        let index = build_filename_index(&[dir_a.path().to_path_buf(), dir_b.path().to_path_buf()]);
         assert_eq!(index.get("dup.png"), Some(&a));
     }
 
@@ -1156,5 +1234,92 @@ mod tests {
         assert_eq!(sanitize_target_name("Instagram 正方形"), "Instagram____");
         assert_eq!(sanitize_target_name("x-post_1600"), "x-post_1600");
         assert_eq!(sanitize_target_name("///"), "target");
+    }
+
+    // ---- 透過破壊バグの回帰テスト ----
+
+    /// 中央だけ不透明赤、周囲が完全透過の RGBA 画像を作る。
+    /// スタンプ (クロマキー抜き後) の実体に近い形。
+    fn transparent_ringed_image(size: u32) -> image::DynamicImage {
+        let mut img: image::RgbaImage =
+            image::ImageBuffer::from_pixel(size, size, image::Rgba([0, 0, 0, 0]));
+        let lo = size / 4;
+        let hi = size - size / 4;
+        for y in lo..hi {
+            for x in lo..hi {
+                img.put_pixel(x, y, image::Rgba([255, 0, 0, 255]));
+            }
+        }
+        image::DynamicImage::ImageRgba8(img)
+    }
+
+    /// 透過画素が黒く焼き付かないこと (cover / contain 両方)。
+    ///
+    /// 真因は canvas の不透明黒初期化 + `imageops::overlay` の**アルファ合成**。
+    /// overlay は置換ではないので、不透明黒の上に透明を重ねると黒が残る。
+    /// canvas を透過 (`CONTAIN_PAD_RGBA`) で初期化することで解消する。
+    ///
+    /// 牙の確認: canvas を `Rgba([0,0,0,255])` に戻すと cover 側が必ず落ちる。
+    #[test]
+    fn resize_one_preserves_transparency_in_both_modes() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = transparent_ringed_image(64);
+
+        for mode in ["cover", "contain"] {
+            let target = ResizeTarget {
+                name: format!("t_{mode}"),
+                width: 64,
+                height: 64,
+                mode: mode.to_string(),
+            };
+            let out = resize_one(&src, &target, dir.path(), "sticker")
+                .unwrap_or_else(|e| panic!("resize_one failed for {mode}: {e}"));
+            let decoded = image::open(&out).unwrap().to_rgba8();
+
+            // 四隅は透過のまま (黒く塗り潰されていない)。
+            let (w, h) = decoded.dimensions();
+            for (x, y) in [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)] {
+                let px = decoded.get_pixel(x, y);
+                assert_eq!(
+                    px[3],
+                    0,
+                    "{mode}: 角 ({x},{y}) の透過が失われた (alpha={}, rgb={:?})",
+                    px[3],
+                    &px.0[..3]
+                );
+            }
+            // 前景は残っている (全部透明にして「透過が保たれた」と誤判定しない)。
+            let center = decoded.get_pixel(w / 2, h / 2);
+            assert_eq!(center[3], 255, "{mode}: 前景まで透過になっている");
+            assert!(center[0] > 200, "{mode}: 前景の色が壊れた: {:?}", center.0);
+        }
+    }
+
+    /// 不透明な入力は従来どおり全面不透明で書き出されること (既存19プリセットの非退行)。
+    #[test]
+    fn resize_one_keeps_opaque_input_opaque() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = image::DynamicImage::ImageRgba8(image::ImageBuffer::from_pixel(
+            80,
+            40,
+            image::Rgba([10, 20, 30, 255]),
+        ));
+
+        for mode in ["cover", "contain"] {
+            let target = ResizeTarget {
+                name: format!("o_{mode}"),
+                width: 40,
+                height: 40,
+                mode: mode.to_string(),
+            };
+            let out = resize_one(&src, &target, dir.path(), "photo").unwrap();
+            let decoded = image::open(&out).unwrap().to_rgba8();
+            assert_eq!(decoded.dimensions(), (40, 40));
+            // cover は枠を覆うので全面不透明。contain は 80x40 → 40x20 で上下に
+            // 透過余白が入るため、中央だけを見る。
+            let center = decoded.get_pixel(20, 20);
+            assert_eq!(center[3], 255, "{mode}: 不透明入力の中央が透過になった");
+            assert_eq!(&center.0[..3], &[10, 20, 30], "{mode}: 色が変わった");
+        }
     }
 }

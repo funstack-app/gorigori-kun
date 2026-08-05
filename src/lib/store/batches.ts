@@ -191,7 +191,10 @@ export const useBatches = create<BatchesState>((set, _get) => ({
     // codex 経路は removeBatch の時点でまだジョブが作られていない
     // (started イベント前) ため、finish/clear は何にもマッチせず無害。
     const status = useGenerationStatus.getState();
-    status.finish(batchId); // 先に終了扱いにしてから
+    // "cancelled" を渡す: ここは失敗・取り消しでカードごと消す経路なので、
+    // 完了通知 (cne) を出してはいけない。消した生成に「完成しました」と
+    // 出すのは、表示と実態の食い違いそのもの。
+    status.finish(batchId, "cancelled"); // 先に終了扱いにしてから
     status.clear(batchId); // 消す (失敗で消えたものを4秒間見せる意味は無い)
     set((s) => ({ batches: s.batches.filter((b) => b.batchId !== batchId) }));
   },
@@ -570,7 +573,8 @@ function syncBatchStatus(batch: {
   }
 
   if (batch.status === "completed" || batch.status === "cancelled") {
-    status.finish(id);
+    // 中止された run を完了通知 (cne) の対象にしない。走り切ったものだけ知らせる。
+    status.finish(id, batch.status === "cancelled" ? "cancelled" : "completed");
     setTimeout(() => useGenerationStatus.getState().clear(id), 4000);
   }
 }

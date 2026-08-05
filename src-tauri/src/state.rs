@@ -9,11 +9,11 @@ use crate::codex::RpcClient;
 use crate::commands::storage::StorageSettings;
 // ort (ONNX Runtime) を使う編集セッション群は Windows 限定 (2026-07-28)。
 // 理由は edit/mod.rs 冒頭のコメント参照 (Intel Mac 対応の復活)。
-#[cfg(target_os = "windows")]
+#[cfg(edit_ai)]
 use crate::edit::runtime::EditRuntime;
-#[cfg(target_os = "windows")]
+#[cfg(edit_ai)]
 use crate::edit::sam2::Sam2Session;
-#[cfg(target_os = "windows")]
+#[cfg(edit_ai)]
 use crate::edit::sam3_text::Sam3TextSession;
 
 type ImageWatcher = Debouncer<notify::RecommendedWatcher, FileIdMap>;
@@ -37,13 +37,13 @@ pub struct AppState {
     /// `await` `db_pool()` and surface a clear error if init failed.
     pub db: Arc<RwLock<Option<sqlx::SqlitePool>>>,
     pub storage_settings: Arc<RwLock<Option<StorageSettings>>>,
-    #[cfg(target_os = "windows")]
+    #[cfg(edit_ai)]
     pub edit_runtime: Arc<EditRuntime>,
-    #[cfg(target_os = "windows")]
+    #[cfg(edit_ai)]
     pub sam2_session: Arc<RwLock<Option<Sam2Session>>>,
     /// ことばで分離 (SAM3) のセッション。embed キャッシュを持つため
     /// コマンド呼び出しをまたいで保持する (同じ画像への語の追加が数秒で返る)。
-    #[cfg(target_os = "windows")]
+    #[cfg(edit_ai)]
     pub sam3_text_session: Arc<RwLock<Option<Sam3TextSession>>>,
 }
 
@@ -94,22 +94,22 @@ impl AppState {
         self.storage_settings.read().await.clone()
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(edit_ai)]
     pub fn edit_runtime(&self) -> &EditRuntime {
         &self.edit_runtime
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(edit_ai)]
     pub async fn set_sam2_session(&self, session: Sam2Session) {
         *self.sam2_session.write().await = Some(session);
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(edit_ai)]
     pub async fn clear_sam2_session(&self) {
         *self.sam2_session.write().await = None;
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(edit_ai)]
     pub async fn clear_sam3_text_session(&self) {
         *self.sam3_text_session.write().await = None;
     }
@@ -117,5 +117,4 @@ impl AppState {
     pub fn inner_clone(&self) -> Self {
         self.clone()
     }
-
 }

@@ -8,7 +8,8 @@ export type GoriSkillId =
   | "gori-comic"
   | "gori-redline"
   | "gori-regulation-check"
-  | "gori-product-set";
+  | "gori-product-set"
+  | "gori-sticker";
 
 export type GoriSkill = {
   id: GoriSkillId;
@@ -27,8 +28,6 @@ export type GoriSkill = {
   /** 近日公開予定。グレイアウト + 「近日公開」ラベル表示。 */
   comingSoon?: boolean;
   launchHint: string;
-  /** ユーザーがインポートしたカスタムスキル。export ボタンを表示する目印にも使う。 */
-  imported?: boolean;
 };
 
 // スキル一覧 v2.1（2026-07-19 STΛCK確定）。
@@ -108,6 +107,25 @@ export const GORI_SKILLS: GoriSkill[] = [
     path: "~/.codex/skills/gori-expression-set",
     availableInApp: true,
     launchHint: "登録キャラ → 表情ちがいを一式",
+  },
+  {
+    // 2026-08-05 追加 (設計書 v3 §6.1 / S8)。表情差分の隣に置く。
+    //
+    // 並び順の意図: キャラ登録 → 表情差分 の直後。スタンプは「同じキャラの
+    // 表情バリエーションを、LINE の画像規格に合わせて一式にする」作業なので、
+    // 用途として最も近いものが隣にある状態にする。ただし**依存は作らない**
+    // (登録キャラが無くても手持ち画像から始められる)。順路の強制ではない。
+    //
+    // 説明文で「審査に通る」と書かない (設計書 §0.4 / §6.5)。機械が保証できるのは
+    // **画像規格** (サイズ・透過・余白・容量) までで、承認可否は LINE の裁量。
+    id: "gori-sticker",
+    name: "LINEスタンプ制作",
+    shortName: "Sticker",
+    description:
+      "キャラや画像を1枚選ぶと、挨拶・返事などのスタンプをまとめて作ります。並べて見ながら使うものを選び、気になる1枚だけ塗って直せます。書き出す前に画像の規格（サイズ・透過・余白・容量）を機械で点検します。審査に通るかどうかはLINEの判断になります。",
+    path: "~/.codex/skills/gori-sticker",
+    availableInApp: true,
+    launchHint: "キャラ1枚 → スタンプ一式",
   },
   {
     // 2026-07-19 追加 (スキル一覧v2.1 #8)。

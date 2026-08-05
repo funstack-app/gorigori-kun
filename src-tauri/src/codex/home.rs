@@ -62,7 +62,10 @@ pub fn legacy_codex_home() -> Option<PathBuf> {
 /// 実際に app-server / codex exec を起動する前には [`ensure_gori_codex_home`] を
 /// 呼んでディレクトリ作成と初回移行を済ませること。
 pub fn gori_codex_home_path() -> Option<PathBuf> {
-    dirs::data_dir().map(|data| data.join(crate::secrets::SERVICE_NAME).join(CODEX_HOME_LEAF))
+    dirs::data_dir().map(|data| {
+        data.join(crate::secrets::SERVICE_NAME)
+            .join(CODEX_HOME_LEAF)
+    })
 }
 
 /// 生成専用 app-server の CODEX_HOME (`codex-home-gen`) のパスを返す。
@@ -70,7 +73,10 @@ pub fn gori_codex_home_path() -> Option<PathBuf> {
 /// `gen_server.rs` が `AppHandle::app_data_dir()` から組み立てるのと同じ場所を、
 /// AppHandle を持たない呼び出し元 (storage_cleanup など) 向けに解決する。
 pub fn gen_codex_home_path() -> Option<PathBuf> {
-    dirs::data_dir().map(|data| data.join(crate::secrets::SERVICE_NAME).join(GEN_CODEX_HOME_LEAF))
+    dirs::data_dir().map(|data| {
+        data.join(crate::secrets::SERVICE_NAME)
+            .join(GEN_CODEX_HOME_LEAF)
+    })
 }
 
 /// 掃除・容量集計の対象になる CODEX_HOME を **1箇所で** 列挙する。

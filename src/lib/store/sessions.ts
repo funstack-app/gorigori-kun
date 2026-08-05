@@ -128,9 +128,20 @@ export const useSessions = create<SessionsState>((set, get) => ({
     } catch (err) {
       console.error("sessions.load failed", err);
       const { useToasts } = await import("./toasts");
+      // 誤診防止 (2026-07-30): React の "Maximum update depth" はグローバル
+      // カウンタ制で、他コンポーネントの更新ストーム由来の throw をここの set()
+      // が拾うことがある。セッションDBの故障と誤認させない文言に分岐する。
+      // 元スタックは直上の console.error が保存している。
+      // 本番ビルドでは React エラーは "Minified React error #185" に短縮され
+      // "Maximum update depth" を含まないため、エラー番号 (errors/185) も見る。
+      const errText = String(err);
+      const isUpdateDepth =
+        errText.includes("Maximum update depth") || errText.includes("errors/185");
       useToasts.getState().push({
         kind: "error",
-        text: `セッション読み込みに失敗: ${String(err)}`,
+        text: isUpdateDepth
+          ? "画面の再描画ループを検出しました(セッションのデータは無事です)。表示が乱れる場合はアプリを再起動してください。"
+          : `セッション読み込みに失敗: ${String(err)}`,
         ttlMs: 8000,
       });
       set({ loading: false });
@@ -168,6 +179,15 @@ export const useSessions = create<SessionsState>((set, get) => ({
       set({ displayedSession: full, isFrozen: true });
     } catch (err) {
       console.warn("session_get_full failed", err);
+      // 件1修正 (2026-07-30): 失敗が console.warn だけだと「開くを押しても
+      // 何も起きない」ように見える。1行で伝える (dynamic import は load() の
+      // 既存パターン sessions.ts:130 と同じ。threads との循環 import 回避)。
+      const { useToasts } = await import("./toasts");
+      useToasts.getState().push({
+        kind: "error",
+        text: "チャット履歴を開けませんでした。もう一度お試しください。",
+        ttlMs: 5000,
+      });
     }
   },
 

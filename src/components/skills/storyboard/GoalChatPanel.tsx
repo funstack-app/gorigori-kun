@@ -1,6 +1,14 @@
-import { convertFileSrc } from "@tauri-apps/api/core";
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import { warnImagePayloadInBackground } from "../../../lib/imagePayloadGuard";
+import {
+  AUDIO_EXTS,
+  AUDIO_REPLACED_MESSAGE,
+  audioAttachedMessage,
+  formatDuration,
+  isAudioFileName,
+  probeAudio,
+} from "../../../lib/audio/attach";
 import { usePlanChat } from "../../../lib/store/planChat";
 import { useStoryboardRun } from "../../../lib/store/storyboardRun";
 import { useSkillMode } from "../../../lib/store/skillMode";
@@ -8,11 +16,16 @@ import { useToasts } from "../../../lib/store/toasts";
 import { useImagePreview } from "../../../lib/store/imagePreview";
 import { useReferenceRoles } from "../../../lib/store/referenceRoles";
 import type { StoryboardGoal } from "../../../lib/storyboard/types";
+import {
+  getStoryboardFinalizeInput,
+  useStoryboardFinalizeInput,
+} from "../../../lib/storyboard/useSceneConstruction";
 import { ReferenceLibraryModal } from "../../ReferenceLibraryModal";
 import { PresetPickerPopover } from "../../PresetPickerPopover";
 import { selectCharacterReferences } from "../../../lib/presets/character";
 import { ReferenceRoleToggle } from "../../ReferenceRoleToggle";
-import { SkillIntro } from "../SkillIntro";
+import { PageHelp } from "../../PageHelp";
+import { SafeImage } from "../../SafeImage";
 import { CandidatesSelect } from "./CandidatesSelect";
 
 const IMAGE_EXTS = ["png", "jpg", "jpeg", "webp", "gif", "bmp"];
@@ -43,8 +56,15 @@ export function GoalChatPanel() {
   const send = usePlanChat((s) => s.send);
   const ensureThread = usePlanChat((s) => s.ensureThread);
   const resetThread = usePlanChat((s) => s.resetThread);
-  const storyboardParams = usePlanChat((s) => s.storyboardParams);
-  const sceneConstruction = usePlanChat((s) => s.sceneConstruction);
+  // 目標確定の入力は共有ストアを直読みしない (Sol 評価 3周目 / 2026-08-04)。
+  // planChat は全スキル共有の 1 本なので、別スキルで作られた構成・パラメータが
+  // 残っていると「確定」ボタンが押せてしまい、他人の構成で storyboard が進む。
+  // 出所判定つきの窓口 1 本に通す (useSceneConstruction.ts)。
+  const { params: storyboardParams, scene: sceneConstruction } =
+    useStoryboardFinalizeInput();
+  // go4: 音源は planChat の単一送信ファネルに合流させる (企画タブと共通)。
+  const pendingAudio = usePlanChat((s) => s.pendingAudio);
+  const clearPendingAudio = usePlanChat((s) => s.clearPendingAudio);
   const setSkillEnabled = useSkillMode((s) => s.setEnabled);
   const setSkillId = useSkillMode((s) => s.setSelectedSkillId);
   const skillEnabled = useSkillMode((s) => s.enabled);
@@ -106,6 +126,13 @@ export function GoalChatPanel() {
     if (attachedImages.length > 0) {
       useReferenceRoles.getState().ensureRoles(attachedImages);
     }
+    // 7zf (2026-08-03): 合計サイズの予告警告。GoalChat の添付はローカル state
+    // なので planChat の addPendingImages 側フックが効かない。この effect が
+    // 全入口 (dialog / ライブラリ / プリセット) をカバーする。
+    // N-01 (Wave 2 REVISE): 0 件でも呼ぶ。空配列は警告去重 (lastWarnedMb) の
+    // リセットになっており、条件から外すと「全部外して同じ枚数を付け直すと
+    // 警告が出ない」取りこぼしが残る。
+    warnImagePayloadInBackground(attachedImages);
   }, [attachedImages]);
 
   // AI が直近のメッセージで「いま何を聞こうとしているか」を抽出する簡易版。
@@ -136,33 +163,78 @@ export function GoalChatPanel() {
     const text = draft.trim();
     if (!text || sending) return;
     const images = attachedImages.slice();
+    // B-02 (Wave 2 REVISE): 入力文と添付を消すのは send が受け付けた後だけ。
+    // GoalChat の添付はこのコンポーネントのローカル state なので、380MB ガードで
+    // ブロックされた後に消すと復元手段が無く、添付を減らして再送できない。
+    const accepted = await send(text, images.length > 0 ? images : undefined);
+    if (!accepted) return;
     setDraft("");
     setAttachedImages([]);
-    await send(text, images.length > 0 ? images : undefined);
   }
 
-  async function pickImages() {
+  /**
+   * PC から画像 / 音源を添付する (go4)。
+   *
+   * 音源は画像とは別経路に載せる。probe したメタデータだけを planChat の
+   * pendingAudio へ渡し、送信時に文字情報としてプロンプトに供給する
+   * (**音声パスを attachedImages に入れてはいけない** — codex に localImage として
+   * 渡ると Windows で sandbox-setup エラーに化ける)。
+   * D&D 経路は現状ゴールチャットに無いので picker のみ。
+   */
+  async function pickFiles() {
     try {
       const { open: openDialog } = await import("@tauri-apps/plugin-dialog");
       const r = await openDialog({
         multiple: true,
-        filters: [{ name: "画像", extensions: IMAGE_EXTS }],
+        filters: [
+          { name: "画像", extensions: IMAGE_EXTS },
+          { name: "音源", extensions: [...AUDIO_EXTS] },
+        ],
       });
       if (!r) return;
       const paths = (Array.isArray(r) ? r : [r]).filter(
         (p): p is string => typeof p === "string",
       );
       if (paths.length === 0) return;
-      setAttachedImages((prev) => {
-        // 重複を弾く
-        const set = new Set(prev);
-        for (const p of paths) set.add(p);
-        return Array.from(set);
-      });
+
+      const imagePaths = paths.filter((p) => !isAudioFileName(p));
+      const audioPaths = paths.filter((p) => isAudioFileName(p));
+
+      if (imagePaths.length > 0) {
+        setAttachedImages((prev) => {
+          // 重複を弾く
+          const set = new Set(prev);
+          for (const p of imagePaths) set.add(p);
+          return Array.from(set);
+        });
+      }
+
+      // 音源は 1 曲まで。複数選ばれたら最後の 1 件を採用する。
+      const audioPath = audioPaths[audioPaths.length - 1];
+      if (audioPath) {
+        try {
+          const attachment = await probeAudio(audioPath);
+          const replacing = usePlanChat.getState().pendingAudio !== null;
+          usePlanChat.getState().setPendingAudio(attachment);
+          useToasts.getState().push({
+            kind: "success",
+            text: replacing
+              ? AUDIO_REPLACED_MESSAGE
+              : audioAttachedMessage(attachment),
+            ttlMs: 2800,
+          });
+        } catch (err) {
+          useToasts.getState().push({
+            kind: "error",
+            text: (err as Error)?.message ?? String(err),
+            ttlMs: 6000,
+          });
+        }
+      }
     } catch (err) {
       useToasts.getState().push({
         kind: "error",
-        text: `画像の選択に失敗しました: ${(err as Error)?.message ?? err}`,
+        text: `ファイルの選択に失敗しました: ${(err as Error)?.message ?? err}`,
         ttlMs: 5000,
       });
     }
@@ -178,8 +250,9 @@ export function GoalChatPanel() {
   // 「storyboardParams + sceneConstruction が揃っている」前提。
   // P7 (2026-05-20): 進む先 Phase を引数で受ける (sketch or generation)。
   function buildAndAdvance(targetPhase: "sketch" | "generation") {
-    const params = usePlanChat.getState().storyboardParams;
-    const scene = usePlanChat.getState().sceneConstruction;
+    // ここも直読みしない。描画時点 (上の hook) と実行時点で判定がずれないよう、
+    // 非 hook 版の同じ窓口を通す (Sol 評価 3周目 / 2026-08-04)。
+    const { params, scene } = getStoryboardFinalizeInput();
     if (!params || !scene) return false;
     const goal: StoryboardGoal = {
       summary: messages
@@ -200,6 +273,12 @@ export function GoalChatPanel() {
       styleReferencePaths: params.style_reference_paths,
     };
     setGoal(goal);
+    // 生成入力の分離保持 (Sol 評価 blocking#3 / 2026-08-04)。
+    // 正本の planChat.sceneConstruction は「別スキルへ入った瞬間」に消える共有ストア。
+    // 目標確定と同時に storyboard 専用の控えへ写しておき、漫画などへ寄り道して
+    // 戻ってきても本生成入力が残るようにする。goal と同じ寿命 (phaseEmptyState) なので、
+    // ストーリー境界のリセットでは goal ごと破棄される。
+    useStoryboardRun.getState().setSceneConstruction(scene);
     setPhase(targetPhase);
     useToasts.getState().push({
       kind: "success",
@@ -226,7 +305,13 @@ export function GoalChatPanel() {
       text: "AI に絵コンテ構成を依頼しています…応答後、自動で次へ進みます。",
       ttlMs: 4000,
     });
-    await send("[FINALIZE_STORYBOARD] ここまでの内容で確定 JSON を出してください。");
+    // B-02: 送信が受け付けられなかった (送信中 / 添付が 380MB 超過) 場合は
+    // awaitingTarget を戻す。そのままだと AI 応答が永遠に来ないのに
+    // 「応答後、自動で次へ進みます」の待機状態が残り、確定ボタンも無効のまま固まる。
+    const accepted = await send(
+      "[FINALIZE_STORYBOARD] ここまでの内容で確定 JSON を出してください。",
+    );
+    if (!accepted) setAwaitingTarget(null);
   }
 
   // AI 応答で揃ったら待機中のターゲットへ自動遷移
@@ -250,7 +335,7 @@ export function GoalChatPanel() {
               2026-07-27: 説明を見出しの横のヘルプボタンに畳んだ (STΛCK 指摘
               「貴重なUIを説明で取りすぎている」)。旧: 見出しの下に常時4行のボックス。
             */}
-            <SkillIntro
+            <PageHelp
               what="作りたい話を伝えると、AI が聞き返しながら絵コンテに起こし、そのままカットを続けて作ります。登録キャラと画風を固定するので、話が進んでも同じ人物・同じ絵柄のまま並びます。"
               first="まずは下の入力欄に、作りたい映像を思いつきの一言で書いてください。足りないところは AI が聞き返します。"
               note="同じ人物のまま並べるには、参照画像を1枚以上入れてください。"
@@ -367,8 +452,8 @@ export function GoalChatPanel() {
                 <ul className="mb-2 flex flex-wrap gap-2">
                   {m.attachedImages.map((path) => (
                     <li key={path}>
-                      <img
-                        src={convertFileSrc(path)}
+                      <SafeImage
+                        path={path}
                         alt={basename(path)}
                         title="ダブルクリックで拡大"
                         onDoubleClick={() =>
@@ -376,11 +461,27 @@ export function GoalChatPanel() {
                             .getState()
                             .open(path, m.attachedImages ?? [])
                         }
-                        className="h-20 w-20 cursor-zoom-in rounded border border-pink-500/30 object-cover hover:border-pink-500"
+                        className="h-20 w-auto max-w-40 cursor-zoom-in rounded border border-pink-500/30 object-contain hover:border-pink-500"
                       />
                     </li>
                   ))}
                 </ul>
+              )}
+              {/*
+                go4 (Sol caveat): 送信済みの音源を履歴にも残す。
+                PlanWorkspace の吹き出し (:662) と同じ見た目の読み取り専用チップ。
+                解除ボタンは付けない (送信済みの添付は変更できない)。
+              */}
+              {m.attachedAudio && (
+                <div className="mb-2 flex items-center gap-1.5 rounded-md border border-[#343434] bg-[#0b0b0b] px-2 py-1">
+                  <span className="text-[12px] text-pink-400">♪</span>
+                  <span className="max-w-[200px] truncate text-[10px] font-bold text-zinc-300">
+                    {m.attachedAudio.fileName}
+                  </span>
+                  <span className="text-[10px] text-zinc-500">
+                    ({formatDuration(m.attachedAudio.durationSec)})
+                  </span>
+                </div>
               )}
               <div className="whitespace-pre-wrap leading-relaxed">{m.text}</div>
               {m.streaming && (
@@ -426,14 +527,14 @@ export function GoalChatPanel() {
                   className="group relative flex flex-col gap-1.5 rounded-md border border-[#2a2a2a] bg-[#0d0d0d] px-2 py-1.5"
                 >
                   <div className="flex items-center gap-2">
-                    <img
-                      src={convertFileSrc(p)}
+                    <SafeImage
+                      path={p}
                       alt={basename(p)}
                       title="ダブルクリックで拡大"
                       onDoubleClick={() =>
                         useImagePreview.getState().open(p, attachedImages)
                       }
-                      className="h-8 w-8 cursor-zoom-in rounded object-cover hover:opacity-80"
+                      className="h-8 w-auto max-w-16 cursor-zoom-in rounded object-contain hover:opacity-80"
                     />
                     <span className="max-w-[120px] truncate text-[11px] text-zinc-300">
                       {basename(p)}
@@ -452,6 +553,28 @@ export function GoalChatPanel() {
                 </li>
               ))}
             </ul>
+          </div>
+        )}
+
+        {/* go4: 添付音源チップ。役割トグルは音声には出さない。 */}
+        {pendingAudio && (
+          <div className="flex items-center gap-2 rounded-md border border-[#2a2a2a] bg-[#0d0d0d] px-2 py-1.5">
+            <span className="text-[12px] text-pink-400">♪</span>
+            <span className="max-w-[200px] truncate text-[11px] text-zinc-300">
+              {pendingAudio.fileName}
+            </span>
+            <span className="text-[10px] text-zinc-500">
+              ({formatDuration(pendingAudio.durationSec)})
+            </span>
+            <button
+              type="button"
+              onClick={clearPendingAudio}
+              className="ml-auto rounded p-0.5 text-zinc-500 hover:bg-pink-500/10 hover:text-pink-300"
+              title="音源を外す"
+              aria-label="音源を外す"
+            >
+              <IconClose />
+            </button>
           </div>
         )}
 
@@ -479,10 +602,10 @@ export function GoalChatPanel() {
           <div className="flex items-center gap-1">
             <button
               type="button"
-              onClick={pickImages}
+              onClick={pickFiles}
               className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-[#2a2a2a] text-zinc-300 hover:border-pink-500/40 hover:text-pink-200"
-              title="PC から画像を添付"
-              aria-label="PC から画像を添付"
+              title="PC から画像・音源を添付"
+              aria-label="PC から画像・音源を添付"
             >
               <IconPaperclip />
             </button>

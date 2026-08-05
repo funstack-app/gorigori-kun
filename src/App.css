@@ -144,6 +144,51 @@ html {
   html { font-size: 13px; }
 }
 
+/*
+ * プロンプト行の狭幅対応 (Sol 指摘 2026-08-04)。
+ *
+ * 左パネルは grid-cols-[minmax(280px,340px)] で、狭いときは 280px に張り付く。
+ * このとき p-3 を引いた実効幅は 256px しかないのに、行の中身は
+ * スケッチ26 + gap18 + 形式select40 + AIで整える90 + 要素別編集88 = 262px 必要で、
+ * 約6px はみ出す。移設時は mr-auto で逃がす設計だったが、mr-auto は「余った幅」を
+ * 分配するだけなので、足りない場合には効かない (指摘の核心)。
+ *
+ * 軸は「ウィンドウ幅」ではなく「パネル自身の幅」。同じ 280px でもウィンドウ幅は
+ * いろいろ有り得るため @media では捉えられない。よって @container を使う
+ * (Tailwind 3.4 にプラグインは無いが、WebView は native 対応済み)。
+ *
+ * 300px 未満では右側3操作のラベルを畳んでアイコンのみにする:
+ *   スケッチ26 + gap18 + select40 + AIで整える(26) + 要素別編集(26) = 136px << 256px
+ * ラベルは display:none にせず、幅ゼロで視覚的にだけ隠す
+ * (読み上げには残す。title/aria-label は元から付いている)。
+ */
+.prompt-row-container {
+  container-type: inline-size;
+  container-name: promptrow;
+}
+
+@container promptrow (max-width: 300px) {
+  .prompt-row-compact-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border-width: 0;
+  }
+  /* ラベルが消えた分、アイコンだけの正方形に寄せる。
+     position: relative は、隠したラベル (position: absolute) の
+     位置基準をこのボタン自身に固定するため (外側へ逃がさない)。 */
+  .prompt-row-compact-btn {
+    position: relative;
+    padding-left: 0.3125rem !important;
+    padding-right: 0.3125rem !important;
+    gap: 0 !important;
+  }
+}
+
 body {
   /* Bug修正 (2026-05-28): 生成開始時の再描画で白い下地が見えないよう暗色を固定。 */
   @apply bg-neutral-950 text-neutral-100;

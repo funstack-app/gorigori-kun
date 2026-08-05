@@ -1,4 +1,9 @@
-//! ONNX Runtime (ort) を必要とする編集コマンドの、非 Windows 向けスタブ (2026-07-28)。
+//! ONNX Runtime (ort) を必要とする編集コマンドの、ort 抜き構成向けスタブ。
+//!
+//! 登録される構成は 2 つ (cfg(not(edit_ai)) で判定):
+//!   1. 非 Windows (Mac / Linux) — ort が Windows 限定依存のため (2026-07-28)
+//!   2. Windows 互換版 (compat, --no-default-features) — 旧 CPU の起動クラッシュ
+//!      対策で ort を丸ごと抜いたビルド (2026-08-02)
 //!
 //! なぜこのファイルがあるか:
 //!   ort-sys 2.0.0-rc.12 が Intel Mac (x86_64-apple-darwin) の prebuilt 配布を
@@ -16,11 +21,14 @@
 //!   Mac の背景透過は Vision (resources/removebg.swift) 経由で、ort とは無関係に
 //!   動く (commands/images.rs)。この差し替えの影響を受けない。
 
-/// 非 Windows で ort 依存コマンドが呼ばれたときに返す文言。
+/// ort 依存コマンドが ort 抜きの構成で呼ばれたときに返す文言。
 ///
-/// フロントはこの文字列をそのままトースト表示する想定。原因 (Windows 限定) と
-/// 代替 (背景透過は使える) が1文で分かるようにしてある。
-const UNSUPPORTED: &str = "この機能は現在 Windows 版のみです。Mac では画像の背景透過をご利用ください。";
+/// フロントはこの文字列をそのままトースト表示する想定。
+///
+/// 「Windows 版のみです」と書かない理由 (2026-08-02): このスタブは Mac だけでなく
+/// Windows 互換版 (compat / edit-ai feature オフ) でも登録される。互換版は
+/// Windows なので、旧文言だと「Windows なら使える」という嘘の案内になる。
+const UNSUPPORTED: &str = "この機能はこの構成では利用できません";
 
 fn unsupported<T>() -> Result<T, String> {
     Err(UNSUPPORTED.to_string())
@@ -97,7 +105,13 @@ pub async fn edit_magic_run(
     include_objects: Option<bool>,
     object_count: Option<usize>,
 ) -> Result<serde_json::Value, String> {
-    let _ = (input_path, project_name, mode, include_objects, object_count);
+    let _ = (
+        input_path,
+        project_name,
+        mode,
+        include_objects,
+        object_count,
+    );
     unsupported()
 }
 

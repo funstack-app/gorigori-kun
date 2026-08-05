@@ -49,6 +49,22 @@ export function composePresetPrompt(
   return body ? `${body}${separator}${character}` : character;
 }
 
+/**
+ * キャラ型プリセットが記録している「生成元の参照画像」を全量で読む。
+ *
+ * 新形式 (characterMeta.sourceImages) を優先し、無ければ旧形式の単数
+ * sourceImage を 1 要素配列として返す。両方無ければ空配列。
+ * 旧データ (sourceImages を持たない既存キャラ) をそのまま扱えるようにするための
+ * 唯一の読み出し口。
+ */
+export function characterSourceImages(preset: Preset): string[] {
+  const meta = preset.characterMeta;
+  const multiple = meta?.sourceImages;
+  if (multiple && multiple.length > 0) return multiple;
+  const single = meta?.sourceImage;
+  return single ? [single] : [];
+}
+
 /** キャラ参照の既定上限。STΛCK 報告 (2026-07-19): 14枚渡ると生成が激遅になる。 */
 export const DEFAULT_CHARACTER_REFERENCE_LIMIT = 3;
 

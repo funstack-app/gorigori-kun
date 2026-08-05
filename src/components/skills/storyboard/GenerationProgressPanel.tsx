@@ -1,14 +1,14 @@
-import { convertFileSrc } from "@tauri-apps/api/core";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { storyboard } from "../../../lib/ipc";
 import { useImagePreview } from "../../../lib/store/imagePreview";
-import { usePlanChat } from "../../../lib/store/planChat";
 import { useStoryboardRun } from "../../../lib/store/storyboardRun";
 import { useToasts } from "../../../lib/store/toasts";
 import { useWorkspace } from "../../../lib/store/workspace";
 import { buildProductionParams } from "../../../lib/storyboard/productionParams";
+import { useSceneConstruction } from "../../../lib/storyboard/useSceneConstruction";
 import { GenerationGauge, recordGenerationDuration } from "../../GenerationGauge";
+import { SafeImage } from "../../SafeImage";
 import { CardSizeSlider, gridColsForAspect } from "./cardSize";
 
 /**
@@ -33,12 +33,14 @@ export function GenerationProgressPanel() {
   const beginRun = useStoryboardRun((s) => s.beginRun);
   const setPhase = useStoryboardRun((s) => s.setPhase);
   const adoptTake = useStoryboardRun((s) => s.adoptTake);
+  const regenerateCut = useStoryboardRun((s) => s.regenerateCut);
   // ラフ消失修正 (2026-07-28): take が届くまでの間、そのカットのラフを下敷きに表示する。
   const generationCutSketchMeta = useStoryboardRun((s) => s.generationCutSketchMeta);
   // B2: キービジュアル固定参照 (全カット共通の基準画像)
   const keyVisualPath = useStoryboardRun((s) => s.keyVisualPath);
   const setKeyVisualPath = useStoryboardRun((s) => s.setKeyVisualPath);
-  const sceneConstruction = usePlanChat((s) => s.sceneConstruction);
+  // 共有 planChat が消えていても storyboard 側の控えから読む (Sol 評価 blocking#3)。
+  const sceneConstruction = useSceneConstruction();
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
   // STΛCK指示(2026-06-07): カードサイズ。1=大きく/2=既定/3=小さく。
@@ -321,8 +323,8 @@ export function GenerationProgressPanel() {
             <div className="flex items-center gap-3">
               <div className="h-12 w-16 shrink-0 overflow-hidden rounded-md border border-[#2a2a2a] bg-[#0d0d0d]">
                 {keyVisualPath ? (
-                  <img
-                    src={convertFileSrc(keyVisualPath)}
+                  <SafeImage
+                    path={keyVisualPath}
                     alt="キービジュアル"
                     className="h-full w-full cursor-zoom-in object-cover"
                     title="ダブルクリックで拡大"
@@ -487,8 +489,8 @@ export function GenerationProgressPanel() {
                             >
                               {take ? (
                                 <>
-                                  <img
-                                    src={convertFileSrc(take.imagePath)}
+                                  <SafeImage
+                                    path={take.imagePath}
                                     alt={`take-${idx + 1}`}
                                     className="h-full w-full cursor-zoom-in object-cover"
                                     onDoubleClick={() =>
@@ -513,8 +515,8 @@ export function GenerationProgressPanel() {
                                 </>
                               ) : sketchUnderlayPath ? (
                                 <>
-                                  <img
-                                    src={convertFileSrc(sketchUnderlayPath)}
+                                  <SafeImage
+                                    path={sketchUnderlayPath}
                                     alt={`sketch-${i + 1}`}
                                     title="絵コンテのラフ（この構図で本生成中）"
                                     className="h-full w-full object-cover opacity-40 grayscale"
@@ -536,6 +538,20 @@ export function GenerationProgressPanel() {
 
                       <div className="line-clamp-2 text-xs text-zinc-300">{o.description}</div>
                       {s?.error && <div className="text-[10px] text-red-400">{s.error}</div>}
+                      {/* A-1 (2026-07-30): 失敗カットに次の操作を提示する。store の
+                          regenerateCut は running のみガードなので failed から呼べる。
+                          成功すると TakeCompleted で review に戻り、採用操作で決着する
+                          (既存設計のまま)。 */}
+                      {s?.status === "failed" && (
+                        <button
+                          type="button"
+                          onClick={() => regenerateCut(o.cutId)}
+                          className="self-start rounded-md border border-red-400/40 bg-red-500/10 px-2.5 py-1 text-[11px] font-semibold text-red-200 transition hover:bg-red-500/20"
+                          title="このカットだけ同じ設定でもう一度生成します"
+                        >
+                          このカットだけ再生成
+                        </button>
+                      )}
                     </li>
                   );
                 })}
@@ -552,8 +568,8 @@ function RefThumb({ label, path }: { label: string; path: string }) {
   return (
     <div className="flex w-20 flex-col items-center gap-1">
       <div className="h-14 w-20 overflow-hidden rounded-md border border-[#242424] bg-[#0d0d0d]">
-        <img
-          src={convertFileSrc(path)}
+        <SafeImage
+          path={path}
           alt={label}
           title="ダブルクリックで拡大"
           onDoubleClick={() => useImagePreview.getState().open(path, [path])}

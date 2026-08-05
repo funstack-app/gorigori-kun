@@ -104,6 +104,13 @@ export type EditPlatformInfo = {
   os: string;
   arch: string;
   isAppleSilicon: boolean;
+  /**
+   * ort (ONNX Runtime) 依存の編集AI機能がこのビルドで使えるか。
+   *
+   * os を直接見て判定しないこと。Windows 互換版 (compat / 旧CPU向け) は
+   * os === "windows" のまま false になる (2026-08-02)。
+   */
+  editAiAvailable: boolean;
 };
 
 export const editModels = {
@@ -268,6 +275,9 @@ export type ResizeResult = {
   failed: { path: string; error: string }[];
 };
 
+/** `images_file_sizes` の 1 件。size=null は取得不能 (存在しない/権限)。 */
+export type FileSizeEntry = { path: string; size: number | null };
+
 export const images = {
   startWatcher: () => invoke<StartWatchResult>("images_start_watcher"),
   saveToProject: (src: string, projectDir: string, newName?: string) =>
@@ -325,6 +335,8 @@ export const images = {
    * 残りは続行し、成功一覧と失敗内訳を返す。 */
   exportResized: (paths: string[], targets: ResizeTarget[], outputDir: string) =>
     invoke<ResizeResult>("images_export_resized", { paths, targets, outputDir }),
+  /** 添付画像の合計サイズ事前検査用 (7zf)。取得できないパスは size=null で返る。 */
+  fileSizes: (paths: string[]) => invoke<FileSizeEntry[]>("images_file_sizes", { paths }),
   /** Spawn N parallel `codex exec` workers (each with its own
    * isolated CODEX_HOME) and copy each output PNG into a fresh
    * `~/.codex/generated_images/batch-<id>/` subdir so the watcher
@@ -344,6 +356,14 @@ export const images = {
     turnId?: string;
     /** direct-run 親 run ID。Started イベントで echo される。生成には影響しない。 */
     sourceTag?: string;
+    /** 通常生成専用。`aspect` の規格寸法への正規化を有効化する。
+     * マスク編集・comic は渡さない (元画像と同じ解像度が正のため)。
+     * 規格寸法表は Rust 側 `images::normalize::canonical_size`。 */
+    enforceAspect?: boolean;
+    /** 1枚あたりの生成試行回数の上限 (1..=3)。未指定なら従来どおり最大3回の自動リトライ。
+     * ブロックアウト生成のように「1操作 = 最大1生成」で生成枠を燃やしたくない
+     * 呼び出し元が `1` を渡してリトライを止める (設計 r3 追補1)。 */
+    maxAttempts?: number;
   }) =>
     invoke<{
       batchId: string;
@@ -353,6 +373,34 @@ export const images = {
       /** Rust のキャンセル台帳の実値。true = ユーザーが中止した run。 */
       cancelled: boolean;
     }>("images_generate_batch", { args }),
+};
+
+/** Rust `commands::audio_probe::AudioProbeResult` と一致させること。 */
+export type AudioProbeResult = {
+  fileName: string;
+  ext: string;
+  durationSec: number;
+  sampleRate: number | null;
+  channels: number | null;
+  bitrateKbps: number | null;
+  title: string | null;
+  artist: string | null;
+};
+
+/**
+ * 音源メタデータ抽出 (go4)。
+ *
+ * 音声データ本体は codex に渡さない。ここで得た文字情報だけをプロンプトへ供給する。
+ * 詳細は `src-tauri/src/commands/audio_probe.rs` の冒頭コメント。
+ */
+export const audio = {
+  probe: (path: string) => invoke<AudioProbeResult>("audio_probe", { path }),
+  /** picker 経由 (file.path が取れない) の bytes を audio_uploads/ に保存してパスを返す。 */
+  writeUpload: (fileName: string, bytes: Uint8Array) =>
+    invoke<string>("audio_write_upload", {
+      fileName,
+      bytes: Array.from(bytes),
+    }),
 };
 
 /**
@@ -387,6 +435,16 @@ export async function cancelGeneration(runId: string): Promise<{
   return invoke<{ terminated: number; found: boolean }>("cancel_generation", {
     runId,
   });
+}
+
+/**
+ * 生成枠 (同時実行の上限) の現在値 (cne / 2026-08-04)。
+ *
+ * 上限はフロントに定数を持たない: 429 を検知すると Rust 側が 9 → 6 へ
+ * 自動降格するため、ミラーした定数は降格後に嘘になる。必ずここで取り直す。
+ */
+export async function genCapacity(): Promise<{ limit: number; degraded: boolean }> {
+  return invoke<{ limit: number; degraded: boolean }>("gen_capacity");
 }
 
 export const editExport = {
@@ -663,6 +721,14 @@ export type RegenerateCutParams = {
   sketchMode?: boolean;
 };
 
+/** adoptions.json (サイドカー v2) の 1 エントリ。cutId → これ。
+ *  imagePath は採用時点の画像パス。v1 形式で書かれた古いファイルから
+ *  読んだ場合は null (Rust 側が正規化して返す)。 */
+export type AdoptionEntry = {
+  takeId: string;
+  imagePath?: string | null;
+};
+
 export const storyboard = {
   run: (params: StoryboardRunParams) => invoke<string>("storyboard_run", { params }),
   // checkpointResume は S3 (2026-07-28) で撤去。Rust 側のコマンドごと消してある。
@@ -670,12 +736,17 @@ export const storyboard = {
   /** 単一カットを追加参照画像で再生成 (新 take として TakeCompleted が来る)。 */
   regenerateCut: (params: RegenerateCutParams) =>
     invoke<string>("storyboard_regenerate_cut", { params }),
-  /** P2.5: ユーザー採用 take を永続化 (adoptions.json サイドカー)。 */
-  persistAdoption: (runId: string, cutId: string, takeId: string) =>
-    invoke<void>("storyboard_persist_adoption", { runId, cutId, takeId }),
-  /** P2.5: 保存済み採用結果を読み込む (cutId → takeId のマップ)。 */
+  /** P2.5: ユーザー採用 take を永続化 (adoptions.json サイドカー)。
+   *  imagePath は採用時点の画像パス。起動時の復元
+   *  (restoreUnrecoveredAdoptions) が manifest.json やディレクトリ走査に
+   *  依存せずプロジェクトへ戻せるように、採用時に焼いておく (rr2)。 */
+  persistAdoption: (runId: string, cutId: string, takeId: string, imagePath?: string) =>
+    invoke<void>("storyboard_persist_adoption", { runId, cutId, takeId, imagePath }),
+  /** P2.5: 保存済み採用結果を読み込む (cutId → 採用記録のマップ)。
+   *  v1 形式 (値が takeId 文字列) で書かれたファイルも Rust 側が
+   *  `{ takeId, imagePath: null }` に正規化して返す。 */
   readAdoptions: (runId: string) =>
-    invoke<Record<string, string>>("storyboard_read_adoptions", { runId }),
+    invoke<Record<string, AdoptionEntry>>("storyboard_read_adoptions", { runId }),
   /** 完了済み run の debug-log.json を読み込む（構造化プロンプト履歴の確認用）。 */
   readDebugLog: (runId: string) => invoke<string>("storyboard_read_debug_log", { runId }),
 };
@@ -695,6 +766,13 @@ export type StorageSettings = {
    * Google Drive 等のローカル同期フォルダを指定すると作品データをクラウド同期できる。
    */
   projectsDataRoot?: string | null;
+  /**
+   * 過去に使っていた画像保存先の履歴 (最大5世代・新しい順)。
+   * ライブラリはここも読み続けるので、保存先を変えても過去の画像が見えなくならない。
+   * **設定を組み立てるときは必ずスプレッド (`{...settings, ...}`) で引き継ぐこと。**
+   * キーを列挙して組み直すとこの履歴が黙って落ち、過去画像が見えなくなる。
+   */
+  previousStorageRoots?: string[];
   /** Supabase BYO クラウド連携が有効か。 */
   cloudSupabaseEnabled?: boolean;
   /** Supabase Project URL（anon key は Keychain 保存）。 */
@@ -744,8 +822,13 @@ export type SupabaseSyncResult = {
 export const storage = {
   /** 現在の保存先設定を取得。なければデフォルトを返す。 */
   getSettings: () => invoke<StorageSettings>("storage_get_settings"),
-  /** 保存先設定を更新。Watcher も再起動される。 */
-  setSettings: (settings: StorageSettings) => invoke<void>("storage_set_settings", { settings }),
+  /** 保存先設定を更新。Watcher も再起動される。
+   *  保存先 (storageRoot) が変わったときは Rust 側で再リンクが走り、その結果
+   *  (旧→新パスマップ) を返す。変更が無ければ null。呼び出し側は返り値を
+   *  applyRelinkResult に流して projects / presets / favorites / judgements /
+   *  referenceRoles を即時追従させる (l99 4-2。欠くと次回起動まで stale)。 */
+  setSettings: (settings: StorageSettings) =>
+    invoke<RelinkResult | null>("storage_set_settings", { settings }),
   /** ~/.codex/generated_images/ の中身を新保存先にコピー（元ファイルは残す）。 */
   migrateFromCodexHome: () => invoke<MigrationResult>("storage_migrate_from_codex_home"),
   /** ~/.codex/generated_images/ に残っている画像の件数と容量を取得。 */
@@ -770,6 +853,27 @@ export const storage = {
   /** 指定バックアップの中身（projects.json 文字列）を取得。復元プレビュー/適用用。 */
   readProjectBackup: (backupPath: string) =>
     invoke<string>("projects_read_backup", { backupPath }),
+  /**
+   * presets.json の世代バックアップ一覧を取得（新しい順）。
+   * 各要素 [絶対パス, epochミリ秒, プリセット件数]。
+   * 「プリセット・キャラクターのバックアップ」UI用。
+   */
+  listPresetBackups: () =>
+    invoke<[string, number, number][]>("presets_list_backups"),
+  /** 指定バックアップの中身（presets.json 文字列）を取得。復元適用用。 */
+  readPresetBackup: (backupPath: string) =>
+    invoke<string>("presets_read_backup", { backupPath }),
+  /**
+   * scene3d.json の世代バックアップ一覧を取得（新しい順）。
+   * 各要素 [絶対パス, epochミリ秒, shot(カット)数]。
+   * 「3Dシーンのバックアップ」UI用。3D シーンは単一プロジェクトなので
+   * 件数ではなくカット数を手がかりに復元時点を選ぶ。
+   */
+  listScene3dBackups: () =>
+    invoke<[string, number, number][]>("scene3d_list_backups"),
+  /** 指定バックアップの中身（scene3d.json 文字列）を取得。復元適用用。 */
+  readScene3dBackup: (backupPath: string) =>
+    invoke<string>("scene3d_read_backup", { backupPath }),
 };
 
 // ──────────── Supabase BYO Cloud ────────────
@@ -1012,6 +1116,29 @@ export const codexVision = {
    */
   extractTextBlocks: (imagePath: string, imgW: number, imgH: number) =>
     invoke<string>("codex_extract_text_blocks", { imagePath, imgW, imgH }),
+  /**
+   * 画像→3Dシーン再構成用: 画像を Blender 風ブロックアウトとして解析し、
+   * 床平面上の配置図 (person/objects/camera) を構造化 JSON で返す。
+   *
+   * 返り値は未検証の生出力。パースと検証は呼び出し側
+   * (scene3d/layoutAnalysis.ts の parseSceneLayout) が行う。
+   */
+  analyzeSceneLayout: (imagePath: string) =>
+    invoke<string>("codex_analyze_scene_layout", { imagePath }),
+  /**
+   * 審査セルフチェック用: 画像から「審査観点の事実」だけを列挙する (生 JSON 文字列)。
+   *
+   * describeImage は「AI画像生成で再現するための英語プロンプト1行」を返すもので、
+   * 固有名詞を出さないよう最適化されている ("a red sports car" であって "a Ferrari"
+   * ではない)。ブランド名・実在人物名・作品名は構造的に出てこないため、権利・肖像
+   * まわりの判定材料には使えない (extractTextBlocks を新設したのと同型の理由)。
+   *
+   * このコマンドは**事実の列挙だけ**を返す。「審査に通るか」の判定はしない
+   * (承認可否は LINE の裁量)。ルールへの当てはめは呼び出し側が行う。
+   *
+   * 返り値は未検証の生出力。パースは呼び出し側 (sticker/check.ts) が行う。
+   */
+  reviewFacts: (imagePath: string) => invoke<string>("codex_review_facts", { imagePath }),
 };
 
 // ──────────── Codex MCP servers (~/.codex/config.toml) ────────────
@@ -1037,10 +1164,21 @@ export type SkillImportResult = {
   fileCount: number;
 };
 
+/** インストール済みスキル (専用 CODEX_HOME/skills 配下の実在ディレクトリ)。 */
+export type InstalledSkill = { id: string; path: string };
+
 export const skills = {
   /** 単一 SKILL.md をインポートする。 */
   importMarkdown: (sourcePath: string) =>
     invoke<SkillImportResult>("skill_import", { sourcePath }),
+  /**
+   * インストール済みスキル一覧。パスは Rust が解決した実パスで、フロントは
+   * ホームディレクトリからパスを組み立てない (ygn 2026-08-03)。
+   */
+  listInstalled: () => invoke<InstalledSkill[]>("skill_list_installed"),
+  /** スキルの SKILL.md 本文を読む。戻り値: [本文, スキルid]。 */
+  readSkillMd: (skillId: string) =>
+    invoke<[string, string]>("skill_export_read", { skillId }),
   /** .gori-skill.zip を一括インポートする (references/agents 込み)。 */
   importZip: (sourcePath: string) =>
     invoke<SkillImportResult>("skill_import_zip", { sourcePath }),
@@ -1063,4 +1201,212 @@ export const scene3d = {
    */
   encode: (exportDir: string, fps: number, projectName?: string) =>
     invoke<[string, string]>("scene3d_encode", { exportDir, fps, projectName }),
+};
+
+/** ストーリー動画のカット結合 (uy6 Wave 3)。 */
+export const videoConcat = {
+  /**
+   * カット動画を順に1本へ再エンコード結合し、保存先の絶対パスを返す。
+   *
+   * ffmpeg 不在時は `ffmpeg-not-found:` で始まるエラー文字列を返す
+   * (scene3d と同じ prefix 規約。呼び出し側はこれを degrade 案内に分岐させる)。
+   */
+  story: (paths: string[]) => invoke<string>("video_concat_story", { paths }),
+};
+
+// ──────────── LINE スタンプ: 層A検査 + 書き出し (7q5 S6) ────────────
+
+/**
+ * 出口の2択。工程①〜⑤は共通で、**ここだけが分岐する**。
+ *
+ * - `personal` (このまま使う): 規格矯正はするが規格違反でも止めない。main/tab を出さない。
+ * - `submission` (申請用に書き出す): 規格違反があれば止める。main/tab を出す。枚数の5択も見る。
+ *
+ * **入口でモードを聞かない。** 何も作っていない段階で商売の意思決定を強いないため。
+ */
+export type StickerExportMode = "personal" | "submission";
+
+/** 層A所見の重さ。`blocker` は申請モードで書き出しを止める。 */
+export type StickerIssueSeverity = "blocker" | "warning";
+
+/** 層A（決定論チェッカー）の所見1件。 */
+export type StickerIssue = {
+  /** `size-over` / `no-alpha` / `margin-short` / `fringe` など。 */
+  id: string;
+  severity: StickerIssueSeverity;
+  message: string;
+};
+
+/** 1枚分の検査結果。 */
+export type StickerInspection = {
+  path: string;
+  width: number;
+  height: number;
+  bytes: number;
+  /** 不透明画素が占める割合 (0〜1)。 */
+  inkRatio: number;
+  /** 被写体と外枠の最短距離 (px)。被写体が無ければ null。 */
+  marginPx: number | null;
+  issues: StickerIssue[];
+};
+
+export type StickerInspectResult = {
+  items: StickerInspection[];
+  /** セット全体の所見 (`total-too-large` / `count-invalid`)。 */
+  setIssues: StickerIssue[];
+  totalBytes: number;
+};
+
+export type StickerExportItem = {
+  source: string;
+  output: string;
+  width: number;
+  height: number;
+  bytes: number;
+  /** 縮小率。**1.0 を超えることはない** (拡大禁止)。 */
+  scale: number;
+  issues: StickerIssue[];
+};
+
+export type StickerExportFailure = { source: string; error: string };
+
+export type StickerExportResult = {
+  mode: StickerExportMode;
+  items: StickerExportItem[];
+  /** 1枚失敗しても残りは書き出される (部分成功)。 */
+  failed: StickerExportFailure[];
+  mainImage: string | null;
+  tabImage: string | null;
+  totalBytes: number;
+  setIssues: StickerIssue[];
+  /** 申請モードで作った提出用 ZIP のパス。personal では null。 */
+  zipPath: string | null;
+  /**
+   * 作った ZIP の**実ファイルサイズ**(バイト)。personal では null。
+   *
+   * `totalBytes` (PNG の素の合計) とは別物。圧縮率は中身次第で変わるため、
+   * 60MB 判定はこちらの実測値で行う。
+   */
+  zipBytes: number | null;
+};
+
+export type StickerChromaResult = {
+  /** 抜いた結果の PNG パス。**元画像は残る** (失敗時に戻れるようにするため)。 */
+  output: string;
+  /** 完全透過にした画素数。**0 なら緑背景が無かった** (＝抜けていない)。 */
+  cleared: number;
+  /** 遷移帯 (半透明) の画素数。 */
+  semiTransparent: number;
+  /** 残った不透明画素数 (＝被写体)。 */
+  opaque: number;
+  /** 緑スピルを削った画素数。 */
+  despilled: number;
+  /** 半透明が輪郭1周分 (100) に対しどれだけ多いか。 */
+  fringePct: number;
+  /**
+   * 抜け残り (輪郭のにじみ) の疑いがあるか。
+   *
+   * しきい値の判定は **Rust 側が済ませて返す**。フロントで数値比較を書くと
+   * しきい値が2箇所になるため (正本は `chroma.rs` の `FRINGE_WARN_PCT`)。
+   */
+  fringeWarn: boolean;
+};
+
+/**
+ * 「この画像はこの統計で抜いた」という申告1件 (A5)。
+ *
+ * 縁の品質 (`fringe` / `edge-aliased`) は**抜いた瞬間にしか測れない**。
+ * Rust 側 `inspect_rgba` は統計を引数で受け取る設計だが、**本番の呼び出しが両方とも
+ * `None` を渡しており、縁の検査が実運用で一度も動いていなかった**。
+ * 抜いた側 (フロント) が覚えておいて `inspect` / `export` の両方へ渡す。
+ *
+ * `path` は `StickerChromaResult.output` と同じ値 (＝抜いた後のファイル)。
+ * **申告が無い画像では `fringe` を判定しない** — 持ち込み画像や抜きに失敗した画像に
+ * 縁の品質は語れないため (測っていないものを測ったふりにしない)。
+ */
+export type StickerChromaSample = {
+  path: string;
+  cleared: number;
+  semiTransparent: number;
+  opaque: number;
+  despilled: number;
+};
+
+/**
+ * LINE スタンプの層A (画像規格の決定論チェック) と書き出し。
+ *
+ * ⚠️ ここが保証するのは **画像規格** (サイズ・透過・余白・容量) だけ。
+ * 「審査に通る」ことは保証しない (承認可否は LINE の裁量)。UI 文言でもそう書かないこと。
+ */
+export const sticker = {
+  /**
+   * 緑背景を色距離で抜いて透過 PNG を作る (決定論・AI不使用)。
+   *
+   * 背景色を先に決めてから抜くので、**被写体が純白でも抜ける** (背景除去AIは
+   * 白を白から分離できない)。ort を使わないため Windows 互換版でも動く。
+   *
+   * `cleared === 0` は**エラーではなく「抜けなかった」事実**として返る。
+   * 規格としての合否は `inspect` / `export` の層A (`no-alpha`) が判定する。
+   */
+  chromaKey: (path: string) => invoke<StickerChromaResult>("sticker_chroma_key", { path }),
+  /**
+   * 検査だけ行う (ファイルは1バイトも書かない)。書き出し前の確認画面が使う。
+   *
+   * 出る所見は `export` と**同じ関数**から出る。別実装にすると
+   * 「確認画面では通ったのに書き出しで止まる」が起きる。
+   */
+  inspect: (
+    paths: string[],
+    mode: StickerExportMode,
+    /** 抜いた側が測った統計 (A5)。渡した画像だけ `fringe` / `edge-aliased` を判定する。 */
+    chromaSamples?: StickerChromaSample[],
+  ) =>
+    invoke<StickerInspectResult>("sticker_inspect", {
+      paths,
+      mode,
+      chromaSamples: chromaSamples ?? null,
+    }),
+  /**
+   * フォルダへ一式書き出す (`01.png`〜)。
+   *
+   * **申請モードは提出用 ZIP も1つ作る** (`line-stickers.zip`)。LINE Creators Market は
+   * ZIP でのアップロードを受け付けるため、作らないとユーザーが手で ZIP 化する作業が残る
+   * (STΛCK指摘 2026-08-05)。個別ファイルもそのまま残るので D&D 派の導線は壊れない。
+   *
+   * 出力先に既存の連番/main/tab があると**書く前にエラーで止まる**
+   * (`01 (1).png` を作って連番を壊さないため)。上書きしてよい場合だけ
+   * `overwrite: true` を渡す — その判断は人がする。
+   */
+  export: (params: {
+    paths: string[];
+    outputDir: string;
+    mode: StickerExportMode;
+    /** メイン画像 (240×240) の元。未指定なら1枚目。submission でのみ使う。 */
+    mainSource?: string;
+    /** タブ画像 (96×74) の元。未指定なら1枚目。submission でのみ使う。 */
+    tabSource?: string;
+    overwrite?: boolean;
+    /**
+     * 作成に使った書き味 (プロンプトスタイル) のID。
+     *
+     * 渡すと出力先に `作成条件.txt` を併置する。**提出物には何も足さない**
+     * (PNG のメタデータには書かない)。あとで「どちらで作ったか」を追うための控え。
+     */
+    promptStyle?: string;
+    /**
+     * 抜いた側が測った統計 (A5)。**`inspect` と同じ配列を渡すこと** —
+     * 材料が違うと「確認画面では出た警告が書き出しでは消える」が起きる。
+     */
+    chromaSamples?: StickerChromaSample[];
+  }) =>
+    invoke<StickerExportResult>("sticker_export", {
+      paths: params.paths,
+      outputDir: params.outputDir,
+      mode: params.mode,
+      mainSource: params.mainSource ?? null,
+      tabSource: params.tabSource ?? null,
+      overwrite: params.overwrite ?? false,
+      promptStyle: params.promptStyle ?? null,
+      chromaSamples: params.chromaSamples ?? null,
+    }),
 };

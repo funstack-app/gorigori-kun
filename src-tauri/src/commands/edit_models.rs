@@ -77,6 +77,12 @@ pub struct EditPlatformInfo {
     pub arch: String,
     /// Apple Silicon (macos + aarch64)。現状どのモードの前提でもない素の環境情報。
     pub is_apple_silicon: bool,
+    /// ort (ONNX Runtime) 依存の編集AI機能がこのビルドで使えるか (2026-08-02)。
+    ///
+    /// フロントは os を直接見ずにこれで判定する。Windows 互換版 (compat) は
+    /// OS が windows のまま false になるため、os での判定だと誤って
+    /// 「使える」と表示してしまう。
+    pub edit_ai_available: bool,
 }
 
 #[tauri::command]
@@ -88,6 +94,7 @@ pub fn edit_platform_info() -> EditPlatformInfo {
         os,
         arch,
         is_apple_silicon,
+        edit_ai_available: cfg!(edit_ai),
     }
 }
 
@@ -107,7 +114,7 @@ pub async fn edit_models_delete(
     // edit_runtime が存在しない (ort が Windows 限定依存のため。2026-07-28)。
     // モデルファイルの削除自体はどちらでも走るので、DL 済みモデルの掃除は
     // Mac でも機能する。
-    #[cfg(target_os = "windows")]
+    #[cfg(edit_ai)]
     state.edit_runtime.clear().await;
     Ok(())
 }

@@ -17,7 +17,12 @@ import type { Reference } from "./store/composer";
  */
 export const REFERENCE_DRAG_MIME = "application/x-gori-reference";
 
-export type DragSource = "gallery" | "preset" | "upload" | "external";
+export type DragSource =
+  | "gallery"
+  | "preset"
+  | "upload"
+  | "external"
+  | "sketch";
 
 export type DraggableRef = {
   path: string;
@@ -59,7 +64,11 @@ export function parseDraggedReference(
         typeof parsed.name === "string" && parsed.name
           ? parsed.name
           : basename(parsed.path),
-      source: parsed.source === "upload" ? "upload" : "gallery",
+      // 既知の source だけを通す。未知の値は "gallery" に倒す (未信頼入力の正規化)。
+      source:
+        parsed.source === "upload" || parsed.source === "sketch"
+          ? parsed.source
+          : "gallery",
       role: parsed.role,
     };
   } catch {

@@ -48,7 +48,7 @@ function persistCount(n: number) {
   }
 }
 
-export type ReferenceSource = "gallery" | "upload";
+export type ReferenceSource = "gallery" | "upload" | "sketch";
 export type ReferenceRole =
   | "subject"
   | "look"

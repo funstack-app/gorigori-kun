@@ -91,9 +91,27 @@ export function Toaster() {
             >
               {s.icon}
             </span>
-            <span className="flex-1 whitespace-pre-wrap text-[11px] leading-relaxed text-neutral-200">
-              {t.text}
-            </span>
+            <div className="flex-1">
+              <span className="whitespace-pre-wrap text-[11px] leading-relaxed text-neutral-200">
+                {t.text}
+              </span>
+              {/*
+                添えられた操作 (cne)。押したらその場で閉じる: 行き先へ移動した後も
+                通知が残っていると「まだ何か残っている」ように見える。
+              */}
+              {t.action && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    t.action?.run();
+                    dismiss(t.id);
+                  }}
+                  className="mt-1.5 block rounded-md border border-neutral-600 px-2 py-0.5 text-[10px] font-bold text-neutral-200 transition-colors hover:border-pink-500/60 hover:text-pink-300"
+                >
+                  {t.action.label}
+                </button>
+              )}
+            </div>
             <button
               onClick={async () => {
                 try {

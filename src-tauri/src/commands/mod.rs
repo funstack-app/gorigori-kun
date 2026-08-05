@@ -1,3 +1,4 @@
+pub mod audio_probe;
 pub mod auth;
 pub mod batch_gen;
 pub mod cloud_supabase;
@@ -7,24 +8,24 @@ pub mod edit_export;
 pub mod edit_fonts;
 // ort (ONNX Runtime) を使う編集コマンド群は Windows 限定 (2026-07-28)。
 // 理由と代替スタブは commands/edit_unsupported.rs の冒頭コメント参照。
-#[cfg(target_os = "windows")]
+pub mod character_sheet;
+#[cfg(edit_ai)]
 pub mod edit_grab;
-#[cfg(target_os = "windows")]
+#[cfg(edit_ai)]
 pub mod edit_inpaint;
-#[cfg(target_os = "windows")]
+#[cfg(edit_ai)]
 pub mod edit_magic;
 pub mod edit_models;
-#[cfg(target_os = "windows")]
+#[cfg(edit_ai)]
 pub mod edit_ocr;
-#[cfg(target_os = "windows")]
+#[cfg(edit_ai)]
 pub mod edit_sam2;
-#[cfg(not(target_os = "windows"))]
-pub mod edit_unsupported;
-#[cfg(target_os = "windows")]
-pub mod edit_words;
-#[cfg(target_os = "windows")]
+#[cfg(edit_ai)]
 pub mod edit_segment;
-pub mod character_sheet;
+#[cfg(not(edit_ai))]
+pub mod edit_unsupported;
+#[cfg(edit_ai)]
+pub mod edit_words;
 pub mod gen_metrics;
 pub mod gen_queue;
 pub mod gen_worker;
@@ -35,16 +36,18 @@ pub mod magnific;
 pub mod mcp;
 pub mod multiangle;
 pub mod rpc_bridge;
+pub mod scene3d;
 pub mod secrets;
 pub mod segment;
 pub mod sessions;
 pub mod skills;
+pub mod sticker;
 pub mod stock;
 pub mod storage;
 pub mod storage_cleanup;
-pub mod scene3d;
 pub mod storyboard;
 pub mod translate;
+pub mod video_concat;
 pub mod worker_registry;
 
 use std::path::Path;
@@ -121,9 +124,7 @@ pub async fn codex_start(
         .map_err(|e| format!("{e:#}"))?;
     tracing::info!(target: "codex", "spawning {}", bin.display());
 
-    let proc = spawn_app_server(&bin)
-        .await
-        .map_err(|e| format!("{e:#}"))?;
+    let proc = spawn_app_server(&bin).await.map_err(|e| format!("{e:#}"))?;
     let stderr_buf = proc.stderr_buf.clone();
     let handle = RpcClient::start(proc.stdin, proc.stdout);
     let client = handle.client.clone();

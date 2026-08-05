@@ -24,9 +24,7 @@ use crate::codex::process::{
 use crate::codex::rpc::{handshake, RpcClient, RpcNotification};
 use crate::commands::gen_metrics;
 use crate::commands::gen_queue::{self, GLOBAL_GEN_SEMAPHORE};
-use crate::commands::worker_registry::{
-    WorkerPidGuard, RESIDENT_GEN_SERVER_WORKER_KIND,
-};
+use crate::commands::worker_registry::{WorkerPidGuard, RESIDENT_GEN_SERVER_WORKER_KIND};
 use crate::state::AppState;
 
 pub(crate) const GENERATION_TIMEOUT: Duration = Duration::from_secs(900);
@@ -226,6 +224,26 @@ pub(crate) async fn generate_image_for_run(
     Err("resident path disabled on windows".to_string())
 }
 
+/// Windows は常駐経路が無効なので、フックを呼ばずそのまま失敗を返す。
+/// 呼び出し側は exec フォールバックへ落ち、そちらの permit でフックが発火する。
+#[allow(clippy::too_many_arguments)]
+#[cfg(windows)]
+pub(crate) async fn generate_image_for_run_with_slot_hook(
+    _app: &AppHandle,
+    _state: &AppState,
+    _prompt: &str,
+    _image_paths: &[String],
+    _cwd: Option<&str>,
+    _model: Option<&str>,
+    _effort: Option<&str>,
+    _run_id: Option<&str>,
+    _image_index: Option<u32>,
+    _feature: &'static str,
+    _slot_hook: &crate::commands::gen_worker::SlotHook<'_>,
+) -> Result<PathBuf, String> {
+    Err("resident path disabled on windows".to_string())
+}
+
 #[allow(clippy::too_many_arguments)]
 #[cfg(not(windows))]
 pub(crate) async fn generate_image(
@@ -267,6 +285,37 @@ pub(crate) async fn generate_image_for_run(
     image_index: Option<u32>,
     feature: &'static str,
 ) -> Result<PathBuf, String> {
+    generate_image_for_run_with_slot_hook(
+        app,
+        state,
+        prompt,
+        image_paths,
+        cwd,
+        model,
+        effort,
+        run_id,
+        image_index,
+        feature,
+        &crate::commands::gen_worker::SlotHook::none(),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+#[cfg(not(windows))]
+pub(crate) async fn generate_image_for_run_with_slot_hook(
+    app: &AppHandle,
+    state: &AppState,
+    prompt: &str,
+    image_paths: &[String],
+    cwd: Option<&str>,
+    model: Option<&str>,
+    effort: Option<&str>,
+    run_id: Option<&str>,
+    image_index: Option<u32>,
+    feature: &'static str,
+    slot_hook: &crate::commands::gen_worker::SlotHook<'_>,
+) -> Result<PathBuf, String> {
     // T0: 1枚の区間タイムを jsonl へ排気する。どの脱出経路を通っても
     // 必ず1行残るよう、成功/失敗の分岐すべてで record する。
     // feature は呼び出し元の機能名 (batch / storyboard / multiangle)。
@@ -284,6 +333,7 @@ pub(crate) async fn generate_image_for_run(
         run_id,
         &phase,
         &mut timer,
+        slot_hook,
     )
     .await;
     match &result {
@@ -310,10 +360,9 @@ async fn generate_image_measured(
     run_id: Option<&str>,
     phase: &GenPhaseReporter,
     timer: &mut gen_metrics::GenTimer,
+    slot_hook: &crate::commands::gen_worker::SlotHook<'_>,
 ) -> Result<PathBuf, String> {
-    let run_id = run_id
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
+    let run_id = run_id.map(str::trim).filter(|value| !value.is_empty());
     if run_is_cancelled(run_id) {
         return Err(gen_queue::cancelled_error());
     }
@@ -370,6 +419,9 @@ async fn generate_image_measured(
     phase.emit_with_position(GenPhase::Queued, Some(position));
     // RAII: 以降どの経路で抜けても Drop が債務返済を通す (直接 drop できない)。
     let permit = gen_queue::OwnedGenPermit::acquire(Arc::clone(&*GLOBAL_GEN_SEMAPHORE)).await?;
+    // 枠が取れた = このカットが本当に動き始めた。呼び出し側 (character_sheet の
+    // cutStarted) へ折り返す。acquire より前で呼ばないのが要点。
+    slot_hook.fire();
     // ① 順番待ち (セマフォ空き待ち)。
     timer.permit_acquired();
     // 待機中にキャンセルされた turn は共有サーバーへ発行しない。
@@ -1002,12 +1054,12 @@ async fn spawn_server(app: &AppHandle) -> Result<GenServerProcess, String> {
     // PID停止対象から外す。実行中turnは turn/interrupt で止める。
     let registration =
         match WorkerPidGuard::register(app, pid, RESIDENT_GEN_SERVER_WORKER_KIND, None) {
-        Ok(registration) => registration,
-        Err(error) => {
-            let _ = child.kill().await;
-            return Err(format!("生成用 app-server の PID 台帳登録に失敗: {error}"));
-        }
-    };
+            Ok(registration) => registration,
+            Err(error) => {
+                let _ = child.kill().await;
+                return Err(format!("生成用 app-server の PID 台帳登録に失敗: {error}"));
+            }
+        };
 
     let handle = RpcClient::start(stdin, stdout);
     let client = handle.client.clone();
@@ -1285,9 +1337,8 @@ fn send_terminate(_pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_thread_id, extract_turn_id, gen_queue, is_gen_server_command,
-        notification_matches, should_replace_server, spawn_permit_watchdog_with_timeout, GenPhase,
-        MAX_TURNS_PER_SERVER,
+        extract_thread_id, extract_turn_id, gen_queue, is_gen_server_command, notification_matches,
+        should_replace_server, spawn_permit_watchdog_with_timeout, GenPhase, MAX_TURNS_PER_SERVER,
     };
     use serde_json::{json, Value};
     use std::sync::Arc;

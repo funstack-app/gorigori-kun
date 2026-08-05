@@ -98,25 +98,86 @@ export const REFERENCE_ROLE_META: Record<ReferenceRoleKind, ReferenceRoleMeta> =
 
 const ROLES_LS_KEY = "referenceRoles.byPath";
 
+/**
+ * plugin-store のファイル名 / キー (2026-08-03 r9c)。
+ *
+ * なぜ localStorage 単独をやめたか: WebView のビルドID
+ * (app.codexframefactory / .dev / .capture) ごとに別領域になり、ビルドを跨ぐと
+ * 割当が空に見える。WebView データ消去でも全損する。
+ * 同型データ (path キーの作品メタ) である favorites/judgements が既に
+ * plugin-store なので、path キー資産の regime を 1 つに揃える
+ * (rename / 移動 / relink の追従面を数えやすくするため)。
+ *
+ * Rust 正本 (motions.json 等) にしないのは、データがパス→ロール1語の小さな map で、
+ * 世代バックアップ・空上書きガードの価値が薄く、再指定コストも極小のため。
+ */
+const ROLES_STORE_FILE = "reference-roles.json";
+const ROLES_STORE_KEY = "byPath";
+
 type RolesMap = Record<string, ReferenceRoleKind>;
 
 function isRoleKind(v: unknown): v is ReferenceRoleKind {
   return (REFERENCE_ROLE_KINDS as readonly string[]).includes(v as string);
 }
 
+/** 未検証の map (localStorage / ファイル由来) を 1 件ずつ検証して取り込む。 */
+function sanitizeRoles(parsed: unknown): RolesMap {
+  if (!parsed || typeof parsed !== "object") return {};
+  const out: RolesMap = {};
+  for (const [path, role] of Object.entries(parsed as Record<string, unknown>)) {
+    if (typeof path === "string" && isRoleKind(role)) out[path] = role;
+  }
+  return out;
+}
+
 function readPersisted(): RolesMap {
   try {
     const raw = localStorage.getItem(ROLES_LS_KEY);
     if (!raw) return {};
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object") return {};
-    const out: RolesMap = {};
-    for (const [path, role] of Object.entries(parsed as Record<string, unknown>)) {
-      if (typeof path === "string" && isRoleKind(role)) out[path] = role;
-    }
-    return out;
+    return sanitizeRoles(JSON.parse(raw));
   } catch {
     return {};
+  }
+}
+
+// store インスタンスはモジュールキャッシュ (savedPrompts.ts と同型)。
+// mutate のたびに plugin import + load を再実行するのは無駄で、書き込み競合も招く。
+let storePromise: Promise<Awaited<ReturnType<typeof loadStoreOnce>> | null> | null = null;
+
+async function loadStoreOnce() {
+  const { load } = await import("@tauri-apps/plugin-store");
+  return await load(ROLES_STORE_FILE, { defaults: {}, autoSave: true });
+}
+
+async function loadStore() {
+  if (storePromise) return storePromise;
+  storePromise = loadStoreOnce().catch((err) => {
+    // Tauri 外 (Vite 単体プレビュー等) や load 失敗。localStorage 運用を継続する。
+    console.warn("[referenceRoles] loadStore failed", err);
+    return null;
+  });
+  return storePromise;
+}
+
+/**
+ * ファイルへ書いてよいと確定したか。initialize が成功したときだけ true。
+ * false の間は localStorage のみに書き、**ファイルへは触らない**
+ * (読めていない正本を localStorage 由来の内容で潰さない)。
+ */
+let fileWriteUnlocked = false;
+/** 解禁前に mutate した path (解禁時にファイル側へ再適用する)。 */
+const mutatedPaths = new Set<string>();
+
+/** plugin-store へ書く (fire-and-forget)。失敗は warn のみ。 */
+async function persistToStore(value: RolesMap): Promise<void> {
+  const store = await loadStore();
+  if (!store) return; // ファイルへは書かない (localStorage のみ継続)
+  try {
+    await store.set(ROLES_STORE_KEY, value);
+    await store.save();
+  } catch (err) {
+    // ロールは再指定可能な軽資産なのでトーストまでは出さない (ログのみ)。
+    console.warn("[referenceRoles] persist failed", err);
   }
 }
 
@@ -125,6 +186,16 @@ function persist(value: RolesMap) {
     localStorage.setItem(ROLES_LS_KEY, JSON.stringify(value));
   } catch {
     /* private mode / quota — non-fatal */
+  }
+  if (!fileWriteUnlocked) return; // 解禁前。mutatedPaths は呼び出し側で記録済み
+  void persistToStore(value);
+}
+
+/** 解禁前の mutate を記録する (initialize でファイル側へ再適用するため)。 */
+function markMutated(...paths: string[]) {
+  if (fileWriteUnlocked) return;
+  for (const p of paths) {
+    if (p) mutatedPaths.add(p);
   }
 }
 
@@ -141,6 +212,24 @@ type ReferenceRolesState = {
   ensureRoles: (paths: string[], fallback?: ReferenceRoleKind) => void;
   /** 添付解除時に役割エントリを掃除する。 */
   clearRole: (path: string) => void;
+  /**
+   * 画像のリネーム / 移動に追従してキーを付け替える (2026-08-03 r9c)。
+   * ここを欠くと、リネームした瞬間にロールが既定 (キャラ) に剥がれる。
+   * presets.renameImagePath と同型で、変化が無ければ set も persist もしない。
+   */
+  renamePath: (oldPath: string, newPath: string) => void;
+  /**
+   * rr2: relink (画像パス修復) の旧→新マップを一括適用する。renamePath の一括版で、
+   * 1 回の set + 1 回の persist で済ませる。
+   * 旧/新パスの両方を markMutated に積むため、initialize (解禁) との実行順が
+   * どちらでも記録が失われない。変化が無ければ set も persist もしない。
+   */
+  relinkPaths: (pathMap: Record<string, string>) => void;
+  /**
+   * 起動時にファイル (reference-roles.json) から読み込み、書き込みを解禁する。
+   * **読めなかった経路ではファイルへ書かない**という不変条件を守る。
+   */
+  initialize: () => Promise<void>;
 };
 
 export const useReferenceRoles = create<ReferenceRolesState>((set, get) => ({
@@ -150,6 +239,7 @@ export const useReferenceRoles = create<ReferenceRolesState>((set, get) => ({
 
   setRole: (path, role) => {
     const next = { ...get().roles, [path]: role };
+    markMutated(path);
     persist(next);
     set({ roles: next });
   },
@@ -160,6 +250,7 @@ export const useReferenceRoles = create<ReferenceRolesState>((set, get) => ({
     const nextRole =
       REFERENCE_ROLE_KINDS[(idx + 1) % REFERENCE_ROLE_KINDS.length];
     const next = { ...get().roles, [path]: nextRole };
+    markMutated(path);
     persist(next);
     set({ roles: next });
   },
@@ -172,6 +263,7 @@ export const useReferenceRoles = create<ReferenceRolesState>((set, get) => ({
       if (path && next[path] === undefined) {
         next[path] = fallback;
         changed = true;
+        markMutated(path);
       }
     }
     if (!changed) return;
@@ -183,7 +275,88 @@ export const useReferenceRoles = create<ReferenceRolesState>((set, get) => ({
     if (get().roles[path] === undefined) return;
     const next = { ...get().roles };
     delete next[path];
+    // 削除も「触った path」として記録する。解禁時の再適用では
+    // 「state に無い = 削除済み」として表現される。
+    markMutated(path);
     persist(next);
     set({ roles: next });
+  },
+
+  renamePath: (oldPath, newPath) => {
+    if (!oldPath || !newPath || oldPath === newPath) return;
+    const current = get().roles;
+    const role = current[oldPath];
+    if (role === undefined) return; // 既定 (キャラ) のままなら記録が無いので何もしない
+    const next = { ...current };
+    delete next[oldPath];
+    next[newPath] = role;
+    markMutated(oldPath, newPath);
+    persist(next);
+    set({ roles: next });
+  },
+
+  relinkPaths: (pathMap) => {
+    const entries = Object.entries(pathMap).filter(
+      ([oldPath, newPath]) => oldPath && newPath && oldPath !== newPath,
+    );
+    if (entries.length === 0) return;
+    const current = get().roles;
+    // 記録があるパスだけが対象 (既定=キャラのままなら何もしない)。
+    const hits = entries.filter(([oldPath]) => current[oldPath] !== undefined);
+    if (hits.length === 0) return;
+    const next = { ...current };
+    for (const [oldPath, newPath] of hits) {
+      const role = next[oldPath];
+      delete next[oldPath];
+      next[newPath] = role;
+      markMutated(oldPath, newPath);
+    }
+    persist(next);
+    set({ roles: next });
+  },
+
+  initialize: async () => {
+    const store = await loadStore();
+    if (!store) return; // 解禁しない (localStorage 運用を継続)
+
+    let fileRoles: unknown;
+    try {
+      fileRoles = await store.get(ROLES_STORE_KEY);
+    } catch (err) {
+      console.warn("[referenceRoles] ファイル読み出しに失敗 (localStorage を継続使用):", err);
+      return; // 解禁しない
+    }
+
+    if (fileRoles != null && typeof fileRoles === "object") {
+      // ファイル有 = 正本。ただし起動〜解禁の間に触った path はセッション中の値を勝たせる
+      // (この窓で付けたロールを黙って捨てない)。
+      const next = sanitizeRoles(fileRoles);
+      const current = get().roles;
+      for (const path of mutatedPaths) {
+        const role = current[path];
+        if (role === undefined) delete next[path];
+        else next[path] = role;
+      }
+      mutatedPaths.clear();
+      fileWriteUnlocked = true;
+      set({ roles: next });
+      // localStorage の冗長バックアップを最新化する。
+      try {
+        localStorage.setItem(ROLES_LS_KEY, JSON.stringify(next));
+      } catch {
+        /* private mode / quota — non-fatal */
+      }
+      return;
+    }
+
+    // ファイル未作成 = localStorage からの移行 or 新規ユーザー。
+    // 現在の state (localStorage 由来) を正とする。
+    mutatedPaths.clear();
+    fileWriteUnlocked = true;
+    const current = get().roles;
+    if (Object.keys(current).length > 0) {
+      console.info("[referenceRoles] localStorage から参照ロールをファイルへ移行");
+      await persistToStore(current);
+    }
   },
 }));

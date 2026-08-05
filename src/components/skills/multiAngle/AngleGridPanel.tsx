@@ -1,4 +1,4 @@
-import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
@@ -19,6 +19,7 @@ import { getAngleCut } from "../../../lib/multiangle/angles";
 import type { CutState, MultiAngleParams } from "../../../lib/multiangle/types";
 import { sendImageToCharacterRegister } from "../../../lib/character/sendImageToCharacterRegister";
 import { GenerationGauge, recordGenerationDuration } from "../../GenerationGauge";
+import { SafeImage } from "../../SafeImage";
 
 /* ---------- フラットラインアイコン (絵文字を使わない。STΛCK 指示 2026-07-25) ---------- */
 
@@ -549,8 +550,8 @@ export function AngleGridPanel({
                   </button>
                 )}
                 {cut.status === "completed" && cut.imagePath ? (
-                  <img
-                    src={convertFileSrc(cut.imagePath)}
+                  <SafeImage
+                    path={cut.imagePath}
                     alt={cut.label}
                     className="h-full w-full cursor-pointer object-contain"
                     onClick={() =>

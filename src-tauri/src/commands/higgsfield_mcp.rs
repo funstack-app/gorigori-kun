@@ -42,7 +42,10 @@ use serde_json::{json, Value};
 use tauri::State;
 
 use crate::codex::mcp_direct::{call_tool, reload_mcp_servers};
-use crate::codex::mcp_shared::{entry_is_authenticated, find_mcp_entry, gori_codex_command, run_codex_capture};
+use crate::codex::mcp_shared::{
+    entry_is_authenticated, find_mcp_entry, gori_codex_command, run_codex_auth_capture,
+    run_codex_capture,
+};
 use crate::state::AppState;
 
 const HIGGSFIELD_MCP_NAME: &str = "higgsfield";
@@ -139,16 +142,14 @@ pub async fn higgsfield_mcp_status() -> Result<HiggsfieldMcpStatus, String> {
         Err(_) => return Ok(higgsfield_mcp_status_unavailable()),
     };
     // `mcp list` はローカル config を読むだけなので速いが、念のため上限を設ける。
-    let output = match tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        child.wait_with_output(),
-    )
-    .await
-    {
-        Ok(Ok(o)) => o,
-        // 実行失敗・タイムアウトとも未接続として degrade。
-        _ => return Ok(higgsfield_mcp_status_unavailable()),
-    };
+    let output =
+        match tokio::time::timeout(std::time::Duration::from_secs(30), child.wait_with_output())
+            .await
+        {
+            Ok(Ok(o)) => o,
+            // 実行失敗・タイムアウトとも未接続として degrade。
+            _ => return Ok(higgsfield_mcp_status_unavailable()),
+        };
 
     let Some(entry) = find_mcp_entry(&output.stdout, HIGGSFIELD_MCP_NAME) else {
         return Ok(higgsfield_mcp_status_unavailable());
@@ -175,8 +176,17 @@ const HIGGSFIELD_MCP_LOGIN_TIMEOUT_SECS: u64 = 180;
 pub async fn higgsfield_mcp_login(state: State<'_, AppState>) -> Result<String, String> {
     // ① 登録 (mcp add)。実機ではこの段階で OAuth が自動完了する。既に登録済みだと
     //    codex が非ゼロ終了することがあるが、それはエラーにせず login に進む (冪等性)。
-    let add = run_codex_capture(
-        &["mcp", "add", HIGGSFIELD_MCP_NAME, "--url", HIGGSFIELD_MCP_URL],
+    //    認可 2 操作 (add / login) だけ codex-auth (0.147.0-alpha.4) で実行する。
+    //    Higgsfield は add 段階で OAuth が自動起動するため add も対象。Magnific と
+    //    同じ rmcp コールバック処理を通るので、iss 広告が入った時点で同じバグを踏む。
+    let add = run_codex_auth_capture(
+        &[
+            "mcp",
+            "add",
+            HIGGSFIELD_MCP_NAME,
+            "--url",
+            HIGGSFIELD_MCP_URL,
+        ],
         std::time::Duration::from_secs(HIGGSFIELD_MCP_LOGIN_TIMEOUT_SECS),
     )
     .await?;
@@ -193,7 +203,7 @@ pub async fn higgsfield_mcp_login(state: State<'_, AppState>) -> Result<String, 
 
     // ② OAuth 認証 (mcp login)。add で既に完了している場合も冪等に試みる。
     //    login が失敗しても add で認証済みなら status 確認で救えるので、ここでは止めない。
-    let login = run_codex_capture(
+    let login = run_codex_auth_capture(
         &["mcp", "login", HIGGSFIELD_MCP_NAME],
         std::time::Duration::from_secs(HIGGSFIELD_MCP_LOGIN_TIMEOUT_SECS),
     )
@@ -205,10 +215,18 @@ pub async fn higgsfield_mcp_login(state: State<'_, AppState>) -> Result<String, 
     // ③ 認証済みかを status で最終確認する。add だけで完了するケース・login で完了する
     //    ケースの両方を、実際の auth_status で判定する (推測しない)。
     let status = higgsfield_mcp_status().await?;
+    // 配布版で codex-auth (0.147.0-alpha.4) が bundle から欠落し、フォールバックで
+    // 0.146.0 が使われた場合の唯一の症状。ユーザーには「アプリを更新する」を示す。
+    let issuer_error = login
+        .as_ref()
+        .map(|(_, _, stderr)| stderr.contains("missing required issuer"))
+        .unwrap_or(false);
     if status.authenticated {
         // ④ 常駐 app-server に MCP 設定を再読込させる (再起動なしで生成可能に)。
         reload_mcp_servers(&state).await;
         Ok("Higgsfield の認証が完了しました。".to_string())
+    } else if issuer_error {
+        Err("HiggsField の認証に失敗しました。アプリ内の接続コンポーネントが見つからないか古い可能性があります。アプリを最新版に更新してから、もう一度お試しください。".to_string())
     } else if status.registered {
         Err("Higgsfield を登録しましたが、認証が完了していません。ブラウザでのログインを完了してから、もう一度「接続」を押してください。".to_string())
     } else {
@@ -421,7 +439,10 @@ async fn upload_reference(
     )
     .await?;
     if out.is_error {
-        return Err(format!("参照画像のアップロード準備に失敗しました: {}", out.text));
+        return Err(format!(
+            "参照画像のアップロード準備に失敗しました: {}",
+            out.text
+        ));
     }
     let upload = out
         .structured
@@ -612,7 +633,9 @@ pub async fn higgsfield_mcp_generate_batch(
     args: HiggsfieldMcpGenArgs,
 ) -> Result<HiggsfieldMcpGenResult, String> {
     let Some(model) = args.model.as_deref().filter(|s| !s.trim().is_empty()) else {
-        return Err("Higgsfield のモデルが未選択です。モデルを選んでから生成してください。".to_string());
+        return Err(
+            "Higgsfield のモデルが未選択です。モデルを選んでから生成してください。".to_string(),
+        );
     };
     let count = args.count.unwrap_or(1).clamp(1, 4);
     let aspect = args
@@ -623,8 +646,7 @@ pub async fn higgsfield_mcp_generate_batch(
     let is_video = args.is_video();
     let noun = if is_video { "動画" } else { "画像" };
     // 生成全体の締め切り。動画は画像より重い (DEV-PLAYBOOK 生成3点セットの 900 秒に揃える)。
-    let deadline = Instant::now()
-        + Duration::from_secs(if is_video { 900 } else { 300 });
+    let deadline = Instant::now() + Duration::from_secs(if is_video { 900 } else { 300 });
 
     let base = crate::images::watcher::generated_images_dir()
         .ok_or_else(|| "generated_images ディレクトリの解決に失敗".to_string())?;
@@ -685,7 +707,10 @@ pub async fn higgsfield_mcp_generate_batch(
         return Ok(HiggsfieldMcpGenResult {
             generated_paths,
             failed_count: count,
-            errors: vec![format!("Higgsfield {noun}生成の投入に失敗しました: {}", out.text)],
+            errors: vec![format!(
+                "Higgsfield {noun}生成の投入に失敗しました: {}",
+                out.text
+            )],
         });
     }
     let job_ids = extract_job_ids(out.structured.as_ref());
@@ -740,7 +765,10 @@ pub async fn higgsfield_mcp_generate_batch(
             },
             Ok(res) => {
                 failed_count += 1;
-                errors.push(format!("Higgsfield {noun}取得に失敗 (HTTP {})", res.status()));
+                errors.push(format!(
+                    "Higgsfield {noun}取得に失敗 (HTTP {})",
+                    res.status()
+                ));
             }
             Err(e) => {
                 failed_count += 1;
@@ -795,7 +823,10 @@ pub async fn higgsfield_mcp_list_models(
     )
     .await?;
     if out.is_error {
-        return Err(format!("Higgsfield モデル一覧の取得に失敗しました: {}", out.text));
+        return Err(format!(
+            "Higgsfield モデル一覧の取得に失敗しました: {}",
+            out.text
+        ));
     }
     let items = out
         .structured
@@ -902,7 +933,10 @@ pub async fn higgsfield_mcp_generate_cost(
     );
     let out = call_tool(&state, HIGGSFIELD_MCP_NAME, tool, arguments).await?;
     if out.is_error {
-        return Err(format!("Higgsfield コスト見積もりに失敗しました: {}", out.text));
+        return Err(format!(
+            "Higgsfield コスト見積もりに失敗しました: {}",
+            out.text
+        ));
     }
     // structuredContent.cost.{credits_exact, credits} を最優先、無ければ text の数値。
     let credits = out
@@ -1060,13 +1094,19 @@ mod tests {
         assert_eq!(content_type_for_path("/a/b.PNG"), "image/png");
         assert_eq!(content_type_for_path("/a/b.jpeg"), "image/jpeg");
         assert_eq!(content_type_for_path("/a/b.mov"), "video/quicktime");
-        assert_eq!(content_type_for_path("/a/b.bin"), "application/octet-stream");
+        assert_eq!(
+            content_type_for_path("/a/b.bin"),
+            "application/octet-stream"
+        );
     }
 
     #[test]
     fn json_to_number_prefers_exact_credits() {
         let cost = json!({"credits": 1, "credits_exact": 1.5});
         assert_eq!(json_to_number(&cost), Some(1.5));
-        assert_eq!(extract_first_number("Credits: 445.77 | Plan: creator"), Some(445.77));
+        assert_eq!(
+            extract_first_number("Credits: 445.77 | Plan: creator"),
+            Some(445.77)
+        );
     }
 }

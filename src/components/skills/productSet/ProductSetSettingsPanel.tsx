@@ -1,4 +1,4 @@
-import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/core";
 import { useState } from "react";
 
 import {
@@ -15,6 +15,7 @@ import {
   ASPECT_RATIO_PICKER_OPTIONS,
 } from "../../../lib/scene/aspectRatioPicker";
 import type { SceneAspectRatio } from "../../../lib/scene/types";
+import { SafeImage } from "../../SafeImage";
 import { OptionPickerModal } from "../../scene/OptionPickerModal";
 
 const IMAGE_EXTS = ["png", "jpg", "jpeg", "webp", "gif", "bmp"];
@@ -150,8 +151,8 @@ export function ProductSetSettingsPanel() {
         {productImagePath ? (
           <div className="space-y-2">
             <div className="overflow-hidden rounded-xl border border-[#2a2a2a]">
-              <img
-                src={convertFileSrc(productImagePath)}
+              <SafeImage
+                path={productImagePath}
                 alt="商品写真"
                 className="aspect-square w-full object-cover"
               />

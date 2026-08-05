@@ -2,11 +2,12 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 
 import {
   CHARACTER_CATEGORY_ID,
+  presetKind,
   usePresets,
   type Preset,
 } from "../store/presets";
 import type { IdentityCheckResult } from "./identityCheck";
-import type { SheetCutState } from "./types";
+import type { SheetBackground, SheetCutState, SheetPromptMode } from "./types";
 
 /**
  * キャラクター登録パイプライン Phase 4: 統合シート1枚をキャラ型プリセットへ橋渡しする。
@@ -68,11 +69,20 @@ async function generateThumbnailDataUrl(imagePath: string): Promise<string | nul
 export type RegisterCharacterArgs = {
   name: string;
   attributes: string;
-  sourceImage: string;
+  /** 生成元の参照画像 (全量)。先頭がメイン=同一性の正。 */
+  sourceImages: string[];
   cuts: SheetCutState[];
   /** 検品結果(NoopIdentityChecker のときは verdict="unavailable"、score/checkedAt 無し)。 */
   identity?: IdentityCheckResult;
   categoryId?: string | null;
+  /** 上書き対象のプリセット ID (シート作り直し)。無ければ新規登録。 */
+  targetPresetId?: string;
+  /** シート背景色(登録時の選択。作り直しで復元する) */
+  sheetBackground: SheetBackground;
+  /** シートの作り方 */
+  sheetPromptMode: SheetPromptMode;
+  /** 自分で作るモードのプロンプト全文。default モードでは undefined */
+  sheetCustomPrompt?: string;
 };
 
 /**
@@ -96,6 +106,43 @@ export async function registerCharacter(
   const thumbnail = await generateThumbnailDataUrl(imagePath);
 
   const attributes = args.attributes.trim();
+  // 旧読み手 (表情差分の参照解決・シート作り直し・パス改名移行) は単数 sourceImage を
+  // 読む。先頭を重複保持することで、新形式で登録したキャラも無修正で扱える。
+  const sourceImages = args.sourceImages;
+  const primarySourceImage = sourceImages[0];
+
+  // B-5 シート作り直し: 対象プリセットが現存すれば新規追加せず上書きする。
+  // 消えていたら通常の新規登録へフォールバック (古い作り直し状態で失敗させない)。
+  // identityScore / verifiedAt は新シートの検品結果で置き換える (旧シートの
+  // スコアを残すと「検品済み」の偽装になる。未検品なら undefined = 欠落のまま)。
+  // 旧シート画像は attachedImages から外れるが、ディスク上のファイルは消さない。
+  if (args.targetPresetId) {
+    const store = usePresets.getState();
+    const target = store.presets.find((p) => p.id === args.targetPresetId);
+    if (target && presetKind(target) === "character") {
+      store.updatePreset(target.id, {
+        name: args.name.trim(),
+        characterMeta: {
+          ...target.characterMeta,
+          attributes: attributes || undefined,
+          sourceImage: primarySourceImage,
+          sourceImages,
+          sheetRoles,
+          identityScore: args.identity?.score,
+          verifiedAt: args.identity?.checkedAt,
+          sheetBackground: args.sheetBackground,
+          sheetPromptMode: args.sheetPromptMode,
+          // custom→default で作り直したキャラに古いプロンプトが残らないよう、
+          // default 登録では明示的に undefined で消す (spread した旧値の上書き)。
+          sheetCustomPrompt:
+            args.sheetPromptMode === "custom" ? args.sheetCustomPrompt : undefined,
+        },
+        thumbnail: thumbnail ?? undefined,
+        attachedImages,
+      });
+      return usePresets.getState().presets.find((p) => p.id === target.id) ?? null;
+    }
+  }
 
   return usePresets.getState().addPreset({
     name: args.name.trim(),
@@ -104,11 +151,16 @@ export async function registerCharacter(
     kind: "character",
     characterMeta: {
       attributes: attributes || undefined,
-      sourceImage: args.sourceImage,
+      sourceImage: primarySourceImage,
+      sourceImages,
       sheetRoles,
       // 未検品は undefined のまま(欠落を可視化)。実採点が付いたときだけ埋める。
       identityScore: args.identity?.score,
       verifiedAt: args.identity?.checkedAt,
+      sheetBackground: args.sheetBackground,
+      sheetPromptMode: args.sheetPromptMode,
+      sheetCustomPrompt:
+        args.sheetPromptMode === "custom" ? args.sheetCustomPrompt : undefined,
     },
     // 2026-07-25 STΛCK指示: 登録キャラは「キャラクター」カテゴリへ入れる。
     // 以前は null で保存され、UI 側の並び順で「衣装」等の用途カテゴリに

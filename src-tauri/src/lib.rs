@@ -288,6 +288,19 @@ pub fn run() {
     let state_for_setup = state.clone();
 
     let app = tauri::Builder::default()
+        // single-instance は **必ず最初に登録する** (公式要件:
+        // v2.tauri.app/plugin/single-instance)。ここより前に別 plugin を
+        // 足すと 2 個目の起動が正しく抑止されず、同じデータファイルを
+        // 2 プロセスが同時に書いて全量上書き事故が起きる (bd 97a)。
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            // 2 個目の起動要求 = 既存ウィンドウを前面へ (公式レシピ)。
+            // ラベルは既定 "main" (tauri.conf.json の windows にラベル指定なし)。
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.show();
+                let _ = win.unminimize();
+                let _ = win.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
@@ -471,6 +484,8 @@ pub fn run() {
             commands::codex_vision::codex_describe_image,
             commands::codex_vision::codex_list_image_objects,
             commands::codex_vision::codex_extract_text_blocks,
+            commands::codex_vision::codex_analyze_scene_layout,
+            commands::codex_vision::codex_review_facts,
             commands::edit_models::edit_models_list,
             commands::edit_models::edit_models_download,
             commands::edit_models::edit_models_delete,
@@ -484,37 +499,37 @@ pub fn run() {
             // 「この機能は現在 Windows 版のみです」を返す。未登録にしないのは、
             // フロント (src/lib/ipc.ts) に invoke ラッパが残っており、
             // 呼ばれた場合に "Command not found" という原因不明のエラーになるため。
-            #[cfg(target_os = "windows")]
+            #[cfg(edit_ai)]
             commands::edit_sam2::edit_sam2_embed,
-            #[cfg(target_os = "windows")]
+            #[cfg(edit_ai)]
             commands::edit_sam2::edit_sam2_predict,
-            #[cfg(target_os = "windows")]
+            #[cfg(edit_ai)]
             commands::edit_ocr::edit_ocr_detect,
-            #[cfg(target_os = "windows")]
+            #[cfg(edit_ai)]
             commands::edit_inpaint::edit_inpaint_run,
-            #[cfg(target_os = "windows")]
+            #[cfg(edit_ai)]
             commands::edit_grab::edit_grab_object,
-            #[cfg(target_os = "windows")]
+            #[cfg(edit_ai)]
             commands::edit_magic::edit_magic_run,
-            #[cfg(target_os = "windows")]
+            #[cfg(edit_ai)]
             commands::edit_words::edit_words_segment,
-            #[cfg(target_os = "windows")]
+            #[cfg(edit_ai)]
             commands::edit_segment::edit_segment_run,
-            #[cfg(not(target_os = "windows"))]
+            #[cfg(not(edit_ai))]
             commands::edit_unsupported::edit_sam2_embed,
-            #[cfg(not(target_os = "windows"))]
+            #[cfg(not(edit_ai))]
             commands::edit_unsupported::edit_sam2_predict,
-            #[cfg(not(target_os = "windows"))]
+            #[cfg(not(edit_ai))]
             commands::edit_unsupported::edit_ocr_detect,
-            #[cfg(not(target_os = "windows"))]
+            #[cfg(not(edit_ai))]
             commands::edit_unsupported::edit_inpaint_run,
-            #[cfg(not(target_os = "windows"))]
+            #[cfg(not(edit_ai))]
             commands::edit_unsupported::edit_grab_object,
-            #[cfg(not(target_os = "windows"))]
+            #[cfg(not(edit_ai))]
             commands::edit_unsupported::edit_magic_run,
-            #[cfg(not(target_os = "windows"))]
+            #[cfg(not(edit_ai))]
             commands::edit_unsupported::edit_words_segment,
-            #[cfg(not(target_os = "windows"))]
+            #[cfg(not(edit_ai))]
             commands::edit_unsupported::edit_segment_run,
             commands::storage_cleanup::storage_cleanup_run,
             commands::storage_cleanup::storage_cleanup_inspect,
@@ -536,7 +551,10 @@ pub fn run() {
             commands::images::images_relink_missing,
             commands::images::images_write_clipboard,
             commands::images::images_write_upload,
+            commands::audio_probe::audio_probe,
+            commands::audio_probe::audio_write_upload,
             commands::images::images_export_resized,
+            commands::images::images_file_sizes,
             commands::layer_splitter::layer_splitter_run,
             // 2026-06-10 段階8: CLI 同梱方式の higgsfield_* コマンドは削除。Higgsfield 連携は
             // 下の higgsfield_mcp_* (MCP 接続方式) に一本化した (higgsfield.rs も削除済み)。
@@ -555,6 +573,16 @@ pub fn run() {
             commands::storage::projects_list_backups,
             commands::storage::projects_read_backup,
             commands::storage::projects_set_data_root,
+            commands::storage::presets_read,
+            commands::storage::presets_write,
+            commands::storage::presets_list_backups,
+            commands::storage::presets_read_backup,
+            commands::storage::scene3d_list_backups,
+            commands::storage::scene3d_read_backup,
+            commands::storage::scene3d_read,
+            commands::storage::scene3d_write,
+            commands::storage::motions_read,
+            commands::storage::motions_write,
             commands::stock::stock_search,
             commands::stock::stock_download,
             commands::translate::translate_ja_to_en,
@@ -575,6 +603,7 @@ pub fn run() {
             commands::higgsfield_mcp::higgsfield_mcp_account,
             commands::batch_gen::images_generate_batch,
             commands::worker_registry::cancel_generation,
+            commands::gen_queue::gen_capacity,
             commands::sessions::sessions_list,
             commands::sessions::session_create,
             commands::sessions::session_rename,
@@ -588,9 +617,9 @@ pub fn run() {
             commands::sessions::turn_get,
             // BiRefNet (ort) 経路。Mac の背景透過 (Vision/removebg.swift) は
             // images.rs 側の別経路なので、この cfg の影響を受けない。
-            #[cfg(target_os = "windows")]
+            #[cfg(edit_ai)]
             commands::segment::segment_image,
-            #[cfg(not(target_os = "windows"))]
+            #[cfg(not(edit_ai))]
             commands::edit_unsupported::segment_image,
             commands::segment::is_segmentation_model_ready,
             commands::segment::download_segmentation_model,
@@ -598,6 +627,7 @@ pub fn run() {
             commands::scene3d::scene3d_write_frame,
             commands::scene3d::scene3d_encode,
             commands::scene3d::scene3d_fetch_capture_video,
+            commands::video_concat::video_concat_story,
             commands::storyboard::storyboard_run,
             commands::storyboard::storyboard_regenerate_cut,
             commands::multiangle::multiangle_run,
@@ -607,6 +637,12 @@ pub fn run() {
             commands::storyboard::storyboard_persist_adoption,
             commands::storyboard::storyboard_read_adoptions,
             commands::storyboard::storyboard_read_debug_log,
+            commands::storyboard::storyboard_write_run_snapshot,
+            commands::storyboard::storyboard_read_run_snapshot,
+            commands::storyboard::storyboard_list_run_snapshots,
+            commands::sticker::sticker_chroma_key,
+            commands::sticker::sticker_inspect,
+            commands::sticker::sticker_export,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

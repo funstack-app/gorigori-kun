@@ -222,6 +222,19 @@ export function buildGalleryItemMenu(
      */
     judgement?: Judgement;
     onSetJudgement?: (path: string, value: Judgement | null) => void;
+    /**
+     * プロジェクト詳細ビューから開いたとき指定。
+     * 「プロジェクトへ移動」(セッション作業フォルダへのファイル移動) は
+     * この文脈では自己言及で紛らわしいため出さず、代わりに
+     * 「このプロジェクトから外す」(箱から外すだけ・ファイルはライブラリに残る) を出す。
+     */
+    projectScope?: { onRemoveFromProject: (path: string) => void };
+    /**
+     * 拡大表示の矢印キーで巡回する前後リスト。省略時は useImages.items 全体に
+     * フォールバックする (imagePreview.open の既定挙動)。
+     * プロジェクト詳細ではライブラリ全体でなく「この箱の中身」を渡す。
+     */
+    previewSiblings?: string[];
   },
 ): ContextMenuItem[] {
   const isFav = ctx.favorites.has(item.path);
@@ -255,7 +268,12 @@ export function buildGalleryItemMenu(
     {
       label: "拡大表示",
       icon: "O",
-      onClick: () => useImagePreview.getState().open(item.path),
+      // プロジェクト詳細では、タイルのダブルクリック (VirtualGalleryGrid) と同じく
+      // 「この箱の中身」を巡回対象にする。渡さないとライブラリ全体へ
+      // フォールバックし、右クリック経由だけプロジェクト外の画像へ矢印で
+      // 移動してしまう。
+      onClick: () =>
+        useImagePreview.getState().open(item.path, ctx.previewSiblings),
     },
     {
       /*
@@ -308,14 +326,38 @@ export function buildGalleryItemMenu(
       icon: "D",
       onClick: () => downloadImageAs(item.path, item.name),
     },
-    {
-      label: item.savedTo ? "プロジェクトへ保存済み" : "プロジェクトへ移動",
-      icon: "P",
-      disabled: !cwd || !!item.savedTo,
-      onClick: () => {
-        if (cwd) useImages.getState().saveToProject(item.path, cwd);
-      },
-    },
+    ctx.projectScope
+      ? {
+          // プロジェクト詳細ビュー限定。箱から外すだけの非破壊操作なので確認なし。
+          label: "このプロジェクトから外す",
+          icon: "P",
+          onClick: () => ctx.projectScope?.onRemoveFromProject(item.path),
+        }
+      : {
+          label: item.savedTo ? "プロジェクトへ保存済み" : "プロジェクトへ移動",
+          icon: "P",
+          disabled: !cwd || !!item.savedTo,
+          onClick: () => {
+            if (!cwd) return;
+            void useImages
+              .getState()
+              .saveToProject(item.path, cwd)
+              .then((ok) => {
+                useToasts.getState().push(
+                  ok
+                    ? {
+                        kind: "success",
+                        text: "プロジェクトへ保存しました",
+                        ttlMs: 3000,
+                      }
+                    : {
+                        kind: "error",
+                        text: "プロジェクトへの保存に失敗しました。画像は元の場所に残っています",
+                      },
+                );
+              });
+          },
+        },
     {
       label: "Finder で表示",
       icon: "F",

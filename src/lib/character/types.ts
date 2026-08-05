@@ -35,11 +35,25 @@ export type SheetCutSpec = {
 export type CharacterSheetGenerationMode = "composite" | "multi-cut";
 
 /**
+ * シート背景色 (STΛCK 2026-08-03 確定仕様の4択)。
+ * auto = 既定(背景句を差し替えない。既定シート=従来のクリーム系 / 自分で作る=プロンプト準拠)
+ * green = グリーンバック #00FF00 / blue = ブルーバック #0000FF (クロマキー標準値)
+ */
+export type SheetBackground = "auto" | "white" | "green" | "blue";
+/** シートの作り方。default=既定シートテンプレ / custom=入力プロンプトをそのまま使う */
+export type SheetPromptMode = "default" | "custom";
+
+/**
  * `invoke("character_sheet_run", { params })` に渡す引数 (camelCase)。
  * Rust 側 `CharacterSheetParams` (serde rename_all="camelCase") と一致。
  */
 export type CharacterSheetParams = {
   characterImage: string;
+  /**
+   * 参照画像の全量。`[0]` はメイン=同一性の正。省略時は Rust 側が `characterImage`
+   * 1 枚にフォールバックする(後方互換)。最大 6 枚。
+   */
+  characterImages?: string[];
   attributes: string;
   aspectRatio: string;
   /** キャラクター登録は composite、表情差分は未指定のまま従来経路を使う。 */
@@ -50,6 +64,10 @@ export type CharacterSheetParams = {
   /** フロントが先に採番する run_id。beginRun 時点から確定 run_id を持ち、
    *  画面往復後の別 run 後着通知を照合で捨てるために使う (B1 混線対策)。 */
   runId?: string;
+  /** シート背景色。省略時は Rust 側が "auto"(従来挙動)にフォールバック */
+  sheetBackground?: SheetBackground;
+  /** 自分で作るモードのプロンプト全文。空/省略 = 既定シートテンプレを使う。上限8000文字 */
+  customPrompt?: string;
 };
 
 /** ストアが保持する1カットの実行状態。 */

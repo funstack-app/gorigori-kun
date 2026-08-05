@@ -48,6 +48,12 @@ design-mockups/0*.png
 _recovery/
 # テスト用に生成された画像 (実機テストの残骸)
 src-tauri/generated_images/
+# CI が都度取得する codex バイナリ (100MB 級)。dev 検証でローカル配置したものを
+# 誤コミットする経路を塞ぐ (2026-08-03)
+src-tauri/resources/codex
+src-tauri/resources/codex.exe
+src-tauri/resources/codex-app-server*
+src-tauri/resources/codex-auth*
 # 開発時のバックアップファイル
 *.backup-*
 *.bak-*
@@ -74,3 +80,8 @@ _work/
 
 # 旧 Git 履歴退避 (個人メアド含む過去 commit、配布対象外)
 .git-backup-*
+
+# 生成物・実験ファイル (配布対象外。2026-08-05 リリース前点検で発見)
+src-tauri/output/
+public/__poc/
+/projects/

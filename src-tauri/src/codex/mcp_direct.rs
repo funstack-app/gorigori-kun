@@ -50,10 +50,10 @@ pub struct ToolCallOutput {
 
 /// 稼働中 app-server の RpcClient を取る。未起動なら分かるエラーを返す。
 async fn rpc_client(state: &AppState) -> Result<RpcClient, String> {
-    state
-        .rpc()
-        .await
-        .ok_or_else(|| "GORI のコアエンジン (app-server) が起動していません。アプリを再起動してください。".to_string())
+    state.rpc().await.ok_or_else(|| {
+        "GORI のコアエンジン (app-server) が起動していません。アプリを再起動してください。"
+            .to_string()
+    })
 }
 
 /// thread/start のレスポンスから threadId を取り出す。codex のバージョンにより
@@ -111,7 +111,10 @@ fn parse_tool_result(result: Value) -> ToolCallOutput {
                 .join("\n")
         })
         .unwrap_or_default();
-    let structured = result.get("structuredContent").cloned().filter(|v| !v.is_null());
+    let structured = result
+        .get("structuredContent")
+        .cloned()
+        .filter(|v| !v.is_null());
     ToolCallOutput {
         structured,
         text,

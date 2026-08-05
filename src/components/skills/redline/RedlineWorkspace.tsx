@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
-import { convertFileSrc } from "@tauri-apps/api/core";
 
 import { ActiveProjectSelector } from "../../ActiveProjectSelector";
 import { WorkspaceTabs } from "../../WorkspaceTabs";
-import { SkillIntro } from "../SkillIntro";
+import { PageHelp } from "../../PageHelp";
+import { SafeImage } from "../../SafeImage";
 import { useEditorActions } from "../../edit/editor/useEditor";
 import { images } from "../../../lib/ipc";
 import { isPdfFile, loadPdf, type LoadedPdf } from "../../../lib/redline/pdf";
@@ -186,7 +186,7 @@ export function RedlineWorkspace() {
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-4 py-4">
-        <SkillIntro
+        <PageHelp
           what="赤ペンや注釈の入った画像を渡すと、どこを何色でどう直せと言われているのかを読み取って、日本語の直し指示に起こします。"
           first="まず左に修正前の元画像、右に赤入れを入れてください"
         />
@@ -497,8 +497,8 @@ function ImageDropSlot({
           </div>
         ) : path ? (
           <>
-            <img
-              src={convertFileSrc(path)}
+            <SafeImage
+              path={path}
               alt={basename(path)}
               className="max-h-[220px] w-full object-contain"
             />

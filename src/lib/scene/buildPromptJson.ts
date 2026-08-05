@@ -141,6 +141,13 @@ export function buildImagePromptJson(
  * 画像と別スキーマにする理由: 動画は「時間軸」の軸 (動き・カメラワーク・尺) を持ち、
  * 画像側の静止画向けキー (composition 単体など) では表現できない。
  */
+/** 動画のタイムスタンプ区間。time は "0-2s" 形式の開始-終了レンジ。 */
+export type VideoTimelineEntry = {
+  time: string;
+  action?: string;
+  camera?: string;
+};
+
 export type VideoPromptJson = {
   subject?: string;
   scene?: string;
@@ -153,6 +160,13 @@ export type VideoPromptJson = {
   style?: string;
   aspect_ratio?: string;
   duration_seconds?: number;
+  /**
+   * 時系列のカット割り。テキスト入力に「複数の連続アクション」が書かれていた
+   * ときだけ AI 整形で付く (シーン構築 UI は単一ビートしか表現しないので
+   * 構造化経路では組み立てない)。キーを足すときは promptFormat.ts の
+   * ALLOWED_VIDEO_KEYS も同期する。
+   */
+  timeline?: VideoTimelineEntry[];
   references?: { slot: string; note?: string }[];
 };
 

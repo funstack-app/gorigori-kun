@@ -30,7 +30,8 @@ export type UiMode =
   | "comic"
   | "redline"
   | "regulationCheck"
-  | "productSet";
+  | "productSet"
+  | "sticker";
 
 type SkillUiModeState = {
   /** 現在アクティブなスキルの ID。null なら作品モード */
@@ -75,6 +76,7 @@ export const SKILL_UI_MODE_MAP: Record<string, UiMode> = {
   "gori-redline": "redline",
   "gori-regulation-check": "regulationCheck",
   "gori-product-set": "productSet",
+  "gori-sticker": "sticker",
 };
 
 export function resolveUiMode(skillId: string): UiMode {

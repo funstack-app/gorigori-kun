@@ -277,14 +277,14 @@ enum ScreenDirection {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum CameraAngle {
-    EyeLevel,      // 目線、共感
-    High,          // 俯瞰、被写体を弱く見せる
-    Low,           // 煽り、被写体を強く見せる
-    Dutch,         // 傾き、不安/狂気
-    BirdsEye,      // 真上から、神視点
-    OverShoulder,  // 肩越し、対話/緊張
-    Pov,           // 主観視点、没入
-    ThreeQuarter,  // 斜め45度、自然
+    EyeLevel,     // 目線、共感
+    High,         // 俯瞰、被写体を弱く見せる
+    Low,          // 煽り、被写体を強く見せる
+    Dutch,        // 傾き、不安/狂気
+    BirdsEye,     // 真上から、神視点
+    OverShoulder, // 肩越し、対話/緊張
+    Pov,          // 主観視点、没入
+    ThreeQuarter, // 斜め45度、自然
 }
 
 impl CameraAngle {
@@ -305,11 +305,15 @@ impl CameraAngle {
     fn directive(&self) -> &'static str {
         match self {
             CameraAngle::EyeLevel => "shot at character eye-level for direct empathy",
-            CameraAngle::High => "high-angle looking down, making subject appear vulnerable or small",
+            CameraAngle::High => {
+                "high-angle looking down, making subject appear vulnerable or small"
+            }
             CameraAngle::Low => "low-angle looking up, making subject appear powerful or imposing",
             CameraAngle::Dutch => "dutch tilt (canted angle, ~10-15deg) to convey unease",
             CameraAngle::BirdsEye => "bird's-eye top-down view, near 90deg overhead",
-            CameraAngle::OverShoulder => "over-the-shoulder framing of another presence in foreground",
+            CameraAngle::OverShoulder => {
+                "over-the-shoulder framing of another presence in foreground"
+            }
             CameraAngle::Pov => "first-person POV through the character's eyes",
             CameraAngle::ThreeQuarter => "three-quarter angle, ~45deg around the subject",
         }
@@ -333,14 +337,14 @@ impl ScreenDirection {
 struct CutVisualPlan {
     cut_id: String,
     scene_group_id: String,
-    cut_role: String,        // establishing / action / detail / reaction / climax / resolution
+    cut_role: String, // establishing / action / detail / reaction / climax / resolution
     shot_size: ShotSize,
     camera_angle: CameraAngle, // P17a: カメラアングル軸
     screen_direction: ScreenDirection,
-    camera_side: String,     // "axis_left" / "axis_right" / "neutral"
+    camera_side: String,      // "axis_left" / "axis_right" / "neutral"
     subject_position: String, // "left_third" / "center" / "right_third" / ...
-    action_start: String,    // 動作の開始姿勢 (i2v 用)
-    action_end: String,      // 動作の終了姿勢 (i2v 用、次カットの action_start に接続)
+    action_start: String,     // 動作の開始姿勢 (i2v 用)
+    action_end: String,       // 動作の終了姿勢 (i2v 用、次カットの action_start に接続)
     emotional_intent: String, // 感情・狙い
     micro_location: String,   // P17b: 同じ大ロケーション内の微小な場所 (nave/altar/pew等)
 }
@@ -476,12 +480,74 @@ struct SceneConstructionCutSnake {
 ///   されていない。adoption をサイドカー JSON (adoptions.json) として別管理
 ///   にして、`storyboard_persist_adoption` で書き込み、
 ///   `storyboard_read_adoptions` で起動時に読み込む。
-#[derive(Serialize, Deserialize, Default)]
+/// 採用 1 件の記録 (sidecar v2)。
+///
+/// v2 で `image_path` を足した理由 (2026-08-03 rr2): 起動時の復元
+/// (restoreUnrecoveredAdoptions) が「採用した take の画像」を知る手段が必要だが、
+/// manifest.json は run 完了時にしか書かれない (= クラッシュ復元でこそ欲しい
+/// 未完了 run には無い)。採用時点で画像パスを焼いておけば、復元は manifest にも
+/// run ディレクトリ走査にも依存せず決定論的に済む。
+#[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AdoptionEntry {
+    pub take_id: String,
+    /// 採用時点の画像パス。v1 から読んだ場合は None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_path: Option<String>,
+}
+
+/// ディスク上の adoptions 値。v1 は素の文字列 (takeId) だったので、
+/// untagged で両方受ける。書き出しは常に v2 (AdoptionEntry) 形式。
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum AdoptionValue {
+    /// v1: `"cut-1": "take-a"`
+    Legacy(String),
+    /// v2: `"cut-1": { "takeId": "take-a", "imagePath": "..." }`
+    Entry(AdoptionEntry),
+}
+
+impl From<AdoptionValue> for AdoptionEntry {
+    fn from(value: AdoptionValue) -> Self {
+        match value {
+            AdoptionValue::Legacy(take_id) => AdoptionEntry {
+                take_id,
+                image_path: None,
+            },
+            AdoptionValue::Entry(entry) => entry,
+        }
+    }
+}
+
+#[derive(Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct AdoptionsSidecar {
     run_id: String,
-    /// cutId → takeId
-    adoptions: std::collections::BTreeMap<String, String>,
+    /// cutId → 採用記録
+    adoptions: std::collections::BTreeMap<String, AdoptionEntry>,
+}
+
+/// 読み込み用。v1 / v2 のどちらの値形式でも受け取れる。
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct AdoptionsSidecarRead {
+    #[serde(default)]
+    run_id: String,
+    #[serde(default)]
+    adoptions: std::collections::BTreeMap<String, AdoptionValue>,
+}
+
+impl From<AdoptionsSidecarRead> for AdoptionsSidecar {
+    fn from(read: AdoptionsSidecarRead) -> Self {
+        AdoptionsSidecar {
+            run_id: read.run_id,
+            adoptions: read
+                .adoptions
+                .into_iter()
+                .map(|(cut_id, value)| (cut_id, value.into()))
+                .collect(),
+        }
+    }
 }
 
 fn adoptions_sidecar_path(run_id: &str) -> Result<PathBuf, String> {
@@ -490,11 +556,44 @@ fn adoptions_sidecar_path(run_id: &str) -> Result<PathBuf, String> {
     Ok(out_dir.join("adoptions.json"))
 }
 
+/// **読み側**の解決。現行 root に無ければ `previous_storage_roots` を順に probe する。
+///
+/// なぜ書き側と分けるか (2026-08-03 rr2): 保存先を変えると run ディレクトリは
+/// 旧 root に取り残される。画像実体と同じく「移動しないで読み続ける」方式に揃える
+/// (l99 の previous_storage_roots 方式との対称)。書き側は現行 root のままでよい。
+fn adoptions_sidecar_read_path(run_id: &str) -> Result<PathBuf, String> {
+    let settings = StorageSettings::load()?;
+    Ok(resolve_adoptions_read_path(&settings, run_id))
+}
+
+/// probe 本体 (テスト可能なように settings を引数で受ける)。
+/// 現行 root → previous_storage_roots の順に最初に実在するものを返す。
+/// どこにも無ければ現行 root のパス (呼び出し側が「無い」として扱う)。
+fn resolve_adoptions_read_path(settings: &StorageSettings, run_id: &str) -> PathBuf {
+    let leaf = format!("gori-storyboard-{run_id}");
+    let current = resolve_output_dir(settings, None, &leaf).join("adoptions.json");
+    if current.is_file() {
+        return current;
+    }
+    for previous in &settings.previous_storage_roots {
+        let probe_settings = StorageSettings {
+            storage_root: previous.clone(),
+            ..settings.clone()
+        };
+        let candidate = resolve_output_dir(&probe_settings, None, &leaf).join("adoptions.json");
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+    current
+}
+
 #[tauri::command]
 pub async fn storyboard_persist_adoption(
     run_id: String,
     cut_id: String,
     take_id: String,
+    image_path: Option<String>,
 ) -> Result<(), String> {
     let path = adoptions_sidecar_path(&run_id)?;
     if let Some(parent) = path.parent() {
@@ -504,11 +603,19 @@ pub async fn storyboard_persist_adoption(
     }
 
     let mut sidecar: AdoptionsSidecar = match tokio::fs::read_to_string(&path).await {
-        Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
+        Ok(s) => serde_json::from_str::<AdoptionsSidecarRead>(&s)
+            .map(Into::into)
+            .unwrap_or_default(),
         Err(_) => AdoptionsSidecar::default(),
     };
     sidecar.run_id = run_id;
-    sidecar.adoptions.insert(cut_id, take_id);
+    sidecar.adoptions.insert(
+        cut_id,
+        AdoptionEntry {
+            take_id,
+            image_path,
+        },
+    );
 
     let json = serde_json::to_string_pretty(&sidecar)
         .map_err(|e| format!("adoptions JSON serialize 失敗: {e}"))?;
@@ -521,15 +628,201 @@ pub async fn storyboard_persist_adoption(
 #[tauri::command]
 pub async fn storyboard_read_adoptions(
     run_id: String,
-) -> Result<std::collections::BTreeMap<String, String>, String> {
-    let path = adoptions_sidecar_path(&run_id)?;
+) -> Result<std::collections::BTreeMap<String, AdoptionEntry>, String> {
+    let path = adoptions_sidecar_read_path(&run_id)?;
     let raw = match tokio::fs::read_to_string(&path).await {
         Ok(s) => s,
         Err(_) => return Ok(Default::default()),
     };
-    let sidecar: AdoptionsSidecar = serde_json::from_str(&raw)
+    let sidecar: AdoptionsSidecar = serde_json::from_str::<AdoptionsSidecarRead>(&raw)
+        .map(Into::into)
         .map_err(|e| format!("adoptions.json parse 失敗: {e}"))?;
     Ok(sidecar.adoptions)
+}
+
+// ===== owt: run 状態スナップショット (読み取り専用の過去 run ビュー用) =====
+//
+// run ごとのサイドカー `run-state.json` を out_dir に置く (adoptions.json と同型)。
+// run と同じディレクトリに置くことで run の掃除と生死が揃う。plugin-store は
+// 全 run を単一ファイルに持つと肥大するため不採用 (設計書 §6-1)。
+
+/// スナップショット一覧の 1 件。フロントは mtime 降順で受け取る。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunSnapshotMeta {
+    pub run_id: String,
+    pub modified_epoch_ms: u64,
+}
+
+/// 一覧で返す最大件数 (新しい順)。
+const RUN_SNAPSHOT_LIST_LIMIT: usize = 20;
+
+/// run ディレクトリ名の接頭辞。`gori-storyboard-<run_id>` が run の leaf。
+const RUN_DIR_PREFIX: &str = "gori-storyboard-";
+
+/// run-state.json のファイル名。
+const RUN_SNAPSHOT_FILE: &str = "run-state.json";
+
+/// run_id をパス結合前に検証する。パス区切り・`..`・空文字を弾く。
+///
+/// なぜ要るか: run_id はフロント由来の文字列で、そのまま `join` するとディレクトリ
+/// 外への書き込み (パストラバーサル) を許してしまう。
+fn validate_run_id(run_id: &str) -> Result<(), String> {
+    if run_id.trim().is_empty() {
+        return Err("runId が空です".into());
+    }
+    if run_id.contains("..")
+        || run_id.contains('/')
+        || run_id.contains('\\')
+        || run_id.contains('\0')
+    {
+        return Err(format!(
+            "runId に使用できない文字が含まれています: {run_id}"
+        ));
+    }
+    Ok(())
+}
+
+/// **書き側**のパス解決 (現行 root)。adoptions_sidecar_path と同型。
+fn run_snapshot_path(run_id: &str) -> Result<PathBuf, String> {
+    validate_run_id(run_id)?;
+    let settings = StorageSettings::load()?;
+    let out_dir = resolve_output_dir(&settings, None, &format!("{RUN_DIR_PREFIX}{run_id}"));
+    Ok(out_dir.join(RUN_SNAPSHOT_FILE))
+}
+
+/// **読み側**のパス解決。現行 root に無ければ `previous_storage_roots` を probe する
+/// (adoptions_sidecar_read_path と同思想: 保存先を変えても過去 run を読み続ける)。
+fn run_snapshot_read_path(run_id: &str) -> Result<PathBuf, String> {
+    validate_run_id(run_id)?;
+    let settings = StorageSettings::load()?;
+    let leaf = format!("{RUN_DIR_PREFIX}{run_id}");
+    let current = resolve_output_dir(&settings, None, &leaf).join(RUN_SNAPSHOT_FILE);
+    if current.is_file() {
+        return Ok(current);
+    }
+    for previous in &settings.previous_storage_roots {
+        let probe_settings = StorageSettings {
+            storage_root: previous.clone(),
+            ..settings.clone()
+        };
+        let candidate = resolve_output_dir(&probe_settings, None, &leaf).join(RUN_SNAPSHOT_FILE);
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+    }
+    Ok(current)
+}
+
+/// run 状態スナップショットを out_dir/run-state.json へアトミックに書く。
+///
+/// フロントは 2 秒デバウンスで呼ぶ best-effort の保全機能。失敗しても生成フロー
+/// 本体は続行する (呼び出し側が console.warn で握る)。
+#[tauri::command]
+pub async fn storyboard_write_run_snapshot(run_id: String, content: String) -> Result<(), String> {
+    let path = run_snapshot_path(&run_id)?;
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| format!("run-state ディレクトリ作成失敗: {e}"))?;
+    }
+    crate::commands::storage::atomic_write_text(&path, &content)
+}
+
+/// run 状態スナップショットを読む。無ければ空文字 (motions_read と同じ規約)。
+#[tauri::command]
+pub async fn storyboard_read_run_snapshot(run_id: String) -> Result<String, String> {
+    let path = run_snapshot_read_path(&run_id)?;
+    match tokio::fs::read_to_string(&path).await {
+        Ok(s) => Ok(s),
+        Err(_) => Ok(String::new()),
+    }
+}
+
+/// run-state.json を持つ run を mtime 降順で最大 20 件返す。
+///
+/// 現行 root と `previous_storage_roots` の両方を走査する (読み側の probe と対称)。
+/// 同じ run_id が複数 root にある場合は新しい方を採る。
+#[tauri::command]
+pub async fn storyboard_list_run_snapshots() -> Result<Vec<RunSnapshotMeta>, String> {
+    let settings = StorageSettings::load()?;
+    let mut roots: Vec<String> = vec![settings.storage_root.clone()];
+    roots.extend(settings.previous_storage_roots.iter().cloned());
+
+    // run_id → 最新 mtime。複数 root に同名 run があれば新しい方が残る。
+    let mut found: std::collections::HashMap<String, u64> = std::collections::HashMap::new();
+
+    for root in roots {
+        let probe_settings = StorageSettings {
+            storage_root: root,
+            ..settings.clone()
+        };
+        // project_subfolder 有効時、run ディレクトリは root/<project>/<leaf> に居る。
+        // resolve_output_dir(None) は root/<leaf> を返すので、その親 = 走査基点。
+        let base = resolve_output_dir(&probe_settings, None, "x");
+        let Some(base) = base.parent().map(Path::to_path_buf) else {
+            continue;
+        };
+        // 直下 (プロジェクトフォルダ無し) と 1 段下 (プロジェクトフォルダ有り) を見る。
+        let mut scan_dirs: Vec<PathBuf> = vec![base.clone()];
+        if let Ok(entries) = std::fs::read_dir(&base) {
+            for entry in entries.flatten() {
+                if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    scan_dirs.push(entry.path());
+                }
+            }
+        }
+        for dir in scan_dirs {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    continue;
+                }
+                let name = entry.file_name();
+                let Some(name) = name.to_str() else { continue };
+                let Some(run_id) = name.strip_prefix(RUN_DIR_PREFIX) else {
+                    continue;
+                };
+                if run_id.is_empty() {
+                    continue;
+                }
+                let snapshot = entry.path().join(RUN_SNAPSHOT_FILE);
+                let Ok(meta) = std::fs::metadata(&snapshot) else {
+                    continue;
+                };
+                if !meta.is_file() {
+                    continue;
+                }
+                let modified = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                found
+                    .entry(run_id.to_string())
+                    .and_modify(|existing| {
+                        if modified > *existing {
+                            *existing = modified;
+                        }
+                    })
+                    .or_insert(modified);
+            }
+        }
+    }
+
+    let mut list: Vec<RunSnapshotMeta> = found
+        .into_iter()
+        .map(|(run_id, modified_epoch_ms)| RunSnapshotMeta {
+            run_id,
+            modified_epoch_ms,
+        })
+        .collect();
+    list.sort_by(|a, b| b.modified_epoch_ms.cmp(&a.modified_epoch_ms));
+    list.truncate(RUN_SNAPSHOT_LIST_LIMIT);
+    Ok(list)
 }
 
 /// Read the debug-log.json for a given run id.
@@ -747,7 +1040,12 @@ pub async fn storyboard_regenerate_cut(
         });
         // user_directive が空文字なら除去 (LLM 混乱回避)
         if params.prompt_override.is_none()
-            || params.prompt_override.as_deref().unwrap_or("").trim().is_empty()
+            || params
+                .prompt_override
+                .as_deref()
+                .unwrap_or("")
+                .trim()
+                .is_empty()
         {
             if let Some(map) = prompt_obj.as_object_mut() {
                 map.remove("user_directive");
@@ -935,8 +1233,7 @@ async fn run_cut_fanout(
 
     // --- 3) 完了順に回収し、カットごとに確定/失敗を emit する ---
     // ManifestTake は Clone ではないので vec![None; n] が使えない。個別に積む。
-    let mut results: Vec<Option<Vec<ManifestTake>>> =
-        (0..cuts.len()).map(|_| None).collect();
+    let mut results: Vec<Option<Vec<ManifestTake>>> = (0..cuts.len()).map(|_| None).collect();
     let mut cancelled = false;
     let mut failures = 0usize;
 
@@ -1147,14 +1444,17 @@ async fn run_storyboard_orchestrator(
     let mut scene_groups = build_scene_groups(&cuts);
     // P18b: AI が scene_construction.scene_groups を返している場合、intent / primary_location を取り込む
     if let Some(scene_construction) = params.scene_construction.as_ref() {
-        if let Some(ai_groups) = scene_construction.get("sceneGroups").and_then(|v| v.as_array())
-            .or_else(|| scene_construction.get("scene_groups").and_then(|v| v.as_array()))
+        if let Some(ai_groups) = scene_construction
+            .get("sceneGroups")
+            .and_then(|v| v.as_array())
+            .or_else(|| {
+                scene_construction
+                    .get("scene_groups")
+                    .and_then(|v| v.as_array())
+            })
         {
             for ai_group in ai_groups {
-                let id_str = ai_group
-                    .get("id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let id_str = ai_group.get("id").and_then(|v| v.as_str()).unwrap_or("");
                 if id_str.is_empty() {
                     continue;
                 }
@@ -1189,8 +1489,11 @@ async fn run_storyboard_orchestrator(
     // 絵コンテ (sketch_mode) では無視する: ラフは常に全カット出す。
     let scope_indices: Vec<usize> = match params.production_scope.as_ref() {
         Some(scope) if !params.sketch_mode => {
-            let wanted: std::collections::HashSet<&str> =
-                scope.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+            let wanted: std::collections::HashSet<&str> = scope
+                .iter()
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .collect();
             let picked: Vec<usize> = cuts
                 .iter()
                 .enumerate()
@@ -1420,8 +1723,8 @@ async fn run_storyboard_orchestrator(
                     .iter()
                     .find(|g| g.id == curr_plan.scene_group_id);
                 let scene_intent = curr_scene_group.and_then(|g| g.intent.as_deref());
-                let scene_primary_location = curr_scene_group
-                    .and_then(|g| g.primary_location.as_deref());
+                let scene_primary_location =
+                    curr_scene_group.and_then(|g| g.primary_location.as_deref());
                 let contract = build_continuity_contract(
                     prev_plan,
                     curr_plan,
@@ -2202,7 +2505,10 @@ fn prefilled_structured_prompt(
     if let Some(identity) = base.get_mut("identity").and_then(|v| v.as_object_mut()) {
         let mut keep: Vec<Value> = p.must_keep.iter().cloned().map(Value::String).collect();
         if let Some(anchors) = look
-            .and_then(|l| l.get("identityAnchors").or_else(|| l.get("identity_anchors")))
+            .and_then(|l| {
+                l.get("identityAnchors")
+                    .or_else(|| l.get("identity_anchors"))
+            })
             .and_then(|v| v.as_array())
         {
             keep.extend(anchors.iter().cloned());
@@ -2304,8 +2610,8 @@ fn camera_angle_for_role(role: &str, cut_index: usize) -> CameraAngle {
     // cut_index を mod でずらしてバリエーションを作る
     match role {
         "establishing" => match cut_index % 3 {
-            0 => CameraAngle::Low,         // 教会の柱を見上げる
-            1 => CameraAngle::High,        // 俯瞰で空間紹介
+            0 => CameraAngle::Low,          // 教会の柱を見上げる
+            1 => CameraAngle::High,         // 俯瞰で空間紹介
             _ => CameraAngle::ThreeQuarter, // 斜めから入場
         },
         "action" => match cut_index % 3 {
@@ -2314,22 +2620,22 @@ fn camera_angle_for_role(role: &str, cut_index: usize) -> CameraAngle {
             _ => CameraAngle::ThreeQuarter,
         },
         "detail" => match cut_index % 3 {
-            0 => CameraAngle::BirdsEye,    // 物の真上 (insert)
+            0 => CameraAngle::BirdsEye, // 物の真上 (insert)
             1 => CameraAngle::EyeLevel,
             _ => CameraAngle::Low,
         },
         "reaction" => match cut_index % 3 {
             0 => CameraAngle::OverShoulder, // OTS で対話/緊張
             1 => CameraAngle::EyeLevel,
-            _ => CameraAngle::Pov,          // POV で没入
+            _ => CameraAngle::Pov, // POV で没入
         },
         "climax" => match cut_index % 3 {
-            0 => CameraAngle::Dutch,       // 不安/狂気
-            1 => CameraAngle::Low,         // 強さ
+            0 => CameraAngle::Dutch, // 不安/狂気
+            1 => CameraAngle::Low,   // 強さ
             _ => CameraAngle::OverShoulder,
         },
         "resolution" => match cut_index % 3 {
-            0 => CameraAngle::High,        // 引いて締める
+            0 => CameraAngle::High, // 引いて締める
             1 => CameraAngle::ThreeQuarter,
             _ => CameraAngle::EyeLevel,
         },
@@ -2438,7 +2744,11 @@ fn micro_locations_for(description: &str) -> Vec<&'static str> {
 
 /// P17a: 同じ camera_angle が直前と被ったら別の angle に切り替える。
 /// 多様性を強制する。
-fn alternate_camera_angle(prev: &CameraAngle, candidate: CameraAngle, cut_index: usize) -> CameraAngle {
+fn alternate_camera_angle(
+    prev: &CameraAngle,
+    candidate: CameraAngle,
+    cut_index: usize,
+) -> CameraAngle {
     if std::mem::discriminant(prev) != std::mem::discriminant(&candidate) {
         return candidate;
     }
@@ -2633,7 +2943,8 @@ fn validate_neighbor_plans(plans: &[CutVisualPlan]) -> Vec<String> {
             ));
         }
         // 同 camera_angle 連続
-        if std::mem::discriminant(&prev.camera_angle) == std::mem::discriminant(&curr.camera_angle) {
+        if std::mem::discriminant(&prev.camera_angle) == std::mem::discriminant(&curr.camera_angle)
+        {
             warnings.push(format!(
                 "{} → {}: same camera_angle {} (lacks angle variation)",
                 prev.cut_id,
@@ -2800,14 +3111,8 @@ fn build_continuity_contract(
     } else {
         // === 最初のカット (prev なし) ===
         change.push("opening_cut: establish this scene's first frame".into());
-        change.push(format!(
-            "shot_size: {} (opening)",
-            curr.shot_size.as_str()
-        ));
-        change.push(format!(
-            "camera_angle: {}",
-            curr.camera_angle.as_str()
-        ));
+        change.push(format!("shot_size: {} (opening)", curr.shot_size.as_str()));
+        change.push(format!("camera_angle: {}", curr.camera_angle.as_str()));
     }
 
     change.push(format!("emphasis: {}", curr.emotional_intent));
@@ -3269,9 +3574,11 @@ async fn generate_one_take(
         }
     }
     // 外部 API 障害(ServerError/5xx/401 等)なら非エンジニア向けの文言に整形する。
-    Err(crate::codex::process::humanize_generation_failure(&format!(
+    Err(crate::codex::process::humanize_generation_failure(
+        &format!(
         "{STORYBOARD_MAX_ATTEMPTS}回試行しても生成できませんでした ({cut_id} {take_id}): {last_err}"
-    )))
+    ),
+    ))
 }
 
 /// 1テイク生成の1試行。画像が出れば Ok、image_gen 未呼び出し等で画像が無ければ Err。
@@ -3432,7 +3739,11 @@ async fn attempt_one_take(
                 .join(" / ");
             return Err(format!(
                 "生成画像が見つかりませんでした: {cut_id} {take_id} (codex最終出力: {})",
-                if tail.is_empty() { "(出力なし)" } else { &tail }
+                if tail.is_empty() {
+                    "(出力なし)"
+                } else {
+                    &tail
+                }
             ));
         }
     };
@@ -3528,7 +3839,6 @@ fn build_generation_prompt(
     )
 }
 
-
 async fn codex_oneshot(
     app: &AppHandle,
     codex_bin: &Path,
@@ -3538,9 +3848,7 @@ async fn codex_oneshot(
     cwd: Option<&str>,
     run_id: Option<&str>,
 ) -> Result<String, String> {
-    let run_id = run_id
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
+    let run_id = run_id.map(str::trim).filter(|value| !value.is_empty());
     if run_id.map(gen_queue::is_cancelled).unwrap_or(false) {
         return Err(gen_queue::cancelled_error());
     }
@@ -3580,12 +3888,8 @@ async fn codex_oneshot(
     let pid = child
         .id()
         .ok_or_else(|| "codex exec の PID を取得できません".to_string())?;
-    let worker_registration = crate::commands::worker_registry::WorkerPidGuard::register(
-        app,
-        pid,
-        "storyboard",
-        run_id,
-    )?;
+    let worker_registration =
+        crate::commands::worker_registry::WorkerPidGuard::register(app, pid, "storyboard", run_id)?;
     if run_id.map(gen_queue::is_cancelled).unwrap_or(false) {
         return Err(gen_queue::cancelled_error());
     }
@@ -3605,7 +3909,11 @@ async fn codex_oneshot(
         Err(_) if run_id.map(gen_queue::is_cancelled).unwrap_or(false) => {
             return Err(gen_queue::cancelled_error());
         }
-        Err(_) => return Err(format!("codex exec が {timeout_secs} 秒でタイムアウトしました")),
+        Err(_) => {
+            return Err(format!(
+                "codex exec が {timeout_secs} 秒でタイムアウトしました"
+            ))
+        }
     };
     drop(worker_registration);
     if run_id.map(gen_queue::is_cancelled).unwrap_or(false) {
@@ -4133,6 +4441,157 @@ fn short_id() -> String {
     format!("{:08x}", nanos & 0xffff_ffff)
 }
 
+/// rr2 (2026-08-03): adoptions サイドカーの v1/v2 互換と、旧保存先 probe。
+#[cfg(test)]
+mod adoptions_sidecar_tests {
+    use super::*;
+    use std::fs;
+
+    /// v1 形式 (値が素の文字列) が v2 として読めること。
+    ///
+    /// なぜ要るか: v1 で採用を記録したユーザーのファイルが読めなくなると、
+    /// 「書いたのに読めない」= 採用判断の消失そのものになる。
+    #[test]
+    fn reads_v1_string_values_as_entries_without_image_path() {
+        let raw = r#"{"runId":"r1","adoptions":{"cut-1":"take-a","cut-2":"take-b"}}"#;
+        let sidecar: AdoptionsSidecar = serde_json::from_str::<AdoptionsSidecarRead>(raw)
+            .expect("v1 が parse できない")
+            .into();
+        assert_eq!(sidecar.run_id, "r1");
+        assert_eq!(
+            sidecar.adoptions.get("cut-1"),
+            Some(&AdoptionEntry {
+                take_id: "take-a".into(),
+                image_path: None,
+            })
+        );
+        assert_eq!(
+            sidecar.adoptions.get("cut-2").map(|e| e.take_id.as_str()),
+            Some("take-b")
+        );
+    }
+
+    /// v2 形式が round-trip すること (書いた imagePath が読み戻せる)。
+    #[test]
+    fn v2_round_trips_with_image_path() {
+        let mut sidecar = AdoptionsSidecar {
+            run_id: "r2".into(),
+            adoptions: Default::default(),
+        };
+        sidecar.adoptions.insert(
+            "cut-1".into(),
+            AdoptionEntry {
+                take_id: "take-a".into(),
+                image_path: Some("/tmp/take-a.png".into()),
+            },
+        );
+        let json = serde_json::to_string(&sidecar).unwrap();
+        let back: AdoptionsSidecar = serde_json::from_str::<AdoptionsSidecarRead>(&json)
+            .expect("v2 が parse できない")
+            .into();
+        assert_eq!(back.run_id, "r2");
+        assert_eq!(
+            back.adoptions.get("cut-1"),
+            Some(&AdoptionEntry {
+                take_id: "take-a".into(),
+                image_path: Some("/tmp/take-a.png".into()),
+            })
+        );
+    }
+
+    /// v1 と v2 が同じファイルに混在していても両方読めること
+    /// (v1 で採用した run に、v2 になってから追加採用したケース)。
+    #[test]
+    fn reads_mixed_v1_and_v2_values() {
+        let raw = r#"{"runId":"r3","adoptions":{
+            "cut-1":"take-old",
+            "cut-2":{"takeId":"take-new","imagePath":"/tmp/new.png"}
+        }}"#;
+        let sidecar: AdoptionsSidecar = serde_json::from_str::<AdoptionsSidecarRead>(raw)
+            .expect("混在が parse できない")
+            .into();
+        assert_eq!(sidecar.adoptions.get("cut-1").unwrap().image_path, None);
+        assert_eq!(
+            sidecar
+                .adoptions
+                .get("cut-2")
+                .unwrap()
+                .image_path
+                .as_deref(),
+            Some("/tmp/new.png")
+        );
+    }
+
+    fn settings_with(root: &Path, previous: Vec<String>) -> StorageSettings {
+        StorageSettings {
+            storage_root: root.to_string_lossy().into_owned(),
+            project_subfolder: true,
+            projects_data_root: None,
+            cloud_supabase_enabled: false,
+            supabase_project_url: None,
+            supabase_bucket_name: None,
+            previous_storage_roots: previous,
+        }
+    }
+
+    /// 現行 root に無く、旧保存先にある adoptions.json を probe が見つけること。
+    ///
+    /// なぜ要るか: 保存先を変えると run ディレクトリは旧 root に取り残される。
+    /// probe が無いと、保存先変更をまたいだ復元が静かに 0 件になる。
+    #[test]
+    fn probe_finds_adoptions_in_previous_root() {
+        let current = tempfile::tempdir().unwrap();
+        let old = tempfile::tempdir().unwrap();
+        let run_id = "run-xyz";
+        let old_dir = old.path().join(format!("gori-storyboard-{run_id}"));
+        fs::create_dir_all(&old_dir).unwrap();
+        let old_file = old_dir.join("adoptions.json");
+        fs::write(&old_file, r#"{"runId":"run-xyz","adoptions":{}}"#).unwrap();
+
+        let settings = settings_with(
+            current.path(),
+            vec![old.path().to_string_lossy().into_owned()],
+        );
+        assert_eq!(resolve_adoptions_read_path(&settings, run_id), old_file);
+    }
+
+    /// 現行 root に実体があるなら旧保存先は見に行かないこと (現行が優先)。
+    #[test]
+    fn probe_prefers_current_root() {
+        let current = tempfile::tempdir().unwrap();
+        let old = tempfile::tempdir().unwrap();
+        let run_id = "run-xyz";
+        for base in [current.path(), old.path()] {
+            let dir = base.join(format!("gori-storyboard-{run_id}"));
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("adoptions.json"), "{}").unwrap();
+        }
+        let settings = settings_with(
+            current.path(),
+            vec![old.path().to_string_lossy().into_owned()],
+        );
+        let expected = current
+            .path()
+            .join(format!("gori-storyboard-{run_id}"))
+            .join("adoptions.json");
+        assert_eq!(resolve_adoptions_read_path(&settings, run_id), expected);
+    }
+
+    /// どこにも無ければ現行 root のパスを返すこと (呼び出し側が「無い」と扱う)。
+    #[test]
+    fn probe_falls_back_to_current_path_when_missing() {
+        let current = tempfile::tempdir().unwrap();
+        let old = tempfile::tempdir().unwrap();
+        let settings = settings_with(
+            current.path(),
+            vec![old.path().to_string_lossy().into_owned()],
+        );
+        let path = resolve_adoptions_read_path(&settings, "nope");
+        assert!(path.starts_with(current.path()));
+        assert!(!path.is_file());
+    }
+}
+
 #[cfg(test)]
 mod sketch_mode_tests {
     use super::*;
@@ -4374,7 +4833,10 @@ mod sketch_mode_tests {
     #[test]
     fn sketch_mode_negative_forbids_photorealism() {
         let prompt = local_structured_prompt(&params(true), &cut(), None, &[]);
-        let negative = prompt.get("negative").and_then(|v| v.as_str()).unwrap_or("");
+        let negative = prompt
+            .get("negative")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         assert!(
             negative.contains("photorealistic"),
             "絵コンテの negative に photorealistic 禁止が入っていない: {negative}"
@@ -4425,7 +4887,9 @@ mod sketch_mode_tests {
                 .as_object_mut()
                 .expect("structured_prompt はオブジェクト")
                 .insert("fixed_core".to_string(), fixed_core.clone());
-            let core = prompt.get("fixed_core").expect("fixed_core が差し込まれていない");
+            let core = prompt
+                .get("fixed_core")
+                .expect("fixed_core が差し込まれていない");
             serialized.push(serde_json::to_string(core).expect("serialize 失敗"));
         }
 
@@ -4460,7 +4924,9 @@ mod sketch_mode_tests {
             "fixed_core がムードを運んでいない: {core}"
         );
         assert_eq!(
-            core.get("identity_anchors").and_then(|v| v.as_array()).map(|a| a.len()),
+            core.get("identity_anchors")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len()),
             Some(2),
             "fixed_core が identity anchor を運んでいない: {core}"
         );
@@ -4479,11 +4945,18 @@ mod sketch_mode_tests {
 
     /// production_scope の絞り込み。orchestrator の実装と同じ手順を再現する。
     /// (cuts 自体は絞らず「生成対象の添字」だけを絞る = 隣接関係を保つ)
-    fn scope_indices_for(cuts: &[CutPlan], scope: Option<&Vec<String>>, sketch_mode: bool) -> Vec<usize> {
+    fn scope_indices_for(
+        cuts: &[CutPlan],
+        scope: Option<&Vec<String>>,
+        sketch_mode: bool,
+    ) -> Vec<usize> {
         match scope {
             Some(scope) if !sketch_mode => {
-                let wanted: std::collections::HashSet<&str> =
-                    scope.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+                let wanted: std::collections::HashSet<&str> = scope
+                    .iter()
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .collect();
                 cuts.iter()
                     .enumerate()
                     .filter(|(_, c)| wanted.contains(c.cut_id.as_str()))
@@ -4516,7 +4989,11 @@ mod sketch_mode_tests {
 
         // 逆方向: 未指定なら全カット (既存の一括本生成が壊れていないこと)。
         let all = scope_indices_for(&cuts, None, false);
-        assert_eq!(all, vec![0, 1, 2, 3], "production_scope 未指定で全カットにならない");
+        assert_eq!(
+            all,
+            vec![0, 1, 2, 3],
+            "production_scope 未指定で全カットにならない"
+        );
 
         // 絵コンテ (sketch_mode) では scope を無視して常に全カット。
         let sketch = scope_indices_for(&cuts, Some(&scope), true);
@@ -4538,8 +5015,10 @@ mod sketch_mode_tests {
             cut_with_id("shot_002", "ドアが開き、車内に乗り込む"),
         ];
         let mut p = params(false);
-        p.sketch_references.insert("shot_001".into(), "/tmp/sketch_001.png".into());
-        p.sketch_references.insert("shot_002".into(), "/tmp/sketch_002.png".into());
+        p.sketch_references
+            .insert("shot_001".into(), "/tmp/sketch_001.png".into());
+        p.sketch_references
+            .insert("shot_002".into(), "/tmp/sketch_002.png".into());
         // 確定ラフ専用マップ (前カット参照はここだけを見る)。
         let mut confirmed = std::collections::HashMap::new();
         confirmed.insert("shot_001".to_string(), "/tmp/sketch_001.png".to_string());
@@ -4610,8 +5089,10 @@ mod sketch_mode_tests {
         ];
         let mut p = params(false);
         // shot_001 のラフは未採用 → sketch_references にはキービジュアルが入る。
-        p.sketch_references.insert("shot_001".into(), "/tmp/keyvisual.png".into());
-        p.sketch_references.insert("shot_002".into(), "/tmp/keyvisual.png".into());
+        p.sketch_references
+            .insert("shot_001".into(), "/tmp/keyvisual.png".into());
+        p.sketch_references
+            .insert("shot_002".into(), "/tmp/keyvisual.png".into());
         // 確定ラフは1枚も無い。
         p.confirmed_sketch_references = Some(std::collections::HashMap::new());
 
@@ -4638,7 +5119,9 @@ mod sketch_mode_tests {
 
         // マップ自体が未指定 (None) の run でも同様に参照なし (後方互換)。
         let mut legacy = params(false);
-        legacy.sketch_references.insert("shot_001".into(), "/tmp/keyvisual.png".into());
+        legacy
+            .sketch_references
+            .insert("shot_001".into(), "/tmp/keyvisual.png".into());
         assert!(
             legacy.confirmed_sketch_references.is_none(),
             "テスト前提が崩れている: confirmed_sketch_references は未指定のはず"
@@ -4683,7 +5166,11 @@ mod sketch_mode_tests {
                     &[],
                     Path::new("/tmp/style.png"),
                     &[],
-                    if i == 0 { None } else { Some(Path::new("/tmp/sketch_001.png")) },
+                    if i == 0 {
+                        None
+                    } else {
+                        Some(Path::new("/tmp/sketch_001.png"))
+                    },
                     Some(Path::new("/tmp/sketch_own.png")),
                 ),
             })
@@ -4728,7 +5215,9 @@ mod sketch_mode_tests {
 
         // fixed_core が非 null で、中身を運んでいること
         // (null / {} に落ちると再現条件の保全が消える)。
-        let core = value.get("fixedCore").expect("manifest に fixedCore が無い");
+        let core = value
+            .get("fixedCore")
+            .expect("manifest に fixedCore が無い");
         assert!(
             !core.is_null(),
             "manifest の fixedCore が null。ルック契約を後から辿れない: {value}"
@@ -4761,7 +5250,9 @@ mod sketch_mode_tests {
             let actual: Vec<String> = cut_value
                 .get("referencePaths")
                 .and_then(|r| r.as_array())
-                .unwrap_or_else(|| panic!("manifest cuts[{i}] に referencePaths が無い: {cut_value}"))
+                .unwrap_or_else(|| {
+                    panic!("manifest cuts[{i}] に referencePaths が無い: {cut_value}")
+                })
                 .iter()
                 .map(|v| v.as_str().unwrap_or_default().to_string())
                 .collect();
@@ -4787,8 +5278,10 @@ mod sketch_mode_tests {
             cut_with_id("shot_002", "ドアが開き、車内に乗り込む"),
         ];
         let mut p = params(true); // sketch_mode = true
-        p.sketch_references.insert("shot_001".into(), "/tmp/keyvisual.png".into());
-        p.sketch_references.insert("shot_002".into(), "/tmp/keyvisual.png".into());
+        p.sketch_references
+            .insert("shot_001".into(), "/tmp/keyvisual.png".into());
+        p.sketch_references
+            .insert("shot_002".into(), "/tmp/keyvisual.png".into());
 
         // orchestrator と同じ選び方を再現する。
         for cut_index in 0..cuts.len() {

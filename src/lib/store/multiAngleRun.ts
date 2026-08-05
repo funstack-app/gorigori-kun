@@ -60,6 +60,19 @@ type MultiAngleRunState = {
   applyEvent: (e: MultiAngleEvent) => void;
   /** run 状態だけ初期化 (設定は保持)。 */
   reset: () => void;
+  /**
+   * 「新規開始」= run も設定もまとめてゼロスタート (Sol 評価 blocking#6 / 2026-08-04)。
+   *
+   * reset() との違い: reset() は生成の失敗・受信準備エラーの後始末用で、
+   * 被写体参照・環境・アスペクト比・構図選択は **わざと残す** (同じ設定で
+   * 撮り直すため)。一方こちらはユーザーが明示的に「別の被写体で最初から」と
+   * 言ったときの操作なので、設定まで初期値へ戻す。
+   *
+   * S2 の mount-pool 化で、スキルを行き来しても状態が残るようになった。
+   * その代償として「前の作業を消す手段」が画面から無くなるため、設計書 §4 DoD 7
+   * (ゼロスタート導線) が各スキルに明示操作を要求している。
+   */
+  startNewRun: () => void;
 };
 
 const runEmptyState = {
@@ -230,4 +243,15 @@ export const useMultiAngleRun = create<MultiAngleRunState>((set) => ({
     }),
 
   reset: () => set({ ...runEmptyState, selectedOutputCutIds: [] }),
+
+  startNewRun: () =>
+    set({
+      ...runEmptyState,
+      selectedOutputCutIds: [],
+      // 設定も初期値へ (reset() との違い。型定義側のコメント参照)。
+      characterImagePath: null,
+      environmentDescription: "",
+      aspectRatio: "1:1",
+      selectedCutIds: [],
+    }),
 }));

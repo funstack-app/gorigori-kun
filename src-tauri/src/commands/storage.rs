@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
@@ -32,6 +33,22 @@ pub struct StorageSettings {
     pub supabase_project_url: Option<String>,
     #[serde(default)]
     pub supabase_bucket_name: Option<String>,
+    /// 過去に使っていた画像保存先の履歴 (新しい順、**無上限**)。
+    ///
+    /// なぜ持つか (2026-07-30): 保存先を変えても既存画像は移動しない
+    /// (巨大で失敗リスクが高い)。代わりに旧 root を **読み続ける** ことで
+    /// 「保存先を変えた瞬間に過去画像が全部見えなくなる」を構造的に無くす。
+    /// watcher_dirs がこの履歴を候補ディレクトリに含める。
+    ///
+    /// なぜ無上限か (2026-08-03 l99 / 4-1): 以前は 5 世代で truncate していたが、
+    /// 6 回目の保存先変更で最古 root が履歴から落ちた瞬間、その root にある画像が
+    /// 次回起動の relink (allow_prune=true) で history.db から**消される**時限爆弾に
+    /// なっていた (prune ガード第 2 段 images.rs は「settings に載っている旧 root が
+    /// 読めない間は消さない」であり、載っていない root は保護できない)。
+    /// 増えるのは「ユーザーが保存先を明示的に変えた回数」だけで現実には高々十数件、
+    /// かつ watcher_dirs は存在しないパスを push しないため、上限撤廃の副作用は小さい。
+    #[serde(default)]
+    pub previous_storage_roots: Vec<String>,
 }
 
 impl Default for StorageSettings {
@@ -43,8 +60,40 @@ impl Default for StorageSettings {
             cloud_supabase_enabled: false,
             supabase_project_url: None,
             supabase_bucket_name: None,
+            previous_storage_roots: Vec::new(),
         }
     }
+}
+
+/// tmp 名のプロセス内ユニーク化カウンタ (settings / 汎用 atomic write 用)。
+static ATOMIC_WRITE_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// settings 書き込みの直列化 (projects の PROJECTS_WRITE_LOCK と同思想)。
+/// save() は同期 fn で await を挟まないため std::sync::Mutex でよい。
+static SETTINGS_WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// `path` へ `content` をアトミックに書く (ユニーク tmp → rename、失敗時 tmp 掃除)。
+/// projects_write と同じ手順の汎用化。tmp は必ず同一ディレクトリに作る
+/// (rename の同一ファイルシステム保証)。
+///
+/// なぜ要るか (4vv): 従来 storage-settings.json は fs::write 直書きで、書き込み中の
+/// 電源断でファイルが壊れると起動時に .broken へ退避 + 既定値フォールバックが走り、
+/// 保存先指定と previous_storage_roots を同時に失っていた。
+/// owt (2026-08-03): storyboard の run-state.json も同じ手順で書くため crate 公開。
+pub(crate) fn atomic_write_text(path: &Path, content: &str) -> Result<(), String> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let seq = ATOMIC_WRITE_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp_path = path.with_extension(format!("json.tmp-{nanos}-{seq}"));
+    fs::write(&tmp_path, content)
+        .map_err(|err| format!("一時書込失敗 ({}): {err}", tmp_path.display()))?;
+    if let Err(err) = fs::rename(&tmp_path, path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(format!("リネーム失敗 ({}): {err}", path.display()));
+    }
+    Ok(())
 }
 
 impl StorageSettings {
@@ -103,7 +152,10 @@ impl StorageSettings {
         }
         let text = serde_json::to_string_pretty(self)
             .map_err(|e| format!("保存先設定のJSON化に失敗: {e}"))?;
-        fs::write(&path, text)
+        let _guard = SETTINGS_WRITE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        atomic_write_text(&path, &text)
             .map_err(|e| format!("保存先設定の保存に失敗 ({}): {e}", path.display()))
     }
 
@@ -151,12 +203,25 @@ pub async fn storage_get_settings(state: State<'_, AppState>) -> Result<StorageS
     Ok(settings)
 }
 
+/// 旧保存先を履歴の先頭へ積む (新しい順)。
+///
+/// - 同じパスの重複は落とす (先頭に積んだ `previous` が正)
+/// - 新しい現行 root (`current_root`) は履歴に残さない (現行と重複するため)
+/// - **件数の上限は無い** (4-1)。上限があると、履歴から落ちた root の画像が
+///   次回起動の relink で prune される時限爆弾になる (StorageSettings のコメント参照)
+fn push_previous_root(existing: &[String], previous: &str, current_root: &str) -> Vec<String> {
+    std::iter::once(previous.to_string())
+        .chain(existing.iter().filter(|r| r.as_str() != previous).cloned())
+        .filter(|r| r != current_root)
+        .collect()
+}
+
 #[tauri::command]
 pub async fn storage_set_settings(
     app: AppHandle,
     state: State<'_, AppState>,
     settings: StorageSettings,
-) -> Result<(), String> {
+) -> Result<Option<crate::commands::images::RelinkResult>, String> {
     // F4: 保存先 (storage_root) を変えると、history.db / projects.json に絶対パスで
     // 記録済みの既存画像が「その場所に無い」状態になり、まとめて見えなくなる。
     // 変更前の値を先に控え、実際に変わったときだけ再リンクを走らせる。
@@ -169,6 +234,20 @@ pub async fn storage_set_settings(
     let root_changed = previous_root
         .as_deref()
         .is_some_and(|previous| previous != settings.storage_root);
+
+    // 保存先が変わったら、旧 root を履歴の先頭に積む。
+    // 画像実体は動かさないので、旧 root を読み続けられるようにするのが目的。
+    // (2026-07-30 全ユーザーデータ生存監査 §3)
+    let mut settings = settings;
+    if root_changed {
+        if let Some(previous) = previous_root.as_deref() {
+            settings.previous_storage_roots = push_previous_root(
+                &settings.previous_storage_roots,
+                previous,
+                &settings.storage_root,
+            );
+        }
+    }
 
     settings.save()?;
     state.set_storage_settings(settings).await;
@@ -188,13 +267,18 @@ pub async fn storage_set_settings(
                     db_unresolved = result.db_unresolved,
                     "storage_set_settings: 保存先変更を検知して画像パスを再リンクした"
                 );
+                // 4-2: 張り替えマップをフロントへ返す。ここを返さないと
+                // projects / presets / favorites / judgements / referenceRoles が
+                // 次回起動まで旧パスを握ったままになる (セッション中ずっと stale)。
+                // 呼び出し側 (SettingsWorkspace) が applyRelinkResult に流す。
+                return Ok(Some(result));
             }
             Err(err) => {
                 tracing::warn!(target: "codex.storage", "保存先変更後の再リンクに失敗 (設定変更は成功): {err}");
             }
         }
     }
-    Ok(())
+    Ok(None)
 }
 
 #[tauri::command]
@@ -209,8 +293,8 @@ pub async fn storage_migrate_from_codex_home(
     // 過去画像。FB#19 で generated_images_dir() が GORI 専用 HOME を指すように
     // なったため、ここは明示的にレガシーディレクトリを参照する (移行漏れ防止)。
     // コピーのみ・元は消さないので非破壊。
-    let legacy =
-        legacy_generated_images_dir().ok_or_else(|| "ホームディレクトリの解決に失敗".to_string())?;
+    let legacy = legacy_generated_images_dir()
+        .ok_or_else(|| "ホームディレクトリの解決に失敗".to_string())?;
     if !legacy.exists() {
         return Ok(MigrationResult {
             copied_count: 0,
@@ -336,7 +420,9 @@ pub fn settings_path() -> Result<PathBuf, String> {
 /// 「Windows で設定が永続しない」という守りたい退行を検出できない。
 /// 引数で Windows 相当のパスを渡せる形にして、macOS 上でも牙を持たせる。
 fn settings_path_in(data_dir: &Path) -> PathBuf {
-    data_dir.join(crate::secrets::SERVICE_NAME).join(SETTINGS_FILE)
+    data_dir
+        .join(crate::secrets::SERVICE_NAME)
+        .join(SETTINGS_FILE)
 }
 
 /// 旧パス（macOS 決め打ち）。**移行元として読むだけで、書き込みはしない。**
@@ -535,6 +621,25 @@ pub fn watcher_dirs(settings: Option<&StorageSettings>) -> Vec<PathBuf> {
         if !dirs.iter().any(|dir| dir == &storage) {
             dirs.push(storage);
         }
+        // 過去の保存先も読み取り対象に含める (2026-07-30)。
+        //
+        // なぜ: 保存先を変えても既存画像は移動しない (巨大で失敗リスクが高い) ため、
+        // 旧 root を候補から外すと「変えた瞬間に過去画像が全部見えなくなる」。
+        // ここに足すだけで watcher / relink / 索引の3経路すべてに同時に効く
+        // (restart_image_watcher と relink_missing_inner が同じ関数を使うため)。
+        //
+        // 存在しないパス (外付けHDD未接続・フォルダ削除済み) は push しない。
+        // 索引作成側は読めないディレクトリを黙って飛ばすが、
+        // 「候補に入っているのに読めない」状態を作らないほうが挙動が読みやすい。
+        for previous in &settings.previous_storage_roots {
+            let p = PathBuf::from(previous);
+            if !p.exists() {
+                continue;
+            }
+            if !dirs.iter().any(|dir| dir == &p) {
+                dirs.push(p);
+            }
+        }
     }
     dirs
 }
@@ -661,11 +766,11 @@ fn default_projects_file_path() -> Result<PathBuf, String> {
     //   Mac:   ~/Library/Application Support
     //   Win:   %APPDATA% (= C:\Users\<user>\AppData\Roaming)
     //   Linux: ~/.local/share
-    let data_dir = dirs::data_dir().ok_or_else(|| "アプリデータディレクトリの解決に失敗".to_string())?;
+    let data_dir =
+        dirs::data_dir().ok_or_else(|| "アプリデータディレクトリの解決に失敗".to_string())?;
     let app_dir = data_dir.join("app.codexframefactory");
     if !app_dir.exists() {
-        fs::create_dir_all(&app_dir)
-            .map_err(|err| format!("アプリディレクトリ作成失敗: {err}"))?;
+        fs::create_dir_all(&app_dir).map_err(|err| format!("アプリディレクトリ作成失敗: {err}"))?;
     }
     Ok(app_dir.join("projects.json"))
 }
@@ -777,6 +882,40 @@ fn backup_projects_file(path: &Path) {
     }
 }
 
+/// 大幅減少ガードの閾値。既存がこれ未満なら発火しない (小規模データの誤爆防止)。
+const DECREASE_GUARD_MIN_EXISTING: usize = 3;
+
+/// 「既存 N 件 → 今回 M 件 (M>=1)」が半分未満への大幅減少なら Some((N, M))。
+/// 0 件は空上書きガードの担当なのでここでは見ない (incoming_count == 0 は None)。
+///
+/// なぜ要るか (ywf): クラウド同期フォルダで巻き戻った古いコピーを読み込んだ
+/// セッション (in-memory 1 件) が、同期で届いた新しい正本 (disk 10 件) を全量
+/// 後勝ち上書きする経路を、書き込み時に disk 側件数と比較して止める。
+///
+/// 判定だけを別関数にしているのは**テストのため** (motions_empty_overwrite_rejected
+/// と同じ理由。本体は実パス解決を伴い単体テストから叩けない)。
+fn projects_decrease_rejected(existing: &str, incoming: &str) -> Option<(usize, usize)> {
+    let existing_count = count_projects(existing).unwrap_or(0);
+    let incoming_count = count_projects(incoming).unwrap_or(0);
+    if existing_count >= DECREASE_GUARD_MIN_EXISTING
+        && incoming_count >= 1
+        && incoming_count * 2 < existing_count
+    {
+        Some((existing_count, incoming_count))
+    } else {
+        None
+    }
+}
+
+/// projects_write の直列化ロック (2026-07-30)。
+/// 並列生成改修 (2026-07-28) で保存の並行度が上がり、固定 tmp 名 + 並行 rename で
+/// 「projects.json リネーム失敗: No such file or directory」が実機多発した
+/// (2026-07-29 23:08〜23:37 ×6回)。書き込み全体 (空上書きガード→バックアップ→
+/// tmp書込→rename) を 1 クリティカルセクションにし、内容の後勝ち逆転も防ぐ。
+static PROJECTS_WRITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// tmp 名のプロセス内ユニーク化カウンタ (epochナノ秒と併用)。
+static PROJECTS_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
 /// projects.json に書き込む (上書き)。
 /// フロント側で JSON.stringify した文字列をそのまま渡す。
 ///
@@ -792,8 +931,16 @@ fn backup_projects_file(path: &Path) {
 ///
 /// `allow_empty`: 0件での上書きを許可するか。通常の保存は false (事故防止)。
 ///   ユーザー操作による明示的な全削除のときだけ true を渡す。
+/// `allow_decrease`: 大幅減少 (半分未満) での上書きを許可するか。通常は false。
+///   フロントが確認ダイアログで「このまま上書きする」を選ばせたときだけ true を渡す。
 #[tauri::command]
-pub async fn projects_write(content: String, allow_empty: Option<bool>) -> Result<(), String> {
+pub async fn projects_write(
+    content: String,
+    allow_empty: Option<bool>,
+    allow_decrease: Option<bool>,
+) -> Result<(), String> {
+    // 直列化: ガード読取→バックアップ→tmp→rename の全工程を1トランザクションに。
+    let _guard = PROJECTS_WRITE_LOCK.lock().await;
     let path = projects_file_path()?;
     let allow_empty = allow_empty.unwrap_or(false);
 
@@ -812,14 +959,37 @@ pub async fn projects_write(content: String, allow_empty: Option<bool>) -> Resul
         }
     }
 
+    // 大幅減少ガード (ywf): disk 側が多いのに今回が半分未満なら中止する。
+    // クラウド同期で巻き戻った古いコピーによる全量後勝ち上書きを止める。
+    // エラー先頭の [DECREASE_GUARD ...] はフロントの機械判定マーカー (形式を変えない)。
+    if !allow_decrease.unwrap_or(false) && path.exists() {
+        if let Ok(existing) = fs::read_to_string(&path) {
+            if let Some((e, i)) = projects_decrease_rejected(&existing, &content) {
+                backup_projects_file(&path);
+                return Err(format!(
+                    "[DECREASE_GUARD existing={e} incoming={i}] 保存内容 ({i} 件) がディスク上のプロジェクトデータ ({e} 件) より大幅に少ないため中止しました (データ保護)。"
+                ));
+            }
+        }
+    }
+
     // 書き込み前に世代バックアップ。
     backup_projects_file(&path);
 
-    let tmp_path = path.with_extension("json.tmp");
-    fs::write(&tmp_path, &content)
-        .map_err(|err| format!("projects.json 一時書込失敗: {err}"))?;
-    fs::rename(&tmp_path, &path)
-        .map_err(|err| format!("projects.json リネーム失敗: {err}"))?;
+    // tmp 名はユニーク化する (直列化に加えた二重防御。別ウィンドウ/将来の別経路が
+    // 同じ固定 tmp を触ってもレースしない)。
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let seq = PROJECTS_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp_path = path.with_extension(format!("json.tmp-{nanos}-{seq}"));
+    fs::write(&tmp_path, &content).map_err(|err| format!("projects.json 一時書込失敗: {err}"))?;
+    if let Err(err) = fs::rename(&tmp_path, &path) {
+        // 失敗した tmp は残骸として残さない (掃除失敗は握り潰してよい)。
+        let _ = fs::remove_file(&tmp_path);
+        return Err(format!("projects.json リネーム失敗: {err}"));
+    }
     Ok(())
 }
 
@@ -953,9 +1123,8 @@ pub async fn projects_set_data_root(
         // (新側が多いなら新側のデータを尊重して触らない)
         if old_count > 0 && old_count >= new_count {
             if let Some(parent) = new_path.parent() {
-                fs::create_dir_all(parent).map_err(|err| {
-                    format!("プロジェクトデータ保存先の作成に失敗: {err}")
-                })?;
+                fs::create_dir_all(parent)
+                    .map_err(|err| format!("プロジェクトデータ保存先の作成に失敗: {err}"))?;
             }
             // 新側に既存データがあるなら上書き前にバックアップ (戻せるように)。
             if new_path.exists() {
@@ -972,15 +1141,963 @@ pub async fn projects_set_data_root(
         }
     }
 
+    // presets.json も同じ保存先に置かれるため、projects.json と同じポリシーで引き継ぐ。
+    // ここを抜くと「保存先を変えたらキャラクター/プリセットが消えた(ように見える)」が
+    // 再発する。旧ファイルは残るので不可逆ではないが、参照が外れる時点で実害。
+    // (2026-07-30 評価者指摘。projects 側と同じ「件数の多い/同等な方を勝たせる」判定)
+    let old_presets = presets_file_path_for(settings.projects_data_root.as_deref())?;
+    let new_presets = presets_file_path_for(normalized.as_deref())?;
+    if old_presets != new_presets {
+        let old_count = presets_count_at(&old_presets).map_err(|err| {
+            format!("保存先の変更を中止しました (データは元の場所に保持されています)。{err}")
+        })?;
+        let new_count = presets_count_at(&new_presets).unwrap_or(0);
+        if old_count > 0 && old_count >= new_count {
+            if let Some(parent) = new_presets.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|err| format!("プリセット保存先の作成に失敗: {err}"))?;
+            }
+            if new_presets.exists() {
+                backup_projects_file(&new_presets);
+            }
+            fs::copy(&old_presets, &new_presets).map_err(|err| {
+                format!(
+                    "保存先の変更を中止しました (データは元の場所に保持されています)。プリセットの移行に失敗 ({} -> {}): {err}",
+                    old_presets.display(),
+                    new_presets.display()
+                )
+            })?;
+        }
+    }
+
+    // scene3d.json も同じ保存先に置かれるため、projects/presets と同じポリシーで引き継ぐ。
+    // (2026-07-30 全ユーザーデータ生存監査 §4: 3Dシーンは presets と同型の時限爆弾)
+    let old_scene = scene3d_file_path_for(settings.projects_data_root.as_deref())?;
+    let new_scene = scene3d_file_path_for(normalized.as_deref())?;
+    if old_scene != new_scene {
+        let old_count = scene3d_count_at(&old_scene).map_err(|err| {
+            format!("保存先の変更を中止しました (データは元の場所に保持されています)。{err}")
+        })?;
+        let new_count = scene3d_count_at(&new_scene).unwrap_or(0);
+        if old_count > 0 && old_count >= new_count {
+            if let Some(parent) = new_scene.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|err| format!("3Dシーン保存先の作成に失敗: {err}"))?;
+            }
+            if new_scene.exists() {
+                backup_projects_file(&new_scene);
+            }
+            fs::copy(&old_scene, &new_scene).map_err(|err| {
+                format!(
+                    "保存先の変更を中止しました (データは元の場所に保持されています)。3Dシーンの移行に失敗 ({} -> {}): {err}",
+                    old_scene.display(),
+                    new_scene.display()
+                )
+            })?;
+        }
+    }
+
+    // motions.json も同じ保存先に置かれるため、projects/presets/scene3d と同じ
+    // ポリシーで引き継ぐ (2026-08-03 gj7)。ここを欠くと「保存先を変えたら
+    // 3Dモーションだけ消えた」という新しい取り残しが生まれる。
+    // モーションの参照元 (scene3d.json) は上のブロックで移行済みなので、
+    // 片方だけ移ると clipId が宙に浮く = gj7 の再発になる。
+    let old_motions = motions_file_path_for(settings.projects_data_root.as_deref())?;
+    let new_motions = motions_file_path_for(normalized.as_deref())?;
+    if old_motions != new_motions {
+        let old_count = motions_count_at(&old_motions).map_err(|err| {
+            format!("保存先の変更を中止しました (データは元の場所に保持されています)。{err}")
+        })?;
+        let new_count = motions_count_at(&new_motions).unwrap_or(0);
+        if old_count > 0 && old_count >= new_count {
+            if let Some(parent) = new_motions.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|err| format!("モーション保存先の作成に失敗: {err}"))?;
+            }
+            if new_motions.exists() {
+                backup_projects_file(&new_motions);
+            }
+            fs::copy(&old_motions, &new_motions).map_err(|err| {
+                format!(
+                    "保存先の変更を中止しました (データは元の場所に保持されています)。モーションの移行に失敗 ({} -> {}): {err}",
+                    old_motions.display(),
+                    new_motions.display()
+                )
+            })?;
+        }
+    }
+
+    // 4-3 (2026-08-03 l99): 世代バックアップ (*.json.bak-<epoch>) も新側へ運ぶ。
+    // 「バックアップから復元」UI (listBackups) は現行 projects_file_path の親だけを
+    // 走査するため、ここを欠くと保存先を変えた瞬間に過去世代が UI から消える
+    // (ファイル自体は旧側に残るが、ユーザーには到達手段が無い)。
+    // best-effort: 失敗しても移行自体は成功扱い (本体 4 ファイルは既にコピー済み)。
+    for (old_file, new_file) in [
+        (&old_path, &new_path),
+        (&old_presets, &new_presets),
+        (&old_scene, &new_scene),
+        (&old_motions, &new_motions),
+    ] {
+        if old_file != new_file {
+            copy_generation_backups(old_file, new_file);
+        }
+    }
+
     settings.projects_data_root = normalized;
     settings.save()?;
     state.set_storage_settings(settings).await;
     Ok(())
 }
 
+/// 世代バックアップ (`<file_name>.bak-<epoch>`) を旧側ディレクトリから新側へコピーする。
+///
+/// - 新側に同名が既にあればスキップ (上書きしない。新側の世代を壊さない)
+/// - 個別の失敗は warn のみ (呼び出し側の移行は成功扱いのまま)
+/// - `old_file` / `new_file` は本体ファイルのパス。その親ディレクトリを走査する
+fn copy_generation_backups(old_file: &Path, new_file: &Path) {
+    let file_name = match old_file.file_name().and_then(|s| s.to_str()) {
+        Some(n) => n,
+        None => return,
+    };
+    let (old_dir, new_dir) = match (old_file.parent(), new_file.parent()) {
+        (Some(o), Some(n)) => (o, n),
+        _ => return,
+    };
+    if old_dir == new_dir {
+        return;
+    }
+    let prefix = format!("{file_name}.bak-");
+    let entries = match fs::read_dir(old_dir) {
+        Ok(rd) => rd,
+        // 旧側が読めないのは「バックアップが無い」と同じ扱いでよい (best-effort)。
+        Err(_) => return,
+    };
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        let name = match path.file_name().and_then(|s| s.to_str()) {
+            Some(n) => n.to_string(),
+            None => continue,
+        };
+        if !name.starts_with(&prefix) || !path.is_file() {
+            continue;
+        }
+        let dest = new_dir.join(&name);
+        if dest.exists() {
+            continue; // 既にある世代は上書きしない
+        }
+        if let Err(err) = fs::copy(&path, &dest) {
+            tracing::warn!(
+                target: "codex.storage",
+                "世代バックアップのコピーに失敗 (移行は継続): {} -> {}: {err}",
+                path.display(),
+                dest.display()
+            );
+        }
+    }
+}
+
+/// presets.json の件数。projects_count_at と同型:
+/// 未作成 → Ok(0) / 壊れたJSON → Ok(0) / 存在するが read 失敗 → Err。
+/// read 失敗を 0 と混同すると「0件＝引き継ぎ不要」と誤判定して旧データを取りこぼす。
+fn presets_count_at(path: &Path) -> Result<usize, String> {
+    if !path.exists() {
+        return Ok(0);
+    }
+    match fs::read_to_string(path) {
+        Ok(c) => Ok(count_presets(&c).unwrap_or(0)),
+        Err(err) => Err(format!(
+            "プリセットデータの読み取りに失敗 ({}): {err}",
+            path.display()
+        )),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// presets.json (プリセット = プロンプト + 登録キャラ) のファイル永続化
+// 2026-07-30: プリセットは localStorage のみに保存されていたため、WebView の
+// ビルドID (app.codexframefactory / .dev / .capture) ごとに別領域になり、
+// ビルドを跨ぐと空に見える + 終了タイミングで失われる。再起動でキャラ/プリセットが
+// 消える最重大バグの根治として、projects.json と同じファイル正本方式へ移行する。
+//
+// 形は projects.json (トップレベル配列) と違い object ({version, categories, presets})。
+// 「配列 = projects / object = presets」で取り違えを機械的に検出できるようにするため。
+// ---------------------------------------------------------------------------
+
+/// presets.json の保存パス。projects.json と同じ解決規則
+/// (StorageSettings.projects_data_root 指定があればその配下、無ければ OS 標準
+/// アプリデータディレクトリ)。
+fn presets_file_path() -> Result<PathBuf, String> {
+    let settings = StorageSettings::load()?;
+    presets_file_path_for(settings.projects_data_root.as_deref())
+}
+
+/// projectsDataRoot (Option) から presets.json パスを組み立てる。
+///
+/// projects 版 (projects_file_path_for) と同型の**意図的な重複**。
+/// projects 側は本番稼働中の消失バグ修正経路であり、共通化リファクタの差分リスクが
+/// 20 行の重複コストを上回るため、あえて共通化しない。
+fn presets_file_path_for(projects_data_root: Option<&str>) -> Result<PathBuf, String> {
+    let root = projects_data_root.map(str::trim).filter(|r| !r.is_empty());
+    match root {
+        Some(dir) => {
+            let dir = PathBuf::from(dir);
+            if !dir.exists() {
+                fs::create_dir_all(&dir).map_err(|err| {
+                    format!(
+                        "プリセットデータ保存先の作成に失敗 ({}): {err}",
+                        dir.display()
+                    )
+                })?;
+            }
+            Ok(dir.join("presets.json"))
+        }
+        None => {
+            let data_dir = dirs::data_dir()
+                .ok_or_else(|| "アプリデータディレクトリの解決に失敗".to_string())?;
+            let app_dir = data_dir.join("app.codexframefactory");
+            if !app_dir.exists() {
+                fs::create_dir_all(&app_dir)
+                    .map_err(|err| format!("アプリディレクトリ作成失敗: {err}"))?;
+            }
+            Ok(app_dir.join("presets.json"))
+        }
+    }
+}
+
+/// presets.json (object 形) の `presets` 配列の要素数。object でない/欠落は None。
+/// categories は既定値が常に入るため、空上書きガードの分母にしない。
+fn count_presets(content: &str) -> Option<usize> {
+    match serde_json::from_str::<serde_json::Value>(content) {
+        Ok(serde_json::Value::Object(map)) => map
+            .get("presets")
+            .and_then(|v| v.as_array())
+            .map(|a| a.len()),
+        _ => None,
+    }
+}
+
+/// presets_write の直列化ロック。PROJECTS_WRITE_LOCK と同型だが**別 static**。
+/// 共有すると projects の保存と presets の保存が互いを待たされる
+/// (無関係なファイルへの書き込みで直列化の範囲を広げない)。
+static PRESETS_WRITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// tmp 名のプロセス内ユニーク化カウンタ (presets 専用、epochナノ秒と併用)。
+static PRESETS_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// presets.json を読み出す。存在しなければ**空文字列**を返す。
+/// 空文字列 = 「ファイル未作成」をフロントが判別して localStorage 移行に入る。
+/// (projects_read の "[]" と違い、「未作成」と「空データ」を区別するため空文字を使う)
+#[tauri::command]
+pub async fn presets_read() -> Result<String, String> {
+    let path = presets_file_path()?;
+    if !path.exists() {
+        return Ok(String::new());
+    }
+    fs::read_to_string(&path).map_err(|err| format!("presets.json 読込失敗: {err}"))
+}
+
+/// presets.json の世代バックアップ一覧を返す (新しい順)。
+/// 各要素は (バックアップ絶対パス, epochミリ秒, プリセット件数)。
+/// 設定画面の「プリセット・キャラクターのバックアップ」UI が使う。
+///
+/// projects 版 (projects_list_backups) と同型の**意図的な重複**。
+/// presets_file_path_for がそうしているのと同じ理由 (共通化リファクタの差分リスクを
+/// 取らない)。
+#[tauri::command]
+pub async fn presets_list_backups() -> Result<Vec<(String, u64, usize)>, String> {
+    let path = presets_file_path()?;
+    let file_name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| "presets.json パス解決失敗".to_string())?;
+    let dir = path
+        .parent()
+        .ok_or_else(|| "presets.json 親ディレクトリ解決失敗".to_string())?;
+    let prefix = format!("{file_name}.bak-");
+    let mut out: Vec<(String, u64, usize)> = Vec::new();
+    if let Ok(rd) = fs::read_dir(dir) {
+        for entry in rd.filter_map(|e| e.ok()) {
+            let p = entry.path();
+            let name = match p.file_name().and_then(|s| s.to_str()) {
+                Some(n) => n.to_string(),
+                None => continue,
+            };
+            if !name.starts_with(&prefix) {
+                continue;
+            }
+            let stamp: u64 = name[prefix.len()..].parse().unwrap_or(0);
+            let count = fs::read_to_string(&p)
+                .ok()
+                .and_then(|c| count_presets(&c))
+                .unwrap_or(0);
+            // 0件のバックアップは復元候補に出さない (projects 版と同じ防御)。
+            // 空で復元しても意味がなく、presets_write の空上書きガードに弾かれて
+            // 無言で失敗するため。
+            if count == 0 {
+                continue;
+            }
+            out.push((p.to_string_lossy().into_owned(), stamp, count));
+        }
+    }
+    out.sort_by(|a, b| b.1.cmp(&a.1)); // 新しい順
+    Ok(out)
+}
+
+/// 指定したバックアップファイルの中身 (JSON文字列) を返す。
+/// パスは presets_list_backups が返したものに限定 (prefix 一致で検証)。
+/// 任意ファイル読み出しにしない (projects_read_backup と同じ検証方針)。
+#[tauri::command]
+pub async fn presets_read_backup(backup_path: String) -> Result<String, String> {
+    let path = presets_file_path()?;
+    let file_name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| "presets.json パス解決失敗".to_string())?;
+    let dir = path
+        .parent()
+        .ok_or_else(|| "presets.json 親ディレクトリ解決失敗".to_string())?;
+    let prefix = dir.join(format!("{file_name}.bak-"));
+    let bak = PathBuf::from(&backup_path);
+    // 任意パス読み出しを防ぐ: 既定のバックアップ命名にマッチするものだけ許可。
+    if !backup_path.starts_with(&*prefix.to_string_lossy()) || !bak.exists() {
+        return Err("不正なバックアップパスです".to_string());
+    }
+    fs::read_to_string(&bak).map_err(|err| format!("バックアップ読込失敗: {err}"))
+}
+
+/// scene3d.json の世代バックアップ一覧を返す (新しい順)。
+/// 各要素は (バックアップ絶対パス, epochミリ秒, shot(カット)数)。
+/// 設定画面の「3Dシーンのバックアップ」UI が使う。
+///
+/// presets 版 (presets_list_backups) と同型の**意図的な重複**。
+/// scene3d_file_path_for がそうしているのと同じ理由 (共通化リファクタの差分リスクを
+/// 取らない)。
+///
+/// 第3要素が presets の「件数」でなく shot 数なのは、3D シーンは単一プロジェクトで
+/// 「件数」の概念がないため。復元候補を選ぶとき「何カットのときの状態か」が
+/// ユーザーにとって最も分かりやすい手がかりになる。
+#[tauri::command]
+pub async fn scene3d_list_backups() -> Result<Vec<(String, u64, usize)>, String> {
+    let path = scene3d_file_path()?;
+    let file_name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| "scene3d.json パス解決失敗".to_string())?;
+    let dir = path
+        .parent()
+        .ok_or_else(|| "scene3d.json 親ディレクトリ解決失敗".to_string())?;
+    let prefix = format!("{file_name}.bak-");
+    let mut out: Vec<(String, u64, usize)> = Vec::new();
+    if let Ok(rd) = fs::read_dir(dir) {
+        for entry in rd.filter_map(|e| e.ok()) {
+            let p = entry.path();
+            let name = match p.file_name().and_then(|s| s.to_str()) {
+                Some(n) => n.to_string(),
+                None => continue,
+            };
+            if !name.starts_with(&prefix) {
+                continue;
+            }
+            let stamp: u64 = name[prefix.len()..].parse().unwrap_or(0);
+            let count = fs::read_to_string(&p)
+                .ok()
+                .and_then(|c| count_scene3d(&c))
+                .unwrap_or(0);
+            // shot 0 のバックアップは復元候補に出さない (presets 版と同じ防御)。
+            // 空で復元しても意味がなく、scene3d_write の空上書きガードに弾かれて
+            // 無言で失敗するため。
+            if count == 0 {
+                continue;
+            }
+            out.push((p.to_string_lossy().into_owned(), stamp, count));
+        }
+    }
+    out.sort_by(|a, b| b.1.cmp(&a.1)); // 新しい順
+    Ok(out)
+}
+
+/// 指定したバックアップファイルの中身 (JSON文字列) を返す。
+/// パスは scene3d_list_backups が返したものに限定 (prefix 一致で検証)。
+/// 任意ファイル読み出しにしない (presets_read_backup と同じ検証方針)。
+#[tauri::command]
+pub async fn scene3d_read_backup(backup_path: String) -> Result<String, String> {
+    let path = scene3d_file_path()?;
+    let file_name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| "scene3d.json パス解決失敗".to_string())?;
+    let dir = path
+        .parent()
+        .ok_or_else(|| "scene3d.json 親ディレクトリ解決失敗".to_string())?;
+    let prefix = dir.join(format!("{file_name}.bak-"));
+    let bak = PathBuf::from(&backup_path);
+    // 任意パス読み出しを防ぐ: 既定のバックアップ命名にマッチするものだけ許可。
+    if !backup_path.starts_with(&*prefix.to_string_lossy()) || !bak.exists() {
+        return Err("不正なバックアップパスです".to_string());
+    }
+    fs::read_to_string(&bak).map_err(|err| format!("バックアップ読込失敗: {err}"))
+}
+
+/// presets.json に書き込む (上書き)。projects_write と同型:
+/// 直列化 → 空上書きガード → 世代バックアップ → ユニーク tmp → rename (失敗時 tmp 掃除)。
+///
+/// `backup_projects_file` はパス汎用実装 (ファイル名 prefix を引数パスから導出する) なので、
+/// presets.json を渡せばそのまま `presets.json.bak-<epochミリ秒>` の世代管理になり、
+/// projects のバックアップとは独立に最大 PROJECTS_BACKUP_KEEP 世代が保たれる。
+///
+/// `allow_empty`: 0件での上書きを許可するか。通常の保存は false (事故防止)。
+///   ユーザー操作による明示的な全削除のときだけ true を渡す。
+#[tauri::command]
+pub async fn presets_write(content: String, allow_empty: Option<bool>) -> Result<(), String> {
+    // 直列化: ガード読取→バックアップ→tmp→rename の全工程を1トランザクションに。
+    let _guard = PRESETS_WRITE_LOCK.lock().await;
+    let path = presets_file_path()?;
+    let allow_empty = allow_empty.unwrap_or(false);
+
+    // 空上書きガード: 既存が非空で今回が0件、かつ明示許可でないなら拒否 (事故防止)。
+    // incoming が None (壊れたJSON / object でない) は 0 扱い = 拒否側に倒す
+    // (壊れた内容で正本を潰さない)。既存側の None も 0 扱いなので、壊れた既存は
+    // 上書きで回復できる (直前に世代バックアップが取られる)。
+    if !allow_empty && path.exists() {
+        if let Ok(existing) = fs::read_to_string(&path) {
+            let existing_count = count_presets(&existing).unwrap_or(0);
+            let incoming_count = count_presets(&content).unwrap_or(0);
+            if existing_count > 0 && incoming_count == 0 {
+                backup_projects_file(&path);
+                return Err(format!(
+                    "空のプリセットデータで {existing_count} 件を上書きしようとしたため中止しました (データ保護)。意図的な全削除なら allow_empty を指定してください。"
+                ));
+            }
+        }
+    }
+
+    // 書き込み前に世代バックアップ (presets.json.bak-<epochミリ秒>、最大10世代)。
+    backup_projects_file(&path);
+
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let seq = PRESETS_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp_path = path.with_extension(format!("json.tmp-{nanos}-{seq}"));
+    fs::write(&tmp_path, &content).map_err(|err| format!("presets.json 一時書込失敗: {err}"))?;
+    if let Err(err) = fs::rename(&tmp_path, &path) {
+        // 失敗した tmp は残骸として残さない (掃除失敗は握り潰してよい)。
+        let _ = fs::remove_file(&tmp_path);
+        return Err(format!("presets.json リネーム失敗: {err}"));
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// scene3d.json (3D シーン = オブジェクト配置・タイムライン・カメラ) のファイル永続化
+// 2026-07-30: 3D シーンは localStorage のみに保存されていたため、WebView の
+// ビルドID (app.codexframefactory / .dev / .capture) ごとに別領域になり、
+// ビルドを跨ぐと空に見える。presets と完全に同型の時限爆弾なので、同じタイミングで
+// ファイル正本方式へ移行する。
+//
+// 形は presets.json と同じ object だが、空上書きガードの分母は `shots` 配列
+// (フロント側 scene3d.ts の有効性判定と同じ基準)。
+// ---------------------------------------------------------------------------
+
+/// scene3d.json の保存パス。presets.json と同じ解決規則
+/// (StorageSettings.projects_data_root 指定があればその配下、無ければ OS 標準
+/// アプリデータディレクトリ)。
+fn scene3d_file_path() -> Result<PathBuf, String> {
+    let settings = StorageSettings::load()?;
+    scene3d_file_path_for(settings.projects_data_root.as_deref())
+}
+
+/// projectsDataRoot (Option) から scene3d.json パスを組み立てる。
+///
+/// presets 版 (presets_file_path_for) と同型の**意図的な重複**。
+/// 共通化リファクタの差分リスクを 20 行の重複コストより重く見る方針
+/// (presets_file_path_for のコメント参照)。
+fn scene3d_file_path_for(projects_data_root: Option<&str>) -> Result<PathBuf, String> {
+    let root = projects_data_root.map(str::trim).filter(|r| !r.is_empty());
+    match root {
+        Some(dir) => {
+            let dir = PathBuf::from(dir);
+            if !dir.exists() {
+                fs::create_dir_all(&dir).map_err(|err| {
+                    format!("3Dシーン保存先の作成に失敗 ({}): {err}", dir.display())
+                })?;
+            }
+            Ok(dir.join("scene3d.json"))
+        }
+        None => {
+            let data_dir = dirs::data_dir()
+                .ok_or_else(|| "アプリデータディレクトリの解決に失敗".to_string())?;
+            let app_dir = data_dir.join("app.codexframefactory");
+            if !app_dir.exists() {
+                fs::create_dir_all(&app_dir)
+                    .map_err(|err| format!("アプリディレクトリ作成失敗: {err}"))?;
+            }
+            Ok(app_dir.join("scene3d.json"))
+        }
+    }
+}
+
+/// scene3d.json の「中身の量」。空上書きガードの分母に使う。
+/// SceneProject は object で、shots 配列を持つ (scene3d.ts の有効性判定と同じ形)。
+/// object でない / shots が無い場合は None (= 壊れているので 0 扱い)。
+fn count_scene3d(content: &str) -> Option<usize> {
+    match serde_json::from_str::<serde_json::Value>(content) {
+        Ok(serde_json::Value::Object(map)) => {
+            map.get("shots").and_then(|v| v.as_array()).map(|a| a.len())
+        }
+        _ => None,
+    }
+}
+
+/// scene3d.json の件数。presets_count_at と同型:
+/// 未作成 → Ok(0) / 壊れたJSON → Ok(0) / 存在するが read 失敗 → Err。
+/// read 失敗を 0 と混同すると「0件＝引き継ぎ不要」と誤判定して旧データを取りこぼす。
+fn scene3d_count_at(path: &Path) -> Result<usize, String> {
+    if !path.exists() {
+        return Ok(0);
+    }
+    match fs::read_to_string(path) {
+        Ok(c) => Ok(count_scene3d(&c).unwrap_or(0)),
+        Err(err) => Err(format!(
+            "3Dシーンデータの読み取りに失敗 ({}): {err}",
+            path.display()
+        )),
+    }
+}
+
+/// scene3d_write の直列化ロック。PRESETS_WRITE_LOCK と同型だが**別 static**。
+/// 共有すると無関係なファイルへの書き込みで直列化の範囲が広がる。
+static SCENE3D_WRITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// tmp 名のプロセス内ユニーク化カウンタ (scene3d 専用、epochナノ秒と併用)。
+static SCENE3D_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// scene3d.json を読み出す。存在しなければ**空文字列**を返す。
+/// 空文字列 = 「ファイル未作成」をフロントが判別して localStorage 移行に入る
+/// (presets_read と同じ規約)。
+#[tauri::command]
+pub async fn scene3d_read() -> Result<String, String> {
+    let path = scene3d_file_path()?;
+    if !path.exists() {
+        return Ok(String::new());
+    }
+    fs::read_to_string(&path).map_err(|err| format!("scene3d.json 読込失敗: {err}"))
+}
+
+/// scene3d.json に書き込む (上書き)。presets_write と同型:
+/// 直列化 → 空上書きガード → 世代バックアップ → ユニーク tmp → rename (失敗時 tmp 掃除)。
+///
+/// `backup_projects_file` はパス汎用実装なので、scene3d.json を渡せばそのまま
+/// `scene3d.json.bak-<epochミリ秒>` の世代管理になる。
+///
+/// `allow_empty`: shots 0 件での上書きを許可するか。通常の保存は false (事故防止)。
+#[tauri::command]
+pub async fn scene3d_write(content: String, allow_empty: Option<bool>) -> Result<(), String> {
+    // 直列化: ガード読取→バックアップ→tmp→rename の全工程を1トランザクションに。
+    let _guard = SCENE3D_WRITE_LOCK.lock().await;
+    let path = scene3d_file_path()?;
+    let allow_empty = allow_empty.unwrap_or(false);
+
+    // 空上書きガード: 既存が非空で今回が0件、かつ明示許可でないなら拒否 (事故防止)。
+    // incoming が None (壊れたJSON / object でない) は 0 扱い = 拒否側に倒す。
+    if !allow_empty && path.exists() {
+        if let Ok(existing) = fs::read_to_string(&path) {
+            let existing_count = count_scene3d(&existing).unwrap_or(0);
+            let incoming_count = count_scene3d(&content).unwrap_or(0);
+            if existing_count > 0 && incoming_count == 0 {
+                backup_projects_file(&path);
+                return Err(format!(
+                    "空の3Dシーンデータで {existing_count} 件のカットを上書きしようとしたため中止しました (データ保護)。"
+                ));
+            }
+        }
+    }
+
+    // 書き込み前に世代バックアップ (scene3d.json.bak-<epochミリ秒>、最大10世代)。
+    backup_projects_file(&path);
+
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let seq = SCENE3D_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp_path = path.with_extension(format!("json.tmp-{nanos}-{seq}"));
+    fs::write(&tmp_path, &content).map_err(|err| format!("scene3d.json 一時書込失敗: {err}"))?;
+    if let Err(err) = fs::rename(&tmp_path, &path) {
+        // 失敗した tmp は残骸として残さない (掃除失敗は握り潰してよい)。
+        let _ = fs::remove_file(&tmp_path);
+        return Err(format!("scene3d.json リネーム失敗: {err}"));
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// motions.json (3D モーション = AI生成/動画取り込みのキーフレーム仕様) のファイル永続化
+// 2026-08-03 (gj7): モーション仕様は localStorage のみに保存されていたため、WebView の
+// ビルドID (app.codexframefactory / .dev / .capture) ごとに別領域になり、ビルドを
+// 跨ぐと空に見える + WebView データ消去で全損する。scene3d.json に残ったシーン側の
+// clipId だけが宙に浮き「シーンは残るのにモーションだけ消える」状態になるため、
+// 参照元 (scene3d.json) と同じ保存 regime へ揃えて生死を構造的に一致させる。
+//
+// scene3d.json への同居にしないのは、動画取り込みモーションが 24fps サンプリングで
+// MB 級になり、scene3d 側の「シーンJSONは数KB」前提 (毎 project 変更での同期
+// stringify + 10世代バックアップ) を壊すため。
+//
+// 形は presets/scene3d と同じ object ({version, motions})。
+// 「配列 = projects / object = それ以外」で取り違えを機械的に検出できるようにする。
+// ---------------------------------------------------------------------------
+
+/// motions.json の保存パス。presets.json と同じ解決規則
+/// (StorageSettings.projects_data_root 指定があればその配下、無ければ OS 標準
+/// アプリデータディレクトリ)。
+fn motions_file_path() -> Result<PathBuf, String> {
+    let settings = StorageSettings::load()?;
+    motions_file_path_for(settings.projects_data_root.as_deref())
+}
+
+/// projectsDataRoot (Option) から motions.json パスを組み立てる。
+///
+/// presets 版 (presets_file_path_for) と同型の**意図的な重複**
+/// (共通化リファクタの差分リスクを 20 行の重複コストより重く見る方針)。
+fn motions_file_path_for(projects_data_root: Option<&str>) -> Result<PathBuf, String> {
+    let root = projects_data_root.map(str::trim).filter(|r| !r.is_empty());
+    match root {
+        Some(dir) => {
+            let dir = PathBuf::from(dir);
+            if !dir.exists() {
+                fs::create_dir_all(&dir).map_err(|err| {
+                    format!(
+                        "モーションデータ保存先の作成に失敗 ({}): {err}",
+                        dir.display()
+                    )
+                })?;
+            }
+            Ok(dir.join("motions.json"))
+        }
+        None => {
+            let data_dir = dirs::data_dir()
+                .ok_or_else(|| "アプリデータディレクトリの解決に失敗".to_string())?;
+            let app_dir = data_dir.join("app.codexframefactory");
+            if !app_dir.exists() {
+                fs::create_dir_all(&app_dir)
+                    .map_err(|err| format!("アプリディレクトリ作成失敗: {err}"))?;
+            }
+            Ok(app_dir.join("motions.json"))
+        }
+    }
+}
+
+/// motions.json (object 形) の `motions` 配列の要素数。object でない/欠落は None。
+/// 空上書きガードの分母に使う。
+fn count_motions(content: &str) -> Option<usize> {
+    match serde_json::from_str::<serde_json::Value>(content) {
+        Ok(serde_json::Value::Object(map)) => map
+            .get("motions")
+            .and_then(|v| v.as_array())
+            .map(|a| a.len()),
+        _ => None,
+    }
+}
+
+/// motions.json の件数。presets_count_at と同型:
+/// 未作成 → Ok(0) / 壊れたJSON → Ok(0) / 存在するが read 失敗 → Err。
+/// read 失敗を 0 と混同すると「0件＝引き継ぎ不要」と誤判定して旧データを取りこぼす。
+fn motions_count_at(path: &Path) -> Result<usize, String> {
+    if !path.exists() {
+        return Ok(0);
+    }
+    match fs::read_to_string(path) {
+        Ok(c) => Ok(count_motions(&c).unwrap_or(0)),
+        Err(err) => Err(format!(
+            "モーションデータの読み取りに失敗 ({}): {err}",
+            path.display()
+        )),
+    }
+}
+
+/// motions_write の直列化ロック。PRESETS_WRITE_LOCK と同型だが**別 static**。
+/// 共有すると無関係なファイルへの書き込みで直列化の範囲が広がる。
+static MOTIONS_WRITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// tmp 名のプロセス内ユニーク化カウンタ (motions 専用、epochナノ秒と併用)。
+static MOTIONS_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// motions.json を読み出す。存在しなければ**空文字列**を返す。
+/// 空文字列 = 「ファイル未作成」をフロントが判別して localStorage 移行に入る
+/// (presets_read / scene3d_read と同じ規約)。
+#[tauri::command]
+pub async fn motions_read() -> Result<String, String> {
+    let path = motions_file_path()?;
+    if !path.exists() {
+        return Ok(String::new());
+    }
+    fs::read_to_string(&path).map_err(|err| format!("motions.json 読込失敗: {err}"))
+}
+
+/// motions.json に書き込む (上書き)。presets_write と同型:
+/// 直列化 → 空上書きガード → 世代バックアップ → ユニーク tmp → rename (失敗時 tmp 掃除)。
+///
+/// `backup_projects_file` はパス汎用実装なので、motions.json を渡せばそのまま
+/// `motions.json.bak-<epochミリ秒>` の世代管理になる。
+///
+/// 空上書きガードの判定本体。「既存が非空 かつ 今回が0件」なら拒否 (Some(既存件数))。
+///
+/// motions_write から切り出しているのは**テストのため**。motions_write 本体は
+/// StorageSettings 経由で実パスを解決するので単体テストから叩けず、判定だけを
+/// 別関数にしないとガードが本当に効くかを機械検査できない
+/// (テストが本体と別実装になると「自分と同じ誤りで一致する」型の無力な検査になる)。
+fn motions_empty_overwrite_rejected(existing: &str, incoming: &str) -> Option<usize> {
+    let existing_count = count_motions(existing).unwrap_or(0);
+    let incoming_count = count_motions(incoming).unwrap_or(0);
+    if existing_count > 0 && incoming_count == 0 {
+        Some(existing_count)
+    } else {
+        None
+    }
+}
+
+/// `allow_empty`: motions 0 件での上書きを許可するか。通常の保存は false (事故防止)。
+///   ユーザー操作で最後の 1 件を削除したときだけ true を渡す。
+#[tauri::command]
+pub async fn motions_write(content: String, allow_empty: Option<bool>) -> Result<(), String> {
+    // 直列化: ガード読取→バックアップ→tmp→rename の全工程を1トランザクションに。
+    let _guard = MOTIONS_WRITE_LOCK.lock().await;
+    let path = motions_file_path()?;
+    let allow_empty = allow_empty.unwrap_or(false);
+
+    // 空上書きガード: 既存が非空で今回が0件、かつ明示許可でないなら拒否 (事故防止)。
+    // incoming が None (壊れたJSON / object でない) は 0 扱い = 拒否側に倒す。
+    if !allow_empty && path.exists() {
+        if let Ok(existing) = fs::read_to_string(&path) {
+            if let Some(existing_count) = motions_empty_overwrite_rejected(&existing, &content) {
+                backup_projects_file(&path);
+                return Err(format!(
+                    "空のモーションデータで {existing_count} 件を上書きしようとしたため中止しました (データ保護)。意図的な全削除なら allow_empty を指定してください。"
+                ));
+            }
+        }
+    }
+
+    // 書き込み前に世代バックアップ (motions.json.bak-<epochミリ秒>、最大10世代)。
+    backup_projects_file(&path);
+
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let seq = MOTIONS_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp_path = path.with_extension(format!("json.tmp-{nanos}-{seq}"));
+    fs::write(&tmp_path, &content).map_err(|err| format!("motions.json 一時書込失敗: {err}"))?;
+    if let Err(err) = fs::rename(&tmp_path, &path) {
+        // 失敗した tmp は残骸として残さない (掃除失敗は握り潰してよい)。
+        let _ = fs::remove_file(&tmp_path);
+        return Err(format!("motions.json リネーム失敗: {err}"));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// atomic_write_text が (a) 新規書き込み (b) 上書き (c) tmp 残骸ゼロ を満たすこと (4vv)。
+    ///
+    /// なぜ要るか: storage-settings.json は保存先指定と previous_storage_roots を持つ
+    /// 単一障害点で、書き込み中断で壊れると .broken 退避 + 既定値フォールバックにより
+    /// 両方を同時に失う。tmp → rename が本当に効いているかを機械検査する。
+    #[test]
+    fn atomic_write_text_writes_overwrites_and_leaves_no_tmp() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("gori-atomic-write-test-{nanos}"));
+        fs::create_dir_all(&dir).expect("テスト用ディレクトリ作成");
+        let path = dir.join("storage-settings.json");
+
+        // (a) 新規パスに書けて内容が一致する
+        atomic_write_text(&path, "{\"a\":1}").expect("新規書き込み");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "{\"a\":1}");
+
+        // (b) 既存ファイルへの上書きで内容が置き換わる
+        atomic_write_text(&path, "{\"b\":2}").expect("上書き");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "{\"b\":2}");
+
+        // (c) 書き込み後に *.json.tmp-* の残骸が無い
+        let leftovers: Vec<String> = fs::read_dir(&dir)
+            .expect("ディレクトリ走査")
+            .filter_map(|e| e.ok())
+            .filter_map(|e| e.file_name().into_string().ok())
+            .filter(|n| n.contains(".json.tmp-"))
+            .collect();
+        assert!(leftovers.is_empty(), "tmp 残骸が残っている: {leftovers:?}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 大幅減少ガードの判定が閾値どおりに効くこと (ywf)。
+    ///
+    /// なぜ要るか: クラウド同期で巻き戻った古いコピー (1 件) が新しい正本 (10 件) を
+    /// 後勝ち上書きする経路を止めるのが目的。同時に、1 件ずつの通常削除
+    /// (N → N-1) や小規模データで誤爆しないことが実用上の必須条件。
+    #[test]
+    fn projects_decrease_guard_rejects_only_large_drops() {
+        let make = |n: usize| {
+            let items: Vec<String> = (0..n).map(|i| format!("{{\"id\":\"p{i}\"}}")).collect();
+            format!("[{}]", items.join(","))
+        };
+
+        // 10 件 → 1 件: 半分未満なので拒否
+        assert_eq!(
+            projects_decrease_rejected(&make(10), &make(1)),
+            Some((10, 1))
+        );
+        // 10 件 → 5 件: ちょうど半分は通す (5*2 < 10 は偽)
+        assert_eq!(projects_decrease_rejected(&make(10), &make(5)), None);
+        // 3 件 → 1 件: 閾値ちょうどで発火する
+        assert_eq!(projects_decrease_rejected(&make(3), &make(1)), Some((3, 1)));
+        // 2 件 → 1 件: 既存が閾値未満なので発火しない (小規模データの誤爆防止)
+        assert_eq!(projects_decrease_rejected(&make(2), &make(1)), None);
+        // 10 件 → 0 件: 空上書きガードの担当なのでここでは見ない
+        assert_eq!(projects_decrease_rejected(&make(10), &make(0)), None);
+        // 壊れた JSON の incoming は 0 扱い = このガードの対象外 (空ガードが拒否する)
+        assert_eq!(projects_decrease_rejected(&make(10), "not json"), None);
+    }
+
+    /// motions.json の空上書きガードが本当に効くこと (gj7 DoD-4)。
+    ///
+    /// なぜ要るか: モーションは AI 生成トークン / 動画取り込み作業の成果物で
+    /// 再生成コストが高い。初期化前の空 state が誤ってファイルへ流れると
+    /// 全損するので、「非空 → 0件」だけを機械的に拒否できているかを検査する。
+    #[test]
+    fn motions_empty_overwrite_guard_rejects_only_nonempty_to_zero() {
+        let two = r#"{"version":1,"motions":[{"id":"a"},{"id":"b"}]}"#;
+        let zero = r#"{"version":1,"motions":[]}"#;
+
+        // 非空 → 0件: 拒否する (件数を返す)
+        assert_eq!(motions_empty_overwrite_rejected(two, zero), Some(2));
+        // 壊れたJSON / object でない incoming も 0 扱い = 拒否側に倒す
+        assert_eq!(motions_empty_overwrite_rejected(two, "not json"), Some(2));
+        assert_eq!(motions_empty_overwrite_rejected(two, "[]"), Some(2));
+
+        // 通常の保存 (非空 → 非空) は通す
+        assert_eq!(motions_empty_overwrite_rejected(two, two), None);
+        // 既存が空 / 未作成相当なら 0件を書いてよい (ガードの対象外)
+        assert_eq!(motions_empty_overwrite_rejected(zero, zero), None);
+        assert_eq!(motions_empty_overwrite_rejected("", zero), None);
+    }
+
+    /// count_motions が「motions 配列長」だけを見ること。
+    /// projects.json (トップレベル配列) を誤って渡しても None = 0 扱いになり、
+    /// 取り違えたファイルの件数でガードが誤作動しない。
+    #[test]
+    fn count_motions_counts_only_object_motions_array() {
+        assert_eq!(
+            count_motions(r#"{"version":1,"motions":[{"id":"a"}]}"#),
+            Some(1)
+        );
+        assert_eq!(count_motions(r#"{"version":1,"motions":[]}"#), Some(0));
+        // トップレベル配列 (projects.json の形) は None
+        assert_eq!(count_motions(r#"[{"id":"a"}]"#), None);
+        // motions キー欠落 (presets.json 等を取り違え) も None
+        assert_eq!(
+            count_motions(r#"{"version":1,"presets":[{"id":"a"}]}"#),
+            None
+        );
+        assert_eq!(count_motions("broken"), None);
+    }
+
+    /// 4-1 (l99): 保存先を 6 回以上変えても旧 root が 1 件も落ちないこと。
+    ///
+    /// なぜこのテストが要るか: 以前は 5 世代で truncate していた。6 回目の変更で
+    /// 最古 root が履歴から落ちると、prune ガード第 2 段 (images.rs「settings に
+    /// 載っている旧 root が読めない間は消さない」) の保護外になり、その root の
+    /// 画像が次回起動の relink (allow_prune=true) で history.db から削除される。
+    /// 上限がある限り同型の時限爆弾が残るので、上限そのものが無いことを固定する。
+    #[test]
+    fn previous_roots_keep_all_generations_without_truncation() {
+        let mut history: Vec<String> = Vec::new();
+        // /root0 → /root1 → ... → /root7 と 7 回変更する。
+        for i in 0..7 {
+            let previous = format!("/root{i}");
+            let current = format!("/root{}", i + 1);
+            history = push_previous_root(&history, &previous, &current);
+        }
+        // 旧 root は全 7 件が新しい順で残る (KEEP=5 時代なら 5 件で落ちていた)。
+        assert_eq!(
+            history.len(),
+            7,
+            "旧 root が truncate されている: {history:?}"
+        );
+        assert_eq!(
+            history,
+            vec!["/root6", "/root5", "/root4", "/root3", "/root2", "/root1", "/root0",]
+        );
+    }
+
+    /// 重複排除と「現行 root は履歴に残さない」フィルタは無上限化後も維持されること。
+    #[test]
+    fn previous_roots_dedupe_and_exclude_current() {
+        // 同じ root へ戻ったケース: /a → /b → /a。履歴に /a が 2 つ並ばない。
+        let history = push_previous_root(&["/a".to_string()], "/b", "/a");
+        // 現行 root (/a) は履歴から除かれ、/b だけが残る。
+        assert_eq!(history, vec!["/b"]);
+
+        // 既に履歴にある root を再び previous として積んでも重複しない。
+        let history = push_previous_root(&["/x".to_string(), "/y".to_string()], "/y", "/z");
+        assert_eq!(history, vec!["/y", "/x"]);
+    }
+
+    /// 4-3 (l99): 世代バックアップが新しい保存先へコピーされること。
+    /// 新側に同名が既にあれば上書きしないこと (新側の世代を壊さない)。
+    #[test]
+    fn generation_backups_are_copied_without_clobbering() {
+        let old_dir = tempfile::tempdir().unwrap();
+        let new_dir = tempfile::tempdir().unwrap();
+        let old_file = old_dir.path().join("projects.json");
+        let new_file = new_dir.path().join("projects.json");
+
+        // 旧側: 本体 + 世代バックアップ 2 件 + 無関係ファイル
+        fs::write(&old_file, b"[]").unwrap();
+        fs::write(old_dir.path().join("projects.json.bak-123"), b"old-123").unwrap();
+        fs::write(old_dir.path().join("projects.json.bak-456"), b"old-456").unwrap();
+        // 別ファイルのバックアップは対象外 (prefix が違う)
+        fs::write(old_dir.path().join("presets.json.bak-999"), b"presets").unwrap();
+
+        // 新側: bak-456 が既にある (中身が違う = 上書きされたら判る)
+        fs::write(&new_file, b"[]").unwrap();
+        fs::write(new_dir.path().join("projects.json.bak-456"), b"new-456").unwrap();
+
+        copy_generation_backups(&old_file, &new_file);
+
+        // 新側に無かった bak-123 はコピーされる
+        assert_eq!(
+            fs::read_to_string(new_dir.path().join("projects.json.bak-123")).unwrap(),
+            "old-123"
+        );
+        // 既にあった bak-456 は上書きされない
+        assert_eq!(
+            fs::read_to_string(new_dir.path().join("projects.json.bak-456")).unwrap(),
+            "new-456"
+        );
+        // 別ファイルのバックアップは運ばれない
+        assert!(!new_dir.path().join("presets.json.bak-999").exists());
+    }
+
+    /// 同一ディレクトリ (保存先が実質変わっていない) なら何もしないこと。
+    #[test]
+    fn generation_backups_skip_when_same_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("projects.json");
+        fs::write(&file, b"[]").unwrap();
+        fs::write(dir.path().join("projects.json.bak-1"), b"x").unwrap();
+
+        copy_generation_backups(&file, &file);
+
+        // 自分自身へのコピーで内容が壊れていないこと
+        assert_eq!(
+            fs::read_to_string(dir.path().join("projects.json.bak-1")).unwrap(),
+            "x"
+        );
+    }
 
     /// 壊れた設定が2回続けて出ても、1回目の退避を潰さないこと。
     ///
@@ -996,7 +2113,10 @@ mod tests {
         fs::write(&first, b"1st").unwrap();
 
         let second = next_free_backup_path(&settings);
-        assert_eq!(second.file_name().unwrap(), "storage-settings.json.broken.2");
+        assert_eq!(
+            second.file_name().unwrap(),
+            "storage-settings.json.broken.2"
+        );
         fs::write(&second, b"2nd").unwrap();
 
         let third = next_free_backup_path(&settings);

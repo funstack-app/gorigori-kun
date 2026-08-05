@@ -71,6 +71,52 @@ pub async fn generate_one_cut(
     .await
 }
 
+/// 生成枠 (セマフォ permit) を取った瞬間に一度だけ呼ばれるフック。
+///
+/// なぜ必要か: `cutStarted` は「このカットが動き始めた」通知として UI が使うが、
+/// permit の取得は `gen_server` / `attempt_one_cut_for_run` の**内側**で起きる。
+/// 呼び出し側で先に emit すると、枠待ちで一歩も進んでいないカットが「生成中」に
+/// 見える (Sol 評価: 枠取得前 emit)。かといって呼び出し側で permit を先取りすると
+/// 外1枚・内1枚の二重取得になり、上限ぶん外側で埋めた瞬間に全停止する。
+///
+/// そこで permit を取る側から呼び出し側へ「取れた」を折り返す。
+/// **同一カットで2経路 (常駐 / exec フォールバック) を通っても発火は1回**に
+/// 抑える責務は `SlotHook::fire` が持つ。
+pub struct SlotHook<'a> {
+    fired: std::sync::atomic::AtomicBool,
+    callback: Option<&'a (dyn Fn() + Send + Sync)>,
+}
+
+impl<'a> SlotHook<'a> {
+    /// 何もしないフック (既存呼び出し元の既定)。
+    pub fn none() -> Self {
+        Self {
+            fired: std::sync::atomic::AtomicBool::new(false),
+            callback: None,
+        }
+    }
+
+    pub fn new(callback: &'a (dyn Fn() + Send + Sync)) -> Self {
+        Self {
+            fired: std::sync::atomic::AtomicBool::new(false),
+            callback: Some(callback),
+        }
+    }
+
+    /// permit を取った直後に呼ぶ。2回目以降は無視する。
+    ///
+    /// 常駐経路が permit を取ったあとに失敗して exec 経路へ落ちると、
+    /// 同じカットで permit が2回取られる。UI から見た「始まった」は1回なので、
+    /// ここで冪等にする (2重 emit でカウンタが狂うのを防ぐ)。
+    pub fn fire(&self) {
+        if let Some(callback) = self.callback {
+            if !self.fired.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                callback();
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn generate_one_cut_for_run(
     app: &AppHandle,
@@ -84,9 +130,37 @@ pub async fn generate_one_cut_for_run(
     cwd: Option<String>,
     run_id: Option<&str>,
 ) -> Result<PathBuf, String> {
-    let run_id = run_id
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
+    generate_one_cut_for_run_with_slot_hook(
+        app,
+        state,
+        codex_bin,
+        codex_home_orig,
+        prompt,
+        reference_images,
+        output_dir,
+        cut_id,
+        cwd,
+        run_id,
+        &SlotHook::none(),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn generate_one_cut_for_run_with_slot_hook(
+    app: &AppHandle,
+    state: &crate::state::AppState,
+    codex_bin: &Path,
+    codex_home_orig: &Path,
+    prompt: &str,
+    reference_images: &[PathBuf],
+    output_dir: &Path,
+    cut_id: &str,
+    cwd: Option<String>,
+    run_id: Option<&str>,
+    slot_hook: &SlotHook<'_>,
+) -> Result<PathBuf, String> {
+    let run_id = run_id.map(str::trim).filter(|value| !value.is_empty());
     if run_is_cancelled(run_id) {
         return Err(gen_queue::cancelled_error());
     }
@@ -104,7 +178,7 @@ pub async fn generate_one_cut_for_run(
         .iter()
         .map(|p| p.to_string_lossy().into_owned())
         .collect();
-    match crate::codex::gen_server::generate_image_for_run(
+    match crate::codex::gen_server::generate_image_for_run_with_slot_hook(
         app,
         state,
         prompt,
@@ -118,6 +192,7 @@ pub async fn generate_one_cut_for_run(
         // 付かないほうが良い)。
         None,
         "multiangle",
+        slot_hook,
     )
     .await
     {
@@ -154,7 +229,7 @@ pub async fn generate_one_cut_for_run(
         if run_is_cancelled(run_id) {
             return Err(gen_queue::cancelled_error());
         }
-        match attempt_one_cut_for_run(
+        match attempt_one_cut_for_run_with_slot_hook(
             app,
             codex_bin,
             codex_home_orig,
@@ -164,6 +239,7 @@ pub async fn generate_one_cut_for_run(
             cut_id,
             cwd.clone(),
             run_id,
+            slot_hook,
         )
         .await
         {
@@ -183,9 +259,11 @@ pub async fn generate_one_cut_for_run(
         }
     }
     // 外部 API 障害(ServerError/5xx/401 等)なら非エンジニア向けの文言に整形する。
-    Err(crate::codex::process::humanize_generation_failure(&format!(
-        "{GENERATION_MAX_ATTEMPTS}回試行しても生成できませんでした ({cut_id}): {last_err}"
-    )))
+    Err(crate::codex::process::humanize_generation_failure(
+        &format!(
+            "{GENERATION_MAX_ATTEMPTS}回試行しても生成できませんでした ({cut_id}): {last_err}"
+        ),
+    ))
 }
 
 /// 1枚生成の1試行。画像が出れば Ok、image_gen 未呼び出し等で画像が無ければ Err。
@@ -225,9 +303,35 @@ async fn attempt_one_cut_for_run(
     cwd: Option<String>,
     run_id: Option<&str>,
 ) -> Result<PathBuf, String> {
-    let run_id = run_id
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
+    attempt_one_cut_for_run_with_slot_hook(
+        app,
+        codex_bin,
+        codex_home_orig,
+        prompt,
+        reference_images,
+        output_dir,
+        cut_id,
+        cwd,
+        run_id,
+        &SlotHook::none(),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn attempt_one_cut_for_run_with_slot_hook(
+    app: &AppHandle,
+    codex_bin: &Path,
+    codex_home_orig: &Path,
+    prompt: &str,
+    reference_images: &[PathBuf],
+    output_dir: &Path,
+    cut_id: &str,
+    cwd: Option<String>,
+    run_id: Option<&str>,
+    slot_hook: &SlotHook<'_>,
+) -> Result<PathBuf, String> {
+    let run_id = run_id.map(str::trim).filter(|value| !value.is_empty());
     if run_is_cancelled(run_id) {
         return Err(gen_queue::cancelled_error());
     }
@@ -279,6 +383,9 @@ async fn attempt_one_cut_for_run(
     }
     // RAII: 以降どの早期 return / `?` で抜けても Drop が債務返済を通す。
     let gen_permit = gen_queue::GenPermit::acquire(&GLOBAL_GEN_SEMAPHORE).await?;
+    // 枠が取れた = このカットが本当に動き始めた。呼び出し側 (character_sheet の
+    // cutStarted) へ折り返す。acquire より前で呼ばないのが要点。
+    slot_hook.fire();
     // permit 待機中にキャンセルされたカットは、プロセスを一度も起動しない。
     if run_is_cancelled(run_id) {
         return Err(gen_queue::cancelled_error());
@@ -289,12 +396,8 @@ async fn attempt_one_cut_for_run(
     let pid = child
         .id()
         .ok_or_else(|| "codex exec の PID を取得できません".to_string())?;
-    let worker_registration = crate::commands::worker_registry::WorkerPidGuard::register(
-        app,
-        pid,
-        "multiangle",
-        run_id,
-    )?;
+    let worker_registration =
+        crate::commands::worker_registry::WorkerPidGuard::register(app, pid, "multiangle", run_id)?;
     // acquire後の確認とspawnの隙間で届いたキャンセルも、ChildのDropで直ちに止める。
     if run_is_cancelled(run_id) {
         return Err(gen_queue::cancelled_error());
@@ -364,7 +467,11 @@ async fn attempt_one_cut_for_run(
                 .join(" / ");
             return Err(format!(
                 "生成画像が見つかりませんでした: {cut_id} (codex最終出力: {})",
-                if tail.is_empty() { "(出力なし)" } else { &tail }
+                if tail.is_empty() {
+                    "(出力なし)"
+                } else {
+                    &tail
+                }
             ));
         }
     };

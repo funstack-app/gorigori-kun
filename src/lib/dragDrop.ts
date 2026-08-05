@@ -1,7 +1,10 @@
 import { useEditor } from "../components/edit/editor/editorStore";
+import { useCharacterSheetRun } from "./store/characterSheetRun";
 import { useComposer, type Reference } from "./store/composer";
 import { usePlanChat } from "./store/planChat";
+import { useSkillUiMode } from "./store/skillUiMode";
 import { useToasts } from "./store/toasts";
+import { useVideoGen } from "./store/videoGen";
 import { useWorkspace } from "./store/workspace";
 
 const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "webp", "gif", "bmp"]);
@@ -85,13 +88,78 @@ export async function attachWindowDragDrop(opts: {
                 ttlMs: 3000,
               });
             }
-          } else {
-            useComposer.getState().addReferences(refs);
+          } else if (activeTab === "video") {
+            // 動画タブ: i2v 元画像スロットが受け口。1 枚制なので先頭のみセット。
+            // (storyboard の sendCutToVideoTab と同じスロット。バナーで即時可視)
+            useVideoGen.getState().setSourceImage(refs[0].path);
             useToasts.getState().push({
               kind: "success",
-              text: `${refs.length} 枚を参照画像に追加しました`,
+              text:
+                refs.length > 1
+                  ? `${refs.length} 枚のうち先頭の 1 枚を i2v 元画像にセットしました`
+                  : "i2v 元画像にセットしました",
               ttlMs: 3000,
             });
+          } else {
+            // "generate" タブ。スキル UI モードごとに受け口が違う。
+            // 受け口を持つ画面が 3 つ目に達したら pathIngestor 方式
+            // (登録レジストリ) へ移行する。最初の移行対象は PresetsDrawer。
+            const uiMode = useSkillUiMode.getState().activeUiMode;
+            if (uiMode === "characterRegister") {
+              const run = useCharacterSheetRun.getState();
+              // SQ2: 走行中ガードを外し、受け口の条件を「入力画面を見ているか」だけにした。
+              // 下書きはジョブから独立した (凍結済みの入力は書き換わらない) ので、
+              // 走っている生成の内容を汚す経路が構造的に無い。
+              // Step 2/3 表示中に受け付けないのは従来どおり (見えていない欄に積まない)。
+              if (run.step === 1) {
+                // 複数枚をまとめて参照に積む (先頭がメイン=同一性の正)。
+                // 上限・重複は store 側で判定し、内訳を toast 文言へ反映する。
+                const r = run.addCharacterImages(refs.map((x) => x.path));
+                if (r.rejected > 0) {
+                  useToasts.getState().push({
+                    kind: "info",
+                    text: `参照画像は最大6枚までです。${r.added} 枚を追加し、${r.rejected} 枚は追加できませんでした。`,
+                    ttlMs: 4000,
+                  });
+                } else if (r.added > 0) {
+                  useToasts.getState().push({
+                    kind: "success",
+                    text: `${r.added} 枚を参照画像に追加しました。`,
+                    ttlMs: 3000,
+                  });
+                } else if (r.duplicates > 0) {
+                  useToasts.getState().push({
+                    kind: "info",
+                    text: "ドロップした画像はすでに参照画像にあります。",
+                    ttlMs: 3000,
+                  });
+                }
+              } else {
+                // step 2(生成中)/ step 3(確認して登録)で差し替えると
+                // 実行中 run・登録確認との整合が壊れる。何も書き換えない。
+                useToasts.getState().push({
+                  kind: "info",
+                  text: "参照画像はステップ1でのみ設定できます。",
+                  ttlMs: 3000,
+                });
+              }
+            } else if (uiMode === "default") {
+              useComposer.getState().addReferences(refs);
+              useToasts.getState().push({
+                kind: "success",
+                text: `${refs.length} 枚を参照画像に追加しました`,
+                ttlMs: 3000,
+              });
+            } else {
+              // 受け口未定義のスキル画面。画像を失わないよう composer に
+              // 退避しつつ、どこへ入ったかを正直に伝える。
+              useComposer.getState().addReferences(refs);
+              useToasts.getState().push({
+                kind: "info",
+                text: `${refs.length} 枚を通常生成の参照画像に追加しました（この画面には表示されません）`,
+                ttlMs: 3000,
+              });
+            }
           }
         }
         if (skipped > 0 && refs.length === 0) {

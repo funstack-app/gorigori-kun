@@ -1,21 +1,32 @@
 import { useEffect, useState } from "react";
-import { BaseDirectory } from "@tauri-apps/api/path";
-import { readTextFile, exists } from "@tauri-apps/plugin-fs";
 
-import type { GoriSkill } from "../lib/skills/catalog";
+import { skills as skillsIpc } from "../lib/ipc";
 import { SkillIcon } from "./SkillIcon";
 
 type SkillDetailModalProps = {
-  skill: GoriSkill;
+  skillId: string;
+  title: string;
+  description: string;
+  /** Rust が返した実パス。無ければヘッダーのパス行を出さない。 */
+  installedPath: string | null;
   onClose: () => void;
 };
 
 /**
  * スキルの詳細を表示するモーダル。
- * ~/.codex/skills/{skill}/SKILL.md を読み込んで表示する。
- * 存在しないスキル(マルチアングル等、未実装)はカタログの説明だけ表示。
+ *
+ * ygn (2026-08-03): 読み込みはすべて IPC 経由にした。フロントで
+ * `~/.codex/skills/...` を組み立てると、実体のある専用 CODEX_HOME と食い違う。
+ * 実在判定も「エラーメッセージの文字列一致」ではなく listInstalled との
+ * 照合 (決定論) で行う。
  */
-export function SkillDetailModal({ skill, onClose }: SkillDetailModalProps) {
+export function SkillDetailModal({
+  skillId,
+  title,
+  description,
+  installedPath,
+  onClose,
+}: SkillDetailModalProps) {
   const [content, setContent] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -24,16 +35,15 @@ export function SkillDetailModal({ skill, onClose }: SkillDetailModalProps) {
     let cancelled = false;
     const load = async () => {
       try {
-        const relative = `${skill.path.replace(/^~\//, "")}/SKILL.md`;
-        const ok = await exists(relative, { baseDir: BaseDirectory.Home });
-        if (!ok) {
+        const list = await skillsIpc.listInstalled();
+        if (!list.some((s) => s.id === skillId)) {
           if (!cancelled) {
             setContent(null);
             setLoading(false);
           }
           return;
         }
-        const text = await readTextFile(relative, { baseDir: BaseDirectory.Home });
+        const [text] = await skillsIpc.readSkillMd(skillId);
         if (!cancelled) {
           setContent(text);
           setLoading(false);
@@ -49,7 +59,7 @@ export function SkillDetailModal({ skill, onClose }: SkillDetailModalProps) {
     return () => {
       cancelled = true;
     };
-  }, [skill]);
+  }, [skillId]);
 
   return (
     <div
@@ -63,13 +73,15 @@ export function SkillDetailModal({ skill, onClose }: SkillDetailModalProps) {
         <header className="flex items-start justify-between border-b border-[#2a2a2a] px-5 py-4">
           <div className="flex items-start gap-3">
             <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-[#101010] text-pink-300">
-              <SkillIcon id={skill.id} className="h-6 w-6" />
+              <SkillIcon id={skillId} className="h-6 w-6" />
             </div>
             <div>
-              <h2 className="text-base font-black text-white">{skill.name}</h2>
-              <p className="mt-0.5 truncate font-mono text-[10px] text-neutral-500">
-                {skill.path}
-              </p>
+              <h2 className="text-base font-black text-white">{title}</h2>
+              {installedPath && (
+                <p className="mt-0.5 truncate font-mono text-[10px] text-neutral-500">
+                  {installedPath}
+                </p>
+              )}
             </div>
           </div>
           <button
@@ -85,7 +97,7 @@ export function SkillDetailModal({ skill, onClose }: SkillDetailModalProps) {
           <section className="mb-4 rounded-xl border border-[#2a2a2a] bg-[#101010] p-3">
             <h3 className="text-xs font-black text-neutral-300">概要</h3>
             <p className="mt-1.5 text-xs leading-relaxed text-neutral-200">
-              {skill.description}
+              {description}
             </p>
           </section>
 
@@ -105,8 +117,7 @@ export function SkillDetailModal({ skill, onClose }: SkillDetailModalProps) {
               <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-3 text-[11px] text-amber-200">
                 <p className="font-bold">SKILL.md が見つかりません</p>
                 <p className="mt-1 text-neutral-400">
-                  このスキルはまだ実装中です。アプリ側の準備ができ次第、
-                  ~/.codex/skills/ に SKILL.md が配置されます。
+                  このスキルの手順書ファイルが見つかりませんでした。削除された可能性があります。もう一度インポートしてください。
                 </p>
               </div>
             )}
