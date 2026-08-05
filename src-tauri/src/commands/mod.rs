@@ -35,6 +35,7 @@ pub mod layer_splitter;
 pub mod magnific;
 pub mod mcp;
 pub mod multiangle;
+pub mod raw_payload;
 pub mod rpc_bridge;
 pub mod scene3d;
 pub mod secrets;

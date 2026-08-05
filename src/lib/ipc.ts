@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { invokeWithBytes } from "./ipcBytes";
 import type {
   EditModeId,
   EditModelProgress,
@@ -289,10 +290,7 @@ export const images = {
   revealInFinder: (path: string) => invoke<void>("images_reveal_in_finder", { path }),
   /** Persist a PNG mask alongside `srcPath` under a hidden `.masks/` dir. */
   writeMask: (srcPath: string, pngBytes: Uint8Array) =>
-    invoke<string>("images_write_mask", {
-      srcPath,
-      pngBytes: Array.from(pngBytes),
-    }),
+    invokeWithBytes<string>("images_write_mask", pngBytes, { "src-path": srcPath }),
   /** Copy an image file to a user-chosen path. */
   saveAs: (src: string, dest: string) => invoke<void>("images_save_as", { src, dest }),
   /** Rename an image file in-place within its current directory. */
@@ -320,16 +318,11 @@ export const images = {
    * so the watcher picks it up and the composer can attach it as a
    * reference. Returns the absolute file path. */
   writeClipboard: (pngBytes: Uint8Array) =>
-    invoke<string>("images_write_clipboard", {
-      pngBytes: Array.from(pngBytes),
-    }),
+    invokeWithBytes<string>("images_write_clipboard", pngBytes),
   /** Persist a dropped / picked browser File under `~/.codex/generated_images/`
    * when the original filesystem path is not available from the webview. */
   writeUpload: (fileName: string, bytes: Uint8Array) =>
-    invoke<string>("images_write_upload", {
-      fileName,
-      bytes: Array.from(bytes),
-    }),
+    invokeWithBytes<string>("images_write_upload", bytes, { "file-name": fileName }),
   /** 生成済み画像を SNS 各サイズへ一括リサイズ書き出しする (W2-2)。
    * paths × targets の直積で PNG を output_dir に書き出す。1 件失敗しても
    * 残りは続行し、成功一覧と失敗内訳を返す。 */
@@ -397,10 +390,7 @@ export const audio = {
   probe: (path: string) => invoke<AudioProbeResult>("audio_probe", { path }),
   /** picker 経由 (file.path が取れない) の bytes を audio_uploads/ に保存してパスを返す。 */
   writeUpload: (fileName: string, bytes: Uint8Array) =>
-    invoke<string>("audio_write_upload", {
-      fileName,
-      bytes: Array.from(bytes),
-    }),
+    invokeWithBytes<string>("audio_write_upload", bytes, { "file-name": fileName }),
 };
 
 /**
@@ -841,9 +831,13 @@ export const storage = {
    * プロジェクトデータ (projects.json) の保存先フォルダを変更する。
    * 既存の projects.json を新しい場所へ移行（コピー）してから設定を保存する。
    * null / 空文字を渡すと OS 標準のアプリデータディレクトリに戻す。
+   *
+   * @returns 新しい保存先へコピーできなかった**世代バックアップの件数**（0 なら完全成功）。
+   *   移行そのものの失敗は throw する。0 より大きい場合、現在のデータは新しい保存先で
+   *   正常に使えるが、過去のバックアップが旧フォルダに取り残されている（2026-08-06 DL-04）。
    */
   setProjectsDataRoot: (newRoot: string | null) =>
-    invoke<void>("projects_set_data_root", { newRoot }),
+    invoke<number>("projects_set_data_root", { newRoot }),
   /**
    * projects.json の世代バックアップ一覧を取得（新しい順）。
    * 各要素 [絶対パス, epochミリ秒, プロジェクト件数]。「バックアップから復元」UI用。

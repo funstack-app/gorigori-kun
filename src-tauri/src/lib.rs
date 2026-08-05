@@ -353,6 +353,25 @@ pub fn run() {
             crate::cloud::sync_worker::spawn_background_sync();
             crate::storage_cleanup::spawn_background_cleanup();
 
+            // 起動時デイリーバックアップ (2026-08-06)。
+            //
+            // なぜ要るか: 従来 .bak は「保存の直前」かつ「ファイルが既に存在する」
+            // ときしか作られず、移行したきり保存していないユーザーは
+            // **バックアップ0件**のままだった (「バックアップがありません」の正体)。
+            // 起動のたびにここを通すことで、触っていないユーザーにも必ず1世代届く。
+            //
+            // block_on しないのは、バックアップ (ファイルコピー) でウィンドウ表示を
+            // 遅らせないため。24時間以内に .bak があれば即 no-op で返る。
+            // 失敗しても起動は止めない (付帯機能で本流を止めない)。
+            tauri::async_runtime::spawn(async {
+                if let Err(err) = commands::storage::storage_ensure_daily_backups().await {
+                    tracing::warn!(
+                        target: "codex.storage",
+                        "起動時デイリーバックアップに失敗 (続行): {err}"
+                    );
+                }
+            });
+
             // アプリデータ置き場。**ここでも起動を止めない。**
             //
             // 解決できない/作れない場合 (権限破損・読み取り専用・ディスクフル)
@@ -577,6 +596,9 @@ pub fn run() {
             commands::storage::presets_write,
             commands::storage::presets_list_backups,
             commands::storage::presets_read_backup,
+            commands::storage::storage_ensure_daily_backups,
+            commands::storage::motions_list_backups,
+            commands::storage::motions_read_backup,
             commands::storage::scene3d_list_backups,
             commands::storage::scene3d_read_backup,
             commands::storage::scene3d_read,

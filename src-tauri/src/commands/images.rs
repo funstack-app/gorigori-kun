@@ -292,9 +292,21 @@ pub async fn images_save_as_format(
 ///
 /// The gallery watcher skips `.masks/` so masks never show up as gallery
 /// items, even though they live next to the source.
+///
+/// 生バイトは raw payload で届く (`src/lib/ipcBytes.ts`)。`Array.from` + JSON 経由の
+/// 旧方式は元サイズの 15〜20 倍の一時メモリを食い、複数枚の貼り付けでレンダラを
+/// 落としていた (2026-08-05 の実害)。`src_path` はヘッダーから復元する。
 #[tauri::command]
-pub async fn images_write_mask(src_path: String, png_bytes: Vec<u8>) -> Result<String, String> {
-    let src = PathBuf::from(&src_path);
+pub async fn images_write_mask(request: tauri::ipc::Request<'_>) -> Result<String, String> {
+    let png_bytes = crate::commands::raw_payload::raw_bytes(&request)?;
+    let src_path = crate::commands::raw_payload::header_meta(&request, "src-path")
+        .ok_or_else(|| "内部エラー: 元画像のパスが指定されていません".to_string())?;
+    write_mask_inner(&src_path, png_bytes)
+}
+
+/// `images_write_mask` の本体。テストから直接呼べるよう分離してある。
+fn write_mask_inner(src_path: &str, png_bytes: &[u8]) -> Result<String, String> {
+    let src = PathBuf::from(src_path);
     let parent = src
         .parent()
         .ok_or_else(|| format!("source has no parent dir: {src_path}"))?;
@@ -308,7 +320,7 @@ pub async fn images_write_mask(src_path: String, png_bytes: Vec<u8>) -> Result<S
         .map(|d| d.as_millis())
         .unwrap_or(0);
     let dest = masks_dir.join(format!("{stem}-mask-{ts}.png"));
-    std::fs::write(&dest, &png_bytes).map_err(|e| e.to_string())?;
+    std::fs::write(&dest, png_bytes).map_err(|e| e.to_string())?;
     Ok(dest.to_string_lossy().into_owned())
 }
 
@@ -317,8 +329,12 @@ pub async fn images_write_mask(src_path: String, png_bytes: Vec<u8>) -> Result<S
 /// The recursive watcher already monitors that tree, so the new file
 /// shows up in the gallery automatically; the returned path is what the
 /// composer uses as a reference.
+///
+/// 生バイトは raw payload で届く (`src/lib/ipcBytes.ts`)。旧 `Array.from` + JSON
+/// 方式のメモリ増幅が、複数枚貼り付け時のクラッシュ原因だった (2026-08-05)。
 #[tauri::command]
-pub async fn images_write_clipboard(png_bytes: Vec<u8>) -> Result<String, String> {
+pub async fn images_write_clipboard(request: tauri::ipc::Request<'_>) -> Result<String, String> {
+    let png_bytes = crate::commands::raw_payload::raw_bytes(&request)?;
     if png_bytes.is_empty() {
         return Err("クリップボードから読み取れる画像がありません".into());
     }
@@ -334,7 +350,7 @@ pub async fn images_write_clipboard(png_bytes: Vec<u8>) -> Result<String, String
     // (which is liberal about what it includes) treats it as a regular
     // image and surfaces it in the gallery without further plumbing.
     let dest = dir.join(format!("ig_clip_{ts}.png"));
-    std::fs::write(&dest, &png_bytes).map_err(|e| format!("write 失敗: {e}"))?;
+    std::fs::write(&dest, png_bytes).map_err(|e| format!("write 失敗: {e}"))?;
     Ok(dest.to_string_lossy().into_owned())
 }
 
@@ -343,8 +359,13 @@ pub async fn images_write_clipboard(png_bytes: Vec<u8>) -> Result<String, String
 /// This is the fallback path for cases where the webview cannot expose the
 /// original filesystem path to the frontend. Keeping the file under the
 /// generated_images tree also makes it visible in the gallery watcher.
+///
+/// 生バイトは raw payload、`file_name` はヘッダー経由で届く (`src/lib/ipcBytes.ts`)。
 #[tauri::command]
-pub async fn images_write_upload(file_name: String, bytes: Vec<u8>) -> Result<String, String> {
+pub async fn images_write_upload(request: tauri::ipc::Request<'_>) -> Result<String, String> {
+    let bytes = crate::commands::raw_payload::raw_bytes(&request)?;
+    let file_name = crate::commands::raw_payload::header_meta(&request, "file-name")
+        .unwrap_or_else(|| "image.png".to_string());
     if bytes.is_empty() {
         return Err("画像データが空です".into());
     }
@@ -360,7 +381,7 @@ pub async fn images_write_upload(file_name: String, bytes: Vec<u8>) -> Result<St
         .unwrap_or(0);
     let dest = pick_unique(&dir, &format!("ig_upload_{ts}_{safe_name}"))
         .ok_or_else(|| "保存先ファイル名の確保に失敗".to_string())?;
-    std::fs::write(&dest, &bytes).map_err(|e| format!("write 失敗: {e}"))?;
+    std::fs::write(&dest, bytes).map_err(|e| format!("write 失敗: {e}"))?;
     Ok(dest.to_string_lossy().into_owned())
 }
 
@@ -1076,15 +1097,13 @@ mod tests {
         assert_eq!(next.file_name().unwrap(), "foo (1).png");
     }
 
-    #[tokio::test]
-    async fn write_mask_creates_masks_subdir_and_returns_path() {
+    #[test]
+    fn write_mask_creates_masks_subdir_and_returns_path() {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("hero.png");
         std::fs::write(&src, b"\x89PNG").unwrap();
 
-        let out = images_write_mask(src.to_string_lossy().into_owned(), vec![0u8, 1, 2, 3, 4, 5])
-            .await
-            .unwrap();
+        let out = write_mask_inner(&src.to_string_lossy(), &[0u8, 1, 2, 3, 4, 5]).unwrap();
 
         let out_path = PathBuf::from(out);
         assert_eq!(out_path.parent().unwrap().file_name().unwrap(), ".masks");

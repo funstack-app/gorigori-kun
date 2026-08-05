@@ -19,6 +19,7 @@ import { PromptLibraryModal } from "./PromptLibraryModal";
 import { SketchPadModal } from "./sketch/SketchPadModal";
 import { SafeImage } from "./SafeImage";
 import { images as imagesIpc } from "../lib/ipc";
+import { guardAttachIntake } from "../lib/imagePayloadGuard";
 import { resolveImageMentions } from "../lib/scene/resolveImageMentions";
 
 const IMAGE_EXTS = ["png", "jpg", "jpeg", "webp", "gif", "bmp"];
@@ -318,10 +319,16 @@ export function PromptComposer({
     const imageItems = items.filter((it) => it.type.startsWith("image/"));
     if (imageItems.length === 0) return; // text paste: let the browser handle it
     e.preventDefault();
+    const files = imageItems
+      .map((it) => it.getAsFile())
+      .filter((f): f is File => f !== null);
+    // 受け付ける前に枚数・合計サイズを検査する (2026-08-05 の 9 枚貼り付けクラッシュ対策)。
+    // ここで止めれば arrayBuffer() すら呼ばれず、メモリスパイクが発生しない。
+    if (!guardAttachIntake(files.map((f) => f.size), 0, references.length)) return;
     const newRefs: Reference[] = [];
-    for (const it of imageItems) {
-      const file = it.getAsFile();
-      if (!file) continue;
+    // 1 枚ずつ完了を待つ (直列)。並行に arrayBuffer() を走らせると
+    // 全枚数分のバイト列が同時にヒープへ載る。
+    for (const file of files) {
       try {
         const buf = new Uint8Array(await file.arrayBuffer());
         const path = await imagesIpc.writeClipboard(buf);
@@ -372,9 +379,20 @@ export function PromptComposer({
       });
       return;
     }
+    const dropped = Array.from(e.dataTransfer.files ?? []);
+    // バイト読み込みが必要なのは実パスを持たないファイルだけ。それらだけを検査対象にする。
+    const needsBytes = dropped.filter(
+      (f) => f.type.startsWith("image/") && !(f as unknown as { path?: string }).path,
+    );
+    if (
+      needsBytes.length > 0 &&
+      !guardAttachIntake(needsBytes.map((f) => f.size), 0, references.length)
+    ) {
+      return;
+    }
     const newRefs: Reference[] = [];
     let skipped = 0;
-    for (const f of Array.from(e.dataTransfer.files ?? [])) {
+    for (const f of dropped) {
       if (!f.type.startsWith("image/")) {
         skipped++;
         continue;
@@ -425,6 +443,16 @@ export function PromptComposer({
     e.target.value = ""; // allow re-picking the same file
     // Tauri exposes the real path; if not present (web build) we can't
     // pass it to codex.
+    // 実パスが無い＝バイト読み込みが要るものだけ入口検査にかける (paste/drop と同じ理由)。
+    const needsBytes = files.filter(
+      (f) => f.type.startsWith("image/") && !(f as unknown as { path?: string }).path,
+    );
+    if (
+      needsBytes.length > 0 &&
+      !guardAttachIntake(needsBytes.map((f) => f.size), 0, references.length)
+    ) {
+      return;
+    }
     const newRefs: Reference[] = [];
     for (const f of files) {
       const p = (f as unknown as { path?: string }).path;
@@ -1038,9 +1066,13 @@ function ReferenceChip({
       }`}
         title={ref_.name}
       >
+        {/* 56px のチップでもフル解像度をデコードするため、多数添付時はデコードが
+            重なってメインスレッドとメモリを圧迫する。非同期デコードに逃がして
+            少なくとも同期デコードの直列詰まりを避ける (2026-08-06)。 */}
         <SafeImage
           path={ref_.path}
           alt={ref_.name}
+          decoding="async"
           className="h-full w-full object-cover"
         />
         {hasMask && (

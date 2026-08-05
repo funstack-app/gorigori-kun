@@ -152,8 +152,14 @@ pub async fn audio_probe(path: String) -> Result<AudioProbeResult, String> {
 /// `images_write_upload` と同じ流儀だが、保存先を **generated_images と分離する**。
 /// 画像 watcher は generated_images 配下を監視しているため、そこに mp3 を置くと
 /// ギャラリー / 履歴が汚染される。
+///
+/// 生バイトは raw payload、`file_name` はヘッダー経由で届く (`src/lib/ipcBytes.ts`)。
+/// 旧 `Array.from` + JSON 方式はメモリを 15〜20 倍に増幅していた (2026-08-05 の実害)。
 #[tauri::command]
-pub async fn audio_write_upload(file_name: String, bytes: Vec<u8>) -> Result<String, String> {
+pub async fn audio_write_upload(request: tauri::ipc::Request<'_>) -> Result<String, String> {
+    let bytes = crate::commands::raw_payload::raw_bytes(&request)?;
+    let file_name = crate::commands::raw_payload::header_meta(&request, "file-name")
+        .unwrap_or_else(|| "audio.mp3".to_string());
     if bytes.is_empty() {
         return Err("音源データが空です".into());
     }
@@ -172,7 +178,7 @@ pub async fn audio_write_upload(file_name: String, bytes: Vec<u8>) -> Result<Str
         .unwrap_or(0);
     let dest = pick_unique(&dir, &format!("audio_{ts}_{safe_name}"))
         .ok_or_else(|| "保存先ファイル名の確保に失敗".to_string())?;
-    std::fs::write(&dest, &bytes).map_err(|e| format!("write 失敗: {e}"))?;
+    std::fs::write(&dest, bytes).map_err(|e| format!("write 失敗: {e}"))?;
     Ok(dest.to_string_lossy().into_owned())
 }
 
