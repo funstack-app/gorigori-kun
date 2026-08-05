@@ -1,4 +1,4 @@
-import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { invoke } from "@tauri-apps/api/core";
 import { useState } from "react";
 import { getAngleCut, MAX_CUTS } from "../../../lib/multiangle/angles";
 import type { MultiAngleParams } from "../../../lib/multiangle/types";
@@ -9,6 +9,7 @@ import {
   ASPECT_RATIO_PICKER_OPTIONS,
 } from "../../../lib/scene/aspectRatioPicker";
 import type { SceneAspectRatio } from "../../../lib/scene/types";
+import { SafeImage } from "../../SafeImage";
 import { OptionPickerModal } from "../../scene/OptionPickerModal";
 import { AnglePickerModal } from "./AnglePickerModal";
 import { CharacterPresetPickerModal } from "./CharacterPresetPickerModal";
@@ -126,8 +127,8 @@ export function AngleSettingsPanel() {
         {characterImagePath ? (
           <div className="space-y-2">
             <div className="overflow-hidden rounded-xl border border-[#2a2a2a]">
-              <img
-                src={convertFileSrc(characterImagePath)}
+              <SafeImage
+                path={characterImagePath}
                 alt="被写体参照"
                 className="aspect-square w-full object-cover"
               />
@@ -148,6 +149,24 @@ export function AngleSettingsPanel() {
                 登録キャラから
               </button>
             </div>
+            {/*
+              D2 (2026-08-05): 被写体参照を空に戻す導線。
+              従来は差し替えしかできず、被写体なしに戻すには右上の「新規開始」で
+              環境文・比率・カット選択・生成結果まで全部捨てるしかなかった。
+              ストア側の setCharacterImage(null) は既にあり、UI から呼べないだけだった。
+              ラベル・見た目は動画タブの i2v 元画像「外す」に揃える。
+            */}
+            <button
+              type="button"
+              onClick={() => {
+                setCharacterImage(null);
+                pushToast({ kind: "info", text: "被写体の参照画像を外しました。", ttlMs: 2500 });
+              }}
+              className="w-full rounded-lg border border-[#343434] px-3 py-1.5 text-[12px] font-bold text-neutral-400 hover:border-pink-400 hover:text-pink-200"
+              title="被写体の参照画像を外す"
+            >
+              外す
+            </button>
           </div>
         ) : (
           <div className="space-y-2">

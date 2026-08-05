@@ -1,4 +1,3 @@
-import { convertFileSrc } from "@tauri-apps/api/core";
 import { useMemo } from "react";
 import { sendImageToPlanForRediscuss } from "../../../lib/sendToPlan";
 import { useActiveProject } from "../../../lib/store/activeProject";
@@ -9,6 +8,7 @@ import { useToasts } from "../../../lib/store/toasts";
 import { useWorkspace } from "../../../lib/store/workspace";
 import { sendCutsBatchToVideoTab, sendCutToVideoTab } from "../../../lib/storyboard/sendCutToVideo";
 import type { StoryboardSketchCut } from "../../../lib/storyboard/types";
+import { SafeImage } from "../../SafeImage";
 import { CardSizeSlider, gridColsForAspect } from "./cardSize";
 
 /**
@@ -100,6 +100,13 @@ export function CutGridReviewPanel() {
   const adoptTake = useStoryboardRun((s) => s.adoptTake);
   const selectTake = useStoryboardRun((s) => s.selectTake);
   const setPhase = useStoryboardRun((s) => s.setPhase);
+  // D1 (2026-08-05): 1 枚だけ捨てる / 1 枚だけ作り直す。
+  // 従来はカード上に「やり直し（未対応）」の押せないボタンがあるだけで、
+  // 気に入らないカットが 1 枚あっても全体リセットで全部捨てるしかなかった。
+  const excludedCutIds = useStoryboardRun((s) => s.excludedCutIds);
+  const excludeCut = useStoryboardRun((s) => s.excludeCut);
+  const includeCut = useStoryboardRun((s) => s.includeCut);
+  const regenerateCut = useStoryboardRun((s) => s.regenerateCut);
   const activeProjectId = useActiveProject((s) => s.activeProjectId);
   const projects = useProjects((s) => s.projects);
   const addItem = useProjects((s) => s.addItem);
@@ -107,6 +114,13 @@ export function CutGridReviewPanel() {
   const revealInFinder = useImages((s) => s.revealInFinder);
 
   const orderedCuts = useMemo(() => Array.from(cuts.values()), [cuts]);
+  // D1: 除外カットはグリッドには残す (取り消せるように) が、成果物の下流
+  // (一括保存 / ストーリー動画 / i2v 一括コピー / 確定フォルダ) からは外す。
+  const excludedSet = useMemo(() => new Set(excludedCutIds), [excludedCutIds]);
+  const keptCuts = useMemo(
+    () => orderedCuts.filter((c) => !excludedSet.has(c.cutId)),
+    [orderedCuts, excludedSet],
+  );
   // P13: 絵コンテバージョンから cutId → SketchCut のマップを引いて i2v プロンプトに使う
   const sketchVersions = useStoryboardRun((s) => s.sketchVersions);
   const activeSketchVersionId = useStoryboardRun((s) => s.activeSketchVersionId);
@@ -133,16 +147,16 @@ export function CutGridReviewPanel() {
     }
     return map;
   }, [generationCutSketchMeta, sketchVersions, activeSketchVersionId]);
-  const confirmedAll = orderedCuts.every((c) => c.status === "confirmed");
+  const confirmedAll = keptCuts.every((c) => c.status === "confirmed");
   const allTakeImages = useMemo(
     () =>
-      orderedCuts
+      keptCuts
         .map((c) => {
           const adopted = c.takes.find((t) => t.takeId === c.selectedTakeId);
           return adopted?.imagePath ?? c.takes[0]?.imagePath;
         })
         .filter((p): p is string => Boolean(p)),
-    [orderedCuts],
+    [keptCuts],
   );
 
   const activeProject = projects.find((p) => p.id === activeProjectId) ?? null;
@@ -157,7 +171,11 @@ export function CutGridReviewPanel() {
       return;
     }
     let saved = 0;
+    // D1: 除外カットは保存しない。ただし採番は元のカット番号を保つ
+    // (Cut 2 を除外しても Cut 3 は Cut 3 のまま。番号がずれると
+    //  絵コンテ・動画キュー側の呼び名と食い違う)。
     orderedCuts.forEach((c, i) => {
+      if (excludedSet.has(c.cutId)) return;
       const adopted = c.takes.find((t) => t.takeId === c.selectedTakeId) ?? c.takes[0];
       if (!adopted) return;
       addItem(activeProjectId, {
@@ -177,7 +195,10 @@ export function CutGridReviewPanel() {
   // P13: 全カットの i2v プロンプトを一括コピー
   function copyAllI2vPrompts() {
     const lines: string[] = [];
+    let copied = 0;
     orderedCuts.forEach((c, i) => {
+      if (excludedSet.has(c.cutId)) return; // D1: 除外カットはコピーしない
+      copied += 1;
       const sketch = sketchByCutId.get(c.cutId) ?? null;
       const duration = sketch?.durationSeconds ?? 2.5;
       const prompt = buildI2vPrompt(
@@ -193,7 +214,7 @@ export function CutGridReviewPanel() {
     void navigator.clipboard.writeText(text).then(() => {
       useToasts.getState().push({
         kind: "success",
-        text: `${orderedCuts.length} カット分の i2v プロンプトをコピーしました。`,
+        text: `${copied} カット分の i2v プロンプトをコピーしました。`,
         ttlMs: 3000,
       });
     });
@@ -265,22 +286,40 @@ export function CutGridReviewPanel() {
     sendCutToVideoTab({ imagePath, prompt });
   }
 
-  // B5: 確定カットをまとめて動画タブへ送る (一括動画化)。
+  // B5 → uy6: 確定カットをまとめてストーリー動画キューへ積む。
   async function sendAllConfirmedToVideo() {
     const batch = orderedCuts
       .map((c, i) => {
+        if (excludedSet.has(c.cutId)) return null; // D1: 除外カットは動画にしない
         const imagePath = adoptedImageOf(c);
         if (!imagePath) return null;
         const sketch = sketchByCutId.get(c.cutId) ?? null;
+        const durationSeconds = sketch?.durationSeconds ?? 2.5;
         const prompt = buildI2vPrompt(
           sketch,
-          { description: sketch?.intent, duration: sketch?.durationSeconds ?? 2.5 },
+          { description: sketch?.intent, duration: durationSeconds },
           goal?.aspectRatio ?? "16:9",
           i,
         );
-        return { imagePath, prompt, label: `Cut ${i + 1}` };
+        return {
+          cutId: c.cutId,
+          imagePath,
+          prompt,
+          label: `Cut ${i + 1}`,
+          durationSeconds,
+        };
       })
-      .filter((x): x is { imagePath: string; prompt: string; label: string } => x !== null);
+      .filter(
+        (
+          x,
+        ): x is {
+          cutId: string;
+          imagePath: string;
+          prompt: string;
+          label: string;
+          durationSeconds: number;
+        } => x !== null,
+      );
     await sendCutsBatchToVideoTab({ cuts: batch });
   }
 
@@ -288,7 +327,8 @@ export function CutGridReviewPanel() {
   // 確定カットは生成時に ~/.codex/... 配下へ書き出されており、その実体パスを
   // Finder で開いて確定フォルダとして露出する。
   async function openConfirmedFolder() {
-    const first = orderedCuts.map(adoptedImageOf).find((p): p is string => Boolean(p));
+    // D1: 除外していないカットの画像フォルダを開く。
+    const first = keptCuts.map(adoptedImageOf).find((p): p is string => Boolean(p));
     if (!first) {
       useToasts.getState().push({
         kind: "error",
@@ -323,6 +363,7 @@ export function CutGridReviewPanel() {
           <h2 className="text-sm font-semibold text-zinc-200">Phase 4: 最終確認</h2>
           <p className="mt-1 text-xs text-zinc-500">
             {orderedCuts.length} カット
+            {excludedCutIds.length > 0 && ` (${excludedCutIds.length} 枚を除外中)`}
             {confirmedAll ? " · 全カット採用済み" : " · 一部 take を切り替え可能"}
             {activeProject && ` · 保存先: ${activeProject.name}`}
           </p>
@@ -353,14 +394,14 @@ export function CutGridReviewPanel() {
           </button>
           {/* カードサイズスライダー (大⇔小)。絵コンテレビュー・本生成進捗と同じ値を共有する */}
           <CardSizeSlider />
-          {/* B5: 確定カットを一括で動画タブへ送る */}
+          {/* B5 → uy6: 確定カットをストーリー動画キューへ積む */}
           <button
             type="button"
             onClick={() => void sendAllConfirmedToVideo()}
             className="rounded-md border border-pink-500/40 bg-pink-500/10 px-3 py-2 text-xs font-semibold text-pink-100 hover:bg-pink-500/20"
-            title="確定カットを動画タブへ送り、全カット分の i2v プロンプトをコピー"
+            title="確定カットをストーリー動画キューへ積み、カットごとに動画化して1本につなげる"
           >
-            一括で動画化 →
+            ストーリー動画にする →
           </button>
           {/* B4: 確定カットのフォルダを開く */}
           <button
@@ -381,10 +422,18 @@ export function CutGridReviewPanel() {
           {orderedCuts.map((c, i) => {
             const adopted = c.takes.find((t) => t.takeId === c.selectedTakeId) ?? c.takes[0];
             if (!adopted) return null;
+            // D1: 除外カットはグリッドから消さず、薄く落として「戻す」を残す。
+            // 消してしまうと取り消せず、全体リセットしか道が無い状態に逆戻りする。
+            const excluded = excludedSet.has(c.cutId);
             return (
               <li
                 key={c.cutId}
-                className="flex flex-col gap-2 rounded-md border border-[#242424] bg-[#1a1a1a] p-3"
+                className={[
+                  "flex flex-col gap-2 rounded-md border p-3",
+                  excluded
+                    ? "border-[#242424] bg-[#141414] opacity-40"
+                    : "border-[#242424] bg-[#1a1a1a]",
+                ].join(" ")}
               >
                 <div className="flex items-center justify-between">
                   <span className="text-[11px] font-semibold uppercase tracking-wider text-pink-200">
@@ -393,18 +442,30 @@ export function CutGridReviewPanel() {
                   <span
                     className={[
                       "text-[11px]",
-                      c.status === "confirmed" ? "text-emerald-300" : "text-zinc-400",
+                      excluded
+                        ? "text-zinc-500"
+                        : c.status === "confirmed"
+                          ? "text-emerald-300"
+                          : c.status === "failed"
+                            ? "text-red-400"
+                            : "text-zinc-400",
                     ].join(" ")}
                   >
-                    {c.status === "confirmed" ? "採用済み" : "未採用"}
+                    {excluded
+                      ? "除外中"
+                      : c.status === "confirmed"
+                        ? "採用済み"
+                        : c.status === "failed"
+                          ? "失敗"
+                          : "未採用"}
                   </span>
                 </div>
 
                 <div
                   className={`${aspectClass(goal?.aspectRatio ?? "16:9")} overflow-hidden rounded-md bg-[#0d0d0d]`}
                 >
-                  <img
-                    src={convertFileSrc(adopted.imagePath)}
+                  <SafeImage
+                    path={adopted.imagePath}
                     alt={`cut-${i + 1}`}
                     className="h-full w-full object-cover"
                   />
@@ -425,8 +486,8 @@ export function CutGridReviewPanel() {
                         ].join(" ")}
                         title={`take ${ti + 1}`}
                       >
-                        <img
-                          src={convertFileSrc(t.imagePath)}
+                        <SafeImage
+                          path={t.imagePath}
                           alt={`take-${ti + 1}`}
                           className="h-full w-full object-cover"
                         />
@@ -454,13 +515,25 @@ export function CutGridReviewPanel() {
                   >
                     動画タブへ送る
                   </button>
+                  {/*
+                    D1 (2026-08-05): 「やり直し（未対応）」の置き換え。
+                    regenerateCut はストア側に実装済みで (storyboardRun.ts)、
+                    本生成中カード (GenerationProgressPanel) では既に生きている。
+                    ここだけ disabled の残骸が置かれ「壊れている」ように見えていた。
+                  */}
                   <button
                     type="button"
-                    disabled
-                    className="cursor-not-allowed rounded border border-[#2a2a2a] px-2 py-1 text-[10px] text-zinc-600"
-                    title="このバージョンでは未対応です"
+                    onClick={() => regenerateCut(c.cutId)}
+                    disabled={c.status === "running"}
+                    className={[
+                      "rounded border px-2 py-1 text-[10px]",
+                      c.status === "running"
+                        ? "cursor-not-allowed border-[#2a2a2a] text-zinc-600"
+                        : "border-[#2a2a2a] text-zinc-300 hover:border-pink-500/40",
+                    ].join(" ")}
+                    title="このカットだけ作り直す (新しい take が追加されます)"
                   >
-                    やり直し（未対応）
+                    {c.status === "running" ? "作り直し中…" : "やり直し"}
                   </button>
                   <button
                     type="button"
@@ -484,6 +557,29 @@ export function CutGridReviewPanel() {
                   >
                     i2v コピー
                   </button>
+                  {/*
+                    D1: このカット 1 枚だけを成果物から外す / 戻す。
+                    画像は消さないので押し間違えても「戻す」で復帰できる。
+                  */}
+                  {excluded ? (
+                    <button
+                      type="button"
+                      onClick={() => includeCut(c.cutId)}
+                      className="rounded border border-pink-500/40 bg-pink-500/10 px-2 py-1 text-[10px] text-pink-200 hover:bg-pink-500/20"
+                      title="このカットを成果物に戻す"
+                    >
+                      戻す
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => excludeCut(c.cutId)}
+                      className="rounded border border-[#2a2a2a] px-2 py-1 text-[10px] text-zinc-300 hover:border-pink-500/40"
+                      title="このカットを保存・動画化の対象から外す (画像は消えません)"
+                    >
+                      除外
+                    </button>
+                  )}
                 </div>
 
                 {/* P13: i2v プロンプトプレビュー */}
@@ -512,7 +608,8 @@ export function CutGridReviewPanel() {
       {allTakeImages.length > 0 && (
         <footer className="flex items-center justify-between gap-3 rounded-md border border-[#242424] bg-[#161616] px-3 py-2 text-[11px] text-zinc-500">
           <span>
-            完成セット: {allTakeImages.length} 枚 / {orderedCuts.length} カット
+            完成セット: {allTakeImages.length} 枚 / {keptCuts.length} カット
+            {excludedCutIds.length > 0 && ` (${excludedCutIds.length} 枚を除外中)`}
             {activeProject && ` · 確定フォルダ: ${activeProject.name}`}
           </span>
           {/* B4: 確定フォルダ導線 (footer からも開ける) */}

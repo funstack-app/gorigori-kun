@@ -2,6 +2,7 @@ import { create } from "zustand";
 
 import { storyboard } from "../ipc";
 import type {
+  SceneConstruction,
   SceneGroup,
   ScoreBundle,
   StoryboardChatMessage,
@@ -21,6 +22,7 @@ import {
 } from "./generationStatus";
 import { usePlanChat } from "./planChat";
 import { useProjects } from "./projects";
+import { clearLastRunPointer, writeLastRunPointer } from "./storyboardLastRun";
 import { useToasts } from "./toasts";
 
 export type Take = {
@@ -79,6 +81,8 @@ type StoryboardRunState = {
   status: StoryboardRunStatus;
   totalCuts: number;
   manifestPath: string | null;
+  /** 直近 completed 時のプロジェクト追加実績。null = 未完了 or ラフ run（追加処理なし）。 */
+  projectAddResult: { noProject: boolean; added: number; total: number } | null;
   lastError: string | null;
   params: StoryboardRunParams | null;
   debugLog: StoryboardEvent[];
@@ -99,6 +103,29 @@ type StoryboardRunState = {
   chatMessages: StoryboardChatMessage[];
   /** Phase 1 終了時に確定したゴール。Phase 2 入力になる。 */
   goal: StoryboardGoal | null;
+  /**
+   * Phase 1 で確定したシーン構成 (本生成の必須入力)。
+   *
+   * ## なぜ storyboard 側に複製を持つか (Sol 評価 blocking#3 / 2026-08-04)
+   *
+   * 正本は共有ストア `planChat.sceneConstruction` (AI 応答のパーサがそこへ書く)。
+   * だが planChat は **スキルを離れた瞬間に resetThread() で消える共有ストア**で、
+   * これは FB#A7 (制作モードの企画チャットがスキルの Phase 1 に流れ込む) /
+   * FB#5 (前スキルの構図が要素別編集に混ざる) を防ぐための意図的な設計。
+   * その破棄は維持したまま「storyboard で目標確定 → 漫画へ寄り道 → storyboard へ
+   * 戻る」で本生成入力だけを生かす必要がある。
+   *
+   * そこで **共有ストアの寿命に依存しない storyboard 専用の控え**をここに持つ。
+   * 読み手 (GenerationProgressPanel 等) は planChat を優先し、消えていたら
+   * こちらへフォールバックする。共有ストアのリセット原則は一切ゆるめない。
+   *
+   * 寿命は goal と同じ (phaseEmptyState)。ストーリー境界のリセット
+   * (resetPhases / resetAll / 「↺ リセット」) で goal ごと破棄されるので、
+   * 前ストーリーの構成が次へ持ち越されることはない。
+   */
+  sceneConstruction: SceneConstruction | null;
+  /** Phase 1 の構成確定時に storyboard 側の控えへ写す。 */
+  setSceneConstruction: (scene: SceneConstruction | null) => void;
   /** Phase 2: 提示したスケッチ案のバージョン履歴 (再生成で増える)。 */
   sketchVersions: StoryboardSketchVersion[];
   /** 現在表示中のスケッチ versionId。null なら最新を使う。 */
@@ -145,6 +172,12 @@ type StoryboardRunState = {
    * 走行中 run の completed/failed 受信時に自動発射して空になる。
    */
   pendingProductionCuts: string[];
+  /**
+   * 23g (2026-08-03): 採用ゲート待機キューを手動で取り消す。イベント途絶で
+   * 発射契機が失われたキューの脱出口 (パネルのエスカレーション表示から呼ばれる)。
+   * 自動では呼ばない。
+   */
+  clearPendingProduction: () => void;
   /**
    * S3 issue-7 (2026-07-28): 中止 (cancel_generation) が実際に効いた run の
    * フロント状態を 'cancelled' に落とす。backend は中止 run のイベントを
@@ -219,6 +252,25 @@ type StoryboardRunState = {
   revertCut: (cutId: string) => void;
   /** review 状態の take を切り替え (左右ボタンで比較) */
   selectTake: (cutId: string, takeId: string) => void;
+
+  // ===== D1: 確定カットの個別除外 (2026-08-05) =====
+  /**
+   * Phase 4 で「このカットだけ要らない」を表現する除外集合。
+   *
+   * **cuts Map からは消さない**。terminalStatusFor が `map.size !== totalCuts`
+   * で終端を判定し、settleAndFlushQueue が決着件数と totalCuts の一致を要求する
+   * (A-7 件数充足ガード)ため、Map から実削除すると走行中 run の終端検知が
+   * 恒久的に成立せず、pendingProductionCuts が永久待機になる。
+   * run のライフサイクルには一切触れず、「成果物として採るか」だけを別集合で持つ。
+   *
+   * 除外カットは Phase 4 の下流 (一括保存 / ストーリー動画キュー / i2v 一括コピー /
+   * 確定フォルダ) から外れる。生成済み画像そのものは消さない (取り消し可能)。
+   */
+  excludedCutIds: string[];
+  /** カットを成果物から除外する (再実行しても増殖しない)。 */
+  excludeCut: (cutId: string) => void;
+  /** 除外を取り消して成果物へ戻す。 */
+  includeCut: (cutId: string) => void;
   /**
    * このカットを1枚だけ作り直す。UI を「生成中」に戻し、Rust の
    * storyboard_regenerate_cut を呼ぶ。新しい take は TakeCompleted イベントで
@@ -262,16 +314,20 @@ const runEmptyState = {
   status: "idle" as const,
   totalCuts: 0,
   manifestPath: null,
+  projectAddResult: null,
   lastError: null,
   params: null,
   debugLog: [],
   lastEventAt: null,
+  // D1: 除外は run に紐づく (新しい run が始まれば前 run の除外は無意味)。
+  excludedCutIds: [] as string[],
 };
 
 const phaseEmptyState = {
   phase: "goal" as StoryboardPhase,
   chatMessages: [] as StoryboardChatMessage[],
   goal: null as StoryboardGoal | null,
+  sceneConstruction: null as SceneConstruction | null,
   sketchVersions: [] as StoryboardSketchVersion[],
   activeSketchVersionId: null as string | null,
   sketchRunStartedAt: null as number | null,
@@ -297,6 +353,36 @@ function ensureCut(cuts: Map<string, CutState>, cutId: string): CutState {
   cuts.set(cutId, created);
   return created;
 }
+
+/**
+ * scoped 本生成 run (productionScope 付き) の判定対象カットだけを取り出す。
+ *
+ * 採用ゲート持ち越し修正 (2026-07-30): beginRun は productionScope 付き run で
+ * scope外カット (確定済みの前 run 分) を cuts Map に持ち越すようになった。
+ * backend の totalCuts は scope 内カット数 (storyboard.rs:1214) なので、
+ * Map 全体と totalCuts の件数一致で終端を見ると恒久的に不一致になり、
+ * r2-2/r3-4 の自力終端検知が死ぬ。終端・決着・完了時のプロジェクト追加は
+ * すべてこのヘルパーで scope 内に絞ってから判定する。
+ * scope 無し (全カット一括 / ラフ run / params 未確定) は Map をそのまま返す。
+ */
+const runScopedCuts = (
+  map: Map<string, CutState>,
+  params: StoryboardRunParams | null,
+): Map<string, CutState> => {
+  const scope =
+    params &&
+    params.sketchMode !== true &&
+    params.productionScope &&
+    params.productionScope.length > 0
+      ? new Set(params.productionScope)
+      : null;
+  if (!scope) return map;
+  const next = new Map<string, CutState>();
+  map.forEach((cut, cutId) => {
+    if (scope.has(cutId)) next.set(cutId, cut);
+  });
+  return next;
+};
 
 /**
  * r2-2 (2026-07-28): 部分失敗 run の自力終端検知。
@@ -373,11 +459,23 @@ export const useStoryboardRun = create<StoryboardRunState>((set, get) => {
     // r3-B1: 終端判定に使う Map は run 種別で切り替える (ラフ run のカットは
     // sketchCuts 側に入るため、cuts を見ると常に「全カット非running」となり
     // 誤発射しうる)。
-    const afterCuts = opts.wasSketchRun ? after.sketchCuts : after.cuts;
+    const afterCuts = runScopedCuts(
+      opts.wasSketchRun ? after.sketchCuts : after.cuts,
+      after.params,
+    );
     const terminal =
       after.status === "completed" ||
       (after.status === "failed" &&
-        Array.from(afterCuts.values()).every((c) => c.status !== "running"));
+        Array.from(afterCuts.values()).every((c) => c.status !== "running") &&
+        // A-7 件数充足ガード (2026-07-30): CutStarted が全カット分届く前の
+        // CutFailed で早発射すると beginRun が activeRunId を差し替え、旧 run の
+        // 後続イベントが全破棄される。terminalStatusFor / r3-4 allSettled は
+        // 件数を見るのにここだけ見ていない非対称の解消。
+        // - totalCuts <= 0: orchestrator が Started 前に死んだ run (CutFailed
+        //   "unknown" のみ・後続イベント無し) を perma-queue にしないための脱出口
+        // - >= (=== にしない): 非 scoped run では cutFailed "unknown" を ensureCut
+        //   が Map に足すため size が totalCuts を超え得る (=== だと恒久不発射)
+        (after.totalCuts <= 0 || afterCuts.size >= after.totalCuts));
     if (!terminal) return;
     const queued = after.pendingProductionCuts;
     set({ pendingProductionCuts: [] });
@@ -397,7 +495,10 @@ export const useStoryboardRun = create<StoryboardRunState>((set, get) => {
     if (before.activeRunId === null) return;
     if (before.params?.sketchMode === true) return;
     if (before.status !== "running" && before.status !== "failed") return;
-    const settledStatus = terminalStatusFor(before.cuts, before.totalCuts);
+    const settledStatus = terminalStatusFor(
+      runScopedCuts(before.cuts, before.params),
+      before.totalCuts,
+    );
     if (settledStatus !== null && before.status !== settledStatus) {
       set({ status: settledStatus });
       notifySelfTerminal(before.activeRunId);
@@ -421,7 +522,20 @@ export const useStoryboardRun = create<StoryboardRunState>((set, get) => {
   sketchCandidatesPerCut: 1 as 1 | 2 | 3,
   generationCandidatesPerCut: 1 as 1 | 2 | 3,
 
-  beginRun: (runId, params) =>
+  beginRun: (runId, params) => {
+    // rr2 (2026-08-03): 本生成 run の「未回収ポインタ」を書く。採用は
+    // adoptions.json に残るのにプロジェクト追加は completed でしか走らないため、
+    // 途中でアプリが落ちると採用判断が UI から消えていた。ポインタが残っている
+    // 状態 = 未回収のまま終了、として起動時に復元する。
+    // 絵コンテ (sketchMode) は採用ゲート→本生成が同一セッション内のフローで、
+    // 成果はスケッチ画像としてディスクに残るため対象外。
+    if (params.sketchMode !== true) {
+      void writeLastRunPointer({
+        runId,
+        projectId: useActiveProject.getState().activeProjectId ?? null,
+        startedAt: Date.now(),
+      });
+    }
     set((s) => {
       // 既存の run があれば pastRuns に退避してから新 run を開始する
       const archived: PastRunSummary[] =
@@ -434,9 +548,9 @@ export const useStoryboardRun = create<StoryboardRunState>((set, get) => {
                 finishedAt: Date.now(),
                 status: s.status,
                 totalCuts: s.totalCuts,
-                confirmedCuts: Array.from(s.cuts.values()).filter(
-                  (c) => c.status === "confirmed",
-                ).length,
+                confirmedCuts: Array.from(
+                  runScopedCuts(s.cuts, s.params).values(),
+                ).filter((c) => c.status === "confirmed").length,
                 manifestPath: s.manifestPath,
                 storyDigest:
                   (s.params?.storyPrompt ?? "").slice(0, 80) +
@@ -448,9 +562,26 @@ export const useStoryboardRun = create<StoryboardRunState>((set, get) => {
       // P19a: sketch_mode の run が始まる場合は sketchCuts を、本生成なら cuts を新規 Map に。
       // どちらの run でも「もう片方の Map」は既存値を保持する。
       const isSketch = params.sketchMode === true;
+      // 採用ゲート持ち越し (2026-07-30): productionScope 付き本生成では cuts を
+      // 全消去せず、scope外カット (前 run で確定/レビュー済みの資産) をそのまま
+      // 持ち越す。scope内カットだけ落として作り直す (cutStarted の ensureCut が
+      // 再生成する)。全カット一括 (scope無し) は従来どおり全消去。
+      const productionScope =
+        !isSketch && params.productionScope && params.productionScope.length > 0
+          ? new Set(params.productionScope)
+          : null;
+      const carriedCuts = (() => {
+        if (isSketch) return s.cuts; // ラフ run は本生成側 Map に触らない (従来どおり)
+        if (!productionScope) return new Map<string, CutState>(); // 一括は全消去 (従来どおり)
+        const next = new Map<string, CutState>();
+        s.cuts.forEach((cut, cutId) => {
+          if (!productionScope.has(cutId)) next.set(cutId, cut);
+        });
+        return next;
+      })();
       return {
         ...runEmptyState,
-        cuts: isSketch ? s.cuts : new Map<string, CutState>(),
+        cuts: carriedCuts,
         sketchCuts: isSketch ? new Map<string, CutState>() : s.sketchCuts,
         pastRuns: archived,
         activeRunId: runId,
@@ -462,9 +593,37 @@ export const useStoryboardRun = create<StoryboardRunState>((set, get) => {
         // 次 run の終端で突然発射される持ち越し誤発射を防ぐ防御的クリア。
         pendingProductionCuts: [],
       };
-    }),
+    });
+    // 23g (2026-08-03): フロント主導でパネルへ即時登録する。
+    //
+    // ## なぜ set() の後で呼ぶか
+    // backend の `started` イベントが来る前に固まると、従来はパネルにジョブ自体が
+    // 存在せず番犬が一切効かなかった (「4時間順番待ち」問題の一因)。ここで登録して
+    // おけば lastEventAt=起動時刻 のジョブが必ず存在する。start は同一 id 冪等
+    // (generationStatus.ts の `if (s.jobs[id]) return s;`) なので、後から backend の
+    // `started` が来ても二重登録にならない。
+    // クロスストア呼び出しは reducer 入れ子を避けるため set() の外に置く。
+    const total =
+      params.sketchMode === true
+        ? params.sceneConstruction?.cuts.length
+        : (params.productionScope?.length ?? params.sceneConstruction?.cuts.length);
+    useGenerationStatus
+      .getState()
+      .start({ id: runId, kind: "storyboard", total: total || undefined });
+  },
 
   pendingProductionCuts: [],
+
+  clearPendingProduction: () => {
+    const dropped = get().pendingProductionCuts.length;
+    if (dropped === 0) return;
+    set({ pendingProductionCuts: [] });
+    useToasts.getState().push({
+      kind: "warn",
+      text: `順番待ちだった本生成 ${dropped} 件を取り消しました`,
+      ttlMs: 6000,
+    });
+  },
 
   markCancelled: (runId) => {
     // r2-1 (2026-07-28): 中止時に待機キューを放置しない。
@@ -642,7 +801,22 @@ export const useStoryboardRun = create<StoryboardRunState>((set, get) => {
       };
     } else {
       const goal = current.goal;
-      const sceneConstruction = usePlanChat.getState().sceneConstruction;
+      // 共有 planChat が消えていても storyboard 側の控えから読む
+      // (Sol 評価 blocking#3 / 2026-08-04)。読み順は useSceneConstruction と同じ。
+      // ここを直読みのままにすると、漫画へ寄り道して戻った後の採用ゲート経由の
+      // 本生成だけが「ゴール・カット構成が揃っていません」で落ちる。
+      //
+      // 2周目 (blocking#2): 直読みだと「別スキルで作られた planChat の構成」まで
+      // 拾ってしまう。共有ストアを採るのは、それを storyboard 自身が作ったときだけ。
+      // 判定は useSceneConstruction.pick と同じ (あちらから import すると
+      // storyboardRun ↔ useSceneConstruction の循環になるのでここでは条件を直書きする)。
+      const plan = usePlanChat.getState();
+      const planIsOurs =
+        plan.sceneConstruction !== null &&
+        plan.sceneConstructionOwner === "gori-storyboard";
+      const sceneConstruction = planIsOurs
+        ? plan.sceneConstruction
+        : current.sceneConstruction;
       if (!goal || !sceneConstruction || sceneConstruction.cuts.length === 0) {
         useToasts.getState().push({
           kind: "error",
@@ -795,7 +969,10 @@ export const useStoryboardRun = create<StoryboardRunState>((set, get) => {
           status: "confirmed",
           selectedTakeId: e.selectedTakeId,
         });
-        const settledStatus = terminalStatusFor(targetMap, s.totalCuts);
+        const settledStatus = terminalStatusFor(
+          runScopedCuts(targetMap, s.params),
+          s.totalCuts,
+        );
         return applyMap({ status: settledStatus ?? ("running" as const) });
       }
 
@@ -810,22 +987,37 @@ export const useStoryboardRun = create<StoryboardRunState>((set, get) => {
 
       if (e.kind === "completed") {
         // 本生成 (sketch_mode=false) の完了時のみ採用画像をプロジェクトへ
+        let projectAddResult:
+          | { noProject: boolean; added: number; total: number }
+          | null = null;
         if (!isSketch) {
+          const scoped = runScopedCuts(targetMap, s.params);
           const activeProjectId = useActiveProject.getState().activeProjectId;
+          let added = 0;
           if (activeProjectId) {
-            targetMap.forEach((cut) => {
+            scoped.forEach((cut) => {
               const take =
                 cut.takes.find((item) => item.takeId === cut.selectedTakeId) ??
                 cut.takes[0];
               if (take) {
-                useProjects.getState().addItem(activeProjectId, {
+                const item = useProjects.getState().addItem(activeProjectId, {
                   imagePath: take.imagePath,
                   prompt: s.params?.storyPrompt,
                   note: `storyboard ${cut.cutId}`,
                 });
+                if (item) added += 1;
               }
             });
           }
+          projectAddResult = {
+            noProject: !activeProjectId,
+            added,
+            total: scoped.size,
+          };
+          // rr2: プロジェクト追加まで到達したので未回収ポインタを消す。
+          // ここを残すと、正常完了した run を次回起動で復元しようとする
+          // (addItem は冪等なので item は増えないが、無意味なトーストが出る)。
+          void clearLastRunPointer();
         }
         return {
           ...s,
@@ -833,6 +1025,7 @@ export const useStoryboardRun = create<StoryboardRunState>((set, get) => {
           manifestPath: e.manifestPath,
           debugLog,
           lastEventAt,
+          projectAddResult,
         };
       }
 
@@ -849,7 +1042,10 @@ export const useStoryboardRun = create<StoryboardRunState>((set, get) => {
     {
       const afterStatus = get().status;
       if (beforeStatus !== "failed" && afterStatus === "failed") {
-        const settledCuts = wasSketchRun ? get().sketchCuts : get().cuts;
+        const settledCuts = runScopedCuts(
+          wasSketchRun ? get().sketchCuts : get().cuts,
+          get().params,
+        );
         const allSettled =
           get().totalCuts > 0 &&
           Array.from(settledCuts.values()).every((c) => c.status !== "running") &&
@@ -893,6 +1089,8 @@ export const useStoryboardRun = create<StoryboardRunState>((set, get) => {
   clearChat: () => set({ chatMessages: [] }),
 
   setGoal: (goal) => set({ goal }),
+
+  setSceneConstruction: (scene) => set({ sceneConstruction: scene }),
 
   pushSketchVersion: (version) =>
     set((s) => ({
@@ -991,10 +1189,20 @@ export const useStoryboardRun = create<StoryboardRunState>((set, get) => {
         },
       ];
       // P2.5 (2026-05-20): 採用結果をサイドカー JSON に永続化 (fire-and-forget)。
-      // アプリ再起動後も storyboard.readAdoptions で復元できる。
+      // adoptions.json はディスク上の台帳。run 画面そのものは復元しないが、
+      // 起動時の restoreUnrecoveredAdoptions が「プロジェクトへ未回収の採用」を
+      // 拾ってプロジェクトへ復元する (rr2 2026-08-03)。
+      // 復元が画像を特定できるよう、採用時点の imagePath も一緒に焼く。
       if (s.activeRunId && finalTakeId) {
+        const adoptedTake =
+          cut.takes.find((item) => item.takeId === finalTakeId) ?? cut.takes[0];
         void storyboard
-          .persistAdoption(s.activeRunId, cutId, finalTakeId)
+          .persistAdoption(
+            s.activeRunId,
+            cutId,
+            finalTakeId,
+            adoptedTake?.imagePath,
+          )
           .catch(() => {
             useToasts.getState().push({
               kind: "error",
@@ -1048,6 +1256,42 @@ export const useStoryboardRun = create<StoryboardRunState>((set, get) => {
       };
     }),
 
+  // D1 (2026-08-05): 成果物からの個別除外。cuts Map は触らない (型定義側の
+  // コメント参照: 実削除すると終端検知と待機キューが壊れる)。
+  excludeCut: (cutId) =>
+    set((s) => {
+      if (s.excludedCutIds.includes(cutId)) return s;
+      return {
+        ...s,
+        excludedCutIds: [...s.excludedCutIds, cutId],
+        uiDebugLog: [
+          ...s.uiDebugLog,
+          {
+            ts: Date.now(),
+            level: "info" as const,
+            message: `excludeCut: ${cutId}`,
+          },
+        ].slice(-500),
+      };
+    }),
+
+  includeCut: (cutId) =>
+    set((s) => {
+      if (!s.excludedCutIds.includes(cutId)) return s;
+      return {
+        ...s,
+        excludedCutIds: s.excludedCutIds.filter((id) => id !== cutId),
+        uiDebugLog: [
+          ...s.uiDebugLog,
+          {
+            ts: Date.now(),
+            level: "info" as const,
+            message: `includeCut: ${cutId}`,
+          },
+        ].slice(-500),
+      };
+    }),
+
   regenerateCut: (cutId) => {
     const state = get();
     const runId = state.activeRunId;
@@ -1075,17 +1319,27 @@ export const useStoryboardRun = create<StoryboardRunState>((set, get) => {
       return { cuts: next };
     });
 
-    // 参照画像・比率は企画チャットが保持している生成パラメータから取る
-    // (StoryboardCutCard が個別に持っていたのと同じ経路に揃える)。
+    // 参照画像・比率は **走っている run 自身の params** から取る
+    // (Sol 評価 2周目 blocking#2 の付随指摘 / 2026-08-04)。
+    //
+    // 旧実装は共有ストア planChat.storyboardParams を直読みしていた。だが planChat は
+    // 別スキルへ入った瞬間に消える共有ストアなので、漫画などへ寄り道して戻ってから
+    // 個別カットを作り直すと、参照画像が空・比率が既定値 9:16 に化けていた
+    // (本生成のときと違う絵が返る)。逆に別スキルの構成が残っていた場合は
+    // そちらの参照画像を掴む。run params はこの run の生成時に確定して以後動かないので、
+    // 「作り直し」が一括本生成と同じ入力を使うことが構造的に保証される。
+    const runParams = state.params;
     const params = usePlanChat.getState().storyboardParams;
     void storyboard
       .regenerateCut({
         runId,
         cutId,
-        characterReferenceImage: params?.character_reference_path ?? "",
-        styleReferenceImage: params?.style_reference_path,
+        characterReferenceImage:
+          runParams?.characterReferenceImage ?? params?.character_reference_path ?? "",
+        styleReferenceImage:
+          runParams?.styleReferenceImage ?? params?.style_reference_path,
         additionalRefs: [],
-        aspectRatio: params?.aspect_ratio ?? "9:16",
+        aspectRatio: runParams?.aspectRatio ?? params?.aspect_ratio ?? "9:16",
         cutDescription: cut.description ?? "",
       })
       .catch((err) => {
