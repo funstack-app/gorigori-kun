@@ -30,6 +30,14 @@ export type PromptStyleId = "emotive" | "spec";
 /**
  * プロンプト組み立ての入力。
  *
+ * ## 参照画像の有無だけを持つ（属性テキストは持たない・2026-08-05 I4）
+ *
+ * `hasReference` は「キャラ参照画像を渡しているか」の真偽だけ。
+ * **キャラの見た目を説明する文（属性）はここに戻さない** — 下の C1 修正の
+ * 理由がそのまま生きている（Rust 側 `build_sheet_prompt` が担う）。
+ * ここで足すのは「画風の支配権を参照画像側に渡す」という制御句だけで、
+ * 見た目の記述ではない。
+ *
  * ## ここに属性（`attributes`）を持たない（2026-08-05 C1 修正）
  *
  * 登録キャラの属性文字列（「銀髪ロング、赤い瞳、黒いセーラー服」等）は
@@ -52,6 +60,14 @@ export type PromptStyleId = "emotive" | "spec";
 export type StickerPromptInput = {
   /** 表情・ポーズの英語断片（`catalog.ts` の `StickerEntry.promptFragment`）。 */
   promptFragment: string;
+  /**
+   * キャラ参照画像を渡しているか（I4）。
+   *
+   * `true` のときだけ参照支配句が付く。参照が無いのに「参照に一致させろ」と書くと、
+   * モデルが存在しない画像を探して指示全体の解像度が落ちる。
+   * 省略時は `false`（参照なし扱い＝従来と同じプロンプト）。
+   */
+  hasReference?: boolean;
 };
 
 export type StickerPromptStyle = {
@@ -107,6 +123,48 @@ export const FRINGE_PREVENTION_CLAUSE =
 export const NO_TEXT_CLAUSE =
   "no text, no letters, no speech bubbles, no watermark, no signature";
 
+/**
+ * 参照画像の**同一性**を勝たせる句。参照があるときだけ付く（I4）。
+ *
+ * 漫画の `REFERENCE_IDENTITY_CLAUSE`（`src/lib/comic/prompts.ts`・2026-07-28 STΛCK実機FBで
+ * 確立）と**同じ思想**を持ち込んだもの。ただし文言はそのまま流用しない —
+ * 漫画側は「漫画キャラとして描き直せ（never photorealistic）」と**画風の変換**を命じるが、
+ * スタンプで要るのは逆方向の「参照の画風のまま保て」だから。
+ * 流用すると変換を命じることになり、この修正の目的と反対に働く。
+ */
+export const REFERENCE_IDENTITY_CLAUSE =
+  "match the reference image exactly: same character, same face, same hairstyle, same outfit, same proportions — this is the same individual, not a similar-looking one";
+
+/**
+ * 参照画像の**画風**を勝たせる句。参照があるときだけ付く（I4）。
+ *
+ * ## なぜこの句が要るか（2026-08-05 STΛCK実機FB「アニメっぽくなる枚がある」）
+ *
+ * キャラ参照を渡していても、書き味プロンプト（仕様型の
+ * `clean bold outline, flat color fill` 等）が強く効いて、**一般的なアニメ調へ
+ * 引きずられる枚**が出る。`STYLE_PRESERVATION_CLAUSE` は
+ * 「same art style as the reference image」と言っているが、
+ * **「汎用のアニメ調へ寄せるな」を名指ししていない**ため、
+ * モデルには「参照に近いアニメ調」が両立しているように見える。
+ *
+ * 漫画の `REFERENCE_STYLE_DOMINANCE_CLAUSE` が解いた問題と同型
+ * （あちらは identity / pose 句だけでは画風が勝てなかった実機FB）。
+ * **支配権がどちらにあるかを明示する**のが解。
+ */
+export const REFERENCE_STYLE_DOMINANCE_CLAUSE =
+  "the reference image's art style has absolute priority over any style wording in this prompt — reproduce its exact linework, coloring, shading and level of detail; never drift toward generic anime or a different illustration style";
+
+/**
+ * 参照ありのときに足す句（順序を固定）。
+ *
+ * **`SHARED_CLAUSES` とは別に持つ**。共通句は「常に付く」もの、これは
+ * 「参照があるときだけ付く」ものなので、混ぜると条件分岐が2箇所に散る。
+ */
+export const REFERENCE_CLAUSES: readonly string[] = [
+  REFERENCE_IDENTITY_CLAUSE,
+  REFERENCE_STYLE_DOMINANCE_CLAUSE,
+];
+
 /** 共通句を1本に束ねたもの（順序を固定して差分を安定させる）。 */
 export const SHARED_CLAUSES: readonly string[] = [
   STYLE_PRESERVATION_CLAUSE,
@@ -120,9 +178,18 @@ export const SHARED_CLAUSES: readonly string[] = [
  *
  * **共通句は必ず後ろに付く**。スタイル側は共通句を自分で書かない（制約2・3を構造で守る）。
  * 空要素は落として区切りの重複を防ぐ。
+ *
+ * 参照支配句（I4）も**ここで1箇所だけ**付ける。スタイルごとに書くと、
+ * 片方だけ直る事故になる（制約3が守っているものと同じ）。
+ * 参照句は共通句より**後ろ**に置く — 直前の `STYLE_PRESERVATION_CLAUSE` を
+ * さらに強める位置づけで、最後に読むものが支配権の宣言になるようにする。
  */
-function composePrompt(styleSpecificParts: string[]): string {
-  return [...styleSpecificParts, ...SHARED_CLAUSES]
+function composePrompt(styleSpecificParts: string[], hasReference: boolean): string {
+  return [
+    ...styleSpecificParts,
+    ...SHARED_CLAUSES,
+    ...(hasReference ? REFERENCE_CLAUSES : []),
+  ]
     .map((p) => p.trim())
     .filter(Boolean)
     .join(", ");
@@ -143,13 +210,16 @@ const EMOTIVE_STYLE: StickerPromptStyle = {
   label: "情緒型",
   description: "世界観や質感を言葉で語る書き方。絵の魅力が出やすい一方、ばらつきが出やすい。",
   build(input) {
-    return composePrompt([
-      "a warm, endearing character sticker illustration",
-      input.promptFragment,
-      "soft even lighting with gentle shadows, matte texture, expressive and full of personality",
-      "charming and comforting atmosphere, the kind of drawing you want to send to a friend",
-      "the character alone, nothing else in the frame",
-    ]);
+    return composePrompt(
+      [
+        "a warm, endearing character sticker illustration",
+        input.promptFragment,
+        "soft even lighting with gentle shadows, matte texture, expressive and full of personality",
+        "charming and comforting atmosphere, the kind of drawing you want to send to a friend",
+        "the character alone, nothing else in the frame",
+      ],
+      input.hasReference ?? false,
+    );
   },
 };
 
@@ -164,12 +234,15 @@ const SPEC_STYLE: StickerPromptStyle = {
   label: "仕様型",
   description: "構図と仕様を数値的に指定する書き方。同じものが安定して出やすい。",
   build(input) {
-    return composePrompt([
-      "character sticker asset, single subject, centered composition, full figure within frame",
-      input.promptFragment,
-      "clean bold outline, flat color fill, die-cut sticker silhouette",
-      "flat even lighting, no cast shadow on the background",
-    ]);
+    return composePrompt(
+      [
+        "character sticker asset, single subject, centered composition, full figure within frame",
+        input.promptFragment,
+        "clean bold outline, flat color fill, die-cut sticker silhouette",
+        "flat even lighting, no cast shadow on the background",
+      ],
+      input.hasReference ?? false,
+    );
   },
 };
 

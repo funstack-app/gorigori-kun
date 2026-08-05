@@ -31,16 +31,52 @@ describe("R5: 抜けなかったことが採否一覧に出る", () => {
     expect(src, "採否一覧へ渡していない").toContain("notClearedPaths={notClearedPaths}");
   });
 
-  it("cutOut が cleared === 0 と失敗の両方で記録している", async () => {
+  /**
+   * ## 2026-08-05 I2 で構造が変わった（この検査を張り直した理由）
+   *
+   * 旧構造では `cutOut` の中に「1画素も抜けなかった」「抜き自体が失敗した」の
+   * 2つの分岐があり、その**両方**に `setNotClearedPaths` があることを数で固定していた。
+   *
+   * AI抜き既定化（J4）で分岐は `cutout.ts` の `cutOutBackground` へ移り、
+   * `cutOut` が受け取るのは判定済みの `notCleared`（真偽1つ）になった。
+   * よって `setNotClearedPaths` の呼び出しは**1箇所で正しい**。
+   *
+   * 数を数える検査をそのまま残すと、正しい実装で落ち続ける。守るべきものは
+   * 「呼び出しが2つあること」ではなく「**抜けなかった事実が黙って捨てられないこと**」
+   * なので、そちらを固定し直す。
+   */
+  it("cutOut が「抜けなかった」を漏れなく可視化している", async () => {
     const src = await readSrc("src/components/skills/sticker/StickerWorkspace.tsx");
     const cutAt = src.indexOf("const cutOut = useCallback");
+    expect(cutAt, "cutOut が見つからない").toBeGreaterThan(-1);
     const body = src.slice(cutAt, src.indexOf("// ── イベント購読", cutAt));
-    // 抜けなかった場合と、抜き自体が失敗した場合の2経路。どちらも救済して可視化する。
-    const marks = body.split("setNotClearedPaths(").length - 1;
+
+    // 判定済みの `notCleared` を見て可視化していること。
+    expect(body, "抜けなかった事実を画面へ出していない（R5 の再発）").toContain(
+      "setNotClearedPaths(",
+    );
     expect(
-      marks,
-      "抜けなかった経路のどれかが黙って進んでいる（R5 の再発）",
-    ).toBeGreaterThanOrEqual(2);
+      body,
+      "notCleared を見ずに可視化している（判定を2箇所に持つと食い違う）",
+    ).toContain("outcome.notCleared");
+  });
+
+  /**
+   * 分岐の網羅は、移った先（`cutout.ts`）で固定する。
+   * ここを空けたままにすると「どこにも検査が無い」状態になる（R5 の穴が開く）。
+   */
+  it("cutOutBackground が3経路すべてで抜けなかったことを判定している", async () => {
+    const src = await readSrc("src/lib/sticker/cutout.ts");
+    // (1) AI成功 = false / (2) クロマキー cleared===0 / (3) 全滅
+    expect(src, "AI成功で notCleared を立てている（抜けているのに警告が出る）").toContain(
+      'method: "ai", chroma: null, notCleared: false',
+    );
+    expect(src, "クロマキーの cleared===0 を判定していない").toContain(
+      "notCleared: res.cleared === 0",
+    );
+    expect(src, "全経路失敗のとき黙って進んでいる（R5 の再発）").toContain(
+      'method: "none", chroma: null, notCleared: true',
+    );
   });
 
   it("採否一覧がバッジを出す（新しいボタンは足さない）", async () => {

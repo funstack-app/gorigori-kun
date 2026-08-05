@@ -27,7 +27,7 @@ import { useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 
 import { MaskCanvas, type MaskCanvasHandle, type MaskMode } from "../../MaskCanvas";
-import { images as imagesIpc, sticker as stickerIpc } from "../../../lib/ipc";
+import { images as imagesIpc } from "../../../lib/ipc";
 import { humanizeError } from "../../../lib/humanizeError";
 import { useToasts } from "../../../lib/store/toasts";
 import {
@@ -38,10 +38,10 @@ import {
 } from "../../../lib/imageReedit/maskReedit";
 import {
   buildStickerReeditRequest,
-  chromaKeyBeforeComposite,
+  cutOutBeforeComposite,
   STICKER_REEDIT_SOURCE_PREFIX,
-  type StickerReeditChromaOutcome,
 } from "../../../lib/sticker/reedit";
+import type { CutoutOutcome } from "../../../lib/sticker/cutout";
 import type { StickerPickItem } from "./StickerPickPanel";
 
 type Props = {
@@ -51,15 +51,14 @@ type Props = {
   /**
    * 採用成功。呼び出し側が差し替え後のパスを正本にする。
    *
-   * `chroma` は**この差し替えで実際に測った**抜きの統計（R2）。呼び出し側が
+   * `cutout` は**この差し替えで実際に抜いたときの結果**（R2 / I2）。呼び出し側が
    * 層Aの材料として登録する。旧実装はこれを渡しておらず、個別再生成の1枚だけが
    * 縁の検査と `chroma-not-cleared` の判定から外れていた。
+   *
+   * AI抜き経路では `cutout.chroma === null`。**そのときは層Aへ統計を渡さない**
+   * （測っていない縁の品質を語らない）。
    */
-  onAdopted: (
-    index: number,
-    newImagePath: string,
-    chroma: StickerReeditChromaOutcome,
-  ) => void;
+  onAdopted: (index: number, newImagePath: string, cutout: CutoutOutcome) => void;
   onClose: () => void;
 };
 
@@ -131,17 +130,18 @@ export function StickerReeditModal({
         throw new Error(generated.errors[0] ?? "再生成した画像を取得できませんでした。");
       }
 
-      // ⚠️ **合成の前にクロマキーを通す**（A1）。順序を入れ替えてはいけない。
+      // ⚠️ **合成の前に背景を抜く**（A1）。順序を入れ替えてはいけない。
       //
       // 生成プロンプトは緑背景を要求している（`reedit.ts` の CHROMA_BACKGROUND_CLAUSE）。
       // 合成はマスクの内側を生成物のまま採るので、抜かずに合成すると
       // **塗った範囲に緑が残ったまま採用される**。マスク外差分ゼロ検証は
       // 「マスクの外」しか守らないので、この緑を誰も検出できない。
       //
-      // 戻りは**パスと統計の両方**（R2）。統計を捨てると、この1枚だけが層Aの
+      // 抜きは本流と同じ `cutOutBeforeComposite`（既定=AI / 保険=クロマキー・I2）。
+      // 戻りは**パスと抜きの結果の両方**（R2）。結果を捨てると、この1枚だけが層Aの
       // 縁の検査・「緑が抜けなかった」判定の材料を持たないまま採否リストへ載る。
-      const chroma = await chromaKeyBeforeComposite(generatedPath, stickerIpc.chromaKey);
-      const cutPath = chroma.path;
+      const cutout = await cutOutBeforeComposite(generatedPath);
+      const cutPath = cutout.path;
       if (!stillMine()) return;
 
       // マスク外が1画素でも変わっていたらここで throw する（別人になった1枚を採用しない）。
@@ -154,8 +154,8 @@ export function StickerReeditModal({
       );
       if (!stillMine()) return;
 
-      // 統計は**合成後のパス**に紐づけて渡す（層Aが検査するのはこの1枚だから）。
-      onAdopted(item.index, compositePath, chroma);
+      // 抜きの結果は**合成後のパス**に紐づけて渡す（層Aが検査するのはこの1枚だから）。
+      onAdopted(item.index, compositePath, cutout);
       pushToast({
         kind: "success",
         text: `${String(item.index).padStart(2, "0")} の塗ったところだけ差し替えました。`,

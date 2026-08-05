@@ -82,16 +82,18 @@ describe("A1: 呼び出し側（StickerReeditModal）の順序", () => {
       "utf8",
     );
 
-    const chromaAt = src.indexOf("chromaKeyBeforeComposite(");
+    // 2026-08-05 I2: 呼び出し側の抜きは `cutOutBeforeComposite`（既定=AI / 保険=クロマキー）
+    // へ変わった。**守る不変条件は変わらない** — 抜きが合成より前にあること。
+    const chromaAt = src.indexOf("cutOutBeforeComposite(");
     const compositeAt = src.indexOf("compositePanelImages(");
 
-    expect(chromaAt, "chromaKeyBeforeComposite が呼ばれていない（A1 の再発）").toBeGreaterThan(
+    expect(chromaAt, "cutOutBeforeComposite が呼ばれていない（A1 の再発）").toBeGreaterThan(
       -1,
     );
     expect(compositeAt, "compositePanelImages が呼ばれていない").toBeGreaterThan(-1);
     expect(
       chromaAt,
-      "クロマキーが合成より後に呼ばれている。マスク内の緑が合成されてしまう（A1 の再発）",
+      "抜きが合成より後に呼ばれている。マスク内の緑が合成されてしまう（A1 の再発）",
     ).toBeLessThan(compositeAt);
 
     // 合成に渡すのが「抜いた後のパス」であること。抜いてから生成物パスを渡すと
@@ -162,12 +164,12 @@ describe("R2: 呼び出し側（StickerReeditModal / StickerWorkspace）が統�
     const src = await readSrc("src/components/skills/sticker/StickerReeditModal.tsx");
     // 抜いた結果を丸ごと受けていること（パスだけ取り出すと統計が消える）。
     expect(src, "抜きの戻りを変数で受けていない").toContain(
-      "const chroma = await chromaKeyBeforeComposite(",
+      "const cutout = await cutOutBeforeComposite(",
     );
     expect(
       src,
-      "onAdopted に統計を渡していない（R2 の再発。層Aが材料を受け取れない）",
-    ).toContain("onAdopted(item.index, compositePath, chroma)");
+      "onAdopted に抜きの結果を渡していない（R2 の再発。層Aが材料を受け取れない）",
+    ).toContain("onAdopted(item.index, compositePath, cutout)");
   });
 
   it("Workspace が個別再生成の統計を**登録**している（delete で終わらせない）", async () => {
@@ -180,9 +182,31 @@ describe("R2: 呼び出し側（StickerReeditModal / StickerWorkspace）が統�
     expect(body, "adoptReedit が統計を登録していない（R2 の再発）").toContain(
       "chromaStatsRef.current.set(newImagePath",
     );
-    expect(body, "統計を delete するだけの旧実装に戻っている（R2 の再発）").not.toContain(
-      "chromaStatsRef.current.delete(newImagePath)",
-    );
+
+    // 2026-08-05 I2: `delete` の意味が変わったので、単純な禁止では固定できない。
+    //
+    // 旧構造ではクロマキーが唯一の経路だったため、`delete` は「測った統計を捨てる」
+    // ことしか意味しなかった（＝R2 の退行）。AI抜き既定化で `chroma === null`
+    // （＝クロマキーを通していない）という経路が増え、そこでは
+    // **前の絵の統計を消すのが正しい**（測っていない画像の縁の品質を語らない）。
+    //
+    // よって固定するのは「delete が無いこと」ではなく、
+    // **統計があるときは登録し、無いときだけ消す**という条件分岐そのもの。
+    const setAt = body.indexOf("chromaStatsRef.current.set(newImagePath");
+    const deleteAt = body.indexOf("chromaStatsRef.current.delete(newImagePath");
+    const guardAt = body.indexOf("if (cutout.chroma)");
+
+    expect(guardAt, "統計の有無で分岐していない（R2 の再発）").toBeGreaterThan(-1);
+    expect(
+      setAt > guardAt,
+      "登録が `if (cutout.chroma)` の内側にない（測っていない統計を作りうる）",
+    ).toBe(true);
+    if (deleteAt > -1) {
+      expect(
+        deleteAt > setAt,
+        "登録より前に delete している（登録した統計をその場で消している・R2 の再発）",
+      ).toBe(true);
+    }
   });
 
   it("通常経路の cutOut も cleared === 0 の統計を登録している（R2 の整合）", async () => {
@@ -192,13 +216,17 @@ describe("R2: 呼び出し側（StickerReeditModal / StickerWorkspace）が統�
     const body = src.slice(cutAt, src.indexOf("// ── イベント購読", cutAt));
 
     const setAt = body.indexOf("chromaStatsRef.current.set(");
-    const clearedGuardAt = body.indexOf("if (res.cleared > 0)");
     expect(setAt, "cutOut が統計を登録していない").toBeGreaterThan(-1);
+
     // 登録が `cleared > 0` の内側にあると、抜けなかった画像の事実が層Aへ届かない
-    // （通常経路の「緑のまま」がすり抜ける）。
+    // （通常経路の「緑のまま」がすり抜ける）。I2 以後、この条件は `cutout.ts` 側で
+    // 閉じている（`cleared === 0` でも統計を組み立てて返す）ので、
+    // 呼び出し側に `cleared > 0` のガードが**復活していないこと**を固定する。
     expect(
-      clearedGuardAt === -1 || setAt < clearedGuardAt,
+      body,
       "統計の登録が cleared > 0 の内側にある（緑のままの画像が層Aの材料を持たない・R2 の再発）",
-    ).toBe(true);
+    ).not.toContain("if (res.cleared > 0)");
+    // 登録は「統計があるかどうか」だけで分岐する。
+    expect(body, "統計の有無で分岐していない").toContain("if (outcome.chroma)");
   });
 });

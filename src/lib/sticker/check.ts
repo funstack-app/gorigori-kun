@@ -372,13 +372,95 @@ export async function reviewStickerSet(
     else targets.push(p);
   }
 
-  const results: StickerReviewResult[] = [];
-  for (const p of targets) {
-    // 直列で回す。層Bは effort を上げた vision を含み、並列に投げると Codex 側で詰まるため。
-    results.push(await reviewStickerImage(p, rules, signal, deps));
-  }
+  const results = await runReviewsWithLimit(targets, rules, signal, deps);
 
   return { results, disclaimer: REVIEW_DISCLAIMER, excluded };
+}
+
+/**
+ * 同時に走らせる検査の数（L5 / 2026-08-05 STΛCK実機FB「確認が遅い」）。
+ *
+ * ## なぜ直列をやめたか
+ *
+ * 旧実装は「層Bは effort を上げた vision を含み、並列に投げると Codex 側で詰まる」
+ * という理由で完全な直列だった。詰まりを避ける判断は正しいが、**1本ずつ**は
+ * 反対側へ振り切りすぎている。40枚を1枚あたり十数秒で回すと、待ち時間が
+ * 人の集中の持続を超える（実機で体感された遅さの主因）。
+ *
+ * ## なぜ 3 か
+ *
+ * 「詰まらせない」と「待たせない」の折衷。無制限（`Promise.all` で40本同時）は
+ * 旧コメントが警告している詰まりをそのまま踏む。3 なら同時実行は常に少数に留まり、
+ * それでいて所要時間は直列の 1/3 程度になる。
+ *
+ * **詰まる実測が出たら 1 に戻せる**（1 にすると旧来の直列と同じ挙動になる）。
+ * そのために定数を1箇所に置き、上限の意味を持たない分岐を作らない。
+ */
+export const REVIEW_CONCURRENCY = 3;
+
+/**
+ * 上限つきの並列で検査を回し、**入力順のまま**結果を返す。
+ *
+ * ## 順序を保つ（最重要）
+ *
+ * 完了順に `push` すると、速く終わった画像から並ぶ。画面の一覧は番号順に
+ * 読まれる前提なので、順序が揺れると「どの絵の指摘か」を人が追えなくなる。
+ * 結果は**添字で確定した場所へ書く**（完了順に依存しない）。
+ *
+ * ## 中断（AbortSignal）
+ *
+ * `signal` は各 `reviewStickerImage` へそのまま渡っており、途中で中断されれば
+ * 実行中のものは各自で終わる。ここでは**まだ始めていないものを始めない** —
+ * 中断後に新しい Codex 実行を起こさないための、ワーカー入口での確認。
+ *
+ * ## 例外を投げない
+ *
+ * `reviewStickerImage` は自分で try/catch して `error` 付きの結果を返す契約なので、
+ * 1枚の失敗で `Promise.all` 全体が落ちることはない。契約が変わったときに
+ * 黙って全滅しないよう、ここでも保険の catch を置いて**その1枚だけ**を error にする。
+ */
+async function runReviewsWithLimit(
+  targets: readonly string[],
+  rules: readonly StickerReviewRule[],
+  signal: AbortSignal | undefined,
+  deps: StickerReviewDeps,
+): Promise<StickerReviewResult[]> {
+  const results = new Array<StickerReviewResult>(targets.length);
+  let next = 0;
+
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const index = next;
+      next += 1;
+      if (index >= targets.length) return;
+      // 中断されたら新しい実行を始めない（走り出したものは各自で終わる）。
+      if (signal?.aborted) {
+        results[index] = {
+          imagePath: targets[index],
+          issues: [],
+          error: "検査を中断しました。",
+          undetermined: [],
+        };
+        continue;
+      }
+      try {
+        results[index] = await reviewStickerImage(targets[index], rules, signal, deps);
+      } catch (err) {
+        // reviewStickerImage は自分で catch する契約だが、破れても全滅させない。
+        results[index] = {
+          imagePath: targets[index],
+          issues: [],
+          error: (err as Error)?.message ?? String(err),
+          undetermined: [],
+        };
+      }
+    }
+  };
+
+  const lanes = Math.max(1, Math.min(REVIEW_CONCURRENCY, targets.length));
+  await Promise.all(Array.from({ length: lanes }, () => worker()));
+
+  return results;
 }
 
 /** 層Bの結果をクリップボード用のプレーンテキストへ整形する。 */

@@ -68,7 +68,11 @@ import {
   type StickerReviewReport,
 } from "../../../lib/sticker/check";
 import { formatStickerError, REVIEW_GUIDELINE_URL } from "../../../lib/sticker/reviewRules";
-import type { StickerReeditChromaOutcome } from "../../../lib/sticker/reedit";
+import { cutOutBackground, type CutoutOutcome } from "../../../lib/sticker/cutout";
+import {
+  inspectWithProgress,
+  type InspectProgress,
+} from "../../../lib/sticker/inspectProgress";
 import {
   buildStickerPrompt,
   DEFAULT_PROMPT_STYLE,
@@ -81,10 +85,16 @@ import {
   STICKER_COUNTS,
   type StickerCount,
 } from "../../../lib/sticker/spec";
+import { applyStickerTextToFile } from "../../../lib/sticker/text";
+import {
+  pickExportFolderName,
+  joinExportPath,
+} from "../../../lib/sticker/exportDir";
 import { usePresets, presetKind, type Preset } from "../../../lib/store/presets";
 import { useToasts } from "../../../lib/store/toasts";
 import { StickerPickPanel, type StickerPickItem } from "./StickerPickPanel";
 import { StickerReeditModal } from "./StickerReeditModal";
+import { StickerTextPanel, defaultStickerTextStyle } from "./StickerTextPanel";
 
 /** 画面の工程。④採否を飛ばす導線は作らない（設計書 §1.6 / K6）。 */
 type Phase = "setup" | "generate" | "pick" | "export";
@@ -104,6 +114,22 @@ const IMAGE_EXTS = ["png", "jpg", "jpeg", "webp"];
 /** キャラの参照画像を解決する（表情差分と同じ規則）。 */
 function resolveCharacterSource(preset: Preset): string | undefined {
   return preset.characterMeta?.sourceImage ?? preset.attachedImages?.[0]?.path;
+}
+
+/**
+ * フォルダ直下の名前一覧（L6 の連番回避に使う）。
+ *
+ * 読めなければ**空集合**を返す。ここで失敗しても書き出しは続けるべきで、
+ * 最悪の結果は「同じ分に2回書き出したとき同名フォルダになる」だけ。その場合も
+ * `sticker_export` の既存の重複検査が書く前に止めるので、黙って上書きはされない。
+ */
+async function listDirNames(dir: string): Promise<Set<string>> {
+  try {
+    const { readDir } = await import("@tauri-apps/plugin-fs");
+    return new Set((await readDir(dir)).map((e) => e.name));
+  } catch {
+    return new Set();
+  }
 }
 
 export function StickerWorkspace() {
@@ -156,12 +182,42 @@ function StickerBody() {
   const [exportedDir, setExportedDir] = useState<string | null>(null);
   const [reeditTarget, setReeditTarget] = useState<StickerPickItem | null>(null);
 
+  /**
+   * ⑤ 文字入れ（L1 / 2026-08-05 STΛCK実機FB「文字を入れたい」）。
+   *
+   * 入力中の文字は index で持つ（パスで持つと、個別再生成で差し替わった瞬間に
+   * 入力が迷子になる）。焼き込みは押したときにまとめて行う。
+   */
+  const [texts, setTexts] = useState<Readonly<Record<number, string>>>({});
+  const [textStyle, setTextStyle] = useState(() => defaultStickerTextStyle());
+  const [applyingText, setApplyingText] = useState(false);
+  /**
+   * 文字を焼く前の元画像（index → パス）。
+   *
+   * **焼き直しは必ずここから行う**。文字入り画像へさらに焼くと前の文字が残って
+   * 重なる（`text.ts` の `renderStickerText` が記録している呼び出し側の責務）。
+   * 「後から直せる」という要件は、この控えを持つことでしか満たせない。
+   */
+  const textBaseRef = useRef<Map<number, string>>(new Map());
+
   // ⑥ 検査
   const [inspectIssues, setInspectIssues] = useState<
     { path: string; issues: StickerIssue[] }[] | null
   >(null);
   const [setIssues, setSetIssues] = useState<StickerIssue[]>([]);
   const [inspecting, setInspecting] = useState(false);
+  /**
+   * 確認中の進捗（実測 k/N・I3）。確認していない間は `null`。
+   *
+   * STΛCK実機FB「確認中にゲージが出ない」（2026-08-05）。生成中（工程③）には
+   * `GenerationGauge` があるのに、確認（層A）の実行中だけ「確認中…」の文字しか
+   * 出ておらず、押したあと何も動いていないように見えていた。
+   *
+   * 検査は**枚数が分かっている**ので、生成と同じく実測を渡せる（推定にしない）。
+   */
+  const [inspectProgress, setInspectProgress] = useState<InspectProgress | null>(null);
+  /** 確認を始めた時刻。`GenerationGauge` に渡す（実測を渡すので幅計算には使われない）。 */
+  const [inspectStartedAt, setInspectStartedAt] = useState(() => Date.now());
   const [review, setReview] = useState<StickerReviewReport | null>(null);
   const [reviewing, setReviewing] = useState(false);
   /**
@@ -208,6 +264,15 @@ function StickerBody() {
   /** 抜いた時点で「縁のにじみが多い」と判定された画像（点検画面に並べて出す用）。 */
   const fringeWarnPathsRef = useRef<Set<string>>(new Set());
   /**
+   * どの経路で背景を抜いたか（I2）。パス → `"ai" | "chroma" | "none"`。
+   *
+   * 「抜けなかった」の説明文が経路で変わる。クロマキー経路なら「緑が抜けなかった」
+   * だが、AI経路が落ちてクロマキーも駄目だったなら「どちらでも抜けなかった」。
+   * 経路を覚えていないと、片方の説明を全部に当てることになる（測っていない
+   * 経路の話をしない）。
+   */
+  const cutoutMethodRef = useRef<Map<string, "ai" | "chroma" | "none">>(new Map());
+  /**
    * 「緑が1画素も抜けなかった」画像（R5）。採否一覧のバッジで可視化する。
    *
    * `cleared === 0` は救済（元画像で先へ進める）するが、**黙って進めない**。
@@ -226,67 +291,62 @@ function StickerBody() {
   const shortfall = count - entries.length;
 
   /**
-   * 生成直後の緑背景カットを、決定論のクロマキーで透過に抜く（設計書 §1.4 / S2）。
+   * 生成直後のカットの背景を抜く（設計書 §1.4 / §9 J4 / S2）。
+   *
+   * ## 既定はAI抜き、クロマキーは保険（I2 / 2026-08-05 J4発動）
+   *
+   * STΛCK実機FB「切り抜きにばらつきがある」を受けて、設計書 §9 J4 に用意されていた
+   * 分岐を引いた。**Mac=Vision / Windows通常版=BiRefNet が既定**で、
+   * 互換版（`edit-ai` 無効ビルド）と失敗時だけクロマキーへ落ちる。
+   * 経路の実装は `cutout.ts`（個別再生成と共有する。同じ経路には同じ関所）。
    *
    * **抜けなかった場合も元のパスを返して先へ進める**。理由は2つ:
    *
-   * 1. ここで止めると、緑が不均一だった1枚のせいでそのカットが採否リストから
+   * 1. ここで止めると、抜けなかった1枚のせいでそのカットが採否リストから
    *    消える。**欠落を欠落のまま可視化する**なら、絵は見せて「透過されていない」
    *    という判定は層A（`no-alpha` / `chroma-not-cleared`）に任せるのが筋
    *    （判断を2箇所に置かない）
    * 2. 抜きは何度でもやり直せる。元の緑背景が残っていれば復帰できる
    *
-   * ## `cleared === 0` の統計も登録する（R2 / 2026-08-05 修正）
+   * ## 統計はクロマキー経路のときだけ登録する（R2 の維持 + I2）
    *
-   * 旧実装は `cleared > 0` のときしか統計を登録しなかった。理由は
-   * 「抜いた事実が無い画像に縁の品質は語れない」で、それ自体は正しい。
-   * だが**統計そのものを登録しない**と、層Aは `chroma: None` を受け取り
-   * 「緑が抜けなかった」という事実にも辿り着けない。緑背景のまま提出用の
-   * 書き出しを通過する経路がここから開いていた。
-   *
-   * 統計は登録する（＝「抜きを試みて 0 だった」という事実を運ぶ）。
-   * ただし `fringeWarn` は `cleared > 0` のときだけ記録する — **測っていない縁の
-   * 品質は語らない**という元の判断は変えない。
+   * `cleared === 0` でも統計を登録するのは R2 の修正どおり（「抜きを試みて 0 だった」
+   * という事実を層Aへ運ぶ）。ただし**AI抜き経路では統計を作らない** —
+   * クロマキーを通していないのだから `cleared` も `fringe` も存在しない。
+   * 偽の統計を置くと、層Aの縁の検査が測っていない値で動く（測ったふりをしない）。
    */
   const cutOut = useCallback(
     async (imagePath: string): Promise<string> => {
-      try {
-        const res = await stickerIpc.chromaKey(imagePath);
-        // 1画素も抜けなかった＝緑背景が無かった。差し替えず元を残す
-        // （中身が同じファイルを増やしても、規格判定は層Aで同じ結論になる）。
-        const path = res.cleared > 0 ? res.output : imagePath;
-        // 抜きの統計を捨てない（A5）。縁の品質は**抜いた瞬間にしか測れない**ので、
-        // 測った側が覚えておいて点検・書き出しの両方へ渡す。
-        chromaStatsRef.current.set(path, {
-          path,
-          cleared: res.cleared,
-          semiTransparent: res.semiTransparent,
-          opaque: res.opaque,
-          despilled: res.despilled,
+      const outcome = await cutOutBackground(imagePath);
+
+      // 抜きの統計は**クロマキー経路にしか存在しない**（A5 / I2）。
+      // 縁の品質は抜いた瞬間にしか測れないので、測った側が覚えておいて
+      // 点検・書き出しの両方へ同じ材料として渡す。
+      if (outcome.chroma) {
+        chromaStatsRef.current.set(outcome.path, {
+          path: outcome.path,
+          cleared: outcome.chroma.cleared,
+          semiTransparent: outcome.chroma.semiTransparent,
+          opaque: outcome.chroma.opaque,
+          despilled: outcome.chroma.despilled,
         });
-        if (res.cleared > 0) {
-          // 縁の品質は抜けた画像に対してだけ語れる。
-          if (res.fringeWarn) fringeWarnPathsRef.current.add(path);
-        } else {
-          // 救済した事実を画面へ出す（R5）。
-          setNotClearedPaths((prev) => {
-            const next = new Set(prev);
-            next.add(path);
-            return next;
-          });
-        }
-        return path;
-      } catch {
-        // 抜きの失敗で生成物を失わせない。規格の可否は層Aが判定する。
-        // 統計が無いので層Aは縁も抜けも判定しない（測っていないものを語らない）。
-        // 抜けなかったことは画面には出す — 救済したことを黙らない（R5）。
+        // 縁の品質は抜けた画像に対してだけ語れる（`chroma.fringeWarn` は
+        // `cleared === 0` のとき常に false になっている）。
+        if (outcome.chroma.fringeWarn) fringeWarnPathsRef.current.add(outcome.path);
+      }
+
+      // どの経路で抜いたかを覚えておく（採否画面のバッジの文言を出し分ける）。
+      cutoutMethodRef.current.set(outcome.path, outcome.method);
+
+      if (outcome.notCleared) {
+        // 救済した事実を画面へ出す（R5）。黙って進めない。
         setNotClearedPaths((prev) => {
           const next = new Set(prev);
-          next.add(imagePath);
+          next.add(outcome.path);
           return next;
         });
-        return imagePath;
       }
+      return outcome.path;
     },
     [],
   );
@@ -466,6 +526,12 @@ function StickerBody() {
             // 同じ文字列が1回のプロンプトに2箇所現れる（詳細は promptStyles.ts）。
             promptFragment: buildStickerPrompt(DEFAULT_PROMPT_STYLE, {
               promptFragment: entry.promptFragment,
+              // 参照支配句を足す条件（I4 / 2026-08-05 STΛCK実機FB
+              // 「アニメっぽくなる枚がある」）。素材画像は必ず参照として渡って
+              // いる（下の `params.characterImage`）ので、ここは常に true になる。
+              // 真偽で渡すのは、参照が無い経路が将来できたときに黙って
+              // 「参照に一致させろ」と書き続けないため。
+              hasReference: Boolean(sourceImage),
             }),
           }));
 
@@ -589,49 +655,160 @@ function StickerBody() {
    * 登録されない**ため、個別再生成で差し替えた1枚だけが層Aの材料を失っていた
    * （本流の `cutOut` は登録している）。同じ経路には同じ材料を流す。
    *
-   * 渡ってくる `chroma` は、この差し替えで実際に抜いたときの統計
-   * （`StickerReeditModal` の `chromaKeyBeforeComposite` の戻り）。
+   * 渡ってくる `cutout` は、この差し替えで実際に抜いたときの結果
+   * （`StickerReeditModal` の `cutOutBeforeComposite` の戻り）。
    * 前の絵の値ではないので、引き継ぎにはならない。
+   *
+   * AI抜き経路では `cutout.chroma === null`。**そのときは統計を登録しない**
+   * （I2。クロマキーを通していないので `cleared` も `fringe` も存在しない）。
+   * 前の絵の統計が残ると「測っていない画像の縁の品質を語る」ことになるので、
+   * その場合は明示的に削除する。
    */
   const adoptReedit = useCallback(
-    (index: number, newImagePath: string, chroma: StickerReeditChromaOutcome) => {
+    (index: number, newImagePath: string, cutout: CutoutOutcome) => {
       // 差し替えたら検査結果は古くなる。黙って残さない。
       setInspectIssues(null);
       setReview(null);
 
-      // 今回測った統計を、差し替え後のパスに紐づけて登録する。
-      chromaStatsRef.current.set(newImagePath, {
-        path: newImagePath,
-        cleared: chroma.cleared,
-        semiTransparent: chroma.semiTransparent,
-        opaque: chroma.opaque,
-        despilled: chroma.despilled,
-      });
-      // 縁の品質は抜けた画像に対してだけ語れる（`cutOut` と同じ規則）。
-      if (chroma.cleared > 0) {
-        if (chroma.fringeWarn) fringeWarnPathsRef.current.add(newImagePath);
-        else fringeWarnPathsRef.current.delete(newImagePath);
-        setNotClearedPaths((prev) => {
-          if (!prev.has(newImagePath)) return prev;
-          const next = new Set(prev);
-          next.delete(newImagePath);
-          return next;
+      if (cutout.chroma) {
+        // 今回測った統計を、差し替え後のパスに紐づけて登録する。
+        chromaStatsRef.current.set(newImagePath, {
+          path: newImagePath,
+          cleared: cutout.chroma.cleared,
+          semiTransparent: cutout.chroma.semiTransparent,
+          opaque: cutout.chroma.opaque,
+          despilled: cutout.chroma.despilled,
         });
+        // 縁の品質は抜けた画像に対してだけ語れる（`cutOut` と同じ規則）。
+        if (cutout.chroma.fringeWarn) fringeWarnPathsRef.current.add(newImagePath);
+        else fringeWarnPathsRef.current.delete(newImagePath);
       } else {
+        // AI経路（または全経路失敗）。統計は存在しない。前の絵の値を残さない。
+        chromaStatsRef.current.delete(newImagePath);
         fringeWarnPathsRef.current.delete(newImagePath);
-        setNotClearedPaths((prev) => {
+      }
+
+      cutoutMethodRef.current.set(newImagePath, cutout.method);
+
+      setNotClearedPaths((prev) => {
+        if (cutout.notCleared) {
           const next = new Set(prev);
           next.add(newImagePath);
           return next;
-        });
-      }
+        }
+        if (!prev.has(newImagePath)) return prev;
+        const next = new Set(prev);
+        next.delete(newImagePath);
+        return next;
+      });
 
       setCuts((prev) =>
         prev.map((c) => (c.index === index ? { ...c, imagePath: newImagePath } : c)),
       );
+
+      // 個別再生成で絵が変われば、文字の下敷きも新しい絵になる。古い控えを残すと
+      // 「差し替えたのに文字を消したら前の絵に戻る」という事故になる。
+      textBaseRef.current.delete(index);
     },
     [],
   );
+
+  /**
+   * ⑤ 文字入れを実行する（L1）。
+   *
+   * ## 常に「文字なしの絵」から焼く
+   *
+   * 文字入り画像へさらに焼くと前の文字が残って重なる。`textBaseRef` に
+   * 文字を入れる前のパスを控え、焼き直しのたびにそこから作る。
+   * これが「後から直せる」という要件の実体（`text.ts` のコメントと対）。
+   *
+   * ## 抜きの統計を焼き直し後のパスへ引き継ぐ
+   *
+   * 文字を焼いた画像は**別ファイル**になるので、層Aへ渡す統計のキー（パス）が変わる。
+   * 引き継がないと、文字を入れた瞬間に縁の検査の材料が消える（測ったものを捨てる）。
+   * 文字を焼いても背景の透過・縁は変わらない（合成しているのは文字だけ）ので、
+   * **同じ統計をそのまま使うのが事実に合う**。
+   */
+  async function applyTexts() {
+    const targets = pickItems.filter(
+      (i) => (texts[i.index] ?? "").trim().length > 0,
+    );
+    if (targets.length === 0) return;
+
+    setApplyingText(true);
+    try {
+      const results: { index: number; path: string }[] = [];
+      const failures: number[] = [];
+
+      for (const item of targets) {
+        // 控えが無ければ今のパスが「文字なしの絵」。あるならそれを下敷きにする。
+        const base = textBaseRef.current.get(item.index) ?? item.imagePath;
+        try {
+          const out = await applyStickerTextToFile(base, {
+            ...textStyle,
+            text: texts[item.index] ?? "",
+          });
+          textBaseRef.current.set(item.index, base);
+          results.push({ index: item.index, path: out });
+
+          // 縁の統計を新しいパスへ引き継ぐ（文字は縁を変えない）。
+          const sample = chromaStatsRef.current.get(base);
+          if (sample) chromaStatsRef.current.set(out, { ...sample, path: out });
+          if (fringeWarnPathsRef.current.has(base)) fringeWarnPathsRef.current.add(out);
+          const method = cutoutMethodRef.current.get(base);
+          if (method) cutoutMethodRef.current.set(out, method);
+        } catch {
+          // 1枚失敗しても他は焼く（全部止めない）。失敗は下でまとめて出す。
+          failures.push(item.index);
+        }
+      }
+
+      if (results.length > 0) {
+        const byIndex = new Map(results.map((r) => [r.index, r.path]));
+        setCuts((prev) =>
+          prev.map((c) =>
+            byIndex.has(c.index) ? { ...c, imagePath: byIndex.get(c.index) } : c,
+          ),
+        );
+        // 絵が変わったら検査結果は古い。黙って残さない（`adoptReedit` と同じ規則）。
+        setInspectIssues(null);
+        setReview(null);
+      }
+
+      if (failures.length > 0) {
+        pushToast({
+          kind: "warn",
+          text: `${results.length} 枚に文字を入れました。${failures.length} 枚は入れられませんでした。`,
+          ttlMs: 7000,
+        });
+      } else {
+        pushToast({
+          kind: "success",
+          text: `${results.length} 枚に文字を入れました。`,
+          ttlMs: 4000,
+        });
+      }
+    } finally {
+      setApplyingText(false);
+    }
+  }
+
+  /**
+   * 焼いた文字を取り消して文字なしの絵へ戻す（L1）。
+   *
+   * 控えているのは**パス**なので、戻すのは参照の付け替えだけ。文字入りファイルは
+   * 消さない（消すと戻したあとに「やっぱり戻す」ができない。生成物を失わせない）。
+   */
+  function resetTexts() {
+    const base = textBaseRef.current;
+    if (base.size === 0) return;
+    setCuts((prev) =>
+      prev.map((c) => (base.has(c.index) ? { ...c, imagePath: base.get(c.index) } : c)),
+    );
+    base.clear();
+    setInspectIssues(null);
+    setReview(null);
+  }
 
   /**
    * 検査・書き出しへ渡す抜きの統計（A5）。
@@ -647,12 +824,28 @@ function StickerBody() {
     [],
   );
 
-  /** ⑥ 層A: 画像規格チェック（決定論・即座・確実）。 */
+  /**
+   * ⑥ 層A: 画像規格チェック（決定論・即座・確実）。
+   *
+   * ## 進捗を実測で出す（I3 / 2026-08-05 STΛCK実機FB「確認中にゲージが出ない」）
+   *
+   * 検査は枚数が分かっているので、生成と同じ横ゲージに**実測 k/N** を渡せる。
+   * 分割実行とセット判定の扱いは `inspectProgress.ts`（分割の都合が
+   * `count-invalid` の判定に化けないよう、セットの所見は全件の1回から採る）。
+   */
   async function runInspect(mode: "personal" | "submission") {
     if (keptPaths.length === 0) return;
     setInspecting(true);
+    setInspectStartedAt(Date.now());
+    setInspectProgress({ done: 0, total: keptPaths.length });
     try {
-      const res = await stickerIpc.inspect(keptPaths, mode, chromaSamplesFor(keptPaths));
+      const res = await inspectWithProgress(
+        keptPaths,
+        mode,
+        chromaSamplesFor(keptPaths),
+        stickerIpc.inspect,
+        setInspectProgress,
+      );
       setInspectIssues(res.items.map((i) => ({ path: i.path, issues: i.issues })));
       setSetIssues(res.setIssues);
     } catch (err) {
@@ -664,6 +857,8 @@ function StickerBody() {
       });
     } finally {
       setInspecting(false);
+      // ゲージは確認が終わったら畳む（残すと「まだ動いている」に見える）。
+      setInspectProgress(null);
     }
   }
 
@@ -722,13 +917,26 @@ function StickerBody() {
       });
       if (typeof dir !== "string") return;
 
+      // ── L6: 選んだフォルダの直下へバラ撒かず、専用のサブフォルダへ集める ──
+      //
+      // 2026-08-05 STΛCK実機FB「ZIPが見つからない」。ZIP は作れていたが、
+      // 個別PNG 26枚と横並びで置かれてダウンロードフォルダに埋もれていた。
+      // 直すのは生成側ではなく**置き場所**（作られていないのではなく見つからない）。
+      //
+      // personal も同じ扱いにする。「このまま使う」でも枚数分のPNGが出るので、
+      // 埋もれる問題は同じ。出口ごとに置き方が違うほうが説明が増える。
+      const outputDir = joinExportPath(
+        dir,
+        pickExportFolderName(new Date(), await listDirNames(dir)),
+      );
+
       // 選んだ絵が採否で外れていたら1枚目へ戻す（使わないと決めた絵を看板にしない）。
       const mainSource =
         mainPath && keptPaths.includes(mainPath) ? mainPath : keptPaths[0];
 
       const res = await stickerIpc.export({
         paths: keptPaths,
-        outputDir: dir,
+        outputDir,
         mode,
         // メイン/タブに使う1枚は人が選ぶ（既定は1枚目）。選んだ絵が採否で外れていたら
         // 1枚目へ戻す — 使わないと決めた絵を看板にしない。
@@ -786,6 +994,11 @@ function StickerBody() {
 
       // 書き出し先を開けるようにする（他スキルの `revealItemInDir` と同じ流儀）。
       // 出したものの置き場所が分からないと、書き出せても次に進めない。
+      //
+      // **ZIP を最優先で指す**（L6）。`revealItemInDir` は渡したファイルを
+      // **選択状態にして**親フォルダを開くので、ZIP を渡せば申請に出すファイルが
+      // 開いた瞬間に反転表示される。フォルダを渡すと中身が並ぶだけで、
+      // どれが提出物かは人が探すことになる（実機FBで埋もれた状況の再現）。
       setExportedDir(res.zipPath ?? res.items[0]?.output ?? null);
 
       // 層Bは**申請経路の、書き出した最終PNGに対してだけ**走らせる（B3）。
@@ -914,6 +1127,28 @@ function StickerBody() {
               onRegenerate={(indexes) => void regenerate(indexes)}
               notClearedPaths={notClearedPaths}
             />
+            {/*
+              ⑤ 文字入れ（L1）。採否一覧の**下**に置く。一等地（タイル）には
+              「使う / 直す」しか置かない配置文法どおりで、文字入れは採否のあとの
+              1セクションとして、使うと決めた絵に対して行う。
+            */}
+            {pickItems.length > 0 && (
+              <div className="shrink-0 overflow-y-auto border-t border-[#242424] px-4 py-3">
+                <StickerTextPanel
+                  items={pickItems.filter((i) => keptIndexes.has(i.index))}
+                  texts={texts}
+                  onText={(index, text) =>
+                    setTexts((prev) => ({ ...prev, [index]: text }))
+                  }
+                  style={textStyle}
+                  onStyle={setTextStyle}
+                  onApply={() => void applyTexts()}
+                  onReset={resetTexts}
+                  busy={applyingText || running}
+                  applied={textBaseRef.current.size > 0}
+                />
+              </div>
+            )}
             <div className="flex items-center gap-3 border-t border-[#242424] px-4 py-3">
               <button
                 type="button"
@@ -943,6 +1178,8 @@ function StickerBody() {
             inspectIssues={inspectIssues}
             setIssues={setIssues}
             inspecting={inspecting}
+            inspectProgress={inspectProgress}
+            inspectStartedAt={inspectStartedAt}
             review={review}
             reviewing={reviewing}
             reviewTargets={reviewTargets}
@@ -1355,6 +1592,8 @@ function ExportPanel({
   inspectIssues,
   setIssues,
   inspecting,
+  inspectProgress,
+  inspectStartedAt,
   review,
   reviewing,
   reviewTargets,
@@ -1371,6 +1610,10 @@ function ExportPanel({
   inspectIssues: { path: string; issues: StickerIssue[] }[] | null;
   setIssues: StickerIssue[];
   inspecting: boolean;
+  /** 確認中の実測 k/N（I3）。確認していない間は null。 */
+  inspectProgress: InspectProgress | null;
+  /** 確認を始めた時刻（`GenerationGauge` の props を揃えるために持つ）。 */
+  inspectStartedAt: number;
   review: StickerReviewReport | null;
   reviewing: boolean;
   reviewTargets: { paths: string[]; excludedTab: string | null } | null;
@@ -1420,6 +1663,37 @@ function ExportPanel({
               {inspecting ? "確認中…" : "確認する"}
             </button>
           </div>
+
+          {/*
+            確認中のゲージ（I3 / 2026-08-05 STΛCK実機FB「確認中にゲージが出ない」）。
+            生成中（工程③の `GeneratePanel`）と**同じ部品・同じ並べ方**にする
+            — 見出しの行のすぐ下にゲージ、数字は別に併記。見た目が違うと
+            「動いているのか分からない」（同FB）。
+            確認は枚数が分かるので `progress` に実測を渡す（推定にしない）。
+            置き場所を確認パネルの中にしたのは、生成タブの右側タイムラインが
+            この画面には無いため（工程④以降は一覧を持たない縦積みのパネル）。
+            押したボタンのすぐ下に出るほうが、押下と反応が結びつく。
+          */}
+          {inspectProgress && (
+            <div className="mt-3">
+              <GenerationGauge
+                startedAt={inspectStartedAt}
+                mode="batch"
+                progress={
+                  inspectProgress.total > 0
+                    ? inspectProgress.done / inspectProgress.total
+                    : 0
+                }
+                done={
+                  inspectProgress.total > 0 &&
+                  inspectProgress.done >= inspectProgress.total
+                }
+              />
+              <p className="mt-1.5 text-[11px] text-neutral-400">
+                {inspectProgress.done} / {inspectProgress.total}枚 確認中
+              </p>
+            </div>
+          )}
 
           {inspectIssues && (
             <div className="mt-3 space-y-1.5 text-[11px]">

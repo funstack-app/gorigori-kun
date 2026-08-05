@@ -21,7 +21,19 @@ import {
   buildPanelReeditGenerationRequest,
   type PanelReeditPoint,
 } from "../imageReedit/maskReedit";
-import { CHROMA_BACKGROUND_CLAUSE, FRINGE_PREVENTION_CLAUSE, NO_TEXT_CLAUSE, STYLE_PRESERVATION_CLAUSE } from "./promptStyles";
+import {
+  cutOutBackground,
+  defaultCutoutDeps,
+  type CutoutDeps,
+  type CutoutOutcome,
+} from "./cutout";
+import {
+  CHROMA_BACKGROUND_CLAUSE,
+  FRINGE_PREVENTION_CLAUSE,
+  NO_TEXT_CLAUSE,
+  REFERENCE_CLAUSES,
+  STYLE_PRESERVATION_CLAUSE,
+} from "./promptStyles";
 
 /** 個別編集の生成に付ける sourceTag の接頭辞（direct-run の親IDと突き合わせる）。 */
 export const STICKER_REEDIT_SOURCE_PREFIX = "sticker-reedit";
@@ -39,9 +51,20 @@ export const STICKER_REEDIT_SOURCE_PREFIX = "sticker-reedit";
  * 「既存画像のマスク内だけを直す」用途には合わない。共通句だけを借りて、
  * マスク編集固有の指示（マスク外を1画素も変えるな）をここで足す。
  *
+ * ## 参照支配句も本流と同じ条件で足す（I4 / 2026-08-05）
+ *
+ * 個別編集にも参照画像を渡している（`StickerReeditModal` の `referencePaths`）ので、
+ * 本流と同じく画風がアニメ調へ流れうる。共通句と同じ理由で
+ * **同じ定数**（`REFERENCE_CLAUSES`）を使う。ここだけ別文言にすると、
+ * 直した1枚だけ絵柄が割れる。
+ *
  * @param instruction ユーザーが日本語で書いた直したい内容。空なら破綻修正の既定文だけ。
+ * @param hasReference 参照画像を渡しているか。false なら参照支配句を足さない。
  */
-export function buildStickerReeditPrompt(instruction: string): string {
+export function buildStickerReeditPrompt(
+  instruction: string,
+  hasReference = false,
+): string {
   const trimmed = instruction.trim();
   return [
     trimmed
@@ -52,6 +75,7 @@ export function buildStickerReeditPrompt(instruction: string): string {
     CHROMA_BACKGROUND_CLAUSE,
     FRINGE_PREVENTION_CLAUSE,
     NO_TEXT_CLAUSE,
+    ...(hasReference ? REFERENCE_CLAUSES : []),
   ].join(" ");
 }
 
@@ -70,7 +94,9 @@ export function buildStickerReeditRequest(
   sourceTag: string,
 ): ReturnType<typeof buildPanelReeditGenerationRequest> {
   return buildPanelReeditGenerationRequest(
-    buildStickerReeditPrompt(instruction),
+    // 参照支配句は**参照を実際に渡すときだけ**（I4）。渡していないのに
+    // 「参照に一致させろ」と書くと、存在しない画像を探して指示の解像度が落ちる。
+    buildStickerReeditPrompt(instruction, referencePaths.length > 0),
     originalPath,
     maskPath,
     referencePaths,
@@ -104,9 +130,16 @@ export type StickerReeditChromaOutcome = {
 };
 
 /**
- * 個別再生成の結果を**合成する前にクロマキーへ通す**（A1 / 設計原則 第3条）。
+ * 個別再生成の結果を**合成する前に背景を抜く**（A1 / 設計原則 第3条）。
  *
- * ## なぜこの1手が要るのか
+ * ## 抜きの経路は本流と同じ（I2 / 2026-08-05 J4発動）
+ *
+ * 既定は AI 抜き（Mac=Vision / Win通常版=BiRefNet）で、失敗と互換版のときだけ
+ * クロマキーへ落ちる。**本流（`StickerWorkspace` の `cutOut`）と同じ関数**
+ * （`cutout.ts` の `cutOutBackground`）を通す — 経路が分かれると、
+ * 個別に直した1枚だけ抜き方が違うことになる（「同じ経路には同じ関所」の逆）。
+ *
+ * ## なぜ順序を変えられないか（A1・旧 `chromaKeyBeforeComposite` から不変）
  *
  * `buildStickerReeditPrompt` は `CHROMA_BACKGROUND_CLAUSE` でAIに緑背景を要求する。
  * 一方、共有層の `compositePanelRgba` が守るのは**マスクの外**（1画素も変わっていないか）
@@ -116,20 +149,33 @@ export type StickerReeditChromaOutcome = {
  * これは層Aの `no-alpha` でも拾えない — 画像の他の部分は既に透過済みなので
  * 「透明画素が1つでもあるか」は真になる。抜き直す以外に閉じ方が無い。
  *
- * 本流の生成（`StickerWorkspace` の `cutOut`）は受領直後に必ず抜いており、
- * 個別再生成だけがその関所を通っていなかった。**同じ経路には同じ関所を置く。**
+ * ## 抜けなかったときに止めない（本流の `cutOut` と同じ判断）
  *
- * ## 抜けなかったときに止めない理由（本流の `cutOut` と同じ判断）
+ * 抜けなかったのは失敗ではなく事実。元のパスで先へ進め、規格の可否は層Aに任せる
+ * （判断を2箇所に置かない）。ただし**事実は捨てない** — `notCleared` を戻して
+ * 呼び出し側が画面に出す（設計原則 第5条は「救済 + 可視化」の両輪）。
+ *
+ * @param generatedPath AIが返した画像の絶対パス。
+ * @param deps 抜きの実体。既定は本番の依存（テストが差し替える継ぎ目）。
+ */
+export async function cutOutBeforeComposite(
+  generatedPath: string,
+  deps: CutoutDeps = defaultCutoutDeps,
+): Promise<CutoutOutcome> {
+  return cutOutBackground(generatedPath, deps);
+}
+
+/**
+ * クロマキー**だけ**を通す下位API。
+ *
+ * `cutOutBeforeComposite` が保険として内部で使う経路と同じ判断（`cleared === 0` は
+ * 救済して先へ進める）をここに持つ。単体で残しているのは、
+ * **クロマキー経路の挙動そのもの**をテストが直接固定できるようにするため。
  *
  * `cleared === 0` は「緑背景が無かった」という事実であって、失敗ではない。
  * AIが緑を使わずに（既に透過された絵として）返すこともある。ここで止めると
- * その1枚を採用できなくなる。**元のパスを使って先へ進め、規格の可否は層Aに任せる**
- * （判断を2箇所に置かない）。
- *
- * ただし**事実は捨てない**（設計原則 第5条は「救済 + 可視化」の両輪）。
- * `cleared === 0` の統計も戻り値に載せ、呼び出し側が層Aの
- * `chroma-not-cleared` 判定へ持ち込めるようにする。旧実装はここで統計を捨てており、
- * 救済だけして可視化していなかった。
+ * その1枚を採用できなくなる。**元のパスを使って先へ進め、規格の可否は層Aに任せる**。
+ * 統計は `cleared === 0` でも戻す（測った事実を捨てない）。
  *
  * @param generatedPath AIが返した画像の絶対パス。
  * @param chromaKey 抜きの実体。既定は `stickerIpc.chromaKey`（テストが差し替える継ぎ目）。
