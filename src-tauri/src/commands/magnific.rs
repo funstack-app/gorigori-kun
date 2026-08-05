@@ -19,7 +19,9 @@
 //! - `creations_wait` {identifiers[], timeoutSeconds(<=25)} → structuredContent.results[]
 //!   .{identifier, status, results.url} + allTerminal。long-poll なのでクライアント sleep 最小。
 //! - 参照画像 (ローカルファイル): `creations_request_upload` {mimeType} →
-//!   {directUploadUrl, path} → その URL へ HTTP PUT (Content-Type 必須) →
+//!   {proxyUploadUrl, path} → その URL へ HTTP PUT (Content-Type 必須) →
+//!   (2026-08-06 実測: 現行 MCP のキー名は **proxyUploadUrl**。PoC 当時の
+//!    `directUploadUrl` はもう返らず、固定キー読みだと参照生成が全滅した)
 //!   `creations_finalize_upload` {path} → {identifier} → images_generate の
 //!   references: [{type: "image", identifier}]。
 //! - `account_balance` {} → {plan: {tier, isUnlimitedMode}, credits: {available, ...}}。
@@ -34,8 +36,8 @@ use tauri::State;
 
 use crate::codex::mcp_direct::{call_tool, reload_mcp_servers};
 use crate::codex::mcp_shared::{
-    entry_is_authenticated, find_mcp_entry, gori_codex_command, run_codex_auth_capture,
-    run_codex_capture,
+    ensure_codex_auth_available, entry_is_authenticated, find_mcp_entry, gori_codex_command,
+    run_codex_auth_capture, run_codex_capture,
 };
 use crate::state::AppState;
 
@@ -116,6 +118,10 @@ const MAGNIFIC_LOGIN_TIMEOUT_SECS: u64 = 180;
 /// 効くようにする。
 #[tauri::command]
 pub async fn magnific_login(state: State<'_, AppState>) -> Result<String, String> {
+    // ⓪ 認可用バイナリ (codex-auth) を用意する。2026-08-06 に同梱をやめたため、
+    //    未取得ならここで初回 DL する (失敗しても止めずフォールバックで続行)。
+    ensure_codex_auth_available().await;
+
     // ① 登録 (mcp add)。既に登録済みだと codex が非ゼロ終了することがあるが、
     //    それはエラーにせず login に進む (冪等性)。
     //
@@ -225,8 +231,46 @@ fn magnific_mime_for_path(path: &str) -> Option<&'static str> {
     }
 }
 
+/// `creations_request_upload` の応答からアップロード先 URL を取り出す。
+///
+/// 2026-08-06: 固定キー `directUploadUrl` 読みを廃止した。現行 MCP は
+/// **`proxyUploadUrl`** を返すため、固定キーだと参照つき生成が必ず全滅していた
+/// (参照なしはこの関数を通らないので成功する = 「参照つけると失敗」の正体)。
+///
+/// `parse_magnific_credits` と同じ多キー・フォールバック方針で読む:
+/// 現行 → 旧 PoC → 一般名 → 最後に「http で始まる文字列値」を拾う。
+/// 見つからなければ `None` を返し、呼び出し側がキー構成付きでエラーにする
+/// (推測で埋めない・無言 degrade しない)。
+fn extract_upload_url(structured: &Value) -> Option<String> {
+    for key in [
+        "proxyUploadUrl",   // 現行 (2026-08-06 実測)
+        "directUploadUrl",  // 旧 PoC (2026-06-10)。復活・併存に備え残す
+        "uploadUrl",
+        "url",
+        "putUrl",
+        "signedUrl",
+    ] {
+        if let Some(v) = structured.get(key).and_then(|v| v.as_str()) {
+            if !v.trim().is_empty() {
+                return Some(v.to_string());
+            }
+        }
+    }
+    // キー名が再び変わっても止まらないための最後の砦: トップレベルの
+    // 「http(s) で始まる文字列値」を1つ拾う (path は URL ではないので当たらない)。
+    structured.as_object().and_then(|obj| {
+        obj.iter()
+            .filter(|(k, _)| k.as_str() != "path")
+            .find_map(|(_, v)| {
+                v.as_str()
+                    .filter(|s| s.starts_with("http://") || s.starts_with("https://"))
+                    .map(|s| s.to_string())
+            })
+    })
+}
+
 /// 参照画像 1 枚を request_upload → HTTP PUT → finalize_upload で creation identifier 化する。
-/// (PoC 実証済みフロー。directUploadUrl への PUT は Content-Type ヘッダ必須)
+/// (PoC 実証済みフロー。アップロード URL への PUT は Content-Type ヘッダ必須)
 async fn upload_magnific_reference(
     state: &AppState,
     http: &reqwest::Client,
@@ -253,17 +297,23 @@ async fn upload_magnific_reference(
         ));
     }
     let structured = out.structured.unwrap_or(Value::Null);
-    let upload_url = structured
-        .get("directUploadUrl")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            "creations_request_upload の応答に directUploadUrl がありません".to_string()
-        })?
-        .to_string();
+    // キー名が変わっても止まらないよう多キーで読む。読めなかったときは受信した
+    // **キー構成だけ** を添える (値は出さない = 署名付き URL を漏らさない)。
+    let upload_url = extract_upload_url(&structured).ok_or_else(|| {
+        format!(
+            "参照画像のアップロード先URLを取得できませんでした。受信したキー構成: {}",
+            magnific_describe_shape(&structured)
+        )
+    })?;
     let upload_path = structured
         .get("path")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| "creations_request_upload の応答に path がありません".to_string())?
+        .ok_or_else(|| {
+            format!(
+                "参照画像のアップロード先パスを取得できませんでした。受信したキー構成: {}",
+                magnific_describe_shape(&structured)
+            )
+        })?
         .to_string();
 
     // ② 発行 URL へ PUT (presigned URL は Content-Type が署名に含まれるため必須)
@@ -292,12 +342,29 @@ async fn upload_magnific_reference(
     if out.is_error {
         return Err(format!("参照画像の確定に失敗しました: {}", out.text));
     }
-    out.structured
+    let identifier = out
+        .structured
         .as_ref()
         .and_then(|s| s.get("identifier"))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
-        .ok_or_else(|| "creations_finalize_upload の応答に identifier がありません".to_string())
+        .ok_or_else(|| {
+            format!(
+                "参照画像の確定後、識別子を取得できませんでした。受信したキー構成: {}",
+                magnific_describe_shape(out.structured.as_ref().unwrap_or(&Value::Null))
+            )
+        })?;
+    // 参照経路は今まで完全に無音で、実機ログに痕跡が残らなかった (2026-08-06)。
+    // ファイル名だけ出す (署名付き URL・画像の中身は出さない)。
+    tracing::info!(
+        target: "magnific",
+        "参照画像をアップロードしました: {}",
+        std::path::Path::new(path)
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "(不明)".to_string())
+    );
+    Ok(identifier)
 }
 
 /// images_generate の応答 structuredContent.creations[] から identifier を集める。
@@ -424,6 +491,9 @@ pub async fn magnific_generate_batch(
             Ok(identifier) => references.push(json!({ "type": "image", "identifier": identifier })),
             Err(e) => {
                 // 参照画像が使えないまま生成すると意図と違う絵になるため即返す。
+                // 2026-08-06: ここが「参照つけると全滅」の出口。無音だと実機ログから
+                // 追えないので必ず残す (エラー文言に秘密値は入らない設計)。
+                tracing::warn!(target: "magnific", "参照画像の準備に失敗したため生成を中止しました: {e}");
                 return Ok(MagnificGenResult {
                     generated_paths,
                     failed_count: count,
@@ -769,6 +839,65 @@ mod tests {
         assert!(entries[1].terminal);
         assert_eq!(entries[1].error.as_deref(), Some("nsfw detected"));
         assert!(!entries[2].terminal);
+    }
+
+    /// 2026-08-06 の実害 (参照つき生成が全滅) を固定するテスト。
+    /// 現行 MCP の実応答キー `proxyUploadUrl` を読めることが本丸。
+    #[test]
+    fn extract_upload_url_reads_current_proxy_key() {
+        // 2026-08-06 に実 MCP から受け取った応答の形 (値はダミー化)。
+        let s = json!({
+            "proxyUploadUrl": "https://ak-data.magnific.com/app/api/mcp/uploads/proxy/x.png?sig=y",
+            "path": "temp-files/x.png",
+            "mimeType": "image/png",
+            "expiresAt": "2026-08-05T16:22:25+00:00",
+            "instructions": "..."
+        });
+        assert_eq!(
+            extract_upload_url(&s).as_deref(),
+            Some("https://ak-data.magnific.com/app/api/mcp/uploads/proxy/x.png?sig=y")
+        );
+    }
+
+    #[test]
+    fn extract_upload_url_keeps_legacy_and_generic_keys() {
+        // 旧 PoC の形 (後方互換。復活・併存しても壊れない)。
+        assert_eq!(
+            extract_upload_url(&json!({"directUploadUrl": "https://a/b", "path": "p"})).as_deref(),
+            Some("https://a/b")
+        );
+        // 一般名。
+        assert_eq!(
+            extract_upload_url(&json!({"uploadUrl": "https://c/d"})).as_deref(),
+            Some("https://c/d")
+        );
+        // 現行キーは旧キーより優先される (両方来ても現行を使う)。
+        assert_eq!(
+            extract_upload_url(&json!({
+                "directUploadUrl": "https://old/x",
+                "proxyUploadUrl": "https://new/x"
+            }))
+            .as_deref(),
+            Some("https://new/x")
+        );
+        // 未知のキー名でも http 値なら拾う (次にキー名が変わっても止まらない)。
+        assert_eq!(
+            extract_upload_url(&json!({"somethingBrandNew": "https://e/f", "path": "p"}))
+                .as_deref(),
+            Some("https://e/f")
+        );
+    }
+
+    #[test]
+    fn extract_upload_url_returns_none_without_url() {
+        // URL がどこにも無ければ None (呼び出し側がキー構成付きで Err にする)。
+        assert_eq!(extract_upload_url(&json!({"path": "temp-files/x.png"})), None);
+        assert_eq!(extract_upload_url(&json!({})), None);
+        // path が URL っぽくない文字列でも誤って拾わない。
+        assert_eq!(
+            extract_upload_url(&json!({"path": "temp-files/https-not-a-url.png"})),
+            None
+        );
     }
 
     #[test]

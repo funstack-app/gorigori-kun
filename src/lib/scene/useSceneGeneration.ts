@@ -105,6 +105,28 @@ function basename(path: string): string {
   return path.split(/[\\/]/).pop() ?? path;
 }
 
+/** 生成に使う画像サービス。失敗案内の宛先を決めるのに使う。 */
+export type GenerationProvider = "magnific" | "higgsfield" | "codex";
+
+/**
+ * 「接続を見直す」案内に出すサービス名 (2026-08-06 追加)。
+ *
+ * 旧実装は provider によらず固定で「ChatGPT / Higgsfield」と書いていた。
+ * Magnific で失敗したユーザーに、使っていない ChatGPT / Higgsfield を
+ * 確認させる誤誘導になっていた (実機報告: Magnific 参照つき生成が全滅した際、
+ * 案内だけ別サービスを指していた)。
+ */
+export function connectionHintFor(provider: GenerationProvider): string {
+  switch (provider) {
+    case "magnific":
+      return "Magnific";
+    case "higgsfield":
+      return "Higgsfield";
+    case "codex":
+      return "ChatGPT";
+  }
+}
+
 function useSceneSnapshot(): SceneState {
   const subjectFraming = useSceneStore((state) => state.subjectFraming);
   const lightingMood = useSceneStore((state) => state.lightingMood);
@@ -492,7 +514,7 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
         `次を順に確認してください:\n` +
         `・少し時間をおいて再試行する（一時的な混雑のことがあります）\n` +
         `・プロンプトを短く・シンプルにしてみる\n` +
-        `・ログイン状態や接続（ChatGPT / Higgsfield）を見直す\n` +
+        `・ログイン状態や接続（${connectionHintFor(provider)}）を見直す\n` +
         `・アスペクト比を 16:9 / 1:1 / 9:16 に変えてみる`
       );
     };
