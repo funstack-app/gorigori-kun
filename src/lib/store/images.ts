@@ -4,7 +4,9 @@ import {
   onImageGenerated,
   type ImageEvent,
 } from "../ipc";
+import { usePresets } from "./presets";
 import { useProjects } from "./projects";
+import { useReferenceRoles } from "./referenceRoles";
 
 export type GalleryItem = {
   path: string;
@@ -72,7 +74,9 @@ type ImagesState = {
   loadJudgements: () => Promise<void>;
   pushActiveTurn: (turnId: string) => void;
   popActiveTurn: (turnId: string) => void;
-  saveToProject: (path: string, projectDir: string) => Promise<void>;
+  /** プロジェクトフォルダへ移動する。成功なら true、失敗なら false
+   * (呼び出し側がトーストで実態を伝えられるよう握りつぶさず伝播する)。 */
+  saveToProject: (path: string, projectDir: string) => Promise<boolean>;
   revealInFinder: (path: string) => Promise<void>;
   /** Open a save dialog and copy the file to the chosen path. */
   downloadAs: (path: string, suggestedName?: string) => Promise<string | null>;
@@ -87,6 +91,10 @@ type ImagesState = {
    *  Rust 側が rename を成功させた直後にフロントから呼ぶ。
    *  watcher の create/delete イベントが追いつかなくても古い path が残らないように手動同期する。 */
   renameLocal: (oldPath: string, newPath: string) => void;
+  /** rr2: relink (画像パス修復) の旧→新マップを favorites / judgements へ一括適用する。
+   *  変化があった側だけ 1 回ずつ永続化する (件数分の persist を避ける)。
+   *  items / knownPaths は watcher が実体から作り直すため対象外。 */
+  relinkPaths: (pathMap: Record<string, string>) => void;
   /** F-#2: リネームが起きるたびに +1 する世代カウンタ。タイムラインの
    *  PastBatchRow など「row.id では変化を検知できない」表示が、これを購読して
    *  リネーム後に turn 詳細を再取得し、旧パスの黒画像を解消するために使う。 */
@@ -98,6 +106,44 @@ type ImagesState = {
 };
 
 let listenerHandle: undefined | (() => void);
+
+/**
+ * B-01 (Wave 2 REVISE): 起動時 relink が「お気に入り / 採否判定の読み込み完了前」に
+ * 適用されると、後から完了したファイル読込が旧パスのまま state を丸ごと set し、
+ * 張り替え済みの内容を上書きして消してしまう。
+ *
+ * 対策は 2 本立て:
+ *
+ * 1. **単一実行化** — loadFavorites / loadJudgements は in-flight の Promise を
+ *    共有する (`favoritesLoading` / `judgementsLoading`)。従来は完了後に立つ
+ *    `favoritesLoaded` フラグでしか多重呼出を弾いておらず、App.tsx と
+ *    ImageGallery / ProjectGallery が同時に呼ぶと 2 本とも読込を走らせ、
+ *    遅い方が先勝ちの結果を潰していた。
+ *
+ * 2. **pathMap のリプレイ** — relinkPaths が適用した対応表をここに累積し、
+ *    ファイル読込の直後 (state に set する前) に必ず適用し直す。読込が relink より
+ *    遅れて完了しても、その読込結果自体を新パスへ張り替えてから set するので、
+ *    「後から旧パスで上書き」経路が閉じる。
+ *
+ * relink は起動時 / 設定の修復ボタン / 保存先変更後の 3 経路あり、いずれの順序でも
+ * 成立させたいので、単発フラグではなく累積 Map を正本にする。
+ */
+const appliedRelinkMap = new Map<string, string>();
+
+/** 累積 pathMap を辿って、旧パスの最終的な現在パスを返す (未登録ならそのまま)。 */
+function currentPathFor(path: string): string {
+  let cur = path;
+  // 保存先変更を跨ぐと A→B, B→C と鎖になりうる。循環しても抜けるよう上限を置く。
+  for (let i = 0; i < 8; i++) {
+    const next = appliedRelinkMap.get(cur);
+    if (!next || next === cur) break;
+    cur = next;
+  }
+  return cur;
+}
+
+let favoritesLoading: Promise<void> | undefined;
+let judgementsLoading: Promise<void> | undefined;
 
 const FAVORITES_STORE_FILE = "favorites.json";
 const FAVORITES_KEY = "paths";
@@ -138,6 +184,18 @@ async function persistJudgements(map: Map<string, Judgement>) {
     await store.save();
   } catch (err) {
     console.warn("judgements save failed", err);
+  }
+}
+
+/** favorites Set を永続化する (toggleFavorite の書き込みと同じ機構・同じキー)。best-effort。 */
+async function persistFavorites(favorites: Set<string>) {
+  const store = await favoritesStore();
+  if (!store) return;
+  try {
+    await store.set(FAVORITES_KEY, Array.from(favorites));
+    await store.save();
+  } catch (err) {
+    console.warn("favorites save failed", err);
   }
 }
 
@@ -236,20 +294,34 @@ export const useImages = create<ImagesState>((set, get) => ({
 
   setFilter: (f) => set({ filter: f }),
 
-  loadFavorites: async () => {
-    if (get().favoritesLoaded) return;
-    const store = await favoritesStore();
-    if (!store) {
-      set({ favoritesLoaded: true });
-      return;
-    }
-    try {
-      const paths = (await store.get<string[]>(FAVORITES_KEY)) ?? [];
-      set({ favorites: new Set(paths), favoritesLoaded: true });
-    } catch (err) {
-      console.warn("favorites load failed", err);
-      set({ favoritesLoaded: true });
-    }
+  // B-01: 単一実行化 + 読込結果への relink リプレイ。詳細は appliedRelinkMap の注釈。
+  loadFavorites: () => {
+    if (get().favoritesLoaded) return Promise.resolve();
+    if (favoritesLoading) return favoritesLoading;
+    favoritesLoading = (async () => {
+      const store = await favoritesStore();
+      if (!store) {
+        set({ favoritesLoaded: true });
+        return;
+      }
+      try {
+        const paths = (await store.get<string[]>(FAVORITES_KEY)) ?? [];
+        // 読込中に relink が走っていた場合、ファイル上の旧パスを現在パスへ
+        // 直してから set する (張り替え済み state の巻き戻しを防ぐ)。
+        const mapped = paths.map(currentPathFor);
+        const changed = mapped.some((p, i) => p !== paths[i]);
+        set({ favorites: new Set(mapped), favoritesLoaded: true });
+        // 張り替えが起きたならファイル側も現在パスへ揃えておく
+        // (次回起動で再び旧パスを読み直さないように)。
+        if (changed) void persistFavorites(get().favorites);
+      } catch (err) {
+        console.warn("favorites load failed", err);
+        set({ favoritesLoaded: true });
+      }
+    })().finally(() => {
+      favoritesLoading = undefined;
+    });
+    return favoritesLoading;
   },
 
   toggleFavorite: async (path) => {
@@ -267,25 +339,37 @@ export const useImages = create<ImagesState>((set, get) => ({
     }
   },
 
-  loadJudgements: async () => {
-    if (get().judgementsLoaded) return;
-    const store = await judgementsStore();
-    if (!store) {
-      set({ judgementsLoaded: true });
-      return;
-    }
-    try {
-      const raw =
-        (await store.get<Record<string, Judgement>>(JUDGEMENTS_KEY)) ?? {};
-      const map = new Map<string, Judgement>();
-      for (const [path, value] of Object.entries(raw)) {
-        if (value === "adopted" || value === "rejected") map.set(path, value);
+  // B-01: favorites と同型 (単一実行化 + 読込結果への relink リプレイ)。
+  loadJudgements: () => {
+    if (get().judgementsLoaded) return Promise.resolve();
+    if (judgementsLoading) return judgementsLoading;
+    judgementsLoading = (async () => {
+      const store = await judgementsStore();
+      if (!store) {
+        set({ judgementsLoaded: true });
+        return;
       }
-      set({ judgements: map, judgementsLoaded: true });
-    } catch (err) {
-      console.warn("judgements load failed", err);
-      set({ judgementsLoaded: true });
-    }
+      try {
+        const raw =
+          (await store.get<Record<string, Judgement>>(JUDGEMENTS_KEY)) ?? {};
+        const map = new Map<string, Judgement>();
+        let changed = false;
+        for (const [path, value] of Object.entries(raw)) {
+          if (value !== "adopted" && value !== "rejected") continue;
+          const cur = currentPathFor(path);
+          if (cur !== path) changed = true;
+          map.set(cur, value);
+        }
+        set({ judgements: map, judgementsLoaded: true });
+        if (changed) void persistJudgements(get().judgements);
+      } catch (err) {
+        console.warn("judgements load failed", err);
+        set({ judgementsLoaded: true });
+      }
+    })().finally(() => {
+      judgementsLoading = undefined;
+    });
+    return judgementsLoading;
   },
 
   setJudgement: async (path, value) => {
@@ -343,8 +427,28 @@ export const useImages = create<ImagesState>((set, get) => ({
       }
       // Persist judgements if path changed (best effort)
       await persistJudgements(get().judgements);
+      // biy: 移動もリネーム (renameLocal) と同じ追従面に揃える。
+      // history.db は Rust 側 images_save_to_project が UPDATE 済み。
+      // ここを欠くと、移動した画像がプロジェクト/プリセット/ロールから参照切れになる。
+      try {
+        useProjects.getState().renameItemPath(path, dest);
+      } catch (err) {
+        console.warn("[images.saveToProject] projects path 追従に失敗:", err);
+      }
+      try {
+        usePresets.getState().renameImagePath(path, dest);
+      } catch (err) {
+        console.warn("[images.saveToProject] presets path 追従に失敗:", err);
+      }
+      try {
+        useReferenceRoles.getState().renamePath(path, dest);
+      } catch (err) {
+        console.warn("[images.saveToProject] referenceRoles path 追従に失敗:", err);
+      }
+      return true;
     } catch (err) {
       console.error("save_to_project failed", err);
+      return false;
     }
   },
 
@@ -420,12 +524,23 @@ export const useImages = create<ImagesState>((set, get) => ({
         judgements.delete(path);
         void persistJudgements(judgements);
       }
+      // お気に入りも同じ扱いに揃える (S3)。judgements だけ掃除して favorites を
+      // 残していたのは非対称のバグ。favorites.json はファイルから読み戻される
+      // (loadFavorites) ため、掃除しないと**再起動で死んだパスが復活し**、
+      // お気に入りフィルタに読めない画像が並ぶ。
+      let favorites = state.favorites;
+      if (favorites.has(path)) {
+        favorites = new Set(favorites);
+        favorites.delete(path);
+        void persistFavorites(favorites);
+      }
       return {
         items: state.items.filter((it) => it.path !== path),
         knownPaths: new Set(
           state.items.filter((it) => it.path !== path).map((it) => it.path),
         ),
         judgements,
+        favorites,
       };
     });
   },
@@ -455,6 +570,9 @@ export const useImages = create<ImagesState>((set, get) => ({
         favorites = new Set(favorites);
         favorites.delete(oldPath);
         favorites.add(newPath);
+        // 付け替えたら永続化する。ここを欠くと再起動でお気に入りが旧パスに
+        // 戻り、リネーム済みの画像がフィルタから消える (judgements と同じ扱い)。
+        void persistFavorites(favorites);
       }
       let judgements = state.judgements;
       const j = judgements.get(oldPath);
@@ -476,6 +594,66 @@ export const useImages = create<ImagesState>((set, get) => ({
     } catch (err) {
       console.warn("[images.renameLocal] projects path 追従に失敗:", err);
     }
+    // d98: プリセット (添付画像 / キャラの正本画像・sheetRoles) も追従させる。
+    // ここを欠くとライブラリでリネームした瞬間にキャラ登録の参照画像が切れる。
+    try {
+      usePresets.getState().renameImagePath(oldPath, newPath);
+    } catch (err) {
+      console.warn("[images.renameLocal] presets path 追従に失敗:", err);
+    }
+    // r9c: 参照ロール割当 (これはキャラ/これはスタイル) も追従させる。
+    // ここを欠くとリネームした瞬間にロールが既定 (キャラ) に剥がれる。
+    try {
+      useReferenceRoles.getState().renamePath(oldPath, newPath);
+    } catch (err) {
+      console.warn("[images.renameLocal] referenceRoles path 追従に失敗:", err);
+    }
+  },
+
+  relinkPaths: (pathMap) => {
+    const entries = Object.entries(pathMap).filter(
+      ([oldPath, newPath]) => oldPath && newPath && oldPath !== newPath,
+    );
+    if (entries.length === 0) return;
+    const map = new Map(entries);
+    // B-01: 適用した対応表を累積しておく。favorites / judgements のファイル読込が
+    // この relink より遅れて完了した場合、読込側が currentPathFor() でこの表を
+    // 引き直し、旧パスのまま state を上書きするのを防ぐ。
+    for (const [oldPath, newPath] of entries) {
+      appliedRelinkMap.set(oldPath, newPath);
+    }
+    let favoritesChanged = false;
+    let judgementsChanged = false;
+    set((state) => {
+      // favorites: 旧パスを持つものだけ新パスへ付け替える。
+      let favorites = state.favorites;
+      const favHits = Array.from(favorites).filter((p) => map.has(p));
+      if (favHits.length > 0) {
+        favorites = new Set(favorites);
+        for (const oldPath of favHits) {
+          favorites.delete(oldPath);
+          favorites.add(map.get(oldPath) as string);
+        }
+        favoritesChanged = true;
+      }
+      // judgements: 採用/ボツの判定値は保持したままキーだけ差し替える。
+      let judgements = state.judgements;
+      const judgeHits = Array.from(judgements.keys()).filter((p) => map.has(p));
+      if (judgeHits.length > 0) {
+        judgements = new Map(judgements);
+        for (const oldPath of judgeHits) {
+          const j = judgements.get(oldPath) as Judgement;
+          judgements.delete(oldPath);
+          judgements.set(map.get(oldPath) as string, j);
+        }
+        judgementsChanged = true;
+      }
+      if (!favoritesChanged && !judgementsChanged) return state;
+      return { ...state, favorites, judgements };
+    });
+    // 変化した側だけ 1 回ずつ永続化する (renameLocal と同じ機構)。
+    if (favoritesChanged) void persistFavorites(get().favorites);
+    if (judgementsChanged) void persistJudgements(get().judgements);
   },
 
   bumpRenameNonce: () => set((state) => ({ renameNonce: state.renameNonce + 1 })),

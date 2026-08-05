@@ -1,6 +1,6 @@
-import { convertFileSrc } from "@tauri-apps/api/core";
 import { useEffect, useMemo, useState } from "react";
 
+import { SafeImage } from "./SafeImage";
 import { useComposer } from "../lib/store/composer";
 import { useImages } from "../lib/store/images";
 import {
@@ -149,7 +149,10 @@ export function ReferenceLibraryModal({ open, onClose, onPick, roleMode }: Props
                 : "検索条件に一致する画像がありません"}
             </div>
           ) : (
-            <div className="grid grid-cols-3 gap-3 sm:grid-cols-4 md:grid-cols-5">
+            // y73 (2026-08-03): 正方形タイルの切り抜きをやめ、原画比率のまま並べる
+            // (CSS columns masonry。StockSearchModal で実証済みの方式)。参照画像の
+            // 選択は「どの絵か」を見分けるのが目的なので、切り抜きは選択精度を落とす。
+            <div className="columns-3 gap-3 sm:columns-4 md:columns-5">
               {filtered.map((item) => {
                 const already = existingPaths.has(item.path);
                 return (
@@ -160,16 +163,17 @@ export function ReferenceLibraryModal({ open, onClose, onPick, roleMode }: Props
                     onClick={() => handlePick(item.path, item.name)}
                     title={already ? "すでに参照に追加済み" : item.name}
                     className={[
-                      "group relative aspect-square overflow-hidden rounded-md border bg-[#0b0b0b] transition",
+                      "group relative mb-3 block w-full break-inside-avoid overflow-hidden rounded-md border bg-[#0b0b0b] transition",
                       already
                         ? "border-pink-400/60 opacity-60"
                         : "border-[#343434] hover:border-pink-400",
                     ].join(" ")}
                   >
-                    <img
-                      src={convertFileSrc(item.path)}
+                    <SafeImage
+                      path={item.path}
                       alt={item.name}
-                      className="h-full w-full object-cover"
+                      loading="lazy"
+                      className="block h-auto w-full"
                     />
                     {already && (
                       <span className="absolute inset-x-1 bottom-1 rounded bg-pink-500/80 px-1 py-0.5 text-center text-[9px] font-black text-white">

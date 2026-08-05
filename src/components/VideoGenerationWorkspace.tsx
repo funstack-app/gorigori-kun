@@ -1,7 +1,9 @@
-import { convertFileSrc } from "@tauri-apps/api/core";
 import { type ReactNode } from "react";
+import { SafeImage } from "./SafeImage";
 import { VideoSceneBuilder } from "./scene/VideoSceneBuilder";
 import { VideoConstructedPromptPanel } from "./VideoConstructedPromptPanel";
+import { VideoStoryQueuePanel } from "./VideoStoryQueuePanel";
+import { PageHelp } from "./PageHelp";
 import { useVideoGen } from "../lib/store/videoGen";
 import { useImagePreview } from "../lib/store/imagePreview";
 
@@ -23,8 +25,8 @@ function I2vSourceBanner() {
   return (
     <div className="shrink-0 px-3 pt-3">
       <div className="flex items-center gap-3 rounded-md border border-pink-500/40 bg-pink-500/5 p-2">
-        <img
-          src={convertFileSrc(sourceImagePath)}
+        <SafeImage
+          path={sourceImagePath}
           alt="i2v 元画像"
           className="h-12 w-16 shrink-0 cursor-zoom-in rounded object-cover"
           title="ダブルクリックで拡大"
@@ -62,9 +64,16 @@ export function VideoGenerationWorkspace({ timeline }: VideoGenerationWorkspaceP
     <div className="grid h-full min-h-0 gap-4 md:grid-cols-[minmax(280px,340px)_minmax(0,1fr)]">
       <section className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-[#2a2a2a] bg-[#181818]">
         <div className="shrink-0 border-b border-[#242424] px-4 py-3">
-          <h3 className="text-sm font-black text-white">動画生成</h3>
+          <div className="flex items-center justify-between gap-2">
+            <h3 className="text-sm font-black text-white">シーン構築</h3>
+            <PageHelp
+              what="要素を選ぶかプロンプトを書くと、その内容で動画を生成します。画像タブの生成画像を元画像（i2v)にもできます。"
+              first="まずは左で要素を選ぶか、入力欄に作りたい動きを書いてください。"
+            />
+          </div>
         </div>
         <I2vSourceBanner />
+        <VideoStoryQueuePanel />
         <div className="shrink-0 p-3">
           <VideoSceneBuilder />
         </div>

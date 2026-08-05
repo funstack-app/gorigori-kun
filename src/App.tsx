@@ -1,6 +1,6 @@
 import "./App.css";
-import { convertFileSrc } from "@tauri-apps/api/core";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { switchActiveProject } from "./components/ActiveProjectSelector";
 import { ApprovalDialog } from "./components/ApprovalDialog";
 import { AuthGate } from "./components/AuthGate";
 import { FirstRunStorageNotice } from "./components/FirstRunStorageNotice";
@@ -16,6 +16,7 @@ import { PresetsDrawer } from "./components/PresetsDrawer";
 import { SnsExportModal } from "./components/SnsExportModal";
 import { PromptComposer } from "./components/PromptComposer";
 import { SafeImage } from "./components/SafeImage";
+import { ProjectGallery } from "./components/ProjectGallery";
 import { SettingsWorkspace } from "./components/SettingsWorkspace";
 import { SkillsWorkspace } from "./components/SkillsWorkspace";
 import { SkillWorkspaceRouter } from "./components/SkillWorkspaceRouter";
@@ -23,6 +24,7 @@ import { Toaster } from "./components/Toaster";
 import { GenerationStatusPanel } from "./components/GenerationStatusPanel";
 import { Badge, Button, EmptyState, SegmentedTabs } from "./components/ui";
 import { attachWindowDragDrop } from "./lib/dragDrop";
+import { humanizeError } from "./lib/humanizeError";
 import {
   type AuthAccount,
   images as imagesIpc,
@@ -31,6 +33,8 @@ import {
   onImageGenerated,
 } from "./lib/ipc";
 import { ensureMultiAngleEventListener } from "./lib/multiangle/events";
+import { applyRelinkResult } from "./lib/relinkApply";
+import { restoreUnrecoveredAdoptions } from "./lib/restoreAdoptions";
 import { useAccounts } from "./lib/store/accounts";
 import { useActiveProject } from "./lib/store/activeProject";
 import { useAuth } from "./lib/store/auth";
@@ -49,12 +53,20 @@ import { type GalleryItem, useImages } from "./lib/store/images";
 import { useLibrarySelection } from "./lib/store/librarySelection";
 import { useMultiAngleRun } from "./lib/store/multiAngleRun";
 import { usePlanChat } from "./lib/store/planChat";
-import { type Project, useProjects } from "./lib/store/projects";
+import { usePresets } from "./lib/store/presets";
+import { exportProjectCsv, type Project, useProjects } from "./lib/store/projects";
+import { initializeScene3d } from "./lib/store/scene3d";
+import { initializeGeneratedMotions } from "./lib/scene3d/motionStore";
+import { useReferenceRoles } from "./lib/store/referenceRoles";
 import { usePromptHistory } from "./lib/store/promptHistory";
 import { useSavedPrompts } from "./lib/store/savedPrompts";
+import { useWorldContexts } from "./lib/store/worldContexts";
+import { useUnsavedPlanChats } from "./lib/store/unsavedPlanChats";
 import { useSceneStore } from "./lib/store/scene";
 import { type Session, useSessions } from "./lib/store/sessions";
 import { useSettings } from "./lib/store/settings";
+import { useSkillMode } from "./lib/store/skillMode";
+import { setDrawerOpen, type FocusSkillDetail } from "./lib/store/generationStatus";
 import { useSnsExport } from "./lib/store/snsExport";
 import { useStoryboardRun } from "./lib/store/storyboardRun";
 import { useThreads } from "./lib/store/threads";
@@ -195,27 +207,6 @@ function basename(p: string) {
   return p.split("/").pop() ?? p;
 }
 
-/**
- * トーストに出す前に、生のエラー文字列 (Tauri 権限エラー等) を
- * 人間向けの簡潔なメッセージに変換する。
- *
- * 生エラーをそのまま出すと
- * 「... fs.write_text_file not allowed. Permissions associated with this command: ...」
- * のような長文がトーストにあふれて読めない。代表的なケースを固定文言にする。
- */
-function humanizeError(err: unknown): string {
-  const raw = String(err);
-  if (/not allowed|forbidden|permission|scope/i.test(raw)) {
-    return "保存先の権限がありません。設定 → 保存先で保存先を確認してください。";
-  }
-  if (/no such file|not found|enoent/i.test(raw)) {
-    return "ファイルが見つかりませんでした。";
-  }
-  // 上記以外は 1 行に丸めて出す (改行・連続空白を畳んで長すぎる場合は切る)。
-  const compact = raw.replace(/\s+/g, " ").trim();
-  return compact.length > 120 ? `${compact.slice(0, 117)}…` : compact;
-}
-
 async function droppedFileToReference(file: File): Promise<Reference | null> {
   const maybePath = (file as unknown as { path?: string }).path;
   if (maybePath) {
@@ -317,6 +308,66 @@ function SignedInScaffold() {
     return () => window.removeEventListener("gori:open-skills", onOpenSkills);
   }, []);
 
+  // GenerationStatusPanel の stuck 案内から設定画面 (アカウント再ログイン) を開く
+  useEffect(() => {
+    const onOpenSettings = () => setDrawer("settings");
+    window.addEventListener("gori:open-settings", onOpenSettings);
+    return () => window.removeEventListener("gori:open-settings", onOpenSettings);
+  }, []);
+
+  /*
+    走っているジョブから、そのスキル画面へ移動する (cne / 2026-08-04)。
+
+    GenerationStatusPanel のジョブ行クリックと、完了トーストの「開く」が
+    ここへ届く。移動先で作業が生きているのは S1/S2 の keep-alive の効果で、
+    ここがやるのは「見えている画面を切り替える」ことだけ。
+
+    skillId が null は作品モードの生成 (画像生成/動画/AI編集)。この場合は
+    スキルを抜けて作品モードへ戻す。
+
+    揃えるゲートは3つ (openSession と同じ考え方):
+      1. スキル (skillMode → skillUiMode)
+      2. タブ —— 目的の結果が映る枠。**ジョブの種類で変わる** (Sol 評価 blocking#5)。
+         専用スキル画面は「画像生成」タブの中だが、AI 編集は「編集」タブ、
+         動画は「動画生成」タブが定位置。ここを generate 決め打ちにしていたため、
+         AI 編集のジョブ行を押すと画像生成タブが開いて「押したのに何も起きない」
+         ように見えていた。行き先の判断は種類の対応表を持つ generationStatus 側に置き、
+         ここは受け取った値へ揃えるだけにする。
+      3. drawer を閉じる (ライブラリ等が被さっていると隠れたままになる)
+    どれか1つでも欠けると「押したのに何も起きない」ように見える。
+  */
+  useEffect(() => {
+    const onFocusSkill = (event: Event) => {
+      const detail = (event as CustomEvent<FocusSkillDetail>).detail;
+      const skillId = detail?.skillId ?? null;
+      const skill = useSkillMode.getState();
+      if (skillId) {
+        skill.setEnabled(true);
+        skill.setSelectedSkillId(skillId);
+      } else if (skill.enabled) {
+        skill.setEnabled(false);
+      }
+      // ゲート2: そのジョブの結果が映るタブへ揃える。
+      useWorkspace.getState().setActiveTab(detail?.tab ?? "generate");
+      // ゲート3: 隠れているスキル画面を表に出す (drawer を閉じる)。
+      setDrawer(null);
+    };
+    window.addEventListener("gori:focus-skill", onFocusSkill);
+    return () => window.removeEventListener("gori:focus-skill", onFocusSkill);
+  }, []);
+
+  /*
+    drawer の開閉を generationStatus へ伝える (cne / 2026-08-04)。
+
+    完了トーストを「裏で終わったときだけ」出すための判定材料。drawer を開いて
+    いる間はスキル画面が隠れている (S1 の keep-alive でマウントは維持されるが
+    見えていない) ので、そこで終わった生成は通知する価値がある。
+    drawer の正本はこの useState のままにし、写しだけを渡す。
+  */
+  useEffect(() => {
+    setDrawerOpen(drawer !== null);
+  }, [drawer]);
+
   const activeSessionId = useSessions((s) => s.activeSessionId);
   const displayedSession = useSessions((s) => s.displayedSession);
   const sessions = useSessions((s) => s.sessions);
@@ -344,8 +395,102 @@ function SignedInScaffold() {
     setDrawer(null);
   };
 
+  /**
+   * スキル生成の走行中に黙ってスキルを終了しない。走行中判定は
+   * storyboardRun.markCancelled と同じ基準 (status + cut単位の running)。
+   * 続行してよいなら true。openSession と openUnsavedChat が共用する。
+   */
+  const confirmLeaveSkillIfRunning = async (): Promise<boolean> => {
+    const skill = useSkillMode.getState();
+    if (!skill.enabled) return true;
+    const sb = useStoryboardRun.getState();
+    const storyboardActive =
+      sb.status === "running" ||
+      Array.from(sb.cuts.values()).some((c) => c.status === "running") ||
+      Array.from(sb.sketchCuts.values()).some((c) => c.status === "running");
+    const multiAngleActive = useMultiAngleRun.getState().status === "running";
+    if (!storyboardActive && !multiAngleActive) return true;
+    const message =
+      "スキルの生成が進行中です。過去のチャットを開くとスキル画面を終了します(生成は裏で続きますが、スキルに入り直すと進行状況の表示は最初からになります)。開きますか?";
+    let ok = false;
+    try {
+      const { ask } = await import("@tauri-apps/plugin-dialog");
+      ok = await ask(message, { title: "過去のチャットを開く", kind: "warning" });
+    } catch {
+      ok = window.confirm(message);
+    }
+    return ok;
+  };
+
   const openSession = async (id: string) => {
+    // 件1修正 (2026-07-30): 「開く→」が sessions store (frozen化) しか更新せず、
+    // frozen ビュー表示の残り2ゲート (skillUiMode=default / activeTab=generate) を
+    // 揃えないため、押しても画面が元のタブ/スキルのままだった。ここで3ゲートを揃える。
+    if (!(await confirmLeaveSkillIfRunning())) return;
     await useSessions.getState().switchTo(id);
+    // switchTo 失敗時 (トーストは sessions.ts 側で表示) は画面を動かさない。
+    const st = useSessions.getState();
+    const opened =
+      id === st.activeSessionId
+        ? !st.isFrozen
+        : st.isFrozen && st.displayedSession?.session.id === id;
+    if (!opened) return;
+    // ゲート1+3: スキルUIモード解除 (skillMode.setEnabled(false) → syncUiMode →
+    // skillUiMode.exitSkill() まで伝搬。run データは触らない)。
+    // await 中にスキルON された場合に旧スナップショット (skill) が false のままで
+    // 解除が空振りするため、最新状態を取り直す (Codex検分 2026-07-30)。
+    const skillNow = useSkillMode.getState();
+    if (skillNow.enabled) skillNow.setEnabled(false);
+    // ゲート2: frozen ビュー (Timeline) を持つ生成タブへ復帰。
+    useWorkspace.getState().setActiveTab("generate");
+    setDrawer(null);
+  };
+
+  /**
+   * 未保存の企画チャット (29z 2026-08-03) を企画タブへ復元して開く。
+   * 復元後は「（保存しない）」状態に戻すので、続きの会話も同じ台帳エントリへ
+   * 退避され続ける。
+   */
+  const openUnsavedChat = async (id: string) => {
+    const entry = useUnsavedPlanChats.getState().items.find((it) => it.id === id);
+    if (!entry) {
+      useToasts.getState().push({
+        kind: "error",
+        text: "このチャットは削除されたか、保存期限が切れています。",
+        ttlMs: 5000,
+      });
+      return;
+    }
+    if (!(await confirmLeaveSkillIfRunning())) return;
+    // 現プロジェクトの会話を退避してから「（保存しない）」へ戻す
+    // (未保存チャットはプロジェクト未選択の状態でしか成立しないため)。
+    const current = useActiveProject.getState().activeProjectId;
+    if (current !== null) {
+      usePlanChat.getState().switchToProject(current, null);
+      useActiveProject.getState().setActive(null);
+    }
+    usePlanChat.getState().restoreUnsaved(entry);
+    const skillNow = useSkillMode.getState();
+    if (skillNow.enabled) skillNow.setEnabled(false);
+    useWorkspace.getState().setActiveTab("plan");
+    setDrawer(null);
+  };
+
+  /**
+   * 案件（プロジェクト）に保存済みの企画チャットを開く (xwl)。
+   * 切替の正規手順 switchActiveProject（未保存破棄ガード込み）を再利用する。
+   */
+  const openProjectPlanChat = async (projectId: string) => {
+    if (!(await confirmLeaveSkillIfRunning())) return;
+    const { activeProjectId, setActive } = useActiveProject.getState();
+    if (activeProjectId !== projectId) {
+      await switchActiveProject(setActive, projectId, activeProjectId);
+      // ガード（未保存チャット破棄の確認）でキャンセルされたら画面を動かさない
+      if (useActiveProject.getState().activeProjectId !== projectId) return;
+    }
+    const skillNow = useSkillMode.getState();
+    if (skillNow.enabled) skillNow.setEnabled(false);
+    useWorkspace.getState().setActiveTab("plan");
     setDrawer(null);
   };
 
@@ -363,11 +508,29 @@ function SignedInScaffold() {
     sessionsStore.load();
     usePromptHistory.getState().load();
     useSavedPrompts.getState().load();
+    useWorldContexts.getState().load();
+    // 未保存の企画チャット台帳 (29z 2026-08-03)。チャット履歴ページで復元できる。
+    void useUnsavedPlanChats.getState().load();
     useImages.getState().attachListeners();
     useImages.getState().startWatcher();
-    // 判定 (採用/ボツ) を起動時にロードして、ライブラリ (AssetsWorkspace) でも
-    // 右クリックメニューとバッジが正しい現在値を出せるようにする。
-    void useImages.getState().loadJudgements();
+    // 判定 (採用/ボツ) とお気に入りを起動時にロードして、ライブラリ
+    // (AssetsWorkspace) でも右クリックメニューとバッジが正しい現在値を出せる
+    // ようにする。
+    // B-01: fire-and-forget をやめ、Promise を捕まえて下の relink バリアへ入れる。
+    // 読込が relink より遅れて完了すると、ファイル上の旧パスで state を丸ごと
+    // 上書きし、張り替え済みのお気に入り・採否が旧パスへ巻き戻ってしまう。
+    const favoritesInit = useImages
+      .getState()
+      .loadFavorites()
+      .catch((err) => {
+        console.warn("favorites load failed", err);
+      });
+    const judgementsInit = useImages
+      .getState()
+      .loadJudgements()
+      .catch((err) => {
+        console.warn("judgements load failed", err);
+      });
     // スキル生成イベント listener を起動時に張る (待機中 0/N 固着バグ修正 2026-06-06)。
     // 各 Workspace の useEffect で張ると listen() の解決前に生成を開始した場合に
     // cutStarted/cutCompleted を取りこぼす。idempotent singleton なので二重登録はされない。
@@ -379,31 +542,59 @@ function SignedInScaffold() {
     // 初期化が終わってから、記録パスと実体のズレを再リンクで解消する。
     // α版→β版で画像の保存先が変わり、history.db / projects.json の旧パスに
     // 実体が無くて「画像が見えない」症状を直す (非破壊・冪等)。
-    useProjects
+    // 2026-07-30: プリセット(キャラ含む)もファイル正本へ移行。localStorage は
+    // WebView ビルドID (app.codexframefactory / .dev / .capture) ごとに別領域で、
+    // ビルドを跨ぐと空に見える + 終了タイミングで失われるため、再起動消失の根治。
+    // rr2: relink 結果は presets にも適用するようになったため、fire-and-forget を
+    // やめて Promise を捕まえる。initialize (ファイル読込) が relink 適用より後に
+    // 完了すると、読み込んだ内容で張り替え済みの state が上書きされて消える
+    // (presets には referenceRoles の mutatedPaths のような合流機構が無い)。
+    // reject しても他面の適用は続けたいので、ここで catch して握り潰す
+    // (エラー自体は各 initialize が console に出す)。
+    const presetsInit = usePresets
       .getState()
       .initialize()
+      .catch((err) => {
+        console.warn("presets.initialize failed", err);
+      });
+    // r9c: 参照ロール割当 (これはキャラ/これはスタイル) も localStorage 単独だった。
+    // plugin-store (reference-roles.json) へ移行する。favorites/judgements と同型。
+    const rolesInit = useReferenceRoles
+      .getState()
+      .initialize()
+      .catch((err) => {
+        console.warn("referenceRoles.initialize failed", err);
+      });
+    // 3Dシーンも presets と同型の時限爆弾 (localStorage 単独) だったためファイル正本へ。
+    // 初期表示は localStorage の同期読み込みで成立しており、ファイルからの上書きは
+    // 非同期で追いつけばよい (sceneInitializeToken が古い結果の上書きを防ぐ)。
+    void initializeScene3d();
+    // gj7: 3Dモーション仕様 (AI生成/動画取り込み) も localStorage 単独だった。
+    // 参照元の scene3d.json と同じファイル正本へ揃え、シーンだけ残って
+    // モーション実体が消える (clipId が宙に浮く) 状態を無くす。
+    void initializeGeneratedMotions();
+    // rr2: relink の実行は presets / referenceRoles / projects の初期化が全部
+    // 終わってから。適用先の store がまだファイルを読んでいる最中だと、
+    // 張り替えが読込結果で上書きされて失われる。
+    // B-01: favorites / judgements も同じ理由でバリアに含める (6 面すべて対称)。
+    // なお images.ts 側にも累積 pathMap のリプレイを入れてあるので、
+    // ImageGallery 等からの後発ロードでも巻き戻らない (二重の防御)。
+    Promise.all([
+      presetsInit,
+      rolesInit,
+      favoritesInit,
+      judgementsInit,
+      useProjects.getState().initialize(),
+    ])
       .then(() => imagesIpc.relinkMissing())
       .then((result) => {
-        if (result.dbUpdated > 0 || Object.keys(result.pathMap).length > 0) {
-          // history.db は Rust が張り替え済み。projects.json は旧→新マップで適用。
-          useProjects.getState().relinkItemPaths(result.pathMap);
-        }
-        // 実体が消えたパスは projects.json からも壊れた item を取り除く
-        // (history.db からは Rust が削除済み)。「画像が見つかりません」を残さない。
-        if (result.prunedPaths && result.prunedPaths.length > 0) {
-          useProjects.getState().pruneItemPaths(result.prunedPaths);
-        }
-        if (result.dbUpdated > 0 || result.dbPruned > 0) {
-          console.info(
-            "[relink] history.db 再リンク",
-            result.dbUpdated,
-            "件 / 実体消失で削除",
-            result.dbPruned,
-            "件 (未解決",
-            result.dbUnresolved,
-            "件)",
-          );
-        }
+        // projects / presets / favorites / judgements / referenceRoles の
+        // 5 面へ一括適用する (history.db は Rust が張り替え済み)。
+        applyRelinkResult(result);
+        // rr2: 絵コンテ生成中にアプリが落ちて、採用したカットがプロジェクトへ
+        // 未回収のままなら復元する。relink 後に呼ぶことで、採用時に焼いた
+        // 画像パスが移動していても張り替えた上で復元できる。
+        void restoreUnrecoveredAdoptions(result.pathMap);
       })
       .catch((err) => {
         console.error("projects.initialize / relink failed", err);
@@ -507,6 +698,14 @@ function SignedInScaffold() {
     // クリアする (#5/R-2 残留対策 2026-06-07)。override は ActiveProjectSelector の
     // switchActiveProject と同じく消さない (動画 i2v を巻き込まないため)。
     useSceneStore.getState().resetScene();
+    // 未保存チャット引き継ぎ (2026-07-30): プロジェクト未選択 (保存しない) のまま
+    // 進めた企画チャットは、新規作成 = 「この会話を残したい」の意思表示なので、
+    // switchToProject が走る前に新プロジェクトへ全量保存する (ActiveProjectSelector
+    // の handleCreate と同じ根治。先に書いておけば切替時のロードで読み戻される)。
+    const carried =
+      prevProjectId === null
+        ? usePlanChat.getState().carryOverToProject(created.id)
+        : 0;
     // FB#A6 (2026-06-08): 企画チャットもプロジェクトに紐づける。旧プロジェクトへ
     // 現在の会話を保存してから、新規プロジェクト (planChat 空) をロード = ゼロスタート。
     usePlanChat.getState().switchToProject(prevProjectId, created.id);
@@ -518,6 +717,13 @@ function SignedInScaffold() {
       text: `プロジェクト「${created.name}」を作成 / 切替`,
       ttlMs: 2400,
     });
+    if (carried > 0) {
+      useToasts.getState().push({
+        kind: "success",
+        text: `企画チャットを「${created.name}」へ引き継ぎました`,
+        ttlMs: 3000,
+      });
+    }
   };
 
   return (
@@ -532,6 +738,8 @@ function SignedInScaffold() {
           setCreateModalOpen(true);
         }}
         onOpen={openSession}
+        onOpenUnsaved={openUnsavedChat}
+        onOpenProjectChat={openProjectPlanChat}
         account={account}
         onLogout={logout}
         assetCount={items.length}
@@ -717,6 +925,8 @@ function Workspace({
   onCreate,
   onOpenNewModal,
   onOpen,
+  onOpenUnsaved,
+  onOpenProjectChat,
   account,
   onLogout,
   assetCount,
@@ -729,6 +939,8 @@ function Workspace({
   onCreate: (title?: string) => Promise<void>;
   onOpenNewModal: () => void;
   onOpen: (id: string) => Promise<void>;
+  onOpenUnsaved: (id: string) => Promise<void>;
+  onOpenProjectChat: (projectId: string) => Promise<void>;
   account: SignedInAccount;
   onLogout: () => void;
   assetCount: number;
@@ -750,7 +962,38 @@ function Workspace({
       />
       <div className="relative flex min-h-0 min-w-0 flex-1 flex-col bg-[#121212]">
         <BoardHeader title={title} activePage={drawer} />
-        <WorkspacePage page={drawer} setDrawer={setDrawer} onCreate={onCreate} onOpen={onOpen} />
+        {/*
+         * STΛCK 指示 (2026-08-04 / bd 2ak): スキル画面 (SkillWorkspaceRouter) は
+         * drawer ページ (ライブラリ等) へ移動しても **unmount しない**。
+         * 従来は WorkspacePage の switch が drawer ページを「代わりに」返していたため
+         * スキル側のサブツリーごと破棄され、
+         *   - ComicFlow 等の useState (phase / あらすじ / 生成結果) が全損
+         *   - 生成司令塔の async クロージャが孤児化し setState が no-op になり結果が UI に戻らない
+         * という「完成品画面が消えて戻れない」が起きていた。
+         * SkillWorkspaceRouter 内のタブ切替 (SkillWorkspaceRouter.tsx:95) と同じ
+         * display: contents / none の keep-alive を drawer 遷移レベルへ移植する。
+         * display:contents はラッパー自身をレイアウトから消すので、親 flex 列の
+         * 見た目は従来 (子の <section> が直下にあった状態) と同一。
+         */}
+        <div style={{ display: drawer === null ? "contents" : "none" }}>
+          {/*
+           * 隠していることを Router へも伝える (Sol 評価 2周目 blocking#1)。
+           * display:none だけだとマウントは生きたままなので、スキル側の
+           * useSkillVisible が true のままになり、ライブラリを開いている間も
+           * 3D の Space / 矢印 / Cmd+Z が見えない画面へ届いていた。
+           */}
+          <SkillWorkspaceRouter hiddenByDrawer={drawer !== null} />
+        </div>
+        {drawer !== null && (
+          <WorkspacePage
+            page={drawer}
+            setDrawer={setDrawer}
+            onCreate={onCreate}
+            onOpen={onOpen}
+            onOpenUnsaved={onOpenUnsaved}
+            onOpenProjectChat={onOpenProjectChat}
+          />
+        )}
       </div>
     </div>
   );
@@ -761,11 +1004,17 @@ function WorkspacePage({
   setDrawer,
   onCreate,
   onOpen,
+  onOpenUnsaved,
+  onOpenProjectChat,
 }: {
-  page: DrawerKind;
+  // スキル画面は Workspace 側で常時マウントされる (keep-alive) ため、
+  // ここは drawer ページ専用。null は呼び出し側で弾く。
+  page: Exclude<DrawerKind, null>;
   setDrawer: (drawer: DrawerKind) => void;
   onCreate: (title?: string) => Promise<void>;
   onOpen: (id: string) => Promise<void>;
+  onOpenUnsaved: (id: string) => Promise<void>;
+  onOpenProjectChat: (projectId: string) => Promise<void>;
 }) {
   // onCreate は将来 ProjectsWorkspace 内の「セッション同時作成」フローで使う想定
   // 現時点では使っていないが、呼び出し側との型契約は維持する。
@@ -778,29 +1027,31 @@ function WorkspacePage({
     case "history":
       return <ProjectsWorkspace />;
     case "presets":
-      return <PresetsWorkspace />;
+      return <PresetsWorkspace onNavigateToSkill={() => setDrawer(null)} />;
     case "skills":
       return <SkillsWorkspace onUseSkill={() => setDrawer(null)} />;
     case "export":
-      return <ChatHistoryWorkspace onOpen={onOpen} />;
+      return (
+        <ChatHistoryWorkspace
+          onOpen={onOpen}
+          onOpenUnsaved={onOpenUnsaved}
+          onOpenProjectChat={onOpenProjectChat}
+        />
+      );
     case "settings":
       return <SettingsWorkspace />;
     default:
-      // STΛCK 指示 (2026-05-20): スキルON時にUIが切り替わる仕組みを有効化。
-      // SkillWorkspaceRouter が useSkillUiMode.activeUiMode を見て、
-      // default なら GenerationWorkspace、storyboard なら StoryboardWorkspace
-      // など、スキル毎に最適化された UI に切り替える。
-      return <SkillWorkspaceRouter />;
+      return null;
   }
 }
 
-function PresetsWorkspace() {
+function PresetsWorkspace({ onNavigateToSkill }: { onNavigateToSkill?: () => void }) {
   // BoardHeader が画面上に「プリセット」タイトルを既に出すので、ここでは
   // PageIntro を使わず本体だけ描画する（重複表示を避ける）。
   return (
     <section className="flex h-full min-h-0 flex-col overflow-hidden bg-[#121212]">
       <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
-        <PresetsDrawer fullPage />
+        <PresetsDrawer fullPage onNavigateToSkill={onNavigateToSkill} />
       </div>
     </section>
   );
@@ -2339,8 +2590,8 @@ function ReferencesWorkspace() {
           {refs.map((ref) => (
             <div key={ref.path} className="rounded-xl border border-[#2a2a2a] bg-[#1a1a1a] p-3">
               <div className="flex gap-3">
-                <img
-                  src={convertFileSrc(ref.path)}
+                <SafeImage
+                  path={ref.path}
                   alt=""
                   className="h-20 w-20 rounded-lg object-cover"
                 />
@@ -2397,7 +2648,6 @@ function ProjectsWorkspace() {
   const createProject = useProjects((s) => s.createProject);
   const renameProject = useProjects((s) => s.renameProject);
   const removeProject = useProjects((s) => s.removeProject);
-  const removeItem = useProjects((s) => s.removeItem);
   const [openId, setOpenId] = useState<string | null>(null);
   const [draftName, setDraftName] = useState("");
 
@@ -2410,6 +2660,16 @@ function ProjectsWorkspace() {
     setOpenId(created.id);
     setDraftName("");
   };
+
+  // プロジェクトを開いている間はカード一覧を隠して詳細を全面表示する。
+  // 仮想グリッドに確定高さを与えるため (ページスクロールとの二重スクロール回避)。
+  if (opened) {
+    return (
+      <section className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#121212] px-4 py-4">
+        <ProjectDetailPanel project={opened} onClose={() => setOpenId(null)} />
+      </section>
+    );
+  }
 
   return (
     <section className="min-h-0 flex-1 overflow-y-auto bg-[#121212] px-4 py-4">
@@ -2455,8 +2715,7 @@ function ProjectsWorkspace() {
             <ProjectCard
               key={project.id}
               project={project}
-              active={project.id === openId}
-              onOpen={() => setOpenId(project.id === openId ? null : project.id)}
+              onOpen={() => setOpenId(project.id)}
               onRename={(name) => renameProject(project.id, name)}
               onRemove={() => {
                 void (async () => {
@@ -2477,14 +2736,6 @@ function ProjectsWorkspace() {
           ))}
         </div>
       )}
-
-      {opened && (
-        <ProjectDetailPanel
-          project={opened}
-          onClose={() => setOpenId(null)}
-          onRemoveItem={(itemId) => removeItem(opened.id, itemId)}
-        />
-      )}
     </section>
   );
 }
@@ -2500,15 +2751,42 @@ function ProjectsWorkspace() {
 function ProjectDetailPanel({
   project,
   onClose,
-  onRemoveItem,
 }: {
   project: Project;
   onClose: () => void;
-  onRemoveItem: (itemId: string) => void;
 }) {
   const chat = project.planChat ?? [];
   const stockCreditCount = project.stockCredits?.length ?? 0;
   const pushToast = useToasts((s) => s.push);
+  // 全面ビューでは画像グリッドに高さを譲るため、企画チャットは初期閉じ。
+  const [chatOpen, setChatOpen] = useState(false);
+  const [exportingLog, setExportingLog] = useState(false);
+
+  /**
+   * プロジェクト記録 CSV の書き出し。「どの画像をどのプロンプトで生成したか」の
+   * ログを、企画チャットも含めて 1 枚のシートに束ねる。
+   * 保存ダイアログのキャンセル (戻り値 false) ではトーストを出さない。
+   */
+  const exportLogCsv = async () => {
+    setExportingLog(true);
+    try {
+      const saved = await exportProjectCsv(project.id);
+      if (saved) {
+        pushToast({
+          kind: "success",
+          text: `プロジェクト記録 CSV を保存しました (画像 ${project.items.length} 件・チャット ${(project.planChat ?? []).length} 通)`,
+          ttlMs: 4000,
+        });
+      }
+    } catch (err) {
+      pushToast({
+        kind: "error",
+        text: `プロジェクト記録 CSV の保存に失敗しました。${humanizeError(err)}`,
+      });
+    } finally {
+      setExportingLog(false);
+    }
+  };
 
   /**
    * 法務対応 (2026-05-21): プロジェクトで使った Pexels 素材のクレジットを
@@ -2564,17 +2842,35 @@ function ProjectDetailPanel({
   };
 
   return (
-    <div className="mt-6 space-y-4">
+    <div className="flex min-h-0 flex-1 flex-col gap-4">
       <div className="flex items-center justify-between rounded-xl border border-[#2a2a2a] bg-[#181818] px-4 py-3">
-        <div>
-          <h4 className="text-sm font-black text-white">{project.name}</h4>
-          <p className="mt-0.5 text-[10px] text-neutral-500">
-            企画ログ {chat.length} 通 ・ 画像 {project.items.length} 件
-            {stockCreditCount > 0 && ` ・ 素材 ${stockCreditCount} 件`}・ 更新{" "}
-            {relativeTimeJa(project.updatedAt)}
-          </p>
+        <div className="flex min-w-0 items-center gap-3">
+          <button
+            type="button"
+            onClick={onClose}
+            className="shrink-0 text-xs text-neutral-400 hover:text-white"
+          >
+            ← プロジェクト一覧へ
+          </button>
+          <div className="min-w-0">
+            <h4 className="truncate text-sm font-black text-white">{project.name}</h4>
+            <p className="mt-0.5 text-[10px] text-neutral-500">
+              企画ログ {chat.length} 通 ・ 画像 {project.items.length} 件
+              {stockCreditCount > 0 && ` ・ 素材 ${stockCreditCount} 件`}・ 更新{" "}
+              {relativeTimeJa(project.updatedAt)}
+            </p>
+          </div>
         </div>
         <div className="flex items-center gap-2">
+          <button
+            type="button"
+            disabled={exportingLog}
+            onClick={() => void exportLogCsv()}
+            className="rounded-md border border-[#343434] bg-[#101010] px-3 py-1 text-[10px] font-bold text-neutral-300 hover:border-pink-400 hover:text-white"
+            title="画像・プロンプト・企画チャットの記録を CSV で書き出す（どの画像をどのプロンプトで生成したかのログ）"
+          >
+            {exportingLog ? "書き出し中..." : "記録 CSV"}
+          </button>
           <button
             type="button"
             onClick={() => void exportCreditsCsv()}
@@ -2583,51 +2879,53 @@ function ProjectDetailPanel({
           >
             クレジット CSV
           </button>
-          <button
-            type="button"
-            onClick={onClose}
-            className="text-xs text-neutral-400 hover:text-white"
-          >
-            閉じる
-          </button>
         </div>
       </div>
 
       {chat.length > 0 && (
-        <div className="rounded-xl border border-[#2a2a2a] bg-[#181818] p-4">
-          <div className="mb-3 flex items-center gap-2">
+        <div className="shrink-0 rounded-xl border border-[#2a2a2a] bg-[#181818] p-4">
+          <button
+            type="button"
+            onClick={() => setChatOpen((v) => !v)}
+            className="flex w-full items-center gap-2 text-left"
+          >
+            <span className="text-[10px] text-neutral-500">
+              {chatOpen ? "▾" : "▸"}
+            </span>
             <span className="text-[10px] font-black uppercase tracking-wide text-pink-300">
-              企画チャット
+              企画チャット ({chat.length} 通)
             </span>
             <span className="text-[10px] text-neutral-500">
               （企画タブで対話したログのスナップショット）
             </span>
-          </div>
-          <div className="space-y-2">
-            {chat.map((msg) => (
-              <div
-                key={msg.id}
-                className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
-              >
+          </button>
+          {chatOpen && (
+            <div className="mt-3 max-h-64 space-y-2 overflow-y-auto">
+              {chat.map((msg) => (
                 <div
-                  className={[
-                    "max-w-[88%] rounded-xl px-3 py-2 text-xs leading-relaxed",
-                    msg.role === "user"
-                      ? "bg-pink-500/10 text-pink-50 ring-1 ring-pink-500/30"
-                      : "bg-[#1f1f1f] text-neutral-200 ring-1 ring-[#2a2a2a]",
-                  ].join(" ")}
+                  key={msg.id}
+                  className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
                 >
-                  <p className="whitespace-pre-wrap break-words">{msg.text}</p>
+                  <div
+                    className={[
+                      "max-w-[88%] rounded-xl px-3 py-2 text-xs leading-relaxed",
+                      msg.role === "user"
+                        ? "bg-pink-500/10 text-pink-50 ring-1 ring-pink-500/30"
+                        : "bg-[#1f1f1f] text-neutral-200 ring-1 ring-[#2a2a2a]",
+                    ].join(" ")}
+                  >
+                    <p className="whitespace-pre-wrap break-words">{msg.text}</p>
+                  </div>
                 </div>
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
       {project.items.length > 0 ? (
-        <div className="rounded-xl border border-[#2a2a2a] bg-[#181818] p-4">
-          <div className="mb-3 flex items-center gap-2">
+        <div className="flex min-h-0 flex-1 flex-col rounded-xl border border-[#2a2a2a] bg-[#181818] p-4">
+          <div className="mb-3 flex shrink-0 items-center gap-2">
             <span className="text-[10px] font-black uppercase tracking-wide text-pink-300">
               生成画像
             </span>
@@ -2635,39 +2933,8 @@ function ProjectDetailPanel({
               （採用→生成で自動的にここに入ります）
             </span>
           </div>
-          <div className="grid grid-cols-[repeat(auto-fill,minmax(160px,1fr))] gap-2">
-            {project.items.map((item) => (
-              <div
-                key={item.id}
-                className="group relative overflow-hidden rounded-lg border border-[#2a2a2a] bg-[#101010]"
-              >
-                <button
-                  type="button"
-                  onClick={() => useImagePreview.getState().open(item.imagePath)}
-                  className="block w-full"
-                  title={item.prompt ?? ""}
-                >
-                  <img
-                    src={convertFileSrc(item.imagePath)}
-                    alt=""
-                    className="aspect-square w-full object-cover"
-                  />
-                </button>
-                <button
-                  type="button"
-                  onClick={() => onRemoveItem(item.id)}
-                  className="absolute right-1 top-1 hidden h-6 w-6 items-center justify-center rounded-full bg-black/85 text-xs font-black text-white shadow-lg group-hover:flex hover:bg-red-500"
-                  title="このプロジェクトから外す"
-                >
-                  ×
-                </button>
-                {item.prompt && (
-                  <p className="line-clamp-2 px-1.5 py-1 font-mono text-[9px] leading-tight text-neutral-500">
-                    {item.prompt}
-                  </p>
-                )}
-              </div>
-            ))}
+          <div className="flex min-h-0 flex-1 flex-col">
+            <ProjectGallery project={project} />
           </div>
         </div>
       ) : (
@@ -2686,13 +2953,11 @@ function ProjectDetailPanel({
 
 function ProjectCard({
   project,
-  active,
   onOpen,
   onRename,
   onRemove,
 }: {
   project: Project;
-  active: boolean;
   onOpen: () => void;
   onRename: (name: string) => void;
   onRemove: () => void;
@@ -2701,13 +2966,7 @@ function ProjectCard({
   const [draft, setDraft] = useState(project.name);
   const previewItems = project.items.slice(0, 4);
   return (
-    <div
-      className={`group rounded-xl border bg-[#181818] p-3 transition ${
-        active
-          ? "border-pink-400 ring-1 ring-pink-400/40"
-          : "border-[#2a2a2a] hover:border-pink-400/60"
-      }`}
-    >
+    <div className="group rounded-xl border border-[#2a2a2a] bg-[#181818] p-3 transition hover:border-pink-400/60">
       <div className="grid grid-cols-2 gap-1">
         {previewItems.length === 0 ? (
           <div className="col-span-2 flex aspect-[16/9] items-center justify-center rounded-md bg-[linear-gradient(135deg,#242424_0%,#171717_100%)] text-[10px] font-bold uppercase tracking-wide text-neutral-600">
@@ -2715,9 +2974,9 @@ function ProjectCard({
           </div>
         ) : (
           previewItems.map((item, index) => (
-            <img
+            <SafeImage
               key={item.id}
-              src={convertFileSrc(item.imagePath)}
+              path={item.imagePath}
               alt=""
               className={`aspect-square w-full rounded-md object-cover ${
                 previewItems.length === 1 ? "col-span-2 aspect-[16/9]" : ""
@@ -2771,7 +3030,7 @@ function ProjectCard({
           onClick={onOpen}
           className="h-7 flex-1 rounded-md border border-[#343434] bg-[#0b0b0b] text-[10px] font-bold text-neutral-300 hover:border-pink-400 hover:text-white"
         >
-          {active ? "閉じる" : "開く"}
+          開く
         </button>
         <button
           type="button"
@@ -2836,7 +3095,188 @@ function ProjectsDrawer() {
  *
  * 書き出しワークフローは制作画面側で完結する方針のため、納品書き出し UI は撤去。
  */
-function ChatHistoryWorkspace({ onOpen }: { onOpen: (id: string) => Promise<void> }) {
+/**
+ * 未保存の企画チャット (29z 2026-08-03)。プロジェクト未選択のまま進めた企画
+ * チャットを最新5件・7日だけ退避してあるので、ここから開き直せるようにする。
+ * 0 件なら何も描画しない。
+ */
+/**
+ * xwl: 履歴検索のフィルタ規則（3セクション共通の正本）。
+ * 親（ChatHistoryWorkspace）は空表示の判定にこれらの件数を集計するので、
+ * セクション側と親で条件が食い違わないよう module 直下に切り出してある。
+ */
+function filterUnsavedPlanChats<T extends { title: string; messages: { text: string }[] }>(
+  items: T[],
+  query: string,
+): T[] {
+  if (!query) return items;
+  return items.filter(
+    (it) =>
+      it.title.toLowerCase().includes(query) ||
+      it.messages.some((m) => m.text.toLowerCase().includes(query)),
+  );
+}
+
+/** xwl: planChat を持つプロジェクトだけを検索クエリで絞り、更新の新しい順に並べる。 */
+function filterProjectPlanChats(projects: Project[], query: string): Project[] {
+  const withChat = projects.filter((p) => (p.planChat?.length ?? 0) > 0);
+  const matched = query
+    ? withChat.filter(
+        (p) =>
+          p.name.toLowerCase().includes(query) ||
+          (p.planChat ?? []).some((m) => m.text.toLowerCase().includes(query)),
+      )
+    : withChat;
+  return [...matched].sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+function UnsavedPlanChatSection({
+  onOpenUnsaved,
+  query,
+}: {
+  onOpenUnsaved: (id: string) => Promise<void>;
+  /** xwl: 履歴検索の正規化済みクエリ (trim + toLowerCase)。空文字なら絞り込みなし。 */
+  query: string;
+}) {
+  const items = useUnsavedPlanChats((s) => s.items);
+  const removeUnsaved = useUnsavedPlanChats((s) => s.remove);
+  const filtered = filterUnsavedPlanChats(items, query);
+  if (filtered.length === 0) return null;
+
+  const handleDelete = async (id: string) => {
+    const message = "この未保存の企画チャットを削除しますか？元に戻せません。";
+    let ok = false;
+    try {
+      const { ask } = await import("@tauri-apps/plugin-dialog");
+      ok = await ask(message, { title: "未保存チャットの削除", kind: "warning" });
+    } catch {
+      ok = window.confirm(message);
+    }
+    if (!ok) return;
+    await removeUnsaved(id);
+  };
+
+  return (
+    <div className="mb-4">
+      <div className="mb-2">
+        <h3 className="text-xs font-black text-neutral-200">未保存の企画チャット</h3>
+        <p className="mt-0.5 text-[11px] text-neutral-500">
+          プロジェクトに保存していない企画の会話です。最新5件を7日間残します。
+        </p>
+      </div>
+      <ul className="space-y-1.5">
+        {filtered.map((entry) => (
+          <li key={entry.id}>
+            <div className="group flex w-full items-center gap-3 rounded-lg border border-[#2a2a2a] bg-[#181818] px-3 py-2.5 text-left transition hover:border-pink-400/60 hover:bg-[#1f1f1f]">
+              <div className="min-w-0 flex-1">
+                <button
+                  type="button"
+                  onClick={() => void onOpenUnsaved(entry.id)}
+                  className="block w-full truncate text-left text-sm font-medium text-neutral-100 hover:text-white"
+                >
+                  {entry.title}
+                </button>
+                <p className="mt-0.5 flex items-center gap-2 text-[11px] text-neutral-500">
+                  <span>{relativeTimeJa(entry.updatedAt)}</span>
+                  <span>{entry.messages.length}通</span>
+                  <span className="rounded bg-yellow-500/15 px-1.5 py-px text-[10px] font-medium text-yellow-200">
+                    未保存
+                  </span>
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => void handleDelete(entry.id)}
+                className="shrink-0 rounded-md border border-[#343434] bg-[#0b0b0b] px-2 py-1 text-[10px] font-medium text-neutral-300 hover:border-pink-400 hover:text-white"
+              >
+                削除
+              </button>
+              <button
+                type="button"
+                onClick={() => void onOpenUnsaved(entry.id)}
+                className="flex shrink-0 items-center gap-1 text-[11px] font-medium text-neutral-500 hover:text-white"
+              >
+                開く
+                <ArrowRightIcon />
+              </button>
+            </div>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/**
+ * 案件（プロジェクト）に保存済みの企画チャット一覧 (xwl 2026-08-03)。
+ * planChat を持つプロジェクトだけを更新の新しい順に並べる。0 件なら描画しない。
+ * 削除は付けない（プロジェクト正本への破壊操作はプロジェクト画面の責務）。
+ */
+function ProjectPlanChatSection({
+  onOpenProjectChat,
+  query,
+}: {
+  onOpenProjectChat: (projectId: string) => Promise<void>;
+  /** xwl: 履歴検索の正規化済みクエリ (trim + toLowerCase)。空文字なら絞り込みなし。 */
+  query: string;
+}) {
+  const projects = useProjects((s) => s.projects);
+  const filtered = useMemo(() => filterProjectPlanChats(projects, query), [projects, query]);
+  if (filtered.length === 0) return null;
+
+  return (
+    <div className="mb-4">
+      <div className="mb-2">
+        <h3 className="text-xs font-black text-neutral-200">案件の企画チャット</h3>
+        <p className="mt-0.5 text-[11px] text-neutral-500">
+          プロジェクトに保存した企画の会話です。開くと企画タブでそのプロジェクトに切り替わります。
+        </p>
+      </div>
+      <ul className="space-y-1.5">
+        {filtered.map((project) => (
+          <li key={project.id}>
+            <div className="group flex w-full items-center gap-3 rounded-lg border border-[#2a2a2a] bg-[#181818] px-3 py-2.5 text-left transition hover:border-pink-400/60 hover:bg-[#1f1f1f]">
+              <div className="min-w-0 flex-1">
+                <button
+                  type="button"
+                  onClick={() => void onOpenProjectChat(project.id)}
+                  className="block w-full truncate text-left text-sm font-medium text-neutral-100 hover:text-white"
+                >
+                  {project.name}
+                </button>
+                <p className="mt-0.5 flex items-center gap-2 text-[11px] text-neutral-500">
+                  <span>{relativeTimeJa(project.updatedAt)}</span>
+                  <span>{project.planChat?.length ?? 0}通</span>
+                  <span className="rounded bg-sky-500/15 px-1.5 py-px text-[10px] font-medium text-sky-200">
+                    案件
+                  </span>
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => void onOpenProjectChat(project.id)}
+                className="flex shrink-0 items-center gap-1 text-[11px] font-medium text-neutral-500 hover:text-white"
+              >
+                開く
+                <ArrowRightIcon />
+              </button>
+            </div>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function ChatHistoryWorkspace({
+  onOpen,
+  onOpenUnsaved,
+  onOpenProjectChat,
+}: {
+  onOpen: (id: string) => Promise<void>;
+  onOpenUnsaved: (id: string) => Promise<void>;
+  onOpenProjectChat: (projectId: string) => Promise<void>;
+}) {
   const sessions = useSessions((s) => s.sessions);
   const activeSessionId = useSessions((s) => s.activeSessionId);
   const displayedSession = useSessions((s) => s.displayedSession);
@@ -2845,6 +3285,61 @@ function ChatHistoryWorkspace({ onOpen }: { onOpen: (id: string) => Promise<void
   // 編集中のセッション id + ドラフトタイトル
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState("");
+  // xwl: 履歴検索（client-side の決定論フィルタ。セッションはタイトルのみ対象）
+  const [query, setQuery] = useState("");
+  const q = query.trim().toLowerCase();
+  const filtered = q ? sessions.filter((s) => s.title.toLowerCase().includes(q)) : sessions;
+  // xwl / C-1: 空表示は 3 セクション（未保存・案件・制作）の一致状態で判定する。
+  // 制作チャットだけを見ると、案件チャットが一致していても「一致なし」が併記される。
+  const unsavedItems = useUnsavedPlanChats((s) => s.items);
+  const projectsForCount = useProjects((s) => s.projects);
+  const unsavedMatchCount = useMemo(
+    () => filterUnsavedPlanChats(unsavedItems, q).length,
+    [unsavedItems, q],
+  );
+  const projectMatchCount = useMemo(
+    () => filterProjectPlanChats(projectsForCount, q).length,
+    [projectsForCount, q],
+  );
+  const totalMatchCount = filtered.length + unsavedMatchCount + projectMatchCount;
+  /**
+   * 全セクションが素で 0 件（＝そもそも履歴が無い）。
+   *
+   * この案内を出すのは **検索していないとき（q 空）だけ**。全履歴 0 件の状態で
+   * 検索窓に何か打った場合、ユーザーが知りたいのは「その語に一致するものが無い」で
+   * あって初回案内ではない（Sol 指摘 C-1）。したがって描画側は
+   * 「検索中の 0 件」→「素の 0 件」の順で分岐する。
+   */
+  const hasNoHistoryAtAll =
+    sessions.length === 0 &&
+    unsavedItems.length === 0 &&
+    projectsForCount.every((p) => (p.planChat?.length ?? 0) === 0);
+
+  /**
+   * チャット履歴（制作チャット）を削除する (xwl)。DB 行のみを消し、生成済みの
+   * 画像ファイルは残す（ライブラリはファイル実体ベースなので影響しない）。
+   */
+  const handleDeleteSession = async (id: string, title: string) => {
+    const message = `チャット履歴「${title}」を削除しますか？会話とプロンプトの記録が消えます（生成済みの画像ファイルは削除されません）。元に戻せません。`;
+    let ok = false;
+    try {
+      const { ask } = await import("@tauri-apps/plugin-dialog");
+      ok = await ask(message, { title: "チャット履歴の削除", kind: "warning" });
+    } catch {
+      ok = window.confirm(message);
+    }
+    if (!ok) return;
+    try {
+      await useSessions.getState().remove(id);
+    } catch (err) {
+      console.error("[ChatHistoryWorkspace] delete failed:", err);
+      useToasts.getState().push({
+        kind: "error",
+        text: "削除に失敗しました。もう一度お試しください。",
+        ttlMs: 5000,
+      });
+    }
+  };
 
   const startEdit = (id: string, current: string) => {
     setEditingId(id);
@@ -2871,14 +3366,46 @@ function ChatHistoryWorkspace({ onOpen }: { onOpen: (id: string) => Promise<void
   return (
     <section className="min-h-0 flex-1 overflow-y-auto bg-[#121212] px-4 py-4">
       {/* ヘッダーの「チャット履歴」見出しと重複していたので PageIntro 撤去。 */}
-      {sessions.length === 0 ? (
+      <input
+        type="text"
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+        placeholder="履歴を検索（タイトル・企画チャット本文）"
+        className="mb-4 h-9 w-full rounded-lg border border-[#2a2a2a] bg-[#181818] px-3 text-sm text-neutral-100 outline-none transition placeholder:text-neutral-600 focus:border-pink-500"
+      />
+      <UnsavedPlanChatSection onOpenUnsaved={onOpenUnsaved} query={q} />
+      <ProjectPlanChatSection onOpenProjectChat={onOpenProjectChat} query={q} />
+      {/*
+        分岐順は「検索中の 0 件」→「素の 0 件」。逆順にすると、全履歴 0 件のまま
+        検索したときに初回案内が勝ってしまい、「一致する履歴はありません」が
+        永久に出ない（Sol 指摘 C-1）。
+      */}
+      {q && totalMatchCount === 0 ? (
+        <DarkEmpty
+          title={`「${query}」に一致する履歴はありません`}
+          description="別の言葉で検索してください。"
+        />
+      ) : hasNoHistoryAtAll ? (
         <DarkEmpty
           title="まだチャット履歴がありません"
           description="制作画面で生成すると、ここに最近のチャットが並びます。"
         />
       ) : (
-        <ul className="space-y-1.5">
-          {sessions.map((session) => {
+        <div className="mb-4">
+          {/*
+            見出しは filtered.length の分岐の外（設計 design-history-models.md 手順5）。
+            制作チャットが 0 件でも見出しは出し、リスト部だけが空になる。
+            他 2 セクションが一致しているのに制作だけ 0 件、という状態で
+            「制作チャットという区画がある」ことを消さないため。
+          */}
+          <div className="mb-2">
+            <h3 className="text-xs font-black text-neutral-200">制作チャット</h3>
+            <p className="mt-0.5 text-[11px] text-neutral-500">
+              画像・動画の生成チャットです。開くと当時の生成結果ごと表示します。
+            </p>
+          </div>
+          <ul className="space-y-1.5">
+            {filtered.map((session) => {
             const active = !isFrozen && session.id === activeSessionId;
             const viewing = isFrozen && displayedSession?.session.id === session.id;
             const selected = active || viewing;
@@ -2901,8 +3428,8 @@ function ChatHistoryWorkspace({ onOpen }: { onOpen: (id: string) => Promise<void
                     aria-label="セッションを開く"
                   >
                     {session.lastImagePath ? (
-                      <img
-                        src={convertFileSrc(session.lastImagePath)}
+                      <SafeImage
+                        path={session.lastImagePath}
                         alt=""
                         className="h-full w-full object-cover"
                       />
@@ -2973,6 +3500,16 @@ function ChatHistoryWorkspace({ onOpen }: { onOpen: (id: string) => Promise<void
                   {!isEditing && (
                     <button
                       type="button"
+                      onClick={() => void handleDeleteSession(session.id, session.title)}
+                      title="このチャット履歴を削除"
+                      className="opacity-0 transition group-hover:opacity-100 shrink-0 rounded-md border border-[#343434] bg-[#0b0b0b] px-2 py-1 text-[10px] font-medium text-neutral-300 hover:border-pink-400 hover:text-white"
+                    >
+                      削除
+                    </button>
+                  )}
+                  {!isEditing && (
+                    <button
+                      type="button"
                       onClick={() => void onOpen(session.id)}
                       className="flex shrink-0 items-center gap-1 text-[11px] font-medium text-neutral-500 hover:text-white"
                     >
@@ -2982,9 +3519,10 @@ function ChatHistoryWorkspace({ onOpen }: { onOpen: (id: string) => Promise<void
                   )}
                 </div>
               </li>
-            );
-          })}
-        </ul>
+              );
+            })}
+          </ul>
+        </div>
       )}
     </section>
   );
@@ -3375,8 +3913,8 @@ function BoardImageCard({
         onDoubleClick={() => useImagePreview.getState().open(item.path)}
         className="block aspect-[16/9] w-full bg-[#0f0f0f]"
       >
-        <img
-          src={convertFileSrc(item.path)}
+        <SafeImage
+          path={item.path}
           alt={item.name}
           className="h-full w-full object-cover"
         />
@@ -3464,8 +4002,8 @@ function BoardListItem({
         className="flex-shrink-0 overflow-hidden rounded-lg bg-[#0f0f0f]"
         style={{ width: thumbnailSize, height: Math.round(thumbnailSize * 0.62) }}
       >
-        <img
-          src={convertFileSrc(item.path)}
+        <SafeImage
+          path={item.path}
           alt={item.name}
           className="h-full w-full object-cover"
         />
@@ -3922,7 +4460,7 @@ function SideDrawer({
           {drawer === "assets" && <AssetsDrawer />}
           {drawer === "references" && <ReferencesDrawer />}
           {drawer === "history" && <ProjectsDrawer />}
-          {drawer === "presets" && <PresetsDrawer />}
+          {drawer === "presets" && <PresetsDrawer onNavigateToSkill={onClose} />}
           {drawer === "skills" && <SkillsWorkspace onUseSkill={onClose} />}
           {drawer === "export" && <ChatHistoryDrawer onOpen={onOpen} />}
         </div>
@@ -3951,7 +4489,11 @@ function drawerTitle(drawer: Exclude<DrawerKind, null>) {
 }
 
 function AssetsDrawer() {
-  const items = useImages((s) => s.items.slice(0, 80));
+  // 不安定セレクタ修正 (2026-07-30): slice はセレクタ内で呼ばない。
+  // zustand v5 はセレクタ結果をキャッシュしないため、毎回新配列を返すと
+  // 同期コミット無限ループになる (React "Maximum update depth exceeded")。
+  const all = useImages((s) => s.items);
+  const items = useMemo(() => all.slice(0, 80), [all]);
   const addReference = useComposer((s) => s.addReference);
   if (items.length === 0) {
     return (
@@ -3972,8 +4514,8 @@ function AssetsDrawer() {
           }
           className="overflow-hidden rounded-2xl border border-neutral-200 bg-white text-left hover:border-blue-400"
         >
-          <img
-            src={convertFileSrc(item.path)}
+          <SafeImage
+            path={item.path}
             alt=""
             className="aspect-square w-full object-cover"
           />
@@ -3997,8 +4539,8 @@ function ReferencesDrawer() {
           key={ref.path}
           className="flex gap-2 rounded-2xl border border-neutral-200 bg-white p-2"
         >
-          <img
-            src={convertFileSrc(ref.path)}
+          <SafeImage
+            path={ref.path}
             alt=""
             className="h-14 w-14 rounded-xl object-cover"
           />
@@ -4043,8 +4585,8 @@ function ChatHistoryDrawer({ onOpen }: { onOpen: (id: string) => Promise<void> }
         >
           <div className="h-10 w-10 shrink-0 overflow-hidden rounded-lg border border-neutral-200 bg-neutral-100">
             {session.lastImagePath ? (
-              <img
-                src={convertFileSrc(session.lastImagePath)}
+              <SafeImage
+                path={session.lastImagePath}
                 alt=""
                 className="h-full w-full object-cover"
               />
@@ -4085,8 +4627,8 @@ function SessionCard({
     >
       <div className="h-14 w-14 flex-shrink-0 overflow-hidden rounded-xl border border-[#333] bg-[#111]">
         {session.lastImagePath ? (
-          <img
-            src={convertFileSrc(session.lastImagePath)}
+          <SafeImage
+            path={session.lastImagePath}
             alt=""
             className="h-full w-full object-cover"
           />

@@ -2,9 +2,22 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import {
   type ImgHTMLAttributes,
   type MouseEvent,
+  type VideoHTMLAttributes,
   useEffect,
+  useRef,
   useState,
 } from "react";
+
+/**
+ * リトライまでの待ち時間 (ms)。
+ *
+ * Codex は image_gen が返った瞬間に item/completed を投げるが、WebView が
+ * 取りに行く時点で PNG の書き込みフラッシュが間に合わず 404 になることがある。
+ * 250ms はディスクフラッシュが落ち着くには十分で、かつユーザーが
+ * 「壊れた画像」のちらつきを感じない程度に短い長さ。
+ * (MessageList.tsx にあった生 <img> のリトライ機構から移設: 2026-08-05)
+ */
+const RETRY_DELAY_MS = 250;
 
 /**
  * 画像ファイルの絶対パスを受け取って `convertFileSrc` 経由で描画する。
@@ -21,23 +34,36 @@ export type SafeImageProps = Omit<ImgHTMLAttributes<HTMLImageElement>, "src"> & 
   path?: string;
   /** フォールバック内に出すテキスト。省略時は「画像なし」。 */
   fallbackLabel?: string;
+  /**
+   * 読み込み失敗時に一度だけ再フェッチしてからフォールバックへ落とす。
+   * 生成直後 (image_gen 直後) の PNG 書き込みフラッシュ待ちが必要なタイルで使う。
+   * 省略時 (false) は従来どおり 1 回目の onError で即フォールバック。
+   */
+  retryOnError?: boolean;
 };
 
 export function SafeImage({
   path,
   fallbackLabel = "画像が見つかりません",
+  retryOnError = false,
   className,
   alt,
   ...rest
 }: SafeImageProps) {
   const [errored, setErrored] = useState(false);
+  // リトライ用の再フェッチキー。値が変わると <img> が作り直されて再取得が走る。
+  const [retryKey, setRetryKey] = useState(0);
+  const retried = useRef(false);
 
   // F-#2 追補 (2026-06-16): path が変わったら errored をリセットする。
   // これが無いと、旧パスで一度 onError が発火して errored=true になった後、
   // path prop が新パスに更新されても黒画像 (フォールバック) のまま固着する。
   // ライブラリ自動命名後に制作タブ/プロジェクトで画像が黒くなる症状の主因。
+  // 併せてリトライ済みフラグも戻す。これが無いと、前の画像で使い切った
+  // リトライ枠のせいで別画像に切り替えた直後の 1 回目の失敗が救えない。
   useEffect(() => {
     setErrored(false);
+    retried.current = false;
   }, [path]);
 
   if (!path || errored) {
@@ -72,10 +98,20 @@ export function SafeImage({
   return (
     <img
       {...rest}
+      // retryOnError=false のときは key を渡さない (従来と同じ 1 要素のまま)。
+      key={retryOnError ? retryKey : undefined}
       src={convertFileSrc(path)}
       alt={alt ?? ""}
       className={className}
-      onError={() => setErrored(true)}
+      onError={(e) => {
+        rest.onError?.(e);
+        if (retryOnError && !retried.current) {
+          retried.current = true;
+          setTimeout(() => setRetryKey((k) => k + 1), RETRY_DELAY_MS);
+          return;
+        }
+        setErrored(true);
+      }}
     />
   );
 }
@@ -89,6 +125,15 @@ export type SafeVideoProps = {
   controls?: boolean;
   /** ホバーで自動再生・離脱で停止 (controls=false のサムネ用)。 */
   hoverPlay?: boolean;
+  /** 表示と同時に再生する (プレビューモーダル等)。省略時は自動再生しない。 */
+  autoPlay?: boolean;
+  /**
+   * ループ再生。**省略時は従来どおり `hoverPlay` 由来**で、
+   * 明示指定したときだけそちらを優先する。
+   */
+  loop?: boolean;
+  onClick?: VideoHTMLAttributes<HTMLVideoElement>["onClick"];
+  onDoubleClick?: VideoHTMLAttributes<HTMLVideoElement>["onDoubleClick"];
 };
 
 /**
@@ -106,6 +151,10 @@ export function SafeVideo({
   fallbackLabel = "動画が見つかりません",
   controls = false,
   hoverPlay = false,
+  autoPlay,
+  loop,
+  onClick,
+  onDoubleClick,
 }: SafeVideoProps) {
   const [errored, setErrored] = useState(false);
 
@@ -145,11 +194,14 @@ export function SafeVideo({
       className={className}
       controls={controls}
       muted={!controls}
-      loop={hoverPlay}
+      autoPlay={autoPlay}
+      loop={loop ?? hoverPlay}
       playsInline
       preload="metadata"
       onMouseEnter={onEnter}
       onMouseLeave={onLeave}
+      onClick={onClick}
+      onDoubleClick={onDoubleClick}
       onError={() => setErrored(true)}
     />
   );

@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 import type { ReactElement, ReactNode } from "react";
-import { convertFileSrc } from "@tauri-apps/api/core";
 
 import { useStoryboardRun, type CutState } from "../lib/store/storyboardRun";
 import { ContextMenu } from "./ContextMenu";
+import { SafeImage } from "./SafeImage";
 import { buildGalleryItemMenu } from "./galleryItemMenu";
 import { RegisterPresetDialog } from "./RegisterPresetDialog";
 import { useImages } from "../lib/store/images";
@@ -198,8 +198,8 @@ export function StoryboardCutCard({ cut }: { cut: CutState }) {
           className="h-24 w-24 shrink-0 overflow-hidden rounded-lg border border-black/30 bg-[#0b0b0b] disabled:cursor-default"
         >
           {selected ? (
-            <img
-              src={convertFileSrc(selected.imagePath)}
+            <SafeImage
+              path={selected.imagePath}
               alt=""
               className="h-full w-full object-cover"
               loading="lazy"

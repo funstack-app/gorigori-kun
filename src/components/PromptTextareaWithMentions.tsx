@@ -1,4 +1,3 @@
-import { convertFileSrc } from "@tauri-apps/api/core";
 import {
   type ChangeEvent,
   type KeyboardEvent,
@@ -11,6 +10,7 @@ import {
 } from "react";
 
 import type { Reference } from "../lib/store/composer";
+import { SafeImage } from "./SafeImage";
 
 type CaretPos = { left: number; top: number; lineHeight: number };
 
@@ -342,8 +342,8 @@ function SuggestionList({
                 : "text-neutral-300 hover:bg-[#1a1a1a]",
             ].join(" ")}
           >
-            <img
-              src={convertFileSrc(item.path)}
+            <SafeImage
+              path={item.path}
               alt=""
               className="h-6 w-6 shrink-0 rounded-full object-cover ring-1 ring-[#2a2a2a]"
             />

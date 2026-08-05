@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from "react";
-import { convertFileSrc } from "@tauri-apps/api/core";
 import type { ImageGenerationItem, Item, Turn } from "../lib/codex-types";
 import { useImagePreview } from "../lib/store/imagePreview";
 import { useImages } from "../lib/store/images";
@@ -12,6 +11,7 @@ import {
 import { ContextMenu } from "./ContextMenu";
 import { buildGalleryItemMenu } from "./galleryItemMenu";
 import { RegisterPresetDialog } from "./RegisterPresetDialog";
+import { SafeImage } from "./SafeImage";
 
 type TurnEntry = { kind: "turn"; turn: Turn; key: string; sortKey: number };
 type BatchEntry = { kind: "batch"; batch: Batch; key: string; sortKey: number };
@@ -238,8 +238,8 @@ function ItemView({ item }: { item: Item }) {
               className="block overflow-hidden rounded ring-1 ring-neutral-200 hover:ring-blue-500"
               title="クリックで拡大"
             >
-              <img
-                src={convertFileSrc(path)}
+              <SafeImage
+                path={path}
                 alt="reference"
                 loading="lazy"
                 decoding="async"
@@ -398,8 +398,6 @@ function ImageGenerationCell({
   const inProgress = item.status === "inProgress";
   const failed = item.status === "failed";
   const savedPath = item.savedPath ?? null;
-  const [imgKey, setImgKey] = useState(0);
-  const retried = useRef(false);
 
   if (inProgress || (!savedPath && !failed)) {
     return (
@@ -441,18 +439,13 @@ function ImageGenerationCell({
       className="relative block aspect-square overflow-hidden rounded-md bg-neutral-100 ring-1 ring-neutral-200 hover:ring-blue-500"
       title="クリックで拡大 / 右クリック=メニュー"
     >
-      <img
-        key={imgKey}
-        src={convertFileSrc(savedPath)}
+      <SafeImage
+        path={savedPath}
+        retryOnError
         alt="generated"
         loading="lazy"
         decoding="async"
         className="h-full w-full object-cover"
-        onError={() => {
-          if (retried.current) return;
-          retried.current = true;
-          setTimeout(() => setImgKey((k) => k + 1), 250);
-        }}
       />
     </button>
   );
@@ -474,13 +467,13 @@ function Spinner({ silent }: { silent?: boolean } = {}) {
  * write may not have flushed by the time the WebView fetches it. If the
  * <img> 404s, retry once after 250ms — long enough for any disk flush
  * to settle but short enough that users don't see a broken-image flicker.
+ * この待ちは `SafeImage retryOnError` が持つ (SafeImage.tsx: RETRY_DELAY_MS)。
+ * リトライしても駄目なら黒画像ではなくフォールバック表示に落ちる。
  */
 function ImageGenerationView({ item }: { item: ImageGenerationItem }) {
   const inProgress = item.status === "inProgress";
   const failed = item.status === "failed";
   const savedPath = item.savedPath ?? null;
-  const [imgKey, setImgKey] = useState(0);
-  const retried = useRef(false);
 
   return (
     <div
@@ -511,18 +504,13 @@ function ImageGenerationView({ item }: { item: ImageGenerationItem }) {
           className="mt-2 block w-full overflow-hidden rounded-md ring-1 ring-neutral-200 hover:ring-blue-500"
           title="クリックで拡大"
         >
-          <img
-            key={imgKey}
-            src={convertFileSrc(savedPath)}
+          <SafeImage
+            path={savedPath}
+            retryOnError
             alt="generated"
             loading="lazy"
             decoding="async"
             className="block max-h-80 w-full bg-neutral-100 object-contain"
-            onError={() => {
-              if (retried.current) return;
-              retried.current = true;
-              setTimeout(() => setImgKey((k) => k + 1), 250);
-            }}
           />
         </button>
       )}
@@ -709,8 +697,6 @@ function BatchWorkerCell({
   worker: BatchWorker;
   onContextMenu?: (path: string, x: number, y: number) => void;
 }) {
-  const [imgKey, setImgKey] = useState(0);
-  const retried = useRef(false);
   const caption = worker.modelDisplayName;
 
   if (worker.status === "pending" || worker.status === "running") {
@@ -791,20 +777,15 @@ function BatchWorkerCell({
         className="relative block aspect-square w-full overflow-hidden rounded-md bg-neutral-100 ring-1 ring-neutral-200 hover:ring-blue-500"
         title="クリックで拡大 / 右クリック=メニュー"
       >
-        <img
-          key={imgKey}
-          src={convertFileSrc(path)}
+        <SafeImage
+          path={path}
+          retryOnError
           alt="generated"
           loading="lazy"
           decoding="async"
           className={`h-full w-full object-cover ${
             worker.justCompleted ? "gori-blur-up" : ""
           }`}
-          onError={() => {
-            if (retried.current) return;
-            retried.current = true;
-            setTimeout(() => setImgKey((k) => k + 1), 250);
-          }}
         />
       </button>
       {/*

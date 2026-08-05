@@ -1,9 +1,12 @@
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
 
 import { SafeImage } from "./SafeImage";
+import { PageHelp } from "./PageHelp";
+import { useActiveProject } from "../lib/store/activeProject";
 import { useComposer } from "../lib/store/composer";
 import { images } from "../lib/ipc";
 import { usePlanChat, type PlanMessage } from "../lib/store/planChat";
+import { deriveTitle } from "../lib/store/unsavedPlanChats";
 import { useScenePromptOverride } from "../lib/store/scenePrompt";
 import { useSkillMode } from "../lib/store/skillMode";
 import { useToasts } from "../lib/store/toasts";
@@ -13,6 +16,18 @@ import {
   type PlanRediscussDetail,
 } from "../lib/sendToPlan";
 import { extractDropped, isImageDrop } from "../lib/dragRef";
+import {
+  AUDIO_REPLACED_MESSAGE,
+  MAX_AUDIO_BYTES,
+  UNSUPPORTED_ATTACHMENT_MESSAGE,
+  audioAttachedMessage,
+  audioTooLargeMessage,
+  fileToAudioPath,
+  formatDuration,
+  isAudioFileName,
+  probeAudio,
+  type AudioAttachment,
+} from "../lib/audio/attach";
 import { useReferenceRoles } from "../lib/store/referenceRoles";
 import {
   composePresetPrompt,
@@ -43,12 +58,52 @@ function isImageFileName(name: string): boolean {
   return IMAGE_EXTS.has(ext);
 }
 
+/**
+ * go4: `file.path` 直通の経路にも拡張子検証を効かせる。
+ *
+ * 以前は directPath があると検証を素通ししていたため、native drop した mp3 が
+ * そのまま `localImage` として codex に渡り、モデルがファイルを調べようとして
+ * シェル実行 → Windows で `codex-windows-sandbox-setup.exe` 不在の
+ * 「sandbox-setup エラー」に化けていた (DB1 の事故連鎖)。
+ * 画像と判定できないファイルは必ず null を返し、呼び出し側で音声/その他へ振り分ける。
+ */
+function isImageFile(file: File): boolean {
+  const directPath = (file as unknown as { path?: string }).path;
+  if (directPath) {
+    // 直接パスは **拡張子だけ**で判定する (Sol指摘 G-2)。
+    // MIME (`file.type`) は OS / ブラウザ側の推測値で、native drop では
+    // 拡張子と食い違うことがある。`image/*` を or 条件で通していると
+    // `song.mp3` が MIME 次第で画像経路に入り、localImage として codex に
+    // 渡ってしまう (設計書 design-audio-codexpath.md :140 の「直接パスは
+    // 画像拡張子を必須にする」)。ここは and ではなく **拡張子単独**が正。
+    return isImageFileName(file.name) || isImageFileName(directPath);
+  }
+  // picker/クリップボード経由 (bytes を自前で書き出す) は従来どおり。
+  // 拡張子の無い貼り付け画像を拾うため MIME も見る。
+  return file.type.startsWith("image/") || isImageFileName(file.name);
+}
+
 async function fileToImagePath(file: File): Promise<string | null> {
+  if (!isImageFile(file)) return null;
   const directPath = (file as unknown as { path?: string }).path;
   if (directPath) return directPath;
-  if (!file.type.startsWith("image/") && !isImageFileName(file.name)) return null;
   const bytes = new Uint8Array(await file.arrayBuffer());
   return images.writeUpload(file.name || `plan-chat-${Date.now()}.png`, bytes);
+}
+
+/**
+ * go4: 企画タブが受け入れる drop かの判定 (画像 or 音声)。
+ *
+ * 共有の `isImageDrop` / `dragDrop.ts` は他タブも使うため変更せず、
+ * ここでローカルに包む。dragover 時点では `DataTransfer.items` の kind/type しか
+ * 見られない (ファイル名は取れない) ので、"Files" が含まれれば受け入れ、
+ * 実際の振り分けは drop 後の `addFiles` が拡張子で行う。
+ */
+function isAttachableDrop(dataTransfer: DataTransfer): boolean {
+  if (isImageDrop(dataTransfer)) return true;
+  return Array.from(dataTransfer.items).some(
+    (item) => item.kind === "file" && item.type.startsWith("audio/"),
+  );
 }
 
 function stripStoryboardParams(text: string): string {
@@ -77,6 +132,9 @@ export function PlanWorkspace() {
   const resetThread = usePlanChat((s) => s.resetThread);
   const addPendingImages = usePlanChat((s) => s.addPendingImages);
   const removePendingImage = usePlanChat((s) => s.removePendingImage);
+  const pendingAudio = usePlanChat((s) => s.pendingAudio);
+  const setPendingAudio = usePlanChat((s) => s.setPendingAudio);
+  const clearPendingAudio = usePlanChat((s) => s.clearPendingAudio);
   const storyboardParams = usePlanChat((s) => s.storyboardParams);
 
   const setText = useComposer((s) => s.setText);
@@ -151,25 +209,90 @@ export function PlanWorkspace() {
   const isStoryboardSkill =
     skillEnabled && selectedSkillId === "gori-storyboard";
 
+  /**
+   * 添付ファイルを画像 / 音源 / その他の 3 分岐で受ける (go4)。
+   *
+   * 音源は codex に**渡さない**。probe したメタデータだけを planChat の
+   * pendingAudio に載せ、送信時に文字情報としてプロンプトへ供給する。
+   */
   const addFiles = async (files: FileList | File[]) => {
+    const list = Array.from(files);
     const paths: string[] = [];
-    for (const file of Array.from(files)) {
-      const path = await fileToImagePath(file);
-      if (path) paths.push(path);
+    let audioAttached: AudioAttachment | null = null;
+    let hadAudioCandidate = false;
+    let unsupported = false;
+
+    for (const file of list) {
+      if (isImageFile(file)) {
+        const path = await fileToImagePath(file);
+        if (path) paths.push(path);
+        continue;
+      }
+      const looksAudio =
+        file.type.startsWith("audio/") || isAudioFileName(file.name);
+      if (!looksAudio) {
+        unsupported = true;
+        continue;
+      }
+      // 対応外の音声拡張子 (.aiff 等) はここで弾く。probe に渡すと
+      // 「壊れファイル」と区別がつかないメッセージになる。
+      if (!isAudioFileName(file.name)) {
+        unsupported = true;
+        continue;
+      }
+      hadAudioCandidate = true;
+      if (file.size > MAX_AUDIO_BYTES) {
+        pushToast({ kind: "error", text: audioTooLargeMessage(file.name), ttlMs: 5000 });
+        continue;
+      }
+      try {
+        const path = await fileToAudioPath(file);
+        audioAttached = await probeAudio(path);
+      } catch (err) {
+        pushToast({
+          kind: "error",
+          text: (err as Error)?.message ?? String(err),
+          ttlMs: 6000,
+        });
+      }
     }
-    if (paths.length === 0) {
-      pushToast({ kind: "error", text: "画像ファイルを選んでください。", ttlMs: 3000 });
-      return;
+
+    if (audioAttached) {
+      const replacing = usePlanChat.getState().pendingAudio !== null;
+      setPendingAudio(audioAttached);
+      pushToast(
+        replacing
+          ? { kind: "success", text: AUDIO_REPLACED_MESSAGE, ttlMs: 2800 }
+          : { kind: "success", text: audioAttachedMessage(audioAttached), ttlMs: 2800 },
+      );
     }
-    addPendingImages(paths);
-    pushToast({ kind: "success", text: `${paths.length} 枚を企画チャットに添付しました`, ttlMs: 2400 });
+
+    if (paths.length > 0) {
+      addPendingImages(paths);
+      pushToast({ kind: "success", text: `${paths.length} 枚を企画チャットに添付しました`, ttlMs: 2400 });
+    }
+
+    // 何も添付できず、対応外ファイルだけだった場合のみ形式エラーを出す
+    // (音源の解析失敗・サイズ超過は既に個別トーストを出している)。
+    if (paths.length === 0 && !audioAttached && !hadAudioCandidate && unsupported) {
+      pushToast({ kind: "error", text: UNSUPPORTED_ATTACHMENT_MESSAGE, ttlMs: 4000 });
+    }
   };
 
   const handleSend = async () => {
     const text = draft.trim();
-    if (!text && pendingImages.length === 0) return;
-    setDraft("");
-    await send(text || "添付画像を参照してください。", pendingImages);
+    if (!text && pendingImages.length === 0 && !pendingAudio) return;
+    // B-02 (Wave 2 REVISE): 入力欄を消すのは send が受け付けた後だけ。
+    // 380MB ガードでブロックされた場合 (false) に消してしまうと、
+    // 書いた文章が失われて添付を減らしての再送ができない。
+    // go4: 本文が空のときの自動文。音源のみの添付なら音源向けの誘導文にする
+    // (「添付画像を参照してください。」だと画像が無いのに画像を探させてしまう)。
+    const fallbackText =
+      pendingImages.length > 0
+        ? "添付画像を参照してください。"
+        : "添付音源を踏まえて企画を進めてください。";
+    const accepted = await send(text || fallbackText, pendingImages);
+    if (accepted) setDraft("");
   };
 
   /**
@@ -186,7 +309,10 @@ export function PlanWorkspace() {
     //  AI が Phase C で具体描写の構成を出していることが前提。
     //  この finalize メッセージで、その構成を **そのまま** JSON 化させる。
     //  仮の抽象的な構成を出してきたら ★失敗扱い★ にしてユーザーに再試行を促す。
-    await send(
+    // B-02: この経路は draft / pendingImages を消さないので、ブロックされても
+    // 失われるものは無い。ただし裸呼び出しを残さない規約に従い結果を受け取る
+    // (ブロック理由のトーストはガード側が既に出している)。
+    const accepted = await send(
       [
         "[FINALIZE_STORYBOARD]",
         "",
@@ -203,6 +329,11 @@ export function PlanWorkspace() {
         "[STORYBOARD_PARAMS] { ... 構造化JSON ... }",
       ].join("\n"),
     );
+    if (!accepted) {
+      console.warn(
+        "[PlanWorkspace] 確定の送信が受け付けられませんでした (送信中 / 添付が容量超過)",
+      );
+    }
   };
 
   /**
@@ -251,6 +382,18 @@ export function PlanWorkspace() {
 
   return (
     <section className="relative flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-[#2a2a2a] bg-[#181818]">
+      {/*
+        ページヘルプ (ui-placement-grammar §4)。本タブは常時表示のヘッダー行を
+        持たないため、右上のステータス列と対になる左上へ常設で置く
+        (右上の列は messages 件数などの条件付き表示なので、ヘルプの到達性を
+        そこに乗せない)。
+      */}
+      <div className="absolute left-4 top-2 z-20">
+        <PageHelp
+          what="作りたいものを相談すると、AI が対話でプロンプトに仕上げ、そのまま画像生成に渡せます。"
+          first="まずは入力欄に、作りたいものを思いつきの一言で書いてください。"
+        />
+      </div>
       {/*
         ステータスバッジとリセットは右上にフローティング配置。
         ・チャットバブルと被らないよう、scroll エリア外側の上端にオーバーレイ。
@@ -326,7 +469,7 @@ export function PlanWorkspace() {
           いずれも添付画像として企画チャットに追加する。
         */
         onDragOver={(event) => {
-          if (isImageDrop(event.dataTransfer)) event.preventDefault();
+          if (isAttachableDrop(event.dataTransfer)) event.preventDefault();
         }}
         onDrop={(event) => {
           event.preventDefault();
@@ -375,6 +518,12 @@ export function PlanWorkspace() {
 
       <div className="border-t border-[#242424] bg-[#161616] p-3">
         {/*
+          g8t (2026-08-04): 未保存企画チャットの案件昇格バンド。
+          プロジェクト未選択のまま進めた会話をその場で案件に確定する導線で、
+          スキル/通常の両モードで確定バンドの **上** に出す。
+        */}
+        <PromoteToProjectBand />
+        {/*
           ストーリーカットスキル時の「確定」ボタン (絵コンテ用 JSON を確定して生成タブへ)。
           通常企画タブの確定は下の !isStoryboardSkill ブロックで別途表示する。
           STΛCK 指示 (2026-05-15): キーワード検知ではなくボタン明示。
@@ -419,6 +568,8 @@ export function PlanWorkspace() {
         <ChatInput
           value={draft}
           attachments={pendingImages}
+          audio={pendingAudio}
+          onRemoveAudio={clearPendingAudio}
           onAddFiles={addFiles}
           onAddImagePaths={addPendingImages}
           onOpenLibrary={() => setLibraryOpen(true)}
@@ -540,6 +691,18 @@ function ChatBubble({
               {displayText || (msg.streaming ? "…" : "")}
             </p>
             <AttachmentThumbs paths={msg.attachedImages ?? []} />
+            {/* go4: 送信した音源をユーザー吹き出しに残す (再起動後の復元でも表示)。 */}
+            {msg.attachedAudio && (
+              <div className="mt-2 flex items-center gap-1.5 rounded-md border border-[#343434] bg-[#0b0b0b] px-2 py-1">
+                <span className="text-[12px] text-pink-400">♪</span>
+                <span className="max-w-[200px] truncate text-[10px] font-bold text-neutral-300">
+                  {msg.attachedAudio.fileName}
+                </span>
+                <span className="text-[10px] text-neutral-500">
+                  ({formatDuration(msg.attachedAudio.durationSec)})
+                </span>
+              </div>
+            )}
           </>
         ) : (
           <>
@@ -698,6 +861,8 @@ function CheckIcon() {
 function ChatInput({
   value,
   attachments,
+  audio: audioAttachment,
+  onRemoveAudio,
   onAddFiles,
   onOpenLibrary,
   onAddImagePaths,
@@ -708,6 +873,9 @@ function ChatInput({
 }: {
   value: string;
   attachments: string[];
+  /** go4: 添付中の音源 (1 曲まで)。null なら未添付。 */
+  audio: AudioAttachment | null;
+  onRemoveAudio: () => void;
   onAddFiles: (files: FileList | File[]) => void;
   /** ライブラリ選択モーダルを開く (2026-07-27 追加)。 */
   onOpenLibrary: () => void;
@@ -719,7 +887,8 @@ function ChatInput({
   disabled: boolean;
 }) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const canSend = value.trim().length > 0 || attachments.length > 0;
+  const canSend =
+    value.trim().length > 0 || attachments.length > 0 || audioAttachment !== null;
   /** 企画タブからプリセットを呼び出し、draft 末尾に追記する。 */
   const presetBtnRef = useRef<HTMLButtonElement | null>(null);
   const [presetOpen, setPresetOpen] = useState(false);
@@ -740,6 +909,27 @@ function ChatInput({
 
   return (
     <div className="space-y-2">
+      {/* go4: 添付音源チップ。役割トグル (キャラ/スタイル) は音声には出さない。 */}
+      {audioAttachment && (
+        <div className="flex items-center gap-2 rounded-lg border border-[#2a2a2a] bg-[#101010] px-2.5 py-2">
+          <span className="text-[13px] text-pink-400">♪</span>
+          <span className="max-w-[220px] truncate text-[11px] font-bold text-neutral-200">
+            {audioAttachment.fileName}
+          </span>
+          <span className="text-[10px] text-neutral-500">
+            ({formatDuration(audioAttachment.durationSec)})
+          </span>
+          <button
+            type="button"
+            onClick={onRemoveAudio}
+            className="ml-auto text-neutral-500 hover:text-white"
+            title="音源を外す"
+            aria-label="音源を外す"
+          >
+            <CloseIcon />
+          </button>
+        </div>
+      )}
       {attachments.length > 0 && (
         <div className="space-y-1.5 rounded-lg border border-[#2a2a2a] bg-[#101010] p-2">
           <div>
@@ -782,7 +972,7 @@ function ChatInput({
         <input
           ref={fileInputRef}
           type="file"
-          accept="image/*"
+          accept="image/*,audio/*,.mp3,.wav,.m4a,.aac,.flac,.ogg"
           multiple
           onChange={onPick}
           className="hidden"
@@ -821,7 +1011,7 @@ function ChatInput({
               type="button"
               onClick={() => fileInputRef.current?.click()}
               disabled={disabled}
-              title="画像を添付"
+              title="画像・音源を添付"
               aria-label="画像を添付"
               className="flex h-8 w-8 items-center justify-center rounded-full text-neutral-400 hover:bg-[#1a1a1a] hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
             >
@@ -909,13 +1099,137 @@ function ChatInput({
   );
 }
 
+/**
+ * g8t (2026-08-04): 未保存企画チャットの案件昇格バンド。
+ *
+ * プロジェクト未選択 + 会話ありのときだけ、確定バンドの上に出す。
+ * 名前は deriveTitle (最初の user メッセージ先頭40字 = 履歴ページの表示名) を
+ * プリフィルし、編集可。処理は planChat.promoteToProject に委譲する。
+ * 昇格は **ディスク保存の完了を待つ非同期処理** (会話が消える窓を作らないため)
+ * なので、待機中は promoting でボタンを止め、失敗したら台帳に残っている旨を伝える。
+ *
+ * sending / starting で disable **しない**: 昇格は thread を作り直さないので
+ * 応答ストリーミング中でも安全で、turn/completed は昇格後の案件へ保存される。
+ */
+function PromoteToProjectBand() {
+  const activeProjectId = useActiveProject((s) => s.activeProjectId);
+  const messages = usePlanChat((s) => s.messages);
+  const promoteToProject = usePlanChat((s) => s.promoteToProject);
+  // 保存完了を待つあいだボタンを止める (連打で案件が2つ出来るのを見た目でも防ぐ。
+  // 実体の二重実行ガードは planChat 側の promoting フラグ)。
+  const promoting = usePlanChat((s) => s.promoting);
+  const pushToast = useToasts((s) => s.push);
+  const [editing, setEditing] = useState(false);
+  const [name, setName] = useState("");
+
+  if (activeProjectId !== null || messages.length === 0) return null;
+
+  const startEditing = () => {
+    setName(deriveTitle(messages));
+    setEditing(true);
+  };
+
+  const submit = async () => {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    const result = await promoteToProject(trimmed);
+    if (!result.ok) {
+      // 保存失敗と、そもそも実行しなかった (guard) を区別して伝える。
+      // save-failed でも会話は未保存台帳に残っているので、そこを明言して
+      // 「消えた」と誤解させない。編集状態は畳まず、そのまま再試行できる。
+      pushToast(
+        result.reason === "save-failed"
+          ? {
+              kind: "error",
+              text: "案件の保存に失敗しました。会話は「未保存」のまま残っているので、もう一度お試しください",
+              ttlMs: 8000,
+            }
+          : {
+              kind: "error",
+              text: "案件にできませんでした。会話が空でないか確認してください",
+              ttlMs: 5000,
+            },
+      );
+      return;
+    }
+    pushToast({
+      kind: "success",
+      text: `案件「${result.projectName}」を作成し、企画チャットを保存しました。ここからの会話と生成画像も自動で保存されます`,
+      ttlMs: 4200,
+    });
+    // バンド自体は activeProjectId が立つことでレンダー条件から消えるが、
+    // 状態は畳んだ形に戻しておく (次に「保存しない」へ戻ったときの初期状態)。
+    setEditing(false);
+    setName("");
+  };
+
+  if (!editing) {
+    return (
+      <div className="mb-2 flex items-center justify-between gap-3 rounded-lg border border-amber-400/30 bg-amber-500/5 px-3 py-2">
+        <p className="text-[11px] font-bold leading-relaxed text-amber-100">
+          この企画はまだ案件になっていません（履歴に7日間だけ残ります）
+        </p>
+        <button
+          type="button"
+          onClick={startEditing}
+          className="shrink-0 rounded-lg bg-amber-500 px-4 py-1.5 text-xs font-black text-white shadow hover:bg-amber-400"
+          title="ここまでの会話を新しい案件として保存する"
+        >
+          案件にする
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mb-2 flex items-center gap-2 rounded-lg border border-amber-400/30 bg-amber-500/5 px-3 py-2">
+      <input
+        type="text"
+        value={name}
+        onChange={(event) => setName(event.target.value)}
+        onKeyDown={(event) => {
+          // IME 変換確定の Enter を送信と誤認しない (ActiveProjectSelector と同パターン)。
+          const isComposing =
+            (event.nativeEvent as KeyboardEvent).isComposing || event.keyCode === 229;
+          if (event.key === "Enter" && !isComposing) {
+            event.preventDefault();
+            void submit();
+          } else if (event.key === "Escape") {
+            setEditing(false);
+          }
+        }}
+        placeholder="案件名"
+        autoFocus
+        className="h-7 flex-1 rounded-md border border-[#343434] bg-[#0b0b0b] px-2 text-xs text-neutral-100 outline-none focus:border-amber-400"
+      />
+      <button
+        type="button"
+        onClick={() => void submit()}
+        disabled={!name.trim() || promoting}
+        className="h-7 shrink-0 rounded-md bg-amber-500 px-3 text-[11px] font-bold text-white hover:bg-amber-400 disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-500"
+      >
+        {promoting ? "保存中…" : "この名前で作成"}
+      </button>
+      <button
+        type="button"
+        onClick={() => setEditing(false)}
+        disabled={promoting}
+        className="h-7 shrink-0 rounded-md border border-[#343434] px-3 text-[11px] font-bold text-neutral-300 hover:bg-[#242424] disabled:cursor-not-allowed disabled:text-neutral-600"
+      >
+        やめる
+      </button>
+    </div>
+  );
+}
+
 function AttachmentThumbs({ paths }: { paths: string[] }) {
   if (paths.length === 0) return null;
   return (
     <div className="flex flex-wrap gap-2 pt-1">
       {paths.map((path) => (
         <div key={path} className="overflow-hidden rounded-md border border-pink-300/30 bg-black/20">
-          <SafeImage path={path} alt={basename(path)} className="h-16 w-16 object-cover" />
+          {/* y73 (2026-08-03): 高さ固定のまま幅を原画比率に追従させる (行高さは崩さない) */}
+          <SafeImage path={path} alt={basename(path)} className="h-16 w-auto max-w-32 object-contain" />
         </div>
       ))}
     </div>

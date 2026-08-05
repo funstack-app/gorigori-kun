@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { convertFileSrc } from "@tauri-apps/api/core";
 import { useThreads } from "../lib/store/threads";
 import {
   ASPECT_OPTIONS,
@@ -17,6 +16,8 @@ import { useSessions } from "../lib/store/sessions";
 import { useWorkflow, type ImageMode, type VideoMode } from "../lib/store/workflow";
 import { PromptEditorModal } from "./PromptEditorModal";
 import { PromptLibraryModal } from "./PromptLibraryModal";
+import { SketchPadModal } from "./sketch/SketchPadModal";
+import { SafeImage } from "./SafeImage";
 import { images as imagesIpc } from "../lib/ipc";
 import { resolveImageMentions } from "../lib/scene/resolveImageMentions";
 
@@ -42,7 +43,11 @@ function parseDraggedReference(e: React.DragEvent): Reference | null {
         typeof parsed.name === "string" && parsed.name
           ? parsed.name
           : basename(parsed.path),
-      source: parsed.source === "upload" ? "upload" : "gallery",
+      // 既知の source だけを通す。未知の値は "gallery" に倒す (未信頼入力の正規化)。
+      source:
+        parsed.source === "upload" || parsed.source === "sketch"
+          ? parsed.source
+          : "gallery",
       role: parsed.role,
     };
   } catch {
@@ -106,6 +111,7 @@ export function PromptComposer({
 
   const [libraryOpen, setLibraryOpen] = useState(false);
   const [saveDraftOpen, setSaveDraftOpen] = useState(false);
+  const [sketchOpen, setSketchOpen] = useState(false);
 
   // Slash-command suggestion state. When the user starts the prompt
   // with `/`, we filter saved prompts by title/body and surface them
@@ -246,6 +252,8 @@ export function PromptComposer({
         model: t.selectedModel,
         effort: t.selectedEffort,
         aspect: snap.aspect,
+        // マスク編集は元画像と同じ解像度が正なので、規格寸法への正規化から外す。
+        enforceAspect: !maskPaths.some(Boolean),
       });
       const okCount = result.generatedPaths.length;
       // 失敗時はバックエンド(batch_gen)が返す真因 errors[] の先頭をトーストに出す。
@@ -642,6 +650,14 @@ export function PromptComposer({
             ariaLabel="画像を添付"
             dark={dark}
           />
+          <ActionButton
+            onClick={() => setSketchOpen(true)}
+            icon=""
+            label="スケッチ"
+            title="手描きのラフを描いて参照に追加 / ブロックアウト化する"
+            ariaLabel="スケッチパッドを開く"
+            dark={dark}
+          />
           {/*
             Command Dock W3-1: 制作コマンドを「チャット」から「コマンド」体験へ。
             - クリア: 送信後もプロンプトは残る方針 (reset() は references だけ落とす)
@@ -818,6 +834,7 @@ export function PromptComposer({
         mode={{ kind: "create", initialBody: text }}
         onClose={() => setSaveDraftOpen(false)}
       />
+      <SketchPadModal open={sketchOpen} onClose={() => setSketchOpen(false)} />
     </div>
   );
 }
@@ -1021,8 +1038,8 @@ function ReferenceChip({
       }`}
         title={ref_.name}
       >
-        <img
-          src={convertFileSrc(ref_.path)}
+        <SafeImage
+          path={ref_.path}
           alt={ref_.name}
           className="h-full w-full object-cover"
         />
@@ -1040,6 +1057,15 @@ function ReferenceChip({
             aria-label="アップロード画像"
           >
             ↑
+          </span>
+        )}
+        {ref_.source === "sketch" && !hasMask && (
+          <span
+            className="pointer-events-none absolute bottom-0 right-0 rounded-tl bg-emerald-500/80 px-1 text-[9px] font-bold text-white"
+            aria-label="スケッチ"
+            title="スケッチ"
+          >
+            ✎
           </span>
         )}
         {hasMask ? (

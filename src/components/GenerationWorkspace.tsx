@@ -3,6 +3,7 @@ import { SafeImage, SafeVideo } from "./SafeImage";
 import { WorkspaceTabs } from "./WorkspaceTabs";
 import { SceneBuilder, VideoSceneBuilder } from "./scene";
 import { ConstructedPromptPanel } from "./ConstructedPromptPanel";
+import { PageHelp } from "./PageHelp";
 import { useSceneGeneration } from "../lib/scene/useSceneGeneration";
 import { AdAgentPanel } from "./agents";
 import { EditWorkspace } from "./EditWorkspace";
@@ -20,7 +21,7 @@ import {
 import { useVideoGen } from "../lib/store/videoGen";
 import { history, sessions as sessionsApi, type PromptHistoryRow, type SessionFull, type TurnWithImages } from "../lib/ipc";
 import { useActiveProject } from "../lib/store/activeProject";
-import { exportProjectCsv, useProjects } from "../lib/store/projects";
+import { useProjects } from "../lib/store/projects";
 import { useSessions } from "../lib/store/sessions";
 import { ActiveProjectSelector } from "./ActiveProjectSelector";
 import { ensureStoryboardEventListener } from "../lib/storyboard/events";
@@ -30,6 +31,12 @@ import { usePlanChat } from "../lib/store/planChat";
 import { useScenePromptOverride } from "../lib/store/scenePrompt";
 import { useSkillMode } from "../lib/store/skillMode";
 import { useStoryboardRun } from "../lib/store/storyboardRun";
+import {
+  hasDiskSnapshot,
+  hydratePastRunsFromDisk,
+  startRunSnapshotWriter,
+} from "../lib/store/storyboardRunSnapshot";
+import { PastRunViewer } from "./PastRunViewer";
 import { useToasts } from "../lib/store/toasts";
 import { StoryboardCutCard } from "./StoryboardCutCard";
 import { SkillRunActions } from "./SkillRunActions";
@@ -52,10 +59,16 @@ export function GenerationWorkspace() {
         そのスキルに最適化されたモードに切り替わる仕様に変更する。
       */}
       <div className="border-b border-[#242424] bg-[#121212] px-4 py-3">
+        {/*
+          S2a (2026-08-04): 「CSVで書き出し」をタブ列から撤去した。
+          重複導線 (プロジェクト詳細シートに同機能あり) かつ低頻度機能が
+          一等地を常時占有していたため (ui-placement-grammar §1 / §5)。
+          機能自体は残す — ProjectCsvExportButton の実装とプロジェクト詳細側の
+          導線は無変更で、書き出しはそちらから行う。
+        */}
         <div className="flex items-center gap-3">
           <WorkspaceTabs />
           <ActiveProjectSelector />
-          <ProjectCsvExportButton />
         </div>
       </div>
 
@@ -66,52 +79,6 @@ export function GenerationWorkspace() {
         {activeTab === "edit" && <EditWorkspace />}
       </div>
     </section>
-  );
-}
-
-function ProjectCsvExportButton() {
-  const activeProjectId = useActiveProject((s) => s.activeProjectId);
-  const activeProject = useProjects((s) =>
-    activeProjectId ? s.projects.find((p) => p.id === activeProjectId) ?? null : null,
-  );
-  const pushToast = useToasts((s) => s.push);
-  const [exporting, setExporting] = useState(false);
-
-  if (!activeProject) return null;
-
-  const handleExport = async () => {
-    setExporting(true);
-    try {
-      const saved = await exportProjectCsv(activeProject.id);
-      if (saved) {
-        pushToast({
-          kind: "success",
-          text: "プロジェクトの生成記録をCSVで保存しました",
-          ttlMs: 3200,
-        });
-      }
-    } catch (err) {
-      console.error("project CSV export failed", err);
-      pushToast({
-        kind: "error",
-        text: "CSVの保存に失敗しました。保存先を確認して、もう一度お試しください。",
-        ttlMs: 5000,
-      });
-    } finally {
-      setExporting(false);
-    }
-  };
-
-  return (
-    <button
-      type="button"
-      disabled={exporting}
-      onClick={() => void handleExport()}
-      className="h-8 shrink-0 rounded-md border border-[#343434] bg-[#181818] px-3 text-[11px] font-bold text-neutral-300 transition hover:border-pink-400 hover:text-white disabled:cursor-wait disabled:opacity-50"
-      title={`${activeProject.name} の画像と生成記録をCSVで保存`}
-    >
-      {exporting ? "書き出し中..." : "CSVで書き出し"}
-    </button>
   );
 }
 
@@ -137,7 +104,14 @@ function LeftPanel({ purpose }: { purpose: "artwork" | "ad" | "videoStory" }) {
   return (
     <section className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-[#2a2a2a] bg-[#181818]">
       <div className="shrink-0 border-b border-[#242424] px-4 py-3">
-        <h3 className="text-sm font-black text-white">{title}</h3>
+        <div className="flex items-center justify-between gap-2">
+          <h3 className="text-sm font-black text-white">{title}</h3>
+          <PageHelp
+            what="左の要素を選ぶかプロンプトを書くと、その内容で画像を生成します。参照画像・プリセット・スキルで狙いを固定できます。"
+            first="まずは左でシーンの要素を選ぶか、下の入力欄に作りたい絵を書いてください。"
+            note="鉛筆アイコンから、自分で描いたスケッチを参照や3Dシーンにできます。"
+          />
+        </div>
       </div>
 
       {purpose === "artwork" && (
@@ -1196,7 +1170,16 @@ function StoryboardRunPanel() {
   const [debugOpen, setDebugOpen] = useState(false);
   const [debugLogContent, setDebugLogContent] = useState<string | null>(null);
   const [debugLoading, setDebugLoading] = useState(false);
-  const completedToastShown = useRef(false);
+  const completedToastRunId = useRef<string | null>(null);
+  // owt: 読み取り専用の過去 run ビューで開いている runId。null = 閉じている。
+  const [pastRunViewerId, setPastRunViewerId] = useState<string | null>(null);
+
+  // owt: run 状態の永続化を開始し、ディスク上の過去 run を一覧へハイドレートする。
+  // どちらも内部で二重実行を防ぐため、マウント時 1 回でよい。
+  useEffect(() => {
+    startRunSnapshotWriter();
+    void hydratePastRunsFromDisk();
+  }, []);
 
   // 完了済み run の debug-log.json を読み込む。構造化プロンプト履歴をUIで確認するため。
   const loadDebugLog = async () => {
@@ -1217,10 +1200,38 @@ function StoryboardRunPanel() {
   };
 
   useEffect(() => {
-    if (run.status !== "completed" || completedToastShown.current) return;
-    completedToastShown.current = true;
-    pushToast({ kind: "success", text: "連続カット生成が完了しました。採用カットをプロジェクトへ追加しました。", ttlMs: 4200 });
-  }, [run.status, pushToast]);
+    if (run.status !== "completed") return;
+    if (!run.activeRunId || completedToastRunId.current === run.activeRunId)
+      return;
+    completedToastRunId.current = run.activeRunId;
+    const r = run.projectAddResult;
+    if (!r) return; // ラフ run: プロジェクト追加は無いので、この文言のトーストは出さない
+    if (r.noProject) {
+      pushToast({
+        kind: "info",
+        text: "連続カット生成が完了しました。プロジェクト未選択のため、採用カットはプロジェクトへ追加されていません。",
+        ttlMs: 6000,
+      });
+    } else if (r.total > 0 && r.added === r.total) {
+      pushToast({
+        kind: "success",
+        text: `連続カット生成が完了しました。採用カット ${r.added} 件をプロジェクトへ追加しました。`,
+        ttlMs: 4200,
+      });
+    } else if (r.total > 0 && r.added < r.total) {
+      pushToast({
+        kind: "warn",
+        text: `連続カット生成が完了しました。採用カット ${r.added} / ${r.total} 件をプロジェクトへ追加しました。`,
+        ttlMs: 6000,
+      });
+    } else {
+      pushToast({
+        kind: "success",
+        text: "連続カット生成が完了しました。",
+        ttlMs: 4200,
+      });
+    }
+  }, [run.status, run.activeRunId, run.projectAddResult, pushToast]);
 
   const cuts = useMemo(() => {
     const items = Array.from(run.cuts.values());
@@ -1252,15 +1263,20 @@ function StoryboardRunPanel() {
       <div className="border-b border-[#242424] bg-[#161616] px-4 py-3">
         <div className="flex items-center justify-between gap-3">
           <div>
+            {/*
+              S2b (2026-08-04): 開発者語彙 (run ID / manifest) をヘッダーの常時表示から
+              撤去し、下部「デバッグログ表示」の展開内へ退避した
+              (ui-placement-grammar §6)。run ID は展開内の既存表示で、manifest は
+              同展開内の保存状態行で確認できる。
+              「レート使用率」はユーザー価値がある実利用情報のため常時表示のまま残す。
+            */}
             <h3 className="flex items-center gap-1.5 text-sm font-black text-white">
               <ClapperIcon />
               <span>連続カット生成 - {statusLabel(run.status)}</span>
             </h3>
-            <p className="mt-0.5 text-[11px] text-neutral-500">run: {run.activeRunId ?? "未開始"}</p>
           </div>
           <div className="flex items-center gap-2 text-[11px] font-bold">
             <span className="rounded border border-[#343434] bg-[#101010] px-2 py-1 text-neutral-300">レート使用率: {Math.round(usedPercent)}%</span>
-            {run.manifestPath && <span className="rounded bg-emerald-500/15 px-2 py-1 text-emerald-200">manifest 保存済み</span>}
           </div>
         </div>
       </div>
@@ -1312,9 +1328,18 @@ function StoryboardRunPanel() {
                 {debugLoading ? "読み込み中..." : "構造化プロンプト履歴を読み込む"}
               </span>
             </button>
+            {/*
+              S2b (2026-08-04): ヘッダーから退避した開発者語彙の受け皿。
+              run ID は既存表示をそのまま使い、manifest の保存状態をここに追加した。
+            */}
             <span className="text-[10px] text-neutral-500">
               {run.activeRunId ? `run: ${run.activeRunId}` : "run なし"}
             </span>
+            {run.manifestPath && (
+              <span className="rounded bg-emerald-500/15 px-2 py-0.5 text-[10px] font-bold text-emerald-200">
+                manifest 保存済み
+              </span>
+            )}
           </div>
           {debugLogContent ? (
             <details open className="mb-2 rounded border border-[#242424] bg-[#0f0f0f] p-2">
@@ -1379,23 +1404,47 @@ function StoryboardRunPanel() {
                 過去 run ({run.pastRuns.length}件)
               </summary>
               <ul className="mt-2 space-y-1 text-[11px] text-neutral-300">
-                {run.pastRuns.map((p) => (
-                  <li key={p.runId} className="rounded bg-[#0b0b0b] p-1.5">
-                    <p className="font-mono text-[10px] text-neutral-500">
-                      {p.runId}
-                    </p>
-                    <p>
-                      {p.confirmedCuts} / {p.totalCuts} カット採用 · {p.status}
-                    </p>
-                    <p className="mt-0.5 text-[10px] text-neutral-400">
-                      {p.storyDigest}
-                    </p>
-                  </li>
-                ))}
+                {run.pastRuns.map((p) => {
+                  // owt: ディスクにスナップショットがある run だけ読み取り専用ビューを
+                  // 開ける。無い run (このセッション内で退避されただけ) は従来表示のまま。
+                  const openable = hasDiskSnapshot(p.runId);
+                  return (
+                    <li
+                      key={p.runId}
+                      className={`rounded bg-[#0b0b0b] p-1.5 ${
+                        openable ? "cursor-pointer hover:bg-[#151515]" : ""
+                      }`}
+                      onClick={
+                        openable ? () => setPastRunViewerId(p.runId) : undefined
+                      }
+                    >
+                      <p className="font-mono text-[10px] text-neutral-500">
+                        {p.runId}
+                      </p>
+                      <p>
+                        {p.confirmedCuts} / {p.totalCuts} カット採用 · {p.status}
+                      </p>
+                      <p className="mt-0.5 text-[10px] text-neutral-400">
+                        {p.storyDigest}
+                      </p>
+                      {openable && (
+                        <p className="mt-0.5 text-[10px] text-sky-400">
+                          クリックで内容を表示（読み取り専用）
+                        </p>
+                      )}
+                    </li>
+                  );
+                })}
               </ul>
             </details>
           )}
         </div>
+      )}
+      {pastRunViewerId && (
+        <PastRunViewer
+          runId={pastRunViewerId}
+          onClose={() => setPastRunViewerId(null)}
+        />
       )}
     </section>
   );

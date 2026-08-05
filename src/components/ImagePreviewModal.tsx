@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { convertFileSrc } from "@tauri-apps/api/core";
 import { useImagePreview } from "../lib/store/imagePreview";
 import { useImages } from "../lib/store/images";
 import { useMaskEditor } from "../lib/store/maskEditor";
@@ -14,6 +13,8 @@ import { useEditor } from "./edit/editor/editorStore";
 import { deleteGalleryImage } from "./galleryItemMenu";
 import { ImageMetaPanel } from "./ImageMetaPanel";
 import { RegisterPresetDialog } from "./RegisterPresetDialog";
+import { SafeImage, SafeVideo } from "./SafeImage";
+import { SceneFromImageDialog } from "./skills/scene3d/SceneFromImageDialog";
 
 export function ImagePreviewModal() {
   const path = useImagePreview((s) => s.path);
@@ -53,6 +54,8 @@ export function ImagePreviewModal() {
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   /** F-#1: プリセット登録ダイアログの開閉。null なら閉じ、文字列なら対象画像 path。 */
   const [presetTarget, setPresetTarget] = useState<string | null>(null);
+  // 3Dシーン化 (Slice D)。写真は元画像のほうがポーズ検出精度が高いので正規化はスキップ可
+  const [scene3dTarget, setScene3dTarget] = useState<string | null>(null);
   /**
    * STΛCK 指示 (2026-05-19): 画像ダブルクリックで画面いっぱい表示。
    * もう一度ダブルクリック or Esc で通常表示に戻る。
@@ -155,6 +158,9 @@ export function ImagePreviewModal() {
   if (!path) return null;
 
   const name = item?.name ?? path.split("/").pop() ?? "";
+  // 動画は3Dシーン化の入力にできない (解析・ポーズ推定はどちらも静止画が前提)。
+  // 表示の出し分けと右クリックメニューの出し分けで同じ判定を使う。
+  const isVideo = /^.+\.(mp4|webm|mov|m4v)$/i.test(path);
 
   return (
     <div
@@ -207,20 +213,20 @@ export function ImagePreviewModal() {
           参照ラックや企画タブ等にドラッグで投げ込める。fullscreen 中も draggable
           のままだが、cursor の見た目で zoom-in/out 操作と区別できる。
         */}
-        {/^.+\.(mp4|webm|mov|m4v)$/i.test(path) ? (
+        {isVideo ? (
           // 動画は controls 付きで再生 (音も出る)。クリックで再生/一時停止できるよう
           // モーダルの閉じ操作と競合しないよう stopPropagation。
-          <video
-            src={convertFileSrc(path)}
+          <SafeVideo
+            path={path}
             className={
               fullscreen
                 ? "max-h-screen max-w-full object-contain"
                 : "max-h-full max-w-full object-contain"
             }
+            fallbackLabel="動画が見つかりません"
             controls
             autoPlay
             loop
-            playsInline
             onClick={(e) => e.stopPropagation()}
             onDoubleClick={(e) => {
               e.stopPropagation();
@@ -228,8 +234,8 @@ export function ImagePreviewModal() {
             }}
           />
         ) : (
-          <img
-            src={convertFileSrc(path)}
+          <SafeImage
+            path={path}
             alt={name}
             className={
               fullscreen
@@ -460,6 +466,17 @@ export function ImagePreviewModal() {
                   close();
                 },
               },
+              // 添付画像→3Dシーン再構成の主導線 (Slice D)。
+              // 動画は入力にできないので項目ごと出さない (押せるのに必ず失敗する導線を作らない)。
+              ...(isVideo
+                ? []
+                : [
+                    {
+                      label: "3Dシーンにする…",
+                      icon: "3",
+                      onClick: () => setScene3dTarget(path),
+                    },
+                  ]),
               { kind: "separator" },
               {
                 label: "プリセットに登録…",
@@ -505,6 +522,11 @@ export function ImagePreviewModal() {
           onClose={() => setPresetTarget(null)}
         />
       )}
+      <SceneFromImageDialog
+        open={scene3dTarget !== null}
+        imagePath={scene3dTarget}
+        onClose={() => setScene3dTarget(null)}
+      />
     </div>
   );
 }

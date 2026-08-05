@@ -188,8 +188,14 @@ pub fn start_watcher(
                         if is_in_masks_dir(p) {
                             continue;
                         }
-                        // CREATE / MODIFY only (REMOVE is ignored — gallery handles
-                        // deletion via direct project moves)
+                        // CREATE / MODIFY only. REMOVE is deliberately not picked up:
+                        // `save_to_project` moves files with `std::fs::rename`
+                        // (images.rs), which reaches the watcher as a REMOVE from the
+                        // watched directory. Acting on it would mistake "moved into a
+                        // project" for "deleted from the gallery" and drop the item the
+                        // frontend just re-pointed at the new path. External deletions
+                        // are handled by SafeImage's "image not found" placeholder and
+                        // by Settings → "画像パスを修復する" (images_relink_missing).
                         use notify::EventKind;
                         let is_create_or_modify =
                             matches!(ev.event.kind, EventKind::Create(_) | EventKind::Modify(_));

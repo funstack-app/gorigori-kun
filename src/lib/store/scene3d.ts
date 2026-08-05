@@ -8,6 +8,7 @@
  * カメラ操作(プリセット/レンズ/尺)が効く。CapCut風タイムラインの正本
  */
 
+import { invoke } from "@tauri-apps/api/core";
 import { create } from "zustand";
 
 import {
@@ -25,6 +26,7 @@ import type {
   SceneShot,
   Vec3,
 } from "../scene3d/types";
+import type { SceneLayoutDraft } from "../scene3d/layoutAnalysis";
 import {
   getShotMove,
   locateShot,
@@ -258,6 +260,24 @@ type Scene3dState = {
    * 返り値: 実際に取り込んだカット数。
    */
   importStoryboardCuts: (cuts: StoryboardCutImport[], mode: "append" | "replace") => number;
+  /**
+   * 画像の移動 / relink (旧→新パス) を storyboardOrigins[].imagePath へ追従させる (S3)。
+   *
+   * ここが無いと「プロジェクトへ移動」した瞬間に 3D の由来記録が旧パスのままになり、
+   * 由来サムネが割れる。ヒットが 1 件も無ければ state を変えない。
+   */
+  relinkStoryboardOrigins: (pathMap: Record<string, string>) => void;
+
+  /**
+   * 画像→3Dシーン再構成 (Slice D) の着地点。解析済みレイアウト草案を実シーンへ写像する。
+   * 追加するのは entities(人物+小物) と cameras/shots のみ。schemaVersion は 3 のまま。
+   */
+  applyImageScene: (
+    draft: SceneLayoutDraft,
+    poseClipId: string | null,
+    /** 入力画像のアスペクト (幅/高さ)。渡すとカメラ枠の比率へ反映する (r3 追補)。 */
+    sourceAspect?: number | null,
+  ) => ImageSceneApplyResult;
 
   /** カット操作(CapCut風タイムライン) */
   selectShot: (id: string) => void;
@@ -382,6 +402,96 @@ function migrateProject(project: SceneProject): SceneProject {
       return { ...e, motion: { ...e.motion, speed, path } };
     }),
   };
+}
+
+/**
+ * 画像→3Dシーン再構成 (Slice D) の反映結果。
+ * UI が「置換したのか追記したのか」「何体置いたのか」を正直に告知するために返す。
+ */
+export type ImageSceneApplyResult = {
+  mode: "replace" | "append";
+  /** 追加した人物マネキンの ID。person が無ければ null */
+  personEntityId: string | null;
+  /** 追加した小物の数 */
+  objectCount: number;
+  /** 追加したカメラ ID (追加カットのカメラ) */
+  cameraId: string;
+};
+
+/**
+ * 「初期未編集シーン」判定 (設計書 §1 論点4-4)。
+ *
+ * 既定プロジェクトと**深く等価**なときだけ置換してよい。1つでもユーザーの手が
+ * 入っていたら追記に倒す (既存エンティティを消さない)。
+ *
+ * 実装は `createDefaultProject()` との構造比較。個別フィールドを列挙する方式だと
+ * 「回転・拡大縮小・カメラ編集・ショット編集・画面比率」のように**見落とした項目が
+ * 静かに初期状態と誤認され、ユーザーの編集を消す** (Sol 評価 blocking B-3)。
+ * 既定生成関数を正本にすれば、types.ts に項目が増えても自動で追随する。
+ *
+ * `createDefaultProject()` は時刻・乱数を含まない決定論な生成関数なので、
+ * 生成しなおして JSON 比較するのが最も確実。
+ */
+function isPristineScene(project: SceneProject): boolean {
+  const pristine = createDefaultProject();
+  // 生成のたびに値が変わる項目は無いので、キー順を揃えた安定シリアライズで足りる。
+  return stableStringify(project) === stableStringify(pristine);
+}
+
+/**
+ * キー順に依存しない安定シリアライズ。
+ * localStorage 復元・spread によるキー順の入れ替えで比較が壊れないようにする。
+ * undefined のプロパティは「無い」と同一視する (既定生成と復元でズレる項目のため)。
+ */
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  const entries = Object.entries(value as Record<string, unknown>)
+    .filter(([, v]) => v !== undefined)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${stableStringify(v)}`).join(",")}}`;
+}
+
+/** 度 → ラジアン。解析 JSON は度、SceneEntity.rotationY はラジアン */
+function degToRad(deg: number): number {
+  return (deg * Math.PI) / 180;
+}
+
+/**
+ * 入力画像のアスペクト (幅/高さ) を、scene3d が持つ3つの比率のうち最も近いものへ丸める
+ * (r3 追補: 入力画像のアスペクトをカメラ枠へ反映。4:5 等の変換表は作らない = 最小)。
+ * 判定できない値なら null を返し、呼び出し元は既存の比率を維持する。
+ */
+function snapSourceAspect(aspect: number | null | undefined): SceneAspectRatio | null {
+  if (typeof aspect !== "number" || !Number.isFinite(aspect) || aspect <= 0) return null;
+  const candidates: [SceneAspectRatio, number][] = [
+    ["16:9", 16 / 9],
+    ["1:1", 1],
+    ["9:16", 9 / 16],
+  ];
+  let best = candidates[0];
+  // 比率の差は対数で測る (縦横で対称にするため。線形だと横長側の差が過大評価される)。
+  let bestDelta = Math.abs(Math.log(aspect / best[1]));
+  for (const c of candidates) {
+    const delta = Math.abs(Math.log(aspect / c[1]));
+    if (delta < bestDelta) {
+      best = c;
+      bestDelta = delta;
+    }
+  }
+  return best[0];
+}
+
+/**
+ * カメラの極座標 (方位角・距離・高さ) → ワールド座標。
+ *
+ * 解析プロンプトの規約: 真正面 (被写体の正面から見る) = azimuth 0 で、そこは +Z 側。
+ * 右回り込みが正。scene3d の座標系は X=右 / Z=カメラ側なので、
+ * azimuth 0 → [0, h, +d]、azimuth +90 → [+d, h, 0] になる向きで写像する。
+ */
+function cameraPosFromPolar(azimuthDeg: number, distanceM: number, heightM: number): Vec3 {
+  const a = degToRad(azimuthDeg);
+  return [Math.sin(a) * distanceM, heightM, Math.cos(a) * distanceM];
 }
 
 const initialProject = ((): SceneProject => {
@@ -927,6 +1037,138 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
     return usable.length;
   },
 
+  relinkStoryboardOrigins: (pathMap) => {
+    const map = new Map(
+      Object.entries(pathMap).filter(
+        ([oldPath, newPath]) => oldPath && newPath && oldPath !== newPath,
+      ),
+    );
+    if (map.size === 0) return;
+    const origins = get().storyboardOrigins;
+    let hit = false;
+    const next: Record<string, StoryboardShotOrigin> = {};
+    for (const [shotId, origin] of Object.entries(origins)) {
+      const newPath = origin.imagePath ? map.get(origin.imagePath) : undefined;
+      if (newPath) {
+        hit = true;
+        next[shotId] = { ...origin, imagePath: newPath };
+      } else {
+        next[shotId] = origin;
+      }
+    }
+    if (!hit) return;
+    set({ storyboardOrigins: next });
+  },
+
+  applyImageScene: (draft, poseClipId, sourceAspect) => {
+    const { project } = get();
+    const stamp = Date.now();
+
+    // 初期未編集シーンなら丸ごと置換、それ以外は追記 (既存シーンを壊さない)。
+    const mode: "replace" | "append" = isPristineScene(project) ? "replace" : "append";
+    const baseEntities = mode === "replace" ? [] : project.entities;
+
+    const added: SceneEntity[] = [];
+
+    // 人物: 既存の mannequin + clip モーションで表現する (types.ts は変更しない)。
+    // poseClipId が null になることは無い (呼び出し側が T字 clip を必ず登録する) が、
+    // null で来ても素立ちのマネキンとして着地させる (位置は反映される)。
+    let personEntityId: string | null = null;
+    if (draft.person) {
+      personEntityId = `mannequin-${stamp}-${entitySeq++}`;
+      added.push({
+        id: personEntityId,
+        kind: "mannequin",
+        label: `人物${baseEntities.filter((e) => e.kind === "mannequin").length + 1}`,
+        position: [draft.person.floorX, 0, draft.person.floorZ],
+        rotationY: degToRad(draft.person.rotationYDeg),
+        scale: 1,
+        // 静的ポーズ: speed/path を持たせない = その場再生 (types.ts:35-38)
+        motion: poseClipId ? { type: "clip", clipId: poseClipId } : null,
+      });
+    }
+
+    // 小物: 解析 JSON の寸法を params(width/height/depth) と scale の両方で反映する。
+    // box/wall は params が直接ジオメトリに効き (scale=1)、それ以外の固定ジオメトリな
+    // kind は uniform scale が寸法を運ぶ (r3 追補4。倍率算出は layoutAnalysis 側)。
+    // 全要素は床接地 (y=0) 前提 (設計書 §1 論点5)。高さ関係は既存の磁石が引き受ける。
+    for (const obj of draft.objects) {
+      const kindCount =
+        baseEntities.filter((e) => e.kind === obj.kind).length +
+        added.filter((e) => e.kind === obj.kind).length +
+        1;
+      added.push({
+        id: `${obj.kind}-${stamp}-${entitySeq++}`,
+        kind: obj.kind,
+        label: obj.label || `${ENTITY_LABELS[obj.kind]}${kindCount}`,
+        position: [obj.floorX, 0, obj.floorZ],
+        rotationY: degToRad(obj.rotationYDeg),
+        scale: obj.scale,
+        params: { width: obj.width, height: obj.height, depth: obj.depth },
+      });
+    }
+
+    const entities = [...baseEntities, ...added];
+
+    // カメラ: 解析した画角で fixed カメラを1台足し、それを使う新カットを末尾に追加する。
+    // 追わせる相手が居なければ人物の立ち位置 (居なければ原点の目線高さ) を見る。
+    const camPos = cameraPosFromPolar(
+      draft.camera.azimuthDeg,
+      draft.camera.distanceM,
+      draft.camera.heightM,
+    );
+    const cameraId = `camera-img-${stamp}-${shotSeq++}`;
+    const camera = {
+      id: cameraId,
+      label: `カメラ${(mode === "replace" ? 0 : project.cameras.length) + 1}`,
+      move: {
+        ...createDefaultCameraMove(),
+        preset: "fixed" as CameraPresetId,
+        targetEntityId: personEntityId,
+        lookAtPos: personEntityId
+          ? undefined
+          : ([draft.person?.floorX ?? 0, 1, draft.person?.floorZ ?? 0] as Vec3),
+        startPos: camPos,
+        endPos: camPos,
+        lensMm: draft.camera.lensMm,
+        midPos: null,
+      },
+    };
+    const shotId = `shot-img-${stamp}-${shotSeq++}`;
+    const shot = createDefaultShot(shotId, "", cameraId);
+
+    const cameras = mode === "replace" ? [camera] : [...project.cameras, camera];
+    const shots =
+      mode === "replace" ? renumberShots([shot]) : renumberShots([...project.shots, shot]);
+
+    // カメラ枠の比率を入力画像に合わせる (r3 追補)。判定できなければ既存値を維持する。
+    const snapped = snapSourceAspect(sourceAspect);
+    const next: SceneProject = {
+      ...project,
+      entities,
+      cameras,
+      shots,
+      aspectRatio: snapped ?? project.aspectRatio,
+    };
+    set({
+      project: next,
+      selectedShotId: shotId,
+      currentFrame: shotStartFrame(next, shotId),
+      selectedEntityId: personEntityId,
+      cameraSelected: personEntityId === null,
+      playing: false,
+      // 追加したカメラのビューを開く (元画像と見比べて直す動線。設計書 §1 論点5)
+      cameraView: true,
+    });
+
+    return {
+      mode,
+      personEntityId,
+      objectCount: draft.objects.length,
+      cameraId,
+    };
+  },
+
   addShot: () => {
     const { project } = get();
     const id = `shot-${Date.now()}-${shotSeq++}`;
@@ -1395,23 +1637,301 @@ export type PaneOp =
   | { type: "reset" };
 
 /* ---------------------------------- 自動保存 ---------------------------------- */
-// シーンはlocalStorageへ自動保存(アプリを閉じても消えない)。
-// アセットを含まない純JSONなので容量は数KB。将来はGORIプロジェクトへの保存に昇格予定
+// シーンは **ファイル (scene3d.json) を正本**、localStorage を冗長バックアップとして
+// 二重に保存する。
+//
+// なぜファイル正本にしたか (2026-07-30):
+//   localStorage だけだと WebView のビルドID (app.codexframefactory / .dev / .capture)
+//   ごとに別領域になり、ビルドを跨ぐと空に見える。presets が同じ理由でキャラクター
+//   消失を起こしたため、同じ構造の時限爆弾である 3D シーンも同時に潰す。
+//   安全機構は presets.ts (fileWriteUnlocked / 最後勝ちキュー / 空上書きガード /
+//   世代バックアップ) をそのまま踏襲する。
 
 const PROJECT_SAVE_KEY = "scene3d.project.v3";
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 
+/**
+ * ファイルへ書いてよいと確定したか。
+ * true になるのは「正常に読めた」か「ファイルが存在しないと確認できた」ときだけ。
+ * **読み出しに失敗した場合は false のまま**で、ファイルへは一切書かない
+ * (読めない正本を localStorage 由来の内容で上書きしない。presets.ts と同じ不変条件)。
+ */
+let sceneFileWriteUnlocked = false;
+/** 解禁前に mutate があったか。解禁時に1回フラッシュして取りこぼしを防ぐ。 */
+let scenePendingBeforeUnlock = false;
+/** initialize の呼出番号。連続呼び出しで古い結果が store を上書きするのを防ぐ世代印。 */
+let sceneInitializeToken = 0;
+
+/** 保存の最後勝ちキュー (presets.ts の writeToFile と同型)。 */
+let scenePendingWrite: { data: SceneProject; allowEmpty: boolean } | null = null;
+let sceneWriteInFlight: Promise<void> | null = null;
+
+async function writeSceneToFileNow(
+  data: SceneProject,
+  allowEmpty: boolean,
+): Promise<void> {
+  try {
+    await invoke("scene3d_write", { content: JSON.stringify(data), allowEmpty });
+  } catch (err) {
+    console.error("[scene3d] ファイル書き込み失敗:", err);
+    // 黙って失敗させない。「保存できていないのに保存されたと思う」型のデータ消失を防ぐ
+    // (presets.ts / projects.ts と同じ防御。2026-07-30 評価者指摘で追加)。
+    try {
+      const { useToasts } = await import("./toasts");
+      useToasts.getState().push({
+        kind: "error",
+        text: `3Dシーンの保存に失敗しました。データ保護のため操作が反映されていない可能性があります: ${String(err)}`,
+        ttlMs: 8000,
+      });
+    } catch {
+      // トースト取得すら失敗した場合はログのみ (これ以上できることはない)。
+    }
+  }
+}
+
+function writeSceneToFile(data: SceneProject, allowEmpty = false): Promise<void> {
+  scenePendingWrite = { data, allowEmpty };
+  if (!sceneWriteInFlight) {
+    sceneWriteInFlight = (async () => {
+      while (scenePendingWrite) {
+        const job = scenePendingWrite;
+        scenePendingWrite = null;
+        await writeSceneToFileNow(job.data, job.allowEmpty);
+      }
+      sceneWriteInFlight = null;
+    })();
+  }
+  return sceneWriteInFlight;
+}
+
+/** ファイル + localStorage の二重保存。localStorage は常に書く (冗長バックアップ)。 */
+/** localStorage への即時保存（冗長バックアップ側。ファイル書き込みとは独立に走る）。 */
+function persistSceneToLocalStorage(project: SceneProject) {
+  try {
+    localStorage.setItem(PROJECT_SAVE_KEY, JSON.stringify(project));
+  } catch {
+    // 容量超過等は握りつぶす(シーンJSONは数KBのため実質起きない)
+  }
+}
+
+function persistScene(project: SceneProject) {
+  persistSceneToLocalStorage(project);
+  if (!sceneFileWriteUnlocked) {
+    // 解禁前の mutate。localStorage には既に書いたので取りこぼしはない。
+    scenePendingBeforeUnlock = true;
+    return;
+  }
+  void writeSceneToFile(project);
+}
+
+/**
+ * ファイル保存のデバウンス。localStorage は従来どおり即時（体感の速さを落とさない）で、
+ * **ファイルへの書き込みだけ**を間引く。
+ *
+ * 3D は編集のたびに state が変わる（カメラ操作・ドラッグ等）。ファイル書き込みは
+ * 1回ごとに世代バックアップ (.bak-*) を作るため、短い間隔で書くと最大10世代が
+ * 数秒で埋まり、「戻せる過去」が実質消える（2026-07-30 評価者指摘 H-2）。
+ * 5秒に伸ばすと、直近10世代がおよそ1分弱をカバーする。
+ * 途中でアプリが落ちても localStorage 側に最新が残るのでデータは失われない。
+ */
+const SCENE_FILE_SAVE_DEBOUNCE_MS = 5000;
+
 useScene3d.subscribe((state, prevState) => {
   if (state.project === prevState.project) return;
+  // localStorage へは即時に書く（アプリが突然落ちても直前の状態が残る）。
+  persistSceneToLocalStorage(state.project);
+  // ファイルは間引く（世代バックアップを浪費しないため）。
   if (saveTimer) clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
-    try {
-      localStorage.setItem(PROJECT_SAVE_KEY, JSON.stringify(state.project));
-    } catch {
-      // 容量超過等は握りつぶす(シーンJSONは数KBのため実質起きない)
-    }
-  }, 400);
+    // デバウンス中に更に変更が来た場合、クロージャが掴んだ state.project は古い。
+    // ファイル書き込みでは古いスナップショットの後勝ちが致命的なので取り直す。
+    persistScene(useScene3d.getState().project);
+  }, SCENE_FILE_SAVE_DEBOUNCE_MS);
 });
+
+/**
+ * 閉じる直前の保存（Codex検分 2026-07-30）。
+ * ファイル保存は5秒デバウンスなので、その途中でウィンドウを閉じると最後の編集が
+ * ファイル正本に載らない（localStorage には即時に入っているのでデータ自体は
+ * 失われないが、正本が古いままになる）。閉じる直前に保留中のタイマーを畳んで
+ * 1回書く。書き込みは非同期なので完了は保証できないが、開始はできる。
+ */
+if (typeof window !== "undefined") {
+  window.addEventListener("beforeunload", () => {
+    if (!saveTimer) return; // 保留中の変更なし
+    clearTimeout(saveTimer);
+    saveTimer = null;
+    persistScene(useScene3d.getState().project);
+  });
+}
+
+/**
+ * 起動時の移行フロー (presets.ts の initialize / readPresetsFileIntoStore と同型)。
+ * 守るべき不変条件:
+ * **「読めなかった」経路では絶対にファイルへ書かない**。書いてよいのは
+ * 「ファイルが存在しない」ときと「ファイルを正しく読めた後の変化」だけ。
+ */
+export async function initializeScene3d(): Promise<void> {
+  const myToken = ++sceneInitializeToken;
+
+  let content: string;
+  try {
+    content = await invoke<string>("scene3d_read");
+  } catch (err) {
+    // Tauri 外 (Vite 単体プレビュー等)。localStorage 由来の state のまま動く。
+    console.error("[scene3d] ファイル読み出し失敗:", err);
+    return; // 解禁しない (読めない正本を localStorage で潰さない)
+  }
+
+  if (content.trim().length > 0) {
+    // ファイル有 = 正本。壊れていたら localStorage 由来の初期値を維持し、
+    // ファイルへは何も書かない (壊れた正本を上書きしない。.bak-* も残っている)。
+    let parsed: SceneProject;
+    try {
+      parsed = JSON.parse(content) as SceneProject;
+    } catch (err) {
+      console.error("[scene3d] scene3d.json のパースに失敗 (localStorage を継続使用):", err);
+      return;
+    }
+    if (
+      parsed?.schemaVersion !== 3 ||
+      !parsed.shots?.length ||
+      !parsed.cameras?.length
+    ) {
+      console.error("[scene3d] scene3d.json の形が不正 (localStorage を継続使用)");
+      return;
+    }
+    if (myToken !== sceneInitializeToken) return; // 後続の initialize が正
+    const project = migrateProject(parsed);
+    useScene3d.setState({ project });
+    // localStorage の冗長バックアップを最新化する。
+    try {
+      localStorage.setItem(PROJECT_SAVE_KEY, JSON.stringify(project));
+    } catch {
+      /* 容量超過等は握りつぶす */
+    }
+    sceneFileWriteUnlocked = true;
+    if (scenePendingBeforeUnlock) {
+      scenePendingBeforeUnlock = false;
+      void writeSceneToFile(useScene3d.getState().project);
+    }
+    return;
+  }
+
+  // ファイル未作成 = localStorage からの移行 or 新規ユーザー。
+  // 現在の in-memory state (localStorage 由来) を正とする。
+  if (myToken !== sceneInitializeToken) return;
+  sceneFileWriteUnlocked = true;
+  scenePendingBeforeUnlock = false;
+  const current = useScene3d.getState().project;
+  // 既定シーンのまま (= 何も作っていない) なら空ファイルを作らない。
+  // localStorage に保存済みのシーンがあったかで判定する
+  // (presets.ts の categoriesAreDefault 判定と同じ思想)。
+  let hadSaved = false;
+  try {
+    hadSaved = localStorage.getItem(PROJECT_SAVE_KEY) !== null;
+  } catch {
+    hadSaved = false;
+  }
+  if (hadSaved) {
+    console.info("[scene3d] localStorage から 3D シーンをファイルへ移行");
+    await writeSceneToFile(current);
+  }
+}
+
+/* ------------------------------ バックアップから復元 ------------------------------ */
+// scene3d.json も保存のたびに自動で世代バックアップされている (最大10世代) のに、
+// そこへ到達する導線が無く開発者しか戻せなかった。presets 側と同じ形で塞ぐ
+// (2026-07-30 独立評価 H-2)。
+
+/**
+ * 3Dシーンの世代バックアップ一覧を取得する（新しい順）。
+ * 返り値: { path, at(epochミリ秒), shots(カット数) }[]。
+ * 「バックアップから復元」UI が選択肢を出すために使う。
+ */
+export async function listScene3dBackups(): Promise<
+  { path: string; at: number; shots: number }[]
+> {
+  try {
+    const { storage } = await import("../ipc");
+    const rows = await storage.listScene3dBackups();
+    // [path, epochミリ秒, shot数]。Rust 側がミリ秒で返すのでそのまま使う。
+    return rows.map(([path, ms, shots]) => ({ path, at: ms, shots }));
+  } catch (err) {
+    console.error("[scene3d] listScene3dBackups 失敗:", err);
+    return [];
+  }
+}
+
+/**
+ * 指定バックアップの内容で現在の3Dシーンを置き換える（復元）。
+ * 成功したら復元後のカット数を返す。失敗時は throw。
+ *
+ * 復元前の現状が失われないこと: 下の persistScene → writeSceneToFile →
+ * Rust の scene3d_write が、**書き込み前に必ず** backup_projects_file で
+ * 世代バックアップを取る（storage.rs「書き込み前に世代バックアップ」）。
+ * よって誤復元してもひとつ前の状態へ戻せる（presets の restoreFromBackup と同じ思想）。
+ */
+export async function restoreScene3dFromBackup(backupPath: string): Promise<number> {
+  // 書き込み解禁前（起動直後の読み込み中、または読み出しに失敗した状態）は復元しない。
+  // persistScene がファイルへ書かずに戻るため、「復元しました」と出るのに正本は
+  // 変わっていない、という最悪の見え方になる（2026-07-30 評価者指摘 M-3 の scene3d 版）。
+  if (!sceneFileWriteUnlocked) {
+    throw new Error("まだ読み込み中です。少し待ってからもう一度お試しください。");
+  }
+  const { storage } = await import("../ipc");
+  const raw = await storage.readScene3dBackup(backupPath);
+  const parsed = JSON.parse(raw) as SceneProject | null;
+  // initializeScene3d のファイル読み出しと同じ有効性判定（壊れた内容で正本を潰さない）。
+  if (
+    !parsed ||
+    typeof parsed !== "object" ||
+    parsed.schemaVersion !== 3 ||
+    !parsed.shots?.length ||
+    !parsed.cameras?.length
+  ) {
+    throw new Error("バックアップの形式が不正です");
+  }
+  const project = migrateProject(parsed);
+  // デバウンス待ちの古い保存が復元後に後勝ちしないよう、先に取り消す。
+  if (saveTimer) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+  }
+  useScene3d.setState({ project });
+  // 即時に永続化する（デバウンスを待たない。復元は明示操作なので取りこぼさない）。
+  persistScene(project);
+  void pushScene3dToast("success", "3Dシーンを過去の状態に戻しました。");
+  return project.shots.length;
+}
+
+/**
+ * 復元の結果をトーストで知らせる。トースト取得に失敗しても復元自体は成立しているので
+ * ログのみに留める（writeSceneToFileNow の失敗トーストと同じ扱い）。
+ */
+async function pushScene3dToast(kind: "success" | "error", text: string): Promise<void> {
+  try {
+    const { useToasts } = await import("./toasts");
+    useToasts.getState().push({ kind, text, ttlMs: kind === "error" ? 8000 : 3500 });
+  } catch {
+    console.error("[scene3d]", text);
+  }
+}
+
+/**
+ * UI から呼ぶ復元エントリ。成否をトーストで伝える（文言は本関数が正本）。
+ * 復元できたらカット数を返し、失敗したら null を返す（呼び出し側で分岐できる）。
+ */
+export async function restoreScene3dFromBackupWithToast(
+  backupPath: string,
+): Promise<number | null> {
+  try {
+    return await restoreScene3dFromBackup(backupPath);
+  } catch (err) {
+    await pushScene3dToast("error", `3Dシーンの復元に失敗しました: ${String(err)}`);
+    return null;
+  }
+}
 
 /* ---------------------------------- Undo / Redo ---------------------------------- */
 // 履歴はUI反応不要のためストア外のモジュール変数で持つ(project の参照変化だけ監視)。

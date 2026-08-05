@@ -1,13 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { convertFileSrc } from "@tauri-apps/api/core";
 import { useSceneGeneration } from "../lib/scene/useSceneGeneration";
 import { buildPromptForOverrideCompare } from "../lib/scene/buildPrompt";
 import {
   buildImagePromptJson,
-  countPromptJsonElements,
-  stringifyPromptJson,
+  type ImagePromptJson,
 } from "../lib/scene/buildPromptJson";
-import { refineImagePrompt } from "../lib/scene/refinePrompt";
+import {
+  stringifyPromptByFormat,
+  type PromptFormat,
+} from "../lib/scene/promptFormat";
+import { refineImageInput } from "../lib/scene/refinePrompt";
+import { useRefineFormat } from "../lib/store/refineFormat";
 import { useToasts } from "../lib/store/toasts";
 import type { SceneAspectRatio } from "../lib/scene/types";
 import {
@@ -31,6 +34,7 @@ import {
   selectCharacterReferences,
 } from "../lib/presets/character";
 import { HiggsfieldModelSelector } from "./HiggsfieldModelSelector";
+import { SafeImage } from "./SafeImage";
 import { OptionPickerModal } from "./scene/OptionPickerModal";
 import { PresetPickerPopover } from "./PresetPickerPopover";
 import { SkillPickerPopover } from "./SkillPickerPopover";
@@ -39,6 +43,7 @@ import { ElementwisePromptModal } from "./ElementwisePromptModal";
 import { ReferenceLibraryModal } from "./ReferenceLibraryModal";
 import { ReferencePicker } from "./ReferencePicker";
 import { StockSearchModal } from "./StockSearchModal";
+import { SketchPadModal } from "./sketch/SketchPadModal";
 
 const MAX_COUNT = 30;
 
@@ -76,6 +81,12 @@ export function ConstructedPromptPanel() {
   const [refining, setRefining] = useState(false);
   const [libraryOpen, setLibraryOpen] = useState(false);
   const [stockOpen, setStockOpen] = useState(false);
+  /**
+   * スケッチパッド (Wave 4 Slice A)。
+   * 旧 PromptComposer にしか繋がっておらず実機で到達できなかったため、
+   * 現行の生成タブ本体である本パネルのボタン列にも取り付ける。
+   */
+  const [sketchOpen, setSketchOpen] = useState(false);
   const [presetOpen, setPresetOpen] = useState(false);
   const [aspectPickerOpen, setAspectPickerOpen] = useState(false);
   const [presetAnchor, setPresetAnchor] = useState<DOMRect | null>(null);
@@ -92,6 +103,9 @@ export function ConstructedPromptPanel() {
   const aspectRatio = useSceneStore((s) => s.subjectFraming.aspectRatio);
   const setSubjectFramingField = useSceneStore((s) => s.setSubjectFramingField);
   const pushToast = useToasts((s) => s.push);
+  /** 「AIで整える」の出力形式。画像と動画で独立に記憶する。 */
+  const format = useRefineFormat((s) => s.image);
+  const setFormat = useRefineFormat((s) => s.setImage);
 
   /**
    * プリセット選択時の追記。既存プロンプト末尾に「, 」で繋げる。空なら本文のみ。
@@ -206,39 +220,91 @@ export function ConstructedPromptPanel() {
     setDraft(generatedPrompt);
   };
 
-  /** 選択から積まれた JSON を取り出す (要素数の表示とAI整形の両方で使う)。 */
+  /** 選択から積まれた JSON を取り出す (シーン構築由来のAI整形で使う)。 */
   const scenePromptJson = useMemo(
     () => buildImagePromptJson(scene),
     // scene の中身が変わったときだけ作り直す
     [scene],
   );
-  const sceneElementCount = countPromptJsonElements(scenePromptJson);
+
+  /** 表示中のテキスト。これが「整える対象」の正 (override 設計と一致させる)。 */
+  const displayed = (isOverriding ? draft : generatedPrompt).trim();
 
   /**
-   * 「AIで整える」— JSON をそのまま textarea に入れる。
+   * 直前の整形結果。形式だけ切り替えたいときに LLM を呼ばず再シリアライズする。
+   * 永続化しない (タブ離脱で消えてよい。消えても LLM 経路で同じ結果になる)。
+   */
+  const lastRefinedRef = useRef<{
+    json: ImagePromptJson;
+    texts: Record<PromptFormat, string>;
+  } | null>(null);
+
+  /**
+   * 「AIで整える」— 構造化テキストを textarea に入れる。
    *
-   * 生成側 (codex image_gen) は JSON をプロンプトとして受け取れるので、
-   * 自然文へ落とさず構造のまま渡す (STΛCK指示: JSON形式にしてほしい)。
+   * 入力ソースは問わない (2026-08-03 STΛCK指示 ②): シーン構築の選択でも、
+   * 手入力でも、企画タブから採用したテキストでも整う。表示中のテキストが
+   * override なら「テキスト入力」、無ければ「シーン構築の構造化 JSON」を整える。
    * 結果は override として入るので「自動に戻す」で元に戻せる。
    */
   const refinePromptWithAi = async () => {
-    if (refining || sceneElementCount === 0) return;
+    if (refining) return;
+    if (!displayed) {
+      pushToast({
+        kind: "info",
+        text: "整える内容がありません。左で要素を選ぶか、プロンプトを入力してください。",
+        ttlMs: 3000,
+      });
+      return;
+    }
+
+    // 直前の整形結果がそのまま表示されているなら、形式変換だけで済ませる。
+    const last = lastRefinedRef.current;
+    if (
+      last &&
+      (displayed === last.texts.json.trim() || displayed === last.texts.yaml.trim())
+    ) {
+      onChangeDraft(last.texts[format]);
+      pushToast({ kind: "info", text: "形式を変換しました。", ttlMs: 3000 });
+      return;
+    }
+
     setRefining(true);
     try {
-      const result = await refineImagePrompt(scenePromptJson);
-      const text = stringifyPromptJson(result.json);
-      if (!text) {
+      const result = await refineImageInput(
+        isOverriding
+          ? { kind: "text", text: draft }
+          : { kind: "structured", json: scenePromptJson },
+      );
+      if (result.json === null) {
+        pushToast({
+          kind: "error",
+          text: `AIの整形は使えませんでした（プロンプトはそのままです）: ${result.error ?? ""}`,
+          ttlMs: 5000,
+        });
+        return;
+      }
+      const texts: Record<PromptFormat, string> = {
+        json: stringifyPromptByFormat(result.json, "json"),
+        yaml: stringifyPromptByFormat(result.json, "yaml"),
+      };
+      if (!texts[format]) {
         pushToast({ kind: "info", text: "整える要素がありません。", ttlMs: 3000 });
         return;
       }
-      onChangeDraft(text);
-      pushToast({
-        kind: result.refined ? "success" : "info",
-        text: result.refined
-          ? "プロンプトを整えました。"
-          : `AIの整形は使えませんでした（選んだ内容をJSONにしました）: ${result.error ?? ""}`,
-        ttlMs: result.refined ? 3000 : 5000,
-      });
+      lastRefinedRef.current = { json: result.json, texts };
+      onChangeDraft(texts[format]);
+      if (result.refined) {
+        pushToast({ kind: "success", text: "プロンプトを整えました。", ttlMs: 3000 });
+      } else if (result.converted) {
+        pushToast({ kind: "info", text: "形式を変換しました。", ttlMs: 3000 });
+      } else {
+        pushToast({
+          kind: "info",
+          text: `AIの整形は使えませんでした（選んだ内容を${format === "yaml" ? "YAML" : "JSON"}にしました）: ${result.error ?? ""}`,
+          ttlMs: 5000,
+        });
+      }
     } catch (err) {
       pushToast({
         kind: "error",
@@ -327,31 +393,59 @@ export function ConstructedPromptPanel() {
         13インチ以上 (画面高さ 720px超) では @media で復活させ、
         通常の使用感は維持する。
       */}
-      <div className="shrink-13-textarea flex min-h-[80px] flex-1 flex-col p-3">
+      <div className="prompt-row-container shrink-13-textarea flex min-h-[80px] flex-1 flex-col p-3">
         <div className="mb-1.5 flex items-center justify-end gap-1.5">
+          {/* スケッチ — プロンプトを作る手段の同族（ui-placement-grammar §2）。
+              描いた絵を参照に追加/ブロックアウト化/3Dシーン化して生成の入力にする。
+              mr-auto は「右3つと視覚分離する」ためだけのもの。狭幅のはみ出し対策は
+              mr-auto ではなく App.css の @container promptrow が担う
+              （mr-auto は余った幅を配るだけで、足りないときは効かない。Sol 指摘 2026-08-04）。 */}
+          <button
+            type="button"
+            onClick={() => setSketchOpen(true)}
+            title="スケッチ — 自分で描いた絵を参照に追加 / 3Dシーンに変換"
+            aria-label="スケッチを開く"
+            className="mr-auto flex h-[26px] w-[26px] items-center justify-center rounded border border-[#343434] bg-[#101010] text-neutral-400 transition hover:border-pink-400 hover:text-white"
+          >
+            <SketchIcon />
+          </button>
           {/*
             「AIで整える」— 要素別編集の左に置く (STΛCK指示 2026-07-25)。
             選択から積まれた JSON を、生成AIが読みやすい構造化プロンプトへ整える。
             余計な要素を足さない・長くしないことをシステムプロンプトとコード両方で縛る。
           */}
+          <select
+            value={format}
+            onChange={(e) => setFormat(e.target.value as PromptFormat)}
+            title="「AIで整える」の出力形式を選びます"
+            aria-label="整形の出力形式"
+            className="h-[26px] rounded border border-[#343434] bg-[#101010] px-1.5 text-[10px] font-bold text-neutral-400 outline-none transition hover:border-pink-400 focus:border-pink-500"
+          >
+            <option value="json">JSON</option>
+            <option value="yaml">YAML</option>
+          </select>
           <button
             type="button"
             onClick={() => void refinePromptWithAi()}
-            disabled={refining || sceneElementCount === 0}
-            className="flex items-center gap-1.5 rounded border border-[#343434] bg-[#101010] px-2 py-1 text-[10px] font-bold text-neutral-400 transition hover:border-pink-400 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
-            title="選んだ要素を、AIが読みやすい構造化プロンプト(JSON)に整えます。要素は足しません"
+            disabled={refining || displayed.length === 0}
+            className="prompt-row-compact-btn flex items-center gap-1.5 rounded border border-[#343434] bg-[#101010] px-2 py-1 text-[10px] font-bold text-neutral-400 transition hover:border-pink-400 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+            title="選んだ要素や入力したプロンプトを、AIが読みやすい構造化プロンプト（JSON / YAML）に整えます。要素は足しません"
+            aria-label="AIで整える"
           >
             <SparkleIcon />
-            <span>{refining ? "整えています…" : "AIで整える"}</span>
+            <span className="prompt-row-compact-label">
+              {refining ? "整えています…" : "AIで整える"}
+            </span>
           </button>
           <button
             type="button"
             onClick={() => setElementModalOpen(true)}
-            className="flex items-center gap-1.5 rounded border border-[#343434] bg-[#101010] px-2 py-1 text-[10px] font-bold text-neutral-400 transition hover:border-pink-400 hover:text-white"
+            className="prompt-row-compact-btn flex items-center gap-1.5 rounded border border-[#343434] bg-[#101010] px-2 py-1 text-[10px] font-bold text-neutral-400 transition hover:border-pink-400 hover:text-white"
             title="要素別編集モーダルを開く — 構図/光/カメラ等を中央画面で個別に編集"
+            aria-label="要素別編集"
           >
             <ElementGridIcon />
-            <span>要素別編集</span>
+            <span className="prompt-row-compact-label">要素別編集</span>
           </button>
         </div>
         <PromptTextareaWithMentions
@@ -542,6 +636,12 @@ export function ConstructedPromptPanel() {
         onClose={() => setElementModalOpen(false)}
         onApply={onChangeDraft}
       />
+      {/*
+        スケッチパッド。「参照に追加」は useComposer.addReferences を叩くので、
+        本パネルが表示している references ラックと、生成が読む
+        useSceneGeneration.refImagePaths の両方にそのまま載る。
+      */}
+      <SketchPadModal open={sketchOpen} onClose={() => setSketchOpen(false)} />
     </section>
   );
 }
@@ -622,7 +722,8 @@ function ReferenceRack({
       }}
       onDrop={handleDrop}
     >
-      {/* 操作ボタン (アイコン上 / 文字下) を常に横並び */}
+      {/* 操作ボタン (アイコン上 / 文字下) を常に横並び。
+          参照を足す手段の同族列。上限5 (ui-placement-grammar §3)。 */}
       <div className="grid grid-cols-5 gap-1.5">
         <button
           type="button"
@@ -748,8 +849,8 @@ function GroupReferenceChip({
       className="group relative h-14 w-14 overflow-hidden rounded-md border border-pink-400/60 bg-[#0b0b0b]"
       title={`${label}（参照${count}枚）`}
     >
-      <img
-        src={convertFileSrc(path)}
+      <SafeImage
+        path={path}
         alt={label}
         className="h-full w-full object-cover"
       />
@@ -789,8 +890,8 @@ function ReferenceChip({
       className="group relative h-14 w-14 overflow-hidden rounded-md border border-[#343434] bg-[#0b0b0b]"
       title={name}
     >
-      <img
-        src={convertFileSrc(path)}
+      <SafeImage
+        path={path}
         alt={name}
         className="h-full w-full object-cover"
       />
@@ -844,6 +945,18 @@ function StockIcon() {
       <path d="M20 20l-4-4" />
       <path d="M8 11h6" />
       <path d="M11 8v6" />
+    </svg>
+  );
+}
+
+/** スケッチ — 鉛筆。「自分で描く」を象徴 */
+function SketchIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 19l7-7 3 3-7 7-3-3z" />
+      <path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z" />
+      <path d="M2 2l7.586 7.586" />
+      <circle cx="11" cy="11" r="2" />
     </svg>
   );
 }

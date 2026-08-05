@@ -5,6 +5,7 @@ import { CharacterIcon } from "./SkillIcon";
 import { PresetThumbnailFocusModal } from "./PresetThumbnailFocus";
 import { SafeImage } from "./SafeImage";
 import { extractDropped, fileToUploadReference, isImageDrop } from "../lib/dragRef";
+import { sendCharacterPresetToSheetRegenerate } from "../lib/character/sendImageToCharacterRegister";
 import {
   focusToImageStyle,
   presetKind,
@@ -48,7 +49,18 @@ const SORT_OPTIONS: { key: SortKey; label: string }[] = [
  * ときだけサイドバー版という使い分け。Midjourney Code Manager のサイドパネル
  * 体験をベースに、PC アプリの広い画面に合わせて拡張している。
  */
-export function PresetsDrawer({ fullPage = false }: { fullPage?: boolean }) {
+export function PresetsDrawer({
+  fullPage = false,
+  onNavigateToSkill,
+}: {
+  fullPage?: boolean;
+  /**
+   * 別スキル画面へ送り込んだ直後に呼ぶ。プリセット画面 (ドロワー / ページ版)
+   * を閉じて、送り先が実際に見える状態にする。SkillsWorkspace の
+   * onUseSkill と同じ役割。
+   */
+  onNavigateToSkill?: () => void;
+}) {
   const categories = usePresets((s) => s.categories);
   const presets = usePresets((s) => s.presets);
   const addCategory = usePresets((s) => s.addCategory);
@@ -233,6 +245,39 @@ export function PresetsDrawer({ fullPage = false }: { fullPage?: boolean }) {
     cancelEdit();
   };
 
+  /**
+   * B-5 (2026-07-30): 編集中のキャラ型プリセットをシート作り直しへ送る。
+   * 編集内容はここでは preset に保存しない (上書きは作り直し後の「上書き登録」が
+   * 唯一の書込点。二重書込にしない)。
+   */
+  const regenerateSheetFromDraft = () => {
+    if (!editingPresetId || editingPresetId === "__new__") return;
+    const sourceImage = draftCharacterMeta?.sourceImage;
+    if (!sourceImage) return;
+    const presetId = editingPresetId;
+    const name = draftName.trim() || "キャラ";
+    const attributes = draftCharacterAttributes.trim();
+    cancelEdit();
+    // 送り込みに成功したときだけプリセット画面を閉じる。失敗時 (元画像なし) は
+    // エラートーストだけ出して、この画面に留まる。
+    // 複数参照で登録されたキャラは全量を復元する (旧データは sourceImage 1 枚)。
+    const sourceImages = draftCharacterMeta?.sourceImages;
+    if (
+      sendCharacterPresetToSheetRegenerate({
+        presetId,
+        name,
+        attributes,
+        sourceImage,
+        sourceImages,
+        sheetBackground: draftCharacterMeta?.sheetBackground,
+        sheetPromptMode: draftCharacterMeta?.sheetPromptMode,
+        sheetCustomPrompt: draftCharacterMeta?.sheetCustomPrompt,
+      })
+    ) {
+      onNavigateToSkill?.();
+    }
+  };
+
   const handleAddCategory = () => {
     const name = newCategoryName.trim();
     if (!name) return;
@@ -316,6 +361,13 @@ export function PresetsDrawer({ fullPage = false }: { fullPage?: boolean }) {
       onChangeAttachedImages={setDraftAttachedImages}
       onSave={savePreset}
       onCancel={cancelEdit}
+      onRegenerateSheet={
+        editingPresetId !== "__new__" &&
+        draftKind === "character" &&
+        draftCharacterMeta?.sourceImage
+          ? regenerateSheetFromDraft
+          : undefined
+      }
     />
   ) : null;
 
@@ -770,6 +822,8 @@ type PresetFormProps = {
   onChangeAttachedImages: (next: string[]) => void;
   onSave: () => void;
   onCancel: () => void;
+  /** B-5: キャラ型のみ。シート作り直しへ送る。新規・sourceImage 無しでは undefined。 */
+  onRegenerateSheet?: () => void;
 };
 
 /**
@@ -865,6 +919,7 @@ function PresetForm({
   onChangeAttachedImages,
   onSave,
   onCancel,
+  onRegenerateSheet,
 }: PresetFormProps) {
   const isCharacter = kind === "character";
   // キャラ型は属性 or プロンプトのどちらかがあれば保存可。プロンプト型はプロンプト必須。
@@ -1008,6 +1063,21 @@ function PresetForm({
             rows={3}
             className="w-full resize-none rounded-md border border-[#343434] bg-[#0b0b0b] p-2 text-[11px] leading-5 text-neutral-100 outline-none focus:border-pink-400"
           />
+        </div>
+      )}
+
+      {kind === "character" && onRegenerateSheet && (
+        <div className="space-y-1">
+          <button
+            type="button"
+            onClick={onRegenerateSheet}
+            className="rounded-md border border-pink-500/40 bg-pink-500/10 px-3 py-1.5 text-[11px] font-bold text-pink-200 transition hover:bg-pink-500/20"
+          >
+            この属性でシートを作り直す
+          </button>
+          <p className="text-[10px] text-neutral-500">
+            キャラクター登録の画面が開きます。生成して「上書き登録」すると、このキャラのシートが置き換わります。
+          </p>
         </div>
       )}
 
