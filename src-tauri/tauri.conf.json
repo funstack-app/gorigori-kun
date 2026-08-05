@@ -30,7 +30,8 @@
           "$APPDATA/segmentation_results/**",
           "$APPDATA/scene_recreate_frames/**",
           "/Volumes/**",
-          "/tmp/**"
+          "/tmp/**",
+          "$HOME/**/.masks/**"
         ]
       }
     }
