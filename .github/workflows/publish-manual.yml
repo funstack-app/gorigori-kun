@@ -169,10 +169,14 @@ jobs:
 
                   # signature が publish/ の対応 .sig と一致するか。
                   # 対応 .sig は url の末尾ファイル名から決まる (推測しない)。
+                  # URL はドット正規化名だがローカルは空白名のことがある (GitHub の
+                  # アップロード時正規化, 2026-08-06 実害)。両方の名前で探す。
                   asset = url.rsplit("/", 1)[-1]
                   sig_path = pub / f"{asset}.sig"
                   if not sig_path.is_file():
-                      problems.append(f"{manifest}[{platform}] 対応する .sig が publish/ に無い: {sig_path.name}")
+                      sig_path = pub / f"{asset.replace('GORI.GORI_', 'GORI GORI_')}.sig"
+                  if not sig_path.is_file():
+                      problems.append(f"{manifest}[{platform}] 対応する .sig が publish/ に無い: {asset}.sig")
                       continue
                   on_disk = sig_path.read_text().replace("\n", "").replace("\r", "")
                   in_manifest = entry["signature"].replace("\n", "").replace("\r", "")
