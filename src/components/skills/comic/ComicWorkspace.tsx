@@ -3,6 +3,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 
 import { images } from "../../../lib/ipc";
 import {
+  ComicTextTurnAbortedError,
   ComicTextTurnTimeoutError,
   runComicTextTurn,
   type ComicTextTurnProgress,
@@ -38,7 +39,11 @@ import {
   type ComicLayoutTemplate,
   type ComicPanelSlot,
 } from "../../../lib/comic/layoutTemplates";
-import { savePageAs, savePagesBulk } from "../../../lib/comic/savePage";
+import {
+  materializeExportPage,
+  savePageAs,
+  savePagesBulk,
+} from "../../../lib/comic/savePage";
 import { COMIC_TEMPLATE_THUMBNAILS } from "./templateThumbnails";
 import { ComicPhaseRail } from "./ComicPhaseRail";
 import { BalloonEditor, SfxEditor } from "./BalloonEditor";
@@ -249,6 +254,14 @@ function ComicFlow() {
   const [storyProgress, setStoryProgress] = useState<ComicTextTurnProgress | undefined>(
     undefined,
   );
+  /**
+   * 構成生成の中止ハンドル（実装契約M 2026-08-05）。
+   *
+   * 活動を観測した turn は自動で切らなくなったので、**やめる判断はユーザーがする**。
+   * その手を用意するのがこれ。ref で持つのは、飛行中の generateStory の
+   * クロージャからも同じハンドルを掴めるようにするため。
+   */
+  const storyAbortRef = useRef<AbortController | null>(null);
   const [generatingPages, setGeneratingPages] = useState(false);
   /** ページ保存の形式（セッション内のみ）。 */
   const [saveFormat, setSaveFormat] = useState<ComicSaveFormat>("png");
@@ -524,6 +537,9 @@ function ComicFlow() {
     );
     setStoryStartedAt(Date.now());
     setStoryProgress(undefined);
+    // 前回の中止ハンドルは捨てて、この走行専用のものを立てる。
+    const abort = new AbortController();
+    storyAbortRef.current = abort;
     setGeneratingStory(true);
     try {
       const template =
@@ -536,14 +552,18 @@ function ComicFlow() {
         readingDirection,
         envNames: envReferences.map((r) => r.name),
       });
-      // 9qm (2026-08-04): 打ち切りは「総時間 300 秒」から
-      // 「無応答 120 秒（受信のたびにリセット）＋総時間 15 分の天井」へ変えた。
-      // 20ページ×最大8コマの JSON は素直に 5 分を超えることがあり、旧方式は
-      // 流れている途中の turn を捨てていた。無応答なら早く（120秒で）切れる。
+      // 実装契約M (2026-08-05): 「時間がかかると勝手に切れる」をやめた。
+      //
+      // - 120 秒は「1文字も来ないまま」のときだけ打ち切りに使う（サーバー死の疑い）
+      // - 一度でも動いた turn は無応答でも切らず、"応答が止まっています" と可視化する
+      // - 天井は暴走の最後の壁として残すが 15分 → 30分 へ広げた。
+      //   受信が続いている正常な長話を殺さない値にする（切る側の自動天井はここだけ）
+      // - やめる判断はユーザーがする（下の中止ボタン → abort.signal）
       const raw = await runComicTextTurn(prompt, {
         idleTimeoutMs: 120_000,
-        totalTimeoutMs: 15 * 60_000,
+        totalTimeoutMs: 30 * 60_000,
         label: "構成",
+        signal: abort.signal,
         onProgress: (p) => {
           // 遅れて届いた進捗で新しい実行の表示を汚さない
           if (storyTokenRef.current !== runToken) return;
@@ -593,6 +613,12 @@ function ComicFlow() {
       setPhase("plan");
     } catch (err) {
       if (storyTokenRef.current !== runToken) return;
+      // 中止は失敗ではない。ユーザーが自分で押した操作を赤いエラーで責めない
+      // （コマ再生成の中止と同じ流儀）。
+      if (err instanceof ComicTextTurnAbortedError) {
+        pushToast({ kind: "info", text: err.message, ttlMs: 3000 });
+        return;
+      }
       pushToast({
         kind: "error",
         // タイムアウトは文言が完結しているのでくるまない
@@ -608,7 +634,14 @@ function ComicFlow() {
         setGeneratingStory(false);
         setStoryProgress(undefined);
       }
+      // このハンドルが今もカレントなら外す（新しい走行のものは消さない）。
+      if (storyAbortRef.current === abort) storyAbortRef.current = null;
     }
+  };
+
+  /** 構成生成をやめる。押した時点で飛行中のものだけに効く。 */
+  const cancelStoryGeneration = () => {
+    storyAbortRef.current?.abort();
   };
 
   /** 構成のページ属性（あらすじ・コマ割り方針）を直す。 */
@@ -1485,6 +1518,7 @@ function ComicFlow() {
               storyStartedAt={storyStartedAt}
               storyProgress={storyProgress}
               onGenerate={generateStory}
+              onCancelGenerate={cancelStoryGeneration}
             />
           )}
 
@@ -1508,6 +1542,7 @@ function ComicFlow() {
 
           {phase === "pages" && (
             <PagesPhase
+              theme={synopsis}
               storyPages={storyPages}
               pageResults={pageResults}
               saveFormat={saveFormat}
@@ -1681,6 +1716,7 @@ function InputPhase({
   storyStartedAt,
   storyProgress,
   onGenerate,
+  onCancelGenerate,
 }: {
   synopsis: string;
   setSynopsis: (v: string) => void;
@@ -1718,6 +1754,7 @@ function InputPhase({
   storyStartedAt?: number;
   storyProgress?: ComicTextTurnProgress;
   onGenerate: () => void;
+  onCancelGenerate: () => void;
 }) {
   // B-3: あらすじ履歴。マウント時に読み込む (load は loaded ガード付きで冪等)。
   const historyItems = useComicStoryHistory((s) => s.items);
@@ -2270,20 +2307,45 @@ function InputPhase({
               9qm (2026-08-04): 「生成中…」の一言だけだと、応答待ちで止まって
               いるのか書き出し中なのか分からず、5分待たされた末に打ち切られる
               体験になっていた。実態をそのまま出す。
+
+              実装契約M (2026-08-05): 止まっても勝手に打ち切らなくなったので、
+              "応答が止まっています" は**予告ではなく状況説明**。文言で
+              「もうすぐ切れます」と読ませない（切らないので嘘になる）。
             */}
-            <span className="text-[12px] font-bold text-pink-300">
-              {storyProgress?.phase === "streaming" ? "構成を書き出し中…" : "生成中…"}
+            <span
+              className={`text-[12px] font-bold ${
+                storyProgress?.phase === "stalled" ? "text-amber-300" : "text-pink-300"
+              }`}
+            >
+              {storyProgress?.phase === "stalled"
+                ? "応答が止まっています"
+                : storyProgress?.phase === "streaming"
+                  ? "構成を書き出し中…"
+                  : "生成中…"}
             </span>
             <span className="text-[11px] text-neutral-400">
-              {storyProgress?.phase === "streaming"
-                ? `${storyProgress.receivedChars.toLocaleString()} 文字を受信`
-                : "AI の応答を待っています"}
+              {storyProgress?.phase === "stalled"
+                ? `${Math.round((storyProgress.idleMs ?? 0) / 1000)} 秒ぶん応答がありません（${storyProgress.receivedChars.toLocaleString()} 文字を受信済み・待てば続くことがあります）`
+                : storyProgress?.phase === "streaming"
+                  ? `${storyProgress.receivedChars.toLocaleString()} 文字を受信`
+                  : "AI の応答を待っています"}
             </span>
             {storyStartedAt ? (
               <div className="w-full max-w-xs">
                 <GenerationGauge startedAt={storyStartedAt} mode="batch" />
               </div>
             ) : null}
+            {/*
+              やめる判断はユーザーがする（自動で切らなくなったため）。
+              一等地に新ボタンを増やさず、進捗表示の中の控えめな導線に置く。
+            */}
+            <button
+              type="button"
+              onClick={onCancelGenerate}
+              className="rounded-md border border-[#343434] px-3 py-1 text-[11px] font-bold text-neutral-300 transition hover:bg-[#242424] hover:text-white"
+            >
+              やめる
+            </button>
           </div>
         )}
       </div>
@@ -2631,6 +2693,7 @@ function PlanPhase({
  * カード内のゲージで1ページずつ進捗が届く。中止は右上の既存 directRun パネルから。
  */
 function PagesPhase({
+  theme,
   storyPages,
   pageResults,
   saveFormat,
@@ -2649,6 +2712,11 @@ function PagesPhase({
   onMergePanels,
   onRecoverSlots,
 }: {
+  /**
+   * 作品のテーマ（＝入力されたあらすじ）。保存ファイル名の先頭に載せる
+   * （実装契約O。空なら savePage 側が従来の連番へフォールバックする）。
+   */
+  theme: string;
   storyPages: ComicStoryPage[];
   pageResults: ComicPageResult[];
   saveFormat: ComicSaveFormat;
@@ -2745,7 +2813,32 @@ function PagesPhase({
   const addItem = useProjects((s) => s.addItem);
   const activeProject = projects.find((p) => p.id === activeProjectId) ?? null;
 
-  function savePageToProject(page: ComicStoryPage) {
+  /**
+   * 実装契約O (2026-08-05): プロジェクト（ギャラリー）へ登録する実体を 4:5 に揃える。
+   *
+   * ここが「出力サイズが統一されていない」の穴だった。保存ボタン経路だけが
+   * 正規化されていて、この経路は**生成直後の生のページ**（モデル出力が 2:3 / 3:4 に
+   * 揺れる）をそのままギャラリーへ登録していた。以降のギャラリー側の書き出し・
+   * 共有はその未正規化の実体を掴むため、作品内でページの形が揃わない。
+   *
+   * 正規化に失敗しても登録自体は諦めない（元パスで登録して続行する）。
+   * ここで throw すると「保存できない」に化けるが、ユーザーの要求は保存であって
+   * 揃えることは手段だから。ただし黙って落とさず、揃わなかったことは伝える。
+   */
+  async function registerExportPage(imagePath: string, pageNo: number): Promise<string> {
+    try {
+      return await materializeExportPage(imagePath, pageNo, saveFormat);
+    } catch {
+      pushToast({
+        kind: "info",
+        text: `ページ ${pageNo} は出力サイズ（4:5）に揃えられなかったため、元のサイズで保存しました。`,
+        ttlMs: 5000,
+      });
+      return imagePath;
+    }
+  }
+
+  async function savePageToProject(page: ComicStoryPage) {
     if (!activeProjectId) {
       pushToast({
         kind: "info",
@@ -2757,7 +2850,7 @@ function PagesPhase({
     const imagePath = pageResults.find((r) => r.page === page.page)?.imagePath;
     if (!imagePath) return;
     addItem(activeProjectId, {
-      imagePath,
+      imagePath: await registerExportPage(imagePath, page.page),
       prompt: page.synopsis || undefined,
       note: `漫画 ページ${page.page}`,
     });
@@ -2768,7 +2861,7 @@ function PagesPhase({
     });
   }
 
-  function saveAllPagesToProject() {
+  async function saveAllPagesToProject() {
     if (!activeProjectId) {
       pushToast({
         kind: "info",
@@ -2782,7 +2875,8 @@ function PagesPhase({
       const imagePath = pageResults.find((r) => r.page === page.page)?.imagePath;
       if (!imagePath) continue;
       addItem(activeProjectId, {
-        imagePath,
+        // 単ページ保存と同じ関所を通す（4:5 に揃った実体を登録する）。
+        imagePath: await registerExportPage(imagePath, page.page),
         prompt: page.synopsis || undefined,
         note: `漫画 ページ${page.page}`,
       });
@@ -2801,7 +2895,10 @@ function PagesPhase({
   async function savePage(imagePath: string | undefined, pageNo: number) {
     if (!imagePath) return;
     try {
-      const saved = await savePageAs(imagePath, pageNo, saveFormat);
+      const saved = await savePageAs(imagePath, pageNo, saveFormat, {
+        theme,
+        totalPages: storyPages.length,
+      });
       if (!saved) return;
       pushToast({
         kind: "success",
@@ -2830,6 +2927,7 @@ function PagesPhase({
           imagePath: pageResults.find((r) => r.page === page.page)?.imagePath,
         })),
         saveFormat,
+        { theme },
       );
       // フォルダ選択のキャンセルは失敗ではない（トーストを出さない）。
       if (!outcome) return;
@@ -2902,7 +3000,7 @@ function PagesPhase({
           </button>
           <button
             type="button"
-            onClick={saveAllPagesToProject}
+            onClick={() => void saveAllPagesToProject()}
             disabled={completedCount === 0 || generatingPages || panelReeditRunningPage !== null}
             className="rounded-md border border-[#2a2a2a] bg-[#1a1a1a] px-3 py-1.5 text-xs font-medium text-neutral-300 transition hover:border-pink-500/40 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
           >
@@ -2996,7 +3094,7 @@ function PagesPhase({
               </button>
               <button
                 type="button"
-                onClick={() => savePageToProject(page)}
+                onClick={() => void savePageToProject(page)}
                 disabled={!result?.imagePath || panelReeditRunningPage !== null}
                 className="rounded border border-[#2a2a2a] bg-[#1a1a1a] px-2 py-1 text-[11px] font-medium text-neutral-300 transition hover:border-pink-500/40 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
               >

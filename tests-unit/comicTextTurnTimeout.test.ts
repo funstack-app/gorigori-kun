@@ -137,41 +137,42 @@ describe("runComicTextTurn のタイムアウト", () => {
     expect(resolved).toBe("xxxxxxxxxx");
   });
 
-  it("T-9qm-3: 受信が途切れたらそこから idle タイムアウトで切れる", async () => {
-    const { runComicTextTurn, ComicTextTurnTimeoutError } = await loadModule();
+  it("T-9qm-3(改M): 受信後の無応答では切れず、再開すれば完走する", async () => {
+    // 旧: 受信が途切れたら idle タイムアウトで切れる、を固定していた。
+    // 契約M (2026-08-05 STΛCK指示「時間かかるとタイムアウトみたいになるのやめて」) で
+    // 方針が反転: 一度でも受信したターンは自動では切らない（作りかけを捨てない）。
+    // 詳細な stalled 可視化は comicTextTurnNoAutoCut.test.ts の T-M-1 が固定する。
+    // ここでは「黙り込み→再開→完走」の一連が成立することを固定する。
+    const { runComicTextTurn } = await loadModule();
 
     const promise = runComicTextTurn("prompt", {
       idleTimeoutMs: 90_000,
       label: "構成",
     });
-    const settled = promise.then(
-      () => ({ ok: true as const }),
-      (err: unknown) => ({ ok: false as const, err }),
+    let resolved: string | undefined;
+    let rejected: unknown;
+    promise.then(
+      (v) => { resolved = v; },
+      (e: unknown) => { rejected = e; },
     );
     await flush();
 
-    // しばらく流れる
+    // 一度受信する
     await vi.advanceTimersByTimeAsync(80_000);
     emitDelta("hello");
     await flush();
 
-    // ここでリセットされているので、80 秒経過してもまだ切れない
-    await vi.advanceTimersByTimeAsync(80_000);
-    let done = false;
-    void settled.then(() => {
-      done = true;
-    });
+    // 旧方針なら 90 秒超の無応答で切れていた。新方針では切れない。
+    await vi.advanceTimersByTimeAsync(200_000);
     await flush();
-    expect(done).toBe(false);
+    expect(rejected).toBeUndefined();
+    expect(resolved).toBeUndefined();
 
-    // 直近の受信から 90 秒を超えたら切れる
-    await vi.advanceTimersByTimeAsync(20_000);
-    const result = await settled;
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect((result.err as InstanceType<typeof ComicTextTurnTimeoutError>).reason).toBe(
-      "idle",
-    );
+    // 黙り込みから再開しても、そのまま完走できる
+    emitDelta(" world");
+    emit("turn/completed", { turn: { status: "completed" } });
+    await flush();
+    expect(resolved).toBe("hello world");
   });
 
   it("T-9qm-4: 受信中でも総時間の天井に当たれば切れる（reason=total）", async () => {

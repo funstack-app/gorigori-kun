@@ -10,8 +10,47 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 
 import { buildExportFileName } from "../exportNaming";
-import { COMIC_EXPORT_TARGET, containRect } from "./exportSize";
+import {
+  buildComicPageFileName,
+  COMIC_EXPORT_TARGET,
+  containRect,
+  toThemeSegment,
+} from "./exportSize";
 import type { ComicSaveFormat } from "./types";
+
+/**
+ * 保存ファイル名を決める。テーマがあれば「テーマ＋ページ数」、無ければ従来の連番。
+ *
+ * 実装契約O (2026-08-05): STΛCK 実機FB「保存ファイル名をテーマ＋ページ数に」。
+ * 従来は `manga_C001.png` で、フォルダに複数作品を保存すると**どれがどの話か
+ * 分からず、さらに同名で上書き衝突する**。テーマを載せると作品の識別が付く。
+ *
+ * フォールバックが要るのは、テーマ（あらすじ）が未入力・記号だけのことがあるため。
+ * その場合に推測でそれらしい名前を作らず、既知の安全な連番へ落とす
+ * （no-silent-gap-filling: 無いものを埋めない）。
+ */
+function resolvePageFileName(opts: {
+  theme: string | undefined;
+  page: number;
+  total: number;
+  ext: string;
+}): string {
+  const theme = opts.theme ? toThemeSegment(opts.theme) : null;
+  if (theme) {
+    return buildComicPageFileName({
+      theme,
+      page: opts.page,
+      total: opts.total,
+      ext: opts.ext,
+    });
+  }
+  return buildExportFileName({
+    style: "sequence",
+    prefix: "manga",
+    index: opts.page,
+    ext: opts.ext,
+  });
+}
 
 /** JPEG の書き出し品質（pageExport と同値）。 */
 const JPEG_QUALITY = 0.92;
@@ -76,6 +115,57 @@ function extOf(format: ComicSaveFormat): string {
 }
 
 /**
+ * ページ画像を 4:5 に正規化した**新しいファイル**を作り、そのパスを返す。
+ *
+ * ## 実装契約O (2026-08-05): なぜ「保存の瞬間」だけでは足りなかったか
+ *
+ * STΛCK 実機FB「出力サイズが統一されていない」。比率は 4:5 のままでよく、
+ * 壊れていたのは**関所の位置**だった。正規化は `encodePageBlob`（＝保存ボタン経路）に
+ * しか無く、生成直後のページは**生のまま**（モデル出力が 2:3 / 3:4 に揺れる）。
+ * その生のページが「プロジェクトに保存」(`addItem`) でギャラリーへ登録されると、
+ * 以降のギャラリー側の書き出し・共有はすべて未正規化の実体を掴む。
+ * ＝ページの形が揃わない実感の正体はこの経路。
+ *
+ * ## 関所を「受領時」に置かなかった理由（確認結果・原則4「矛盾に名前を付ける」）
+ *
+ * 契約Oは「受領時に1回正規化し、以後の全経路がそれを使う」を第1案としていた。
+ * **これは採れない**。コマ再編集(panelReedit)がページ画像の画素に依存するため:
+ *
+ * | 依存 | 実体 | 白帯を焼くと何が壊れるか |
+ * |---|---|---|
+ * | `detectPanelInterior` | ページ画像から枠線を**勾配検出**してコマ内側を決める | 白帯が偽の枠線・偽の余白として混じり、コマ境界の検出がずれる |
+ * | `assertSameRasterDimensions` | 元ページ・生成画像・マスクの寸法一致を要求（maskReedit.ts:312） | 正規化後ページ(1080×1350)と AI 返却画像の寸法が噛み合わず不採用が増える |
+ *
+ * さらに既存プロジェクトの未正規化ページとの互換も切れる（過去ページだけ座標系が違う）。
+ * よって**編集の実体は元寸のまま**にし、正規化は「外に出る出口」に置く。
+ * 出口は3つで、すべてこの関所を通る:
+ *
+ *   1. `savePageAs`          … 1ページ保存（`encodePageBlob` 経由）
+ *   2. `savePagesBulk`       … 一括保存（同上）
+ *   3. `materializeExportPage` … ギャラリー/プロジェクト登録（本関数。ここが今回の穴）
+ *
+ * 元ファイルは消さず別ファイルを作る。編集・再編集は元寸の実体を使い続けるため
+ * （上の表の依存を壊さない）。情報は1画素も捨てない（contain・縮小のみ）。
+ */
+export async function materializeExportPage(
+  imagePath: string,
+  pageNo: number,
+  format: ComicSaveFormat = "png",
+): Promise<string> {
+  const blob = await encodePageBlob(imagePath, format);
+  const { writeFile } = await import("@tauri-apps/plugin-fs");
+  const { join, dirname, basename, extname } = await import("@tauri-apps/api/path");
+  const dir = await dirname(imagePath);
+  const base = await basename(imagePath, await extname(imagePath).catch(() => ""));
+  // 元ファイルの隣に `_4x5` を付けた別名で置く。元を上書きしないのが要点
+  // （上書きすると panelReedit の寸法一致・枠線検出が壊れる）。
+  const stem = base.replace(/\.$/, "") || `manga_p${pageNo}`;
+  const dest = await join(dir, `${stem}_4x5.${extOf(format)}`);
+  await writeFile(dest, new Uint8Array(await blob.arrayBuffer()));
+  return dest;
+}
+
+/**
  * 1ページ保存。save ダイアログ → 拡張子で最終形式決定 → encodePageBlob → writeFile。
  *
  * 返却パスの拡張子が最終決定（ダイアログで変更できる）。キャンセルは false。
@@ -84,15 +174,17 @@ export async function savePageAs(
   imagePath: string,
   pageNo: number,
   format: ComicSaveFormat,
+  naming?: { theme?: string; totalPages?: number },
 ): Promise<boolean> {
   const { save } = await import("@tauri-apps/plugin-dialog");
   const pngFilter = { name: "PNG", extensions: ["png"] };
   const jpegFilter = { name: "JPEG", extensions: ["jpg", "jpeg"] };
   const dest = await save({
-    defaultPath: buildExportFileName({
-      style: "sequence",
-      prefix: "manga",
-      index: pageNo,
+    defaultPath: resolvePageFileName({
+      theme: naming?.theme,
+      page: pageNo,
+      // 総数が未指定なら「このページまで」を総数と見る（1ページ保存の既定）。
+      total: naming?.totalPages ?? pageNo,
       ext: extOf(format),
     }),
     filters: format === "jpeg" ? [jpegFilter, pngFilter] : [pngFilter, jpegFilter],
@@ -123,6 +215,7 @@ export async function savePageAs(
 export async function savePagesBulk(
   pages: Array<{ page: number; imagePath?: string }>,
   format: ComicSaveFormat,
+  naming?: { theme?: string },
 ): Promise<{ saved: number; skipped: number; failed: number } | null> {
   const { open: openDialog } = await import("@tauri-apps/plugin-dialog");
   const dir = await openDialog({
@@ -140,17 +233,32 @@ export async function savePagesBulk(
   let saved = 0;
   let skipped = 0;
   let failed = 0;
+  // 総数は「実際に保存対象になるページ数」＝渡された一覧の長さ。
+  // 実行時点の固定値を書かない（規律3）。
+  const total = pages.length;
+  // この一括保存の中で既に使った名前。同名衝突を上書きでなく連番退避で避ける。
+  const usedNames = new Set<string>();
   for (const page of pages) {
     if (!page.imagePath) {
       skipped += 1;
       continue;
     }
-    const name = buildExportFileName({
-      style: "sequence",
-      prefix: "manga",
-      index: page.page,
+    const base = resolvePageFileName({
+      theme: naming?.theme,
+      page: page.page,
+      total,
       ext,
     });
+    // 既存の流儀に合わせて上書きせず連番退避する（`名前_2.png`）。
+    // テーマ名は 20 文字で切るため、別テーマでも先頭が同じだと衝突しうる。
+    let name = base;
+    if (usedNames.has(name)) {
+      const stem = base.slice(0, base.length - (ext.length + 1));
+      let n = 2;
+      while (usedNames.has(`${stem}_${n}.${ext}`)) n += 1;
+      name = `${stem}_${n}.${ext}`;
+    }
+    usedNames.add(name);
     try {
       const blob = await encodePageBlob(page.imagePath, format);
       await writeFile(await join(dir, name), new Uint8Array(await blob.arrayBuffer()));
