@@ -55,10 +55,16 @@ jobs:
         run: |
           set -e
           V="${{ inputs.version }}"
-          gh release create "v${V}" -R funstack-app/gorigori-kun-releases \
-            --title "GORI GORI KUN v${V}" \
-            --notes "GORI GORI KUN v${V}。ダウンロードと使い方は会員ページをご覧ください。" \
-            publish/*
+          # 冪等: 部分失敗後の再実行でタグが既に在っても続行できる (2026-08-06 実害)
+          if gh release view "v${V}" -R funstack-app/gorigori-kun-releases >/dev/null 2>&1; then
+            echo "release v${V} already exists — re-uploading assets with --clobber"
+            gh release upload "v${V}" -R funstack-app/gorigori-kun-releases publish/* --clobber
+          else
+            gh release create "v${V}" -R funstack-app/gorigori-kun-releases \
+              --title "GORI GORI KUN v${V}" \
+              --notes "GORI GORI KUN v${V}。ダウンロードと使い方は会員ページをご覧ください。" \
+              publish/*
+          fi
           gh release view "v${V}" -R funstack-app/gorigori-kun-releases --json assets --jq '.assets[].name'
 
       - name: Generate manifests
@@ -105,11 +111,18 @@ jobs:
         run: |
           set -e
           V="${{ inputs.version }}"
-          gh release create "v${V}" -R funstack-app/gorigori-kun \
-            --title "GORI GORI KUN v${V}" \
-            --notes "v${V} 更新情報。本体は gorigori-kun-releases にあります。" \
-            --latest \
-            latest.json latest-compat.json
+          # 冪等: 部分失敗後の再実行でタグが既に在っても続行できる (2026-08-06 実害)
+          if gh release view "v${V}" -R funstack-app/gorigori-kun >/dev/null 2>&1; then
+            echo "release v${V} already exists — re-uploading manifests with --clobber"
+            gh release upload "v${V}" -R funstack-app/gorigori-kun latest.json latest-compat.json --clobber
+            gh release edit "v${V}" -R funstack-app/gorigori-kun --latest
+          else
+            gh release create "v${V}" -R funstack-app/gorigori-kun \
+              --title "GORI GORI KUN v${V}" \
+              --notes "v${V} 更新情報。本体は gorigori-kun-releases にあります。" \
+              --latest \
+              latest.json latest-compat.json
+          fi
           sleep 5
           curl -sL https://github.com/funstack-app/gorigori-kun/releases/latest/download/latest.json | python3 -c "import sys,json;d=json.load(sys.stdin);assert d['version']=='$V', d['version'];print('updater OK:', d['version'])"
 
