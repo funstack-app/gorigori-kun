@@ -82,6 +82,80 @@ pub async fn run_codex_capture(
     run_capture_with(gori_codex_command()?, args, timeout).await
 }
 
+/// 認可用バイナリ (codex-auth) が既に解決できるかを返す。
+///
+/// 解決順序 ①env / ②同梱 / ③data_dir キャッシュ のいずれかに当たっていれば `true`。
+/// ④の従来 CLI フォールバックしか無い場合は `false` (= iss バグ経路)。
+///
+/// `resolve_codex_auth_binary()` は必ず何かを返す (最後は従来 CLI) ため、
+/// 「返り値が Ok かどうか」では判定できない。**上位 3 経路に当たったかどうか**で判定する。
+fn codex_auth_is_ready() -> bool {
+    if let Some(p) = std::env::var_os("GORI_CODEX_AUTH_BIN") {
+        if std::path::Path::new(&p).is_file() {
+            return true;
+        }
+    }
+    if let Some(cached) = crate::codex::auth_helper::codex_auth_cache_path() {
+        if crate::codex::auth_helper::is_usable_codex_auth(&cached) {
+            return true;
+        }
+    }
+    // 同梱 resources。resolve_codex_auth_binary の②と同じ探索。
+    let Ok(exe_path) = std::env::current_exe() else {
+        return false;
+    };
+    let Some(exe_dir) = exe_path.parent() else {
+        return false;
+    };
+    let name = crate::codex::auth_helper::cache_file_name();
+    if exe_dir.join(name).is_file() {
+        return true;
+    }
+    ["resources", "../Resources", "../Resources/resources"]
+        .iter()
+        .any(|rel| exe_dir.join(rel).join(name).is_file())
+}
+
+/// 認可を実行する直前に、必要なら codex-auth をオンデマンド取得する。
+///
+/// ## なぜここに 1 箇所だけ置くか (2026-08-06)
+///
+/// codex-auth は 200〜290MB あり、同梱すると Windows の更新 DL が 518MB に達して
+/// Tauri updater が落ちる (v2.5.1 の実害)。そこで同梱をやめ、**実際に接続する人が
+/// 接続するときだけ**落とす形にした。取得コードの本体は
+/// `crate::codex::auth_helper::ensure_codex_auth`。
+///
+/// magnific.rs / higgsfield_mcp.rs の両方から呼ばれるので、重複実装を作らないよう
+/// ここに置く。**取得に失敗しても Err を返さない**。従来どおり同梱 0.146.0 へ
+/// フォールバックして接続を続行し、issuer バグが出た場合は各コマンド側の既存
+/// エラー文言 (「アプリを最新版に更新してから…」) がユーザーに次の一手を示す。
+pub async fn ensure_codex_auth_available() {
+    if codex_auth_is_ready() {
+        return;
+    }
+    tracing::info!(
+        target: "mcp.auth",
+        "接続コンポーネント (codex-auth) が見つかりません。ダウンロードを試みます"
+    );
+    match crate::codex::auth_helper::ensure_codex_auth().await {
+        Ok(path) => {
+            tracing::info!(
+                target: "mcp.auth",
+                path = %path.display(),
+                "接続コンポーネントを取得しました"
+            );
+        }
+        Err(e) => {
+            // 取得できなくても接続は続行する (degrade)。
+            tracing::warn!(
+                target: "mcp.auth",
+                error = %e,
+                "接続コンポーネントの取得に失敗しました (従来バイナリで続行)"
+            );
+        }
+    }
+}
+
 /// `run_codex_capture` の **認可専用** 版。バイナリ解決が codex-auth になるだけで、
 /// spawn / timeout / 出力整形の挙動は完全に同一。
 pub async fn run_codex_auth_capture(

@@ -160,55 +160,21 @@ jobs:
           # 確認
           ls -lh src-tauri/resources/codex src-tauri/resources/codex-app-server
 
-      # 2026-08-03: MCP 認可 (mcp add / mcp login) 専用の補助バイナリを同梱する。
-      # 同梱 0.146.0 は OAuth コールバックの iss を捨てるバグ (rmcp 1.8.0 の
-      # RFC 9207 検証と不整合) があり、Magnific の認可が missing required issuer で
-      # 必ず失敗する。修正 (openai/codex PR #35720) は 0.147.0-alpha.4 にのみ入る。
-      # トークン取得後の利用・リフレッシュは 0.146.0 で動くため、alpha の実行面は
-      # 認可 2 操作に閉じ込める (日常実行は上の 0.146.0 のまま)。
-      # 0.147.0 安定版が出たら本ステップごと撤去して一本化する。
-      - name: Fetch Codex auth helper (rust-v0.147.0-alpha.4)
-        run: |
-          set -e
-          # 変数名に連続文字列 "codexVer" を含めないこと。
-          # scripts/check-model-cli-match.py の正規表現 codexVer\s*=\s*"..." が
-          # 誤検出し、検査 E (platform 間一致) が偽陽性で落ちる。
-          codexAuthVer="rust-v0.147.0-alpha.4"
-          authBase="https://github.com/openai/codex/releases/download/$codexAuthVer"
-          codex_arch="${{ matrix.target }}"
-          mkdir -p src-tauri/resources
-
-          curl -L -o codex-auth.tar.gz "$authBase/codex-${codex_arch}.tar.gz"
-          mkdir -p tmp-codex-auth
-          tar -xzf codex-auth.tar.gz -C tmp-codex-auth
-          find tmp-codex-auth -type f -name "codex-${codex_arch}" -exec mv {} src-tauri/resources/codex-auth \;
-          if [ ! -f "src-tauri/resources/codex-auth" ]; then
-            echo "Failed to find codex-${codex_arch} in extracted auth helper tar"
-            ls -la tmp-codex-auth/
-            exit 1
-          fi
-          chmod +x src-tauri/resources/codex-auth
-          rm -rf codex-auth.tar.gz tmp-codex-auth
-
-          # 壊れ DL 検出 (codex CLI は 100MB 級。10MB 未満なら中身が違う)
-          authSize=$(wc -c < src-tauri/resources/codex-auth)
-          if [ "$authSize" -lt 10485760 ]; then
-            echo "codex-auth is suspiciously small: ${authSize} bytes"
-            exit 1
-          fi
-
-          # ランナーは arm64 なので aarch64 leg だけ実行検査できる。
-          # x86_64 leg では実行不能なのでサイズ検査のみ。
-          if [ "$codex_arch" = "aarch64-apple-darwin" ]; then
-            authVersionOut=$(./src-tauri/resources/codex-auth --version)
-            echo "codex-auth --version: $authVersionOut"
-            case "$authVersionOut" in
-              *0.147.0-alpha.4*) ;;
-              *) echo "codex-auth is not 0.147.0-alpha.4"; exit 1 ;;
-            esac
-          fi
-
-          ls -lh src-tauri/resources/codex-auth
+      # 2026-08-06: MCP 認可用の補助バイナリ (codex-auth) の **同梱をやめた**。
+      #
+      # なぜ: codex-auth は codex CLI 本体そのもの (0.147.0-alpha.4) で 200〜290MB
+      # ある。同梱した結果 **Windows の更新 DL が 518MB** に達し、Tauri updater が
+      # 更新アーカイブを全体メモリに載せてから署名検証する仕様に当たって、
+      # v2.5.1 で「アプデを確認 → 更新する」が Windows で通らなくなった。
+      # codex-auth を使うのは MCP の認可 2 操作 (mcp add / mcp login) だけで、
+      # 生成・日常実行は上の 0.146.0 が担う。全ユーザーが常時持つ必要が無いため、
+      # 接続する人が接続するときにその場で取得する方式へ移した。
+      #
+      # 取得コードの場所: src-tauri/src/codex/auth_helper.rs
+      #   (バージョン定数 CODEX_AUTH_VERSION がこの版の唯一の正本。
+      #    配線は src-tauri/src/codex/mcp_shared.rs の ensure_codex_auth_available)
+      # 解決順序は src-tauri/src/codex/process.rs の resolve_codex_auth_binary。
+      # 0.147.0 安定版が出たら auth_helper.rs ごと撤去して一本化する。
 
       # tauri.conf.json の resources 配列に macOS 用 codex バイナリを追記
       - name: Patch tauri.conf.json for macOS bundle
@@ -220,7 +186,8 @@ jobs:
           with open(path) as f:
               conf = json.load(f)
           existing = conf["bundle"].get("resources", [])
-          additions = ["resources/codex", "resources/codex-app-server", "resources/codex-auth"]
+          # 2026-08-06: "resources/codex-auth" を削除 (上のコメント参照)。
+          additions = ["resources/codex", "resources/codex-app-server"]
           for a in additions:
               if a not in existing:
                   existing.append(a)
@@ -341,49 +308,13 @@ jobs:
           Write-Host "✓ Codex binaries staged in src-tauri/resources/"
           Get-ChildItem "src-tauri/resources" | Format-Table Name, Length
 
-      # 2026-08-03: MCP 認可 (mcp add / mcp login) 専用の補助バイナリ。理由は
-      # macOS ジョブの同名ステップのコメント参照 (0.146.0 の iss 破棄バグ回避)。
-      - name: Fetch Codex auth helper (rust-v0.147.0-alpha.4)
-        shell: pwsh
-        run: |
-          # 変数名に連続文字列 "codexVer" を含めないこと
-          # (scripts/check-model-cli-match.py の検査 E が誤検出する)。
-          $codexAuthVer = "rust-v0.147.0-alpha.4"
-          $authBase = "https://github.com/openai/codex/releases/download/$codexAuthVer"
-
-          New-Item -ItemType Directory -Force -Path "src-tauri/resources" | Out-Null
-
-          Invoke-WebRequest -Uri "$authBase/codex-x86_64-pc-windows-msvc.exe.zip" -OutFile "codex-auth.zip"
-          Expand-Archive -Path "codex-auth.zip" -DestinationPath "tmp-codex-auth" -Force
-          Get-ChildItem "tmp-codex-auth" -Recurse |
-            Where-Object { $_.Name -eq "codex-x86_64-pc-windows-msvc.exe" } |
-            Select-Object -First 1 |
-            ForEach-Object {
-              Move-Item -Path $_.FullName -Destination "src-tauri/resources/codex-auth.exe" -Force
-            }
-          if (-not (Test-Path "src-tauri/resources/codex-auth.exe")) {
-            Write-Error "Failed to find codex-x86_64-pc-windows-msvc.exe in extracted auth helper zip"
-            exit 1
-          }
-          Remove-Item "codex-auth.zip"
-          Remove-Item "tmp-codex-auth" -Recurse -Force
-
-          # 壊れ DL 検出 (codex CLI は 100MB 級)
-          $authSize = (Get-Item "src-tauri/resources/codex-auth.exe").Length
-          if ($authSize -lt 10485760) {
-            Write-Error "codex-auth.exe is suspiciously small: $authSize bytes"
-            exit 1
-          }
-
-          # ランナーは x64 なので実行検査できる
-          $authVersionOut = & "src-tauri/resources/codex-auth.exe" --version
-          Write-Host "codex-auth --version: $authVersionOut"
-          if ("$authVersionOut" -notlike "*0.147.0-alpha.4*") {
-            Write-Error "codex-auth.exe is not 0.147.0-alpha.4"
-            exit 1
-          }
-
-          Get-ChildItem "src-tauri/resources" | Format-Table Name, Length
+      # 2026-08-06: MCP 認可用の補助バイナリ (codex-auth.exe) の **同梱をやめた**。
+      # 理由は macOS ジョブの同位置コメント参照。要約すると、290MB の codex-auth.exe を
+      # 同梱したせいで **Windows の更新 DL が 518MB** になり、Tauri updater が
+      # アーカイブを全体メモリに載せて署名検証する仕様に当たって v2.5.1 の
+      # 「アプデを確認 → 更新する」が Windows で通らなくなった。接続する人が
+      # 接続するときにその場で取得する方式へ移した。
+      # 取得コード: src-tauri/src/codex/auth_helper.rs
 
       # tauri.conf.json の resources 配列に Windows 用 codex バイナリを追記
       - name: Patch tauri.conf.json for Windows bundle
@@ -392,7 +323,8 @@ jobs:
           $confPath = "src-tauri/tauri.conf.json"
           $conf = Get-Content $confPath -Raw | ConvertFrom-Json
           $existing = @($conf.bundle.resources)
-          $additions = @("resources/codex.exe", "resources/codex-app-server.exe", "resources/codex-auth.exe")
+          # 2026-08-06: "resources/codex-auth.exe" を削除 (上のコメント参照)。
+          $additions = @("resources/codex.exe", "resources/codex-app-server.exe")
           $conf.bundle.resources = $existing + $additions
           $conf | ConvertTo-Json -Depth 50 | Set-Content $confPath -Encoding UTF8
           Write-Host "✓ tauri.conf.json updated:"
@@ -511,50 +443,11 @@ jobs:
           Write-Host "✓ Codex binaries staged in src-tauri/resources/"
           Get-ChildItem "src-tauri/resources" | Format-Table Name, Length
 
-      # 2026-08-03: MCP 認可 (mcp add / mcp login) 専用の補助バイナリ。理由は
-      # macOS ジョブの同名ステップのコメント参照 (0.146.0 の iss 破棄バグ回避)。
-      # 互換版でも認可経路は同一なので通常 windows ジョブと同文にする。
-      - name: Fetch Codex auth helper (rust-v0.147.0-alpha.4)
-        shell: pwsh
-        run: |
-          # 変数名に連続文字列 "codexVer" を含めないこと
-          # (scripts/check-model-cli-match.py の検査 E が誤検出する)。
-          $codexAuthVer = "rust-v0.147.0-alpha.4"
-          $authBase = "https://github.com/openai/codex/releases/download/$codexAuthVer"
-
-          New-Item -ItemType Directory -Force -Path "src-tauri/resources" | Out-Null
-
-          Invoke-WebRequest -Uri "$authBase/codex-x86_64-pc-windows-msvc.exe.zip" -OutFile "codex-auth.zip"
-          Expand-Archive -Path "codex-auth.zip" -DestinationPath "tmp-codex-auth" -Force
-          Get-ChildItem "tmp-codex-auth" -Recurse |
-            Where-Object { $_.Name -eq "codex-x86_64-pc-windows-msvc.exe" } |
-            Select-Object -First 1 |
-            ForEach-Object {
-              Move-Item -Path $_.FullName -Destination "src-tauri/resources/codex-auth.exe" -Force
-            }
-          if (-not (Test-Path "src-tauri/resources/codex-auth.exe")) {
-            Write-Error "Failed to find codex-x86_64-pc-windows-msvc.exe in extracted auth helper zip"
-            exit 1
-          }
-          Remove-Item "codex-auth.zip"
-          Remove-Item "tmp-codex-auth" -Recurse -Force
-
-          # 壊れ DL 検出 (codex CLI は 100MB 級)
-          $authSize = (Get-Item "src-tauri/resources/codex-auth.exe").Length
-          if ($authSize -lt 10485760) {
-            Write-Error "codex-auth.exe is suspiciously small: $authSize bytes"
-            exit 1
-          }
-
-          # ランナーは x64 なので実行検査できる
-          $authVersionOut = & "src-tauri/resources/codex-auth.exe" --version
-          Write-Host "codex-auth --version: $authVersionOut"
-          if ("$authVersionOut" -notlike "*0.147.0-alpha.4*") {
-            Write-Error "codex-auth.exe is not 0.147.0-alpha.4"
-            exit 1
-          }
-
-          Get-ChildItem "src-tauri/resources" | Format-Table Name, Length
+      # 2026-08-06: MCP 認可用の補助バイナリ (codex-auth.exe) の **同梱をやめた**。
+      # 理由は macOS ジョブの同位置コメント参照。290MB の同梱で Windows の更新 DL が
+      # 518MB に達し、Tauri updater (アーカイブを全体メモリに載せて署名検証する) が
+      # v2.5.1 で落ちた。互換版でも認可経路は同一なので通常 windows ジョブと同じく
+      # オンデマンド取得へ移した。取得コード: src-tauri/src/codex/auth_helper.rs
 
       # 通常版のパッチに加えて、updater endpoint を compat 用に差し替える。
       # identifier / productName は触らない (設計 §2-8)。
@@ -564,7 +457,8 @@ jobs:
           $confPath = "src-tauri/tauri.conf.json"
           $conf = Get-Content $confPath -Raw | ConvertFrom-Json
           $existing = @($conf.bundle.resources)
-          $additions = @("resources/codex.exe", "resources/codex-app-server.exe", "resources/codex-auth.exe")
+          # 2026-08-06: "resources/codex-auth.exe" を削除 (上のコメント参照)。
+          $additions = @("resources/codex.exe", "resources/codex-app-server.exe")
           $conf.bundle.resources = $existing + $additions
 
           # 互換版は専用チャンネルを見る。通常版の latest.json を読ませると、

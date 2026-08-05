@@ -336,7 +336,11 @@ pub fn resolve_codex_cli_binary() -> Result<PathBuf> {
 /// ## 解決順序
 /// 1. `GORI_CODEX_AUTH_BIN` (dev / 障害時の明示上書きは常に勝つ)
 /// 2. アプリ同梱の `codex-auth`(.exe) — resolve_codex_cli_binary と同じ 4 相対パス
-/// 3. `resolve_codex_cli_binary()` へフォールバック
+///    (2026-08-06 に同梱はやめたが、**探索は残す**。旧バージョンから更新した
+///     ユーザーの bundle には残っており、将来同梱に戻しても壊れないため)
+/// 3. data_dir にオンデマンド取得したキャッシュ
+///    (`codex::auth_helper::codex_auth_cache_path`)
+/// 4. `resolve_codex_cli_binary()` へフォールバック
 ///    (dev 環境・0.147 安定版一本化後はこちらが正常経路になる)
 ///
 /// `/Applications/Codex.app/...` の優先探索は **含めない**。あちらの世代は不定で、
@@ -372,7 +376,16 @@ pub fn resolve_codex_auth_binary() -> Result<PathBuf> {
         }
     }
 
-    // ③ 見つからなければ従来バイナリ (dev では常にここ。挙動不変)
+    // ③ オンデマンド取得したキャッシュ (2026-08-06 以降の正常経路)。
+    //    サイズ検査を通らないもの (途中で落ちた DL・HTML エラーページ) は
+    //    **使わずに ④ へ落とす**。壊れたバイナリを spawn すると意味不明な失敗になる。
+    if let Some(cached) = crate::codex::auth_helper::codex_auth_cache_path() {
+        if crate::codex::auth_helper::is_usable_codex_auth(&cached) {
+            return Ok(cached);
+        }
+    }
+
+    // ④ 見つからなければ従来バイナリ (dev では常にここ。挙動不変)
     resolve_codex_cli_binary()
 }
 
@@ -809,5 +822,111 @@ mod humanize_tests {
     fn plain_rate_limit_still_humanized() {
         let msg = humanize_generation_failure("HTTP 429 Too Many Requests");
         assert!(msg.contains("短時間に生成しすぎて"), "{msg}");
+    }
+}
+
+/// codex-auth 不在時の退行検査 (2026-08-06 同梱廃止に伴う「牙」)。
+///
+/// ## 何を守るテストか
+///
+/// codex-auth の同梱をやめたので、**大多数のユーザーの手元には codex-auth が
+/// 存在しない**状態が既定になった。このとき壊れてはいけないのは:
+///
+///   1. `resolve_codex_auth_binary()` が **エラーで死なず** 従来 CLI へ落ちること
+///      (= 接続以外の全機能が使う `resolve_codex_cli_binary` と同じ結果になる)。
+///      ここが Err になると、認可以外の経路まで巻き添えで止まる。
+///   2. **壊れたキャッシュ (サイズ不足) を掴まない**こと。掴むと spawn 時に
+///      意味不明な失敗になり、原因が追えなくなる。
+#[cfg(test)]
+mod codex_auth_absent_tests {
+    use super::{resolve_codex_auth_binary, resolve_codex_cli_binary};
+    use crate::codex::auth_helper::{is_usable_codex_auth, MIN_CODEX_AUTH_BYTES};
+
+    /// codex-auth が用意されていない経路でも、解決が **エラーで死なず**
+    /// 従来 CLI へ落ちる。つまり接続以外の全機能は影響を受けない。
+    ///
+    /// 検査は「実行環境に codex-auth があるか」に依存させない。
+    /// ローカルの build tree には過去のビルドが置いた
+    /// `target/debug/Resources/codex-auth` が残っていることがあり、
+    /// その有無でテストの意味が変わってしまうため (実測 2026-08-06)。
+    /// 代わりに **解決順序の契約**を検査する:
+    ///   - 成否は必ず従来 CLI と一致する (認可経路だけが余計に死なない)
+    ///   - ①②③のどれにも当たっていないなら、結果は従来 CLI と同一
+    #[test]
+    fn falls_back_to_the_normal_cli_when_codex_auth_is_absent() {
+        let cli = resolve_codex_cli_binary();
+        let auth = resolve_codex_auth_binary();
+
+        // 従来 CLI が見つからない環境 (CI 等) では、①②③に当たらない限り
+        // 両方 Err になるのが正しい。認可側だけが死ぬのは退行。
+        let upper_paths_hit = upper_auth_path_exists();
+        if !upper_paths_hit {
+            assert_eq!(
+                cli.is_ok(),
+                auth.is_ok(),
+                "codex-auth 不在時に、認可経路だけが従来 CLI と違う成否になっている"
+            );
+        }
+
+        if let (Ok(cli), Ok(auth)) = (cli, auth) {
+            if upper_paths_hit {
+                // ①②③のいずれかが存在する環境。そちらが勝つのが正しい挙動なので、
+                // 「従来 CLI と同一」を要求しない。
+                return;
+            }
+            assert_eq!(
+                auth, cli,
+                "codex-auth 不在時のフォールバック先が従来 CLI と違う"
+            );
+        }
+    }
+
+    /// 解決順序 ①env / ②同梱 / ③キャッシュ のいずれかが実在するか。
+    /// テストが実行環境の残骸に振り回されないための判定。
+    fn upper_auth_path_exists() -> bool {
+        if let Some(p) = std::env::var_os("GORI_CODEX_AUTH_BIN") {
+            if std::path::Path::new(&p).is_file() {
+                return true;
+            }
+        }
+        if let Some(cached) = crate::codex::auth_helper::codex_auth_cache_path() {
+            if is_usable_codex_auth(&cached) {
+                return true;
+            }
+        }
+        let Ok(exe) = std::env::current_exe() else {
+            return false;
+        };
+        let Some(dir) = exe.parent() else {
+            return false;
+        };
+        let name = crate::codex::auth_helper::cache_file_name();
+        dir.join(name).is_file()
+            || ["resources", "../Resources", "../Resources/resources"]
+                .iter()
+                .any(|rel| dir.join(rel).join(name).is_file())
+    }
+
+    /// サイズ不足のキャッシュは「使えるもの」と判定しない。
+    /// 判定がここで甘くなると、③で壊れたバイナリを掴んで④へ落ちなくなる。
+    #[test]
+    fn undersized_cache_is_rejected_so_resolution_continues_to_the_fallback() {
+        let dir =
+            std::env::temp_dir().join(format!("gori-auth-absent-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+
+        let broken = dir.join("codex-auth-broken");
+        // 閾値から 1 バイト足りないファイル (境界の値を決め打ちしない)。
+        std::fs::write(&broken, vec![0u8; (MIN_CODEX_AUTH_BYTES - 1) as usize])
+            .expect("write");
+        assert!(
+            !is_usable_codex_auth(&broken),
+            "閾値未満のキャッシュを採用してしまっている"
+        );
+
+        // ディレクトリを渡しても採用しない (is_file 判定が効いているか)。
+        assert!(!is_usable_codex_auth(&dir));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

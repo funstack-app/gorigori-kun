@@ -1,3 +1,4 @@
+pub mod auth_helper;
 pub mod gen_server;
 pub mod home;
 pub mod mcp_direct;

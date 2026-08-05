@@ -19,6 +19,8 @@ type Status =
       showManual?: boolean;
       /** 報告用の生メッセージ。 */
       raw?: string;
+      /** どの段階で失敗したか。報告用。 */
+      stage?: UpdateStage;
     };
 
 /**
@@ -28,8 +30,51 @@ type Status =
  *   https://github.com/funstack-app/gorigori-kun/releases/latest/download/latest.json
  * (このコメントは説明用。実際の参照先は必ず tauri.conf.json 側を正とする)
  */
-/** リリースページ。更新が自動で通らないときの手動DL先。 */
-const RELEASES_URL = "https://github.com/funstack-app/gorigori-kun/releases/latest";
+/**
+ * リリースページ。更新が自動で通らないときの手動DL先。
+ *
+ * なぜ配布リポジトリ (gorigori-kun-releases) を指すか (2026-08-06 修正):
+ *   従来は `funstack-app/gorigori-kun` の releases/latest を開いていたが、
+ *   そこに置かれるのは updater マニフェスト (latest.json / latest-compat.json) だけで
+ *   **本体インストーラが 1 つも無い**。手動DLボタンを押したユーザーが JSON しか
+ *   置いていないページに飛ばされ、逃げ道として機能していなかった (今日の実害)。
+ *   本体 (dmg / setup.exe) は publish-manual.yml が
+ *   `funstack-app/gorigori-kun-releases` に上げているので、そちらを開く。
+ */
+export const RELEASES_URL =
+  "https://github.com/funstack-app/gorigori-kun-releases/releases/latest";
+
+/**
+ * 更新が失敗した段階。「詳細（報告用）」に出して原因の切り分けを助ける。
+ *
+ * なぜ段階が要るか (2026-08-06):
+ *   分類 (ネットワーク / 署名 / ディスク / 権限) だけでは、
+ *   「そもそもマニフェストに届いていない」のか「500MB 落とし切った後で
+ *   署名検証に失敗した」のかが区別できない。Windows の更新不能 (v2.5.1) は
+ *   後者だったが、報告からはそれが読み取れなかった。
+ */
+export type UpdateStage =
+  | "manifest"
+  | "download"
+  | "verify"
+  | "install"
+  | "unknown";
+
+/** 段階の日本語ラベル (報告用の表示に使う)。 */
+export const UPDATE_STAGE_LABEL: Record<UpdateStage, string> = {
+  manifest: "更新情報の取得",
+  download: "ダウンロード中",
+  verify: "更新ファイルの検証",
+  install: "インストール",
+  unknown: "不明",
+};
+
+/**
+ * 呼び出し元が分かっている範囲での段階ヒント。
+ *   - `check`: `check()` だけを呼ぶ経路。失敗は必ずマニフェスト取得段階。
+ *   - `install`: `downloadAndInstall()` 経路。DL 以降のどこかで失敗している。
+ */
+export type UpdateStageHint = "check" | "install";
 
 type UpdateFailure = {
   /** ユーザーに見せる本文。次の行動が分かる日本語にする。 */
@@ -38,7 +83,48 @@ type UpdateFailure = {
   showManual: boolean;
   /** 報告用に残す生のメッセージ。 */
   raw: string;
+  /** どの段階で失敗したか。報告用。 */
+  stage: UpdateStage;
 };
+
+/**
+ * 失敗した段階を判定する。
+ *
+ * エラー文字列だけでは足りない (「network error」は manifest 取得中にも
+ * DL 中にも出る) ので、**呼び出し元のヒントと併用**する。
+ *   - `check` 経路なら、まだ DL に入っていないので manifest 段階で確定。
+ *   - `install` 経路なら DL 以降。文字列から verify / install を拾い、
+ *     どちらでもなければ download とみなす。
+ */
+export function classifyUpdateStage(
+  err: unknown,
+  hint: UpdateStageHint,
+): UpdateStage {
+  const lower = String(err).toLowerCase();
+
+  if (hint === "check") return "manifest";
+
+  const isVerify =
+    lower.includes("signature") ||
+    lower.includes("verify") ||
+    lower.includes("verification") ||
+    lower.includes("untrusted") ||
+    lower.includes("minisign");
+  if (isVerify) return "verify";
+
+  const isInstall =
+    lower.includes("install") ||
+    lower.includes("extract") ||
+    lower.includes("unpack") ||
+    lower.includes("mount") ||
+    lower.includes("replace") ||
+    lower.includes("elevat");
+  if (isInstall) return "install";
+
+  // DL 中の失敗 (ネットワーク断・容量不足・メモリ不足)。
+  // v2.5.1 の Windows 更新不能はここに落ちる想定。
+  return "download";
+}
 
 /**
  * 更新の失敗を分類して、ユーザーが次に何をすればよいかを示す。
@@ -51,9 +137,13 @@ type UpdateFailure = {
  *   ユーザーは抜け出せない。
  *   分類して文言を出し分け、どの分岐でも手動DLの逃げ道を残す。
  */
-function classifyUpdateFailure(err: unknown): UpdateFailure {
+export function classifyUpdateFailure(
+  err: unknown,
+  hint: UpdateStageHint,
+): UpdateFailure {
   const raw = String(err);
   const lower = raw.toLowerCase();
+  const stage = classifyUpdateStage(err, hint);
 
   const isNetwork =
     lower.includes("network") ||
@@ -68,6 +158,7 @@ function classifyUpdateFailure(err: unknown): UpdateFailure {
       text: "インターネットに接続できませんでした。接続を確認してもう一度お試しください。",
       showManual: false,
       raw,
+      stage,
     };
   }
 
@@ -83,6 +174,7 @@ function classifyUpdateFailure(err: unknown): UpdateFailure {
       text: "更新ファイルの検証に失敗しました。お手数ですが、下のボタンから最新版を直接ダウンロードしてください。",
       showManual: true,
       raw,
+      stage,
     };
   }
 
@@ -95,6 +187,7 @@ function classifyUpdateFailure(err: unknown): UpdateFailure {
       text: "ディスクの空き容量が足りません。空き容量を作ってからもう一度お試しください。",
       showManual: false,
       raw,
+      stage,
     };
   }
 
@@ -108,6 +201,7 @@ function classifyUpdateFailure(err: unknown): UpdateFailure {
       text: "更新の書き込みが許可されませんでした。アプリを一度終了してから、もう一度お試しください。",
       showManual: true,
       raw,
+      stage,
     };
   }
 
@@ -115,6 +209,7 @@ function classifyUpdateFailure(err: unknown): UpdateFailure {
     text: "更新に失敗しました。下のボタンから最新版を直接ダウンロードできます。",
     showManual: true,
     raw,
+    stage,
   };
 }
 
@@ -210,12 +305,14 @@ export function UpdateChecker() {
         notes: update.body,
       });
     } catch (err) {
-      const failure = classifyUpdateFailure(err);
+      // runCheck は check() しか呼ばないので、失敗は必ずマニフェスト取得段階。
+      const failure = classifyUpdateFailure(err, "check");
       setStatus({
         kind: "error",
         message: failure.text,
         showManual: failure.showManual,
         raw: failure.raw,
+        stage: failure.stage,
       });
       pushToast({ kind: "error", text: failure.text, ttlMs: 7000 });
     }
@@ -223,12 +320,16 @@ export function UpdateChecker() {
 
   const runInstall = async () => {
     setStatus({ kind: "downloading", downloaded: 0, total: 0 });
+    // runInstall は check() → downloadAndInstall() の 2 段。どちらで落ちたかで
+    // 段階が変わるので、check() を抜けた時点でヒントを install に切り替える。
+    let hint: UpdateStageHint = "check";
     try {
       const update = await check();
       if (!update) {
         setStatus({ kind: "up-to-date" });
         return;
       }
+      hint = "install";
       let total = 0;
       let downloaded = 0;
       await update.downloadAndInstall((event) => {
@@ -245,12 +346,13 @@ export function UpdateChecker() {
       // インストール完了 → 再起動
       await relaunch();
     } catch (err) {
-      const failure = classifyUpdateFailure(err);
+      const failure = classifyUpdateFailure(err, hint);
       setStatus({
         kind: "error",
         message: failure.text,
         showManual: failure.showManual,
         raw: failure.raw,
+        stage: failure.stage,
       });
       pushToast({ kind: "error", text: failure.text, ttlMs: 8000 });
     }
@@ -378,6 +480,16 @@ export function UpdateChecker() {
                 <summary className="cursor-pointer text-[10px] text-neutral-600 hover:text-neutral-400">
                   詳細（報告用）
                 </summary>
+                {/*
+                  どの段階で落ちたかを先に出す。生メッセージだけだと
+                  「マニフェストに届いていない」のか「落とし切った後で検証に
+                  失敗した」のかが読み取れない (2026-08-06)。
+                */}
+                {status.stage && (
+                  <p className="mt-1 text-[10px] leading-relaxed text-neutral-500">
+                    失敗した段階: {UPDATE_STAGE_LABEL[status.stage]}
+                  </p>
+                )}
                 <p className="mt-1 break-all font-mono text-[10px] leading-relaxed text-neutral-500">
                   {status.raw}
                 </p>

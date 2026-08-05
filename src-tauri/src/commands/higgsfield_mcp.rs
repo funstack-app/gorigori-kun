@@ -43,8 +43,8 @@ use tauri::State;
 
 use crate::codex::mcp_direct::{call_tool, reload_mcp_servers};
 use crate::codex::mcp_shared::{
-    entry_is_authenticated, find_mcp_entry, gori_codex_command, run_codex_auth_capture,
-    run_codex_capture,
+    ensure_codex_auth_available, entry_is_authenticated, find_mcp_entry, gori_codex_command,
+    run_codex_auth_capture, run_codex_capture,
 };
 use crate::state::AppState;
 
@@ -174,6 +174,10 @@ const HIGGSFIELD_MCP_LOGIN_TIMEOUT_SECS: u64 = 180;
 /// 直接呼び出し (モデル一覧・生成) が効くようにする。
 #[tauri::command]
 pub async fn higgsfield_mcp_login(state: State<'_, AppState>) -> Result<String, String> {
+    // ⓪ 認可用バイナリ (codex-auth) を用意する。2026-08-06 に同梱をやめたため、
+    //    未取得ならここで初回 DL する (失敗しても止めずフォールバックで続行)。
+    ensure_codex_auth_available().await;
+
     // ① 登録 (mcp add)。実機ではこの段階で OAuth が自動完了する。既に登録済みだと
     //    codex が非ゼロ終了することがあるが、それはエラーにせず login に進む (冪等性)。
     //    認可 2 操作 (add / login) だけ codex-auth (0.147.0-alpha.4) で実行する。
