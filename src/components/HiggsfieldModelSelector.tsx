@@ -39,6 +39,16 @@ const CODEX_STANDARD_LABEL = "GPT Image 2 (デフォルト)";
 const PICKER_WIDTH = 390;
 const MAX_COMPARE_MODELS = 4;
 
+/**
+ * Magnific 未接続と断定するまでに必要な「連続 false 観測回数」(2026-08-05)。
+ *
+ * magnific_status は外部プロセス (`codex mcp list`) の結果で、失敗・タイムアウトも
+ * すべて authenticated:false に潰れる。1 回の false で判断すると、生成中など
+ * codex が混む場面で一過性の false を拾い、タブと選択が往復して「チカチカ」する。
+ * 2 回にすると 1 回きりのブレは無視でき、本当の接続解除は次の refresh で確定する。
+ */
+const MAGNIFIC_UNAUTH_STRIKES = 2;
+
 // モデル一覧の localStorage キャッシュ (2026-06-10)。
 // 直接呼び出し化で取得は1-2秒に縮んだが、キャッシュがあれば開いた瞬間に表示し、
 // 裏で最新を取得して差し替える (stale-while-revalidate)。
@@ -338,11 +348,32 @@ function ModelPickerPopover({
 
   // Magnific 未接続なのに magnific タブが開いたままだと、タブボタンは消えるのに
   // 中身 (モデル一覧+選択チェック) だけ残る (2026-06-10 実機FB)。強制的に default へ戻す。
+  //
+  // ただし magnificAuthed の false は「本当に未接続」とは限らない (2026-08-05 実機FB
+  // 「Magnific のモデルを選ぼうとすると何回もリロードみたいになってチカチカする」)。
+  // magnific_status は `codex mcp list` を spawn する外部プロセス呼び出しで、
+  // spawn 失敗・タイムアウト・codex 不在をすべて magnific_status_unavailable()
+  // (= authenticated:false) に潰して返す (src-tauri/src/commands/magnific.rs:57-106)。
+  // 生成中は codex プロセスが混み合うため、この一時的な false が起きやすい。
+  //
+  // 以前はその一瞬の false で即 default タブへ戻し選択も消していたため、
+  // 次の refresh で true に戻る→タブが復帰→また false…の往復が
+  // 「タブが開いては閉じ、選択が消えては戻る」= チカチカとして見えていた。
+  //
+  // 対策: false が **連続 MAGNIFIC_UNAUTH_STRIKES 回** 観測されるまで退避しない。
+  // true を観測した時点でカウンタは 0 に戻る。これで一過性のブレは無視しつつ、
+  // 本当に接続解除されたケース (false が続く) では従来どおり default へ戻る。
+  const unauthStrikesRef = useRef(0);
   useEffect(() => {
-    if (!magnificAuthed && providerTab === "magnific") {
-      setProviderTab("default");
-      if (magnificCount > 0) clearMagnific();
+    if (magnificAuthed) {
+      unauthStrikesRef.current = 0;
+      return;
     }
+    if (providerTab !== "magnific") return;
+    unauthStrikesRef.current += 1;
+    if (unauthStrikesRef.current < MAGNIFIC_UNAUTH_STRIKES) return;
+    setProviderTab("default");
+    if (magnificCount > 0) clearMagnific();
   }, [magnificAuthed, providerTab, magnificCount, clearMagnific]);
 
   useEffect(() => {

@@ -243,6 +243,15 @@ export const useAccounts = create<AccountsState>((set, get) => ({
 
   refreshMagnific: async () => {
     // Magnific はオプショナル拡張。status が取れなければ未接続として degrade する。
+    //
+    // 選択のクリアは「未登録 (registered:false)」のときだけに絞る (2026-08-05)。
+    // magnific_status は `codex mcp list` の spawn 失敗・タイムアウトも
+    // {registered:false, authenticated:false} に潰して返すため、認証済みでも
+    // 一時的に authenticated:false が返りうる。ここで毎回 clear すると、
+    // ユーザーが選んだモデルが生成中などに勝手に消える (実機FB: チカチカ)。
+    //
+    // registered:true かつ authenticated:false は「登録済みだがトークン切れ」で、
+    // 再ログインすればそのまま使える。選択を消さずに残すほうが実態に合う。
     try {
       const status = await magnific.status();
       set({
@@ -251,10 +260,11 @@ export const useAccounts = create<AccountsState>((set, get) => ({
           authenticated: status.authenticated,
         },
       });
-      if (!status.authenticated) clearMagnificSelectionIfStale();
+      if (!status.registered) clearMagnificSelectionIfStale();
     } catch {
+      // 例外は status 取得そのものの失敗。接続状態は不明なので、
+      // 選択は消さずに未接続表示へ倒すだけにする。
       set({ magnific: { registered: false, authenticated: false } });
-      clearMagnificSelectionIfStale();
     }
   },
 
