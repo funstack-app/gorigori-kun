@@ -33,6 +33,11 @@ import type {
 import { defaultIdentityChecker } from "../../../lib/character/identityCheck";
 import type { IdentityCheckResult } from "../../../lib/character/identityCheck";
 import { registerCharacter } from "../../../lib/character/registerCharacter";
+import {
+  CHARACTER_NEXT_STEP_SKILL_IDS,
+  openSkillWithCharacter,
+} from "../../../lib/character/openSkillWithCharacter";
+import { GORI_SKILLS } from "../../../lib/skills/catalog";
 
 const IMAGE_EXTS = ["png", "jpg", "jpeg", "webp", "gif", "bmp"];
 const COMPOSITE_ASPECT_RATIO = "3:4";
@@ -1094,6 +1099,18 @@ function StepRegister({
   const [identity, setIdentity] = useState<IdentityCheckResult | null>(null);
   const [checking, setChecking] = useState(true);
   const [saving, setSaving] = useState(false);
+  /**
+   * H1 (2026-08-05): 登録に成功したキャラ名。null の間は登録前。
+   *
+   * 旧実装は登録成功と同時に setStep(1) で入力画面へ戻していたため、
+   * 「登録できた」の直後が**完全な行き止まり**だった (アンケート最頻出:
+   * 「キャラシートの使い道がわからない」同型3件)。そこで登録後は
+   * この画面に留まり、次工程の展開先を一度だけ出す。
+   *
+   * 「次のキャラを登録する」を押したときに初めて Step1 へ戻す
+   * (順路を強制しないので、戻る操作もユーザーが選ぶ)。
+   */
+  const [registeredName, setRegisteredName] = useState<string | null>(null);
 
   // 検品はメイン(先頭)の参照画像を基準にする。identityCheck は現状 Noop なので
   // 挙動は変わらない (S5 実装時に「メイン基準 + 補助参照」へ拡張する)。
@@ -1170,7 +1187,10 @@ function StepRegister({
       // 登録できたジョブだけを台帳から外す。**下書きには触らない** ——
       // 仕込み途中の次のキャラが消えないことが、連続登録の体験の本体。
       completeJob(job.jobId);
-      setStep(1);
+      // H1: ここで setStep(1) しない。登録直後こそ「で、これで何ができるの?」が
+      // 最大化する瞬間なので、この画面に留まって展開先を出す。Step1 へ戻すのは
+      // 「次のキャラを登録する」を押したときだけ (下の完了パネル)。
+      setRegisteredName(characterName.trim());
     } catch (err) {
       pushToast({
         kind: "error",
@@ -1249,20 +1269,96 @@ function StepRegister({
         )}
       </div>
 
-      <div className="flex items-center justify-end gap-2 border-t border-[#242424] px-4 py-3">
+      {registeredName ? (
+        <NextStepPanel
+          characterName={registeredName}
+          onRegisterNext={() => {
+            setRegisteredName(null);
+            setStep(1);
+          }}
+        />
+      ) : (
+        <div className="flex items-center justify-end gap-2 border-t border-[#242424] px-4 py-3">
+          <button
+            type="button"
+            onClick={() => void handleRegister()}
+            disabled={!canRegister}
+            className={
+              "rounded-xl px-5 py-2.5 text-[14px] font-black transition " +
+              (canRegister
+                ? "bg-pink-500 text-white hover:bg-pink-400"
+                : "cursor-not-allowed bg-[#242424] text-neutral-600")
+            }
+          >
+            {saving ? "登録中…" : regenTarget ? "このキャラを上書き登録" : "このキャラを登録"}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * H1 (2026-08-05): 登録完了 → 次の工程への分岐点。
+ *
+ * 配置文法は AngleGridPanel.tsx:636-641 で確立済みの形に従う ——
+ * 「保存系」とは役割が違う「次の工程へ進む」導線なので**行を分けて**出し、
+ * アクセント色 (ピンク) を当てる。一等地 (共通ヘッダー等) には足さない。
+ *
+ * 明示型・一度だけ: 登録直後のこの位置に出す。モーダルで割り込まない。
+ * 押さずに「次のキャラを登録する」へ抜けるのも同じ重さで選べるようにする
+ * (順路を強制しない = STΛCK 方針 A案)。
+ *
+ * ラベルはスキル名 + 短い動詞だけにする。長い説明は置かない (H2)。
+ */
+function NextStepPanel({
+  characterName,
+  onRegisterNext,
+}: {
+  characterName: string;
+  onRegisterNext: () => void;
+}) {
+  // catalog を正本にする (ここでスキル名を二重管理しない)。
+  // id は絞り込んだ型のまま持ち回る (find の戻り値だけ使うと GoriSkillId へ
+  // 広がってしまい、openSkillWithCharacter の型が受け付けない)。
+  const nextSkills = useMemo(
+    () =>
+      CHARACTER_NEXT_STEP_SKILL_IDS.map((id) => ({
+        id,
+        skill: GORI_SKILLS.find((s) => s.id === id),
+      })).filter(
+        (entry): entry is { id: typeof entry.id; skill: (typeof GORI_SKILLS)[number] } =>
+          Boolean(entry.skill),
+      ),
+    [],
+  );
+
+  return (
+    <div className="border-t border-[#242424] px-4 py-3">
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+        <div className="text-[12px] font-bold text-neutral-300">
+          「{characterName}」を登録しました。このキャラで次を作れます
+        </div>
         <button
           type="button"
-          onClick={() => void handleRegister()}
-          disabled={!canRegister}
-          className={
-            "rounded-xl px-5 py-2.5 text-[14px] font-black transition " +
-            (canRegister
-              ? "bg-pink-500 text-white hover:bg-pink-400"
-              : "cursor-not-allowed bg-[#242424] text-neutral-600")
-          }
+          onClick={onRegisterNext}
+          className="rounded-lg border border-[#343434] px-3 py-1.5 text-[11px] font-bold text-neutral-400 transition hover:border-neutral-500 hover:text-white"
         >
-          {saving ? "登録中…" : regenTarget ? "このキャラを上書き登録" : "このキャラを登録"}
+          次のキャラを登録する
         </button>
+      </div>
+      <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-4">
+        {nextSkills.map(({ id, skill }) => (
+          <button
+            key={id}
+            type="button"
+            onClick={() => openSkillWithCharacter(id, characterName)}
+            title={skill.launchHint}
+            className="flex items-center justify-center rounded-md border border-pink-500/40 bg-pink-500/10 px-2 py-1.5 text-[11px] font-bold text-pink-200 transition hover:border-pink-400 hover:bg-pink-500/20 hover:text-white"
+          >
+            {skill.name}を作る
+          </button>
+        ))}
       </div>
     </div>
   );
