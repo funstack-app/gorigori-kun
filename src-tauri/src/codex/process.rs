@@ -614,6 +614,26 @@ pub fn humanize_generation_failure(raw: &str) -> String {
     if lower.contains("http 401") || lower.contains("unauthorized") {
         return "画像生成サービスの認証が切れている可能性があります。設定 → アカウントから再ログインしてください。".to_string();
     }
+    // クレジット不足 / 利用枠切れ。補充・プラン変更まで直らない(429と違い待っても復帰しない)。
+    //
+    // 429 より **前** に判定する。Higgsfield/Magnific は枠切れを 429 と併記して
+    // 返すことがあり(`HTTP 429 ... not_enough_credits`)、429 分岐が先だと
+    // 「1〜2分おいて再生成」という直らない案内を出してしまうため。
+    //
+    // 判定語は `src/lib/scene/retryClassify.ts` の PERMANENT_KEYWORDS
+    // クレジット節と同じ (恒久的失敗としてリトライ対象から外している分類と
+    // 表示の日本語化を、同じ語彙で揃える)。
+    if lower.contains("not_enough_credits")
+        || lower.contains("not enough credits")
+        || lower.contains("insufficient_credits")
+        || lower.contains("insufficient credits")
+        || lower.contains("insufficient_quota")
+        || lower.contains("out of credits")
+        || lower.contains("クレジットが不足")
+        || lower.contains("クレジット不足")
+    {
+        return "AIの利用枠(クレジット)が不足しています。作成済みのデータはすべて残っています。設定 → アカウントで残量を確認するか、時間をおいてからもう一度お試しください。".to_string();
+    }
     // レート制限(429)。少し待てば直る。
     if lower.contains("http 429")
         || lower.contains("rate limit")
@@ -745,5 +765,49 @@ mod humanize_tests {
     fn unknown_error_is_unchanged() {
         let raw = "なにか未知のエラー xyz";
         assert_eq!(humanize_generation_failure(raw), raw);
+    }
+
+    /// クレジット不足が日本語化される。Higgsfield MCP の job_status が返す
+    /// `generation.error` がそのまま素通しされる経路(higgsfield_mcp.rs:611)の
+    /// 実際の値を想定する。
+    #[test]
+    fn not_enough_credits_is_humanized() {
+        for raw in [
+            "not_enough_credits",
+            "Generation failed: not enough credits",
+            "insufficient_quota",
+            "You are out of credits",
+            "クレジットが不足しています",
+        ] {
+            let msg = humanize_generation_failure(raw);
+            assert!(
+                msg.contains("利用枠(クレジット)が不足"),
+                "not humanized: {raw} -> {msg}"
+            );
+            // 料金不安を煽らない: 課金を迫る文言を含めない。
+            assert!(!msg.contains("購入"), "urges payment: {msg}");
+            assert!(!msg.contains("課金"), "urges payment: {msg}");
+            // データ保全の安心を必ず伝える(3点書式の2番目)。
+            assert!(msg.contains("残っています"), "no data-safety line: {msg}");
+        }
+    }
+
+    /// 枠切れが 429 と併記されて返っても、「1〜2分おいて再生成」(待てば直る)
+    /// ではなくクレジット不足として案内する。待っても直らないため。
+    #[test]
+    fn credits_wins_over_rate_limit_when_both_present() {
+        let msg = humanize_generation_failure("HTTP 429 Too Many Requests: not_enough_credits");
+        assert!(
+            msg.contains("利用枠(クレジット)が不足"),
+            "rate-limit branch shadowed the credit branch: {msg}"
+        );
+        assert!(!msg.contains("1〜2分"), "gave a wait-and-retry hint: {msg}");
+    }
+
+    /// 通常の 429 は従来どおりレート制限として扱う(上の分岐追加で退行しない)。
+    #[test]
+    fn plain_rate_limit_still_humanized() {
+        let msg = humanize_generation_failure("HTTP 429 Too Many Requests");
+        assert!(msg.contains("短時間に生成しすぎて"), "{msg}");
     }
 }

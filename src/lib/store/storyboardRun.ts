@@ -13,6 +13,7 @@ import type {
   StoryboardSketchCut,
   StoryboardSketchVersion,
 } from "../storyboard/types";
+import { humanizeError } from "../humanizeError";
 import { buildProductionParams } from "../storyboard/productionParams";
 import { useActiveProject } from "./activeProject";
 import {
@@ -854,9 +855,11 @@ export const useStoryboardRun = create<StoryboardRunState>((set, get) => {
       // 復元しないので、待機していたカットが静かに消えたことが分かるよう
       // 対象カット数をトーストに含める (自動再キューは無限リトライの危険が
       // あるため行わない)。
+      // G2 (2026-08-05): 生エラーを直に出さない。クレジット不足等は日本語の
+      // 案内に変換する (lastError には原因究明のため生の msg を残したまま)。
       useToasts.getState().push({
         kind: "error",
-        text: `本生成の起動に失敗しました (自動開始待ちだった${params.productionScope?.length ?? 0}件を含む): ${msg}`,
+        text: `本生成の起動に失敗しました (自動開始待ちだった${params.productionScope?.length ?? 0}件を含む): ${humanizeError(msg)}`,
         ttlMs: 6000,
       });
       return false;
@@ -1356,7 +1359,8 @@ export const useStoryboardRun = create<StoryboardRunState>((set, get) => {
         });
         useToasts.getState().push({
           kind: "error",
-          text: `作り直しに失敗しました: ${(err as Error)?.message ?? String(err)}`,
+          // G2 (2026-08-05): 生エラー直出しをやめ、クレジット不足等を日本語化する。
+          text: `作り直しに失敗しました: ${humanizeError((err as Error)?.message ?? err)}`,
           ttlMs: 5000,
         });
       });

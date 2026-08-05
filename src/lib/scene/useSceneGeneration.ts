@@ -7,6 +7,7 @@ import {
 } from "./generate";
 import { resolveImageMentions } from "./resolveImageMentions";
 import { classifyFailures } from "./retryClassify";
+import { humanizeError } from "../humanizeError";
 import type { SceneState } from "./types";
 import { useActiveProject } from "../store/activeProject";
 import { useAuth } from "../store/auth";
@@ -469,9 +470,14 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
     // 全件失敗時のユーザー向けメッセージ (恒久的失敗の理由があれば併記)。
     const totalFailureMessage = (permanentReasons: string[]): string => {
       if (permanentReasons.length > 0) {
+        // G2 (2026-08-05): 理由をそのまま並べると `not_enough_credits` 等の生の
+        // 英語が出る (Higgsfield MCP 経路の errors は Rust 側の
+        // humanize_generation_failure を通らないため)。ここで日本語化する。
+        // 同一文言に畳まれた場合は重複を除く。
+        const readable = Array.from(new Set(permanentReasons.map((r) => humanizeError(r))));
         return (
           `画像生成に失敗しました（${effectiveCount}件すべて失敗）。\n` +
-          `理由:\n${permanentReasons.map((r) => `・${r}`).join("\n")}`
+          `理由:\n${readable.map((r) => `・${r}`).join("\n")}`
         );
       }
       // 理由が1件も取れなかったとき。原因を断定しない (2026-06-07 修正)。

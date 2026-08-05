@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { SafeImage } from "./SafeImage";
+import { humanizeError } from "../lib/humanizeError";
 import { useBatches } from "../lib/store/batches";
 import { useImages } from "../lib/store/images";
 import { useVideoGen } from "../lib/store/videoGen";
@@ -113,7 +114,7 @@ export function VideoStoryQueuePanel() {
                       void retryCut(cut.cutId).finally(() => setRetrying(null));
                     }}
                     className="shrink-0 rounded border border-pink-500/40 bg-pink-500/10 px-2 py-1 text-[10px] text-pink-100 hover:bg-pink-500/20 disabled:cursor-not-allowed disabled:opacity-50"
-                    title={cut.error}
+                    title={cut.error ? humanizeError(cut.error) : undefined}
                   >
                     このカットを再生成
                   </button>
@@ -151,14 +152,19 @@ export function VideoStoryQueuePanel() {
           })}
         </ol>
 
-        {/* 失敗理由は行に収まらないので、まとめて下に出す */}
+        {/*
+          失敗理由は行に収まらないので、まとめて下に出す。
+          G2 (2026-08-05): Higgsfield MCP の `generation.error` はそのまま
+          流れてくる (higgsfield_mcp.rs の job_status 経路)。`not_enough_credits`
+          等の生の英語がここで初めてユーザーの目に触れるので日本語化する。
+        */}
         {cuts.some((c) => c.status === "failed" && c.error) && (
           <ul className="mt-1.5 flex flex-col gap-0.5">
             {cuts
               .filter((c) => c.status === "failed" && c.error)
               .map((c) => (
                 <li key={c.cutId} className="text-[10px] leading-relaxed text-red-300">
-                  Cut {c.order}: {c.error}
+                  Cut {c.order}: {humanizeError(c.error)}
                 </li>
               ))}
           </ul>

@@ -30,8 +30,16 @@ const PERMANENT_KEYWORDS: readonly string[] = [
   "性的表現",
   "暴力",
   // ── クレジット不足（補充するまで直らない＝同一プロンプトの即時リトライでは無駄）──
+  // 語彙は `src/lib/humanizeError.ts` の CREDIT_SHORTAGE_PATTERN および Rust 側
+  // `codex::process::humanize_generation_failure` のクレジット分岐と揃える。
+  // ズレると「リトライしないのに英語のまま」「日本語化されるのにリトライされる」
+  // という中途半端な状態になる（tests-unit/creditShortageMessage.test.ts で固定）。
   "not_enough_credits",
   "not enough credits",
+  "insufficient_credits",
+  "insufficient credits",
+  "insufficient_quota",
+  "out of credits",
   "クレジットが不足",
   "クレジット不足",
   // ── パラメータ不正（アプリ側バグ。リトライしても同じ）──
