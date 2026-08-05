@@ -16,6 +16,8 @@
  * 吹き出しの画像への焼き込み（書き出し）は将来課題（表示は CSS で成立させる）。
  */
 
+import type { ComicPanelSlot } from "./layoutTemplates";
+
 /** ページ数の指定。"auto"=AI が決める（目安 MAX_STORY_PAGES）／数値=そのページ数（上限なし）。 */
 export type PageCountChoice = "auto" | number;
 
@@ -48,6 +50,27 @@ export type ComicImageCharacter = {
 };
 
 /**
+ * 背景・小物の環境参照（3ir 2026-08-03）。
+ * ページ間でデザインを固定したい物・背景・環境をユーザーが明示添付する。
+ * ComicFlow のセッション内 state 専用（ディスク保存しない。imageCharacters と同格）。
+ * kind の語彙は referenceRoles.ts の ReferenceRoleKind から location / item を流用する
+ * （企画チャットの参照ロールと同じ意味論。ただし保存 regime は別＝グローバル
+ * referenceRoles ストアには書かない）。
+ */
+export type ComicEnvReference = {
+  /** セッション内一意 ID（crypto.randomUUID()）。削除・編集のキー。 */
+  id: string;
+  /** 表示名。プロンプトへ「名前」としてそのまま出す（例:「ドア」）。空にはさせない。 */
+  name: string;
+  /** location = 背景・環境・舞台 / item = 小物・オブジェクト（形状・質感を固定） */
+  kind: "location" | "item";
+  /** 参照画像の絶対パス。 */
+  imagePath: string;
+  /** 入力元（チップのラベル表示用）。 */
+  source: "file" | "library";
+};
+
+/**
  * コマ絵の画風。生成プロンプトのベース句を切り替える（セッション内のみ・保存しない）。
  * 既定は "mono"（従来どおりの白黒漫画）。
  *
@@ -57,10 +80,35 @@ export type ComicImageCharacter = {
  */
 export type ComicColorMode = "mono" | "color" | "faithful";
 
+/**
+ * コマの読み方向 (B-1 2026-07-30)。生成プロンプトの空間指示
+ * (panel 位置の明示・読み順強調句) に効く。既定は "rtl" (右→左・日本式)。
+ * 最終レイアウトは画像生成AIが描くため、指示を強めても保証はされない
+ * (効果は確率的)。決定論保証はコード合成経路の復活が必要で、今回はやらない。
+ */
+export type ComicReadingDirection = "rtl" | "ltr";
+
+/** 枠線の太さ (B-4b)。プロンプト近似のため再現は保証されない。既定 "standard"。 */
+export type ComicFrameStyle = "thin" | "standard" | "bold";
+/** コマ間隔 (B-4b)。プロンプト近似のため再現は保証されない。既定 "standard"。 */
+export type ComicGutterStyle = "narrow" | "standard" | "wide";
+
 /** 保存形式（セッション内のみ・保存しない）。 */
 export type ComicSaveFormat = "png" | "jpeg";
 
-export type ComicBalloonKind = "normal" | "shout" | "monologue" | "narration";
+/**
+ * 吹き出しの種類（gtm 2026-08-03。出典: Chico 要望 DB3 / bd gtm ①〜⑥）。
+ * ページ生成プロンプトへ kind 別の英語記述子として焼き込む（効果は確率的）。
+ */
+export type ComicBalloonKind =
+  | "normal" // 通常
+  | "black" // 黒ベタ（Chico ①）
+  | "shout" // 叫び（既存）
+  | "shout_black" // 黒ギザギザ（Chico ⑥）
+  | "monologue" // 心の声（既存。記述子を④仕様に強化）
+  | "narration" // ナレーション・四角囲み（既存）
+  | "caption" // ナレーション・文字のみ（Chico ③）
+  | "machine"; // 機械音声・動物用の多角形（Chico ⑤）
 
 /** ネームの吹き出し1個。AI が生成し、ネーム確認とページ編集で人が直す。 */
 export type ComicBalloon = {
@@ -153,6 +201,13 @@ export type ComicStoryPage = {
   /** このページのコマ数。panels.length と常に一致（isValidStory が保証）。 */
   panelCount: number;
   panels: ComicPanel[];
+  /**
+   * 生成後のコマ分割/統合でこのページ専用に上書きされたスロット。
+   * undefined = テンプレ（getComicTemplate(storyTemplateId).slots）が正。
+   * ある場合は length === panels.length を分割/統合の操作側が常に保証する。
+   * ページ丸ごと再生成が成功した時点で破棄される（新画像には適用されないため）。
+   */
+  slotsOverride?: ComicPanelSlot[];
 };
 
 /** 1ページの生成結果。ComicPanelResult のページ版（構造を揃えて実装を写経可能にする）。 */
@@ -162,6 +217,12 @@ export type ComicPageResult = {
   generating: boolean;
   startedAt?: number;
   error?: string;
+  /** この画像を生成したときの読み方向。1コマ再編集の対応判定に使う（B-1 の鏡像問題）。 */
+  direction?: ComicReadingDirection;
+  /** この画像を生成したときの画風。faithful は1コマ再編集の対象外判定に使う。 */
+  colorMode?: ComicColorMode;
+  /** この画像を生成したときの絵柄テキスト（qvs）。1コマ再編集が同じ絵柄を引き継ぐための記録。 */
+  styleText?: string;
 };
 
 /**

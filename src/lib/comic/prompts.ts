@@ -9,7 +9,11 @@
  */
 
 import { SFX_INTENT } from "./balloonLayout";
-import { describeSlotShape, type ComicLayoutTemplate } from "./layoutTemplates";
+import {
+  describeSlotShape,
+  type ComicLayoutTemplate,
+  type ComicPanelSlot,
+} from "./layoutTemplates";
 // references.ts は ./types しか import しないため循環しない（cast の導出規則を1箇所に閉じる）。
 import { unionPanelCharacters } from "./references";
 import type {
@@ -17,11 +21,51 @@ import type {
   ComicBalloonKind,
   ComicCharacter,
   ComicColorMode,
+  ComicFrameStyle,
+  ComicGutterStyle,
   ComicPanel,
+  ComicReadingDirection,
   ComicSfx,
   ComicSfxIntent,
   ComicStoryPage,
 } from "./types";
+
+/**
+ * 吹き出しの種類ごとの英語記述子（gtm 2026-08-03）。
+ *
+ * ページ生成プロンプトのコマ行で、そのセリフの引用の直後に括弧書きで足す。
+ * 黒系2種に white outer rim を含めるのは、白黒漫画で黒ベタ吹き出しが背景の黒と
+ * 同化する事故を防ぐため（Chico ①の「白縁」指定そのもの）。
+ */
+export const BALLOON_KIND_DESCRIPTOR: Record<ComicBalloonKind, string> = {
+  normal: "rounded speech balloon",
+  black:
+    "solid black speech balloon with white lettering and a thin white outer rim",
+  shout: "jagged spiky shout balloon",
+  shout_black:
+    "solid black jagged spiky shout balloon with white lettering and a thin white outer rim",
+  monologue:
+    "thought bubble whose tail is a trail of small round bubbles instead of a pointed tail, lettered in a softer rounded style distinct from spoken dialogue",
+  narration: "rectangular narration box",
+  caption:
+    "narration text floating directly on the artwork with no box or balloon around it",
+  machine:
+    "angular polygonal balloon with straight edges, for an electronic, broadcast, or animal voice",
+};
+
+/**
+ * 数珠つなぎ（gtm ②）の分割。1個の吹き出しの text 内の「／」「/」を区切りとして
+ * 連結吹き出しのセグメントへ割る。
+ *
+ * データ上は1個の ComicBalloon のまま（表示・編集・保存の正本は「／」入りテキスト）。
+ * プロンプト組み立てだけがこれを使う唯一の実装点。
+ */
+export function balloonSegments(text: string): string[] {
+  return text
+    .split(/[／/]/)
+    .map((seg) => seg.trim())
+    .filter((seg) => seg.length > 0);
+}
 
 /**
  * 登場キャラ一覧と「名前の厳守」ブロックを導出する。
@@ -151,6 +195,10 @@ export function buildStoryPrompt(
     pageCount?: number;
     /** 参考テンプレ。undefined = AI にコマ割り最適化させる。 */
     template?: ComicLayoutTemplate;
+    /** 読み方向。省略時 "rtl"。 */
+    readingDirection?: ComicReadingDirection;
+    /** 固定の背景・小物の名前（3ir）。省略時は出力不変。 */
+    envNames?: string[];
   },
 ): string {
   const { charList, nameDiscipline } = characterListLines(characters);
@@ -194,8 +242,11 @@ export function buildStoryPrompt(
     "",
     "【吹き出し（セリフ）のルール】",
     "- 全コマにセリフを入れないでください。各ページで、4 コマ以下のページは 0〜1 コマ、5 コマ以上のページは 1〜2 コマを balloons 空配列にして、表情や間で見せる無言のコマにします。",
-    "- balloons は1コマ最大2個、1コマの合計40字以内。話す順に並べてください（漫画は右上から読むため、先頭の吹き出しが右上に置かれます）。",
-    '- kind の使い分け: 通常の発話は "normal"、叫び・驚きは "shout"、心の中の声は "monologue"、状況説明・時間経過の説明文は "narration"（narration の speaker は空文字にします）。',
+    opts.readingDirection === "ltr"
+      ? "- balloons は1コマ最大2個、1コマの合計40字以内。話す順に並べてください（左→右で読む設定のため、先頭の吹き出しが左上に置かれます）。"
+      : "- balloons は1コマ最大2個、1コマの合計40字以内。話す順に並べてください（漫画は右上から読むため、先頭の吹き出しが右上に置かれます）。",
+    '- kind の使い分け: 通常の発話は "normal"、強い感情・威圧・不気味さの演出は "black"（黒ベタ）、叫び・驚きは "shout"、ひときわ強い叫びは "shout_black"（黒ギザギザ）、心の中の声は "monologue"、状況説明・時間経過の説明文は "narration"（四角囲み）、囲みを付けない説明文は "caption"。"narration" と "caption" の speaker は空文字にします。機械音声・スピーカー越しの声・動物の声は "machine" にします。',
+    '- ひと息で畳みかけるセリフは、1個の吹き出しの text の中を「／」で区切ってください。連結した数珠つなぎの吹き出しとして描かれます（例: "もうっ！／勝手なことばかり言っちゃって"）。',
     "",
     "【擬音（オノマトペ）のルール】",
     "- 動き・衝撃・静けさを強調したいコマにだけ、sfx にカタカナ中心の短い擬音（2〜6文字）を最大2個入れます。他のコマは空配列にします。付けるのは全体の半分以下のコマにします。",
@@ -211,6 +262,14 @@ export function buildStoryPrompt(
     "【登場キャラ】",
     charList,
     ...nameDiscipline,
+    ...(opts.envNames && opts.envNames.length > 0
+      ? [
+          "",
+          "【固定の背景・小物】",
+          `この作品には毎回同じデザインで描く背景・小物があります: ${opts.envNames.map((n) => `「${n}」`).join("")}`,
+          "話に登場する場面では、各コマの composition / prompt にこの名前をそのまま使って言及してください（無理に全コマへ登場させる必要はありません）。",
+        ]
+      : []),
     ...(characters.length > 0
       ? [
           "",
@@ -239,7 +298,7 @@ export function buildStoryPrompt(
     '          "composition": "構図・カメラの説明（引き/寄り、アングル、画角）",',
     '          "characters": ["このコマに登場するキャラ名", ...],',
     '          "acting": "演技・表情・動きの説明",',
-    '          "balloons": [{"speaker": "話者名（narration は空文字）", "text": "セリフ", "kind": "normal|shout|monologue|narration"}],',
+    '          "balloons": [{"speaker": "話者名（narration は空文字）", "text": "セリフ", "kind": "normal|black|shout|shout_black|monologue|narration|caption|machine"}],',
     '          "sfx": [{"text": "擬音（例: ガタッ）", "intent": "impact|motion|quiet|emotion"}],',
     '          "prompt": "画像生成用の1コマ分プロンプト（構図＋演技＋背景を英語で簡潔に）"',
     "        }",
@@ -255,7 +314,16 @@ export function buildStoryPrompt(
 
 /** balloons の取り込み。新スキーマ優先、旧 dialogue 文字列からの移行を後方互換で持つ。 */
 function toBalloons(obj: Record<string, unknown>): ComicBalloon[] {
-  const KINDS = new Set(["normal", "shout", "monologue", "narration"]);
+  const KINDS = new Set([
+    "normal",
+    "black",
+    "shout",
+    "shout_black",
+    "monologue",
+    "narration",
+    "caption",
+    "machine",
+  ]);
   let items: Array<{ speaker: string; text: string; kind: ComicBalloonKind }> = [];
   if (Array.isArray(obj.balloons)) {
     items = obj.balloons
@@ -620,6 +688,72 @@ function finalStyleClause(colorMode: Exclude<ComicColorMode, "faithful">): strin
     : "final output must look like a page from a professional Japanese black-and-white manga: ink lines, screentones, no photographic textures";
 }
 
+type IndexedSlot = ComicPanelSlot & { i: number };
+
+/**
+ * スロットを y 帯の重なりで「段（row）」にまとめる (describePageLayout の段検出を
+ * 共有化。B-1 の位置語導出 panelPositionPhrases と同じ段構造を使うため)。
+ * 各スロットは元配列 index (= 読み順) を i に持つ。
+ */
+function groupSlotsIntoRows(template: ComicLayoutTemplate): IndexedSlot[][] {
+  const slots = template.slots.map((s, i) => ({ ...s, i }));
+  const sorted = [...slots].sort((a, b) => a.y - b.y || b.x - a.x);
+  const rows: IndexedSlot[][] = [];
+  let bottom = Number.NEGATIVE_INFINITY;
+  for (const slot of sorted) {
+    // 現在の段の下端より上に始まるなら同じ段（斜めコマの数percentのズレを吸収）。
+    if (rows.length > 0 && slot.y < bottom) {
+      rows[rows.length - 1].push(slot);
+      bottom = Math.min(bottom, slot.y + slot.h);
+    } else {
+      rows.push([slot]);
+      bottom = slot.y + slot.h;
+    }
+  }
+  return rows;
+}
+
+/**
+ * 各コマ (配列順 = 読み順) の紙面位置語を導出する (B-1 2026-07-30)。
+ * 例: "top-right" / "top-center" / "middle, full width" / "bottom-left"。
+ *
+ * 段内の順序はスロット座標でなく **読み順 (配列 index)** で決める。
+ * rtl では読み順どおり右→左 (テンプレ座標と一致)、ltr では同じ段構造を
+ * 左右反転して panel 1 が top-left になるように語を割り当てる
+ * (レイアウトはAIが描き直すため、座標の実位置でなく「panel N をどこに
+ * 置かせたいか」が正)。
+ */
+export function panelPositionPhrases(
+  template: ComicLayoutTemplate,
+  direction: ComicReadingDirection,
+): string[] {
+  const rows = groupSlotsIntoRows(template);
+  const phrases: string[] = new Array(template.slots.length).fill("");
+  rows.forEach((row, ri) => {
+    const vertical =
+      rows.length === 1 ? "middle" : ri === 0 ? "top" : ri === rows.length - 1 ? "bottom" : "middle";
+    const ordered = [...row].sort((a, b) => a.i - b.i); // 配列順 = 読み順
+    ordered.forEach((slot, j) => {
+      if (row.length === 1) {
+        phrases[slot.i] = `${vertical}, full width`;
+        return;
+      }
+      const horizontal =
+        j === 0
+          ? direction === "ltr"
+            ? "left"
+            : "right"
+          : j === row.length - 1
+            ? direction === "ltr"
+              ? "right"
+              : "left"
+            : "center";
+      phrases[slot.i] = `${vertical}-${horizontal}`;
+    });
+  });
+  return phrases;
+}
+
 /**
  * テンプレのスロットから「段（row）ごとに何コマ・どの大きさか」を英語1行で導出する。
  *
@@ -632,7 +766,10 @@ function finalStyleClause(colorMode: Exclude<ComicColorMode, "faithful">): strin
  *
  * 例: `row 1: three small panels; row 2: one large wide panel; row 3: two medium panels`
  */
-function describePageLayout(template: ComicLayoutTemplate): string {
+function describePageLayout(
+  template: ComicLayoutTemplate,
+  direction: ComicReadingDirection,
+): string {
   const slots = template.slots.map((s, i) => ({ ...s, i }));
   if (slots.length === 0) return "";
 
@@ -640,28 +777,16 @@ function describePageLayout(template: ComicLayoutTemplate): string {
   const areas = slots.map((s) => s.w * s.h);
   const avgArea = areas.reduce((a, b) => a + b, 0) / areas.length;
 
-  // 1. y帯の重なりで段にまとめる
-  const sorted = [...slots].sort((a, b) => a.y - b.y || b.x - a.x);
-  const rows: (typeof sorted)[] = [];
-  let bottom = Number.NEGATIVE_INFINITY;
-  for (const slot of sorted) {
-    // 現在の段の下端より上に始まるなら同じ段（斜めコマの数percentのズレを吸収）。
-    if (rows.length > 0 && slot.y < bottom) {
-      rows[rows.length - 1].push(slot);
-      bottom = Math.min(bottom, slot.y + slot.h);
-    } else {
-      rows.push([slot]);
-      bottom = slot.y + slot.h;
-    }
-  }
+  // 1. y帯の重なりで段にまとめる（段検出は groupSlotsIntoRows に共有化）
+  const rows = groupSlotsIntoRows(template);
 
   const countWord = (n: number): string =>
     ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight"][n] ??
     String(n);
 
   const parts = rows.map((row, ri) => {
-    // 段内のコマは読み順（右→左）に見る
-    const ordered = [...row].sort((a, b) => b.x - a.x);
+    // 段内のコマは読み順に見る
+    const ordered = [...row].sort((a, b) => a.i - b.i);
     // 段内で面積がほぼ同じなら1グループにまとめて「N panels」と言う。
     const describeSize = (w: number, h: number): string => {
       const area = w * h;
@@ -685,7 +810,9 @@ function describePageLayout(template: ComicLayoutTemplate): string {
     return `row ${ri + 1}: ${desc}`;
   });
 
-  return parts.join("; ");
+  return `${parts.join("; ")}; within each row the panels are numbered in ${
+    direction === "ltr" ? "left-to-right" : "right-to-left"
+  } order`;
 }
 
 /** ページ生成プロンプトへ渡す、ページ番号・前後のあらすじ・コマ割り方針。 */
@@ -699,7 +826,26 @@ export type FullPageContext = {
   layoutHint?: string;
   /** このページの cast（名前一致解決済みのみ）。指定時は「このページに出るのはこの面々だけ」句を足す。 */
   castNames?: string[];
+  /** 読み方向 (B-1)。省略時 "rtl" (右→左・日本式)。 */
+  readingDirection?: ComicReadingDirection;
+  /** 枠線の太さ (B-4b)。省略時 "standard" = 従来と同一文字列。 */
+  frameStyle?: ComicFrameStyle;
+  /** コマ間隔 (B-4b)。省略時 "standard" = 従来と同一文字列。 */
+  gutterStyle?: ComicGutterStyle;
+  /** 環境参照（背景・小物）。resolvePageCast の envReferences をそのまま渡す（3ir）。 */
+  envReferences?: Array<{ name: string; kind: "location" | "item" }>;
+  /** refImagePaths のうちキャラ参照の枚数。環境参照のインデックス起点（3ir）。 */
+  charRefCount?: number;
+  /** 絵柄テキスト（qvs）。空/未指定は従来どおり。faithful では呼び出し側が渡さない。 */
+  styleText?: string;
 };
+
+/**
+ * 絵柄テキスト句（qvs 2026-08-03）。ページ経路とコマ経路で**同一文字列**を使う
+ * （PAGE_SIZE_CLAUSE と同じ「両経路で同一句」原則）。
+ */
+const STYLE_TEXT_CLAUSE = (text: string): string =>
+  `art style: ${text} — apply this exact art style consistently to every panel and every page`;
 
 /**
  * ページ丸ごと1枚を生成するプロンプトを組む（主経路）。
@@ -722,6 +868,16 @@ export function buildFullPagePrompt(
 ): string {
   const parts: string[] = [];
 
+  const direction = context.readingDirection ?? "rtl";
+  // B-1 (2026-07-30): 読み順を「言葉1句」でなく空間位置で明示する。
+  // 従来の "Japanese right-to-left reading order." 1句では panel 1 の置き場所が
+  // 未指定で、モデルが西洋コミックの学習分布に引かれて左上から並べていた
+  // (実機報告4件)。効果は確率的 (保証はない)。
+  const readingOrderClause =
+    direction === "ltr"
+      ? "CRITICAL reading order: left-to-right (western comic style) — panel 1 is the TOP-LEFT panel, panels flow left to right, then top to bottom; the last panel is the BOTTOM-RIGHT panel. never arrange panels right-to-left; within each panel, speech balloons follow the same left-to-right order — the first quoted balloon sits on the LEFT side of its panel and is read first"
+      : "CRITICAL reading order: Japanese manga right-to-left — panel 1 is the TOP-RIGHT panel, panels flow right to left, then top to bottom; the last panel is the BOTTOM-LEFT panel. never arrange panels left-to-right; within each panel, speech balloons follow the same right-to-left order — the first quoted balloon sits on the RIGHT side of its panel and is read first, even if its text is written horizontally";
+
   // 1. ベース句（mono/color は既存文字列・無変更。faithful だけ新規）
   parts.push(
     colorMode === "faithful"
@@ -731,16 +887,23 @@ export function buildFullPagePrompt(
         : "one complete manga page, black and white manga illustration, professional ink line art, screentone shading",
   );
 
+  // 1b. 絵柄句（qvs）。faithful は参照画像が絵柄の供給源なので受けない（呼び出し側
+  //     ゲートに加えた二重防御）。空文字は従来どおり何も足さない。
+  const styleText = context.styleText?.trim();
+  if (styleText && colorMode !== "faithful") {
+    parts.push(STYLE_TEXT_CLAUSE(styleText));
+  }
+
   // 2. レイアウト句
   if (template) {
-    const layout = describePageLayout(template);
+    const layout = describePageLayout(template, direction);
     parts.push(
-      `${template.panelCount} panels, Japanese right-to-left reading order.${layout ? ` ${layout}` : ""}`,
+      `${template.panelCount} panels. ${readingOrderClause}.${layout ? ` ${layout}` : ""}`,
     );
   } else {
     const hint = context.layoutHint?.trim();
     parts.push(
-      `${panels.length} panels, Japanese right-to-left reading order. design the panel layout yourself for maximum readability and dramatic impact: vary panel sizes and shapes, give the key moment the largest panel, keep the gutters clean${hint ? `. layout direction: ${hint}` : ""}`,
+      `${panels.length} panels. ${readingOrderClause}. design the panel layout yourself for maximum readability and dramatic impact: vary panel sizes and shapes, give the key moment the largest panel, keep the gutters clean${hint ? `. layout direction: ${hint}` : ""}`,
     );
   }
 
@@ -765,11 +928,31 @@ export function buildFullPagePrompt(
   }
 
   // 4. コマごとの内容（セリフ・擬音は日本語のまま渡す）
+  // 位置語はテンプレとコマ数が一致するときだけ導出する (B-4 のコマ追加/削除で
+  // ズレたページは呼び出し側が template=null を渡すが、二重の防御)。
+  const positionPhrases =
+    template && panels.length === template.slots.length
+      ? panelPositionPhrases(template, direction)
+      : null;
   for (const panel of panels) {
     const body = panel.prompt.trim() || panel.composition.trim();
+    // gtm (2026-08-03): 引用＋kind 記述子の形式。数珠つなぎ（「／」区切り）は
+    // セグメント単位で引用を分け、記述子に chain 句を連結する。区切り文字自体は
+    // 引用に含めない（仕上げ句の「write the dialogue exactly as given」が
+    // 「／」を絵に描かせる事故の防止）。
     const lines = panel.balloons
       .filter((b) => b.visible && b.text.trim().length > 0)
-      .map((b) => `「${b.text.trim()}」`);
+      .map((b) => {
+        const segments = balloonSegments(b.text);
+        const quoted = (segments.length > 0 ? segments : [b.text.trim()])
+          .map((seg) => `「${seg}」`)
+          .join("");
+        const descriptor =
+          segments.length > 1
+            ? `${BALLOON_KIND_DESCRIPTOR[b.kind]}, drawn as a chain of ${segments.length} linked balloons, one balloon per quoted phrase, connected in reading order`
+            : BALLOON_KIND_DESCRIPTOR[b.kind];
+        return `${quoted} (${descriptor})`;
+      });
     const balloonPart =
       lines.length > 0
         ? ` speech balloon${lines.length > 1 ? "s" : ""}: ${lines.join(" ")}`
@@ -781,7 +964,14 @@ export function buildFullPagePrompt(
       sfxLines.length > 0
         ? ` sound effect${sfxLines.length > 1 ? "s" : ""}: ${sfxLines.join(" ")}`
         : "";
-    parts.push(`panel ${panel.index}: ${body}.${balloonPart}${sfxPart}`);
+    const pos = positionPhrases?.[panel.index - 1]
+      ? ` (${positionPhrases[panel.index - 1]})`
+      : !template && panels.length > 1 && panel.index === 1
+        ? ` (${direction === "ltr" ? "top-left" : "top-right"} opening panel)`
+        : !template && panels.length > 1 && panel.index === panels.length
+          ? ` (${direction === "ltr" ? "bottom-right" : "bottom-left"} final panel)`
+          : "";
+    parts.push(`panel ${panel.index}${pos}: ${body}.${balloonPart}${sfxPart}`);
   }
 
   // 5. 参照画像がある時だけ同一性・ポーズ写し防止・画風句（mono/color は既存文字列・無変更）
@@ -792,6 +982,12 @@ export function buildFullPagePrompt(
   // REFERENCE_IDENTITY_CLAUSE は「漫画キャラとして描き直せ（never photorealistic）」を
   // 含み、faithful の「元の画風を保て（do not convert）」と矛盾するため。
   // ポーズ非写し（POSE）は faithful でも要るので共通。
+  //
+  // 3ir (2026-08-03): キャラ参照句（既存・無変更）→ ロール区分（新規）→
+  // 環境参照句（新規）→ 画風支配句（既存・無変更）の順。
+  // hasReferences は「キャラ参照が1枚以上」の意味（呼び出し側が charRefCount で渡す）。
+  const envRefs = context.envReferences ?? [];
+  const charRefCount = context.charRefCount ?? 0;
   if (hasReferences) {
     parts.push(
       colorMode === "faithful"
@@ -799,6 +995,23 @@ export function buildFullPagePrompt(
         : REFERENCE_IDENTITY_CLAUSE,
     );
     parts.push(REFERENCE_POSE_CLAUSE);
+  }
+  if (hasReferences && envRefs.length > 0) {
+    // キャラ用 identity 句が環境参照（ドア等）に誤適用されるのを緩和する区分句。
+    parts.push(
+      `reference images 1-${charRefCount} are character references — the character identity instructions apply only to these images`,
+    );
+  }
+  envRefs.forEach((ref, j) => {
+    const idx = charRefCount + 1 + j;
+    parts.push(
+      ref.kind === "item"
+        ? `reference image ${idx}: 「${ref.name}」 — a fixed prop reference; whenever this object appears in any panel on any page, reproduce this exact design: same shape, proportions, colors, materials, and details; never redesign or restyle it between panels or pages`
+        : `reference image ${idx}: 「${ref.name}」 — a fixed location/background reference; whenever this place appears in any panel on any page, reproduce this exact environment: same layout, architecture, furniture, colors, and details; never redesign it between panels or pages`,
+    );
+  });
+  // 画風支配句は「どちらかの参照があれば」出す（環境参照の写真調が画風に勝つ事故対策）。
+  if (hasReferences || envRefs.length > 0) {
     parts.push(
       colorMode === "faithful"
         ? REFERENCE_FAITHFUL_CLAUSE
@@ -807,8 +1020,24 @@ export function buildFullPagePrompt(
   }
 
   // 6. 仕上げ句（文字を発明・改変させない指示を追加した確定文字列）
+  // B-4b (2026-07-30): 枠線・間隔はプロンプト近似 (AI任せ・保証なし)。
+  // 既定 (standard/standard) では従来と同一文字列になる。
+  const frame = context.frameStyle ?? "standard";
+  const gutter = context.gutterStyle ?? "standard";
+  const borderWord =
+    frame === "thin"
+      ? "thin clean black panel borders"
+      : frame === "bold"
+        ? "bold thick black panel borders"
+        : "clean black panel borders";
+  const gutterWord =
+    gutter === "narrow"
+      ? "narrow white gutters between panels"
+      : gutter === "wide"
+        ? "wide white gutters between panels"
+        : "white gutters";
   parts.push(
-    "hand-drawn speech balloons with vertical Japanese text — write the dialogue exactly as given, character for character, do not invent or alter any text; bold hand-lettered manga sound effects integrated with the art; clean black panel borders and white gutters",
+    `hand-drawn speech balloons with vertical Japanese text — write the dialogue exactly as given, character for character, do not invent or alter any text; bold hand-lettered manga sound effects integrated with the art; ${borderWord} and ${gutterWord}`,
   );
 
   // 6b. 最終出力の画風を末尾で念押しする。
@@ -858,6 +1087,7 @@ export function buildPanelImagePrompt(
   characters: ComicCharacter[],
   colorMode: Exclude<ComicColorMode, "faithful"> = "mono",
   hasReferences = false,
+  styleText = "",
 ): string {
   const base = panel.prompt.trim() || panel.composition.trim();
 
@@ -875,6 +1105,11 @@ export function buildPanelImagePrompt(
       ? "manga panel, full color manga illustration, clean ink line art, anime-style cel shading, vibrant colors"
       : "manga panel, black and white manga illustration, professional ink line art, screentone shading",
   ];
+  // 絵柄句（qvs）。ページ経路と同一文字列。空文字は従来どおり何も足さない。
+  const trimmedStyle = styleText.trim();
+  if (trimmedStyle) {
+    parts.push(STYLE_TEXT_CLAUSE(trimmedStyle));
+  }
   if (hasReferences) {
     parts.push(REFERENCE_IDENTITY_CLAUSE);
     parts.push(REFERENCE_POSE_CLAUSE);

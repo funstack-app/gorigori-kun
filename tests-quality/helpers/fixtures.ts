@@ -54,7 +54,9 @@ export const EXPECTED_FIXTURE_COUNT = 7;
 export function listFixtureNames(): string[] {
   return fs
     .readdirSync(FIXTURES_DIR, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory())
+    // `fixtures/` には分解回帰とは別用途のfixtureも置く。
+    // 分解fixtureの契約ファイルを持つディレクトリだけを列挙し、専用画像テストを誤読しない。
+    .filter((entry) => entry.isDirectory() && fs.existsSync(path.join(FIXTURES_DIR, entry.name, "decomposition.json")))
     .map((entry) => entry.name)
     .sort();
 }

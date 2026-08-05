@@ -16,9 +16,13 @@ import type {
 /** kind select の表示ラベル（値は kind 英字）。 */
 const KIND_OPTIONS: Array<{ value: ComicBalloonKind; label: string }> = [
   { value: "normal", label: "通常" },
+  { value: "black", label: "黒ベタ" },
   { value: "shout", label: "叫び" },
+  { value: "shout_black", label: "叫び（黒ギザギザ）" },
   { value: "monologue", label: "心の声" },
-  { value: "narration", label: "ナレーション" },
+  { value: "narration", label: "ナレーション（四角）" },
+  { value: "caption", label: "ナレーション（文字のみ）" },
+  { value: "machine", label: "機械・動物" },
 ];
 
 /** intent select の表示ラベル（値は intent 英字）。 */
@@ -74,7 +78,7 @@ export function BalloonEditor({
   return (
     <div className="flex flex-col gap-1.5">
       <span className="block text-[11px] font-medium text-neutral-500">
-        吹き出し（最大2個・話す順）
+        吹き出し（最大2個・話す順。「／」で数珠つなぎ）
       </span>
       {balloons.map((balloon) => (
         <div key={balloon.id} className="flex items-center gap-1.5">

@@ -44,12 +44,22 @@ export function balloonPoints(kind: ComicBalloonKind): [number, number][] | unde
   return undefined;
 }
 
-/** テキストの内側余白（表示 px。書き出しは EXPORT_SCALE 倍）。 */
+/**
+ * テキストの内側余白（表示 px。書き出しは EXPORT_SCALE 倍）。
+ *
+ * gtm (2026-08-03) の kind 8値化に伴う追加キーは、既存の同系 kind と同値にして
+ * 表示挙動を変えない（black=normal / shout_black=shout / caption=narration /
+ * machine=normal）。この表を読むのは旧・詳細編集経路だけ（現行主経路は未使用）。
+ */
 export const BALLOON_PADDING: Record<ComicBalloonKind, { x: number; y: number }> = {
   normal: { x: 12, y: 14 },
+  black: { x: 12, y: 14 },
   shout: { x: 16, y: 18 },
+  shout_black: { x: 16, y: 18 },
   monologue: { x: 10, y: 12 },
   narration: { x: 6, y: 8 },
+  caption: { x: 6, y: 8 },
+  machine: { x: 12, y: 14 },
 };
 
 /** 枠線の表示 px（書き出しは同比率でスケール）。 */

@@ -14,7 +14,12 @@
  * が**同じ判定**を使う。表示と実際の受け渡しが乖離する経路を構造的に塞ぐ。
  */
 
-import type { ComicCharacter, ComicPanel, ComicStoryPage } from "./types";
+import type {
+  ComicCharacter,
+  ComicEnvReference,
+  ComicPanel,
+  ComicStoryPage,
+} from "./types";
 
 export type PanelReferenceResolution = {
   refPaths: string[];
@@ -78,6 +83,13 @@ export function resolvePanelReferences(
  * presets/character.ts コメント）に対しマージンを取って 9 で確定。
  */
 export const MAX_PAGE_REFERENCES = 9;
+
+/**
+ * 環境参照（背景・小物）の1ページあたり上限（3ir 2026-08-03）。
+ * キャラ参照上限9と合わせて総添付は最大12枚。STΛCK実測「14枚で激遅」
+ * （2026-07-19）に対しマージンを残す。
+ */
+export const MAX_ENV_REFERENCES = 3;
 
 /**
  * panels 配列順 → 各コマの characters 配列順で trim・非空・初出順 dedupe した名前配列。
@@ -168,6 +180,10 @@ export type PageCastResolution = {
   castCharacters: ComicCharacter[];
   /** matched / fallback / none（resolvePanelReferences と同語彙） */
   mode: "matched" | "fallback" | "none";
+  /** 実際に添付する環境参照（上限適用済み・入力順）。 */
+  envReferences: ComicEnvReference[];
+  /** refPaths のうちキャラ参照の枚数（環境参照は charRefCount 以降に並ぶ）。 */
+  charRefCount: number;
 };
 
 /**
@@ -182,14 +198,25 @@ export type PageCastResolution = {
 export function resolvePageCast(
   page: Pick<ComicStoryPage, "cast" | "panels">,
   characters: ComicCharacter[],
+  envRefs: ComicEnvReference[] = [],
 ): PageCastResolution {
+  // 3ir: 環境参照の添付は cast 解決と独立。キャラ0・無人ページ（cast 空）でも
+  // 添付する（風景ページの背景こそ固定したい対象＝ドア問題の本丸）。
+  // 省略時（既定 []）は全 return が現行と同値（後方互換）。
+  const attachedEnv = envRefs
+    .filter((r) => r.imagePath)
+    .slice(0, MAX_ENV_REFERENCES);
+  const envPaths = attachedEnv.map((r) => r.imagePath);
+
   const empty = (castNames: string[]): PageCastResolution => ({
-    refPaths: [],
+    refPaths: [...envPaths],
     castNames,
     matchedNames: [],
     unmatchedNames: [],
     castCharacters: [],
     mode: "none",
+    envReferences: attachedEnv,
+    charRefCount: 0,
   });
 
   if (characters.length === 0) return empty([]);
@@ -222,25 +249,31 @@ export function resolvePageCast(
   }
 
   if (matchedCharacters.length > 0) {
+    const charPaths = allocatePageReferences(matchedCharacters);
     return {
-      refPaths: allocatePageReferences(matchedCharacters),
+      refPaths: [...charPaths, ...envPaths],
       castNames,
       matchedNames,
       unmatchedNames,
       castCharacters: matchedCharacters,
       mode: "matched",
+      envReferences: attachedEnv,
+      charRefCount: charPaths.length,
     };
   }
 
   // 一致ゼロ。名前がズレただけで参照が消えるより、全員渡して
   // 「一致しなかった」ことを UI で見せるほうが実害が小さい。
+  const charPaths = allocatePageReferences(characters);
   return {
-    refPaths: allocatePageReferences(characters),
+    refPaths: [...charPaths, ...envPaths],
     castNames,
     matchedNames: [],
     unmatchedNames,
     castCharacters: characters,
     mode: "fallback",
+    envReferences: attachedEnv,
+    charRefCount: charPaths.length,
   };
 }
 

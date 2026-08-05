@@ -10,6 +10,7 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 
 import { buildExportFileName } from "../exportNaming";
+import { COMIC_EXPORT_TARGET, containRect } from "./exportSize";
 import type { ComicSaveFormat } from "./types";
 
 /** JPEG の書き出し品質（pageExport と同値）。 */
@@ -29,21 +30,35 @@ function loadImage(src: string) {
   });
 }
 
-/** 画像パスを canvas 経由で png/jpeg の Blob にする（crossOrigin 必須）。 */
+/**
+ * 画像パスを canvas 経由で png/jpeg の Blob にする（crossOrigin 必須）。
+ *
+ * **出力は必ず SNS 規格 1080×1350（4:5）**。生成側は 3:4 を指定しているのに
+ * モデル出力が 2:3 と 3:4 に混在し、同一作品内でページの形が揃わないため、
+ * 保存の瞬間にここで固定する（規格と理由の正本は exportSize.ts）。
+ * contain なので入力は切らず、余った左右（または上下）が白帯になる。
+ * 元画像のファイル実体・表示・再編集は元寸のまま（触るのは書き出し canvas だけ）。
+ */
 export async function encodePageBlob(
   imagePath: string,
   format: ComicSaveFormat,
 ): Promise<Blob> {
   const img = await loadImage(convertFileSrc(imagePath));
   const canvas = document.createElement("canvas");
-  canvas.width = img.naturalWidth;
-  canvas.height = img.naturalHeight;
+  canvas.width = COMIC_EXPORT_TARGET.width;
+  canvas.height = COMIC_EXPORT_TARGET.height;
   const ctx = canvas.getContext("2d");
   if (!ctx) throw new Error("画像の変換に失敗しました。");
-  // 透過 PNG → JPEG の黒化防止。白地で塗ってから描く。
-  ctx.fillStyle = "#ffffff";
+  // 白地で塗ってから描く。透過 PNG → JPEG の黒化防止と contain の帯を1回の塗りで兼ねる。
+  ctx.fillStyle = COMIC_EXPORT_TARGET.pad;
   ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.drawImage(img, 0, 0);
+  const rect = containRect(
+    img.naturalWidth,
+    img.naturalHeight,
+    canvas.width,
+    canvas.height,
+  );
+  ctx.drawImage(img, rect.x, rect.y, rect.w, rect.h);
   const blob = await new Promise<Blob | null>((resolve) =>
     canvas.toBlob(
       resolve,

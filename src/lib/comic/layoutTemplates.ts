@@ -285,7 +285,9 @@ export function describeSlotShape(t: ComicLayoutTemplate, i: number): string {
   return "ほぼ正方形のコマ";
 }
 
-if (import.meta.env.DEV) {
+// Playwright の純ロジックテストでは Vite を通らず import.meta.env が無いため、
+// その場合は開発専用の検査だけを飛ばす（アプリの DEV 時は従来どおり実行）。
+if (import.meta.env?.DEV) {
   for (const t of COMIC_LAYOUT_TEMPLATES) {
     // COMIC_PAGE_ASPECT は先頭テンプレから導出している。全テンプレが同一比で
     // ないなら「ページの比率は1つ」という前提が崩れるので、DEV で気付かせる。

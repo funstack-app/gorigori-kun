@@ -73,12 +73,23 @@ export const SFX_FONT_FAMILY =
 /** セリフも同スタック（ウェイトのみ違う）。 */
 export const BALLOON_FONT_FAMILY = SFX_FONT_FAMILY;
 
-/** kind ごとの追加スタイル（叫びは太字）。 */
+/**
+ * kind ごとの追加スタイル（叫びは太字）。
+ *
+ * gtm (2026-08-03) の kind 8値化に伴う追加キーは、既存の同系 kind と同値にして
+ * 表示挙動を変えない（black=normal / shout_black=shout / caption・machine=normal）。
+ * この表を読むのは旧・詳細編集経路（ComicPageOverlays / pageExport）だけで、
+ * 現行の主経路では吹き出しを AI が絵として描くため使われない。
+ */
 export const BALLOON_FONT_WEIGHT: Record<ComicBalloonKind, number> = {
   normal: 500,
+  black: 500,
   shout: 900,
+  shout_black: 900,
   monologue: 500,
   narration: 500,
+  caption: 500,
+  machine: 500,
 };
 
 export const SFX_INTENT: Record<ComicSfxIntent, { rotation: number; scale: number }> = {

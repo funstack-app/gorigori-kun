@@ -41,30 +41,90 @@ export type ComicTextTurnLabel = "ネーム" | "構成";
  * 呼び出し側は「〜に失敗しました: {message}」でくるまず、message をそのまま
  * 出す（くるむと「構成の生成に失敗しました: 構成の生成がタイムアウトしました」と
  * 二重になる）。判別を instanceof でできるようにクラスで分ける。
+ *
+ * 9qm (2026-08-04): 打ち切りの理由を2種類に分ける。
+ *   - "idle"  … 一定時間まったく応答が来ない（＝本当に詰まっている）
+ *   - "total" … 応答は来ているが総時間の上限に達した
+ * 文言を変えるのは「無言で固まった」と「長考の末に上限へ当たった」で
+ * ユーザーの次の行動が違うため（前者は再実行、後者は分量を減らす）。
  */
 export class ComicTextTurnTimeoutError extends Error {
-  constructor(label: ComicTextTurnLabel) {
+  readonly reason: "idle" | "total";
+
+  constructor(label: ComicTextTurnLabel, reason: "idle" | "total" = "idle") {
+    const subject = label === "構成" ? "構成" : "ネーム";
     super(
-      label === "構成"
-        ? "構成の生成がタイムアウトしました。もう一度お試しください。"
-        : "ネームの生成がタイムアウトしました。もう一度お試しください。",
+      reason === "total"
+        ? `${subject}の生成が長すぎるため打ち切りました。ページ数やコマ数を減らしてお試しください。`
+        : `${subject}の生成がタイムアウトしました。もう一度お試しください。`,
     );
     this.name = "ComicTextTurnTimeoutError";
+    this.reason = reason;
   }
 }
+
+/** 無応答と判定するまでの既定時間。これを超えて「1文字も来ない」と打ち切る。 */
+export const DEFAULT_IDLE_TIMEOUT_MS = 90_000;
+
+/**
+ * 進行状況の通知。呼び出し側は「待たされている実態」をそのまま UI に出す。
+ *
+ * - `phase: "waiting"` … turn を送ったがまだ1文字も返ってきていない
+ * - `phase: "streaming"` … 本文が流れている（`receivedChars` が増えていく）
+ */
+export type ComicTextTurnProgress = {
+  phase: "waiting" | "streaming";
+  receivedChars: number;
+};
+
+export type RunComicTextTurnOptions = {
+  /**
+   * 無応答タイムアウト（既定 90 秒）。**受信があるたびにリセットされる**。
+   * 「考えている間は待つ / 黙り込んだら切る」を分けるのがこの値の役割。
+   */
+  idleTimeoutMs?: number;
+  /**
+   * 総時間の上限（省略時は無制限）。受信が続いていても、この時間で打ち切る。
+   * 暴走した turn がいつまでも UI を占有するのを防ぐ最後の天井。
+   */
+  totalTimeoutMs?: number;
+  /** エラー文言に使う工程名（既定「ネーム」）。 */
+  label?: ComicTextTurnLabel;
+  /** 進行状況のコールバック。UI の正直な待ち表示に使う。 */
+  onProgress?: (progress: ComicTextTurnProgress) => void;
+};
 
 /**
  * 1ターンだけ codex にテキストを送り、assistant の応答テキスト全文を返す。
  *
+ * 9qm (2026-08-04): 打ち切り方式を「送信からの総時間」から
+ * **「無応答時間（受信のたびにリセット）＋総時間の天井」**へ変えた。
+ *
+ * なぜ: 旧実装は 300 秒の一発タイマーで、データが流れていても容赦なく切れた。
+ * 長い構成 JSON（20ページ×最大8コマ）は素直に 5 分を超えることがあり、
+ * 「あと少しで完成」の turn を毎回捨てていた。一方で本当に詰まった場合
+ * （app-server 落ち・上流無応答）は 5 分間まったく無音のまま待たされる。
+ * 無応答で切り、受信中は延ばすと、この2つを正しく別扱いできる。
+ *
+ * 自動リトライはしない（ユーザーの明示再実行のみ）。
+ *
  * @param prompt 送信するプロンプト本文
- * @param timeoutMs タイムアウト（既定 90 秒）。超過時は reject
- * @param label エラー文言に使う工程名（既定「ネーム」）
+ * @param options 数値を渡した場合は後方互換のため無応答タイムアウトとして扱う
+ * @param labelArg 第2引数が数値のときのみ使う工程名（旧シグネチャ互換）
  */
 export async function runComicTextTurn(
   prompt: string,
-  timeoutMs = 90_000,
-  label: ComicTextTurnLabel = "ネーム",
+  options: RunComicTextTurnOptions | number = {},
+  labelArg?: ComicTextTurnLabel,
 ): Promise<string> {
+  const opts: RunComicTextTurnOptions =
+    typeof options === "number"
+      ? { idleTimeoutMs: options, label: labelArg }
+      : options;
+  const idleTimeoutMs = opts.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
+  const totalTimeoutMs = opts.totalTimeoutMs;
+  const label: ComicTextTurnLabel = opts.label ?? "ネーム";
+  const onProgress = opts.onProgress;
   const startParams: ThreadStartParams = {
     model: COMIC_MODEL,
     approvalPolicy: "never",
@@ -78,23 +138,61 @@ export async function runComicTextTurn(
     let buffer = "";
     let settled = false;
     let unlisten: (() => void) | undefined;
+    let idleTimer: ReturnType<typeof setTimeout> | undefined;
+    let totalTimer: ReturnType<typeof setTimeout> | undefined;
 
     const finish = (fn: () => void) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      if (idleTimer !== undefined) clearTimeout(idleTimer);
+      if (totalTimer !== undefined) clearTimeout(totalTimer);
       unlisten?.();
       fn();
     };
 
-    const timer = setTimeout(() => {
-      finish(() => reject(new ComicTextTurnTimeoutError(label)));
-    }, timeoutMs);
+    /**
+     * 無応答タイマーを張り直す。**この関数だけがタイマーを設置する**。
+     * 「受信のたびに呼ぶ」以外の使い方をしないことで、
+     * 「無応答では切れる / 受信中は切れない」の不変条件を1箇所に閉じる。
+     */
+    const armIdleTimer = () => {
+      if (settled) return;
+      if (idleTimer !== undefined) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        finish(() => reject(new ComicTextTurnTimeoutError(label, "idle")));
+      }, idleTimeoutMs);
+    };
+
+    /** 何らかの受信があった。無応答タイマーをリセットし、進捗を通知する。 */
+    const noteActivity = () => {
+      if (settled) return;
+      armIdleTimer();
+      const phase: ComicTextTurnProgress["phase"] =
+        buffer.length > 0 ? "streaming" : "waiting";
+      onProgress?.({ phase, receivedChars: buffer.length });
+    };
+
+    armIdleTimer();
+    if (totalTimeoutMs !== undefined) {
+      totalTimer = setTimeout(() => {
+        // 総時間の天井。受信が続いていても打ち切る（暴走 turn の最後の壁）。
+        //
+        // 理由は**常に "total"**。ここへ到達したという事実そのものが
+        // 「無応答ではなかった」の証明になる（無応答なら先に idle タイマーが
+        // 切っている。idle < total は呼び出し側の前提）。
+        // 本文の有無で分けていた頃は、推論通知だけが流れ続けた turn が
+        // 総時間で切れたのに「タイムアウトしました。もう一度お試しください」と
+        // 再実行を促す誤案内になっていた（Sol 指摘 2026-08-04）。
+        finish(() => reject(new ComicTextTurnTimeoutError(label, "total")));
+      }, totalTimeoutMs);
+    }
 
     const handleNotification = (n: RpcNotification) => {
       const params = n.params as any;
       const tid = params?.threadId ?? params?.thread?.id;
-      // このスレッド以外の通知（他の生成スレッド）は無視する
+      // このスレッド以外の通知（他の生成スレッド）は無視する。
+      // ここで return するのが重要: 他スレッドの賑わいで自分の無応答タイマーを
+      // リセットすると、「自分は無言なのに切れない」状態になる。
       if (tid !== threadId) return;
 
       if (n.method === "item/started") {
@@ -118,7 +216,12 @@ export async function runComicTextTurn(
         } else {
           finish(() => resolve(buffer));
         }
+        return;
       }
+
+      // 自スレッドの通知が届いた＝上流は生きている。無応答タイマーを張り直す。
+      // turn/completed は上で return 済み（既に settled なので張り直さない）。
+      noteActivity();
     };
 
     void (async () => {
