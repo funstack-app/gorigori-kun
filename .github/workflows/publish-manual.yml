@@ -1,0 +1,109 @@
+# 手動公開ワークフロー (2026-08-05 新設)
+#
+# なぜ: 組織設定で GITHUB_TOKEN が read 固定のため、release.yml は公開を行えず
+# 「手元に4GB落として上げ直す」手動運用になっていた。今夜、回線絞りで往復に
+# 1時間超かかることが実測され、データセンター内で完結するこの経路を作った。
+# 認証は PUBLISH_PAT（repo スコープの PAT を secret 登録）で行う。
+#
+# 使い方: gh workflow run publish-manual.yml -f run_id=<release.ymlのrun> -f version=2.5.1
+name: publish-manual
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "release.yml の run ID（成果物の取得元）"
+        required: true
+        type: string
+      version:
+        description: "公開するバージョン（例 2.5.1）"
+        required: true
+        type: string
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts from the build run
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ secrets.PUBLISH_PAT }}
+          path: art
+
+      - name: Assemble the 10 distribution files
+        run: |
+          set -e
+          V="${{ inputs.version }}"
+          mkdir -p publish
+          cp "art/macos-aarch64-apple-darwin/dmg/GORI GORI_${V}_aarch64.dmg" "publish/GORI.GORI_${V}_aarch64.dmg"
+          cp "art/macos-x86_64-apple-darwin/dmg/GORI GORI_${V}_x64.dmg"     "publish/GORI.GORI_${V}_x64.dmg"
+          cp "art/macos-aarch64-apple-darwin/macos/GORI GORI.app.tar.gz"     "publish/GORI.GORI_aarch64.app.tar.gz"
+          cp "art/macos-aarch64-apple-darwin/macos/GORI GORI.app.tar.gz.sig" "publish/GORI.GORI_aarch64.app.tar.gz.sig"
+          cp "art/macos-x86_64-apple-darwin/macos/GORI GORI.app.tar.gz"      "publish/GORI.GORI_x64.app.tar.gz"
+          cp "art/macos-x86_64-apple-darwin/macos/GORI GORI.app.tar.gz.sig"  "publish/GORI.GORI_x64.app.tar.gz.sig"
+          find art/windows-x86_64 -name "*setup*.exe"     -exec cp {} publish/ \;
+          find art/windows-x86_64 -name "*setup*.exe.sig" -exec cp {} publish/ \;
+          find art/windows-x86_64-compat -name "*setup*.exe" -exec sh -c 'cp "$1" "publish/$(basename "${1%.exe}")-compat.exe"' _ {} \;
+          find art/windows-x86_64-compat -name "*setup*.exe.sig" -exec sh -c 'cp "$1" "publish/$(basename "${1%.exe.sig}")-compat.exe.sig"' _ {} \;
+          N=$(ls publish | wc -l)
+          echo "publish/ = $N files"; ls -la publish/
+          [ "$N" -ge 10 ] || { echo "10未満 = 衝突か欠落"; exit 1; }
+
+      - name: Publish binaries to gorigori-kun-releases (FIRST)
+        env:
+          GH_TOKEN: ${{ secrets.PUBLISH_PAT }}
+        run: |
+          set -e
+          V="${{ inputs.version }}"
+          gh release create "v${V}" -R funstack-app/gorigori-kun-releases \
+            --title "GORI GORI KUN v${V}" \
+            --notes "GORI GORI KUN v${V}。ダウンロードと使い方は会員ページをご覧ください。" \
+            publish/*
+          gh release view "v${V}" -R funstack-app/gorigori-kun-releases --json assets --jq '.assets[].name'
+
+      - name: Generate manifests
+        run: |
+          set -e
+          V="${{ inputs.version }}"
+          python3 - <<PY
+          import json, datetime, pathlib, glob, os
+          VER = "${{ inputs.version }}"
+          BASE = f"https://github.com/funstack-app/gorigori-kun-releases/releases/download/v{VER}"
+          pub = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+          p = pathlib.Path("publish")
+          def sig(name):
+              s = (p / f"{name}.sig").read_text().replace("\n", "")
+              assert len(s) >= 200, f"{name}.sig too short"
+              return s
+          def find_one(pat, anti=None):
+              xs = [x for x in sorted(glob.glob(str(p / pat))) if not (anti and anti in x)]
+              assert len(xs) == 1, f"{pat}: {xs}"
+              return os.path.basename(xs[0])
+          win = find_one("*setup*.exe", anti="compat")
+          winc = find_one("*compat*.exe")
+          d = {"version": VER, "notes": f"GORI GORI KUN v{VER}", "pub_date": pub, "platforms": {
+              "darwin-aarch64": {"signature": sig("GORI.GORI_aarch64.app.tar.gz"), "url": f"{BASE}/GORI.GORI_aarch64.app.tar.gz"},
+              "darwin-x86_64":  {"signature": sig("GORI.GORI_x64.app.tar.gz"),     "url": f"{BASE}/GORI.GORI_x64.app.tar.gz"},
+              "windows-x86_64": {"signature": sig(win), "url": f"{BASE}/{win}"},
+          }}
+          json.dump(d, open("latest.json", "w"), indent=2)
+          dc = {"version": VER, "notes": f"GORI GORI KUN v{VER} (compat)", "pub_date": pub, "platforms": {
+              "windows-x86_64": {"signature": sig(winc), "url": f"{BASE}/{winc}"},
+          }}
+          json.dump(dc, open("latest-compat.json", "w"), indent=2)
+          print("manifests OK:", win, winc)
+          PY
+
+      - name: Publish manifests to gorigori-kun (AFTER binaries)
+        env:
+          GH_TOKEN: ${{ secrets.PUBLISH_PAT }}
+        run: |
+          set -e
+          V="${{ inputs.version }}"
+          gh release create "v${V}" -R funstack-app/gorigori-kun \
+            --title "GORI GORI KUN v${V}" \
+            --notes "v${V} 更新情報。本体は gorigori-kun-releases にあります。" \
+            --latest \
+            latest.json latest-compat.json
+          sleep 5
+          curl -sL https://github.com/funstack-app/gorigori-kun/releases/latest/download/latest.json | python3 -c "import sys,json;d=json.load(sys.stdin);assert d['version']=='$V', d['version'];print('updater OK:', d['version'])"
