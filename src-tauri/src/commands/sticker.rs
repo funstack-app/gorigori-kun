@@ -610,6 +610,22 @@ fn inspect_set(total_bytes: u64, count: usize, mode: ExportMode) -> Vec<StickerI
 /// 工程⑥（書き出し前の確認画面）が使う。ここで出る所見と、`sticker_export` が
 /// 出す所見は**同じ関数**（`inspect_rgba` / `inspect_set`）から出る。
 /// 別実装にすると「確認画面では通ったのに書き出しで止まる」が起きる。
+///
+/// ## 正規化のドライランを通してから検査する（export 第1段と同じ順序 / F2）
+///
+/// 同じ関数を呼ぶだけでは足りない。**渡す画像が違えば結論も違う**。旧実装は
+/// `image::open` した生画像をそのまま検査していたが、生成直後の素材は 1024×1024 級なので
+/// `size-over`（場合により `file-too-large`）が毎回ブロッカーで出た。一方 `sticker_export`
+/// は `normalize_sticker` を通した後を検査するため通る。**同じ画像で確認は赤・書き出しは通る**
+/// という食い違いになっていた。
+///
+/// ここでは書き出しと同じ順序でドライランする:
+/// 元画像の透過を測る（B1・正規化より先）→ `normalize_sticker` → `encoded_len` で容量を
+/// 見積もる → `inspect_rgba`。ファイルは1バイトも書かない点は変わらない。
+///
+/// 返す `width` / `height` / `bytes` も**正規化後の値**にする。書き出されるものを見せるのが
+/// 目的であり、生寸法（1024×1024）を出すと「その寸法なのに size-over が出ない」という
+/// 別種の混乱になる。
 #[tauri::command]
 pub async fn sticker_inspect(
     paths: Vec<String>,
@@ -629,11 +645,9 @@ pub async fn sticker_inspect(
 
     for path in &paths {
         let p = PathBuf::from(path);
-        let bytes = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
-        total_bytes += bytes;
 
         let img = match image::open(&p) {
-            Ok(i) => i.to_rgba8(),
+            Ok(i) => i,
             Err(e) => {
                 // 読めないものは「規格外」ではなく「壊れている」。所見として残し、
                 // 黙って除外しない（除外は下流の判定者の仕事）。
@@ -641,7 +655,7 @@ pub async fn sticker_inspect(
                     path: path.clone(),
                     width: 0,
                     height: 0,
-                    bytes,
+                    bytes: 0,
                     ink_ratio: 0.0,
                     margin_px: None,
                     issues: vec![StickerIssue::blocker(
@@ -653,17 +667,60 @@ pub async fn sticker_inspect(
             }
         };
 
-        let (w, h) = img.dimensions();
+        // ⚠️ **透過の判定は正規化より先**（B1）。`sticker_export` と同じ順序。
+        // `normalize_sticker` は被写体の周りへ透明な余白を足すため、正規化後は
+        // 元が全面不透明でも透明画素を持つ。順序を入れ替えると `no-alpha` が恒真に
+        // 通過し、背景を抜いていない画像が確認画面で「問題なし」に見える。
+        let source_opaque = is_fully_opaque(&img.to_rgba8());
+
+        let normalized = normalize_sticker(
+            &img,
+            MAX_STICKER_WIDTH,
+            MAX_STICKER_HEIGHT,
+            STICKER_PADDING_PX,
+        );
+
+        // 容量は**正規化後**をエンコードして見積もる（export と同じ）。ディスク上の
+        // 実バイト数を使うと、生成直後の大きな元画像で `file-too-large` が出て
+        // 書き出しと食い違う。
+        let est_bytes = match encoded_len(&normalized.image) {
+            Ok(n) => n,
+            Err(e) => {
+                // 1枚の見積り失敗で検査全体を落とさない（export が `failed` に積んで
+                // 続行するのと同じ扱い）。「確認できない」ことを所見として残す。
+                items.push(StickerInspection {
+                    path: path.clone(),
+                    width: normalized.image.width(),
+                    height: normalized.image.height(),
+                    bytes: 0,
+                    ink_ratio: 0.0,
+                    margin_px: None,
+                    issues: vec![StickerIssue::blocker(
+                        "decode-failed",
+                        format!("画像の容量を見積もれません: {e}"),
+                    )],
+                });
+                continue;
+            }
+        };
+        total_bytes += est_bytes;
+
+        let (w, h) = normalized.image.dimensions();
         items.push(StickerInspection {
             path: path.clone(),
             width: w,
             height: h,
-            bytes,
-            ink_ratio: ink_ratio_of(&img),
-            margin_px: margin_of(&img),
-            // 正規化を通していない生の画像なので、透過の有無は `img` 自身から測れる。
-            // 抜きの統計は申告があるものだけ渡す（A5。無ければ `fringe` を判定しない）。
-            issues: inspect_rgba(&img, bytes, chroma_by_path.get(path.as_str()), None),
+            bytes: est_bytes,
+            ink_ratio: ink_ratio_of(&normalized.image),
+            margin_px: margin_of(&normalized.image),
+            // 縁の統計は**元パス**に対して申告される（正規化後の画像は別物なので、
+            // 抜いた時の path で引く）。無ければ `fringe` は判定しない（A5）。
+            issues: inspect_rgba(
+                &normalized.image,
+                est_bytes,
+                chroma_by_path.get(path.as_str()),
+                Some(source_opaque),
+            ),
         });
     }
 
@@ -2145,6 +2202,120 @@ mod tests {
             res.items[0].issues.iter().any(|i| i.id == "fringe"),
             "書き出し側で抜きの統計が使われていない（A5 の再発）"
         );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ───────────── F2: 確認と書き出しが同じ所見を返す ─────────────
+    //
+    // ## この検査が守っているもの
+    //
+    // 旧実装の `sticker_inspect` は `image::open` した**生画像**をそのまま検査していた。
+    // 生成直後の素材は 1024×1024 級なので `size-over` が毎回ブロッカーで出る一方、
+    // `sticker_export` は `normalize_sticker` を通した後を検査するので通る。
+    // **同じ画像で「確認する」は赤・書き出しは成功**という誤報になっていた。
+    //
+    // ここでは同じ画像を両経路へ通し、所見（id の集合）が一致することを見る。
+    // 「同じ関数を呼んでいるか」ではなく「**同じ結論が出るか**」で固定する。
+
+    /// 所見 id を並べ替えて返す（比較用）。
+    fn issue_ids(issues: &[StickerIssue]) -> Vec<String> {
+        let mut ids: Vec<String> = issues.iter().map(|i| i.id.clone()).collect();
+        ids.sort();
+        ids
+    }
+
+    #[tokio::test]
+    async fn f2_inspect_and_export_agree_on_a_generated_size_image() {
+        let dir = std::env::temp_dir().join(format!(
+            "sticker-f2-agree-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let out_dir = dir.join("out");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 生成直後の実寸（1024×1024）。透過済み・被写体は中央。
+        let src = dir.join("01.png");
+        subject(1024, 1024, 100).save(&src).unwrap();
+        let src_str = src.to_string_lossy().into_owned();
+
+        let inspected = sticker_inspect(vec![src_str.clone()], ExportMode::Personal, None)
+            .await
+            .expect("検査が失敗した");
+        let exported = sticker_export(
+            vec![src_str.clone()],
+            out_dir.to_string_lossy().into_owned(),
+            ExportMode::Personal,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("書き出しが失敗した");
+
+        let inspect_ids = issue_ids(&inspected.items[0].issues);
+        let export_ids = issue_ids(&exported.items[0].issues);
+        assert_eq!(
+            inspect_ids, export_ids,
+            "同じ画像で確認と書き出しの所見が食い違っている（F2 の再発）"
+        );
+
+        // 具体的にどう食い違っていたか（旧実装の症状）を名指しで固定する。
+        assert!(
+            !inspect_ids.iter().any(|id| id == "size-over"),
+            "正規化前の生寸法を測っている（size-over の誤報 / F2 の再発）: {inspect_ids:?}"
+        );
+        assert!(
+            !inspect_ids.iter().any(|id| id == "file-too-large"),
+            "ディスク上の実バイト数を測っている（file-too-large の誤報 / F2 の再発）: {inspect_ids:?}"
+        );
+
+        // 返す寸法・容量も書き出されるものに揃っている（生の 1024×1024 を出さない）。
+        assert!(
+            inspected.items[0].width <= MAX_STICKER_WIDTH
+                && inspected.items[0].height <= MAX_STICKER_HEIGHT,
+            "確認画面が生寸法（{}×{}）を返している",
+            inspected.items[0].width,
+            inspected.items[0].height
+        );
+        assert_eq!(
+            inspected.total_bytes,
+            inspected.items[0].bytes,
+            "セット合計が各枚の見積りと揃っていない"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn f2_inspect_still_blocks_a_fully_opaque_image_with_no_alpha() {
+        // F2 で `source_opaque` を渡すようになったので、この経路の B1 保護を
+        // 新たにテストで固定する。正規化が透明な余白を足しても `no-alpha` は消えない。
+        let dir = std::env::temp_dir().join(format!(
+            "sticker-f2-noalpha-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("01.png");
+        opaque(1024, 1024).save(&src).unwrap();
+        let src_str = src.to_string_lossy().into_owned();
+
+        let inspected = sticker_inspect(vec![src_str.clone()], ExportMode::Personal, None)
+            .await
+            .expect("検査が失敗した");
+        let ids = issue_ids(&inspected.items[0].issues);
+        assert!(
+            ids.iter().any(|id| id == "no-alpha"),
+            "全面不透明の画像が確認画面をすり抜けた（B1 の再発）: {ids:?}"
+        );
+        assert!(inspected.items[0]
+            .issues
+            .iter()
+            .any(|i| i.id == "no-alpha" && i.severity == IssueSeverity::Blocker));
 
         std::fs::remove_dir_all(&dir).ok();
     }

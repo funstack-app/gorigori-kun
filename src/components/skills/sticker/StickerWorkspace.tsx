@@ -46,7 +46,6 @@ import { GenerationGauge } from "../../GenerationGauge";
 import { PageHelp } from "../../PageHelp";
 import { SafeImage } from "../../SafeImage";
 import { CharacterIcon } from "../../SkillIcon";
-import { useSkillVisible } from "../../SkillWorkspaceRouter";
 import { WorkspaceTabs } from "../../WorkspaceTabs";
 import { onCharacterSheetEvent } from "../../../lib/character/events";
 import type { CharacterSheetParams, SheetCutSpec } from "../../../lib/character/types";
@@ -123,7 +122,6 @@ export function StickerWorkspace() {
 
 function StickerBody() {
   const pushToast = useToasts((s) => s.push);
-  const visible = useSkillVisible();
   const presets = usePresets((s) => s.presets);
   const characters = useMemo(
     () => presets.filter((p) => presetKind(p) === "character"),
@@ -294,8 +292,20 @@ function StickerBody() {
   );
 
   // ── イベント購読。自分が投げた run のカットだけを反映する ──
+  //
+  // ## なぜ `visible` に連動させないか（F1 / 2026-08-05）
+  //
+  // 旧実装は `if (!visible) return;` で購読を張っていた。だが `visible`
+  // （`useSkillVisible`）は「ライブラリ/設定 drawer を開いた」「他スキルへ切り替えた」
+  // 「生成タブ以外を開いた」で false になる。生成中に画面を離れるだけで購読が外れ、
+  // `cutCompleted` / `completed` を取りこぼす。取りこぼすと採否リストに画像が載らず、
+  // 波待ち（`waveWaitersRef`）も cleanup で強制解放されるので**生成ループが崩れる**。
+  //
+  // S2 の mount-pool 化（`SkillWorkspaceRouter`）で、この Workspace は非アクティブでも
+  // unmount されず `display:none` で残り続ける。つまり購読を可視性へ結ぶ理由が無い。
+  // 重い RAF 描画ループ（scene3d）と違い、ここはイベントを受けて setState するだけなので
+  // 裏で回り続けても負荷にならない。**マウントしている間は常駐**させる。
   useEffect(() => {
-    if (!visible) return;
     let unlisten: (() => void) | null = null;
     let cancelled = false;
 
@@ -359,11 +369,15 @@ function StickerBody() {
       unlisten?.();
       // 購読が外れると completed を受け取れない。待っている波を解放しないと
       // 生成ループが永久に止まり、連打ガードも解除されない（押せないまま固まる）。
+      //
+      // この cleanup は**アンマウント時にだけ**走る（`visible` を依存から外したため）。
+      // 画面切替では走らないので、生成中に離席しても波は解放されず、戻ってくれば
+      // 続きがそのまま反映される。
       const waiters = waveWaitersRef.current;
       for (const resolve of waiters.values()) resolve();
       waiters.clear();
     };
-  }, [visible, pushToast, cutOut]);
+  }, [pushToast, cutOut]);
 
   const doneCount = cuts.filter((c) => c.status === "completed").length;
 
