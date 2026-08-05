@@ -6,6 +6,7 @@ import {
   buildCreditsCsv as buildCreditsCsvRows,
   buildProjectLogCsv,
 } from "../projectLogCsv";
+import { type BackupListResult, toBackupListResult } from "./backupHealth";
 
 /**
  * プロジェクト = 制作物のアーカイブ箱。
@@ -769,10 +770,12 @@ type ProjectsState = {
 
   /**
    * 世代バックアップの一覧を取得する（新しい順）。
-   * 返り値: { path, at(epochミリ秒), count(件数) }[]。
-   * 「バックアップから復元」UI が選択肢を出すために使う。
+   * 返り値: 成功なら { ok: true, items }、失敗なら { ok: false, error }。
+   * 失敗を空配列に畳まない理由は presets.ts 側の同名メソッドに記載（2026-08-06）。
    */
-  listBackups: () => Promise<{ path: string; at: number; count: number }[]>;
+  listBackups: () => Promise<
+    BackupListResult<{ path: string; at: number; count: number }>
+  >;
 
   /**
    * 指定バックアップの内容で現在のプロジェクトを置き換える（復元）。
@@ -807,8 +810,8 @@ export const useProjects = create<ProjectsState>((set, get) => ({
     }
   },
 
-  listBackups: async () => {
-    try {
+  listBackups: () =>
+    toBackupListResult(async () => {
       const { storage } = await import("../ipc");
       const rows = await storage.listProjectBackups();
       // [path, epochミリ秒, count]。Rust 側がミリ秒で返すのでそのまま使う。
@@ -817,11 +820,7 @@ export const useProjects = create<ProjectsState>((set, get) => ({
         at: ms,
         count,
       }));
-    } catch (err) {
-      console.error("[projects] listBackups 失敗:", err);
-      return [];
-    }
-  },
+    }, "projects"),
 
   restoreFromBackup: async (backupPath) => {
     const { storage } = await import("../ipc");
@@ -830,8 +829,21 @@ export const useProjects = create<ProjectsState>((set, get) => ({
     if (!Array.isArray(parsed)) {
       throw new Error("バックアップの形式が不正です");
     }
+    // 復元前の現在値。保存に失敗したら画面をここへ戻す (下記)。
+    const before = get().projects;
     // persist 経由で書き戻すと、復元前の現状も自動バックアップされる（二重に安全）。
-    persist(parsed);
+    //
+    // **保存完了を待つ** (2026-08-06 / DL-06)。待たずに set すると、画面だけ
+    // 復元済みになり「復元しました (N件)」と表示されるのに、ディスクは
+    // 元のまま = 再起動で戻る。復元はユーザーが「これで確定」と決めた操作なので、
+    // 成否を隠さず、失敗したら画面も元に戻して throw する。
+    const ok = await persist(parsed);
+    if (!ok) {
+      set({ projects: before });
+      throw new Error(
+        "バックアップは読めましたが、保存先へ書き込めませんでした。復元は取り消しました。",
+      );
+    }
     set({ projects: parsed });
     return parsed.length;
   },

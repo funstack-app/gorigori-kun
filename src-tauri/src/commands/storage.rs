@@ -819,8 +819,79 @@ pub async fn projects_read() -> Result<String, String> {
     fs::read_to_string(&path).map_err(|err| format!("projects.json 読込失敗: {err}"))
 }
 
-/// 保持する projects.json バックアップの世代数。これを超えた古いものは削除する。
-const PROJECTS_BACKUP_KEEP: usize = 10;
+/// 2層保持 (2026-08-06 新設) の「直近層」に残す世代数。
+///
+/// 直前の状態へ戻すための層。連続保存するとここは数分間隔で埋まる。
+const BACKUP_KEEP_RECENT: usize = 5;
+
+/// 2層保持の「日次層」に残す世代数 (日付が互いに異なるもの)。
+///
+/// なぜ要るか (実害): 従来は「新しい順に10世代」だけだったため、連続保存すると
+/// 全世代が直近数分に偏り、**事故の前のスナップショットが押し出されて消えた**。
+/// 「壊れたことに翌日気づく」型の事故では直近層は全部壊れた後の状態なので、
+/// 日付の違う世代を別枠で確保しないと復元先が1つも残らない。
+const BACKUP_KEEP_DAILY: usize = 5;
+
+/// 1日のミリ秒。epoch ミリ秒 → 「epoch からの日数」への換算に使う。
+const DAY_MS: u64 = 24 * 60 * 60 * 1000;
+
+/// バックアップのファイル名からタイムスタンプ (epoch ミリ秒) を取り出す。
+///
+/// `<file_name>.bak-<epochミリ秒>` 以外の形なら None。数値でないもの
+/// (旧 `.bak-YYYYMMDD-HHMMSS` 形式の残骸等) を巻き込まないための関門でもある。
+fn backup_stamp(name: &str, prefix: &str) -> Option<u64> {
+    name.strip_prefix(prefix)?.parse::<u64>().ok()
+}
+
+/// epoch ミリ秒を「epoch からの通算日」に落とす (UTC 基準)。
+///
+/// ローカルタイムゾーンを使わないのは、chrono 非依存を保つため。日次層の目的は
+/// 「別の日のスナップショットを1つ確保する」ことなので、日境界が UTC でも
+/// 目的は達せられる (最大数時間ずれるだけで、層が消えることはない)。
+fn day_index(stamp_ms: u64) -> u64 {
+    stamp_ms / DAY_MS
+}
+
+/// 2層保持の選別: 残すべきバックアップの stamp 集合を返す。
+///
+/// - 直近層: 新しい順に BACKUP_KEEP_RECENT 件
+/// - 日次層: 直近層に入らなかったもののうち、**日付が互いに異なる**世代を
+///   新しい順に BACKUP_KEEP_DAILY 件 (同じ日なら、その日で最も新しいものを残す)
+///
+/// 判定だけを純関数にしているのは**テストのため** (実 I/O なしで固定できる)。
+/// 引数は (stamp) の一覧。順不同で渡してよい。
+fn backups_to_keep(stamps: &[u64]) -> std::collections::HashSet<u64> {
+    let mut sorted: Vec<u64> = stamps.to_vec();
+    sorted.sort_unstable_by(|a, b| b.cmp(a)); // 新しい順
+    let mut keep: std::collections::HashSet<u64> = std::collections::HashSet::new();
+
+    // 直近層。
+    for stamp in sorted.iter().take(BACKUP_KEEP_RECENT) {
+        keep.insert(*stamp);
+    }
+
+    // 日次層。直近層で既に確保した日は「その日は埋まっている」とみなさない
+    // (直近層が今日ばかりでも、日次層は昨日以前を BACKUP_KEEP_DAILY 日分取る)。
+    let recent_days: std::collections::HashSet<u64> = sorted
+        .iter()
+        .take(BACKUP_KEEP_RECENT)
+        .map(|s| day_index(*s))
+        .collect();
+    let mut daily_days: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    for stamp in sorted.iter().skip(BACKUP_KEEP_RECENT) {
+        if daily_days.len() >= BACKUP_KEEP_DAILY {
+            break;
+        }
+        let day = day_index(*stamp);
+        if recent_days.contains(&day) || daily_days.contains(&day) {
+            continue; // その日は既に代表が居る
+        }
+        daily_days.insert(day);
+        keep.insert(*stamp);
+    }
+
+    keep
+}
 
 /// JSON 文字列に含まれるプロジェクト件数 (トップレベル配列の要素数) を数える。
 /// パースできない/配列でないときは None。空上書きガードと件数比較に使う。
@@ -831,20 +902,50 @@ fn count_projects(content: &str) -> Option<usize> {
     }
 }
 
+/// 同一ミリ秒でも世代が潰れない `.bak` パスを決める (2026-08-06 DL-03)。
+///
+/// なぜ要るか: stamp は epoch ミリ秒なので、1ミリ秒以内に 2 回バックアップが走ると
+/// (空上書きガードで backup → 直後の本書き込みで backup 等、実際に連続する経路がある)
+/// `fs::copy` が **同名を黙って上書き**し、直前の世代が消える。連番サフィックスを
+/// 足して衝突を避ける。
+///
+/// 命名は `<file_name>.bak-<stamp>` (初回) と `<file_name>.bak-<stamp>-<n>` (衝突時)。
+/// `backup_stamp` は `-` を含む残りを数値パースできないため後者を stamp として拾わないが、
+/// **prune の対象外 = 消されない**だけで実害はない (知らないものを消さない方針とも整合)。
+/// 衝突は 1 ミリ秒以内の連続保存でしか起きないので、残骸が積み上がる経路にはならない。
+fn next_free_backup_path_for(dir: &Path, file_name: &str, stamp: u128) -> PathBuf {
+    let base = dir.join(format!("{file_name}.bak-{stamp}"));
+    if !base.exists() {
+        return base;
+    }
+    for n in 1..1000u32 {
+        let candidate = dir.join(format!("{file_name}.bak-{stamp}-{n}"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    base
+}
+
 /// projects.json を世代付きバックアップする。`path` が存在しなければ何もしない。
-/// `<path>.bak-YYYYMMDD-HHMMSS` を作り、PROJECTS_BACKUP_KEEP を超えた古い世代を削除。
-/// バックアップ失敗は致命ではない (ログのみ) — 本書き込みは止めない。
-fn backup_projects_file(path: &Path) {
+/// `<path>.bak-<epochミリ秒>` を作り、2層保持 (直近5 + 日次5) から漏れた世代を削除。
+///
+/// **戻り値: バックアップを取れたか** (2026-08-06 DL-03)。`path` が存在しない場合は
+/// 「守るものが無い＝取れた扱い」で true。存在するのにコピーに失敗したときだけ false。
+/// 呼び出し側 (破壊的書き込みの直前) は false なら書き込みを中止し、正本を守る。
+#[must_use]
+fn backup_projects_file(path: &Path) -> bool {
     if !path.exists() {
-        return;
+        // 守る対象が無い = 失うものが無い。書き込みを止める理由にしない。
+        return true;
     }
     let file_name = match path.file_name().and_then(|s| s.to_str()) {
         Some(n) => n,
-        None => return,
+        None => return false,
     };
     let dir = match path.parent() {
         Some(d) => d,
-        None => return,
+        None => return false,
     };
     // タイムスタンプ (epochミリ秒)。chrono 非依存で SystemTime から組む。
     // 秒だと同一秒内の連続保存でバックアップ名が衝突し世代が潰れるため、ミリ秒にする。
@@ -853,37 +954,247 @@ fn backup_projects_file(path: &Path) {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
-    let bak = dir.join(format!("{file_name}.bak-{stamp}"));
+    let bak = next_free_backup_path_for(dir, file_name, stamp);
     if let Err(err) = fs::copy(path, &bak) {
-        eprintln!("[projects] バックアップ作成失敗 (継続): {err}");
-        return;
+        eprintln!("[projects] バックアップ作成失敗: {err}");
+        return false;
     }
-    // 古い世代を掃除する。`<file_name>.bak-` 始まりを集めて、名前順 (= 時刻順) で
-    // 末尾 PROJECTS_BACKUP_KEEP 件だけ残す。
+    // 古い世代を掃除する (2層保持)。`<file_name>.bak-` 始まりを集め、
+    // backups_to_keep が返した stamp 集合に無いものだけ消す。
+    // 「新しい順に10件」ではないので、連続保存しても日次層は押し出されない。
     let prefix = format!("{file_name}.bak-");
-    let mut baks: Vec<PathBuf> = match fs::read_dir(dir) {
-        Ok(rd) => rd
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| {
-                p.file_name()
-                    .and_then(|s| s.to_str())
-                    .map(|n| n.starts_with(&prefix))
-                    .unwrap_or(false)
-            })
-            .collect(),
+    prune_backups(dir, &prefix);
+    true
+}
+
+/// 破壊的書き込みの直前に世代バックアップを取り、失敗したら書き込みを中止させる
+/// (2026-08-06 DL-03)。
+///
+/// なぜ要るか: 従来はバックアップ失敗を「ログして継続」していたため、
+/// **戻せない状態のまま正本を上書き**していた。ディスク満杯・権限エラー・
+/// クラウド同期の一時ロックなど、バックアップが取れない状況は正本の書き込みも
+/// 危ういので、安全側 (書かない) に倒す。
+fn backup_before_write(path: &Path, label: &str) -> Result<(), String> {
+    if backup_projects_file(path) {
+        return Ok(());
+    }
+    Err(format!(
+        "{label}のバックアップを作成できなかったため、保存を中止しました (データ保護)。\
+         元のデータはそのまま残っています。ディスクの空き容量と保存先フォルダの書き込み権限を確認してください。"
+    ))
+}
+
+/// `dir` 内の `<prefix><epochミリ秒>` 形式のバックアップを 2層保持で間引く。
+///
+/// backups_to_keep の判定に載らないものだけを削除する。stamp が数値でない
+/// ファイル (想定外の命名) は**触らない** (知らないものを消さない)。
+fn prune_backups(dir: &Path, prefix: &str) {
+    let mut entries: Vec<(u64, PathBuf)> = Vec::new();
+    let rd = match fs::read_dir(dir) {
+        Ok(rd) => rd,
         Err(_) => return,
     };
-    if baks.len() > PROJECTS_BACKUP_KEEP {
-        baks.sort();
-        let remove_count = baks.len() - PROJECTS_BACKUP_KEEP;
-        for old in baks.into_iter().take(remove_count) {
-            let _ = fs::remove_file(old);
+    for entry in rd.filter_map(|e| e.ok()) {
+        let p = entry.path();
+        let Some(name) = p.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let Some(stamp) = backup_stamp(name, prefix) else {
+            continue;
+        };
+        entries.push((stamp, p));
+    }
+    let stamps: Vec<u64> = entries.iter().map(|(s, _)| *s).collect();
+    let keep = backups_to_keep(&stamps);
+    for (stamp, path) in entries {
+        if !keep.contains(&stamp) {
+            let _ = fs::remove_file(path);
         }
     }
 }
 
+/// デイリーバックアップの間隔 (ミリ秒)。最新の .bak がこれより古ければ1世代作る。
+const DAILY_BACKUP_INTERVAL_MS: u64 = DAY_MS;
+
+/// `path` の最新バックアップの stamp (epoch ミリ秒) を返す。1つも無ければ None。
+fn latest_backup_stamp(path: &Path) -> Option<u64> {
+    let file_name = path.file_name().and_then(|s| s.to_str())?;
+    let dir = path.parent()?;
+    let prefix = format!("{file_name}.bak-");
+    let rd = fs::read_dir(dir).ok()?;
+    rd.filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let p = e.path();
+            let name = p.file_name().and_then(|s| s.to_str())?.to_string();
+            backup_stamp(&name, &prefix)
+        })
+        .max()
+}
+
+/// 「いま1世代バックアップを取るべきか」を判定する純関数。
+///
+/// 取るべき条件:
+///   - 対象ファイルが存在し、かつ**非空** (0バイトや空配列を守っても意味がない)
+///   - 最新の .bak が1つも無い、または `interval_ms` より古い
+///
+/// なぜ純関数に切り出すか: 実 I/O と時刻に依存させるとテストで固定できないため
+/// (projects_decrease_rejected と同じ理由)。`now_ms` / `latest` を引数で受ける。
+fn daily_backup_due(exists_nonempty: bool, latest: Option<u64>, now_ms: u64, interval_ms: u64) -> bool {
+    if !exists_nonempty {
+        return false;
+    }
+    match latest {
+        None => true, // 1つも無い = 移行したきり触っていないユーザー。ここが本命
+        Some(stamp) => now_ms.saturating_sub(stamp) >= interval_ms,
+    }
+}
+
+/// 対象ファイルが「存在して非空か」を返す。読めない場合は false (触らない)。
+///
+/// 非空の判定にファイルサイズを使うのは、JSON パースまでせずに済ませるため。
+/// 中身が壊れていてもバックアップする価値はある (壊れた正本より前の世代が要る)。
+fn file_exists_nonempty(path: &Path) -> bool {
+    fs::metadata(path).map(|m| m.len() > 0).unwrap_or(false)
+}
+
+/// 1ファイル分のデイリーバックアップ。**実際に取れたら** true。
+///
+/// 2026-08-06 (DL-03): 以前は `backup_projects_file` の結果を捨てて常に true を返して
+/// いたため、コピーが失敗しても「N ファイルを1世代保存しました」と数えられていた。
+/// 取れていないバックアップを取れたと報告するのは、無いより悪い (安心して失う)。
+fn ensure_daily_backup_for(path: &Path, now_ms: u64) -> bool {
+    let due = daily_backup_due(
+        file_exists_nonempty(path),
+        latest_backup_stamp(path),
+        now_ms,
+        DAILY_BACKUP_INTERVAL_MS,
+    );
+    if !due {
+        return false;
+    }
+    backup_projects_file(path)
+}
+
+/// 保護対象4ファイルのパスを解決する (presets / projects / scene3d / motions)。
+///
+/// 解決に失敗したもの (保存先が今使えない等) は**黙って飛ばす**。
+/// バックアップは付帯機能であり、ここで起動やユーザー操作を止める理由がない。
+fn protected_data_files() -> Vec<PathBuf> {
+    [
+        presets_file_path(),
+        projects_file_path(),
+        scene3d_file_path(),
+        motions_file_path(),
+    ]
+    .into_iter()
+    .filter_map(|r| r.ok())
+    .collect()
+}
+
+/// 保護対象ファイルに対し、必要ならデイリーバックアップを1世代作る。
+///
+/// なぜ要るか (2026-08-06 実害): バックアップは従来 `backup_projects_file` が
+/// 「保存の直前」にしか作らず、しかも**ファイルが既に存在するときだけ**作っていた
+/// (`!path.exists()` で即 return)。つまり
+///   - 初回移行でファイルを作った回は .bak が作られない
+///   - 以後そのデータを一度も保存し直していないユーザーは .bak が**1つも無い**
+/// という状態が普通に成立し、「バックアップがありません」と表示されていた。
+///
+/// 起動のたびにここを通すことで、**触っていないユーザーにも必ず1世代**行き渡る。
+/// 24時間より新しい .bak があるときは何もしないので、起動を繰り返しても増えない。
+///
+/// 返り値: 実際にバックアップを作ったファイル数。
+#[tauri::command]
+pub async fn storage_ensure_daily_backups() -> Result<usize, String> {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let created = protected_data_files()
+        .iter()
+        .filter(|path| ensure_daily_backup_for(path, now_ms))
+        .count();
+    if created > 0 {
+        tracing::info!(
+            target: "codex.storage",
+            "起動時デイリーバックアップ: {created} ファイルを1世代保存しました"
+        );
+    }
+    Ok(created)
+}
+
 /// 大幅減少ガードの閾値。既存がこれ未満なら発火しない (小規模データの誤爆防止)。
 const DECREASE_GUARD_MIN_EXISTING: usize = 3;
+
+/// presets / scene3d / motions の大幅減少ガードの閾値 (2026-08-06 新設)。
+///
+/// projects より高い (10件) 理由: プリセットは 1〜2 件ずつ整理する運用が普通で、
+/// 少数時の減少は正当な操作である可能性が高い。「30体が1件になる」級の事故
+/// (2026-08-06 実ユーザー被害) を止めることに絞る。
+const SHRINK_GUARD_MIN_EXISTING: usize = 10;
+
+/// tmp ファイルへ書き、**rename 前に fsync する** (2026-08-06 新設)。
+///
+/// なぜ要るか: `fs::write` はページキャッシュに載せるだけで、rename が先にディスクへ
+/// 到達すると「中身が空/途中の新ファイル」が正本の位置に居座り得る (電源断・強制終了)。
+/// アトミック rename は「旧か新か」を保証するが、**新の中身が完全であることは
+/// 保証しない**。sync_all を挟むと、rename 時点で中身が確実にディスクにある。
+fn write_file_synced(path: &Path, content: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut file = fs::File::create(path)?;
+    file.write_all(content.as_bytes())?;
+    file.sync_all()?;
+    Ok(())
+}
+
+/// 上書きガードのために既存ファイルを読む (2026-08-06 DL-01)。
+///
+/// **なぜ Result を返すか**: 従来は `if let Ok(existing) = fs::read_to_string(&path)`
+/// と書いていたため、**既存ファイルが存在するのに読めないと比較そのものが省略され、
+/// 空上書きガードも激減ガードも素通りして書き込みが通っていた**。
+/// 権限エラー (Google Drive の os error 13 等) や一時的な I/O 障害のときに、
+/// 「読めない＝守るべき中身が分からない」正本を上書きできてしまう。
+///
+/// 返り値:
+///   - `Ok(None)`  — ファイルが存在しない (守る対象が無い。ガードは非適用でよい)
+///   - `Ok(Some(s))` — 読めた。ガード判定に使う
+///   - `Err(msg)`  — **存在するのに読めない**。呼び出し側は書き込みを中止する
+fn read_existing_for_guard(path: &Path, label: &str) -> Result<Option<String>, String> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    match fs::read_to_string(path) {
+        Ok(content) => Ok(Some(content)),
+        Err(err) => Err(format!(
+            "既存の{label}を読み取れなかったため、保存を中止しました (データ保護)。\
+             上書きすると失われる可能性があるため書き込みませんでした。\
+             元のデータはそのまま残っています。保存先フォルダの権限とクラウド同期の状態を確認してください ({}): {err}",
+            path.display()
+        )),
+    }
+}
+
+/// 「既存 N 件 (N >= min) → 今回 M 件 (M >= 1)」が半分未満への激減なら Some((N, M))。
+///
+/// 0 件は空上書きガードの担当なのでここでは見ない (incoming_count == 0 は None)。
+/// count 関数を引数に取ることで presets / scene3d / motions で共有する
+/// (それぞれ数える対象の配列名が違うだけで判定式は同一)。
+fn shrink_rejected(
+    existing: &str,
+    incoming: &str,
+    count: impl Fn(&str) -> Option<usize>,
+) -> Option<(usize, usize)> {
+    let existing_count = count(existing).unwrap_or(0);
+    let incoming_count = count(incoming).unwrap_or(0);
+    if existing_count >= SHRINK_GUARD_MIN_EXISTING
+        && incoming_count >= 1
+        && incoming_count * 2 < existing_count
+    {
+        Some((existing_count, incoming_count))
+    } else {
+        None
+    }
+}
 
 /// 「既存 N 件 → 今回 M 件 (M>=1)」が半分未満への大幅減少なら Some((N, M))。
 /// 0 件は空上書きガードの担当なのでここでは見ない (incoming_count == 0 は None)。
@@ -944,14 +1255,19 @@ pub async fn projects_write(
     let path = projects_file_path()?;
     let allow_empty = allow_empty.unwrap_or(false);
 
+    // 既存を1回だけ読む。**存在するのに読めないなら書き込みを中止**する (DL-01)。
+    // 従来は読めないとガード自体が省略され、素通りで上書きされていた。
+    let existing = read_existing_for_guard(&path, "プロジェクトデータ")?;
+
     // 空上書きガード: 既存が非空で今回が0件、かつ明示許可でないなら拒否 (事故防止)。
-    if !allow_empty && path.exists() {
-        if let Ok(existing) = fs::read_to_string(&path) {
-            let existing_count = count_projects(&existing).unwrap_or(0);
+    if !allow_empty {
+        if let Some(existing) = existing.as_deref() {
+            let existing_count = count_projects(existing).unwrap_or(0);
             let incoming_count = count_projects(&content).unwrap_or(0);
             if existing_count > 0 && incoming_count == 0 {
                 // 念のためバックアップは取った上で、上書きは行わない。
-                backup_projects_file(&path);
+                // (ここは書き込まない経路なので、バックアップ失敗でも元のエラーを優先する)
+                let _ = backup_projects_file(&path);
                 return Err(format!(
                     "空のプロジェクトデータで {existing_count} 件を上書きしようとしたため中止しました (データ保護)。意図的な全削除なら allow_empty を指定してください。"
                 ));
@@ -962,10 +1278,10 @@ pub async fn projects_write(
     // 大幅減少ガード (ywf): disk 側が多いのに今回が半分未満なら中止する。
     // クラウド同期で巻き戻った古いコピーによる全量後勝ち上書きを止める。
     // エラー先頭の [DECREASE_GUARD ...] はフロントの機械判定マーカー (形式を変えない)。
-    if !allow_decrease.unwrap_or(false) && path.exists() {
-        if let Ok(existing) = fs::read_to_string(&path) {
-            if let Some((e, i)) = projects_decrease_rejected(&existing, &content) {
-                backup_projects_file(&path);
+    if !allow_decrease.unwrap_or(false) {
+        if let Some(existing) = existing.as_deref() {
+            if let Some((e, i)) = projects_decrease_rejected(existing, &content) {
+                let _ = backup_projects_file(&path);
                 return Err(format!(
                     "[DECREASE_GUARD existing={e} incoming={i}] 保存内容 ({i} 件) がディスク上のプロジェクトデータ ({e} 件) より大幅に少ないため中止しました (データ保護)。"
                 ));
@@ -973,8 +1289,8 @@ pub async fn projects_write(
         }
     }
 
-    // 書き込み前に世代バックアップ。
-    backup_projects_file(&path);
+    // 書き込み前に世代バックアップ。**取れなければ書かない** (DL-03)。
+    backup_before_write(&path, "プロジェクトデータ")?;
 
     // tmp 名はユニーク化する (直列化に加えた二重防御。別ウィンドウ/将来の別経路が
     // 同じ固定 tmp を触ってもレースしない)。
@@ -984,7 +1300,10 @@ pub async fn projects_write(
         .unwrap_or(0);
     let seq = PROJECTS_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
     let tmp_path = path.with_extension(format!("json.tmp-{nanos}-{seq}"));
-    fs::write(&tmp_path, &content).map_err(|err| format!("projects.json 一時書込失敗: {err}"))?;
+    // DL-02: projects だけ素の `fs::write` で fsync が無く、電源断で「空/途中の新ファイル」が
+    // 正本の位置に居座り得た。他3正本と同じ write_file_synced に揃える。
+    write_file_synced(&tmp_path, &content)
+        .map_err(|err| format!("projects.json 一時書込失敗: {err}"))?;
     if let Err(err) = fs::rename(&tmp_path, &path) {
         // 失敗した tmp は残骸として残さない (掃除失敗は握り潰してよい)。
         let _ = fs::remove_file(&tmp_path);
@@ -1093,10 +1412,12 @@ fn projects_count_at(path: &Path) -> Result<usize, String> {
 /// `new_root` が空文字列または null なら、デフォルト (アプリデータ
 /// ディレクトリ) に戻す。
 #[tauri::command]
+/// 戻り値: **新しい保存先へコピーできなかった世代バックアップの件数** (0 なら完全成功)。
+/// 移行そのものの失敗は Err で返す (この戻り値は「移行は成功したが付随物が残った」警告)。
 pub async fn projects_set_data_root(
     state: State<'_, AppState>,
     new_root: Option<String>,
-) -> Result<(), String> {
+) -> Result<usize, String> {
     let mut settings = StorageSettings::load()?;
 
     let normalized = new_root
@@ -1114,10 +1435,16 @@ pub async fn projects_set_data_root(
         let old_count = projects_count_at(&old_path).map_err(|err| {
             format!("保存先の変更を中止しました (データは元の場所に保持されています)。{err}")
         })?;
-        // 新側が読めない場合は「件数不明」だが、ここで中止すると新規フォルダに切り替え
-        // られなくなるため、安全側に new_count=0 (新側は空とみなす) で進める。
-        // (新側に実データがあって読めないケースでも、上書き前に backup を取る)
-        let new_count = projects_count_at(&new_path).unwrap_or(0);
+        // 新側が「存在するのに読めない」ときは中止する (DL-04)。
+        // 従来は unwrap_or(0) で **0件とみなして旧側で上書き**していたため、新側に
+        // 実データがあって一時的に読めないだけの場合に、その未読データを潰していた。
+        // ファイルが存在しない (=新規フォルダ) なら Ok(0) が返るので、切り替えは通る。
+        let new_count = projects_count_at(&new_path).map_err(|err| {
+            format!(
+                "保存先の変更を中止しました (データは元の場所に保持されています)。\
+                 切り替え先のプロジェクトデータを読み取れないため、上書きすると失われる可能性があります。{err}"
+            )
+        })?;
 
         // 旧側が新側と同等以上の件数を持つときだけ、旧→新へ引き継ぐ。
         // (新側が多いなら新側のデータを尊重して触らない)
@@ -1127,9 +1454,8 @@ pub async fn projects_set_data_root(
                     .map_err(|err| format!("プロジェクトデータ保存先の作成に失敗: {err}"))?;
             }
             // 新側に既存データがあるなら上書き前にバックアップ (戻せるように)。
-            if new_path.exists() {
-                backup_projects_file(&new_path);
-            }
+            // **取れなければ移行を中止**する (DL-03/DL-04: 戻せないまま上書きしない)。
+            backup_before_write(&new_path, "切り替え先のプロジェクトデータ")?;
             // コピー失敗時は設定を変更しない = 元の保存先のままデータを保持する。
             fs::copy(&old_path, &new_path).map_err(|err| {
                 format!(
@@ -1151,15 +1477,19 @@ pub async fn projects_set_data_root(
         let old_count = presets_count_at(&old_presets).map_err(|err| {
             format!("保存先の変更を中止しました (データは元の場所に保持されています)。{err}")
         })?;
-        let new_count = presets_count_at(&new_presets).unwrap_or(0);
+        // 新側が「存在するのに読めない」なら中止 (DL-04。projects 側と同じ理由)。
+        let new_count = presets_count_at(&new_presets).map_err(|err| {
+            format!(
+                "保存先の変更を中止しました (データは元の場所に保持されています)。\
+                 切り替え先のプリセットデータを読み取れないため、上書きすると失われる可能性があります。{err}"
+            )
+        })?;
         if old_count > 0 && old_count >= new_count {
             if let Some(parent) = new_presets.parent() {
                 fs::create_dir_all(parent)
                     .map_err(|err| format!("プリセット保存先の作成に失敗: {err}"))?;
             }
-            if new_presets.exists() {
-                backup_projects_file(&new_presets);
-            }
+            backup_before_write(&new_presets, "切り替え先のプリセットデータ")?;
             fs::copy(&old_presets, &new_presets).map_err(|err| {
                 format!(
                     "保存先の変更を中止しました (データは元の場所に保持されています)。プリセットの移行に失敗 ({} -> {}): {err}",
@@ -1178,15 +1508,19 @@ pub async fn projects_set_data_root(
         let old_count = scene3d_count_at(&old_scene).map_err(|err| {
             format!("保存先の変更を中止しました (データは元の場所に保持されています)。{err}")
         })?;
-        let new_count = scene3d_count_at(&new_scene).unwrap_or(0);
+        // 新側が「存在するのに読めない」なら中止 (DL-04。projects 側と同じ理由)。
+        let new_count = scene3d_count_at(&new_scene).map_err(|err| {
+            format!(
+                "保存先の変更を中止しました (データは元の場所に保持されています)。\
+                 切り替え先の3Dシーンデータを読み取れないため、上書きすると失われる可能性があります。{err}"
+            )
+        })?;
         if old_count > 0 && old_count >= new_count {
             if let Some(parent) = new_scene.parent() {
                 fs::create_dir_all(parent)
                     .map_err(|err| format!("3Dシーン保存先の作成に失敗: {err}"))?;
             }
-            if new_scene.exists() {
-                backup_projects_file(&new_scene);
-            }
+            backup_before_write(&new_scene, "切り替え先の3Dシーンデータ")?;
             fs::copy(&old_scene, &new_scene).map_err(|err| {
                 format!(
                     "保存先の変更を中止しました (データは元の場所に保持されています)。3Dシーンの移行に失敗 ({} -> {}): {err}",
@@ -1208,15 +1542,19 @@ pub async fn projects_set_data_root(
         let old_count = motions_count_at(&old_motions).map_err(|err| {
             format!("保存先の変更を中止しました (データは元の場所に保持されています)。{err}")
         })?;
-        let new_count = motions_count_at(&new_motions).unwrap_or(0);
+        // 新側が「存在するのに読めない」なら中止 (DL-04。projects 側と同じ理由)。
+        let new_count = motions_count_at(&new_motions).map_err(|err| {
+            format!(
+                "保存先の変更を中止しました (データは元の場所に保持されています)。\
+                 切り替え先のモーションデータを読み取れないため、上書きすると失われる可能性があります。{err}"
+            )
+        })?;
         if old_count > 0 && old_count >= new_count {
             if let Some(parent) = new_motions.parent() {
                 fs::create_dir_all(parent)
                     .map_err(|err| format!("モーション保存先の作成に失敗: {err}"))?;
             }
-            if new_motions.exists() {
-                backup_projects_file(&new_motions);
-            }
+            backup_before_write(&new_motions, "切り替え先のモーションデータ")?;
             fs::copy(&old_motions, &new_motions).map_err(|err| {
                 format!(
                     "保存先の変更を中止しました (データは元の場所に保持されています)。モーションの移行に失敗 ({} -> {}): {err}",
@@ -1231,7 +1569,10 @@ pub async fn projects_set_data_root(
     // 「バックアップから復元」UI (listBackups) は現行 projects_file_path の親だけを
     // 走査するため、ここを欠くと保存先を変えた瞬間に過去世代が UI から消える
     // (ファイル自体は旧側に残るが、ユーザーには到達手段が無い)。
-    // best-effort: 失敗しても移行自体は成功扱い (本体 4 ファイルは既にコピー済み)。
+    // 本体 4 ファイルは既にコピー済みなので、ここでの失敗は移行を巻き戻す理由にならない
+    // (巻き戻す方がデータを危険にさらす)。ただし**黙って捨てない**: 失敗件数を数え、
+    // 設定保存後に警告として返す (DL-04: 世代バックアップの移行失敗も結果として返す)。
+    let mut backup_copy_failures = 0usize;
     for (old_file, new_file) in [
         (&old_path, &new_path),
         (&old_presets, &new_presets),
@@ -1239,39 +1580,50 @@ pub async fn projects_set_data_root(
         (&old_motions, &new_motions),
     ] {
         if old_file != new_file {
-            copy_generation_backups(old_file, new_file);
+            backup_copy_failures += copy_generation_backups(old_file, new_file);
         }
     }
 
     settings.projects_data_root = normalized;
     settings.save()?;
     state.set_storage_settings(settings).await;
-    Ok(())
+
+    // 世代バックアップのコピー失敗は **Err にしない** (DL-04 の設計判断)。
+    // ここで Err を返すと、呼び出し側 (SettingsWorkspace) が catch へ落ちて
+    // store の読み直し (initialize 群) をスキップし、「保存先の変更に失敗」と表示する。
+    // 実際には移行は完了しているので、UI だけ旧 root を握った偽の失敗になり、
+    // 直そうとしている事故より悪い。件数を返り値で報せ、フロントが警告表示する。
+    Ok(backup_copy_failures)
 }
 
 /// 世代バックアップ (`<file_name>.bak-<epoch>`) を旧側ディレクトリから新側へコピーする。
 ///
 /// - 新側に同名が既にあればスキップ (上書きしない。新側の世代を壊さない)
-/// - 個別の失敗は warn のみ (呼び出し側の移行は成功扱いのまま)
+/// - 個別の失敗は warn した上で**件数を数えて返す** (2026-08-06 DL-04)。
+///   移行自体は成功扱いのままだが、黙って捨てずに呼び出し側へ報せる
 /// - `old_file` / `new_file` は本体ファイルのパス。その親ディレクトリを走査する
-fn copy_generation_backups(old_file: &Path, new_file: &Path) {
+///
+/// 戻り値: コピーに失敗した世代バックアップの件数。
+#[must_use]
+fn copy_generation_backups(old_file: &Path, new_file: &Path) -> usize {
     let file_name = match old_file.file_name().and_then(|s| s.to_str()) {
         Some(n) => n,
-        None => return,
+        None => return 0,
     };
     let (old_dir, new_dir) = match (old_file.parent(), new_file.parent()) {
         (Some(o), Some(n)) => (o, n),
-        _ => return,
+        _ => return 0,
     };
     if old_dir == new_dir {
-        return;
+        return 0;
     }
     let prefix = format!("{file_name}.bak-");
     let entries = match fs::read_dir(old_dir) {
         Ok(rd) => rd,
         // 旧側が読めないのは「バックアップが無い」と同じ扱いでよい (best-effort)。
-        Err(_) => return,
+        Err(_) => return 0,
     };
+    let mut failures = 0usize;
     for entry in entries.filter_map(|e| e.ok()) {
         let path = entry.path();
         let name = match path.file_name().and_then(|s| s.to_str()) {
@@ -1286,6 +1638,7 @@ fn copy_generation_backups(old_file: &Path, new_file: &Path) {
             continue; // 既にある世代は上書きしない
         }
         if let Err(err) = fs::copy(&path, &dest) {
+            failures += 1;
             tracing::warn!(
                 target: "codex.storage",
                 "世代バックアップのコピーに失敗 (移行は継続): {} -> {}: {err}",
@@ -1294,6 +1647,7 @@ fn copy_generation_backups(old_file: &Path, new_file: &Path) {
             );
         }
     }
+    failures
 }
 
 /// presets.json の件数。projects_count_at と同型:
@@ -1542,7 +1896,7 @@ pub async fn scene3d_read_backup(backup_path: String) -> Result<String, String> 
 ///
 /// `backup_projects_file` はパス汎用実装 (ファイル名 prefix を引数パスから導出する) なので、
 /// presets.json を渡せばそのまま `presets.json.bak-<epochミリ秒>` の世代管理になり、
-/// projects のバックアップとは独立に最大 PROJECTS_BACKUP_KEEP 世代が保たれる。
+/// projects のバックアップとは独立に 2層保持 (直近5 + 日次5) が保たれる。
 ///
 /// `allow_empty`: 0件での上書きを許可するか。通常の保存は false (事故防止)。
 ///   ユーザー操作による明示的な全削除のときだけ true を渡す。
@@ -1557,21 +1911,33 @@ pub async fn presets_write(content: String, allow_empty: Option<bool>) -> Result
     // incoming が None (壊れたJSON / object でない) は 0 扱い = 拒否側に倒す
     // (壊れた内容で正本を潰さない)。既存側の None も 0 扱いなので、壊れた既存は
     // 上書きで回復できる (直前に世代バックアップが取られる)。
-    if !allow_empty && path.exists() {
-        if let Ok(existing) = fs::read_to_string(&path) {
-            let existing_count = count_presets(&existing).unwrap_or(0);
+    // 既存を1回だけ読む。**存在するのに読めないなら書き込みを中止**する (DL-01)。
+    let existing = read_existing_for_guard(&path, "プリセットデータ")?;
+
+    if !allow_empty {
+        if let Some(existing) = existing.as_deref() {
+            let existing_count = count_presets(existing).unwrap_or(0);
             let incoming_count = count_presets(&content).unwrap_or(0);
             if existing_count > 0 && incoming_count == 0 {
-                backup_projects_file(&path);
+                let _ = backup_projects_file(&path);
                 return Err(format!(
                     "空のプリセットデータで {existing_count} 件を上書きしようとしたため中止しました (データ保護)。意図的な全削除なら allow_empty を指定してください。"
+                ));
+            }
+            // 激減ガード (2026-08-06): 30件 → 1件のような半減以下の上書きを止める。
+            // 空上書きガード (0件) だけでは 30→1 が素通りしていた (実ユーザー被害)。
+            if let Some((e, i)) = shrink_rejected(existing, &content, count_presets) {
+                let _ = backup_projects_file(&path);
+                return Err(format!(
+                    "[SHRINK_GUARD existing={e} incoming={i}] 保存内容 ({i} 件) がディスク上のプリセット ({e} 件) より大幅に少ないため中止しました (データ保護)。意図的な整理なら allow_empty を指定してください。"
                 ));
             }
         }
     }
 
     // 書き込み前に世代バックアップ (presets.json.bak-<epochミリ秒>、最大10世代)。
-    backup_projects_file(&path);
+    // **取れなければ書かない** (DL-03)。
+    backup_before_write(&path, "プリセットデータ")?;
 
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1579,7 +1945,8 @@ pub async fn presets_write(content: String, allow_empty: Option<bool>) -> Result
         .unwrap_or(0);
     let seq = PRESETS_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
     let tmp_path = path.with_extension(format!("json.tmp-{nanos}-{seq}"));
-    fs::write(&tmp_path, &content).map_err(|err| format!("presets.json 一時書込失敗: {err}"))?;
+    write_file_synced(&tmp_path, &content)
+        .map_err(|err| format!("presets.json 一時書込失敗: {err}"))?;
     if let Err(err) = fs::rename(&tmp_path, &path) {
         // 失敗した tmp は残骸として残さない (掃除失敗は握り潰してよい)。
         let _ = fs::remove_file(&tmp_path);
@@ -1699,21 +2066,32 @@ pub async fn scene3d_write(content: String, allow_empty: Option<bool>) -> Result
 
     // 空上書きガード: 既存が非空で今回が0件、かつ明示許可でないなら拒否 (事故防止)。
     // incoming が None (壊れたJSON / object でない) は 0 扱い = 拒否側に倒す。
-    if !allow_empty && path.exists() {
-        if let Ok(existing) = fs::read_to_string(&path) {
-            let existing_count = count_scene3d(&existing).unwrap_or(0);
+    // 既存を1回だけ読む。**存在するのに読めないなら書き込みを中止**する (DL-01)。
+    let existing = read_existing_for_guard(&path, "3Dシーンデータ")?;
+
+    if !allow_empty {
+        if let Some(existing) = existing.as_deref() {
+            let existing_count = count_scene3d(existing).unwrap_or(0);
             let incoming_count = count_scene3d(&content).unwrap_or(0);
             if existing_count > 0 && incoming_count == 0 {
-                backup_projects_file(&path);
+                let _ = backup_projects_file(&path);
                 return Err(format!(
                     "空の3Dシーンデータで {existing_count} 件のカットを上書きしようとしたため中止しました (データ保護)。"
+                ));
+            }
+            // 激減ガード (2026-08-06): presets と同基準。半減以下の上書きを止める。
+            if let Some((e, i)) = shrink_rejected(existing, &content, count_scene3d) {
+                let _ = backup_projects_file(&path);
+                return Err(format!(
+                    "[SHRINK_GUARD existing={e} incoming={i}] 保存内容 ({i} 件) がディスク上の3Dシーン ({e} 件) より大幅に少ないため中止しました (データ保護)。"
                 ));
             }
         }
     }
 
     // 書き込み前に世代バックアップ (scene3d.json.bak-<epochミリ秒>、最大10世代)。
-    backup_projects_file(&path);
+    // **取れなければ書かない** (DL-03)。
+    backup_before_write(&path, "3Dシーンデータ")?;
 
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1721,7 +2099,8 @@ pub async fn scene3d_write(content: String, allow_empty: Option<bool>) -> Result
         .unwrap_or(0);
     let seq = SCENE3D_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
     let tmp_path = path.with_extension(format!("json.tmp-{nanos}-{seq}"));
-    fs::write(&tmp_path, &content).map_err(|err| format!("scene3d.json 一時書込失敗: {err}"))?;
+    write_file_synced(&tmp_path, &content)
+        .map_err(|err| format!("scene3d.json 一時書込失敗: {err}"))?;
     if let Err(err) = fs::rename(&tmp_path, &path) {
         // 失敗した tmp は残骸として残さない (掃除失敗は握り潰してよい)。
         let _ = fs::remove_file(&tmp_path);
@@ -1832,6 +2211,73 @@ pub async fn motions_read() -> Result<String, String> {
     fs::read_to_string(&path).map_err(|err| format!("motions.json 読込失敗: {err}"))
 }
 
+/// motions.json の世代バックアップ一覧を返す (新しい順)。
+/// 各要素は (バックアップ絶対パス, epochミリ秒, モーション件数)。
+///
+/// presets 版 (presets_list_backups) と同型の**意図的な重複**
+/// (共通化リファクタの差分リスクを取らない、既存3実装と同じ方針)。
+///
+/// 2026-08-06 新設: motions だけバックアップは作られていたのに一覧コマンドが
+/// 無く、**到達導線ゼロ**だった (scene3d が 2026-07-30 に塞いだのと同じ穴)。
+#[tauri::command]
+pub async fn motions_list_backups() -> Result<Vec<(String, u64, usize)>, String> {
+    let path = motions_file_path()?;
+    let file_name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| "motions.json パス解決失敗".to_string())?;
+    let dir = path
+        .parent()
+        .ok_or_else(|| "motions.json 親ディレクトリ解決失敗".to_string())?;
+    let prefix = format!("{file_name}.bak-");
+    let mut out: Vec<(String, u64, usize)> = Vec::new();
+    if let Ok(rd) = fs::read_dir(dir) {
+        for entry in rd.filter_map(|e| e.ok()) {
+            let p = entry.path();
+            let name = match p.file_name().and_then(|s| s.to_str()) {
+                Some(n) => n.to_string(),
+                None => continue,
+            };
+            let stamp = match backup_stamp(&name, &prefix) {
+                Some(s) => s,
+                None => continue,
+            };
+            let count = fs::read_to_string(&p)
+                .ok()
+                .and_then(|c| count_motions(&c))
+                .unwrap_or(0);
+            // 0件のバックアップは復元候補に出さない (他3実装と同じ防御)。
+            if count == 0 {
+                continue;
+            }
+            out.push((p.to_string_lossy().into_owned(), stamp, count));
+        }
+    }
+    out.sort_by(|a, b| b.1.cmp(&a.1)); // 新しい順
+    Ok(out)
+}
+
+/// 指定したバックアップファイルの中身 (JSON文字列) を返す。
+/// パスは motions_list_backups が返したものに限定 (prefix 一致で検証)。
+/// 任意ファイル読み出しにしない (presets_read_backup と同じ検証方針)。
+#[tauri::command]
+pub async fn motions_read_backup(backup_path: String) -> Result<String, String> {
+    let path = motions_file_path()?;
+    let file_name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| "motions.json パス解決失敗".to_string())?;
+    let dir = path
+        .parent()
+        .ok_or_else(|| "motions.json 親ディレクトリ解決失敗".to_string())?;
+    let prefix = dir.join(format!("{file_name}.bak-"));
+    let bak = PathBuf::from(&backup_path);
+    if !backup_path.starts_with(&*prefix.to_string_lossy()) || !bak.exists() {
+        return Err("不正なバックアップパスです".to_string());
+    }
+    fs::read_to_string(&bak).map_err(|err| format!("バックアップ読込失敗: {err}"))
+}
+
 /// motions.json に書き込む (上書き)。presets_write と同型:
 /// 直列化 → 空上書きガード → 世代バックアップ → ユニーク tmp → rename (失敗時 tmp 掃除)。
 ///
@@ -1865,19 +2311,30 @@ pub async fn motions_write(content: String, allow_empty: Option<bool>) -> Result
 
     // 空上書きガード: 既存が非空で今回が0件、かつ明示許可でないなら拒否 (事故防止)。
     // incoming が None (壊れたJSON / object でない) は 0 扱い = 拒否側に倒す。
-    if !allow_empty && path.exists() {
-        if let Ok(existing) = fs::read_to_string(&path) {
-            if let Some(existing_count) = motions_empty_overwrite_rejected(&existing, &content) {
-                backup_projects_file(&path);
+    // 既存を1回だけ読む。**存在するのに読めないなら書き込みを中止**する (DL-01)。
+    let existing = read_existing_for_guard(&path, "モーションデータ")?;
+
+    if !allow_empty {
+        if let Some(existing) = existing.as_deref() {
+            if let Some(existing_count) = motions_empty_overwrite_rejected(existing, &content) {
+                let _ = backup_projects_file(&path);
                 return Err(format!(
                     "空のモーションデータで {existing_count} 件を上書きしようとしたため中止しました (データ保護)。意図的な全削除なら allow_empty を指定してください。"
+                ));
+            }
+            // 激減ガード (2026-08-06): presets と同基準。半減以下の上書きを止める。
+            if let Some((e, i)) = shrink_rejected(existing, &content, count_motions) {
+                let _ = backup_projects_file(&path);
+                return Err(format!(
+                    "[SHRINK_GUARD existing={e} incoming={i}] 保存内容 ({i} 件) がディスク上のモーション ({e} 件) より大幅に少ないため中止しました (データ保護)。意図的な整理なら allow_empty を指定してください。"
                 ));
             }
         }
     }
 
     // 書き込み前に世代バックアップ (motions.json.bak-<epochミリ秒>、最大10世代)。
-    backup_projects_file(&path);
+    // **取れなければ書かない** (DL-03)。
+    backup_before_write(&path, "モーションデータ")?;
 
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1885,7 +2342,8 @@ pub async fn motions_write(content: String, allow_empty: Option<bool>) -> Result
         .unwrap_or(0);
     let seq = MOTIONS_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
     let tmp_path = path.with_extension(format!("json.tmp-{nanos}-{seq}"));
-    fs::write(&tmp_path, &content).map_err(|err| format!("motions.json 一時書込失敗: {err}"))?;
+    write_file_synced(&tmp_path, &content)
+        .map_err(|err| format!("motions.json 一時書込失敗: {err}"))?;
     if let Err(err) = fs::rename(&tmp_path, &path) {
         // 失敗した tmp は残骸として残さない (掃除失敗は握り潰してよい)。
         let _ = fs::remove_file(&tmp_path);
@@ -1960,6 +2418,99 @@ mod tests {
         assert_eq!(projects_decrease_rejected(&make(10), &make(0)), None);
         // 壊れた JSON の incoming は 0 扱い = このガードの対象外 (空ガードが拒否する)
         assert_eq!(projects_decrease_rejected(&make(10), "not json"), None);
+    }
+
+    /// S4 の牙: presets の激減ガードが 30 → 1 を拒否すること (2026-08-06 実被害)。
+    ///
+    /// なぜ要るか: 実ユーザーのプリセット 30 体消失では、空上書きガード (0件) だけが
+    /// あり「30件 → 1件」が素通りしていた。0 は特別な値ではなく、少数への激減も
+    /// 同じ事故なので、閾値付きで止める。
+    ///
+    /// 壊し方の実証 (2026-08-06 実施): shrink_rejected の `incoming_count * 2 <
+    /// existing_count` を `incoming_count == 0` に変えると、30→1 のケースが
+    /// `Some((30, 1))` を返さなくなり本テストは落ちる。
+    #[test]
+    fn presets_shrink_guard_rejects_only_large_drops() {
+        let make = |n: usize| {
+            let items: Vec<String> = (0..n).map(|i| format!("{{\"id\":\"x{i}\"}}")).collect();
+            format!(r#"{{"version":1,"categories":[],"presets":[{}]}}"#, items.join(","))
+        };
+
+        // 30 件 → 1 件: 実被害と同じ形。必ず拒否する
+        assert_eq!(
+            shrink_rejected(&make(30), &make(1), count_presets),
+            Some((30, 1))
+        );
+        // 10 件 → 4 件: 半分未満なので拒否 (閾値ちょうどの既存件数で発火する)
+        assert_eq!(
+            shrink_rejected(&make(10), &make(4), count_presets),
+            Some((10, 4))
+        );
+        // 10 件 → 5 件: ちょうど半分は通す (正当な整理を妨げない)
+        assert_eq!(shrink_rejected(&make(10), &make(5), count_presets), None);
+        // 9 件 → 1 件: 既存が閾値 (10) 未満なので発火しない。
+        // プリセットは少数時に 1〜2 件ずつ整理する運用が普通で、誤爆コストが高い
+        assert_eq!(shrink_rejected(&make(9), &make(1), count_presets), None);
+        // 30 件 → 29 件: 通常の 1 件削除は当然通す
+        assert_eq!(shrink_rejected(&make(30), &make(29), count_presets), None);
+        // 30 件 → 0 件: 空上書きガードの担当なのでここでは見ない (二重拒否しない)
+        assert_eq!(shrink_rejected(&make(30), &make(0), count_presets), None);
+    }
+
+    /// S4 の牙 (同型展開): scene3d / motions でも同じ判定が効くこと。
+    ///
+    /// なぜ同じテストを分けるか: count 関数が違う (shots / motions) ため、
+    /// 数える対象を取り違えると presets だけ守られて他が素通りする。
+    #[test]
+    fn scene3d_and_motions_shrink_guards_use_their_own_counters() {
+        let shots = |n: usize| {
+            let items: Vec<String> = (0..n).map(|i| format!("{{\"id\":\"s{i}\"}}")).collect();
+            format!(r#"{{"shots":[{}]}}"#, items.join(","))
+        };
+        let motions = |n: usize| {
+            let items: Vec<String> = (0..n).map(|i| format!("{{\"id\":\"m{i}\"}}")).collect();
+            format!(r#"{{"version":1,"motions":[{}]}}"#, items.join(","))
+        };
+
+        assert_eq!(
+            shrink_rejected(&shots(30), &shots(1), count_scene3d),
+            Some((30, 1))
+        );
+        assert_eq!(shrink_rejected(&shots(30), &shots(29), count_scene3d), None);
+
+        assert_eq!(
+            shrink_rejected(&motions(30), &motions(1), count_motions),
+            Some((30, 1))
+        );
+        assert_eq!(
+            shrink_rejected(&motions(30), &motions(29), count_motions),
+            None
+        );
+    }
+
+    /// S5 の牙: write_file_synced が中身を確実に書けること。
+    ///
+    /// fsync 自体は単体テストで観測できない (OS がキャッシュを返すため) が、
+    /// 「書けている・上書きできる」という最低条件は固定する。sync_all を消しても
+    /// このテストは通るので、fsync の有無は本テストではなくコードレビューで担保する
+    /// (指標より目的: 観測できないものを観測したと偽らない)。
+    #[test]
+    fn write_file_synced_writes_and_overwrites() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("gori-synced-write-test-{nanos}"));
+        fs::create_dir_all(&dir).expect("テスト用ディレクトリ作成");
+        let path = dir.join("presets.json");
+
+        write_file_synced(&path, r#"{"a":1}"#).expect("新規書き込み");
+        assert_eq!(fs::read_to_string(&path).unwrap(), r#"{"a":1}"#);
+
+        write_file_synced(&path, r#"{"b":2}"#).expect("上書き");
+        assert_eq!(fs::read_to_string(&path).unwrap(), r#"{"b":2}"#);
+
+        let _ = fs::remove_dir_all(&dir);
     }
 
     /// motions.json の空上書きガードが本当に効くこと (gj7 DoD-4)。
@@ -2200,5 +2751,491 @@ mod tests {
             "移行元の旧パスが macOS レイアウトでない: {shown}"
         );
         assert!(legacy.ends_with(SETTINGS_FILE));
+    }
+
+    // -----------------------------------------------------------------------
+    // U1 / U2: バックアップ形式のロジック (2026-08-06)
+    // -----------------------------------------------------------------------
+
+    /// テスト用の一時ディレクトリ。テスト名でユニーク化する
+    /// (`Date.now()` 的な実行時値をアサートに使わない = 規律3)。
+    fn temp_dir_for(label: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("gori-backup-{label}-{nanos}"));
+        fs::create_dir_all(&dir).expect("テスト用ディレクトリ作成");
+        dir
+    }
+
+    /// **U1 受入基準2**: .bak が 0 件 + 対象ファイルが存在する状態で
+    /// 起動相当の処理を通すと、1 世代できること。
+    ///
+    /// これが今回の実害の本命。従来は `backup_projects_file` が保存の直前しか
+    /// 走らず、移行したきり保存していないユーザーは .bak が 1 つも無いまま
+    /// 「バックアップがありません」と表示されていた。
+    #[test]
+    fn daily_backup_creates_first_generation_when_none_exists() {
+        let dir = temp_dir_for("first-gen");
+        let path = dir.join("presets.json");
+        fs::write(&path, r#"{"version":1,"presets":[{"id":"a"}]}"#).expect("正本作成");
+
+        // 前提: .bak は 1 つも無い
+        assert_eq!(latest_backup_stamp(&path), None, "前提: .bak が無いこと");
+
+        let now_ms = 1_700_000_000_000u64; // 固定値 (実行時刻に依存させない)
+        let created = ensure_daily_backup_for(&path, now_ms);
+
+        assert!(created, "0件の状態からは必ず1世代作られること");
+        let baks: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("presets.json.bak-")
+            })
+            .collect();
+        assert_eq!(baks.len(), 1, "ちょうど1世代できること");
+
+        // 中身が正本と一致する (空ファイルを作って満足しない)
+        let content = fs::read_to_string(baks[0].path()).unwrap();
+        assert!(content.contains("\"id\":\"a\""), "バックアップ中身が正本と一致");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// **U1 の牙**: 判定ロジックが本当に条件を見ているか。
+    ///
+    /// わざと条件を崩したケースで false になることを確認する
+    /// (常に true を返す実装では通らない)。
+    #[test]
+    fn daily_backup_due_respects_each_condition() {
+        let now = 1_700_000_000_000u64;
+        let interval = DAILY_BACKUP_INTERVAL_MS;
+
+        // .bak が無く、ファイルが非空 → 取る (本命ケース)
+        assert!(daily_backup_due(true, None, now, interval));
+
+        // ファイルが存在しない/空 → 取らない (空を守っても意味がない)
+        assert!(
+            !daily_backup_due(false, None, now, interval),
+            "空ファイルはバックアップしない"
+        );
+
+        // 直近 (1時間前) に .bak がある → 取らない (起動のたびに増やさない)
+        assert!(
+            !daily_backup_due(true, Some(now - 3_600_000), now, interval),
+            "24時間以内に .bak があれば作らない"
+        );
+
+        // 25時間前が最新 → 取る
+        assert!(
+            daily_backup_due(true, Some(now - 25 * 3_600_000), now, interval),
+            "24時間より古ければ作る"
+        );
+
+        // ちょうど境界 (24時間丁度) は取る側
+        assert!(daily_backup_due(true, Some(now - interval), now, interval));
+    }
+
+    /// **U1 の牙 (2)**: 24時間以内に .bak があるとき、実際に増えないこと。
+    /// 起動を繰り返してもバックアップが無限に増えない保証。
+    #[test]
+    fn daily_backup_is_noop_when_recent_backup_exists() {
+        let dir = temp_dir_for("noop");
+        let path = dir.join("presets.json");
+        fs::write(&path, r#"{"version":1,"presets":[{"id":"a"}]}"#).expect("正本作成");
+
+        let now_ms = 1_700_000_000_000u64;
+        // 1時間前の .bak を仕込む
+        fs::write(dir.join(format!("presets.json.bak-{}", now_ms - 3_600_000)), "{}")
+            .expect(".bak 仕込み");
+
+        let created = ensure_daily_backup_for(&path, now_ms);
+        assert!(!created, "直近に .bak があれば作らない");
+
+        let count = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("presets.json.bak-")
+            })
+            .count();
+        assert_eq!(count, 1, "世代が増えていないこと");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// **U2 受入基準3**: 連続12回保存しても、日付の異なる世代が残ること。
+    ///
+    /// 従来の「新しい順に10件」だと、連続保存で全世代が直近数分に偏り、
+    /// **事故前のスナップショットが押し出されて消えた**。2層保持
+    /// (直近5 + 日次5) がそれを防ぐことを固定する。
+    #[test]
+    fn consecutive_saves_do_not_evict_older_days() {
+        let day = DAY_MS;
+        let base = 1_700_000_000_000u64;
+        // 4日前・3日前・2日前・1日前に1世代ずつ (過去の日次スナップショット)
+        let mut stamps: Vec<u64> = vec![
+            base - 4 * day,
+            base - 3 * day,
+            base - 2 * day,
+            base - day,
+        ];
+        // 今日、連続で12回保存 (1分間隔)
+        for i in 0..12 {
+            stamps.push(base + i * 60_000);
+        }
+
+        let keep = backups_to_keep(&stamps);
+
+        // 過去4日分がすべて生き残っていること (これが本命)
+        for (i, old) in [base - 4 * day, base - 3 * day, base - 2 * day, base - day]
+            .iter()
+            .enumerate()
+        {
+            assert!(
+                keep.contains(old),
+                "{i} 日前のスナップショットが連続保存で押し出された: {old}"
+            );
+        }
+
+        // 直近層として今日の最新5世代も残っていること
+        for i in 7..12 {
+            assert!(
+                keep.contains(&(base + i * 60_000)),
+                "直近層が保持されていない: {i}"
+            );
+        }
+
+        // 今日の古い方 (直近5に入らない分) は間引かれていること
+        // = 無制限に貯め込む実装では通らない
+        assert!(
+            !keep.contains(&base),
+            "今日の最古の世代は直近層から押し出されるはず (無制限保持になっている)"
+        );
+    }
+
+    /// **U2 の牙**: 同じ日の世代を日次層が重複して抱えないこと。
+    /// (日付判定をしていない実装 = 「単に15件残す」では通らない)
+    #[test]
+    fn daily_tier_keeps_one_per_distinct_day() {
+        let day = DAY_MS;
+        let base = 1_700_000_000_000u64;
+        let mut stamps: Vec<u64> = Vec::new();
+        // 今日 6 世代 (直近層が埋まる)
+        for i in 0..6 {
+            stamps.push(base + i * 60_000);
+        }
+        // 昨日 5 世代 (日次層は 1 つだけ拾うべき)
+        for i in 0..5 {
+            stamps.push(base - day + i * 60_000);
+        }
+
+        let keep = backups_to_keep(&stamps);
+        let yesterday_kept = stamps
+            .iter()
+            .filter(|s| day_index(**s) == day_index(base - day) && keep.contains(s))
+            .count();
+
+        assert_eq!(
+            yesterday_kept, 1,
+            "同じ日からは1世代だけ残すこと (日付判定が効いていない)"
+        );
+        // 昨日の中で残るのは最も新しいもの
+        assert!(
+            keep.contains(&(base - day + 4 * 60_000)),
+            "その日の最新世代が残ること"
+        );
+    }
+
+    /// **U2 の牙 (2)**: prune_backups が実ファイルを本当に消すこと、かつ
+    /// **想定外の命名のファイルは消さないこと** (知らないものを消さない)。
+    #[test]
+    fn prune_backups_removes_only_known_naming() {
+        let dir = temp_dir_for("prune");
+        let prefix = "presets.json.bak-";
+        let base = 1_700_000_000_000u64;
+
+        // 同日 12 世代 → 直近5だけ残るはず (同日なので日次層は増えない)
+        for i in 0..12 {
+            fs::write(dir.join(format!("{prefix}{}", base + i * 60_000)), "{}").unwrap();
+        }
+        // 想定外の命名 (旧形式の残骸 / 無関係ファイル)
+        fs::write(dir.join("presets.json.bak-20260806-120000"), "{}").unwrap();
+        fs::write(dir.join("presets.json"), "{}").unwrap();
+
+        prune_backups(&dir, prefix);
+
+        let numbered = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| backup_stamp(&e.file_name().to_string_lossy(), prefix).is_some())
+            .count();
+        assert_eq!(numbered, 5, "同日連投は直近層の5世代まで間引かれること");
+
+        // 知らない形式は残す
+        assert!(
+            dir.join("presets.json.bak-20260806-120000").exists(),
+            "数値でない stamp のファイルを消してはいけない"
+        );
+        assert!(dir.join("presets.json").exists(), "正本を消してはいけない");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ===================================================================
+    // 2026-08-06 第2波 (Sol監査 DL-01〜04) の牙
+    // ===================================================================
+
+    /// **V1 の牙**: `read_existing_for_guard` が「存在するのに読めない」を Err にすること。
+    ///
+    /// なぜ要るか (DL-01): 従来は `if let Ok(existing) = fs::read_to_string(&path)` で、
+    /// 読めないと**ガードごと省略されて書き込みが通っていた**。権限エラー時に
+    /// 「守るべき中身が分からない正本」を上書きできる経路そのもの。
+    ///
+    /// 3状態を区別できることを固定する: 無い→Ok(None) / 読める→Ok(Some) / 読めない→Err。
+    #[test]
+    fn read_existing_for_guard_distinguishes_missing_from_unreadable() {
+        let dir = temp_dir_for("guard-read");
+
+        // (a) 存在しない → Ok(None) (ガード非適用でよい。新規保存を妨げない)
+        let missing = dir.join("presets.json");
+        assert!(
+            matches!(read_existing_for_guard(&missing, "テスト"), Ok(None)),
+            "未作成は Ok(None) であること"
+        );
+
+        // (b) 存在して読める → Ok(Some(中身))
+        fs::write(&missing, r#"{"presets":[{"id":"a"}]}"#).unwrap();
+        let got = read_existing_for_guard(&missing, "テスト").expect("読めるはず");
+        assert_eq!(got.as_deref(), Some(r#"{"presets":[{"id":"a"}]}"#));
+
+        // (c) 存在するが読めない → Err (書き込みを中止させる)
+        //     ディレクトリを渡すと read_to_string が失敗する (権限操作より移植性が高い)。
+        let unreadable = dir.join("as-dir.json");
+        fs::create_dir_all(&unreadable).unwrap();
+        let err = read_existing_for_guard(&unreadable, "テスト")
+            .expect_err("存在するのに読めない場合は Err であること");
+        assert!(
+            err.contains("保存を中止"),
+            "中止したことが伝わる文言であること: {err}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// **V3 の牙 (1)**: バックアップ失敗が `false` として伝わること。
+    ///
+    /// なぜ要るか (DL-03): 従来は失敗しても eprintln して継続し、
+    /// **戻せないまま正本を上書き**していた。呼び出し側が中止判断できる形かを固定する。
+    #[test]
+    fn backup_projects_file_reports_failure() {
+        let dir = temp_dir_for("backup-fail");
+
+        // (a) 対象が存在しない → true (守るものが無い。書き込みを止める理由にしない)
+        assert!(
+            backup_projects_file(&dir.join("nope.json")),
+            "未作成は true (書き込みを妨げない)"
+        );
+
+        // (b) 正常にコピーできる → true
+        let path = dir.join("projects.json");
+        fs::write(&path, "[]").unwrap();
+        assert!(backup_projects_file(&path), "通常はバックアップできる");
+
+        // (c) コピーできない → false。
+        //     ディレクトリを「正本」に見せかけると fs::copy が失敗する。
+        let as_dir = dir.join("weird.json");
+        fs::create_dir_all(&as_dir).unwrap();
+        assert!(
+            !backup_projects_file(&as_dir),
+            "コピー失敗は false を返すこと (成功と報告しない)"
+        );
+
+        // (d) backup_before_write はその false を Err に変換して書き込みを止める
+        let err = backup_before_write(&as_dir, "テストデータ")
+            .expect_err("バックアップ失敗なら Err であること");
+        assert!(
+            err.contains("保存を中止"),
+            "書き込みを中止したことが伝わること: {err}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// **V3 の牙 (2)**: 同一ミリ秒でも `.bak` が上書きされず世代が残ること。
+    ///
+    /// なぜ要るか (DL-03): stamp は epoch ミリ秒なので、1ミリ秒以内に 2 回
+    /// バックアップが走ると `fs::copy` が同名を黙って上書きし、直前の世代が消える。
+    /// 時刻に依存させないため、stamp を固定して純関数を直接叩く。
+    #[test]
+    fn backup_path_does_not_collide_within_same_millisecond() {
+        let dir = temp_dir_for("bak-collision");
+        let stamp = 1_700_000_000_000u128;
+
+        let first = next_free_backup_path_for(&dir, "projects.json", stamp);
+        assert_eq!(
+            first.file_name().unwrap().to_string_lossy(),
+            format!("projects.json.bak-{stamp}")
+        );
+        fs::write(&first, "gen1").unwrap();
+
+        // 同一ミリ秒の 2 回目は別名になること (= 1世代目を潰さない)
+        let second = next_free_backup_path_for(&dir, "projects.json", stamp);
+        assert_ne!(first, second, "同一ミリ秒で同じパスを返してはいけない");
+        fs::write(&second, "gen2").unwrap();
+
+        assert_eq!(
+            fs::read_to_string(&first).unwrap(),
+            "gen1",
+            "先の世代が上書きされていないこと"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// **V2 の牙**: 4 正本すべてが `write_file_synced` 経由で書かれること (DL-02)。
+    ///
+    /// なぜこの形か: fsync が効いているかは単体テストからは観測できない
+    /// (電源断を再現できない)。観測できるのは「素の書き込みに戻っていないか」なので、
+    /// **projects だけ `fs::write` だった**という今回の欠落そのものを検査する。
+    /// 誰かが再び素の書き込みへ戻したらここが落ちる。
+    #[test]
+    fn all_four_stores_write_through_fsync_helper() {
+        let src = include_str!("storage.rs");
+
+        // (a) helper が sync_all を呼んでいること (中身が空洞化していない)
+        let helper_start = src
+            .find("fn write_file_synced")
+            .expect("write_file_synced が存在すること");
+        let helper_body = &src[helper_start..helper_start + 400];
+        assert!(
+            helper_body.contains("sync_all"),
+            "write_file_synced が sync_all を呼ばなくなっている"
+        );
+
+        // (b) 4 正本の一時書込がすべて helper 経由であること。
+        //     各 write 関数の本体から「一時書込失敗」の直前を見る。
+        for store in ["projects", "presets", "scene3d", "motions"] {
+            let marker = format!("{store}.json 一時書込失敗");
+            let at = src
+                .find(&marker)
+                .unwrap_or_else(|| panic!("{store} の一時書込が見つからない"));
+            // 直前 200 バイトに write_file_synced があること (fs::write ではない)
+            let before = &src[at.saturating_sub(200)..at];
+            assert!(
+                before.contains("write_file_synced"),
+                "{store} が write_file_synced を経由していない (素の書き込みに戻っている)"
+            );
+        }
+    }
+
+    /// **V4 の牙**: 移行先が「存在するのに読めない」を 0 件と混同しないこと。
+    ///
+    /// なぜ要るか (DL-04): 従来は `*_count_at(...).unwrap_or(0)` で新側を 0 件とみなし、
+    /// 旧側で上書きしていた。新側に実データがあって一時的に読めないだけの場合に
+    /// その未読データを潰す経路そのもの。4 ストアが同じ判定関数を共有していることを固定する。
+    #[test]
+    fn count_at_helpers_error_when_existing_target_is_unreadable() {
+        let dir = temp_dir_for("migrate-unreadable");
+
+        // 存在しない → Ok(0)。新規フォルダへの切り替えは通す必要がある。
+        assert_eq!(projects_count_at(&dir.join("none.json")), Ok(0));
+        assert_eq!(presets_count_at(&dir.join("none.json")), Ok(0));
+        assert_eq!(scene3d_count_at(&dir.join("none.json")), Ok(0));
+        assert_eq!(motions_count_at(&dir.join("none.json")), Ok(0));
+
+        // 存在するが読めない → Err。4ストアすべてで同じ扱いであること。
+        let unreadable = dir.join("as-dir.json");
+        fs::create_dir_all(&unreadable).unwrap();
+        assert!(
+            projects_count_at(&unreadable).is_err(),
+            "projects: 読めない移行先を0件扱いしてはいけない"
+        );
+        assert!(
+            presets_count_at(&unreadable).is_err(),
+            "presets: 読めない移行先を0件扱いしてはいけない"
+        );
+        assert!(
+            scene3d_count_at(&unreadable).is_err(),
+            "scene3d: 読めない移行先を0件扱いしてはいけない"
+        );
+        assert!(
+            motions_count_at(&unreadable).is_err(),
+            "motions: 読めない移行先を0件扱いしてはいけない"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// **V4 の牙 (2)**: 世代バックアップのコピー失敗が件数として返ること
+    /// (黙って捨てない)。
+    #[test]
+    fn copy_generation_backups_counts_failures() {
+        let root = temp_dir_for("bak-migrate");
+        let old_dir = root.join("old");
+        let new_dir = root.join("new");
+        fs::create_dir_all(&old_dir).unwrap();
+        fs::create_dir_all(&new_dir).unwrap();
+
+        let old_file = old_dir.join("projects.json");
+        let new_file = new_dir.join("projects.json");
+        fs::write(&old_file, "[]").unwrap();
+        fs::write(old_dir.join("projects.json.bak-1700000000000"), "gen1").unwrap();
+        fs::write(old_dir.join("projects.json.bak-1700000001000"), "gen2").unwrap();
+
+        // 正常時は失敗 0 件で、両世代が新側へ渡る。
+        assert_eq!(copy_generation_backups(&old_file, &new_file), 0);
+        assert!(new_dir.join("projects.json.bak-1700000000000").exists());
+        assert!(new_dir.join("projects.json.bak-1700000001000").exists());
+
+        // コピーできない世代があれば件数に計上されること。
+        // 「読めない通常ファイル」を作る (パーミッション 000)。ディレクトリでは
+        // is_file() で先に弾かれてしまい、copy 失敗経路に到達しない。
+        let root2 = temp_dir_for("bak-migrate-fail");
+        let old2 = root2.join("old");
+        let new2 = root2.join("new");
+        fs::create_dir_all(&old2).unwrap();
+        fs::create_dir_all(&new2).unwrap();
+        fs::write(old2.join("projects.json"), "[]").unwrap();
+        let bad = old2.join("projects.json.bak-1700000002000");
+        fs::write(&bad, "gen").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&bad, fs::Permissions::from_mode(0o000)).unwrap();
+        }
+
+        // 前提確認: この環境で 000 が本当に読み取りを阻むか (root で走ると阻まない)。
+        // 阻まないなら失敗を再現できないので、検査を飛ばす代わりに理由を明示する。
+        let perm_blocks_read = fs::read_to_string(&bad).is_err();
+
+        let failures =
+            copy_generation_backups(&old2.join("projects.json"), &new2.join("projects.json"));
+        if perm_blocks_read {
+            assert_eq!(
+                failures, 1,
+                "コピーできなかった世代は件数として返すこと (黙って捨てない)"
+            );
+        } else {
+            eprintln!(
+                "[skip] このユーザーは 0o000 のファイルを読めるため (root 等)、\
+                 コピー失敗を再現できなかった"
+            );
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // 後始末できるよう戻す
+            let _ = fs::set_permissions(&bad, fs::Permissions::from_mode(0o644));
+        }
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&root2);
     }
 }

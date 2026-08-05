@@ -33,15 +33,33 @@ export async function restoreUnrecoveredAdoptions(
   const pointer = await readLastRunPointer();
   if (!pointer) return 0;
 
-  try {
-    // projectId が無い run (箱を選ばずに生成した) は復元先が無い。
-    // ポインタだけ消して静かに終わる。
-    if (!pointer.projectId) {
-      await clearLastRunPointer();
-      return 0;
-    }
+  // projectId が無い run (箱を選ばずに生成した) は復元先が無い。
+  // ポインタだけ消して静かに終わる。
+  if (!pointer.projectId) {
+    await clearLastRunPointer();
+    return 0;
+  }
 
-    const adoptions = await storyboard.readAdoptions(pointer.runId);
+  // 採用記録の読み込み (2026-08-06 V5)。
+  //
+  // **読めなかった場合はポインタを消さない**。Rust 側は「まだ無い」(空 Map) と
+  // 「読めない」(Err) を区別して返すようになったので、Err はデータが存在する
+  // 可能性がある状態。ここでポインタを消すと次回起動で復元を試みる機会まで
+  // 失われ、ユーザーの採用判断が静かに確定的に失われる。
+  let adoptions: Awaited<ReturnType<typeof storyboard.readAdoptions>>;
+  try {
+    adoptions = await storyboard.readAdoptions(pointer.runId);
+  } catch (err) {
+    console.warn("[restoreAdoptions] 採用記録を読めないため復元を保留:", err);
+    useToasts.getState().push({
+      kind: "error",
+      text: "前回採用したカットの記録を読み取れませんでした。次回起動時に再試行します。",
+      ttlMs: 6000,
+    });
+    return 0;
+  }
+
+  try {
     const entries = Object.entries(adoptions ?? {});
     let restored = 0;
     for (const [cutId, entry] of entries) {

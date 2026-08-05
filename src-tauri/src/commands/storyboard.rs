@@ -588,6 +588,17 @@ fn resolve_adoptions_read_path(settings: &StorageSettings, run_id: &str) -> Path
     current
 }
 
+/// adoptions.json 書き込みの直列化ロック (2026-08-06 V5)。
+///
+/// なぜ要るか: 本関数は read → 変更 → write の read-modify-write で、**採用は
+/// 並列に起こる** (複数カットのテイクを続けて採用する / 並列生成の完了が重なる)。
+/// ロックが無いと、2 つの採用が同時に古い同じスナップショットを読み、後勝ちの片方が
+/// もう片方の採用を消す。storage.rs の PROJECTS_WRITE_LOCK と同思想。
+static ADOPTIONS_WRITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// adoptions.json 書き込みの tmp 名ユニーク化カウンタ。
+static ADOPTIONS_TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 #[tauri::command]
 pub async fn storyboard_persist_adoption(
     run_id: String,
@@ -595,6 +606,9 @@ pub async fn storyboard_persist_adoption(
     take_id: String,
     image_path: Option<String>,
 ) -> Result<(), String> {
+    // 直列化: 読み込み → 変更 → 書き込み の全工程を 1 トランザクションにする。
+    let _guard = ADOPTIONS_WRITE_LOCK.lock().await;
+
     let path = adoptions_sidecar_path(&run_id)?;
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent)
@@ -602,11 +616,33 @@ pub async fn storyboard_persist_adoption(
             .map_err(|e| format!("adoptions ディレクトリ作成失敗: {e}"))?;
     }
 
+    // 既存台帳の読み込み。**「読めない」を「空」と混同しない** (2026-08-06 V5)。
+    //
+    // 従来は read 失敗も parse 失敗も default() (= 採用ゼロ) に落としていたため、
+    // 権限エラーや一時的な I/O 障害のときに「これまでの採用が 1 件も無い台帳」を
+    // 作り、直後の write でそれを正本として**全採用を消していた**。
+    // ファイルが無い (NotFound) ときだけ空から始めてよい。
     let mut sidecar: AdoptionsSidecar = match tokio::fs::read_to_string(&path).await {
-        Ok(s) => serde_json::from_str::<AdoptionsSidecarRead>(&s)
-            .map(Into::into)
-            .unwrap_or_default(),
-        Err(_) => AdoptionsSidecar::default(),
+        Ok(s) => {
+            // parse 失敗も上書きしない: 壊れた台帳を空で潰すと、手で直す余地まで消える。
+            serde_json::from_str::<AdoptionsSidecarRead>(&s)
+                .map(Into::into)
+                .map_err(|e| {
+                    format!(
+                        "既存の採用記録を解釈できなかったため、採用の保存を中止しました \
+                         (データ保護)。上書きすると以前の採用が失われます ({}): {e}",
+                        path.display()
+                    )
+                })?
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => AdoptionsSidecar::default(),
+        Err(err) => {
+            return Err(format!(
+                "既存の採用記録を読み取れなかったため、採用の保存を中止しました (データ保護)。\
+                 上書きすると以前の採用が失われます。保存先フォルダの権限を確認してください ({}): {err}",
+                path.display()
+            ));
+        }
     };
     sidecar.run_id = run_id;
     sidecar.adoptions.insert(
@@ -619,9 +655,56 @@ pub async fn storyboard_persist_adoption(
 
     let json = serde_json::to_string_pretty(&sidecar)
         .map_err(|e| format!("adoptions JSON serialize 失敗: {e}"))?;
-    tokio::fs::write(&path, json)
+
+    // tmp → fsync → rename (2026-08-06 V5)。他 3 正本 (storage.rs) と同じ規約。
+    // 素の write だと、書き込み途中の電源断で「切れた JSON」が正本の位置に残り、
+    // 次回起動の復元 (restoreUnrecoveredAdoptions) が採用を 1 件も拾えなくなる。
+    write_json_atomically(&path, &json, &ADOPTIONS_TMP_SEQ)
         .await
         .map_err(|e| format!("adoptions.json 書き込み失敗: {e}"))?;
+    Ok(())
+}
+
+/// JSON をアトミックに書く (tmp へ書く → fsync → rename)。
+///
+/// storage.rs の `write_file_synced` + ユニーク tmp 名と同じ規約の async 版。
+/// rename が先にディスクへ到達して「中身が空/途中の新ファイル」が正本の位置に
+/// 居座る事故を防ぐため、rename の前に必ず sync_all する。
+async fn write_json_atomically(
+    path: &Path,
+    json: &str,
+    seq: &std::sync::atomic::AtomicU64,
+) -> Result<(), String> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let n = seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp_path = path.with_extension(format!("json.tmp-{nanos}-{n}"));
+
+    let write_result: Result<(), String> = async {
+        let mut file = tokio::fs::File::create(&tmp_path)
+            .await
+            .map_err(|e| format!("一時ファイル作成失敗: {e}"))?;
+        file.write_all(json.as_bytes())
+            .await
+            .map_err(|e| format!("一時書込失敗: {e}"))?;
+        file.sync_all()
+            .await
+            .map_err(|e| format!("sync 失敗: {e}"))?;
+        Ok(())
+    }
+    .await;
+
+    if let Err(e) = write_result {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return Err(e);
+    }
+    if let Err(e) = tokio::fs::rename(&tmp_path, path).await {
+        // 失敗した tmp は残骸として残さない (掃除失敗は握り潰してよい)。
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return Err(format!("リネーム失敗: {e}"));
+    }
     Ok(())
 }
 
@@ -630,9 +713,19 @@ pub async fn storyboard_read_adoptions(
     run_id: String,
 ) -> Result<std::collections::BTreeMap<String, AdoptionEntry>, String> {
     let path = adoptions_sidecar_read_path(&run_id)?;
+    // 「まだ無い」(NotFound) と「読めない」を区別する (2026-08-06 V5)。
+    // 従来はどちらも空 Map を返していたため、権限エラー等で読めないときに
+    // 呼び出し側 (restoreUnrecoveredAdoptions) が「採用は 0 件だった」と解釈し、
+    // 復元をせずにポインタだけ消す = 採用の取りこぼしが静かに確定していた。
     let raw = match tokio::fs::read_to_string(&path).await {
         Ok(s) => s,
-        Err(_) => return Ok(Default::default()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Default::default()),
+        Err(err) => {
+            return Err(format!(
+                "採用記録を読み取れませんでした ({}): {err}",
+                path.display()
+            ));
+        }
     };
     let sidecar: AdoptionsSidecar = serde_json::from_str::<AdoptionsSidecarRead>(&raw)
         .map(Into::into)
@@ -5370,5 +5463,145 @@ mod sketch_mode_tests {
             "local_structured_prompt が previous_cut を無視している。\
              上の検査が意味を失う: {state}"
         );
+    }
+}
+
+/// 2026-08-06 第2波 V5: 採用台帳 (adoptions.json) を他の正本と同じ保存規約へ揃えた分の牙。
+#[cfg(test)]
+mod adoptions_durability_tests {
+    use super::*;
+    use std::fs;
+
+    fn temp_dir_for(label: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("gori-adoptions-{label}-{nanos}"));
+        fs::create_dir_all(&dir).expect("テスト用ディレクトリ作成");
+        dir
+    }
+
+    /// **V5 の牙 (1)**: `write_json_atomically` が tmp 残骸を残さず、
+    /// 新規・上書きの両方で中身が正しいこと。
+    ///
+    /// なぜ要るか: 従来 adoptions.json は素の `tokio::fs::write` で、書き込み途中の
+    /// 電源断で「切れた JSON」が正本の位置に残り得た。そうなると次回起動の復元
+    /// (restoreUnrecoveredAdoptions) が採用を 1 件も拾えない = 採用判断の全損。
+    #[tokio::test]
+    async fn write_json_atomically_leaves_no_tmp_and_overwrites() {
+        let dir = temp_dir_for("atomic");
+        let path = dir.join("adoptions.json");
+        let seq = std::sync::atomic::AtomicU64::new(0);
+
+        write_json_atomically(&path, r#"{"a":1}"#, &seq)
+            .await
+            .expect("新規書き込み");
+        assert_eq!(fs::read_to_string(&path).unwrap(), r#"{"a":1}"#);
+
+        write_json_atomically(&path, r#"{"b":2}"#, &seq)
+            .await
+            .expect("上書き");
+        assert_eq!(fs::read_to_string(&path).unwrap(), r#"{"b":2}"#);
+
+        let leftovers: Vec<String> = fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter_map(|e| e.file_name().into_string().ok())
+            .filter(|n| n.contains(".tmp-"))
+            .collect();
+        assert!(leftovers.is_empty(), "tmp 残骸が残っている: {leftovers:?}");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// **V5 の牙 (2)**: `storyboard_persist_adoption` が実際に
+    /// 「ロック → 非NotFoundは中止 → アトミック書き込み」を通ること。
+    ///
+    /// なぜこの形か: helper (`write_json_atomically`) を直接叩くテストだけだと、
+    /// **呼び出し側が素の `tokio::fs::write` に戻っても気づけない** (実際に牙の検証で
+    /// 素通りした)。ロック取得・NotFound 判定・helper 経由の 3 点を本体側で固定する。
+    #[test]
+    fn persist_adoption_uses_lock_and_atomic_write() {
+        let src = include_str!("storyboard.rs");
+        let start = src
+            .find("pub async fn storyboard_persist_adoption")
+            .expect("storyboard_persist_adoption が存在すること");
+        let end = src[start..]
+            .find("\n#[tauri::command]")
+            .map(|o| start + o)
+            .unwrap_or(src.len());
+        let body = &src[start..end];
+
+        assert!(
+            body.contains("ADOPTIONS_WRITE_LOCK.lock().await"),
+            "採用の保存が直列化されていない (read-modify-write が並列で後勝ちする)"
+        );
+        assert!(
+            body.contains("write_json_atomically"),
+            "採用の保存がアトミック書き込みを経由していない (素の write に戻っている)"
+        );
+        assert!(
+            !body.contains("tokio::fs::write("),
+            "素の tokio::fs::write が残っている (書き込み途中の電源断で台帳が壊れる)"
+        );
+        assert!(
+            body.contains("ErrorKind::NotFound"),
+            "「まだ無い」と「読めない」を区別していない (読めない台帳を空で潰す)"
+        );
+
+        // helper 側が sync_all を保っていること (中身の空洞化を防ぐ)。
+        let helper = src
+            .find("async fn write_json_atomically")
+            .expect("write_json_atomically が存在すること");
+        assert!(
+            src[helper..helper + 900].contains("sync_all"),
+            "write_json_atomically が sync_all を呼ばなくなっている"
+        );
+    }
+
+    /// **V5 の牙 (3)**: 採用の保存が「読めない台帳」を空で潰さないこと。
+    ///
+    /// 従来は read 失敗も parse 失敗も `default()` (採用ゼロ) へ落としてから
+    /// 書き戻していたため、一時的に読めないだけの状況で**過去の採用を全消し**していた。
+    /// ここでは判定の中核 (NotFound だけが空スタート) をパス解決に依存せず検査する。
+    #[test]
+    fn unreadable_ledger_is_not_treated_as_empty() {
+        let dir = temp_dir_for("read-fail");
+
+        // (a) 存在しない → NotFound。空から始めてよい唯一のケース。
+        let missing = dir.join("adoptions.json");
+        let kind = fs::read_to_string(&missing).unwrap_err().kind();
+        assert_eq!(
+            kind,
+            std::io::ErrorKind::NotFound,
+            "未作成は NotFound として観測できること (空スタートの判定条件)"
+        );
+
+        // (b) 存在するが読めない → NotFound 以外。空スタートしてはいけない。
+        let unreadable = dir.join("as-dir.json");
+        fs::create_dir_all(&unreadable).unwrap();
+        let kind = fs::read_to_string(&unreadable).unwrap_err().kind();
+        assert_ne!(
+            kind,
+            std::io::ErrorKind::NotFound,
+            "読めないファイルを NotFound と混同すると空で上書きしてしまう"
+        );
+
+        // (c) 壊れた JSON は parse 失敗 = 上書きせず Err にする対象。
+        let broken = r#"{"runId":"r1","adoptions":{"cut-1":"#;
+        assert!(
+            serde_json::from_str::<AdoptionsSidecarRead>(broken).is_err(),
+            "壊れた台帳が parse 成功してはいけない (空で潰す経路になる)"
+        );
+
+        // 逆方向の検査: 正しい台帳はちゃんと読める (上の検査が常に真にならない)。
+        let good = r#"{"runId":"r1","adoptions":{"cut-1":{"takeId":"t1"}}}"#;
+        assert!(
+            serde_json::from_str::<AdoptionsSidecarRead>(good).is_ok(),
+            "正常な台帳が読めなくなっている"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

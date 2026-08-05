@@ -35,6 +35,11 @@ import {
 } from "../scene3d/evaluateScene";
 import { resolveClipSpeed } from "../scene3d/clipSpeed";
 import type { EntityMotionType } from "../scene3d/types";
+import {
+  type BackupListResult,
+  ensureDailyBackupsSafe,
+  toBackupListResult,
+} from "./backupHealth";
 
 let entitySeq = 1;
 let shotSeq = 1;
@@ -1664,7 +1669,7 @@ let sceneInitializeToken = 0;
 
 /** 保存の最後勝ちキュー (presets.ts の writeToFile と同型)。 */
 let scenePendingWrite: { data: SceneProject; allowEmpty: boolean } | null = null;
-let sceneWriteInFlight: Promise<void> | null = null;
+let sceneWriteInFlight: Promise<boolean> | null = null;
 
 async function writeSceneToFileNow(
   data: SceneProject,
@@ -1680,26 +1685,39 @@ async function writeSceneToFileNow(
       const { useToasts } = await import("./toasts");
       useToasts.getState().push({
         kind: "error",
-        text: `3Dシーンの保存に失敗しました。データ保護のため操作が反映されていない可能性があります: ${String(err)}`,
+        text: `3Dシーンの保存先ファイルに書き込めませんでした。作成済みのシーンは一時領域に残っています。アプリを再起動すると再試行します: ${String(err)}`,
         ttlMs: 8000,
       });
     } catch {
       // トースト取得すら失敗した場合はログのみ (これ以上できることはない)。
     }
+    // 2026-08-06: presets.ts と同型修正。移行の成否を呼び出し側が判断できるよう
+    // 再 throw する (成功扱いで解禁するとデータ消失経路が残る)。
+    throw err;
   }
 }
 
-function writeSceneToFile(data: SceneProject, allowEmpty = false): Promise<void> {
+/** presets.ts の writeToFile と同型。**失敗しても reject せず** 成否を boolean で返す。 */
+function writeSceneToFile(data: SceneProject, allowEmpty = false): Promise<boolean> {
   scenePendingWrite = { data, allowEmpty };
   if (!sceneWriteInFlight) {
-    sceneWriteInFlight = (async () => {
+    const run = (async (): Promise<boolean> => {
+      let lastOk = true;
       while (scenePendingWrite) {
         const job = scenePendingWrite;
         scenePendingWrite = null;
-        await writeSceneToFileNow(job.data, job.allowEmpty);
+        try {
+          await writeSceneToFileNow(job.data, job.allowEmpty);
+          lastOk = true;
+        } catch {
+          lastOk = false;
+        }
       }
       sceneWriteInFlight = null;
+      return lastOk;
     })();
+    sceneWriteInFlight = run;
+    return run;
   }
   return sceneWriteInFlight;
 }
@@ -1821,8 +1839,6 @@ export async function initializeScene3d(): Promise<void> {
   // ファイル未作成 = localStorage からの移行 or 新規ユーザー。
   // 現在の in-memory state (localStorage 由来) を正とする。
   if (myToken !== sceneInitializeToken) return;
-  sceneFileWriteUnlocked = true;
-  scenePendingBeforeUnlock = false;
   const current = useScene3d.getState().project;
   // 既定シーンのまま (= 何も作っていない) なら空ファイルを作らない。
   // localStorage に保存済みのシーンがあったかで判定する
@@ -1835,7 +1851,24 @@ export async function initializeScene3d(): Promise<void> {
   }
   if (hadSaved) {
     console.info("[scene3d] localStorage から 3D シーンをファイルへ移行");
-    await writeSceneToFile(current);
+    // 2026-08-06: presets.ts と同型修正。移行の**成功を確認してから**解禁する。
+    // 以前は書き込みより先に無条件で解禁しており、移行が失敗しても
+    // 「ファイルがある前提」で動いていた (プリセット30体消失と同じ機序)。
+    const ok = await writeSceneToFile(current);
+    if (!ok) {
+      console.error("[scene3d] ファイルへの移行に失敗。localStorage を正のまま維持する");
+      return; // 解禁しない。次回起動で再試行する
+    }
+    // 移行成功直後に1世代バックアップ (presets.ts と同型・2026-08-06)。
+    // 移行したきり編集していないユーザーが .bak 0 件になるのを防ぐ。
+    void ensureDailyBackupsSafe();
+  }
+  sceneFileWriteUnlocked = true;
+  // 移行を待つ間にユーザーが編集していたら、その分を 1 回フラッシュする
+  // (解禁前の mutate はファイルへ流れていないため。上の「ファイル有」経路と同じ)。
+  if (scenePendingBeforeUnlock) {
+    scenePendingBeforeUnlock = false;
+    void writeSceneToFile(useScene3d.getState().project);
   }
 }
 
@@ -1846,21 +1879,18 @@ export async function initializeScene3d(): Promise<void> {
 
 /**
  * 3Dシーンの世代バックアップ一覧を取得する（新しい順）。
- * 返り値: { path, at(epochミリ秒), shots(カット数) }[]。
- * 「バックアップから復元」UI が選択肢を出すために使う。
+ * 返り値: 成功なら { ok: true, items }、失敗なら { ok: false, error }。
+ * 失敗を空配列に畳まない理由は presets.ts 側の listBackups に記載（2026-08-06）。
  */
 export async function listScene3dBackups(): Promise<
-  { path: string; at: number; shots: number }[]
+  BackupListResult<{ path: string; at: number; shots: number }>
 > {
-  try {
+  return toBackupListResult(async () => {
     const { storage } = await import("../ipc");
     const rows = await storage.listScene3dBackups();
     // [path, epochミリ秒, shot数]。Rust 側がミリ秒で返すのでそのまま使う。
     return rows.map(([path, ms, shots]) => ({ path, at: ms, shots }));
-  } catch (err) {
-    console.error("[scene3d] listScene3dBackups 失敗:", err);
-    return [];
-  }
+  }, "scene3d");
 }
 
 /**

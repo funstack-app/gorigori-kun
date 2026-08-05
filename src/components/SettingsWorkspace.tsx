@@ -12,6 +12,11 @@ import {
   initializeGeneratedMotions,
 } from "../lib/scene3d/motionStore";
 import { applyRelinkResult } from "../lib/relinkApply";
+import {
+  type BackupListResult,
+  formatRelativeAge,
+  summarizeBackupHealth,
+} from "../lib/store/backupHealth";
 import { type CodexPlan, useAccounts } from "../lib/store/accounts";
 import { usePresets } from "../lib/store/presets";
 import { initializeScene3d } from "../lib/store/scene3d";
@@ -464,23 +469,26 @@ function StorageSettingsTab() {
   const [migrating, setMigrating] = useState(false);
   const [saving, setSaving] = useState(false);
   // バックアップから復元 UI 用。
+  // 「取得できなかった」と「0件だった」を区別するため、配列でなく
+  // BackupListResult を保持する（2026-08-06。空配列に畳むと故障時に
+  // 「バックアップがありません」と誤って断言してしまう）。
   const [backups, setBackups] = useState<
-    { path: string; at: number; count: number }[]
-  >([]);
+    BackupListResult<{ path: string; at: number; count: number }> | null
+  >(null);
   const [backupsOpen, setBackupsOpen] = useState(false);
   const [restoring, setRestoring] = useState(false);
   // プリセット（キャラクター含む）のバックアップから復元 UI 用。
   // projects 側と state を分ける（片方を開いても他方の一覧が出ない）。
   const [presetBackups, setPresetBackups] = useState<
-    { path: string; at: number; count: number }[]
-  >([]);
+    BackupListResult<{ path: string; at: number; count: number }> | null
+  >(null);
   const [presetBackupsOpen, setPresetBackupsOpen] = useState(false);
   const [presetRestoring, setPresetRestoring] = useState(false);
   // 3Dシーンのバックアップから復元 UI 用。
   // presets / projects と state を分ける（片方を開いても他方の一覧が出ない）。
   const [scene3dBackups, setScene3dBackups] = useState<
-    { path: string; at: number; shots: number }[]
-  >([]);
+    BackupListResult<{ path: string; at: number; shots: number }> | null
+  >(null);
   const [scene3dBackupsOpen, setScene3dBackupsOpen] = useState(false);
   const [scene3dRestoring, setScene3dRestoring] = useState(false);
 
@@ -592,7 +600,9 @@ function StorageSettingsTab() {
       // 適用は下の initialize 群が終わってから (先に当てるとファイル読込で消える)。
       const relink = await storage.setSettings(next);
       // 2. プロジェクトデータも同じ root へ (既存の安全移行ロジックを再利用)。
-      await storage.setProjectsDataRoot(root);
+      // 戻り値は「新 root へ運べなかった世代バックアップの件数」(2026-08-06 DL-04)。
+      // 移行自体は成功しているので処理は続け、下で警告だけ出す。
+      const backupCopyFailures = await storage.setProjectsDataRoot(root);
       const merged = await storage.getSettings();
       setSettings(merged);
       // 3. 新しい場所の projects.json から読み直す (移行済みデータを反映)。
@@ -617,6 +627,13 @@ function StorageSettingsTab() {
         text: "保存先を更新しました（画像・作品データを集約）",
         ttlMs: 2800,
       });
+      if (backupCopyFailures > 0) {
+        push({
+          kind: "error",
+          text: `過去のバックアップ ${backupCopyFailures} 件を新しい保存先へコピーできませんでした。現在のデータは問題なく使えます（過去のバックアップは元のフォルダに残っています）。`,
+          ttlMs: 8000,
+        });
+      }
     } catch (err) {
       push({ kind: "error", text: `保存先の更新に失敗: ${String(err)}` });
     } finally {
@@ -663,7 +680,8 @@ function StorageSettingsTab() {
     try {
       // applyUnifiedRoot と同じ理由でモーション書き込みを先に決着させる (B1)。
       switchToken = await beginStorageRootSwitch();
-      await storage.setProjectsDataRoot(newRoot);
+      // 戻り値は「新 root へ運べなかった世代バックアップの件数」(2026-08-06 DL-04)。
+      const backupCopyFailures = await storage.setProjectsDataRoot(newRoot);
       const next = await storage.getSettings();
       setSettings(next);
       // 新しい保存先のファイルから projects を読み直す（移行済みデータを反映）。
@@ -682,6 +700,13 @@ function StorageSettingsTab() {
           : "プロジェクトデータ保存先を既定に戻しました",
         ttlMs: 3200,
       });
+      if (backupCopyFailures > 0) {
+        push({
+          kind: "error",
+          text: `過去のバックアップ ${backupCopyFailures} 件を新しい保存先へコピーできませんでした。現在のデータは問題なく使えます（過去のバックアップは元のフォルダに残っています）。`,
+          ttlMs: 8000,
+        });
+      }
     } catch (err) {
       push({ kind: "error", text: `保存先の変更に失敗: ${String(err)}` });
     } finally {
@@ -703,21 +728,10 @@ function StorageSettingsTab() {
   };
 
   // バックアップ一覧を開く（取得して展開）。
+  // 0件でも一覧を開く（枠内に「無い」or「取れなかった」を出し分ける）。
   const openBackups = async () => {
-    try {
-      const list = await useProjects.getState().listBackups();
-      setBackups(list);
-      setBackupsOpen(true);
-      if (list.length === 0) {
-        push({
-          kind: "info",
-          text: "まだバックアップがありません（保存のたびに自動で作られます）。",
-          ttlMs: 3500,
-        });
-      }
-    } catch (err) {
-      push({ kind: "error", text: `バックアップ取得に失敗: ${String(err)}` });
-    }
+    setBackups(await useProjects.getState().listBackups());
+    setBackupsOpen(true);
   };
 
   // 選んだバックアップで現在のプロジェクトを置き換える（復元）。
@@ -739,21 +753,10 @@ function StorageSettingsTab() {
   };
 
   // プリセットのバックアップ一覧を開く（取得して展開）。
+  // projects 側と同じく、0件でも一覧を開いて枠内で理由を出し分ける。
   const openPresetBackups = async () => {
-    try {
-      const list = await usePresets.getState().listBackups();
-      setPresetBackups(list);
-      setPresetBackupsOpen(true);
-      if (list.length === 0) {
-        push({
-          kind: "info",
-          text: "まだバックアップがありません（保存のたびに自動で作られます）。",
-          ttlMs: 3500,
-        });
-      }
-    } catch (err) {
-      push({ kind: "error", text: `バックアップ取得に失敗: ${String(err)}` });
-    }
+    setPresetBackups(await usePresets.getState().listBackups());
+    setPresetBackupsOpen(true);
   };
 
   // 選んだバックアップでプリセット・キャラクターを置き換える（復元）。
@@ -777,13 +780,9 @@ function StorageSettingsTab() {
   // 3Dシーンのバックアップ一覧を開く（取得して展開）。
   // 0件でも一覧を開く（presets 側のトースト方式と違い、空であることを枠内に出す）。
   const openScene3dBackups = async () => {
-    try {
-      const { listScene3dBackups } = await import("../lib/store/scene3d");
-      setScene3dBackups(await listScene3dBackups());
-      setScene3dBackupsOpen(true);
-    } catch (err) {
-      push({ kind: "error", text: `バックアップ取得に失敗: ${String(err)}` });
-    }
+    const { listScene3dBackups } = await import("../lib/store/scene3d");
+    setScene3dBackups(await listScene3dBackups());
+    setScene3dBackupsOpen(true);
   };
 
   // 選んだバックアップで3Dシーンを置き換える（復元）。
@@ -960,6 +959,7 @@ function StorageSettingsTab() {
           プロジェクト一覧は保存のたびに自動でバックアップされています。
           もしプロジェクトが消えた・おかしくなった場合は、ここから過去の状態に戻せます。
         </p>
+        <BackupHealthLine result={backups} />
         <button
           type="button"
           disabled={restoring}
@@ -969,7 +969,7 @@ function StorageSettingsTab() {
           バックアップから復元…
         </button>
 
-        {backupsOpen && backups.length > 0 ? (
+        {backupsOpen && backups ? (
           <div className="mt-2 max-h-60 overflow-y-auto rounded-md border border-[#2a2a2a] bg-[#0b0b0b] p-2">
             <div className="mb-1.5 flex items-center justify-between px-1">
               <span className="text-[11px] font-bold text-neutral-300">
@@ -983,30 +983,22 @@ function StorageSettingsTab() {
                 閉じる
               </button>
             </div>
-            <ul className="space-y-1">
-              {backups.map((b) => (
-                <li
-                  key={b.path}
-                  className="flex items-center justify-between rounded-md bg-[#141414] px-2.5 py-1.5"
+            <BackupListBody
+              result={backups}
+              emptyText="まだバックアップがありません（保存のたびに自動で作られます）。"
+              onRetry={() => void openBackups()}
+              renderMeta={(b) => `${b.count} 件`}
+              renderAction={(b) => (
+                <button
+                  type="button"
+                  disabled={restoring}
+                  onClick={() => void restoreBackup(b.path)}
+                  className={`${MUTED_BUTTON} h-7 px-2.5 text-[11px] disabled:opacity-40`}
                 >
-                  <span className="text-[12px] text-neutral-200">
-                    {new Date(b.at).toLocaleString("ja-JP")}{" "}
-                    <span className="text-neutral-500">— {b.count} 件</span>
-                  </span>
-                  <button
-                    type="button"
-                    disabled={restoring}
-                    onClick={() => void restoreBackup(b.path)}
-                    className={`${MUTED_BUTTON} h-7 px-2.5 text-[11px] disabled:opacity-40`}
-                  >
-                    {restoring ? "復元中…" : "これで復元"}
-                  </button>
-                </li>
-              ))}
-            </ul>
-            <p className="mt-1.5 px-1 text-[10px] text-neutral-500">
-              復元しても、その直前の状態もバックアップされるので、間違えてもまた戻せます。
-            </p>
+                  {restoring ? "復元中…" : "これで復元"}
+                </button>
+              )}
+            />
           </div>
         ) : null}
       </Field>
@@ -1023,6 +1015,7 @@ function StorageSettingsTab() {
           登録したキャラクターやプリセットは、保存のたびに自動でバックアップされています。
           もしキャラクターやプリセットが消えた・おかしくなった場合は、ここから過去の状態に戻せます。
         </p>
+        <BackupHealthLine result={presetBackups} />
         <button
           type="button"
           disabled={presetRestoring}
@@ -1032,7 +1025,7 @@ function StorageSettingsTab() {
           バックアップから復元…
         </button>
 
-        {presetBackupsOpen && presetBackups.length > 0 ? (
+        {presetBackupsOpen && presetBackups ? (
           <div className="mt-2 max-h-60 overflow-y-auto rounded-md border border-[#2a2a2a] bg-[#0b0b0b] p-2">
             <div className="mb-1.5 flex items-center justify-between px-1">
               <span className="text-[11px] font-bold text-neutral-300">
@@ -1046,30 +1039,22 @@ function StorageSettingsTab() {
                 閉じる
               </button>
             </div>
-            <ul className="space-y-1">
-              {presetBackups.map((b) => (
-                <li
-                  key={b.path}
-                  className="flex items-center justify-between rounded-md bg-[#141414] px-2.5 py-1.5"
+            <BackupListBody
+              result={presetBackups}
+              emptyText="まだバックアップがありません（保存のたびに自動で作られます）。"
+              onRetry={() => void openPresetBackups()}
+              renderMeta={(b) => `${b.count} 件`}
+              renderAction={(b) => (
+                <button
+                  type="button"
+                  disabled={presetRestoring}
+                  onClick={() => void restorePresetBackup(b.path)}
+                  className={`${MUTED_BUTTON} h-7 px-2.5 text-[11px] disabled:opacity-40`}
                 >
-                  <span className="text-[12px] text-neutral-200">
-                    {new Date(b.at).toLocaleString("ja-JP")}{" "}
-                    <span className="text-neutral-500">— {b.count} 件</span>
-                  </span>
-                  <button
-                    type="button"
-                    disabled={presetRestoring}
-                    onClick={() => void restorePresetBackup(b.path)}
-                    className={`${MUTED_BUTTON} h-7 px-2.5 text-[11px] disabled:opacity-40`}
-                  >
-                    {presetRestoring ? "復元中…" : "これで復元"}
-                  </button>
-                </li>
-              ))}
-            </ul>
-            <p className="mt-1.5 px-1 text-[10px] text-neutral-500">
-              復元しても、その直前の状態もバックアップされるので、間違えてもまた戻せます。
-            </p>
+                  {presetRestoring ? "復元中…" : "これで復元"}
+                </button>
+              )}
+            />
           </div>
         ) : null}
       </Field>
@@ -1085,6 +1070,7 @@ function StorageSettingsTab() {
           3Dシーンは編集のたびに自動でバックアップされています。
           おかしくなった・前の状態に戻したい場合は、ここから過去の状態に戻せます。
         </p>
+        <BackupHealthLine result={scene3dBackups} />
         <button
           type="button"
           disabled={scene3dRestoring}
@@ -1094,7 +1080,7 @@ function StorageSettingsTab() {
           バックアップから復元…
         </button>
 
-        {scene3dBackupsOpen ? (
+        {scene3dBackupsOpen && scene3dBackups ? (
           <div className="mt-2 max-h-60 overflow-y-auto rounded-md border border-[#2a2a2a] bg-[#0b0b0b] p-2">
             <div className="mb-1.5 flex items-center justify-between px-1">
               <span className="text-[11px] font-bold text-neutral-300">
@@ -1108,38 +1094,22 @@ function StorageSettingsTab() {
                 閉じる
               </button>
             </div>
-            {scene3dBackups.length === 0 ? (
-              <p className="px-1 py-1 text-[11px] text-neutral-500">
-                まだバックアップがありません。3Dシーンを編集すると自動で作られます。
-              </p>
-            ) : (
-              <>
-                <ul className="space-y-1">
-                  {scene3dBackups.map((b) => (
-                    <li
-                      key={b.path}
-                      className="flex items-center justify-between rounded-md bg-[#141414] px-2.5 py-1.5"
-                    >
-                      <span className="text-[12px] text-neutral-200">
-                        {new Date(b.at).toLocaleString("ja-JP")}{" "}
-                        <span className="text-neutral-500">— {b.shots} カット</span>
-                      </span>
-                      <button
-                        type="button"
-                        disabled={scene3dRestoring}
-                        onClick={() => void restoreScene3dBackup(b.path)}
-                        className={`${MUTED_BUTTON} h-7 px-2.5 text-[11px] disabled:opacity-40`}
-                      >
-                        {scene3dRestoring ? "復元中…" : "これで復元"}
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-                <p className="mt-1.5 px-1 text-[10px] text-neutral-500">
-                  復元しても、その直前の状態もバックアップされるので、間違えてもまた戻せます。
-                </p>
-              </>
-            )}
+            <BackupListBody
+              result={scene3dBackups}
+              emptyText="まだバックアップがありません。3Dシーンを編集すると自動で作られます。"
+              onRetry={() => void openScene3dBackups()}
+              renderMeta={(b) => `${b.shots} カット`}
+              renderAction={(b) => (
+                <button
+                  type="button"
+                  disabled={scene3dRestoring}
+                  onClick={() => void restoreScene3dBackup(b.path)}
+                  className={`${MUTED_BUTTON} h-7 px-2.5 text-[11px] disabled:opacity-40`}
+                >
+                  {scene3dRestoring ? "復元中…" : "これで復元"}
+                </button>
+              )}
+            />
           </div>
         ) : null}
       </Field>
@@ -1368,6 +1338,109 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       <span className="text-xs font-medium text-neutral-300">{label}</span>
       {children}
     </label>
+  );
+}
+
+/**
+ * バックアップ健全性の1行表示（2026-08-06 / U4）。
+ *
+ * 「最終バックアップ: N時間前 / M世代」を出し、ユーザーが自分のデータが守られて
+ * いるかを設定画面で確認できるようにする。**ゼロのときだけ目立たせる**
+ * （守られている状態は静かでよい。一等地には出さない方針）。
+ */
+function BackupHealthLine({
+  result,
+}: {
+  result: BackupListResult<{ at: number }> | null;
+}) {
+  // まだ開いていない（取得していない）ときは何も出さない。
+  if (result === null) return null;
+  const health = summarizeBackupHealth(result);
+  if (health.failed) {
+    return (
+      <p className="mb-1.5 text-[11px] font-bold text-orange-300">
+        バックアップの状態を確認できませんでした（保存先に接続できない可能性）。
+      </p>
+    );
+  }
+  if (health.generations === 0 || health.latestAt === null) {
+    return (
+      <p className="mb-1.5 text-[11px] font-bold text-orange-300">
+        バックアップがまだ 0 件です。
+      </p>
+    );
+  }
+  return (
+    <p className="mb-1.5 text-[11px] text-neutral-500">
+      最終バックアップ: {formatRelativeAge(health.latestAt, Date.now())} ／{" "}
+      {health.generations} 世代
+    </p>
+  );
+}
+
+/**
+ * バックアップ一覧の中身（空 / 取得失敗 / 一覧）を出し分ける共通枠。
+ *
+ * **「まだありません」と「取得できませんでした」を必ず分ける**（U3 の要点）。
+ * 前者は正常、後者は保存先に届いていない故障で、ユーザーが取るべき行動が違う。
+ */
+function BackupListBody<T extends { path: string; at: number }>({
+  result,
+  emptyText,
+  onRetry,
+  renderMeta,
+  renderAction,
+}: {
+  result: BackupListResult<T>;
+  emptyText: string;
+  onRetry: () => void;
+  renderMeta: (item: T) => React.ReactNode;
+  renderAction: (item: T) => React.ReactNode;
+}) {
+  if (!result.ok) {
+    return (
+      <div className="px-1 py-1">
+        <p className="text-[11px] font-bold text-orange-300">
+          バックアップ一覧を取得できませんでした。
+        </p>
+        <p className="mt-0.5 text-[10px] leading-relaxed text-neutral-400">
+          保存先に接続できていない可能性があります（外付けドライブ・クラウド同期
+          フォルダが未接続など）。保存先を確認してから、もう一度お試しください。
+        </p>
+        <p className="mt-0.5 break-all text-[10px] text-neutral-600">{result.error}</p>
+        <button
+          type="button"
+          onClick={onRetry}
+          className={`${MUTED_BUTTON} mt-1.5 h-7 px-2.5 text-[11px]`}
+        >
+          再試行
+        </button>
+      </div>
+    );
+  }
+  if (result.items.length === 0) {
+    return <p className="px-1 py-1 text-[11px] text-neutral-500">{emptyText}</p>;
+  }
+  return (
+    <>
+      <ul className="space-y-1">
+        {result.items.map((b) => (
+          <li
+            key={b.path}
+            className="flex items-center justify-between rounded-md bg-[#141414] px-2.5 py-1.5"
+          >
+            <span className="text-[12px] text-neutral-200">
+              {new Date(b.at).toLocaleString("ja-JP")}{" "}
+              <span className="text-neutral-500">— {renderMeta(b)}</span>
+            </span>
+            {renderAction(b)}
+          </li>
+        ))}
+      </ul>
+      <p className="mt-1.5 px-1 text-[10px] text-neutral-500">
+        復元しても、その直前の状態もバックアップされるので、間違えてもまた戻せます。
+      </p>
+    </>
   );
 }
 function TextInput(props: {

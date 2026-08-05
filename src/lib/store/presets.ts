@@ -2,6 +2,11 @@ import { invoke } from "@tauri-apps/api/core";
 import { create } from "zustand";
 
 import type { SheetBackground, SheetPromptMode } from "../character/types";
+import {
+  type BackupListResult,
+  ensureDailyBackupsSafe,
+  toBackupListResult,
+} from "./backupHealth";
 
 /**
  * プロンプトプリセット管理。Midjourney Code Manager 仕様を参考に、
@@ -251,6 +256,13 @@ type PresetsFileData = {
  * Tauri 経由でファイルに書く実体。
  * 書き込みが失敗したら、サイレントに握り潰さずユーザーへトースト通知する
  * (「保存できていないのに成功したと思う」型のデータ消失を防ぐ)。
+ *
+ * **2026-08-06 重大修正 (実ユーザーのプリセット30体消失)**: 以前はトースト通知の
+ * あと `return` して**呼び出し側には成功として返っていた**。そのため初回移行
+ * (localStorage → ファイル) が失敗しても移行側が成功扱いでファイル書き込みを解禁し、
+ * 「ファイルは作られていないのに、作られた前提で動く」状態になった。そこへ掃除が
+ * localStorage を消し、再起動で 0 件になった。
+ * 失敗は**失敗として throw する**。呼び出し側が解禁判断に使う。
  */
 async function writeToFileNow(
   data: PresetsFileData,
@@ -264,12 +276,14 @@ async function writeToFileNow(
       const { useToasts } = await import("./toasts");
       useToasts.getState().push({
         kind: "error",
-        text: `プリセットの保存に失敗しました。データ保護のため操作が反映されていない可能性があります: ${String(err)}`,
+        text: `プリセットの保存先ファイルに書き込めませんでした。登録済みのデータは一時領域に残っています。アプリを再起動すると再試行します: ${String(err)}`,
         ttlMs: 8000,
       });
     } catch {
       // トースト取得すら失敗した場合はログのみ (これ以上できることはない)。
     }
+    // 呼び出し側 (移行・解禁判断) が失敗を検知できるよう再 throw する。
+    throw err;
   }
 }
 
@@ -280,21 +294,43 @@ async function writeToFileNow(
  * してよい (常に全量スナップショットなので最終状態が正)。
  */
 let pendingWrite: { data: PresetsFileData; allowEmpty: boolean } | null = null;
-let writeInFlight: Promise<void> | null = null;
+let writeInFlight: Promise<boolean> | null = null;
 
-function writeToFile(data: PresetsFileData, allowEmpty = false): Promise<void> {
+/**
+ * キュー経由の書き込み。**失敗しても reject しない** (成否は boolean で返す)。
+ *
+ * writeToFileNow は 2026-08-06 から throw するようになったが、このキューは
+ * 「最後勝ち」で複数ジョブを直列処理するため、1 件の失敗で while を抜けると
+ * 後続ジョブが落ちる。また mutate 経路 (persistAll) は結果を待たない
+ * `void writeToFile(...)` なので、reject させると unhandled rejection になる。
+ * したがってここで受け止め、**呼び出し側が知りたい「今回書けたか」だけを返す**。
+ */
+function writeToFile(data: PresetsFileData, allowEmpty = false): Promise<boolean> {
   pendingWrite = { data, allowEmpty };
   if (!writeInFlight) {
-    writeInFlight = (async () => {
+    const run = (async (): Promise<boolean> => {
+      let lastOk = true;
       while (pendingWrite) {
         const job = pendingWrite;
         pendingWrite = null;
-        await writeToFileNow(job.data, job.allowEmpty);
+        try {
+          await writeToFileNow(job.data, job.allowEmpty);
+          lastOk = true;
+        } catch {
+          // 通知は writeToFileNow 側で済んでいる。ここでは成否だけ記録し、
+          // 後続ジョブの処理は続ける (1 件の失敗で保存経路全体を止めない)。
+          lastOk = false;
+        }
       }
       // ここは最後の await 再開後の同期区間なので、pendingWrite チェックと
       // フラグ解除の間に別コードは割り込めない (JS シングルスレッド)。
       writeInFlight = null;
+      return lastOk;
     })();
+    writeInFlight = run;
+    // run をそのまま返す。`writeInFlight` は上の async 内で null に戻るため、
+    // 戻り値に使うと「完了済みの呼び出しが null を返す」型・実行時両方の穴になる。
+    return run;
   }
   return writeInFlight;
 }
@@ -537,10 +573,15 @@ type PresetsState = {
 
   /**
    * 世代バックアップの一覧を取得する（新しい順）。
-   * 返り値: { path, at(epochミリ秒), count(プリセット件数) }[]。
-   * 「バックアップから復元」UI が選択肢を出すために使う。
+   * 返り値: 成功なら { ok: true, items }、失敗なら { ok: false, error }。
+   *
+   * **失敗を空配列に畳まない**（2026-08-06）。畳むと、保存先が読めないとき
+   * （外付け未接続・権限エラー・クラウド同期の不達）に「まだバックアップが
+   * ありません」と表示され、復元がいちばん必要な故障時に原因が消える。
    */
-  listBackups: () => Promise<{ path: string; at: number; count: number }[]>;
+  listBackups: () => Promise<
+    BackupListResult<{ path: string; at: number; count: number }>
+  >;
 
   /**
    * 指定バックアップの内容で現在のプリセット・カテゴリを置き換える（復元）。
@@ -609,17 +650,13 @@ export const usePresets = create<PresetsState>((set, get) => ({
     if (readable) unlockFileWrite(get());
   },
 
-  listBackups: async () => {
-    try {
+  listBackups: () =>
+    toBackupListResult(async () => {
       const { storage } = await import("../ipc");
       const rows = await storage.listPresetBackups();
       // [path, epochミリ秒, count]。Rust 側がミリ秒で返すのでそのまま使う。
       return rows.map(([path, ms, count]) => ({ path, at: ms, count }));
-    } catch (err) {
-      console.error("[presets] listBackups 失敗:", err);
-      return [];
-    }
-  },
+    }, "presets"),
 
   restoreFromBackup: async (backupPath) => {
     // 「まだ読み込み中」のときだけ拒否する。persistAll がファイルへ書かずに戻り、
@@ -649,9 +686,28 @@ export const usePresets = create<PresetsState>((set, get) => ({
     }
     const categories = ensureCharacterCategory(parsed.categories as PresetCategory[]);
     const presets = parsed.presets as Preset[];
-    // persistAll 経由で書き戻すと、復元前の現状も presets_write 側で自動
-    // バックアップされる（二重に安全。projects の restoreFromBackup と同じ思想）。
-    persistAll(categories, presets);
+    // 復元前の現在値。保存に失敗したら画面をここへ戻す (下記)。
+    const before = { categories: get().categories, presets: get().presets };
+    // 正本ファイルへ書き戻す。復元前の現状も presets_write 側で自動バックアップ
+    // される（二重に安全。projects の restoreFromBackup と同じ思想）。
+    //
+    // **保存完了を待つ** (2026-08-06 / DL-08)。待たずに set すると、画面だけ
+    // 復元済みになり「復元しました (N件)」と出るのに正本は変わっていない =
+    // 再起動で戻る。復元はユーザーが「これで確定」と決めた操作なので成否を隠さない。
+    //
+    // localStorage への冗長書き込みは**ファイル書き込みが通ってから**行う。
+    // 先に書くと、失敗して画面を戻したのに localStorage だけバックアップの内容が
+    // 残り、次回起動の「多い方を勝たせる」判定 (readPresetsFileIntoStore) が
+    // 取り消したはずの復元を蘇らせる。
+    const ok = await writeToFile({ version: 1, categories, presets });
+    if (!ok) {
+      set(before);
+      throw new Error(
+        "バックアップは読めましたが、保存先へ書き込めませんでした。復元は取り消しました。",
+      );
+    }
+    persist(CATEGORIES_LS_KEY, categories);
+    persist(PRESETS_LS_KEY, presets);
     set({ categories, presets });
     return presets.length;
   },
@@ -964,6 +1020,51 @@ async function readPresetsFileIntoStore(
     // 自分が最新の呼び出しでなければ store を触らない（旧 root の内容で上書きしない）。
     if (!isCurrent()) return false;
 
+    // **2026-08-06 重大修正 (実ユーザーのプリセット30体消失)**: ここは以前、
+    // ファイルが JSON として読めさえすれば **0 件でも無条件に正本として採用**し、
+    // localStorage の冗長バックアップをその 0 件で巻き戻していた。
+    // 初回移行の書き込み失敗 + 掃除による localStorage 削除が重なったとき、
+    // 「30 件あるバックアップ」を「0 件のファイル」で潰す最後の一押しになった。
+    //
+    // ファイルが localStorage より明らかに少ないときは、**多い方を採用**して
+    // ファイルへ書き戻す。判定は件数だけで足りる: プリセットは追加が主で、
+    // 半減以下の減少は正当な操作としてほぼ起きない。タイムスタンプ比較は
+    // 時計ずれ・保存漏れで誤判定する要素が増えるだけなので採らない。
+    const backupPresets = loadPresets();
+    if (backupPresets.length > presets.length) {
+      console.warn(
+        "[presets] ファイル",
+        presets.length,
+        "件よりバックアップ",
+        backupPresets.length,
+        "件の方が多いため、バックアップを正として復元します",
+      );
+      const backupCategories = ensureCharacterCategory(
+        readPersisted<PresetCategory[]>(CATEGORIES_LS_KEY, DEFAULT_CATEGORIES),
+      );
+      set({ categories: backupCategories, presets: backupPresets });
+      // 復元内容をファイルへ書き戻す。少ない件数を多い件数で上書きする方向なので
+      // Rust 側の激減ガード (S4) には当たらない。
+      void writeToFile({
+        version: 1,
+        categories: backupCategories,
+        presets: backupPresets,
+      });
+      void (async () => {
+        try {
+          const { useToasts } = await import("./toasts");
+          useToasts.getState().push({
+            kind: "info",
+            text: `プリセットをバックアップから復元しました (${backupPresets.length} 件)。`,
+            ttlMs: 8000,
+          });
+        } catch {
+          /* トースト表示に失敗しても復元自体は成功しているので握り潰す */
+        }
+      })();
+      return true; // 復元できた = 以後ファイルへ書いてよい
+    }
+
     // 読み込みを待つ間にユーザーが編集していた場合、ファイルの内容で上書きしない。
     // 上書きすると「起動直後に足したキャラが消える」「前回ディスク満杯で保存できず
     // localStorage にだけ残っていた最新が、古いファイルに潰される」が実際に起きる
@@ -998,7 +1099,22 @@ async function readPresetsFileIntoStore(
       presets.length,
       "件のプリセットをファイルへ移行",
     );
-    await writeToFile({ version: 1, categories, presets });
+    const ok = await writeToFile({ version: 1, categories, presets });
+    if (!ok) {
+      // **2026-08-06 重大修正 (実ユーザーのプリセット30体消失)**: ここで移行が
+      // 失敗しても成功扱いで解禁していた。解禁されると以後の mutate がファイルへ
+      // 流れる前提になり、localStorage 側だけが唯一の実体である事実が見えなくなる。
+      // 失敗したら**解禁しない**。localStorage を正のまま次回起動で再試行する
+      // (掃除側の S1 修正と二重防御: localStorage はもう消されない)。
+      console.error("[presets] ファイルへの移行に失敗。localStorage を正のまま維持する");
+      return false;
+    }
+    // 移行に成功した直後に1世代バックアップを取る (2026-08-06)。
+    // 従来は「ファイルが既にある + 2回目以降の保存」でしか .bak が作られず、
+    // 移行したきり保存していないユーザーは**バックアップ0件**のままだった
+    // (「バックアップがありません」の正体)。ここで最初の1世代を確保する。
+    // 失敗しても移行自体は成功なので握り潰す (付帯機能で本流を止めない)。
+    void ensureDailyBackupsSafe();
   }
   // 両方とも初期値のままなら何も書かない (空ファイルを作らない)。
   return true; // ファイル未作成を確認できた = 以後ファイルへ書いてよい
