@@ -4,6 +4,7 @@ import type {
   ComicFrameStyle,
   ComicGutterStyle,
   ComicImageCharacter,
+  ComicPageGenMode,
   ComicReadingDirection,
   PageCountChoice,
 } from "../../../lib/comic/types";
@@ -55,9 +56,12 @@ const COMIC_STYLE_CHIPS: ReadonlyArray<{ label: string; text: string }> = [
 type CharacterPresets = ReturnType<typeof usePresets.getState>["presets"];
 
 export function buildLayoutSummary(
+  pageGenMode: ComicPageGenMode,
   templateId: string,
   pageCountChoice: PageCountChoice,
 ): string {
+  const modeLabel =
+    pageGenMode === "structure" ? "きっちりコマ割り" : "おまかせ一枚描き";
   const template = COMIC_LAYOUT_TEMPLATES.find((item) => item.id === templateId);
   const templateLabel =
     templateId === AUTO_TEMPLATE_ID
@@ -67,7 +71,7 @@ export function buildLayoutSummary(
         : "未設定";
   const pageLabel =
     pageCountChoice === "auto" ? "ページ数おまかせ" : `${pageCountChoice}ページ`;
-  return compact(templateLabel, pageLabel);
+  return compact(modeLabel, templateLabel, pageLabel);
 }
 
 export function buildArtStyleSummary(
@@ -206,11 +210,15 @@ function TemplateMiniPreview({
 }
 
 export function LayoutSection({
+  pageGenMode,
+  setPageGenMode,
   templateId,
   setTemplateId,
   pageCountChoice,
   setPageCountChoice,
 }: {
+  pageGenMode: ComicPageGenMode;
+  setPageGenMode: (v: ComicPageGenMode) => void;
   templateId: string;
   setTemplateId: (v: string) => void;
   pageCountChoice: PageCountChoice;
@@ -218,6 +226,52 @@ export function LayoutSection({
 }) {
   return (
     <div className="flex flex-col gap-4">
+      <div>
+        <label className="mb-1.5 block text-xs font-medium text-neutral-400">
+          つくり方
+        </label>
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+          {(
+            [
+              {
+                value: "direct",
+                label: "おまかせ一枚描き",
+                description: "AIがページ全体を1枚の絵として描きます（構図の勢い優先）",
+              },
+              {
+                value: "structure",
+                label: "きっちりコマ割り",
+                description:
+                  "コマの位置とサイズを先に固定し、コマごとに絵を作ってはめ込みます（レイアウト正確さ優先）",
+              },
+            ] as const
+          ).map((option) => {
+            const selected = pageGenMode === option.value;
+            return (
+              <button
+                key={option.value}
+                type="button"
+                onClick={() => setPageGenMode(option.value)}
+                aria-pressed={selected}
+                className={`flex flex-col gap-1 rounded-md border px-3 py-2 text-left transition ${
+                  selected
+                    ? "border-pink-500 bg-pink-500/10 text-pink-200"
+                    : "border-[#2a2a2a] bg-[#1a1a1a] text-neutral-300 hover:border-pink-500/40"
+                }`}
+              >
+                <span className="text-xs font-semibold">{option.label}</span>
+                <span className="text-[11px] leading-relaxed text-neutral-500">
+                  {option.description}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+        <p className="mt-1 text-[11px] text-neutral-500">
+          きっちりコマ割りは、画像の生成回数がコマ数ぶんになります
+        </p>
+      </div>
+
       <div>
         <label className="mb-1.5 block text-xs font-medium text-neutral-400">
           コマ割りの参考（任意）
@@ -422,6 +476,7 @@ export function ArtStyleSection({
 }
 
 export function FormatSection({
+  pageGenMode,
   readingDirection,
   setReadingDirection,
   frameStyle,
@@ -429,6 +484,7 @@ export function FormatSection({
   gutterStyle,
   setGutterStyle,
 }: {
+  pageGenMode: ComicPageGenMode;
   readingDirection: ComicReadingDirection;
   setReadingDirection: (v: ComicReadingDirection) => void;
   frameStyle: ComicFrameStyle;
@@ -534,6 +590,11 @@ export function FormatSection({
         <p className="mt-1 text-[11px] text-neutral-500">
           読み方向・枠線・コマ間隔・吹き出しの種類はAIへの指示で近づけます。毎回同じ見た目になる保証はありません。
         </p>
+        {pageGenMode === "structure" ? (
+          <p className="mt-1 text-[11px] text-neutral-500">
+            きっちりコマ割りでは、コマの間隔は自動で一定になります（枠線の太さは反映されます）
+          </p>
+        ) : null}
       </div>
     </div>
   );
