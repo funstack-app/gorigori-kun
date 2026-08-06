@@ -15,8 +15,11 @@ import {
   ASPECT_RATIO_PICKER_OPTIONS,
 } from "../../../lib/scene/aspectRatioPicker";
 import type { SceneAspectRatio } from "../../../lib/scene/types";
+import { compact } from "../../../lib/ui/foldSummary";
 import { SafeImage } from "../../SafeImage";
 import { OptionPickerModal } from "../../scene/OptionPickerModal";
+import { SceneCompactCard } from "../../scene/SceneCompactCard";
+import { SceneSectionModal } from "../../scene/SceneSectionModal";
 
 const IMAGE_EXTS = ["png", "jpg", "jpeg", "webp", "gif", "bmp"];
 
@@ -31,9 +34,9 @@ const GROUP_ORDER: ProductCutGroup[] = ["white", "lifestyle", "detail"];
 /**
  * EC納品セット 設定パネル（左サイドバー）
  *
- * 商品写真1枚 → 商品説明(任意) → シーン指定(任意) → アスペクト比 → 納品カット選択 →
- * 一気に生成。マルチアングルの AngleSettingsPanel と同じ2ペイン思想だが、6カットの
- * カタログはインラインのチェックリストで取捨選択する（構図数が少ないためモーダル不要）。
+ * 商品写真1枚 → 設定サマリカード（商品情報 / 納品カット）→ アスペクト比 → 一気に生成。
+ * 詳細設定は `_work/gori-ux-redesign/design-cognitive-load-ui.md` §3.2 に従い
+ * モーダルへ畳み、主経路の常時表示を最小限に保つ。
  */
 export function ProductSetSettingsPanel() {
   const productImagePath = useProductSetRun((s) => s.productImagePath);
@@ -55,11 +58,25 @@ export function ProductSetSettingsPanel() {
 
   const pushToast = useToasts((s) => s.push);
   const [aspectPickerOpen, setAspectPickerOpen] = useState(false);
+  const [openSection, setOpenSection] = useState<"info" | "cuts" | null>(null);
 
   const count = selectedCutIds.length;
   const running = status === "running";
   const canRun = Boolean(productImagePath) && count > 0 && !running;
   const allSelected = count >= PRODUCT_CUTS.length;
+  const productInfoSummary = compact(
+    productDescription.split("\n")[0],
+    sceneHint,
+    sku,
+  );
+  const cutSummary =
+    count === 0
+      ? "未設定"
+      : count === PRODUCT_CUTS.length
+        ? `全 ${PRODUCT_CUTS.length} カット`
+        : compact(
+            ...selectedCutIds.map((id) => getProductCut(id)?.label ?? ""),
+          );
 
   async function pickProductImage() {
     try {
@@ -143,7 +160,7 @@ export function ProductSetSettingsPanel() {
   }
 
   return (
-    <aside className="flex w-72 shrink-0 flex-col gap-4 overflow-y-auto border-r border-[#242424] bg-[#141414] px-4 py-4">
+    <aside className="flex w-80 shrink-0 flex-col gap-4 overflow-y-auto border-r border-[#242424] bg-[#141414] px-4 py-4">
       <div>
         <div className="mb-1.5 text-[11px] font-black uppercase tracking-wider text-neutral-500">
           商品写真
@@ -177,55 +194,19 @@ export function ProductSetSettingsPanel() {
         )}
       </div>
 
-      <div>
-        <div className="mb-1.5 text-[11px] font-black uppercase tracking-wider text-neutral-500">
-          商品説明（任意）
-        </div>
-        <textarea
-          value={productDescription}
-          onChange={(e) => setProductDescription(e.target.value)}
-          placeholder="例: 白い陶器のマグカップ、艶あり"
-          rows={2}
-          className="w-full resize-none rounded-lg border border-[#2a2a2a] bg-[#0d0d0d] px-3 py-2 text-[12px] text-neutral-200 placeholder:text-neutral-600 focus:border-pink-400/60 focus:outline-none"
+      <div className="space-y-2">
+        <SceneCompactCard
+          number="01"
+          title="商品情報（説明・シーン・品番）"
+          summary={productInfoSummary}
+          onClick={() => setOpenSection("info")}
         />
-        <p className="mt-1 text-[10px] text-neutral-600">
-          商品名・素材を書くと同一性維持が安定します。
-        </p>
-      </div>
-
-      <div>
-        <div className="mb-1.5 text-[11px] font-black uppercase tracking-wider text-neutral-500">
-          シーン指定（任意）
-        </div>
-        <input
-          type="text"
-          value={sceneHint}
-          onChange={(e) => setSceneHint(e.target.value)}
-          placeholder="例: 木目のテーブル、屋外"
-          className="w-full rounded-lg border border-[#2a2a2a] bg-[#0d0d0d] px-3 py-2 text-[12px] text-neutral-200 placeholder:text-neutral-600 focus:border-pink-400/60 focus:outline-none"
+        <SceneCompactCard
+          number="02"
+          title="納品カット"
+          summary={cutSummary}
+          onClick={() => setOpenSection("cuts")}
         />
-        <p className="mt-1 text-[10px] text-neutral-600">
-          ライフスタイルシーンのカットに反映されます。
-        </p>
-      </div>
-
-      {/* 2026-07-27: EC実務の診断で追加。生成内容には影響せず、書き出しファイル名
-          だけに使う。日本語ファイル名はモールに弾かれるため、SKU を入れると
-          `SKU123_01_white_bg.png` の形で書き出せる。 */}
-      <div>
-        <div className="mb-1.5 text-[11px] font-black uppercase tracking-wider text-neutral-500">
-          品番・SKU（任意）
-        </div>
-        <input
-          type="text"
-          value={sku}
-          onChange={(e) => setSku(e.target.value)}
-          placeholder="例: ABC-1234"
-          className="w-full rounded-lg border border-[#2a2a2a] bg-[#0d0d0d] px-3 py-2 text-[12px] text-neutral-200 placeholder:text-neutral-600 focus:border-pink-400/60 focus:outline-none"
-        />
-        <p className="mt-1 text-[10px] text-neutral-600">
-          入れると書き出しファイル名が「品番_連番_役割」になります（モールに入稿できる半角の名前）。
-        </p>
       </div>
 
       <div>
@@ -250,79 +231,6 @@ export function ProductSetSettingsPanel() {
         </button>
       </div>
 
-      <div className="border-t border-[#242424] pt-4">
-        <div className="mb-2 flex items-center justify-between">
-          <span className="text-[11px] font-black uppercase tracking-wider text-neutral-500">
-            納品カット
-          </span>
-          <button
-            type="button"
-            onClick={() => (allSelected ? clearSelection() : selectAllCuts())}
-            className="text-[11px] font-bold text-neutral-400 hover:text-pink-300"
-          >
-            {allSelected ? "全解除" : "全選択"}
-          </button>
-        </div>
-
-        <div className="space-y-3">
-          {GROUP_ORDER.map((group) => {
-            const cutsInGroup = PRODUCT_CUTS.filter((c) => c.group === group);
-            if (cutsInGroup.length === 0) return null;
-            return (
-              <div key={group}>
-                <div className="mb-1 text-[10px] font-bold text-neutral-600">
-                  {GROUP_LABELS[group]}
-                </div>
-                <div className="space-y-1.5">
-                  {cutsInGroup.map((cut) => {
-                    const selected = selectedCutIds.includes(cut.id);
-                    return (
-                      <button
-                        key={cut.id}
-                        type="button"
-                        onClick={() => toggleCut(cut.id)}
-                        className={`flex w-full items-start gap-2 rounded-lg border px-2.5 py-2 text-left transition ${
-                          selected
-                            ? "border-pink-400/70 bg-pink-500/10"
-                            : "border-[#2a2a2a] bg-[#0d0d0d] hover:border-[#3a3a3a]"
-                        }`}
-                      >
-                        <span
-                          className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border text-[10px] font-black ${
-                            selected
-                              ? "border-pink-400 bg-pink-500 text-white"
-                              : "border-[#3a3a3a] text-transparent"
-                          }`}
-                          aria-hidden
-                        >
-                          ✓
-                        </span>
-                        <span className="min-w-0">
-                          <span className="block truncate text-[12px] font-bold text-neutral-200">
-                            {cut.label}
-                          </span>
-                          <span className="block truncate text-[10px] text-neutral-500">
-                            {cut.hint}
-                          </span>
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-
-        <div className="mt-2 text-center text-[12px] font-bold text-neutral-400">
-          選択中:{" "}
-          <span className={count > 0 ? "text-pink-300" : "text-neutral-500"}>
-            {count} カット
-          </span>
-          <span className="text-neutral-600"> / {PRODUCT_CUTS.length}</span>
-        </div>
-      </div>
-
       <button
         type="button"
         onClick={runGeneration}
@@ -338,6 +246,144 @@ export function ProductSetSettingsPanel() {
         )}
         {running ? "生成中…" : count > 0 ? `${count} カットの納品セットを生成` : "納品セットを生成"}
       </button>
+
+      <SceneSectionModal
+        open={openSection === "info"}
+        number="01"
+        title="商品情報（説明・シーン・品番）"
+        onClose={() => setOpenSection(null)}
+      >
+        <div>
+          <div className="mb-1.5 text-[11px] font-black uppercase tracking-wider text-neutral-500">
+            商品説明（任意）
+          </div>
+          <textarea
+            value={productDescription}
+            onChange={(e) => setProductDescription(e.target.value)}
+            placeholder="例: 白い陶器のマグカップ、艶あり"
+            rows={2}
+            className="w-full resize-none rounded-lg border border-[#2a2a2a] bg-[#0d0d0d] px-3 py-2 text-[12px] text-neutral-200 placeholder:text-neutral-600 focus:border-pink-400/60 focus:outline-none"
+          />
+          <p className="mt-1 text-[10px] text-neutral-600">
+            商品名・素材を書くと同一性維持が安定します。
+          </p>
+        </div>
+
+        <div>
+          <div className="mb-1.5 text-[11px] font-black uppercase tracking-wider text-neutral-500">
+            シーン指定（任意）
+          </div>
+          <input
+            type="text"
+            value={sceneHint}
+            onChange={(e) => setSceneHint(e.target.value)}
+            placeholder="例: 木目のテーブル、屋外"
+            className="w-full rounded-lg border border-[#2a2a2a] bg-[#0d0d0d] px-3 py-2 text-[12px] text-neutral-200 placeholder:text-neutral-600 focus:border-pink-400/60 focus:outline-none"
+          />
+          <p className="mt-1 text-[10px] text-neutral-600">
+            ライフスタイルシーンのカットに反映されます。
+          </p>
+        </div>
+
+        {/* 2026-07-27: EC実務の診断で追加。生成内容には影響せず、書き出しファイル名
+            だけに使う。日本語ファイル名はモールに弾かれるため、SKU を入れると
+            `SKU123_01_white_bg.png` の形で書き出せる。 */}
+        <div>
+          <div className="mb-1.5 text-[11px] font-black uppercase tracking-wider text-neutral-500">
+            品番・SKU（任意）
+          </div>
+          <input
+            type="text"
+            value={sku}
+            onChange={(e) => setSku(e.target.value)}
+            placeholder="例: ABC-1234"
+            className="w-full rounded-lg border border-[#2a2a2a] bg-[#0d0d0d] px-3 py-2 text-[12px] text-neutral-200 placeholder:text-neutral-600 focus:border-pink-400/60 focus:outline-none"
+          />
+          <p className="mt-1 text-[10px] text-neutral-600">
+            入れると書き出しファイル名が「品番_連番_役割」になります（モールに入稿できる半角の名前）。
+          </p>
+        </div>
+      </SceneSectionModal>
+
+      <SceneSectionModal
+        open={openSection === "cuts"}
+        number="02"
+        title="納品カット"
+        onClose={() => setOpenSection(null)}
+      >
+        <div className="border-t border-[#242424] pt-4">
+          <div className="mb-2 flex items-center justify-between">
+            <span className="text-[11px] font-black uppercase tracking-wider text-neutral-500">
+              納品カット
+            </span>
+            <button
+              type="button"
+              onClick={() => (allSelected ? clearSelection() : selectAllCuts())}
+              className="text-[11px] font-bold text-neutral-400 hover:text-pink-300"
+            >
+              {allSelected ? "全解除" : "全選択"}
+            </button>
+          </div>
+
+          <div className="space-y-3">
+            {GROUP_ORDER.map((group) => {
+              const cutsInGroup = PRODUCT_CUTS.filter((c) => c.group === group);
+              if (cutsInGroup.length === 0) return null;
+              return (
+                <div key={group}>
+                  <div className="mb-1 text-[10px] font-bold text-neutral-600">
+                    {GROUP_LABELS[group]}
+                  </div>
+                  <div className="space-y-1.5">
+                    {cutsInGroup.map((cut) => {
+                      const selected = selectedCutIds.includes(cut.id);
+                      return (
+                        <button
+                          key={cut.id}
+                          type="button"
+                          onClick={() => toggleCut(cut.id)}
+                          className={`flex w-full items-start gap-2 rounded-lg border px-2.5 py-2 text-left transition ${
+                            selected
+                              ? "border-pink-400/70 bg-pink-500/10"
+                              : "border-[#2a2a2a] bg-[#0d0d0d] hover:border-[#3a3a3a]"
+                          }`}
+                        >
+                          <span
+                            className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border text-[10px] font-black ${
+                              selected
+                                ? "border-pink-400 bg-pink-500 text-white"
+                                : "border-[#3a3a3a] text-transparent"
+                            }`}
+                            aria-hidden
+                          >
+                            ✓
+                          </span>
+                          <span className="min-w-0">
+                            <span className="block truncate text-[12px] font-bold text-neutral-200">
+                              {cut.label}
+                            </span>
+                            <span className="block truncate text-[10px] text-neutral-500">
+                              {cut.hint}
+                            </span>
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="mt-2 text-center text-[12px] font-bold text-neutral-400">
+            選択中:{" "}
+            <span className={count > 0 ? "text-pink-300" : "text-neutral-500"}>
+              {count} カット
+            </span>
+            <span className="text-neutral-600"> / {PRODUCT_CUTS.length}</span>
+          </div>
+        </div>
+      </SceneSectionModal>
 
       <OptionPickerModal
         open={aspectPickerOpen}
