@@ -52,6 +52,7 @@ import { useToasts } from "../../../lib/store/toasts";
 import { ActiveProjectSelector } from "../../ActiveProjectSelector";
 import { GenerationGauge } from "../../GenerationGauge";
 import { ReferenceLibraryModal } from "../../ReferenceLibraryModal";
+import { useImagePreview } from "../../../lib/store/imagePreview";
 import { SafeImage } from "../../SafeImage";
 import { WorkspaceTabs } from "../../WorkspaceTabs";
 import { PageHelp } from "../../PageHelp";
@@ -2717,11 +2718,27 @@ function PagesPhase({
                     ) : null}
                   </div>
                 ) : result?.imagePath ? (
-                  <SafeImage
-                    path={result.imagePath}
-                    alt={`ページ ${page.page}`}
-                    className="h-full w-full object-contain"
-                  />
+                  /* アプリ標準の「ダブルクリックで拡大」。siblings に全ページを渡すので
+                     拡大中も ←→ でページを行き来できる（STΛCK要望 2026-08-06）。 */
+                  <button
+                    type="button"
+                    onDoubleClick={() =>
+                      useImagePreview.getState().open(
+                        result.imagePath as string,
+                        pageResults
+                          .filter((r) => r.imagePath)
+                          .map((r) => r.imagePath as string),
+                      )
+                    }
+                    title="ダブルクリックで拡大"
+                    className="h-full w-full"
+                  >
+                    <SafeImage
+                      path={result.imagePath}
+                      alt={`ページ ${page.page}`}
+                      className="h-full w-full object-contain"
+                    />
+                  </button>
                 ) : result?.error ? (
                   <span className="px-1 text-center text-[11px] text-rose-400">失敗</span>
                 ) : (
