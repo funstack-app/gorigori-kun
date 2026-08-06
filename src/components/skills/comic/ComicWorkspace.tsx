@@ -107,6 +107,7 @@ import {
   effectivePageSlots,
   mergeStoryPage,
   mergedSlot,
+  recomposeAutoLayoutPlans,
   splitSlotQuads,
   splitStoryPage,
   type SplitDirection,
@@ -151,6 +152,20 @@ type PanelReeditOutcome =
 
 /** directRun の中止を、コマ生成失敗と区別してページへ採用しないための印。 */
 class StructurePanelCancelledError extends Error {}
+
+/**
+ * B方式の実行中stateを、開始前スナップショットへ丸ごと戻す。
+ *
+ * 現在値へスナップショットを上書きする形にすると、スナップショットに無い
+ * panelImagePaths / panelErrors が残る。現在値はページ一致の確認だけに使い、
+ * 復元値には混ぜない。
+ */
+function restorePageResultSnapshot(
+  current: ComicPageResult,
+  snapshot: ComicPageResult,
+): ComicPageResult {
+  return current.page === snapshot.page ? { ...snapshot } : current;
+}
 
 /**
  * コマ割り認識（recoverAndAdoptSlots）の結果。
@@ -290,6 +305,22 @@ function ComicFlow() {
     invalidateAll: invalidatePanelReeditLock,
   } = usePanelReeditLock();
   const [panelReeditHistory, setPanelReeditHistory] = useState<PanelReeditHistoryEntry[]>([]);
+
+  /**
+   * おまかせ構成は、現在のlayoutPlanを反転せず、正本のrowsから新方向で作り直す。
+   * テンプレ構成は従来どおり表示・生成側のミラーへ任せる。
+   */
+  const changeReadingDirection = (next: ComicReadingDirection) => {
+    if (next === readingDirection) return;
+    setReadingDirection(next);
+    setStoryPages((previous) =>
+      recomposeAutoLayoutPlans({
+        pages: previous,
+        storyTemplateId,
+        direction: next,
+      }),
+    );
+  };
 
   /** 1コマ再編集中は工程移動も止め、旧runが別構成へ書き込む競合を防ぐ。 */
   const requestPhaseChange = (next: ComicPhase) => {
@@ -1491,6 +1522,9 @@ function ComicFlow() {
                 contentRect: normalizedPage.contentRect,
                 startedAt: undefined,
                 genMode: "direct",
+                // B方式で保持したコマ素材は、A方式の新しい1枚絵とは対応しない。
+                panelImagePaths: undefined,
+                panelErrors: undefined,
                 // この画像が実際にどの条件で作られたかを記録する（1コマ再編集の対応判定の正）。
                 direction: readingDirection,
                 colorMode,
@@ -1550,6 +1584,7 @@ function ComicFlow() {
     if (pagesRunTokenRef.current !== runToken) return false;
 
     const resultBeforeRun = pageResults.find((result) => result.page === page.page);
+    if (!resultBeforeRun) return false;
     const pageTokens = pageTokensRef.current;
     const pageToken = (pageTokens.get(page.page) ?? 0) + 1;
     pageTokens.set(page.page, pageToken);
@@ -1559,12 +1594,7 @@ function ComicFlow() {
       setPageResults((previous) =>
         previous.map((result) =>
           result.page === page.page
-            ? {
-                ...result,
-                ...resultBeforeRun,
-                generating: false,
-                startedAt: undefined,
-              }
+            ? restorePageResultSnapshot(result, resultBeforeRun)
             : result,
         ),
       );
@@ -1764,26 +1794,12 @@ function ComicFlow() {
         });
       }
       return true;
-    } catch (error) {
+    } catch {
       if (!stillMine()) return false;
-      const message = (error as Error)?.message ?? String(error);
       setPageResults((previous) =>
         previous.map((result) =>
           result.page === page.page
-            ? resultBeforeRun?.imagePath
-              ? {
-                  ...result,
-                  ...resultBeforeRun,
-                  generating: false,
-                  error: message,
-                  startedAt: undefined,
-                }
-              : {
-                  ...result,
-                  generating: false,
-                  error: message,
-                  startedAt: undefined,
-                }
+            ? restorePageResultSnapshot(result, resultBeforeRun)
             : result,
         ),
       );
@@ -2012,13 +2028,8 @@ function ComicFlow() {
           setPageResults((previous) =>
             previous.map((result) => {
               const before = resultsBeforeRun.find((item) => item.page === result.page);
-              return result.generating
-                ? {
-                    ...result,
-                    ...before,
-                    generating: false,
-                    startedAt: undefined,
-                  }
+              return result.generating && before
+                ? restorePageResultSnapshot(result, before)
                 : result;
             }),
           );
@@ -2107,7 +2118,7 @@ function ComicFlow() {
               onToggleEnvRefKind={toggleEnvRefKind}
               onRemoveEnvRef={removeEnvReference}
               readingDirection={readingDirection}
-              setReadingDirection={setReadingDirection}
+              setReadingDirection={changeReadingDirection}
               frameStyle={frameStyle}
               setFrameStyle={setFrameStyle}
               gutterStyle={gutterStyle}

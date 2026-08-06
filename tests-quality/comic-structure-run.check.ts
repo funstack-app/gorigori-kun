@@ -1,4 +1,5 @@
 /** きっちりコマ割り: スロット優先順位と生成リクエスト組立の純関数検査。 */
+import { readFileSync } from "node:fs";
 import { expect, test } from "@playwright/test";
 
 import {
@@ -6,7 +7,10 @@ import {
   type ComicPanelSlot,
 } from "../src/lib/comic/layoutTemplates";
 import { synthesizeSlotsFromRows } from "../src/lib/comic/layoutSynthesis";
-import { mirrorSlotX } from "../src/lib/comic/panelLayoutOps";
+import {
+  mirrorSlotX,
+  recomposeAutoLayoutPlans,
+} from "../src/lib/comic/panelLayoutOps";
 import {
   buildStructureRunPlan,
   fallbackRowsForPanelCount,
@@ -18,6 +22,11 @@ import type {
   ComicPanel,
   ComicStoryPage,
 } from "../src/lib/comic/types";
+
+const workspaceSource = readFileSync(
+  new URL("../src/components/skills/comic/ComicWorkspace.tsx", import.meta.url),
+  "utf8",
+);
 
 function panel(index: number, characters: string[] = ["モチ丸"]): ComicPanel {
   return {
@@ -149,6 +158,65 @@ test("ltrのテンプレはコマ番号を保ったままX軸ミラーされる"
   });
   expect(resolved).toEqual(original.map(mirrorSlotX));
   expect(resolved[0].x).toBeLessThan(original[0].x);
+});
+
+test("B方式の復元は実行中に増えたコマ素材を残さず開始前結果を丸ごと戻す", () => {
+  // 牙: currentを先に展開する実装へ戻すと、snapshotに無いコマ素材キーが残る。
+  expect(workspaceSource).toContain(
+    "return current.page === snapshot.page ? { ...snapshot } : current;",
+  );
+  expect(workspaceSource).not.toMatch(
+    /\.\.\.result,\s*\.\.\.resultBeforeRun/,
+  );
+  // 単体中止・失敗・一括中止が、同じ復元関数だけを通ることを固定する。
+  expect(
+    workspaceSource.match(/restorePageResultSnapshot\(result, (?:resultBeforeRun|before)\)/g),
+  ).toHaveLength(3);
+});
+
+test("おまかせ構成の方向変更はrowsから再合成し、往復しても二重反転しない", () => {
+  const rows = [[1, 2], [3]];
+  const rtlPlan = synthesizeSlotsFromRows(rows, 3, "rtl");
+  expect(rtlPlan).not.toBeNull();
+  const original = page(3, { rows, layoutPlan: rtlPlan! });
+
+  const ltrPages = recomposeAutoLayoutPlans({
+    pages: [original],
+    storyTemplateId: null,
+    direction: "ltr",
+  });
+  expect(ltrPages[0].layoutPlan).toEqual(
+    synthesizeSlotsFromRows(rows, 3, "ltr"),
+  );
+  expect(ltrPages[0].layoutPlan?.[0].x).toBeLessThan(
+    ltrPages[0].layoutPlan?.[1].x ?? 0,
+  );
+
+  const rtlAgain = recomposeAutoLayoutPlans({
+    pages: ltrPages,
+    storyTemplateId: null,
+    direction: "rtl",
+  });
+  // 牙: 現在のlayoutPlanを都度ミラーする実装ではなく、正本rowsから毎回同じ値を作る。
+  expect(rtlAgain[0].layoutPlan).toEqual(rtlPlan);
+});
+
+test("テンプレ構成の方向変更ではlayoutPlanを再合成しない", () => {
+  const rows = [[1, 2], [3]];
+  const templatePage = page(3, {
+    rows,
+    layoutPlan: synthesizeSlotsFromRows(rows, 3, "rtl")!,
+  });
+  const pages = [templatePage];
+
+  const unchanged = recomposeAutoLayoutPlans({
+    pages,
+    storyTemplateId: "manga01",
+    direction: "ltr",
+  });
+
+  expect(unchanged).toBe(pages);
+  expect(unchanged[0]).toBe(templatePage);
 });
 
 test("buildStructureRunPlanはaspect・参照上限・sourceTag・genModeを一度に決める", () => {

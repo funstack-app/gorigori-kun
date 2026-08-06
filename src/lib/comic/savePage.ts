@@ -114,6 +114,19 @@ function extOf(format: ComicSaveFormat): string {
   return format === "jpeg" ? "jpg" : "png";
 }
 
+/** blob → base64（data: プレフィックスなし）。大きな画像でもスタックを使わない。 */
+function blobToBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const value = String(reader.result);
+      resolve(value.slice(value.indexOf(",") + 1));
+    };
+    reader.onerror = () => reject(new Error("画像の書き出し準備に失敗しました。"));
+    reader.readAsDataURL(blob);
+  });
+}
+
 /**
  * ページ画像を 4:5 に正規化した**新しいファイル**を作り、そのパスを返す。
  *
@@ -149,7 +162,7 @@ export async function materializeExportPage(
   format: ComicSaveFormat = "png",
 ): Promise<string> {
   const blob = await encodePageBlob(imagePath, format);
-  const { writeFile } = await import("@tauri-apps/plugin-fs");
+  const { editExport } = await import("../ipc");
   const { join, dirname, basename, extname } = await import("@tauri-apps/api/path");
   const dir = await dirname(imagePath);
   const base = await basename(imagePath, await extname(imagePath).catch(() => ""));
@@ -157,7 +170,8 @@ export async function materializeExportPage(
   // （上書きすると panelReedit の寸法一致・枠線検出が壊れる）。
   const stem = base.replace(/\.$/, "") || `manga_p${pageNo}`;
   const dest = await join(dir, `${stem}_4x5.${extOf(format)}`);
-  await writeFile(dest, new Uint8Array(await blob.arrayBuffer()));
+  // 元画像がfs:scope外でも書けるRustコマンドを使う。JPEGもバイト列のまま保存される。
+  await editExport.png(dest, await blobToBase64(blob));
   return dest;
 }
 
