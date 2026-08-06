@@ -6,14 +6,14 @@
  *     → 構成生成（AI が JSON でページ割り+コマ割り+セリフを返す）
  *     → 構成確認（人がページ/コマ単位で直す）
  *     → おまかせ一枚描き（1ページ=1枚をAI生成）
- *       または きっちりコマ割り（コマごとにAI生成して機械ではめ込む）
+ *       または きっちりコマ割り（1枚生成後にテンプレ枠へ再組立する）
  *     → ページ一覧（再生成・保存・一括保存）
  *
  * 旧「詳細編集（コマ別）」経路（ネーム → コマ生成 → CSS合成ページ確認 →
  * Canvas 1枚書き出し）は 2026-07-28 に撤去した（STΛCK指示）。
- * 2026-08-06 の構造先行モード設計で生成方式の選択を再導入した。ただし新方式は
- * CSS表示ではなく、1080×1440の1枚画像へ決定論ではめ込み、保存まで完結する。
- * 正本: design-comic-structure-mode.md §0・§2。
+ * 2026-08-06 のレイアウト正典化で生成方式の選択を維持しつつ、
+ * 「きっちり」は一枚絵のコマ枠をテンプレに照合して再組立する方式へ置き換えた。
+ * 正本: design-comic-b2-layout-truth.md §1・§4。
  *
  * コマ数の正本は layoutTemplates.ts の `panelCount`（旧・形式(4|8)型は 2026-07-28 に廃止）。
  * 吹き出し・擬音は両方式ともAIが絵の中へ描き、CSS後貼り経路は復活させない。
@@ -84,7 +84,7 @@ export type ComicEnvReference = {
 export type ComicColorMode = "mono" | "color" | "faithful";
 
 /** 漫画ページの生成方式。既定は既存挙動の "direct"。 */
-export type ComicPageGenMode = "direct" | "structure";
+export type ComicPageGenMode = "direct" | "aligned";
 
 /**
  * コマの読み方向 (B-1 2026-07-30)。生成プロンプトの空間指示
@@ -94,9 +94,9 @@ export type ComicPageGenMode = "direct" | "structure";
  */
 export type ComicReadingDirection = "rtl" | "ltr";
 
-/** 枠線の太さ (B-4b)。directはプロンプト近似、structureはpxで決定する。既定 "standard"。 */
+/** 枠線の太さ (B-4b)。directはプロンプト近似、alignedの再組立枠は機械側で決定する。既定 "standard"。 */
 export type ComicFrameStyle = "thin" | "standard" | "bold";
-/** コマ間隔 (B-4b)。directはプロンプト近似、structureでは固定スロットを使う。既定 "standard"。 */
+/** コマ間隔 (B-4b)。directはプロンプト近似、alignedではテンプレスロットを使う。既定 "standard"。 */
 export type ComicGutterStyle = "narrow" | "standard" | "wide";
 
 /** 保存形式（セッション内のみ・保存しない）。 */
@@ -208,6 +208,11 @@ export type ComicStoryPage = {
   panelCount: number;
   panels: ComicPanel[];
   /**
+   * おまかせ構成が12種からページ単位で選んだテンプレID。
+   * 明示テンプレ時は storyTemplateId が正のため省略できる。
+   */
+  layoutTemplateId?: string;
+  /**
    * おまかせレイアウトの行構造。各行は上から順、値は読み順のコマ番号。
    * 旧データや構成AIの省略に耐えるため任意。
    */
@@ -233,11 +238,14 @@ export type ComicPageResult = {
   generating: boolean;
   startedAt?: number;
   error?: string;
-  /** このページ画像を実際に作った方式。undefined は方式記録前の旧データ。 */
-  genMode?: ComicPageGenMode;
-  /** structure のコマ画像素材。配列の0始まり位置がコマ番号-1に対応する。 */
+  /**
+   * このページ画像を実際に作った方式。
+   * "structure" は読込み専用の旧値で、normalizeComicPageGenMode が "direct" へ変換する。
+   */
+  genMode?: ComicPageGenMode | "structure";
+  /** 旧 structure ページの後方互換用コマ画像素材。新規生成では書かない。 */
   panelImagePaths?: (string | undefined)[];
-  /** structure で生成できなかったコマの理由。配列の0始まり位置がコマ番号-1に対応する。 */
+  /** 旧 structure ページの後方互換用失敗理由。新規生成では書かない。 */
   panelErrors?: (string | undefined)[];
   /** この画像を生成したときの読み方向。1コマ再編集の対応判定に使う（B-1 の鏡像問題）。 */
   direction?: ComicReadingDirection;
@@ -248,6 +256,14 @@ export type ComicPageResult = {
   /** 正規化後画像における実コンテンツ領域（percent）。帯なしでは省略。 */
   contentRect?: { x: number; y: number; w: number; h: number };
 };
+
+/**
+ * 保存済みデータの生成方式を現行2値へ取り込む。
+ * 旧 "structure"・未知値・省略値は、画像を壊さない "direct" として扱う。
+ */
+export function normalizeComicPageGenMode(value: unknown): ComicPageGenMode {
+  return value === "aligned" ? "aligned" : "direct";
+}
 
 /**
  * ワークスペースの工程フェーズ。

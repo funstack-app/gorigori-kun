@@ -23,11 +23,13 @@ import type {
   ComicCharacter,
   ComicColorMode,
   ComicEnvReference,
-  ComicPageGenMode,
   ComicPanel,
   ComicReadingDirection,
   ComicStoryPage,
 } from "./types";
+
+/** 撤去済み旧B部品の内部だけで使う生成方式。 */
+export type StructureRunGenMode = "structure";
 
 /** images.generateBatchへそのまま渡せる、1コマ分の引数。 */
 export type StructureGenerateBatchRequest = {
@@ -46,7 +48,7 @@ export type StructurePanelRequest = {
 
 /** U4が生成と成功記録に使う、1ページ分の決定済み計画。 */
 export type StructureRunPlan = {
-  genMode: Extract<ComicPageGenMode, "structure">;
+  genMode: StructureRunGenMode;
   slots: ComicPanelSlot[];
   panelRequests: StructurePanelRequest[];
 };
