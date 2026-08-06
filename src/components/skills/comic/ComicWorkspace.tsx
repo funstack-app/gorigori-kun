@@ -14,7 +14,6 @@ import {
   buildStoryPrompt,
   isValidStory,
   MAX_PANELS_PER_PAGE,
-  MAX_STORY_PAGES,
   parseComicStory,
 } from "../../../lib/comic/prompts";
 import type {
@@ -33,10 +32,8 @@ import type {
   PageCountChoice,
 } from "../../../lib/comic/types";
 import {
-  COMIC_LAYOUT_TEMPLATES,
   COMIC_PAGE_ASPECT,
   getComicTemplate,
-  type ComicLayoutTemplate,
   type ComicPanelSlot,
 } from "../../../lib/comic/layoutTemplates";
 import {
@@ -44,7 +41,6 @@ import {
   savePageAs,
   savePagesBulk,
 } from "../../../lib/comic/savePage";
-import { COMIC_TEMPLATE_THUMBNAILS } from "./templateThumbnails";
 import { ComicPhaseRail } from "./ComicPhaseRail";
 import { BalloonEditor, SfxEditor } from "./BalloonEditor";
 import { presetKind, usePresets } from "../../../lib/store/presets";
@@ -60,6 +56,18 @@ import { SafeImage } from "../../SafeImage";
 import { WorkspaceTabs } from "../../WorkspaceTabs";
 import { PageHelp } from "../../PageHelp";
 import { ComicSpreadPreviewModal } from "./ComicSpreadPreviewModal";
+import {
+  ArtStyleSection,
+  buildArtStyleSummary,
+  buildCastSummary,
+  buildFormatSummary,
+  buildLayoutSummary,
+  CastSection,
+  FormatSection,
+  LayoutSection,
+} from "./ComicInputSections";
+import { SceneCompactCard } from "../../scene/SceneCompactCard";
+import { SceneSectionModal } from "../../scene/SceneSectionModal";
 import { beginDirectRun } from "../../../lib/store/generationStatus";
 import {
   registerDirectRunParent,
@@ -70,7 +78,6 @@ import {
   MAX_ENV_REFERENCES,
   resolvePageCast,
 } from "../../../lib/comic/references";
-import { REFERENCE_ROLE_META } from "../../../lib/store/referenceRoles";
 import {
   buildPanelReeditGenerationRequest,
   compositePanelImages,
@@ -104,38 +111,6 @@ const IMAGE_EXTS = ["png", "jpg", "jpeg", "webp", "gif", "bmp"];
  * （layoutTemplates.ts は実在するコマ割りだけを持つ正本のまま）。
  */
 const AUTO_TEMPLATE_ID = "auto";
-
-/**
- * 絵柄のクイック選択チップ（qvs 2026-08-03）。
- * クリックでテキスト欄へ確定英語句をセットするだけの決定論UI（トグルではなく上書き）。
- * プロンプト定数だが UI 専属なので comic/prompts.ts へは置かない。
- */
-const COMIC_STYLE_CHIPS: ReadonlyArray<{ label: string; text: string }> = [
-  {
-    label: "少年漫画",
-    text: "shonen manga style, dynamic bold ink lines, high-energy action shading",
-  },
-  {
-    label: "少女漫画",
-    text: "shojo manga style, delicate thin lines, sparkling decorative screentones, expressive large eyes",
-  },
-  {
-    label: "劇画",
-    text: "gekiga style, heavy dramatic ink shading, realistic proportions, gritty texture",
-  },
-  {
-    label: "ゆるコメディ",
-    text: "loose comedy manga style, simple rounded lines, minimal shading",
-  },
-  {
-    label: "アメコミ",
-    text: "american comic book style, bold outlines, dramatic shadows, halftone dots",
-  },
-  {
-    label: "水彩",
-    text: "soft watercolor illustration style, gentle color bleeding, hand-painted texture",
-  },
-];
 
 type PanelReeditHistoryEntry = {
   page: number;
@@ -1581,104 +1556,6 @@ function ComicFlow() {
   );
 }
 
-/**
- * 多角形コマの枠線・塗りを描く SVG オーバーレイ。
- * ページ/サムネの percent 座標系 (0-100) を preserveAspectRatio="none" で
- * コンテナへ引き伸ばし、div の percent 配置と完全に一致させる。
- * vectorEffect="non-scaling-stroke" で線幅は表示pxで一定（縮小オフセット計算は不要）。
- */
-function PolygonFrameOverlay({
-  template,
-  stroke,
-  strokeWidth,
-  fill = "none",
-}: {
-  template: ComicLayoutTemplate;
-  stroke: string;
-  strokeWidth: number;
-  fill?: string;
-}) {
-  const polys = template.slots.filter((s) => s.points);
-  if (polys.length === 0) return null;
-  return (
-    <svg
-      viewBox="0 0 100 100"
-      preserveAspectRatio="none"
-      className="pointer-events-none absolute inset-0 h-full w-full"
-    >
-      {polys.map((slot, i) => (
-        <polygon
-          key={i}
-          points={(slot.points ?? []).map((p) => p.join(",")).join(" ")}
-          fill={fill}
-          stroke={stroke}
-          strokeWidth={strokeWidth}
-          vectorEffect="non-scaling-stroke"
-        />
-      ))}
-    </svg>
-  );
-}
-
-/**
- * コマ割りテンプレのミニプレビュー。
- *
- * マンガ01〜12 は STΛCK 提供の参照画像を12分割したサムネ画像を出す
- * (COMIC_TEMPLATE_THUMBNAILS。STΛCK 指示 2026-07-28)。
- * それ以外はスロット定義（percent 座標）だけから CSS で描くので、画像アセットを
- * 持たずテンプレを足せば自動で絵が付く（配布時のリソース漏れも起きない）。
- */
-function TemplateMiniPreview({
-  template,
-  selected,
-}: {
-  template: ComicLayoutTemplate;
-  selected: boolean;
-}) {
-  const thumbnail = COMIC_TEMPLATE_THUMBNAILS[template.id];
-  return (
-    <div
-      className={`relative w-full max-h-[72px] overflow-hidden rounded-sm border ${
-        selected ? "border-pink-400 bg-white/90" : "border-[#3a3a3a] bg-[#0f0f0f]"
-      }`}
-      style={{ aspectRatio: `${template.pageAspect.w} / ${template.pageAspect.h}` }}
-    >
-      {thumbnail ? (
-        <img
-          src={thumbnail}
-          alt=""
-          className={`h-full w-full object-contain ${selected ? "" : "opacity-70 invert"}`}
-        />
-      ) : (
-        <>
-          {template.slots.map((slot, i) =>
-            slot.points ? null : (
-              <div
-                key={i}
-                className={`absolute border ${
-                  selected ? "border-pink-600 bg-pink-500/20" : "border-neutral-600 bg-[#1c1c1c]"
-                }`}
-                style={{
-                  left: `${slot.x}%`,
-                  top: `${slot.y}%`,
-                  width: `${slot.w}%`,
-                  height: `${slot.h}%`,
-                }}
-              />
-            ),
-          )}
-          <PolygonFrameOverlay
-            template={template}
-            stroke={selected ? "#db2777" : "#525252"}
-            strokeWidth={1}
-            fill={selected ? "rgba(236,72,153,0.2)" : "#1c1c1c"}
-          />
-        </>
-      )}
-    </div>
-  );
-}
-
 function InputPhase({
   synopsis,
   setSynopsis,
@@ -1761,6 +1638,10 @@ function InputPhase({
   const loadHistory = useComicStoryHistory((s) => s.load);
   const removeHistory = useComicStoryHistory((s) => s.remove);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [openSection, setOpenSection] = useState<
+    "layout" | "artStyle" | "format" | "cast" | null
+  >(null);
+  const closeSection = () => setOpenSection(null);
   useEffect(() => {
     void loadHistory();
   }, [loadHistory]);
@@ -1836,456 +1717,104 @@ function InputPhase({
         />
       </div>
 
-      <div>
-        <label className="mb-1.5 block text-xs font-medium text-neutral-400">
-          コマ割りの参考（任意）
-        </label>
-        <div className="grid grid-cols-[repeat(auto-fill,minmax(96px,1fr))] gap-2">
-          {(() => {
-            const selected = templateId === AUTO_TEMPLATE_ID;
-            return (
-              <button
-                type="button"
-                onClick={() => setTemplateId(AUTO_TEMPLATE_ID)}
-                className={`flex w-full flex-col items-center gap-2 rounded-md border px-2 py-2 text-[11px] font-medium transition ${
-                  selected
-                    ? "border-pink-500 bg-pink-500/10 text-pink-200"
-                    : "border-[#2a2a2a] bg-[#1a1a1a] text-neutral-400 hover:text-neutral-200"
-                }`}
-              >
-                <div
-                  className={`flex w-full max-h-[72px] items-center justify-center overflow-hidden rounded-sm border ${
-                    selected
-                      ? "border-pink-400 bg-pink-500/10"
-                      : "border-[#3a3a3a] bg-[#0f0f0f]"
-                  }`}
-                  style={{ aspectRatio: "3 / 4" }}
-                >
-                  <span className="text-[11px]">AIが最適化</span>
-                </div>
-                <span className="flex flex-col items-center gap-0.5 leading-tight">
-                  <span className="text-center">おまかせ</span>
-                </span>
-              </button>
-            );
-          })()}
-          {COMIC_LAYOUT_TEMPLATES.map((t) => {
-            const selected = templateId === t.id;
-            return (
-              <button
-                key={t.id}
-                type="button"
-                onClick={() => setTemplateId(t.id)}
-                className={`flex w-full flex-col items-center gap-2 rounded-md border px-2 py-2 text-[11px] font-medium transition ${
-                  selected
-                    ? "border-pink-500 bg-pink-500/10 text-pink-200"
-                    : "border-[#2a2a2a] bg-[#1a1a1a] text-neutral-400 hover:text-neutral-200"
-                }`}
-              >
-                <TemplateMiniPreview template={t} selected={selected} />
-                <span className="flex flex-col items-center gap-0.5 leading-tight">
-                  <span className="text-center">{t.label}</span>
-                  <span className="text-center text-[11px] font-normal text-neutral-400">
-                    {t.panelCount}コマ
-                  </span>
-                </span>
-              </button>
-            );
-          })}
-        </div>
-      </div>
-
-      <div>
-        <label className="mb-1.5 block text-xs font-medium text-neutral-400">
-          画風
-        </label>
-        <div className="inline-flex items-center gap-1 rounded-md border border-[#2a2a2a] bg-[#161616] p-1">
-          {(
-            [
-              { value: "mono", label: "白黒（標準）" },
-              { value: "color", label: "カラー" },
-              { value: "faithful", label: "キャラ忠実" },
-            ] as const
-          ).map((option) => {
-            const selected = colorMode === option.value;
-            return (
-              <button
-                key={option.value}
-                type="button"
-                onClick={() => setColorMode(option.value)}
-                aria-pressed={selected}
-                className={`rounded px-3 py-1.5 text-xs font-medium transition ${
-                  selected
-                    ? "border border-pink-500 bg-pink-500/10 text-pink-200"
-                    : "border border-transparent text-neutral-400 hover:text-pink-200"
-                }`}
-              >
-                {option.label}
-              </button>
-            );
-          })}
-        </div>
-        {/* faithful のときだけ、何が起きるかを1行で説明する（他の画風には出さない）。 */}
-        {colorMode === "faithful" && (
-          <p className="mt-1 text-[11px] text-neutral-500">
-            リファレンス画像の画風・質感をそのまま保って作ります（漫画調への変換をしません）。
-          </p>
-        )}
-      </div>
-
-      {/* qvs (2026-08-03): 絵柄をキャラ参照と分離したテキスト項目で指定する。
-          faithful は参照画像が絵柄の供給源なので構造的に排他＝無効化する。 */}
-      <div>
-        <label
-          className="mb-1.5 block text-xs font-medium text-neutral-400"
-          htmlFor="comic-style-text"
-        >
-          絵柄の指定（任意）
-        </label>
-        <div className="mb-1.5 flex flex-wrap gap-1.5">
-          {COMIC_STYLE_CHIPS.map((chip) => {
-            const selected = styleText === chip.text;
-            return (
-              <button
-                key={chip.label}
-                type="button"
-                onClick={() => setStyleText(chip.text)}
-                disabled={colorMode === "faithful"}
-                aria-pressed={selected}
-                className={`rounded-md border px-2.5 py-1 text-[11px] font-medium transition disabled:cursor-not-allowed disabled:opacity-40 ${
-                  selected
-                    ? "border-pink-500 bg-pink-500/10 text-pink-200"
-                    : "border-[#2a2a2a] bg-[#1a1a1a] text-neutral-300 hover:border-pink-500/40 hover:text-white"
-                }`}
-              >
-                {chip.label}
-              </button>
-            );
-          })}
-        </div>
-        <input
-          id="comic-style-text"
-          value={styleText}
-          onChange={(e) => setStyleText(e.target.value)}
-          disabled={colorMode === "faithful"}
-          placeholder="例: 劇画タッチ、太い主線、リアルな陰影"
-          aria-label="絵柄の指定"
-          className="w-full rounded-md border border-[#2a2a2a] bg-[#1a1a1a] px-3 py-2 text-sm text-neutral-100 placeholder:text-neutral-600 focus:border-pink-500/50 focus:outline-none disabled:opacity-40"
+      <div className="grid grid-cols-2 gap-2">
+        <SceneCompactCard
+          number="01"
+          title="コマ割りとページ数"
+          summary={buildLayoutSummary(templateId, pageCountChoice)}
+          onClick={() => setOpenSection("layout")}
         />
-        <p className="mt-1 text-[11px] text-neutral-500">
-          {colorMode === "faithful"
-            ? "「キャラ忠実」ではリファレンス画像の画風を使うため、絵柄の指定は無効になります。"
-            : "白黒／カラーの選択が優先されます。絵柄はその中でのタッチの指定です（毎回同じ見た目になる保証はありません）。"}
-        </p>
+        <SceneCompactCard
+          number="02"
+          title="画風と絵柄"
+          summary={buildArtStyleSummary(colorMode, styleText)}
+          onClick={() => setOpenSection("artStyle")}
+        />
+        <SceneCompactCard
+          number="03"
+          title="読み方向と体裁"
+          summary={buildFormatSummary(readingDirection, frameStyle, gutterStyle)}
+          onClick={() => setOpenSection("format")}
+        />
+        <SceneCompactCard
+          number="04"
+          title="キャラと背景・小物"
+          summary={buildCastSummary(
+            characterPresets,
+            selectedIds,
+            imageCharacters,
+            envReferences,
+          )}
+          onClick={() => setOpenSection("cast")}
+        />
       </div>
 
-      <div>
-        <label className="mb-1.5 block text-xs font-medium text-neutral-400">
-          読み方向
-        </label>
-        <div className="inline-flex items-center gap-1 rounded-md border border-[#2a2a2a] bg-[#161616] p-1">
-          {(
-            [
-              { value: "rtl", label: "右→左（日本式・標準）" },
-              { value: "ltr", label: "左→右" },
-            ] as const
-          ).map((option) => {
-            const selected = readingDirection === option.value;
-            return (
-              <button
-                key={option.value}
-                type="button"
-                onClick={() => setReadingDirection(option.value)}
-                aria-pressed={selected}
-                className={`rounded px-3 py-1.5 text-xs font-medium transition ${
-                  selected
-                    ? "border border-pink-500 bg-pink-500/10 text-pink-200"
-                    : "border border-transparent text-neutral-400 hover:text-pink-200"
-                }`}
-              >
-                {option.label}
-              </button>
-            );
-          })}
-        </div>
-      </div>
-
-      <div>
-        <label className="mb-1.5 block text-xs font-medium text-neutral-400">
-          枠線の太さ
-        </label>
-        <div className="inline-flex items-center gap-1 rounded-md border border-[#2a2a2a] bg-[#161616] p-1">
-          {(
-            [
-              { value: "thin", label: "細い" },
-              { value: "standard", label: "標準" },
-              { value: "bold", label: "太い" },
-            ] as const
-          ).map((option) => {
-            const selected = frameStyle === option.value;
-            return (
-              <button
-                key={option.value}
-                type="button"
-                onClick={() => setFrameStyle(option.value)}
-                aria-pressed={selected}
-                className={`rounded px-3 py-1.5 text-xs font-medium transition ${
-                  selected
-                    ? "border border-pink-500 bg-pink-500/10 text-pink-200"
-                    : "border border-transparent text-neutral-400 hover:text-pink-200"
-                }`}
-              >
-                {option.label}
-              </button>
-            );
-          })}
-        </div>
-      </div>
-
-      <div>
-        <label className="mb-1.5 block text-xs font-medium text-neutral-400">
-          コマの間隔
-        </label>
-        <div className="inline-flex items-center gap-1 rounded-md border border-[#2a2a2a] bg-[#161616] p-1">
-          {(
-            [
-              { value: "narrow", label: "狭い" },
-              { value: "standard", label: "標準" },
-              { value: "wide", label: "広い" },
-            ] as const
-          ).map((option) => {
-            const selected = gutterStyle === option.value;
-            return (
-              <button
-                key={option.value}
-                type="button"
-                onClick={() => setGutterStyle(option.value)}
-                aria-pressed={selected}
-                className={`rounded px-3 py-1.5 text-xs font-medium transition ${
-                  selected
-                    ? "border border-pink-500 bg-pink-500/10 text-pink-200"
-                    : "border border-transparent text-neutral-400 hover:text-pink-200"
-                }`}
-              >
-                {option.label}
-              </button>
-            );
-          })}
-        </div>
-        <p className="mt-1 text-[11px] text-neutral-500">
-          読み方向・枠線・コマ間隔・吹き出しの種類はAIへの指示で近づけます。毎回同じ見た目になる保証はありません。
-        </p>
-      </div>
-
-      <div>
-        <label
-          className="mb-1.5 block text-xs font-medium text-neutral-400"
-          htmlFor="comic-page-count"
-        >
-          ページ数
-        </label>
-        {/*
-          ページ数の上限は撤廃（2026-07-28 STΛCK指示）。ページ生成は並列で発行し、
-          Rust の GLOBAL_GEN_SEMAPHORE が順番に消化するため、枚数の安全弁は
-          そちらが持つ。ここでは 1 以上であることだけを守る。
-        */}
-        <div className="flex items-center gap-3">
-          <label className="flex items-center gap-1.5 text-xs text-neutral-300">
-            <input
-              type="checkbox"
-              checked={pageCountChoice === "auto"}
-              onChange={(e) =>
-                setPageCountChoice(e.target.checked ? "auto" : MAX_STORY_PAGES)
-              }
-              className="h-3.5 w-3.5 accent-pink-500"
-            />
-            おまかせ
-          </label>
-          <input
-            id="comic-page-count"
-            type="number"
-            min={1}
-            step={1}
-            disabled={pageCountChoice === "auto"}
-            value={pageCountChoice === "auto" ? "" : String(pageCountChoice)}
-            onChange={(e) => {
-              const n = Math.floor(Number(e.target.value));
-              if (!Number.isFinite(n) || n < 1) return;
-              setPageCountChoice(n);
-            }}
-            className="w-20 rounded-md border border-[#2a2a2a] bg-[#1a1a1a] px-3 py-1.5 text-xs text-neutral-100 focus:border-pink-500/50 focus:outline-none disabled:opacity-40"
-          />
-        </div>
-      </div>
-
-      <div>
-        <label className="mb-1.5 block text-xs font-medium text-neutral-400">
-          登場キャラ（登録キャラ・画像から追加）
-        </label>
-        {characterPresets.length === 0 ? (
-          <p className="rounded-md border border-dashed border-[#2a2a2a] bg-[#1a1a1a] px-3 py-3 text-xs text-neutral-500">
-            登録キャラがありません。キャラを登録すると、同一キャラでコマを生成できます（キャラなしでも話は作れます）。
-          </p>
-        ) : (
-          <div className="flex flex-wrap gap-2">
-            {characterPresets.map((p) => {
-              const selected = selectedIds.includes(p.id);
-              return (
-                <button
-                  key={p.id}
-                  type="button"
-                  onClick={() => toggleCharacter(p.id)}
-                  className={`flex items-center gap-2 rounded-md border px-2.5 py-1.5 text-xs transition ${
-                    selected
-                      ? "border-pink-500 bg-pink-500/10 text-pink-100"
-                      : "border-[#2a2a2a] bg-[#1a1a1a] text-neutral-300 hover:border-[#3a3a3a]"
-                  }`}
-                >
-                  {p.thumbnail && (
-                    <img src={p.thumbnail} alt="" className="h-6 w-6 rounded object-cover" />
-                  )}
-                  {p.name}
-                </button>
-              );
-            })}
-          </div>
-        )}
-
-        {imageCharacters.length > 0 && (
-          <div className="mt-2 flex flex-wrap gap-2">
-            {imageCharacters.map((c) => (
-              <div
-                key={c.id}
-                className="flex items-center gap-2 rounded-md border border-[#2a2a2a] bg-[#1a1a1a] px-2 py-1.5"
-              >
-                <div className="h-8 w-8 shrink-0 overflow-hidden rounded">
-                  <SafeImage
-                    path={c.imagePath}
-                    alt={c.name}
-                    className="h-full w-full object-cover"
-                  />
-                </div>
-                <div className="flex flex-col gap-0.5">
-                  <input
-                    value={c.name}
-                    onChange={(e) => onRenameImageChar(c.id, e.target.value)}
-                    // 空名はネーム配役・参照解決を壊すため、既定名へ戻す（黙って壊さない）。
-                    onBlur={() => onRestoreImageCharName(c.id)}
-                    className="w-24 rounded border border-[#2a2a2a] bg-[#121212] px-1.5 py-0.5 text-xs text-neutral-100 focus:border-pink-500/50 focus:outline-none"
-                    aria-label="キャラ名"
-                  />
-                  <span className="text-[10px] text-neutral-500">
-                    {c.source === "file" ? "添付" : "ライブラリ"}
-                  </span>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => onRemoveImageChar(c.id)}
-                  className="rounded px-1 text-neutral-500 transition hover:text-rose-400"
-                  title={`${c.name} を削除`}
-                  aria-label={`${c.name} を削除`}
-                >
-                  ✕
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
-
-        <div className="mt-2 flex gap-2">
-          <button
-            type="button"
-            onClick={onPickFiles}
-            className="rounded-md border border-[#2a2a2a] bg-[#1a1a1a] px-3 py-1.5 text-xs font-medium text-neutral-300 transition hover:border-pink-500/40 hover:text-white"
-          >
-            画像を追加
-          </button>
-          <button
-            type="button"
-            onClick={onOpenLibrary}
-            className="rounded-md border border-[#2a2a2a] bg-[#1a1a1a] px-3 py-1.5 text-xs font-medium text-neutral-300 transition hover:border-pink-500/40 hover:text-white"
-          >
-            ライブラリから選ぶ
-          </button>
-        </div>
-      </div>
-
-      {/* 3ir (2026-08-03): 背景・小物の環境参照。全ページに一律添付して
-          「ドアのデザインがページ間で変わる」問題を直接解消する。 */}
-      <div>
-        <label className="mb-1.5 block text-xs font-medium text-neutral-400">
-          背景・小物（ページ間でデザイン固定・任意）
-        </label>
-        {envReferences.length === 0 ? (
-          <p className="rounded-md border border-dashed border-[#2a2a2a] bg-[#1a1a1a] px-3 py-3 text-xs text-neutral-500">
-            ドア・部屋・持ち物などの画像を追加すると、全ページで同じデザインに固定されやすくなります。
-          </p>
-        ) : (
-          <div className="flex flex-wrap gap-2">
-            {envReferences.map((ref) => (
-              <div
-                key={ref.id}
-                className="flex items-center gap-2 rounded-md border border-[#2a2a2a] bg-[#1a1a1a] px-2 py-1.5"
-              >
-                <div className="h-8 w-8 shrink-0 overflow-hidden rounded">
-                  <SafeImage
-                    path={ref.imagePath}
-                    alt={ref.name}
-                    className="h-full w-full object-cover"
-                  />
-                </div>
-                <div className="flex flex-col gap-0.5">
-                  <input
-                    value={ref.name}
-                    onChange={(e) => onRenameEnvRef(ref.id, e.target.value)}
-                    // 空名はプロンプトの参照名を壊すため、既定名へ戻す。
-                    onBlur={() => onRestoreEnvRefName(ref.id)}
-                    className="w-24 rounded border border-[#2a2a2a] bg-[#121212] px-1.5 py-0.5 text-xs text-neutral-100 focus:border-pink-500/50 focus:outline-none"
-                    aria-label="参照の名前"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => onToggleEnvRefKind(ref.id)}
-                    title={REFERENCE_ROLE_META[ref.kind].description}
-                    className="rounded border border-[#2a2a2a] bg-[#121212] px-1.5 py-0.5 text-[10px] text-neutral-300 transition hover:border-pink-500/40 hover:text-pink-200"
-                  >
-                    {REFERENCE_ROLE_META[ref.kind].label}
-                  </button>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => onRemoveEnvRef(ref.id)}
-                  className="rounded px-1 text-neutral-500 transition hover:text-rose-400"
-                  title={`${ref.name} を削除`}
-                  aria-label={`${ref.name} を削除`}
-                >
-                  ✕
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
-
-        <div className="mt-2 flex gap-2">
-          <button
-            type="button"
-            onClick={onPickEnvFiles}
-            className="rounded-md border border-[#2a2a2a] bg-[#1a1a1a] px-3 py-1.5 text-xs font-medium text-neutral-300 transition hover:border-pink-500/40 hover:text-white"
-          >
-            画像を追加
-          </button>
-          <button
-            type="button"
-            onClick={onOpenEnvLibrary}
-            className="rounded-md border border-[#2a2a2a] bg-[#1a1a1a] px-3 py-1.5 text-xs font-medium text-neutral-300 transition hover:border-pink-500/40 hover:text-white"
-          >
-            ライブラリから選ぶ
-          </button>
-        </div>
-        <p className="mt-1 text-[11px] text-neutral-500">
-          背景・小物はAIへの指示と参照画像で近づけます。毎回完全に同じになる保証はありません。
-        </p>
-      </div>
+      <SceneSectionModal
+        open={openSection === "layout"}
+        number="01"
+        title="コマ割りとページ数"
+        onClose={closeSection}
+      >
+        <LayoutSection
+          templateId={templateId}
+          setTemplateId={setTemplateId}
+          pageCountChoice={pageCountChoice}
+          setPageCountChoice={setPageCountChoice}
+        />
+      </SceneSectionModal>
+      <SceneSectionModal
+        open={openSection === "artStyle"}
+        number="02"
+        title="画風と絵柄"
+        onClose={closeSection}
+      >
+        <ArtStyleSection
+          colorMode={colorMode}
+          setColorMode={setColorMode}
+          styleText={styleText}
+          setStyleText={setStyleText}
+        />
+      </SceneSectionModal>
+      <SceneSectionModal
+        open={openSection === "format"}
+        number="03"
+        title="読み方向と体裁"
+        onClose={closeSection}
+      >
+        <FormatSection
+          readingDirection={readingDirection}
+          setReadingDirection={setReadingDirection}
+          frameStyle={frameStyle}
+          setFrameStyle={setFrameStyle}
+          gutterStyle={gutterStyle}
+          setGutterStyle={setGutterStyle}
+        />
+      </SceneSectionModal>
+      <SceneSectionModal
+        open={openSection === "cast"}
+        number="04"
+        title="キャラと背景・小物"
+        onClose={closeSection}
+      >
+        <CastSection
+          characterPresets={characterPresets}
+          selectedIds={selectedIds}
+          toggleCharacter={toggleCharacter}
+          imageCharacters={imageCharacters}
+          onPickFiles={onPickFiles}
+          onOpenLibrary={onOpenLibrary}
+          onRenameImageChar={onRenameImageChar}
+          onRestoreImageCharName={onRestoreImageCharName}
+          onRemoveImageChar={onRemoveImageChar}
+          envReferences={envReferences}
+          onPickEnvFiles={onPickEnvFiles}
+          onOpenEnvLibrary={onOpenEnvLibrary}
+          onRenameEnvRef={onRenameEnvRef}
+          onRestoreEnvRefName={onRestoreEnvRefName}
+          onToggleEnvRefKind={onToggleEnvRefKind}
+          onRemoveEnvRef={onRemoveEnvRef}
+        />
+      </SceneSectionModal>
 
       <div className="flex flex-col gap-3">
         <button
