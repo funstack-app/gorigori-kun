@@ -7,11 +7,17 @@
 
 import { convertFileSrc } from "@tauri-apps/api/core";
 
-import type { ComicPanelSlot } from "./layoutTemplates";
+import type { ComicLayoutTemplate, ComicPanelSlot } from "./layoutTemplates";
 import type { ComicFrameStyle } from "./types";
 
 export const STRUCTURE_PAGE_W = 1080;
 export const STRUCTURE_PAGE_H = 1440;
+
+/** 再組立はテンプレ座標を正とし、紙と枠線だけを固定する。 */
+export const RECOMPOSE_PAGE_PAPER = "#ffffff";
+export const RECOMPOSE_PANEL_BORDER_PX = 3;
+export const RECOMPOSE_SOURCE_INSET_EXTRA_PX = 1;
+export const RECOMPOSE_ASPECT_COVER_THRESHOLD = 0.1;
 
 export type PxRect = {
   x: number;
@@ -35,6 +41,23 @@ export type AssemblyPlan = {
   pageW: number;
   pageH: number;
   panels: AssemblyPanelPlan[];
+};
+
+export type RecompositionPanelPlan = AssemblyPanelPlan & {
+  /** 照合で得た実枠の、元画像上のpx矩形。 */
+  matchedRect: PxRect;
+  /** 実枠から検出枠線+1pxを除いた、絵だけの矩形。 */
+  insetRect: PxRect;
+  /** drawImageへ渡す最終切り出し矩形。 */
+  sourceCrop: PxRect;
+  /** 実枠とテンプレ枠の比率差が10%を超え、coverを適用した。 */
+  coverApplied: boolean;
+};
+
+export type RecompositionPlan = {
+  pageW: number;
+  pageH: number;
+  panels: RecompositionPanelPlan[];
 };
 
 const ASPECT_CANDIDATES = [
@@ -247,6 +270,41 @@ function canvasToPngBytes(canvas: HTMLCanvasElement): Promise<Uint8Array> {
   );
 }
 
+function createWhitePageCanvas(pageW: number, pageH: number): {
+  canvas: HTMLCanvasElement;
+  context: CanvasRenderingContext2D;
+} {
+  const canvas = document.createElement("canvas");
+  canvas.width = pageW;
+  canvas.height = pageH;
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("漫画ページの合成に必要なcanvasを取得できません。");
+
+  context.fillStyle = RECOMPOSE_PAGE_PAPER;
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = "high";
+  return { canvas, context };
+}
+
+function drawClippedPanel(
+  context: CanvasRenderingContext2D,
+  panel: AssemblyPanelPlan,
+  drawContent?: () => void,
+): void {
+  const path = panelPath(panel);
+  context.save();
+  context.clip(path);
+  drawContent?.();
+  context.strokeStyle = "#000";
+  // stroke中心の外側半分はclipで切られるため、指定幅の2倍で描く。
+  context.lineWidth = panel.borderWidthPx * 2;
+  context.lineJoin = "miter";
+  context.lineCap = "butt";
+  context.stroke(path);
+  context.restore();
+}
+
 /**
  * 白地1080x1440へ全コマをcover-clipで描き、枠線まで焼き込んだPNG bytesを返す。
  * undefined のコマは白地を残し、枠線だけを描く。
@@ -260,23 +318,10 @@ export async function assembleStructurePage(args: {
     throw new Error("コマ画像とスロットの数が一致しません。");
   }
   const plan = buildAssemblyPlan(args.slots, args.frameStyle);
-  const canvas = document.createElement("canvas");
-  canvas.width = plan.pageW;
-  canvas.height = plan.pageH;
-  const context = canvas.getContext("2d");
-  if (!context) throw new Error("漫画ページの合成に必要なcanvasを取得できません。");
-
-  context.fillStyle = "#ffffff";
-  context.fillRect(0, 0, canvas.width, canvas.height);
-  context.imageSmoothingEnabled = true;
-  context.imageSmoothingQuality = "high";
+  const { canvas, context } = createWhitePageCanvas(plan.pageW, plan.pageH);
 
   for (let index = 0; index < plan.panels.length; index += 1) {
     const panel = plan.panels[index];
-    const path = panelPath(panel);
-    context.save();
-    context.clip(path);
-
     const imagePath = args.panelImagePaths[index];
     if (imagePath) {
       const image = await loadImage(imagePath);
@@ -286,26 +331,135 @@ export async function assembleStructurePage(args: {
         panel.rect.w,
         panel.rect.h,
       );
+      drawClippedPanel(
+        context,
+        panel,
+        () =>
+          context.drawImage(
+            image,
+            crop.sx,
+            crop.sy,
+            crop.sw,
+            crop.sh,
+            panel.rect.x,
+            panel.rect.y,
+            panel.rect.w,
+            panel.rect.h,
+          ),
+      );
+    } else {
+      drawClippedPanel(context, panel);
+    }
+  }
+
+  return canvasToPngBytes(canvas);
+}
+
+/**
+ * 照合済みの実枠とテンプレから、再組立の切り出し・配置計画を決める。
+ * 配置先は一律マージン/ガターではなく、template.slots のpercent座標を
+ * 1080x1440へ換算した値だけを正とする。
+ */
+export function buildRecompositionPlan(args: {
+  alignedSlots: ComicPanelSlot[];
+  template: ComicLayoutTemplate;
+  sourceWidth: number;
+  sourceHeight: number;
+  borderPx: number;
+}): RecompositionPlan {
+  requirePositiveFinite(args.sourceWidth, "sourceWidth");
+  requirePositiveFinite(args.sourceHeight, "sourceHeight");
+  requireFinite(args.borderPx, "borderPx");
+  if (args.borderPx < 0) {
+    throw new Error("borderPx は0以上で指定してください。");
+  }
+  if (args.alignedSlots.length !== args.template.slots.length) {
+    throw new Error("照合済み実枠とテンプレのコマ数が一致しません。");
+  }
+
+  const destinationPlan = buildAssemblyPlan(args.template.slots, "standard");
+  const insetPx = args.borderPx + RECOMPOSE_SOURCE_INSET_EXTRA_PX;
+  const panels = args.alignedSlots.map((slot, index): RecompositionPanelPlan => {
+    const matchedRect = slotPixelRect(slot, args.sourceWidth, args.sourceHeight);
+    const insetRect: PxRect = {
+      x: matchedRect.x + insetPx,
+      y: matchedRect.y + insetPx,
+      w: matchedRect.w - insetPx * 2,
+      h: matchedRect.h - insetPx * 2,
+    };
+    if (insetRect.w <= 0 || insetRect.h <= 0) {
+      throw new Error(`コマ${index + 1}は枠線を除くと切り出し領域が残りません。`);
+    }
+
+    const destination = destinationPlan.panels[index];
+    const sourceAspect = insetRect.w / insetRect.h;
+    const destinationAspect = destination.rect.w / destination.rect.h;
+    const coverApplied =
+      Math.abs(sourceAspect / destinationAspect - 1) >
+      RECOMPOSE_ASPECT_COVER_THRESHOLD;
+    let sourceCrop = insetRect;
+    if (coverApplied) {
+      const crop = coverCrop(
+        insetRect.w,
+        insetRect.h,
+        destination.rect.w,
+        destination.rect.h,
+      );
+      sourceCrop = {
+        x: insetRect.x + crop.sx,
+        y: insetRect.y + crop.sy,
+        w: crop.sw,
+        h: crop.sh,
+      };
+    }
+
+    return {
+      ...destination,
+      borderWidthPx: RECOMPOSE_PANEL_BORDER_PX,
+      matchedRect,
+      insetRect,
+      sourceCrop,
+      coverApplied,
+    };
+  });
+
+  return {
+    pageW: STRUCTURE_PAGE_W,
+    pageH: STRUCTURE_PAGE_H,
+    panels,
+  };
+}
+
+/**
+ * 元の一枚絵を、照合済み実枠から切り出してテンプレ正枠へ再組立する。
+ * ファイル保存は行わず、白地1080x1440のcanvasを返す。
+ */
+export function recomposePageToTemplate(args: {
+  sourceImage: CanvasImageSource;
+  sourceWidth: number;
+  sourceHeight: number;
+  alignedSlots: ComicPanelSlot[];
+  template: ComicLayoutTemplate;
+  borderPx: number;
+}): HTMLCanvasElement {
+  const plan = buildRecompositionPlan(args);
+  const { canvas, context } = createWhitePageCanvas(plan.pageW, plan.pageH);
+
+  for (const panel of plan.panels) {
+    drawClippedPanel(context, panel, () =>
       context.drawImage(
-        image,
-        crop.sx,
-        crop.sy,
-        crop.sw,
-        crop.sh,
+        args.sourceImage,
+        panel.sourceCrop.x,
+        panel.sourceCrop.y,
+        panel.sourceCrop.w,
+        panel.sourceCrop.h,
         panel.rect.x,
         panel.rect.y,
         panel.rect.w,
         panel.rect.h,
-      );
-    }
-
-    context.strokeStyle = "#000";
-    context.lineWidth = panel.borderWidthPx * 2;
-    context.lineJoin = "miter";
-    context.lineCap = "butt";
-    context.stroke(path);
-    context.restore();
+      ),
+    );
   }
 
-  return canvasToPngBytes(canvas);
+  return canvas;
 }
