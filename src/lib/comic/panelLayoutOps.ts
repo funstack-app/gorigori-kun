@@ -24,6 +24,7 @@ import {
   type PanelReeditPoint,
   type RgbaRaster,
 } from "./panelReedit";
+import { synthesizeSlotsFromRows } from "./layoutSynthesis";
 import { getComicTemplate, type ComicPanelSlot } from "./layoutTemplates";
 import type {
   ComicPanel,
@@ -39,6 +40,33 @@ export const SPLIT_GUTTER_PERCENT = 3;
 
 const WHITE: [number, number, number, number] = [255, 255, 255, 255];
 const BLACK: [number, number, number, number] = [0, 0, 0, 255];
+
+/**
+ * 読み方向変更時、おまかせ構成のlayoutPlanだけをrowsから再合成する。
+ * 現在のlayoutPlanをミラーしないため、rtl→ltr→rtlでも二重反転しない。
+ * テンプレ構成は既存のeffectivePageSlots側で方向ごとにミラーするため触らない。
+ */
+export function recomposeAutoLayoutPlans(args: {
+  pages: ComicStoryPage[];
+  storyTemplateId: string | null;
+  direction: ComicReadingDirection;
+}): ComicStoryPage[] {
+  if (args.storyTemplateId) return args.pages;
+
+  let changed = false;
+  const pages = args.pages.map((page) => {
+    if (!page.rows) return page;
+    const layoutPlan = synthesizeSlotsFromRows(
+      page.rows,
+      page.panelCount,
+      args.direction,
+    );
+    if (!layoutPlan) return page;
+    changed = true;
+    return { ...page, layoutPlan };
+  });
+  return changed ? pages : args.pages;
+}
 
 /**
  * points から bbox を導出して ComicPanelSlot を作る。

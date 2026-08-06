@@ -31,6 +31,22 @@ export function buildSpreads(pageCount: number): number[][] {
   return spreads;
 }
 
+/** 記録済みページだけを使い、見開きの生成方式表示を決める。旧データは推測しない。 */
+export function spreadGenModeLabel(
+  pageNumbers: number[],
+  results: ComicPageResult[],
+): "一枚描き" | "コマ割り" | "方式混在" | undefined {
+  const modes = pageNumbers.map(
+    (pageNumber) => results.find((item) => item.page === pageNumber)?.genMode,
+  );
+  if (modes.length === 0 || modes.some((mode) => mode === undefined)) {
+    return undefined;
+  }
+  const first = modes[0];
+  if (!modes.every((mode) => mode === first)) return "方式混在";
+  return first === "structure" ? "コマ割り" : "一枚描き";
+}
+
 export type ComicSpreadPreviewModalProps = {
   /** ページ番号・総数の源。 */
   pages: ComicStoryPage[];
@@ -108,6 +124,7 @@ export function ComicSpreadPreviewModal({
     spread.length === 2
       ? `${spread[0]}-${spread[1]} / ${pageCount}ページ`
       : `${spread[0] ?? 0} / ${pageCount}ページ`;
+  const genModeLabel = spreadGenModeLabel(spread, results);
 
   return (
     <div
@@ -227,6 +244,11 @@ export function ComicSpreadPreviewModal({
           ›
         </button>
         <span className="text-xs font-medium text-neutral-300">{label}</span>
+        {genModeLabel ? (
+          <span className="rounded-full border border-pink-500/30 bg-pink-500/10 px-2 py-0.5 text-[11px] font-medium text-pink-200">
+            ・{genModeLabel}
+          </span>
+        ) : null}
       </div>
     </div>
   );

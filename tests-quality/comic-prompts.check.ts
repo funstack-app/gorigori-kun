@@ -5,6 +5,7 @@ import { getComicTemplate } from "../src/lib/comic/layoutTemplates";
 import {
   buildFullPagePrompt,
   buildPanelImagePrompt,
+  buildStructurePanelPrompt,
   buildStoryPrompt,
   parseComicStory,
 } from "../src/lib/comic/prompts";
@@ -161,4 +162,153 @@ test("template=nullでもlayoutPlanの座標とrows由来の全コマ位置語�
   expect(prompt).toContain("panel 2 (top-right): prompt-2");
   expect(prompt).toContain("panel 3 (bottom, full width): prompt-3");
   expect(prompt).not.toContain("design the panel layout yourself");
+});
+
+test("structureコマpromptは枠なし・吹き出しchain・端余白を含み、ページ寸法句を除く", () => {
+  const panel: ComicPanel = {
+    ...comicPanel(1),
+    balloons: [
+      {
+        id: "balloon-chain",
+        speaker: "モチ丸",
+        text: "お餅だ／食べよう",
+        kind: "shout_black",
+        pos: null,
+        visible: true,
+      },
+      {
+        id: "balloon-hidden",
+        speaker: "モチ丸",
+        text: "描いてはいけない",
+        kind: "normal",
+        pos: null,
+        visible: false,
+      },
+    ],
+    sfx: [
+      {
+        id: "sfx-visible",
+        text: "モチッ",
+        intent: "impact",
+        pos: null,
+        rotation: -5,
+        scale: 1.3,
+        visible: true,
+      },
+    ],
+  };
+  const prompt = buildStructurePanelPrompt({
+    panel,
+    characters: [character],
+    colorMode: "mono",
+    styleText: "soft pencil texture",
+    hasCharRefs: true,
+    envReferences: [{ name: "餅つき会場", kind: "location" }],
+    charRefCount: 1,
+    direction: "rtl",
+    pageContext: { panelNo: 1, panelTotal: 3, synopsis: "みんなで餅を食べる" },
+  });
+
+  expect(prompt).toContain("single manga panel artwork, black and white manga illustration");
+  expect(prompt).toContain("full-bleed single panel: draw the scene edge to edge");
+  expect(prompt).toContain("no panel frame, no border lines, no gutters");
+  expect(prompt).toContain("art style: soft pencil texture");
+  expect(prompt).toContain("「お餅だ」「食べよう」");
+  expect(prompt).toContain(
+    "solid black jagged spiky shout balloon with white lettering and a thin white outer rim",
+  );
+  expect(prompt).toContain(
+    "drawn as a chain of 2 linked balloons, one balloon per quoted phrase, connected in reading order",
+  );
+  expect(prompt).toContain("balloons read right to left");
+  expect(prompt).toContain("first quoted balloon sits toward the upper RIGHT");
+  expect(prompt).toContain(
+    "keep every speech balloon and sound effect fully inside the artwork with a comfortable margin from all edges",
+  );
+  expect(prompt).toContain("sound effect: 「モチッ」");
+  expect(prompt).toContain("character design — モチ丸: round white face");
+  expect(prompt).toContain("story context: this is panel 1 of 3 on one manga page");
+  expect(prompt).toContain("do not render any meta text or numbers on the image");
+  expect(prompt).not.toContain("portrait page, consistent page size");
+  expect(prompt).not.toContain("描いてはいけない");
+
+  // 牙: 「／」をそのまま引用するだけの実装では、分割引用とchain句の両方を満たせない。
+  expect(prompt).not.toContain("「お餅だ／食べよう」");
+});
+
+test("structure faithfulは専用句だけを使い、ltrの吹き出し順へ切り替える", () => {
+  const prompt = buildStructurePanelPrompt({
+    panel: comicPanel(1),
+    characters: [character],
+    colorMode: "faithful",
+    styleText: "faithfulへ混ぜてはいけない絵柄",
+    hasCharRefs: true,
+    direction: "ltr",
+    pageContext: { panelNo: 1, panelTotal: 1, synopsis: "お餅を見つける" },
+  });
+
+  expect(prompt).toContain(
+    "single manga panel artwork, rendered in the exact art style of the reference images",
+  );
+  expect(prompt).toContain(FAITHFUL_IDENTITY);
+  expect(prompt).toContain(REFERENCE_POSE);
+  expect(prompt).toContain(REFERENCE_FAITHFUL);
+  expect(prompt).toContain(
+    "faithfully reproduce the referenced characters' appearance and original art style",
+  );
+  expect(prompt).toContain("balloons read left to right");
+  expect(prompt).toContain("first quoted balloon sits toward the upper LEFT");
+  expect(prompt).not.toContain("balloons read right to left");
+  expect(prompt).not.toContain("black and white manga illustration");
+  expect(prompt).not.toContain("full color manga illustration");
+  expect(prompt).not.toContain("final output must look like a professional Japanese");
+  expect(prompt).not.toContain("faithfulへ混ぜてはいけない絵柄");
+  expect(prompt).not.toContain("portrait page, consistent page size");
+});
+
+test("コマの吹き出し・擬音句は引用とkind記述子を保ち、空パネルでは空文字になる", async () => {
+  const { buildPanelBalloonSfxClause } = await import("../src/lib/comic/prompts");
+  const panel: ComicPanel = {
+    ...comicPanel(1),
+    balloons: [
+      {
+        id: "balloon-visible",
+        speaker: "モチ丸",
+        text: "午前10時",
+        kind: "shout",
+        pos: null,
+        visible: true,
+      },
+      {
+        id: "balloon-hidden",
+        speaker: "モチ丸",
+        text: "描いてはいけない",
+        kind: "normal",
+        pos: null,
+        visible: false,
+      },
+    ],
+    sfx: [
+      {
+        id: "sfx-visible",
+        text: "ザッ",
+        intent: "motion",
+        pos: null,
+        rotation: 0,
+        scale: 1,
+        visible: true,
+      },
+    ],
+  };
+
+  const clause = buildPanelBalloonSfxClause(panel);
+  expect(clause).toBe(
+    "speech balloon: 「午前10時」 (jagged spiky shout balloon) sound effect: 「ザッ」",
+  );
+  expect(clause).not.toContain("描いてはいけない");
+  expect(buildPanelBalloonSfxClause(comicPanel(2))).toBe("");
+
+  // 牙: ページ経路が別実装へ戻ると、抽出した句との完全一致を満たせない。
+  const pagePrompt = buildFullPagePrompt([panel], null, [character]);
+  expect(pagePrompt).toContain(`panel 1: prompt-1. ${clause}`);
 });

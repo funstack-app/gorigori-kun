@@ -1,19 +1,22 @@
 /**
  * 漫画制作スキル（スキル一覧v2.1 #9）の型定義。
  *
- * データフロー（おまかせ一括・唯一の経路）:
+ * データフロー（2つの生成方式で構成確認までは共通）:
  *   話 + キャラ + ページ数 + 参考テンプレ(任意)
  *     → 構成生成（AI が JSON でページ割り+コマ割り+セリフを返す）
  *     → 構成確認（人がページ/コマ単位で直す）
- *     → ページ並列生成（1ページ=1枚。吹き出し・擬音は絵として描かれる）
+ *     → おまかせ一枚描き（1ページ=1枚をAI生成）
+ *       または きっちりコマ割り（コマごとにAI生成して機械ではめ込む）
  *     → ページ一覧（再生成・保存・一括保存）
  *
  * 旧「詳細編集（コマ別）」経路（ネーム → コマ生成 → CSS合成ページ確認 →
  * Canvas 1枚書き出し）は 2026-07-28 に撤去した（STΛCK指示）。
- * つくり方の選択自体を無くし、上の一気生成だけを残している。
+ * 2026-08-06 の構造先行モード設計で生成方式の選択を再導入した。ただし新方式は
+ * CSS表示ではなく、1080×1440の1枚画像へ決定論ではめ込み、保存まで完結する。
+ * 正本: design-comic-structure-mode.md §0・§2。
  *
  * コマ数の正本は layoutTemplates.ts の `panelCount`（旧・形式(4|8)型は 2026-07-28 に廃止）。
- * 吹き出しの画像への焼き込み（書き出し）は将来課題（表示は CSS で成立させる）。
+ * 吹き出し・擬音は両方式ともAIが絵の中へ描き、CSS後貼り経路は復活させない。
  */
 
 import type { ComicPanelSlot } from "./layoutTemplates";
@@ -80,6 +83,9 @@ export type ComicEnvReference = {
  */
 export type ComicColorMode = "mono" | "color" | "faithful";
 
+/** 漫画ページの生成方式。既定は既存挙動の "direct"。 */
+export type ComicPageGenMode = "direct" | "structure";
+
 /**
  * コマの読み方向 (B-1 2026-07-30)。生成プロンプトの空間指示
  * (panel 位置の明示・読み順強調句) に効く。既定は "rtl" (右→左・日本式)。
@@ -88,9 +94,9 @@ export type ComicColorMode = "mono" | "color" | "faithful";
  */
 export type ComicReadingDirection = "rtl" | "ltr";
 
-/** 枠線の太さ (B-4b)。プロンプト近似のため再現は保証されない。既定 "standard"。 */
+/** 枠線の太さ (B-4b)。directはプロンプト近似、structureはpxで決定する。既定 "standard"。 */
 export type ComicFrameStyle = "thin" | "standard" | "bold";
-/** コマ間隔 (B-4b)。プロンプト近似のため再現は保証されない。既定 "standard"。 */
+/** コマ間隔 (B-4b)。directはプロンプト近似、structureでは固定スロットを使う。既定 "standard"。 */
 export type ComicGutterStyle = "narrow" | "standard" | "wide";
 
 /** 保存形式（セッション内のみ・保存しない）。 */
@@ -227,6 +233,12 @@ export type ComicPageResult = {
   generating: boolean;
   startedAt?: number;
   error?: string;
+  /** このページ画像を実際に作った方式。undefined は方式記録前の旧データ。 */
+  genMode?: ComicPageGenMode;
+  /** structure のコマ画像素材。配列の0始まり位置がコマ番号-1に対応する。 */
+  panelImagePaths?: (string | undefined)[];
+  /** structure で生成できなかったコマの理由。配列の0始まり位置がコマ番号-1に対応する。 */
+  panelErrors?: (string | undefined)[];
   /** この画像を生成したときの読み方向。1コマ再編集の対応判定に使う（B-1 の鏡像問題）。 */
   direction?: ComicReadingDirection;
   /** この画像を生成したときの画風。faithful は1コマ再編集の対象外判定に使う。 */

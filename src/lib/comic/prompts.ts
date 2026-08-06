@@ -70,6 +70,51 @@ export function balloonSegments(text: string): string[] {
 }
 
 /**
+ * 吹き出しを「引用 + kind記述子」へ変換する共通規則。
+ * ページ一枚描きと、きっちりコマ割りのコマ生成で同じ文言を使う。
+ */
+function balloonPromptLines(panel: Pick<ComicPanel, "balloons">): string[] {
+  return panel.balloons
+    .filter((balloon) => balloon.visible && balloon.text.trim().length > 0)
+    .map((balloon) => {
+      const segments = balloonSegments(balloon.text);
+      const quoted = (segments.length > 0 ? segments : [balloon.text.trim()])
+        .map((segment) => `「${segment}」`)
+        .join("");
+      const descriptor =
+        segments.length > 1
+          ? `${BALLOON_KIND_DESCRIPTOR[balloon.kind]}, drawn as a chain of ${segments.length} linked balloons, one balloon per quoted phrase, connected in reading order`
+          : BALLOON_KIND_DESCRIPTOR[balloon.kind];
+      return `${quoted} (${descriptor})`;
+    });
+}
+
+/** ページ/コマ生成で共通の、可視な擬音だけを引用へ変換する規則。 */
+function sfxPromptQuotes(panel: Pick<ComicPanel, "sfx">): string[] {
+  return panel.sfx
+    .filter((sfx) => sfx.visible && sfx.text.trim().length > 0)
+    .map((sfx) => `「${sfx.text.trim()}」`);
+}
+
+/** ページ/コマ再生成で共通の「吹き出し＋擬音」句。対象が無ければ空文字。 */
+export function buildPanelBalloonSfxClause(panel: ComicPanel): string {
+  const parts: string[] = [];
+  const balloonLines = balloonPromptLines(panel);
+  if (balloonLines.length > 0) {
+    parts.push(
+      `speech balloon${balloonLines.length > 1 ? "s" : ""}: ${balloonLines.join(" ")}`,
+    );
+  }
+  const sfxLines = sfxPromptQuotes(panel);
+  if (sfxLines.length > 0) {
+    parts.push(
+      `sound effect${sfxLines.length > 1 ? "s" : ""}: ${sfxLines.join(" ")}`,
+    );
+  }
+  return parts.join(" ");
+}
+
+/**
  * 登場キャラ一覧と「名前の厳守」ブロックを導出する。
  *
  * buildNamePrompt（detail）と buildStoryPrompt（auto）の両方から呼ぶ共通ヘルパ。
@@ -955,6 +1000,71 @@ export type FullPageContext = {
 const STYLE_TEXT_CLAUSE = (text: string): string =>
   `art style: ${text} — apply this exact art style consistently to every panel and every page`;
 
+type PromptEnvReference = { name: string; kind: "location" | "item" };
+
+/** キャラ参照との区分句 + 環境参照ごとの固定句（ページ/コマ共通）。 */
+function environmentReferenceClauses(
+  envReferences: PromptEnvReference[],
+  charRefCount: number,
+  hasCharReferences: boolean,
+): string[] {
+  const clauses: string[] = [];
+  if (hasCharReferences && envReferences.length > 0) {
+    clauses.push(
+      `reference images 1-${charRefCount} are character references — the character identity instructions apply only to these images`,
+    );
+  }
+  envReferences.forEach((reference, index) => {
+    const refIndex = charRefCount + 1 + index;
+    clauses.push(
+      reference.kind === "item"
+        ? `reference image ${refIndex}: 「${reference.name}」 — a fixed prop reference; whenever this object appears in any panel on any page, reproduce this exact design: same shape, proportions, colors, materials, and details; never redesign or restyle it between panels or pages`
+        : `reference image ${refIndex}: 「${reference.name}」 — a fixed location/background reference; whenever this place appears in any panel on any page, reproduce this exact environment: same layout, architecture, furniture, colors, and details; never redesign it between panels or pages`,
+    );
+  });
+  return clauses;
+}
+
+/** このコマに実際に登場するキャラだけの属性句を導出する。 */
+function panelCharacterAttributeBlock(
+  panel: Pick<ComicPanel, "characters">,
+  characters: ComicCharacter[],
+): string {
+  return characters
+    .filter((character) =>
+      panel.characters.some((name) => name.trim() === character.name.trim()),
+    )
+    .map((character) =>
+      character.attributes?.trim()
+        ? `${character.name}: ${character.attributes.trim()}`
+        : "",
+    )
+    .filter(Boolean)
+    .join("; ");
+}
+
+const DIALOGUE_AND_SFX_FINISH_CLAUSE =
+  "hand-drawn speech balloons with vertical Japanese text — write the dialogue exactly as given, character for character, do not invent or alter any text; bold hand-lettered manga sound effects integrated with the art";
+
+const STRUCTURE_PANEL_MONO_BASE_CLAUSE =
+  "single manga panel artwork, black and white manga illustration, professional ink line art, screentone shading";
+const STRUCTURE_PANEL_COLOR_BASE_CLAUSE =
+  "single manga panel artwork, full color manga illustration, clean ink line art, anime-style cel shading, vibrant colors";
+const STRUCTURE_PANEL_FAITHFUL_BASE_CLAUSE =
+  "single manga panel artwork, rendered in the exact art style of the reference images";
+const STRUCTURE_PANEL_FULL_BLEED_CLAUSE =
+  "full-bleed single panel: draw the scene edge to edge — no panel frame, no border lines, no gutters, no surrounding panels; the frame will be added mechanically afterwards";
+const STRUCTURE_PANEL_EDGE_MARGIN_CLAUSE =
+  "keep every speech balloon and sound effect fully inside the artwork with a comfortable margin from all edges (the outer edges may be trimmed slightly)";
+const STRUCTURE_PANEL_FAITHFUL_FINAL_CLAUSE =
+  "faithfully reproduce the referenced characters' appearance and original art style";
+
+function structureBalloonOrderClause(direction: ComicReadingDirection): string {
+  return direction === "ltr"
+    ? "balloons read left to right — the first quoted balloon sits toward the upper LEFT of the panel"
+    : "balloons read right to left — the first quoted balloon sits toward the upper RIGHT of the panel";
+}
+
 /**
  * ページ丸ごと1枚を生成するプロンプトを組む（主経路）。
  *
@@ -1059,34 +1169,7 @@ export function buildFullPagePrompt(
         : null;
   for (const panel of panels) {
     const body = panel.prompt.trim() || panel.composition.trim();
-    // gtm (2026-08-03): 引用＋kind 記述子の形式。数珠つなぎ（「／」区切り）は
-    // セグメント単位で引用を分け、記述子に chain 句を連結する。区切り文字自体は
-    // 引用に含めない（仕上げ句の「write the dialogue exactly as given」が
-    // 「／」を絵に描かせる事故の防止）。
-    const lines = panel.balloons
-      .filter((b) => b.visible && b.text.trim().length > 0)
-      .map((b) => {
-        const segments = balloonSegments(b.text);
-        const quoted = (segments.length > 0 ? segments : [b.text.trim()])
-          .map((seg) => `「${seg}」`)
-          .join("");
-        const descriptor =
-          segments.length > 1
-            ? `${BALLOON_KIND_DESCRIPTOR[b.kind]}, drawn as a chain of ${segments.length} linked balloons, one balloon per quoted phrase, connected in reading order`
-            : BALLOON_KIND_DESCRIPTOR[b.kind];
-        return `${quoted} (${descriptor})`;
-      });
-    const balloonPart =
-      lines.length > 0
-        ? ` speech balloon${lines.length > 1 ? "s" : ""}: ${lines.join(" ")}`
-        : "";
-    const sfxLines = panel.sfx
-      .filter((s) => s.visible && s.text.trim().length > 0)
-      .map((s) => `「${s.text.trim()}」`);
-    const sfxPart =
-      sfxLines.length > 0
-        ? ` sound effect${sfxLines.length > 1 ? "s" : ""}: ${sfxLines.join(" ")}`
-        : "";
+    const balloonSfxClause = buildPanelBalloonSfxClause(panel);
     const pos = positionPhrases?.[panel.index - 1]
       ? ` (${positionPhrases[panel.index - 1]})`
       : !template && panels.length > 1 && panel.index === 1
@@ -1094,7 +1177,9 @@ export function buildFullPagePrompt(
         : !template && panels.length > 1 && panel.index === panels.length
           ? ` (${direction === "ltr" ? "bottom-right" : "bottom-left"} final panel)`
           : "";
-    parts.push(`panel ${panel.index}${pos}: ${body}.${balloonPart}${sfxPart}`);
+    parts.push(
+      `panel ${panel.index}${pos}: ${body}.${balloonSfxClause ? ` ${balloonSfxClause}` : ""}`,
+    );
   }
 
   // 5. 参照画像がある時だけ同一性・ポーズ写し防止・画風句（mono/color は既存文字列・無変更）
@@ -1119,20 +1204,7 @@ export function buildFullPagePrompt(
     );
     parts.push(REFERENCE_POSE_CLAUSE);
   }
-  if (hasReferences && envRefs.length > 0) {
-    // キャラ用 identity 句が環境参照（ドア等）に誤適用されるのを緩和する区分句。
-    parts.push(
-      `reference images 1-${charRefCount} are character references — the character identity instructions apply only to these images`,
-    );
-  }
-  envRefs.forEach((ref, j) => {
-    const idx = charRefCount + 1 + j;
-    parts.push(
-      ref.kind === "item"
-        ? `reference image ${idx}: 「${ref.name}」 — a fixed prop reference; whenever this object appears in any panel on any page, reproduce this exact design: same shape, proportions, colors, materials, and details; never redesign or restyle it between panels or pages`
-        : `reference image ${idx}: 「${ref.name}」 — a fixed location/background reference; whenever this place appears in any panel on any page, reproduce this exact environment: same layout, architecture, furniture, colors, and details; never redesign it between panels or pages`,
-    );
-  });
+  parts.push(...environmentReferenceClauses(envRefs, charRefCount, hasReferences));
   // 画風支配句は「どちらかの参照があれば」出す（環境参照の写真調が画風に勝つ事故対策）。
   if (hasReferences || envRefs.length > 0) {
     parts.push(
@@ -1159,9 +1231,7 @@ export function buildFullPagePrompt(
       : gutter === "wide"
         ? "wide white gutters between panels"
         : "white gutters";
-  parts.push(
-    `hand-drawn speech balloons with vertical Japanese text — write the dialogue exactly as given, character for character, do not invent or alter any text; bold hand-lettered manga sound effects integrated with the art; ${borderWord} and ${gutterWord}`,
-  );
+  parts.push(`${DIALOGUE_AND_SFX_FINISH_CLAUSE}; ${borderWord} and ${gutterWord}`);
 
   // 6b. 最終出力の画風を末尾で念押しする。
   // mono/color は参照画像のフォト/3D調に勝たせる（実機FB 2026-07-28 STΛCK）。
@@ -1184,6 +1254,106 @@ export function buildFullPagePrompt(
     .filter(Boolean)
     .join("; ");
   if (attrBlock) parts.push(`character design — ${attrBlock}`);
+
+  return parts.filter(Boolean).join(", ");
+}
+
+/**
+ * 「きっちりコマ割り」で初回生成する、1コマ分のプロンプトを組む。
+ *
+ * ページ枠は後段の機械合成で描くため、AIには枠・ガターを描かせない。
+ * ページ生成ではないので PAGE_SIZE_CLAUSE も入れず、スロット比率は呼び出し側の
+ * aspectヒントとcover-clipで扱う。
+ */
+export function buildStructurePanelPrompt(args: {
+  panel: ComicPanel;
+  characters: ComicCharacter[];
+  colorMode: ComicColorMode;
+  styleText?: string;
+  hasCharRefs: boolean;
+  envReferences?: PromptEnvReference[];
+  charRefCount?: number;
+  direction: ComicReadingDirection;
+  pageContext: { panelNo: number; panelTotal: number; synopsis: string };
+}): string {
+  const {
+    panel,
+    characters,
+    colorMode,
+    hasCharRefs,
+    direction,
+    pageContext,
+  } = args;
+  const envReferences = args.envReferences ?? [];
+  const charRefCount = args.charRefCount ?? 0;
+  const parts: string[] = [
+    colorMode === "faithful"
+      ? STRUCTURE_PANEL_FAITHFUL_BASE_CLAUSE
+      : colorMode === "color"
+        ? STRUCTURE_PANEL_COLOR_BASE_CLAUSE
+        : STRUCTURE_PANEL_MONO_BASE_CLAUSE,
+    STRUCTURE_PANEL_FULL_BLEED_CLAUSE,
+  ];
+
+  const styleText = args.styleText?.trim();
+  if (styleText && colorMode !== "faithful") {
+    parts.push(STYLE_TEXT_CLAUSE(styleText));
+  }
+
+  if (hasCharRefs) {
+    parts.push(
+      colorMode === "faithful"
+        ? REFERENCE_FAITHFUL_IDENTITY_CLAUSE
+        : REFERENCE_IDENTITY_CLAUSE,
+    );
+    parts.push(REFERENCE_POSE_CLAUSE);
+  }
+  parts.push(
+    ...environmentReferenceClauses(
+      envReferences,
+      charRefCount,
+      hasCharRefs,
+    ),
+  );
+  if (hasCharRefs || envReferences.length > 0) {
+    parts.push(
+      colorMode === "faithful"
+        ? REFERENCE_FAITHFUL_CLAUSE
+        : REFERENCE_STYLE_DOMINANCE_CLAUSE,
+    );
+  }
+
+  parts.push(panel.prompt.trim() || panel.composition.trim());
+
+  const balloonLines = balloonPromptLines(panel);
+  if (balloonLines.length > 0) {
+    parts.push(
+      `speech balloon${balloonLines.length > 1 ? "s" : ""}: ${balloonLines.join(" ")}`,
+    );
+  }
+  parts.push(structureBalloonOrderClause(direction));
+  parts.push(STRUCTURE_PANEL_EDGE_MARGIN_CLAUSE);
+
+  const sfxLines = sfxPromptQuotes(panel);
+  if (sfxLines.length > 0) {
+    parts.push(
+      `sound effect${sfxLines.length > 1 ? "s" : ""}: ${sfxLines.join(" ")}`,
+    );
+  }
+  const attrBlock = panelCharacterAttributeBlock(panel, characters);
+  if (attrBlock) parts.push(`character design — ${attrBlock}`);
+  if (panel.acting.trim()) parts.push(panel.acting.trim());
+
+  parts.push(
+    `story context: this is panel ${pageContext.panelNo} of ${pageContext.panelTotal} on one manga page — 「${pageContext.synopsis.trim()}」; keep character appearance and art style consistent with the other panels of this page`,
+  );
+  parts.push(DIALOGUE_AND_SFX_FINISH_CLAUSE);
+  parts.push(
+    colorMode === "faithful"
+      ? STRUCTURE_PANEL_FAITHFUL_FINAL_CLAUSE
+      : finalStyleClause(colorMode),
+  );
+  parts.push(NO_META_TEXT_CLAUSE);
 
   return parts.filter(Boolean).join(", ");
 }
