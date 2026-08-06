@@ -18,7 +18,8 @@
  */
 
 import type { PanelImageData } from "./panelReedit";
-import type { ComicPanelSlot } from "./layoutTemplates";
+import type { ComicLayoutTemplate, ComicPanelSlot } from "./layoutTemplates";
+import type { ComicReadingDirection } from "./types";
 
 export type PanelSlotRecoveryFailure =
   /** 分割結果0個 or 全 leaf が最小サイズ未満。 */
@@ -36,6 +37,36 @@ export type PanelSlotRecovery =
    * UI 文言が実数を出せるように返す（推測の数字を表示しないため）。
    */
   | { ok: false; failureCode: PanelSlotRecoveryFailure; detectedCount?: number };
+
+export type TemplateSlotAlignmentFailure = "invalid-input" | "low-confidence";
+
+export type TemplateSlotAlignmentMetrics = {
+  /** テンプレ境界のうち、近傍のガターと枠線を確認できた割合。 */
+  snappedBoundaryRatio: number;
+  /** スナップできた境界がテンプレ位置から動いた平均距離（ページ短辺percent）。 */
+  averageDriftPercent: number;
+  snappedBoundaries: number;
+  totalBoundaries: number;
+};
+
+export type TemplateSlotAlignment =
+  | {
+      ok: true;
+      /** 実画像の枠外縁へ合わせた、ページpercent座標。 */
+      slots: ComicPanelSlot[];
+      /** 実測した枠線太さ。複数境界の中央値。 */
+      borderPx: number;
+      /** 再組立で枠を絵に混ぜないための切り出し余白（borderPx + 1px）。 */
+      insetPx: number;
+      confidence: number;
+      metrics: TemplateSlotAlignmentMetrics;
+    }
+  | {
+      ok: false;
+      failureCode: TemplateSlotAlignmentFailure;
+      confidence: number;
+      metrics: TemplateSlotAlignmentMetrics;
+    };
 
 /**
  * 白判定の輝度しきい値。`grayscaleGradient` と同じ係数（0.299/0.587/0.114）を使う。
@@ -112,6 +143,10 @@ type LumaMask = {
 
 /** 枠線とみなす暗さ。ガター判定の白しきい値とは別軸で、灰色トーンを枠線に数えない。 */
 const DARK_LUMA = 128;
+/** テンプレ境界の探索幅（ページ短辺比）。detectPanelInterior と同じ ±2.5%。 */
+const TEMPLATE_ALIGNMENT_BAND_RATIO = 0.025;
+/** 全境界の80%以上を確認できたページだけ再組立へ渡す。 */
+const TEMPLATE_ALIGNMENT_MIN_SNAP_RATIO = 0.8;
 
 type Region = { left: number; top: number; right: number; bottom: number };
 
@@ -494,4 +529,356 @@ export function recoverPanelSlots(image: PanelImageData): PanelSlotRecovery {
   if (coverage < MIN_COVERAGE_RATIO) return { ok: false, failureCode: "coverage" };
 
   return { ok: true, slots: sortReadingOrderRtl(slots) };
+}
+
+type PixelPoint = { x: number; y: number };
+
+type BoundaryProfile = {
+  offset: number;
+  whiteRatio: number;
+  darkRatio: number;
+};
+
+type AlignedBoundary = {
+  point: PixelPoint;
+  direction: PixelPoint;
+  snapped: boolean;
+  driftPx: number;
+  borderPx?: number;
+};
+
+/** `panelPositionPhrases` と同じく、ltr はコマ番号の空間位置を左右反転する。 */
+function slotForReadingDirection(
+  slot: ComicPanelSlot,
+  direction: ComicReadingDirection,
+): ComicPanelSlot {
+  if (direction === "rtl") {
+    return {
+      ...slot,
+      points: slot.points?.map(([x, y]) => [x, y] as [number, number]),
+    };
+  }
+  const mirroredPoints = slot.points
+    ? [slot.points[1], slot.points[0], slot.points[3], slot.points[2]].map(
+        ([x, y]) => [100 - x, y] as [number, number],
+      )
+    : undefined;
+  return { ...slot, x: 100 - slot.x - slot.w, points: mirroredPoints };
+}
+
+function slotBoundaryPoints(slot: ComicPanelSlot): [number, number][] {
+  return slot.points ?? [
+    [slot.x, slot.y],
+    [slot.x + slot.w, slot.y],
+    [slot.x + slot.w, slot.y + slot.h],
+    [slot.x, slot.y + slot.h],
+  ];
+}
+
+/** 辺の端5%を除いて走査し、隣接辺の角をプロファイルへ混ぜない。 */
+function sampleBoundaryProfile(
+  mask: LumaMask,
+  start: PixelPoint,
+  end: PixelPoint,
+  normal: PixelPoint,
+  offset: number,
+): Pick<BoundaryProfile, "whiteRatio" | "darkRatio"> {
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const length = Math.hypot(dx, dy);
+  if (length <= 0) return { whiteRatio: 0, darkRatio: 0 };
+
+  const from = length * 0.05;
+  const to = length * 0.95;
+  const samples = Math.max(2, Math.ceil(to - from));
+  let white = 0;
+  let dark = 0;
+  let measured = 0;
+  for (let index = 0; index <= samples; index += 1) {
+    const along = from + ((to - from) * index) / samples;
+    const x = Math.round(start.x + (dx * along) / length + normal.x * offset);
+    const y = Math.round(start.y + (dy * along) / length + normal.y * offset);
+    if (x < 0 || y < 0 || x >= mask.width || y >= mask.height) continue;
+    const pixel = y * mask.width + x;
+    white += mask.white[pixel];
+    dark += mask.dark[pixel];
+    measured += 1;
+  }
+  if (measured === 0) return { whiteRatio: 0, darkRatio: 0 };
+  return { whiteRatio: white / measured, darkRatio: dark / measured };
+}
+
+function profileWhiteBands(profiles: BoundaryProfile[]): Array<{ start: number; end: number }> {
+  const bands: Array<{ start: number; end: number }> = [];
+  let start: number | null = null;
+  for (let index = 0; index < profiles.length; index += 1) {
+    const isWhite = profiles[index].whiteRatio >= GUTTER_WHITE_RATIO;
+    if (isWhite && start === null) start = index;
+    if ((!isWhite || index === profiles.length - 1) && start !== null) {
+      const end = isWhite && index === profiles.length - 1 ? index : index - 1;
+      if (profiles[end].offset - profiles[start].offset + 1 >= MIN_BAND_PX) {
+        bands.push({ start, end });
+      }
+      start = null;
+    }
+  }
+  return bands;
+}
+
+/**
+ * ガター帯の内側に隣接する暗線を探す。暗率30%以上という既存基準を使い、
+ * ガターから内側へ連続する幅を枠線太さとして測る。
+ */
+function borderBeforeGutter(
+  profiles: BoundaryProfile[],
+  band: { start: number; end: number },
+  borderRangePx: number,
+): { snapOffset: number; borderPx: number } | null {
+  const searchFrom = Math.max(0, band.start - borderRangePx);
+  let seed = -1;
+  for (let index = band.start - 1; index >= searchFrom; index -= 1) {
+    if (profiles[index].darkRatio >= BORDER_ADJACENT_DARK_RATIO) {
+      seed = index;
+      break;
+    }
+  }
+  if (seed < 0) return null;
+
+  // 枠から内側の絵まで黒い場合に、コマ全体を「太い枠」と数えないための上限。
+  const maxBorderPx = Math.max(1, borderRangePx * 2);
+  let runStart = seed;
+  while (
+    runStart > 0 &&
+    seed - runStart + 1 < maxBorderPx &&
+    profiles[runStart - 1].darkRatio >= BORDER_ADJACENT_DARK_RATIO
+  ) {
+    runStart -= 1;
+  }
+  let runEnd = seed;
+  while (
+    runEnd + 1 < profiles.length &&
+    runEnd - runStart + 1 < maxBorderPx &&
+    profiles[runEnd + 1].darkRatio >= BORDER_ADJACENT_DARK_RATIO
+  ) {
+    runEnd += 1;
+  }
+  return {
+    // slot は枠を含む外接矩形なので、白ガター側の暗線外縁へ合わせる。
+    snapOffset: profiles[runEnd].offset,
+    borderPx: profiles[runEnd].offset - profiles[runStart].offset + 1,
+  };
+}
+
+function alignBoundary(
+  mask: LumaMask,
+  start: PixelPoint,
+  end: PixelPoint,
+  centroid: PixelPoint,
+  searchRadiusPx: number,
+  borderRangePx: number,
+): AlignedBoundary {
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const length = Math.hypot(dx, dy);
+  if (length <= 0) {
+    return { point: start, direction: { x: dx, y: dy }, snapped: false, driftPx: 0 };
+  }
+
+  const midpoint = { x: (start.x + end.x) / 2, y: (start.y + end.y) / 2 };
+  let normal = { x: -dy / length, y: dx / length };
+  if ((midpoint.x - centroid.x) * normal.x + (midpoint.y - centroid.y) * normal.y < 0) {
+    normal = { x: -normal.x, y: -normal.y };
+  }
+
+  const radius = Math.max(MIN_BAND_PX, Math.floor(searchRadiusPx));
+  const profiles: BoundaryProfile[] = [];
+  for (let offset = -radius; offset <= radius; offset += 1) {
+    profiles.push({
+      offset,
+      ...sampleBoundaryProfile(mask, start, end, normal, offset),
+    });
+  }
+
+  const candidates = profileWhiteBands(profiles)
+    .map((band) => borderBeforeGutter(profiles, band, borderRangePx))
+    .filter((candidate): candidate is { snapOffset: number; borderPx: number } => candidate !== null)
+    .sort((a, b) => Math.abs(a.snapOffset) - Math.abs(b.snapOffset));
+  const best = candidates[0];
+  if (!best) {
+    return { point: start, direction: { x: dx, y: dy }, snapped: false, driftPx: 0 };
+  }
+  return {
+    point: { x: start.x + normal.x * best.snapOffset, y: start.y + normal.y * best.snapOffset },
+    direction: { x: dx, y: dy },
+    snapped: true,
+    driftPx: Math.abs(best.snapOffset),
+    borderPx: best.borderPx,
+  };
+}
+
+function intersectBoundaries(first: AlignedBoundary, second: AlignedBoundary): PixelPoint | null {
+  const denominator = first.direction.x * second.direction.y - first.direction.y * second.direction.x;
+  if (Math.abs(denominator) < 0.00001) return null;
+  const dx = second.point.x - first.point.x;
+  const dy = second.point.y - first.point.y;
+  const t = (dx * second.direction.y - dy * second.direction.x) / denominator;
+  return {
+    x: first.point.x + first.direction.x * t,
+    y: first.point.y + first.direction.y * t,
+  };
+}
+
+function alignedSlotFromBoundaries(
+  sourceSlot: ComicPanelSlot,
+  boundaries: AlignedBoundary[],
+  width: number,
+  height: number,
+): ComicPanelSlot | null {
+  const points = boundaries.map((boundary, index) =>
+    intersectBoundaries(boundaries[(index - 1 + boundaries.length) % boundaries.length], boundary),
+  );
+  if (points.some((point) => point === null)) return null;
+  const percentPoints = points.map((point) => [
+    Math.max(0, Math.min(100, (point!.x * 100) / width)),
+    Math.max(0, Math.min(100, (point!.y * 100) / height)),
+  ] as [number, number]);
+  const xs = percentPoints.map(([x]) => x);
+  const ys = percentPoints.map(([, y]) => y);
+  const x = Math.min(...xs);
+  const y = Math.min(...ys);
+  const w = Math.max(...xs) - x;
+  const h = Math.max(...ys) - y;
+  if (![x, y, w, h].every(Number.isFinite) || w <= 0 || h <= 0) return null;
+  return sourceSlot.points ? { x, y, w, h, points: percentPoints } : { x, y, w, h };
+}
+
+function median(values: number[]): number {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1
+    ? sorted[middle]
+    : (sorted[middle - 1] + sorted[middle]) / 2;
+}
+
+const emptyAlignmentMetrics = (): TemplateSlotAlignmentMetrics => ({
+  snappedBoundaryRatio: 0,
+  averageDriftPercent: 0,
+  snappedBoundaries: 0,
+  totalBoundaries: 0,
+});
+
+/**
+ * 既知テンプレを事前分布に、実画像のガターと枠線へ各slotを微修正する。
+ * 探索は各境界のページ短辺±2.5%だけ。80%以上の境界を確認できない画像は、
+ * 無理に組み替えず failure に倒す。
+ */
+export function alignSlotsToTemplate(
+  image: PanelImageData,
+  template: ComicLayoutTemplate,
+  direction: ComicReadingDirection,
+): TemplateSlotAlignment {
+  if (
+    image.width <= 0 ||
+    image.height <= 0 ||
+    image.data.length < image.width * image.height * 4 ||
+    template.slots.length === 0 ||
+    (direction !== "rtl" && direction !== "ltr")
+  ) {
+    return {
+      ok: false,
+      failureCode: "invalid-input",
+      confidence: 0,
+      metrics: emptyAlignmentMetrics(),
+    };
+  }
+
+  const shortSide = Math.min(image.width, image.height);
+  const searchRadiusPx = shortSide * TEMPLATE_ALIGNMENT_BAND_RATIO;
+  const borderRangePx = Math.max(1, Math.round(shortSide * BORDER_ADJACENT_RANGE_RATIO));
+  const mask = buildLumaMask(image);
+  const expectedSlots = template.slots.map((slot) => slotForReadingDirection(slot, direction));
+  const alignedSlots: ComicPanelSlot[] = [];
+  const allBoundaries: AlignedBoundary[] = [];
+
+  for (const slot of expectedSlots) {
+    const percentPoints = slotBoundaryPoints(slot);
+    if (
+      percentPoints.length !== 4 ||
+      percentPoints.some(([x, y]) => !Number.isFinite(x) || !Number.isFinite(y))
+    ) {
+      return {
+        ok: false,
+        failureCode: "invalid-input",
+        confidence: 0,
+        metrics: emptyAlignmentMetrics(),
+      };
+    }
+    const points = percentPoints.map(([x, y]) => ({
+      x: (x * image.width) / 100,
+      y: (y * image.height) / 100,
+    }));
+    const centroid = points.reduce(
+      (sum, point) => ({ x: sum.x + point.x / points.length, y: sum.y + point.y / points.length }),
+      { x: 0, y: 0 },
+    );
+    const boundaries = points.map((point, index) =>
+      alignBoundary(
+        mask,
+        point,
+        points[(index + 1) % points.length],
+        centroid,
+        searchRadiusPx,
+        borderRangePx,
+      ),
+    );
+    const aligned = alignedSlotFromBoundaries(slot, boundaries, image.width, image.height);
+    if (!aligned) {
+      return {
+        ok: false,
+        failureCode: "invalid-input",
+        confidence: 0,
+        metrics: emptyAlignmentMetrics(),
+      };
+    }
+    alignedSlots.push(aligned);
+    allBoundaries.push(...boundaries);
+  }
+
+  const snapped = allBoundaries.filter((boundary) => boundary.snapped);
+  const snappedBoundaryRatio = snapped.length / Math.max(1, allBoundaries.length);
+  const averageDriftPercent =
+    snapped.length === 0
+      ? 0
+      : (snapped.reduce((sum, boundary) => sum + boundary.driftPx, 0) / snapped.length / shortSide) * 100;
+  const driftScore = Math.max(
+    0,
+    1 - averageDriftPercent / (TEMPLATE_ALIGNMENT_BAND_RATIO * 100),
+  );
+  const confidence = Math.max(
+    0,
+    Math.min(1, snappedBoundaryRatio * (0.8 + 0.2 * driftScore)),
+  );
+  const metrics: TemplateSlotAlignmentMetrics = {
+    snappedBoundaryRatio,
+    averageDriftPercent,
+    snappedBoundaries: snapped.length,
+    totalBoundaries: allBoundaries.length,
+  };
+
+  if (snappedBoundaryRatio + Number.EPSILON < TEMPLATE_ALIGNMENT_MIN_SNAP_RATIO) {
+    return { ok: false, failureCode: "low-confidence", confidence, metrics };
+  }
+
+  const borderPx = Math.round(median(snapped.flatMap((boundary) =>
+    boundary.borderPx === undefined ? [] : [boundary.borderPx],
+  )));
+  return {
+    ok: true,
+    slots: alignedSlots,
+    borderPx,
+    insetPx: borderPx + 1,
+    confidence,
+    metrics,
+  };
 }
