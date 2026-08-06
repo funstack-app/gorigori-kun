@@ -4,6 +4,8 @@ import { ActiveProjectSelector } from "../../ActiveProjectSelector";
 import { WorkspaceTabs } from "../../WorkspaceTabs";
 import { PageHelp } from "../../PageHelp";
 import { SafeImage } from "../../SafeImage";
+import { SceneCompactCard } from "../../scene/SceneCompactCard";
+import { SceneSectionModal } from "../../scene/SceneSectionModal";
 import { useToasts } from "../../../lib/store/toasts";
 import {
   checkImage,
@@ -93,6 +95,7 @@ export function RegulationCheckWorkspace() {
   const [imagePaths, setImagePaths] = useState<string[]>([]);
   const [ruleSetId, setRuleSetId] = useState<string>(DEFAULT_RULE_SETS[0].id);
   const [customRule, setCustomRule] = useState("");
+  const [open, setOpen] = useState(false);
   const [running, setRunning] = useState(false);
   const [resultState, setResultState] = useState<CheckResultsState | null>(null);
   const runTokenRef = useRef(0);
@@ -264,60 +267,78 @@ export function RegulationCheckWorkspace() {
 
       <div className="flex min-h-0 flex-1 overflow-hidden">
         {/* 左: 設定パネル */}
-        <div className="flex w-[340px] shrink-0 flex-col gap-4 overflow-y-auto border-r border-[#242424] p-4">
+        <div className="flex w-80 shrink-0 flex-col gap-4 overflow-y-auto border-r border-[#242424] p-4">
           <PageHelp
             what="入稿前のクリエイティブを渡すと、文字の占める割合・入れ忘れてはいけない表記・ロゴの扱い・使ってはいけない表現を見て、引っかかる箇所を理由つきで指摘します。"
             first="まずは出す先の媒体を下から選び、検査したい画像を入れてください。"
           />
 
-          {/* 媒体プリセット */}
-          <div className="flex flex-col gap-1.5">
-            <label className="text-xs font-medium text-neutral-300">媒体ルールセット</label>
-            <select
-              value={ruleSetId}
-              onChange={(e) => setRuleSetId(e.target.value)}
-              disabled={running}
-              className="rounded-md border border-[#2c2c2c] bg-[#1a1a1a] px-2 py-1.5 text-xs text-neutral-200 outline-none focus:border-neutral-500 disabled:opacity-50"
-            >
-              {DEFAULT_RULE_SETS.map((rs) => (
-                <option key={rs.id} value={rs.id}>
-                  {rs.name}
-                </option>
-              ))}
-            </select>
-            <p className="text-[11px] leading-relaxed text-neutral-500">{ruleSet.description}</p>
-          </div>
+          <SceneCompactCard
+            number="01"
+            title="検査ルール"
+            summary={`${ruleSet.name}（${activeRules.length}件）${
+              customRule.trim() ? " / 追加ルールあり" : ""
+            }`}
+            onClick={() => setOpen(true)}
+          />
 
-          {/* 適用中ルール一覧 */}
-          <div className="flex flex-col gap-1.5">
-            <span className="text-xs font-medium text-neutral-300">
-              適用ルール（{ruleSet.rules.length} 件）
-            </span>
-            <ul className="flex flex-col gap-1">
-              {ruleSet.rules.map((r) => (
-                <li
-                  key={r.id}
-                  className="rounded border border-[#242424] bg-[#171717] px-2 py-1.5 text-[11px]"
+          <SceneSectionModal
+            open={open}
+            number="01"
+            title="検査ルール"
+            onClose={() => setOpen(false)}
+          >
+            <div className="flex flex-col gap-4">
+              {/* 媒体プリセット */}
+              <div className="flex flex-col gap-1.5">
+                <label className="text-xs font-medium text-neutral-300">媒体ルールセット</label>
+                <select
+                  value={ruleSetId}
+                  onChange={(e) => setRuleSetId(e.target.value)}
+                  disabled={running}
+                  className="rounded-md border border-[#2c2c2c] bg-[#1a1a1a] px-2 py-1.5 text-xs text-neutral-200 outline-none focus:border-neutral-500 disabled:opacity-50"
                 >
-                  <span className="font-medium text-neutral-300">{r.name}</span>
-                  <span className="ml-1 text-neutral-500">— {r.description}</span>
-                </li>
-              ))}
-            </ul>
-          </div>
+                  {DEFAULT_RULE_SETS.map((rs) => (
+                    <option key={rs.id} value={rs.id}>
+                      {rs.name}
+                    </option>
+                  ))}
+                </select>
+                <p className="text-[11px] leading-relaxed text-neutral-500">{ruleSet.description}</p>
+              </div>
 
-          {/* 自由記述ルール */}
-          <div className="flex flex-col gap-1.5">
-            <label className="text-xs font-medium text-neutral-300">追加ルール（自由記述・任意）</label>
-            <textarea
-              value={customRule}
-              onChange={(e) => setCustomRule(e.target.value)}
-              disabled={running}
-              rows={3}
-              placeholder="例: 画面下部に「PR」の表記が必須。無ければ指摘してください。"
-              className="resize-none rounded-md border border-[#2c2c2c] bg-[#1a1a1a] px-2 py-1.5 text-xs text-neutral-200 outline-none placeholder:text-neutral-600 focus:border-neutral-500 disabled:opacity-50"
-            />
-          </div>
+              {/* 適用中ルール一覧 */}
+              <div className="flex flex-col gap-1.5">
+                <span className="text-xs font-medium text-neutral-300">
+                  適用ルール（{ruleSet.rules.length} 件）
+                </span>
+                <ul className="flex flex-col gap-1">
+                  {ruleSet.rules.map((r) => (
+                    <li
+                      key={r.id}
+                      className="rounded border border-[#242424] bg-[#171717] px-2 py-1.5 text-[11px]"
+                    >
+                      <span className="font-medium text-neutral-300">{r.name}</span>
+                      <span className="ml-1 text-neutral-500">— {r.description}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+
+              {/* 自由記述ルール */}
+              <div className="flex flex-col gap-1.5">
+                <label className="text-xs font-medium text-neutral-300">追加ルール（自由記述・任意）</label>
+                <textarea
+                  value={customRule}
+                  onChange={(e) => setCustomRule(e.target.value)}
+                  disabled={running}
+                  rows={3}
+                  placeholder="例: 画面下部に「PR」の表記が必須。無ければ指摘してください。"
+                  className="resize-none rounded-md border border-[#2c2c2c] bg-[#1a1a1a] px-2 py-1.5 text-xs text-neutral-200 outline-none placeholder:text-neutral-600 focus:border-neutral-500 disabled:opacity-50"
+                />
+              </div>
+            </div>
+          </SceneSectionModal>
 
           {/* 検査対象の追加 */}
           <div className="flex flex-col gap-1.5">
