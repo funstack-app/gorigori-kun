@@ -42,13 +42,18 @@ import {
   savePagesBulk,
 } from "../../../lib/comic/savePage";
 import { ComicPhaseRail } from "./ComicPhaseRail";
-import { BalloonEditor, SfxEditor } from "./BalloonEditor";
+import { ComicPlanCards } from "./ComicPlanCards";
 import { presetKind, usePresets } from "../../../lib/store/presets";
 import { selectCharacterReferences } from "../../../lib/presets/character";
 import { useActiveProject } from "../../../lib/store/activeProject";
 import { useComicStoryHistory } from "../../../lib/store/comicStoryHistory";
 import { useProjects } from "../../../lib/store/projects";
 import { useToasts } from "../../../lib/store/toasts";
+import {
+  COMIC_CARD_SIZE_MAX,
+  COMIC_CARD_SIZE_MIN,
+  useWorkspace,
+} from "../../../lib/store/workspace";
 import { ActiveProjectSelector } from "../../ActiveProjectSelector";
 import { GenerationGauge } from "../../GenerationGauge";
 import { ReferenceLibraryModal } from "../../ReferenceLibraryModal";
@@ -1617,6 +1622,7 @@ function ComicFlow() {
               characters={characters}
               envReferences={envReferences}
               storyTemplateId={storyTemplateId}
+              readingDirection={readingDirection}
               updateStoryPage={updateStoryPage}
               updateStoryPanel={updateStoryPanel}
               onInsertPanel={insertStoryPanel}
@@ -2073,49 +2079,6 @@ function PageCastRow({
 }
 
 /**
- * コマ境界の挿入バー（e57 + r83 2026-08-03）。
- *
- * 各コマカードの間（ページ先頭と末尾を含む、コマ数+1箇所）に常時表示し、
- * 「そこに挿す」を位置の数値入力なしで直感的に伝える。
- * 場面転換コマは専用フラグを持たない「プリセット内容入りの通常コマ」。
- */
-function PanelInsertBar({
-  full,
-  onInsert,
-}: {
-  /** コマ数が上限に達しているか（両ボタンを disabled にする）。 */
-  full: boolean;
-  onInsert: (preset: "blank" | "transition") => void;
-}) {
-  const buttonClass =
-    "rounded border border-dashed border-[#2a2a2a] bg-[#141414] px-2 py-1 text-[11px] text-neutral-400 transition hover:border-pink-500/40 hover:text-pink-200 disabled:cursor-not-allowed disabled:opacity-40";
-  return (
-    <div className="flex items-center gap-2">
-      <span className="h-px flex-1 bg-[#242424]" />
-      <button
-        type="button"
-        onClick={() => onInsert("blank")}
-        disabled={full}
-        title={full ? "1ページは最大8コマです" : "この位置にコマを挿入"}
-        className={buttonClass}
-      >
-        ＋コマを追加
-      </button>
-      <button
-        type="button"
-        onClick={() => onInsert("transition")}
-        disabled={full}
-        title={full ? "1ページは最大8コマです" : "この位置に間・場面転換の空白コマを挿入"}
-        className={buttonClass}
-      >
-        ＋場面転換コマ
-      </button>
-      <span className="h-px flex-1 bg-[#242424]" />
-    </div>
-  );
-}
-
-/**
  * 構成の確認（主経路の工程の要）。
  *
  * ページ単位のあらすじ・コマ割り方針と、
@@ -2128,6 +2091,7 @@ function PlanPhase({
   characters,
   envReferences,
   storyTemplateId,
+  readingDirection,
   updateStoryPage,
   updateStoryPanel,
   onInsertPanel,
@@ -2144,6 +2108,7 @@ function PlanPhase({
   envReferences: ComicEnvReference[];
   /** 構成生成が使ったテンプレ（null=おまかせ）。非 null ならコマ割り方針は出さない。 */
   storyTemplateId: string | null;
+  readingDirection: ComicReadingDirection;
   updateStoryPage: (pageNo: number, patch: Partial<ComicStoryPage>) => void;
   updateStoryPanel: (
     pageNo: number,
@@ -2200,107 +2165,14 @@ function PlanPhase({
             />
           </Field>
 
-          {/* テンプレを選んでいるときはテンプレがレイアウトの正なので出さない。 */}
-          {storyTemplateId === null && (
-            <Field label="コマ割り方針（英語）">
-              <input
-                value={page.layoutHint}
-                onChange={(e) =>
-                  updateStoryPage(page.page, { layoutHint: e.target.value })
-                }
-                className="w-full rounded border border-[#2a2a2a] bg-[#1a1a1a] px-2 py-1.5 text-xs text-neutral-100 focus:border-pink-500/50 focus:outline-none"
-              />
-            </Field>
-          )}
-
-          {page.panels.map((panel) => (
-            <div key={panel.index} className="flex flex-col gap-2">
-              {/* e57 + r83: このコマの直前にコマ/場面転換コマを挿入するバー。 */}
-              <PanelInsertBar
-                full={page.panels.length >= MAX_PANELS_PER_PAGE}
-                onInsert={(preset) => onInsertPanel(page.page, panel.index - 1, preset)}
-              />
-              <div
-                className="rounded-md border border-[#2a2a2a] bg-[#141414] p-3"
-              >
-              <div className="mb-2 flex flex-wrap items-center gap-2">
-                <span className="rounded bg-pink-500/10 px-2 py-0.5 text-xs font-semibold text-pink-200">
-                  コマ {panel.index}
-                </span>
-                {panel.characters.length > 0 && (
-                  <span className="text-xs text-neutral-500">
-                    登場: {panel.characters.join("、")}
-                  </span>
-                )}
-                <button
-                  type="button"
-                  onClick={() => onRemovePanel(page.page, panel.index)}
-                  disabled={page.panels.length <= 1}
-                  className="ml-auto rounded border border-[#2a2a2a] bg-[#1a1a1a] px-2 py-0.5 text-[11px] text-neutral-400 transition hover:border-rose-500/40 hover:text-rose-300 disabled:cursor-not-allowed disabled:opacity-40"
-                  title="このコマを削除"
-                >
-                  コマを削除
-                </button>
-                {/* per-panel の参照バッジは撤去（2026-07-28）。story 経路の添付は
-                    ページ一括なので、コマ単位の表示は実態と乖離していた。
-                    紐付けの正はページヘッダの PageCastRow。 */}
-              </div>
-
-              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                <Field label="構図・カメラ">
-                  <input
-                    value={panel.composition}
-                    onChange={(e) =>
-                      updateStoryPanel(page.page, panel.index, {
-                        composition: e.target.value,
-                      })
-                    }
-                    className="w-full rounded border border-[#2a2a2a] bg-[#1a1a1a] px-2 py-1.5 text-xs text-neutral-100 focus:border-pink-500/50 focus:outline-none"
-                  />
-                </Field>
-                <Field label="演技・表情">
-                  <input
-                    value={panel.acting}
-                    onChange={(e) =>
-                      updateStoryPanel(page.page, panel.index, { acting: e.target.value })
-                    }
-                    className="w-full rounded border border-[#2a2a2a] bg-[#1a1a1a] px-2 py-1.5 text-xs text-neutral-100 focus:border-pink-500/50 focus:outline-none"
-                  />
-                </Field>
-              </div>
-
-              <div className="mt-2 flex flex-col gap-2">
-                <BalloonEditor
-                  balloons={panel.balloons}
-                  onChange={(balloons) =>
-                    updateStoryPanel(page.page, panel.index, { balloons })
-                  }
-                />
-                <SfxEditor
-                  sfx={panel.sfx}
-                  onChange={(sfx) => updateStoryPanel(page.page, panel.index, { sfx })}
-                />
-              </div>
-
-              <Field label="生成プロンプト" className="mt-2">
-                <textarea
-                  value={panel.prompt}
-                  onChange={(e) =>
-                    updateStoryPanel(page.page, panel.index, { prompt: e.target.value })
-                  }
-                  rows={2}
-                  className="w-full resize-y rounded border border-[#2a2a2a] bg-[#1a1a1a] px-2 py-1.5 text-xs text-neutral-100 focus:border-pink-500/50 focus:outline-none"
-                />
-              </Field>
-              </div>
-            </div>
-          ))}
-
-          {/* 末尾の挿入バー（合計 panels.length + 1 本）。旧・単独の
-              「＋ コマを追加」ボタンはこのバーが代替する（導線の重複を作らない）。 */}
-          <PanelInsertBar
-            full={page.panels.length >= MAX_PANELS_PER_PAGE}
-            onInsert={(preset) => onInsertPanel(page.page, page.panels.length, preset)}
+          <ComicPlanCards
+            page={page}
+            storyTemplateId={storyTemplateId}
+            readingDirection={readingDirection}
+            updateStoryPage={updateStoryPage}
+            updateStoryPanel={updateStoryPanel}
+            onInsertPanel={onInsertPanel}
+            onRemovePanel={onRemovePanel}
           />
         </div>
       ))}
@@ -2327,6 +2199,13 @@ function PlanPhase({
     </div>
   );
 }
+
+/** 3:4 ページカード用。静的文字列にして Tailwind の解析対象から外さない。 */
+const COMIC_PAGE_GRID_COLS: Record<number, string> = {
+  1: "grid-cols-1 sm:grid-cols-2 lg:grid-cols-3",
+  2: "grid-cols-2 sm:grid-cols-3 lg:grid-cols-4",
+  3: "grid-cols-3 sm:grid-cols-4 lg:grid-cols-6",
+};
 
 /**
  * ページ一覧（主経路の出口）。
@@ -2388,6 +2267,8 @@ function PagesPhase({
   onRecoverSlots: (page: ComicStoryPage) => Promise<SlotRecoveryOutcome>;
 }) {
   const pushToast = useToasts((s) => s.push);
+  const comicCardSize = useWorkspace((s) => s.comicCardSize);
+  const setComicCardSize = useWorkspace((s) => s.setComicCardSize);
   const [editingPage, setEditingPage] = useState<number | null>(null);
   /** Kindle 風・見開きプレビュー（読み取り専用）の開閉。常に1ページ目から開く。 */
   const [previewOpen, setPreviewOpen] = useState(false);
@@ -2610,6 +2491,20 @@ function PagesPhase({
           ページ一覧（全{storyPages.length}ページ）
         </p>
         <div className="flex flex-wrap items-center gap-2">
+          <label className="inline-flex items-center gap-1" title="カードを大きく ⇔ 小さく">
+            <span className="text-[10px] font-bold text-neutral-500">大</span>
+            <input
+              type="range"
+              min={COMIC_CARD_SIZE_MIN}
+              max={COMIC_CARD_SIZE_MAX}
+              step={1}
+              value={comicCardSize}
+              onChange={(event) => setComicCardSize(Number(event.target.value))}
+              className="h-1 w-16 cursor-pointer accent-pink-500"
+              aria-label="カードサイズ"
+            />
+            <span className="text-[10px] font-bold text-neutral-500">小</span>
+          </label>
           <span className="text-xs text-neutral-400">保存形式</span>
           <div className="inline-flex items-center gap-1 rounded-md border border-[#2a2a2a] bg-[#161616] p-1">
             {(
@@ -2666,7 +2561,11 @@ function PagesPhase({
         </div>
       </div>
 
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+      <div
+        className={`grid gap-3 ${
+          COMIC_PAGE_GRID_COLS[comicCardSize] ?? COMIC_PAGE_GRID_COLS[2]
+        }`}
+      >
         {storyPages.map((page) => {
           const result = pageResults.find((r) => r.page === page.page);
           const isPanelReediting = panelReeditRunningPage === page.page;
