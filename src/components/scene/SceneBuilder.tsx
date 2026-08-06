@@ -1,26 +1,13 @@
 import { useState } from "react";
 
-import { NO_SELECT } from "../../lib/scene/catalog";
 import { useSceneStore } from "../../lib/store/scene";
+import { compact, show } from "../../lib/ui/foldSummary";
 import { CameraSection } from "./CameraSection";
 import { LightingMoodSection } from "./LightingMoodSection";
 import { SceneCompactCard } from "./SceneCompactCard";
 import { SceneSectionModal } from "./SceneSectionModal";
 import { StyleSection } from "./StyleSection";
 import { SubjectFramingSection } from "./SubjectFramingSection";
-
-function show(value: string, fallback: string): string {
-  const trimmed = value.trim();
-  if (!trimmed || trimmed === NO_SELECT) return fallback;
-  return trimmed;
-}
-
-function compact(...values: string[]): string {
-  const filtered = values
-    .map((value) => value.trim())
-    .filter((value) => value.length > 0 && value !== NO_SELECT);
-  return filtered.length > 0 ? filtered.join(" / ") : "未設定";
-}
 
 type SectionId = "subject" | "lighting" | "camera" | "style";
 
