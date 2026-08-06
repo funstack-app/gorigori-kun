@@ -197,6 +197,23 @@ function canvasToPngBlob(canvas: HTMLCanvasElement): Promise<Blob> {
 }
 
 /**
+ * blob → base64（data: プレフィックスなし）。
+ * 大きな PNG でもスタックを使わないよう FileReader 経由で変換する。
+ */
+function blobToBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const s = String(reader.result);
+      resolve(s.slice(s.indexOf(",") + 1));
+    };
+    reader.onerror = () =>
+      reject(new Error("漫画ページの正規化に失敗しました。"));
+    reader.readAsDataURL(blob);
+  });
+}
+
+/**
  * 画像を必ず1080x1440のPNGへ正規化し、元画像の隣へ別名で保存する。
  * ±15%超でも止めず、aspectWarn=trueを添えて返す。
  */
@@ -224,16 +241,20 @@ export async function normalizeComicPage(
   );
 
   const blob = await canvasToPngBlob(canvas);
-  const { writeFile } = await import("@tauri-apps/plugin-fs");
+  // 書き込みは plugin-fs でなく Rust コマンド経由にする。
+  // storageRoot はユーザー設定で任意パス（Pictures / 外付け等）になり、
+  // plugin-fs の fs:scope 許可リストでは列挙しきれない（実害 2026-08-06:
+  // 保存先が ~/Pictures のとき writeFile が scope 違反で全ページ失敗した）。
+  const { editExport } = await import("../ipc");
   const { basename, dirname, extname, join } = await import("@tauri-apps/api/path");
   const extension = await extname(imagePath).catch(() => "");
-  const base = await basename(imagePath, extension);
+  const base = await basename(imagePath, extension ? `.${extension}` : undefined);
   const stem = base.replace(/_comic_1080x1440$/, "") || "manga_page";
   const dest = await join(
     await dirname(imagePath),
     `${stem}_comic_1080x1440.png`,
   );
-  await writeFile(dest, new Uint8Array(await blob.arrayBuffer()));
+  await editExport.png(dest, await blobToBase64(blob));
 
   return {
     imagePath: dest,
