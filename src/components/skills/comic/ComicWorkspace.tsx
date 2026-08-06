@@ -1453,7 +1453,7 @@ function ComicFlow() {
       return false;
     };
 
-    // 単体生成のときは自前で親 run を立てる。どちらの方式も画像生成は1ページ1回。
+    // 単体生成のときは自前で親 run を立てる。aligned だけ照合失敗時に1回再試行する。
     let soloTrack: ReturnType<typeof beginDirectRun> | null = null;
     if (!sourceTag) {
       soloTrack = beginDirectRun("comic", 1);
@@ -1531,29 +1531,37 @@ function ComicFlow() {
           styleText: colorMode === "faithful" ? undefined : styleText,
         },
       );
-      const generated = await images.generateBatch({
-        prompt,
-        count: 1,
-        refImagePaths: refPaths.length > 0 ? refPaths : undefined,
-        aspect: COMIC_PAGE_ASPECT,
-        sourceTag: tag,
-      });
-      if (!stillMine()) return false;
-      if (generated.cancelled) {
-        resetPageTile();
-        return false;
-      }
-      const generatedPath = generated.generatedPaths[0];
-      if (!generatedPath) {
-        throw new Error(generated.errors[0] ?? "画像が生成されませんでした");
-      }
+      /** 初回とaligned再試行を、同じ生成条件・正規化・中止経路へ通す。 */
+      const generateNormalizedPage = async () => {
+        const generated = await images.generateBatch({
+          prompt,
+          count: 1,
+          refImagePaths: refPaths.length > 0 ? refPaths : undefined,
+          aspect: COMIC_PAGE_ASPECT,
+          sourceTag: tag,
+        });
+        if (!stillMine()) return null;
+        if (generated.cancelled) {
+          resetPageTile();
+          return null;
+        }
+        const generatedPath = generated.generatedPaths[0];
+        if (!generatedPath) {
+          throw new Error(generated.errors[0] ?? "画像が生成されませんでした");
+        }
 
-      // Aとalignedの両方を同じ既存関所で1080x1440へ正規化する。
-      const normalizedPage = await normalizeComicPage(generatedPath);
-      if (!stillMine()) return false;
-      if (normalizedPage.aspectWarn) {
-        pushToast({ kind: "info", text: COMIC_PAGE_ASPECT_WARN_MESSAGE, ttlMs: 5000 });
-      }
+        // Aとalignedの両方を同じ既存関所で1080x1440へ正規化する。
+        const normalized = await normalizeComicPage(generatedPath);
+        if (!stillMine()) return null;
+        if (normalized.aspectWarn) {
+          pushToast({ kind: "info", text: COMIC_PAGE_ASPECT_WARN_MESSAGE, ttlMs: 5000 });
+        }
+        return normalized;
+      };
+
+      const initialNormalizedPage = await generateNormalizedPage();
+      if (!initialNormalizedPage) return false;
+      let normalizedPage = initialNormalizedPage;
 
       /** 素のA画像を採用する。direct本流とaligned照合失敗の共通処理。 */
       const adoptDirectPage = () => {
@@ -1590,13 +1598,30 @@ function ComicFlow() {
       } else {
         // template は上で必須確認済み。TypeScriptへも同じ事実を明示する。
         if (!alignedTemplate) throw new Error("テンプレを確認できませんでした。");
-        const imageData = await readPanelImageData(normalizedPage.imagePath);
+        let imageData = await readPanelImageData(normalizedPage.imagePath);
         if (!stillMine()) return false;
-        const alignment = alignSlotsToTemplate(
+        let alignment = alignSlotsToTemplate(
           imageData,
           alignedTemplate,
           readingDirection,
         );
+        if (!alignment.ok) {
+          pushToast({
+            kind: "info",
+            text: "枠が揃わなかったため、もう一度だけ描き直しています…",
+            ttlMs: 7000,
+          });
+          const retryNormalizedPage = await generateNormalizedPage();
+          if (!retryNormalizedPage) return false;
+          normalizedPage = retryNormalizedPage;
+          imageData = await readPanelImageData(normalizedPage.imagePath);
+          if (!stillMine()) return false;
+          alignment = alignSlotsToTemplate(
+            imageData,
+            alignedTemplate,
+            readingDirection,
+          );
+        }
         if (!alignment.ok) {
           adoptDirectPage();
           pushToast({
@@ -3106,6 +3131,7 @@ function PanelReeditModal({
   const [detecting, setDetecting] = useState(false);
   const [manualAdjust, setManualAdjust] = useState(false);
   const [manualValidated, setManualValidated] = useState(false);
+  const [detectionFailed, setDetectionFailed] = useState(false);
   const [rangeError, setRangeError] = useState<string | null>(null);
   const [reeditError, setReeditError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -3136,6 +3162,7 @@ function PanelReeditModal({
     setDetection(null);
     setManualAdjust(false);
     setManualValidated(false);
+    setDetectionFailed(false);
     setRangeError(null);
     setReeditError(null);
     setMergeTarget(null);
@@ -3184,7 +3211,11 @@ function PanelReeditModal({
   const confirmRange = () => {
     if (locked) return;
     try {
-      validatePanelPolygon(points, { selectedSlotIndex: selectedIndex - 1, slots });
+      if (detectionFailed) {
+        validatePanelPolygon(points);
+      } else {
+        validatePanelPolygon(points, { selectedSlotIndex: selectedIndex - 1, slots });
+      }
       setManualValidated(true);
       setRangeError(null);
       setReeditError(null);
@@ -3238,6 +3269,7 @@ function PanelReeditModal({
       setDetection(null);
       setManualAdjust(false);
       setManualValidated(false);
+      setDetectionFailed(false);
       setPoints(guideForPanel(selectedIndex));
       setRangeError(null);
       setReeditError(null);
@@ -3247,6 +3279,7 @@ function PanelReeditModal({
     setDetection(null);
     setManualAdjust(false);
     setManualValidated(false);
+    setDetectionFailed(false);
     void readPanelImageData(imagePath)
       .then((imageData) => {
         if (detectionTokenRef.current !== token) return;
@@ -3257,14 +3290,17 @@ function PanelReeditModal({
           // 検出に失敗したら、自分で「範囲を微調整」を探させずに手動調整へ自動移行する。
           // ドラッグ可能な頂点が出るので「次に何をするか」が画面上で自明になる。
           setManualAdjust(true);
+          setDetectionFailed(true);
           setReeditError("自動で枠の内側を特定できなかったため、手動調整モードにしました。頂点をドラッグして枠に合わせ、「調整した範囲を確認」を押してください。");
         } else {
+          setDetectionFailed(false);
           setReeditError(null);
         }
       })
       .catch((error) => {
         if (detectionTokenRef.current !== token) return;
         setDetection(null);
+        setDetectionFailed(true);
         setReeditError(`自動選択に失敗しました: ${(error as Error)?.message ?? error}。ページを開き直して、もう一度お試しください。`);
       })
       .finally(() => {
