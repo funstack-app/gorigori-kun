@@ -308,11 +308,16 @@ export function createPanelMaskRgba(
   return pixels;
 }
 
+/** 人間可読の文言を保ったまま、呼び出し側がサイズ不一致だけを検知する固定接頭辞。 */
+export const PANEL_SIZE_MISMATCH_PREFIX = "生成サイズ不一致: ";
+
 /** 寸法不一致の返却画像・マスクは、合成前に必ず不採用にする。 */
 export function assertSameRasterDimensions(...rasters: RgbaRaster[]): void {
   const first = rasters[0];
   if (!first || rasters.some((raster) => raster.width !== first.width || raster.height !== first.height)) {
-    throw new Error("元ページ・生成画像・マスクのサイズが一致しないため採用しませんでした。");
+    throw new Error(
+      `${PANEL_SIZE_MISMATCH_PREFIX}元ページ・生成画像・マスクのサイズが一致しないため採用しませんでした。`,
+    );
   }
 }
 

@@ -202,6 +202,16 @@ export type ComicStoryPage = {
   panelCount: number;
   panels: ComicPanel[];
   /**
+   * おまかせレイアウトの行構造。各行は上から順、値は読み順のコマ番号。
+   * 旧データや構成AIの省略に耐えるため任意。
+   */
+  rows?: number[][];
+  /**
+   * rows から合成した、このページの決定論レイアウト。
+   * 旧データやテンプレ指定ページでは undefined。
+   */
+  layoutPlan?: ComicPanelSlot[];
+  /**
    * 生成後のコマ分割/統合でこのページ専用に上書きされたスロット。
    * undefined = テンプレ（getComicTemplate(storyTemplateId).slots）が正。
    * ある場合は length === panels.length を分割/統合の操作側が常に保証する。
@@ -223,6 +233,8 @@ export type ComicPageResult = {
   colorMode?: ComicColorMode;
   /** この画像を生成したときの絵柄テキスト（qvs）。1コマ再編集が同じ絵柄を引き継ぐための記録。 */
   styleText?: string;
+  /** 正規化後画像における実コンテンツ領域（percent）。帯なしでは省略。 */
+  contentRect?: { x: number; y: number; w: number; h: number };
 };
 
 /**

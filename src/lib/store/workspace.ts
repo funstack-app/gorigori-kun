@@ -30,9 +30,17 @@ export const STORYBOARD_CARD_SIZE_MIN = 1;
 export const STORYBOARD_CARD_SIZE_MAX = 3;
 export const STORYBOARD_CARD_SIZE_DEFAULT = 2;
 
+/** 漫画ページ一覧のカードサイズ。1=大きく / 2=既定 / 3=小さく。 */
+export type ComicCardSize = number;
+
+export const COMIC_CARD_SIZE_MIN = 1;
+export const COMIC_CARD_SIZE_MAX = 3;
+export const COMIC_CARD_SIZE_DEFAULT = 2;
+
 const WORKSPACE_PURPOSE_IDS = ["artwork", "ad", "videoStory"] as const;
 const TIMELINE_SIZE_LS_KEY = "workspace.timelineSize";
 const STORYBOARD_CARD_SIZE_LS_KEY = "workspace.storyboardCardSize";
+const COMIC_CARD_SIZE_LS_KEY = "workspace.comicCardSize";
 
 export function isWorkspacePurpose(value: string): value is WorkspacePurpose {
   return (WORKSPACE_PURPOSE_IDS as readonly string[]).includes(value);
@@ -95,15 +103,45 @@ function persistStoryboardCardSize(size: StoryboardCardSize) {
   }
 }
 
+export function clampComicCardSize(n: number): ComicCardSize {
+  if (!Number.isFinite(n)) return COMIC_CARD_SIZE_DEFAULT;
+  return Math.min(
+    COMIC_CARD_SIZE_MAX,
+    Math.max(COMIC_CARD_SIZE_MIN, Math.round(n)),
+  );
+}
+
+function readPersistedComicCardSize(): ComicCardSize {
+  try {
+    const raw = localStorage.getItem(COMIC_CARD_SIZE_LS_KEY);
+    if (!raw) return COMIC_CARD_SIZE_DEFAULT;
+    const n = Number(raw);
+    if (Number.isFinite(n)) return clampComicCardSize(n);
+  } catch {
+    /* private mode etc. */
+  }
+  return COMIC_CARD_SIZE_DEFAULT;
+}
+
+function persistComicCardSize(size: ComicCardSize) {
+  try {
+    localStorage.setItem(COMIC_CARD_SIZE_LS_KEY, String(size));
+  } catch {
+    /* non-fatal */
+  }
+}
+
 type WorkspaceState = {
   activeTab: WorkspaceTab;
   purpose: WorkspacePurpose;
   timelineSize: TimelineSize;
   storyboardCardSize: StoryboardCardSize;
+  comicCardSize: ComicCardSize;
   setActiveTab: (tab: WorkspaceTab) => void;
   setPurpose: (purpose: WorkspacePurpose) => void;
   setTimelineSize: (size: TimelineSize) => void;
   setStoryboardCardSize: (size: StoryboardCardSize) => void;
+  setComicCardSize: (size: ComicCardSize) => void;
 };
 
 export const useWorkspace = create<WorkspaceState>((set) => ({
@@ -111,6 +149,7 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
   purpose: "artwork",
   timelineSize: readPersistedTimelineSize(),
   storyboardCardSize: readPersistedStoryboardCardSize(),
+  comicCardSize: readPersistedComicCardSize(),
   setActiveTab: (activeTab) => set({ activeTab }),
   setPurpose: (purpose) => set({ purpose }),
   setTimelineSize: (size) => {
@@ -122,5 +161,10 @@ export const useWorkspace = create<WorkspaceState>((set) => ({
     const next = clampStoryboardCardSize(size);
     persistStoryboardCardSize(next);
     set({ storyboardCardSize: next });
+  },
+  setComicCardSize: (size) => {
+    const next = clampComicCardSize(size);
+    persistComicCardSize(next);
+    set({ comicCardSize: next });
   },
 }));

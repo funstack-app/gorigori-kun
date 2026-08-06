@@ -55,6 +55,7 @@ export function ComicSpreadPreviewModal({
   onClose,
 }: ComicSpreadPreviewModalProps) {
   const [spreadIndex, setSpreadIndex] = useState(0);
+  const [zoom, setZoom] = useState(100);
   const closeBtnRef = useRef<HTMLButtonElement | null>(null);
 
   const pageCount = pages.length;
@@ -63,6 +64,7 @@ export function ComicSpreadPreviewModal({
   const safeIndex = Math.min(spreadIndex, Math.max(spreads.length - 1, 0));
   const spread = spreads[safeIndex] ?? [];
   const rtl = direction === "rtl";
+  const zoomed = zoom > 100;
 
   // 端でループしない。範囲外は何もしないだけ（クラッシュさせない）。
   const goNext = () =>
@@ -118,22 +120,44 @@ export function ComicSpreadPreviewModal({
         <span className="text-xs text-neutral-400">
           {rtl ? "右→左（日本式）" : "左→右"}
         </span>
-        <button
-          ref={closeBtnRef}
-          type="button"
-          onClick={onClose}
-          aria-label="プレビューを閉じる"
-          className="rounded-md border border-[#2a2a2a] bg-[#1a1a1a] px-3 py-1.5 text-xs font-medium text-neutral-300 transition hover:border-pink-500/40 hover:text-white"
-        >
-          ✕ 閉じる
-        </button>
+        <div className="flex items-center gap-3">
+          <label className="flex items-center gap-2 text-xs text-neutral-400">
+            <span>{zoom}%</span>
+            <input
+              type="range"
+              min={100}
+              max={200}
+              step={10}
+              value={zoom}
+              onChange={(event) => setZoom(Number(event.target.value))}
+              aria-label="プレビュー拡大率"
+              className="h-1 w-24 cursor-pointer accent-pink-500"
+            />
+          </label>
+          <button
+            ref={closeBtnRef}
+            type="button"
+            onClick={onClose}
+            aria-label="プレビューを閉じる"
+            className="rounded-md border border-[#2a2a2a] bg-[#1a1a1a] px-3 py-1.5 text-xs font-medium text-neutral-300 transition hover:border-pink-500/40 hover:text-white"
+          >
+            ✕ 閉じる
+          </button>
+        </div>
       </div>
 
-      <div className="relative flex flex-1 items-center justify-center overflow-hidden px-4">
+      <div
+        className={`relative flex flex-1 px-4 ${
+          zoomed
+            ? "items-start justify-start overflow-auto"
+            : "items-center justify-center overflow-hidden"
+        }`}
+      >
         <div
-          className={`flex h-full max-h-full items-center justify-center ${
+          className={`flex shrink-0 items-center justify-center ${
             rtl ? "flex-row-reverse" : "flex-row"
-          }`}
+          } ${zoomed ? "m-auto" : "h-full max-h-full"}`}
+          style={zoomed ? { height: `${zoom}%` } : undefined}
         >
           {spread.map((pageNumber) => (
             <SpreadPage
@@ -172,7 +196,36 @@ export function ComicSpreadPreviewModal({
         </button>
       </div>
 
-      <div className="flex items-center justify-center px-4 py-3">
+      <div className="flex items-center justify-center gap-3 px-4 py-3">
+        <button
+          type="button"
+          onClick={leftIsNext ? goNext : goPrev}
+          disabled={leftIsNext ? atLast : atFirst}
+          aria-label={leftIsNext ? "次の見開き" : "前の見開き"}
+          className="text-xl text-neutral-400 transition hover:text-white disabled:cursor-default disabled:text-neutral-700"
+        >
+          ‹
+        </button>
+        <input
+          type="range"
+          min={0}
+          max={Math.max(spreads.length - 1, 0)}
+          step={1}
+          value={safeIndex}
+          onChange={(event) => setSpreadIndex(Number(event.target.value))}
+          disabled={spreads.length <= 1}
+          aria-label="見開きページを移動"
+          className="h-1 w-40 cursor-pointer accent-pink-500 disabled:cursor-default"
+        />
+        <button
+          type="button"
+          onClick={leftIsNext ? goPrev : goNext}
+          disabled={leftIsNext ? atFirst : atLast}
+          aria-label={leftIsNext ? "前の見開き" : "次の見開き"}
+          className="text-xl text-neutral-400 transition hover:text-white disabled:cursor-default disabled:text-neutral-700"
+        >
+          ›
+        </button>
         <span className="text-xs font-medium text-neutral-300">{label}</span>
       </div>
     </div>
