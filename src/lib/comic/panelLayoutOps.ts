@@ -24,8 +24,12 @@ import {
   type PanelReeditPoint,
   type RgbaRaster,
 } from "./panelReedit";
-import type { ComicPanelSlot } from "./layoutTemplates";
-import type { ComicPanel, ComicStoryPage } from "./types";
+import { getComicTemplate, type ComicPanelSlot } from "./layoutTemplates";
+import type {
+  ComicPanel,
+  ComicReadingDirection,
+  ComicStoryPage,
+} from "./types";
 
 /** "vertical" = 縦の分割線で左右に分ける / "horizontal" = 横の分割線で上下に分ける。 */
 export type SplitDirection = "vertical" | "horizontal";
@@ -60,15 +64,85 @@ function midpoint(a: PanelReeditPoint, b: PanelReeditPoint): PanelReeditPoint {
 }
 
 /**
- * スロットを2分割する。first = 読み順で先（rtl 前提: vertical→右半分 / horizontal→上半分）、
- * second = 読み順で後（空白になる側）。ガターは分割線の両側へ半分ずつ取る。
- * 入口ゲートが rtl 限定を保証している前提（ltr は本機能ごと対象外）。
+ * スロットをページ中央のX軸で左右反転する。
+ * points は [tl,tr,br,bl] → [mirror(tr),mirror(tl),mirror(bl),mirror(br)] と並べ直し、
+ * TL→TR→BR→BL の正典順を保つ。2回適用すると元へ戻る純関数。
+ */
+export function mirrorSlotX(slot: ComicPanelSlot): ComicPanelSlot {
+  if (!slot.points) {
+    return { ...slot, x: 100 - (slot.x + slot.w) };
+  }
+  const [tl, tr, br, bl] = slot.points;
+  const mirror = ([x, y]: [number, number]): PanelReeditPoint => ({ x: 100 - x, y });
+  return slotFromPoints([mirror(tr), mirror(tl), mirror(bl), mirror(br)]);
+}
+
+/** テンプレ/layoutPlan のページpercent座標を、帯を除いた実コンテンツ領域へ写す。 */
+function slotInContentRect(
+  slot: ComicPanelSlot,
+  rect: { x: number; y: number; w: number; h: number },
+): ComicPanelSlot {
+  return {
+    x: rect.x + (slot.x / 100) * rect.w,
+    y: rect.y + (slot.y / 100) * rect.h,
+    w: (slot.w / 100) * rect.w,
+    h: (slot.h / 100) * rect.h,
+    ...(slot.points
+      ? {
+          points: slot.points.map(
+            ([x, y]) =>
+              [rect.x + (x / 100) * rect.w, rect.y + (y / 100) * rect.h] as [number, number],
+          ),
+        }
+      : {}),
+  };
+}
+
+/**
+ * 編集UIが使う実効スロットを1箇所で解決する。
+ * 優先順位: 画像座標の slotsOverride → テンプレ → rows由来 layoutPlan → null。
+ */
+export function effectivePageSlots(args: {
+  page: ComicStoryPage;
+  storyTemplateId: string | null;
+  direction: ComicReadingDirection;
+  contentRect?: { x: number; y: number; w: number; h: number };
+}): ComicPanelSlot[] | null {
+  const { page, storyTemplateId, direction, contentRect } = args;
+
+  // 復元/分割/統合後の座標は、すでに画像全体に対するpercent。再変換しない。
+  if (page.slotsOverride) return page.slotsOverride;
+
+  if (storyTemplateId) {
+    const template = getComicTemplate(storyTemplateId);
+    if (template.slots.length === page.panelCount) {
+      const slots =
+        direction === "ltr" ? template.slots.map(mirrorSlotX) : template.slots;
+      return contentRect ? slots.map((slot) => slotInContentRect(slot, contentRect)) : slots;
+    }
+  }
+
+  if (page.layoutPlan && page.layoutPlan.length === page.panelCount) {
+    // layoutPlan は生成時の direction で合成済みなのでミラーしない。
+    return contentRect
+      ? page.layoutPlan.map((slot) => slotInContentRect(slot, contentRect))
+      : page.layoutPlan;
+  }
+
+  return null;
+}
+
+/**
+ * スロットを2分割する。first = 読み順で先（vertical は rtl→右 / ltr→左、
+ * horizontal は両方向とも上）、second = 読み順で後（空白になる側）。
+ * ガターは分割線の両側へ半分ずつ取る。
  *
  * 4点は TL→TR→BR→BL の時計回り固定（ComicPanelSlot.points 型正典）。
  */
 export function splitSlotQuads(
   slot: ComicPanelSlot,
   direction: SplitDirection,
+  readingDirection: ComicReadingDirection = "rtl",
 ): { first: ComicPanelSlot; second: ComicPanelSlot } {
   const [tl, tr, br, bl] = panelGuidePoints(slot);
   const half = SPLIT_GUTTER_PERCENT / 2;
@@ -81,10 +155,11 @@ export function splitSlotQuads(
     const rightBottom = { x: midBottom.x + half, y: midBottom.y };
     const leftTop = { x: midTop.x - half, y: midTop.y };
     const leftBottom = { x: midBottom.x - half, y: midBottom.y };
-    return {
-      first: slotFromPoints([rightTop, tr, br, rightBottom]),
-      second: slotFromPoints([tl, leftTop, leftBottom, bl]),
-    };
+    const right = slotFromPoints([rightTop, tr, br, rightBottom]);
+    const left = slotFromPoints([tl, leftTop, leftBottom, bl]);
+    return readingDirection === "ltr"
+      ? { first: left, second: right }
+      : { first: right, second: left };
   }
   // 左辺・右辺の中点を結ぶ横の分割線。上半分（読み順で先）と下半分に分ける。
   const midLeft = midpoint(tl, bl);
@@ -307,13 +382,18 @@ export function drawSplitOnRaster(
   // 空白コマは4辺すべてに枠線を描く。元 quad でクリップして外へはみ出させない。
   strokeEdges(next, blankPx, [[0, 1], [1, 2], [2, 3], [3, 0]], widthPx, originalPx);
   // 残す側は分割線側の1辺だけ描く（他3辺は元の枠線がそのまま残っている）。
-  // kept/blank の頂点順は splitSlotQuads が保証する:
-  //   vertical → kept=[分割線上, TR, BR, 分割線下] なので分割線側は辺 3→0
+  // kept/blank の頂点順は splitSlotQuads が保証する。vertical は読み方向により
+  // kept が右半分（分割線側=辺3→0）または左半分（分割線側=辺1→2）になる。
   //   horizontal → kept=[TL, TR, 分割線右, 分割線左] なので分割線側は辺 2→3
-  // 方向は呼び出し側が確定して渡す。頂点座標からの推測（頂点0-3の x/y 差の比較）は
-  // 斜めコマで逆の辺を選び、分割線が描かれないまま残る欠陥になっていた（Codex検分 2026-07-30）。
-  const keptSharedEdge: Array<[number, number]> =
-    direction === "vertical" ? [[3, 0]] : [[2, 3]];
+  // 縦/横そのものは引数で確定し、vertical の左右だけを両quadの重心で判定する。
+  // 旧実装の「頂点0-3のx/y差から縦横を推測」は行わない。
+  const averageX = (quad: PanelReeditPoint[]) =>
+    quad.reduce((sum, point) => sum + point.x, 0) / quad.length;
+  const keptSharedEdge: Array<[number, number]> = direction === "vertical"
+    ? averageX(keptPx) < averageX(blankPx)
+      ? [[1, 2]]
+      : [[3, 0]]
+    : [[2, 3]];
   strokeEdges(next, keptPx, keptSharedEdge, widthPx, originalPx);
   return next;
 }

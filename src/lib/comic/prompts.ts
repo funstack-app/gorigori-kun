@@ -10,10 +10,12 @@
 
 import { SFX_INTENT } from "./balloonLayout";
 import {
+  COMIC_LAYOUT_TEMPLATES,
   describeSlotShape,
   type ComicLayoutTemplate,
   type ComicPanelSlot,
 } from "./layoutTemplates";
+import { synthesizeSlotsFromRows } from "./layoutSynthesis";
 // references.ts は ./types しか import しないため循環しない（cast の導出規則を1箇所に閉じる）。
 import { unionPanelCharacters } from "./references";
 import type {
@@ -221,6 +223,7 @@ export function buildStoryPrompt(
       ]
     : [
         "ページごとに 1〜8 コマの範囲で、そのページの内容に合う最適なコマ数を決めてください。見せ場のページはコマ数を減らして1コマを大きく、テンポの速い掛け合いのページはコマ数を増やします。",
+        '各ページの rows には、読み順のコマ番号を上の行から順にグループ化して入れてください（例: [[1,2],[3],[4,5,6]]）。1 から panelCount までの番号を、重複・欠番なく1回ずつ使います。',
       ];
 
   return [
@@ -292,6 +295,9 @@ export function buildStoryPrompt(
     '      "layoutHint": "このページのコマ割り方針（英語1文）",',
     '      "cast": ["このページに登場するキャラ名", ...],',
     '      "panelCount": このページのコマ数(整数),',
+    ...(template
+      ? []
+      : ['      "rows": [[上段のコマ番号を読み順で], [次の段のコマ番号を読み順で], ...],']),
     '      "panels": [',
     "        {",
     '          "index": ページ内のコマ番号(1始まりの整数),',
@@ -434,6 +440,39 @@ function parsePanelArray(data: unknown): ComicPanel[] | null {
 }
 
 /**
+ * おまかせレイアウトの rows を全体単位で検査する。
+ * 1..panelCount が重複・欠番なく1回ずつ揃わない場合は null（部分採用しない）。
+ */
+function parseStoryRows(data: unknown, panelCount: number): number[][] | null {
+  if (!Array.isArray(data) || data.length === 0) return null;
+  const rows: number[][] = [];
+  const seen = new Set<number>();
+  for (const rawRow of data) {
+    if (!Array.isArray(rawRow) || rawRow.length === 0) return null;
+    const row: number[] = [];
+    for (const value of rawRow) {
+      if (
+        typeof value !== "number" ||
+        !Number.isInteger(value) ||
+        value < 1 ||
+        value > panelCount ||
+        seen.has(value)
+      ) {
+        return null;
+      }
+      seen.add(value);
+      row.push(value);
+    }
+    rows.push(row);
+  }
+  if (seen.size !== panelCount) return null;
+  for (let index = 1; index <= panelCount; index += 1) {
+    if (!seen.has(index)) return null;
+  }
+  return rows;
+}
+
+/**
  * ネーム応答テキストから ComicPanel[] を抽出する。
  * - ```json フェンスがあれば剥がす
  * - 最初の '[' から対応する ']' までを JSON としてパースする
@@ -472,10 +511,16 @@ export function parseComicName(raw: string): ComicPanel[] | null {
  *   - panels: parsePanelArray が非 null
  *   - synopsis: string なら trim、それ以外は ""（欠落を落とさず空で可視化）
  *   - layoutHint: string なら trim、それ以外は ""
+ *   - rows: 任意。1..panelCount が重複・欠番なく揃う場合だけ受理し、readingDirection
+ *     とともに synthesizeSlotsFromRows へ渡して layoutPlan を保存する
+ *     （不整合時は rows/layoutPlan だけを捨てて従来動作）
  * 1ページでも壊れていれば全体を null（部分採用しない。黙って切り捨てない）。
  * 返却前に page 昇順へソートする。
  */
-export function parseComicStory(raw: string): ComicStoryPage[] | null {
+export function parseComicStory(
+  raw: string,
+  readingDirection: ComicReadingDirection = "rtl",
+): ComicStoryPage[] | null {
   if (!raw) return null;
 
   let text = raw.trim();
@@ -519,6 +564,12 @@ export function parseComicStory(raw: string): ComicStoryPage[] | null {
     }
     const panels = parsePanelArray(obj.panels);
     if (!panels) return null;
+    // rows は任意。壊れている場合はページ全体を落とさず、rows/layoutPlan だけを
+    // 丸ごと捨てて従来経路へ戻す（旧履歴・AIの省略との後方互換）。
+    const rows = parseStoryRows(obj.rows, obj.panelCount);
+    const layoutPlan = rows
+      ? synthesizeSlotsFromRows(rows, obj.panelCount, readingDirection)
+      : null;
     pageNumbers.add(obj.page);
     // cast の正規化（検証で落とさず、構成的に不変条件を作る）:
     //   cast := dedupe(rawCast ∪ panels の characters 和集合)
@@ -544,6 +595,7 @@ export function parseComicStory(raw: string): ComicStoryPage[] | null {
       cast,
       panelCount: obj.panelCount,
       panels,
+      ...(rows && layoutPlan ? { rows, layoutPlan } : {}),
     });
   }
 
@@ -652,6 +704,14 @@ const REFERENCE_FAITHFUL_IDENTITY_CLAUSE =
 const FAITHFUL_FINAL_CLAUSE =
   "final output must look like a professional comic page where every panel faithfully reproduces the referenced characters' appearance and original art style, with consistent rendering across panels";
 
+/** faithful の1コマ再編集では、reference image 1（元ページ）を画風アンカーにする。 */
+const FAITHFUL_PANEL_BASE_CLAUSE =
+  "manga panel edit, rendered in the exact art style of the existing page — reference image 1 is the page being edited; match its style precisely";
+
+/** faithful の1コマ再編集専用の仕上げ句。未編集コマとの画風一致を要求する。 */
+const FAITHFUL_PANEL_FINAL_CLAUSE =
+  "the edited panel must be indistinguishable in style from the untouched panels around it";
+
 /**
  * ページの形（縦長）と、全ページで同じ大きさに揃えることを念押しする句。
  *
@@ -713,26 +773,28 @@ function groupSlotsIntoRows(template: ComicLayoutTemplate): IndexedSlot[][] {
   return rows;
 }
 
-/**
- * 各コマ (配列順 = 読み順) の紙面位置語を導出する (B-1 2026-07-30)。
- * 例: "top-right" / "top-center" / "middle, full width" / "bottom-left"。
- *
- * 段内の順序はスロット座標でなく **読み順 (配列 index)** で決める。
- * rtl では読み順どおり右→左 (テンプレ座標と一致)、ltr では同じ段構造を
- * 左右反転して panel 1 が top-left になるように語を割り当てる
- * (レイアウトはAIが描き直すため、座標の実位置でなく「panel N をどこに
- * 置かせたいか」が正)。
- */
-export function panelPositionPhrases(
-  template: ComicLayoutTemplate,
+/** rows の番号どおりに layoutPlan を段へ束ねる。座標からの段再検出はしない。 */
+function layoutPlanRows(
+  slots: ComicPanelSlot[],
+  rows: number[][] | undefined,
+): IndexedSlot[][] | null {
+  const parsed = parseStoryRows(rows, slots.length);
+  if (!parsed) return null;
+  return parsed.map((row) =>
+    row.map((panelNumber) => ({ ...slots[panelNumber - 1], i: panelNumber - 1 })),
+  );
+}
+
+function positionPhrasesFromRows(
+  rows: IndexedSlot[][],
+  slotCount: number,
   direction: ComicReadingDirection,
 ): string[] {
-  const rows = groupSlotsIntoRows(template);
-  const phrases: string[] = new Array(template.slots.length).fill("");
+  const phrases: string[] = new Array(slotCount).fill("");
   rows.forEach((row, ri) => {
     const vertical =
       rows.length === 1 ? "middle" : ri === 0 ? "top" : ri === rows.length - 1 ? "bottom" : "middle";
-    const ordered = [...row].sort((a, b) => a.i - b.i); // 配列順 = 読み順
+    const ordered = [...row].sort((a, b) => a.i - b.i);
     ordered.forEach((slot, j) => {
       if (row.length === 1) {
         phrases[slot.i] = `${vertical}, full width`;
@@ -755,6 +817,24 @@ export function panelPositionPhrases(
 }
 
 /**
+ * 各コマ (配列順 = 読み順) の紙面位置語を導出する (B-1 2026-07-30)。
+ * 例: "top-right" / "top-center" / "middle, full width" / "bottom-left"。
+ *
+ * 段内の順序はスロット座標でなく **読み順 (配列 index)** で決める。
+ * rtl では読み順どおり右→左 (テンプレ座標と一致)、ltr では同じ段構造を
+ * 左右反転して panel 1 が top-left になるように語を割り当てる
+ * (レイアウトはAIが描き直すため、座標の実位置でなく「panel N をどこに
+ * 置かせたいか」が正)。
+ */
+export function panelPositionPhrases(
+  template: ComicLayoutTemplate,
+  direction: ComicReadingDirection,
+): string[] {
+  const rows = groupSlotsIntoRows(template);
+  return positionPhrasesFromRows(rows, template.slots.length, direction);
+}
+
+/**
  * テンプレのスロットから「段（row）ごとに何コマ・どの大きさか」を英語1行で導出する。
  *
  * 手書きの決め打ちをしない（テンプレを足したら自動で追従する）。導出手順:
@@ -766,19 +846,17 @@ export function panelPositionPhrases(
  *
  * 例: `row 1: three small panels; row 2: one large wide panel; row 3: two medium panels`
  */
-function describePageLayout(
-  template: ComicLayoutTemplate,
+function describeRowsLayout(
+  slots: ComicPanelSlot[],
+  pageAspect: { w: number; h: number },
+  rows: IndexedSlot[][],
   direction: ComicReadingDirection,
 ): string {
-  const slots = template.slots.map((s, i) => ({ ...s, i }));
   if (slots.length === 0) return "";
 
   // ページ全体の平均コマ面積。大小の基準はテンプレ内から導出する（定数の決め打ちをしない）。
   const areas = slots.map((s) => s.w * s.h);
   const avgArea = areas.reduce((a, b) => a + b, 0) / areas.length;
-
-  // 1. y帯の重なりで段にまとめる（段検出は groupSlotsIntoRows に共有化）
-  const rows = groupSlotsIntoRows(template);
 
   const countWord = (n: number): string =>
     ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight"][n] ??
@@ -792,7 +870,7 @@ function describePageLayout(
       const area = w * h;
       const size = area >= avgArea * 1.5 ? "large" : area <= avgArea * 0.6 ? "small" : "medium";
       // 実アスペクト比（pageAspect 込み）で横長/縦長を足す
-      const ratio = (w * template.pageAspect.w) / (h * template.pageAspect.h);
+      const ratio = (w * pageAspect.w) / (h * pageAspect.h);
       const shape = ratio >= 1.4 ? " wide" : ratio <= 0.72 ? " tall" : "";
       return `${size}${shape}`;
     };
@@ -815,6 +893,32 @@ function describePageLayout(
   } order`;
 }
 
+function describePageLayout(
+  template: ComicLayoutTemplate,
+  direction: ComicReadingDirection,
+): string {
+  return describeRowsLayout(
+    template.slots,
+    template.pageAspect,
+    groupSlotsIntoRows(template),
+    direction,
+  );
+}
+
+function formatPercent(value: number): string {
+  return Number(value.toFixed(2)).toString();
+}
+
+/** layoutPlan の bbox をページpercentとして全コマ分明示する。 */
+function describeLayoutCoordinates(slots: ComicPanelSlot[]): string {
+  return slots
+    .map(
+      (slot, index) =>
+        `panel ${index + 1} bounds: x ${formatPercent(slot.x)}%-${formatPercent(slot.x + slot.w)}%, y ${formatPercent(slot.y)}%-${formatPercent(slot.y + slot.h)}%`,
+    )
+    .join("; ");
+}
+
 /** ページ生成プロンプトへ渡す、ページ番号・前後のあらすじ・コマ割り方針。 */
 export type FullPageContext = {
   pageNumber?: number;
@@ -824,6 +928,10 @@ export type FullPageContext = {
   nextSynopsis?: string;
   /** テンプレ未指定時のみ使うコマ割り方針（構成 AI 由来・ユーザー編集可）。 */
   layoutHint?: string;
+  /** テンプレ未指定時の行構造。上から順、各行の値は読み順のコマ番号。 */
+  rows?: number[][];
+  /** rows から合成済みのページpercent座標。rows と揃う場合だけ焼き込む。 */
+  layoutPlan?: ComicPanelSlot[];
   /** このページの cast（名前一致解決済みのみ）。指定時は「このページに出るのはこの面々だけ」句を足す。 */
   castNames?: string[];
   /** 読み方向 (B-1)。省略時 "rtl" (右→左・日本式)。 */
@@ -850,7 +958,8 @@ const STYLE_TEXT_CLAUSE = (text: string): string =>
 /**
  * ページ丸ごと1枚を生成するプロンプトを組む（主経路）。
  *
- * template=null のときは AI にコマ割りを最適化させる（layoutHint があれば方向を渡す）。
+ * template=null で rows/layoutPlan が揃うときは座標・段構造・全コマ位置語を焼き込む。
+ * layoutPlan が無い旧データだけは AI にコマ割りを最適化させる（layoutHint を補助に渡す）。
  * template があるときは従来どおり describePageLayout で slots から機械導出する。
  *
  * 参照画像があるときは detail 経路（buildPanelImagePrompt）と同じ画風支配句
@@ -869,6 +978,10 @@ export function buildFullPagePrompt(
   const parts: string[] = [];
 
   const direction = context.readingDirection ?? "rtl";
+  const plannedRows =
+    !template && context.layoutPlan?.length === panels.length
+      ? layoutPlanRows(context.layoutPlan, context.rows)
+      : null;
   // B-1 (2026-07-30): 読み順を「言葉1句」でなく空間位置で明示する。
   // 従来の "Japanese right-to-left reading order." 1句では panel 1 の置き場所が
   // 未指定で、モデルが西洋コミックの学習分布に引かれて左上から並べていた
@@ -899,6 +1012,14 @@ export function buildFullPagePrompt(
     const layout = describePageLayout(template, direction);
     parts.push(
       `${template.panelCount} panels. ${readingOrderClause}.${layout ? ` ${layout}` : ""}`,
+    );
+  } else if (context.layoutPlan && plannedRows) {
+    const hint = context.layoutHint?.trim();
+    const pageAspect = COMIC_LAYOUT_TEMPLATES[0].pageAspect;
+    const layout = describeRowsLayout(context.layoutPlan, pageAspect, plannedRows, direction);
+    const coordinates = describeLayoutCoordinates(context.layoutPlan);
+    parts.push(
+      `${panels.length} panels. ${readingOrderClause}. follow this exact panel layout: ${layout}. exact page-percent coordinates — ${coordinates}${hint ? `. layout direction: ${hint}` : ""}`,
     );
   } else {
     const hint = context.layoutHint?.trim();
@@ -933,7 +1054,9 @@ export function buildFullPagePrompt(
   const positionPhrases =
     template && panels.length === template.slots.length
       ? panelPositionPhrases(template, direction)
-      : null;
+      : context.layoutPlan && plannedRows
+        ? positionPhrasesFromRows(plannedRows, context.layoutPlan.length, direction)
+        : null;
   for (const panel of panels) {
     const body = panel.prompt.trim() || panel.composition.trim();
     // gtm (2026-08-03): 引用＋kind 記述子の形式。数珠つなぎ（「／」区切り）は
@@ -1070,7 +1193,8 @@ export function buildFullPagePrompt(
  * コマの prompt（人が編集済み）に、登場キャラの属性テキストを合成する。
  * 参照画像は既存の refImagePaths 経路で別途渡すので、ここでは属性テキストのみ足す。
  *
- * `colorMode` は先頭のベース句だけを切り替える（既定 "mono" = 従来どおり）。
+ * `colorMode` は mono/color の漫画化句と faithful の既存ページ忠実句を切り替える
+ * （既定 "mono" = 従来どおり）。
  *
  * `hasReferences` は「このコマに参照画像が1枚以上渡るか」。実写写真を参照に
  * 渡すと写真調のまま出てしまうため、参照があるときだけ画風変換句
@@ -1078,14 +1202,13 @@ export function buildFullPagePrompt(
  * 「同一人物のまま手描き漫画に描き直す」を明示する (2026-07-28 STΛCK 実機FB)。
  * さらに末尾で最終出力の画風を念押しする（参照のフォト/3D調に勝たせる）。
  *
- * `colorMode` は mono/color だけを受ける。画風「キャラ忠実」(faithful) は
- * ページ丸ごと生成（buildFullPagePrompt）専用で、コマ単位のこの関数は対応しない
- * （唯一の呼び出し元だった詳細編集・コマ別経路は 2026-07-28 に撤去済み）。
+ * faithful は reference image 1（編集元ページ）を画風アンカーとして、未編集コマと
+ * 見分けがつかない画風を要求する。mono/color 用の漫画化句とは排他にする。
  */
 export function buildPanelImagePrompt(
   panel: ComicPanel,
   characters: ComicCharacter[],
-  colorMode: Exclude<ComicColorMode, "faithful"> = "mono",
+  colorMode: ComicColorMode = "mono",
   hasReferences = false,
   styleText = "",
 ): string {
@@ -1099,6 +1222,23 @@ export function buildPanelImagePrompt(
     .map((c) => (c.attributes?.trim() ? `${c.name}: ${c.attributes.trim()}` : ""))
     .filter(Boolean)
     .join("; ");
+
+  // A-c faithful の6項構成。文言と順序を設計書どおり固定し、mono/color 用の
+  // styleText・finalStyleClause・PAGE_SIZE_CLAUSE は混ぜない。
+  if (colorMode === "faithful") {
+    const faithfulParts = [FAITHFUL_PANEL_BASE_CLAUSE];
+    if (hasReferences) {
+      faithfulParts.push(REFERENCE_FAITHFUL_IDENTITY_CLAUSE);
+      faithfulParts.push(REFERENCE_POSE_CLAUSE);
+    }
+    faithfulParts.push(REFERENCE_FAITHFUL_CLAUSE);
+    faithfulParts.push(base);
+    if (attrBlock) faithfulParts.push(`character design — ${attrBlock}`);
+    if (panel.acting.trim()) faithfulParts.push(panel.acting.trim());
+    faithfulParts.push(FAITHFUL_PANEL_FINAL_CLAUSE);
+    faithfulParts.push(NO_META_TEXT_CLAUSE);
+    return faithfulParts.filter(Boolean).join(", ");
+  }
 
   const parts = [
     colorMode === "color"

@@ -22,8 +22,10 @@ import {
   adjacentSlotIndices,
   drawMergeOnRaster,
   drawSplitOnRaster,
+  effectivePageSlots,
   mergeStoryPage,
   mergedSlot,
+  mirrorSlotX,
   splitSlotQuads,
   splitStoryPage,
   SPLIT_GUTTER_PERCENT,
@@ -195,6 +197,129 @@ function storyPage(panelCount: number, slots: ComicPanelSlot[]): ComicStoryPage 
     slotsOverride: slots,
   };
 }
+
+function signedQuadArea(points: PanelReeditPoint[]): number {
+  return points.reduce((sum, point, index) => {
+    const next = points[(index + 1) % points.length];
+    return sum + point.x * next.y - next.x * point.y;
+  }, 0) / 2;
+}
+
+test("mirrorSlotX は往復恒等で、左右反転後も TL→TR→BR→BL 順を保つ", () => {
+  const original = getComicTemplate("manga01").slots[0];
+  const mirrored = mirrorSlotX(original);
+
+  expect(mirrorSlotX(mirrored)).toEqual(original);
+  expect(panelGuidePoints(mirrored)).toEqual([
+    { x: 4, y: 4 },
+    { x: 33, y: 4 },
+    { x: 35, y: 27 },
+    { x: 4, y: 26 },
+  ]);
+  expect(mirrored.x + mirrored.w, "manga01 slot[0] は左上域へ移る").toBeLessThan(50);
+  expect(mirrored.y + mirrored.h).toBeLessThan(50);
+  expect(signedQuadArea(panelGuidePoints(mirrored)), "正典順なら画面座標で正の面積").toBeGreaterThan(0);
+
+  // 牙: TL→BL→BR→TR と意図的に順序を壊すと、符号が反転して検査が落とせる。
+  const canonical = panelGuidePoints(mirrored);
+  const brokenOrder = [canonical[0], canonical[3], canonical[2], canonical[1]];
+  expect(signedQuadArea(brokenOrder), "壊した頂点順を正典扱いしない").toBeLessThan(0);
+
+  const rectangle: ComicPanelSlot = { x: 8, y: 12, w: 30, h: 40 };
+  expect(mirrorSlotX(mirrorSlotX(rectangle))).toEqual(rectangle);
+});
+
+test("splitSlotQuads は縦分割の first を読み方向側へ切り替え、横分割は上を保つ", () => {
+  const slot = getComicTemplate("manga01").slots[0];
+  const rtl = splitSlotQuads(slot, "vertical", "rtl");
+  const ltr = splitSlotQuads(slot, "vertical", "ltr");
+  expect(centroid(panelGuidePoints(rtl.first)).x).toBeGreaterThan(
+    centroid(panelGuidePoints(rtl.second)).x,
+  );
+  expect(centroid(panelGuidePoints(ltr.first)).x).toBeLessThan(
+    centroid(panelGuidePoints(ltr.second)).x,
+  );
+
+  for (const readingDirection of ["rtl", "ltr"] as const) {
+    const horizontal = splitSlotQuads(slot, "horizontal", readingDirection);
+    expect(centroid(panelGuidePoints(horizontal.first)).y).toBeLessThan(
+      centroid(panelGuidePoints(horizontal.second)).y,
+    );
+  }
+});
+
+test("effectivePageSlots は override→template→layoutPlan の優先順位と帯変換を守る", () => {
+  const template = getComicTemplate("manga01");
+  const layoutPlan = Array.from({ length: 6 }, (_, index): ComicPanelSlot => ({
+    x: 4 + index * 10,
+    y: 8,
+    w: 8,
+    h: 20,
+  }));
+  const override: ComicPanelSlot[] = Array.from({ length: 6 }, (_, index) => ({
+    x: 77 - index * 10,
+    y: 66,
+    w: 8,
+    h: 12,
+  }));
+  const basePage: ComicStoryPage = {
+    ...storyPage(6, template.slots),
+    slotsOverride: override,
+    layoutPlan,
+  };
+  const contentRect = { x: 10, y: 20, w: 80, h: 60 };
+
+  // 牙: override は画像座標なので、コマ数や帯があっても部分変換せず最優先でそのまま返す。
+  expect(
+    effectivePageSlots({
+      page: basePage,
+      storyTemplateId: "manga01",
+      direction: "ltr",
+      contentRect,
+    }),
+  ).toBe(override);
+
+  const withoutOverride = { ...basePage, slotsOverride: undefined };
+  const fromTemplate = effectivePageSlots({
+    page: withoutOverride,
+    storyTemplateId: "manga01",
+    direction: "ltr",
+    contentRect,
+  });
+  expect(fromTemplate).not.toBeNull();
+  expect(fromTemplate?.[0].x).toBeCloseTo(13.2);
+  expect(fromTemplate?.[0].y).toBeCloseTo(22.4);
+  expect(fromTemplate?.[0].w).toBeCloseTo(24.8);
+  expect(fromTemplate?.[0].h).toBeCloseTo(13.8);
+  const expectedPoints = [
+    [13.2, 22.4],
+    [36.4, 22.4],
+    [38, 36.2],
+    [13.2, 35.6],
+  ];
+  expect(fromTemplate?.[0].points).toHaveLength(expectedPoints.length);
+  fromTemplate?.[0].points?.forEach(([x, y], index) => {
+    expect(x).toBeCloseTo(expectedPoints[index][0]);
+    expect(y).toBeCloseTo(expectedPoints[index][1]);
+  });
+
+  // manga10 は4コマで不一致なので、第3候補 layoutPlan を使う。ltr でも再ミラーしない。
+  const fromLayoutPlan = effectivePageSlots({
+    page: withoutOverride,
+    storyTemplateId: "manga10",
+    direction: "ltr",
+    contentRect,
+  });
+  expect(fromLayoutPlan?.[0]).toEqual({ x: 13.2, y: 24.8, w: 6.4, h: 12 });
+
+  expect(
+    effectivePageSlots({
+      page: { ...withoutOverride, layoutPlan: undefined },
+      storyTemplateId: null,
+      direction: "rtl",
+    }),
+  ).toBeNull();
+});
 
 test("長方形と斜めスロットの2分割は、ガター付きの2つの妥当なコマを返す", () => {
   let checked = 0;
