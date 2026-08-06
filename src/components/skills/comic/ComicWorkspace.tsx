@@ -33,9 +33,12 @@ import type {
   ComicStoryPage,
   PageCountChoice,
 } from "../../../lib/comic/types";
+import { normalizeComicPageGenMode } from "../../../lib/comic/types";
 import {
+  COMIC_LAYOUT_TEMPLATES,
   COMIC_PAGE_ASPECT,
   getComicTemplate,
+  type ComicLayoutTemplate,
   type ComicPanelSlot,
 } from "../../../lib/comic/layoutTemplates";
 import {
@@ -96,12 +99,16 @@ import {
   readPanelImageData,
   validatePanelPolygon,
   type PanelDetection,
+  type PanelImageData,
   type PanelReeditPoint,
 } from "../../../lib/comic/panelReedit";
 import { PANEL_SIZE_MISMATCH_PREFIX } from "../../../lib/imageReedit/maskReedit";
 import { normalizeComicPage } from "../../../lib/comic/pageNormalize";
 import { usePanelReeditLock } from "../../../lib/comic/panelReeditLock";
-import { recoverPanelSlots } from "../../../lib/comic/panelSlotRecovery";
+import {
+  alignSlotsToTemplate,
+  recoverPanelSlots,
+} from "../../../lib/comic/panelSlotRecovery";
 import {
   adjacentSlotIndices,
   applyPanelMergeToImage,
@@ -109,16 +116,13 @@ import {
   effectivePageSlots,
   mergeStoryPage,
   mergedSlot,
+  mirrorSlotX,
   recomposeAutoLayoutPlans,
   splitSlotQuads,
   splitStoryPage,
   type SplitDirection,
 } from "../../../lib/comic/panelLayoutOps";
-import {
-  buildStructurePanelRequest,
-  buildStructureRunPlan,
-} from "../../../lib/comic/structureRun";
-import { assembleStructurePage } from "../../../lib/comic/pageAssembly";
+import { recomposePageToTemplate } from "../../../lib/comic/pageAssembly";
 
 /** PC から画像を添付するときの拡張子フィルタ（GoalChatPanel と同値）。 */
 const IMAGE_EXTS = ["png", "jpg", "jpeg", "webp", "gif", "bmp"];
@@ -137,6 +141,47 @@ const PANEL_REEDIT_BUSY_MESSAGE =
 const COMIC_PAGE_ASPECT_WARN_MESSAGE =
   "生成画像の比率が想定(3:4)と大きく違います。作り直しをおすすめします";
 
+/** aligned 生成で使うページ単位の12テンプレを厳密に解決する。 */
+function resolveAlignedTemplate(
+  page: ComicStoryPage,
+  storyTemplateId: string | null,
+): ComicLayoutTemplate | null {
+  const id = storyTemplateId ?? page.layoutTemplateId;
+  if (!id) return null;
+  const template = COMIC_LAYOUT_TEMPLATES.find((item) => item.id === id) ?? null;
+  return template?.panelCount === page.panels.length ? template : null;
+}
+
+/** ltr の再組立先だけを左右反転し、パネル番号の読み順を保つ。 */
+function templateForReadingDirection(
+  template: ComicLayoutTemplate,
+  direction: ComicReadingDirection,
+): ComicLayoutTemplate {
+  return direction === "ltr"
+    ? { ...template, slots: template.slots.map(mirrorSlotX) }
+    : template;
+}
+
+/** 照合に使ったRGBAをそのまま再組立入力にする。 */
+function panelImageDataCanvas(image: PanelImageData): HTMLCanvasElement {
+  const canvas = document.createElement("canvas");
+  canvas.width = image.width;
+  canvas.height = image.height;
+  const context = canvas.getContext("2d");
+  if (!context) throw new Error("コマ枠を揃えるための canvas を取得できません。");
+  context.putImageData(new ImageData(image.data, image.width, image.height), 0, 0);
+  return canvas;
+}
+
+/** canvas をPNGバイトにし、保存自体は images.writeUpload（Rust）に任せる。 */
+async function canvasToPngBytes(canvas: HTMLCanvasElement): Promise<Uint8Array> {
+  const blob = await new Promise<Blob | null>((resolve) =>
+    canvas.toBlob(resolve, "image/png"),
+  );
+  if (!blob) throw new Error("コマ枠を揃えたPNGを作成できません。");
+  return new Uint8Array(await blob.arrayBuffer());
+}
+
 type PanelReeditHistoryEntry = {
   page: number;
   /** 差し替え前のページ画像（ファイルは消さないので常に復元可能）。 */
@@ -144,19 +189,14 @@ type PanelReeditHistoryEntry = {
   /** 差し替え前のページ構成の丸ごとスナップショット（panels / slotsOverride 含む）。
    *  state 更新は常に新オブジェクト生成（Immutability 規約）なので参照保持で安全。 */
   pageSnapshot: ComicStoryPage;
-  /** structure の素材差し替えも画像と同じ1操作として戻す。 */
-  resultPatch?: Pick<ComicPageResult, "panelImagePaths" | "panelErrors">;
 };
 
 type PanelReeditOutcome =
   | { adopted: true }
   | { adopted: false; error: string };
 
-/** directRun の中止を、コマ生成失敗と区別してページへ採用しないための印。 */
-class StructurePanelCancelledError extends Error {}
-
 /**
- * B方式の実行中stateを、開始前スナップショットへ丸ごと戻す。
+ * aligned 方式の実行中stateを、開始前スナップショットへ丸ごと戻す。
  *
  * 現在値へスナップショットを上書きする形にすると、スナップショットに無い
  * panelImagePaths / panelErrors が残る。現在値はページ一致の確認だけに使い、
@@ -167,6 +207,15 @@ function restorePageResultSnapshot(
   snapshot: ComicPageResult,
 ): ComicPageResult {
   return current.page === snapshot.page ? { ...snapshot } : current;
+}
+
+/** 後方互換で読める旧B素材を、新しいページ結果へ持ち越さない。 */
+function withoutLegacyPanelResults(result: ComicPageResult): ComicPageResult {
+  const cleanResult = { ...result };
+  delete cleanResult.panelImagePaths;
+  delete cleanResult.panelErrors;
+  cleanResult.genMode = normalizeComicPageGenMode(cleanResult.genMode);
+  return cleanResult;
 }
 
 /**
@@ -181,14 +230,13 @@ type SlotRecoveryOutcome =
 /**
  * 漫画制作 Workspace（スキル一覧v2.1 #9）
  *
- * 構成確認までは1本。その後はページ丸ごと描く方式と、コマごとに描いて
- * 1080×1440へ機械ではめ込む方式を選べる。吹き出し・擬音はどちらも絵として描かれる。
+ * 構成確認までは1本。その後はページ丸ごと描く方式と、一枚絵を
+ * テンプレの正しい枠へ再組立する方式を選べる。吹き出し・擬音はどちらも絵として描かれる。
  *   1. input — あらすじ + ページ数 + 参考テンプレ(任意) + 登場キャラを入力
  *   2. plan  — AI がページ構成を JSON 生成。ページ/コマ単位で人が直す（工程の要）
  *   3. pages — 選んだ方式で並列生成。ページ単位で再生成・保存
  *
- * 旧「詳細編集（コマ別）」経路（ネーム → コマ生成 → CSS合成ページ確認）は
- * 2026-07-28 に撤去済み。新しいコマ別方式はCSS表示でなく、1枚画像として保存まで完結する。
+ * 旧「コマごとに生成してはめ込む」経路は 2026-08-06 に撤去済み。
  *
  * SkillWorkspaceRouter が activeUiMode === "comic" のとき本コンポーネントを描画する。
  * 既存の GenerationWorkspace / 他スキル Workspace は触らない。
@@ -627,6 +675,7 @@ function ComicFlow() {
         !isValidStory(parsed, {
           expectedPages: pageCount,
           templatePanelCount: template?.panelCount,
+          requireLayoutTemplateId: template === undefined,
         })
       ) {
         pushToast({
@@ -984,7 +1033,7 @@ function ComicFlow() {
         previous.map((result) =>
           result.page === page.page
             ? {
-                ...result,
+                ...withoutLegacyPanelResults(result),
                 imagePath: normalizedComposite.imagePath,
                 contentRect: currentResult?.contentRect ?? normalizedComposite.contentRect,
                 error: undefined,
@@ -1034,8 +1083,7 @@ function ComicFlow() {
       previous.map((result) =>
         result.page === entry.page
           ? {
-              ...result,
-              ...entry.resultPatch,
+              ...withoutLegacyPanelResults(result),
               imagePath: entry.imagePath,
               error: undefined,
             }
@@ -1228,12 +1276,6 @@ function ComicFlow() {
         page: page.page,
         imagePath,
         pageSnapshot: currentPage,
-        resultPatch: {
-          panelImagePaths: pageResults.find((result) => result.page === page.page)
-            ?.panelImagePaths,
-          panelErrors: pageResults.find((result) => result.page === page.page)
-            ?.panelErrors,
-        },
       };
       setStoryPages((previous) =>
         previous.map((item) => (item.page === page.page ? nextPage : item)),
@@ -1242,13 +1284,9 @@ function ComicFlow() {
         previous.map((result) =>
           result.page === page.page
             ? {
-                ...result,
+                ...withoutLegacyPanelResults(result),
                 imagePath: normalizedPage.imagePath,
                 contentRect: result.contentRect ?? normalizedPage.contentRect,
-                // 分割後は「コマ素材N枚 → Nスロット」の対応が失われる。
-                // 素材を破棄し、以後の1コマ再生成は既存マスク経路へ落とす。
-                panelImagePaths: undefined,
-                panelErrors: undefined,
                 error: undefined,
               }
             : result,
@@ -1336,12 +1374,6 @@ function ComicFlow() {
         page: page.page,
         imagePath,
         pageSnapshot: currentPage,
-        resultPatch: {
-          panelImagePaths: pageResults.find((result) => result.page === page.page)
-            ?.panelImagePaths,
-          panelErrors: pageResults.find((result) => result.page === page.page)
-            ?.panelErrors,
-        },
       };
       setStoryPages((previous) =>
         previous.map((item) => (item.page === page.page ? nextPage : item)),
@@ -1350,12 +1382,9 @@ function ComicFlow() {
         previous.map((result) =>
           result.page === page.page
             ? {
-                ...result,
+                ...withoutLegacyPanelResults(result),
                 imagePath: normalizedPage.imagePath,
                 contentRect: result.contentRect ?? normalizedPage.contentRect,
-                // 統合後は元のコマ素材から同じ見た目を再現できないため破棄する。
-                panelImagePaths: undefined,
-                panelErrors: undefined,
                 error: undefined,
               }
             : result,
@@ -1379,17 +1408,12 @@ function ComicFlow() {
   };
 
   /**
-   * 1ページ分（ページ丸ごと1枚）を生成する。
-   *
-   * トークン設計（stillMine / resetTile / onCancel の分離）は
-   * 実測でソフトロックを潰した構造なので、簡略化しない。
-   * 参照画像は resolvePageCast（そのページの cast のみ・上限 MAX_PAGE_REFERENCES）で
-   * 決める。構成確認の PageCastRow と同じ判定を使うので、表示と実際の添付がズレない。
-   *
-   * 戻り値は「このページが画像まで到達したか」。
+   * 1ページを既存Aリクエストで生成する。
+   * aligned のときだけ、正規化後にテンプレ照合と再組立を追加する。
    */
   const generateStoryPage = async (
     page: ComicStoryPage,
+    mode: ComicPageGenMode,
     batchToken?: number,
     sourceTag?: string,
   ): Promise<boolean> => {
@@ -1397,21 +1421,28 @@ function ComicFlow() {
     const runToken = batchToken ?? pagesRunTokenRef.current;
     if (pagesRunTokenRef.current !== runToken) return false;
 
+    const resultBeforeRun = pageResults.find((result) => result.page === page.page);
+    if (!resultBeforeRun) return false;
+
     // このページだけの中止トークン。単体生成の中止は「押したページ」にしか効かない。
     const pageTokens = pageTokensRef.current;
     const pageToken = (pageTokens.get(page.page) ?? 0) + 1;
     pageTokens.set(page.page, pageToken);
 
-    /** このページのタイルを未生成へ戻す（冪等）。 */
+    /** aligned は途中結果を採用せず開始前へ戻す。direct は既存どおり生成表示だけ戻す。 */
     const resetPageTile = () => {
-      setPageResults((prev) =>
-        prev.map((r) =>
-          r.page === page.page ? { ...r, generating: false, startedAt: undefined } : r,
+      setPageResults((previous) =>
+        previous.map((result) =>
+          result.page !== page.page
+            ? result
+            : mode === "aligned"
+              ? restorePageResultSnapshot(result, resultBeforeRun)
+              : { ...result, generating: false, startedAt: undefined },
         ),
       );
     };
 
-    /** 自分の走行がまだ有効か。無効ならタイルを未生成へ戻してから抜ける。 */
+    /** 自分の走行がまだ有効か。無効ならタイルを戻してから抜ける。 */
     const stillMine = (): boolean => {
       if (
         pagesRunTokenRef.current === runToken &&
@@ -1423,13 +1454,12 @@ function ComicFlow() {
       return false;
     };
 
-    // 単体生成のときは自前で親 run を立てる。
+    // 単体生成のときは自前で親 run を立てる。どちらの方式も画像生成は1ページ1回。
     let soloTrack: ReturnType<typeof beginDirectRun> | null = null;
     if (!sourceTag) {
       soloTrack = beginDirectRun("comic", 1);
       registerDirectRunParent(soloTrack.id, {
         onCancel: () => {
-          // 全ページ一括の pagesRunTokenRef は触らない（他ページの走行を殺さない）。
           pageTokens.set(page.page, pageToken + 1);
           resetPageTile();
         },
@@ -1445,31 +1475,37 @@ function ComicFlow() {
     const tag = sourceTag ?? soloTrack?.id;
 
     const startedAt = Date.now();
-    setPageResults((prev) =>
-      prev.map((r) =>
-        r.page === page.page ? { ...r, generating: true, error: undefined, startedAt } : r,
+    setPageResults((previous) =>
+      previous.map((result) =>
+        result.page === page.page
+          ? { ...result, generating: true, error: undefined, startedAt }
+          : result,
       ),
     );
+
     try {
       const storyTemplate = storyTemplateId ? getComicTemplate(storyTemplateId) : null;
-      // B-4 (2026-07-30): コマ追加/削除でテンプレとコマ数がズレたページは、テンプレの
-      // 段組み記述・位置語が実態と矛盾するため「おまかせ」扱い (template=null) で生成する。
-      const template =
+      // direct は従来どおり、コマ数がテンプレとズレたページだけ template=null にする。
+      const directTemplate =
         storyTemplate && storyTemplate.panelCount === page.panels.length
           ? storyTemplate
           : null;
+      // aligned は明示テンプレまたは構成AIがページ単位で選んだテンプレを必須にする。
+      const alignedTemplate = resolveAlignedTemplate(page, storyTemplateId);
+      if (mode === "aligned" && !alignedTemplate) {
+        throw new Error("このページのコマ数に合うテンプレを確認できませんでした。");
+      }
+      const template = mode === "aligned" ? alignedTemplate : directTemplate;
+
       // このページの cast だけを参照・属性・限定句の基準にする（PageCastRow と同じ判定）。
       const resolution = resolvePageCast(page, characters, envReferences);
       const refPaths = resolution.refPaths;
-      // 前後ページのあらすじは構成 state から引く（隣接ページのみ）。
-      const idx = storyPages.findIndex((p) => p.page === page.page);
+      const idx = storyPages.findIndex((item) => item.page === page.page);
       const prompt = buildFullPagePrompt(
         page.panels,
         template,
         resolution.castCharacters,
         colorMode,
-        // 3ir: identity/pose 句はキャラ参照があるときだけ（環境参照だけのとき、
-        // ドアを「manga character として描き直せ」と言わない）。
         resolution.charRefCount > 0,
         {
           pageNumber: page.page,
@@ -1481,10 +1517,8 @@ function ComicFlow() {
               ? storyPages[idx + 1].synopsis
               : undefined,
           layoutHint: page.layoutHint,
-          // おまかせ時も、構成AIの行構造から合成した座標と全コマ位置語を焼く。
           rows: page.rows,
           layoutPlan: page.layoutPlan,
-          // fallback は誰が正か不明なので限定句を出さない。none は cast 自体が無い。
           castNames:
             resolution.mode === "matched" ? resolution.matchedNames : undefined,
           readingDirection,
@@ -1498,321 +1532,162 @@ function ComicFlow() {
           styleText: colorMode === "faithful" ? undefined : styleText,
         },
       );
-      const res = await images.generateBatch({
+      const generated = await images.generateBatch({
         prompt,
         count: 1,
         refImagePaths: refPaths.length > 0 ? refPaths : undefined,
-        // ページは縦。値はテンプレの pageAspect から導出する（決め打ちしない）。
         aspect: COMIC_PAGE_ASPECT,
         sourceTag: tag,
       });
       if (!stillMine()) return false;
-      // 中止は失敗ではない。エラー表示にせず未生成へ戻す。
-      if (res.cancelled) {
+      if (generated.cancelled) {
         resetPageTile();
         return false;
       }
-      const imagePath = res.generatedPaths[0];
-      if (!imagePath) {
-        throw new Error(res.errors[0] ?? "画像が生成されませんでした");
+      const generatedPath = generated.generatedPaths[0];
+      if (!generatedPath) {
+        throw new Error(generated.errors[0] ?? "画像が生成されませんでした");
       }
-      // 受領した全ページを、例外なく作業用規格1080x1440へそろえる。
-      const normalizedPage = await normalizeComicPage(imagePath);
+
+      // Aとalignedの両方を同じ既存関所で1080x1440へ正規化する。
+      const normalizedPage = await normalizeComicPage(generatedPath);
       if (!stillMine()) return false;
       if (normalizedPage.aspectWarn) {
         pushToast({ kind: "info", text: COMIC_PAGE_ASPECT_WARN_MESSAGE, ttlMs: 5000 });
       }
-      setPageResults((prev) =>
-        prev.map((r) =>
-          r.page === page.page
-            ? {
-                ...r,
-                generating: false,
-                imagePath: normalizedPage.imagePath,
-                contentRect: normalizedPage.contentRect,
-                startedAt: undefined,
-                genMode: "direct",
-                // B方式で保持したコマ素材は、A方式の新しい1枚絵とは対応しない。
-                panelImagePaths: undefined,
-                panelErrors: undefined,
-                // この画像が実際にどの条件で作られたかを記録する（1コマ再編集の対応判定の正）。
-                direction: readingDirection,
-                colorMode,
-                styleText:
-                  colorMode === "faithful" ? undefined : styleText.trim() || undefined,
-              }
-            : r,
-        ),
-      );
-      // ページ丸ごと再生成した画像は分割/統合前のレイアウトへ戻る（フリーフォーム含む）ため、
-      // 旧画像に紐づくスロット上書きは新画像の正にならない。黙って古い座標で編集させない。
-      setStoryPages((prev) =>
-        prev.map((p) => (p.page === page.page && p.slotsOverride ? { ...p, slotsOverride: undefined } : p)),
-      );
-      // このページのコマ編集履歴も無効化する (Codex検分 2026-07-30)。
-      // 残すと「戻す」が再生成前の画像とスロットを復元し、いま画面にある新しい絵を
-      // 古い状態へ巻き戻してしまう（別レイアウトの混入）。
-      setPanelReeditHistory((prev) => prev.filter((entry) => entry.page !== page.page));
-      return true;
-    } catch (err) {
-      if (!stillMine()) return false;
-      const message = (err as Error)?.message ?? String(err);
-      setPageResults((prev) =>
-        prev.map((r) =>
-          r.page === page.page
-            ? { ...r, generating: false, error: message, startedAt: undefined }
-            : r,
-        ),
-      );
-      pushToast({
-        kind: "error",
-        text: `ページ ${page.page} の生成に失敗しました`,
-        ttlMs: 5000,
-      });
-      return false;
-    } finally {
-      if (soloTrack) {
-        soloTrack.done();
-        releaseDirectRunParent(soloTrack.id);
-      }
-    }
-  };
 
-  /**
-   * 「きっちりコマ割り」で1ページを作る。
-   * コマ生成は全件を決着させ、1件でも成功すれば白い空きコマ付きでページを完成させる。
-   */
-  const generateStructurePage = async (
-    page: ComicStoryPage,
-    batchToken?: number,
-    sourceTag?: string,
-  ): Promise<boolean> => {
-    if (panelReeditHeldRef.current || (batchToken === undefined && generatingPages)) {
-      return false;
-    }
-    const runToken = batchToken ?? pagesRunTokenRef.current;
-    if (pagesRunTokenRef.current !== runToken) return false;
-
-    const resultBeforeRun = pageResults.find((result) => result.page === page.page);
-    if (!resultBeforeRun) return false;
-    const pageTokens = pageTokensRef.current;
-    const pageToken = (pageTokens.get(page.page) ?? 0) + 1;
-    pageTokens.set(page.page, pageToken);
-
-    /** 中止時は途中まで集まったコマ素材を採用せず、開始前の結果へ戻す。 */
-    const resetPageTile = () => {
-      setPageResults((previous) =>
-        previous.map((result) =>
-          result.page === page.page
-            ? restorePageResultSnapshot(result, resultBeforeRun)
-            : result,
-        ),
-      );
-    };
-    const stillMine = (): boolean => {
-      if (
-        pagesRunTokenRef.current === runToken &&
-        pageTokens.get(page.page) === pageToken
-      ) {
-        return true;
-      }
-      resetPageTile();
-      return false;
-    };
-
-    let soloTrack: ReturnType<typeof beginDirectRun> | null = null;
-    if (!sourceTag) {
-      soloTrack = beginDirectRun("comic", page.panels.length);
-      registerDirectRunParent(soloTrack.id, {
-        onCancel: () => {
-          pageTokens.set(page.page, pageToken + 1);
-          resetPageTile();
-        },
-        onLateCancelError: (error) => {
-          pushToast({
-            kind: "error",
-            text: `ページ ${page.page} の中止に失敗したコマがあります（${(error as Error)?.message ?? error}）`,
-            ttlMs: 6000,
-          });
-        },
-      });
-    }
-    // sourceTag が無い単体生成では、直前に必ず soloTrack を作っている。
-    const tag = sourceTag ?? soloTrack!.id;
-
-    const startedAt = Date.now();
-    const emptyPanelPaths = Array<string | undefined>(page.panels.length).fill(undefined);
-    const emptyPanelErrors = Array<string | undefined>(page.panels.length).fill(undefined);
-    setPageResults((previous) =>
-      previous.map((result) =>
-        result.page === page.page
-          ? {
-              ...result,
-              generating: true,
-              error: undefined,
-              startedAt,
-              panelImagePaths: emptyPanelPaths,
-              panelErrors: emptyPanelErrors,
-            }
-          : result,
-      ),
-    );
-
-    try {
-      const plan = buildStructureRunPlan({
-        page,
-        storyTemplateId,
-        direction: readingDirection,
-        characters,
-        colorMode,
-        styleText: colorMode === "faithful" ? undefined : styleText,
-        envReferences,
-        sourceTag: tag,
-      });
-
-      const settled = await Promise.allSettled(
-        plan.panelRequests.map(async ({ panelIndex, request }) => {
-          try {
-            const generated = await images.generateBatch(request);
-            if (!stillMine()) throw new StructurePanelCancelledError();
-            if (generated.cancelled) {
-              throw new StructurePanelCancelledError("コマ生成は中止されました。");
-            }
-            const imagePath = generated.generatedPaths[0];
-            if (!imagePath) {
-              throw new Error(
-                generated.errors[0] ?? `コマ ${panelIndex} の画像が生成されませんでした`,
-              );
-            }
-            setPageResults((previous) =>
-              previous.map((result) => {
-                if (result.page !== page.page) return result;
-                const panelImagePaths = Array.from(
-                  { length: page.panels.length },
-                  (_, index) => result.panelImagePaths?.[index],
-                );
-                const panelErrors = Array.from(
-                  { length: page.panels.length },
-                  (_, index) => result.panelErrors?.[index],
-                );
-                panelImagePaths[panelIndex - 1] = imagePath;
-                panelErrors[panelIndex - 1] = undefined;
-                return { ...result, panelImagePaths, panelErrors };
-              }),
-            );
-            return imagePath;
-          } catch (error) {
-            if (error instanceof StructurePanelCancelledError) throw error;
-            if (stillMine()) {
-              const message = (error as Error)?.message ?? String(error);
-              setPageResults((previous) =>
-                previous.map((result) => {
-                  if (result.page !== page.page) return result;
-                  const panelErrors = Array.from(
-                    { length: page.panels.length },
-                    (_, index) => result.panelErrors?.[index],
-                  );
-                  panelErrors[panelIndex - 1] = message;
-                  return { ...result, panelErrors };
-                }),
-              );
-            }
-            throw error;
-          }
-        }),
-      );
-
-      if (!stillMine()) return false;
-      if (
-        settled.some(
-          (outcome) =>
-            outcome.status === "rejected" &&
-            outcome.reason instanceof StructurePanelCancelledError,
-        )
-      ) {
-        resetPageTile();
-        return false;
-      }
-
-      const panelImagePaths = settled.map((outcome) =>
-        outcome.status === "fulfilled" ? outcome.value : undefined,
-      );
-      const panelErrors = settled.map((outcome) =>
-        outcome.status === "rejected"
-          ? (outcome.reason as Error)?.message ?? String(outcome.reason)
-          : undefined,
-      );
-      const succeeded = panelImagePaths.filter((path): path is string => Boolean(path));
-      if (succeeded.length === 0) {
-        throw new Error(
-          panelErrors.find((error): error is string => Boolean(error)) ??
-            "全コマの生成に失敗しました",
+      /** 素のA画像を採用する。direct本流とaligned照合失敗の共通処理。 */
+      const adoptDirectPage = () => {
+        setPageResults((previous) =>
+          previous.map((result) =>
+            result.page === page.page
+              ? {
+                  ...withoutLegacyPanelResults(result),
+                  generating: false,
+                  imagePath: normalizedPage.imagePath,
+                  contentRect: normalizedPage.contentRect,
+                  startedAt: undefined,
+                  error: undefined,
+                  genMode: "direct",
+                  direction: readingDirection,
+                  colorMode,
+                  styleText:
+                    colorMode === "faithful" ? undefined : styleText.trim() || undefined,
+                }
+              : result,
+          ),
         );
-      }
+        setStoryPages((previous) =>
+          previous.map((item) =>
+            item.page === page.page && item.slotsOverride
+              ? { ...item, slotsOverride: undefined }
+              : item,
+          ),
+        );
+      };
 
-      const bytes = await assembleStructurePage({
-        panelImagePaths,
-        slots: plan.slots,
-        frameStyle,
-      });
-      if (!stillMine()) return false;
-      // 保存はフロント直書きではなく Rust の images_write_upload 経由だけを使う。
-      const imagePath = await images.writeUpload(
-        `comic-structure-p${page.page}-${Date.now()}.png`,
-        bytes,
-      );
-      if (!stillMine()) return false;
+      if (mode === "direct") {
+        adoptDirectPage();
+      } else {
+        // template は上で必須確認済み。TypeScriptへも同じ事実を明示する。
+        if (!alignedTemplate) throw new Error("テンプレを確認できませんでした。");
+        const imageData = await readPanelImageData(normalizedPage.imagePath);
+        if (!stillMine()) return false;
+        const alignment = alignSlotsToTemplate(
+          imageData,
+          alignedTemplate,
+          readingDirection,
+        );
+        if (!alignment.ok) {
+          adoptDirectPage();
+          pushToast({
+            kind: "info",
+            text: "枠の自動整列を見送りました（絵はそのまま使えます）",
+            ttlMs: 7000,
+          });
+        } else {
+          const outputTemplate = templateForReadingDirection(
+            alignedTemplate,
+            readingDirection,
+          );
+          const canvas = recomposePageToTemplate({
+            sourceImage: panelImageDataCanvas(imageData),
+            sourceWidth: imageData.width,
+            sourceHeight: imageData.height,
+            alignedSlots: alignment.slots,
+            template: outputTemplate,
+            borderPx: alignment.borderPx,
+          });
+          const pngBytes = await canvasToPngBytes(canvas);
+          if (!stillMine()) return false;
+          // ブラウザから直接書かず、Rustコマンド経由で保存する。
+          const alignedPath = await images.writeUpload(
+            `comic-aligned-p${page.page}-${Date.now()}.png`,
+            pngBytes,
+          );
+          if (!stillMine()) return false;
 
-      setPageResults((previous) =>
-        previous.map((result) =>
-          result.page === page.page
-            ? {
-                ...result,
+          setPageResults((previous) =>
+            previous.map((result) => {
+              if (result.page !== page.page) return result;
+              // 旧structure素材キーはaligned結果へ持ち越さない。
+              const cleanResult = withoutLegacyPanelResults(result);
+              return {
+                ...cleanResult,
                 generating: false,
-                imagePath,
+                imagePath: alignedPath,
                 contentRect: undefined,
                 startedAt: undefined,
                 error: undefined,
-                genMode: plan.genMode,
-                panelImagePaths,
-                panelErrors,
+                genMode: "aligned",
                 direction: readingDirection,
                 colorMode,
                 styleText:
                   colorMode === "faithful" ? undefined : styleText.trim() || undefined,
-              }
-            : result,
-        ),
-      );
-      setStoryPages((previous) =>
-        previous.map((item) =>
-          item.page === page.page ? { ...item, slotsOverride: plan.slots } : item,
-        ),
-      );
+              };
+            }),
+          );
+          // 再組立先と同じテンプレpercent座標を、以後の編集範囲の正にする。
+          setStoryPages((previous) =>
+            previous.map((item) =>
+              item.page === page.page
+                ? {
+                    ...item,
+                    slotsOverride: outputTemplate.slots.map((slot) => ({
+                      ...slot,
+                      points: slot.points?.map(([x, y]) => [x, y] as [number, number]),
+                    })),
+                  }
+                : item,
+            ),
+          );
+        }
+      }
+
       setPanelReeditHistory((previous) =>
         previous.filter((entry) => entry.page !== page.page),
       );
-
-      const failedPanelNumbers = panelErrors.flatMap((error, index) =>
-        error ? [index + 1] : [],
-      );
-      if (failedPanelNumbers.length > 0) {
-        pushToast({
-          kind: "info",
-          text: `ページ${page.page}のコマ ${failedPanelNumbers.join(",")} は生成に失敗しました。1コマずつ直すから再生成できます`,
-          ttlMs: 7000,
-        });
-      }
       return true;
-    } catch {
+    } catch (error) {
       if (!stillMine()) return false;
-      setPageResults((previous) =>
-        previous.map((result) =>
-          result.page === page.page
-            ? restorePageResultSnapshot(result, resultBeforeRun)
-            : result,
-        ),
-      );
+      if (mode === "aligned") {
+        setPageResults((previous) =>
+          previous.map((result) =>
+            result.page === page.page
+              ? restorePageResultSnapshot(result, resultBeforeRun)
+              : result,
+          ),
+        );
+      } else {
+        const message = (error as Error)?.message ?? String(error);
+        setPageResults((previous) =>
+          previous.map((result) =>
+            result.page === page.page
+              ? { ...result, generating: false, error: message, startedAt: undefined }
+              : result,
+          ),
+        );
+      }
       pushToast({
         kind: "error",
         text: `ページ ${page.page} の生成に失敗しました`,
@@ -1824,188 +1699,12 @@ function ComicFlow() {
         soloTrack.done();
         releaseDirectRunParent(soloTrack.id);
       }
-    }
-  };
-
-  /** structure ページの1コマ素材だけを差し替え、同じスロットへ再構成する。 */
-  const regenerateStructurePanel = async (
-    page: ComicStoryPage,
-    draftPanel: ComicPanel,
-  ): Promise<PanelReeditOutcome> => {
-    const currentResult = pageResults.find((result) => result.page === page.page);
-    const originalPath = currentResult?.imagePath;
-    if (
-      !originalPath ||
-      currentResult?.genMode !== "structure" ||
-      generatingStory ||
-      generatingPages ||
-      pageResults.some((result) => result.generating)
-    ) {
-      return { adopted: false, error: PANEL_REEDIT_BUSY_MESSAGE };
-    }
-
-    const currentPage = storyPages.find((item) => item.page === page.page);
-    const panelImagePaths = currentResult.panelImagePaths;
-    const pageDirection = currentResult.direction ?? readingDirection;
-    const slots = currentPage
-      ? effectivePageSlots({
-          page: currentPage,
-          storyTemplateId,
-          direction: pageDirection,
-          contentRect: currentResult.contentRect,
-        })
-      : null;
-    if (
-      !currentPage ||
-      !panelImagePaths ||
-      panelImagePaths.length !== currentPage.panels.length ||
-      !slots ||
-      slots.length !== currentPage.panels.length ||
-      !slots[draftPanel.index - 1]
-    ) {
-      return {
-        adopted: false,
-        error: "コマ素材とコマ割りの対応を確認できないため、通常の編集方法で開き直してください。",
-      };
-    }
-
-    const lockHandle = acquirePanelReeditLock(page.page);
-    if (!lockHandle) {
-      pushToast({ kind: "info", text: PANEL_REEDIT_BUSY_MESSAGE, ttlMs: 4000 });
-      return { adopted: false, error: PANEL_REEDIT_BUSY_MESSAGE };
-    }
-    const track = beginDirectRun("comic", 1);
-    registerDirectRunParent(track.id, {
-      onCancel: () => invalidatePanelReeditLock(),
-      onLateCancelError: (error) => {
-        pushToast({
-          kind: "error",
-          text: `コマ ${draftPanel.index} の中止に失敗しました（${(error as Error)?.message ?? error}）`,
-          ttlMs: 6000,
-        });
-      },
-    });
-    const stillMine = () => isCurrentPanelReeditLock(lockHandle);
-
-    try {
-      const pageColorMode = currentResult.colorMode ?? colorMode;
-      const request = buildStructurePanelRequest({
-        panel: draftPanel,
-        slot: slots[draftPanel.index - 1],
-        characters,
-        colorMode: pageColorMode,
-        styleText: currentResult.styleText,
-        envReferences,
-        direction: pageDirection,
-        pageContext: {
-          panelNo: draftPanel.index,
-          panelTotal: currentPage.panels.length,
-          synopsis: currentPage.synopsis,
-        },
-        sourceTag: track.id,
-      }).request;
-      const generated = await images.generateBatch(request);
-      if (!stillMine()) {
-        return { adopted: false, error: "再生成は中止されました。元ページは変更していません。" };
-      }
-      if (generated.cancelled) {
-        return { adopted: false, error: "AIによる再生成が中止されました。元ページは変更していません。" };
-      }
-      const generatedPath = generated.generatedPaths[0];
-      if (!generatedPath) {
-        throw new Error(generated.errors[0] ?? "コマの再生成画像を取得できませんでした。");
-      }
-
-      const nextPanelImagePaths = [...panelImagePaths];
-      nextPanelImagePaths[draftPanel.index - 1] = generatedPath;
-      const nextPanelErrors = Array.from(
-        { length: currentPage.panels.length },
-        (_, index) => currentResult.panelErrors?.[index],
-      );
-      nextPanelErrors[draftPanel.index - 1] = undefined;
-      const bytes = await assembleStructurePage({
-        panelImagePaths: nextPanelImagePaths,
-        slots,
-        frameStyle,
-      });
-      if (!stillMine()) {
-        return { adopted: false, error: "再生成は中止されました。元ページは変更していません。" };
-      }
-      const imagePath = await images.writeUpload(
-        `comic-structure-reedit-p${page.page}-c${draftPanel.index}-${Date.now()}.png`,
-        bytes,
-      );
-      if (!stillMine()) {
-        return { adopted: false, error: "再生成は中止されました。元ページは変更していません。" };
-      }
-
-      const historyEntry: PanelReeditHistoryEntry = {
-        page: page.page,
-        imagePath: originalPath,
-        pageSnapshot: currentPage,
-        resultPatch: {
-          panelImagePaths: currentResult.panelImagePaths,
-          panelErrors: currentResult.panelErrors,
-        },
-      };
-      setStoryPages((previous) =>
-        previous.map((item) =>
-          item.page === page.page
-            ? {
-                ...item,
-                panels: item.panels.map((panel) =>
-                  panel.index === draftPanel.index ? draftPanel : panel,
-                ),
-              }
-            : item,
-        ),
-      );
-      setPageResults((previous) =>
-        previous.map((result) =>
-          result.page === page.page
-            ? {
-                ...result,
-                imagePath,
-                contentRect: undefined,
-                genMode: "structure",
-                panelImagePaths: nextPanelImagePaths,
-                panelErrors: nextPanelErrors,
-                error: undefined,
-              }
-            : result,
-        ),
-      );
-      setPanelReeditHistory((previous) => [...previous, historyEntry]);
-      pushToast({
-        kind: "success",
-        text: `ページ ${page.page} のコマ ${draftPanel.index} だけを差し替えました。`,
-        ttlMs: 4000,
-      });
-      return { adopted: true };
-    } catch (error) {
-      if (stillMine()) {
-        pushToast({
-          kind: "error",
-          text: `コマ ${draftPanel.index} は変更せずに停止しました: ${(error as Error)?.message ?? error}`,
-          ttlMs: 6500,
-        });
-      }
-      return {
-        adopted: false,
-        error: `採用できませんでした: ${String((error as Error)?.message ?? error).replace(/。+$/, "")}。元ページは変更していません。もう一度お試しください。`,
-      };
-    } finally {
-      lockHandle.release();
-      track.done();
-      releaseDirectRunParent(track.id);
     }
   };
 
   /** 現在選んだ方式だけを切り替え、構成データは共用する。 */
   const generatePage = async (page: ComicStoryPage): Promise<boolean> =>
-    pageGenMode === "structure"
-      ? generateStructurePage(page)
-      : generateStoryPage(page);
+    generateStoryPage(page, pageGenMode);
 
   /**
    * 全ページを並列生成する。
@@ -2024,17 +1723,13 @@ function ComicFlow() {
     const runMode = pageGenMode;
     const resultsBeforeRun = pageResults;
     setGeneratingPages(true);
-    const generationCount =
-      runMode === "structure"
-        ? storyPages.reduce((sum, page) => sum + page.panels.length, 0)
-        : storyPages.length;
-    const track = beginDirectRun("comic", generationCount);
+    const track = beginDirectRun("comic", storyPages.length);
     registerDirectRunParent(track.id, {
       onCancel: () => {
         pagesRunTokenRef.current += 1;
         setGeneratingPages(false);
-        if (runMode === "structure") {
-          // 途中まで揃ったコマ素材は採用せず、一括開始前の結果へ戻す。
+        if (runMode === "aligned") {
+          // 照合・再組立の途中結果は採用せず、一括開始前の結果へ戻す。
           setPageResults((previous) =>
             previous.map((result) => {
               const before = resultsBeforeRun.find((item) => item.page === result.page);
@@ -2062,9 +1757,7 @@ function ComicFlow() {
     try {
       const settled = await Promise.allSettled(
         storyPages.map((page) =>
-          runMode === "structure"
-            ? generateStructurePage(page, runToken, track.id)
-            : generateStoryPage(page, runToken, track.id),
+          generateStoryPage(page, runMode, runToken, track.id),
         ),
       );
       if (pagesRunTokenRef.current !== runToken) return false;
@@ -2190,7 +1883,6 @@ function ComicFlow() {
               panelReeditRunningPage={panelReeditRunningPage}
               panelReeditBlocked={panelReeditHeld || generatingStory || generatingPages || pageResults.some((r) => r.generating)}
               onRegeneratePanel={regeneratePanel}
-              onRegenerateStructurePanel={regenerateStructurePanel}
               onUndoPanelReedit={undoPanelReedit}
               canUndoPanelReedit={(pageNo) => panelReeditHistory.some((entry) => entry.page === pageNo)}
               onSplitPanel={splitStoryPanelOnImage}
@@ -2718,7 +2410,10 @@ function PlanPhase({
 
           <ComicPlanCards
             page={page}
-            storyTemplateId={storyTemplateId}
+            storyTemplateId={
+              storyTemplateId ??
+              (pageGenMode === "aligned" ? page.layoutTemplateId ?? null : null)
+            }
             readingDirection={readingDirection}
             updateStoryPage={updateStoryPage}
             updateStoryPanel={updateStoryPanel}
@@ -2730,9 +2425,7 @@ function PlanPhase({
 
       <div className="flex flex-col items-start gap-1">
         <p className="text-[11px] text-neutral-500">
-          {pageGenMode === "structure"
-            ? `画像の生成回数: 約${storyPages.reduce((sum, page) => sum + page.panels.length, 0)}回（コマごとに1回）`
-            : `画像の生成回数: 約${storyPages.length}回（1ページ = 1回）`}
+          画像の生成回数: 約{storyPages.length}回（1ページ = 1回）
         </p>
         <div className="flex flex-wrap gap-2">
           <button
@@ -2764,8 +2457,8 @@ const COMIC_PAGE_GRID_COLS: Record<number, string> = {
   3: "grid-cols-3 sm:grid-cols-4 lg:grid-cols-6",
 };
 
-function comicPageModeLabel(mode: ComicPageGenMode | undefined): string | undefined {
-  return mode === "structure" ? "コマ割り" : mode === "direct" ? "一枚描き" : undefined;
+function comicPageModeLabel(mode: unknown): string {
+  return normalizeComicPageGenMode(mode) === "aligned" ? "枠そろえ済み" : "一枚描き";
 }
 
 /**
@@ -2789,7 +2482,6 @@ function PagesPhase({
   panelReeditRunningPage,
   panelReeditBlocked,
   onRegeneratePanel,
-  onRegenerateStructurePanel,
   onUndoPanelReedit,
   canUndoPanelReedit,
   onSplitPanel,
@@ -2817,10 +2509,6 @@ function PagesPhase({
     page: ComicStoryPage,
     panel: ComicPanel,
     points: PanelReeditPoint[],
-  ) => Promise<PanelReeditOutcome>;
-  onRegenerateStructurePanel: (
-    page: ComicStoryPage,
-    panel: ComicPanel,
   ) => Promise<PanelReeditOutcome>;
   onUndoPanelReedit: (pageNo: number) => void;
   canUndoPanelReedit: (pageNo: number) => boolean;
@@ -3078,7 +2766,7 @@ function PagesPhase({
             {(
               [
                 { value: "direct", label: "一枚描き" },
-                { value: "structure", label: "コマ割り" },
+                { value: "aligned", label: "コマ割り" },
               ] as const
             ).map((option) => {
               const selected = pageGenMode === option.value;
@@ -3178,18 +2866,7 @@ function PagesPhase({
         {storyPages.map((page) => {
           const result = pageResults.find((r) => r.page === page.page);
           const isPanelReediting = panelReeditRunningPage === page.page;
-          const resultModeLabel = comicPageModeLabel(result?.genMode);
-          const structureDoneCount = Array.from(
-            { length: page.panels.length },
-            (_, index) =>
-              Boolean(result?.panelImagePaths?.[index] || result?.panelErrors?.[index]),
-          ).filter(Boolean).length;
-          const failedPanelNumbers =
-            result?.genMode === "structure"
-              ? Array.from({ length: page.panels.length }, (_, index) =>
-                  result.panelErrors?.[index] ? index + 1 : null,
-                ).filter((index): index is number => index !== null)
-              : [];
+          const alignedResult = normalizeComicPageGenMode(result?.genMode) === "aligned";
           // スロット未確定（おまかせ・コマ追加後）でも入口は閉じない。押した時点で
           // 線認識を走らせて slotsOverride を復元する（失敗はそこで理由を出す）。
           // コマ数不一致も同様に、認識結果と突き合わせてから判定する。
@@ -3207,9 +2884,9 @@ function PagesPhase({
                   <span className="text-xs font-semibold text-pink-200">
                     ページ {page.page}
                   </span>
-                  {resultModeLabel ? (
+                  {alignedResult ? (
                     <span className="rounded border border-[#343434] bg-[#111] px-1.5 py-0.5 text-[9px] font-bold text-neutral-400">
-                      {resultModeLabel}
+                      枠そろえ済み
                     </span>
                   ) : null}
                 </div>
@@ -3227,9 +2904,7 @@ function PagesPhase({
                   title={
                     panelReeditRunningPage !== null
                       ? PANEL_REEDIT_BUSY_MESSAGE
-                      : pageGenMode === "structure"
-                        ? `このページはコマ数ぶん（${page.panels.length}回）の生成を行います`
-                        : undefined
+                      : undefined
                   }
                   className="rounded border border-[#2a2a2a] bg-[#1a1a1a] px-2 py-0.5 text-[11px] text-neutral-300 transition hover:border-pink-500/40 disabled:opacity-40"
                 >
@@ -3243,9 +2918,7 @@ function PagesPhase({
                     <span className="text-[12px] font-bold text-pink-300">
                       {isPanelReediting
                         ? "このコマだけ再生成中…"
-                        : pageGenMode === "structure"
-                          ? `コマ ${structureDoneCount}/${page.panels.length} を生成中…`
-                          : "生成中…"}
+                        : "生成中…"}
                     </span>
                     {result?.startedAt ? (
                       <div className="w-full max-w-xs">
@@ -3281,11 +2954,6 @@ function PagesPhase({
                   <span className="text-[11px] text-neutral-600">未生成</span>
                 )}
               </div>
-              {failedPanelNumbers.map((panelNo) => (
-                <p key={panelNo} className="text-[10px] text-amber-200">
-                  コマ {panelNo} は未生成
-                </p>
-              ))}
               <button
                 type="button"
                 onClick={() => void savePage(result?.imagePath, page.page)}
@@ -3353,9 +3021,8 @@ function PagesPhase({
             })
           : null;
         if (!page || !result?.imagePath || !slots) return null;
-        const structureFastPath =
-          result.genMode === "structure" &&
-          result.panelImagePaths?.length === page.panels.length &&
+        const alignedLayout =
+          normalizeComicPageGenMode(result.genMode) === "aligned" &&
           slots.length === page.panels.length;
         return (
           <PanelReeditModal
@@ -3369,13 +3036,11 @@ function PagesPhase({
             recoveredLayout={
               !storyTemplateId &&
               Boolean(page.slotsOverride) &&
-              result.genMode !== "structure"
+              normalizeComicPageGenMode(result.genMode) === "direct"
             }
-            structureFastPath={structureFastPath}
-            panelErrors={result.panelErrors}
+            alignedLayout={alignedLayout}
             onClose={() => setEditingPage(null)}
             onRegenerate={onRegeneratePanel}
-            onRegenerateStructure={onRegenerateStructurePanel}
             onSplitPanel={onSplitPanel}
             onMergePanels={onMergePanels}
           />
@@ -3407,11 +3072,9 @@ function PanelReeditModal({
   slots,
   busy,
   recoveredLayout,
-  structureFastPath,
-  panelErrors,
+  alignedLayout,
   onClose,
   onRegenerate,
-  onRegenerateStructure,
   onSplitPanel,
   onMergePanels,
 }: {
@@ -3422,19 +3085,13 @@ function PanelReeditModal({
   busy: boolean;
   /** 線認識で復元したコマ割りのページか（副題の出し分けだけに使う）。 */
   recoveredLayout: boolean;
-  /** コマ素材とスロットが1対1で残っており、マスクなしで差し替えられる。 */
-  structureFastPath: boolean;
-  /** structure 初回生成で失敗したコマの理由（index-1対応）。 */
-  panelErrors?: (string | undefined)[];
+  /** aligned 再組立で、テンプレ座標が画像と一致している。 */
+  alignedLayout: boolean;
   onClose: () => void;
   onRegenerate: (
     page: ComicStoryPage,
     panel: ComicPanel,
     points: PanelReeditPoint[],
-  ) => Promise<PanelReeditOutcome>;
-  onRegenerateStructure: (
-    page: ComicStoryPage,
-    panel: ComicPanel,
   ) => Promise<PanelReeditOutcome>;
   onSplitPanel: (
     page: ComicStoryPage,
@@ -3476,7 +3133,7 @@ function PanelReeditModal({
   const [mergeTarget, setMergeTarget] = useState<number | null>(null);
   const detectionTokenRef = useRef(0);
   const locked = busy || submitting;
-  const generationAllowed = structureFastPath
+  const generationAllowed = alignedLayout
     ? true
     : manualAdjust
       ? manualValidated
@@ -3559,9 +3216,7 @@ function PanelReeditModal({
     setSubmitStartedAt(Date.now());
     setReeditError(null);
     try {
-      const outcome = structureFastPath
-        ? await onRegenerateStructure(page, selectedPanel)
-        : await onRegenerate(page, selectedPanel, points);
+      const outcome = await onRegenerate(page, selectedPanel, points);
       if (outcome.adopted) {
         onClose();
         return;
@@ -3595,7 +3250,7 @@ function PanelReeditModal({
   useEffect(() => {
     const token = detectionTokenRef.current + 1;
     detectionTokenRef.current = token;
-    if (structureFastPath) {
+    if (alignedLayout) {
       setDetecting(false);
       setDetection(null);
       setManualAdjust(false);
@@ -3632,9 +3287,8 @@ function PanelReeditModal({
       .finally(() => {
         if (detectionTokenRef.current === token) setDetecting(false);
       });
-  }, [imagePath, selectedIndex, slots, structureFastPath]);
+  }, [imagePath, selectedIndex, slots, alignedLayout]);
   const polygon = points.map((point) => `${point.x},${point.y}`).join(" ");
-  const selectedPanelFailed = Boolean(panelErrors?.[selectedIndex - 1]);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-3 backdrop-blur-sm" role="dialog" aria-modal="true" aria-label={`ページ ${page.page} の1コマ編集`}>
@@ -3643,7 +3297,7 @@ function PanelReeditModal({
           <div>
             <h3 className="text-sm font-bold text-white">ページ {page.page}：1コマずつ直す</h3>
             <p className="text-[11px] text-neutral-400">
-              {structureFastPath
+              {alignedLayout
                 ? "色分けされたコマを選び、内容を直して再生成します。コマの位置と大きさはそのまま保たれます。"
                 : recoveredLayout
                 ? "画像から認識したコマ割りです。色分けされたコマをクリックして選び、内容を直して再生成します。"
@@ -3674,9 +3328,8 @@ function PanelReeditModal({
                   if (panel.index === selectedIndex) return null;
                   const slot = slots[panel.index - 1];
                   if (!slot) return null;
-                  const color = panelErrors?.[panel.index - 1]
-                    ? "#fbbf24"
-                    : PANEL_OVERLAY_COLORS[(panel.index - 1) % PANEL_OVERLAY_COLORS.length];
+                  const color =
+                    PANEL_OVERLAY_COLORS[(panel.index - 1) % PANEL_OVERLAY_COLORS.length];
                   const guide = panelGuidePoints(slot);
                   const centroid = guide.reduce(
                     (sum, point) => ({ x: sum.x + point.x / guide.length, y: sum.y + point.y / guide.length }),
@@ -3715,8 +3368,8 @@ function PanelReeditModal({
                 })}
                 <polygon
                   points={polygon}
-                  fill={selectedPanelFailed ? "rgba(251,191,36,0.28)" : "rgba(236,72,153,0.28)"}
-                  stroke={selectedPanelFailed ? "#fbbf24" : "#f9a8d4"}
+                  fill="rgba(236,72,153,0.28)"
+                  stroke="#f9a8d4"
                   strokeWidth="0.9"
                   vectorEffect="non-scaling-stroke"
                 />
@@ -3733,7 +3386,7 @@ function PanelReeditModal({
                       dominantBaseline="central"
                       fontSize="4"
                       fontWeight="bold"
-                      fill={selectedPanelFailed ? "#fbbf24" : "#f9a8d4"}
+                      fill="#f9a8d4"
                       stroke="#ffffff"
                       strokeWidth="0.9"
                       paintOrder="stroke"
@@ -3765,7 +3418,7 @@ function PanelReeditModal({
               </svg>
             </div>
             <p className={`mt-2 text-xs ${generationAllowed ? "text-emerald-200" : "text-amber-200"}`}>
-              {structureFastPath
+              {alignedLayout
                 ? "コマ割りは固定済みです。選んだコマだけを作り直して、同じ位置へはめ込みます。"
                 : detecting
                 ? "実際の枠線を自動で探しています…"
@@ -3778,7 +3431,6 @@ function PanelReeditModal({
             <div className="grid grid-cols-3 gap-1" role="group" aria-label="編集するコマ">
               {drafts.map((panel) => {
                 const selected = panel.index === selectedIndex;
-                const failed = Boolean(panelErrors?.[panel.index - 1]);
                 return (
                   <button
                     key={panel.index}
@@ -3789,9 +3441,7 @@ function PanelReeditModal({
                     className={`rounded border px-2 py-1.5 text-xs font-semibold ${
                       selected
                         ? "border-pink-400 bg-pink-500/20 text-pink-100"
-                        : failed
-                          ? "border-amber-400/60 bg-amber-400/10 text-amber-100"
-                          : "border-[#3a3a3a] text-neutral-300"
+                        : "border-[#3a3a3a] text-neutral-300"
                     }`}
                   >
                     コマ {panel.index}
@@ -3801,12 +3451,6 @@ function PanelReeditModal({
             </div>
             {selectedPanel ? (
               <>
-                {panelErrors?.[selectedPanel.index - 1] ? (
-                  <p className="rounded border border-amber-400/40 bg-amber-400/10 px-2 py-2 text-xs leading-relaxed text-amber-100">
-                    コマ {selectedPanel.index} は未生成です：
-                    {panelErrors[selectedPanel.index - 1]}
-                  </p>
-                ) : null}
                 <Field label="構図">
                   <input disabled={locked} value={selectedPanel.composition} onChange={(event) => updatePanel({ composition: event.target.value })} className="w-full rounded border border-[#3a3a3a] bg-[#101010] px-2 py-1.5 text-xs text-white disabled:opacity-40" />
                 </Field>
@@ -3824,12 +3468,12 @@ function PanelReeditModal({
                 </Field>
               </>
             ) : null}
-            {!structureFastPath ? (
+            {!alignedLayout ? (
               <button type="button" onClick={() => { if (!locked) { setManualAdjust(true); setManualValidated(false); } }} disabled={locked || detecting} className="rounded border border-amber-300/60 bg-amber-300/10 px-3 py-2 text-xs font-semibold text-amber-100 disabled:opacity-40">
                 範囲を微調整
               </button>
             ) : null}
-            {!structureFastPath && manualAdjust ? (
+            {!alignedLayout && manualAdjust ? (
               <button type="button" onClick={confirmRange} disabled={locked} className="rounded border border-amber-300/60 bg-amber-300/10 px-3 py-2 text-xs font-semibold text-amber-100 disabled:opacity-40">
                 調整した範囲を確認
               </button>
@@ -3904,9 +3548,7 @@ function PanelReeditModal({
               <p className="text-[10px] leading-relaxed text-neutral-500">コマ割りの変更はこのページの画像と構成に反映されます。「直前のコマ編集を戻す」で1段ずつ戻せます。</p>
             </div>
             <p className="text-[10px] leading-relaxed text-neutral-500">
-              {structureFastPath
-                ? "選んだコマ画像だけを差し替え、固定済みのコマ割りへページ全体を組み直します。"
-                : "他のコマと枠線は、AI画像をそのまま使わず、白いマスク内だけを元ページへ合成して守ります。"}
+              他のコマと枠線は、AI画像をそのまま使わず、白いマスク内だけを元ページへ合成して守ります。
             </p>
           </div>
         </div>

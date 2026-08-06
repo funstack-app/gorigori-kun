@@ -3,6 +3,7 @@ import { useState, type ReactNode } from "react";
 import { MAX_PANELS_PER_PAGE } from "../../../lib/comic/prompts";
 import { effectivePageSlots } from "../../../lib/comic/panelLayoutOps";
 import { panelGuidePoints } from "../../../lib/comic/panelReedit";
+import { synthesizeSlotsFromRows } from "../../../lib/comic/layoutSynthesis";
 import type { ComicPanelSlot } from "../../../lib/comic/layoutTemplates";
 import type {
   ComicPanel,
@@ -127,11 +128,19 @@ export function ComicPlanCards({
   const [pageSettingsOpen, setPageSettingsOpen] = useState(false);
   const selectedPanel = page.panels.find((panel) => panel.index === selectedPanelIndex) ?? null;
   const full = page.panels.length >= MAX_PANELS_PER_PAGE;
-  const slots = effectivePageSlots({
+  const effectiveSlots = effectivePageSlots({
     page,
     storyTemplateId,
     direction: readingDirection,
   });
+  const previewSlots =
+    effectiveSlots ??
+    (page.rows
+      ? synthesizeSlotsFromRows(page.rows, page.panels.length, readingDirection)
+      : null);
+  const panelsInReadingOrder = [...page.panels].sort(
+    (left, right) => left.index - right.index,
+  );
 
   const insertPanel = (
     afterPosition: number,
@@ -157,14 +166,14 @@ export function ComicPlanCards({
       ) : null}
 
       <div
-        className="grid auto-rows-fr grid-cols-3 gap-2 sm:grid-cols-4"
+        className="grid auto-rows-fr grid-flow-row grid-cols-3 gap-2 sm:grid-cols-4"
         dir={readingDirection === "rtl" ? "rtl" : "ltr"}
       >
-        {page.panels.map((panel) => (
+        {panelsInReadingOrder.map((panel) => (
           <PanelCard
             key={panel.index}
             panel={panel}
-            slots={slots}
+            slots={previewSlots}
             onClick={() => setSelectedPanelIndex(panel.index)}
           />
         ))}

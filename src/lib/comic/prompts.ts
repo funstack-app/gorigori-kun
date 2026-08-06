@@ -268,6 +268,7 @@ export function buildStoryPrompt(
       ]
     : [
         "ページごとに 1〜8 コマの範囲で、そのページの内容に合う最適なコマ数を決めてください。見せ場のページはコマ数を減らして1コマを大きく、テンポの速い掛け合いのページはコマ数を増やします。",
+        `各ページで、次の12テンプレから1つだけ選び、その id を layoutTemplateId に入れてください: ${COMIC_LAYOUT_TEMPLATES.map((item) => `${item.id}(${item.panelCount}コマ)`).join(", ")}。panelCount と panels の要素数は、選んだテンプレのコマ数と一致させてください。`,
         '各ページの rows には、読み順のコマ番号を上の行から順にグループ化して入れてください（例: [[1,2],[3],[4,5,6]]）。1 から panelCount までの番号を、重複・欠番なく1回ずつ使います。',
       ];
 
@@ -342,7 +343,10 @@ export function buildStoryPrompt(
     '      "panelCount": このページのコマ数(整数),',
     ...(template
       ? []
-      : ['      "rows": [[上段のコマ番号を読み順で], [次の段のコマ番号を読み順で], ...],']),
+      : [
+          '      "layoutTemplateId": "manga01〜manga12のいずれか1つ",',
+          '      "rows": [[上段のコマ番号を読み順で], [次の段のコマ番号を読み順で], ...],',
+        ]),
     '      "panels": [',
     "        {",
     '          "index": ページ内のコマ番号(1始まりの整数),',
@@ -517,6 +521,15 @@ function parseStoryRows(data: unknown, panelCount: number): number[][] | null {
   return rows;
 }
 
+/** 12テンプレの実在IDだけをページ構成へ取り込む。 */
+function parseStoryLayoutTemplateId(data: unknown): string | undefined {
+  if (typeof data !== "string") return undefined;
+  const id = data.trim();
+  return COMIC_LAYOUT_TEMPLATES.some((template) => template.id === id)
+    ? id
+    : undefined;
+}
+
 /**
  * ネーム応答テキストから ComicPanel[] を抽出する。
  * - ```json フェンスがあれば剥がす
@@ -609,6 +622,7 @@ export function parseComicStory(
     }
     const panels = parsePanelArray(obj.panels);
     if (!panels) return null;
+    const layoutTemplateId = parseStoryLayoutTemplateId(obj.layoutTemplateId);
     // rows は任意。壊れている場合はページ全体を落とさず、rows/layoutPlan だけを
     // 丸ごと捨てて従来経路へ戻す（旧履歴・AIの省略との後方互換）。
     const rows = parseStoryRows(obj.rows, obj.panelCount);
@@ -640,6 +654,7 @@ export function parseComicStory(
       cast,
       panelCount: obj.panelCount,
       panels,
+      ...(layoutTemplateId ? { layoutTemplateId } : {}),
       ...(rows && layoutPlan ? { rows, layoutPlan } : {}),
     });
   }
@@ -658,9 +673,14 @@ export function parseComicStory(
  */
 export function isValidStory(
   pages: ComicStoryPage[],
-  opts: { expectedPages?: number; templatePanelCount?: number },
+  opts: {
+    expectedPages?: number;
+    templatePanelCount?: number;
+    /** おまかせ新規生成で、各ページの12テンプレ選択を必須にする。 */
+    requireLayoutTemplateId?: boolean;
+  },
 ): boolean {
-  const { expectedPages, templatePanelCount } = opts;
+  const { expectedPages, templatePanelCount, requireLayoutTemplateId = false } = opts;
   // ページ数の上限判定は撤廃（2026-07-28 STΛCK指示）。ページ生成は並列＋セマフォで
   // 順番に消化されるため、枚数はここで遮断しない。1ページ未満だけが不正。
   if (expectedPages !== undefined) {
@@ -676,6 +696,12 @@ export function isValidStory(
       if (page.panelCount !== templatePanelCount) return false;
     } else if (page.panelCount < 1 || page.panelCount > MAX_PANELS_PER_PAGE) {
       return false;
+    }
+    if (requireLayoutTemplateId) {
+      const selectedTemplate = COMIC_LAYOUT_TEMPLATES.find(
+        (template) => template.id === page.layoutTemplateId,
+      );
+      if (!selectedTemplate || selectedTemplate.panelCount !== page.panelCount) return false;
     }
     if (!isValidPanelSet(page.panels, page.panelCount)) return false;
   }

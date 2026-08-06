@@ -9,8 +9,11 @@ import {
   assembleStructurePage,
   borderWidthPxFor,
   buildAssemblyPlan,
+  buildRecompositionPlan,
   coverCrop,
   nearestAspectLabel,
+  recomposePageToTemplate,
+  RECOMPOSE_PANEL_BORDER_PX,
   slotPixelRect,
   STRUCTURE_PAGE_H,
   STRUCTURE_PAGE_W,
@@ -209,4 +212,176 @@ test("牙: コマ画像数とスロット数が違うassemble呼び出しは描�
       frameStyle: "standard",
     }),
   ).rejects.toThrow(/数が一致しません/);
+});
+
+test("牙: 再組立は検出枠線+1pxを除き、比率差10%超だけcoverする", () => {
+  const template = getComicTemplate("manga10");
+  const sameShape = buildRecompositionPlan({
+    alignedSlots: template.slots,
+    template,
+    sourceWidth: 1080,
+    sourceHeight: 1440,
+    borderPx: 3,
+  });
+  expect(sameShape.panels[0].matchedRect).toEqual({
+    x: 43,
+    y: 58,
+    w: 994,
+    h: 374,
+  });
+  expect(sameShape.panels[0].insetRect).toEqual({
+    x: 47,
+    y: 62,
+    w: 986,
+    h: 366,
+  });
+  expect(sameShape.panels[0].coverApplied).toBe(false);
+
+  const mismatchedSlots = template.slots.map((slot, index) =>
+    index === 0 ? { x: 4, y: 4, w: 30, h: 40 } : slot,
+  );
+  const mismatched = buildRecompositionPlan({
+    alignedSlots: mismatchedSlots,
+    template,
+    sourceWidth: 1080,
+    sourceHeight: 1440,
+    borderPx: 3,
+  });
+  const first = mismatched.panels[0];
+  expect(first.coverApplied).toBe(true);
+  expect(first.sourceCrop.w / first.sourceCrop.h).toBeCloseTo(
+    first.rect.w / first.rect.h,
+    12,
+  );
+  expect(first.sourceCrop.x).toBeGreaterThanOrEqual(first.insetRect.x);
+  expect(first.sourceCrop.y).toBeGreaterThanOrEqual(first.insetRect.y);
+  expect(first.sourceCrop.x + first.sourceCrop.w).toBeLessThanOrEqual(
+    first.insetRect.x + first.insetRect.w,
+  );
+  expect(first.sourceCrop.y + first.sourceCrop.h).toBeLessThanOrEqual(
+    first.insetRect.y + first.insetRect.h,
+  );
+});
+
+test("牙: 再組立出力は2テンプレの実slot座標と全コマ±1pxで一致する", () => {
+  const globals = globalThis as unknown as Record<string, unknown>;
+  const hadDocument = Object.prototype.hasOwnProperty.call(globals, "document");
+  const hadPath2D = Object.prototype.hasOwnProperty.call(globals, "Path2D");
+  const previousDocument = globals.document;
+  const previousPath2D = globals.Path2D;
+  const renderedPages: Array<{
+    canvas: { width: number; height: number };
+    fills: Array<{ fillStyle: unknown; args: number[] }>;
+    draws: number[][];
+    strokes: Array<{ lineWidth: number; strokeStyle: unknown }>;
+  }> = [];
+
+  class FakePath2D {
+    moveTo() {}
+    lineTo() {}
+    closePath() {}
+    rect() {}
+  }
+
+  globals.document = {
+    createElement: () => {
+      const fills: Array<{ fillStyle: unknown; args: number[] }> = [];
+      const draws: number[][] = [];
+      const strokes: Array<{ lineWidth: number; strokeStyle: unknown }> = [];
+      const context = {
+        fillStyle: "",
+        strokeStyle: "",
+        lineWidth: 0,
+        lineJoin: "",
+        lineCap: "",
+        imageSmoothingEnabled: false,
+        imageSmoothingQuality: "low",
+        fillRect(...args: number[]) {
+          fills.push({ fillStyle: this.fillStyle, args });
+        },
+        save() {},
+        clip() {},
+        drawImage(_source: unknown, ...args: number[]) {
+          draws.push(args);
+        },
+        stroke() {
+          strokes.push({ lineWidth: this.lineWidth, strokeStyle: this.strokeStyle });
+        },
+        restore() {},
+      };
+      const canvas = {
+        width: 0,
+        height: 0,
+        getContext: () => context,
+      };
+      renderedPages.push({ canvas, fills, draws, strokes });
+      return canvas;
+    },
+  };
+  globals.Path2D = FakePath2D;
+
+  const cases = [
+    {
+      templateId: "manga08",
+      expected: [
+        { x: 713, y: 58, w: 324, h: 374 },
+        { x: 378, y: 58, w: 302, h: 374 },
+        { x: 43, y: 58, w: 302, h: 374 },
+        { x: 43, y: 475, w: 994, h: 432 },
+        { x: 616, y: 950, w: 421, h: 432 },
+        { x: 43, y: 950, w: 540, h: 432 },
+      ],
+    },
+    {
+      templateId: "manga10",
+      expected: [
+        { x: 43, y: 58, w: 994, h: 374 },
+        { x: 562, y: 475, w: 475, h: 432 },
+        { x: 43, y: 475, w: 486, h: 432 },
+        { x: 43, y: 950, w: 994, h: 432 },
+      ],
+    },
+  ] as const;
+
+  try {
+    for (const item of cases) {
+      const template = getComicTemplate(item.templateId);
+      const canvas = recomposePageToTemplate({
+        sourceImage: {} as CanvasImageSource,
+        sourceWidth: 1080,
+        sourceHeight: 1440,
+        alignedSlots: template.slots,
+        template,
+        borderPx: 3,
+      });
+      const rendered = renderedPages[renderedPages.length - 1];
+      expect(canvas).toBe(rendered.canvas);
+      expect(rendered.canvas).toMatchObject({ width: 1080, height: 1440 });
+      expect(rendered.fills).toEqual([
+        { fillStyle: "#ffffff", args: [0, 0, 1080, 1440] },
+      ]);
+      expect(rendered.draws).toHaveLength(item.expected.length);
+      expect(rendered.strokes).toEqual(
+        item.expected.map(() => ({ lineWidth: 6, strokeStyle: "#000" })),
+      );
+      expect(RECOMPOSE_PANEL_BORDER_PX).toBe(3);
+
+      for (let index = 0; index < item.expected.length; index += 1) {
+        const draw = rendered.draws[index];
+        const actual = { x: draw[4], y: draw[5], w: draw[6], h: draw[7] };
+        const expected = item.expected[index];
+        for (const key of ["x", "y", "w", "h"] as const) {
+          expect(
+            Math.abs(actual[key] - expected[key]),
+            `${item.templateId} コマ${index + 1} ${key}`,
+          ).toBeLessThanOrEqual(1);
+        }
+      }
+    }
+  } finally {
+    if (hadDocument) globals.document = previousDocument;
+    else delete globals.document;
+    if (hadPath2D) globals.Path2D = previousPath2D;
+    else delete globals.Path2D;
+  }
 });
