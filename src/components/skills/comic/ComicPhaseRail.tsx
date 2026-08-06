@@ -49,14 +49,24 @@ export function ComicPhaseRail({
         // 入場可否は旧 PhaseNav の disabled 条件をそのまま移植する（ロジック追加なし）。
         const enabled = p.id === "input" || hasStory;
 
-        // 生成中は非クリックの進捗タイルにする。
+        // 生成中も進捗タイルのままクリックで戻れるようにする。
+        // 以前は非クリックの div で、構成の確認へ移動すると生成画面へ
+        // 戻る経路が無くなる一方通行だった（STΛCK 実機報告 2026-08-06）。
         if (p.id === GENERATING_PHASE && generating) {
           return (
-            <div
+            <button
+              type="button"
               key={p.id}
-              className="flex flex-col gap-1.5 rounded-md border border-pink-500 bg-pink-500/10 px-3 py-2 text-pink-200"
+              onClick={() => setPhase(p.id)}
+              title="生成の進捗画面へ戻る"
+              className={[
+                "flex flex-col gap-1.5 rounded-md border px-3 py-2 text-left text-pink-200 transition",
+                active
+                  ? "border-pink-500 bg-pink-500/10"
+                  : "border-pink-500/50 bg-pink-500/5 hover:border-pink-500 hover:bg-pink-500/10",
+              ].join(" ")}
             >
-              <div className="flex items-center justify-between">
+              <div className="flex w-full items-center justify-between">
                 <span className="text-sm font-semibold">{GENERATING_LABEL}</span>
                 <span className="text-[10px] opacity-80">
                   {completed}/{total}
@@ -69,7 +79,7 @@ export function ComicPhaseRail({
                 />
               </div>
               <span className="text-[11px] opacity-80">生成中…</span>
-            </div>
+            </button>
           );
         }
 
