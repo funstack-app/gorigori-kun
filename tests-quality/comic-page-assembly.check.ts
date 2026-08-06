@@ -385,3 +385,175 @@ test("牙: 再組立出力は2テンプレの実slot座標と全コマ±1pxで�
     else delete globals.Path2D;
   }
 });
+
+import { mirrorSlotX } from "../src/lib/comic/panelLayoutOps";
+
+type FramePoint = readonly [number, number];
+type FrameGapPair = readonly [number, number];
+type FrameSlot = ReturnType<typeof getComicTemplate>["slots"][number];
+
+const COMMON_FRAME_TEMPLATE_IDS = [
+  "manga01",
+  "manga02",
+  "manga03",
+  "manga04",
+  "manga05",
+  "manga06",
+  "manga07",
+  "manga08",
+  "manga09",
+  "manga10",
+  "manga11",
+  "manga12",
+] as const;
+
+const HORIZONTAL_GAP_PAIRS: Record<string, readonly FrameGapPair[]> = {
+  manga01: [[0, 1], [1, 2], [4, 5]],
+  manga02: [[0, 1], [3, 4]],
+  manga03: [[0, 1], [3, 4]],
+  manga04: [[0, 1], [0, 2], [3, 2]],
+  manga05: [[0, 1], [2, 3], [4, 5]],
+  manga06: [[0, 1], [3, 4]],
+  manga07: [[0, 1], [3, 4]],
+  manga08: [[0, 1], [1, 2], [4, 5]],
+  manga09: [[0, 1], [2, 3]],
+  manga10: [[1, 2]],
+  manga11: [[2, 3]],
+  manga12: [[0, 1], [2, 3], [4, 5]],
+};
+
+const VERTICAL_GAP_PAIRS: Record<string, readonly FrameGapPair[]> = {
+  manga01: [[0, 3], [1, 3], [2, 3], [3, 4], [3, 5]],
+  manga02: [[0, 2], [1, 2], [2, 3], [2, 4]],
+  manga03: [[0, 2], [1, 2], [2, 3], [2, 4]],
+  manga04: [[0, 3], [1, 2], [2, 4], [3, 4]],
+  manga05: [[0, 2], [1, 3], [2, 4], [3, 5]],
+  manga06: [[0, 2], [1, 2], [2, 3], [2, 4]],
+  manga07: [[0, 2], [1, 2], [2, 3], [2, 4]],
+  manga08: [[0, 3], [1, 3], [2, 3], [3, 4], [3, 5]],
+  manga09: [[0, 2], [0, 3], [1, 3], [2, 4], [3, 4]],
+  manga10: [[0, 1], [0, 2], [1, 3], [2, 3]],
+  manga11: [[0, 1], [1, 2], [1, 3]],
+  manga12: [[0, 2], [1, 3], [2, 4], [3, 5]],
+};
+
+function frameQuad(slot: FrameSlot): [FramePoint, FramePoint, FramePoint, FramePoint] {
+  if (slot.points) return slot.points;
+  return [
+    [slot.x, slot.y],
+    [slot.x + slot.w, slot.y],
+    [slot.x + slot.w, slot.y + slot.h],
+    [slot.x, slot.y + slot.h],
+  ];
+}
+
+function frameCenter(slot: FrameSlot): { x: number; y: number } {
+  const quad = frameQuad(slot);
+  return {
+    x: quad.reduce((sum, point) => sum + point[0], 0) / quad.length,
+    y: quad.reduce((sum, point) => sum + point[1], 0) / quad.length,
+  };
+}
+
+function edgeValueAt(
+  edge: readonly [FramePoint, FramePoint],
+  sample: number,
+  fixedAxis: 0 | 1,
+): number {
+  const [a, b] = edge;
+  const span = b[fixedAxis] - a[fixedAxis];
+  if (Math.abs(span) < 1e-12) return (a[1 - fixedAxis] + b[1 - fixedAxis]) / 2;
+  const progress = (sample - a[fixedAxis]) / span;
+  return a[1 - fixedAxis] + progress * (b[1 - fixedAxis] - a[1 - fixedAxis]);
+}
+
+function medianOfThree(values: readonly [number, number, number]): number {
+  return [...values].sort((a, b) => a - b)[1];
+}
+
+/** 同じ高さの両端+中央でx差を測り、斜め横ガターの代表厚みを返す。 */
+function horizontalGap(slots: readonly FrameSlot[], pair: FrameGapPair): number {
+  const [a, b] = pair.map((index) => slots[index]) as [FrameSlot, FrameSlot];
+  const [right, left] = frameCenter(a).x > frameCenter(b).x ? [a, b] : [b, a];
+  const rightEdge: [FramePoint, FramePoint] = [frameQuad(right)[0], frameQuad(right)[3]];
+  const leftEdge: [FramePoint, FramePoint] = [frameQuad(left)[1], frameQuad(left)[2]];
+  const from = Math.max(
+    Math.min(rightEdge[0][1], rightEdge[1][1]),
+    Math.min(leftEdge[0][1], leftEdge[1][1]),
+  );
+  const to = Math.min(
+    Math.max(rightEdge[0][1], rightEdge[1][1]),
+    Math.max(leftEdge[0][1], leftEdge[1][1]),
+  );
+  expect(to, "横ガターを同じ高さで測れません").toBeGreaterThanOrEqual(from);
+  const samples = [from, (from + to) / 2, to] as const;
+  return medianOfThree(
+    samples.map(
+      (sample) => edgeValueAt(rightEdge, sample, 1) - edgeValueAt(leftEdge, sample, 1),
+    ) as [number, number, number],
+  );
+}
+
+/** 同じ横位置の両端+中央でy差を測り、斜め縦ガターの代表厚みを返す。 */
+function verticalGap(slots: readonly FrameSlot[], pair: FrameGapPair): number {
+  const [a, b] = pair.map((index) => slots[index]) as [FrameSlot, FrameSlot];
+  const [upper, lower] = frameCenter(a).y < frameCenter(b).y ? [a, b] : [b, a];
+  const upperEdge: [FramePoint, FramePoint] = [frameQuad(upper)[2], frameQuad(upper)[3]];
+  const lowerEdge: [FramePoint, FramePoint] = [frameQuad(lower)[0], frameQuad(lower)[1]];
+  const from = Math.max(
+    Math.min(upperEdge[0][0], upperEdge[1][0]),
+    Math.min(lowerEdge[0][0], lowerEdge[1][0]),
+  );
+  const to = Math.min(
+    Math.max(upperEdge[0][0], upperEdge[1][0]),
+    Math.max(lowerEdge[0][0], lowerEdge[1][0]),
+  );
+  expect(to, "縦ガターを同じ横位置で測れません").toBeGreaterThanOrEqual(from);
+  const samples = [from, (from + to) / 2, to] as const;
+  return medianOfThree(
+    samples.map(
+      (sample) => edgeValueAt(lowerEdge, sample, 0) - edgeValueAt(upperEdge, sample, 0),
+    ) as [number, number, number],
+  );
+}
+
+function assertCommonFrame(
+  templateId: string,
+  slots: readonly FrameSlot[],
+  topologyId = templateId,
+): void {
+  const points = slots.flatMap(frameQuad);
+  expect(Math.min(...points.map(([x]) => x)), `${templateId} 左外周`).toBe(4);
+  expect(100 - Math.max(...points.map(([x]) => x)), `${templateId} 右外周`).toBe(4);
+  expect(Math.min(...points.map(([, y]) => y)), `${templateId} 上外周`).toBe(4);
+  expect(100 - Math.max(...points.map(([, y]) => y)), `${templateId} 下外周`).toBe(4);
+
+  for (const pair of HORIZONTAL_GAP_PAIRS[topologyId]) {
+    expect(
+      Number(horizontalGap(slots, pair).toFixed(2)),
+      `${templateId} 横ガター ${pair[0] + 1}-${pair[1] + 1}`,
+    ).toBe(3);
+  }
+  for (const pair of VERTICAL_GAP_PAIRS[topologyId]) {
+    expect(
+      Number(verticalGap(slots, pair).toFixed(2)),
+      `${templateId} 縦ガター ${pair[0] + 1}-${pair[1] + 1}`,
+    ).toBe(3);
+  }
+}
+
+test("12テンプレすべての外周4%・横縦ガター3%が共通で、ltrミラー後も保たれる", () => {
+  for (const templateId of COMMON_FRAME_TEMPLATE_IDS) {
+    const template = getComicTemplate(templateId);
+    assertCommonFrame(templateId, template.slots);
+    assertCommonFrame(`${templateId} ltr`, template.slots.map(mirrorSlotX), templateId);
+  }
+});
+
+test("牙: 1テンプレの座標を0.5%崩すと共通枠寸法の検査が落ちる", () => {
+  const template = getComicTemplate("manga08");
+  const broken = template.slots.map((slot, index) =>
+    index === 0 ? { ...slot, x: slot.x + 0.5 } : { ...slot },
+  );
+  expect(() => assertCommonFrame("manga08 broken", broken, "manga08")).toThrow();
+});
