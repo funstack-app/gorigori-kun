@@ -10,6 +10,7 @@ import {
 } from "../../../lib/comic/codexText";
 import {
   buildFullPagePrompt,
+  buildPanelBalloonSfxClause,
   buildPanelImagePrompt,
   buildStoryPrompt,
   isValidStory,
@@ -884,6 +885,7 @@ function ComicFlow() {
       if (!stillMine()) return { adopted: false, error: "再生成は中止されました。元ページは変更していません。必要なら範囲を確認して再実行してください。" };
 
       const resolution = resolvePanelReeditReferences(draftPanel, characters);
+      const balloonSfxClause = buildPanelBalloonSfxClause(draftPanel);
       const prompt = [
         buildPanelImagePrompt(
           draftPanel,
@@ -895,6 +897,13 @@ function ComicFlow() {
           pageStyleText,
         ),
         `Edit only panel ${draftPanel.index} of this existing manga page. Page context: ${currentPage.synopsis}. Keep every pixel outside the supplied white mask unchanged. The visible panel border and gutter are protected and must remain unchanged.`,
+        ...(balloonSfxClause
+          ? [
+              balloonSfxClause,
+              "hand-drawn speech balloon with vertical Japanese text inside the edited panel — write the dialogue exactly as given, character for character, do not invent or alter any text; bold hand-lettered manga sound effects integrated with the art",
+            ]
+          : []),
+        "do not add any speech balloon or sound effect that is not quoted in this prompt",
       ].join(" ");
       const generationRequest = buildPanelReeditGenerationRequest(
         prompt,

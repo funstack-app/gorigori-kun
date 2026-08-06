@@ -96,6 +96,24 @@ function sfxPromptQuotes(panel: Pick<ComicPanel, "sfx">): string[] {
     .map((sfx) => `「${sfx.text.trim()}」`);
 }
 
+/** ページ/コマ再生成で共通の「吹き出し＋擬音」句。対象が無ければ空文字。 */
+export function buildPanelBalloonSfxClause(panel: ComicPanel): string {
+  const parts: string[] = [];
+  const balloonLines = balloonPromptLines(panel);
+  if (balloonLines.length > 0) {
+    parts.push(
+      `speech balloon${balloonLines.length > 1 ? "s" : ""}: ${balloonLines.join(" ")}`,
+    );
+  }
+  const sfxLines = sfxPromptQuotes(panel);
+  if (sfxLines.length > 0) {
+    parts.push(
+      `sound effect${sfxLines.length > 1 ? "s" : ""}: ${sfxLines.join(" ")}`,
+    );
+  }
+  return parts.join(" ");
+}
+
 /**
  * 登場キャラ一覧と「名前の厳守」ブロックを導出する。
  *
@@ -1151,20 +1169,7 @@ export function buildFullPagePrompt(
         : null;
   for (const panel of panels) {
     const body = panel.prompt.trim() || panel.composition.trim();
-    // gtm (2026-08-03): 引用＋kind 記述子の形式。数珠つなぎ（「／」区切り）は
-    // セグメント単位で引用を分け、記述子に chain 句を連結する。区切り文字自体は
-    // 引用に含めない（仕上げ句の「write the dialogue exactly as given」が
-    // 「／」を絵に描かせる事故の防止）。
-    const lines = balloonPromptLines(panel);
-    const balloonPart =
-      lines.length > 0
-        ? ` speech balloon${lines.length > 1 ? "s" : ""}: ${lines.join(" ")}`
-        : "";
-    const sfxLines = sfxPromptQuotes(panel);
-    const sfxPart =
-      sfxLines.length > 0
-        ? ` sound effect${sfxLines.length > 1 ? "s" : ""}: ${sfxLines.join(" ")}`
-        : "";
+    const balloonSfxClause = buildPanelBalloonSfxClause(panel);
     const pos = positionPhrases?.[panel.index - 1]
       ? ` (${positionPhrases[panel.index - 1]})`
       : !template && panels.length > 1 && panel.index === 1
@@ -1172,7 +1177,9 @@ export function buildFullPagePrompt(
         : !template && panels.length > 1 && panel.index === panels.length
           ? ` (${direction === "ltr" ? "bottom-right" : "bottom-left"} final panel)`
           : "";
-    parts.push(`panel ${panel.index}${pos}: ${body}.${balloonPart}${sfxPart}`);
+    parts.push(
+      `panel ${panel.index}${pos}: ${body}.${balloonSfxClause ? ` ${balloonSfxClause}` : ""}`,
+    );
   }
 
   // 5. 参照画像がある時だけ同一性・ポーズ写し防止・画風句（mono/color は既存文字列・無変更）

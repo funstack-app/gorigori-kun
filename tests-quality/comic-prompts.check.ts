@@ -265,3 +265,50 @@ test("structure faithfulは専用句だけを使い、ltrの吹き出し順へ�
   expect(prompt).not.toContain("faithfulへ混ぜてはいけない絵柄");
   expect(prompt).not.toContain("portrait page, consistent page size");
 });
+
+test("コマの吹き出し・擬音句は引用とkind記述子を保ち、空パネルでは空文字になる", async () => {
+  const { buildPanelBalloonSfxClause } = await import("../src/lib/comic/prompts");
+  const panel: ComicPanel = {
+    ...comicPanel(1),
+    balloons: [
+      {
+        id: "balloon-visible",
+        speaker: "モチ丸",
+        text: "午前10時",
+        kind: "shout",
+        pos: null,
+        visible: true,
+      },
+      {
+        id: "balloon-hidden",
+        speaker: "モチ丸",
+        text: "描いてはいけない",
+        kind: "normal",
+        pos: null,
+        visible: false,
+      },
+    ],
+    sfx: [
+      {
+        id: "sfx-visible",
+        text: "ザッ",
+        intent: "motion",
+        pos: null,
+        rotation: 0,
+        scale: 1,
+        visible: true,
+      },
+    ],
+  };
+
+  const clause = buildPanelBalloonSfxClause(panel);
+  expect(clause).toBe(
+    "speech balloon: 「午前10時」 (jagged spiky shout balloon) sound effect: 「ザッ」",
+  );
+  expect(clause).not.toContain("描いてはいけない");
+  expect(buildPanelBalloonSfxClause(comicPanel(2))).toBe("");
+
+  // 牙: ページ経路が別実装へ戻ると、抽出した句との完全一致を満たせない。
+  const pagePrompt = buildFullPagePrompt([panel], null, [character]);
+  expect(pagePrompt).toContain(`panel 1: prompt-1. ${clause}`);
+});
