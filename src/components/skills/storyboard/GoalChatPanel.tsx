@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { warnImagePayloadInBackground } from "../../../lib/imagePayloadGuard";
+import { ensureDownscaledCopy } from "../../../lib/referenceDownscale";
 import {
   AUDIO_EXTS,
   AUDIO_REPLACED_MESSAGE,
@@ -163,6 +164,17 @@ export function GoalChatPanel() {
     const text = draft.trim();
     if (!text || sending) return;
     const images = attachedImages.slice();
+    // 送信直前に1枚ずつ軽量コピーを用意する。planChat 側は同じキャッシュを使うため、
+    // 実際の送信時に二重変換されない。state は元パスのままなのでプレビューも不変。
+    for (const path of images) {
+      try {
+        await ensureDownscaledCopy(path);
+      } catch (error) {
+        // 共通送信口でも再試行し、失敗時は入力を残したまま送信を止める。
+        console.warn("[GoalChatPanel] reference downscale preflight failed", error);
+        break;
+      }
+    }
     // B-02 (Wave 2 REVISE): 入力文と添付を消すのは send が受け付けた後だけ。
     // GoalChat の添付はこのコンポーネントのローカル state なので、380MB ガードで
     // ブロックされた後に消すと復元手段が無く、添付を減らして再送できない。

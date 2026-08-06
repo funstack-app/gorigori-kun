@@ -13,6 +13,7 @@ import {
   guardImagePayloadForSend,
   warnImagePayloadInBackground,
 } from "../imagePayloadGuard";
+import { ensureDownscaledCopy } from "../referenceDownscale";
 import { useActiveProject } from "./activeProject";
 import { logError } from "./errorLog";
 import { useProjects, type ProjectChatMessage } from "./projects";
@@ -1193,11 +1194,21 @@ export const usePlanChat = create<PlanChatState>((set, get) => ({
       ? buildWorldContextBlock(useWorldContexts.getState().activeContent())
       : "";
     const imagesForTurn = attachedImages ?? get().pendingImages;
-    // 7zf (2026-08-03): 入力サイズの事前ガード。企画タブもゴールチャットも
-    // この送信ファネルへ合流するので、ここ1点で全経路を塞ぐ。
+    // V7 (2026-08-07): 送信直前だけ軽量コピーへ差し替える。元パスは履歴・
+    // プレビュー・参照役割の正本として保持する。1枚ずつ処理して一時メモリも抑える。
+    const imagesForSend: string[] = [];
+    try {
+      for (const path of imagesForTurn) {
+        imagesForSend.push(await ensureDownscaledCopy(path));
+      }
+    } catch (error) {
+      console.warn("[planChat] reference downscale failed", error);
+      return false;
+    }
+    // 7zf (2026-08-03): 縮小後の送信実体を既存上限で検査する。
     // チャット履歴・pendingImages・sending を一切変えずに戻る (添付を減らして再送できる)。
     // B-02: false を返して呼び出し元にも「入力文・添付を消すな」と伝える。
-    if (imagesForTurn.length > 0 && !(await guardImagePayloadForSend(imagesForTurn)))
+    if (imagesForSend.length > 0 && !(await guardImagePayloadForSend(imagesForSend)))
       return false;
     // FB#3 (2026-06-06) / N-2 (2026-06-16): 添付画像の役割をユーザーが明示指定して
     // いれば、そのまま AI に伝える。AI の文脈推測に任せず、登場キャラが複数いる
@@ -1207,13 +1218,16 @@ export const usePlanChat = create<PlanChatState>((set, get) => ({
     const roleStore = useReferenceRoles.getState();
     const imageNote = imagesForTurn.length > 0
       ? `\n\n[添付画像]\n${imagesForTurn
-          .map((path, index) => {
-            const meta = REFERENCE_ROLE_META[roleStore.getRole(path)];
-            return `${index + 1}. [${meta.promptLabelJa}] ${path}`;
+          .map((sourcePath, index) => {
+            const meta = REFERENCE_ROLE_META[roleStore.getRole(sourcePath)];
+            return `${index + 1}. [${meta.promptLabelJa}] ${imagesForSend[index]}`;
           })
           .join("\n")}\n` +
         REFERENCE_ROLE_KINDS.map((kind) => {
-          const paths = imagesForTurn.filter((p) => roleStore.getRole(p) === kind);
+          const paths = imagesForTurn
+            .map((sourcePath, index) => ({ sourcePath, sendPath: imagesForSend[index] }))
+            .filter(({ sourcePath }) => roleStore.getRole(sourcePath) === kind)
+            .map(({ sendPath }) => sendPath);
           if (paths.length === 0) return "";
           const meta = REFERENCE_ROLE_META[kind];
           return `${meta.promptLabelJa} (${meta.promptNoteJa}, ${paths.length}枚): ${paths.join(", ")}\n`;
@@ -1241,7 +1255,7 @@ export const usePlanChat = create<PlanChatState>((set, get) => ({
       const threadId = await get().ensureThread();
       const input: InputItem[] = [
         { type: "text", text: submitText },
-        ...imagesForTurn.map((path) => ({ type: "localImage" as const, path })),
+        ...imagesForSend.map((path) => ({ type: "localImage" as const, path })),
       ];
       await rpcRequest("turn/start", {
         threadId,
