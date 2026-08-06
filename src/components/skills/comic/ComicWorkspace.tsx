@@ -83,7 +83,6 @@ import {
   compositePanelImages,
   createPanelMaskPng,
   detectPanelInterior,
-  isCurrentPanelReeditRun,
   panelGuidePoints,
   resolvePanelReeditReferences,
   readPanelImageData,
@@ -91,11 +90,15 @@ import {
   type PanelDetection,
   type PanelReeditPoint,
 } from "../../../lib/comic/panelReedit";
+import { PANEL_SIZE_MISMATCH_PREFIX } from "../../../lib/imageReedit/maskReedit";
+import { normalizeComicPage } from "../../../lib/comic/pageNormalize";
+import { usePanelReeditLock } from "../../../lib/comic/panelReeditLock";
 import { recoverPanelSlots } from "../../../lib/comic/panelSlotRecovery";
 import {
   adjacentSlotIndices,
   applyPanelMergeToImage,
   applyPanelSplitToImage,
+  effectivePageSlots,
   mergeStoryPage,
   mergedSlot,
   splitSlotQuads,
@@ -111,6 +114,14 @@ const IMAGE_EXTS = ["png", "jpg", "jpeg", "webp", "gif", "bmp"];
  * （layoutTemplates.ts は実在するコマ割りだけを持つ正本のまま）。
  */
 const AUTO_TEMPLATE_ID = "auto";
+
+/** 1コマ編集の入口で共通利用する既存文言。disabled の title にも同じ理由を出す。 */
+const PANEL_REEDIT_BUSY_MESSAGE =
+  "今は1コマ再生成を始められません。ほかの生成が終わってから、もう一度お試しください。";
+
+/** 設計書 §1 A-a 修正1で確定した、正規化を止めずに出す警告。 */
+const COMIC_PAGE_ASPECT_WARN_MESSAGE =
+  "生成画像の比率が想定(3:4)と大きく違います。作り直しをおすすめします";
 
 type PanelReeditHistoryEntry = {
   page: number;
@@ -250,15 +261,20 @@ function ComicFlow() {
   const pageTokensRef = useRef(new Map<number, number>());
   /** 構成生成の走行トークン。 */
   const storyTokenRef = useRef(0);
-  /** 1コマ再編集はページ生成と競合させない。 */
-  const panelReeditTokenRef = useRef(0);
-  const panelReeditActiveRef = useRef(false);
-  const [panelReeditRunningPage, setPanelReeditRunningPage] = useState<number | null>(null);
+  /** 1コマ再編集はページ生成と競合させず、取得・解除・失効を1つの状態源で管理する。 */
+  const {
+    acquire: acquirePanelReeditLock,
+    isCurrent: isCurrentPanelReeditLock,
+    held: panelReeditHeld,
+    heldRef: panelReeditHeldRef,
+    runningPage: panelReeditRunningPage,
+    invalidateAll: invalidatePanelReeditLock,
+  } = usePanelReeditLock();
   const [panelReeditHistory, setPanelReeditHistory] = useState<PanelReeditHistoryEntry[]>([]);
 
   /** 1コマ再編集中は工程移動も止め、旧runが別構成へ書き込む競合を防ぐ。 */
   const requestPhaseChange = (next: ComicPhase) => {
-    if (panelReeditActiveRef.current) {
+    if (panelReeditHeldRef.current) {
       pushToast({
         kind: "info",
         text: "1コマ再生成中は工程を移動できません。完了または中止後に操作してください。",
@@ -274,12 +290,11 @@ function ComicFlow() {
       // アンマウント時は構成生成・全ページ一括・ページ単体をすべて無効化する。
       storyTokenRef.current += 1;
       pagesRunTokenRef.current += 1;
-      panelReeditTokenRef.current += 1;
-      panelReeditActiveRef.current = false;
+      invalidatePanelReeditLock();
       const pageTokens = pageTokensRef.current;
       for (const [page, token] of pageTokens) pageTokens.set(page, token + 1);
     },
-    [],
+    [invalidatePanelReeditLock],
   );
 
   // 選択されたキャラプリセット + 画像から追加したキャラを ComicCharacter に合流
@@ -475,7 +490,7 @@ function ComicFlow() {
    * パース不能・条件不一致は**生成に入る前に**止める（課金前に停止・黙って切り捨てない）。
    */
   const generateStory = async () => {
-    if (panelReeditActiveRef.current) {
+    if (panelReeditHeldRef.current) {
       pushToast({
         kind: "info",
         text: "1コマ再生成中は構成をやり直せません。完了または中止後に操作してください。",
@@ -485,7 +500,7 @@ function ComicFlow() {
     }
     // 中止済みでも非同期処理が遅れて返る可能性があるため、新しい構成開始時に
     // 既存の1コマrunを必ず失効させる。
-    panelReeditTokenRef.current += 1;
+    invalidatePanelReeditLock();
     if (!synopsis.trim()) {
       pushToast({ kind: "error", text: "話（あらすじ）を入力してください", ttlMs: 4000 });
       return;
@@ -546,7 +561,8 @@ function ComicFlow() {
         },
       });
       if (storyTokenRef.current !== runToken) return;
-      const parsed = parseComicStory(raw);
+      // rows から作る layoutPlan は、この構成を作った読み方向で確定させる。
+      const parsed = parseComicStory(raw, readingDirection);
       if (!parsed) {
         pushToast({
           kind: "error",
@@ -760,12 +776,11 @@ function ComicFlow() {
     const originalPath = currentResult?.imagePath;
     if (
       !originalPath ||
-      panelReeditActiveRef.current ||
       generatingStory ||
       generatingPages ||
       pageResults.some((result) => result.generating)
     ) {
-      return { adopted: false, error: "今は1コマ再生成を始められません。ほかの生成が終わってから、もう一度お試しください。" };
+      return { adopted: false, error: PANEL_REEDIT_BUSY_MESSAGE };
     }
 
     const currentPage = storyPages.find((item) => item.page === page.page);
@@ -774,33 +789,30 @@ function ComicFlow() {
       return { adopted: false, error: "編集元のページ情報を確認できません。モーダルを閉じて、ページを開き直してください。" };
     }
 
-    // スロットの正は「テンプレ」ではなく「このページの実効スロット」。
-    // 分割/統合したページは slotsOverride が正で、テンプレ座標は実描画と無関係になる。
-    const effectiveSlots = currentPage.slotsOverride
-      ?? (storyTemplateId ? getComicTemplate(storyTemplateId).slots : null);
+    // スロットの正は effectivePageSlots に集約する。分割/統合後・ltr・
+    // rows由来レイアウト・正規化の白帯を、すべて同じ入口で画像座標へ解決する。
+    const effectiveSlots = effectivePageSlots({
+      page: currentPage,
+      storyTemplateId,
+      direction: currentResult?.direction ?? readingDirection,
+      contentRect: currentResult?.contentRect,
+    });
     if (!effectiveSlots || currentPage.panels.length !== effectiveSlots.length) {
       return { adopted: false, error: "コマ割りの情報とコマ数が一致しないため、このページは編集できません。" };
     }
-    // buildPanelImagePrompt は型で faithful を拒否する。mono 句で代替するとページ内の
-    // 1コマだけ画風が割れるため、変換せず未対応として正直に止める（入口ゲートと二重防御）。
     const pageColorMode = currentResult?.colorMode ?? colorMode;
-    if (pageColorMode === "faithful") {
-      return { adopted: false, error: "「キャラ忠実」で生成したページは1コマ再生成に未対応です。" };
-    }
-    // qvs: そのページを生成した時の絵柄。faithful ページは上のゲートで弾かれるため
-    // ここへ来る記録値は常に非 faithful。
+    // qvs: そのページを生成した時の絵柄。faithful は専用句を使うため記録値は空。
     const pageStyleText = currentResult?.styleText ?? "";
 
-    const runToken = panelReeditTokenRef.current + 1;
-    panelReeditTokenRef.current = runToken;
-    panelReeditActiveRef.current = true;
-    setPanelReeditRunningPage(page.page);
+    const lockHandle = acquirePanelReeditLock(page.page);
+    if (!lockHandle) {
+      pushToast({ kind: "info", text: PANEL_REEDIT_BUSY_MESSAGE, ttlMs: 4000 });
+      return { adopted: false, error: PANEL_REEDIT_BUSY_MESSAGE };
+    }
     const track = beginDirectRun("comic", 1);
     registerDirectRunParent(track.id, {
       onCancel: () => {
-        panelReeditTokenRef.current += 1;
-        panelReeditActiveRef.current = false;
-        setPanelReeditRunningPage(null);
+        invalidatePanelReeditLock();
       },
       onLateCancelError: (error) => {
         pushToast({
@@ -810,7 +822,7 @@ function ComicFlow() {
         });
       },
     });
-    const stillMine = () => isCurrentPanelReeditRun(runToken, panelReeditTokenRef.current);
+    const stillMine = () => isCurrentPanelReeditLock(lockHandle);
 
     try {
       // 元画像を基準にマスクを作るので、マスクの寸法は元ページと必ず一致する。
@@ -834,25 +846,47 @@ function ComicFlow() {
         ),
         `Edit only panel ${draftPanel.index} of this existing manga page. Page context: ${currentPage.synopsis}. Keep every pixel outside the supplied white mask unchanged. The visible panel border and gutter are protected and must remain unchanged.`,
       ].join(" ");
-      const generated = await images.generateBatch(buildPanelReeditGenerationRequest(
+      const generationRequest = buildPanelReeditGenerationRequest(
         prompt,
         originalPath,
         maskPath,
         resolution.refPaths,
         track.id,
-      ));
-      if (!stillMine()) {
-        return { adopted: false, error: "再生成は中止されました。元ページは変更していません。必要なら範囲を確認して再実行してください。" };
+      );
+      let composite: Awaited<ReturnType<typeof compositePanelImages>> | null = null;
+      // サイズ不一致だけは、同じプロンプト・元画像・マスクで1回だけ生成からやり直す。
+      // 2回目も不一致なら下の既存エラー経路へ進み、元ページは変更しない。
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const generated = await images.generateBatch(generationRequest);
+        if (!stillMine()) {
+          return { adopted: false, error: "再生成は中止されました。元ページは変更していません。必要なら範囲を確認して再実行してください。" };
+        }
+        if (generated.cancelled) {
+          return { adopted: false, error: "AIによる再生成が中止されました。元ページは変更していません。範囲と指示を確認して、もう一度お試しください。" };
+        }
+        const generatedPath = generated.generatedPaths[0];
+        if (!generatedPath || generated.failedCount > 0) {
+          throw new Error(generated.errors[0] ?? "コマの再生成画像を取得できませんでした。");
+        }
+        try {
+          composite = await compositePanelImages(originalPath, generatedPath, mask.raster);
+          break;
+        } catch (error) {
+          const message = (error as Error)?.message ?? String(error);
+          if (attempt === 0 && message.startsWith(PANEL_SIZE_MISMATCH_PREFIX)) {
+            pushToast({
+              kind: "info",
+              text: "生成サイズ不一致のため、1回だけ自動再試行します。",
+              ttlMs: 4000,
+            });
+            continue;
+          }
+          throw error;
+        }
       }
-      if (generated.cancelled) {
-        return { adopted: false, error: "AIによる再生成が中止されました。元ページは変更していません。範囲と指示を確認して、もう一度お試しください。" };
+      if (!composite) {
+        throw new Error("コマの再生成画像を取得できませんでした。");
       }
-      const generatedPath = generated.generatedPaths[0];
-      if (!generatedPath || generated.failedCount > 0) {
-        throw new Error(generated.errors[0] ?? "コマの再生成画像を取得できませんでした。");
-      }
-
-      const composite = await compositePanelImages(originalPath, generatedPath, mask.raster);
       if (!stillMine()) return { adopted: false, error: "再生成は中止されました。元ページは変更していません。必要なら範囲を確認して再実行してください。" };
       if (composite.outsideDifferences !== 0) {
         throw new Error("マスク外の画素が変化したため採用しませんでした。");
@@ -862,6 +896,11 @@ function ComicFlow() {
         composite.bytes,
       );
       if (!stillMine()) return { adopted: false, error: "再生成は中止されました。元ページは変更していません。必要なら範囲を確認して再実行してください。" };
+      const normalizedComposite = await normalizeComicPage(compositePath);
+      if (!stillMine()) return { adopted: false, error: "再生成は中止されました。元ページは変更していません。必要なら範囲を確認して再実行してください。" };
+      if (normalizedComposite.aspectWarn) {
+        pushToast({ kind: "info", text: COMIC_PAGE_ASPECT_WARN_MESSAGE, ttlMs: 5000 });
+      }
 
       // 成功したこの瞬間だけ、画像とページ構成を同じ履歴単位で差し替える。
       const historyEntry: PanelReeditHistoryEntry = {
@@ -883,7 +922,14 @@ function ComicFlow() {
       );
       setPageResults((previous) =>
         previous.map((result) =>
-          result.page === page.page ? { ...result, imagePath: compositePath, error: undefined } : result,
+          result.page === page.page
+            ? {
+                ...result,
+                imagePath: normalizedComposite.imagePath,
+                contentRect: currentResult?.contentRect ?? normalizedComposite.contentRect,
+                error: undefined,
+              }
+            : result,
         ),
       );
       setPanelReeditHistory((previous) => [...previous, historyEntry]);
@@ -906,10 +952,7 @@ function ComicFlow() {
         error: `採用できませんでした: ${String((error as Error)?.message ?? error).replace(/。+$/, "")}。元ページは変更していません。範囲・指示・画像サイズを確認して、もう一度お試しください。`,
       };
     } finally {
-      if (stillMine()) {
-        panelReeditActiveRef.current = false;
-        setPanelReeditRunningPage(null);
-      }
+      lockHandle.release();
       track.done();
       releaseDirectRunParent(track.id);
     }
@@ -917,7 +960,10 @@ function ComicFlow() {
 
   /** 最後に成功した再編集だけを、画像とページ構成を揃えて戻す。 */
   const undoPanelReedit = (pageNo: number) => {
-    if (panelReeditActiveRef.current) return;
+    if (panelReeditHeldRef.current) {
+      pushToast({ kind: "info", text: PANEL_REEDIT_BUSY_MESSAGE, ttlMs: 4000 });
+      return;
+    }
     const historyIndex = panelReeditHistory.map((entry) => entry.page).lastIndexOf(pageNo);
     if (historyIndex < 0) return;
     const entry = panelReeditHistory[historyIndex];
@@ -943,29 +989,39 @@ function ComicFlow() {
   const prepareLayoutOp = (
     page: ComicStoryPage,
   ):
-    | { ok: true; currentPage: ComicStoryPage; imagePath: string; slots: ComicPanelSlot[] }
+    | {
+        ok: true;
+        currentPage: ComicStoryPage;
+        imagePath: string;
+        slots: ComicPanelSlot[];
+        pageDirection: ComicReadingDirection;
+      }
     | { ok: false; error: string } => {
     const currentResult = pageResults.find((result) => result.page === page.page);
     const imagePath = currentResult?.imagePath;
     if (
       !imagePath ||
-      panelReeditActiveRef.current ||
       generatingStory ||
       generatingPages ||
       pageResults.some((result) => result.generating)
     ) {
-      return { ok: false, error: "今は1コマ再生成を始められません。ほかの生成が終わってから、もう一度お試しください。" };
+      return { ok: false, error: PANEL_REEDIT_BUSY_MESSAGE };
     }
     const currentPage = storyPages.find((item) => item.page === page.page);
     if (!currentPage) {
       return { ok: false, error: "編集元のページ情報を確認できません。モーダルを閉じて、ページを開き直してください。" };
     }
-    const slots = currentPage.slotsOverride
-      ?? (storyTemplateId ? getComicTemplate(storyTemplateId).slots : null);
+    const pageDirection = currentResult?.direction ?? readingDirection;
+    const slots = effectivePageSlots({
+      page: currentPage,
+      storyTemplateId,
+      direction: pageDirection,
+      contentRect: currentResult?.contentRect,
+    });
     if (!slots || currentPage.panels.length !== slots.length) {
       return { ok: false, error: "コマ割りの情報とコマ数が一致しないため、このページは編集できません。" };
     }
-    return { ok: true, currentPage, imagePath, slots };
+    return { ok: true, currentPage, imagePath, slots, pageDirection };
   };
 
   /**
@@ -983,12 +1039,12 @@ function ComicFlow() {
     const imagePath = currentResult?.imagePath;
     if (
       !imagePath ||
-      panelReeditActiveRef.current ||
+      panelReeditHeldRef.current ||
       generatingStory ||
       generatingPages ||
       pageResults.some((result) => result.generating)
     ) {
-      return { adopted: false, error: "今は1コマ再生成を始められません。ほかの生成が終わってから、もう一度お試しください。" };
+      return { adopted: false, error: PANEL_REEDIT_BUSY_MESSAGE };
     }
     const currentPage = storyPages.find((item) => item.page === page.page);
     if (!currentPage) {
@@ -1046,7 +1102,7 @@ function ComicFlow() {
   ): Promise<PanelReeditOutcome> => {
     const prepared = prepareLayoutOp(page);
     if (!prepared.ok) return { adopted: false, error: prepared.error };
-    const { currentPage, imagePath, slots } = prepared;
+    const { currentPage, imagePath, slots, pageDirection } = prepared;
     if (currentPage.panels.length >= MAX_PANELS_PER_PAGE) {
       return {
         adopted: false,
@@ -1058,12 +1114,22 @@ function ComicFlow() {
       return { adopted: false, error: "編集元のページ情報を確認できません。モーダルを閉じて、ページを開き直してください。" };
     }
 
-    panelReeditActiveRef.current = true;
-    setPanelReeditRunningPage(page.page);
+    const lockHandle = acquirePanelReeditLock(page.page);
+    if (!lockHandle) {
+      pushToast({ kind: "info", text: PANEL_REEDIT_BUSY_MESSAGE, ttlMs: 4000 });
+      return { adopted: false, error: PANEL_REEDIT_BUSY_MESSAGE };
+    }
     try {
-      const { first, second } = splitSlotQuads(targetSlot, direction);
+      const { first, second } = splitSlotQuads(targetSlot, direction, pageDirection);
       const nextPage = splitStoryPage(currentPage, panelIndex, first, second, slots);
-      const nextSlots = nextPage.slotsOverride ?? [];
+      const nextSlots = effectivePageSlots({
+        page: nextPage,
+        storyTemplateId,
+        direction: pageDirection,
+      });
+      if (!nextSlots) {
+        throw new Error("コマ割りの情報とコマ数が一致しないため、このページは編集できません。");
+      }
       // 新しいスロット集合の中で、両方が隣接制約を満たすことを画像へ書く前に確認する。
       validatePanelPolygon(panelGuidePoints(first), {
         selectedSlotIndex: panelIndex - 1,
@@ -1084,6 +1150,13 @@ function ComicFlow() {
         `comic-panel-split-p${page.page}-${Date.now()}.png`,
         bytes,
       );
+      const normalizedPage = await normalizeComicPage(nextImagePath);
+      if (!isCurrentPanelReeditLock(lockHandle)) {
+        return { adopted: false, error: PANEL_REEDIT_BUSY_MESSAGE };
+      }
+      if (normalizedPage.aspectWarn) {
+        pushToast({ kind: "info", text: COMIC_PAGE_ASPECT_WARN_MESSAGE, ttlMs: 5000 });
+      }
       const historyEntry: PanelReeditHistoryEntry = {
         page: page.page,
         imagePath,
@@ -1095,7 +1168,12 @@ function ComicFlow() {
       setPageResults((previous) =>
         previous.map((result) =>
           result.page === page.page
-            ? { ...result, imagePath: nextImagePath, error: undefined }
+            ? {
+                ...result,
+                imagePath: normalizedPage.imagePath,
+                contentRect: result.contentRect ?? normalizedPage.contentRect,
+                error: undefined,
+              }
             : result,
         ),
       );
@@ -1112,8 +1190,7 @@ function ComicFlow() {
         error: `コマ割りを変更できませんでした: ${(error as Error)?.message ?? error}。元ページは変更していません。`,
       };
     } finally {
-      panelReeditActiveRef.current = false;
-      setPanelReeditRunningPage(null);
+      lockHandle.release();
     }
   };
 
@@ -1128,7 +1205,7 @@ function ComicFlow() {
   ): Promise<PanelReeditOutcome> => {
     const prepared = prepareLayoutOp(page);
     if (!prepared.ok) return { adopted: false, error: prepared.error };
-    const { currentPage, imagePath, slots } = prepared;
+    const { currentPage, imagePath, slots, pageDirection } = prepared;
     if (!adjacentSlotIndices(slots, panelIndex - 1).includes(neighborIndex - 1)) {
       return { adopted: false, error: "このコマに隣り合うコマがないため統合できません。" };
     }
@@ -1138,12 +1215,22 @@ function ComicFlow() {
       return { adopted: false, error: "編集元のページ情報を確認できません。モーダルを閉じて、ページを開き直してください。" };
     }
 
-    panelReeditActiveRef.current = true;
-    setPanelReeditRunningPage(page.page);
+    const lockHandle = acquirePanelReeditLock(page.page);
+    if (!lockHandle) {
+      pushToast({ kind: "info", text: PANEL_REEDIT_BUSY_MESSAGE, ttlMs: 4000 });
+      return { adopted: false, error: PANEL_REEDIT_BUSY_MESSAGE };
+    }
     try {
       const merged = mergedSlot(slotA, slotB);
       const nextPage = mergeStoryPage(currentPage, panelIndex, neighborIndex, merged.slot, slots);
-      const nextSlots = nextPage.slotsOverride ?? [];
+      const nextSlots = effectivePageSlots({
+        page: nextPage,
+        storyTemplateId,
+        direction: pageDirection,
+      });
+      if (!nextSlots) {
+        throw new Error("コマ割りの情報とコマ数が一致しないため、このページは編集できません。");
+      }
       // 統合後の残るコマの index（読み順で先のコマが残る）。
       const keptIndex = Math.min(panelIndex, neighborIndex);
       validatePanelPolygon(panelGuidePoints(merged.slot), {
@@ -1161,6 +1248,13 @@ function ComicFlow() {
         `comic-panel-merge-p${page.page}-${Date.now()}.png`,
         bytes,
       );
+      const normalizedPage = await normalizeComicPage(nextImagePath);
+      if (!isCurrentPanelReeditLock(lockHandle)) {
+        return { adopted: false, error: PANEL_REEDIT_BUSY_MESSAGE };
+      }
+      if (normalizedPage.aspectWarn) {
+        pushToast({ kind: "info", text: COMIC_PAGE_ASPECT_WARN_MESSAGE, ttlMs: 5000 });
+      }
       const historyEntry: PanelReeditHistoryEntry = {
         page: page.page,
         imagePath,
@@ -1172,7 +1266,12 @@ function ComicFlow() {
       setPageResults((previous) =>
         previous.map((result) =>
           result.page === page.page
-            ? { ...result, imagePath: nextImagePath, error: undefined }
+            ? {
+                ...result,
+                imagePath: normalizedPage.imagePath,
+                contentRect: result.contentRect ?? normalizedPage.contentRect,
+                error: undefined,
+              }
             : result,
         ),
       );
@@ -1189,8 +1288,7 @@ function ComicFlow() {
         error: `コマ割りを変更できませんでした: ${(error as Error)?.message ?? error}。元ページは変更していません。`,
       };
     } finally {
-      panelReeditActiveRef.current = false;
-      setPanelReeditRunningPage(null);
+      lockHandle.release();
     }
   };
 
@@ -1209,7 +1307,7 @@ function ComicFlow() {
     batchToken?: number,
     sourceTag?: string,
   ): Promise<boolean> => {
-    if (panelReeditActiveRef.current || (batchToken === undefined && generatingPages)) return false;
+    if (panelReeditHeldRef.current || (batchToken === undefined && generatingPages)) return false;
     const runToken = batchToken ?? pagesRunTokenRef.current;
     if (pagesRunTokenRef.current !== runToken) return false;
 
@@ -1297,6 +1395,9 @@ function ComicFlow() {
               ? storyPages[idx + 1].synopsis
               : undefined,
           layoutHint: page.layoutHint,
+          // おまかせ時も、構成AIの行構造から合成した座標と全コマ位置語を焼く。
+          rows: page.rows,
+          layoutPlan: page.layoutPlan,
           // fallback は誰が正か不明なので限定句を出さない。none は cast 自体が無い。
           castNames:
             resolution.mode === "matched" ? resolution.matchedNames : undefined,
@@ -1329,13 +1430,20 @@ function ComicFlow() {
       if (!imagePath) {
         throw new Error(res.errors[0] ?? "画像が生成されませんでした");
       }
+      // 受領した全ページを、例外なく作業用規格1080x1440へそろえる。
+      const normalizedPage = await normalizeComicPage(imagePath);
+      if (!stillMine()) return false;
+      if (normalizedPage.aspectWarn) {
+        pushToast({ kind: "info", text: COMIC_PAGE_ASPECT_WARN_MESSAGE, ttlMs: 5000 });
+      }
       setPageResults((prev) =>
         prev.map((r) =>
           r.page === page.page
             ? {
                 ...r,
                 generating: false,
-                imagePath,
+                imagePath: normalizedPage.imagePath,
+                contentRect: normalizedPage.contentRect,
                 startedAt: undefined,
                 // この画像が実際にどの条件で作られたかを記録する（1コマ再編集の対応判定の正）。
                 direction: readingDirection,
@@ -1385,8 +1493,11 @@ function ComicFlow() {
    * 絞りは Rust の GLOBAL_GEN_SEMAPHORE 一本（フロントに上限を作らない）。
    */
   const generateAllStoryPages = async (): Promise<boolean> => {
+    if (panelReeditHeldRef.current) {
+      pushToast({ kind: "info", text: PANEL_REEDIT_BUSY_MESSAGE, ttlMs: 4000 });
+      return false;
+    }
     if (
-      panelReeditActiveRef.current ||
       generatingPages ||
       pageResults.some((result) => result.generating)
     ) return false;
@@ -1432,7 +1543,10 @@ function ComicFlow() {
    * 全ページ完了を待たずに、1ページずつカードのゲージへ進捗が届く。
    */
   const generatePagesFromPlan = () => {
-    if (panelReeditActiveRef.current) return;
+    if (panelReeditHeldRef.current) {
+      pushToast({ kind: "info", text: PANEL_REEDIT_BUSY_MESSAGE, ttlMs: 4000 });
+      return;
+    }
     setPhase("pages");
     void generateAllStoryPages();
   };
@@ -1443,7 +1557,7 @@ function ComicFlow() {
         phase={phase}
         setPhase={requestPhaseChange}
         hasStory={storyPages.length > 0}
-        generating={panelReeditActiveRef.current || generatingPages || pageResults.some((r) => r.generating)}
+        generating={panelReeditHeld || generatingPages || pageResults.some((r) => r.generating)}
         completed={pageResults.filter((r) => r.imagePath).length}
         total={storyPages.length}
       />
@@ -1526,9 +1640,8 @@ function ComicFlow() {
               generatingPages={generatingPages}
               storyTemplateId={storyTemplateId}
               readingDirection={readingDirection}
-              colorMode={colorMode}
               panelReeditRunningPage={panelReeditRunningPage}
-              panelReeditBlocked={generatingStory || generatingPages || pageResults.some((r) => r.generating)}
+              panelReeditBlocked={panelReeditHeld || generatingStory || generatingPages || pageResults.some((r) => r.generating)}
               onRegeneratePanel={regeneratePanel}
               onUndoPanelReedit={undoPanelReedit}
               canUndoPanelReedit={(pageNo) => panelReeditHistory.some((entry) => entry.page === pageNo)}
@@ -2231,7 +2344,6 @@ function PagesPhase({
   generatingPages,
   storyTemplateId,
   readingDirection,
-  colorMode,
   panelReeditRunningPage,
   panelReeditBlocked,
   onRegeneratePanel,
@@ -2254,7 +2366,6 @@ function PagesPhase({
   generatingPages: boolean;
   storyTemplateId: string | null;
   readingDirection: ComicReadingDirection;
-  colorMode: ComicColorMode;
   panelReeditRunningPage: number | null;
   panelReeditBlocked: boolean;
   onRegeneratePanel: (
@@ -2282,7 +2393,7 @@ function PagesPhase({
   const [previewOpen, setPreviewOpen] = useState(false);
   /**
    * コマ割り認識中のページ番号。読み取り専用処理なのでグローバルの
-   * panelReeditActiveRef は取らず、二重クリックだけをここで防ぐ。
+   * 1コマ再編集ロックは取らず、二重クリックだけをここで防ぐ。
    */
   const [recoveringPage, setRecoveringPage] = useState<number | null>(null);
   /**
@@ -2309,11 +2420,18 @@ function PagesPhase({
    */
   const openPanelReedit = async (page: ComicStoryPage) => {
     if (recoveringRef.current) return;
-    // D-1: テンプレ選択中でも、テンプレのコマ数と実際の構成コマ数がずれたページは
-    // テンプレ座標をそのまま使えない。その場合は線認識へ進める（ゲートで塞がない）。
-    const templateSlotCount = storyTemplateId ? getComicTemplate(storyTemplateId).slots.length : null;
-    const templateUsable = templateSlotCount !== null && templateSlotCount === page.panels.length;
-    if (page.slotsOverride || templateUsable) {
+    if (panelReeditBlocked) {
+      pushToast({ kind: "info", text: PANEL_REEDIT_BUSY_MESSAGE, ttlMs: 4000 });
+      return;
+    }
+    const result = pageResults.find((item) => item.page === page.page);
+    const slots = effectivePageSlots({
+      page,
+      storyTemplateId,
+      direction: result?.direction ?? readingDirection,
+      contentRect: result?.contentRect,
+    });
+    if (slots) {
       setEditingPage(page.page);
       return;
     }
@@ -2531,6 +2649,7 @@ function PagesPhase({
             type="button"
             onClick={() => void saveAllPagesToProject()}
             disabled={completedCount === 0 || generatingPages || panelReeditRunningPage !== null}
+            title={panelReeditRunningPage !== null ? PANEL_REEDIT_BUSY_MESSAGE : undefined}
             className="rounded-md border border-[#2a2a2a] bg-[#1a1a1a] px-3 py-1.5 text-xs font-medium text-neutral-300 transition hover:border-pink-500/40 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
           >
             全ページをプロジェクトに保存
@@ -2539,6 +2658,7 @@ function PagesPhase({
             type="button"
             onClick={() => void saveAllPages()}
             disabled={completedCount === 0 || generatingPages || panelReeditRunningPage !== null}
+            title={panelReeditRunningPage !== null ? PANEL_REEDIT_BUSY_MESSAGE : undefined}
             className="rounded-md bg-pink-500 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-pink-400 disabled:cursor-not-allowed disabled:opacity-40"
           >
             全ページを一括保存
@@ -2550,18 +2670,12 @@ function PagesPhase({
         {storyPages.map((page) => {
           const result = pageResults.find((r) => r.page === page.page);
           const isPanelReediting = panelReeditRunningPage === page.page;
-          const pageDirection = result?.direction ?? readingDirection;
-          const pageColorMode = result?.colorMode ?? colorMode;
           // スロット未確定（おまかせ・コマ追加後）でも入口は閉じない。押した時点で
           // 線認識を走らせて slotsOverride を復元する（失敗はそこで理由を出す）。
           // コマ数不一致も同様に、認識結果と突き合わせてから判定する。
-          const gateReason: string | null = pageDirection === "ltr"
-            ? "今は右→左（日本式）のページのみ対応しています"
-            : pageColorMode === "faithful"
-              ? "「キャラ忠実」で生成したページは1コマ再生成に未対応です"
-              : !result?.imagePath
-                ? "ページ画像を生成してから編集できます"
-                : null;
+          const gateReason: string | null = !result?.imagePath
+            ? "ページ画像を生成してから編集できます"
+            : null;
           const canOpenPanelReedit = gateReason === null;
           return (
             <div
@@ -2583,6 +2697,7 @@ function PagesPhase({
                     panelReeditRunningPage !== null ||
                     recoveringPage === page.page
                   }
+                  title={panelReeditRunningPage !== null ? PANEL_REEDIT_BUSY_MESSAGE : undefined}
                   className="rounded border border-[#2a2a2a] bg-[#1a1a1a] px-2 py-0.5 text-[11px] text-neutral-300 transition hover:border-pink-500/40 disabled:opacity-40"
                 >
                   再生成
@@ -2617,6 +2732,7 @@ function PagesPhase({
                 type="button"
                 onClick={() => void savePage(result?.imagePath, page.page)}
                 disabled={!result?.imagePath || panelReeditRunningPage !== null}
+                title={panelReeditRunningPage !== null ? PANEL_REEDIT_BUSY_MESSAGE : undefined}
                 className="rounded border border-[#2a2a2a] bg-[#1a1a1a] px-2 py-1 text-[11px] font-medium text-neutral-300 transition hover:border-pink-500/40 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
               >
                 保存
@@ -2625,6 +2741,7 @@ function PagesPhase({
                 type="button"
                 onClick={() => void savePageToProject(page)}
                 disabled={!result?.imagePath || panelReeditRunningPage !== null}
+                title={panelReeditRunningPage !== null ? PANEL_REEDIT_BUSY_MESSAGE : undefined}
                 className="rounded border border-[#2a2a2a] bg-[#1a1a1a] px-2 py-1 text-[11px] font-medium text-neutral-300 transition hover:border-pink-500/40 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
               >
                 プロジェクトに保存
@@ -2633,7 +2750,7 @@ function PagesPhase({
                 type="button"
                 onClick={() => void openPanelReedit(page)}
                 disabled={!canOpenPanelReedit || panelReeditBlocked || recoveringPage !== null}
-                title={gateReason ?? undefined}
+                title={gateReason ?? (panelReeditBlocked ? PANEL_REEDIT_BUSY_MESSAGE : undefined)}
                 className="rounded border border-pink-500/50 bg-pink-500/10 px-2 py-1 text-[11px] font-medium text-pink-100 transition hover:border-pink-300 disabled:cursor-not-allowed disabled:opacity-40"
               >
                 {recoveringPage === page.page ? "コマ割りを認識中…" : "1コマずつ直す"}
@@ -2645,7 +2762,11 @@ function PagesPhase({
                 type="button"
                 onClick={() => onUndoPanelReedit(page.page)}
                 disabled={!canUndoPanelReedit(page.page) || panelReeditRunningPage !== null}
-                title="元に戻せるのはこのアプリを開いている間だけです（閉じると復元ボタンの履歴は消えます。差し替え前の画像ファイル自体は残っています）"
+                title={
+                  panelReeditRunningPage !== null
+                    ? PANEL_REEDIT_BUSY_MESSAGE
+                    : "元に戻せるのはこのアプリを開いている間だけです（閉じると復元ボタンの履歴は消えます。差し替え前の画像ファイル自体は残っています）"
+                }
                 className="rounded border border-[#2a2a2a] bg-[#1a1a1a] px-2 py-1 text-[11px] font-medium text-neutral-300 transition hover:border-pink-500/40 disabled:cursor-not-allowed disabled:opacity-40"
               >
                 直前のコマ編集を戻す
@@ -2665,8 +2786,14 @@ function PagesPhase({
       {editingPage !== null ? (() => {
         const page = storyPages.find((item) => item.page === editingPage);
         const result = pageResults.find((item) => item.page === editingPage);
-        const slots = page?.slotsOverride
-          ?? (storyTemplateId ? getComicTemplate(storyTemplateId).slots : null);
+        const slots = page
+          ? effectivePageSlots({
+              page,
+              storyTemplateId,
+              direction: result?.direction ?? readingDirection,
+              contentRect: result?.contentRect,
+            })
+          : null;
         if (!page || !result?.imagePath || !slots) return null;
         return (
           <PanelReeditModal
