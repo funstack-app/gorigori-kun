@@ -1164,7 +1164,7 @@ export function buildFullPagePrompt(
     );
   }
   parts.push(
-    "full-bleed page layout — panels extend to the left and right edges of the page with no outer side margin; keep the top and bottom outer margins",
+    "uniform outer margin on all four sides — do not extend panels to the page edges",
   );
 
   // 3. 連続ストーリー文脈（複数ページのときだけ）

@@ -43,12 +43,12 @@ const FIXTURE_RECTS: Rect[] = [
 
 /** layoutTemplates.ts の manga08 と独立に固定した描画正解。 */
 const MANGA08_RECTS: Rect[] = [
-  { x: 66, y: 4, w: 34, h: 26 },
+  { x: 66, y: 4, w: 30, h: 26 },
   { x: 35, y: 4, w: 28, h: 26 },
-  { x: 0, y: 4, w: 32, h: 26 },
-  { x: 0, y: 33, w: 100, h: 30 },
-  { x: 57, y: 66, w: 43, h: 30 },
-  { x: 0, y: 66, w: 54, h: 30 },
+  { x: 4, y: 4, w: 28, h: 26 },
+  { x: 4, y: 33, w: 92, h: 30 },
+  { x: 57, y: 66, w: 39, h: 30 },
+  { x: 4, y: 66, w: 50, h: 30 },
 ];
 
 function blankPage(): PanelImageData {
@@ -69,7 +69,6 @@ function drawPanel(
   image: PanelImageData,
   rect: Rect,
   borderPx = BORDER_PX,
-  omitPaperEdgeBorders = false,
 ): void {
   const left = Math.round((rect.x * image.width) / 100);
   const top = Math.round((rect.y * image.height) / 100);
@@ -84,17 +83,15 @@ function drawPanel(
       paint(image, x, bottom - inset, 24);
     }
     for (let y = top; y <= bottom; y += 1) {
-      if (!omitPaperEdgeBorders || left > 0) paint(image, left + inset, y, 24);
-      if (!omitPaperEdgeBorders || right < image.width - 1) {
-        paint(image, right - inset, y, 24);
-      }
+      paint(image, left + inset, y, 24);
+      paint(image, right - inset, y, 24);
     }
   }
 }
 
-function fixturePage(rects: Rect[], omitPaperEdgeBorders = false): PanelImageData {
+function fixturePage(rects: Rect[]): PanelImageData {
   const image = blankPage();
-  for (const rect of rects) drawPanel(image, rect, BORDER_PX, omitPaperEdgeBorders);
+  for (const rect of rects) drawPanel(image, rect);
   return image;
 }
 
@@ -142,16 +139,7 @@ function distanceToSegment(
   return Math.hypot(x - (start[0] + progress * dx), y - (start[1] + progress * dy));
 }
 
-function isPaperEdge(start: Point, end: Point): boolean {
-  return (
-    (start[0] === 0 && end[0] === 0) ||
-    (start[0] === WIDTH && end[0] === WIDTH) ||
-    (start[1] === 0 && end[1] === 0) ||
-    (start[1] === HEIGHT && end[1] === HEIGHT)
-  );
-}
-
-/** 斜めコマも含め、紙端だけ枠線を省いた模擬ページを描く。 */
+/** 斜めコマも含め、全辺に枠線がある模擬ページを描く。 */
 function templateFixturePage(template: ComicLayoutTemplate): PanelImageData {
   const image = blankPage();
   for (const slot of template.slots) {
@@ -169,8 +157,7 @@ function templateFixturePage(template: ComicLayoutTemplate): PanelImageData {
         if (!pointInsidePolygon(centerX, centerY, points)) continue;
         const onBorder = points.some((start, index) => {
           const end = points[(index + 1) % points.length];
-          return !isPaperEdge(start, end) &&
-            distanceToSegment(centerX, centerY, start, end) <= BORDER_PX;
+          return distanceToSegment(centerX, centerY, start, end) <= BORDER_PX;
         });
         paint(image, x, y, onBorder ? 24 : 180);
       }
@@ -214,7 +201,7 @@ test("正典manga08でも6コマ・全24境界をスナップする", () => {
   result.slots.forEach((slot, index) => expectRectNear(slot, MANGA08_RECTS[index]));
 });
 
-test("全12テンプレの左右紙端を枠線なしで固定し、全境界をスナップする", () => {
+test("全12テンプレの外周4%枠を含む全境界をスナップする", () => {
   expect(COMIC_LAYOUT_TEMPLATES.map(({ id }) => id)).toEqual(
     Array.from({ length: 12 }, (_, index) => `manga${String(index + 1).padStart(2, "0")}`),
   );
@@ -229,14 +216,16 @@ test("全12テンプレの左右紙端を枠線なしで固定し、全境界を
     template.slots.forEach((expectedSlot, slotIndex) => {
       const expected = slotQuad(expectedSlot);
       const actual = slotQuad(result.slots[slotIndex]);
-      if (expected[0][0] === 0 && expected[3][0] === 0) {
-        expect(actual[0][0], `${template.id} コマ${slotIndex + 1} 左紙端`).toBeCloseTo(0, 10);
-        expect(actual[3][0], `${template.id} コマ${slotIndex + 1} 左紙端`).toBeCloseTo(0, 10);
-      }
-      if (expected[1][0] === 100 && expected[2][0] === 100) {
-        expect(actual[1][0], `${template.id} コマ${slotIndex + 1} 右紙端`).toBeCloseTo(100, 10);
-        expect(actual[2][0], `${template.id} コマ${slotIndex + 1} 右紙端`).toBeCloseTo(100, 10);
-      }
+      expected.forEach(([expectedX, expectedY], pointIndex) => {
+        expect(
+          Math.abs(actual[pointIndex][0] - expectedX),
+          `${template.id} コマ${slotIndex + 1} 点${pointIndex + 1} x`,
+        ).toBeLessThanOrEqual(0.35);
+        expect(
+          Math.abs(actual[pointIndex][1] - expectedY),
+          `${template.id} コマ${slotIndex + 1} 点${pointIndex + 1} y`,
+        ).toBeLessThanOrEqual(0.35);
+      });
     });
   }
 });
@@ -255,25 +244,25 @@ test("わざと2%動かした境界へスナップし、テンプレ座標の丸
   expectRectNear(result.slots[0], shifted[0]);
 });
 
-test("断ち切りの左右端は線なしでも固定し、内側境界だけ従来どおり探索する", () => {
-  const bleedTemplate: ComicLayoutTemplate = {
-    id: "bleed-edge-fixture",
-    label: "bleed edge fixture",
+test("四辺4%の外枠と内側境界を同じ枠線規則で実測する", () => {
+  const uniformMarginTemplate: ComicLayoutTemplate = {
+    id: "uniform-margin-fixture",
+    label: "uniform margin fixture",
     panelCount: 2,
     pageAspect: { w: 2, h: 3 },
     slots: [
-      { x: 51.5, y: 4, w: 48.5, h: 92 },
-      { x: 0, y: 4, w: 48.5, h: 92 },
+      { x: 52, y: 4, w: 44, h: 92 },
+      { x: 4, y: 4, w: 45, h: 92 },
     ],
     roles: ["1", "2"],
   };
-  const shiftedInnerEdges: Rect[] = [
-    { x: 53.5, y: 4, w: 46.5, h: 92 },
-    { x: 0, y: 4, w: 50.5, h: 92 },
+  const shiftedEdges: Rect[] = [
+    { x: 54, y: 4, w: 42, h: 92 },
+    { x: 4, y: 4, w: 47, h: 92 },
   ];
   const result = alignSlotsToTemplate(
-    fixturePage(shiftedInnerEdges, true),
-    bleedTemplate,
+    fixturePage(shiftedEdges),
+    uniformMarginTemplate,
     "rtl",
   );
   expect(result.ok, JSON.stringify(result)).toBe(true);
@@ -281,33 +270,25 @@ test("断ち切りの左右端は線なしでも固定し、内側境界だけ�
 
   expect(result.metrics.snappedBoundaries).toBe(8);
   expect(result.metrics.totalBoundaries).toBe(8);
-  expect(result.borderPx, "紙端の0pxを混ぜず内側枠だけ実測").toBe(BORDER_PX);
+  expect(result.borderPx, "外周と内側で同じ3px枠を実測").toBe(BORDER_PX);
   expect(result.insetPx).toBe(BORDER_PX + 1);
-  result.slots.forEach((slot, index) => expectRectNear(slot, shiftedInnerEdges[index]));
-  expect(result.slots[0].x + result.slots[0].w, "右紙端を固定").toBe(100);
-  expect(result.slots[1].x, "左紙端を固定").toBe(0);
+  result.slots.forEach((slot, index) => expectRectNear(slot, shiftedEdges[index]));
 });
 
-test("上下左右すべて紙端なら探索せず固定し、枠・インセットを0にする", () => {
-  const fullBleedTemplate: ComicLayoutTemplate = {
-    id: "full-bleed-fixture",
-    label: "full bleed fixture",
+test("外枠線が見つからなければ四辺4%のテンプレ位置を維持する", () => {
+  const uniformMarginTemplate: ComicLayoutTemplate = {
+    id: "uniform-margin-fallback-fixture",
+    label: "uniform margin fallback fixture",
     panelCount: 1,
     pageAspect: { w: 2, h: 3 },
-    slots: [{ x: 0, y: 0, w: 100, h: 100 }],
+    slots: [{ x: 4, y: 4, w: 92, h: 92 }],
     roles: ["1"],
   };
-  const borderlessImage = blankPage();
-  for (let offset = 0; offset < borderlessImage.data.length; offset += 4) {
-    borderlessImage.data[offset] = 180;
-    borderlessImage.data[offset + 1] = 180;
-    borderlessImage.data[offset + 2] = 180;
-  }
-  const result = alignSlotsToTemplate(borderlessImage, fullBleedTemplate, "rtl");
+  const result = alignSlotsToTemplate(blankPage(), uniformMarginTemplate, "rtl");
   expect(result.ok, JSON.stringify(result)).toBe(true);
   if (!result.ok) return;
 
-  expect(result.slots).toEqual([{ x: 0, y: 0, w: 100, h: 100 }]);
+  expect(result.slots).toEqual([{ x: 4, y: 4, w: 92, h: 92 }]);
   expect(result.metrics).toMatchObject({
     snappedBoundaryRatio: 1,
     snappedBoundaries: 4,
@@ -358,17 +339,17 @@ test("牙: ±2.5%帯の内側2%は通り、外側3.2%は境界80%未満で落ち
   expect(outside.metrics.snappedBoundaryRatio).toBe(0.75);
 });
 
-test("紙端から4%の外枠を8%帯で見つけ、枠線より内側をクロップ開始にする", () => {
-  const fullBleedTemplate: ComicLayoutTemplate = {
-    id: "edge-margin-crop-fixture",
-    label: "edge margin crop fixture",
+test("外周±8%帯で6%ずれた外枠を見つけ、枠線より内側をクロップ開始にする", () => {
+  const uniformMarginTemplate: ComicLayoutTemplate = {
+    id: "outer-margin-crop-fixture",
+    label: "outer margin crop fixture",
     panelCount: 1,
     pageAspect: { w: 2, h: 3 },
-    slots: [{ x: 0, y: 0, w: 100, h: 100 }],
+    slots: [{ x: 4, y: 4, w: 92, h: 92 }],
     roles: ["1"],
   };
-  const outerFrame = { x: 4, y: 4, w: 92, h: 92 };
-  const result = alignSlotsToTemplate(fixturePage([outerFrame]), fullBleedTemplate, "rtl");
+  const outerFrame = { x: 10, y: 10, w: 80, h: 80 };
+  const result = alignSlotsToTemplate(fixturePage([outerFrame]), uniformMarginTemplate, "rtl");
   expect(result.ok, JSON.stringify(result)).toBe(true);
   if (!result.ok) return;
 
@@ -380,17 +361,17 @@ test("紙端から4%の外枠を8%帯で見つけ、枠線より内側をクロ�
 
   const cropStartX = result.slots[0].x + (result.insetPx * 100) / WIDTH;
   const cropStartY = result.slots[0].y + (result.insetPx * 100) / HEIGHT;
-  expect(cropStartX, "牙: 端帯が0%なら4%外枠を拾えず、クロップ開始が枠内へ進まない").toBeGreaterThan(4);
-  expect(cropStartY, "実測枠線+1pxだけ内側から切り出す").toBeGreaterThan(4);
+  expect(cropStartX, "牙: 外周が±2.5%のままなら6%ずれた枠を拾えない").toBeGreaterThan(10);
+  expect(cropStartY, "実測枠線+1pxだけ内側から切り出す").toBeGreaterThan(10);
 });
 
-test("本当に端まで絵がある場合は紙端固定・インセット0のままにする", () => {
-  const fullBleedTemplate: ComicLayoutTemplate = {
-    id: "true-full-bleed-fixture",
-    label: "true full bleed fixture",
+test("端まで絵があり外枠線が無い場合も四辺4%へ広げず戻す", () => {
+  const uniformMarginTemplate: ComicLayoutTemplate = {
+    id: "edge-art-fallback-fixture",
+    label: "edge art fallback fixture",
     panelCount: 1,
     pageAspect: { w: 2, h: 3 },
-    slots: [{ x: 0, y: 0, w: 100, h: 100 }],
+    slots: [{ x: 4, y: 4, w: 92, h: 92 }],
     roles: ["1"],
   };
   const image = blankPage();
@@ -400,10 +381,10 @@ test("本当に端まで絵がある場合は紙端固定・インセット0の�
     image.data[offset + 2] = 180;
   }
 
-  const result = alignSlotsToTemplate(image, fullBleedTemplate, "rtl");
+  const result = alignSlotsToTemplate(image, uniformMarginTemplate, "rtl");
   expect(result.ok, JSON.stringify(result)).toBe(true);
   if (!result.ok) return;
-  expect(result.slots).toEqual([{ x: 0, y: 0, w: 100, h: 100 }]);
+  expect(result.slots).toEqual([{ x: 4, y: 4, w: 92, h: 92 }]);
   expect(result.borderPx).toBe(0);
   expect(result.insetPx).toBe(0);
   expect(result.metrics.snappedBoundaries).toBe(4);

@@ -9,6 +9,10 @@ import {
   getComicTemplate,
 } from "../src/lib/comic/layoutTemplates";
 import {
+  COMIC_EXPORT_TARGET,
+  containRect,
+} from "../src/lib/comic/exportSize";
+import {
   assembleStructurePage,
   borderWidthPxFor,
   buildAssemblyPlan,
@@ -61,6 +65,16 @@ test("coverCropは元画像と出力先が同比率なら全面を採用する",
   });
 });
 
+test("書き出しは2160x2880の3:4で、作業ページを白帯なしの2倍へ拡大する", () => {
+  expect(COMIC_EXPORT_TARGET).toMatchObject({ width: 2160, height: 2880 });
+  expect(containRect(1080, 1440, 2160, 2880)).toEqual({
+    x: 0,
+    y: 0,
+    w: 2160,
+    h: 2880,
+  });
+});
+
 test("牙: 全面を縦横別々に引き伸ばす誤った期待値は等方検査で落ちる", () => {
   const stretched = { sw: 1600, sh: 900 };
   expect(() => assertIsotropicCover(stretched, 400, 400)).toThrow(/非等方/);
@@ -78,12 +92,12 @@ test("manga01の全スロットをpercentから正確な1080x1440 pxへ変換す
     slotPixelRect(slot, STRUCTURE_PAGE_W, STRUCTURE_PAGE_H),
   );
   expect(rects).toEqual([
-    { x: 702, y: 58, w: 378, h: 331 },
+    { x: 702, y: 58, w: 335, h: 331 },
     { x: 367, y: 58, w: 324, h: 346 },
-    { x: 0, y: 58, w: 356, h: 359 },
-    { x: 0, y: 418, w: 1080, h: 562 },
-    { x: 551, y: 1008, w: 529, h: 374 },
-    { x: 0, y: 994, w: 540, h: 389 },
+    { x: 43, y: 58, w: 313, h: 360 },
+    { x: 43, y: 418, w: 994, h: 562 },
+    { x: 551, y: 1008, w: 486, h: 374 },
+    { x: 43, y: 994, w: 497, h: 389 },
   ]);
   for (let i = 0; i < rects.length; i += 1) {
     for (let j = i + 1; j < rects.length; j += 1) {
@@ -207,7 +221,7 @@ test("枠線はclip内側へ決定論幅で描かれ、未生成コマは白地�
   }
 });
 
-test("断ち切りは紙端の枠線だけを描かず、内側の3px枠は保つ", async () => {
+test("全コマは外周を含む四辺を閉じ、全辺に3px枠を描く", async () => {
   const globals = globalThis as unknown as Record<string, unknown>;
   const hadDocument = Object.prototype.hasOwnProperty.call(globals, "document");
   const hadPath2D = Object.prototype.hasOwnProperty.call(globals, "Path2D");
@@ -269,12 +283,9 @@ test("断ち切りは紙端の枠線だけを描かず、内側の3px枠は保�
     });
     expect(strokedPaths).toHaveLength(1);
     expect(strokedPaths[0].commands).toEqual([
-      { kind: "moveTo", x: 1080, y: 432 },
-      { kind: "lineTo", x: 713, y: 432 },
-      { kind: "lineTo", x: 713, y: 58 },
-      { kind: "lineTo", x: 1080, y: 58 },
+      { kind: "rect", x: 713, y: 58, w: 324, h: 374 },
     ]);
-    expect(context.lineWidth, "内側の指定3pxは従来どおり倍幅6pxでclip").toBe(6);
+    expect(context.lineWidth, "指定3pxは全辺で従来どおり倍幅6pxをclip").toBe(6);
 
     for (const template of COMIC_LAYOUT_TEMPLATES) {
       const strokeOffset = strokedPaths.length;
@@ -284,38 +295,13 @@ test("断ち切りは紙端の枠線だけを描かず、内側の3px枠は保�
         frameStyle: "standard",
       });
       const templatePaths = strokedPaths.slice(strokeOffset);
-      expect(templatePaths, `${template.id} 全コマの内側枠`).toHaveLength(template.panelCount);
+      expect(templatePaths, `${template.id} 全コマの四辺枠`).toHaveLength(template.panelCount);
       template.slots.forEach((slot, slotIndex) => {
-        const quad = slot.points ?? [
-          [slot.x, slot.y],
-          [slot.x + slot.w, slot.y],
-          [slot.x + slot.w, slot.y + slot.h],
-          [slot.x, slot.y + slot.h],
-        ];
-        const touchesLeft = quad[0][0] === 0 && quad[3][0] === 0;
-        const touchesRight = quad[1][0] === 100 && quad[2][0] === 100;
-        if (!touchesLeft && !touchesRight) return;
-
         const path = templatePaths[slotIndex];
         expect(
           path.commands.some((command) => command.kind === "rect" || command.kind === "closePath"),
-          `${template.id} コマ${slotIndex + 1} 紙端を閉じた枠で描かない`,
-        ).toBe(false);
-        let cursor: { x: number; y: number } | null = null;
-        for (const command of path.commands) {
-          if (command.kind === "moveTo") {
-            cursor = { x: command.x, y: command.y };
-            continue;
-          }
-          if (command.kind !== "lineTo") continue;
-          expect(
-            cursor !== null &&
-              ((cursor.x === 0 && command.x === 0) ||
-                (cursor.x === STRUCTURE_PAGE_W && command.x === STRUCTURE_PAGE_W)),
-            `${template.id} コマ${slotIndex + 1} 左右紙端の枠線`,
-          ).toBe(false);
-          cursor = { x: command.x, y: command.y };
-        }
+          `${template.id} コマ${slotIndex + 1} 四辺を閉じた枠`,
+        ).toBe(true);
       });
     }
 
@@ -325,9 +311,12 @@ test("断ち切りは紙端の枠線だけを描かず、内側の3px枠は保�
       slots: [{ x: 0, y: 0, w: 100, h: 100 }],
       frameStyle: "standard",
     });
-    expect(strokedPaths, "上下左右すべて紙端なら枠線は0本").toHaveLength(
-      strokeCountBeforeFullPage,
+    expect(strokedPaths, "仮に全面コマでも四辺の枠線を描く").toHaveLength(
+      strokeCountBeforeFullPage + 1,
     );
+    expect(strokedPaths.at(-1)?.commands).toEqual([
+      { kind: "rect", x: 0, y: 0, w: 1080, h: 1440 },
+    ]);
   } finally {
     if (hadDocument) globals.document = previousDocument;
     else delete globals.document;
@@ -356,15 +345,15 @@ test("牙: 再組立は検出枠線+1pxを除き、比率差10%超だけcoverす
     borderPx: 3,
   });
   expect(sameShape.panels[0].matchedRect).toEqual({
-    x: 0,
+    x: 43,
     y: 58,
-    w: 1080,
+    w: 994,
     h: 374,
   });
   expect(sameShape.panels[0].insetRect).toEqual({
-    x: 4,
+    x: 47,
     y: 62,
-    w: 1072,
+    w: 986,
     h: 366,
   });
   expect(sameShape.panels[0].coverApplied).toBe(false);
@@ -456,21 +445,21 @@ test("牙: 再組立出力は2テンプレの実slot座標と全コマ±1pxで�
     {
       templateId: "manga08",
       expected: [
-        { x: 713, y: 58, w: 367, h: 374 },
+        { x: 713, y: 58, w: 324, h: 374 },
         { x: 378, y: 58, w: 302, h: 374 },
-        { x: 0, y: 58, w: 346, h: 374 },
-        { x: 0, y: 475, w: 1080, h: 432 },
-        { x: 616, y: 950, w: 464, h: 432 },
-        { x: 0, y: 950, w: 583, h: 432 },
+        { x: 43, y: 58, w: 302, h: 374 },
+        { x: 43, y: 475, w: 994, h: 432 },
+        { x: 616, y: 950, w: 421, h: 432 },
+        { x: 43, y: 950, w: 540, h: 432 },
       ],
     },
     {
       templateId: "manga10",
       expected: [
-        { x: 0, y: 58, w: 1080, h: 374 },
-        { x: 562, y: 475, w: 518, h: 432 },
-        { x: 0, y: 475, w: 529, h: 432 },
-        { x: 0, y: 950, w: 1080, h: 432 },
+        { x: 43, y: 58, w: 994, h: 374 },
+        { x: 562, y: 475, w: 475, h: 432 },
+        { x: 43, y: 475, w: 486, h: 432 },
+        { x: 43, y: 950, w: 994, h: 432 },
       ],
     },
   ] as const;
@@ -696,8 +685,8 @@ function assertCommonFrame(
   }
 
   const expectedOuterCoordinate: Record<OuterSide, number> = {
-    left: 0,
-    right: 100,
+    left: 4,
+    right: 96,
     top: 4,
     bottom: 96,
   };
@@ -710,14 +699,14 @@ function assertCommonFrame(
       for (const point of frameSideEdge(slot, side)) {
         expect(
           point[axis],
-          `${templateId} コマ${slotIndex + 1} ${side} ${axis === 0 ? "紙端" : "上下外周"}`,
+          `${templateId} コマ${slotIndex + 1} ${side} 外周`,
         ).toBe(expected);
       }
     }
   });
 }
 
-test("全12テンプレの左右紙端・上下外周4%・内側ガター3%をltrミラー後も保つ", () => {
+test("全12テンプレの左右上下外周4%・内側ガター3%をltrミラー後も保つ", () => {
   for (const templateId of COMMON_FRAME_TEMPLATE_IDS) {
     const template = getComicTemplate(templateId);
     assertCommonFrame(templateId, template.slots);
@@ -736,15 +725,15 @@ test("テンプレ一覧はid・表示名を保ったマンガ01〜12だけで�
   );
 });
 
-test("牙: 1テンプレの右紙端に0.5%の余白を作ると落ちる", () => {
+test("牙: 1テンプレの左外周を0%へ広げると落ちる", () => {
   const template = getComicTemplate("manga08");
   const broken = template.slots.map((slot, index) =>
-    index === 0 ? { ...slot, w: slot.w - 0.5 } : { ...slot },
+    index === 2 ? { ...slot, x: 0, w: slot.w + 4 } : { ...slot },
   );
   expect(() => assertCommonFrame("manga08 broken", broken, "manga08")).toThrow();
 });
 
-test("牙: 紙端を保ったまま内側ガターを0.5%崩すと落ちる", () => {
+test("牙: 外周4%を保ったまま内側ガターを0.5%崩すと落ちる", () => {
   const template = getComicTemplate("manga08");
   const broken = template.slots.map((slot, index) =>
     index === 0 ? { ...slot, x: slot.x + 0.5, w: slot.w - 0.5 } : { ...slot },
