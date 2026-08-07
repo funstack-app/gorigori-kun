@@ -275,7 +275,7 @@ test("四辺4%の外枠と内側境界を同じ枠線規則で実測する", () 
   result.slots.forEach((slot, index) => expectRectNear(slot, shiftedEdges[index]));
 });
 
-test("外枠線が見つからなければ四辺4%のテンプレ位置を維持する", () => {
+test("外枠線が1本も見つからなければテンプレ位置を維持したまま安全側へ倒す", () => {
   const uniformMarginTemplate: ComicLayoutTemplate = {
     id: "uniform-margin-fallback-fixture",
     label: "uniform margin fallback fixture",
@@ -285,17 +285,14 @@ test("外枠線が見つからなければ四辺4%のテンプレ位置を維持
     roles: ["1"],
   };
   const result = alignSlotsToTemplate(blankPage(), uniformMarginTemplate, "rtl");
-  expect(result.ok, JSON.stringify(result)).toBe(true);
-  if (!result.ok) return;
-
-  expect(result.slots).toEqual([{ x: 4, y: 4, w: 92, h: 92 }]);
+  expect(result.ok, JSON.stringify(result)).toBe(false);
+  if (result.ok) return;
+  expect(result.failureCode).toBe("low-confidence");
   expect(result.metrics).toMatchObject({
-    snappedBoundaryRatio: 1,
-    snappedBoundaries: 4,
+    snappedBoundaryRatio: 0,
+    snappedBoundaries: 0,
     totalBoundaries: 4,
   });
-  expect(result.borderPx).toBe(0);
-  expect(result.insetPx).toBe(0);
 });
 
 test("全コマを40%ずらすと近傍帯に枠がなく、安全側のfailureになる", () => {
@@ -311,7 +308,7 @@ test("全コマを40%ずらすと近傍帯に枠がなく、安全側のfailure�
   expect(result.metrics.snappedBoundaryRatio).toBeLessThan(0.8);
 });
 
-test("牙: ±2.5%帯の内側2%は通り、外側3.2%は境界80%未満で落ちる", () => {
+test("牙: ±2.5%帯の外側3.2%は未検出境界をテンプレ位置に保ち、3本照合で通る", () => {
   const onePanelTemplate: ComicLayoutTemplate = {
     id: "band-fence",
     label: "band fence",
@@ -332,14 +329,15 @@ test("牙: ±2.5%帯の内側2%は通り、外側3.2%は境界80%未満で落ち
     onePanelTemplate,
     "rtl",
   );
-  expect(outside.ok, JSON.stringify(outside)).toBe(false);
-  if (outside.ok) return;
+  expect(outside.ok, JSON.stringify(outside)).toBe(true);
+  if (!outside.ok) return;
   expect(outside.metrics.snappedBoundaries).toBe(3);
   expect(outside.metrics.totalBoundaries).toBe(4);
   expect(outside.metrics.snappedBoundaryRatio).toBe(0.75);
+  expect(outside.slots[0].x, "未検出の左境界はテンプレ位置を維持").toBe(20);
 });
 
-test("外周±8%帯で6%ずれた外枠を見つけ、枠線より内側をクロップ開始にする", () => {
+test("外周±8%帯で4%ずれた外枠を見つけ、枠線より内側をクロップ開始にする", () => {
   const uniformMarginTemplate: ComicLayoutTemplate = {
     id: "outer-margin-crop-fixture",
     label: "outer margin crop fixture",
@@ -348,7 +346,7 @@ test("外周±8%帯で6%ずれた外枠を見つけ、枠線より内側をク�
     slots: [{ x: 4, y: 4, w: 92, h: 92 }],
     roles: ["1"],
   };
-  const outerFrame = { x: 10, y: 10, w: 80, h: 80 };
+  const outerFrame = { x: 8, y: 8, w: 84, h: 84 };
   const result = alignSlotsToTemplate(fixturePage([outerFrame]), uniformMarginTemplate, "rtl");
   expect(result.ok, JSON.stringify(result)).toBe(true);
   if (!result.ok) return;
@@ -361,11 +359,11 @@ test("外周±8%帯で6%ずれた外枠を見つけ、枠線より内側をク�
 
   const cropStartX = result.slots[0].x + (result.insetPx * 100) / WIDTH;
   const cropStartY = result.slots[0].y + (result.insetPx * 100) / HEIGHT;
-  expect(cropStartX, "牙: 外周が±2.5%のままなら6%ずれた枠を拾えない").toBeGreaterThan(10);
-  expect(cropStartY, "実測枠線+1pxだけ内側から切り出す").toBeGreaterThan(10);
+  expect(cropStartX, "牙: 外周が±2.5%のままなら4%ずれた枠を拾えない").toBeGreaterThan(8);
+  expect(cropStartY, "実測枠線+1pxだけ内側から切り出す").toBeGreaterThan(8);
 });
 
-test("端まで絵があり外枠線が無い場合も四辺4%へ広げず戻す", () => {
+test("端まで絵があり外枠線が無い場合は安全側へ倒す", () => {
   const uniformMarginTemplate: ComicLayoutTemplate = {
     id: "edge-art-fallback-fixture",
     label: "edge art fallback fixture",
@@ -382,10 +380,108 @@ test("端まで絵があり外枠線が無い場合も四辺4%へ広げず戻す
   }
 
   const result = alignSlotsToTemplate(image, uniformMarginTemplate, "rtl");
-  expect(result.ok, JSON.stringify(result)).toBe(true);
+  expect(result.ok, JSON.stringify(result)).toBe(false);
+  if (result.ok) return;
+  expect(result.failureCode).toBe("low-confidence");
+  expect(result.metrics.snappedBoundaries).toBe(0);
+});
+
+function drawPanelEdges(
+  image: PanelImageData,
+  rect: Rect,
+  edges: ReadonlySet<"top" | "right" | "bottom" | "left">,
+): void {
+  const left = Math.round((rect.x * image.width) / 100);
+  const top = Math.round((rect.y * image.height) / 100);
+  const right = Math.round(((rect.x + rect.w) * image.width) / 100) - 1;
+  const bottom = Math.round(((rect.y + rect.h) * image.height) / 100) - 1;
+  for (let inset = 0; inset < BORDER_PX; inset += 1) {
+    if (edges.has("top")) {
+      for (let x = left; x <= right; x += 1) paint(image, x, top + inset, 24);
+    }
+    if (edges.has("right")) {
+      for (let y = top; y <= bottom; y += 1) paint(image, right - inset, y, 24);
+    }
+    if (edges.has("bottom")) {
+      for (let x = left; x <= right; x += 1) paint(image, x, bottom - inset, 24);
+    }
+    if (edges.has("left")) {
+      for (let y = top; y <= bottom; y += 1) paint(image, left + inset, y, 24);
+    }
+  }
+}
+
+const PARTIAL_BOUNDARY_TEMPLATE: ComicLayoutTemplate = {
+  id: "partial-boundary-fixture",
+  label: "partial boundary fixture",
+  panelCount: 4,
+  pageAspect: { w: 2, h: 3 },
+  slots: [
+    { x: 55, y: 10, w: 25, h: 30 },
+    { x: 20, y: 10, w: 25, h: 30 },
+    { x: 55, y: 60, w: 25, h: 30 },
+    { x: 20, y: 60, w: 25, h: 30 },
+  ],
+  roles: ["1", "2", "3", "4"],
+};
+
+test("境界の5割だけ実在しても、残りをテンプレ位置に保って照合できる", () => {
+  const image = fixturePage(PARTIAL_BOUNDARY_TEMPLATE.slots.slice(0, 2));
+  const result = alignSlotsToTemplate(image, PARTIAL_BOUNDARY_TEMPLATE, "rtl");
+  expect(result.ok, `牙: しきい値を0.8へ戻すと失敗する: ${JSON.stringify(result)}`).toBe(true);
   if (!result.ok) return;
-  expect(result.slots).toEqual([{ x: 4, y: 4, w: 92, h: 92 }]);
-  expect(result.borderPx).toBe(0);
-  expect(result.insetPx).toBe(0);
+
+  expect(result.metrics.snappedBoundaries).toBe(8);
+  expect(result.metrics.totalBoundaries).toBe(16);
+  expect(result.metrics.snappedBoundaryRatio).toBe(0.5);
+  expect(result.slots.slice(2)).toEqual(PARTIAL_BOUNDARY_TEMPLATE.slots.slice(2));
+});
+
+test("照合できた境界が2本だけならtoo-few-boundariesになる", () => {
+  const onePanelTemplate: ComicLayoutTemplate = {
+    id: "two-boundaries-fixture",
+    label: "two boundaries fixture",
+    panelCount: 1,
+    pageAspect: { w: 2, h: 3 },
+    slots: [{ x: 20, y: 20, w: 60, h: 60 }],
+    roles: ["1"],
+  };
+  const image = blankPage();
+  drawPanelEdges(image, onePanelTemplate.slots[0], new Set(["top", "right"]));
+  const result = alignSlotsToTemplate(image, onePanelTemplate, "rtl");
+
+  expect(result.ok, JSON.stringify(result)).toBe(false);
+  if (result.ok) return;
+  expect(result.failureCode).toBe("too-few-boundaries");
+  expect(result.metrics.snappedBoundaries).toBe(2);
+  expect(result.metrics.snappedBoundaryRatio).toBe(0.5);
+});
+
+test("全境界が探索幅いっぱいにずれていればdrift-too-largeになる", () => {
+  const onePanelTemplate: ComicLayoutTemplate = {
+    id: "full-drift-fixture",
+    label: "full drift fixture",
+    panelCount: 1,
+    pageAspect: { w: 2, h: 3 },
+    slots: [{ x: 20, y: 20, w: 60, h: 60 }],
+    roles: ["1"],
+  };
+  const searchRadiusPx = Math.floor(Math.min(WIDTH, HEIGHT) * 0.025);
+  // 右端・下端は描画矩形の包含端が-1pxになるため、全4辺が探索帯へ入る上限は半径-1px。
+  const driftPx = searchRadiusPx - 1;
+  const insetX = (driftPx * 100) / WIDTH;
+  const insetY = (driftPx * 100) / HEIGHT;
+  const shiftedInward: Rect = {
+    x: 20 + insetX,
+    y: 20 + insetY,
+    w: 60 - insetX * 2,
+    h: 60 - insetY * 2,
+  };
+  const result = alignSlotsToTemplate(fixturePage([shiftedInward]), onePanelTemplate, "rtl");
+
+  expect(result.ok, JSON.stringify(result)).toBe(false);
+  if (result.ok) return;
+  expect(result.failureCode, JSON.stringify(result)).toBe("drift-too-large");
   expect(result.metrics.snappedBoundaries).toBe(4);
+  expect(result.metrics.averageDriftPercent).toBeGreaterThan(1.5);
 });

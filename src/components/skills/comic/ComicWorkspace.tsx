@@ -170,11 +170,18 @@ function logComicPageGeneration(args: {
 
 /** aligned の内部コードを、ユーザーが判断できる短い理由へ直す。 */
 function describeAlignmentFailure(
-  failureCode: "invalid-input" | "low-confidence",
+  failureCode: "invalid-input" | "low-confidence" | "drift-too-large" | "too-few-boundaries",
 ): string {
-  return failureCode === "invalid-input"
-    ? "画像データかコマ割りの型を確認できませんでした"
-    : "枠線を十分に照合できませんでした";
+  if (failureCode === "invalid-input") {
+    return "画像データかコマ割りの型を確認できませんでした";
+  }
+  if (failureCode === "drift-too-large") {
+    return "枠の位置が大きくずれていました";
+  }
+  if (failureCode === "too-few-boundaries") {
+    return "枠線をほとんど見つけられませんでした";
+  }
+  return "枠線を十分に照合できませんでした";
 }
 
 /** aligned 生成で使う型を、構成指定または共通の決定論補完で解決する。 */

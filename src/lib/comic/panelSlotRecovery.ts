@@ -38,10 +38,14 @@ export type PanelSlotRecovery =
    */
   | { ok: false; failureCode: PanelSlotRecoveryFailure; detectedCount?: number };
 
-export type TemplateSlotAlignmentFailure = "invalid-input" | "low-confidence";
+export type TemplateSlotAlignmentFailure =
+  | "invalid-input"
+  | "low-confidence"
+  | "drift-too-large"
+  | "too-few-boundaries";
 
 export type TemplateSlotAlignmentMetrics = {
-  /** テンプレ境界のうち、枠線へスナップまたは外周の正位置を維持できた割合。 */
+  /** テンプレ境界のうち、実画像の枠線へスナップできた割合。 */
   snappedBoundaryRatio: number;
   /** スナップできた境界がテンプレ位置から動いた平均距離（ページ短辺percent）。 */
   averageDriftPercent: number;
@@ -147,8 +151,12 @@ const DARK_LUMA = 128;
 const TEMPLATE_ALIGNMENT_BAND_RATIO = 0.025;
 /** 外周境界は、AIの余白量の揺れを覆うため各軸の ±8% を探索する。 */
 const TEMPLATE_OUTER_ALIGNMENT_BAND_RATIO = 0.08;
-/** 全境界の80%以上を確認できたページだけ再組立へ渡す。 */
-const TEMPLATE_ALIGNMENT_MIN_SNAP_RATIO = 0.8;
+/** 全境界の40%以上を確認できれば、未検出境界はテンプレ位置のまま再組立する。 */
+const TEMPLATE_ALIGNMENT_MIN_SNAP_RATIO = 0.4;
+/** 1〜2本の偶然一致で通さない、実画像で確認できた境界数の下限。 */
+const TEMPLATE_ALIGNMENT_MIN_SNAPPED_BOUNDARIES = 3;
+/** 誤マッチの群れを弾く、平均ドリフト量 / 各境界の探索幅の上限。 */
+const TEMPLATE_ALIGNMENT_MAX_AVERAGE_DRIFT_RATIO = 0.6;
 
 type Region = { left: number; top: number; right: number; bottom: number };
 
@@ -546,6 +554,7 @@ type AlignedBoundary = {
   direction: PixelPoint;
   snapped: boolean;
   driftPx: number;
+  searchRadiusPx: number;
   borderPx?: number;
 };
 
@@ -744,8 +753,15 @@ function alignBoundary(
   const dx = end.x - start.x;
   const dy = end.y - start.y;
   const length = Math.hypot(dx, dy);
+  const radius = Math.max(MIN_BAND_PX, Math.floor(searchRadiusPx));
   if (length <= 0) {
-    return { point: start, direction: { x: dx, y: dy }, snapped: false, driftPx: 0 };
+    return {
+      point: start,
+      direction: { x: dx, y: dy },
+      snapped: false,
+      driftPx: 0,
+      searchRadiusPx: radius,
+    };
   }
 
   const midpoint = { x: (start.x + end.x) / 2, y: (start.y + end.y) / 2 };
@@ -754,7 +770,6 @@ function alignBoundary(
     normal = { x: -normal.x, y: -normal.y };
   }
 
-  const radius = Math.max(MIN_BAND_PX, Math.floor(searchRadiusPx));
   const profiles: BoundaryProfile[] = [];
   for (let offset = -radius; offset <= radius; offset += 1) {
     profiles.push({
@@ -765,13 +780,20 @@ function alignBoundary(
 
   const best = nearestBorderCandidate(profiles, borderRangePx);
   if (!best) {
-    return { point: start, direction: { x: dx, y: dy }, snapped: false, driftPx: 0 };
+    return {
+      point: start,
+      direction: { x: dx, y: dy },
+      snapped: false,
+      driftPx: 0,
+      searchRadiusPx: radius,
+    };
   }
   return {
     point: { x: start.x + normal.x * best.snapOffset, y: start.y + normal.y * best.snapOffset },
     direction: { x: dx, y: dy },
     snapped: true,
     driftPx: Math.abs(best.snapOffset),
+    searchRadiusPx: radius,
     borderPx: best.borderPx,
   };
 }
@@ -831,8 +853,8 @@ const emptyAlignmentMetrics = (): TemplateSlotAlignmentMetrics => ({
 /**
  * 既知テンプレを事前分布に、実画像のガターと枠線へ各slotを微修正する。
  * 内側境界はページ短辺±2.5%、外周境界は各軸±8%を探索する。外周で枠線が
- * 見つからないときだけテンプレ位置を維持し、全境界の80%以上を扱えない画像は
- * 無理に組み替えず failure に倒す。
+ * 見つからないときもテンプレ位置を維持する。全境界の40%以上かつ3本以上を照合し、
+ * 平均ドリフトが探索幅の60%以内に収まる画像だけを再組立へ渡す。
  */
 export function alignSlotsToTemplate(
   image: PanelImageData,
@@ -901,8 +923,9 @@ export function alignSlotsToTemplate(
           : searchRadiusPx,
         borderRangePx,
       );
-      // 外周線が描かれていないAI画像でも、余白4%の正典を崩さない。
-      return outer && !aligned.snapped ? { ...aligned, snapped: true } : aligned;
+      // 枠線が見つからない境界は、aligned.point が元のテンプレ位置を保つ。
+      // 外周も位置維持はするが、無関係な画像を通さないため照合成功数には数えない。
+      return aligned;
     });
     const aligned = alignedSlotFromBoundaries(slot, boundaries, image.width, image.height);
     if (!aligned) {
@@ -923,10 +946,14 @@ export function alignSlotsToTemplate(
     snapped.length === 0
       ? 0
       : (snapped.reduce((sum, boundary) => sum + boundary.driftPx, 0) / snapped.length / shortSide) * 100;
-  const driftScore = Math.max(
-    0,
-    1 - averageDriftPercent / (TEMPLATE_ALIGNMENT_BAND_RATIO * 100),
-  );
+  const averageDriftRatio =
+    snapped.length === 0
+      ? 0
+      : snapped.reduce(
+          (sum, boundary) => sum + boundary.driftPx / boundary.searchRadiusPx,
+          0,
+        ) / snapped.length;
+  const driftScore = Math.max(0, 1 - averageDriftRatio);
   const confidence = Math.max(
     0,
     Math.min(1, snappedBoundaryRatio * (0.8 + 0.2 * driftScore)),
@@ -940,6 +967,15 @@ export function alignSlotsToTemplate(
 
   if (snappedBoundaryRatio + Number.EPSILON < TEMPLATE_ALIGNMENT_MIN_SNAP_RATIO) {
     return { ok: false, failureCode: "low-confidence", confidence, metrics };
+  }
+  if (snapped.length < TEMPLATE_ALIGNMENT_MIN_SNAPPED_BOUNDARIES) {
+    return { ok: false, failureCode: "too-few-boundaries", confidence, metrics };
+  }
+  if (
+    averageDriftRatio - Number.EPSILON >
+    TEMPLATE_ALIGNMENT_MAX_AVERAGE_DRIFT_RATIO
+  ) {
+    return { ok: false, failureCode: "drift-too-large", confidence, metrics };
   }
 
   const borderPx = Math.round(median(snapped.flatMap((boundary) =>
