@@ -4,6 +4,7 @@ import { MAX_PANELS_PER_PAGE } from "../../../lib/comic/prompts";
 import { effectivePageSlots } from "../../../lib/comic/panelLayoutOps";
 import { panelGuidePoints } from "../../../lib/comic/panelReedit";
 import { synthesizeSlotsFromRows } from "../../../lib/comic/layoutSynthesis";
+import { fallbackRowsForPanelCount } from "../../../lib/comic/structureRun";
 import type { ComicPanelSlot } from "../../../lib/comic/layoutTemplates";
 import type {
   ComicPanel,
@@ -33,9 +34,41 @@ type ComicPlanCardsProps = {
 
 type PanelCardProps = {
   panel: ComicPanel;
-  slots: ComicPanelSlot[] | null;
+  slots: ComicPanelSlot[];
   onClick: () => void;
 };
+
+/** 表示専用の概形を、保存済み配置・rows・均等割りの順で必ず解決する。 */
+function resolvePreviewSlots(args: {
+  page: ComicStoryPage;
+  storyTemplateId: string | null;
+  direction: ComicReadingDirection;
+}): ComicPanelSlot[] {
+  const effectiveSlots = effectivePageSlots(args);
+  if (effectiveSlots) return effectiveSlots;
+
+  const panelCount = args.page.panels.length;
+  const rowsPanelCount = args.page.rows?.reduce(
+    (count, row) => count + row.length,
+    0,
+  );
+  if (args.page.rows && rowsPanelCount === panelCount) {
+    const rowSlots = synthesizeSlotsFromRows(
+      args.page.rows,
+      panelCount,
+      args.direction,
+    );
+    if (rowSlots) return rowSlots;
+  }
+
+  return (
+    synthesizeSlotsFromRows(
+      fallbackRowsForPanelCount(panelCount),
+      panelCount,
+      args.direction,
+    ) ?? []
+  );
+}
 
 /** ネームの1コマ。ページ内の位置と内容の要約だけを常時見せる。 */
 function PanelCard({ panel, slots, onClick }: PanelCardProps) {
@@ -50,38 +83,30 @@ function PanelCard({ panel, slots, onClick }: PanelCardProps) {
       aria-label={`ページ内のコマ ${panel.index} を編集`}
       className="group flex h-full w-full flex-col gap-2 rounded-lg border border-[#2a2a2a] bg-[#101010] p-2 text-left transition hover:border-pink-400 hover:bg-[#141414]"
     >
-      {slots ? (
-        <svg
-          viewBox="0 0 100 100"
-          preserveAspectRatio="none"
-          className="mx-auto aspect-[3/4] h-24 max-w-full rounded border border-[#2a2a2a] bg-[#171717]"
-          aria-hidden="true"
-        >
-          {slots.map((slot, index) => {
-            const selected = index === panel.index - 1;
-            const points = panelGuidePoints(slot)
-              .map((point) => `${point.x},${point.y}`)
-              .join(" ");
-            return (
-              <polygon
-                key={index}
-                points={points}
-                fill={selected ? "#ec4899" : "#292929"}
-                fillOpacity={selected ? 0.9 : 0.85}
-                stroke={selected ? "#f9a8d4" : "#525252"}
-                strokeWidth={selected ? 1.5 : 0.75}
-                vectorEffect="non-scaling-stroke"
-              />
-            );
-          })}
-        </svg>
-      ) : (
-        <div className="mx-auto flex aspect-[3/4] h-24 max-w-full items-center justify-center">
-          <span className="rounded-full border border-pink-500/40 bg-pink-500/10 px-2 py-1 text-sm font-black text-pink-200">
-            {String(panel.index).padStart(2, "0")}
-          </span>
-        </div>
-      )}
+      <svg
+        viewBox="0 0 100 100"
+        preserveAspectRatio="none"
+        className="mx-auto aspect-[3/4] h-24 max-w-full rounded border border-[#2a2a2a] bg-[#171717]"
+        aria-hidden="true"
+      >
+        {slots.map((slot, index) => {
+          const selected = index === panel.index - 1;
+          const points = panelGuidePoints(slot)
+            .map((point) => `${point.x},${point.y}`)
+            .join(" ");
+          return (
+            <polygon
+              key={index}
+              points={points}
+              fill={selected ? "#ec4899" : "#292929"}
+              fillOpacity={selected ? 0.9 : 0.85}
+              stroke={selected ? "#f9a8d4" : "#525252"}
+              strokeWidth={selected ? 1.5 : 0.75}
+              vectorEffect="non-scaling-stroke"
+            />
+          );
+        })}
+      </svg>
 
       <div className="min-h-[4.5rem] w-full space-y-0.5 text-[11px] leading-snug">
         <p className="truncate font-black text-pink-200">コマ {panel.index}</p>
@@ -128,16 +153,11 @@ export function ComicPlanCards({
   const [pageSettingsOpen, setPageSettingsOpen] = useState(false);
   const selectedPanel = page.panels.find((panel) => panel.index === selectedPanelIndex) ?? null;
   const full = page.panels.length >= MAX_PANELS_PER_PAGE;
-  const effectiveSlots = effectivePageSlots({
+  const previewSlots = resolvePreviewSlots({
     page,
     storyTemplateId,
     direction: readingDirection,
   });
-  const previewSlots =
-    effectiveSlots ??
-    (page.rows
-      ? synthesizeSlotsFromRows(page.rows, page.panels.length, readingDirection)
-      : null);
   const panelsInReadingOrder = [...page.panels].sort(
     (left, right) => left.index - right.index,
   );
@@ -177,14 +197,23 @@ export function ComicPlanCards({
             onClick={() => setSelectedPanelIndex(panel.index)}
           />
         ))}
+      </div>
 
-        <div className="relative h-full" dir="ltr">
+      <div
+        className={`mt-2 flex ${
+          readingDirection === "rtl" ? "justify-start" : "justify-end"
+        }`}
+        dir="ltr"
+      >
+        <div
+          className="relative w-[calc(33.333333%_-_0.333333rem)] sm:w-[calc(25%_-_0.375rem)]"
+        >
           <button
             type="button"
             onClick={() => setAddMenuOpen((open) => !open)}
             disabled={full}
             title={full ? "1ページは最大8コマです" : undefined}
-            className="flex h-full min-h-40 w-full items-center justify-center rounded-lg border border-dashed border-[#3a3a3a] bg-[#101010] p-3 text-xs font-bold text-neutral-400 transition hover:border-pink-500/50 hover:text-pink-200 disabled:cursor-not-allowed disabled:opacity-40"
+            className="flex min-h-40 w-full items-center justify-center rounded-lg border border-dashed border-[#3a3a3a] bg-[#101010] p-3 text-xs font-bold text-neutral-400 transition hover:border-pink-500/50 hover:text-pink-200 disabled:cursor-not-allowed disabled:opacity-40"
           >
             ＋ コマを追加
           </button>
