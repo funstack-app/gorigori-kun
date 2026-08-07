@@ -72,10 +72,9 @@ function loadImage(src: string) {
 /**
  * 画像パスを canvas 経由で png/jpeg の Blob にする（crossOrigin 必須）。
  *
- * **出力は必ず SNS 規格 1080×1350（4:5）**。生成側は 3:4 を指定しているのに
- * モデル出力が 2:3 と 3:4 に混在し、同一作品内でページの形が揃わないため、
- * 保存の瞬間にここで固定する（規格と理由の正本は exportSize.ts）。
- * contain なので入力は切らず、余った左右（または上下）が白帯になる。
+ * **出力は必ず高解像度2160×2880（3:4）**。作業寸法1080×1440と同じ比率なので、
+ * 標準の作業ページは白帯なしで縦横2倍へ拡大する（規格の正本は exportSize.ts）。
+ * 別比率の入力も contain で切らず、余った左右（または上下）だけ白帯にする。
  * 元画像のファイル実体・表示・再編集は元寸のまま（触るのは書き出し canvas だけ）。
  */
 export async function encodePageBlob(
@@ -91,6 +90,8 @@ export async function encodePageBlob(
   // 白地で塗ってから描く。透過 PNG → JPEG の黒化防止と contain の帯を1回の塗りで兼ねる。
   ctx.fillStyle = COMIC_EXPORT_TARGET.pad;
   ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = "high";
   const rect = containRect(
     img.naturalWidth,
     img.naturalHeight,
@@ -128,12 +129,12 @@ function blobToBase64(blob: Blob): Promise<string> {
 }
 
 /**
- * ページ画像を 4:5 に正規化した**新しいファイル**を作り、そのパスを返す。
+ * ページ画像を高解像度3:4に正規化した**新しいファイル**を作り、そのパスを返す。
  *
  * ## 実装契約O (2026-08-05): なぜ「保存の瞬間」だけでは足りなかったか
  *
- * STΛCK 実機FB「出力サイズが統一されていない」。比率は 4:5 のままでよく、
- * 壊れていたのは**関所の位置**だった。正規化は `encodePageBlob`（＝保存ボタン経路）に
+ * STΛCK 実機FB「出力サイズが統一されていない」。壊れていたのは**関所の位置**だった。
+ * 正規化は `encodePageBlob`（＝保存ボタン経路）に
  * しか無く、生成直後のページは**生のまま**（モデル出力が 2:3 / 3:4 に揺れる）。
  * その生のページが「プロジェクトに保存」(`addItem`) でギャラリーへ登録されると、
  * 以降のギャラリー側の書き出し・共有はすべて未正規化の実体を掴む。
@@ -146,15 +147,15 @@ function blobToBase64(blob: Blob): Promise<string> {
  * これにより編集対象・マスク・AI返却画像の比率を3:4へ揃え、コマ座標は
  * `contentRect` を通して実コンテンツ領域へ合わせる。
  *
- * 本ファイルの関所は廃止せず、外へ出す画像を従来の1080×1350（4:5）へ揃える
+ * 本ファイルの関所は廃止せず、外へ出す画像を2160×2880（3:4）へ揃える
  * **出口側の役割**を引き続き担う。出口は次の3つ:
  *
  *   1. `savePageAs`            … 1ページ保存（`encodePageBlob` 経由）
  *   2. `savePagesBulk`         … 一括保存（同上）
  *   3. `materializeExportPage` … ギャラリー/プロジェクト登録
  *
- * 作業用3:4と書き出し用4:5を別ファイルにし、元ファイルを上書きしない。
- * どちらも contain で縦横比を変えず、画像を切り落とさない。
+ * 作業用1080×1440と書き出し用2160×2880を別ファイルにし、元ファイルを上書きしない。
+ * 同じ3:4なので標準経路は白帯なしで2倍拡大し、画像を切り落とさない。
  */
 export async function materializeExportPage(
   imagePath: string,
@@ -166,10 +167,10 @@ export async function materializeExportPage(
   const { join, dirname, basename, extname } = await import("@tauri-apps/api/path");
   const dir = await dirname(imagePath);
   const base = await basename(imagePath, await extname(imagePath).catch(() => ""));
-  // 元ファイルの隣に `_4x5` を付けた別名で置く。元を上書きしないのが要点
+  // 元ファイルの隣に `_3x4` を付けた別名で置く。元を上書きしないのが要点
   // （上書きすると panelReedit の寸法一致・枠線検出が壊れる）。
   const stem = base.replace(/\.$/, "") || `manga_p${pageNo}`;
-  const dest = await join(dir, `${stem}_4x5.${extOf(format)}`);
+  const dest = await join(dir, `${stem}_3x4.${extOf(format)}`);
   // 元画像がfs:scope外でも書けるRustコマンドを使う。JPEGもバイト列のまま保存される。
   await editExport.png(dest, await blobToBase64(blob));
   return dest;

@@ -41,7 +41,7 @@ export type PanelSlotRecovery =
 export type TemplateSlotAlignmentFailure = "invalid-input" | "low-confidence";
 
 export type TemplateSlotAlignmentMetrics = {
-  /** テンプレ境界のうち、近傍のガターと枠線を確認できた割合。 */
+  /** テンプレ境界のうち、枠線へスナップまたは外周の正位置を維持できた割合。 */
   snappedBoundaryRatio: number;
   /** スナップできた境界がテンプレ位置から動いた平均距離（ページ短辺percent）。 */
   averageDriftPercent: number;
@@ -143,10 +143,10 @@ type LumaMask = {
 
 /** 枠線とみなす暗さ。ガター判定の白しきい値とは別軸で、灰色トーンを枠線に数えない。 */
 const DARK_LUMA = 128;
-/** テンプレ境界の探索幅（ページ短辺比）。detectPanelInterior と同じ ±2.5%。 */
+/** 内側テンプレ境界の探索幅（ページ短辺比）。detectPanelInterior と同じ ±2.5%。 */
 const TEMPLATE_ALIGNMENT_BAND_RATIO = 0.025;
-/** 紙端だけは、AIが残しがちな旧4%余白と外枠線を覆う内向き8%を探索する。 */
-const PAGE_EDGE_ALIGNMENT_BAND_RATIO = 0.08;
+/** 外周境界は、AIの余白量の揺れを覆うため各軸の ±8% を探索する。 */
+const TEMPLATE_OUTER_ALIGNMENT_BAND_RATIO = 0.08;
 /** 全境界の80%以上を確認できたページだけ再組立へ渡す。 */
 const TEMPLATE_ALIGNMENT_MIN_SNAP_RATIO = 0.8;
 
@@ -577,6 +577,57 @@ function slotBoundaryPoints(slot: ComicPanelSlot): [number, number][] {
   ];
 }
 
+type TemplateOuterBounds = { left: number; top: number; right: number; bottom: number };
+
+function templateOuterBounds(slots: ComicPanelSlot[]): TemplateOuterBounds {
+  const points = slots.flatMap(slotBoundaryPoints);
+  return {
+    left: Math.min(...points.map(([x]) => x)),
+    top: Math.min(...points.map(([, y]) => y)),
+    right: Math.max(...points.map(([x]) => x)),
+    bottom: Math.max(...points.map(([, y]) => y)),
+  };
+}
+
+/** 全スロットの外接範囲に接する辺だけを外周境界に分類する。 */
+function isTemplateOuterBoundary(
+  start: [number, number],
+  end: [number, number],
+  bounds: TemplateOuterBounds,
+): boolean {
+  const same = (first: number, second: number) => Math.abs(first - second) < 1e-9;
+  const outerZonePercent = TEMPLATE_OUTER_ALIGNMENT_BAND_RATIO * 100;
+  return (
+    (bounds.left <= outerZonePercent &&
+      same(start[0], bounds.left) &&
+      same(end[0], bounds.left)) ||
+    (bounds.right >= 100 - outerZonePercent &&
+      same(start[0], bounds.right) &&
+      same(end[0], bounds.right)) ||
+    (bounds.top <= outerZonePercent &&
+      same(start[1], bounds.top) &&
+      same(end[1], bounds.top)) ||
+    (bounds.bottom >= 100 - outerZonePercent &&
+      same(start[1], bounds.bottom) &&
+      same(end[1], bounds.bottom))
+  );
+}
+
+function outerBoundarySearchRadiusPx(
+  start: PixelPoint,
+  end: PixelPoint,
+  width: number,
+  height: number,
+): number {
+  if (Math.abs(start.x - end.x) < 1e-9) {
+    return width * TEMPLATE_OUTER_ALIGNMENT_BAND_RATIO;
+  }
+  if (Math.abs(start.y - end.y) < 1e-9) {
+    return height * TEMPLATE_OUTER_ALIGNMENT_BAND_RATIO;
+  }
+  return Math.min(width, height) * TEMPLATE_OUTER_ALIGNMENT_BAND_RATIO;
+}
+
 /** 辺の端5%を除いて走査し、隣接辺の角をプロファイルへ混ぜない。 */
 function sampleBoundaryProfile(
   mask: LumaMask,
@@ -671,7 +722,7 @@ function borderBeforeGutter(
   };
 }
 
-/** 内側境界と紙端境界で、白帯に隣接する最寄りの暗線を同じ規則で選ぶ。 */
+/** 白帯に隣接する最寄りの暗線を選ぶ。 */
 function nearestBorderCandidate(
   profiles: BoundaryProfile[],
   borderRangePx: number,
@@ -722,68 +773,6 @@ function alignBoundary(
     snapped: true,
     driftPx: Math.abs(best.snapOffset),
     borderPx: best.borderPx,
-  };
-}
-
-/**
- * 紙端から内側8%だけを走査する。余白+外枠があれば枠外縁へ合わせ、後段が
- * 実測枠線+1pxを除いてクロップする。無ければ真の断ち切りとして紙端へ固定する。
- */
-function alignPageEdgeBoundary(
-  mask: LumaMask,
-  start: PixelPoint,
-  end: PixelPoint,
-  centroid: PixelPoint,
-  borderRangePx: number,
-): AlignedBoundary | null {
-  const isPageEdge =
-    (start.x === 0 && end.x === 0) ||
-    (start.x === mask.width && end.x === mask.width) ||
-    (start.y === 0 && end.y === 0) ||
-    (start.y === mask.height && end.y === mask.height);
-  if (!isPageEdge) return null;
-
-  const dx = end.x - start.x;
-  const dy = end.y - start.y;
-  const length = Math.hypot(dx, dy);
-  if (length <= 0) {
-    return { point: start, direction: { x: dx, y: dy }, snapped: true, driftPx: 0, borderPx: 0 };
-  }
-
-  const midpoint = { x: (start.x + end.x) / 2, y: (start.y + end.y) / 2 };
-  let normal = { x: -dy / length, y: dx / length };
-  if ((midpoint.x - centroid.x) * normal.x + (midpoint.y - centroid.y) * normal.y < 0) {
-    normal = { x: -normal.x, y: -normal.y };
-  }
-  const inwardSpanPx = start.x === end.x ? mask.width : mask.height;
-  const radius = Math.max(
-    MIN_BAND_PX,
-    Math.floor(inwardSpanPx * PAGE_EDGE_ALIGNMENT_BAND_RATIO),
-  );
-  const profiles: BoundaryProfile[] = [];
-  for (let offset = -radius; offset <= 0; offset += 1) {
-    profiles.push({
-      offset,
-      ...sampleBoundaryProfile(mask, start, end, normal, offset),
-    });
-  }
-  const best = nearestBorderCandidate(profiles, borderRangePx);
-  if (best) {
-    return {
-      point: { x: start.x + normal.x * best.snapOffset, y: start.y + normal.y * best.snapOffset },
-      direction: { x: dx, y: dy },
-      snapped: true,
-      driftPx: Math.abs(best.snapOffset),
-      borderPx: best.borderPx,
-    };
-  }
-
-  return {
-    point: start,
-    direction: { x: dx, y: dy },
-    snapped: true,
-    driftPx: 0,
-    borderPx: 0,
   };
 }
 
@@ -841,7 +830,8 @@ const emptyAlignmentMetrics = (): TemplateSlotAlignmentMetrics => ({
 
 /**
  * 既知テンプレを事前分布に、実画像のガターと枠線へ各slotを微修正する。
- * 探索は各境界のページ短辺±2.5%だけ。80%以上の境界を確認できない画像は、
+ * 内側境界はページ短辺±2.5%、外周境界は各軸±8%を探索する。外周で枠線が
+ * 見つからないときだけテンプレ位置を維持し、全境界の80%以上を扱えない画像は
  * 無理に組み替えず failure に倒す。
  */
 export function alignSlotsToTemplate(
@@ -869,6 +859,7 @@ export function alignSlotsToTemplate(
   const borderRangePx = Math.max(1, Math.round(shortSide * BORDER_ADJACENT_RANGE_RATIO));
   const mask = buildLumaMask(image);
   const expectedSlots = template.slots.map((slot) => slotForReadingDirection(slot, direction));
+  const outerBounds = templateOuterBounds(expectedSlots);
   const alignedSlots: ComicPanelSlot[] = [];
   const allBoundaries: AlignedBoundary[] = [];
 
@@ -895,17 +886,23 @@ export function alignSlotsToTemplate(
     );
     const boundaries = points.map((point, index) => {
       const end = points[(index + 1) % points.length];
-      return (
-        alignPageEdgeBoundary(mask, point, end, centroid, borderRangePx) ??
-        alignBoundary(
-          mask,
-          point,
-          end,
-          centroid,
-          searchRadiusPx,
-          borderRangePx,
-        )
+      const outer = isTemplateOuterBoundary(
+        percentPoints[index],
+        percentPoints[(index + 1) % percentPoints.length],
+        outerBounds,
       );
+      const aligned = alignBoundary(
+        mask,
+        point,
+        end,
+        centroid,
+        outer
+          ? outerBoundarySearchRadiusPx(point, end, image.width, image.height)
+          : searchRadiusPx,
+        borderRangePx,
+      );
+      // 外周線が描かれていないAI画像でも、余白4%の正典を崩さない。
+      return outer && !aligned.snapped ? { ...aligned, snapped: true } : aligned;
     });
     const aligned = alignedSlotFromBoundaries(slot, boundaries, image.width, image.height);
     if (!aligned) {
