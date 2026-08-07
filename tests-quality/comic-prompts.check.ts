@@ -378,3 +378,16 @@ test("コマ数一致の型がない場合は決定論補完もnullを返す", a
 
   expect(resolveStoryLayoutTemplateWithDeterministicFallback(1, 3)).toBeNull();
 });
+
+test("V14: 5コマは型未指定でも補完し、候補が空ならnullを返す", async () => {
+  const { resolveStoryLayoutTemplateWithDeterministicFallback } = await import(
+    "../src/lib/comic/prompts"
+  );
+
+  for (const page of [1, 2, 6, 7, 100]) {
+    expect(resolveStoryLayoutTemplateWithDeterministicFallback(page, 5)).not.toBeNull();
+  }
+
+  // 牙: 3コマに一致する型は0件。候補なしを別コマ数の型で埋めてはいけない。
+  expect(resolveStoryLayoutTemplateWithDeterministicFallback(1, 3)).toBeNull();
+});
