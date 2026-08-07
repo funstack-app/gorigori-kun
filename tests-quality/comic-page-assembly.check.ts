@@ -4,7 +4,10 @@
  */
 import { expect, test } from "@playwright/test";
 
-import { getComicTemplate } from "../src/lib/comic/layoutTemplates";
+import {
+  COMIC_LAYOUT_TEMPLATES,
+  getComicTemplate,
+} from "../src/lib/comic/layoutTemplates";
 import {
   assembleStructurePage,
   borderWidthPxFor,
@@ -75,12 +78,12 @@ test("manga01の全スロットをpercentから正確な1080x1440 pxへ変換す
     slotPixelRect(slot, STRUCTURE_PAGE_W, STRUCTURE_PAGE_H),
   );
   expect(rects).toEqual([
-    { x: 702, y: 58, w: 335, h: 331 },
+    { x: 702, y: 58, w: 378, h: 331 },
     { x: 367, y: 58, w: 324, h: 346 },
-    { x: 43, y: 58, w: 313, h: 360 },
-    { x: 43, y: 418, w: 994, h: 562 },
-    { x: 551, y: 1008, w: 486, h: 374 },
-    { x: 43, y: 994, w: 497, h: 389 },
+    { x: 0, y: 58, w: 356, h: 359 },
+    { x: 0, y: 418, w: 1080, h: 562 },
+    { x: 551, y: 1008, w: 529, h: 374 },
+    { x: 0, y: 994, w: 540, h: 389 },
   ]);
   for (let i = 0; i < rects.length; i += 1) {
     for (let j = i + 1; j < rects.length; j += 1) {
@@ -204,6 +207,135 @@ test("枠線はclip内側へ決定論幅で描かれ、未生成コマは白地�
   }
 });
 
+test("断ち切りは紙端の枠線だけを描かず、内側の3px枠は保つ", async () => {
+  const globals = globalThis as unknown as Record<string, unknown>;
+  const hadDocument = Object.prototype.hasOwnProperty.call(globals, "document");
+  const hadPath2D = Object.prototype.hasOwnProperty.call(globals, "Path2D");
+  const previousDocument = globals.document;
+  const previousPath2D = globals.Path2D;
+  const strokedPaths: FakePath2D[] = [];
+
+  class FakePath2D {
+    commands: Array<
+      | { kind: "moveTo" | "lineTo"; x: number; y: number }
+      | { kind: "rect"; x: number; y: number; w: number; h: number }
+      | { kind: "closePath" }
+    > = [];
+    moveTo(x: number, y: number) {
+      this.commands.push({ kind: "moveTo", x, y });
+    }
+    lineTo(x: number, y: number) {
+      this.commands.push({ kind: "lineTo", x, y });
+    }
+    closePath() {
+      this.commands.push({ kind: "closePath" });
+    }
+    rect(x: number, y: number, w: number, h: number) {
+      this.commands.push({ kind: "rect", x, y, w, h });
+    }
+  }
+  const context = {
+    fillStyle: "",
+    strokeStyle: "",
+    lineWidth: 0,
+    lineJoin: "",
+    lineCap: "",
+    imageSmoothingEnabled: false,
+    imageSmoothingQuality: "low",
+    fillRect() {},
+    save() {},
+    clip() {},
+    drawImage() {},
+    stroke(path: FakePath2D) {
+      strokedPaths.push(path);
+    },
+    restore() {},
+  };
+  const canvas = {
+    width: 0,
+    height: 0,
+    getContext: () => context,
+    toBlob: (callback: (blob: Blob) => void) =>
+      callback(new Blob([new Uint8Array([137, 80, 78, 71])], { type: "image/png" })),
+  };
+  globals.document = { createElement: () => canvas };
+  globals.Path2D = FakePath2D;
+
+  try {
+    await assembleStructurePage({
+      panelImagePaths: [undefined],
+      slots: [getComicTemplate("manga08").slots[0]],
+      frameStyle: "standard",
+    });
+    expect(strokedPaths).toHaveLength(1);
+    expect(strokedPaths[0].commands).toEqual([
+      { kind: "moveTo", x: 1080, y: 432 },
+      { kind: "lineTo", x: 713, y: 432 },
+      { kind: "lineTo", x: 713, y: 58 },
+      { kind: "lineTo", x: 1080, y: 58 },
+    ]);
+    expect(context.lineWidth, "内側の指定3pxは従来どおり倍幅6pxでclip").toBe(6);
+
+    for (const template of COMIC_LAYOUT_TEMPLATES) {
+      const strokeOffset = strokedPaths.length;
+      await assembleStructurePage({
+        panelImagePaths: template.slots.map(() => undefined),
+        slots: template.slots,
+        frameStyle: "standard",
+      });
+      const templatePaths = strokedPaths.slice(strokeOffset);
+      expect(templatePaths, `${template.id} 全コマの内側枠`).toHaveLength(template.panelCount);
+      template.slots.forEach((slot, slotIndex) => {
+        const quad = slot.points ?? [
+          [slot.x, slot.y],
+          [slot.x + slot.w, slot.y],
+          [slot.x + slot.w, slot.y + slot.h],
+          [slot.x, slot.y + slot.h],
+        ];
+        const touchesLeft = quad[0][0] === 0 && quad[3][0] === 0;
+        const touchesRight = quad[1][0] === 100 && quad[2][0] === 100;
+        if (!touchesLeft && !touchesRight) return;
+
+        const path = templatePaths[slotIndex];
+        expect(
+          path.commands.some((command) => command.kind === "rect" || command.kind === "closePath"),
+          `${template.id} コマ${slotIndex + 1} 紙端を閉じた枠で描かない`,
+        ).toBe(false);
+        let cursor: { x: number; y: number } | null = null;
+        for (const command of path.commands) {
+          if (command.kind === "moveTo") {
+            cursor = { x: command.x, y: command.y };
+            continue;
+          }
+          if (command.kind !== "lineTo") continue;
+          expect(
+            cursor !== null &&
+              ((cursor.x === 0 && command.x === 0) ||
+                (cursor.x === STRUCTURE_PAGE_W && command.x === STRUCTURE_PAGE_W)),
+            `${template.id} コマ${slotIndex + 1} 左右紙端の枠線`,
+          ).toBe(false);
+          cursor = { x: command.x, y: command.y };
+        }
+      });
+    }
+
+    const strokeCountBeforeFullPage = strokedPaths.length;
+    await assembleStructurePage({
+      panelImagePaths: [undefined],
+      slots: [{ x: 0, y: 0, w: 100, h: 100 }],
+      frameStyle: "standard",
+    });
+    expect(strokedPaths, "上下左右すべて紙端なら枠線は0本").toHaveLength(
+      strokeCountBeforeFullPage,
+    );
+  } finally {
+    if (hadDocument) globals.document = previousDocument;
+    else delete globals.document;
+    if (hadPath2D) globals.Path2D = previousPath2D;
+    else delete globals.Path2D;
+  }
+});
+
 test("牙: コマ画像数とスロット数が違うassemble呼び出しは描画前に落ちる", async () => {
   await expect(
     assembleStructurePage({
@@ -224,15 +356,15 @@ test("牙: 再組立は検出枠線+1pxを除き、比率差10%超だけcoverす
     borderPx: 3,
   });
   expect(sameShape.panels[0].matchedRect).toEqual({
-    x: 43,
+    x: 0,
     y: 58,
-    w: 994,
+    w: 1080,
     h: 374,
   });
   expect(sameShape.panels[0].insetRect).toEqual({
-    x: 47,
+    x: 4,
     y: 62,
-    w: 986,
+    w: 1072,
     h: 366,
   });
   expect(sameShape.panels[0].coverApplied).toBe(false);
@@ -324,21 +456,21 @@ test("牙: 再組立出力は2テンプレの実slot座標と全コマ±1pxで�
     {
       templateId: "manga08",
       expected: [
-        { x: 713, y: 58, w: 324, h: 374 },
+        { x: 713, y: 58, w: 367, h: 374 },
         { x: 378, y: 58, w: 302, h: 374 },
-        { x: 43, y: 58, w: 302, h: 374 },
-        { x: 43, y: 475, w: 994, h: 432 },
-        { x: 616, y: 950, w: 421, h: 432 },
-        { x: 43, y: 950, w: 540, h: 432 },
+        { x: 0, y: 58, w: 346, h: 374 },
+        { x: 0, y: 475, w: 1080, h: 432 },
+        { x: 616, y: 950, w: 464, h: 432 },
+        { x: 0, y: 950, w: 583, h: 432 },
       ],
     },
     {
       templateId: "manga10",
       expected: [
-        { x: 43, y: 58, w: 994, h: 374 },
-        { x: 562, y: 475, w: 475, h: 432 },
-        { x: 43, y: 475, w: 486, h: 432 },
-        { x: 43, y: 950, w: 994, h: 432 },
+        { x: 0, y: 58, w: 1080, h: 374 },
+        { x: 562, y: 475, w: 518, h: 432 },
+        { x: 0, y: 475, w: 529, h: 432 },
+        { x: 0, y: 950, w: 1080, h: 432 },
       ],
     },
   ] as const;
@@ -437,6 +569,8 @@ const VERTICAL_GAP_PAIRS: Record<string, readonly FrameGapPair[]> = {
   manga12: [[0, 2], [1, 3], [2, 4], [3, 5]],
 };
 
+type OuterSide = "left" | "right" | "top" | "bottom";
+
 function frameQuad(slot: FrameSlot): [FramePoint, FramePoint, FramePoint, FramePoint] {
   if (slot.points) return slot.points;
   return [
@@ -517,32 +651,73 @@ function verticalGap(slots: readonly FrameSlot[], pair: FrameGapPair): number {
   );
 }
 
+function frameSideEdge(
+  slot: FrameSlot,
+  side: OuterSide,
+): readonly [FramePoint, FramePoint] {
+  const quad = frameQuad(slot);
+  if (side === "left") return [quad[0], quad[3]];
+  if (side === "right") return [quad[1], quad[2]];
+  if (side === "top") return [quad[0], quad[1]];
+  return [quad[3], quad[2]];
+}
+
 function assertCommonFrame(
   templateId: string,
   slots: readonly FrameSlot[],
   topologyId = templateId,
 ): void {
-  const points = slots.flatMap(frameQuad);
-  expect(Math.min(...points.map(([x]) => x)), `${templateId} 左外周`).toBe(4);
-  expect(100 - Math.max(...points.map(([x]) => x)), `${templateId} 右外周`).toBe(4);
-  expect(Math.min(...points.map(([, y]) => y)), `${templateId} 上外周`).toBe(4);
-  expect(100 - Math.max(...points.map(([, y]) => y)), `${templateId} 下外周`).toBe(4);
-
+  const innerSides = slots.map(() => new Set<OuterSide>());
   for (const pair of HORIZONTAL_GAP_PAIRS[topologyId]) {
+    const [aIndex, bIndex] = pair;
+    const [rightIndex, leftIndex] =
+      frameCenter(slots[aIndex]).x > frameCenter(slots[bIndex]).x
+        ? [aIndex, bIndex]
+        : [bIndex, aIndex];
+    innerSides[rightIndex].add("left");
+    innerSides[leftIndex].add("right");
     expect(
       Number(horizontalGap(slots, pair).toFixed(2)),
       `${templateId} 横ガター ${pair[0] + 1}-${pair[1] + 1}`,
     ).toBe(3);
   }
   for (const pair of VERTICAL_GAP_PAIRS[topologyId]) {
+    const [aIndex, bIndex] = pair;
+    const [upperIndex, lowerIndex] =
+      frameCenter(slots[aIndex]).y < frameCenter(slots[bIndex]).y
+        ? [aIndex, bIndex]
+        : [bIndex, aIndex];
+    innerSides[upperIndex].add("bottom");
+    innerSides[lowerIndex].add("top");
     expect(
       Number(verticalGap(slots, pair).toFixed(2)),
       `${templateId} 縦ガター ${pair[0] + 1}-${pair[1] + 1}`,
     ).toBe(3);
   }
+
+  const expectedOuterCoordinate: Record<OuterSide, number> = {
+    left: 0,
+    right: 100,
+    top: 4,
+    bottom: 96,
+  };
+  const sides: OuterSide[] = ["left", "right", "top", "bottom"];
+  slots.forEach((slot, slotIndex) => {
+    for (const side of sides) {
+      if (innerSides[slotIndex].has(side)) continue;
+      const axis = side === "left" || side === "right" ? 0 : 1;
+      const expected = expectedOuterCoordinate[side];
+      for (const point of frameSideEdge(slot, side)) {
+        expect(
+          point[axis],
+          `${templateId} コマ${slotIndex + 1} ${side} ${axis === 0 ? "紙端" : "上下外周"}`,
+        ).toBe(expected);
+      }
+    }
+  });
 }
 
-test("12テンプレすべての外周4%・横縦ガター3%が共通で、ltrミラー後も保たれる", () => {
+test("全12テンプレの左右紙端・上下外周4%・内側ガター3%をltrミラー後も保つ", () => {
   for (const templateId of COMMON_FRAME_TEMPLATE_IDS) {
     const template = getComicTemplate(templateId);
     assertCommonFrame(templateId, template.slots);
@@ -550,10 +725,29 @@ test("12テンプレすべての外周4%・横縦ガター3%が共通で、ltr�
   }
 });
 
-test("牙: 1テンプレの座標を0.5%崩すと共通枠寸法の検査が落ちる", () => {
+test("テンプレ一覧はid・表示名を保ったマンガ01〜12だけで構成する", () => {
+  expect(
+    COMIC_LAYOUT_TEMPLATES.map(({ id, label }) => ({ id, label })),
+  ).toEqual(
+    COMMON_FRAME_TEMPLATE_IDS.map((id, index) => ({
+      id,
+      label: `マンガ${String(index + 1).padStart(2, "0")}`,
+    })),
+  );
+});
+
+test("牙: 1テンプレの右紙端に0.5%の余白を作ると落ちる", () => {
   const template = getComicTemplate("manga08");
   const broken = template.slots.map((slot, index) =>
-    index === 0 ? { ...slot, x: slot.x + 0.5 } : { ...slot },
+    index === 0 ? { ...slot, w: slot.w - 0.5 } : { ...slot },
+  );
+  expect(() => assertCommonFrame("manga08 broken", broken, "manga08")).toThrow();
+});
+
+test("牙: 紙端を保ったまま内側ガターを0.5%崩すと落ちる", () => {
+  const template = getComicTemplate("manga08");
+  const broken = template.slots.map((slot, index) =>
+    index === 0 ? { ...slot, x: slot.x + 0.5, w: slot.w - 0.5 } : { ...slot },
   );
   expect(() => assertCommonFrame("manga08 broken", broken, "manga08")).toThrow();
 });

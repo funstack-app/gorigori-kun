@@ -261,6 +261,43 @@ function panelPath(panel: AssemblyPanelPlan): Path2D {
   return path;
 }
 
+/** 紙端に重なる辺を除き、実際に焼き込む枠線だけのpathを作る。 */
+function panelBorderPath(panel: AssemblyPanelPlan): Path2D | null {
+  const points = panel.clipPolygon ?? [
+    { x: panel.rect.x, y: panel.rect.y },
+    { x: panel.rect.x + panel.rect.w, y: panel.rect.y },
+    { x: panel.rect.x + panel.rect.w, y: panel.rect.y + panel.rect.h },
+    { x: panel.rect.x, y: panel.rect.y + panel.rect.h },
+  ];
+  const pageEdgeFlags = points.map((start, index) => {
+    const end = points[(index + 1) % points.length];
+    return (
+      (start.x === 0 && end.x === 0) ||
+      (start.x === STRUCTURE_PAGE_W && end.x === STRUCTURE_PAGE_W) ||
+      (start.y === 0 && end.y === 0) ||
+      (start.y === STRUCTURE_PAGE_H && end.y === STRUCTURE_PAGE_H)
+    );
+  });
+  if (pageEdgeFlags.every(Boolean)) return null;
+  if (pageEdgeFlags.every((flag) => !flag)) return panelPath(panel);
+
+  const firstDrawable = pageEdgeFlags.findIndex(
+    (flag, index) => !flag && pageEdgeFlags[(index - 1 + points.length) % points.length],
+  );
+  const path = new Path2D();
+  for (let offset = 0; offset < points.length; offset += 1) {
+    const index = (firstDrawable + offset) % points.length;
+    if (pageEdgeFlags[index]) continue;
+    const start = points[index];
+    const end = points[(index + 1) % points.length];
+    if (pageEdgeFlags[(index - 1 + points.length) % points.length]) {
+      path.moveTo(start.x, start.y);
+    }
+    path.lineTo(end.x, end.y);
+  }
+  return path;
+}
+
 function canvasToPngBytes(canvas: HTMLCanvasElement): Promise<Uint8Array> {
   return new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png")).then(
     async (blob) => {
@@ -301,7 +338,8 @@ function drawClippedPanel(
   context.lineWidth = panel.borderWidthPx * 2;
   context.lineJoin = "miter";
   context.lineCap = "butt";
-  context.stroke(path);
+  const borderPath = panelBorderPath(panel);
+  if (borderPath) context.stroke(borderPath);
   context.restore();
 }
 
