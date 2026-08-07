@@ -4,7 +4,10 @@
  */
 import { expect, test } from "@playwright/test";
 
-import { getComicTemplate } from "../src/lib/comic/layoutTemplates";
+import {
+  COMIC_LAYOUT_TEMPLATES,
+  getComicTemplate,
+} from "../src/lib/comic/layoutTemplates";
 import {
   assembleStructurePage,
   borderWidthPxFor,
@@ -196,6 +199,89 @@ test("枠線はclip内側へ決定論幅で描かれ、未生成コマは白地�
     ]);
     // stroke中心の外側半分はclipで切られるため、指定3pxの2倍=6pxで描く。
     expect(strokes).toEqual([{ lineWidth: 6, strokeStyle: "#000" }]);
+  } finally {
+    if (hadDocument) globals.document = previousDocument;
+    else delete globals.document;
+    if (hadPath2D) globals.Path2D = previousPath2D;
+    else delete globals.Path2D;
+  }
+});
+
+test("断ち切りは紙端の枠線だけを描かず、内側の3px枠は保つ", async () => {
+  const globals = globalThis as unknown as Record<string, unknown>;
+  const hadDocument = Object.prototype.hasOwnProperty.call(globals, "document");
+  const hadPath2D = Object.prototype.hasOwnProperty.call(globals, "Path2D");
+  const previousDocument = globals.document;
+  const previousPath2D = globals.Path2D;
+  const strokedPaths: FakePath2D[] = [];
+
+  class FakePath2D {
+    commands: Array<
+      | { kind: "moveTo" | "lineTo"; x: number; y: number }
+      | { kind: "rect"; x: number; y: number; w: number; h: number }
+      | { kind: "closePath" }
+    > = [];
+    moveTo(x: number, y: number) {
+      this.commands.push({ kind: "moveTo", x, y });
+    }
+    lineTo(x: number, y: number) {
+      this.commands.push({ kind: "lineTo", x, y });
+    }
+    closePath() {
+      this.commands.push({ kind: "closePath" });
+    }
+    rect(x: number, y: number, w: number, h: number) {
+      this.commands.push({ kind: "rect", x, y, w, h });
+    }
+  }
+  const context = {
+    fillStyle: "",
+    strokeStyle: "",
+    lineWidth: 0,
+    lineJoin: "",
+    lineCap: "",
+    imageSmoothingEnabled: false,
+    imageSmoothingQuality: "low",
+    fillRect() {},
+    save() {},
+    clip() {},
+    drawImage() {},
+    stroke(path: FakePath2D) {
+      strokedPaths.push(path);
+    },
+    restore() {},
+  };
+  const canvas = {
+    width: 0,
+    height: 0,
+    getContext: () => context,
+    toBlob: (callback: (blob: Blob) => void) =>
+      callback(new Blob([new Uint8Array([137, 80, 78, 71])], { type: "image/png" })),
+  };
+  globals.document = { createElement: () => canvas };
+  globals.Path2D = FakePath2D;
+
+  try {
+    await assembleStructurePage({
+      panelImagePaths: [undefined],
+      slots: [getComicTemplate("bleed03").slots[0]],
+      frameStyle: "standard",
+    });
+    expect(strokedPaths).toHaveLength(1);
+    expect(strokedPaths[0].commands).toEqual([
+      { kind: "moveTo", x: 1080, y: 432 },
+      { kind: "lineTo", x: 713, y: 432 },
+      { kind: "lineTo", x: 713, y: 58 },
+      { kind: "lineTo", x: 1080, y: 58 },
+    ]);
+    expect(context.lineWidth, "内側の指定3pxは従来どおり倍幅6pxでclip").toBe(6);
+
+    await assembleStructurePage({
+      panelImagePaths: [undefined],
+      slots: [{ x: 0, y: 0, w: 100, h: 100 }],
+      frameStyle: "standard",
+    });
+    expect(strokedPaths, "上下左右すべて紙端なら枠線は0本").toHaveLength(1);
   } finally {
     if (hadDocument) globals.document = previousDocument;
     else delete globals.document;
@@ -405,6 +491,10 @@ const COMMON_FRAME_TEMPLATE_IDS = [
   "manga10",
   "manga11",
   "manga12",
+  "bleed01",
+  "bleed02",
+  "bleed03",
+  "bleed04",
 ] as const;
 
 const HORIZONTAL_GAP_PAIRS: Record<string, readonly FrameGapPair[]> = {
@@ -420,6 +510,10 @@ const HORIZONTAL_GAP_PAIRS: Record<string, readonly FrameGapPair[]> = {
   manga10: [[1, 2]],
   manga11: [[2, 3]],
   manga12: [[0, 1], [2, 3], [4, 5]],
+  bleed01: [[0, 1], [3, 4]],
+  bleed02: [[0, 1], [2, 3], [4, 5]],
+  bleed03: [[0, 1], [1, 2], [4, 5]],
+  bleed04: [[0, 1], [2, 3]],
 };
 
 const VERTICAL_GAP_PAIRS: Record<string, readonly FrameGapPair[]> = {
@@ -435,6 +529,19 @@ const VERTICAL_GAP_PAIRS: Record<string, readonly FrameGapPair[]> = {
   manga10: [[0, 1], [0, 2], [1, 3], [2, 3]],
   manga11: [[0, 1], [1, 2], [1, 3]],
   manga12: [[0, 2], [1, 3], [2, 4], [3, 5]],
+  bleed01: [[0, 2], [1, 2], [2, 3], [2, 4]],
+  bleed02: [[0, 2], [1, 3], [2, 4], [3, 5]],
+  bleed03: [[0, 3], [1, 3], [2, 3], [3, 4], [3, 5]],
+  bleed04: [[0, 2], [0, 3], [1, 3], [2, 4], [3, 4]],
+};
+
+type OuterSide = "left" | "right" | "top" | "bottom";
+
+const PAGE_EDGE_SIDES: Partial<Record<string, readonly OuterSide[]>> = {
+  bleed01: ["left", "right"],
+  bleed02: ["left", "right"],
+  bleed03: ["left", "right"],
+  bleed04: ["left", "right"],
 };
 
 function frameQuad(slot: FrameSlot): [FramePoint, FramePoint, FramePoint, FramePoint] {
@@ -523,10 +630,19 @@ function assertCommonFrame(
   topologyId = templateId,
 ): void {
   const points = slots.flatMap(frameQuad);
-  expect(Math.min(...points.map(([x]) => x)), `${templateId} 左外周`).toBe(4);
-  expect(100 - Math.max(...points.map(([x]) => x)), `${templateId} 右外周`).toBe(4);
-  expect(Math.min(...points.map(([, y]) => y)), `${templateId} 上外周`).toBe(4);
-  expect(100 - Math.max(...points.map(([, y]) => y)), `${templateId} 下外周`).toBe(4);
+  const outerInsets: Record<OuterSide, number> = {
+    left: Math.min(...points.map(([x]) => x)),
+    right: 100 - Math.max(...points.map(([x]) => x)),
+    top: Math.min(...points.map(([, y]) => y)),
+    bottom: 100 - Math.max(...points.map(([, y]) => y)),
+  };
+  const expectedPageEdges = new Set(PAGE_EDGE_SIDES[topologyId] ?? []);
+  for (const [side, inset] of Object.entries(outerInsets) as [OuterSide, number][]) {
+    const edgeKind = expectedPageEdges.has(side) ? "紙端" : "外周";
+    expect(inset, `${templateId} ${side} ${edgeKind}`).toBe(
+      expectedPageEdges.has(side) ? 0 : 4,
+    );
+  }
 
   for (const pair of HORIZONTAL_GAP_PAIRS[topologyId]) {
     expect(
@@ -542,12 +658,34 @@ function assertCommonFrame(
   }
 }
 
-test("12テンプレすべての外周4%・横縦ガター3%が共通で、ltrミラー後も保たれる", () => {
+test("16テンプレの紙端/外周を分類し、横縦ガター3%をltrミラー後も保つ", () => {
   for (const templateId of COMMON_FRAME_TEMPLATE_IDS) {
     const template = getComicTemplate(templateId);
     assertCommonFrame(templateId, template.slots);
     assertCommonFrame(`${templateId} ltr`, template.slots.map(mirrorSlotX), templateId);
   }
+});
+
+test("断ち切り4種は元テンプレのコマ数・役割を保ち、一覧へ同じ表示機構で載る", () => {
+  const seedIds = ["manga02", "manga05", "manga08", "manga09"] as const;
+  const bleedIds = ["bleed01", "bleed02", "bleed03", "bleed04"] as const;
+  const bleedIdSet = new Set<string>(bleedIds);
+  expect(
+    COMIC_LAYOUT_TEMPLATES.filter((template) => bleedIdSet.has(template.id)).map(
+      ({ id, label }) => ({ id, label }),
+    ),
+  ).toEqual([
+    { id: "bleed01", label: "断ち切り01" },
+    { id: "bleed02", label: "断ち切り02" },
+    { id: "bleed03", label: "断ち切り03" },
+    { id: "bleed04", label: "断ち切り04" },
+  ]);
+  bleedIds.forEach((bleedId, index) => {
+    const bleed = getComicTemplate(bleedId);
+    const seed = getComicTemplate(seedIds[index]);
+    expect(bleed.panelCount, bleedId).toBe(seed.panelCount);
+    expect(bleed.roles, bleedId).toEqual(seed.roles);
+  });
 });
 
 test("牙: 1テンプレの座標を0.5%崩すと共通枠寸法の検査が落ちる", () => {
@@ -556,4 +694,12 @@ test("牙: 1テンプレの座標を0.5%崩すと共通枠寸法の検査が落�
     index === 0 ? { ...slot, x: slot.x + 0.5 } : { ...slot },
   );
   expect(() => assertCommonFrame("manga08 broken", broken, "manga08")).toThrow();
+});
+
+test("牙: bleedテンプレの紙端を保ったまま内側ガターを0.5%崩すと落ちる", () => {
+  const template = getComicTemplate("bleed03");
+  const broken = template.slots.map((slot, index) =>
+    index === 0 ? { ...slot, x: slot.x + 0.5, w: slot.w - 0.5 } : { ...slot },
+  );
+  expect(() => assertCommonFrame("bleed03 broken", broken, "bleed03")).toThrow();
 });

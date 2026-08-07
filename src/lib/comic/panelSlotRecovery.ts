@@ -716,6 +716,28 @@ function alignBoundary(
   };
 }
 
+/** 紙端には探索対象のガターも枠線も無いため、移動0・枠0で固定する。 */
+function fixedPageEdgeBoundary(
+  start: PixelPoint,
+  end: PixelPoint,
+  width: number,
+  height: number,
+): AlignedBoundary | null {
+  const isPageEdge =
+    (start.x === 0 && end.x === 0) ||
+    (start.x === width && end.x === width) ||
+    (start.y === 0 && end.y === 0) ||
+    (start.y === height && end.y === height);
+  if (!isPageEdge) return null;
+  return {
+    point: start,
+    direction: { x: end.x - start.x, y: end.y - start.y },
+    snapped: true,
+    driftPx: 0,
+    borderPx: 0,
+  };
+}
+
 function intersectBoundaries(first: AlignedBoundary, second: AlignedBoundary): PixelPoint | null {
   const denominator = first.direction.x * second.direction.y - first.direction.y * second.direction.x;
   if (Math.abs(denominator) < 0.00001) return null;
@@ -822,16 +844,20 @@ export function alignSlotsToTemplate(
       (sum, point) => ({ x: sum.x + point.x / points.length, y: sum.y + point.y / points.length }),
       { x: 0, y: 0 },
     );
-    const boundaries = points.map((point, index) =>
-      alignBoundary(
-        mask,
-        point,
-        points[(index + 1) % points.length],
-        centroid,
-        searchRadiusPx,
-        borderRangePx,
-      ),
-    );
+    const boundaries = points.map((point, index) => {
+      const end = points[(index + 1) % points.length];
+      return (
+        fixedPageEdgeBoundary(point, end, image.width, image.height) ??
+        alignBoundary(
+          mask,
+          point,
+          end,
+          centroid,
+          searchRadiusPx,
+          borderRangePx,
+        )
+      );
+    });
     const aligned = alignedSlotFromBoundaries(slot, boundaries, image.width, image.height);
     if (!aligned) {
       return {
@@ -871,13 +897,13 @@ export function alignSlotsToTemplate(
   }
 
   const borderPx = Math.round(median(snapped.flatMap((boundary) =>
-    boundary.borderPx === undefined ? [] : [boundary.borderPx],
+    boundary.borderPx === undefined || boundary.borderPx === 0 ? [] : [boundary.borderPx],
   )));
   return {
     ok: true,
     slots: alignedSlots,
     borderPx,
-    insetPx: borderPx + 1,
+    insetPx: borderPx === 0 ? 0 : borderPx + 1,
     confidence,
     metrics,
   };

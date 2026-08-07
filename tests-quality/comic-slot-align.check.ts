@@ -62,7 +62,12 @@ function paint(image: PanelImageData, x: number, y: number, value: number): void
 }
 
 /** 白ガター・3px暗線・灰色の模擬絵を持つコマを描く。 */
-function drawPanel(image: PanelImageData, rect: Rect, borderPx = BORDER_PX): void {
+function drawPanel(
+  image: PanelImageData,
+  rect: Rect,
+  borderPx = BORDER_PX,
+  omitPaperEdgeBorders = false,
+): void {
   const left = Math.round((rect.x * image.width) / 100);
   const top = Math.round((rect.y * image.height) / 100);
   const right = Math.round(((rect.x + rect.w) * image.width) / 100) - 1;
@@ -76,15 +81,17 @@ function drawPanel(image: PanelImageData, rect: Rect, borderPx = BORDER_PX): voi
       paint(image, x, bottom - inset, 24);
     }
     for (let y = top; y <= bottom; y += 1) {
-      paint(image, left + inset, y, 24);
-      paint(image, right - inset, y, 24);
+      if (!omitPaperEdgeBorders || left > 0) paint(image, left + inset, y, 24);
+      if (!omitPaperEdgeBorders || right < image.width - 1) {
+        paint(image, right - inset, y, 24);
+      }
     }
   }
 }
 
-function fixturePage(rects: Rect[]): PanelImageData {
+function fixturePage(rects: Rect[], omitPaperEdgeBorders = false): PanelImageData {
   const image = blankPage();
-  for (const rect of rects) drawPanel(image, rect);
+  for (const rect of rects) drawPanel(image, rect, BORDER_PX, omitPaperEdgeBorders);
   return image;
 }
 
@@ -135,6 +142,68 @@ test("わざと2%動かした境界へスナップし、テンプレ座標の丸
   expect(Math.abs(result.slots[0].x - 54)).toBeLessThanOrEqual(0.35);
   expect(Math.abs(result.slots[0].x - TEMPLATE.slots[0].x), "牙: template丸写し").toBeGreaterThan(1.5);
   expectRectNear(result.slots[0], shifted[0]);
+});
+
+test("断ち切りの左右端は線なしでも固定し、内側境界だけ従来どおり探索する", () => {
+  const bleedTemplate: ComicLayoutTemplate = {
+    id: "bleed-edge-fixture",
+    label: "bleed edge fixture",
+    panelCount: 2,
+    pageAspect: { w: 2, h: 3 },
+    slots: [
+      { x: 51.5, y: 4, w: 48.5, h: 92 },
+      { x: 0, y: 4, w: 48.5, h: 92 },
+    ],
+    roles: ["1", "2"],
+  };
+  const shiftedInnerEdges: Rect[] = [
+    { x: 53.5, y: 4, w: 46.5, h: 92 },
+    { x: 0, y: 4, w: 50.5, h: 92 },
+  ];
+  const result = alignSlotsToTemplate(
+    fixturePage(shiftedInnerEdges, true),
+    bleedTemplate,
+    "rtl",
+  );
+  expect(result.ok, JSON.stringify(result)).toBe(true);
+  if (!result.ok) return;
+
+  expect(result.metrics.snappedBoundaries).toBe(8);
+  expect(result.metrics.totalBoundaries).toBe(8);
+  expect(result.borderPx, "紙端の0pxを混ぜず内側枠だけ実測").toBe(BORDER_PX);
+  expect(result.insetPx).toBe(BORDER_PX + 1);
+  result.slots.forEach((slot, index) => expectRectNear(slot, shiftedInnerEdges[index]));
+  expect(result.slots[0].x + result.slots[0].w, "右紙端を固定").toBe(100);
+  expect(result.slots[1].x, "左紙端を固定").toBe(0);
+});
+
+test("上下左右すべて紙端なら探索せず固定し、枠・インセットを0にする", () => {
+  const fullBleedTemplate: ComicLayoutTemplate = {
+    id: "full-bleed-fixture",
+    label: "full bleed fixture",
+    panelCount: 1,
+    pageAspect: { w: 2, h: 3 },
+    slots: [{ x: 0, y: 0, w: 100, h: 100 }],
+    roles: ["1"],
+  };
+  const borderlessImage = blankPage();
+  for (let offset = 0; offset < borderlessImage.data.length; offset += 4) {
+    borderlessImage.data[offset] = 180;
+    borderlessImage.data[offset + 1] = 180;
+    borderlessImage.data[offset + 2] = 180;
+  }
+  const result = alignSlotsToTemplate(borderlessImage, fullBleedTemplate, "rtl");
+  expect(result.ok, JSON.stringify(result)).toBe(true);
+  if (!result.ok) return;
+
+  expect(result.slots).toEqual([{ x: 0, y: 0, w: 100, h: 100 }]);
+  expect(result.metrics).toMatchObject({
+    snappedBoundaryRatio: 1,
+    snappedBoundaries: 4,
+    totalBoundaries: 4,
+  });
+  expect(result.borderPx).toBe(0);
+  expect(result.insetPx).toBe(0);
 });
 
 test("全コマを40%ずらすと近傍帯に枠がなく、安全側のfailureになる", () => {
