@@ -357,3 +357,54 @@ test("牙: ±2.5%帯の内側2%は通り、外側3.2%は境界80%未満で落ち
   expect(outside.metrics.totalBoundaries).toBe(4);
   expect(outside.metrics.snappedBoundaryRatio).toBe(0.75);
 });
+
+test("紙端から4%の外枠を8%帯で見つけ、枠線より内側をクロップ開始にする", () => {
+  const fullBleedTemplate: ComicLayoutTemplate = {
+    id: "edge-margin-crop-fixture",
+    label: "edge margin crop fixture",
+    panelCount: 1,
+    pageAspect: { w: 2, h: 3 },
+    slots: [{ x: 0, y: 0, w: 100, h: 100 }],
+    roles: ["1"],
+  };
+  const outerFrame = { x: 4, y: 4, w: 92, h: 92 };
+  const result = alignSlotsToTemplate(fixturePage([outerFrame]), fullBleedTemplate, "rtl");
+  expect(result.ok, JSON.stringify(result)).toBe(true);
+  if (!result.ok) return;
+
+  expect(result.metrics.snappedBoundaries).toBe(4);
+  expect(result.metrics.totalBoundaries).toBe(4);
+  expect(result.borderPx).toBe(BORDER_PX);
+  expect(result.insetPx).toBe(BORDER_PX + 1);
+  expectRectNear(result.slots[0], outerFrame);
+
+  const cropStartX = result.slots[0].x + (result.insetPx * 100) / WIDTH;
+  const cropStartY = result.slots[0].y + (result.insetPx * 100) / HEIGHT;
+  expect(cropStartX, "牙: 端帯が0%なら4%外枠を拾えず、クロップ開始が枠内へ進まない").toBeGreaterThan(4);
+  expect(cropStartY, "実測枠線+1pxだけ内側から切り出す").toBeGreaterThan(4);
+});
+
+test("本当に端まで絵がある場合は紙端固定・インセット0のままにする", () => {
+  const fullBleedTemplate: ComicLayoutTemplate = {
+    id: "true-full-bleed-fixture",
+    label: "true full bleed fixture",
+    panelCount: 1,
+    pageAspect: { w: 2, h: 3 },
+    slots: [{ x: 0, y: 0, w: 100, h: 100 }],
+    roles: ["1"],
+  };
+  const image = blankPage();
+  for (let offset = 0; offset < image.data.length; offset += 4) {
+    image.data[offset] = 180;
+    image.data[offset + 1] = 180;
+    image.data[offset + 2] = 180;
+  }
+
+  const result = alignSlotsToTemplate(image, fullBleedTemplate, "rtl");
+  expect(result.ok, JSON.stringify(result)).toBe(true);
+  if (!result.ok) return;
+  expect(result.slots).toEqual([{ x: 0, y: 0, w: 100, h: 100 }]);
+  expect(result.borderPx).toBe(0);
+  expect(result.insetPx).toBe(0);
+  expect(result.metrics.snappedBoundaries).toBe(4);
+});

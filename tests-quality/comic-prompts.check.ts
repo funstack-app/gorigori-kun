@@ -162,6 +162,9 @@ test("template=nullでもlayoutPlanの座標とrows由来の全コマ位置語�
   expect(prompt).toContain("panel 2 (top-right): prompt-2");
   expect(prompt).toContain("panel 3 (bottom, full width): prompt-3");
   expect(prompt).not.toContain("design the panel layout yourself");
+  const fullBleedClause =
+    "full-bleed page layout — panels extend to the left and right edges of the page with no outer side margin; keep the top and bottom outer margins";
+  expect(prompt.split(fullBleedClause)).toHaveLength(2);
 });
 
 test("structureコマpromptは枠なし・吹き出しchain・端余白を含み、ページ寸法句を除く", () => {
@@ -230,6 +233,7 @@ test("structureコマpromptは枠なし・吹き出しchain・端余白を含み
   expect(prompt).toContain("story context: this is panel 1 of 3 on one manga page");
   expect(prompt).toContain("do not render any meta text or numbers on the image");
   expect(prompt).not.toContain("portrait page, consistent page size");
+  expect(prompt).not.toContain("full-bleed page layout — panels extend to the left and right edges");
   expect(prompt).not.toContain("描いてはいけない");
 
   // 牙: 「／」をそのまま引用するだけの実装では、分割引用とchain句の両方を満たせない。

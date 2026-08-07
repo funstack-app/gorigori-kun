@@ -145,6 +145,8 @@ type LumaMask = {
 const DARK_LUMA = 128;
 /** テンプレ境界の探索幅（ページ短辺比）。detectPanelInterior と同じ ±2.5%。 */
 const TEMPLATE_ALIGNMENT_BAND_RATIO = 0.025;
+/** 紙端だけは、AIが残しがちな旧4%余白と外枠線を覆う内向き8%を探索する。 */
+const PAGE_EDGE_ALIGNMENT_BAND_RATIO = 0.08;
 /** 全境界の80%以上を確認できたページだけ再組立へ渡す。 */
 const TEMPLATE_ALIGNMENT_MIN_SNAP_RATIO = 0.8;
 
@@ -669,6 +671,17 @@ function borderBeforeGutter(
   };
 }
 
+/** 内側境界と紙端境界で、白帯に隣接する最寄りの暗線を同じ規則で選ぶ。 */
+function nearestBorderCandidate(
+  profiles: BoundaryProfile[],
+  borderRangePx: number,
+): { snapOffset: number; borderPx: number } | null {
+  return profileWhiteBands(profiles)
+    .map((band) => borderBeforeGutter(profiles, band, borderRangePx))
+    .filter((candidate): candidate is { snapOffset: number; borderPx: number } => candidate !== null)
+    .sort((a, b) => Math.abs(a.snapOffset) - Math.abs(b.snapOffset))[0] ?? null;
+}
+
 function alignBoundary(
   mask: LumaMask,
   start: PixelPoint,
@@ -699,11 +712,7 @@ function alignBoundary(
     });
   }
 
-  const candidates = profileWhiteBands(profiles)
-    .map((band) => borderBeforeGutter(profiles, band, borderRangePx))
-    .filter((candidate): candidate is { snapOffset: number; borderPx: number } => candidate !== null)
-    .sort((a, b) => Math.abs(a.snapOffset) - Math.abs(b.snapOffset));
-  const best = candidates[0];
+  const best = nearestBorderCandidate(profiles, borderRangePx);
   if (!best) {
     return { point: start, direction: { x: dx, y: dy }, snapped: false, driftPx: 0 };
   }
@@ -716,22 +725,62 @@ function alignBoundary(
   };
 }
 
-/** 紙端には探索対象のガターも枠線も無いため、移動0・枠0で固定する。 */
-function fixedPageEdgeBoundary(
+/**
+ * 紙端から内側8%だけを走査する。余白+外枠があれば枠外縁へ合わせ、後段が
+ * 実測枠線+1pxを除いてクロップする。無ければ真の断ち切りとして紙端へ固定する。
+ */
+function alignPageEdgeBoundary(
+  mask: LumaMask,
   start: PixelPoint,
   end: PixelPoint,
-  width: number,
-  height: number,
+  centroid: PixelPoint,
+  borderRangePx: number,
 ): AlignedBoundary | null {
   const isPageEdge =
     (start.x === 0 && end.x === 0) ||
-    (start.x === width && end.x === width) ||
+    (start.x === mask.width && end.x === mask.width) ||
     (start.y === 0 && end.y === 0) ||
-    (start.y === height && end.y === height);
+    (start.y === mask.height && end.y === mask.height);
   if (!isPageEdge) return null;
+
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const length = Math.hypot(dx, dy);
+  if (length <= 0) {
+    return { point: start, direction: { x: dx, y: dy }, snapped: true, driftPx: 0, borderPx: 0 };
+  }
+
+  const midpoint = { x: (start.x + end.x) / 2, y: (start.y + end.y) / 2 };
+  let normal = { x: -dy / length, y: dx / length };
+  if ((midpoint.x - centroid.x) * normal.x + (midpoint.y - centroid.y) * normal.y < 0) {
+    normal = { x: -normal.x, y: -normal.y };
+  }
+  const inwardSpanPx = start.x === end.x ? mask.width : mask.height;
+  const radius = Math.max(
+    MIN_BAND_PX,
+    Math.floor(inwardSpanPx * PAGE_EDGE_ALIGNMENT_BAND_RATIO),
+  );
+  const profiles: BoundaryProfile[] = [];
+  for (let offset = -radius; offset <= 0; offset += 1) {
+    profiles.push({
+      offset,
+      ...sampleBoundaryProfile(mask, start, end, normal, offset),
+    });
+  }
+  const best = nearestBorderCandidate(profiles, borderRangePx);
+  if (best) {
+    return {
+      point: { x: start.x + normal.x * best.snapOffset, y: start.y + normal.y * best.snapOffset },
+      direction: { x: dx, y: dy },
+      snapped: true,
+      driftPx: Math.abs(best.snapOffset),
+      borderPx: best.borderPx,
+    };
+  }
+
   return {
     point: start,
-    direction: { x: end.x - start.x, y: end.y - start.y },
+    direction: { x: dx, y: dy },
     snapped: true,
     driftPx: 0,
     borderPx: 0,
@@ -847,7 +896,7 @@ export function alignSlotsToTemplate(
     const boundaries = points.map((point, index) => {
       const end = points[(index + 1) % points.length];
       return (
-        fixedPageEdgeBoundary(point, end, image.width, image.height) ??
+        alignPageEdgeBoundary(mask, point, end, centroid, borderRangePx) ??
         alignBoundary(
           mask,
           point,
