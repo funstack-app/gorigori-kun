@@ -5,7 +5,10 @@
 import { expect, test } from "@playwright/test";
 
 import { alignSlotsToTemplate } from "../src/lib/comic/panelSlotRecovery";
-import { getComicTemplate } from "../src/lib/comic/layoutTemplates";
+import {
+  COMIC_LAYOUT_TEMPLATES,
+  getComicTemplate,
+} from "../src/lib/comic/layoutTemplates";
 import type { ComicLayoutTemplate, ComicPanelSlot } from "../src/lib/comic/layoutTemplates";
 import type { PanelImageData } from "../src/lib/comic/panelReedit";
 
@@ -40,12 +43,12 @@ const FIXTURE_RECTS: Rect[] = [
 
 /** layoutTemplates.ts の manga08 と独立に固定した描画正解。 */
 const MANGA08_RECTS: Rect[] = [
-  { x: 66, y: 4, w: 30, h: 26 },
+  { x: 66, y: 4, w: 34, h: 26 },
   { x: 35, y: 4, w: 28, h: 26 },
-  { x: 4, y: 4, w: 28, h: 26 },
-  { x: 4, y: 33, w: 92, h: 30 },
-  { x: 57, y: 66, w: 39, h: 30 },
-  { x: 4, y: 66, w: 50, h: 30 },
+  { x: 0, y: 4, w: 32, h: 26 },
+  { x: 0, y: 33, w: 100, h: 30 },
+  { x: 57, y: 66, w: 43, h: 30 },
+  { x: 0, y: 66, w: 54, h: 30 },
 ];
 
 function blankPage(): PanelImageData {
@@ -95,6 +98,87 @@ function fixturePage(rects: Rect[], omitPaperEdgeBorders = false): PanelImageDat
   return image;
 }
 
+type Point = readonly [number, number];
+
+function slotQuad(slot: ComicPanelSlot): readonly [Point, Point, Point, Point] {
+  if (slot.points) return slot.points;
+  return [
+    [slot.x, slot.y],
+    [slot.x + slot.w, slot.y],
+    [slot.x + slot.w, slot.y + slot.h],
+    [slot.x, slot.y + slot.h],
+  ];
+}
+
+function pointInsidePolygon(x: number, y: number, points: readonly Point[]): boolean {
+  let inside = false;
+  for (let current = 0, previous = points.length - 1; current < points.length; previous = current++) {
+    const [currentX, currentY] = points[current];
+    const [previousX, previousY] = points[previous];
+    if (
+      (currentY > y) !== (previousY > y) &&
+      x < ((previousX - currentX) * (y - currentY)) / (previousY - currentY) + currentX
+    ) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+function distanceToSegment(
+  x: number,
+  y: number,
+  start: Point,
+  end: Point,
+): number {
+  const dx = end[0] - start[0];
+  const dy = end[1] - start[1];
+  const lengthSquared = dx * dx + dy * dy;
+  if (lengthSquared === 0) return Math.hypot(x - start[0], y - start[1]);
+  const progress = Math.max(
+    0,
+    Math.min(1, ((x - start[0]) * dx + (y - start[1]) * dy) / lengthSquared),
+  );
+  return Math.hypot(x - (start[0] + progress * dx), y - (start[1] + progress * dy));
+}
+
+function isPaperEdge(start: Point, end: Point): boolean {
+  return (
+    (start[0] === 0 && end[0] === 0) ||
+    (start[0] === WIDTH && end[0] === WIDTH) ||
+    (start[1] === 0 && end[1] === 0) ||
+    (start[1] === HEIGHT && end[1] === HEIGHT)
+  );
+}
+
+/** 斜めコマも含め、紙端だけ枠線を省いた模擬ページを描く。 */
+function templateFixturePage(template: ComicLayoutTemplate): PanelImageData {
+  const image = blankPage();
+  for (const slot of template.slots) {
+    const points = slotQuad(slot).map(
+      ([x, y]) => [x * WIDTH / 100, y * HEIGHT / 100] as const,
+    );
+    const minX = Math.max(0, Math.floor(Math.min(...points.map(([x]) => x))));
+    const maxX = Math.min(WIDTH - 1, Math.ceil(Math.max(...points.map(([x]) => x))) - 1);
+    const minY = Math.max(0, Math.floor(Math.min(...points.map(([, y]) => y))));
+    const maxY = Math.min(HEIGHT - 1, Math.ceil(Math.max(...points.map(([, y]) => y))) - 1);
+    for (let y = minY; y <= maxY; y += 1) {
+      for (let x = minX; x <= maxX; x += 1) {
+        const centerX = x + 0.5;
+        const centerY = y + 0.5;
+        if (!pointInsidePolygon(centerX, centerY, points)) continue;
+        const onBorder = points.some((start, index) => {
+          const end = points[(index + 1) % points.length];
+          return !isPaperEdge(start, end) &&
+            distanceToSegment(centerX, centerY, start, end) <= BORDER_PX;
+        });
+        paint(image, x, y, onBorder ? 24 : 180);
+      }
+    }
+  }
+  return image;
+}
+
 function expectRectNear(actual: ComicPanelSlot, expected: Rect, tolerance = 0.35): void {
   expect(actual.x, `x actual=${actual.x} want=${expected.x}`).toBeCloseTo(expected.x, 0);
   expect(Math.abs(actual.x - expected.x)).toBeLessThanOrEqual(tolerance);
@@ -128,6 +212,33 @@ test("正典manga08でも6コマ・全24境界をスナップする", () => {
   expect(result.metrics.snappedBoundaries).toBe(24);
   expect(result.metrics.totalBoundaries).toBe(24);
   result.slots.forEach((slot, index) => expectRectNear(slot, MANGA08_RECTS[index]));
+});
+
+test("全12テンプレの左右紙端を枠線なしで固定し、全境界をスナップする", () => {
+  expect(COMIC_LAYOUT_TEMPLATES.map(({ id }) => id)).toEqual(
+    Array.from({ length: 12 }, (_, index) => `manga${String(index + 1).padStart(2, "0")}`),
+  );
+
+  for (const template of COMIC_LAYOUT_TEMPLATES) {
+    const result = alignSlotsToTemplate(templateFixturePage(template), template, "rtl");
+    expect(result.ok, `${template.id}: ${JSON.stringify(result)}`).toBe(true);
+    if (!result.ok) continue;
+    expect(result.metrics.snappedBoundaries, template.id).toBe(template.panelCount * 4);
+    expect(result.metrics.totalBoundaries, template.id).toBe(template.panelCount * 4);
+
+    template.slots.forEach((expectedSlot, slotIndex) => {
+      const expected = slotQuad(expectedSlot);
+      const actual = slotQuad(result.slots[slotIndex]);
+      if (expected[0][0] === 0 && expected[3][0] === 0) {
+        expect(actual[0][0], `${template.id} コマ${slotIndex + 1} 左紙端`).toBeCloseTo(0, 10);
+        expect(actual[3][0], `${template.id} コマ${slotIndex + 1} 左紙端`).toBeCloseTo(0, 10);
+      }
+      if (expected[1][0] === 100 && expected[2][0] === 100) {
+        expect(actual[1][0], `${template.id} コマ${slotIndex + 1} 右紙端`).toBeCloseTo(100, 10);
+        expect(actual[2][0], `${template.id} コマ${slotIndex + 1} 右紙端`).toBeCloseTo(100, 10);
+      }
+    });
+  }
 });
 
 test("わざと2%動かした境界へスナップし、テンプレ座標の丸写しをしない", () => {
