@@ -141,6 +141,42 @@ const PANEL_REEDIT_BUSY_MESSAGE =
 const COMIC_PAGE_ASPECT_WARN_MESSAGE =
   "生成画像の比率が想定(3:4)と大きく違います。作り直しをおすすめします";
 
+type ComicPageGenerationDiagnosticReason =
+  | "成立"
+  | "型なし"
+  | "照合失敗1回目"
+  | "照合失敗2回目"
+  | "例外";
+
+/**
+ * 本番でも残すページ生成の恒久診断ログ。
+ * 1ページにつき最終経路を1行に固定し、エラーログ画面と開発者ツールで追跡できるようにする。
+ */
+function logComicPageGeneration(args: {
+  page: number;
+  requestedMode: ComicPageGenMode;
+  templateId: string | null;
+  aligned: boolean;
+  reason: ComicPageGenerationDiagnosticReason;
+  errorMessage?: string;
+}): void {
+  const errorSuffix = args.errorMessage
+    ? ` error=${args.errorMessage.replace(/\s+/g, " ").trim()}`
+    : "";
+  console.info(
+    `[comic] page=${args.page} requestedMode=${args.requestedMode} templateId=${args.templateId ?? "null"} aligned=${args.aligned} reason=${args.reason}${errorSuffix}`,
+  );
+}
+
+/** aligned の内部コードを、ユーザーが判断できる短い理由へ直す。 */
+function describeAlignmentFailure(
+  failureCode: "invalid-input" | "low-confidence",
+): string {
+  return failureCode === "invalid-input"
+    ? "画像データかコマ割りの型を確認できませんでした"
+    : "枠線を十分に照合できませんでした";
+}
+
 /** aligned 生成で使う型を、構成指定または共通の決定論補完で解決する。 */
 function resolveAlignedTemplate(
   page: ComicStoryPage,
@@ -1424,6 +1460,9 @@ function ComicFlow() {
 
     const resultBeforeRun = pageResults.find((result) => result.page === page.page);
     if (!resultBeforeRun) return false;
+    let resolvedTemplateId: string | null = null;
+    let diagnosticAligned = false;
+    let diagnosticReason: ComicPageGenerationDiagnosticReason = "成立";
 
     // このページだけの中止トークン。単体生成の中止は「押したページ」にしか効かない。
     const pageTokens = pageTokensRef.current;
@@ -1493,6 +1532,8 @@ function ComicFlow() {
           : null;
       // aligned は明示テンプレ・構成AI・決定論補完の順でページ単位の型を解決する。
       const alignedTemplate = resolveAlignedTemplate(page, storyTemplateId);
+      resolvedTemplateId =
+        mode === "aligned" ? alignedTemplate?.id ?? null : directTemplate?.id ?? null;
       if (mode === "aligned" && alignedTemplate) {
         // ミニ図と実レイアウトを一致させるため、補完結果もページ構成へ確定保存する。
         setStoryPages((previous) =>
@@ -1612,9 +1653,11 @@ function ComicFlow() {
 
       if (!shouldAlign) {
         adoptDirectPage();
+        diagnosticReason = mode === "aligned" ? "型なし" : "成立";
       } else {
         // template は上で必須確認済み。TypeScriptへも同じ事実を明示する。
         if (!alignedTemplate) throw new Error("テンプレを確認できませんでした。");
+        let alignmentFailedOnce = false;
         let imageData = await readPanelImageData(normalizedPage.imagePath);
         if (!stillMine()) return false;
         let alignment = alignSlotsToTemplate(
@@ -1623,6 +1666,7 @@ function ComicFlow() {
           readingDirection,
         );
         if (!alignment.ok) {
+          alignmentFailedOnce = true;
           pushToast({
             kind: "info",
             text: "枠が揃わなかったため、もう一度だけ描き直しています…",
@@ -1640,13 +1684,16 @@ function ComicFlow() {
           );
         }
         if (!alignment.ok) {
+          diagnosticReason = "照合失敗2回目";
           adoptDirectPage(true);
           pushToast({
             kind: "info",
-            text: "枠の自動整列を見送りました（絵はそのまま使えます）",
+            text: `枠そろえに失敗しました（${describeAlignmentFailure(alignment.failureCode)}）。絵はそのまま使えます`,
             ttlMs: 7000,
           });
         } else {
+          diagnosticAligned = true;
+          diagnosticReason = alignmentFailedOnce ? "照合失敗1回目" : "成立";
           const outputTemplate = templateForReadingDirection(
             alignedTemplate,
             readingDirection,
@@ -1709,9 +1756,25 @@ function ComicFlow() {
       setPanelReeditHistory((previous) =>
         previous.filter((entry) => entry.page !== page.page),
       );
+      logComicPageGeneration({
+        page: page.page,
+        requestedMode: mode,
+        templateId: resolvedTemplateId,
+        aligned: diagnosticAligned,
+        reason: diagnosticReason,
+      });
       return true;
     } catch (error) {
       if (!stillMine()) return false;
+      const message = (error as Error)?.message ?? String(error);
+      logComicPageGeneration({
+        page: page.page,
+        requestedMode: mode,
+        templateId: resolvedTemplateId,
+        aligned: false,
+        reason: "例外",
+        errorMessage: message,
+      });
       if (mode === "aligned") {
         setPageResults((previous) =>
           previous.map((result) =>
@@ -1721,7 +1784,6 @@ function ComicFlow() {
           ),
         );
       } else {
-        const message = (error as Error)?.message ?? String(error);
         setPageResults((previous) =>
           previous.map((result) =>
             result.page === page.page
