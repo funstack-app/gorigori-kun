@@ -243,6 +243,8 @@ export type ComicPageResult = {
    * "structure" は読込み専用の旧値で、normalizeComicPageGenMode が "direct" へ変換する。
    */
   genMode?: ComicPageGenMode | "structure";
+  /** aligned で生成を試したが、枠の照合に失敗して元画像を採用した。 */
+  alignFallback?: boolean;
   /** 旧 structure ページの後方互換用コマ画像素材。新規生成では書かない。 */
   panelImagePaths?: (string | undefined)[];
   /** 旧 structure ページの後方互換用失敗理由。新規生成では書かない。 */

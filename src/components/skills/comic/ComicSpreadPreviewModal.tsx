@@ -6,6 +6,7 @@ import type {
   ComicReadingDirection,
   ComicStoryPage,
 } from "../../../lib/comic/types";
+import { normalizeComicPageGenMode } from "../../../lib/comic/types";
 
 /**
  * ページ番号を「見開き（最大2ページ）」の列に組み立てる。読み方向には依存しない
@@ -42,9 +43,10 @@ export function spreadGenModeLabel(
   if (modes.length === 0 || modes.some((mode) => mode === undefined)) {
     return undefined;
   }
-  const first = modes[0];
-  if (!modes.every((mode) => mode === first)) return "方式混在";
-  return first === "structure" ? "コマ割り" : "一枚描き";
+  const normalizedModes = modes.map(normalizeComicPageGenMode);
+  const first = normalizedModes[0];
+  if (!normalizedModes.every((mode) => mode === first)) return "方式混在";
+  return first === "aligned" ? "コマ割り" : "一枚描き";
 }
 
 export type ComicSpreadPreviewModalProps = {

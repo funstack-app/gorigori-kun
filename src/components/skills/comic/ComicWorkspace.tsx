@@ -1564,7 +1564,7 @@ function ComicFlow() {
       let normalizedPage = initialNormalizedPage;
 
       /** 素のA画像を採用する。direct本流とaligned照合失敗の共通処理。 */
-      const adoptDirectPage = () => {
+      const adoptDirectPage = (alignFallback = false) => {
         setPageResults((previous) =>
           previous.map((result) =>
             result.page === page.page
@@ -1576,6 +1576,7 @@ function ComicFlow() {
                   startedAt: undefined,
                   error: undefined,
                   genMode: "direct",
+                  alignFallback: alignFallback || undefined,
                   direction: readingDirection,
                   colorMode,
                   styleText:
@@ -1623,7 +1624,7 @@ function ComicFlow() {
           );
         }
         if (!alignment.ok) {
-          adoptDirectPage();
+          adoptDirectPage(true);
           pushToast({
             kind: "info",
             text: "枠の自動整列を見送りました（絵はそのまま使えます）",
@@ -1664,6 +1665,7 @@ function ComicFlow() {
                 startedAt: undefined,
                 error: undefined,
                 genMode: "aligned",
+                alignFallback: undefined,
                 direction: readingDirection,
                 colorMode,
                 styleText:
@@ -2776,7 +2778,20 @@ function PagesPhase({
     }
   }
 
-  const completedCount = pageResults.filter((r) => r.imagePath).length;
+  const completedResults = pageResults.filter((result) => result.imagePath);
+  const completedCount = completedResults.length;
+  const alignedCount = completedResults.filter(
+    (result) => normalizeComicPageGenMode(result.genMode) === "aligned",
+  ).length;
+  const directCount = completedCount - alignedCount;
+  const generatedModeNote =
+    completedCount === 0
+      ? null
+      : alignedCount === completedCount
+        ? "このページ群はコマ割りで生成しました"
+        : directCount === completedCount
+          ? "このページ群は一枚描きで生成しました"
+          : `方式が混在しています（コマ割り: ${alignedCount} / 一枚描き: ${directCount}）`;
 
   return (
     <div className="flex flex-col gap-3">
@@ -2785,32 +2800,41 @@ function PagesPhase({
           ページ一覧（全{storyPages.length}ページ）
         </p>
         <div className="flex flex-wrap items-center gap-2">
-          <span className="text-xs text-neutral-400">生成方式</span>
-          <div className="inline-flex items-center gap-1 rounded-md border border-[#2a2a2a] bg-[#161616] p-1">
-            {(
-              [
-                { value: "direct", label: "一枚描き" },
-                { value: "aligned", label: "コマ割り" },
-              ] as const
-            ).map((option) => {
-              const selected = pageGenMode === option.value;
-              return (
-                <button
-                  key={option.value}
-                  type="button"
-                  onClick={() => setPageGenMode(option.value)}
-                  disabled={modeSwitchDisabled}
-                  aria-pressed={selected}
-                  className={`rounded px-2.5 py-1 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-40 ${
-                    selected
-                      ? "border border-pink-500 bg-pink-500/10 text-pink-200"
-                      : "border border-transparent text-neutral-400 hover:text-pink-200"
-                  }`}
-                >
-                  {option.label}
-                </button>
-              );
-            })}
+          <div className="flex items-start gap-2">
+            <span className="pt-2 text-xs text-neutral-400">生成方式</span>
+            <div className="flex flex-col gap-1">
+              <div className="inline-flex items-center gap-1 rounded-md border border-[#2a2a2a] bg-[#161616] p-1">
+                {(
+                  [
+                    { value: "direct", label: "一枚描き" },
+                    { value: "aligned", label: "コマ割り" },
+                  ] as const
+                ).map((option) => {
+                  const selected = pageGenMode === option.value;
+                  return (
+                    <button
+                      key={option.value}
+                      type="button"
+                      onClick={() => setPageGenMode(option.value)}
+                      disabled={modeSwitchDisabled}
+                      aria-pressed={selected}
+                      className={`rounded px-2.5 py-1 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-40 ${
+                        selected
+                          ? "border border-pink-500 bg-pink-500/10 text-pink-200"
+                          : "border border-transparent text-neutral-400 hover:text-pink-200"
+                      }`}
+                    >
+                      {option.label}
+                    </button>
+                  );
+                })}
+              </div>
+              {generatedModeNote ? (
+                <p className="whitespace-nowrap text-xs text-neutral-500">
+                  {generatedModeNote}
+                </p>
+              ) : null}
+            </div>
           </div>
           <label className="inline-flex items-center gap-1" title="カードを大きく ⇔ 小さく">
             <span className="text-[10px] font-bold text-neutral-500">大</span>
@@ -2911,6 +2935,13 @@ function PagesPhase({
                   {alignedResult ? (
                     <span className="rounded border border-[#343434] bg-[#111] px-1.5 py-0.5 text-[9px] font-bold text-neutral-400">
                       枠そろえ済み
+                    </span>
+                  ) : result?.alignFallback === true ? (
+                    <span
+                      title="絵は変更していません。1コマずつ直すから範囲を調整できます"
+                      className="rounded border border-[#343434] bg-[#111] px-1.5 py-0.5 text-[9px] font-bold text-neutral-400"
+                    >
+                      枠そろえ見送り
                     </span>
                   ) : null}
                 </div>
