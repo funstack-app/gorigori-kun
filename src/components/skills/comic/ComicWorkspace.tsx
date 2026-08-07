@@ -16,6 +16,7 @@ import {
   isValidStory,
   MAX_PANELS_PER_PAGE,
   parseComicStory,
+  resolveStoryLayoutTemplateWithDeterministicFallback,
 } from "../../../lib/comic/prompts";
 import type {
   ComicCharacter,
@@ -35,7 +36,6 @@ import type {
 } from "../../../lib/comic/types";
 import { normalizeComicPageGenMode } from "../../../lib/comic/types";
 import {
-  COMIC_LAYOUT_TEMPLATES,
   COMIC_PAGE_ASPECT,
   getComicTemplate,
   type ComicLayoutTemplate,
@@ -141,15 +141,16 @@ const PANEL_REEDIT_BUSY_MESSAGE =
 const COMIC_PAGE_ASPECT_WARN_MESSAGE =
   "生成画像の比率が想定(3:4)と大きく違います。作り直しをおすすめします";
 
-/** aligned 生成で使うページ単位の12テンプレを厳密に解決する。 */
+/** aligned 生成で使う型を、構成指定または共通の決定論補完で解決する。 */
 function resolveAlignedTemplate(
   page: ComicStoryPage,
   storyTemplateId: string | null,
 ): ComicLayoutTemplate | null {
-  const id = storyTemplateId ?? page.layoutTemplateId;
-  if (!id) return null;
-  const template = COMIC_LAYOUT_TEMPLATES.find((item) => item.id === id) ?? null;
-  return template?.panelCount === page.panels.length ? template : null;
+  return resolveStoryLayoutTemplateWithDeterministicFallback(
+    page.page,
+    page.panels.length,
+    storyTemplateId ?? page.layoutTemplateId,
+  );
 }
 
 /** ltr の再組立先だけを左右反転し、パネル番号の読み順を保つ。 */
@@ -1490,12 +1491,26 @@ function ComicFlow() {
         storyTemplate && storyTemplate.panelCount === page.panels.length
           ? storyTemplate
           : null;
-      // aligned は明示テンプレまたは構成AIがページ単位で選んだテンプレを必須にする。
+      // aligned は明示テンプレ・構成AI・決定論補完の順でページ単位の型を解決する。
       const alignedTemplate = resolveAlignedTemplate(page, storyTemplateId);
-      if (mode === "aligned" && !alignedTemplate) {
-        throw new Error("このページのコマ数に合うテンプレを確認できませんでした。");
+      if (mode === "aligned" && alignedTemplate) {
+        // ミニ図と実レイアウトを一致させるため、補完結果もページ構成へ確定保存する。
+        setStoryPages((previous) =>
+          previous.map((item) =>
+            item.page === page.page && item.layoutTemplateId !== alignedTemplate.id
+              ? { ...item, layoutTemplateId: alignedTemplate.id }
+              : item,
+          ),
+        );
+      } else if (mode === "aligned") {
+        pushToast({
+          kind: "info",
+          text: `このページはコマ数が ${page.panels.length} のため、コマ割りの型に合わせられませんでした（一枚描きで生成します）`,
+          ttlMs: 7000,
+        });
       }
-      const template = mode === "aligned" ? alignedTemplate : directTemplate;
+      const shouldAlign = mode === "aligned" && alignedTemplate !== null;
+      const template = shouldAlign ? alignedTemplate : directTemplate;
 
       // このページの cast だけを参照・属性・限定句の基準にする（PageCastRow と同じ判定）。
       const resolution = resolvePageCast(page, characters, envReferences);
@@ -1595,7 +1610,7 @@ function ComicFlow() {
         );
       };
 
-      if (mode === "direct") {
+      if (!shouldAlign) {
         adoptDirectPage();
       } else {
         // template は上で必須確認済み。TypeScriptへも同じ事実を明示する。

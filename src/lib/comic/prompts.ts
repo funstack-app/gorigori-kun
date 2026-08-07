@@ -521,13 +521,27 @@ function parseStoryRows(data: unknown, panelCount: number): number[][] | null {
   return rows;
 }
 
-/** 12テンプレの実在IDだけをページ構成へ取り込む。 */
-function parseStoryLayoutTemplateId(data: unknown): string | undefined {
-  if (typeof data !== "string") return undefined;
-  const id = data.trim();
-  return COMIC_LAYOUT_TEMPLATES.some((template) => template.id === id)
-    ? id
-    : undefined;
+/**
+ * AI 未指定・無効時の決定論補完として、ページのコマ数に合う型を解決する。
+ * 有効な指定IDを優先し、それ以外はID昇順の候補をページ番号で循環させる。
+ * 同じ入力は必ず同じ型になり、コマ数一致がなければ null を返す。
+ */
+export function resolveStoryLayoutTemplateWithDeterministicFallback(
+  pageNumber: number,
+  panelCount: number,
+  candidateId?: unknown,
+): ComicLayoutTemplate | null {
+  const id = typeof candidateId === "string" ? candidateId.trim() : "";
+  const selected = COMIC_LAYOUT_TEMPLATES.find(
+    (template) => template.id === id && template.panelCount === panelCount,
+  );
+  if (selected) return selected;
+
+  const matches = COMIC_LAYOUT_TEMPLATES.filter(
+    (template) => template.panelCount === panelCount,
+  ).sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  if (matches.length === 0) return null;
+  return matches[(pageNumber - 1) % matches.length] ?? null;
 }
 
 /**
@@ -622,7 +636,11 @@ export function parseComicStory(
     }
     const panels = parsePanelArray(obj.panels);
     if (!panels) return null;
-    const layoutTemplateId = parseStoryLayoutTemplateId(obj.layoutTemplateId);
+    const layoutTemplate = resolveStoryLayoutTemplateWithDeterministicFallback(
+      obj.page,
+      panels.length,
+      obj.layoutTemplateId,
+    );
     // rows は任意。壊れている場合はページ全体を落とさず、rows/layoutPlan だけを
     // 丸ごと捨てて従来経路へ戻す（旧履歴・AIの省略との後方互換）。
     const rows = parseStoryRows(obj.rows, obj.panelCount);
@@ -654,7 +672,7 @@ export function parseComicStory(
       cast,
       panelCount: obj.panelCount,
       panels,
-      ...(layoutTemplateId ? { layoutTemplateId } : {}),
+      ...(layoutTemplate ? { layoutTemplateId: layoutTemplate.id } : {}),
       ...(rows && layoutPlan ? { rows, layoutPlan } : {}),
     });
   }

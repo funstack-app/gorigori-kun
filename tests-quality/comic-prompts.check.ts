@@ -318,3 +318,63 @@ test("コマの吹き出し・擬音句は引用とkind記述子を保ち、空�
   const pagePrompt = buildFullPagePrompt([panel], null, [character]);
   expect(pagePrompt).toContain(`panel 1: prompt-1. ${clause}`);
 });
+
+test("AI未指定の型はID昇順をページ番号で循環し、同じ入力では同じ型になる", async () => {
+  const { resolveStoryLayoutTemplateWithDeterministicFallback } = await import(
+    "../src/lib/comic/prompts"
+  );
+
+  const ids = [1, 2, 3, 4, 5, 6, 7].map(
+    (page) =>
+      resolveStoryLayoutTemplateWithDeterministicFallback(page, 5)?.id ?? null,
+  );
+  expect(ids).toEqual([
+    "manga02",
+    "manga03",
+    "manga04",
+    "manga06",
+    "manga07",
+    "manga09",
+    "manga02",
+  ]);
+  expect(resolveStoryLayoutTemplateWithDeterministicFallback(7, 5)?.id).toBe(
+    resolveStoryLayoutTemplateWithDeterministicFallback(7, 5)?.id,
+  );
+
+  // 牙: 常に先頭を返す実装や循環の起点をずらす実装では、この境界を満たせない。
+  expect(resolveStoryLayoutTemplateWithDeterministicFallback(6, 5)?.id).toBe(
+    "manga09",
+  );
+  expect(resolveStoryLayoutTemplateWithDeterministicFallback(7, 5)?.id).toBe(
+    "manga02",
+  );
+});
+
+test("AIが無効な型IDを返しても構成取り込み時に決定論で補完する", () => {
+  const panels = [1, 2, 3, 4, 5].map(comicPanel);
+  const parsed = parseComicStory(
+    JSON.stringify({
+      pages: [
+        {
+          page: 2,
+          synopsis: "お餅を丸める",
+          layoutHint: "five panels",
+          cast: ["モチ丸"],
+          panelCount: 5,
+          layoutTemplateId: "not-a-template",
+          panels,
+        },
+      ],
+    }),
+  );
+
+  expect(parsed?.[0].layoutTemplateId).toBe("manga03");
+});
+
+test("コマ数一致の型がない場合は決定論補完もnullを返す", async () => {
+  const { resolveStoryLayoutTemplateWithDeterministicFallback } = await import(
+    "../src/lib/comic/prompts"
+  );
+
+  expect(resolveStoryLayoutTemplateWithDeterministicFallback(1, 3)).toBeNull();
+});
