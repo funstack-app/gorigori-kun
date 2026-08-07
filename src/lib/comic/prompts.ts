@@ -1163,6 +1163,9 @@ export function buildFullPagePrompt(
       `${panels.length} panels. ${readingOrderClause}. design the panel layout yourself for maximum readability and dramatic impact: vary panel sizes and shapes, give the key moment the largest panel, keep the gutters clean${hint ? `. layout direction: ${hint}` : ""}`,
     );
   }
+  parts.push(
+    "full-bleed page layout — panels extend to the left and right edges of the page with no outer side margin; keep the top and bottom outer margins",
+  );
 
   // 3. 連続ストーリー文脈（複数ページのときだけ）
   if ((context.totalPages ?? 1) > 1 && context.pageNumber) {
