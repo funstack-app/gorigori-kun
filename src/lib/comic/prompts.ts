@@ -1306,6 +1306,26 @@ export function buildFullPagePrompt(
 }
 
 /**
+ * 塗り絵方式（stencil）でだけ足す句（設計書 §2）。
+ *
+ * 1枚目の参照画像は機械が描いた枠だけのページ（scaffold）で、対になるマスクの
+ * 白い部分がコマの内側。枠線・ガター・外周は生成後に機械が焼き戻すため、AIには
+ * 「白い所だけに描け・黒い線には触るな」だけを伝える。
+ */
+export const STENCIL_FRAME_CLAUSE =
+  "the first reference image is the fixed panel frame layout of this page — draw the manga artwork and speech balloons ONLY inside the white panel areas of the mask; never redraw, move, or cover the black frame lines, gutters, or outer margins";
+
+/**
+ * 既存のページプロンプトへ stencil 句を足す（塗り絵生成のときだけ呼ぶ）。
+ *
+ * 既存句には一切触らず末尾に1句足すだけ。区切りは buildFullPagePrompt の
+ * parts 連結と同じ `, ` にして、ページ経路のプロンプトの見え方を揃える。
+ */
+export function buildStencilPagePrompt(basePagePrompt: string): string {
+  return `${basePagePrompt}, ${STENCIL_FRAME_CLAUSE}`;
+}
+
+/**
  * 「きっちりコマ割り」で初回生成する、1コマ分のプロンプトを組む。
  *
  * ページ枠は後段の機械合成で描くため、AIには枠・ガターを描かせない。

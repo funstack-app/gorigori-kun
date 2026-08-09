@@ -12,6 +12,7 @@ import {
   buildFullPagePrompt,
   buildPanelBalloonSfxClause,
   buildPanelImagePrompt,
+  buildStencilPagePrompt,
   buildStoryPrompt,
   isValidStory,
   MAX_PANELS_PER_PAGE,
@@ -91,6 +92,7 @@ import {
 } from "../../../lib/comic/references";
 import {
   buildPanelReeditGenerationRequest,
+  buildPanelReeditImageInputs,
   compositePanelImages,
   createPanelMaskPng,
   detectPanelInterior,
@@ -123,6 +125,12 @@ import {
   type SplitDirection,
 } from "../../../lib/comic/panelLayoutOps";
 import { recomposePageToTemplate } from "../../../lib/comic/pageAssembly";
+import {
+  assertStencilFrames,
+  compositeStencilResult,
+  renderPanelMask,
+  renderTemplateScaffold,
+} from "../../../lib/comic/stencil";
 
 /** PC から画像を添付するときの拡張子フィルタ（GoalChatPanel と同値）。 */
 const IMAGE_EXTS = ["png", "jpg", "jpeg", "webp", "gif", "bmp"];
@@ -141,11 +149,23 @@ const PANEL_REEDIT_BUSY_MESSAGE =
 const COMIC_PAGE_ASPECT_WARN_MESSAGE =
   "生成画像の比率が想定(3:4)と大きく違います。作り直しをおすすめします";
 
+/**
+ * きっちりコマ割りの生成方式（設計書 S1）。既定は塗り絵（stencil）。
+ *
+ * 塗り絵は枠を生成前に機械で描いて確定させるので、枠の検出工程そのものが無い。
+ * 実機で塗り絵が使い物にならなかったときは、この定数を "align" に戻すだけで
+ * 旧・枠検出方式へ復旧できる（設計書 §6-5。旧経路のコードは消していない）。
+ */
+const ALIGNED_PIPELINE: "stencil" | "align" = "stencil";
+
 type ComicPageGenerationDiagnosticReason =
   | "成立"
   | "型なし"
   | "照合失敗1回目"
   | "照合失敗2回目"
+  | "stencil成立"
+  | "stencil寸法不一致1回目"
+  | "stencil寸法不一致2回目"
   | "例外";
 
 /**
@@ -158,13 +178,17 @@ function logComicPageGeneration(args: {
   templateId: string | null;
   aligned: boolean;
   reason: ComicPageGenerationDiagnosticReason;
+  /** 塗り絵の枠照合（assertStencilFrames）の結果。塗り絵を通らなかった行では出さない。 */
+  framesVerified?: boolean;
   errorMessage?: string;
 }): void {
   const errorSuffix = args.errorMessage
     ? ` error=${args.errorMessage.replace(/\s+/g, " ").trim()}`
     : "";
+  const framesSuffix =
+    args.framesVerified === undefined ? "" : ` framesVerified=${args.framesVerified}`;
   console.info(
-    `[comic] page=${args.page} requestedMode=${args.requestedMode} templateId=${args.templateId ?? "null"} aligned=${args.aligned} reason=${args.reason}${errorSuffix}`,
+    `[comic] page=${args.page} requestedMode=${args.requestedMode} templateId=${args.templateId ?? "null"} aligned=${args.aligned} reason=${args.reason}${framesSuffix}${errorSuffix}`,
   );
 }
 
@@ -1470,6 +1494,8 @@ function ComicFlow() {
     let resolvedTemplateId: string | null = null;
     let diagnosticAligned = false;
     let diagnosticReason: ComicPageGenerationDiagnosticReason = "成立";
+    /** 塗り絵の枠照合を通ったか。塗り絵を通らない経路では undefined のままにする。 */
+    let diagnosticFramesVerified: boolean | undefined;
 
     // このページだけの中止トークン。単体生成の中止は「押したページ」にしか効かない。
     const pageTokens = pageTokensRef.current;
@@ -1595,6 +1621,17 @@ function ComicFlow() {
           styleText: colorMode === "faithful" ? undefined : styleText,
         },
       );
+      /** 生成直後の1080x1440正規化。中止・比率警告の扱いを全経路で1本にする。 */
+      const normalizeGeneratedPage = async (generatedPath: string) => {
+        // Aとalignedの両方を同じ既存関所で1080x1440へ正規化する。
+        const normalized = await normalizeComicPage(generatedPath);
+        if (!stillMine()) return null;
+        if (normalized.aspectWarn) {
+          pushToast({ kind: "info", text: COMIC_PAGE_ASPECT_WARN_MESSAGE, ttlMs: 5000 });
+        }
+        return normalized;
+      };
+
       /** 初回とaligned再試行を、同じ生成条件・正規化・中止経路へ通す。 */
       const generateNormalizedPage = async () => {
         const generated = await images.generateBatch({
@@ -1613,30 +1650,24 @@ function ComicFlow() {
         if (!generatedPath) {
           throw new Error(generated.errors[0] ?? "画像が生成されませんでした");
         }
-
-        // Aとalignedの両方を同じ既存関所で1080x1440へ正規化する。
-        const normalized = await normalizeComicPage(generatedPath);
-        if (!stillMine()) return null;
-        if (normalized.aspectWarn) {
-          pushToast({ kind: "info", text: COMIC_PAGE_ASPECT_WARN_MESSAGE, ttlMs: 5000 });
-        }
-        return normalized;
+        return await normalizeGeneratedPage(generatedPath);
       };
 
-      const initialNormalizedPage = await generateNormalizedPage();
-      if (!initialNormalizedPage) return false;
-      let normalizedPage = initialNormalizedPage;
+      /** 直近に採用候補となった正規化済みページ。direct と失敗時fallbackが共有する。 */
+      let normalizedPage: Awaited<ReturnType<typeof generateNormalizedPage>> = null;
 
-      /** 素のA画像を採用する。direct本流とaligned照合失敗の共通処理。 */
+      /** 素のA画像を採用する。direct本流とaligned失敗時fallbackの共通処理。 */
       const adoptDirectPage = (alignFallback = false) => {
+        const adopted = normalizedPage;
+        if (!adopted) throw new Error("ページ画像を取得できませんでした。");
         setPageResults((previous) =>
           previous.map((result) =>
             result.page === page.page
               ? {
                   ...withoutLegacyPanelResults(result),
                   generating: false,
-                  imagePath: normalizedPage.imagePath,
-                  contentRect: normalizedPage.contentRect,
+                  imagePath: adopted.imagePath,
+                  contentRect: adopted.contentRect,
                   startedAt: undefined,
                   error: undefined,
                   genMode: "direct",
@@ -1658,15 +1689,176 @@ function ComicFlow() {
         );
       };
 
-      if (!shouldAlign) {
-        adoptDirectPage();
-        diagnosticReason = mode === "aligned" ? "型なし" : "成立";
-      } else {
-        // template は上で必須確認済み。TypeScriptへも同じ事実を明示する。
-        if (!alignedTemplate) throw new Error("テンプレを確認できませんでした。");
+      /**
+       * 枠そろえ成功時の状態遷移。塗り絵と旧・枠検出で完全に同じ形にする（設計書 S4）。
+       * 下流（編集誤差ゼロ・バッジ・注記）は slotsOverride と genMode に既配線。
+       */
+      const adoptAlignedPage = (
+        alignedPath: string,
+        outputTemplate: ComicLayoutTemplate,
+      ) => {
+        setPageResults((previous) =>
+          previous.map((result) => {
+            if (result.page !== page.page) return result;
+            // 旧structure素材キーはaligned結果へ持ち越さない。
+            const cleanResult = withoutLegacyPanelResults(result);
+            return {
+              ...cleanResult,
+              generating: false,
+              imagePath: alignedPath,
+              contentRect: undefined,
+              startedAt: undefined,
+              error: undefined,
+              genMode: "aligned",
+              alignFallback: undefined,
+              direction: readingDirection,
+              colorMode,
+              styleText:
+                colorMode === "faithful" ? undefined : styleText.trim() || undefined,
+            };
+          }),
+        );
+        // 枠を確定させたテンプレpercent座標を、以後の編集範囲の正にする。
+        setStoryPages((previous) =>
+          previous.map((item) =>
+            item.page === page.page
+              ? {
+                  ...item,
+                  slotsOverride: outputTemplate.slots.map((slot) => ({
+                    ...slot,
+                    points: slot.points?.map(([x, y]) => [x, y] as [number, number]),
+                  })),
+                }
+              : item,
+          ),
+        );
+      };
+
+      /**
+       * 塗り絵方式（設計書 §1）。枠は生成前に機械で描いて確定させるので、
+       * 生成後にやることは「AIの絵の枠外を scaffold で焼き戻す」決定論合成だけ。
+       * 非決定なのは AI の出力寸法だけなので、そこだけ既存の再試行パターンで扱う。
+       */
+      const runStencilPipeline = async (
+        alignedTemplate: ComicLayoutTemplate,
+      ): Promise<"done" | "cancelled"> => {
+        const scaffold = renderTemplateScaffold(alignedTemplate, readingDirection);
+        const mask = renderPanelMask(alignedTemplate, readingDirection);
+        const stencilStamp = Date.now();
+        // ブラウザから直接書かず、Rustコマンド経由で保存する。
+        const scaffoldPath = await images.writeUpload(
+          `comic-stencil-scaffold-p${page.page}-${stencilStamp}.png`,
+          await canvasToPngBytes(scaffold),
+        );
+        if (!stillMine()) return "cancelled";
+        const maskPath = await images.writeUpload(
+          `comic-stencil-mask-p${page.page}-${stencilStamp}.png`,
+          await canvasToPngBytes(mask),
+        );
+        if (!stillMine()) return "cancelled";
+
+        // 1コマ再生成と同じ規約: 参照1枚目が下地でマスク対、以降のキャラ参照はマスクなし。
+        const imageInputs = buildPanelReeditImageInputs(scaffoldPath, maskPath, refPaths);
+        const stencilPrompt = buildStencilPagePrompt(prompt);
+
+        let drawnPage: PanelImageData | null = null;
+        let lastGeneratedPath: string | null = null;
+        let sizeMismatchedOnce = false;
+        // 寸法不一致だけは同じ入力で1回だけやり直す。2回目も違えば下のfallbackへ。
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          const generated = await images.generateBatch({
+            prompt: stencilPrompt,
+            count: 1,
+            ...imageInputs,
+            sourceTag: tag,
+          });
+          if (!stillMine()) return "cancelled";
+          if (generated.cancelled) {
+            resetPageTile();
+            return "cancelled";
+          }
+          const generatedPath = generated.generatedPaths[0];
+          if (!generatedPath) {
+            throw new Error(generated.errors[0] ?? "画像が生成されませんでした");
+          }
+          lastGeneratedPath = generatedPath;
+          const drawn = await readPanelImageData(generatedPath);
+          if (!stillMine()) return "cancelled";
+          if (drawn.width === scaffold.width && drawn.height === scaffold.height) {
+            drawnPage = drawn;
+            break;
+          }
+          if (attempt === 0) {
+            sizeMismatchedOnce = true;
+            pushToast({
+              kind: "info",
+              text: "枠が揃わなかったため、もう一度だけ描き直しています…",
+              ttlMs: 7000,
+            });
+          }
+        }
+
+        if (!drawnPage) {
+          // 合成できないのは寸法違いのときだけ。絵はそのまま一枚描きとして採用する。
+          diagnosticReason = "stencil寸法不一致2回目";
+          if (!lastGeneratedPath) {
+            throw new Error("画像が生成されませんでした");
+          }
+          const fallbackPage = await normalizeGeneratedPage(lastGeneratedPath);
+          if (!fallbackPage) return "cancelled";
+          normalizedPage = fallbackPage;
+          adoptDirectPage(true);
+          pushToast({
+            kind: "info",
+            text: "枠そろえに失敗しました（生成画像の寸法が合いませんでした）。絵はそのまま使えます",
+            ttlMs: 7000,
+          });
+          return "done";
+        }
+
+        const composite = compositeStencilResult(
+          panelImageDataCanvas(drawnPage),
+          scaffold,
+          mask,
+        );
+        // 実機ゲート2の機械照合。枠外が1画素でも scaffold と違えば例外にして採用しない。
+        diagnosticFramesVerified = false;
+        assertStencilFrames(composite, scaffold, mask);
+        diagnosticFramesVerified = true;
+
+        const pngBytes = await canvasToPngBytes(composite);
+        if (!stillMine()) return "cancelled";
+        const alignedPath = await images.writeUpload(
+          `comic-aligned-p${page.page}-${Date.now()}.png`,
+          pngBytes,
+        );
+        if (!stillMine()) return "cancelled";
+
+        diagnosticAligned = true;
+        diagnosticReason = sizeMismatchedOnce ? "stencil寸法不一致1回目" : "stencil成立";
+        adoptAlignedPage(
+          alignedPath,
+          templateForReadingDirection(alignedTemplate, readingDirection),
+        );
+        return "done";
+      };
+
+      /**
+       * 旧・枠検出方式（生成した絵から枠線を探してテンプレへ再組立する）。
+       *
+       * 既定では呼ばれない。実機で塗り絵が使い物にならなかったときに
+       * ALIGNED_PIPELINE を "align" へ戻すだけで復旧できるよう残している
+       * （設計書 S2 / §6-5。旧経路のコードは消さない）。
+       */
+      const runAlignDetectionPipeline = async (
+        alignedTemplate: ComicLayoutTemplate,
+      ): Promise<"done" | "cancelled"> => {
+        const initialPage = await generateNormalizedPage();
+        if (!initialPage) return "cancelled";
+        normalizedPage = initialPage;
         let alignmentFailedOnce = false;
-        let imageData = await readPanelImageData(normalizedPage.imagePath);
-        if (!stillMine()) return false;
+        let imageData = await readPanelImageData(initialPage.imagePath);
+        if (!stillMine()) return "cancelled";
         let alignment = alignSlotsToTemplate(
           imageData,
           alignedTemplate,
@@ -1680,10 +1872,10 @@ function ComicFlow() {
             ttlMs: 7000,
           });
           const retryNormalizedPage = await generateNormalizedPage();
-          if (!retryNormalizedPage) return false;
+          if (!retryNormalizedPage) return "cancelled";
           normalizedPage = retryNormalizedPage;
-          imageData = await readPanelImageData(normalizedPage.imagePath);
-          if (!stillMine()) return false;
+          imageData = await readPanelImageData(retryNormalizedPage.imagePath);
+          if (!stillMine()) return "cancelled";
           alignment = alignSlotsToTemplate(
             imageData,
             alignedTemplate,
@@ -1698,66 +1890,48 @@ function ComicFlow() {
             text: `枠そろえに失敗しました（${describeAlignmentFailure(alignment.failureCode)}）。絵はそのまま使えます`,
             ttlMs: 7000,
           });
-        } else {
-          diagnosticAligned = true;
-          diagnosticReason = alignmentFailedOnce ? "照合失敗1回目" : "成立";
-          const outputTemplate = templateForReadingDirection(
-            alignedTemplate,
-            readingDirection,
-          );
-          const canvas = recomposePageToTemplate({
-            sourceImage: panelImageDataCanvas(imageData),
-            sourceWidth: imageData.width,
-            sourceHeight: imageData.height,
-            alignedSlots: alignment.slots,
-            template: outputTemplate,
-            borderPx: alignment.borderPx,
-          });
-          const pngBytes = await canvasToPngBytes(canvas);
-          if (!stillMine()) return false;
-          // ブラウザから直接書かず、Rustコマンド経由で保存する。
-          const alignedPath = await images.writeUpload(
-            `comic-aligned-p${page.page}-${Date.now()}.png`,
-            pngBytes,
-          );
-          if (!stillMine()) return false;
-
-          setPageResults((previous) =>
-            previous.map((result) => {
-              if (result.page !== page.page) return result;
-              // 旧structure素材キーはaligned結果へ持ち越さない。
-              const cleanResult = withoutLegacyPanelResults(result);
-              return {
-                ...cleanResult,
-                generating: false,
-                imagePath: alignedPath,
-                contentRect: undefined,
-                startedAt: undefined,
-                error: undefined,
-                genMode: "aligned",
-                alignFallback: undefined,
-                direction: readingDirection,
-                colorMode,
-                styleText:
-                  colorMode === "faithful" ? undefined : styleText.trim() || undefined,
-              };
-            }),
-          );
-          // 再組立先と同じテンプレpercent座標を、以後の編集範囲の正にする。
-          setStoryPages((previous) =>
-            previous.map((item) =>
-              item.page === page.page
-                ? {
-                    ...item,
-                    slotsOverride: outputTemplate.slots.map((slot) => ({
-                      ...slot,
-                      points: slot.points?.map(([x, y]) => [x, y] as [number, number]),
-                    })),
-                  }
-                : item,
-            ),
-          );
+          return "done";
         }
+        const outputTemplate = templateForReadingDirection(
+          alignedTemplate,
+          readingDirection,
+        );
+        const canvas = recomposePageToTemplate({
+          sourceImage: panelImageDataCanvas(imageData),
+          sourceWidth: imageData.width,
+          sourceHeight: imageData.height,
+          alignedSlots: alignment.slots,
+          template: outputTemplate,
+          borderPx: alignment.borderPx,
+        });
+        const pngBytes = await canvasToPngBytes(canvas);
+        if (!stillMine()) return "cancelled";
+        // ブラウザから直接書かず、Rustコマンド経由で保存する。
+        const alignedPath = await images.writeUpload(
+          `comic-aligned-p${page.page}-${Date.now()}.png`,
+          pngBytes,
+        );
+        if (!stillMine()) return "cancelled";
+        diagnosticAligned = true;
+        diagnosticReason = alignmentFailedOnce ? "照合失敗1回目" : "成立";
+        adoptAlignedPage(alignedPath, outputTemplate);
+        return "done";
+      };
+
+      if (!shouldAlign) {
+        const directPage = await generateNormalizedPage();
+        if (!directPage) return false;
+        normalizedPage = directPage;
+        adoptDirectPage();
+        diagnosticReason = mode === "aligned" ? "型なし" : "成立";
+      } else {
+        // template は上で必須確認済み。TypeScriptへも同じ事実を明示する。
+        if (!alignedTemplate) throw new Error("テンプレを確認できませんでした。");
+        const outcome =
+          ALIGNED_PIPELINE === "stencil"
+            ? await runStencilPipeline(alignedTemplate)
+            : await runAlignDetectionPipeline(alignedTemplate);
+        if (outcome === "cancelled") return false;
       }
 
       setPanelReeditHistory((previous) =>
@@ -1769,6 +1943,7 @@ function ComicFlow() {
         templateId: resolvedTemplateId,
         aligned: diagnosticAligned,
         reason: diagnosticReason,
+        framesVerified: diagnosticFramesVerified,
       });
       return true;
     } catch (error) {
@@ -1780,6 +1955,7 @@ function ComicFlow() {
         templateId: resolvedTemplateId,
         aligned: false,
         reason: "例外",
+        framesVerified: diagnosticFramesVerified,
         errorMessage: message,
       });
       if (mode === "aligned") {
