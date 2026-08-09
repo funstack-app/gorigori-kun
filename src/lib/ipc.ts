@@ -951,6 +951,7 @@ export type GenerationInfo = {
   modelDisplayName: string | null;
   effort: string | null;
   provider: string | null;
+  count: number;
   kind: string;
   refImagePaths: string[];
   generatedAt: number;
@@ -987,6 +988,8 @@ export type PromptHistoryRow = {
 
 export const history = {
   recent: (limit?: number) => invoke<PromptHistoryRow[]>("turns_recent", { limit }),
+  recentWithImages: (limit?: number) =>
+    invoke<TurnWithImages[]>("turns_recent_with_images", { limit }),
   generationInfoForImage: (path: string) =>
     invoke<GenerationInfo | null>("generation_info_for_image", { path }),
 };

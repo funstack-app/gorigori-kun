@@ -174,6 +174,7 @@ pub struct GenerationInfo {
     pub model_display_name: Option<String>,
     pub effort: Option<String>,
     pub provider: Option<String>,
+    pub count: i64,
     pub kind: String,
     pub ref_image_paths: Vec<String>,
     pub generated_at: i64,
@@ -553,7 +554,7 @@ pub async fn generation_info_for_image(
     let pool = get_sqlite_pool(&app).await?;
     let row = sqlx::query(
         "SELECT t.prompt, t.model, t.model_display_name, t.effort, t.provider, \
-                t.kind, t.ref_image_paths, t.created_at \
+                t.count, t.kind, t.ref_image_paths, t.created_at \
          FROM images i \
          JOIN turns t ON t.id = i.turn_id \
          WHERE i.path = ?1 \
@@ -580,6 +581,7 @@ pub async fn generation_info_for_image(
         model_display_name: row.get::<Option<String>, _>("model_display_name"),
         effort: row.get::<Option<String>, _>("effort"),
         provider: row.get::<Option<String>, _>("provider"),
+        count: row.get::<i64, _>("count"),
         kind: row.get::<String, _>("kind"),
         ref_image_paths,
         generated_at: row.get::<i64, _>("created_at"),
@@ -692,6 +694,99 @@ pub async fn turns_recent(
             thumb_path: r.get::<Option<String>, _>("thumb_path"),
         })
         .collect())
+}
+
+/// Return the most-recent N prompt turns together with all image rows.
+///
+/// Unlike calling `turn_get` once per history row, this acquires one pooled
+/// connection and runs one joined query, so DB connection requests stay
+/// constant regardless of the number of returned turns or images.
+#[tauri::command]
+pub async fn turns_recent_with_images(
+    app: AppHandle,
+    limit: Option<i64>,
+) -> Result<Vec<TurnWithImages>, String> {
+    let pool = get_sqlite_pool(&app).await?;
+    let limit = limit.unwrap_or(200).clamp(1, 2000);
+    let mut conn = pool
+        .acquire()
+        .await
+        .map_err(|e| format!("turns_recent_with_images acquire failed: {e}"))?;
+    let rows = sqlx::query(
+        "SELECT t.id AS turn_id, t.session_id, t.prompt, t.model, t.effort, \
+                t.provider, t.model_job_set_type, t.model_display_name, \
+                t.ref_image_paths, t.count, t.kind AS turn_kind, \
+                t.created_at AS turn_created_at, \
+                i.id AS image_id, i.turn_id AS image_turn_id, i.path AS image_path, \
+                i.mtime_ms AS image_mtime_ms, i.size AS image_size, \
+                i.kind AS image_kind, i.media_type AS image_media_type, \
+                i.duration_seconds AS image_duration_seconds, \
+                i.thumbnail_path AS image_thumbnail_path, \
+                i.created_at AS image_created_at \
+         FROM ( \
+             SELECT id, session_id, prompt, model, effort, provider, \
+                    model_job_set_type, model_display_name, ref_image_paths, \
+                    count, kind, created_at \
+             FROM turns \
+             WHERE TRIM(prompt) <> '' \
+             ORDER BY created_at DESC \
+             LIMIT ?1 \
+         ) AS t \
+         LEFT JOIN images i ON i.turn_id = t.id \
+         ORDER BY t.created_at DESC, t.id DESC, i.created_at ASC",
+    )
+    .bind(limit)
+    .fetch_all(&mut *conn)
+    .await
+    .map_err(|e| format!("turns_recent_with_images query failed: {e}"))?;
+
+    let mut turns: Vec<TurnWithImages> = Vec::new();
+    for row in rows {
+        let turn_id = row.get::<String, _>("turn_id");
+        let is_new_turn = turns.last().map(|turn| turn.id.as_str()) != Some(turn_id.as_str());
+        if is_new_turn {
+            let ref_paths_json = row
+                .get::<Option<String>, _>("ref_image_paths")
+                .unwrap_or_else(|| "[]".to_string());
+            let ref_image_paths =
+                serde_json::from_str::<Vec<String>>(&ref_paths_json).unwrap_or_default();
+            turns.push(TurnWithImages {
+                id: turn_id.clone(),
+                session_id: row.get::<String, _>("session_id"),
+                prompt: row.get::<String, _>("prompt"),
+                model: row.get::<Option<String>, _>("model"),
+                effort: row.get::<Option<String>, _>("effort"),
+                provider: row.get::<Option<String>, _>("provider"),
+                model_job_set_type: row.get::<Option<String>, _>("model_job_set_type"),
+                model_display_name: row.get::<Option<String>, _>("model_display_name"),
+                ref_image_paths,
+                count: row.get::<i64, _>("count"),
+                kind: row.get::<String, _>("turn_kind"),
+                created_at: row.get::<i64, _>("turn_created_at"),
+                images: Vec::new(),
+            });
+        }
+
+        let Some(image_id) = row.get::<Option<String>, _>("image_id") else {
+            continue;
+        };
+        if let Some(turn) = turns.last_mut() {
+            turn.images.push(ImageRow {
+                id: image_id,
+                turn_id: row.get::<String, _>("image_turn_id"),
+                path: row.get::<String, _>("image_path"),
+                mtime_ms: row.get::<i64, _>("image_mtime_ms"),
+                size: row.get::<i64, _>("image_size"),
+                kind: row.get::<String, _>("image_kind"),
+                media_type: row.get::<String, _>("image_media_type"),
+                duration_seconds: row.get::<Option<i64>, _>("image_duration_seconds"),
+                thumbnail_path: row.get::<Option<String>, _>("image_thumbnail_path"),
+                created_at: row.get::<i64, _>("image_created_at"),
+            });
+        }
+    }
+
+    Ok(turns)
 }
 
 #[tauri::command]

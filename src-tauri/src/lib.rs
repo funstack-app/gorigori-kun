@@ -636,6 +636,7 @@ pub fn run() {
             commands::sessions::generation_info_for_image,
             commands::sessions::session_export,
             commands::sessions::turns_recent,
+            commands::sessions::turns_recent_with_images,
             commands::sessions::turn_get,
             // BiRefNet (ort) 経路。Mac の背景透過 (Vision/removebg.swift) は
             // images.rs 側の別経路なので、この cfg の影響を受けない。

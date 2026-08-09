@@ -3,9 +3,7 @@ import { useEffect, useState, type KeyboardEvent } from "react";
 import {
   images,
   history,
-  sessions as sessionsApi,
-  type PromptHistoryRow,
-  type TurnWithImages,
+  type GenerationInfo,
 } from "../lib/ipc";
 import { useImagePreview } from "../lib/store/imagePreview";
 import { useImages } from "../lib/store/images";
@@ -22,13 +20,9 @@ import { useToasts } from "../lib/store/toasts";
  * - ファイル名
  *
  * メタ情報の取得手順:
- *  1. history.recent(2000) で履歴の turn 一覧を取る（直近 120 件だけだと
- *     少し前の生成のプロンプトが拾えず「履歴に紐付いていません」になるため、
- *     Rust 側 clamp 上限の 2000 まで広げる）
- *  2. その中から、対象 imagePath を含む turn を逆引き
- *     （turn ごとに getTurn を呼んで images に該当 path があるか確認）
- *  3. 見つかった turn の prompt / model / effort / refImagePaths を表示
- *  4. turn が見つからなくても、projects.json のいずれかの item.prompt に
+ *  1. 対象 imagePath をDBで直接検索し、紐づく生成情報を1回で取得
+ *  2. 見つかった turn の prompt / model / effort / refImagePaths を表示
+ *  3. turn が見つからなくても、projects.json のいずれかの item.prompt に
  *     同じ imagePath があればそれをプロンプトとして表示する。
  *     Storyboard / マルチアングル等、turn を持たず projects.json 側にだけ
  *     プロンプトを保存する生成方法でもプロンプトをコピーできるようにする。
@@ -38,13 +32,7 @@ import { useToasts } from "../lib/store/toasts";
  * どの状態でも、プロンプトが取れたら「コピー」ボタンを表示する。
  */
 
-/** 履歴 turn の逆引き上限。Rust 側 turns_recent の clamp(1, 2000) と揃える。 */
-const HISTORY_LOOKUP_LIMIT = 2000;
-
-type Meta = {
-  turn: TurnWithImages;
-  row: PromptHistoryRow;
-};
+type Meta = GenerationInfo;
 
 export function ImageMetaPanel({ path }: { path: string }) {
   const item = useImages((s) => s.items.find((it) => it.path === path));
@@ -84,24 +72,13 @@ export function ImageMetaPanel({ path }: { path: string }) {
 
     (async () => {
       try {
-        const rows = await history.recent(HISTORY_LOOKUP_LIMIT);
+        const info = await history.generationInfoForImage(path);
         if (cancelled) return;
-        // 直近順に turn を当たって、最初に画像 path を含む turn を採用
-        for (const row of rows) {
-          if (cancelled) return;
-          try {
-            const turn = await sessionsApi.getTurn(row.id);
-            if (cancelled) return;
-            if (turn.images.some((img) => img.path === path)) {
-              setMeta({ turn, row });
-              setStatus("found");
-              return;
-            }
-          } catch {
-            // 単発の getTurn 失敗は無視して次へ
-          }
+        if (info) {
+          setMeta(info);
+          setStatus("found");
+          return;
         }
-        if (cancelled) return;
         // turn が見つからなくても projects.json にプロンプトがあれば拾う
         const fallback = promptFromProjects();
         if (fallback) {
@@ -111,7 +88,7 @@ export function ImageMetaPanel({ path }: { path: string }) {
         }
         setStatus("not-found");
       } catch (err) {
-        console.error("ImageMetaPanel history fetch failed", err);
+        console.error("ImageMetaPanel generation info fetch failed", err);
         if (cancelled) return;
         // 履歴取得に失敗しても projects.json 側でプロンプトが拾えれば出す
         const fallback = promptFromProjects();
@@ -292,7 +269,7 @@ export function ImageMetaPanel({ path }: { path: string }) {
         />
       )}
       {status === "found" && meta && (
-        <MetaRows meta={meta} onCopy={() => void copyPrompt(meta.row.prompt)} />
+        <MetaRows meta={meta} onCopy={() => void copyPrompt(meta.prompt)} />
       )}
     </div>
   );
@@ -341,7 +318,6 @@ function CopyPromptButton({ onClick }: { onClick: () => void }) {
 }
 
 function MetaRows({ meta, onCopy }: { meta: Meta; onCopy: () => void }) {
-  const { turn, row } = meta;
   return (
     /*
       STΛCK 指示 (2026-05-19):
@@ -360,38 +336,38 @@ function MetaRows({ meta, onCopy }: { meta: Meta; onCopy: () => void }) {
             {/*
               Higgsfield 経路で生成された turn は provider="higgsfield" +
               modelDisplayName ("Seedream V5 Lite" など) を保持している。
-              Codex 経路の turn.model (例: "gpt-5.5") は Codex の制御モデル名で
+              Codex 経路の meta.model (例: "gpt-5.5") は Codex の制御モデル名で
               あって、画像生成モデル名ではない。provider に応じて表示を切り替える。
             */}
-            {turn.provider === "magnific" && turn.modelDisplayName
-              ? `Magnific · ${turn.modelDisplayName}`
-              : turn.provider === "higgsfield" && turn.modelDisplayName
-                ? `Higgsfield · ${turn.modelDisplayName}`
-                : turn.provider === "codex" && turn.modelDisplayName
-                  ? `Codex · ${turn.modelDisplayName}`
-                  : (turn.model ?? "（未記録）")}
-            {turn.provider !== "higgsfield" && turn.effort
-              ? ` ・ effort: ${turn.effort}`
+            {meta.provider === "magnific" && meta.modelDisplayName
+              ? `Magnific · ${meta.modelDisplayName}`
+              : meta.provider === "higgsfield" && meta.modelDisplayName
+                ? `Higgsfield · ${meta.modelDisplayName}`
+                : meta.provider === "codex" && meta.modelDisplayName
+                  ? `Codex · ${meta.modelDisplayName}`
+                  : (meta.model ?? "（未記録）")}
+            {meta.provider !== "higgsfield" && meta.effort
+              ? ` ・ effort: ${meta.effort}`
               : ""}
           </dd>
           <dt className="text-[10px] font-bold uppercase tracking-wide text-neutral-500">
             生成日時
           </dt>
           <dd className="text-neutral-200">
-            {new Date(turn.createdAt).toLocaleString("ja-JP")}
+            {new Date(meta.generatedAt).toLocaleString("ja-JP")}
           </dd>
           <dt className="text-[10px] font-bold uppercase tracking-wide text-neutral-500">
             枚数
           </dt>
           <dd className="text-neutral-200">
-            {row.count} 枚 ({turn.kind})
+            {meta.count} 枚 ({meta.kind})
           </dd>
-          {turn.refImagePaths.length > 0 && (
+          {meta.refImagePaths.length > 0 && (
             <>
               <dt className="text-[10px] font-bold uppercase tracking-wide text-neutral-500">
                 参照画像
               </dt>
-              <dd className="text-neutral-200">{turn.refImagePaths.length} 件</dd>
+              <dd className="text-neutral-200">{meta.refImagePaths.length} 件</dd>
             </>
           )}
         </dl>
@@ -403,12 +379,12 @@ function MetaRows({ meta, onCopy }: { meta: Meta; onCopy: () => void }) {
           <span className="text-[10px] font-bold uppercase tracking-wide text-neutral-500">
             プロンプト
           </span>
-          {row.prompt && row.prompt.trim() ? (
+          {meta.prompt && meta.prompt.trim() ? (
             <CopyPromptButton onClick={onCopy} />
           ) : null}
         </div>
         <pre className="m-0 min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words rounded border border-neutral-800 bg-neutral-950 p-3 font-mono text-[12px] leading-relaxed text-neutral-200">
-          {row.prompt || "(プロンプトなし)"}
+          {meta.prompt || "(プロンプトなし)"}
         </pre>
       </div>
     </div>
