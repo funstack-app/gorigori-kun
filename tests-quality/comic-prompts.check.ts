@@ -5,9 +5,11 @@ import { getComicTemplate } from "../src/lib/comic/layoutTemplates";
 import {
   buildFullPagePrompt,
   buildPanelImagePrompt,
+  buildStencilPagePrompt,
   buildStructurePanelPrompt,
   buildStoryPrompt,
   parseComicStory,
+  STENCIL_FRAME_CLAUSE,
 } from "../src/lib/comic/prompts";
 import type { ComicCharacter, ComicPanel } from "../src/lib/comic/types";
 
@@ -377,6 +379,34 @@ test("コマ数一致の型がない場合は決定論補完もnullを返す", a
   );
 
   expect(resolveStoryLayoutTemplateWithDeterministicFallback(1, 3)).toBeNull();
+});
+
+test("塗り絵句は既存ページpromptを変えず、末尾に1回だけ足される", () => {
+  const panels = [1, 2, 3].map(comicPanel);
+  const base = buildFullPagePrompt(
+    panels,
+    getComicTemplate("manga02"),
+    [character],
+    "mono",
+    true,
+    { pageNumber: 1, totalPages: 1, readingDirection: "rtl" },
+  );
+
+  // 既存ページpromptには塗り絵句が混ざらない（stencil生成のときだけ足す）。
+  expect(base).not.toContain(STENCIL_FRAME_CLAUSE);
+
+  const stencil = buildStencilPagePrompt(base);
+
+  // 設計書 §2 の確定文字列。マスクの白い所だけに描かせ、黒い枠線に触らせない。
+  expect(STENCIL_FRAME_CLAUSE).toBe(
+    "the first reference image is the fixed panel frame layout of this page — draw the manga artwork and speech balloons ONLY inside the white panel areas of the mask; never redraw, move, or cover the black frame lines, gutters, or outer margins",
+  );
+  expect(stencil).toBe(`${base}, ${STENCIL_FRAME_CLAUSE}`);
+  expect(stencil.startsWith(base)).toBe(true);
+
+  // 牙: 句を2回足す実装や、既存句を置き換える実装ではここが落ちる。
+  expect(stencil.split(STENCIL_FRAME_CLAUSE).length - 1).toBe(1);
+  expect(stencil).toContain("clean black panel borders");
 });
 
 test("V14: 5コマは型未指定でも補完し、候補が空ならnullを返す", async () => {
