@@ -10,7 +10,7 @@ import type {
 } from "../../../lib/comic/types";
 import { MAX_STORY_PAGES } from "../../../lib/comic/prompts";
 import {
-  COMIC_LAYOUT_TEMPLATES,
+  ALL_COMIC_LAYOUT_TEMPLATES,
   type ComicLayoutTemplate,
 } from "../../../lib/comic/layoutTemplates";
 import { compact } from "../../../lib/ui/foldSummary";
@@ -62,7 +62,7 @@ export function buildLayoutSummary(
 ): string {
   const modeLabel =
     pageGenMode === "aligned" ? "きっちりコマ割り" : "おまかせ一枚描き";
-  const template = COMIC_LAYOUT_TEMPLATES.find((item) => item.id === templateId);
+  const template = ALL_COMIC_LAYOUT_TEMPLATES.find((item) => item.id === templateId);
   const templateLabel =
     templateId === AUTO_TEMPLATE_ID
       ? "おまかせ"
@@ -301,7 +301,7 @@ export function LayoutSection({
               </button>
             );
           })()}
-          {COMIC_LAYOUT_TEMPLATES.map((t) => {
+          {ALL_COMIC_LAYOUT_TEMPLATES.map((t) => {
             const selected = templateId === t.id;
             return (
               <button

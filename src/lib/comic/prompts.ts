@@ -10,6 +10,7 @@
 
 import { SFX_INTENT } from "./balloonLayout";
 import {
+  ALL_COMIC_LAYOUT_TEMPLATES,
   COMIC_LAYOUT_TEMPLATES,
   describeSlotShape,
   type ComicLayoutTemplate,
@@ -532,7 +533,7 @@ export function resolveStoryLayoutTemplateWithDeterministicFallback(
   candidateId?: unknown,
 ): ComicLayoutTemplate | null {
   const id = typeof candidateId === "string" ? candidateId.trim() : "";
-  const selected = COMIC_LAYOUT_TEMPLATES.find(
+  const selected = ALL_COMIC_LAYOUT_TEMPLATES.find(
     (template) => template.id === id && template.panelCount === panelCount,
   );
   if (selected) return selected;
@@ -716,7 +717,7 @@ export function isValidStory(
       return false;
     }
     if (requireLayoutTemplateId) {
-      const selectedTemplate = COMIC_LAYOUT_TEMPLATES.find(
+      const selectedTemplate = ALL_COMIC_LAYOUT_TEMPLATES.find(
         (template) => template.id === page.layoutTemplateId,
       );
       if (!selectedTemplate || selectedTemplate.panelCount !== page.panelCount) return false;

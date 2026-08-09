@@ -241,6 +241,26 @@ export const COMIC_LAYOUT_TEMPLATES: ComicLayoutTemplate[] = [
   },
 ];
 
+export const USER_COMIC_LAYOUT_TEMPLATES: ComicLayoutTemplate[] = [
+  {
+    id: "user01",
+    label: "手作り01",
+    panelCount: 3,
+    pageAspect: { w: 3, h: 4 },
+    slots: [
+      { x: 58.80, y: 2.36, w: 37.69, h: 36.04 },
+      { x: 3.52, y: 2.36, w: 52.92, h: 36.04 },
+      { x: 3.52, y: 41.53, w: 92.96, h: 56.01 },
+    ],
+    roles: ["起（導入）", "承（展開）", "見せ場（大ゴマ）"],
+  },
+];
+
+export const ALL_COMIC_LAYOUT_TEMPLATES = [
+  ...COMIC_LAYOUT_TEMPLATES,
+  ...USER_COMIC_LAYOUT_TEMPLATES,
+];
+
 export const DEFAULT_COMIC_TEMPLATE_ID = "manga01";
 
 /**
@@ -258,7 +278,7 @@ export const COMIC_PAGE_ASPECT: string = `${COMIC_LAYOUT_TEMPLATES[0].pageAspect
 /** 不明な ID は先頭テンプレへフォールバックする（保存データの前方互換）。 */
 export function getComicTemplate(id: string): ComicLayoutTemplate {
   return (
-    COMIC_LAYOUT_TEMPLATES.find((t) => t.id === id) ?? COMIC_LAYOUT_TEMPLATES[0]
+    ALL_COMIC_LAYOUT_TEMPLATES.find((t) => t.id === id) ?? COMIC_LAYOUT_TEMPLATES[0]
   );
 }
 
