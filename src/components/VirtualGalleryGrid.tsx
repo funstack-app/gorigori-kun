@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { type MouseEvent, useEffect, useRef, useState } from "react";
 import { Grid, type CellComponentProps } from "react-window";
 import { SafeImage } from "./SafeImage";
 import { type GalleryItem, type Judgement } from "../lib/store/images";
@@ -10,6 +10,11 @@ import { RegisterPresetDialog } from "./RegisterPresetDialog";
 const COLUMNS = 3;
 const GAP = 8; // px (matches Tailwind gap-2)
 const PADDING = 8; // px (matches Tailwind p-2)
+const LIBRARY_GAP = 12; // px (matches Tailwind gap-3)
+const LIBRARY_GRID_META_HEIGHT = 48;
+const LIBRARY_LIST_ROW_HEIGHT = 56;
+
+type GalleryViewMode = "grid" | "list";
 
 type CellProps = {
   items: GalleryItem[];
@@ -21,6 +26,7 @@ type CellProps = {
   onSelectClick: (
     path: string,
     mods: { meta?: boolean; shift?: boolean },
+    item: GalleryItem,
   ) => void;
   onToggleFavorite: (path: string) => void;
   onSetJudgement: (path: string, value: Judgement | null) => void;
@@ -33,6 +39,14 @@ type CellProps = {
   /** セルの最小幅(px)。指定時は列数を floor(内寸/minCellWidth) で可変にする
    *  (下限1列)。未指定なら従来の3列固定。 */
   minCellWidth?: number;
+  /** ライブラリ本画面用の見た目と操作。未指定なら従来のプロジェクト表示。 */
+  variant?: "project" | "library";
+  /** ライブラリ本画面の表示形式。variant="library" のときだけ使う。 */
+  viewMode?: GalleryViewMode;
+  /** グリッドの希望タイル幅(px)。variant="library" のときだけ使う。 */
+  tileSize?: number;
+  /** ライブラリ本画面が複数選択モードか。 */
+  selectionMode?: boolean;
 };
 
 /**
@@ -49,7 +63,7 @@ export function VirtualGalleryGrid(props: CellProps) {
   const [size, setSize] = useState({ width: 0, height: 0 });
   const [menu, setMenu] = useState<MenuState>(null);
   /** F-#1: ライブラリ右クリックメニュー → 「プリセット登録」で開くダイアログ。 */
-  const [presetTarget, setPresetTarget] = useState<string | null>(null);
+  const [presetTarget, setPresetTarget] = useState<GalleryItem | null>(null);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -67,15 +81,41 @@ export function VirtualGalleryGrid(props: CellProps) {
     return () => observer.disconnect();
   }, []);
 
-  // minCellWidth 指定時のみ列数可変 (下限1列)。未指定なら従来の 3 列固定。
-  const columns = props.minCellWidth
-    ? Math.max(
-        1,
-        Math.floor((size.width - PADDING * 2) / props.minCellWidth) || 1,
-      )
-    : COLUMNS;
-  const cellSize =
-    size.width > 0 ? Math.floor((size.width - PADDING * 2) / columns) : 100;
+  const isLibrary = props.variant === "library";
+  const viewMode = props.viewMode ?? "grid";
+  // ProjectGallery は従来計算を完全維持。ライブラリだけ表示幅とスライダー値から列数を決める。
+  const columns = isLibrary
+    ? viewMode === "list"
+      ? 1
+      : Math.max(
+          1,
+          Math.floor(
+            (size.width + LIBRARY_GAP) /
+              ((props.tileSize ?? 160) + LIBRARY_GAP),
+          ) || 1,
+        )
+    : props.minCellWidth
+      ? Math.max(
+          1,
+          Math.floor((size.width - PADDING * 2) / props.minCellWidth) || 1,
+        )
+      : COLUMNS;
+  const cellSize = isLibrary
+    ? size.width > 0
+      ? Math.floor(size.width / columns)
+      : 100
+    : size.width > 0
+      ? Math.floor((size.width - PADDING * 2) / columns)
+      : 100;
+  const rowHeight = isLibrary
+    ? viewMode === "list"
+      ? LIBRARY_LIST_ROW_HEIGHT
+      : Math.ceil(
+          Math.max(1, cellSize - LIBRARY_GAP) * (9 / 16) +
+            LIBRARY_GRID_META_HEIGHT +
+            LIBRARY_GAP,
+        )
+    : cellSize;
   const rowCount = Math.ceil(props.items.length / columns);
 
   const cellPropsWithMenu: CellPropsInternal = {
@@ -91,14 +131,19 @@ export function VirtualGalleryGrid(props: CellProps) {
           columnCount={columns}
           columnWidth={cellSize}
           rowCount={rowCount}
-          rowHeight={cellSize}
-          cellComponent={Cell}
+          rowHeight={rowHeight}
+          cellComponent={isLibrary ? LibraryCell : Cell}
           cellProps={cellPropsWithMenu}
-          style={{
-            height: size.height,
-            width: size.width,
-            padding: PADDING / 2,
-          }}
+          overscanCount={isLibrary ? 2 : undefined}
+          style={
+            isLibrary
+              ? { height: size.height, width: size.width }
+              : {
+                  height: size.height,
+                  width: size.width,
+                  padding: PADDING / 2,
+                }
+          }
         />
       )}
       {menu && (
@@ -108,7 +153,7 @@ export function VirtualGalleryGrid(props: CellProps) {
           items={buildGalleryItemMenu(menu.item, {
             favorites: props.favorites,
             onToggleFavorite: props.onToggleFavorite,
-            onRegisterPreset: (path) => setPresetTarget(path),
+            onRegisterPreset: () => setPresetTarget(menu.item),
             judgement: props.judgements.get(menu.item.path),
             onSetJudgement: props.onSetJudgement,
             projectScope: props.projectScope,
@@ -119,7 +164,8 @@ export function VirtualGalleryGrid(props: CellProps) {
       )}
       {presetTarget && (
         <RegisterPresetDialog
-          imagePath={presetTarget}
+          imagePath={presetTarget.path}
+          defaultName={isLibrary ? presetTarget.name : undefined}
           onClose={() => setPresetTarget(null)}
         />
       )}
@@ -182,10 +228,14 @@ function Cell({
             e.dataTransfer.effectAllowed = "copy";
           }}
           onClick={(e) =>
-            onSelectClick(it.path, {
-              meta: e.metaKey || e.ctrlKey,
-              shift: e.shiftKey,
-            })
+            onSelectClick(
+              it.path,
+              {
+                meta: e.metaKey || e.ctrlKey,
+                shift: e.shiftKey,
+              },
+              it,
+            )
           }
           onDoubleClick={() =>
             useImagePreview.getState().open(it.path, previewSiblings)
@@ -276,5 +326,177 @@ function Cell({
         </button>
       </div>
     </div>
+  );
+}
+
+/** ライブラリ本画面用セル。従来の見た目とクリック動作を保ったまま仮想化する。 */
+function LibraryCell({
+  columnIndex,
+  rowIndex,
+  style,
+  items,
+  selection,
+  judgements,
+  columns,
+  viewMode = "grid",
+  selectionMode = false,
+  onSelectClick,
+  onContextMenu,
+}: CellComponentProps<CellPropsInternal>) {
+  const i = rowIndex * columns + columnIndex;
+  const item = items[i];
+  if (!item) return <div style={style} />;
+
+  const isSelected = selection.has(item.path);
+  const judgement = judgements.get(item.path);
+  const handleClick = (event: MouseEvent<HTMLButtonElement>) =>
+    onSelectClick(
+      item.path,
+      {
+        meta: event.metaKey || event.ctrlKey,
+        shift: event.shiftKey,
+      },
+      item,
+    );
+  const handleContextMenu = (event: MouseEvent<HTMLButtonElement>) => {
+    event.preventDefault();
+    onContextMenu(item, event.clientX, event.clientY);
+  };
+
+  if (viewMode === "list") {
+    return (
+      <div style={{ ...style, paddingBottom: 4 }}>
+        <button
+          type="button"
+          onDoubleClick={() => useImagePreview.getState().open(item.path)}
+          onContextMenu={handleContextMenu}
+          onClick={handleClick}
+          className={[
+            "flex h-full w-full items-center gap-3 rounded-md border bg-[#1a1a1a] px-2 py-1.5 text-left transition",
+            isSelected
+              ? "border-pink-400 ring-1 ring-pink-500/40"
+              : "border-[#2a2a2a] hover:border-pink-400",
+          ].join(" ")}
+        >
+          <SafeImage
+            path={item.path}
+            alt=""
+            className="h-10 w-16 shrink-0 rounded object-cover"
+          />
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-[12px] font-medium text-neutral-200">
+              {item.name}
+            </p>
+            <p className="truncate text-[10px] text-neutral-500">
+              {selectionMode
+                ? isSelected
+                  ? "選択中（クリックで外す）"
+                  : "クリックで選択"
+                : "クリックで参照 / ダブルクリックで拡大"}
+            </p>
+          </div>
+          {judgement && (
+            <span
+              className={[
+                "shrink-0 rounded px-1.5 py-0.5 text-[10px] font-bold text-white",
+                judgement === "adopted"
+                  ? "bg-pink-500/90"
+                  : "bg-neutral-600/90",
+              ].join(" ")}
+            >
+              {judgement === "adopted" ? "採用" : "ボツ"}
+            </span>
+          )}
+          {selectionMode && isSelected && (
+            <span className="shrink-0 text-pink-400" aria-hidden>
+              <CheckIcon />
+            </span>
+          )}
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      style={{
+        ...style,
+        paddingRight: LIBRARY_GAP,
+        paddingBottom: LIBRARY_GAP,
+      }}
+    >
+      <div
+        className={[
+          "group relative h-full overflow-hidden rounded-xl border bg-[#1a1a1a] text-left transition",
+          isSelected
+            ? "border-pink-400 ring-2 ring-pink-500/40"
+            : "border-[#2a2a2a] hover:border-pink-400",
+        ].join(" ")}
+      >
+        <button
+          type="button"
+          onDoubleClick={() => useImagePreview.getState().open(item.path)}
+          onContextMenu={handleContextMenu}
+          onClick={handleClick}
+          className="block h-full w-full text-left"
+        >
+          <SafeImage
+            path={item.path}
+            alt=""
+            className="aspect-[16/9] w-full object-cover"
+          />
+          <div className="p-2">
+            <p className="truncate text-[11px] font-bold text-neutral-200">
+              {item.name}
+            </p>
+            <p className="mt-1 text-[10px] text-neutral-500">
+              {selectionMode
+                ? isSelected
+                  ? "選択中（クリックで外す）"
+                  : "クリックで選択"
+                : "クリックで参照 / ダブルクリックで拡大"}
+            </p>
+          </div>
+        </button>
+        {selectionMode && (
+          <div
+            className={[
+              "pointer-events-none absolute left-2 top-2 flex h-6 w-6 items-center justify-center rounded-md border-2",
+              isSelected
+                ? "border-pink-400 bg-pink-500 text-white"
+                : "border-white/70 bg-black/60 text-transparent",
+            ].join(" ")}
+          >
+            <CheckIcon />
+          </div>
+        )}
+        {judgement && (
+          <span
+            className={[
+              "pointer-events-none absolute right-2 top-2 rounded px-1.5 py-0.5 text-[10px] font-bold text-white shadow",
+              judgement === "adopted"
+                ? "bg-pink-500/90"
+                : "bg-neutral-600/90",
+            ].join(" ")}
+          >
+            {judgement === "adopted" ? "採用" : "ボツ"}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function CheckIcon() {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" className="h-4 w-4" aria-hidden>
+      <path
+        d="m5 10 3 3 7-7"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
   );
 }

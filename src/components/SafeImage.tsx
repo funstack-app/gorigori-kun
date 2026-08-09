@@ -48,6 +48,8 @@ export function SafeImage({
   retryOnError = false,
   className,
   alt,
+  loading = "lazy",
+  decoding = "async",
   ...rest
 }: SafeImageProps) {
   const [errored, setErrored] = useState(false);
@@ -103,6 +105,8 @@ export function SafeImage({
       src={convertFileSrc(path)}
       alt={alt ?? ""}
       className={className}
+      loading={loading}
+      decoding={decoding}
       onError={(e) => {
         rest.onError?.(e);
         if (retryOnError && !retried.current) {

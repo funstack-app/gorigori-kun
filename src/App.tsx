@@ -4,10 +4,8 @@ import { switchActiveProject } from "./components/ActiveProjectSelector";
 import { ApprovalDialog } from "./components/ApprovalDialog";
 import { AuthGate } from "./components/AuthGate";
 import { FirstRunStorageNotice } from "./components/FirstRunStorageNotice";
-import { ContextMenu, type ContextMenuItem } from "./components/ContextMenu";
 import { ErrorLogPanel } from "./components/ErrorLogPanel";
-import { buildGalleryItemMenu, deleteGalleryImages } from "./components/galleryItemMenu";
-import { RegisterPresetDialog } from "./components/RegisterPresetDialog";
+import { deleteGalleryImages } from "./components/galleryItemMenu";
 import { ImagePreviewModal } from "./components/ImagePreviewModal";
 import { LibraryAutoRenameButton } from "./components/LibraryAutoRenameButton";
 import { LibraryBatchSaveButton } from "./components/LibraryBatchSaveButton";
@@ -15,6 +13,7 @@ import { MaskEditorModal } from "./components/MaskEditorModal";
 import { PresetsDrawer } from "./components/PresetsDrawer";
 import { SnsExportModal } from "./components/SnsExportModal";
 import { SafeImage } from "./components/SafeImage";
+import { VirtualGalleryGrid } from "./components/VirtualGalleryGrid";
 import { ProjectGallery } from "./components/ProjectGallery";
 import { SettingsWorkspace } from "./components/SettingsWorkspace";
 import { SkillsWorkspace } from "./components/SkillsWorkspace";
@@ -45,8 +44,7 @@ import {
 } from "./lib/store/composer";
 import { routeDirectRunBatchEvent } from "./lib/store/directRun";
 import { useDragHover } from "./lib/store/dragHover";
-import { useImagePreview } from "./lib/store/imagePreview";
-import { type GalleryItem, useImages } from "./lib/store/images";
+import { useImages } from "./lib/store/images";
 import { useLibrarySelection } from "./lib/store/librarySelection";
 import { useMultiAngleRun } from "./lib/store/multiAngleRun";
 import { usePlanChat } from "./lib/store/planChat";
@@ -1521,24 +1519,14 @@ function AssetsWorkspace() {
   const selectAll = useLibrarySelection((s) => s.selectAll);
   const clear = useLibrarySelection((s) => s.clear);
 
-  // 右クリックメニュー (FB#1: f_matsu106 さん。ライブラリで画像を右クリックしても
-  // プリセット登録等が出ず WebView 標準メニューが出ていた。実ライブラリ=この
-  // AssetsWorkspace のタイルに onContextMenu が無かったのが原因。プレビューモーダルと
-  // 同じ buildGalleryItemMenu + ContextMenu をここにも配線する 2026-06-07)。
   const favorites = useImages((s) => s.favorites);
   const toggleFavorite = useImages((s) => s.toggleFavorite);
   const judgements = useImages((s) => s.judgements);
   const setJudgement = useImages((s) => s.setJudgement);
-  const [contextMenu, setContextMenu] = useState<{
-    x: number;
-    y: number;
-    item: GalleryItem;
-  } | null>(null);
-  const [presetTarget, setPresetTarget] = useState<GalleryItem | null>(null);
 
   const allSelected = items.length > 0 && selected.size === items.length;
   return (
-    <section className="min-h-0 flex-1 overflow-y-auto bg-[#121212] px-4 py-4">
+    <section className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#121212] px-4 py-4">
       {/* ヘッダーの「ライブラリ」見出しと重複していたので PageIntro を撤去。
           description はヘッダー側で持つ。 */}
 
@@ -1635,183 +1623,30 @@ function AssetsWorkspace() {
           title="素材がありません"
           description="画像を生成またはアップロードするとここに並びます。"
         />
-      ) : viewMode === "grid" ? (
-        <div
-          className="grid gap-3"
-          style={{
-            gridTemplateColumns: `repeat(auto-fill, minmax(${tileSize}px, 1fr))`,
-          }}
-        >
-          {items.map((item) => {
-            const isSelected = selected.has(item.path);
-            const judgement = judgements.get(item.path);
-            return (
-              <div
-                key={item.path}
-                className={[
-                  "group relative overflow-hidden rounded-xl border bg-[#1a1a1a] text-left transition",
-                  isSelected
-                    ? "border-pink-400 ring-2 ring-pink-500/40"
-                    : "border-[#2a2a2a] hover:border-pink-400",
-                ].join(" ")}
-              >
-                <button
-                  type="button"
-                  onDoubleClick={() => useImagePreview.getState().open(item.path)}
-                  onContextMenu={(e) => {
-                    e.preventDefault();
-                    setContextMenu({ x: e.clientX, y: e.clientY, item });
-                  }}
-                  onClick={() => {
-                    if (selectionMode) {
-                      toggle(item.path);
-                    } else {
-                      addReference({
-                        path: item.path,
-                        name: item.name,
-                        source: "gallery",
-                        role: "subject",
-                      });
-                    }
-                  }}
-                  className="block w-full text-left"
-                >
-                  <SafeImage
-                    path={item.path}
-                    alt=""
-                    className="aspect-[16/9] w-full object-cover"
-                  />
-                  <div className="p-2">
-                    <p className="truncate text-[11px] font-bold text-neutral-200">{item.name}</p>
-                    <p className="mt-1 text-[10px] text-neutral-500">
-                      {selectionMode
-                        ? isSelected
-                          ? "選択中（クリックで外す）"
-                          : "クリックで選択"
-                        : "クリックで参照 / ダブルクリックで拡大"}
-                    </p>
-                  </div>
-                </button>
-                {selectionMode && (
-                  <div
-                    className={[
-                      "pointer-events-none absolute left-2 top-2 flex h-6 w-6 items-center justify-center rounded-md border-2",
-                      isSelected
-                        ? "border-pink-400 bg-pink-500 text-white"
-                        : "border-white/70 bg-black/60 text-transparent",
-                    ].join(" ")}
-                  >
-                    <CheckIcon />
-                  </div>
-                )}
-                {judgement && (
-                  <span
-                    className={[
-                      "pointer-events-none absolute right-2 top-2 rounded px-1.5 py-0.5 text-[10px] font-bold text-white shadow",
-                      judgement === "adopted"
-                        ? "bg-pink-500/90"
-                        : "bg-neutral-600/90",
-                    ].join(" ")}
-                  >
-                    {judgement === "adopted" ? "採用" : "ボツ"}
-                  </span>
-                )}
-              </div>
-            );
-          })}
-        </div>
       ) : (
-        /* リスト表示: 横長 1 列、サムネイル小 + ファイル名/操作 */
-        <div className="flex flex-col gap-1">
-          {items.map((item) => {
-            const isSelected = selected.has(item.path);
-            const judgement = judgements.get(item.path);
-            return (
-              <button
-                key={item.path}
-                type="button"
-                onDoubleClick={() => useImagePreview.getState().open(item.path)}
-                onContextMenu={(e) => {
-                  e.preventDefault();
-                  setContextMenu({ x: e.clientX, y: e.clientY, item });
-                }}
-                onClick={() => {
-                  if (selectionMode) {
-                    toggle(item.path);
-                  } else {
-                    addReference({
-                      path: item.path,
-                      name: item.name,
-                      source: "gallery",
-                      role: "subject",
-                    });
-                  }
-                }}
-                className={[
-                  "flex items-center gap-3 rounded-md border bg-[#1a1a1a] px-2 py-1.5 text-left transition",
-                  isSelected
-                    ? "border-pink-400 ring-1 ring-pink-500/40"
-                    : "border-[#2a2a2a] hover:border-pink-400",
-                ].join(" ")}
-              >
-                <SafeImage
-                  path={item.path}
-                  alt=""
-                  className="h-10 w-16 shrink-0 rounded object-cover"
-                />
-                <div className="min-w-0 flex-1">
-                  <p className="truncate text-[12px] font-medium text-neutral-200">{item.name}</p>
-                  <p className="truncate text-[10px] text-neutral-500">
-                    {selectionMode
-                      ? isSelected
-                        ? "選択中（クリックで外す）"
-                        : "クリックで選択"
-                      : "クリックで参照 / ダブルクリックで拡大"}
-                  </p>
-                </div>
-                {judgement && (
-                  <span
-                    className={[
-                      "shrink-0 rounded px-1.5 py-0.5 text-[10px] font-bold text-white",
-                      judgement === "adopted"
-                        ? "bg-pink-500/90"
-                        : "bg-neutral-600/90",
-                    ].join(" ")}
-                  >
-                    {judgement === "adopted" ? "採用" : "ボツ"}
-                  </span>
-                )}
-                {selectionMode && isSelected && (
-                  <span className="shrink-0 text-pink-400" aria-hidden>
-                    <CheckIcon />
-                  </span>
-                )}
-              </button>
-            );
-          })}
-        </div>
-      )}
-      {contextMenu && (
-        <ContextMenu
-          x={contextMenu.x}
-          y={contextMenu.y}
-          items={
-            buildGalleryItemMenu(contextMenu.item, {
-              favorites,
-              onToggleFavorite: (path) => void toggleFavorite(path),
-              onRegisterPreset: () => setPresetTarget(contextMenu.item),
-              judgement: judgements.get(contextMenu.item.path),
-              onSetJudgement: (path, value) => void setJudgement(path, value),
-            }) satisfies ContextMenuItem[]
-          }
-          onClose={() => setContextMenu(null)}
-        />
-      )}
-      {presetTarget && (
-        <RegisterPresetDialog
-          imagePath={presetTarget.path}
-          defaultName={presetTarget.name}
-          onClose={() => setPresetTarget(null)}
+        <VirtualGalleryGrid
+          items={items}
+          selection={selected}
+          favorites={favorites}
+          judgements={judgements}
+          onSelectClick={(_path, _mods, item) => {
+            if (selectionMode) {
+              toggle(item.path);
+            } else {
+              addReference({
+                path: item.path,
+                name: item.name,
+                source: "gallery",
+                role: "subject",
+              });
+            }
+          }}
+          onToggleFavorite={(path) => void toggleFavorite(path)}
+          onSetJudgement={(path, value) => void setJudgement(path, value)}
+          variant="library"
+          viewMode={viewMode}
+          tileSize={tileSize}
+          selectionMode={selectionMode}
         />
       )}
     </section>
@@ -3049,15 +2884,6 @@ function CheckSquareIcon() {
     <svg {...APP_SVG} width={12} height={12} strokeWidth={1.8} className="shrink-0" aria-hidden>
       <rect x="3.5" y="3.5" width="17" height="17" rx="2" />
       <path d="M7.5 12.2l3 3 6-6.4" />
-    </svg>
-  );
-}
-
-/** チェック (選択中バッジ)。 */
-function CheckIcon() {
-  return (
-    <svg {...APP_SVG} width={13} height={13} strokeWidth={2.8} className="shrink-0" aria-hidden>
-      <path d="M4 12.5l5.5 5.5L20 6" />
     </svg>
   );
 }
