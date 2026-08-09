@@ -281,6 +281,9 @@ export type FileSizeEntry = { path: string; size: number | null };
 
 export const images = {
   startWatcher: () => invoke<StartWatchResult>("images_start_watcher"),
+  /** 一覧用の縮小JPEGをオンデマンド生成し、キャッシュ済みの絶対パスを返す。 */
+  thumbnail: (path: string, maxEdge: number) =>
+    invoke<string>("images_thumbnail", { path, maxEdge }),
   saveToProject: (src: string, projectDir: string, newName?: string) =>
     invoke<string>("images_save_to_project", {
       src,

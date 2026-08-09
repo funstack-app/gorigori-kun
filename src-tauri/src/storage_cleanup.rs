@@ -9,6 +9,7 @@
 //! - GORI 専用 CODEX_HOME/.tmp/marketplaces/
 //! - <CODEX_HOME>/logs_2.sqlite*
 //! - GORI の WebView キャッシュ
+//! - <app_data>/thumb-cache/ (一覧用の再生成可能な縮小画像)
 //!
 //! FB#19 対応で GORI は専用 CODEX_HOME
 //! (~/Library/Application Support/app.codexframefactory/codex-home) を使うように
@@ -62,6 +63,7 @@ const STRIPPED_PAYLOAD: &[u8] = b"[stripped]";
 /// 本文・説明・ログを載せてはいけない。
 const IMAGE_PAYLOAD_FIELDS: &[&[u8]] = &[b"image_url", b"imageUrl"];
 const STRIP_STATE_FILE: &str = "rollout-image-strip-v1.json";
+pub(crate) const THUMB_CACHE_DIR_NAME: &str = "thumb-cache";
 
 #[derive(Debug, Clone, Default, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -188,6 +190,17 @@ pub async fn run_cleanup() -> Result<CleanupReport, String> {
         }
     }
 
+    // 一覧用サムネイルは元画像から再生成できるため、通常キャッシュと同じ掃除対象。
+    // app_data の直下だけを名指しし、history.db やユーザー作品には触れない。
+    if let Some(dir) = thumbnail_cache_dir() {
+        if dir.exists() {
+            match remove_dir_contents(&dir).await {
+                Ok((_, bytes)) => report.cache_bytes_freed += bytes,
+                Err(err) => report.errors.push(format!("thumbnail cache: {err}")),
+            }
+        }
+    }
+
     tracing::info!(
         target: "storage.cleanup",
         sessions = report.sessions_deleted,
@@ -273,6 +286,15 @@ fn legacy_codex_home_dir() -> Option<PathBuf> {
 /// パス解決のみ (作成・移行はしない)。
 fn gori_codex_home_dir() -> Option<PathBuf> {
     crate::codex::home::gori_codex_home_path()
+}
+
+/// Tauri の app_data_dir と同じ `<OS data dir>/<bundle identifier>` を返す。
+/// 生成・容量表示・掃除で同じディレクトリ名を使い、集計漏れを防ぐ。
+pub(crate) fn thumbnail_cache_dir() -> Option<PathBuf> {
+    dirs::data_dir().map(|dir| {
+        dir.join(crate::secrets::SERVICE_NAME)
+            .join(THUMB_CACHE_DIR_NAME)
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]

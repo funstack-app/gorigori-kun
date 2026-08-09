@@ -7,6 +7,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { images } from "../lib/ipc";
 
 /**
  * リトライまでの待ち時間 (ms)。
@@ -18,6 +19,7 @@ import {
  * (MessageList.tsx にあった生 <img> のリトライ機構から移設: 2026-08-05)
  */
 const RETRY_DELAY_MS = 250;
+const THUMBNAIL_MAX_EDGE = 512;
 
 /**
  * 画像ファイルの絶対パスを受け取って `convertFileSrc` 経由で描画する。
@@ -40,12 +42,15 @@ export type SafeImageProps = Omit<ImgHTMLAttributes<HTMLImageElement>, "src"> & 
    * 省略時 (false) は従来どおり 1 回目の onError で即フォールバック。
    */
   retryOnError?: boolean;
+  /** 一覧用。true のとき512pxのディスクキャッシュを表示する。 */
+  thumbnail?: boolean;
 };
 
 export function SafeImage({
   path,
   fallbackLabel = "画像が見つかりません",
   retryOnError = false,
+  thumbnail = false,
   className,
   alt,
   loading = "lazy",
@@ -56,6 +61,10 @@ export function SafeImage({
   // リトライ用の再フェッチキー。値が変わると <img> が作り直されて再取得が走る。
   const [retryKey, setRetryKey] = useState(0);
   const retried = useRef(false);
+  const [thumbnailResult, setThumbnailResult] = useState<{
+    sourcePath: string;
+    displayPath: string;
+  } | null>(null);
 
   // F-#2 追補 (2026-06-16): path が変わったら errored をリセットする。
   // これが無いと、旧パスで一度 onError が発火して errored=true になった後、
@@ -64,11 +73,35 @@ export function SafeImage({
   // 併せてリトライ済みフラグも戻す。これが無いと、前の画像で使い切った
   // リトライ枠のせいで別画像に切り替えた直後の 1 回目の失敗が救えない。
   useEffect(() => {
+    let cancelled = false;
     setErrored(false);
     retried.current = false;
-  }, [path]);
+    setThumbnailResult(null);
 
-  if (!path || errored) {
+    if (thumbnail && path) {
+      void images
+        .thumbnail(path, THUMBNAIL_MAX_EDGE)
+        .then((displayPath) => {
+          if (!cancelled) setThumbnailResult({ sourcePath: path, displayPath });
+        })
+        .catch(() => {
+          // サムネ生成に失敗しても、従来の元画像表示へ戻して画面を壊さない。
+          if (!cancelled) setThumbnailResult({ sourcePath: path, displayPath: path });
+        });
+    }
+
+    return () => {
+      cancelled = true;
+    };
+  }, [path, thumbnail]);
+
+  const displayPath = thumbnail
+    ? thumbnailResult && thumbnailResult.sourcePath === path
+      ? thumbnailResult.displayPath
+      : undefined
+    : path;
+
+  if (!path || !displayPath || errored) {
     return (
       <div
         className={[
@@ -102,12 +135,18 @@ export function SafeImage({
       {...rest}
       // retryOnError=false のときは key を渡さない (従来と同じ 1 要素のまま)。
       key={retryOnError ? retryKey : undefined}
-      src={convertFileSrc(path)}
+      src={convertFileSrc(displayPath)}
       alt={alt ?? ""}
       className={className}
       loading={loading}
       decoding={decoding}
       onError={(e) => {
+        // キャッシュ掃除との競合などでサムネ自体を読めない場合も元画像へ戻す。
+        if (thumbnail && displayPath !== path) {
+          setThumbnailResult({ sourcePath: path, displayPath: path });
+          retried.current = false;
+          return;
+        }
         rest.onError?.(e);
         if (retryOnError && !retried.current) {
           retried.current = true;

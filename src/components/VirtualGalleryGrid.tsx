@@ -250,6 +250,7 @@ function Cell({
         >
           <SafeImage
             path={it.path}
+            thumbnail
             alt={it.name}
             className="h-full w-full object-cover"
             loading="lazy"
@@ -380,6 +381,7 @@ function LibraryCell({
         >
           <SafeImage
             path={item.path}
+            thumbnail
             alt=""
             className="h-10 w-16 shrink-0 rounded object-cover"
           />
@@ -442,6 +444,7 @@ function LibraryCell({
         >
           <SafeImage
             path={item.path}
+            thumbnail
             alt=""
             className="aspect-[16/9] w-full object-cover"
           />

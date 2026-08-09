@@ -564,6 +564,7 @@ pub fn run() {
             commands::images::images_save_as,
             commands::images::images_rename,
             commands::images::images_save_as_format,
+            commands::images::images_thumbnail,
             commands::images::images_remove_background,
             commands::images::images_delete,
             commands::images::images_delete_many,
