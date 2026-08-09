@@ -1,8 +1,11 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use sqlx::Row as _;
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_opener::OpenerExt;
@@ -10,6 +13,15 @@ use tauri_plugin_opener::OpenerExt;
 use crate::commands::storage::{watcher_dirs, StorageSettings};
 use crate::images::watcher::{scan_existing, start_watcher};
 use crate::state::AppState;
+
+/// 同じキャッシュ先の同時生成を1本にまとめる。
+/// 値は生成完了後に map から外すため、3,500件のライブラリを巡回しても増え続けない。
+static THUMBNAIL_LOCKS: Lazy<tokio::sync::Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> =
+    Lazy::new(|| tokio::sync::Mutex::new(HashMap::new()));
+
+/// 画像デコードは一時的に大きなメモリを使うため、別画像でも同時実行数を抑える。
+static THUMBNAIL_GENERATION_LIMIT: Lazy<Arc<tokio::sync::Semaphore>> =
+    Lazy::new(|| Arc::new(tokio::sync::Semaphore::new(2)));
 
 #[derive(Serialize)]
 pub struct StartWatchResult {
@@ -285,6 +297,134 @@ pub async fn images_save_as_format(
         _ => return Err("unsupported format".to_string()),
     }
     Ok(())
+}
+
+/// 一覧表示用の縮小JPEGを `<app_data>/thumb-cache/` に作り、その絶対パスを返す。
+///
+/// キャッシュ名は「元パスのSHA-256 + 元ファイルのmtime + max_edge」。元画像が
+/// 更新されると別名になるため、古いサムネイルを誤って再利用しない。
+#[tauri::command]
+pub async fn images_thumbnail(
+    app: AppHandle,
+    path: String,
+    max_edge: u32,
+) -> Result<String, String> {
+    if max_edge == 0 {
+        return Err("max_edge must be greater than zero".to_string());
+    }
+
+    let source = PathBuf::from(&path);
+    let metadata =
+        std::fs::metadata(&source).map_err(|e| format!("thumbnail source metadata failed: {e}"))?;
+    if !metadata.is_file() {
+        return Err(format!("not a file: {path}"));
+    }
+    let modified = metadata
+        .modified()
+        .map_err(|e| format!("thumbnail source mtime failed: {e}"))?
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| format!("thumbnail source mtime is before unix epoch: {e}"))?;
+
+    let path_hash = Sha256::digest(source.to_string_lossy().as_bytes());
+    let file_name = format!(
+        "{}-{}-{:09}-{max_edge}.jpg",
+        hex::encode(path_hash),
+        modified.as_secs(),
+        modified.subsec_nanos()
+    );
+    let cache_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("app data dir resolution failed: {e}"))?
+        .join(crate::storage_cleanup::THUMB_CACHE_DIR_NAME);
+    let destination = cache_dir.join(file_name);
+
+    if destination.is_file() {
+        return Ok(destination.to_string_lossy().into_owned());
+    }
+
+    let destination_lock = {
+        let mut locks = THUMBNAIL_LOCKS.lock().await;
+        locks
+            .entry(destination.clone())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    };
+    let generation_guard = destination_lock.lock().await;
+
+    // 待っている間に先頭の要求が生成済みなら、再デコードせず即返す。
+    let result = if destination.is_file() {
+        Ok(destination.to_string_lossy().into_owned())
+    } else {
+        match THUMBNAIL_GENERATION_LIMIT.clone().acquire_owned().await {
+            Ok(permit) => {
+                let source_for_task = source.clone();
+                let destination_for_task = destination.clone();
+                let cache_dir_for_task = cache_dir.clone();
+                let joined = tokio::task::spawn_blocking(move || {
+                    write_thumbnail(
+                        &source_for_task,
+                        &destination_for_task,
+                        &cache_dir_for_task,
+                        max_edge,
+                    )
+                })
+                .await;
+                drop(permit);
+                match joined {
+                    Ok(inner) => inner,
+                    Err(e) => Err(format!("thumbnail worker failed: {e}")),
+                }
+            }
+            Err(e) => Err(format!("thumbnail generation limiter failed: {e}")),
+        }
+    };
+
+    drop(generation_guard);
+    let mut locks = THUMBNAIL_LOCKS.lock().await;
+    if locks
+        .get(&destination)
+        .is_some_and(|current| Arc::ptr_eq(current, &destination_lock))
+    {
+        locks.remove(&destination);
+    }
+
+    result
+}
+
+fn write_thumbnail(
+    source: &Path,
+    destination: &Path,
+    cache_dir: &Path,
+    max_edge: u32,
+) -> Result<String, String> {
+    std::fs::create_dir_all(cache_dir)
+        .map_err(|e| format!("thumbnail cache dir creation failed: {e}"))?;
+    if destination.is_file() {
+        return Ok(destination.to_string_lossy().into_owned());
+    }
+
+    let image = image::open(source).map_err(|e| format!("thumbnail decode failed: {e}"))?;
+    let thumbnail = image.thumbnail(max_edge, max_edge).to_rgb8();
+    let temp_path = destination.with_extension(format!("jpg.{}.tmp", std::process::id()));
+
+    let encode_result = (|| -> Result<(), String> {
+        let file = std::fs::File::create(&temp_path)
+            .map_err(|e| format!("thumbnail temp creation failed: {e}"))?;
+        let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(file, 80);
+        encoder
+            .encode_image(&thumbnail)
+            .map_err(|e| format!("thumbnail jpeg encode failed: {e}"))?;
+        std::fs::rename(&temp_path, destination)
+            .map_err(|e| format!("thumbnail cache commit failed: {e}"))?;
+        Ok(())
+    })();
+
+    if encode_result.is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+    }
+    encode_result?;
+    Ok(destination.to_string_lossy().into_owned())
 }
 
 /// Write a PNG mask alongside the source image under a hidden `.masks/`

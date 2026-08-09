@@ -38,7 +38,11 @@ pub async fn storage_cleanup_inspect() -> Result<CleanupInspection, String> {
         Some(legacy) => dir_size(&legacy.join("generated_images")).await,
         None => 0,
     };
-    let cache_bytes = mac_cache_size(&home).await;
+    let thumbnail_bytes = match crate::storage_cleanup::thumbnail_cache_dir() {
+        Some(dir) => dir_size(&dir).await,
+        None => 0,
+    };
+    let cache_bytes = mac_cache_size(&home).await + thumbnail_bytes;
 
     Ok(CleanupInspection {
         sessions_bytes,
