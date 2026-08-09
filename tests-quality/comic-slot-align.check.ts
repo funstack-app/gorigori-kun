@@ -10,6 +10,7 @@ import {
   getComicTemplate,
 } from "../src/lib/comic/layoutTemplates";
 import type { ComicLayoutTemplate, ComicPanelSlot } from "../src/lib/comic/layoutTemplates";
+import { ALL_COMIC_LAYOUT_TEMPLATES } from "../src/lib/comic/layoutTemplates";
 import type { PanelImageData } from "../src/lib/comic/panelReedit";
 
 const WIDTH = 400;
@@ -484,4 +485,21 @@ test("全境界が探索幅いっぱいにずれていればdrift-too-largeに�
   expect(result.failureCode, JSON.stringify(result)).toBe("drift-too-large");
   expect(result.metrics.snappedBoundaries).toBe(4);
   expect(result.metrics.averageDriftPercent).toBeGreaterThan(1.5);
+});
+
+test("手作り01を全テンプレ一覧から実測slot座標のまま解決する", () => {
+  const template = ALL_COMIC_LAYOUT_TEMPLATES.find(({ id }) => id === "user01");
+  expect(template).toBeDefined();
+  if (!template) return;
+
+  expect(template).toMatchObject({
+    id: "user01",
+    label: "手作り01",
+    panelCount: 3,
+  });
+  expect(template.slots).toEqual([
+    { x: 58.80, y: 2.36, w: 37.69, h: 36.04 },
+    { x: 3.52, y: 2.36, w: 52.92, h: 36.04 },
+    { x: 3.52, y: 41.53, w: 92.96, h: 56.01 },
+  ]);
 });
