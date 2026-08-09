@@ -788,10 +788,15 @@ async fn relink_missing_inner(
         let _ = &app;
         return Ok(result);
     };
+    let mut conn = pool
+        .acquire()
+        .await
+        .map_err(|e| format!("history.db 接続の取得に失敗: {e}"))?;
 
-    // 全 images.path を取得 (重複は DISTINCT で 1 回だけ評価)。
+    // 全 images.path の取得から修復 UPDATE/DELETE まで、同じ1接続を使い回す。
+    // 件数分の pool acquire を避け、接続要求が画像数に比例しないようにする。
     let rows = sqlx::query("SELECT DISTINCT path FROM images")
-        .fetch_all(&pool)
+        .fetch_all(&mut *conn)
         .await
         .map_err(|e| format!("images.path の読み出しに失敗: {e}"))?;
 
@@ -822,7 +827,7 @@ async fn relink_missing_inner(
             // 候補なし = 実体がどこにも無い → DB から該当行を削除。
             match sqlx::query("DELETE FROM images WHERE path = ?1")
                 .bind(&old_path)
-                .execute(&pool)
+                .execute(&mut *conn)
                 .await
             {
                 Ok(_) => {
@@ -845,7 +850,7 @@ async fn relink_missing_inner(
         let update = sqlx::query("UPDATE images SET path = ?1 WHERE path = ?2")
             .bind(&new_path_str)
             .bind(&old_path)
-            .execute(&pool)
+            .execute(&mut *conn)
             .await;
         match update {
             Ok(_) => {

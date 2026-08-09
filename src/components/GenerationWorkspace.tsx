@@ -19,7 +19,7 @@ import {
   type TimelineSize,
 } from "../lib/store/workspace";
 import { useVideoGen } from "../lib/store/videoGen";
-import { history, sessions as sessionsApi, type PromptHistoryRow, type SessionFull, type TurnWithImages } from "../lib/ipc";
+import { history, type SessionFull, type TurnWithImages } from "../lib/ipc";
 import { useActiveProject } from "../lib/store/activeProject";
 import { useProjects } from "../lib/store/projects";
 import { useSessions } from "../lib/store/sessions";
@@ -217,31 +217,35 @@ export function Timeline() {
   // ユーザー指摘:
   //   - 制作タブに移動するとタイムラインがリセットされて見える
   //   - 過去の生成は「ログごとに」リスト表示してほしい
-  // → useImages.items を一括グリッドにせず、turns_recent (PromptHistoryRow[]) で
-  //   バッチ単位に分けて表示する。各行クリックで turn_get → 中身画像を展開。
-  const [pastBatches, setPastBatches] = useState<PromptHistoryRow[]>([]);
+  // → useImages.items を一括グリッドにせず、履歴と画像パスを一括取得して
+  //   バッチ単位に分けて表示する。
+  const [pastBatches, setPastBatches] = useState<TurnWithImages[]>([]);
   const [pastLoading, setPastLoading] = useState(false);
 
-  // batches が変わる = 新規生成が走った可能性 → 履歴を再ロード。
-  // それ以外は items.length の変化（外部追加やライブラリスキャン）で再ロード。
-  const batchesSignal = batches.length;
-  const itemsSignal = items.length;
+  // 画像 watcher の1枚ごとの通知ではなく、既存 batch state の完了/中止を合図にする。
+  // ライブラリスキャンの画像数に比例せず、新しい生成が終わった時だけ自動反映する。
+  const completedBatchesSignal = batches
+    .filter((batch) => batch.status === "completed" || batch.status === "cancelled")
+    .map((batch) => `${batch.startedAt}:${batch.status}`)
+    .join("|");
+  // リネーム時も、行ごとの再取得ではなく履歴全体を1回だけ取り直す。
+  const renameNonce = useImages((s) => s.renameNonce);
   useEffect(() => {
     let cancelled = false;
     setPastLoading(true);
     history
-      .recent(60)
+      .recentWithImages(60)
       .then((rows) => {
         if (!cancelled) setPastBatches(rows);
       })
-      .catch((err) => console.error("history.recent failed", err))
+      .catch((err) => console.error("recentWithImages failed", err))
       .finally(() => {
         if (!cancelled) setPastLoading(false);
       });
     return () => {
       cancelled = true;
     };
-  }, [batchesSignal, itemsSignal]);
+  }, [completedBatchesSignal, renameNonce]);
 
   // 現在 batches に出ている turn id は除外（重複表示防止）。
   // 現状 batches 側は dbTurnId を直接持たないので、最近 5 件分はラフに除外する。
@@ -494,19 +498,19 @@ function FrozenTurnBlock({
 }
 
 /**
- * 過去の生成バッチをログ単位（PromptHistoryRow = turn）でリスト表示する。
- * 各行はクリック展開で turn_get を呼び、中身画像を BatchBlock 風に表示する。
+ * 過去の生成バッチをログ単位（TurnWithImages = turn）でリスト表示する。
+ * 画像は親で一括取得済みなので、行ごとのDB取得は行わない。
  *
  * BatchBlock との違い:
  * - 進行中 / 失敗の status はない（過去ログなので全件成功扱い）
- * - 画像は遅延ロード（行を開いたタイミングで turn_get を呼ぶ）
+ * - 画像は最近の履歴と一緒に一括ロードする
  */
 function PastBatchList({
   rows,
   size,
   projectImagePaths,
 }: {
-  rows: PromptHistoryRow[];
+  rows: TurnWithImages[];
   size: TimelineSize;
   /** activeProject が選ばれていれば、その画像 path セット。null なら全件表示。 */
   projectImagePaths: Set<string> | null;
@@ -537,53 +541,19 @@ function PastBatchRow({
   size,
   projectImagePaths,
 }: {
-  row: PromptHistoryRow;
+  row: TurnWithImages;
   size: TimelineSize;
   projectImagePaths: Set<string> | null;
 }) {
-  const [detail, setDetail] = useState<TurnWithImages | null>(null);
-  const [loading, setLoading] = useState(true);
-  // 最新の detail を ref で保持。effect 内で「初回ロードか/再取得か」を判定するのに
-  // detail を依存配列へ入れずに参照するため (依存に入れると無駄に再取得が走る)。
-  const detailRef = useRef<TurnWithImages | null>(null);
-  detailRef.current = detail;
-  // F-#2 追補 (2026-06-16): リネーム世代カウンタを購読する。ライブラリ自動命名で
-  // 画像 path が変わると history.db は UPDATE 済みだが、この turn detail は
-  // 旧 path をキャッシュしたままになる (row.id は不変なので再取得が走らない)。
-  // renameNonce が +1 されたら getTurn を叩き直し、detail.images[].path を最新化する。
-  const renameNonce = useImages((s) => s.renameNonce);
-
   // ユーザー指摘: 「折りたたみ式だとサイズスライダーが効いている実感がない」
   // → 各バッチを最初から展開し、画像グリッドが常に見える状態にする。
-  // turn_get は行ごとに 1 回だけ叩く (renameNonce 変化時は黒画像解消のため再取得)。
-  useEffect(() => {
-    let cancelled = false;
-    // 初回 (detail===null) は loading 表示。リネーム後の再取得は detail を保持した
-    // まま静かに差し替える (グリッドが一瞬「読み込み中...」に戻るちらつきを防ぐ)。
-    if (detailRef.current === null) setLoading(true);
-    sessionsApi
-      .getTurn(row.id)
-      .then((t: TurnWithImages) => {
-        if (!cancelled) setDetail(t);
-      })
-      .catch((err: unknown) => console.error("turn fetch failed", err))
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [row.id, renameNonce]);
-
   // プロジェクト指定時は images をフィルタ。ヒット 0 件なら行ごと隠す。
-  const visibleImages = detail
-    ? projectImagePaths
-      ? detail.images.filter((img) => projectImagePaths.has(img.path))
-      : detail.images
-    : [];
-  // ロード完了済 + プロジェクト絞り込み時 + 該当画像 0 → このバッチは
+  const visibleImages = projectImagePaths
+    ? row.images.filter((img) => projectImagePaths.has(img.path))
+    : row.images;
+  // プロジェクト絞り込み時 + 該当画像 0 → このバッチは
   // プロジェクト外なので行ごと描画しない (空のカードを増やさない)。
-  if (!loading && projectImagePaths && visibleImages.length === 0) {
+  if (projectImagePaths && visibleImages.length === 0) {
     return null;
   }
 
@@ -603,17 +573,14 @@ function PastBatchRow({
             </span>
             <span className="text-[9px] text-neutral-600">{row.kind}</span>
             <ModelTagPill
-              provider={row.provider ?? detail?.provider}
-              modelDisplayName={row.modelDisplayName ?? detail?.modelDisplayName}
+              provider={row.provider}
+              modelDisplayName={row.modelDisplayName}
             />
           </p>
         </div>
       </div>
       <div className="p-3">
-        {loading && (
-          <p className="text-[11px] text-neutral-500">画像を読み込み中...</p>
-        )}
-        {!loading && visibleImages.length > 0 && (
+        {visibleImages.length > 0 && (
           <div className={`grid gap-2 ${gridColsClass(size)}`}>
             {visibleImages.map((img) => (
               <button
@@ -646,7 +613,7 @@ function PastBatchRow({
             ))}
           </div>
         )}
-        {!loading && detail && visibleImages.length === 0 && !projectImagePaths && (
+        {visibleImages.length === 0 && !projectImagePaths && (
           <p className="text-[11px] text-neutral-500">
             画像はまだ記録されていません。
           </p>
