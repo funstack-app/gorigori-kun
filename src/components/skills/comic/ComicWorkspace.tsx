@@ -1515,17 +1515,10 @@ function ComicFlow() {
       );
     };
 
-    /** 自分の走行がまだ有効か。無効ならタイルを戻してから抜ける。 */
-    const stillMine = (): boolean => {
-      if (
-        pagesRunTokenRef.current === runToken &&
-        pageTokens.get(page.page) === pageToken
-      ) {
-        return true;
-      }
-      resetPageTile();
-      return false;
-    };
+    // 中止競合で古い走行が新しい状態を巻き戻さないよう、stillMine は確認だけにする。
+    const stillMine = (): boolean =>
+      pagesRunTokenRef.current === runToken &&
+      pageTokens.get(page.page) === pageToken;
 
     // 単体生成のときは自前で親 run を立てる。aligned だけ照合失敗時に1回再試行する。
     let soloTrack: ReturnType<typeof beginDirectRun> | null = null;
@@ -1745,102 +1738,120 @@ function ComicFlow() {
         const scaffold = renderTemplateScaffold(alignedTemplate, readingDirection);
         const mask = renderPanelMask(alignedTemplate, readingDirection);
         const stencilStamp = Date.now();
-        // ブラウザから直接書かず、Rustコマンド経由で保存する。
-        const scaffoldPath = await images.writeUpload(
-          `comic-stencil-scaffold-p${page.page}-${stencilStamp}.png`,
-          await canvasToPngBytes(scaffold),
-        );
-        if (!stillMine()) return "cancelled";
-        const maskPath = await images.writeUpload(
-          `comic-stencil-mask-p${page.page}-${stencilStamp}.png`,
-          await canvasToPngBytes(mask),
-        );
-        if (!stillMine()) return "cancelled";
-
-        // 1コマ再生成と同じ規約: 参照1枚目が下地でマスク対、以降のキャラ参照はマスクなし。
-        const imageInputs = buildPanelReeditImageInputs(scaffoldPath, maskPath, refPaths);
-        const stencilPrompt = buildStencilPagePrompt(prompt);
-
-        let drawnPage: PanelImageData | null = null;
-        let lastGeneratedPath: string | null = null;
-        let sizeMismatchedOnce = false;
-        // 寸法不一致だけは同じ入力で1回だけやり直す。2回目も違えば下のfallbackへ。
-        for (let attempt = 0; attempt < 2; attempt += 1) {
-          const generated = await images.generateBatch({
-            prompt: stencilPrompt,
-            count: 1,
-            ...imageInputs,
-            sourceTag: tag,
-          });
+        let scaffoldPath: string | null = null;
+        let maskPath: string | null = null;
+        try {
+          // ブラウザから直接書かず、Rustコマンド経由で保存する。
+          scaffoldPath = await images.writeUpload(
+            `comic-stencil-scaffold-p${page.page}-${stencilStamp}.png`,
+            await canvasToPngBytes(scaffold),
+          );
           if (!stillMine()) return "cancelled";
-          if (generated.cancelled) {
-            resetPageTile();
-            return "cancelled";
-          }
-          const generatedPath = generated.generatedPaths[0];
-          if (!generatedPath) {
-            throw new Error(generated.errors[0] ?? "画像が生成されませんでした");
-          }
-          lastGeneratedPath = generatedPath;
-          const drawn = await readPanelImageData(generatedPath);
+          maskPath = await images.writeUpload(
+            `comic-stencil-mask-p${page.page}-${stencilStamp}.png`,
+            await canvasToPngBytes(mask),
+          );
           if (!stillMine()) return "cancelled";
-          if (drawn.width === scaffold.width && drawn.height === scaffold.height) {
-            drawnPage = drawn;
-            break;
+
+          // 1コマ再生成と同じ規約: 参照1枚目が下地でマスク対、以降のキャラ参照はマスクなし。
+          const imageInputs = buildPanelReeditImageInputs(scaffoldPath, maskPath, refPaths);
+          const stencilPrompt = buildStencilPagePrompt(prompt);
+
+          let drawnPage: PanelImageData | null = null;
+          let lastGeneratedPath: string | null = null;
+          let sizeMismatchedOnce = false;
+          // 寸法不一致だけは同じ入力で1回だけやり直す。2回目も違えば下のfallbackへ。
+          for (let attempt = 0; attempt < 2; attempt += 1) {
+            const generated = await images.generateBatch({
+              prompt: stencilPrompt,
+              count: 1,
+              ...imageInputs,
+              sourceTag: tag,
+            });
+            if (!stillMine()) return "cancelled";
+            if (generated.cancelled) {
+              resetPageTile();
+              return "cancelled";
+            }
+            const generatedPath = generated.generatedPaths[0];
+            if (!generatedPath) {
+              throw new Error(generated.errors[0] ?? "画像が生成されませんでした");
+            }
+            lastGeneratedPath = generatedPath;
+            const drawn = await readPanelImageData(generatedPath);
+            if (!stillMine()) return "cancelled";
+            if (drawn.width === scaffold.width && drawn.height === scaffold.height) {
+              drawnPage = drawn;
+              break;
+            }
+            if (attempt === 0) {
+              sizeMismatchedOnce = true;
+              pushToast({
+                kind: "info",
+                text: "枠が揃わなかったため、もう一度だけ描き直しています…",
+                ttlMs: 7000,
+              });
+            }
           }
-          if (attempt === 0) {
-            sizeMismatchedOnce = true;
+
+          if (!drawnPage) {
+            // 合成できないのは寸法違いのときだけ。絵はそのまま一枚描きとして採用する。
+            diagnosticReason = "stencil寸法不一致2回目";
+            if (!lastGeneratedPath) {
+              throw new Error("画像が生成されませんでした");
+            }
+            const fallbackPage = await normalizeGeneratedPage(lastGeneratedPath);
+            if (!fallbackPage) return "cancelled";
+            normalizedPage = fallbackPage;
+            adoptDirectPage(true);
             pushToast({
               kind: "info",
-              text: "枠が揃わなかったため、もう一度だけ描き直しています…",
+              text: "枠そろえに失敗しました（生成画像の寸法が合いませんでした）。絵はそのまま使えます",
               ttlMs: 7000,
             });
+            return "done";
           }
-        }
 
-        if (!drawnPage) {
-          // 合成できないのは寸法違いのときだけ。絵はそのまま一枚描きとして採用する。
-          diagnosticReason = "stencil寸法不一致2回目";
-          if (!lastGeneratedPath) {
-            throw new Error("画像が生成されませんでした");
-          }
-          const fallbackPage = await normalizeGeneratedPage(lastGeneratedPath);
-          if (!fallbackPage) return "cancelled";
-          normalizedPage = fallbackPage;
-          adoptDirectPage(true);
-          pushToast({
-            kind: "info",
-            text: "枠そろえに失敗しました（生成画像の寸法が合いませんでした）。絵はそのまま使えます",
-            ttlMs: 7000,
-          });
+          const composite = compositeStencilResult(
+            panelImageDataCanvas(drawnPage),
+            scaffold,
+            mask,
+          );
+          // 実機ゲート2の機械照合。枠外が1画素でも scaffold と違えば例外にして採用しない。
+          diagnosticFramesVerified = false;
+          assertStencilFrames(composite, scaffold, mask);
+          diagnosticFramesVerified = true;
+
+          const pngBytes = await canvasToPngBytes(composite);
+          if (!stillMine()) return "cancelled";
+          const alignedPath = await images.writeUpload(
+            `comic-aligned-p${page.page}-${Date.now()}.png`,
+            pngBytes,
+          );
+          if (!stillMine()) return "cancelled";
+
+          diagnosticAligned = true;
+          diagnosticReason = sizeMismatchedOnce ? "stencil寸法不一致1回目" : "stencil成立";
+          adoptAlignedPage(
+            alignedPath,
+            templateForReadingDirection(alignedTemplate, readingDirection),
+          );
           return "done";
+        } finally {
+          const internalPaths = [scaffoldPath, maskPath].filter(
+            (path): path is string => path !== null,
+          );
+          if (internalPaths.length > 0) {
+            const cleanup = await images.deleteFiles(internalPaths);
+            if (cleanup.failed.length > 0) {
+              throw new Error(
+                `塗り絵の中間画像を削除できませんでした: ${cleanup.failed
+                  .map(({ error }) => error)
+                  .join(" / ")}`,
+              );
+            }
+          }
         }
-
-        const composite = compositeStencilResult(
-          panelImageDataCanvas(drawnPage),
-          scaffold,
-          mask,
-        );
-        // 実機ゲート2の機械照合。枠外が1画素でも scaffold と違えば例外にして採用しない。
-        diagnosticFramesVerified = false;
-        assertStencilFrames(composite, scaffold, mask);
-        diagnosticFramesVerified = true;
-
-        const pngBytes = await canvasToPngBytes(composite);
-        if (!stillMine()) return "cancelled";
-        const alignedPath = await images.writeUpload(
-          `comic-aligned-p${page.page}-${Date.now()}.png`,
-          pngBytes,
-        );
-        if (!stillMine()) return "cancelled";
-
-        diagnosticAligned = true;
-        diagnosticReason = sizeMismatchedOnce ? "stencil寸法不一致1回目" : "stencil成立";
-        adoptAlignedPage(
-          alignedPath,
-          templateForReadingDirection(alignedTemplate, readingDirection),
-        );
-        return "done";
       };
 
       /**
