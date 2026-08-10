@@ -184,3 +184,32 @@ describe("clampBrushSize — 数値入力の唯一の関門", () => {
     expect(clampBrushSize(Number.NaN)).toBe(MIN_BRUSH_PX);
   });
 });
+
+describe("renderStrokes — 1ストロークにつき stroke() はちょうど1回", () => {
+  /**
+   * つなぎ目の均一性の不変条件。線分を1本ずつ stroke すると、半透明ペンの
+   * 重なった継ぎ目だけが二重合成で濃くなる。描画中のプレビューも確定後の
+   * 再描画も同じ renderStrokes を通すので、ここが1回であることが
+   * 「描いている最中と確定後で線が変わらない」ことの担保になる。
+   * 画素レベルの確認は実機受入に委ねる。
+   */
+  it("点10個の折れ線でも stroke() は1回・lineTo は9回", () => {
+    const g = makeCtx();
+    const points = Array.from({ length: 10 }, (_, i) => ({
+      x: i / 9,
+      y: 0.5,
+    }));
+    renderStrokes(g, [stroke({ pen: "marker", points })], 1024, 576);
+
+    expect(g.calls.filter((c) => c.op === "stroke")).toHaveLength(1);
+    expect(g.calls.filter((c) => c.op === "lineTo")).toHaveLength(9);
+    expect(g.calls.filter((c) => c.op === "moveTo")).toHaveLength(1);
+    expect(g.calls.filter((c) => c.op === "beginPath")).toHaveLength(1);
+  });
+
+  it("3ストロークなら stroke() は3回 (1本につき1回)", () => {
+    const g = makeCtx();
+    renderStrokes(g, [stroke(), stroke({ pen: "pencil" }), stroke()], 1024, 576);
+    expect(g.calls.filter((c) => c.op === "stroke")).toHaveLength(3);
+  });
+});

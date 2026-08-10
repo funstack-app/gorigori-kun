@@ -7,10 +7,8 @@ import {
   useState,
 } from "react";
 import {
-  PEN_STYLES,
   isSketchEmpty,
   renderStrokes,
-  strokeLineWidth,
   type PenType,
   type SketchStroke,
 } from "./sketchModel";
@@ -77,6 +75,11 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, Props>(
     const strokeRef = useRef<HTMLCanvasElement | null>(null);
     /** 確定済みストローク (これが唯一の正本。表示も書き出しもここから描く)。 */
     const strokes = useRef<SketchStroke[]>([]);
+    /**
+     * 確定済みストロークを焼いたオフスクリーン (表示と同解像度)。
+     * 描画中のプレビューを「committed を戻す → 活性ストロークを1パス」で作るための土台。
+     */
+    const committed = useRef<HTMLCanvasElement | null>(null);
     /** undo 用のストローク配列スナップショット。 */
     const history = useRef<SketchStroke[][]>([]);
     /** 描画中のストローク (pointerUp で strokes へ確定)。 */
@@ -137,7 +140,10 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, Props>(
       };
     })();
 
-    /** 表示レイヤーを紙色 + 全ストロークで描き直す。 */
+    /**
+     * committed をベクターから作り直し、表示レイヤーへ反映する。
+     * リサイズ・DPR 変化・undo・clear・比率変更の共通経路。
+     */
     const repaint = useCallback(() => {
       const bg = bgRef.current;
       const stroke = strokeRef.current;
@@ -148,12 +154,55 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, Props>(
         bgCtx.fillStyle = SKETCH_PAPER_COLOR;
         bgCtx.fillRect(0, 0, bg.width, bg.height);
       }
+
+      const c = committed.current ?? document.createElement("canvas");
+      committed.current = c;
+      if (c.width !== stroke.width || c.height !== stroke.height) {
+        c.width = stroke.width;
+        c.height = stroke.height;
+      }
+      const cg = c.getContext("2d");
+      if (cg) {
+        cg.setTransform(1, 0, 0, 1, 0, 0);
+        cg.clearRect(0, 0, c.width, c.height);
+        renderStrokes(cg, strokes.current, c.width, c.height);
+      }
+      presentCommitted();
+    }, []);
+
+    /** committed の内容をそのまま表示レイヤーへ写す (活性ストロークなし)。 */
+    const presentCommitted = () => {
+      const stroke = strokeRef.current;
+      const c = committed.current;
+      if (!stroke) return;
       const g = stroke.getContext("2d");
       if (!g) return;
       g.setTransform(1, 0, 0, 1, 0, 0);
+      g.globalAlpha = 1;
+      g.globalCompositeOperation = "source-over";
       g.clearRect(0, 0, stroke.width, stroke.height);
-      renderStrokes(g, strokes.current, stroke.width, stroke.height);
-    }, []);
+      if (c && c.width > 0 && c.height > 0) g.drawImage(c, 0, 0);
+    };
+
+    /**
+     * 描画中のプレビュー: 表示を committed で戻してから、活性ストロークを
+     * **1パスで1回だけ** 描く。
+     *
+     * 線分を1本ずつ stroke すると、半透明ペン (鉛筆・マーカー) の重なった
+     * つなぎ目だけが二重合成で濃くなり、確定後の全再描画 (1パス) と見た目が
+     * 変わる。renderStrokes に活性ストロークを丸ごと渡すことで、描画中と
+     * 確定後がまったく同じ経路になる。
+     */
+    const previewLive = () => {
+      const stroke = strokeRef.current;
+      const active = current.current;
+      if (!stroke) return;
+      presentCommitted();
+      if (!active) return;
+      const g = stroke.getContext("2d");
+      if (!g) return;
+      renderStrokes(g, [active], stroke.width, stroke.height);
+    };
 
     // backing store を実解像度 (CSS サイズ × DPR) に張り直して全再描画。
     // ストロークはベクターで保持しているので、リサイズしても描いた内容は消えない。
@@ -185,8 +234,6 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, Props>(
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [width, height]);
 
-    const ctx = () => strokeRef.current?.getContext("2d") ?? null;
-
     const pushHistory = () => {
       history.current.push(strokes.current.slice());
       if (history.current.length > HISTORY_LIMIT) history.current.shift();
@@ -204,72 +251,35 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, Props>(
       };
     };
 
-    /**
-     * 描画中の1セグメントだけを表示レイヤーへ足す (フル再描画しない)。
-     * 線幅・不透明度・合成の式は renderStrokes と同じものを使い、
-     * 確定後の再描画で線が変わって見えないようにする。
-     */
-    const applyLiveStyle = (
-      g: CanvasRenderingContext2D,
-      stroke: SketchStroke,
-      pxW: number,
-      pxH: number,
-    ) => {
-      const erasing = stroke.mode === "erase";
-      g.globalCompositeOperation = erasing ? "destination-out" : "source-over";
-      g.globalAlpha = erasing ? 1 : PEN_STYLES[stroke.pen].alpha;
-      const w = strokeLineWidth(stroke.size, pxW, pxH);
-      g.lineWidth = w;
-      g.lineCap = "round";
-      g.lineJoin = "round";
-      g.strokeStyle = stroke.color;
-      g.fillStyle = stroke.color;
-      return w;
-    };
-
     const startStroke = (e: React.PointerEvent<HTMLCanvasElement>) => {
       const c = strokeRef.current;
-      const g = ctx();
-      if (!c || !g) return;
+      if (!c) return;
       const p = eventToNorm(e);
       if (!p) return;
       pushHistory();
       isDrawing.current = true;
       e.currentTarget.setPointerCapture(e.pointerId);
       last.current = p;
-      const stroke: SketchStroke = {
+      current.current = {
         pen,
         mode,
         color,
         size: brushSize,
         points: [p],
       };
-      current.current = stroke;
-      const w = applyLiveStyle(g, stroke, c.width, c.height);
-      g.beginPath();
-      g.arc(p.x * c.width, p.y * c.height, w / 2, 0, Math.PI * 2);
-      g.fill();
-      g.globalAlpha = 1;
-      g.globalCompositeOperation = "source-over";
+      // 点1個のストロークは renderStrokes 側が arc+fill の点として描く
+      previewLive();
     };
 
     const moveStroke = (e: React.PointerEvent<HTMLCanvasElement>) => {
       if (!isDrawing.current) return;
-      const c = strokeRef.current;
-      const g = ctx();
       const stroke = current.current;
-      if (!c || !g || !stroke || !last.current) return;
+      if (!stroke || !last.current) return;
       const p = eventToNorm(e);
       if (!p) return;
       stroke.points.push(p);
-      applyLiveStyle(g, stroke, c.width, c.height);
-      g.beginPath();
-      g.moveTo(last.current.x * c.width, last.current.y * c.height);
-      g.lineTo(p.x * c.width, p.y * c.height);
-      g.stroke();
-      g.globalAlpha = 1;
-      g.globalCompositeOperation = "source-over";
       last.current = p;
+      previewLive();
     };
 
     const endStroke = (e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -278,7 +288,14 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, Props>(
       last.current = null;
       const stroke = current.current;
       current.current = null;
-      if (stroke) strokes.current.push(stroke);
+      if (stroke) {
+        strokes.current.push(stroke);
+        // 確定分を committed へ焼き込む (次のプレビューの土台になる)
+        const c = committed.current;
+        const cg = c?.getContext("2d") ?? null;
+        if (c && cg) renderStrokes(cg, [stroke], c.width, c.height);
+        presentCommitted();
+      }
       try {
         e.currentTarget.releasePointerCapture(e.pointerId);
       } catch {
@@ -291,6 +308,17 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, Props>(
       toBlob: async () => {
         // 書き出しは props の width×height (1024 長辺) 固定。表示解像度が変わっても
         // 生成パイプラインが受け取る PNG のサイズは従来どおり。
+        //
+        // 紙とストロークは**必ず別レイヤー**にする。同じキャンバスに直接描くと
+        // 消しゴム (destination-out) が紙まで削り、書き出し PNG に透明画素が空く
+        // (生成側は不透明 PNG を受け取る契約)。表示側と同じ二層構造。
+        const layer = document.createElement("canvas");
+        layer.width = width;
+        layer.height = height;
+        const lg = layer.getContext("2d");
+        if (!lg) throw new Error("2d context unavailable");
+        renderStrokes(lg, strokes.current, width, height);
+
         const out = document.createElement("canvas");
         out.width = width;
         out.height = height;
@@ -298,7 +326,7 @@ export const SketchCanvas = forwardRef<SketchCanvasHandle, Props>(
         if (!g) throw new Error("2d context unavailable");
         g.fillStyle = SKETCH_PAPER_COLOR;
         g.fillRect(0, 0, width, height);
-        renderStrokes(g, strokes.current, width, height);
+        g.drawImage(layer, 0, 0);
         return await new Promise<Blob>((resolve, reject) => {
           out.toBlob(
             (b) => (b ? resolve(b) : reject(new Error("toBlob returned null"))),
