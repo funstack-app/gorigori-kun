@@ -119,4 +119,24 @@ describe("estimateScaleCorrection", () => {
   it("正常身長1.8mは補正しない(null)", () => {
     expect(estimateScaleCorrection(1.8)).toBeNull();
   });
+
+  // 表記は factor の符号と対応していること(exp の符号を取り違えると
+  // cm系巨人に「m換算」、極小モデルに「cm→m」が出る)
+  it("factor 0.01(cm系)の表記は cm→m", () => {
+    const correction = estimateScaleCorrection(170);
+    expect(correction?.factor).toBeCloseTo(0.01, 10);
+    expect(correction?.label).toBe("cm→m");
+  });
+
+  it("factor 0.001(mm系)の表記は mm→m", () => {
+    const correction = estimateScaleCorrection(1700);
+    expect(correction?.factor).toBeCloseTo(0.001, 10);
+    expect(correction?.label).toBe("mm→m");
+  });
+
+  it("factor 100(極小モデル)の表記は m換算", () => {
+    const correction = estimateScaleCorrection(0.017);
+    expect(correction?.factor).toBeCloseTo(100, 10);
+    expect(correction?.label).toBe("m換算");
+  });
 });

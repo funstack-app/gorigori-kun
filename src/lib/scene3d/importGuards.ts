@@ -124,10 +124,13 @@ export function convertClipInPlace(clip: AnimationClip, trackIndex: number): Ani
   return converted;
 }
 
-/** 補正係数の指数から推定単位の表記を作る。専門用語は出さず「元の単位→m」の形で示す */
+/**
+ * 補正係数の指数から推定単位の表記を作る。専門用語は出さず「元の単位→m」の形で示す。
+ * factor = 10^exp なので、cm系(100倍で大きい)を縮める補正は exp = -2 になる。
+ */
 function scaleLabel(exp: number): string {
-  if (exp === 2) return "cm→m";
-  if (exp === 3) return "mm→m";
+  if (exp === -2) return "cm→m";
+  if (exp === -3) return "mm→m";
   return "m換算";
 }
 
