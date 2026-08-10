@@ -3,7 +3,7 @@
  *
  * ## 何を守っているか
  *
- * O2: **どの出口から出しても 4:5（1080×1350）になる**こと。
+ * O2: **どの出口から出しても 3:4（2160×2880）になる**こと。
  *     壊れ方は「新しい出口を足したのに正規化を通し忘れる」。実際 2026-08-05 まで
  *     プロジェクト（ギャラリー）登録の経路が素通りで、作品内でページの形が
  *     揃わない実感の原因になっていた。出口の一覧をテストで固定する。
@@ -21,27 +21,28 @@ import {
   toThemeSegment,
 } from "../src/lib/comic/exportSize";
 
-describe("O2: 出力サイズ 4:5 の統一", () => {
-  it("T-O2-1: 規格は 4:5・contain・白帯（比率を変えない）", () => {
-    // STΛCK 確定: 比率は 4:5 のままでよい。問題は揃っていないことだった。
-    expect(COMIC_EXPORT_TARGET.width / COMIC_EXPORT_TARGET.height).toBeCloseTo(4 / 5, 10);
+describe("O2: 出力サイズ 3:4 の統一", () => {
+  it("T-O2-1: 規格は 3:4・contain・白帯（比率を変えない）", () => {
+    // 2026-08-07 コミット95f5ea0 で 3:4(2160×2880) へ変更確定（旧決定 4:5 を上書き）。
+    // 作業寸法1080×1440と同じ比率へ揃え、縦横2倍の高解像度で書き出す。
+    expect(COMIC_EXPORT_TARGET.width / COMIC_EXPORT_TARGET.height).toBeCloseTo(3 / 4, 10);
     expect(COMIC_EXPORT_TARGET.mode).toBe("contain");
   });
 
-  it("T-O2-2: モデル出力が揺れても canvas の比率は常に 4:5 に収まる", () => {
+  it("T-O2-2: モデル出力が揺れても canvas の比率は常に 3:4 に収まる", () => {
     // 実測で揺れる代表寸法（2:3 と 3:4）と、正方形・横長も混ぜる。
     const inputs = [
       [1024, 1536], // 2:3
       [1024, 1365], // 3:4 相当
-      [1080, 1350], // 既に 4:5
+      [1080, 1350], // 4:5（旧規格）
       [1200, 1200], // 正方形
       [1920, 1080], // 横長
     ];
     for (const [w, h] of inputs) {
       const r = containRect(w, h, COMIC_EXPORT_TARGET.width, COMIC_EXPORT_TARGET.height);
       // 出力面（canvas）は常に規格どおり = 揃う
-      expect(COMIC_EXPORT_TARGET.width).toBe(1080);
-      expect(COMIC_EXPORT_TARGET.height).toBe(1350);
+      expect(COMIC_EXPORT_TARGET.width).toBe(2160);
+      expect(COMIC_EXPORT_TARGET.height).toBe(2880);
       // 中身は切られない（contain: 枠内に完全に収まる）
       expect(r.x).toBeGreaterThanOrEqual(0);
       expect(r.y).toBeGreaterThanOrEqual(0);
@@ -52,10 +53,18 @@ describe("O2: 出力サイズ 4:5 の統一", () => {
     }
   });
 
-  it("T-O2-3: 引き伸ばさない（規格より小さい入力は原寸のまま中央へ）", () => {
-    const r = containRect(540, 675, COMIC_EXPORT_TARGET.width, COMIC_EXPORT_TARGET.height);
-    expect(r.w).toBe(540);
-    expect(r.h).toBe(675);
+  it("T-O2-3: 作業ページは白帯なしで2倍に拡大され、別比率は中央配置になる", () => {
+    // 3:4の作業ページ(1080×1440)は出力全面へ拡大される = 白帯が出ない
+    const page = containRect(1080, 1440, COMIC_EXPORT_TARGET.width, COMIC_EXPORT_TARGET.height);
+    expect(page).toEqual({ x: 0, y: 0, w: 2160, h: 2880 });
+
+    // 別比率(4:5)は縦横比を保ったまま中央へ。切られず、帯は上下に均等
+    const other = containRect(540, 675, COMIC_EXPORT_TARGET.width, COMIC_EXPORT_TARGET.height);
+    expect(other.w / other.h).toBeCloseTo(540 / 675, 2);
+    expect(other.x).toBe((COMIC_EXPORT_TARGET.width - other.w) / 2);
+    expect(other.y).toBe((COMIC_EXPORT_TARGET.height - other.h) / 2);
+    expect(other.w).toBeLessThanOrEqual(COMIC_EXPORT_TARGET.width);
+    expect(other.h).toBeLessThanOrEqual(COMIC_EXPORT_TARGET.height);
   });
 });
 
