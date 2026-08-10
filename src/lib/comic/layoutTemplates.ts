@@ -254,6 +254,19 @@ export const USER_COMIC_LAYOUT_TEMPLATES: ComicLayoutTemplate[] = [
     ],
     roles: ["起（導入）", "承（展開）", "見せ場（大ゴマ）"],
   },
+  {
+    id: "user02",
+    label: "手作り02（4:5）",
+    panelCount: 4,
+    pageAspect: { w: 4, h: 5 },
+    slots: [
+      { x: 62.31, y: 3.67, w: 33.15, h: 58.41 },
+      { x: 4.58, y: 3.67, w: 56.99, h: 34.11 },
+      { x: 4.58, y: 39.59, w: 57.04, h: 22.52 },
+      { x: 4.58, y: 63.93, w: 90.83, h: 32.41 },
+    ],
+    roles: ["起（導入）", "承（展開）", "転（見せ場）", "結（オチ）"],
+  },
 ];
 
 export const ALL_COMIC_LAYOUT_TEMPLATES = [

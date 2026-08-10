@@ -7,11 +7,9 @@
 
 import { synthesizeSlotsFromRows } from "./layoutSynthesis";
 import type { ComicPanelSlot } from "./layoutTemplates";
-import {
-  STRUCTURE_PAGE_H,
-  STRUCTURE_PAGE_W,
-  nearestAspectLabel,
-} from "./pageAssembly";
+import { getComicTemplate } from "./layoutTemplates";
+import type { ComicPageAspect } from "./pageAssembly";
+import { nearestAspectLabel, structurePageSize } from "./pageAssembly";
 import { effectivePageSlots } from "./panelLayoutOps";
 import { buildStructurePanelPrompt } from "./prompts";
 import {
@@ -132,6 +130,8 @@ export function buildStructurePanelRequest(args: {
   direction: ComicReadingDirection;
   pageContext: { panelNo: number; panelTotal: number; synopsis: string };
   sourceTag: string;
+  /** ページの縦横比。省略時は 3:4 の既定（従来挙動）。 */
+  pageAspect?: ComicPageAspect;
 }): StructurePanelRequest {
   const environmentReferences = attachedEnvironmentReferences(
     args.envReferences ?? [],
@@ -147,9 +147,8 @@ export function buildStructurePanelRequest(args: {
     ...charRefPaths,
     ...environmentReferences.map((reference) => reference.imagePath),
   ];
-  const slotRatio =
-    (args.slot.w * STRUCTURE_PAGE_W) /
-    (args.slot.h * STRUCTURE_PAGE_H);
+  const page = structurePageSize(args.pageAspect);
+  const slotRatio = (args.slot.w * page.w) / (args.slot.h * page.h);
 
   return {
     panelIndex: args.panel.index,
@@ -199,6 +198,11 @@ export function buildStructureRunPlan(args: {
   if (slots.length !== args.page.panelCount) {
     throw new Error("コマ割りの情報とコマ数が一致しません。");
   }
+  // ページ比率はテンプレ追従（2026-08-10 STΛCK決定）。テンプレ未選択（rows合成）の
+  // ときは既定の 3:4 のまま＝従来挙動。
+  const pageAspect = args.storyTemplateId
+    ? getComicTemplate(args.storyTemplateId).pageAspect
+    : undefined;
 
   return {
     genMode: "structure",
@@ -218,6 +222,7 @@ export function buildStructureRunPlan(args: {
           synopsis: args.page.synopsis,
         },
         sourceTag: args.sourceTag,
+        pageAspect,
       }),
     ),
   };

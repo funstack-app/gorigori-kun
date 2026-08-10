@@ -2,7 +2,8 @@
  * 「きっちりコマ割り」のページ合成。
  *
  * 純関数で座標・中央cover・枠線幅を先に決め、ブラウザ境界ではその計画だけを
- * Canvasへ描く。出力は常に白地1080x1440で、画像は縦横同じ倍率のまま切り抜く。
+ * Canvasへ描く。出力は白地・幅1080固定で、高さはテンプレの pageAspect から決まる
+ * （3:4なら1080x1440、4:5なら1080x1350）。画像は縦横同じ倍率のまま切り抜く。
  */
 
 import { convertFileSrc } from "@tauri-apps/api/core";
@@ -10,8 +11,31 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import type { ComicLayoutTemplate, ComicPanelSlot } from "./layoutTemplates";
 import type { ComicFrameStyle } from "./types";
 
+/** ページの縦横比（width : height）。テンプレの pageAspect と同じ形。 */
+export type ComicPageAspect = { w: number; h: number };
+
 export const STRUCTURE_PAGE_W = 1080;
 export const STRUCTURE_PAGE_H = 1440;
+
+/**
+ * 作業ページのpx寸法を、テンプレの縦横比から決める。
+ *
+ * STΛCK 決定 (2026-08-10):「書き出しは固定規格でなく**テンプレサイズにあわせる**」。
+ * 幅1080を軸に、高さだけを比率から導く（3:4 → 1080x1440 ＝ 従来と同値）。
+ * 未指定は 3:4 の既定にするため、pageAspect を渡さない既存経路は挙動が変わらない。
+ */
+export function structurePageSize(aspect?: ComicPageAspect): {
+  w: number;
+  h: number;
+} {
+  if (!aspect) return { w: STRUCTURE_PAGE_W, h: STRUCTURE_PAGE_H };
+  requirePositiveFinite(aspect.w, "pageAspect.w");
+  requirePositiveFinite(aspect.h, "pageAspect.h");
+  return {
+    w: STRUCTURE_PAGE_W,
+    h: Math.round((STRUCTURE_PAGE_W * aspect.h) / aspect.w),
+  };
+}
 
 /** 再組立はテンプレ座標を正とし、紙と枠線だけを固定する。 */
 export const RECOMPOSE_PAGE_PAPER = "#ffffff";
@@ -185,15 +209,13 @@ function polygonArea(points: PxPoint[]): number {
 export function buildAssemblyPlan(
   slots: ComicPanelSlot[],
   frameStyle: ComicFrameStyle,
+  pageAspect?: ComicPageAspect,
 ): AssemblyPlan {
   if (slots.length === 0) {
     throw new Error("はめ込むコマがありません。");
   }
-  const borderWidthPx = borderWidthPxFor(
-    frameStyle,
-    STRUCTURE_PAGE_W,
-    STRUCTURE_PAGE_H,
-  );
+  const page = structurePageSize(pageAspect);
+  const borderWidthPx = borderWidthPxFor(frameStyle, page.w, page.h);
   const panels = slots.map((slot, index): AssemblyPanelPlan => {
     for (const [label, value] of Object.entries({
       x: slot.x,
@@ -216,15 +238,11 @@ export function buildAssemblyPlan(
       }
     }
 
-    const rect = slotPixelRect(slot, STRUCTURE_PAGE_W, STRUCTURE_PAGE_H);
+    const rect = slotPixelRect(slot, page.w, page.h);
     if (rect.w <= 0 || rect.h <= 0) {
       throw new Error(`コマ${index + 1}のpxスロットが退化しています。`);
     }
-    const clipPolygon = slotClipPolygonPx(
-      slot,
-      STRUCTURE_PAGE_W,
-      STRUCTURE_PAGE_H,
-    );
+    const clipPolygon = slotClipPolygonPx(slot, page.w, page.h);
     if (clipPolygon && polygonArea(clipPolygon) <= 0) {
       throw new Error(`コマ${index + 1}のclip多角形が退化しています。`);
     }
@@ -232,8 +250,8 @@ export function buildAssemblyPlan(
   });
 
   return {
-    pageW: STRUCTURE_PAGE_W,
-    pageH: STRUCTURE_PAGE_H,
+    pageW: page.w,
+    pageH: page.h,
     panels,
   };
 }
@@ -306,18 +324,20 @@ function drawClippedPanel(
 }
 
 /**
- * 白地1080x1440へ全コマをcover-clipで描き、枠線まで焼き込んだPNG bytesを返す。
+ * 白地のページ（幅1080・高さは pageAspect 由来）へ全コマをcover-clipで描き、
+ * 枠線まで焼き込んだPNG bytesを返す。
  * undefined のコマは白地を残し、枠線だけを描く。
  */
 export async function assembleStructurePage(args: {
   panelImagePaths: (string | undefined)[];
   slots: ComicPanelSlot[];
   frameStyle: ComicFrameStyle;
+  pageAspect?: ComicPageAspect;
 }): Promise<Uint8Array> {
   if (args.panelImagePaths.length !== args.slots.length) {
     throw new Error("コマ画像とスロットの数が一致しません。");
   }
-  const plan = buildAssemblyPlan(args.slots, args.frameStyle);
+  const plan = buildAssemblyPlan(args.slots, args.frameStyle, args.pageAspect);
   const { canvas, context } = createWhitePageCanvas(plan.pageW, plan.pageH);
 
   for (let index = 0; index < plan.panels.length; index += 1) {
@@ -358,7 +378,9 @@ export async function assembleStructurePage(args: {
 /**
  * 照合済みの実枠とテンプレから、再組立の切り出し・配置計画を決める。
  * 配置先は一律マージン/ガターではなく、template.slots のpercent座標を
- * 1080x1440へ換算した値だけを正とする。
+ * テンプレ比率のページ（幅1080）へ換算した値だけを正とする。
+ *
+ * pageAspect は明示指定が無ければ template.pageAspect を使う（テンプレ追従）。
  */
 export function buildRecompositionPlan(args: {
   alignedSlots: ComicPanelSlot[];
@@ -366,6 +388,7 @@ export function buildRecompositionPlan(args: {
   sourceWidth: number;
   sourceHeight: number;
   borderPx: number;
+  pageAspect?: ComicPageAspect;
 }): RecompositionPlan {
   requirePositiveFinite(args.sourceWidth, "sourceWidth");
   requirePositiveFinite(args.sourceHeight, "sourceHeight");
@@ -377,7 +400,11 @@ export function buildRecompositionPlan(args: {
     throw new Error("照合済み実枠とテンプレのコマ数が一致しません。");
   }
 
-  const destinationPlan = buildAssemblyPlan(args.template.slots, "standard");
+  const destinationPlan = buildAssemblyPlan(
+    args.template.slots,
+    "standard",
+    args.pageAspect ?? args.template.pageAspect,
+  );
   const insetPx = args.borderPx + RECOMPOSE_SOURCE_INSET_EXTRA_PX;
   const panels = args.alignedSlots.map((slot, index): RecompositionPanelPlan => {
     const matchedRect = slotPixelRect(slot, args.sourceWidth, args.sourceHeight);
@@ -424,15 +451,15 @@ export function buildRecompositionPlan(args: {
   });
 
   return {
-    pageW: STRUCTURE_PAGE_W,
-    pageH: STRUCTURE_PAGE_H,
+    pageW: destinationPlan.pageW,
+    pageH: destinationPlan.pageH,
     panels,
   };
 }
 
 /**
  * 元の一枚絵を、照合済み実枠から切り出してテンプレ正枠へ再組立する。
- * ファイル保存は行わず、白地1080x1440のcanvasを返す。
+ * ファイル保存は行わず、白地のページcanvas（幅1080・高さは pageAspect 由来）を返す。
  */
 export function recomposePageToTemplate(args: {
   sourceImage: CanvasImageSource;
@@ -441,6 +468,7 @@ export function recomposePageToTemplate(args: {
   alignedSlots: ComicPanelSlot[];
   template: ComicLayoutTemplate;
   borderPx: number;
+  pageAspect?: ComicPageAspect;
 }): HTMLCanvasElement {
   const plan = buildRecompositionPlan(args);
   const { canvas, context } = createWhitePageCanvas(plan.pageW, plan.pageH);

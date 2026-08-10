@@ -13,6 +13,7 @@ import { buildExportFileName } from "../exportNaming";
 import {
   buildComicPageFileName,
   COMIC_EXPORT_TARGET,
+  comicExportSize,
   containRect,
   toThemeSegment,
 } from "./exportSize";
@@ -72,9 +73,11 @@ function loadImage(src: string) {
 /**
  * 画像パスを canvas 経由で png/jpeg の Blob にする（crossOrigin 必須）。
  *
- * **出力は必ず高解像度2160×2880（3:4）**。作業寸法1080×1440と同じ比率なので、
- * 標準の作業ページは白帯なしで縦横2倍へ拡大する（規格の正本は exportSize.ts）。
- * 別比率の入力も contain で切らず、余った左右（または上下）だけ白帯にする。
+ * **出力は幅2160の高解像度で、高さは元ページの比率に追従する**
+ * （2026-08-10 STΛCK決定「書き出しはテンプレサイズにあわせる」。3:4ページ→2160×2880、
+ * 4:5ページ→2160×2700。寸法の正本は exportSize.ts の `comicExportSize`）。
+ * 比率が一致するため作業ページは白帯なしで縦横2倍へ拡大される。
+ * 描画は contain のままなので、想定外の比率でも切り落とさない。
  * 元画像のファイル実体・表示・再編集は元寸のまま（触るのは書き出し canvas だけ）。
  */
 export async function encodePageBlob(
@@ -82,9 +85,10 @@ export async function encodePageBlob(
   format: ComicSaveFormat,
 ): Promise<Blob> {
   const img = await loadImage(convertFileSrc(imagePath));
+  const target = comicExportSize(img.naturalWidth, img.naturalHeight);
   const canvas = document.createElement("canvas");
-  canvas.width = COMIC_EXPORT_TARGET.width;
-  canvas.height = COMIC_EXPORT_TARGET.height;
+  canvas.width = target.width;
+  canvas.height = target.height;
   const ctx = canvas.getContext("2d");
   if (!ctx) throw new Error("画像の変換に失敗しました。");
   // 白地で塗ってから描く。透過 PNG → JPEG の黒化防止と contain の帯を1回の塗りで兼ねる。
@@ -129,7 +133,8 @@ function blobToBase64(blob: Blob): Promise<string> {
 }
 
 /**
- * ページ画像を高解像度3:4に正規化した**新しいファイル**を作り、そのパスを返す。
+ * ページ画像を、比率そのままの高解像度（幅2160）へ拡大した**新しいファイル**を作り、
+ * そのパスを返す。
  *
  * ## 実装契約O (2026-08-05): なぜ「保存の瞬間」だけでは足りなかったか
  *
@@ -143,19 +148,20 @@ function blobToBase64(blob: Blob): Promise<string> {
  * ## 受領時正規化との役割分担（design-comic-feedback-r1.md §1 A-a・修正1）
  *
  * S9 以降は、生成・再生成・分割/統合で受け取った作業用ページを先に
- * 1080×1440（3:4）へ contain 正規化し、白帯がある場合は `contentRect` を記録する。
- * これにより編集対象・マスク・AI返却画像の比率を3:4へ揃え、コマ座標は
- * `contentRect` を通して実コンテンツ領域へ合わせる。
+ * 幅1080の作業寸法へ contain 正規化し、白帯がある場合は `contentRect` を記録する。
+ * これにより編集対象・マスク・AI返却画像の比率をページ比率へ揃え、コマ座標は
+ * `contentRect` を通して実コンテンツ領域へ合わせる（2026-08-10 以降、その比率は
+ * 3:4固定でなく**テンプレの pageAspect 追従**）。
  *
- * 本ファイルの関所は廃止せず、外へ出す画像を2160×2880（3:4）へ揃える
+ * 本ファイルの関所は廃止せず、外へ出す画像を幅2160の高解像度へ揃える
  * **出口側の役割**を引き続き担う。出口は次の3つ:
  *
  *   1. `savePageAs`            … 1ページ保存（`encodePageBlob` 経由）
  *   2. `savePagesBulk`         … 一括保存（同上）
  *   3. `materializeExportPage` … ギャラリー/プロジェクト登録
  *
- * 作業用1080×1440と書き出し用2160×2880を別ファイルにし、元ファイルを上書きしない。
- * 同じ3:4なので標準経路は白帯なしで2倍拡大し、画像を切り落とさない。
+ * 作業用（幅1080）と書き出し用（幅2160）を別ファイルにし、元ファイルを上書きしない。
+ * 比率は元のままなので白帯なしで2倍拡大し、画像を切り落とさない。
  */
 export async function materializeExportPage(
   imagePath: string,
