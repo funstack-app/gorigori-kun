@@ -2402,13 +2402,16 @@ function PathDrawOverlay() {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         drawing.current = false;
+        // 描いている途中のEscでも dragging を解除する。残すと視点操作が
+        // ロックされたままになる(ViewportControls の enabled が false のまま)
+        setDragging(null);
         setStroke([]);
         setPathDrawMode(false);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [pathDrawMode, visible, setPathDrawMode]);
+  }, [pathDrawMode, visible, setPathDrawMode, setDragging]);
 
   if (!pathDrawMode) return null;
   const shot = getSelectedShot({ project, selectedShotId });
@@ -2502,13 +2505,16 @@ function BodyPathDrawOverlay() {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         drawing.current = false;
+        // 描いている途中のEscでも dragging を解除する。残すと視点操作が
+        // ロックされたままになる(ViewportControls の enabled が false のまま)
+        setDragging(null);
         setStroke([]);
         setBodyDrawEntityId(null);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [bodyDrawEntityId, visible, setBodyDrawEntityId]);
+  }, [bodyDrawEntityId, visible, setBodyDrawEntityId, setDragging]);
 
   if (!bodyDrawEntityId) return null;
   const entity = entities.find((e) => e.id === bodyDrawEntityId);
