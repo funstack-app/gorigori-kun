@@ -10,8 +10,19 @@
  */
 
 import type { AnimationClip, Group } from "three";
+import { Box3, Vector3 } from "three";
 import { FBXLoader } from "three/examples/jsm/loaders/FBXLoader.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+
+import {
+  convertClipInPlace,
+  estimateScaleCorrection,
+  findRootPositionTrack,
+  isHeightOutOfRange,
+  isNonInPlace,
+  isUnmeasurableHeight,
+  measureRootMotion,
+} from "./importGuards";
 
 export type ImportedMotion = {
   id: string;
@@ -139,12 +150,20 @@ function baseName(fileName: string): string {
   return fileName.replace(/\.(fbx|glb|gltf)$/i, "");
 }
 
-/** File(複数可)を読み込んでライブラリに登録。UI登録用の {id,name}[] を返す */
+/**
+ * File(複数可)を読み込んでライブラリに登録。UI登録用の {id,name}[] を返す。
+ *
+ * 取り込み時に2つの地雷を検出して自動補正する(importGuards.ts):
+ *   - 移動成分入りクリップ → その場再生に変換(パス移動との二重移動を防ぐ)
+ *   - 単位系違いのモデル → 10の冪でスケール補正(巨人/豆粒を防ぐ)
+ * 補正した内容は warnings で平易な日本語として返し、呼び出し側が表示する。
+ */
 export async function importMotionFiles(
   files: File[],
-): Promise<{ ok: { id: string; name: string }[]; errors: string[] }> {
+): Promise<{ ok: { id: string; name: string }[]; errors: string[]; warnings: string[] }> {
   const ok: { id: string; name: string }[] = [];
   const errors: string[] = [];
+  const warnings: string[] = [];
   const fbxLoader = new FBXLoader();
   const gltfLoader = new GLTFLoader();
 
@@ -175,17 +194,47 @@ export async function importMotionFiles(
         continue;
       }
 
+      // サイズ検証: 単位系違い(cm系GLB等)を10の冪で補正する。
+      // 骨のみのファイルは高さが測れないので検証ごとスキップ(警告も出さない)
+      const size = new Box3().setFromObject(template).getSize(new Vector3());
+      const heightMeters = size.y * scale;
+      if (!isUnmeasurableHeight(heightMeters)) {
+        const correction = estimateScaleCorrection(heightMeters);
+        if (correction) {
+          scale *= correction.factor;
+          warnings.push(
+            `${file.name}: サイズが規格外だったため自動調整しました(${correction.label})`,
+          );
+        } else if (isHeightOutOfRange(heightMeters)) {
+          warnings.push(
+            `${file.name}: サイズが規格外(推定${heightMeters.toFixed(1)}m)のため正しく表示されない可能性があります`,
+          );
+        }
+      }
+
       // 1ファイルに複数クリップがあれば全部登録
       for (const clip of clips) {
         const id = `motion-${Date.now()}-${seq++}`;
         const name =
           clips.length > 1 ? `${baseName(file.name)} / ${clip.name}` : baseName(file.name);
-        library.set(id, { id, name, template, clip, scale });
+
+        // ルートモーション検証: 移動しながらのクリップはその場再生に変換する。
+        // エンジンは移動をパス側で与えるため、変換しないと二重移動でワープする
+        let registered = clip;
+        const trackIndex = findRootPositionTrack(clip);
+        if (trackIndex !== null && isNonInPlace(measureRootMotion(clip, trackIndex, scale))) {
+          registered = convertClipInPlace(clip, trackIndex);
+          warnings.push(
+            `${name}: 移動しながらのアニメーションだったため、その場再生に変換して取り込みました(移動はパスで付けられます)`,
+          );
+        }
+
+        library.set(id, { id, name, template, clip: registered, scale });
         ok.push({ id, name });
       }
     } catch (e) {
       errors.push(`${file.name}: 読み込み失敗 (${String(e).slice(0, 120)})`);
     }
   }
-  return { ok, errors };
+  return { ok, errors, warnings };
 }

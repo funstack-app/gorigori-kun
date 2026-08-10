@@ -949,6 +949,8 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
   const fileRef = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
   const [errors, setErrors] = useState<string[]>([]);
+  /** 取り込み時の自動補正の通知(エラーではない。その場再生への変換・サイズ調整) */
+  const [warnings, setWarnings] = useState<string[]>([]);
   const [filter, setFilter] = useState("");
   const [genText, setGenText] = useState("");
   // AIで直す対象(nullなら新規生成モード)
@@ -1114,9 +1116,10 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
     if (!list || list.length === 0) return;
     setBusy(true);
     setErrors([]);
-    const { ok, errors: errs } = await importMotionFiles(Array.from(list));
+    const { ok, errors: errs, warnings: warns } = await importMotionFiles(Array.from(list));
     registerImportedMotions(ok);
     setErrors(errs);
+    setWarnings(warns);
     setBusy(false);
   };
 
@@ -1277,6 +1280,14 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
         <div className="mb-2 rounded border border-red-500/30 bg-red-500/10 p-2 text-[11px] text-red-300">
           {errors.map((er, i) => (
             <p key={i}>{er}</p>
+          ))}
+        </div>
+      )}
+
+      {warnings.length > 0 && (
+        <div className="mb-2 rounded border border-amber-400/30 bg-amber-400/10 p-2 text-[11px] text-amber-200">
+          {warnings.map((wr, i) => (
+            <p key={i}>{wr}</p>
           ))}
         </div>
       )}
