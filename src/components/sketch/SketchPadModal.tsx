@@ -25,12 +25,17 @@ const PEN_COLORS: { id: string; label: string; value: string }[] = [
   { id: "skin", label: "肌", value: "#f3c6a5" },
 ];
 
-/** 太さ3段 (px)。 */
+/** 太さ4段 (px)。極細は鉛筆の下書き級(1024px長辺キャンバス基準)。 */
 const BRUSH_SIZES: { label: string; value: number }[] = [
+  { label: "極細", value: 2 },
   { label: "細", value: 4 },
   { label: "中", value: 10 },
   { label: "太", value: 24 },
 ];
+
+/** 既定の太さ(中)。BRUSH_SIZES に段を足してもここがずれないよう値で引く。 */
+const DEFAULT_BRUSH_SIZE =
+  BRUSH_SIZES.find((b) => b.label === "中")?.value ?? BRUSH_SIZES[0].value;
 
 /** キャンバス既定は 1024 長辺。 */
 const CANVAS_LONG_EDGE = 1024;
@@ -74,7 +79,7 @@ export function SketchPadModal({
 
   const [aspect, setAspect] = useState<FrameAspect>(DEFAULT_SKETCH_ASPECT);
   const [color, setColor] = useState(PEN_COLORS[0].value);
-  const [brushSize, setBrushSize] = useState(BRUSH_SIZES[1].value);
+  const [brushSize, setBrushSize] = useState(DEFAULT_BRUSH_SIZE);
   const [mode, setMode] = useState<SketchMode>("draw");
   // Canvas mutations happen outside React state, so the toolbar needs an
   // explicit nudge to re-read canUndo()/isEmpty() after each stroke.
