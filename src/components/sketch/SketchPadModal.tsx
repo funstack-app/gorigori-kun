@@ -11,6 +11,13 @@ import {
 } from "../../lib/store/sceneFromImage";
 import { BLOCKOUT_PRESET_PROMPT } from "../../lib/sketch/presets";
 import { SketchCanvas, type SketchCanvasHandle, type SketchMode } from "./SketchCanvas";
+import {
+  MAX_BRUSH_PX,
+  MIN_BRUSH_PX,
+  PEN_STYLES,
+  clampBrushSize,
+  type PenType,
+} from "./sketchModel";
 import { SceneFromImageDialog } from "../skills/scene3d/SceneFromImageDialog";
 
 /** ペン色8色 (設計書 §1 論点1 の確定値)。 */
@@ -32,6 +39,9 @@ const BRUSH_SIZES: { label: string; value: number }[] = [
   { label: "中", value: 10 },
   { label: "太", value: 24 },
 ];
+
+/** ペンの種類3つ。表示順は PEN_STYLES の定義順ではなくここで固定する。 */
+const PEN_TYPES: PenType[] = ["pen", "pencil", "marker"];
 
 /** 既定の太さ(中)。BRUSH_SIZES に段を足してもここがずれないよう値で引く。 */
 const DEFAULT_BRUSH_SIZE =
@@ -80,6 +90,7 @@ export function SketchPadModal({
   const [aspect, setAspect] = useState<FrameAspect>(DEFAULT_SKETCH_ASPECT);
   const [color, setColor] = useState(PEN_COLORS[0].value);
   const [brushSize, setBrushSize] = useState(DEFAULT_BRUSH_SIZE);
+  const [pen, setPen] = useState<PenType>("pen");
   const [mode, setMode] = useState<SketchMode>("draw");
   // Canvas mutations happen outside React state, so the toolbar needs an
   // explicit nudge to re-read canUndo()/isEmpty() after each stroke.
@@ -305,6 +316,26 @@ export function SketchPadModal({
           </div>
 
           <div className="flex items-center gap-1">
+            {PEN_TYPES.map((p) => (
+              <button
+                key={p}
+                type="button"
+                onClick={() => {
+                  setPen(p);
+                  setMode("draw");
+                }}
+                className={`rounded-md border px-2 py-1 text-[11px] font-medium ${
+                  mode === "draw" && pen === p
+                    ? "border-blue-500 bg-blue-500/15 text-blue-300"
+                    : "border-[#333] bg-[#101010] text-neutral-300 hover:border-neutral-500"
+                }`}
+              >
+                {PEN_STYLES[p].label}
+              </button>
+            ))}
+          </div>
+
+          <div className="flex items-center gap-1">
             {BRUSH_SIZES.map((b) => (
               <button
                 key={b.value}
@@ -319,6 +350,19 @@ export function SketchPadModal({
                 {b.label}
               </button>
             ))}
+            {/* 太さの正本は brushSize state。プリセットは値をセットするだけなので、
+                数値を直接入れてもプリセット選択表示と食い違わない。 */}
+            <input
+              type="number"
+              min={MIN_BRUSH_PX}
+              max={MAX_BRUSH_PX}
+              step={1}
+              value={brushSize}
+              onChange={(e) => setBrushSize(clampBrushSize(Number(e.target.value)))}
+              title={`太さをpxで指定(${MIN_BRUSH_PX}〜${MAX_BRUSH_PX})`}
+              aria-label="太さ(px)"
+              className="w-14 rounded-md border border-[#333] bg-[#101010] px-1.5 py-1 text-[11px] font-medium text-neutral-300 focus:border-neutral-500 focus:outline-none"
+            />
           </div>
 
           <button
@@ -381,6 +425,7 @@ export function SketchPadModal({
             color={color}
             brushSize={brushSize}
             mode={mode}
+            pen={pen}
             onChange={() => bumpVersion((v) => v + 1)}
           />
         </div>
