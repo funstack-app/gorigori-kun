@@ -1619,9 +1619,18 @@ function SelectedObjectSection() {
   const setEntityLookAt = useScene3d((s) => s.setEntityLookAt);
   const setEntityOverlayClip = useScene3d((s) => s.setEntityOverlayClip);
   const [overlayPickerOpen, setOverlayPickerOpen] = useState(false);
+  const bodyDrawEntityId = useScene3d((s) => s.bodyDrawEntityId);
+  const setBodyDrawEntityId = useScene3d((s) => s.setBodyDrawEntityId);
 
   const entity = project.entities.find((e) => e.id === selectedEntityId);
   if (!entity) return null;
+
+  // 道を描けるのは「移動する」モーションのときだけ(立ち・倒れる・その場再生は道を持たない)
+  const canDrawPath =
+    entity.motion?.type === "walk" ||
+    entity.motion?.type === "run" ||
+    (entity.motion?.type === "clip" && (entity.motion.speed ?? 0) > 0);
+  const bodyDrawing = bodyDrawEntityId === entity.id;
 
   const degrees = ((Math.round((entity.rotationY * 180) / Math.PI) % 360) + 360) % 360;
   const motionType = entity.motion?.type ?? null;
@@ -1703,6 +1712,19 @@ function SelectedObjectSection() {
             倒れる
           </button>
         </div>
+      )}
+      {canDrawPath && (
+        <button
+          className={`rounded-lg border px-2 py-1.5 text-xs ${
+            bodyDrawing
+              ? "border-sky-400 bg-sky-400/10 text-sky-300"
+              : "border-[#2a2a2a] text-neutral-400 hover:border-sky-400/60 hover:text-neutral-200"
+          }`}
+          onClick={() => setBodyDrawEntityId(bodyDrawing ? null : entity.id)}
+          title="ビューポートで一筆書きすると、この人物の通り道になる(今の場所から、描き終えた場所まで)"
+        >
+          {bodyDrawing ? "描いてください…(Escで中止)" : "移動の道を手で描く"}
+        </button>
       )}
       {motionType && motionType !== "clip" && motionType !== "fall" && (
         <p className="text-[10px] leading-4 text-neutral-500">

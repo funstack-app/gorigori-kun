@@ -251,6 +251,14 @@ type Scene3dState = {
   moveMotionPathPoint: (id: string, index: number, position: Vec3) => void;
   /** 体の軌跡: index番目の通過点を消す(最後の1点=行き先は消せない) */
   removeMotionPathPoint: (id: string, index: number) => void;
+  /**
+   * 移動の道を手で描くモード(このエンティティの通り道を一筆書きで作る)。
+   * null = オフ。カメラの pathDrawMode とは相互排他(同時活性を構造的に禁止)
+   */
+  bodyDrawEntityId: string | null;
+  setBodyDrawEntityId: (id: string | null) => void;
+  /** 一筆書きの結果(経由点+到着点)で、そのエンティティの経路を丸ごと置き換える */
+  setMotionPathFromStroke: (id: string, waypoints: Vec3[]) => void;
   setDragging: (id: string | null) => void;
 
   /**
@@ -943,6 +951,29 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
     });
   },
 
+  bodyDrawEntityId: null,
+  // 相互排他: 体を描き始めたらカメラの一筆書きは降ろす(両方の受け皿が
+  // 同じレイを取り合って、どちらの道を描いているのか分からなくなるため)
+  setBodyDrawEntityId: (id) =>
+    set(id == null ? { bodyDrawEntityId: null } : { bodyDrawEntityId: id, pathDrawMode: false }),
+
+  setMotionPathFromStroke: (id, waypoints) => {
+    const { project } = get();
+    set({
+      project: {
+        ...project,
+        entities: project.entities.map((e) => {
+          if (e.id !== id || !e.motion) return e;
+          // 移動しないモーション(倒れる・その場再生クリップ)は道を持たない
+          if (e.motion.type === "fall") return e;
+          if (e.motion.type === "clip" && (e.motion.speed ?? 0) <= 0) return e;
+          // 描き直しなので既存の経路は捨てる(足すのではなく置き換える)
+          return { ...e, motion: { ...e.motion, path: [...waypoints] } };
+        }),
+      },
+    });
+  },
+
   setEntityOverlayClip: (id, clipId) => {
     const { project } = get();
     set({
@@ -1423,7 +1454,8 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
   },
 
   pathDrawMode: false,
-  setPathDrawMode: (on) => set({ pathDrawMode: on }),
+  // 相互排他: カメラを描き始めたら体の一筆書きは降ろす(setBodyDrawEntityId と対)
+  setPathDrawMode: (on) => set(on ? { pathDrawMode: true, bodyDrawEntityId: null } : { pathDrawMode: false }),
 
   resetCameraWork: () => {
     // 選択中のカメラワーク(プリセット)のデフォルト配置に戻す。

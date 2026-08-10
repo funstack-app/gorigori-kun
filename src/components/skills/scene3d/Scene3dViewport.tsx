@@ -2479,6 +2479,111 @@ function PathDrawOverlay() {
 }
 
 /**
+ * 移動の道を手で描く: ビューポートの一筆書きで、被写体(人物・物)の通り道を作る。
+ * 始点は今いる場所、終点は描き終わった場所。途中の形は数個の真珠に要約されて経路になる。
+ * 高さは世界(磁石・自動ジャンプ)が決めるので、ここでは水平面のXZだけを与える
+ */
+function BodyPathDrawOverlay() {
+  const bodyDrawEntityId = useScene3d((s) => s.bodyDrawEntityId);
+  const setBodyDrawEntityId = useScene3d((s) => s.setBodyDrawEntityId);
+  const setMotionPathFromStroke = useScene3d((s) => s.setMotionPathFromStroke);
+  const entities = useScene3d((s) => s.project.entities);
+  const setDragging = useScene3d((s) => s.setDragging);
+  const [stroke, setStroke] = useState<Vec3[]>([]);
+  const drawing = useRef(false);
+
+  // Escで中止。
+  // 非表示中は登録しない (Sol 評価 blocking#1 / 2026-08-04)。mount-pool で裏に
+  // 残った 3D 画面が、別スキルのモーダルを閉じる Esc を巻き込んで描画モードを
+  // 解除してしまうのを防ぐ。
+  const visible = useSkillVisible();
+  useEffect(() => {
+    if (!bodyDrawEntityId || !visible) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        drawing.current = false;
+        setStroke([]);
+        setBodyDrawEntityId(null);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [bodyDrawEntityId, visible, setBodyDrawEntityId]);
+
+  if (!bodyDrawEntityId) return null;
+  const entity = entities.find((e) => e.id === bodyDrawEntityId);
+  if (!entity) return null;
+  // 描く平面の高さ: その被写体の足元の高さ(旗ドラッグと同じ面)
+  const drawY = entity.position[1];
+
+  const finish = (last: Vec3 | null) => {
+    drawing.current = false;
+    setDragging(null);
+    const end = last ?? stroke[stroke.length - 1] ?? null;
+    if (end) {
+      // 到着点は描き終わった場所(0.1m丸めは真珠と同じ粒度)
+      const strokeEnd: Vec3 = [
+        Math.round(end[0] * 10) / 10,
+        drawY,
+        Math.round(end[2] * 10) / 10,
+      ];
+      const pearls = resampleStrokeToPearls(stroke, entity.position, strokeEnd);
+      if (pearls.length > 0) {
+        setMotionPathFromStroke(entity.id, [...pearls, strokeEnd]);
+      }
+    }
+    setStroke([]);
+    setBodyDrawEntityId(null);
+  };
+
+  return (
+    <>
+      {/* 描画の受け皿(巨大な水平面。見えないがレイは受ける) */}
+      <mesh
+        visible={false}
+        position={[0, drawY, 0]}
+        rotation={[-Math.PI / 2, 0, 0]}
+        onPointerDown={(e) => {
+          e.stopPropagation();
+          drawing.current = true;
+          setDragging("__body-path-draw");
+          (e.target as Element).setPointerCapture(e.pointerId);
+          const p = rayToPlaneY(e.ray, drawY);
+          if (p) setStroke([p]);
+        }}
+        onPointerMove={(e) => {
+          if (!drawing.current) return;
+          const p = rayToPlaneY(e.ray, drawY);
+          if (!p) return;
+          setStroke((prev) => {
+            const last = prev[prev.length - 1];
+            if (last && Math.hypot(p[0] - last[0], p[2] - last[2]) < 0.15) return prev;
+            return [...prev, p];
+          });
+        }}
+        onPointerUp={(e) => {
+          if (!drawing.current) return;
+          (e.target as Element).releasePointerCapture(e.pointerId);
+          finish(rayToPlaneY(e.ray, drawY));
+        }}
+      >
+        <planeGeometry args={[400, 400]} />
+        <meshBasicMaterial />
+      </mesh>
+      {/* 描いている線(体の移動系は sky。カメラのピンクと区別する) */}
+      {stroke.length >= 2 && (
+        <Line points={stroke} color="#38bdf8" lineWidth={3} dashed={false} transparent opacity={0.9} />
+      )}
+      {/* 始点の目印(今いる場所)。終点は描き終わった場所で決まるので出さない */}
+      <mesh position={entity.position}>
+        <sphereGeometry args={[0.12, 12, 8]} />
+        <meshBasicMaterial color="#4ade80" />
+      </mesh>
+    </>
+  );
+}
+
+/**
  * カーソルへ寄るホイールズーム(自前実装)。
  * OrbitControls標準のズームは「注視点までの残り%で刻む」ため近づくほど歩幅が縮み、
  * 最後は壁になって寄れない。ここでは常にカーソルの先へ最低歩幅を保証して進む
@@ -2549,7 +2654,9 @@ function ViewportControls() {
   const cameraView = useScene3d((s) => s.cameraView);
   const splitView = useScene3d((s) => s.splitView);
   const pathDrawMode = useScene3d((s) => s.pathDrawMode);
-  const enabled = !dragging && !pathDrawMode && (splitView || (!playing && !cameraView));
+  const bodyDrawMode = useScene3d((s) => s.bodyDrawEntityId != null);
+  const enabled =
+    !dragging && !pathDrawMode && !bodyDrawMode && (splitView || (!playing && !cameraView));
   return (
     <>
       <OrbitControls
@@ -2652,6 +2759,7 @@ export function Scene3dViewport({
       {!exporting && !isCameraPane && <AllCameraIndicators />}
       {!exporting && !isCameraPane && <CameraFollowLinks />}
       {!exporting && !isCameraPane && <PathDrawOverlay />}
+      {!exporting && !isCameraPane && <BodyPathDrawOverlay />}
       {!exporting && !isCameraPane && cameraSelected && <CameraEndMarker />}
       {!exporting && !isCameraPane && cameraSelected && <CameraMidMarker />}
       {!exporting && !isCameraPane && cameraSelected && <PathPearls />}
