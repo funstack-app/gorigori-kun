@@ -13,6 +13,7 @@ import { buildExportFileName } from "../exportNaming";
 import {
   buildComicPageFileName,
   COMIC_EXPORT_TARGET,
+  comicAspectSuffix,
   comicExportSize,
   containRect,
   toThemeSegment,
@@ -84,6 +85,19 @@ export async function encodePageBlob(
   imagePath: string,
   format: ComicSaveFormat,
 ): Promise<Blob> {
+  return (await encodePageBlobWithSize(imagePath, format)).blob;
+}
+
+/**
+ * `encodePageBlob` と同じ変換を行い、**採用した書き出し寸法も返す**内部版。
+ *
+ * 呼び出し側（`materializeExportPage`）がファイル名の比率接尾辞を決めるのに要る。
+ * blob を再デコードして寸法を測り直すより、変換時点の確定値を渡すほうが安い。
+ */
+async function encodePageBlobWithSize(
+  imagePath: string,
+  format: ComicSaveFormat,
+): Promise<{ blob: Blob; width: number; height: number }> {
   const img = await loadImage(convertFileSrc(imagePath));
   const target = comicExportSize(img.naturalWidth, img.naturalHeight);
   const canvas = document.createElement("canvas");
@@ -111,7 +125,7 @@ export async function encodePageBlob(
     ),
   );
   if (!blob) throw new Error("画像の変換に失敗しました。");
-  return blob;
+  return { blob, width: canvas.width, height: canvas.height };
 }
 
 /** 保存形式に対応する拡張子。 */
@@ -168,15 +182,19 @@ export async function materializeExportPage(
   pageNo: number,
   format: ComicSaveFormat = "png",
 ): Promise<string> {
-  const blob = await encodePageBlob(imagePath, format);
+  const { blob, width, height } = await encodePageBlobWithSize(imagePath, format);
   const { editExport } = await import("../ipc");
   const { join, dirname, basename, extname } = await import("@tauri-apps/api/path");
   const dir = await dirname(imagePath);
   const base = await basename(imagePath, await extname(imagePath).catch(() => ""));
-  // 元ファイルの隣に `_3x4` を付けた別名で置く。元を上書きしないのが要点
-  // （上書きすると panelReedit の寸法一致・枠線検出が壊れる）。
+  // 元ファイルの隣に比率の接尾辞（`_3x4` / `_4x5`）を付けた別名で置く。
+  // 元を上書きしないのが要点（上書きすると panelReedit の寸法一致・枠線検出が壊れる）。
+  // 比率は実際の書き出し寸法から約分する（3:4 は従来どおり `_3x4` ＝既存名不変）。
   const stem = base.replace(/\.$/, "") || `manga_p${pageNo}`;
-  const dest = await join(dir, `${stem}_3x4.${extOf(format)}`);
+  const dest = await join(
+    dir,
+    `${stem}_${comicAspectSuffix(width, height)}.${extOf(format)}`,
+  );
   // 元画像がfs:scope外でも書けるRustコマンドを使う。JPEGもバイト列のまま保存される。
   await editExport.png(dest, await blobToBase64(blob));
   return dest;

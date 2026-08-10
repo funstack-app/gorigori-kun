@@ -15,8 +15,7 @@ import {
   RECOMPOSE_PAGE_PAPER,
   RECOMPOSE_PANEL_BORDER_PX,
   slotPixelRect,
-  STRUCTURE_PAGE_H,
-  STRUCTURE_PAGE_W,
+  structurePageSize,
 } from "./pageAssembly";
 import { isInsidePolygon, distanceToSegment } from "../imageReedit/maskReedit";
 import type { RgbaRaster } from "../imageReedit/maskReedit";
@@ -102,7 +101,7 @@ function distanceToPolygonEdges(
  *
  * bbox の外の画素は定義上その多角形の内側になり得ないので、走査を bbox に
  * 限れば出力は1画素も変わらないまま計算量だけが落ちる（ページ全面を
- * コマ数ぶん舐めると 1080x1440xN 回の多角形判定になり、生成のたびに待たされる）。
+ * コマ数ぶん舐めると ページ幅×高さ×N 回の多角形判定になり、生成のたびに待たされる）。
  */
 function scanBounds(
   quad: { x: number; y: number }[],
@@ -133,18 +132,18 @@ export function stencilSlots(
  * 枠線は「多角形の内側かつ、辺からの距離が枠線幅未満」の画素を黒で塗る。
  * stroke の中心合わせではなく内側だけに引くので、隣接コマのガター幅
  * （テンプレの 3%）が枠線で削られない。
+ *
+ * 寸法は `structurePageSize(template.pageAspect)` から取る（2026-08-10 STΛCK決定の
+ * テンプレ比率追従）。3:4テンプレは従来どおり1080×1440、4:5テンプレは1080×1350。
  */
 export function renderTemplateScaffoldRaster(
   template: ComicLayoutTemplate,
   direction: ComicReadingDirection,
 ): RgbaRaster {
-  const raster = createRaster(
-    STRUCTURE_PAGE_W,
-    STRUCTURE_PAGE_H,
-    parseHexRgb(STENCIL_PAGE_PAPER),
-  );
+  const page = structurePageSize(template.pageAspect);
+  const raster = createRaster(page.w, page.h, parseHexRgb(STENCIL_PAGE_PAPER));
   const quads = stencilSlots(template, direction).map((slot) =>
-    slotQuadPx(slot, STRUCTURE_PAGE_W, STRUCTURE_PAGE_H),
+    slotQuadPx(slot, page.w, page.h),
   );
 
   for (const quad of quads) {
@@ -174,19 +173,23 @@ export function renderTemplateScaffoldRaster(
  * 白は「多角形の内側かつ、辺からの距離が 枠線幅 + にじみ代 以上」。
  * 枠線画素とは構造的に重ならない（同じ辺距離で判定しているため、
  * にじみ代が正である限り白と黒線が接することがない）。
+ *
+ * 寸法は scaffold と同じ `structurePageSize(template.pageAspect)` から取る。
+ * 同じテンプレから作る限り両者は必ず同寸になり、合成時の寸法不一致が起きない。
  */
 export function renderPanelMaskRaster(
   template: ComicLayoutTemplate,
   direction: ComicReadingDirection,
 ): RgbaRaster {
-  const raster = createRaster(STRUCTURE_PAGE_W, STRUCTURE_PAGE_H, [
+  const page = structurePageSize(template.pageAspect);
+  const raster = createRaster(page.w, page.h, [
     MASK_BLACK,
     MASK_BLACK,
     MASK_BLACK,
   ]);
   const inset = STENCIL_PANEL_BORDER_PX + STENCIL_MASK_BLEED_PX;
   const quads = stencilSlots(template, direction).map((slot) =>
-    slotQuadPx(slot, STRUCTURE_PAGE_W, STRUCTURE_PAGE_H),
+    slotQuadPx(slot, page.w, page.h),
   );
 
   for (const quad of quads) {
@@ -300,7 +303,7 @@ function canvasToRaster(source: CanvasImageSource, width: number, height: number
   return { width, height, rgba: imageData.data };
 }
 
-/** 1080x1440。白地に各コマの枠線 3px #000 を描く。 */
+/** 幅1080・高さはテンプレ比率。白地に各コマの枠線 3px #000 を描く。 */
 export function renderTemplateScaffold(
   template: ComicLayoutTemplate,
   direction: ComicReadingDirection,
@@ -308,7 +311,7 @@ export function renderTemplateScaffold(
   return rasterToCanvas(renderTemplateScaffoldRaster(template, direction));
 }
 
-/** 1080x1440。黒地に各コマ内側（枠線内からさらに 2px 内側）を白で塗る。 */
+/** 幅1080・高さはテンプレ比率。黒地に各コマ内側（枠線内からさらに 2px 内側）を白で塗る。 */
 export function renderPanelMask(
   template: ComicLayoutTemplate,
   direction: ComicReadingDirection,
@@ -318,7 +321,7 @@ export function renderPanelMask(
 
 /**
  * AI 出力を下地に、マスクが黒の画素を scaffold で上書きする。
- * 出力は必ず scaffold と同寸（= 1080x1440）。
+ * 出力は必ず scaffold と同寸（= 幅1080・高さはテンプレ比率）。
  */
 export function compositeStencilResult(
   aiImage: CanvasImageSource,

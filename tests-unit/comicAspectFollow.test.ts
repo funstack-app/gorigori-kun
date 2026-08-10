@@ -12,10 +12,15 @@
  *      （3:4 の既存ページ・保存済みデータが作り直しになる）
  *
  * 特に 2 は静かに壊れるので、「省略時は現行と同値」を各層で固定する。
+ *
+ * 補遺1 (2026-08-10) で塗り絵経路(stencil)と書き出しファイル名の接尾辞も対象に加えた。
+ * stencil は ALIGNED_PIPELINE の既定経路なので、ここが3:4のままだと
+ * user02(4:5) の主経路が丸ごと追従しない。
  */
 import { describe, expect, it } from "vitest";
 
 import {
+  comicAspectSuffix,
   comicExportSize,
 } from "../src/lib/comic/exportSize";
 import {
@@ -33,6 +38,10 @@ import {
   comicPageAspectCandidates,
   planComicPageNormalization,
 } from "../src/lib/comic/pageNormalize";
+import {
+  renderPanelMaskRaster,
+  renderTemplateScaffoldRaster,
+} from "../src/lib/comic/stencil";
 
 describe("A1: structurePageSize は比率追従・省略時は現行同値", () => {
   it("T-A1-1: 3:4 は 1080×1440（従来の作業寸法）", () => {
@@ -202,5 +211,68 @@ describe("A4: comicExportSize は比率追従（幅2160固定）", () => {
       width: 2160,
       height: 2880,
     });
+  });
+});
+
+describe("A5: 塗り絵経路(stencil)もテンプレ比率に追従する", () => {
+  it("T-A5-1: 4:5テンプレの scaffold / mask は 1080×1350 で生成される", () => {
+    const template = getComicTemplate("user02");
+    const scaffold = renderTemplateScaffoldRaster(template, "rtl");
+    const mask = renderPanelMaskRaster(template, "rtl");
+    expect([scaffold.width, scaffold.height]).toEqual([1080, 1350]);
+    expect([mask.width, mask.height]).toEqual([1080, 1350]);
+    // scaffold と mask が同寸 = 合成時の寸法不一致で落ちない
+    expect([mask.width, mask.height]).toEqual([scaffold.width, scaffold.height]);
+    // raster の実体もその寸法ぶんある（寸法だけ変えて中身が伴わない事故を止める）
+    expect(scaffold.rgba.length).toBe(1080 * 1350 * 4);
+  });
+
+  it("T-A5-2: 3:4テンプレは従来どおり 1080×1440（後方互換）", () => {
+    const template = getComicTemplate("manga10");
+    expect(template.pageAspect).toEqual({ w: 3, h: 4 });
+    const scaffold = renderTemplateScaffoldRaster(template, "rtl");
+    const mask = renderPanelMaskRaster(template, "rtl");
+    expect([scaffold.width, scaffold.height]).toEqual([1080, 1440]);
+    expect([mask.width, mask.height]).toEqual([1080, 1440]);
+  });
+
+  it("T-A5-3: 4:5でも枠線が実際に描かれる（白紙のまま返さない）", () => {
+    const scaffold = renderTemplateScaffoldRaster(getComicTemplate("user02"), "rtl");
+    let blackPixels = 0;
+    for (let offset = 0; offset < scaffold.rgba.length; offset += 4) {
+      if (scaffold.rgba[offset] === 0 && scaffold.rgba[offset + 1] === 0) {
+        blackPixels += 1;
+      }
+    }
+    expect(blackPixels).toBeGreaterThan(0);
+    // マスク側もコマ内側が白く塗られている
+    const mask = renderPanelMaskRaster(getComicTemplate("user02"), "rtl");
+    let whitePixels = 0;
+    for (let offset = 0; offset < mask.rgba.length; offset += 4) {
+      if (mask.rgba[offset] === 255) whitePixels += 1;
+    }
+    expect(whitePixels).toBeGreaterThan(0);
+  });
+});
+
+describe("A6: 書き出しファイル名の比率接尾辞", () => {
+  it("T-A6-1: 2160×2880 → 3x4（既存ファイル名を変えない）", () => {
+    expect(comicAspectSuffix(2160, 2880)).toBe("3x4");
+  });
+
+  it("T-A6-2: 2160×2700 → 4x5（4:5ページに 3x4 と書かない）", () => {
+    expect(comicAspectSuffix(2160, 2700)).toBe("4x5");
+  });
+
+  it("T-A6-3: 書き出し寸法から通しで求めても同じ接尾辞になる", () => {
+    const page34 = comicExportSize(1080, 1440);
+    expect(comicAspectSuffix(page34.width, page34.height)).toBe("3x4");
+    const page45 = comicExportSize(1080, 1350);
+    expect(comicAspectSuffix(page45.width, page45.height)).toBe("4x5");
+  });
+
+  it("T-A6-4: 寸法を読めない場合は既定規格の比率へ落ちる", () => {
+    expect(comicAspectSuffix(0, 2880)).toBe("3x4");
+    expect(comicAspectSuffix(Number.NaN, Number.NaN)).toBe("3x4");
   });
 });
