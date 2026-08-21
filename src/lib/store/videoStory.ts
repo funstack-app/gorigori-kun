@@ -35,6 +35,8 @@ export type StoryRunStatus =
   | "failedPartial"
   | "concatFailed";
 
+export type StoryConcatFailReason = "ffmpeg-not-found" | "other" | null;
+
 /** 実行中（＝新しい全体ランを始めてはいけない）とみなす状態。 */
 export function isStoryRunBusy(status: StoryRunStatus): boolean {
   return status === "starting" || status === "running" || status === "concatenating";
@@ -43,6 +45,7 @@ export function isStoryRunBusy(status: StoryRunStatus): boolean {
 type VideoStoryStore = {
   cuts: StoryCutJob[];
   runStatus: StoryRunStatus;
+  concatFailReason: StoryConcatFailReason;
   finalVideoPath: string | null;
   cancelRequested: boolean;
   /** キューを丸ごと置き換える (全 status="queued")。 */
@@ -74,6 +77,7 @@ type VideoStoryStore = {
    */
   relinkPaths: (pathMap: Record<string, string>) => void;
   setRunStatus: (s: StoryRunStatus) => void;
+  setConcatFailReason: (reason: StoryConcatFailReason) => void;
   setFinalVideoPath: (p: string | null) => void;
   requestCancel: () => void;
   /**
@@ -115,6 +119,7 @@ export function hasGeneratedWork(state: {
 export const useVideoStory = create<VideoStoryStore>((set) => ({
   cuts: [],
   runStatus: "idle",
+  concatFailReason: null,
   finalVideoPath: null,
   cancelRequested: false,
 
@@ -122,6 +127,7 @@ export const useVideoStory = create<VideoStoryStore>((set) => ({
     set({
       cuts: cuts.map((c) => ({ ...c, status: "queued" as const })),
       runStatus: "idle",
+      concatFailReason: null,
       finalVideoPath: null,
       cancelRequested: false,
     }),
@@ -140,7 +146,13 @@ export const useVideoStory = create<VideoStoryStore>((set) => ({
         .map((c, i) => ({ ...c, order: i + 1 }));
       // 最後の 1 件を抜いたらランの残骸 (完成表示・結合パス) も一緒に畳む。
       if (cuts.length === 0) {
-        return { ...s, cuts, runStatus: "idle" as const, finalVideoPath: null };
+        return {
+          ...s,
+          cuts,
+          runStatus: "idle" as const,
+          concatFailReason: null,
+          finalVideoPath: null,
+        };
       }
       // 結合済みの「完成」表示は、構成が変わった時点で嘘になる
       // (その動画はもう画面のカット列と一致しない)。done から降ろす。
@@ -150,7 +162,13 @@ export const useVideoStory = create<VideoStoryStore>((set) => ({
       // 出すべき導線は「1本につなげる」だけ。concatFailed + 全 done は
       // canConcatOnly を満たし、結合のやり直しだけが提示される。
       if (s.runStatus === "done") {
-        return { ...s, cuts, runStatus: "concatFailed" as const, finalVideoPath: null };
+        return {
+          ...s,
+          cuts,
+          runStatus: "concatFailed" as const,
+          concatFailReason: null,
+          finalVideoPath: null,
+        };
       }
       return { ...s, cuts };
     });
@@ -185,6 +203,7 @@ export const useVideoStory = create<VideoStoryStore>((set) => ({
   },
 
   setRunStatus: (runStatus) => set({ runStatus }),
+  setConcatFailReason: (concatFailReason) => set({ concatFailReason }),
   setFinalVideoPath: (finalVideoPath) => set({ finalVideoPath }),
   requestCancel: () => set({ cancelRequested: true }),
 
@@ -195,7 +214,12 @@ export const useVideoStory = create<VideoStoryStore>((set) => ({
     set((s) => {
       if (isStoryRunBusy(s.runStatus)) return s;
       acquired = true;
-      return { ...s, runStatus: "starting" as const, cancelRequested: false };
+      return {
+        ...s,
+        runStatus: "starting" as const,
+        concatFailReason: null,
+        cancelRequested: false,
+      };
     });
     return acquired;
   },
@@ -204,6 +228,7 @@ export const useVideoStory = create<VideoStoryStore>((set) => ({
     set({
       cuts: [],
       runStatus: "idle",
+      concatFailReason: null,
       finalVideoPath: null,
       cancelRequested: false,
     }),
@@ -216,6 +241,7 @@ export const useVideoStory = create<VideoStoryStore>((set) => ({
     set({
       cuts: [],
       runStatus: "idle",
+      concatFailReason: null,
       finalVideoPath: null,
       cancelRequested: true,
     }),

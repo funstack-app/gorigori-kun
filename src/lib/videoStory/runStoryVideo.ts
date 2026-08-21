@@ -173,6 +173,7 @@ async function concatCuts(cuts: StoryCutJob[]): Promise<void> {
     .map((c) => c.videoPath)
     .filter((p): p is string => typeof p === "string" && p.length > 0);
 
+  store.setConcatFailReason(null);
   store.setRunStatus("concatenating");
   try {
     const finalPath = await videoConcat.story(paths);
@@ -197,6 +198,7 @@ async function concatCuts(cuts: StoryCutJob[]): Promise<void> {
     });
     addToActiveProject(finalPath, ordered[0]?.prompt ?? "");
     useVideoStory.getState().setFinalVideoPath(finalPath);
+    useVideoStory.getState().setConcatFailReason(null);
     useVideoStory.getState().setRunStatus("done");
     useToasts.getState().push({
       kind: "success",
@@ -208,6 +210,9 @@ async function concatCuts(cuts: StoryCutJob[]): Promise<void> {
     // (Error インスタンスではない)。e.message で読むと undefined になり degrade 分岐が
     // 死ぬため、既存の scene3d 経路 (Scene3dViewport.tsx) と同じ String(e)+includes で判定する。
     const message = String(e);
+    useVideoStory
+      .getState()
+      .setConcatFailReason(message.includes("ffmpeg-not-found") ? "ffmpeg-not-found" : "other");
     useVideoStory.getState().setRunStatus("concatFailed");
     if (message.includes("ffmpeg-not-found")) {
       // 結合できないだけでカット動画は資産として残る。エラー扱いしない。

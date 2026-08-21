@@ -1,8 +1,10 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { SafeImage } from "./SafeImage";
 import { humanizeError } from "../lib/humanizeError";
+import { editModels } from "../lib/ipc";
 import { useBatches } from "../lib/store/batches";
 import { useImages } from "../lib/store/images";
+import { useToasts } from "../lib/store/toasts";
 import { useVideoGen } from "../lib/store/videoGen";
 import { isStoryRunBusy, useVideoStory, type StoryCutJob } from "../lib/store/videoStory";
 import { clampDurationForModel, findVideoModel, VIDEO_MODELS } from "../lib/videoModels";
@@ -18,6 +20,8 @@ import { concatOnly, retryCut, runStoryVideo } from "../lib/videoStory/runStoryV
 
 /** 同時に走らせられるバッチ数。useVideoSceneGeneration と同値。 */
 const MAX_CONCURRENT_BATCHES = 3;
+
+type InstallPlatform = "mac" | "windows" | "unknown";
 
 const STATUS_LABEL: Record<StoryCutJob["status"], string> = {
   queued: "待機中",
@@ -42,6 +46,7 @@ function statusClass(status: StoryCutJob["status"]): string {
 export function VideoStoryQueuePanel() {
   const cuts = useVideoStory((s) => s.cuts);
   const runStatus = useVideoStory((s) => s.runStatus);
+  const concatFailReason = useVideoStory((s) => s.concatFailReason);
   const finalVideoPath = useVideoStory((s) => s.finalVideoPath);
   const cancelRequested = useVideoStory((s) => s.cancelRequested);
   const requestCancel = useVideoStory((s) => s.requestCancel);
@@ -49,8 +54,51 @@ export function VideoStoryQueuePanel() {
   const removeCut = useVideoStory((s) => s.removeCut);
   const modelId = useVideoGen((s) => s.modelId);
   const revealInFinder = useImages((s) => s.revealInFinder);
+  const pushToast = useToasts((s) => s.push);
   const batches = useBatches((s) => s.batches);
   const [retrying, setRetrying] = useState<string | null>(null);
+  const [installPlatform, setInstallPlatform] = useState<InstallPlatform>("unknown");
+
+  const showFfmpegGuide =
+    runStatus === "concatFailed" && concatFailReason === "ffmpeg-not-found";
+
+  useEffect(() => {
+    if (!showFfmpegGuide) return;
+
+    let active = true;
+    void editModels
+      .platformInfo()
+      .then(({ os }) => {
+        if (!active) return;
+        const normalized = os.toLowerCase();
+        if (normalized.includes("mac") || normalized.includes("darwin")) {
+          setInstallPlatform("mac");
+        } else if (normalized.includes("windows") || normalized.includes("win32")) {
+          setInstallPlatform("windows");
+        } else {
+          setInstallPlatform("unknown");
+        }
+      })
+      .catch(() => {
+        if (active) setInstallPlatform("unknown");
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [showFfmpegGuide]);
+
+  const copyInstallCommand = async (command: string) => {
+    try {
+      await navigator.clipboard.writeText(command);
+      pushToast({ kind: "success", text: "インストールコマンドをコピーしました。" });
+    } catch {
+      pushToast({
+        kind: "warn",
+        text: "コピーできませんでした。コマンドを選んでコピーしてください。",
+      });
+    }
+  };
 
   if (cuts.length === 0) return null;
 
@@ -170,6 +218,78 @@ export function VideoStoryQueuePanel() {
           </ul>
         )}
 
+        {showFfmpegGuide && (
+          <details
+            open
+            className="mt-2 rounded-md border border-amber-400/30 bg-amber-400/5 px-2.5 py-2"
+          >
+            <summary className="cursor-pointer text-[11px] font-semibold leading-relaxed text-amber-100">
+              1本にまとめるには ffmpeg（無料の動画結合ツール）が必要です
+            </summary>
+
+            <div className="mt-2 space-y-2">
+              {(installPlatform === "mac" || installPlatform === "unknown") && (
+                <div>
+                  <p className="text-[10px] font-semibold text-zinc-300">Mac</p>
+                  <div className="mt-1 flex items-center gap-1.5">
+                    <code className="min-w-0 flex-1 overflow-x-auto rounded bg-black/30 px-2 py-1.5 text-[10px] text-zinc-200">
+                      brew install ffmpeg
+                    </code>
+                    <button
+                      type="button"
+                      onClick={() => void copyInstallCommand("brew install ffmpeg")}
+                      className="shrink-0 rounded border border-[#3a3a3a] px-2 py-1 text-[10px] text-zinc-300 hover:border-amber-300/50 hover:text-white"
+                    >
+                      コピー
+                    </button>
+                  </div>
+                  <p className="mt-1 text-[10px] leading-relaxed text-zinc-400">
+                    Homebrew が無い場合は、先に
+                    <a
+                      href="https://brew.sh"
+                      target="_blank"
+                      rel="noreferrer"
+                      className="ml-1 text-amber-200 underline decoration-amber-200/50 underline-offset-2 hover:text-amber-100"
+                    >
+                      Homebrew 公式サイト
+                    </a>
+                    の手順で入れてください。
+                  </p>
+                </div>
+              )}
+
+              {(installPlatform === "windows" || installPlatform === "unknown") && (
+                <div>
+                  <p className="text-[10px] font-semibold text-zinc-300">Windows</p>
+                  <div className="mt-1 flex items-center gap-1.5">
+                    <code className="min-w-0 flex-1 overflow-x-auto rounded bg-black/30 px-2 py-1.5 text-[10px] text-zinc-200">
+                      winget install Gyan.FFmpeg
+                    </code>
+                    <button
+                      type="button"
+                      onClick={() => void copyInstallCommand("winget install Gyan.FFmpeg")}
+                      className="shrink-0 rounded border border-[#3a3a3a] px-2 py-1 text-[10px] text-zinc-300 hover:border-amber-300/50 hover:text-white"
+                    >
+                      コピー
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              <div className="flex flex-wrap items-center gap-2 pt-1">
+                <span className="text-[10px] text-zinc-400">インストールできたら</span>
+                <button
+                  type="button"
+                  onClick={() => void concatOnly()}
+                  className="rounded-md bg-pink-500 px-3 py-1.5 text-[11px] font-semibold text-white hover:bg-pink-400"
+                >
+                  もう一度1本にまとめる
+                </button>
+              </div>
+            </div>
+          </details>
+        )}
+
         <div className="mt-2 flex flex-wrap items-center gap-2">
           {runStatus === "idle" && (
             <>
@@ -204,7 +324,7 @@ export function VideoStoryQueuePanel() {
             <span className="text-[11px] text-pink-200">結合中…</span>
           )}
 
-          {canConcatOnly && (
+          {canConcatOnly && !showFfmpegGuide && (
             <button
               type="button"
               onClick={() => void concatOnly()}
