@@ -1155,6 +1155,7 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
             </>
           )}
         </button>
+        <p className="mt-1.5 text-[11px] text-neutral-500">手ブレ・パン・ズームのある動画は再現精度が落ちます。カメラ固定の動画がおすすめ</p>
         {capBusy && capStartedAt ? (
           <div className="mt-1.5">
             <GenerationGauge startedAt={capStartedAt} mode="batch" />

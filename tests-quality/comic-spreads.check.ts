@@ -11,7 +11,7 @@
  */
 import { expect, test } from "@playwright/test";
 
-import { buildSpreads } from "../src/components/skills/comic/ComicSpreadPreviewModal";
+import { buildSpreads } from "../src/lib/comic/spreads";
 
 test("1ページの本は単独見開き1つ", () => {
   expect(buildSpreads(1)).toEqual([[1]]);
