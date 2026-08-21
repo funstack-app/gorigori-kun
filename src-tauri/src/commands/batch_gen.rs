@@ -613,9 +613,11 @@ async fn run_one_worker_inner(
             if gen_queue::is_cancelled_error(&resident_error) {
                 return Err(resident_error);
             }
-            if crate::codex::gen_server::is_timeout_error(&resident_error) {
-                // この試行で exec も続けると 900秒x2 になるため、
-                // 今回は失敗とし、同じ worker の次試行だけ旧 exec 経路に切り替える。
+            if crate::codex::gen_server::is_timeout_error(&resident_error)
+                || crate::codex::gen_server::is_stale_server_error(&resident_error)
+            {
+                // この試行では二重生成を避けて失敗とし、同じ worker の次試行だけ
+                // 旧 exec 経路に切り替える。900秒タイムアウトと無音接続の両方が対象。
                 *resident_timed_out = true;
                 return Err(resident_error);
             }

@@ -28,13 +28,15 @@ use crate::commands::worker_registry::{WorkerPidGuard, RESIDENT_GEN_SERVER_WORKE
 use crate::state::AppState;
 
 pub(crate) const GENERATION_TIMEOUT: Duration = Duration::from_secs(900);
+// セマフォ取得済みの turn はすぐ開始されるため、健全な接続なら数秒〜数十秒で
+// 最初の通知が届く。900秒の生成全体タイムアウトとは別に、接続死による「無音」を
+// 早く検出するための上限。
+const FIRST_SIGNAL_TIMEOUT: Duration = Duration::from_secs(120);
 const WORKER_REGISTRY_FILE: &str = "worker-pids.json";
-// ディレクトリ名の正本は codex::home 側に置く (storage_cleanup の掃除対象列挙と
-// 同じ値を2箇所に持たせないため。2026-07-25: この値が掃除から漏れて 2.5GB 溜まった)
-#[cfg(unix)]
-use crate::codex::home::GEN_CODEX_HOME_LEAF as GEN_CODEX_HOME_DIR;
 const INTERRUPT_TIMEOUT: Duration = Duration::from_secs(5);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+const STALE_SERVER_ERROR: &str =
+    "生成サーバーが応答しません（接続が古くなっている可能性があります）。別の経路で再試行します。";
 
 /// 画像1枚がいまどの段階にいるか (設計書 S1)。
 ///
@@ -535,6 +537,12 @@ pub(crate) fn is_timeout_error(error: &str) -> bool {
     error.contains("画像生成がタイムアウトしました")
 }
 
+/// turn/start は受理されたのに最初の通知が届かなかった接続死か。
+/// 呼び出し側はタイムアウトと同じく、次の試行だけ旧 exec 経路へ切り替える。
+pub(crate) fn is_stale_server_error(error: &str) -> bool {
+    error.contains(STALE_SERVER_ERROR)
+}
+
 /// 生成失敗が429なら同時実行数を自動降格し、ユーザーへ1度だけ通知する (T3)。
 ///
 /// 上限を9へ上げた得は確実だが、混雑時間帯の429再発リスクは残る
@@ -621,6 +629,9 @@ async fn wait_for_saved_path(
 ) -> Result<PathBuf, WaitForSavedPathError> {
     let mut health_tick = interval(Duration::from_millis(250));
     health_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let first_signal_deadline = tokio::time::sleep(FIRST_SIGNAL_TIMEOUT);
+    tokio::pin!(first_signal_deadline);
+    let mut first_signal_seen = false;
 
     loop {
         if run_is_cancelled(run_id) {
@@ -635,9 +646,29 @@ async fn wait_for_saved_path(
         }
 
         tokio::select! {
+            _ = &mut first_signal_deadline, if !first_signal_seen => {
+                // turn/start が通っても、この turn の通知が1件も来ない接続は
+                // 認証更新などで実質的に死んでいる。次の turn で交換されるよう
+                // 先に汚染マークを付け、現在の turn は正規RPCで中断を試みる。
+                poisoned.store(true, Ordering::Release);
+                let interruption_confirmed =
+                    interrupt_or_poison(client, notifications, thread_id, turn_id, poisoned).await;
+                return Err(if interruption_confirmed {
+                    WaitForSavedPathError::release(STALE_SERVER_ERROR)
+                } else {
+                    WaitForSavedPathError::hold(STALE_SERVER_ERROR)
+                });
+            }
             notification = notifications.recv() => {
                 match notification {
                     Ok(notification) => {
+                        if notification_matches(&notification.params, thread_id, turn_id)
+                            || turn_notification_matches(&notification.params, thread_id, turn_id)
+                        {
+                            // この turn の通知が1件でも来れば接続は生きている。
+                            // 以後は通常の900秒全体タイムアウトだけに委ねる。
+                            first_signal_seen = true;
+                        }
                         // ③ 描画開始。app-server は以前からこの通知を送っていたが、
                         // GORI は item/completed しか見ておらず**受信者がいなかった**
                         // (設計書 1-3)。ここが「LLMが考え中」と「実際に描いている」を
@@ -1024,18 +1055,80 @@ async fn ensure_client(app: &AppHandle, state: &AppState) -> Result<GenServerLea
 async fn spawn_server(app: &AppHandle) -> Result<GenServerProcess, String> {
     let source_home = crate::codex::home::resolve_command_codex_home()
         .ok_or_else(|| "生成用 CODEX_HOME のミラー元を解決できません".to_string())?;
-    let generation_home = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| format!("生成用 CODEX_HOME の場所を解決できません: {error}"))?
-        .join(GEN_CODEX_HOME_DIR);
+    let generation_home = crate::codex::home::gen_codex_home_path()
+        .ok_or_else(|| "生成用 CODEX_HOME の場所を解決できません".to_string())?;
     crate::commands::batch_gen::mirror_resident_codex_home(&source_home, &generation_home)?;
 
     let bin = resolve_codex_binary(None)
         .map_err(|error| format!("生成用 Codex app-server の解決に失敗: {error:#}"))?;
-    let proc = spawn_generation_app_server(&bin, &generation_home)
+    let first_error = match spawn_server_attempt(app, &bin, &generation_home).await {
+        Ok(server) => return Ok(server),
+        Err(error) => error,
+    };
+    if !first_error.sqlite_state_corruption {
+        return Err(first_error.message);
+    }
+
+    let quarantine = match quarantine_sqlite_state(&generation_home) {
+        Ok(Some(result)) => result,
+        Ok(None) => return Err(first_error.message),
+        Err(error) => {
+            tracing::warn!(
+                target: "codex.gen_server",
+                "壊れた可能性がある sqlite state を退避できませんでした: {error}"
+            );
+            return Err(first_error.message);
+        }
+    };
+    tracing::warn!(
+        target: "codex.gen_server",
+        path = %quarantine.path.display(),
+        moved_files = quarantine.moved_files,
+        "壊れた可能性がある sqlite state を退避し、app-server を1回だけ再起動します"
+    );
+
+    match spawn_server_attempt(app, &bin, &generation_home).await {
+        Ok(server) => Ok(server),
+        Err(retry_error) => Err(format!(
+            "生成エンジンの内部データが壊れています。自動修復を試みましたが復旧できませんでした。アプリを再起動しても直らない場合は、設定 → ストレージから生成エンジンのデータ初期化をお試しください。(詳細: 初回: {}; 再試行: {})",
+            first_error.message, retry_error.message
+        )),
+    }
+}
+
+#[cfg(unix)]
+struct SpawnServerAttemptError {
+    message: String,
+    sqlite_state_corruption: bool,
+}
+
+#[cfg(unix)]
+impl SpawnServerAttemptError {
+    fn plain(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            sqlite_state_corruption: false,
+        }
+    }
+}
+
+#[cfg(unix)]
+struct SqliteQuarantine {
+    path: PathBuf,
+    moved_files: usize,
+}
+
+#[cfg(unix)]
+async fn spawn_server_attempt(
+    app: &AppHandle,
+    bin: &Path,
+    generation_home: &Path,
+) -> Result<GenServerProcess, SpawnServerAttemptError> {
+    let proc = spawn_generation_app_server(bin, generation_home)
         .await
-        .map_err(|error| format!("生成用 Codex app-server の起動に失敗: {error}"))?;
+        .map_err(|error| {
+            SpawnServerAttemptError::plain(format!("生成用 Codex app-server の起動に失敗: {error}"))
+        })?;
     let AppServerProcess {
         mut child,
         stdin,
@@ -1047,7 +1140,9 @@ async fn spawn_server(app: &AppHandle) -> Result<GenServerProcess, String> {
         Some(pid) => pid,
         None => {
             let _ = child.kill().await;
-            return Err("生成用 Codex app-server の PID を取得できません".to_string());
+            return Err(SpawnServerAttemptError::plain(
+                "生成用 Codex app-server の PID を取得できません",
+            ));
         }
     };
     // 常駐サーバーは複数runで共有するため run_id を紐づけず、個別キャンセルの
@@ -1057,7 +1152,9 @@ async fn spawn_server(app: &AppHandle) -> Result<GenServerProcess, String> {
             Ok(registration) => registration,
             Err(error) => {
                 let _ = child.kill().await;
-                return Err(format!("生成用 app-server の PID 台帳登録に失敗: {error}"));
+                return Err(SpawnServerAttemptError::plain(format!(
+                    "生成用 app-server の PID 台帳登録に失敗: {error}"
+                )));
             }
         };
 
@@ -1098,6 +1195,7 @@ async fn spawn_server(app: &AppHandle) -> Result<GenServerProcess, String> {
     if let Some(error) = handshake_error {
         tokio::time::sleep(Duration::from_millis(100)).await;
         let stderr = stderr_buf.snapshot();
+        let sqlite_state_corruption = is_sqlite_state_corruption_error(&error, &stderr);
         let stderr_tail = stderr
             .last()
             .map(String::as_str)
@@ -1114,9 +1212,10 @@ async fn spawn_server(app: &AppHandle) -> Result<GenServerProcess, String> {
                 "初期化失敗後の app-server 終了待機がタイムアウトしました"
             );
         }
-        return Err(format!(
-            "生成用 Codex app-server の初期化に失敗: {error} ({stderr_tail})"
-        ));
+        return Err(SpawnServerAttemptError {
+            message: format!("生成用 Codex app-server の初期化に失敗: {error} ({stderr_tail})"),
+            sqlite_state_corruption,
+        });
     }
 
     let (process_stopped, _) = watch::channel(false);
@@ -1130,6 +1229,115 @@ async fn spawn_server(app: &AppHandle) -> Result<GenServerProcess, String> {
         poisoned: Arc::new(AtomicBool::new(false)),
         process_stopped,
     })
+}
+
+fn is_sqlite_state_corruption_error(error: &str, stderr_snapshot: &[String]) -> bool {
+    let combined = std::iter::once(error)
+        .chain(stderr_snapshot.iter().map(String::as_str))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .to_ascii_lowercase();
+
+    // handshake 失敗に限定して既知のDB系シグナルだけを見る。
+    // `state` 単独や `runtime` 単独では発火させず、誤退避を避ける。
+    [
+        "sqlite",
+        "state runtime",
+        "database",
+        "malformed",
+        "unable to open",
+    ]
+    .iter()
+    .any(|signal| combined.contains(signal))
+}
+
+#[cfg(unix)]
+fn quarantine_sqlite_state(generation_home: &Path) -> Result<Option<SqliteQuarantine>, String> {
+    let entries = std::fs::read_dir(generation_home).map_err(|error| {
+        format!(
+            "生成用 CODEX_HOME を読み込めません ({}): {error}",
+            generation_home.display()
+        )
+    })?;
+    let mut candidates = Vec::new();
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                tracing::warn!(
+                    target: "codex.gen_server",
+                    "sqlite state の退避候補を読み取れませんでした: {error}"
+                );
+                continue;
+            }
+        };
+        let name = entry.file_name();
+        if !name.to_string_lossy().contains(".sqlite") {
+            continue;
+        }
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(error) => {
+                tracing::warn!(
+                    target: "codex.gen_server",
+                    path = %entry.path().display(),
+                    "sqlite state の種類を確認できませんでした: {error}"
+                );
+                continue;
+            }
+        };
+        if file_type.is_file() || file_type.is_symlink() {
+            candidates.push(entry.path());
+        }
+    }
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+
+    let base_seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| format!("sqlite state 退避時刻の取得に失敗: {error}"))?
+        .as_secs();
+    let mut quarantine_seconds = base_seconds;
+    let quarantine_path = loop {
+        let path = generation_home.join(format!("broken-{quarantine_seconds}"));
+        match std::fs::create_dir(&path) {
+            Ok(()) => break path,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                quarantine_seconds = quarantine_seconds
+                    .checked_add(1)
+                    .ok_or_else(|| "sqlite state の退避先名を決められません".to_string())?;
+            }
+            Err(error) => {
+                return Err(format!(
+                    "sqlite state の退避先を作成できませんでした ({}): {error}",
+                    path.display()
+                ));
+            }
+        }
+    };
+
+    let mut moved_files = 0;
+    for source in candidates {
+        let Some(file_name) = source.file_name() else {
+            continue;
+        };
+        let destination = quarantine_path.join(file_name);
+        match std::fs::rename(&source, &destination) {
+            Ok(()) => moved_files += 1,
+            Err(error) => tracing::warn!(
+                target: "codex.gen_server",
+                source = %source.display(),
+                destination = %destination.display(),
+                "sqlite state を退避できませんでした: {error}"
+            ),
+        }
+    }
+
+    Ok((moved_files > 0).then_some(SqliteQuarantine {
+        path: quarantine_path,
+        moved_files,
+    }))
 }
 
 #[cfg(not(unix))]
@@ -1337,7 +1545,8 @@ fn send_terminate(_pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_thread_id, extract_turn_id, gen_queue, is_gen_server_command, notification_matches,
+        extract_thread_id, extract_turn_id, gen_queue, is_gen_server_command,
+        is_sqlite_state_corruption_error, is_stale_server_error, notification_matches,
         should_replace_server, spawn_permit_watchdog_with_timeout, GenPhase, MAX_TURNS_PER_SERVER,
     };
     use serde_json::{json, Value};
@@ -1426,6 +1635,42 @@ mod tests {
         assert!(is_gen_server_command("/usr/local/bin/codex app-server"));
         assert!(is_gen_server_command("/Applications/GORI/codex-app-server"));
         assert!(!is_gen_server_command("/usr/local/bin/codex exec -"));
+    }
+
+    #[test]
+    fn recognizes_sqlite_state_corruption_without_matching_plain_state_errors() {
+        assert!(is_sqlite_state_corruption_error(
+            "SQLite state runtime initialization failed",
+            &[],
+        ));
+        assert!(is_sqlite_state_corruption_error(
+            "initialize failed",
+            &["DATABASE disk image is MALFORMED".to_string()],
+        ));
+        assert!(is_sqlite_state_corruption_error(
+            "unable to open state store",
+            &[],
+        ));
+        assert!(is_sqlite_state_corruption_error("database error", &[]));
+        assert!(is_sqlite_state_corruption_error("malformed page", &[]));
+        assert!(!is_sqlite_state_corruption_error(
+            "state initialization failed",
+            &[],
+        ));
+        assert!(!is_sqlite_state_corruption_error(
+            "runtime initialization failed",
+            &[],
+        ));
+    }
+
+    #[test]
+    fn recognizes_only_stale_server_fallback_error() {
+        assert!(is_stale_server_error(
+            "生成サーバーが応答しません（接続が古くなっている可能性があります）。別の経路で再試行します。"
+        ));
+        assert!(!is_stale_server_error(
+            "生成用 app-server が生成中に終了しました"
+        ));
     }
 
     #[test]
