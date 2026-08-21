@@ -212,8 +212,11 @@ describe("A2: どの runStatus でもキューから出られる", () => {
     const src = await readSrc("src/components/VideoStoryQueuePanel.tsx");
     // 行内: このカットを再生成 / 外す。操作列: 全体ラン(idle) / 中止 /
     // 1本につなげる / Finder で表示 / 全体ラン(allFailed) / キューを空にする。
+    // ＋ffmpeg 未導入の救済ボックス内のみ: コピー(brew) / コピー(winget) /
+    // もう一度1本にまとめる（2026-08-22 3c4c950。concatFailed かつ
+    // ffmpeg-not-found のときだけ描画される案内内で、一等地ではない）。
     const buttons = src.split("<button").length - 1;
-    expect(buttons, `button が増えている（${buttons} 個）`).toBe(8);
+    expect(buttons, `button が増えている（${buttons} 個）`).toBe(11);
   });
 });
 
