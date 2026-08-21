@@ -176,7 +176,9 @@ async function concatCuts(cuts: StoryCutJob[]): Promise<void> {
   store.setConcatFailReason(null);
   store.setRunStatus("concatenating");
   try {
-    const finalPath = await videoConcat.story(paths, store.concatTransition);
+    const requestedTransition = store.concatTransition;
+    const concatResult = await videoConcat.story(paths, requestedTransition);
+    const finalPath = concatResult.path;
     const batchId = `local-story-concat-${newRunId()}`;
     const { model } = currentVideoSettings();
     useBatches.getState().startBatch({
@@ -205,6 +207,13 @@ async function concatCuts(cuts: StoryCutJob[]): Promise<void> {
       text: "ストーリー動画が完成しました。タイムラインに追加されます。",
       ttlMs: 5000,
     });
+    if (requestedTransition === "crossfade" && concatResult.transitionApplied === "cut") {
+      useToasts.getState().push({
+        kind: "info",
+        text: "動画が短いか長さを取得できなかったため、通常のつなぎで1本にしました",
+        ttlMs: 10000,
+      });
+    }
   } catch (e) {
     // Tauri の invoke は Rust の Err(String) を **素の文字列** で reject する
     // (Error インスタンスではない)。e.message で読むと undefined になり degrade 分岐が

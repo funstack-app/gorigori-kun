@@ -21,6 +21,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const CROSSFADE_SECONDS: f64 = 0.5;
 const MIN_CROSSFADE_CLIP_SECONDS: f64 = 1.2;
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoConcatStoryResult {
+    path: String,
+    transition_applied: &'static str,
+}
+
 fn now_millis() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -28,14 +35,14 @@ fn now_millis() -> u128 {
         .unwrap_or(0)
 }
 
-/// カット動画を順に 1 本へ再エンコード結合し、保存先の絶対パスを返す。
+/// カット動画を順に 1 本へ再エンコード結合し、保存先と実際に使ったつなぎ方を返す。
 ///
 /// `paths` の順序が結合順の正 (カット順)。
 #[tauri::command]
 pub async fn video_concat_story(
     paths: Vec<String>,
     transition: Option<String>,
-) -> Result<String, String> {
+) -> Result<VideoConcatStoryResult, String> {
     if paths.len() < 2 {
         return Err("結合できる動画が2本未満です".to_string());
     }
@@ -78,14 +85,28 @@ pub async fn video_concat_story(
     // ① 音声込みで結合を試す。
     let status = run_concat(&ffmpeg, &paths, &out, true, crossfade_durations.as_deref()).await?;
     if status_success(&status) {
-        return Ok(out.to_string_lossy().into_owned());
+        return Ok(VideoConcatStoryResult {
+            path: out.to_string_lossy().into_owned(),
+            transition_applied: if crossfade_durations.is_some() {
+                "crossfade"
+            } else {
+                "cut"
+            },
+        });
     }
 
     // ② 音声ストリームが無いカットが混ざっていると ① は必ず失敗する。
     //    映像のみで結合し直す (音は落ちるが 1 本にはなる)。
     let status = run_concat(&ffmpeg, &paths, &out, false, crossfade_durations.as_deref()).await?;
     if status_success(&status) {
-        return Ok(out.to_string_lossy().into_owned());
+        return Ok(VideoConcatStoryResult {
+            path: out.to_string_lossy().into_owned(),
+            transition_applied: if crossfade_durations.is_some() {
+                "crossfade"
+            } else {
+                "cut"
+            },
+        });
     }
 
     // xfade 自体が入力形式の差などで失敗しても、1 本化を優先して素の連結へ戻す。
@@ -99,12 +120,18 @@ pub async fn video_concat_story(
 
         let status = run_concat(&ffmpeg, &paths, &out, true, None).await?;
         if status_success(&status) {
-            return Ok(out.to_string_lossy().into_owned());
+            return Ok(VideoConcatStoryResult {
+                path: out.to_string_lossy().into_owned(),
+                transition_applied: "cut",
+            });
         }
 
         let status = run_concat(&ffmpeg, &paths, &out, false, None).await?;
         if status_success(&status) {
-            return Ok(out.to_string_lossy().into_owned());
+            return Ok(VideoConcatStoryResult {
+                path: out.to_string_lossy().into_owned(),
+                transition_applied: "cut",
+            });
         }
 
         return Err(format!("ffmpeg がエラー終了しました (exit: {status})"));

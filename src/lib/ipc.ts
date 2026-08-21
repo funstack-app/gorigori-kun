@@ -1226,13 +1226,16 @@ export const scene3d = {
 /** ストーリー動画のカット結合 (uy6 Wave 3)。 */
 export const videoConcat = {
   /**
-   * カット動画を順に1本へ再エンコード結合し、保存先の絶対パスを返す。
+   * カット動画を順に1本へ再エンコード結合し、保存先と実際に使ったつなぎ方を返す。
    *
    * ffmpeg 不在時は `ffmpeg-not-found:` で始まるエラー文字列を返す
    * (scene3d と同じ prefix 規約。呼び出し側はこれを degrade 案内に分岐させる)。
    */
   story: (paths: string[], transition: "cut" | "crossfade" = "cut") =>
-    invoke<string>("video_concat_story", { paths, transition }),
+    invoke<{ path: string; transitionApplied: "cut" | "crossfade" }>("video_concat_story", {
+      paths,
+      transition,
+    }),
 };
 
 // ──────────── LINE スタンプ: 層A検査 + 書き出し (7q5 S6) ────────────
