@@ -3,6 +3,7 @@ import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { getVersion } from "@tauri-apps/api/app";
 import { useToasts } from "../lib/store/toasts";
+import { editModels } from "../lib/ipc";
 
 type Status =
   | { kind: "idle" }
@@ -21,6 +22,8 @@ type Status =
       raw?: string;
       /** どの段階で失敗したか。報告用。 */
       stage?: UpdateStage;
+      /** check() で取得済みなら、手動インストーラの直リンク生成に使う。 */
+      version?: string;
     };
 
 /**
@@ -280,15 +283,49 @@ async function openReleasesPage(): Promise<void> {
   }
 }
 
+type InstallerAsset =
+  | "aarch64.dmg"
+  | "x64.dmg"
+  | "x64-setup.exe"
+  | "x64-setup-compat.exe";
+
+/** 最新リリースにある指定OS用インストーラを、GitHub画面を挟まず開く。 */
+async function openInstallerDownload(
+  version: string,
+  asset: InstallerAsset,
+): Promise<void> {
+  const assetName = `GORI.GORI_${version}_${asset}`;
+  const downloadUrl = `${RELEASES_URL}/download/${encodeURIComponent(assetName)}`;
+
+  try {
+    const { openUrl } = await import("@tauri-apps/plugin-opener");
+    await openUrl(downloadUrl);
+  } catch {
+    // ブラウザを開けなくても、下のリリースページ導線は残す。
+  }
+}
+
 export function UpdateChecker() {
   const [current, setCurrent] = useState<string>("...");
   const [status, setStatus] = useState<Status>({ kind: "idle" });
+  const [downloadPlatform, setDownloadPlatform] = useState<
+    "macos" | "windows" | "other" | null
+  >(null);
   const pushToast = useToasts((s) => s.push);
 
   useEffect(() => {
     getVersion()
       .then(setCurrent)
       .catch(() => setCurrent("?"));
+
+    editModels
+      .platformInfo()
+      .then(({ os }) => {
+        setDownloadPlatform(
+          os === "macos" || os === "windows" ? os : "other",
+        );
+      })
+      .catch(() => setDownloadPlatform("other"));
   }, []);
 
   const runCheck = async () => {
@@ -323,12 +360,14 @@ export function UpdateChecker() {
     // runInstall は check() → downloadAndInstall() の 2 段。どちらで落ちたかで
     // 段階が変わるので、check() を抜けた時点でヒントを install に切り替える。
     let hint: UpdateStageHint = "check";
+    let availableVersion: string | undefined;
     try {
       const update = await check();
       if (!update) {
         setStatus({ kind: "up-to-date" });
         return;
       }
+      availableVersion = update.version;
       hint = "install";
       let total = 0;
       let downloaded = 0;
@@ -350,9 +389,11 @@ export function UpdateChecker() {
       setStatus({
         kind: "error",
         message: failure.text,
-        showManual: failure.showManual,
+        // check() 後の失敗なら、原因を問わず手動インストーラへ逃げられるようにする。
+        showManual: availableVersion ? true : failure.showManual,
         raw: failure.raw,
         stage: failure.stage,
+        version: availableVersion,
       });
       pushToast({ kind: "error", text: failure.text, ttlMs: 8000 });
     }
@@ -465,15 +506,104 @@ export function UpdateChecker() {
                 これが無いとユーザーは抜け出せない (2026-07-25 配布検証の指摘)。
               */}
               {status.showManual && (
-                <button
-                  type="button"
-                  onClick={() => void openReleasesPage()}
-                  className="flex-1 rounded-lg border border-pink-500/50 bg-pink-500/10 px-3 py-1.5 text-xs font-black text-pink-100 hover:border-pink-400 hover:bg-pink-500/20"
-                >
-                  最新版をダウンロード
-                </button>
+                !status.version && (
+                  <button
+                    type="button"
+                    onClick={() => void openReleasesPage()}
+                    className="flex-1 rounded-lg border border-pink-500/50 bg-pink-500/10 px-3 py-1.5 text-xs font-black text-pink-100 hover:border-pink-400 hover:bg-pink-500/20"
+                  >
+                    ダウンロードページを開く
+                  </button>
+                )
               )}
             </div>
+            {status.showManual && status.version && (
+              <div className="rounded-lg border border-pink-500/20 bg-pink-500/5 p-2">
+                <p className="mb-2 text-[10px] font-bold text-pink-100">
+                  お使いの機種を選ぶと、ダウンロードが始まります
+                </p>
+
+                {downloadPlatform === "macos" && (
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        void openInstallerDownload(
+                          status.version!,
+                          "aarch64.dmg",
+                        )
+                      }
+                      className="rounded-lg bg-pink-500 px-2 py-2 text-xs font-black text-white hover:bg-pink-400"
+                    >
+                      Apple Silicon (M1以降)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        void openInstallerDownload(status.version!, "x64.dmg")
+                      }
+                      className="rounded-lg border border-pink-500/50 bg-pink-500/10 px-2 py-2 text-xs font-black text-pink-100 hover:bg-pink-500/20"
+                    >
+                      Intel Mac
+                    </button>
+                  </div>
+                )}
+
+                {downloadPlatform === "windows" && (
+                  <div className="space-y-2">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        void openInstallerDownload(
+                          status.version!,
+                          "x64-setup.exe",
+                        )
+                      }
+                      className="w-full rounded-lg bg-pink-500 px-2 py-2 text-xs font-black text-white hover:bg-pink-400"
+                    >
+                      通常版
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        void openInstallerDownload(
+                          status.version!,
+                          "x64-setup-compat.exe",
+                        )
+                      }
+                      className="w-full rounded-md border border-[#343434] bg-[#1e1e1e] px-2 py-1.5 text-[10px] font-bold text-neutral-400 hover:border-pink-400 hover:text-white"
+                    >
+                      旧CPU向け互換版
+                    </button>
+                  </div>
+                )}
+
+                {downloadPlatform === null && (
+                  <p className="text-[10px] text-neutral-500">環境を確認中…</p>
+                )}
+
+                {downloadPlatform === "other" && (
+                  <button
+                    type="button"
+                    onClick={() => void openReleasesPage()}
+                    className="w-full rounded-lg border border-pink-500/50 bg-pink-500/10 px-3 py-1.5 text-xs font-black text-pink-100 hover:border-pink-400 hover:bg-pink-500/20"
+                  >
+                    ダウンロードページを開く
+                  </button>
+                )}
+
+                {(downloadPlatform === "macos" ||
+                  downloadPlatform === "windows") && (
+                  <button
+                    type="button"
+                    onClick={() => void openReleasesPage()}
+                    className="mt-2 w-full text-center text-[10px] text-neutral-500 underline decoration-neutral-700 underline-offset-2 hover:text-neutral-300"
+                  >
+                    うまくいかない場合はダウンロードページへ
+                  </button>
+                )}
+              </div>
+            )}
             {/* 報告用。原因の切り分けに必要なので隠さず、ただし小さく置く */}
             {status.raw && (
               <details className="mt-2">
