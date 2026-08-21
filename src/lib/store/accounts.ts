@@ -5,6 +5,7 @@ import {
   higgsfieldMcp,
   magnific,
   mcp,
+  remoteMcp,
   secrets,
   type McpServer,
   type SecretKey,
@@ -50,6 +51,10 @@ export type MagnificAccountState = {
   registered: boolean;
   authenticated: boolean;
 };
+export type RemoteMcpAccountState = Record<
+  string,
+  { registered: boolean; authenticated: boolean }
+>;
 export type SecretsState = {
   hasOpenAIKey: boolean;
   hasAnthropicKey: boolean;
@@ -77,6 +82,7 @@ type AccountsState = {
   codex: CodexAccountState;
   higgsfield: HiggsfieldAccountState;
   magnific: MagnificAccountState;
+  remoteMcp: RemoteMcpAccountState;
   secrets: SecretsState;
   mcp: McpServerState[];
   loading: boolean;
@@ -86,6 +92,7 @@ type AccountsState = {
   refreshMcp: () => Promise<void>;
   refreshHiggsfield: () => Promise<void>;
   refreshMagnific: () => Promise<void>;
+  refreshRemoteMcp: () => Promise<void>;
   loginCodex: () => Promise<void>;
   setCodexPlan: (plan: CodexPlan) => void;
   setSecretPresence: (key: SecretKey, present: boolean) => void;
@@ -158,6 +165,7 @@ export const useAccounts = create<AccountsState>((set, get) => ({
   codex: { loggedIn: false, plan: loadCodexPlan() },
   higgsfield: { registered: false, authenticated: false },
   magnific: { registered: false, authenticated: false },
+  remoteMcp: {},
   secrets: createEmptySecrets(),
   mcp: [],
   loading: false,
@@ -182,6 +190,7 @@ export const useAccounts = create<AccountsState>((set, get) => ({
       })(),
       get().refreshHiggsfield(),
       get().refreshMagnific(),
+      get().refreshRemoteMcp(),
       get().refreshSecrets(),
       get().refreshMcp(),
     ]);
@@ -265,6 +274,23 @@ export const useAccounts = create<AccountsState>((set, get) => ({
       // 例外は status 取得そのものの失敗。接続状態は不明なので、
       // 選択は消さずに未接続表示へ倒すだけにする。
       set({ magnific: { registered: false, authenticated: false } });
+    }
+  },
+
+  refreshRemoteMcp: async () => {
+    // 状態一覧は Rust 側で codex を1回だけ起動して取得する。取得不能時は、
+    // 設定画面を止めずに全サービスを未接続表示へ倒す。
+    try {
+      const statuses = await remoteMcp.statusAll();
+      const next = Object.fromEntries(
+        statuses.map(({ id, registered, authenticated }) => [
+          id,
+          { registered, authenticated },
+        ]),
+      );
+      set({ remoteMcp: next });
+    } catch {
+      set({ remoteMcp: {} });
     }
   },
 

@@ -36,6 +36,7 @@ pub mod magnific;
 pub mod mcp;
 pub mod multiangle;
 pub mod raw_payload;
+pub mod remote_mcp;
 pub mod rpc_bridge;
 pub mod scene3d;
 pub mod secrets;

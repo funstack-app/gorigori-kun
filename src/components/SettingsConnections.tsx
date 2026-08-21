@@ -4,11 +4,16 @@ import {
   higgsfieldMcp,
   magnific,
   mcp,
+  remoteMcp,
   secrets,
   type MagnificAccount,
   type McpServer,
   type SecretKey,
 } from "../lib/ipc";
+import {
+  REMOTE_MCP_PROVIDERS,
+  type RemoteMcpProviderCatalogEntry,
+} from "../lib/remoteMcpProviders";
 import { useAccounts, type SecretsState } from "../lib/store/accounts";
 import { useToasts } from "../lib/store/toasts";
 
@@ -268,6 +273,9 @@ export function SettingsConnections() {
       <ConnectionSection title="AI 生成">
         <HiggsfieldConnectionCard />
         <MagnificConnectionCard />
+        {REMOTE_MCP_PROVIDERS.map((provider) => (
+          <RemoteMcpConnectionCard key={provider.id} provider={provider} />
+        ))}
       </ConnectionSection>
 
       {SERVICE_CATEGORIES.map((category) => (
@@ -879,6 +887,122 @@ function MagnificConnectionCard() {
           disabled={busy}
           onClick={connect}
           className="h-9 w-full rounded-lg bg-violet-500 px-3 text-xs font-black text-white transition hover:bg-violet-400 disabled:opacity-60"
+        >
+          {busy ? "接続中…" : "接続する (ブラウザでログイン)"}
+        </button>
+      ) : (
+        <button
+          type="button"
+          disabled={busy}
+          onClick={disconnect}
+          className="h-9 w-full rounded-lg border border-[#343434] bg-[#1e1e1e] px-3 text-xs font-bold text-neutral-300 transition hover:border-rose-400 hover:text-rose-300 disabled:opacity-60"
+        >
+          {busy ? "解除中…" : "接続を解除"}
+        </button>
+      )}
+    </div>
+  );
+}
+
+/** 段階1の汎用リモート MCP 接続カード。専用生成 UI にはまだ配線しない。 */
+function RemoteMcpConnectionCard({
+  provider,
+}: {
+  provider: RemoteMcpProviderCatalogEntry;
+}) {
+  const status = useAccounts((state) => state.remoteMcp[provider.id]);
+  const refresh = useAccounts((state) => state.refreshRemoteMcp);
+  const toast = useToasts.getState();
+  const [busy, setBusy] = useState(false);
+
+  const authed = status?.authenticated ?? false;
+
+  const connect = async () => {
+    setBusy(true);
+    try {
+      await remoteMcp.login(provider.id);
+      await refresh();
+      const connected =
+        useAccounts.getState().remoteMcp[provider.id]?.authenticated ?? false;
+      if (connected) {
+        toast.push({
+          kind: "success",
+          text: `${provider.label} に接続しました`,
+          ttlMs: 3000,
+        });
+      } else {
+        toast.push({
+          kind: "info",
+          text: "ブラウザでログインを完了してから、もう一度接続を押してください。",
+          ttlMs: 7000,
+        });
+      }
+    } catch (error) {
+      toast.push({
+        kind: "error",
+        text: `${provider.label} 接続に失敗: ${String(error)}`,
+        ttlMs: 6000,
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const disconnect = async () => {
+    setBusy(true);
+    try {
+      await remoteMcp.logout(provider.id);
+      await refresh();
+      toast.push({
+        kind: "success",
+        text: `${provider.label} の接続を解除しました`,
+        ttlMs: 3000,
+      });
+    } catch (error) {
+      toast.push({
+        kind: "error",
+        text: `${provider.label} 接続解除に失敗: ${String(error)}`,
+        ttlMs: 6000,
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className={`space-y-3 rounded-xl border p-3 ${provider.accentClasses.card}`}>
+      <div className="flex items-start gap-2">
+        <span
+          className={`grid h-8 min-w-8 place-items-center rounded-md border bg-[#101010] px-1 text-[10px] font-black ${provider.accentClasses.icon}`}
+        >
+          {provider.initials}
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <p className={`text-sm font-black ${provider.accentClasses.title}`}>
+              {provider.label}
+            </p>
+            {authed && (
+              <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-black text-emerald-200">
+                接続済み
+              </span>
+            )}
+          </div>
+          <p className="mt-0.5 text-[11px] font-bold text-neutral-300">
+            {provider.capabilities}
+          </p>
+          <p className="mt-1 text-[11px] leading-relaxed text-neutral-500">
+            {provider.description}
+          </p>
+        </div>
+      </div>
+
+      {!authed ? (
+        <button
+          type="button"
+          disabled={busy}
+          onClick={connect}
+          className={`h-9 w-full rounded-lg px-3 text-xs font-black text-white transition disabled:opacity-60 ${provider.accentClasses.button}`}
         >
           {busy ? "接続中…" : "接続する (ブラウザでログイン)"}
         </button>

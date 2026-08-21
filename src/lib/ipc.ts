@@ -521,6 +521,26 @@ export const magnific = {
   account: () => invoke<MagnificAccount>("magnific_account"),
 };
 
+export type RemoteMcpProvider = {
+  id: string;
+  label: string;
+  url: string;
+};
+
+export type RemoteMcpStatus = {
+  id: string;
+  registered: boolean;
+  authenticated: boolean;
+};
+
+/** OAuth 対応リモート HTTP MCP の共通接続層。専用生成 UI とは独立している。 */
+export const remoteMcp = {
+  providers: () => invoke<RemoteMcpProvider[]>("remote_mcp_providers"),
+  statusAll: () => invoke<RemoteMcpStatus[]>("remote_mcp_status_all"),
+  login: (id: string) => invoke<string>("remote_mcp_login", { providerId: id }),
+  logout: (id: string) => invoke<void>("remote_mcp_logout", { providerId: id }),
+};
+
 // Higgsfield リモートMCP拡張 (2026-06-10 段階3)。CLI同梱方式の作り直し。
 // mcp.higgsfield.ai に codex mcp で接続するだけ。未接続なら全false で degrade。
 // 既存 higgsfield (CLI版) とは別オブジェクトとして共存させる。
