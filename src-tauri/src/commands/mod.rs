@@ -26,6 +26,7 @@ pub mod edit_segment;
 pub mod edit_unsupported;
 #[cfg(edit_ai)]
 pub mod edit_words;
+pub mod film_storage;
 pub mod gen_metrics;
 pub mod gen_queue;
 pub mod gen_worker;

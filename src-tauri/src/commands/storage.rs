@@ -934,7 +934,7 @@ fn next_free_backup_path_for(dir: &Path, file_name: &str, stamp: u128) -> PathBu
 /// 「守るものが無い＝取れた扱い」で true。存在するのにコピーに失敗したときだけ false。
 /// 呼び出し側 (破壊的書き込みの直前) は false なら書き込みを中止し、正本を守る。
 #[must_use]
-fn backup_projects_file(path: &Path) -> bool {
+pub(crate) fn backup_projects_file(path: &Path) -> bool {
     if !path.exists() {
         // 守る対象が無い = 失うものが無い。書き込みを止める理由にしない。
         return true;
@@ -974,7 +974,7 @@ fn backup_projects_file(path: &Path) -> bool {
 /// **戻せない状態のまま正本を上書き**していた。ディスク満杯・権限エラー・
 /// クラウド同期の一時ロックなど、バックアップが取れない状況は正本の書き込みも
 /// 危ういので、安全側 (書かない) に倒す。
-fn backup_before_write(path: &Path, label: &str) -> Result<(), String> {
+pub(crate) fn backup_before_write(path: &Path, label: &str) -> Result<(), String> {
     if backup_projects_file(path) {
         return Ok(());
     }
@@ -1139,7 +1139,7 @@ const SHRINK_GUARD_MIN_EXISTING: usize = 10;
 /// 到達すると「中身が空/途中の新ファイル」が正本の位置に居座り得る (電源断・強制終了)。
 /// アトミック rename は「旧か新か」を保証するが、**新の中身が完全であることは
 /// 保証しない**。sync_all を挟むと、rename 時点で中身が確実にディスクにある。
-fn write_file_synced(path: &Path, content: &str) -> std::io::Result<()> {
+pub(crate) fn write_file_synced(path: &Path, content: &str) -> std::io::Result<()> {
     use std::io::Write;
     let mut file = fs::File::create(path)?;
     file.write_all(content.as_bytes())?;
@@ -1159,7 +1159,7 @@ fn write_file_synced(path: &Path, content: &str) -> std::io::Result<()> {
 ///   - `Ok(None)`  — ファイルが存在しない (守る対象が無い。ガードは非適用でよい)
 ///   - `Ok(Some(s))` — 読めた。ガード判定に使う
 ///   - `Err(msg)`  — **存在するのに読めない**。呼び出し側は書き込みを中止する
-fn read_existing_for_guard(path: &Path, label: &str) -> Result<Option<String>, String> {
+pub(crate) fn read_existing_for_guard(path: &Path, label: &str) -> Result<Option<String>, String> {
     if !path.exists() {
         return Ok(None);
     }
@@ -1179,7 +1179,7 @@ fn read_existing_for_guard(path: &Path, label: &str) -> Result<Option<String>, S
 /// 0 件は空上書きガードの担当なのでここでは見ない (incoming_count == 0 は None)。
 /// count 関数を引数に取ることで presets / scene3d / motions で共有する
 /// (それぞれ数える対象の配列名が違うだけで判定式は同一)。
-fn shrink_rejected(
+pub(crate) fn shrink_rejected(
     existing: &str,
     incoming: &str,
     count: impl Fn(&str) -> Option<usize>,
