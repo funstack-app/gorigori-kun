@@ -52,6 +52,8 @@ export function VideoStoryQueuePanel() {
   const requestCancel = useVideoStory((s) => s.requestCancel);
   const abortAndClear = useVideoStory((s) => s.abortAndClear);
   const removeCut = useVideoStory((s) => s.removeCut);
+  const concatTransition = useVideoStory((s) => s.concatTransition);
+  const setConcatTransition = useVideoStory((s) => s.setConcatTransition);
   const modelId = useVideoGen((s) => s.modelId);
   const revealInFinder = useImages((s) => s.revealInFinder);
   const pushToast = useToasts((s) => s.push);
@@ -122,6 +124,21 @@ export function VideoStoryQueuePanel() {
           <p className="text-[11px] font-semibold text-pink-100">ストーリー動画</p>
           <span className="text-[10px] text-zinc-500">{cuts.length} カット</span>
         </div>
+
+        <label className="mt-2 flex items-center gap-2 text-[10px] text-zinc-400">
+          <span className="shrink-0">つなぎ方</span>
+          <select
+            value={concatTransition}
+            disabled={isStoryRunBusy(runStatus)}
+            onChange={(event) =>
+              setConcatTransition(event.target.value === "crossfade" ? "crossfade" : "cut")
+            }
+            className="min-w-0 rounded border border-[#2a2a2a] bg-[#141414] px-2 py-1 text-[10px] text-zinc-200 outline-none hover:border-pink-500/40 focus:border-pink-500/60 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <option value="cut">そのまま</option>
+            <option value="crossfade">クロスフェード 0.5秒</option>
+          </select>
+        </label>
 
         <ol className="mt-2 flex flex-col gap-1">
           {cuts.map((cut) => {

@@ -6,8 +6,9 @@ import { create } from "zustand";
  * 絵コンテ (ストーリーモード Phase 4) で確定したカット列を積み、動画タブで
  * カットごとに i2v 生成 → ffmpeg で 1 本に結合するまでの進行状態を持つ。
  *
- * 永続化しない (メモリのみ)。カット動画自体は generated_images と履歴に残るので、
- * アプリ再起動でキューが消えても生成物は失われない (design-video-story.md §1-B)。
+ * キュー自体は永続化しない (メモリのみ)。カット動画自体は generated_images と履歴に
+ * 残るので、アプリ再起動でキューが消えても生成物は失われない
+ * (design-video-story.md §1-B)。つなぎ方の好みだけは localStorage に保存する。
  */
 
 export type StoryCutJob = {
@@ -36,6 +37,20 @@ export type StoryRunStatus =
   | "concatFailed";
 
 export type StoryConcatFailReason = "ffmpeg-not-found" | "other" | null;
+export type StoryConcatTransition = "cut" | "crossfade";
+
+const CONCAT_TRANSITION_STORAGE_KEY = "videoStory.concatTransition";
+
+function loadConcatTransition(): StoryConcatTransition {
+  if (typeof window === "undefined") return "cut";
+  try {
+    return window.localStorage.getItem(CONCAT_TRANSITION_STORAGE_KEY) === "crossfade"
+      ? "crossfade"
+      : "cut";
+  } catch {
+    return "cut";
+  }
+}
 
 /** 実行中（＝新しい全体ランを始めてはいけない）とみなす状態。 */
 export function isStoryRunBusy(status: StoryRunStatus): boolean {
@@ -48,6 +63,7 @@ type VideoStoryStore = {
   concatFailReason: StoryConcatFailReason;
   finalVideoPath: string | null;
   cancelRequested: boolean;
+  concatTransition: StoryConcatTransition;
   /** キューを丸ごと置き換える (全 status="queued")。 */
   setQueue: (cuts: Omit<StoryCutJob, "status">[]) => void;
   /**
@@ -79,6 +95,7 @@ type VideoStoryStore = {
   setRunStatus: (s: StoryRunStatus) => void;
   setConcatFailReason: (reason: StoryConcatFailReason) => void;
   setFinalVideoPath: (p: string | null) => void;
+  setConcatTransition: (transition: StoryConcatTransition) => void;
   requestCancel: () => void;
   /**
    * 全体ランの開始ロックを取る。既に実行中なら false を返し、呼び出し側は中止する。
@@ -122,6 +139,7 @@ export const useVideoStory = create<VideoStoryStore>((set) => ({
   concatFailReason: null,
   finalVideoPath: null,
   cancelRequested: false,
+  concatTransition: loadConcatTransition(),
 
   setQueue: (cuts) =>
     set({
@@ -205,6 +223,14 @@ export const useVideoStory = create<VideoStoryStore>((set) => ({
   setRunStatus: (runStatus) => set({ runStatus }),
   setConcatFailReason: (concatFailReason) => set({ concatFailReason }),
   setFinalVideoPath: (finalVideoPath) => set({ finalVideoPath }),
+  setConcatTransition: (concatTransition) => {
+    set({ concatTransition });
+    try {
+      window.localStorage.setItem(CONCAT_TRANSITION_STORAGE_KEY, concatTransition);
+    } catch {
+      // 保存できない環境でも、現在のセッションでは選択をそのまま使う。
+    }
+  },
   requestCancel: () => set({ cancelRequested: true }),
 
   tryBeginRun: () => {

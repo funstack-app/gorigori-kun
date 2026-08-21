@@ -1231,7 +1231,8 @@ export const videoConcat = {
    * ffmpeg 不在時は `ffmpeg-not-found:` で始まるエラー文字列を返す
    * (scene3d と同じ prefix 規約。呼び出し側はこれを degrade 案内に分岐させる)。
    */
-  story: (paths: string[]) => invoke<string>("video_concat_story", { paths }),
+  story: (paths: string[], transition: "cut" | "crossfade" = "cut") =>
+    invoke<string>("video_concat_story", { paths, transition }),
 };
 
 // ──────────── LINE スタンプ: 層A検査 + 書き出し (7q5 S6) ────────────

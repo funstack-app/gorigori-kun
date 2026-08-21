@@ -176,7 +176,7 @@ async function concatCuts(cuts: StoryCutJob[]): Promise<void> {
   store.setConcatFailReason(null);
   store.setRunStatus("concatenating");
   try {
-    const finalPath = await videoConcat.story(paths);
+    const finalPath = await videoConcat.story(paths, store.concatTransition);
     const batchId = `local-story-concat-${newRunId()}`;
     const { model } = currentVideoSettings();
     useBatches.getState().startBatch({
