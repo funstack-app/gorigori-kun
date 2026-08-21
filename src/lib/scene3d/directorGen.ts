@@ -81,6 +81,64 @@ export type DirectorPlan = {
   note: string;
 };
 
+const DIRECTOR_MOTION_CONCURRENCY = 3;
+let lastGeneratedMotionTimestamp = 0;
+
+/** Date.now() が同値でも重ならない、単調増加のモーションID用時刻を返す。 */
+function nextGeneratedMotionTimestamp(): number {
+  lastGeneratedMotionTimestamp = Math.max(Date.now(), lastGeneratedMotionTimestamp + 1);
+  return lastGeneratedMotionTimestamp;
+}
+
+/** 追加依存なしの小さな p-limit 相当。実行中の Promise を limit 件までに抑える。 */
+function createConcurrencyLimit(limit: number) {
+  let activeCount = 0;
+  const queue: Array<() => void> = [];
+
+  const runNext = () => {
+    if (activeCount >= limit) return;
+    const start = queue.shift();
+    if (!start) return;
+    activeCount += 1;
+    start();
+  };
+
+  return <T>(task: () => Promise<T>): Promise<T> =>
+    new Promise<T>((resolve, reject) => {
+      queue.push(() => {
+        void Promise.resolve()
+          .then(task)
+          .then(resolve, reject)
+          .finally(() => {
+            activeCount -= 1;
+            runNext();
+          });
+      });
+      runNext();
+    });
+}
+
+/** 同じ entity は入力順を守りつつ、entity 間を上限付きで並列実行する。 */
+async function runAllSettledByEntity<T extends { entityId: string }>(
+  items: readonly T[],
+  task: (item: T, index: number) => Promise<void>,
+): Promise<PromiseSettledResult<void>[]> {
+  const limit = createConcurrencyLimit(DIRECTOR_MOTION_CONCURRENCY);
+  const entityTails = new Map<string, Promise<void>>();
+  const jobs = items.map((item, index) => {
+    const previous = entityTails.get(item.entityId) ?? Promise.resolve();
+    // 前の処理が失敗しても、同じ entity の後続は必ず試す。
+    const job = previous.catch(() => {}).then(() => limit(() => task(item, index)));
+    entityTails.set(item.entityId, job);
+    return job;
+  });
+  return Promise.allSettled(jobs);
+}
+
+function errorMessage(reason: unknown): string {
+  return reason instanceof Error ? reason.message : String(reason);
+}
+
 /* ---------------------------------- prompt ---------------------------------- */
 
 const PRESET_MEANINGS: Record<CameraPresetId, string> = {
@@ -313,7 +371,7 @@ export async function reviseGeneratedMotion(
       ? { ...(parsed as object), rig }
       : parsed,
   );
-  const id = `gen-${Date.now()}`;
+  const id = `gen-${nextGeneratedMotionTimestamp()}`;
   const clip = buildGeneratedClip(template, spec, id);
   // plantsは引き継がない: AI改訂でタイミングが変わると古い接地スパンがIK破綻の原因になる
   const entry = registerGeneratedClip(id, spec.name, clip, undefined, rig);
@@ -385,7 +443,7 @@ export async function applyDirectorPlan(
 
   // モーション割り当て
   const toGenerate: { entityId: string; desc: string; append?: boolean }[] = [];
-  const toRevise: { entityId: string; clipId: string; instruction: string }[] = [];
+  const toRevise: { entityId: string; clipId: string; desc: string; instruction: string }[] = [];
   const findClip = (name: string) => {
     const clips = st().importedMotions;
     return (
@@ -401,7 +459,7 @@ export async function applyDirectorPlan(
       const hit = findClip(m.clip);
       // AI生成モーションへの修正指示: 改訂して割り当て直す(後段の生成フェーズで実行)
       if (hit && m.revise && hit.id.startsWith("gen-")) {
-        toRevise.push({ entityId: id, clipId: hit.id, instruction: m.revise });
+        toRevise.push({ entityId: id, clipId: hit.id, desc: m.clip, instruction: m.revise });
         assigned = true;
       } else if (hit) {
         st().setEntityMotionClip(id, hit.id);
@@ -441,36 +499,65 @@ export async function applyDirectorPlan(
     }
   }
 
-  // 既存AI生成モーションの改訂(会話でリグ調整。1件ずつ・遅い)
-  for (let i = 0; i < toRevise.length; i++) {
-    const r = toRevise[i];
-    onProgress?.(`モーション改訂中 (${i + 1}/${toRevise.length})…`);
-    const entry = await reviseGeneratedMotion(r.clipId, r.instruction);
-    st().setEntityMotionClip(r.entityId, entry.id);
-  }
+  const failures: string[] = [];
 
-  // 新規モーション生成(AIアニメーターへ委譲。1件ずつ・遅い)
-  for (let i = 0; i < toGenerate.length; i++) {
-    const g = toGenerate[i];
-    onProgress?.(`モーション生成中: 「${g.desc}」(${i + 1}/${toGenerate.length})…`);
-    // AI監督の新規生成もMixamo規格(Y Bot)に統一(2026-07-22移行)
-    const template = await loadCaptureRig();
-    const { systemPrompt, prompt } = buildMotionPrompt(g.desc, "mixamo");
-    const res = await codexTextQuery({ prompt, systemPrompt, expectJson: true, timeoutSecs: 180 });
-    const parsed = res.parsedJson;
-    const spec = validateGeneratedSpec(
-      parsed && typeof parsed === "object" && !Array.isArray(parsed)
-        ? { ...(parsed as object), rig: "mixamo" }
-        : parsed,
-    );
-    const id = `gen-${Date.now()}-${i}`;
-    const clip = buildGeneratedClip(template, spec, id);
-    const entry = registerGeneratedClip(id, spec.name, clip, undefined, spec.rig);
-    if (!entry) throw new Error(`モーション「${g.desc}」の登録に失敗しました`);
-    if (spec.moveSpeed != null) registerClipSpeed(id, spec.moveSpeed);
-    saveGeneratedSpec(id, spec);
-    st().registerImportedMotions([entry]);
-    if (g.append) st().appendEntityArrivalStep(g.entityId, id);
-    else st().setEntityMotionClip(g.entityId, id);
+  // 既存AI生成モーションの改訂。別entityは最大3並列、同じentityは入力順を維持する。
+  let revisedCount = 0;
+  if (toRevise.length > 0) onProgress?.(`モーション改訂中 (完了0/${toRevise.length})…`);
+  const reviseResults = await runAllSettledByEntity(toRevise, async (r) => {
+    try {
+      const entry = await reviseGeneratedMotion(r.clipId, r.instruction);
+      st().setEntityMotionClip(r.entityId, entry.id);
+    } finally {
+      revisedCount += 1;
+      onProgress?.(`モーション改訂中 (完了${revisedCount}/${toRevise.length})…`);
+    }
+  });
+  reviseResults.forEach((result, index) => {
+    if (result.status === "rejected") {
+      const r = toRevise[index];
+      failures.push(`改訂「${r.desc}」（${r.instruction}）: ${errorMessage(result.reason)}`);
+    }
+  });
+
+  // 新規モーション生成。改訂を全件決着させた後、同じ規則で最大3並列にする。
+  let generatedCount = 0;
+  const generationStartedAt = nextGeneratedMotionTimestamp();
+  if (toGenerate.length > 0) onProgress?.(`モーション生成中 (完了0/${toGenerate.length})…`);
+  const generateResults = await runAllSettledByEntity(toGenerate, async (g, index) => {
+    try {
+      // テンプレートは共有せず、各タスク内で従来どおり読み込む。
+      const template = await loadCaptureRig();
+      const { systemPrompt, prompt } = buildMotionPrompt(g.desc, "mixamo");
+      const res = await codexTextQuery({ prompt, systemPrompt, expectJson: true, timeoutSecs: 180 });
+      const parsed = res.parsedJson;
+      const spec = validateGeneratedSpec(
+        parsed && typeof parsed === "object" && !Array.isArray(parsed)
+          ? { ...(parsed as object), rig: "mixamo" }
+          : parsed,
+      );
+      const id = `gen-${generationStartedAt}-${index}`;
+      const clip = buildGeneratedClip(template, spec, id);
+      const entry = registerGeneratedClip(id, spec.name, clip, undefined, spec.rig);
+      if (!entry) throw new Error(`モーション「${g.desc}」の登録に失敗しました`);
+      if (spec.moveSpeed != null) registerClipSpeed(id, spec.moveSpeed);
+      saveGeneratedSpec(id, spec);
+      st().registerImportedMotions([entry]);
+      if (g.append) st().appendEntityArrivalStep(g.entityId, id);
+      else st().setEntityMotionClip(g.entityId, id);
+    } finally {
+      generatedCount += 1;
+      onProgress?.(`モーション生成中 (完了${generatedCount}/${toGenerate.length})…`);
+    }
+  });
+  generateResults.forEach((result, index) => {
+    if (result.status === "rejected") {
+      const g = toGenerate[index];
+      failures.push(`生成「${g.desc}」: ${errorMessage(result.reason)}`);
+    }
+  });
+
+  if (failures.length > 0) {
+    throw new Error(`一部のモーション処理に失敗しました（成功分は適用済みです）:\n${failures.map((x) => `- ${x}`).join("\n")}`);
   }
 }
