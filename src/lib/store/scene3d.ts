@@ -20,6 +20,7 @@ import {
 import type {
   CameraPresetId,
   SceneAspectRatio,
+  SceneCamera,
   SceneEntity,
   SceneEntityKind,
   SceneProject,
@@ -176,6 +177,16 @@ export type StoryboardShotOrigin = {
   cameraNote?: string;
 };
 
+/** シーン再現など、外部スキルから追加するカメラの初期配置。 */
+export type Scene3dCameraSpec = {
+  label: string;
+  preset: CameraPresetId;
+  lensMm: number;
+  startPos: Vec3;
+  endPos: Vec3;
+  lookAtPos: Vec3;
+};
+
 type Scene3dState = {
   project: SceneProject;
   selectedEntityId: string | null;
@@ -305,6 +316,8 @@ type Scene3dState = {
 
   /** カメラ機材の管理(マルチカム) */
   addCamera: () => void;
+  /** 外部スキルで決めたカメラを、対応カットとともに末尾へ追加する。 */
+  appendCamerasFromSpecs: (specs: readonly Scene3dCameraSpec[]) => number;
   removeCamera: (cameraId: string) => void;
   assignShotCamera: (shotId: string, cameraId: string) => void;
 
@@ -1249,6 +1262,51 @@ export const useScene3d = create<Scene3dState>((set, get) => ({
       selectedEntityId: null,
       currentFrame: shotStartFrame(next, shotId),
     });
+  },
+
+  appendCamerasFromSpecs: (specs) => {
+    if (specs.length === 0) return 0;
+
+    const { project } = get();
+    const stamp = Date.now();
+    const entries = specs.map((spec) => {
+      const seq = shotSeq++;
+      const cameraId = `camera-scene-recreate-${stamp}-${seq}`;
+      const camera: SceneCamera = {
+        id: cameraId,
+        label: spec.label,
+        move: {
+          ...createDefaultCameraMove(),
+          preset: spec.preset,
+          targetEntityId: null,
+          lookAtPos: [...spec.lookAtPos] as Vec3,
+          startPos: [...spec.startPos] as Vec3,
+          endPos: [...spec.endPos] as Vec3,
+          lensMm: spec.lensMm,
+          orbitDegrees: 0,
+          midPos: null,
+        },
+      };
+      const shot = createDefaultShot(`shot-scene-recreate-${stamp}-${seq}`, "", cameraId);
+      return { camera, shot };
+    });
+    const next: SceneProject = {
+      ...project,
+      cameras: [...project.cameras, ...entries.map((entry) => entry.camera)],
+      shots: renumberShots([...project.shots, ...entries.map((entry) => entry.shot)]),
+    };
+    const firstShotId = entries[0].shot.id;
+
+    set({
+      project: next,
+      selectedShotId: firstShotId,
+      cameraSelected: true,
+      selectedEntityId: null,
+      currentFrame: shotStartFrame(next, firstShotId),
+      playing: false,
+      cameraView: true,
+    });
+    return entries.length;
   },
 
   removeCamera: (cameraId) => {

@@ -11,6 +11,7 @@ import { useToasts } from "../../../lib/store/toasts";
 import { usePresets, presetKind, type Preset } from "../../../lib/store/presets";
 import { composePresetPrompt } from "../../../lib/presets/character";
 import { analyzeScene } from "../../../lib/sceneRecreate/analyze";
+import { sendShotsToScene3d } from "../../../lib/sceneRecreate/toScene3dCameras";
 import {
   MAX_KEYFRAMES,
   MAX_VIDEO_SECONDS,
@@ -106,8 +107,8 @@ function formatAnalysisAsMarkdown(
  * 再現するプロンプトを出力する。
  *
  * MVP の割り切り: codex は動画を直接見られないため「時系列キーフレームを投入する」
- * 方式で成立させる(将来: 自動フレーム抽出)。3D カメラプリセット出力は今後の
- * Scene 3D 連携として表示のみ。
+ * 方式で成立させる(将来: 自動フレーム抽出)。分析後のショット割りは Scene 3D の
+ * カメラ初期配置として書き出せる。
  *
  * SkillWorkspaceRouter が activeUiMode === "sceneRecreate" のとき本コンポーネントを描画する。
  * 既存の GenerationWorkspace / 他スキル Workspace は触らない。
@@ -483,7 +484,7 @@ export function SceneRecreateWorkspace() {
         {/* 右: 結果 */}
         <div className="min-h-0 flex-1 overflow-y-auto">
           {analysis ? (
-            <AnalysisResult analysis={analysis} />
+            <AnalysisResult analysis={analysis} canSendToScene3d={status === "done"} />
           ) : status === "describing" || status === "analyzing" ? (
             /*
               2026-07-27: 解析中の待ち表示を、通常の画像生成と同じ
@@ -528,7 +529,13 @@ export function SceneRecreateWorkspace() {
 // 分析結果 + 再現出力
 // ─────────────────────────────────────────────────────────────────────────────
 
-function AnalysisResult({ analysis }: { analysis: SceneAnalysis }) {
+function AnalysisResult({
+  analysis,
+  canSendToScene3d,
+}: {
+  analysis: SceneAnalysis;
+  canSendToScene3d: boolean;
+}) {
   return (
     <div className="flex flex-col gap-5 px-5 py-5">
       {/* 全体の演出構造 */}
@@ -581,7 +588,7 @@ function AnalysisResult({ analysis }: { analysis: SceneAnalysis }) {
       </div>
 
       {/* 再現出力 */}
-      <RecreatePanel analysis={analysis} />
+      <RecreatePanel analysis={analysis} canSendToScene3d={canSendToScene3d} />
     </div>
   );
 }
@@ -610,7 +617,13 @@ function Field({ label, value }: { label: string; value: string }) {
 // 「自分のキャラで再現」
 // ─────────────────────────────────────────────────────────────────────────────
 
-function RecreatePanel({ analysis }: { analysis: SceneAnalysis }) {
+function RecreatePanel({
+  analysis,
+  canSendToScene3d,
+}: {
+  analysis: SceneAnalysis;
+  canSendToScene3d: boolean;
+}) {
   const pushToast = useToasts((s) => s.push);
   const presets = usePresets((s) => s.presets);
   const characterPresets = useMemo(
@@ -710,12 +723,20 @@ function RecreatePanel({ analysis }: { analysis: SceneAnalysis }) {
         ))}
       </div>
 
-      {/* 3D カメラプリセット出力(今後の連携) */}
-      <div className="mt-4 rounded-lg border border-dashed border-[#343434] bg-[#0d0d0d] px-3 py-2.5 text-[11px] text-neutral-500">
-        <span className="font-bold text-neutral-400">今後 Scene 3D 連携:</span>{" "}
-        ショット割りを Scene 3D の 3D カメラプリセット(アングル・寄り引き)へ
-        直接書き出す機能は準備中です。現状はプロンプト出力までを提供します。
-      </div>
+      {canSendToScene3d && analysis.shots.length > 0 && (
+        <div className="mt-4 rounded-lg border border-pink-400/30 bg-[#0d0d0d] px-3 py-3">
+          <button
+            type="button"
+            onClick={() => void sendShotsToScene3d(analysis.shots)}
+            className="w-full rounded-lg bg-pink-500 px-3 py-2 text-[12px] font-black text-white hover:bg-pink-400"
+          >
+            ショット割りを 3D カメラとして書き出す
+          </button>
+          <p className="mt-2 text-[11px] text-neutral-500">
+            配置は目安です。Scene 3D 側で調整できます
+          </p>
+        </div>
+      )}
     </div>
   );
 }
