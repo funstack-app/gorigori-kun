@@ -24,6 +24,7 @@ import { useProjects } from "../lib/store/projects";
 import { useSettings } from "../lib/store/settings";
 import { useThreads } from "../lib/store/threads";
 import { useToasts } from "../lib/store/toasts";
+import { type SettingsWorkspaceTab, useWorkspace } from "../lib/store/workspace";
 import { useWorldContexts } from "../lib/store/worldContexts";
 // SettingsCloudSection は v0.6.13 でα版非表示。β以降で復活予定。
 // import { SettingsCloudSection } from "./SettingsCloudSection";
@@ -32,8 +33,7 @@ import { StorageManagementSection } from "./StorageManagementSection";
 import { UpdateChecker } from "./UpdateChecker";
 import { FONT_SCALE_OPTIONS, useFontScale } from "../lib/store/fontScale";
 
-type Tab = "basic" | "storage" | "accounts" | "connections";
-const TABS: Array<{ id: Tab; label: string }> = [
+const TABS: Array<{ id: SettingsWorkspaceTab; label: string }> = [
   { id: "basic", label: "基本" },
   { id: "storage", label: "保存先" },
   { id: "accounts", label: "アカウント" },
@@ -49,8 +49,19 @@ const PRIMARY_BUTTON = "rounded-md bg-pink-500 font-bold text-white hover:bg-pin
 const MUTED_BUTTON =
   "rounded-md border border-[#343434] bg-[#1e1e1e] font-bold text-neutral-300 hover:border-[#555] hover:text-white";
 export function SettingsWorkspace() {
-  const [tab, setTab] = useState<Tab>("basic");
+  const [tab, setTab] = useState<SettingsWorkspaceTab>(
+    () => useWorkspace.getState().requestedSettingsTab ?? "basic",
+  );
+  const requestedSettingsTab = useWorkspace((state) => state.requestedSettingsTab);
+  const consumeRequestedSettingsTab = useWorkspace(
+    (state) => state.consumeRequestedSettingsTab,
+  );
   const accounts = useAccounts();
+  useEffect(() => {
+    if (!requestedSettingsTab) return;
+    setTab(requestedSettingsTab);
+    consumeRequestedSettingsTab();
+  }, [requestedSettingsTab, consumeRequestedSettingsTab]);
   useEffect(() => {
     void accounts.refresh();
   }, []);

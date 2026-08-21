@@ -8,6 +8,7 @@ import {
 import { resolveImageMentions } from "./resolveImageMentions";
 import { classifyFailures } from "./retryClassify";
 import { humanizeError } from "../humanizeError";
+import { isMcpAuthError, mcpReauthMessage, pushMcpReauthToast } from "../mcpAuthError";
 import type { SceneState } from "./types";
 import { useActiveProject } from "../store/activeProject";
 import { useAuth } from "../store/auth";
@@ -566,6 +567,16 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
           return result;
         }
 
+        // Higgsfield / Magnific の認証切れは再試行しても直らない。生の OAuth 文言を
+        // 出さず、選択中の接続先へそのまま移動できる案内を表示する。
+        if (provider !== "codex" && result.errors.some(isMcpAuthError)) {
+          const providerLabel = connectionHintFor(provider);
+          const message = mcpReauthMessage(providerLabel);
+          setStatus({ kind: "error", message });
+          pushMcpReauthToast(providerLabel);
+          return result;
+        }
+
         // 1 枚でも生成できた = 部分成功以上。リトライせず結果を返す。
         if (!isTotalFailure(result)) {
           setStatus({
@@ -597,6 +608,13 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
         });
         return result;
       } catch (error) {
+        if (provider !== "codex" && isMcpAuthError(error)) {
+          const providerLabel = connectionHintFor(provider);
+          const message = mcpReauthMessage(providerLabel);
+          setStatus({ kind: "error", message });
+          pushMcpReauthToast(providerLabel);
+          return null;
+        }
         // IPC reject (ネットワーク/プロセス起動失敗等) は一時的失敗とみなしリトライ。
         lastError = error;
         console.error(

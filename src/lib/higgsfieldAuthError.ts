@@ -19,28 +19,13 @@
  * 認証切れ以外の理由は情報量があるので**従来どおりそのまま**通す。
  */
 
-/** 認証切れと判定したときに表示する固定文言 (設定画面の「接続」へ誘導する)。 */
-export const HIGGSFIELD_REAUTH_MESSAGE =
-  "Higgsfieldの接続が切れています。設定から再接続してください。";
+import { isMcpAuthError, mcpReauthMessage } from "./mcpAuthError";
 
-/**
- * 認証切れ (トークン失効・更新失敗) を示す文字列かどうか。
- *
- * `invalid_grant` は OAuth の失効系エラーコードで、refresh token が無効・期限切れ・
- * 別クライアント発行のいずれでも返る。`issued to another client` はその具体ケース。
- * codex 側の文言が版によって揺れるため、代表パターンを幅広く拾う。
- */
-export function isHiggsfieldAuthError(reason: unknown): boolean {
-  const raw = String(reason ?? "");
-  if (!raw) return false;
-  return (
-    /invalid_grant/i.test(raw) ||
-    /issued to another client/i.test(raw) ||
-    /(oauth|token)[^\n]{0,40}refresh failed/i.test(raw) ||
-    /refresh token[^\n]{0,40}(invalid|expired|revoked)/i.test(raw) ||
-    /unauthorized_client/i.test(raw)
-  );
-}
+/** 後方互換: 既存の Higgsfield 専用 import を共通判定へつなぐ。 */
+export const isHiggsfieldAuthError = isMcpAuthError;
+
+/** 後方互換: 既存の固定文言 export を維持する。 */
+export const HIGGSFIELD_REAUTH_MESSAGE = mcpReauthMessage("Higgsfield");
 
 /**
  * 失敗理由の配列から、認証切れなら固定文言 1 本に畳んだ結果を返す。

@@ -2,6 +2,7 @@ import { create } from "zustand";
 
 export type WorkspaceTab = "plan" | "generate" | "video" | "edit";
 export type WorkspacePurpose = "artwork" | "ad" | "videoStory";
+export type SettingsWorkspaceTab = "basic" | "storage" | "accounts" | "connections";
 
 /**
  * 生成タイムラインのサムネサイズ。
@@ -134,11 +135,14 @@ function persistComicCardSize(size: ComicCardSize) {
 type WorkspaceState = {
   activeTab: WorkspaceTab;
   purpose: WorkspacePurpose;
+  requestedSettingsTab: SettingsWorkspaceTab | null;
   timelineSize: TimelineSize;
   storyboardCardSize: StoryboardCardSize;
   comicCardSize: ComicCardSize;
   setActiveTab: (tab: WorkspaceTab) => void;
   setPurpose: (purpose: WorkspacePurpose) => void;
+  requestSettingsTab: (tab: SettingsWorkspaceTab) => void;
+  consumeRequestedSettingsTab: () => void;
   setTimelineSize: (size: TimelineSize) => void;
   setStoryboardCardSize: (size: StoryboardCardSize) => void;
   setComicCardSize: (size: ComicCardSize) => void;
@@ -147,11 +151,14 @@ type WorkspaceState = {
 export const useWorkspace = create<WorkspaceState>((set) => ({
   activeTab: "generate",
   purpose: "artwork",
+  requestedSettingsTab: null,
   timelineSize: readPersistedTimelineSize(),
   storyboardCardSize: readPersistedStoryboardCardSize(),
   comicCardSize: readPersistedComicCardSize(),
   setActiveTab: (activeTab) => set({ activeTab }),
   setPurpose: (purpose) => set({ purpose }),
+  requestSettingsTab: (requestedSettingsTab) => set({ requestedSettingsTab }),
+  consumeRequestedSettingsTab: () => set({ requestedSettingsTab: null }),
   setTimelineSize: (size) => {
     const next = clampTimelineSize(size);
     persistTimelineSize(next);

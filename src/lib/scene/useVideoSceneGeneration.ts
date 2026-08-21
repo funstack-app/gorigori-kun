@@ -4,10 +4,10 @@ import { resolveImageMentions } from "./resolveImageMentions";
 import { resolveVideoRefPaths } from "./resolveVideoRefPaths";
 import { higgsfieldMcp, type HiggsfieldVideoParams } from "../ipc";
 import {
-  HIGGSFIELD_REAUTH_MESSAGE,
-  isHiggsfieldAuthError,
-  toHiggsfieldAuthMessage,
-} from "../higgsfieldAuthError";
+  isMcpAuthError,
+  mcpReauthMessage,
+  pushMcpReauthToast,
+} from "../mcpAuthError";
 import { useActiveProject } from "../store/activeProject";
 import { useAuth } from "../store/auth";
 import { useBatches } from "../store/batches";
@@ -394,9 +394,9 @@ export function useVideoSceneGeneration(): UseVideoSceneGenerationReturn {
         // p20 (2026-08-04): Higgsfield の認証切れ (invalid_grant 等) は生 RPC 文字列を
         // 出さず、再接続導線つきの日本語に差し替える。プロンプトを変えても直らない
         // ので、他の失敗と同じ再試行ガイドを出すのは誤り。認証切れ以外は従来どおり。
-        const authCheck = toHiggsfieldAuthMessage(uniqueReasons);
-        const message = authCheck.isAuthError
-          ? (authCheck.message as string)
+        const isAuthError = uniqueReasons.some((reason) => isMcpAuthError(reason));
+        const message = isAuthError
+          ? mcpReauthMessage("Higgsfield")
           : uniqueReasons.length > 0
             ? "動画生成に失敗しました。\n\n理由:\n" + uniqueReasons.join("\n\n")
             : "動画生成に失敗しました。\n" +
@@ -406,7 +406,11 @@ export function useVideoSceneGeneration(): UseVideoSceneGenerationReturn {
         // 全件失敗時は明示的にカードを除去する (画像版で removeBatch している経路と揃える)。
         useBatches.getState().removeBatch(batchId);
         setStatus({ kind: "error", message });
-        useToasts.getState().push({ kind: "error", text: message, ttlMs: 0 });
+        if (isAuthError) {
+          pushMcpReauthToast("Higgsfield");
+        } else {
+          useToasts.getState().push({ kind: "error", text: message, ttlMs: 0 });
+        }
         return;
       }
 
@@ -437,15 +441,20 @@ export function useVideoSceneGeneration(): UseVideoSceneGenerationReturn {
       const errorMessage = String(error);
       // p20 (2026-08-04): 例外経路でも認証切れは生文字列を出さない (上の失敗理由
       // 経路と同じ扱い)。トークン更新は MCP 呼び出し中に例外として上がることもある。
-      const message = isHiggsfieldAuthError(errorMessage)
-        ? HIGGSFIELD_REAUTH_MESSAGE
+      const isAuthError = isMcpAuthError(errorMessage);
+      const message = isAuthError
+        ? mcpReauthMessage("Higgsfield")
         : `動画生成に失敗しました: ${errorMessage}`;
       setStatus({ kind: "error", message });
-      useToasts.getState().push({
-        kind: "error",
-        text: message,
-        ttlMs: 12000,
-      });
+      if (isAuthError) {
+        pushMcpReauthToast("Higgsfield");
+      } else {
+        useToasts.getState().push({
+          kind: "error",
+          text: message,
+          ttlMs: 12000,
+        });
+      }
       console.error("[useVideoSceneGeneration] generate failed:", error);
     } finally {
       setGenerating(false);
