@@ -1,5 +1,14 @@
 export type RemoteMcpProviderCatalogEntry = {
-  id: "krea" | "runway" | "bfl" | "ideogram" | "openart" | "pika" | "kling";
+  id:
+    | "krea"
+    | "runway"
+    | "bfl"
+    | "ideogram"
+    | "openart"
+    | "pika"
+    | "kling"
+    | "pollo"
+    | "topview";
   label: string;
   initials: string;
   description: string;
@@ -109,6 +118,32 @@ export const REMOTE_MCP_PROVIDERS: readonly RemoteMcpProviderCatalogEntry[] = [
       icon: "border-violet-400/20 text-violet-200",
       title: "text-violet-100",
       button: "bg-violet-500 hover:bg-violet-400",
+    },
+  },
+  {
+    id: "pollo",
+    label: "Pollo AI",
+    initials: "PL",
+    description: CONNECTION_NOTE,
+    capabilities: "多モデル集約の画像・動画生成サービスとの連携",
+    accentClasses: {
+      card: "border-emerald-400/30 bg-emerald-500/5",
+      icon: "border-emerald-400/20 text-emerald-200",
+      title: "text-emerald-100",
+      button: "bg-emerald-600 hover:bg-emerald-500",
+    },
+  },
+  {
+    id: "topview",
+    label: "TopView",
+    initials: "TV",
+    description: `${CONNECTION_NOTE} MCP利用可否はプランにより異なります。`,
+    capabilities: "広告・SNS向けの動画・画像生成サービスとの連携",
+    accentClasses: {
+      card: "border-sky-400/30 bg-sky-500/5",
+      icon: "border-sky-400/20 text-sky-200",
+      title: "text-sky-100",
+      button: "bg-sky-600 hover:bg-sky-500",
     },
   },
 ];

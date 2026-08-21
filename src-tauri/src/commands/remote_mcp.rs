@@ -63,6 +63,19 @@ pub static REMOTE_PROVIDERS: &[RemoteProviderDef] = &[
         label: "Kling AI",
         url: "https://kling.ai/mcp",
     },
+    // 2026-08-22 追加調査分 (STΛCK候補5件のうちOAuth対応の2件。
+    // Vidu/PixVerse はAPIキー式ローカルMCPのみ、TapNow はMCP自体なしで見送り)。
+    // 両URLとも JSON-RPC initialize POST で 401 (=実在・OAuth保護) を実測確認済み。
+    RemoteProviderDef {
+        id: "pollo",
+        label: "Pollo AI",
+        url: "https://mcp.pollo.ai/mcp",
+    },
+    RemoteProviderDef {
+        id: "topview",
+        label: "TopView",
+        url: "https://mcp.topview.ai/mcp",
+    },
 ];
 
 /// 1サービス分の接続状態。取得失敗時は全フィールド false に倒す。
