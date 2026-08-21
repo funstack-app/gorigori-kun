@@ -352,6 +352,9 @@ pub fn run() {
             tauri::async_runtime::block_on(commands::storage::initialize_storage(&state_for_setup));
             crate::cloud::sync_worker::spawn_background_sync();
             crate::storage_cleanup::spawn_background_cleanup();
+            // 撤去済みの MCP 認可専用バイナリ (200〜290MB) のキャッシュを掃除する。
+            // best-effort。失敗しても起動は止めない。
+            crate::codex::cleanup_legacy_mcp_auth_cache();
 
             // 起動時デイリーバックアップ (2026-08-06)。
             //

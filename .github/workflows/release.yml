@@ -125,7 +125,11 @@ jobs:
           # 2026-08-03: Magnific MCP の OAuth (issuer 検証) 不具合対応で
           # 0.146.0 (安定版・2026-07-29 公開) へ更新。実機での Magnific 接続確認を
           # リリースゲートとする。
-          codexVer="rust-v0.146.0"
+          #
+          # 2026-08-15: 0.147.0 (安定版・2026-08-07 公開) へ更新し、**一本化**した。
+          # issuer バグ修正 (openai/codex PR #35720) が安定版に入ったため、
+          # 認可専用の補助バイナリ (codex-auth) による二段構えを撤去した。
+          codexVer="rust-v0.147.0"
           base="https://github.com/openai/codex/releases/download/$codexVer"
           # matrix.target からファイル名を逆引き
           codex_arch="${{ matrix.target }}"
@@ -160,21 +164,13 @@ jobs:
           # 確認
           ls -lh src-tauri/resources/codex src-tauri/resources/codex-app-server
 
-      # 2026-08-06: MCP 認可用の補助バイナリ (codex-auth) の **同梱をやめた**。
+      # 2026-08-15: MCP 認可専用の補助バイナリによる二段構えは **撤去済み**。
+      # 認可 (mcp add / mcp login) も日常実行も、上で同梱した 0.147.0 一本で動く。
       #
-      # なぜ: codex-auth は codex CLI 本体そのもの (0.147.0-alpha.4) で 200〜290MB
-      # ある。同梱した結果 **Windows の更新 DL が 518MB** に達し、Tauri updater が
-      # 更新アーカイブを全体メモリに載せてから署名検証する仕様に当たって、
-      # v2.5.1 で「アプデを確認 → 更新する」が Windows で通らなくなった。
-      # codex-auth を使うのは MCP の認可 2 操作 (mcp add / mcp login) だけで、
-      # 生成・日常実行は上の 0.146.0 が担う。全ユーザーが常時持つ必要が無いため、
-      # 接続する人が接続するときにその場で取得する方式へ移した。
-      #
-      # 取得コードの場所: src-tauri/src/codex/auth_helper.rs
-      #   (バージョン定数 CODEX_AUTH_VERSION がこの版の唯一の正本。
-      #    配線は src-tauri/src/codex/mcp_shared.rs の ensure_codex_auth_available)
-      # 解決順序は src-tauri/src/codex/process.rs の resolve_codex_auth_binary。
-      # 0.147.0 安定版が出たら auth_helper.rs ごと撤去して一本化する。
+      # 経緯: CLI 0.143〜0.146 は OAuth コールバックの iss を捨てるバグを持ち、
+      # 認可 2 操作だけを修正版 alpha で実行する二段構えを組んでいた (2026-08-03)。
+      # 修正 (openai/codex PR #35720) が 0.147.0 安定版に入ったため、補助バイナリと
+      # そのオンデマンド取得コードごと撤去した。
 
       # tauri.conf.json の resources 配列に macOS 用 codex バイナリを追記
       - name: Patch tauri.conf.json for macOS bundle
@@ -186,7 +182,6 @@ jobs:
           with open(path) as f:
               conf = json.load(f)
           existing = conf["bundle"].get("resources", [])
-          # 2026-08-06: "resources/codex-auth" を削除 (上のコメント参照)。
           additions = ["resources/codex", "resources/codex-app-server"]
           for a in additions:
               if a not in existing:
@@ -265,7 +260,9 @@ jobs:
           # 2026-08-03: Magnific MCP の OAuth (issuer 検証) 不具合対応で
           # 0.146.0 (安定版・2026-07-29 公開) へ更新。実機での Magnific 接続確認を
           # リリースゲートとする。
-          $codexVer = "rust-v0.146.0"
+          #
+          # 2026-08-15: 0.147.0 (安定版) へ更新し一本化 (macOS ジョブの同位置コメント参照)。
+          $codexVer = "rust-v0.147.0"
           $base = "https://github.com/openai/codex/releases/download/$codexVer"
 
           New-Item -ItemType Directory -Force -Path "src-tauri/resources" | Out-Null
@@ -308,13 +305,8 @@ jobs:
           Write-Host "✓ Codex binaries staged in src-tauri/resources/"
           Get-ChildItem "src-tauri/resources" | Format-Table Name, Length
 
-      # 2026-08-06: MCP 認可用の補助バイナリ (codex-auth.exe) の **同梱をやめた**。
-      # 理由は macOS ジョブの同位置コメント参照。要約すると、290MB の codex-auth.exe を
-      # 同梱したせいで **Windows の更新 DL が 518MB** になり、Tauri updater が
-      # アーカイブを全体メモリに載せて署名検証する仕様に当たって v2.5.1 の
-      # 「アプデを確認 → 更新する」が Windows で通らなくなった。接続する人が
-      # 接続するときにその場で取得する方式へ移した。
-      # 取得コード: src-tauri/src/codex/auth_helper.rs
+      # 2026-08-15: MCP 認可専用の補助バイナリによる二段構えは **撤去済み**
+      # (macOS ジョブの同位置コメント参照)。認可も日常実行も 0.147.0 一本で動く。
 
       # tauri.conf.json の resources 配列に Windows 用 codex バイナリを追記
       - name: Patch tauri.conf.json for Windows bundle
@@ -323,7 +315,6 @@ jobs:
           $confPath = "src-tauri/tauri.conf.json"
           $conf = Get-Content $confPath -Raw | ConvertFrom-Json
           $existing = @($conf.bundle.resources)
-          # 2026-08-06: "resources/codex-auth.exe" を削除 (上のコメント参照)。
           $additions = @("resources/codex.exe", "resources/codex-app-server.exe")
           $conf.bundle.resources = $existing + $additions
           $conf | ConvertTo-Json -Depth 50 | Set-Content $confPath -Encoding UTF8
@@ -405,7 +396,7 @@ jobs:
         shell: pwsh
         run: |
           # 通常の windows ジョブと同じ版を使う (同梱 CLI は ort と無関係)。
-          $codexVer = "rust-v0.146.0"
+          $codexVer = "rust-v0.147.0"
           $base = "https://github.com/openai/codex/releases/download/$codexVer"
 
           New-Item -ItemType Directory -Force -Path "src-tauri/resources" | Out-Null
@@ -443,11 +434,9 @@ jobs:
           Write-Host "✓ Codex binaries staged in src-tauri/resources/"
           Get-ChildItem "src-tauri/resources" | Format-Table Name, Length
 
-      # 2026-08-06: MCP 認可用の補助バイナリ (codex-auth.exe) の **同梱をやめた**。
-      # 理由は macOS ジョブの同位置コメント参照。290MB の同梱で Windows の更新 DL が
-      # 518MB に達し、Tauri updater (アーカイブを全体メモリに載せて署名検証する) が
-      # v2.5.1 で落ちた。互換版でも認可経路は同一なので通常 windows ジョブと同じく
-      # オンデマンド取得へ移した。取得コード: src-tauri/src/codex/auth_helper.rs
+      # 2026-08-15: MCP 認可専用の補助バイナリによる二段構えは **撤去済み**
+      # (macOS ジョブの同位置コメント参照)。互換版でも認可経路は通常版と同一で、
+      # 0.147.0 一本で動く。
 
       # 通常版のパッチに加えて、updater endpoint を compat 用に差し替える。
       # identifier / productName は触らない (設計 §2-8)。
@@ -457,7 +446,6 @@ jobs:
           $confPath = "src-tauri/tauri.conf.json"
           $conf = Get-Content $confPath -Raw | ConvertFrom-Json
           $existing = @($conf.bundle.resources)
-          # 2026-08-06: "resources/codex-auth.exe" を削除 (上のコメント参照)。
           $additions = @("resources/codex.exe", "resources/codex-app-server.exe")
           $conf.bundle.resources = $existing + $additions
 

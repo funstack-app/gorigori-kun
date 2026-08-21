@@ -42,11 +42,6 @@ tauri-plugin-process = "2"
 tauri-plugin-single-instance = "2"
 sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio"] }
 zip = "2"
-# codex-auth のオンデマンド取得 (codex/auth_helper.rs) で macOS 版 tar.gz を展開する。
-# Windows 版は zip なので既存の `zip` を使う。flate2 は zip の推移依存として
-# 既に依存木に居るため、直接依存に上げても依存木は増えない。
-tar = "0.4"
-flate2 = "1"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 # `image` 0.25 の PngEncoder は sRGB チャンク・pHYs チャンクを書く API を持たない
 # （S9: LINE スタンプの「解像度 72dpi以上 / カラーモード RGB」対応）。png は既に
