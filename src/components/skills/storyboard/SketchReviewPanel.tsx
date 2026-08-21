@@ -113,6 +113,8 @@ export function SketchReviewPanel() {
           (cut) => cut.sketchStatus !== "done" || !cut.sketchImagePath,
         ),
       ));
+  const alternativeSketchDisabled =
+    generationRunStartedAt !== null || sketchGenerationRunning;
 
   // 初回版と別案版で同じ組み立て方を使い、版ごとの差分を生成結果だけにする。
   const buildSketchVersion = useCallback((): StoryboardSketchVersion | null => {
@@ -173,10 +175,12 @@ export function SketchReviewPanel() {
     targetVersion = activeVersion,
     storyPromptAppend = "",
     successText = "絵コンテを生成しています…",
+    onStartFailure,
   }: {
     targetVersion?: StoryboardSketchVersion | null;
     storyPromptAppend?: string;
     successText?: string;
+    onStartFailure?: () => void;
   } = {}) {
     if (sketchGenerationRunning) return;
     if (!targetVersion) return;
@@ -238,6 +242,7 @@ export function SketchReviewPanel() {
           lastError: message,
         });
       }
+      onStartFailure?.();
       useToasts.getState().push({
         kind: "error",
         text: `絵コンテ生成の起動に失敗: ${message}`,
@@ -322,6 +327,14 @@ export function SketchReviewPanel() {
   }
 
   async function handleRegenerate() {
+    if (generationRunStartedAt !== null) {
+      useToasts.getState().push({
+        kind: "warn",
+        text: "本生成が終わってから別案を依頼できます",
+        ttlMs: 4000,
+      });
+      return;
+    }
     if (sketchGenerationRunning) {
       useToasts.getState().push({
         kind: "info",
@@ -330,7 +343,17 @@ export function SketchReviewPanel() {
       });
       return;
     }
+    if (!goal?.characterReferencePath) {
+      useToasts.getState().push({
+        kind: "error",
+        text: "キャラ参照画像を選んでから絵コンテを生成してください。",
+        ttlMs: 4000,
+      });
+      return;
+    }
+    if (!sceneConstruction) return;
 
+    const previousActiveVersionId = activeVersion?.versionId ?? null;
     const version = buildSketchVersion();
     if (!version) return;
     pushSketchVersion(version);
@@ -338,6 +361,14 @@ export function SketchReviewPanel() {
       targetVersion: version,
       storyPromptAppend: ALTERNATIVE_SKETCH_PROMPT_APPEND,
       successText: "別案の絵コンテを生成しています…",
+      onStartFailure: () => {
+        useStoryboardRun.setState((state) => ({
+          sketchVersions: state.sketchVersions.filter(
+            (candidate) => candidate.versionId !== version.versionId,
+          ),
+          activeSketchVersionId: previousActiveVersionId,
+        }));
+      },
     });
   }
 
@@ -652,17 +683,19 @@ export function SketchReviewPanel() {
               <button
                 type="button"
                 onClick={() => void handleRegenerate()}
-                disabled={sketchGenerationRunning}
+                disabled={alternativeSketchDisabled}
                 className={[
                   "rounded-md border px-3 py-2 text-xs transition",
-                  sketchGenerationRunning
+                  alternativeSketchDisabled
                     ? "cursor-not-allowed border-[#242424] text-zinc-600"
                     : "border-[#2a2a2a] text-zinc-300 hover:border-pink-500/40 hover:bg-pink-500/5",
                 ].join(" ")}
                 title={
-                  sketchGenerationRunning
-                    ? "現在の絵コンテ生成が終わってから別案を依頼できます"
-                    : "構図・カメラアングル・画面レイアウトを変えた別案を生成"
+                  generationRunStartedAt !== null
+                    ? "本生成が終わってから別案を依頼できます"
+                    : sketchGenerationRunning
+                      ? "現在の絵コンテ生成が終わってから別案を依頼できます"
+                      : "構図・カメラアングル・画面レイアウトを変えた別案を生成"
                 }
               >
                 別案を依頼
