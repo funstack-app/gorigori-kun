@@ -220,13 +220,14 @@ test("緑背景の値が Rust 側 COMPOSITE_SHEET_BG_LINE_GREEN と同じ色指�
   expect(CHROMA_BACKGROUND_CLAUSE).toContain("evenly lit");
 });
 
-test("promptFragment と attributes がプロンプトへ反映される", () => {
+test("promptFragment がプロンプトへ反映される（属性はここに載らない・C1）", () => {
+  // 2026-08-05 C1 修正: 属性（キャラの不変の見た目）は Rust 側 build_sheet_prompt の
+  // 「不変の見た目」行が担う。書き味プロンプトへ再掲すると同一指示が1生成に2箇所
+  // 現れるため、StickerPromptInput から attributes を撤去した（promptStyles.ts 冒頭）。
   const prompt = buildStickerPrompt("spec", {
     promptFragment: "grateful happy expression",
-    attributes: "short black hair, red hoodie",
   });
   expect(prompt).toContain("grateful happy expression");
-  expect(prompt).toContain("short black hair, red hoodie");
 });
 
 test("attributes 未指定でも区切りが崩れない（空要素を落とす）", () => {

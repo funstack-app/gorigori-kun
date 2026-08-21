@@ -181,11 +181,17 @@ test("Workspace が採否フェーズを経ずに書き出しへ入る導線を�
  * 「コマンドは登録したが呼んでいない」は cargo/tsc の両方を通るので、ここで止める
  * （実装時に実際に踏んだ抜け）。
  */
-test("生成完了時にクロマキー抜きを通してから採否リストへ載せる", () => {
+test("生成完了時に背景抜きを通してから採否リストへ載せる", () => {
+  // 2026-08-05 J4: 抜きの実装は Workspace 直書きから lib/sticker/cutout.ts の
+  // cutOutBackground（AI抜き優先・クロマキー保険）へ移動した。契約は同じ:
+  // 「緑背景のまま採否へ流さない」。
   const workspace = read("src/components/skills/sticker/StickerWorkspace.tsx");
-  expect(workspace, "chromaKey を一度も呼んでいない（緑背景のまま採否へ流れる）").toContain(
-    "stickerIpc.chromaKey",
+  expect(workspace, "背景抜きを一度も呼んでいない（緑背景のまま採否へ流れる）").toContain(
+    "cutOutBackground(",
   );
+  // 保険のクロマキー経路が cutout.ts 側に現存すること。
+  const cutout = read("src/lib/sticker/cutout.ts");
+  expect(cutout, "クロマキー保険経路が消えている").toContain("sticker.chromaKey(");
   // cutCompleted の処理から抜きが呼ばれていること。
   const completedAt = workspace.indexOf('event.kind === "cutCompleted"');
   const failedAt = workspace.indexOf('event.kind === "cutFailed"');
@@ -194,13 +200,12 @@ test("生成完了時にクロマキー抜きを通してから採否リスト�
 });
 
 test("クロマキーに失敗しても生成物を捨てない（元パスへ退避する）", () => {
-  const workspace = read("src/components/skills/sticker/StickerWorkspace.tsx");
-  const start = workspace.indexOf("const cutOut =");
-  const body = workspace.slice(start, workspace.indexOf("// ── イベント購読"));
-  expect(start).toBeGreaterThan(0);
-  // 抜けなかった時・例外時のどちらも元パスを返す（欠落を消さない）。
-  expect(body).toContain("res.cleared > 0 ? res.output : imagePath");
-  expect(body).toMatch(/catch\s*\{[\s\S]*return imagePath;/);
+  // J4 移動先の cutout.ts で同じ契約を検査する。
+  const cutout = read("src/lib/sticker/cutout.ts");
+  // 1画素も抜けなかった時は元パスを返す（欠落を消さない）。
+  expect(cutout).toContain("res.cleared > 0 ? res.output : imagePath");
+  // 例外時も生成物を失わせず、notCleared: true で可視化して返す。
+  expect(cutout).toMatch(/catch\s*\{[\s\S]*notCleared:\s*true/);
 });
 
 test("Workspace が層Aと層Bを別セクションとして描く（事実と意見の隔離）", () => {
