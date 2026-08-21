@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type DragEvent } from "react";
+import { useCallback, useEffect, useMemo, useState, type DragEvent } from "react";
 import {
   DndContext,
   closestCenter,
@@ -33,6 +33,8 @@ import type {
 } from "../../../lib/storyboard/types";
 
 const IMAGE_EXTS = ["png", "jpg", "jpeg", "webp", "gif", "bmp"];
+const ALTERNATIVE_SKETCH_PROMPT_APPEND =
+  "\n\n【別案指示】これまでの版とは異なる構図・カメラアングル・画面レイアウトを提案してください。各カットの狙い（何を見せるカットか）は sceneConstruction のまま維持してください。";
 
 function basename(p: string): string {
   const seg = p.split(/[\\/]/);
@@ -103,19 +105,23 @@ export function SketchReviewPanel() {
     return sketchVersions[sketchVersions.length - 1];
   }, [sketchVersions, activeSketchVersionId]);
 
-  // 初回マウントで sketch 未生成なら、planChat の sceneConstruction から組み立てる
-  useEffect(() => {
-    if (!goal) return;
-    // ラフ消失修正 (2026-07-28): 「1つでもバージョンがあれば return」から
-    // 「現在の goal に紐づくバージョンがあれば return」へ。本生成開始で reset を
-    // 呼ばなくなったため、前ストーリーの残留は破棄ではなく表示選択で防ぐ。
-    const goalKey = goal.summary.slice(0, 200);
-    if (sketchVersions.some((v) => v.fromGoalSummary === goalKey)) return;
-    if (!sceneConstruction || sceneConstruction.cuts.length === 0) return;
+  const sketchGenerationRunning =
+    sketchStarting ||
+    (sketchStarted &&
+      Boolean(
+        activeVersion?.cuts.some(
+          (cut) => cut.sketchStatus !== "done" || !cut.sketchImagePath,
+        ),
+      ));
 
-    const version: StoryboardSketchVersion = {
-      versionId: `sketch-${Date.now()}`,
-      createdAt: Date.now(),
+  // 初回版と別案版で同じ組み立て方を使い、版ごとの差分を生成結果だけにする。
+  const buildSketchVersion = useCallback((): StoryboardSketchVersion | null => {
+    if (!goal || !sceneConstruction || sceneConstruction.cuts.length === 0) return null;
+
+    const now = Date.now();
+    return {
+      versionId: `sketch-${now}`,
+      createdAt: now,
       fromGoalSummary: goal.summary.slice(0, 200),
       directorNotes:
         "キャラクターの一貫性最優先。最初の参照画像と直前のエンドフレームを各カットで参照する。",
@@ -128,17 +134,28 @@ export function SketchReviewPanel() {
         visualLayout: cut.description,
         filmNotes: inferFilmNotes(index, sceneConstruction.cuts.length),
         // AI が sceneConstruction に出した shot_type/camera_motion/camera_angle を
-        // sketch メタに引き継ぐ。これを埋めないと buildI2vPrompt が全カット
-        // 「medium shot / locked camera」固定になり、動画タブ送り/i2vコピーの
-        // カメラワークがカットごとに変わらなかった (#5/i2v固定 2026-06-07)。
-        // AI が想定外の値を返しても壊れないよう、enum 許可リストでバリデートする。
+        // sketch メタに引き継ぐ。想定外の値は enum 許可リストで防ぐ。
         shotType: toShotType(cut.shot_type),
         cameraMotion: toCameraMotion(cut.camera_motion),
         cameraAngle: toCameraAngle(cut.camera_angle),
       })),
     };
+  }, [goal, sceneConstruction]);
+
+  // 初回マウントで sketch 未生成なら、planChat の sceneConstruction から組み立てる
+  useEffect(() => {
+    if (!goal) return;
+    // ラフ消失修正 (2026-07-28): 「1つでもバージョンがあれば return」から
+    // 「現在の goal に紐づくバージョンがあれば return」へ。本生成開始で reset を
+    // 呼ばなくなったため、前ストーリーの残留は破棄ではなく表示選択で防ぐ。
+    const goalKey = goal.summary.slice(0, 200);
+    if (sketchVersions.some((v) => v.fromGoalSummary === goalKey)) return;
+    if (!sceneConstruction || sceneConstruction.cuts.length === 0) return;
+
+    const version = buildSketchVersion();
+    if (!version) return;
     pushSketchVersion(version);
-  }, [sceneConstruction, goal, sketchVersions, pushSketchVersion]);
+  }, [sceneConstruction, goal, sketchVersions, pushSketchVersion, buildSketchVersion]);
 
   // カーソルが範囲外になったら 0 に戻す
   useEffect(() => {
@@ -152,9 +169,17 @@ export function SketchReviewPanel() {
   // 理由: Phase 2 入場時に自動で走ると、ユーザーが「この絵コンテで生成」を
   // 押す前から絵コンテも本番も走るような印象になり、UX が一方通行ではなくなる。
   // ルートを明確にするため、絵コンテはユーザー意思で開始する。
-  async function startSketchGeneration() {
-    if (sketchStarted || sketchStarting) return;
-    if (!activeVersion) return;
+  async function startSketchGeneration({
+    targetVersion = activeVersion,
+    storyPromptAppend = "",
+    successText = "絵コンテを生成しています…",
+  }: {
+    targetVersion?: StoryboardSketchVersion | null;
+    storyPromptAppend?: string;
+    successText?: string;
+  } = {}) {
+    if (sketchGenerationRunning) return;
+    if (!targetVersion) return;
     if (!goal?.characterReferencePath) {
       useToasts.getState().push({
         kind: "error",
@@ -165,7 +190,7 @@ export function SketchReviewPanel() {
     }
     if (!sceneConstruction) return;
 
-    const allDone = activeVersion.cuts.every((c) => c.sketchImagePath);
+    const allDone = targetVersion.cuts.every((c) => c.sketchImagePath);
     if (allDone) {
       setSketchRunStartedAt(Date.now());
       return;
@@ -178,7 +203,9 @@ export function SketchReviewPanel() {
       issuedRunId = runId;
       const params = {
         runId,
-        storyPrompt: goal.summary || "ストーリーカット",
+        storyPrompt: storyPromptAppend
+          ? `${goal.summary}${storyPromptAppend}`
+          : goal.summary || "ストーリーカット",
         characterReferenceImage: goal.characterReferencePath,
         styleReferenceImage: goal.styleReferencePath,
         // FB#3 (2026-06-06): 複数キャラ/スタイル参照 (後方互換: 単数も維持)。
@@ -198,7 +225,7 @@ export function SketchReviewPanel() {
       setSketchRunStartedAt(Date.now());
       useToasts.getState().push({
         kind: "info",
-        text: "絵コンテを生成しています…",
+        text: successText,
         ttlMs: 2400,
       });
     } catch (e) {
@@ -294,12 +321,23 @@ export function SketchReviewPanel() {
     await useStoryboardRun.getState().startProductionForCuts(cutIds);
   }
 
-  function handleRegenerate() {
-    useToasts.getState().push({
-      kind: "info",
-      text:
-        "別バージョンの絵コンテを AI に依頼する機能は実装中です。一度 Phase 1 に戻って追加の指示を出してください。",
-      ttlMs: 5000,
+  async function handleRegenerate() {
+    if (sketchGenerationRunning) {
+      useToasts.getState().push({
+        kind: "info",
+        text: "現在の絵コンテ生成が終わってから別案を依頼できます",
+        ttlMs: 4000,
+      });
+      return;
+    }
+
+    const version = buildSketchVersion();
+    if (!version) return;
+    pushSketchVersion(version);
+    await startSketchGeneration({
+      targetVersion: version,
+      storyPromptAppend: ALTERNATIVE_SKETCH_PROMPT_APPEND,
+      successText: "別案の絵コンテを生成しています…",
     });
   }
 
@@ -591,7 +629,7 @@ export function SketchReviewPanel() {
               />
               <button
                 type="button"
-                onClick={startSketchGeneration}
+                onClick={() => void startSketchGeneration()}
                 disabled={sketchStarting || !canProceed}
                 className={[
                   "rounded-md px-4 py-2 text-sm font-semibold transition",
@@ -613,8 +651,19 @@ export function SketchReviewPanel() {
             <>
               <button
                 type="button"
-                onClick={handleRegenerate}
-                className="rounded-md border border-[#2a2a2a] px-3 py-2 text-xs text-zinc-300 hover:border-pink-500/40 hover:bg-pink-500/5"
+                onClick={() => void handleRegenerate()}
+                disabled={sketchGenerationRunning}
+                className={[
+                  "rounded-md border px-3 py-2 text-xs transition",
+                  sketchGenerationRunning
+                    ? "cursor-not-allowed border-[#242424] text-zinc-600"
+                    : "border-[#2a2a2a] text-zinc-300 hover:border-pink-500/40 hover:bg-pink-500/5",
+                ].join(" ")}
+                title={
+                  sketchGenerationRunning
+                    ? "現在の絵コンテ生成が終わってから別案を依頼できます"
+                    : "構図・カメラアングル・画面レイアウトを変えた別案を生成"
+                }
               >
                 別案を依頼
               </button>
