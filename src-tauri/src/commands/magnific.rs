@@ -236,8 +236,8 @@ fn magnific_mime_for_path(path: &str) -> Option<&'static str> {
 /// (推測で埋めない・無言 degrade しない)。
 fn extract_upload_url(structured: &Value) -> Option<String> {
     for key in [
-        "proxyUploadUrl",   // 現行 (2026-08-06 実測)
-        "directUploadUrl",  // 旧 PoC (2026-06-10)。復活・併存に備え残す
+        "proxyUploadUrl",  // 現行 (2026-08-06 実測)
+        "directUploadUrl", // 旧 PoC (2026-06-10)。復活・併存に備え残す
         "uploadUrl",
         "url",
         "putUrl",
@@ -884,7 +884,10 @@ mod tests {
     #[test]
     fn extract_upload_url_returns_none_without_url() {
         // URL がどこにも無ければ None (呼び出し側がキー構成付きで Err にする)。
-        assert_eq!(extract_upload_url(&json!({"path": "temp-files/x.png"})), None);
+        assert_eq!(
+            extract_upload_url(&json!({"path": "temp-files/x.png"})),
+            None
+        );
         assert_eq!(extract_upload_url(&json!({})), None);
         // path が URL っぽくない文字列でも誤って拾わない。
         assert_eq!(

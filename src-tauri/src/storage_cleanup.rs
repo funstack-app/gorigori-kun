@@ -240,7 +240,8 @@ const WEBKIT_CACHE_SUBDIRS: &[&str] = &["NetworkCache", "MediaCache", "ResourceL
 ///
 /// なぜ定数として持つか: 「WebsiteData を消さない」は実装の暗黙知にすると
 /// 次の改修で再び消える (実際 b1371c5 でそうなった)。名前で持ち、テストで固定する。
-const WEBKIT_PROTECTED_SUBDIRS: &[&str] = &["WebsiteData", "LocalStorage", "Databases", "IndexedDB"];
+const WEBKIT_PROTECTED_SUBDIRS: &[&str] =
+    &["WebsiteData", "LocalStorage", "Databases", "IndexedDB"];
 
 /// 掃除対象の WebView キャッシュディレクトリ候補を返す。
 ///

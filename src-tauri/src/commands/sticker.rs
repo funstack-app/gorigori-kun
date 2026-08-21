@@ -2282,8 +2282,7 @@ mod tests {
             inspected.items[0].height
         );
         assert_eq!(
-            inspected.total_bytes,
-            inspected.items[0].bytes,
+            inspected.total_bytes, inspected.items[0].bytes,
             "セット合計が各枚の見積りと揃っていない"
         );
 
