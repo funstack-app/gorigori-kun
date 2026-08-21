@@ -8,12 +8,14 @@
 import { expect, test } from "@playwright/test";
 
 import {
+  ALL_COMIC_LAYOUT_TEMPLATES,
   COMIC_LAYOUT_TEMPLATES,
   getComicTemplate,
 } from "../src/lib/comic/layoutTemplates";
 import { mirrorSlotX } from "../src/lib/comic/panelLayoutOps";
 import {
   slotPixelRect,
+  structurePageSize,
   STRUCTURE_PAGE_H,
   STRUCTURE_PAGE_W,
 } from "../src/lib/comic/pageAssembly";
@@ -22,6 +24,11 @@ import {
   compositeStencilRaster,
   renderPanelMaskRaster,
   renderTemplateScaffoldRaster,
+  scaleToScaffoldSize,
+  stencilAspectLabel,
+  stencilAspectWithinTolerance,
+  STENCIL_ASPECT_TOLERANCE,
+  STENCIL_ASPECT_TOLERANCE_EPSILON,
   STENCIL_MASK_BLEED_PX,
   STENCIL_PANEL_BORDER_PX,
 } from "../src/lib/comic/stencil";
@@ -328,6 +335,212 @@ test("牙: マスク白を枠線へ食い込ませると重なり検査が発火
   expect(overlaps, "枠線へ食い込ませても重なりを検出できないなら検査が無力").toBeGreaterThan(0);
   expect(STENCIL_MASK_BLEED_PX).toBeGreaterThan(0);
   expect(STENCIL_PANEL_BORDER_PX).toBe(3);
+});
+
+/** 任意寸法・単色の raster（scaffold と違う寸法のAI出力を模す）。 */
+function solidRasterOfSize(
+  width: number,
+  height: number,
+  color: [number, number, number],
+): RgbaRaster {
+  const rgba = new Uint8ClampedArray(width * height * 4);
+  for (let offset = 0; offset < rgba.length; offset += 4) {
+    rgba[offset] = color[0];
+    rgba[offset + 1] = color[1];
+    rgba[offset + 2] = color[2];
+    rgba[offset + 3] = 255;
+  }
+  return { width, height, rgba };
+}
+
+/**
+ * canvas 非搭載の node で `scaleToScaffoldSize` を実測するための最小の偽 canvas。
+ *
+ * drawImage は最近傍で実寸法へ写す（品質ではなく「scaffold 寸法へ揃うか」を見る）。
+ * 引き伸ばし結果をそのまま raster として取り出し、合成・枠外照合まで通す。
+ */
+function withFakeCanvas<T>(run: () => T): T {
+  const globals = globalThis as unknown as Record<string, unknown>;
+  const hadDocument = Object.prototype.hasOwnProperty.call(globals, "document");
+  const previousDocument = globals.document;
+
+  const makeCanvas = () => {
+    const canvas = {
+      width: 0,
+      height: 0,
+      raster: null as RgbaRaster | null,
+      getContext: () => context,
+    };
+    const context = {
+      imageSmoothingEnabled: false,
+      imageSmoothingQuality: "low" as CanvasImageSmoothingQuality,
+      drawImage(
+        source: RgbaRaster | { raster: RgbaRaster | null },
+        _dx: number,
+        _dy: number,
+        dw: number,
+        dh: number,
+      ) {
+        // 元画像は raster そのもの（テストが渡すダミー）か、
+        // 偽canvas（引き伸ばし済みの中間結果）のどちらかを受ける。
+        const src = "rgba" in source ? source : source.raster;
+        if (!src) throw new Error("偽canvas: 元画像のrasterがありません");
+        const rgba = new Uint8ClampedArray(dw * dh * 4);
+        for (let y = 0; y < dh; y += 1) {
+          const sy = Math.min(src.height - 1, Math.floor((y * src.height) / dh));
+          for (let x = 0; x < dw; x += 1) {
+            const sx = Math.min(src.width - 1, Math.floor((x * src.width) / dw));
+            const to = (y * dw + x) * 4;
+            const from = (sy * src.width + sx) * 4;
+            rgba[to] = src.rgba[from];
+            rgba[to + 1] = src.rgba[from + 1];
+            rgba[to + 2] = src.rgba[from + 2];
+            rgba[to + 3] = src.rgba[from + 3];
+          }
+        }
+        canvas.raster = { width: dw, height: dh, rgba };
+      },
+    };
+    return canvas;
+  };
+
+  globals.document = { createElement: () => makeCanvas() };
+  try {
+    return run();
+  } finally {
+    if (hadDocument) globals.document = previousDocument;
+    else delete globals.document;
+  }
+}
+
+test("4:5テンプレに対し1122x1402は許容内で、正規化後の合成が枠外照合を通る", () => {
+  const template = getComicTemplate("user02");
+  expect(template.pageAspect, "user02 は 4:5 テンプレ").toEqual({ w: 4, h: 5 });
+  const scaffold = renderTemplateScaffoldRaster(template, "rtl");
+  const mask = renderPanelMaskRaster(template, "rtl");
+  expect([scaffold.width, scaffold.height], "4:5 の scaffold 寸法").toEqual([1080, 1350]);
+
+  // 実測された「aspect を渡したときのAI出力」寸法（比率誤差0.03%）。
+  const drawn = solidRasterOfSize(1122, 1402, [255, 0, 0]);
+  expect(
+    stencilAspectWithinTolerance(drawn.width, drawn.height, scaffold.width, scaffold.height),
+  ).toBe(true);
+
+  const scaled = withFakeCanvas(() =>
+    (
+      scaleToScaffoldSize(
+        drawn as unknown as CanvasImageSource,
+        scaffold.width,
+        scaffold.height,
+      ) as unknown as { raster: RgbaRaster | null }
+    ).raster,
+  );
+  expect(scaled, "引き伸ばし結果が取れていない").not.toBeNull();
+  if (!scaled) return;
+  expect([scaled.width, scaled.height], "scaffold 寸法へ揃う").toEqual([1080, 1350]);
+
+  const composite = compositeStencilRaster(scaled, scaffold, mask);
+  expect(() => assertStencilFramesRaster(composite, scaffold, mask)).not.toThrow();
+});
+
+test("3:4テンプレに対し1254x1254（正方形）は許容外と判定される", () => {
+  const template = getComicTemplate("manga01");
+  const scaffold = renderTemplateScaffoldRaster(template, "rtl");
+  expect([scaffold.width, scaffold.height]).toEqual([1080, 1440]);
+
+  // aspect 無指定時に実際に返ってきていた寸法（診断 F2）。
+  expect(
+    stencilAspectWithinTolerance(1254, 1254, scaffold.width, scaffold.height),
+  ).toBe(false);
+
+  // 0以下・非有限は黙って通さない。
+  expect(() => stencilAspectWithinTolerance(0, 1440, 1080, 1440)).toThrow();
+  expect(() => stencilAspectWithinTolerance(1080, -1, 1080, 1440)).toThrow();
+  expect(() => stencilAspectWithinTolerance(1080, Number.NaN, 1080, 1440)).toThrow();
+});
+
+/**
+ * `"4:5"` 形式のラベルを比率の分子・分母へ戻す。
+ *
+ * 本番の判定式・閾値は一切写経しない（写経すると実装と同じ誤りを見逃す）。
+ * ここでやるのはラベル文字列のパースだけで、合否は本番の
+ * `stencilAspectWithinTolerance` に出させる。
+ */
+function parseAspectLabel(label: string): { w: number; h: number } {
+  const match = /^(\d+):(\d+)$/.exec(label);
+  if (!match) throw new Error(`aspectラベルの形式が不正: ${label}`);
+  return { w: Number(match[1]), h: Number(match[2]) };
+}
+
+test("統合: 全テンプレでaspectラベルの比率がscaffold比率の許容内に入る", () => {
+  // 対象は組み込み＋手作りの全テンプレ（ALL_）。塗り絵経路は getComicTemplate 経由で
+  // どちらも受け取るので、組み込みだけを見ると 4:5 の欠陥をまるごと見逃す。
+  // 本番と同じ関数で「生成へ渡すラベル」と「合否判定」を通す。
+  // nearestAspectLabel 経由に戻すと 4:5 テンプレが "3:4" になり、ここで落ちる。
+  for (const template of ALL_COMIC_LAYOUT_TEMPLATES) {
+    const label = stencilAspectLabel(template.pageAspect);
+    const parsed = parseAspectLabel(label);
+    const page = structurePageSize(template.pageAspect);
+
+    expect(
+      stencilAspectWithinTolerance(parsed.w, parsed.h, page.w, page.h),
+      `${template.id} ラベル=${label} scaffold=${page.w}x${page.h}`,
+    ).toBe(true);
+  }
+
+  // 4:5 テンプレが1つ以上あることを確かめる（無ければこの統合検査は空振りする）。
+  const wide = ALL_COMIC_LAYOUT_TEMPLATES.filter(
+    (t) => t.pageAspect.w === 4 && t.pageAspect.h === 5,
+  );
+  expect(wide.length, "4:5テンプレが1つも無いと今回の欠陥を再現できない").toBeGreaterThan(0);
+  expect(stencilAspectLabel({ w: 4, h: 5 })).toBe("4:5");
+  expect(stencilAspectLabel({ w: 3, h: 4 })).toBe("3:4");
+});
+
+test("stencilAspectLabelは正の整数以外を黙って通さない", () => {
+  expect(() => stencilAspectLabel({ w: 0, h: 5 })).toThrow();
+  expect(() => stencilAspectLabel({ w: 4, h: 0 })).toThrow();
+  expect(() => stencilAspectLabel({ w: -4, h: 5 })).toThrow();
+  expect(() => stencilAspectLabel({ w: 4.5, h: 5 })).toThrow();
+  expect(() => stencilAspectLabel({ w: 4, h: Number.NaN })).toThrow();
+});
+
+test("境界: ちょうど±5%は合格し、その外側は不合格になる", () => {
+  const scaffoldW = 1080;
+  const scaffoldH = 1440;
+  const scaffoldRatio = scaffoldW / scaffoldH;
+
+  // 「偏差ちょうど STENCIL_ASPECT_TOLERANCE」になる幅を閾値定数から作る
+  // （閾値の数値はテスト側に複製しない）。
+  const exactHigh = scaffoldRatio * (1 + STENCIL_ASPECT_TOLERANCE) * scaffoldH;
+  const exactLow = scaffoldRatio * (1 - STENCIL_ASPECT_TOLERANCE) * scaffoldH;
+
+  expect(
+    stencilAspectWithinTolerance(exactHigh, scaffoldH, scaffoldW, scaffoldH),
+    "ちょうど+5%は設計上「以内」なので合格",
+  ).toBe(true);
+  expect(
+    stencilAspectWithinTolerance(exactLow, scaffoldH, scaffoldW, scaffoldH),
+    "ちょうど-5%は設計上「以内」なので合格",
+  ).toBe(true);
+
+  // 直内側（閾値の 1/2 だけ内）は当然合格。
+  const insideHigh = scaffoldRatio * (1 + STENCIL_ASPECT_TOLERANCE / 2) * scaffoldH;
+  expect(stencilAspectWithinTolerance(insideHigh, scaffoldH, scaffoldW, scaffoldH)).toBe(true);
+
+  // 直外側は不合格。イプシロンは丸め誤差の代であって許容の拡張ではないので、
+  // イプシロンの1000倍だけ外へ出せば必ず落ちる。
+  const outsideHigh =
+    scaffoldRatio *
+    (1 + STENCIL_ASPECT_TOLERANCE + STENCIL_ASPECT_TOLERANCE_EPSILON * 1000) *
+    scaffoldH;
+  expect(
+    stencilAspectWithinTolerance(outsideHigh, scaffoldH, scaffoldW, scaffoldH),
+    "閾値の外側は落ちる",
+  ).toBe(false);
+
+  // イプシロンが許容を実質的に広げていないこと（閾値に対して桁違いに小さい）。
+  expect(STENCIL_ASPECT_TOLERANCE_EPSILON).toBeLessThan(STENCIL_ASPECT_TOLERANCE / 1e6);
 });
 
 test("牙: 枠線色を紙と同じにするとscaffold検査が落ちる", () => {

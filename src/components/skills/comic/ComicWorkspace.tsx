@@ -130,6 +130,9 @@ import {
   compositeStencilResult,
   renderPanelMask,
   renderTemplateScaffold,
+  scaleToScaffoldSize,
+  stencilAspectLabel,
+  stencilAspectWithinTolerance,
 } from "../../../lib/comic/stencil";
 
 /** PC から画像を添付するときの拡張子フィルタ（GoalChatPanel と同値）。 */
@@ -1757,15 +1760,21 @@ function ComicFlow() {
           const imageInputs = buildPanelReeditImageInputs(scaffoldPath, maskPath, refPaths);
           const stencilPrompt = buildStencilPagePrompt(prompt);
 
+          // テンプレ比率をモデルへ渡す（設計書 A1）。渡さないと出力が正方形になり、
+          // 比率判定が必ず外れる（診断 F3）。ラベルはテンプレの pageAspect から
+          // そのまま作る（設計書 R1。共通候補への吸着で 4:5 が 3:4 になるのを避ける）。
+          const stencilAspect = stencilAspectLabel(alignedTemplate.pageAspect);
+
           let drawnPage: PanelImageData | null = null;
           let lastGeneratedPath: string | null = null;
           let sizeMismatchedOnce = false;
-          // 寸法不一致だけは同じ入力で1回だけやり直す。2回目も違えば下のfallbackへ。
+          // 比率不一致だけは同じ入力で1回だけやり直す。2回目も違えば下のfallbackへ。
           for (let attempt = 0; attempt < 2; attempt += 1) {
             const generated = await images.generateBatch({
               prompt: stencilPrompt,
               count: 1,
               ...imageInputs,
+              aspect: stencilAspect,
               sourceTag: tag,
             });
             if (!stillMine()) return "cancelled";
@@ -1780,7 +1789,16 @@ function ComicFlow() {
             lastGeneratedPath = generatedPath;
             const drawn = await readPanelImageData(generatedPath);
             if (!stillMine()) return "cancelled";
-            if (drawn.width === scaffold.width && drawn.height === scaffold.height) {
+            // モデルは比率だけ守り画素数は任意に決めるので、完全一致ではなく
+            // 比率±5%で合否を出す（設計書 A2）。合格なら scaffold 寸法へ揃える。
+            if (
+              stencilAspectWithinTolerance(
+                drawn.width,
+                drawn.height,
+                scaffold.width,
+                scaffold.height,
+              )
+            ) {
               drawnPage = drawn;
               break;
             }
@@ -1812,8 +1830,14 @@ function ComicFlow() {
             return "done";
           }
 
+          // 比率は許容内でも画素数は違うので、合成前に scaffold 寸法へ引き伸ばす
+          // （設計書 A2/A4。最近傍推定の normalizeComicPage は使わない）。
           const composite = compositeStencilResult(
-            panelImageDataCanvas(drawnPage),
+            scaleToScaffoldSize(
+              panelImageDataCanvas(drawnPage),
+              scaffold.width,
+              scaffold.height,
+            ),
             scaffold,
             mask,
           );

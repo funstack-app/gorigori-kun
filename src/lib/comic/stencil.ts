@@ -37,6 +37,46 @@ export const STENCIL_PANEL_BORDER_PX = RECOMPOSE_PANEL_BORDER_PX;
 const MASK_WHITE = 255;
 const MASK_BLACK = 0;
 
+/**
+ * 生成画像の縦横比が scaffold の縦横比からどれだけ外れてよいかの上限（設計書 A2）。
+ *
+ * モデルは比率だけは正確に守るがピクセル数は任意に決める（4:5指定→1122×1402 は
+ * 比率誤差0.03%）。よって「寸法が完全一致するか」では一生成立しない。
+ * 5% は丸め誤差の安全帯で、この範囲の引き伸ばしは目視できない。
+ */
+export const STENCIL_ASPECT_TOLERANCE = 0.05;
+
+/**
+ * 許容判定に足す丸め誤差の代（設計書 R2）。
+ *
+ * ちょうど±5%の入力が浮動小数の誤差で 0.050000000000000044 になり、
+ * 「±5%以内なら合格」という設計に反して不合格になる。境界を設計どおりに
+ * 閉じるための代であり、許容そのものを広げる意図はない（1e-9 は
+ * 比率にすると 0.0000001% 相当で、実測の偏差分布に影響しない）。
+ */
+export const STENCIL_ASPECT_TOLERANCE_EPSILON = 1e-9;
+
+/**
+ * テンプレの pageAspect をそのまま生成aspectラベル（"4:5" 等）にする（設計書 R1）。
+ *
+ * `nearestAspectLabel` は使わない。共通の候補リスト（ASPECT_CANDIDATES）に "4:5" が
+ * 無く、4:5テンプレが "3:4" へ吸着して偏差6.25%＝許容外になり毎回 fallback へ落ちる。
+ * aspect はプロンプトへ自由文字列として埋まる（batch_gen.rs）ので、候補リストに
+ * 縛られる理由がそもそも無い。
+ */
+export function stencilAspectLabel(pageAspect: { w: number; h: number }): string {
+  const parts: [number, string][] = [
+    [pageAspect.w, "pageAspect.w"],
+    [pageAspect.h, "pageAspect.h"],
+  ];
+  for (const [value, label] of parts) {
+    if (!Number.isInteger(value) || value <= 0) {
+      throw new Error(`${label}は正の整数で指定してください: ${value}`);
+    }
+  }
+  return `${pageAspect.w}:${pageAspect.h}`;
+}
+
 /** #ffffff 等の 6桁 hex を RGB へ。定数の取り違えを早期に落とす。 */
 function parseHexRgb(hex: string): [number, number, number] {
   const match = /^#([0-9a-fA-F]{6})$/.exec(hex);
@@ -211,6 +251,40 @@ export function renderPanelMaskRaster(
   return raster;
 }
 
+/**
+ * 生成画像の縦横比が scaffold の縦横比の許容内（±5%）かを返す（設計書 A2）。
+ *
+ * 判定は比率だけを見る。ピクセル数はモデルが任意に決めるので、寸法の完全一致を
+ * 条件にすると構造的に成立しない（診断 F4/F5）。偏差は
+ * `|生成比 / scaffold比 - 1|` で取り、0以下や非有限の入力は黙って通さず throw する。
+ */
+export function stencilAspectWithinTolerance(
+  width: number,
+  height: number,
+  scaffoldWidth: number,
+  scaffoldHeight: number,
+): boolean {
+  const sizes: [number, string][] = [
+    [width, "width"],
+    [height, "height"],
+    [scaffoldWidth, "scaffoldWidth"],
+    [scaffoldHeight, "scaffoldHeight"],
+  ];
+  for (const [value, label] of sizes) {
+    if (!Number.isFinite(value) || value <= 0) {
+      throw new Error(`${label}は正の有限値で指定してください: ${value}`);
+    }
+  }
+  const ratio = width / height;
+  const scaffoldRatio = scaffoldWidth / scaffoldHeight;
+  // ちょうど±5%が浮動小数で閾値をわずかに超えることがあるので、丸め誤差の代を足す
+  // （設計書 R2）。
+  return (
+    Math.abs(ratio / scaffoldRatio - 1) <=
+    STENCIL_ASPECT_TOLERANCE + STENCIL_ASPECT_TOLERANCE_EPSILON
+  );
+}
+
 function assertSameSize(a: RgbaRaster, b: RgbaRaster, label: string): void {
   if (a.width !== b.width || a.height !== b.height) {
     throw new Error(
@@ -334,6 +408,26 @@ export function compositeStencilResult(
   // 生成前に検査する契約（設計書 S3）で、この時点では下地として揃える。
   const aiRaster = canvasToRaster(aiImage, scaffold.width, scaffold.height);
   return rasterToCanvas(compositeStencilRaster(aiRaster, scaffoldRaster, maskRaster));
+}
+
+/**
+ * 生成画像を scaffold 寸法のキャンバスへ引き伸ばして返す（設計書 A2/A4）。
+ *
+ * `normalizeComicPage`（最近傍テンプレ比率を推定する関所）は使わない。塗り絵は
+ * テンプレが確定しているので、確定している寸法へ直接 drawImage する。
+ * 比率が許容内であることは呼び出し側が事前に判定する契約なので、ここでは
+ * 縦横を独立に fill する（許容内なら引き伸ばし量は目視できない）。
+ */
+export function scaleToScaffoldSize(
+  image: CanvasImageSource,
+  scaffoldWidth: number,
+  scaffoldHeight: number,
+): HTMLCanvasElement {
+  const { canvas, context } = createCanvas(scaffoldWidth, scaffoldHeight);
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = "high";
+  context.drawImage(image, 0, 0, scaffoldWidth, scaffoldHeight);
+  return canvas;
 }
 
 /** 合成済み canvas のマスク黒領域が scaffold と完全一致することを検証する。 */
