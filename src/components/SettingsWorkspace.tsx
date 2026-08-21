@@ -474,6 +474,7 @@ function WorldContextSettings() {
 // 既存の ~/.codex/generated_images/ から新保存先へのマイグレーション機能つき。
 function StorageSettingsTab() {
   const push = useToasts((s) => s.push);
+  const presetsFileState = usePresets((s) => s.presetsFileState);
   const [settings, setSettings] = useState<StorageSettings | null>(null);
   const [legacy, setLegacy] = useState<LegacySummary | null>(null);
   const [home, setHome] = useState<string | null>(null);
@@ -1026,6 +1027,11 @@ function StorageSettingsTab() {
           登録したキャラクターやプリセットは、保存のたびに自動でバックアップされています。
           もしキャラクターやプリセットが消えた・おかしくなった場合は、ここから過去の状態に戻せます。
         </p>
+        {presetsFileState === "corrupted" || presetsFileState === "unreadable" ? (
+          <p className="mb-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[11px] font-bold leading-relaxed text-amber-200">
+            プリセット正本ファイルが読み込めない状態です。復元をおすすめします
+          </p>
+        ) : null}
         <BackupHealthLine result={presetBackups} />
         <button
           type="button"

@@ -252,6 +252,8 @@ type PresetsFileData = {
   presets: Preset[];
 };
 
+export type PresetsFileState = "ok" | "missing" | "corrupted" | "unreadable";
+
 /**
  * Tauri 経由でファイルに書く実体。
  * 書き込みが失敗したら、サイレントに握り潰さずユーザーへトースト通知する
@@ -380,6 +382,46 @@ let pendingBeforeUnlock = false;
  * 古い呼び出しの結果（旧 root の内容）で store を上書きしないための世代印。
  */
 let initializeToken = 0;
+
+/**
+ * 正本ファイルの読み込み異常は、同じセッションでは1回だけ通知する。
+ * initialize は保存先変更などでも再実行されるため、呼び出し回数ではなく
+ * モジュールの生存期間で重複を防ぐ。
+ */
+let presetsFileErrorToastShown = false;
+
+async function showPresetsFileErrorToast(reason: string): Promise<void> {
+  if (presetsFileErrorToastShown) return;
+  presetsFileErrorToastShown = true;
+  try {
+    const [{ useToasts }, { useWorkspace }] = await Promise.all([
+      import("./toasts"),
+      import("./workspace"),
+    ]);
+    useToasts.getState().push({
+      kind: "error",
+      text: `プリセットの保存ファイルが読み込めません（${reason}）。いま登録・変更した内容はこのファイルには保存されません。設定 → ストレージの「バックアップから復元」で直前の状態に戻せます。`,
+      ttlMs: 0,
+      action: {
+        label: "設定を開く",
+        run: () => {
+          useWorkspace.getState().requestSettingsTab("storage");
+          if (typeof window !== "undefined") {
+            window.dispatchEvent(new CustomEvent("gori:open-settings"));
+          }
+        },
+      },
+    });
+  } catch (err) {
+    // トースト取得に失敗しても、正本を上書きしない本来の防御は維持する。
+    console.error("[presets] 読み込み異常の通知に失敗:", err);
+  }
+}
+
+/** Tauri の invoke が無いブラウザ単体プレビューでは読み込み警告を出さない。 */
+function hasTauriInvoke(): boolean {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
 
 /**
  * ファイル書き込みを解禁し、解禁前の mutate を1回だけ反映する。
@@ -524,6 +566,7 @@ const DEFAULT_CATEGORIES: PresetCategory[] = [
 type PresetsState = {
   categories: PresetCategory[];
   presets: Preset[];
+  presetsFileState: PresetsFileState;
 
   addCategory: (name: string, color?: string, tags?: string[]) => PresetCategory;
   updateCategory: (id: string, updates: Partial<Omit<PresetCategory, "id">>) => void;
@@ -628,6 +671,8 @@ export const usePresets = create<PresetsState>((set, get) => ({
     persist(PRESETS_LS_KEY, merged);
     return merged;
   })(),
+  // 読み込み前は警告しない。initialize が正本の実状態へ更新する。
+  presetsFileState: "missing",
 
   /**
    * 起動時の移行フロー。守るべき不変条件:
@@ -708,7 +753,7 @@ export const usePresets = create<PresetsState>((set, get) => ({
     }
     persist(CATEGORIES_LS_KEY, categories);
     persist(PRESETS_LS_KEY, presets);
-    set({ categories, presets });
+    set({ categories, presets, presetsFileState: "ok" });
     return presets.length;
   },
 
@@ -973,12 +1018,20 @@ async function readPresetsFileIntoStore(
   get: () => PresetsState,
   isCurrent: () => boolean,
 ): Promise<boolean> {
+  if (!hasTauriInvoke()) {
+    // Tauri 外 (Vite 単体プレビュー等)。localStorage 由来の state のまま動く。
+    return false;
+  }
+
   let content: string;
   try {
     content = await invoke<string>("presets_read");
   } catch (err) {
-    // Tauri 外 (Vite 単体プレビュー等)。localStorage 由来の state のまま動く。
     console.error("[presets] ファイル読み出し失敗:", err);
+    if (isCurrent()) {
+      set({ presetsFileState: "unreadable" });
+      void showPresetsFileErrorToast("ファイルを開けません");
+    }
     return false; // 解禁しない（読めない正本を localStorage で潰さない）
   }
 
@@ -991,6 +1044,10 @@ async function readPresetsFileIntoStore(
       file = JSON.parse(content);
     } catch (err) {
       console.error("[presets] presets.json のパースに失敗 (localStorage を継続使用):", err);
+      if (isCurrent()) {
+        set({ presetsFileState: "corrupted" });
+        void showPresetsFileErrorToast("内容が壊れています");
+      }
       return false; // 壊れた正本を上書きしない
     }
     const parsed = file as Partial<PresetsFileData> | null;
@@ -1001,6 +1058,10 @@ async function readPresetsFileIntoStore(
       !Array.isArray(parsed.presets)
     ) {
       console.error("[presets] presets.json の形が不正 (localStorage を継続使用)");
+      if (isCurrent()) {
+        set({ presetsFileState: "corrupted" });
+        void showPresetsFileErrorToast("形式が正しくありません");
+      }
       return false; // 壊れた正本を上書きしない
     }
 
@@ -1019,6 +1080,7 @@ async function readPresetsFileIntoStore(
     });
     // 自分が最新の呼び出しでなければ store を触らない（旧 root の内容で上書きしない）。
     if (!isCurrent()) return false;
+    set({ presetsFileState: "ok" });
 
     // **2026-08-06 重大修正 (実ユーザーのプリセット30体消失)**: ここは以前、
     // ファイルが JSON として読めさえすれば **0 件でも無条件に正本として採用**し、
@@ -1089,6 +1151,7 @@ async function readPresetsFileIntoStore(
 
   // ファイル未作成 = localStorage からの移行 or 新規ユーザー。
   // 現在の in-memory state (localStorage 由来 + legacy 移行済み) を正とする。
+  if (isCurrent()) set({ presetsFileState: "missing" });
   const { categories, presets } = get();
   const categoriesAreDefault =
     categories.length === DEFAULT_CATEGORIES.length &&
