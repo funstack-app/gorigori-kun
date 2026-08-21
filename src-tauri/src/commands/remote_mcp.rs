@@ -119,6 +119,23 @@ fn provider_by_id(provider_id: &str) -> Result<&'static RemoteProviderDef, Strin
         .ok_or_else(|| format!("未対応のリモート MCP プロバイダです: {provider_id}"))
 }
 
+fn remove_output_is_already_absent(stdout: &str, stderr: &str) -> bool {
+    let output = format!("{stdout}\n{stderr}").to_lowercase();
+    [
+        "not found",
+        "unknown",
+        "does not exist",
+        "doesn't exist",
+        "not registered",
+        "見つからない",
+        "見つかりません",
+        "存在しない",
+        "未登録",
+    ]
+    .iter()
+    .any(|message| output.contains(message))
+}
+
 /// フロントへ接続可能なプロバイダ一覧を返す。
 #[tauri::command]
 pub fn remote_mcp_providers() -> Vec<RemoteProviderDef> {
@@ -228,12 +245,26 @@ pub async fn remote_mcp_logout(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let provider = provider_by_id(&provider_id)?;
-    let _ = run_codex_capture(
+    let remove = run_codex_capture(
         &["mcp", "remove", provider.id],
         Duration::from_secs(STATUS_TIMEOUT_SECS),
     )
     .await
     .map_err(|error| format!("{} の接続解除に失敗しました: {error}", provider.label))?;
+
+    if !remove.0 && !remove_output_is_already_absent(&remove.1, &remove.2) {
+        let detail = if remove.2.trim().is_empty() {
+            remove.1.trim()
+        } else {
+            remove.2.trim()
+        };
+        return Err(if detail.is_empty() {
+            format!("{} の接続解除に失敗しました。", provider.label)
+        } else {
+            format!("{} の接続解除に失敗しました: {detail}", provider.label)
+        });
+    }
+
     reload_mcp_servers(&state).await;
     Ok(())
 }
@@ -256,6 +287,26 @@ mod tests {
         assert!(REMOTE_PROVIDERS
             .iter()
             .all(|provider| provider.url.starts_with("https://")));
+    }
+
+    #[test]
+    fn remove_absent_detection_keeps_logout_idempotent() {
+        for message in [
+            "MCP server not found",
+            "Unknown MCP server",
+            "登録が見つかりません",
+            "プロバイダは存在しない",
+        ] {
+            assert!(remove_output_is_already_absent("", message));
+        }
+    }
+
+    #[test]
+    fn remove_absent_detection_does_not_hide_other_failures() {
+        assert!(!remove_output_is_already_absent(
+            "",
+            "permission denied while updating config"
+        ));
     }
 
     #[tokio::test]

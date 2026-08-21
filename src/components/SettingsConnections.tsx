@@ -953,11 +953,24 @@ function RemoteMcpConnectionCard({
     try {
       await remoteMcp.logout(provider.id);
       await refresh();
-      toast.push({
-        kind: "success",
-        text: `${provider.label} の接続を解除しました`,
-        ttlMs: 3000,
-      });
+      const refreshedStatus = useAccounts.getState().remoteMcp[provider.id];
+      const disconnected =
+        refreshedStatus != null &&
+        !refreshedStatus.registered &&
+        !refreshedStatus.authenticated;
+      if (disconnected) {
+        toast.push({
+          kind: "success",
+          text: `${provider.label} の接続を解除しました`,
+          ttlMs: 3000,
+        });
+      } else {
+        toast.push({
+          kind: "warn",
+          text: "解除を確認できませんでした。もう一度お試しください",
+          ttlMs: 6000,
+        });
+      }
     } catch (error) {
       toast.push({
         kind: "error",

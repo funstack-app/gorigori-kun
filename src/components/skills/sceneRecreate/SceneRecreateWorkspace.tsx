@@ -678,6 +678,19 @@ function RecreatePanel({
     }
   }
 
+  async function sendToScene3d() {
+    try {
+      await sendShotsToScene3d(analysis.shots);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      pushToast({
+        kind: "error",
+        text: `3D カメラの書き出しに失敗しました: ${reason}`,
+        ttlMs: 6000,
+      });
+    }
+  }
+
   return (
     <div className="rounded-xl border border-[#2a2a2a] bg-[#161616] p-4">
       <div className="mb-1 flex items-center justify-between gap-3">
@@ -727,7 +740,7 @@ function RecreatePanel({
         <div className="mt-4 rounded-lg border border-pink-400/30 bg-[#0d0d0d] px-3 py-3">
           <button
             type="button"
-            onClick={() => void sendShotsToScene3d(analysis.shots)}
+            onClick={() => void sendToScene3d()}
             className="w-full rounded-lg bg-pink-500 px-3 py-2 text-[12px] font-black text-white hover:bg-pink-400"
           >
             ショット割りを 3D カメラとして書き出す
