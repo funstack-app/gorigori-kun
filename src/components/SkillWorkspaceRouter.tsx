@@ -28,6 +28,7 @@ import { RedlineWorkspace } from "./skills/redline/RedlineWorkspace";
 import { RegulationCheckWorkspace } from "./skills/regulationCheck/RegulationCheckWorkspace";
 import { ProductSetWorkspace } from "./skills/productSet/ProductSetWorkspace";
 import { StickerWorkspace } from "./skills/sticker/StickerWorkspace";
+import { FilmWorkspace } from "./skills/film/FilmWorkspace";
 
 // three.js を含むためメインバンドルから分離(スキルに入った時だけロード)
 const Scene3dWorkspace = lazy(() =>
@@ -123,9 +124,12 @@ export function SkillWorkspaceRouter({
     ? mountedModes
     : [...mountedModes, activeUiMode];
 
-  // default (作品モード) と storyboard は自前でタブ構造を持つため、
+  // default (作品モード)、storyboard、film は自前でタブ構造を持つため、
   // 共通のスキル用タブ枠 (企画/動画/編集) を被せない。従来の早期 return と同じ扱い。
-  const usesSharedTabs = activeUiMode !== "default" && activeUiMode !== "storyboard";
+  const usesSharedTabs =
+    activeUiMode !== "default" &&
+    activeUiMode !== "storyboard" &&
+    activeUiMode !== "film";
 
   return (
     <>
@@ -141,7 +145,8 @@ export function SkillWorkspaceRouter({
         // 両方が可視扱いになり、ホイール監視が二重に張られる。
         // 3 を含めないと、ライブラリを開いている間も 3D のキー監視が生き残る。
         const isActiveMode = mode === activeUiMode;
-        const rendersOutsideGenerateTab = mode === "default" || mode === "storyboard";
+        const rendersOutsideGenerateTab =
+          mode === "default" || mode === "storyboard" || mode === "film";
         const visible =
           !hiddenByDrawer &&
           isActiveMode &&
@@ -152,6 +157,8 @@ export function SkillWorkspaceRouter({
               <GenerationWorkspace />
             ) : mode === "storyboard" ? (
               <StoryboardWorkspace />
+            ) : mode === "film" ? (
+              <FilmWorkspace />
             ) : (
               <div
                 style={{ display: activeTab === "generate" ? "contents" : "none" }}

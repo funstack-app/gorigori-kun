@@ -764,6 +764,13 @@ export const storyboard = {
   readDebugLog: (runId: string) => invoke<string>("storyboard_read_debug_log", { runId }),
 };
 
+/** film-projects.json のファイル正本を扱う薄い IPC 境界。 */
+export const filmProjects = {
+  read: () => invoke<string>("film_projects_read"),
+  write: (content: string, allowEmpty = false) =>
+    invoke<void>("film_projects_write", { content, allowEmpty }),
+};
+
 // ──────────── Storage Settings ────────────
 // 生成画像のローカル保存先。デフォルトは ~/Pictures/GORI GORI/。
 // 設定ファイルは ~/Library/Application Support/app.codexframefactory/storage-settings.json。

@@ -12,6 +12,7 @@
  * 想定するUIモード:
  *   - "default"    : α版の作品モード (既存 GenerationWorkspace そのまま)
  *   - "storyboard" : ストーリーカットスキル専用UI (β版で実装)
+ *   - "film"       : 設計先行のフィルム制作専用UI
  *   - "multiAngle" : マルチアングルスキル専用UI (β版で実装)
  *
  * 拡張時はここに UiMode を追加する。
@@ -22,6 +23,7 @@ import { create } from "zustand";
 export type UiMode =
   | "default"
   | "storyboard"
+  | "film"
   | "multiAngle"
   | "scene3d"
   | "characterRegister"
@@ -67,6 +69,7 @@ export const useSkillUiMode = create<SkillUiModeState>((set) => ({
  */
 export const SKILL_UI_MODE_MAP: Record<string, UiMode> = {
   "gori-storyboard": "storyboard",
+  film: "film",
   "gori-multi-angle": "multiAngle",
   "gori-scene-3d": "scene3d",
   "gori-character-register": "characterRegister",

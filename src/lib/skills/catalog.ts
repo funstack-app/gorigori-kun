@@ -11,8 +11,11 @@ export type GoriSkillId =
   | "gori-product-set"
   | "gori-sticker";
 
+/** 専用アイコン未登録の新設スキルも含む、カタログ上のID。 */
+export type GoriCatalogSkillId = GoriSkillId | "film";
+
 export type GoriSkill = {
-  id: GoriSkillId;
+  id: GoriCatalogSkillId;
   name: string;
   shortName: string;
   /**
@@ -62,6 +65,17 @@ export const GORI_SKILLS: GoriSkill[] = [
     path: "~/.codex/skills/gori-character-register",
     availableInApp: true,
     launchHint: "まずはここから · 絵1枚 → 登録キャラ",
+  },
+  {
+    // 2026-08-22 追加: run-ai-film の設計先行・承認ゲート駆動を移植した
+    // 6工程の専用 Workspace。旧ストーリーカットとは S7 まで並存する。
+    id: "film",
+    name: "フィルム",
+    shortName: "Film",
+    description: "企画から完成動画まで、設計を固めてから作る映像制作",
+    path: "~/.codex/skills/film",
+    availableInApp: true,
+    launchHint: "企画 → 設計 → 生成 → 完成",
   },
   {
     // 2026-05-20 開放: β版で 4-Phase 専用 Workspace (StoryboardWorkspace) を

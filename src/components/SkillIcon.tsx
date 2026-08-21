@@ -188,6 +188,8 @@ export function ProjectIcon({ className }: IconProps) {
 }
 
 export function SkillIcon({ id, className }: { id: string; className?: string }) {
+  // フィルム (S1, 2026-08-22) はカタログ拡張ID。既存の FilmIcon をそのまま使う。
+  if (id === "film") return <FilmIcon className={className} />;
   const Component = ICONS[id as GoriSkillId];
   if (!Component) {
     // 未知のスキル (imported 等) は汎用枠アイコン
