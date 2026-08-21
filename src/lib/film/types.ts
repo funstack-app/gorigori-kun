@@ -7,6 +7,7 @@ export type FilmApprovals = {
   beatsheet: FilmApproval;
   treatment: FilmApproval;
   scenelist: FilmApproval;
+  blocks: FilmApproval;
   look: FilmApproval;
 };
 
@@ -36,6 +37,13 @@ export type FilmScript = {
   treatment: string;
   scenes: FilmScene[];
   blocks: FilmBlock[];
+  /** 編集可能なカードを再起動後も同じ文章で復元するための原文。 */
+  scenelistText?: string;
+  blockScriptText?: string;
+  /** S2 の執筆条件。S1 で作った既存プロジェクトでは未設定になり得る。 */
+  targetDurationSeconds?: number;
+  topicMemo?: string;
+  characterNames?: string[];
 };
 
 export type AssetImportance = "primary" | "supporting" | "background";

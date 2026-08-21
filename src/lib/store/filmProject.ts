@@ -1,7 +1,13 @@
 import { create } from "zustand";
 
 import { filmProjects } from "../ipc";
-import type { FilmPhase, FilmProject } from "../film/types";
+import type {
+  FilmBlock,
+  FilmPhase,
+  FilmProject,
+  FilmScene,
+  FilmScript,
+} from "../film/types";
 
 export type FilmProjectsFileData = {
   version: 1;
@@ -9,6 +15,19 @@ export type FilmProjectsFileData = {
 };
 
 export type FilmProjectsFileState = "ok" | "missing" | "corrupted" | "unreadable";
+
+export type FilmScriptApprovalStage =
+  | "logline"
+  | "beatsheet"
+  | "treatment"
+  | "scenelist"
+  | "blocks";
+
+export type FilmScriptSettings = {
+  targetDurationSeconds: number;
+  topicMemo: string;
+  characterNames: string[];
+};
 
 type FilmProjectState = {
   projects: FilmProject[];
@@ -18,7 +37,66 @@ type FilmProjectState = {
   createProject: (title: string, theme: string, service: string) => FilmProject;
   setActiveProjectId: (projectId: string | null) => void;
   setPhase: (phase: FilmPhase) => void;
+  saveScriptSettings: (settings: FilmScriptSettings) => void;
+  saveLogline: (logline: string) => void;
+  saveBeatsheet: (beatsheet: string) => void;
+  saveTreatment: (treatment: string) => void;
+  saveScenelist: (scenelistText: string, scenes: FilmScene[]) => void;
+  saveSceneList: (scenelistText: string, scenes: FilmScene[]) => void;
+  saveBlocks: (blockScriptText: string, blocks: FilmBlock[]) => void;
+  approveStage: (stage: FilmScriptApprovalStage) => boolean;
 };
+
+const SCRIPT_STAGE_ORDER: FilmScriptApprovalStage[] = [
+  "logline",
+  "beatsheet",
+  "treatment",
+  "scenelist",
+  "blocks",
+];
+
+function emptyScript(): FilmScript {
+  return {
+    logline: "",
+    beatsheet: "",
+    treatment: "",
+    scenes: [],
+    blocks: [],
+    scenelistText: "",
+    blockScriptText: "",
+    targetDurationSeconds: 90,
+    topicMemo: "",
+    characterNames: [],
+  };
+}
+
+function scriptOf(project: FilmProject): FilmScript {
+  return Array.isArray(project.script) ? emptyScript() : project.script;
+}
+
+function normalizedProject(project: FilmProject): FilmProject {
+  return {
+    ...project,
+    approvals: {
+      ...project.approvals,
+      blocks: project.approvals.blocks ?? null,
+    },
+  };
+}
+
+function invalidateApprovalsFrom(
+  project: FilmProject,
+  stage: FilmScriptApprovalStage,
+): FilmProject["approvals"] {
+  const startIndex = SCRIPT_STAGE_ORDER.indexOf(stage);
+  const approvals = { ...project.approvals, blocks: project.approvals.blocks ?? null };
+  for (const stageToClear of SCRIPT_STAGE_ORDER.slice(startIndex)) {
+    approvals[stageToClear] = null;
+  }
+  // ③設計の見た目承認も脚本の上に建つため、脚本変更時は無効にする。
+  approvals.look = null;
+  return approvals;
+}
 
 async function writeToFileNow(
   data: FilmProjectsFileData,
@@ -141,6 +219,7 @@ function makeProject(title: string, theme: string, service: string): FilmProject
       beatsheet: null,
       treatment: null,
       scenelist: null,
+      blocks: null,
       look: null,
     },
     script: [],
@@ -205,7 +284,7 @@ async function readFilmProjectsFileIntoStore(
     // 読み込み中の入力を、到着した古いスナップショットで消さない。
     if (pendingBeforeUnlock) return true;
 
-    const projects = parsed.projects as FilmProject[];
+    const projects = (parsed.projects as FilmProject[]).map(normalizedProject);
     const currentActiveId = get().activeProjectId;
     const activeProjectId = projects.some((project) => project.id === currentActiveId)
       ? currentActiveId
@@ -271,7 +350,143 @@ export const useFilmProjectStore = create<FilmProjectState>((set, get) => ({
     persistProjects(projects);
     set({ projects });
   },
+
+  saveScriptSettings: (settings) => {
+    const activeProjectId = get().activeProjectId;
+    if (!activeProjectId) return;
+    const targetDurationSeconds = Math.max(1, Math.round(settings.targetDurationSeconds));
+    const topicMemo = settings.topicMemo.trim();
+    const characterNames = settings.characterNames.map((name) => name.trim()).filter(Boolean);
+    let changed = false;
+    const projects = get().projects.map((sourceProject) => {
+      if (sourceProject.id !== activeProjectId) return sourceProject;
+      const project = normalizedProject(sourceProject);
+      const script = scriptOf(project);
+      const targetChanged = (script.targetDurationSeconds ?? 90) !== targetDurationSeconds;
+      const topicChanged = (script.topicMemo ?? "") !== topicMemo;
+      const namesChanged = JSON.stringify(script.characterNames ?? []) !== JSON.stringify(characterNames);
+      if (!targetChanged && !topicChanged && !namesChanged) return sourceProject;
+      changed = true;
+      const earliestStage: FilmScriptApprovalStage = topicChanged
+        ? "logline"
+        : targetChanged
+          ? "beatsheet"
+          : "treatment";
+      return {
+        ...project,
+        approvals: invalidateApprovalsFrom(project, earliestStage),
+        script: {
+          ...script,
+          targetDurationSeconds,
+          topicMemo,
+          characterNames,
+        },
+      };
+    });
+    if (!changed) return;
+    persistProjects(projects);
+    set({ projects });
+  },
+
+  saveLogline: (logline) => {
+    updateActiveScript(get, set, "logline", (script) => ({ ...script, logline }));
+  },
+
+  saveBeatsheet: (beatsheet) => {
+    updateActiveScript(get, set, "beatsheet", (script) => ({ ...script, beatsheet }));
+  },
+
+  saveTreatment: (treatment) => {
+    updateActiveScript(get, set, "treatment", (script) => ({ ...script, treatment }));
+  },
+
+  saveScenelist: (scenelistText, scenes) => {
+    updateActiveScript(get, set, "scenelist", (script) => ({
+      ...script,
+      scenelistText,
+      scenes,
+    }));
+  },
+
+  saveSceneList: (scenelistText, scenes) => {
+    updateActiveScript(get, set, "scenelist", (script) => ({
+      ...script,
+      scenelistText,
+      scenes,
+    }));
+  },
+
+  saveBlocks: (blockScriptText, blocks) => {
+    updateActiveScript(get, set, "blocks", (script) => ({
+      ...script,
+      blockScriptText,
+      blocks,
+    }));
+  },
+
+  approveStage: (stage) => {
+    const activeProjectId = get().activeProjectId;
+    if (!activeProjectId) return false;
+    let approved = false;
+    const projects = get().projects.map((sourceProject) => {
+      if (sourceProject.id !== activeProjectId) return sourceProject;
+      const project = normalizedProject(sourceProject);
+      const script = scriptOf(project);
+      const stageIndex = SCRIPT_STAGE_ORDER.indexOf(stage);
+      const previousStage = SCRIPT_STAGE_ORDER[stageIndex - 1];
+      if (previousStage && !project.approvals[previousStage]) return sourceProject;
+      const hasContent = stage === "logline"
+        ? Boolean(script.logline.trim())
+        : stage === "beatsheet"
+          ? Boolean(script.beatsheet.trim())
+          : stage === "treatment"
+            ? Boolean(script.treatment.trim())
+            : stage === "scenelist"
+              ? Boolean(script.scenelistText?.trim()) && script.scenes.length > 0
+              : Boolean(script.blockScriptText?.trim()) && script.blocks.length > 0;
+      if (!hasContent) return sourceProject;
+      approved = true;
+      return {
+        ...project,
+        approvals: {
+          ...project.approvals,
+          [stage]: { approvedAt: new Date().toISOString() },
+        },
+      };
+    });
+    if (!approved) return false;
+    persistProjects(projects);
+    set({ projects });
+    return true;
+  },
 }));
+
+function updateActiveScript(
+  get: () => FilmProjectState,
+  set: (partial: Partial<FilmProjectState>) => void,
+  stage: FilmScriptApprovalStage,
+  update: (script: FilmScript) => FilmScript,
+): void {
+  const activeProjectId = get().activeProjectId;
+  if (!activeProjectId) return;
+  let changed = false;
+  const projects = get().projects.map((sourceProject) => {
+    if (sourceProject.id !== activeProjectId) return sourceProject;
+    const project = normalizedProject(sourceProject);
+    const currentScript = scriptOf(project);
+    const nextScript = update(currentScript);
+    if (JSON.stringify(currentScript) === JSON.stringify(nextScript)) return sourceProject;
+    changed = true;
+    return {
+      ...project,
+      approvals: invalidateApprovalsFrom(project, stage),
+      script: nextScript,
+    };
+  });
+  if (!changed) return;
+  persistProjects(projects);
+  set({ projects });
+}
 
 // 後続ステージの復元導線が「読込完了」と「書込可能」を区別できるよう保持する。
 export function filmProjectsFileReadDecided(): boolean {
