@@ -17,7 +17,7 @@ import { createPersistGuard, describeOutcome } from "./persistGuard";
  *
  * ### (1) plugin-store
  * - `settings.json` (このファイル): codexBinaryPath / defaultModel / defaultEffort /
- *   defaultCwd / approvalPolicy / sandbox / worldContext
+ *   defaultCwd / approvalPolicy / sandbox / worldContext / navigationWelcomeSeen
  * - `lib/store/images.ts`: お気に入り (favorites) / 採否判定 (judgements)
  * - `lib/store/savedPrompts.ts`: 保存済みプロンプト
  * - `world-contexts.json` (`lib/store/worldContexts.ts`): 世界観 / コンテキストの複数保持
@@ -108,6 +108,8 @@ export type AppSettings = {
   defaultCwd?: string;
   approvalPolicy?: "never" | "on-request" | "everything";
   sandbox?: "read-only" | "workspace-write" | "danger-full-access";
+  /** 初回起動の案内を一度表示したか。左下のヘルプからはいつでも再表示できる。 */
+  navigationWelcomeSeen?: boolean;
   /**
    * FB#16: 作品の世界観・コンテキスト (Markdown 等の自由文)。
    * 企画チャット (PlanWorkspace) の初回ターンでシステムプロンプトに注入され、

@@ -132,6 +132,7 @@ export function WorkspaceTabs() {
     <div className="flex items-center gap-2">
     <div
       ref={stripRef}
+      data-tour="workspace-tabs"
       className="grid w-full grid-cols-4 rounded-lg border border-[#2a2a2a] bg-[#0f0f0f] p-1 sm:w-[420px]"
     >
       {TABS.map((tab) => {

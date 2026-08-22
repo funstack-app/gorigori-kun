@@ -393,7 +393,10 @@ export function ConstructedPromptPanel() {
         13インチ以上 (画面高さ 720px超) では @media で復活させ、
         通常の使用感は維持する。
       */}
-      <div className="prompt-row-container shrink-13-textarea flex min-h-[80px] flex-1 flex-col p-3">
+      <div
+        data-tour="generation-prompt"
+        className="prompt-row-container shrink-13-textarea flex min-h-[80px] flex-1 flex-col p-3"
+      >
         <div className="mb-1.5 flex items-center justify-end gap-1.5">
           {/* スケッチ — プロンプトを作る手段の同族（ui-placement-grammar §2）。
               描いた絵を参照に追加/ブロックアウト化/3Dシーン化して生成の入力にする。
@@ -561,6 +564,7 @@ export function ConstructedPromptPanel() {
 
         <button
           type="button"
+          data-tour="generation-submit"
           onClick={() => void generate()}
           disabled={disabled}
           className="w-full rounded-md bg-pink-500 px-4 py-2 text-sm font-bold text-white transition hover:bg-pink-600 disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-500"

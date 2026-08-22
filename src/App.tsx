@@ -7,7 +7,6 @@ import { FirstRunStorageNotice } from "./components/FirstRunStorageNotice";
 import { ErrorLogPanel } from "./components/ErrorLogPanel";
 import { deleteGalleryImages } from "./components/galleryItemMenu";
 import { ImagePreviewModal } from "./components/ImagePreviewModal";
-import { LibraryAutoRenameButton } from "./components/LibraryAutoRenameButton";
 import { LibraryBatchSaveButton } from "./components/LibraryBatchSaveButton";
 import { MaskEditorModal } from "./components/MaskEditorModal";
 import { PresetsDrawer } from "./components/PresetsDrawer";
@@ -15,11 +14,22 @@ import { SnsExportModal } from "./components/SnsExportModal";
 import { SafeImage } from "./components/SafeImage";
 import { VirtualGalleryGrid } from "./components/VirtualGalleryGrid";
 import { ProjectGallery } from "./components/ProjectGallery";
+import {
+  LibrarySidebar,
+  type LibraryScope,
+} from "./components/library/LibrarySidebar";
+import { LibrarySelectionBar } from "./components/library/LibrarySelectionBar";
+import {
+  groupLibraryItemsByDate,
+  matchesLibrarySearch,
+} from "./components/library/libraryGrouping";
 import { SettingsWorkspace } from "./components/SettingsWorkspace";
 import { SkillsWorkspace } from "./components/SkillsWorkspace";
 import { SkillWorkspaceRouter } from "./components/SkillWorkspaceRouter";
 import { Toaster } from "./components/Toaster";
 import { GenerationStatusPanel } from "./components/GenerationStatusPanel";
+import { HelpButton } from "./components/HelpButton";
+import { TourOverlay } from "./components/TourOverlay";
 import { Badge } from "./components/ui";
 import { attachWindowDragDrop } from "./lib/dragDrop";
 import { humanizeError } from "./lib/humanizeError";
@@ -44,7 +54,7 @@ import {
 } from "./lib/store/composer";
 import { routeDirectRunBatchEvent } from "./lib/store/directRun";
 import { useDragHover } from "./lib/store/dragHover";
-import { useImages } from "./lib/store/images";
+import { galleryItemMediaType, useImages } from "./lib/store/images";
 import { useLibrarySelection } from "./lib/store/librarySelection";
 import { useMultiAngleRun } from "./lib/store/multiAngleRun";
 import { usePlanChat } from "./lib/store/planChat";
@@ -60,6 +70,7 @@ import { useSceneStore } from "./lib/store/scene";
 import { useSessions } from "./lib/store/sessions";
 import { useSettings } from "./lib/store/settings";
 import { useSkillMode } from "./lib/store/skillMode";
+import { useSkillUiMode } from "./lib/store/skillUiMode";
 import { setDrawerOpen, type FocusSkillDetail } from "./lib/store/generationStatus";
 import { useSnsExport } from "./lib/store/snsExport";
 import { useStoryboardRun } from "./lib/store/storyboardRun";
@@ -68,6 +79,7 @@ import { useErrorLog } from "./lib/store/errorLog";
 import { useToasts } from "./lib/store/toasts";
 import { useWorkspace } from "./lib/store/workspace";
 import { ensureStoryboardEventListener } from "./lib/storyboard/events";
+import { PAGE_TOURS, WELCOME_TOUR, type TourDefinition } from "./lib/tour";
 
 type DrawerKind =
   | "assets"
@@ -148,6 +160,34 @@ function SignedInScaffold() {
   const [drawer, setDrawer] = useState<DrawerKind>(null);
   const [navCollapsed, setNavCollapsed] = useState(false);
   const navCollapseManualOverrideRef = useRef(false);
+  const activeUiMode = useSkillUiMode((state) => state.activeUiMode);
+  const activeWorkspaceTab = useWorkspace((state) => state.activeTab);
+  const [activeTour, setActiveTour] = useState<TourDefinition | null>(null);
+  const welcomeStartedRef = useRef(false);
+
+  const currentTour = useMemo<TourDefinition | null>(() => {
+    if (drawer === "skills") return PAGE_TOURS.skills;
+    if (drawer === "settings") return PAGE_TOURS.settingsConnections;
+    if (drawer !== null) return null;
+    if (activeUiMode === "film") return PAGE_TOURS.film;
+    if (activeUiMode === "default" && activeWorkspaceTab === "generate") {
+      return PAGE_TOURS.artworkGeneration;
+    }
+    return null;
+  }, [activeUiMode, activeWorkspaceTab, drawer]);
+
+  useEffect(() => {
+    if (
+      !settings.loaded ||
+      settings.settings.navigationWelcomeSeen ||
+      welcomeStartedRef.current
+    ) {
+      return;
+    }
+    welcomeStartedRef.current = true;
+    setActiveTour(WELCOME_TOUR);
+    void settings.save({ navigationWelcomeSeen: true });
+  }, [settings.loaded, settings.save, settings.settings.navigationWelcomeSeen]);
 
   // 960px 未満ではサイドバーを自動 collapse。ユーザー操作後は手動状態を優先する。
   useEffect(() => {
@@ -611,6 +651,20 @@ function SignedInScaffold() {
         navCollapsed={navCollapsed}
         onSetNavCollapsed={handleSetNavCollapsed}
       />
+      <HelpButton
+        hasCurrentTour={currentTour !== null}
+        onStartCurrent={() => {
+          if (currentTour) setActiveTour(currentTour);
+        }}
+        onStartWelcome={() => setActiveTour(WELCOME_TOUR)}
+      />
+      {activeTour ? (
+        <TourOverlay
+          key={activeTour.id}
+          tour={activeTour}
+          onClose={() => setActiveTour(null)}
+        />
+      ) : null}
       {createModalOpen && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
@@ -695,7 +749,10 @@ function Workspace({
   onSetNavCollapsed: (collapsed: boolean) => void;
 }) {
   return (
-    <div className="flex h-full min-h-0 overflow-hidden bg-[#0b0b0c] text-neutral-100">
+    <div
+      data-tour="app-shell"
+      className="flex h-full min-h-0 overflow-hidden bg-[#0b0b0c] text-neutral-100"
+    >
       <DarkGlobalNav
         drawer={drawer}
         setDrawer={setDrawer}
@@ -1034,6 +1091,7 @@ function DarkGlobalNav({
   const nav = (kind: DrawerKind, label: string, icon: React.ReactNode) => (
     <button
       type="button"
+      data-tour={kind === "assets" ? "generation-library" : undefined}
       onPointerDown={() => setDrawer(kind)}
       onClick={() => setDrawer(kind)}
       title={label}
@@ -1479,18 +1537,21 @@ function UsageGauges() {
 
 function AssetsWorkspace() {
   const items = useImages((s) => s.items);
-  const addReference = useComposer((s) => s.addReference);
-  const selectionMode = useLibrarySelection((s) => s.selectionMode);
   const selected = useLibrarySelection((s) => s.selected);
-  // ライブラリ表示モード + タイルサイズ (localStorage 永続化)
-  const [viewMode, setViewMode] = useState<"grid" | "list">(() => {
-    try {
-      const v = localStorage.getItem("library.viewMode");
-      return v === "list" ? "list" : "grid";
-    } catch {
-      return "grid";
-    }
-  });
+  const selectionMode = useLibrarySelection((s) => s.selectionMode);
+  const toggle = useLibrarySelection((s) => s.toggle);
+  const toggleMany = useLibrarySelection((s) => s.toggleMany);
+  const clear = useLibrarySelection((s) => s.clear);
+  const projects = useProjects((s) => s.projects);
+  const favorites = useImages((s) => s.favorites);
+  const toggleFavorite = useImages((s) => s.toggleFavorite);
+  const judgements = useImages((s) => s.judgements);
+  const setJudgement = useImages((s) => s.setJudgement);
+
+  const [query, setQuery] = useState("");
+  const [scope, setScope] = useState<LibraryScope>("all");
+  // 見た目だけの設定なので localStorage で十分。作品メタのお気に入りは
+  // images.ts の favorites.json に保存され、ここには置かない。
   const [tileSize, setTileSize] = useState<number>(() => {
     try {
       const v = Number(localStorage.getItem("library.tileSize"));
@@ -1501,154 +1562,159 @@ function AssetsWorkspace() {
   });
   useEffect(() => {
     try {
-      localStorage.setItem("library.viewMode", viewMode);
-    } catch {
-      /* ignore */
-    }
-  }, [viewMode]);
-  useEffect(() => {
-    try {
       localStorage.setItem("library.tileSize", String(tileSize));
     } catch {
       /* ignore */
     }
   }, [tileSize]);
-  const enterMode = useLibrarySelection((s) => s.enterMode);
-  const exitMode = useLibrarySelection((s) => s.exitMode);
-  const toggle = useLibrarySelection((s) => s.toggle);
-  const selectAll = useLibrarySelection((s) => s.selectAll);
-  const clear = useLibrarySelection((s) => s.clear);
 
-  const favorites = useImages((s) => s.favorites);
-  const toggleFavorite = useImages((s) => s.toggleFavorite);
-  const judgements = useImages((s) => s.judgements);
-  const setJudgement = useImages((s) => s.setJudgement);
+  const projectPathSets = useMemo(
+    () =>
+      new Map(
+        projects.map((project) => [
+          project.id,
+          new Set(project.items.map((item) => item.imagePath)),
+        ]),
+      ),
+    [projects],
+  );
+  const counts = useMemo(
+    () => ({
+      all: items.length,
+      favorites: items.filter((item) => favorites.has(item.path)).length,
+      image: items.filter((item) => galleryItemMediaType(item) === "image").length,
+      video: items.filter((item) => galleryItemMediaType(item) === "video").length,
+    }),
+    [favorites, items],
+  );
+  const projectSummaries = useMemo(
+    () =>
+      projects.map((project) => ({
+        id: project.id,
+        name: project.name,
+        count: new Set(project.items.map((item) => item.imagePath)).size,
+      })),
+    [projects],
+  );
+  const visibleItems = useMemo(() => {
+    const projectId = scope.startsWith("project:") ? scope.slice(8) : null;
+    const projectPaths = projectId ? projectPathSets.get(projectId) : undefined;
+    return items.filter((item) => {
+      if (!matchesLibrarySearch(item, query)) return false;
+      if (scope === "favorites") return favorites.has(item.path);
+      if (scope === "image") return galleryItemMediaType(item) === "image";
+      if (scope === "video") return galleryItemMediaType(item) === "video";
+      if (projectId) return projectPaths?.has(item.path) ?? false;
+      return true;
+    });
+  }, [favorites, items, projectPathSets, query, scope]);
+  const dateGroups = useMemo(
+    () => groupLibraryItemsByDate(visibleItems),
+    [visibleItems],
+  );
+  const heading = useMemo(() => {
+    if (scope === "favorites") return "お気に入り";
+    if (scope === "image") return "画像";
+    if (scope === "video") return "動画";
+    if (scope.startsWith("project:")) {
+      return projects.find((project) => project.id === scope.slice(8))?.name ?? "プロジェクト";
+    }
+    return "画像・動画";
+  }, [projects, scope]);
 
-  const allSelected = items.length > 0 && selected.size === items.length;
+  // 開いていたプロジェクトが別画面で削除されたら、空の死んだ絞り込みを残さない。
+  useEffect(() => {
+    if (!scope.startsWith("project:")) return;
+    if (!projectPathSets.has(scope.slice(8))) setScope("all");
+  }, [projectPathSets, scope]);
+
+  const favoriteSelected = () => {
+    const paths = Array.from(selected);
+    const removeFavorites = paths.every((path) => favorites.has(path));
+    void useImages.getState().setFavorites(paths, !removeFavorites);
+  };
+
   return (
-    <section className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#121212] px-4 py-4">
-      {/* ヘッダーの「ライブラリ」見出しと重複していたので PageIntro を撤去。
-          description はヘッダー側で持つ。 */}
+    <section className="relative flex min-h-0 flex-1 gap-3 overflow-hidden bg-[#121212] px-4 py-4">
+      <LibrarySidebar
+        query={query}
+        onQueryChange={setQuery}
+        scope={scope}
+        onScopeChange={setScope}
+        counts={counts}
+        projects={projectSummaries}
+      />
 
-      {/* ツールバー: 選択モード切替 + ビュー切替 + サイズ調整 + 一括操作 */}
-      <div className="mb-3 flex items-center justify-between gap-3 rounded-lg border border-[#2a2a2a] bg-[#181818] px-3 py-2">
-        <div className="flex items-center gap-3 text-[11px] text-neutral-400">
-          <span>{items.length} 件</span>
-          {selectionMode && (
-            <>
-              <span className="text-neutral-600">/</span>
-              <span className="font-bold text-pink-300">{selected.size} 選択中</span>
-            </>
-          )}
-          {/* ビュー切替 (grid / list) */}
-          <div className="ml-2 flex items-center gap-0.5 rounded-md border border-[#343434] bg-[#0b0b0b] p-0.5">
-            <button
-              type="button"
-              onClick={() => setViewMode("grid")}
-              title="グリッド表示"
-              className={`flex h-6 items-center gap-1 rounded px-2 text-[11px] font-medium transition ${
-                viewMode === "grid" ? "bg-pink-500 text-white" : "text-neutral-400 hover:text-white"
-              }`}
-            >
-              <GridViewIcon />
-              グリッド
-            </button>
-            <button
-              type="button"
-              onClick={() => setViewMode("list")}
-              title="リスト表示"
-              className={`flex h-6 items-center gap-1 rounded px-2 text-[11px] font-medium transition ${
-                viewMode === "list" ? "bg-pink-500 text-white" : "text-neutral-400 hover:text-white"
-              }`}
-            >
-              <ListViewIcon />
-              リスト
-            </button>
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-2xl border border-white/10 bg-white/[0.025] backdrop-blur-xl">
+        <div className="flex shrink-0 items-center justify-between gap-4 border-b border-white/10 px-4 py-3">
+          <div className="min-w-0">
+            <h2 className="truncate text-sm font-black text-white">{heading}</h2>
+            <p className="mt-0.5 text-[10px] text-neutral-500">
+              {visibleItems.length}件{query.trim() ? `・「${query.trim()}」の検索結果` : ""}
+            </p>
           </div>
-          {/* グリッド時のみタイルサイズスライダー */}
-          {viewMode === "grid" && (
-            <div className="flex items-center gap-2">
-              <span className="text-[10px] text-neutral-500">サイズ</span>
-              <input
-                type="range"
-                min={100}
-                max={320}
-                step={20}
-                value={tileSize}
-                onChange={(e) => setTileSize(Number(e.target.value))}
-                className="h-1 w-24 cursor-pointer accent-pink-500"
-              />
-              <span className="w-8 text-[10px] tabular-nums text-neutral-500">{tileSize}</span>
-            </div>
-          )}
+          <label className="flex shrink-0 items-center gap-2 text-[10px] text-neutral-500">
+            <SmallTileIcon />
+            <input
+              type="range"
+              min={100}
+              max={320}
+              step={20}
+              value={tileSize}
+              onChange={(event) => setTileSize(Number(event.target.value))}
+              className="h-1 w-28 cursor-pointer accent-pink-500"
+              aria-label="タイルサイズ"
+            />
+            <LargeTileIcon />
+          </label>
         </div>
-        <div className="flex items-center gap-1.5">
-          {selectionMode ? (
-            <>
-              <button
-                type="button"
-                onClick={() => (allSelected ? clear() : selectAll(items.map((it) => it.path)))}
-                className="h-7 rounded-md border border-[#343434] bg-[#0b0b0b] px-2 text-[11px] font-bold text-neutral-300 hover:border-pink-400 hover:text-white"
-              >
-                {allSelected ? "全解除" : "全選択"}
-              </button>
-              <LibraryAutoRenameButton />
-              <LibraryAddToProjectButton />
-              <LibraryBatchSaveButton />
-              <LibraryDeleteButton />
-              <button
-                type="button"
-                onClick={exitMode}
-                className="h-7 rounded-md border border-[#343434] bg-[#0b0b0b] px-2 text-[11px] font-bold text-neutral-300 hover:border-pink-400 hover:text-white"
-              >
-                選択解除
-              </button>
-            </>
+
+        <div className="flex min-h-0 flex-1 flex-col p-3 pb-16">
+          {visibleItems.length === 0 ? (
+            <DarkEmpty
+              title={items.length === 0 ? "素材がありません" : "条件に合う素材がありません"}
+              description={
+                items.length === 0
+                  ? "画像や動画を生成すると、ここに日付順で並びます。"
+                  : "検索語や左の絞り込みを変えてみてください。"
+              }
+            />
           ) : (
-            <button
-              type="button"
-              onClick={enterMode}
-              className="flex h-7 items-center gap-1.5 rounded-md bg-pink-500 px-3 text-[11px] font-bold text-white hover:bg-pink-400"
-              disabled={items.length === 0}
-            >
-              <CheckSquareIcon />
-              選択モード
-            </button>
+            <VirtualGalleryGrid
+              items={visibleItems}
+              dateGroups={dateGroups}
+              selection={selected}
+              favorites={favorites}
+              judgements={judgements}
+              onSelectClick={(path) => toggle(path)}
+              onToggleSelection={toggle}
+              onToggleDateSelection={toggleMany}
+              onToggleFavorite={(path) => void toggleFavorite(path)}
+              onSetJudgement={(path, value) => void setJudgement(path, value)}
+              variant="library"
+              viewMode="grid"
+              tileSize={tileSize}
+              selectionMode={selectionMode}
+            />
           )}
         </div>
       </div>
 
-      {items.length === 0 ? (
-        <DarkEmpty
-          title="素材がありません"
-          description="画像を生成またはアップロードするとここに並びます。"
-        />
-      ) : (
-        <VirtualGalleryGrid
-          items={items}
-          selection={selected}
-          favorites={favorites}
-          judgements={judgements}
-          onSelectClick={(_path, _mods, item) => {
-            if (selectionMode) {
-              toggle(item.path);
-            } else {
-              addReference({
-                path: item.path,
-                name: item.name,
-                source: "gallery",
-                role: "subject",
-              });
-            }
-          }}
-          onToggleFavorite={(path) => void toggleFavorite(path)}
-          onSetJudgement={(path, value) => void setJudgement(path, value)}
-          variant="library"
-          viewMode={viewMode}
-          tileSize={tileSize}
-          selectionMode={selectionMode}
-        />
-      )}
+      <LibrarySelectionBar count={selected.size} onClear={clear}>
+        <LibraryBatchSaveButton />
+        <LibraryAddToProjectButton />
+        <button
+          type="button"
+          onClick={favoriteSelected}
+          className="flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-pink-400/30 bg-pink-500/10 px-3 text-[11px] font-bold text-pink-200 transition hover:bg-pink-500 hover:text-white"
+        >
+          <FavoriteActionIcon />
+          {Array.from(selected).every((path) => favorites.has(path))
+            ? "お気に入り解除"
+            : "お気に入り"}
+        </button>
+        <LibraryDeleteButton />
+      </LibrarySelectionBar>
     </section>
   );
 }
@@ -1702,8 +1768,8 @@ function LibraryDeleteButton() {
 }
 
 /**
- * ライブラリの選択画像をプロジェクトに一括追加するボタン。
- * 押すとポップオーバーで「既存プロジェクト一覧 / 新規プロジェクト作成」が出る。
+ * ライブラリの選択素材を既存の projects 帰属情報で別プロジェクトへ移動する。
+ * ファイル実体は動かさず、projects.json の所属だけを付け替える。
  */
 function LibraryAddToProjectButton() {
   const selected = useLibrarySelection((s) => s.selected);
@@ -1731,15 +1797,48 @@ function LibraryAddToProjectButton() {
     };
   }, [open]);
 
-  const handleAdd = (projectId: string, projectName: string) => {
-    let added = 0;
+  const handleMove = (projectId: string, projectName: string) => {
+    const snapshot = useProjects.getState().projects;
+    let moved = 0;
     selected.forEach((path) => {
-      const r = addItem(projectId, { imagePath: path });
-      if (r) added += 1;
+      const memberships = snapshot.flatMap((project) =>
+        project.items
+          .filter((item) => item.imagePath === path)
+          .map((item) => ({ projectId: project.id, item })),
+      );
+      const alreadyInTarget = memberships.some(
+        (membership) => membership.projectId === projectId,
+      );
+
+      if (!alreadyInTarget) {
+        const source = memberships[0]?.item;
+        const added = addItem(
+          projectId,
+          source
+            ? {
+                imagePath: path,
+                note: source.note,
+                prompt: source.prompt,
+                sourceSessionId: source.sourceSessionId,
+                generation: source.generation,
+              }
+            : { imagePath: path },
+        );
+        if (!added) return;
+      }
+
+      for (const membership of memberships) {
+        if (membership.projectId !== projectId) {
+          useProjects
+            .getState()
+            .removeItem(membership.projectId, membership.item.id);
+        }
+      }
+      moved += 1;
     });
     pushToast({
       kind: "success",
-      text: `${projectName} に ${added} 件追加しました`,
+      text: `${moved}件を「${projectName}」へ移動しました`,
       ttlMs: 2400,
     });
     exitMode();
@@ -1750,7 +1849,7 @@ function LibraryAddToProjectButton() {
     const name = draftName.trim();
     if (!name) return;
     const created = createProject(name);
-    handleAdd(created.id, created.name);
+    handleMove(created.id, created.name);
     setDraftName("");
   };
 
@@ -1769,16 +1868,16 @@ function LibraryAddToProjectButton() {
               ? "bg-pink-400 text-white"
               : "bg-pink-500 text-white hover:bg-pink-400",
         ].join(" ")}
-        title="選択中の画像をプロジェクトに追加"
+        title="選択中の素材をプロジェクトへ移動"
       >
         <FolderAddIcon />
-        <span className="tabular-nums">{selected.size} 件をプロジェクトへ</span>
+        <span className="tabular-nums">移動</span>
         <CaretDownIcon />
       </button>
       {open && !disabled && (
-        <div className="absolute right-0 top-full z-40 mt-1 w-72 rounded-lg border border-[#2a2a2a] bg-[#161616] shadow-2xl">
+        <div className="absolute bottom-full right-0 z-40 mb-2 w-72 rounded-lg border border-[#2a2a2a] bg-[#161616] shadow-2xl">
           <div className="border-b border-[#242424] px-3 py-2 text-[10px] font-bold uppercase tracking-wide text-neutral-500">
-            既存プロジェクトに追加
+            移動先のプロジェクト
           </div>
           <div className="max-h-48 overflow-y-auto py-1">
             {projects.length === 0 ? (
@@ -1790,7 +1889,7 @@ function LibraryAddToProjectButton() {
                 <button
                   key={project.id}
                   type="button"
-                  onClick={() => handleAdd(project.id, project.name)}
+                  onClick={() => handleMove(project.id, project.name)}
                   className="flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-xs text-neutral-200 hover:bg-[#1f1f1f]"
                 >
                   <span className="truncate">{project.name}</span>
@@ -1803,7 +1902,7 @@ function LibraryAddToProjectButton() {
           </div>
           <div className="border-t border-[#242424] p-2">
             <div className="mb-1 px-1 text-[10px] font-bold uppercase tracking-wide text-neutral-500">
-              新規プロジェクトに追加
+              新しい移動先を作成
             </div>
             <div className="flex gap-1">
               <input
@@ -1829,7 +1928,7 @@ function LibraryAddToProjectButton() {
                 disabled={!draftName.trim()}
                 className="h-7 rounded-md bg-pink-500 px-2 text-[11px] font-bold text-white hover:bg-pink-400 disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-500"
               >
-                作成して追加
+                作成して移動
               </button>
             </div>
           </div>
@@ -2829,6 +2928,33 @@ const APP_SVG = {
   strokeLinejoin: "round" as const,
 };
 
+function SmallTileIcon() {
+  return (
+    <svg {...APP_SVG} width={13} height={13} aria-hidden>
+      <rect x="4" y="4" width="6" height="6" rx="1" />
+      <rect x="14" y="4" width="6" height="6" rx="1" />
+      <rect x="4" y="14" width="6" height="6" rx="1" />
+      <rect x="14" y="14" width="6" height="6" rx="1" />
+    </svg>
+  );
+}
+
+function LargeTileIcon() {
+  return (
+    <svg {...APP_SVG} width={15} height={15} aria-hidden>
+      <rect x="3" y="3" width="18" height="18" rx="3" />
+    </svg>
+  );
+}
+
+function FavoriteActionIcon() {
+  return (
+    <svg {...APP_SVG} width={12} height={12} aria-hidden>
+      <path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1.1-1.1a5.5 5.5 0 0 0-7.8 7.8L12 21l8.8-8.6a5.5 5.5 0 0 0 0-7.8Z" />
+    </svg>
+  );
+}
+
 /** クラウド (Supabase 使用量ラベル)。 */
 function CloudIcon() {
   return (
@@ -2853,37 +2979,6 @@ function BoltIcon() {
   return (
     <svg {...APP_SVG} width={11} height={11} className="shrink-0" aria-hidden>
       <path d="M13 2L4.5 13.5H11l-1 8.5L19.5 10H13z" />
-    </svg>
-  );
-}
-
-/** グリッド表示。 */
-function GridViewIcon() {
-  return (
-    <svg {...APP_SVG} width={12} height={12} strokeWidth={1.8} className="shrink-0" aria-hidden>
-      <rect x="3" y="3" width="7.5" height="7.5" rx="1" />
-      <rect x="13.5" y="3" width="7.5" height="7.5" rx="1" />
-      <rect x="3" y="13.5" width="7.5" height="7.5" rx="1" />
-      <rect x="13.5" y="13.5" width="7.5" height="7.5" rx="1" />
-    </svg>
-  );
-}
-
-/** リスト表示。 */
-function ListViewIcon() {
-  return (
-    <svg {...APP_SVG} width={12} height={12} className="shrink-0" aria-hidden>
-      <path d="M4 6h16M4 12h16M4 18h16" />
-    </svg>
-  );
-}
-
-/** チェック済みの四角 (選択モード開始)。 */
-function CheckSquareIcon() {
-  return (
-    <svg {...APP_SVG} width={12} height={12} strokeWidth={1.8} className="shrink-0" aria-hidden>
-      <rect x="3.5" y="3.5" width="17" height="17" rx="2" />
-      <path d="M7.5 12.2l3 3 6-6.4" />
     </svg>
   );
 }
