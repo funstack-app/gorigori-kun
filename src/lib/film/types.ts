@@ -1,5 +1,12 @@
 export type FilmPhase = 1 | 2 | 3 | 4 | 5 | 6;
 
+export type FilmChatMessage = {
+  id: string;
+  role: "assistant" | "user";
+  text: string;
+  createdAt: string;
+};
+
 export type FilmApproval = { approvedAt: string } | null;
 
 export type FilmApprovals = {
@@ -159,4 +166,10 @@ export type FilmProject = {
   /** AI生成ルックを選んだ場合に、Style Prefix起草へ渡す設計文。 */
   lookMasterDescription?: string;
   takes: FilmTake[];
+  /** 企画から脚本までのAIアドバイザーとの会話。旧データでは未設定。 */
+  chatMessages?: FilmChatMessage[];
+  /** 「YouTube横長」など、専門用語を使わず会話で確定した投稿先。 */
+  postingTarget?: string;
+  /** 一覧の更新日表示に使う。旧データでは未設定。 */
+  updatedAt?: string;
 };

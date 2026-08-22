@@ -88,6 +88,9 @@ export function FilmPhaseRail({
       aria-label="フィルム制作工程"
       className="flex h-full w-52 shrink-0 flex-col gap-2 border-r border-[#242424] bg-[#161616] px-3 py-4"
     >
+      <p className="px-2 pb-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-zinc-600">
+        進み具合
+      </p>
       {PHASES.map((item) => {
         const active = phase === item.id;
         const enabled = isEnabled(item.id);

@@ -11,6 +11,7 @@ import type {
   AssetLedgerEntry,
   AssetType,
   FilmBlock,
+  FilmChatMessage,
   ForeshadowEntry,
   FilmPhase,
   FilmProject,
@@ -21,6 +22,10 @@ import type {
 export type FilmProjectsFileData = {
   version: 1;
   projects: FilmProject[];
+  /** premise確定前の会話も、モードを閉じた後に再開するための退避欄。 */
+  planningChatMessages?: FilmChatMessage[];
+  /** 保存済み企画ではなく、premise確定前の相談を表示していた印。 */
+  planningActive?: true;
 };
 
 export type FilmProjectsFileState = "ok" | "missing" | "corrupted" | "unreadable";
@@ -38,13 +43,29 @@ export type FilmScriptSettings = {
   characterNames: string[];
 };
 
+export type CreateFilmProjectOptions = {
+  chatMessages?: FilmChatMessage[];
+  postingTarget?: string;
+  scriptSettings?: FilmScriptSettings;
+  startInScript?: boolean;
+};
+
 type FilmProjectState = {
   projects: FilmProject[];
   activeProjectId: string | null;
+  planningChatMessages: FilmChatMessage[];
   filmProjectsFileState: FilmProjectsFileState;
   initialize: () => Promise<void>;
-  createProject: (title: string, theme: string, videoServiceId: string) => FilmProject;
+  createProject: (
+    title: string,
+    theme: string,
+    videoServiceId: string,
+    options?: CreateFilmProjectOptions,
+  ) => FilmProject;
   setActiveProjectId: (projectId: string | null) => void;
+  appendPlanningChatMessage: (message: FilmChatMessage) => void;
+  resetPlanningChat: (messages?: FilmChatMessage[]) => void;
+  appendChatMessage: (message: FilmChatMessage) => void;
   setPhase: (phase: FilmPhase) => void;
   saveScriptSettings: (settings: FilmScriptSettings) => void;
   saveLogline: (logline: string) => void;
@@ -89,6 +110,24 @@ function emptyScript(): FilmScript {
   };
 }
 
+function normalizeChatMessages(value: unknown): FilmChatMessage[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((message): message is FilmChatMessage => {
+    if (!message || typeof message !== "object") return false;
+    const candidate = message as Partial<FilmChatMessage>;
+    return (
+      typeof candidate.id === "string" &&
+      (candidate.role === "assistant" || candidate.role === "user") &&
+      typeof candidate.text === "string" &&
+      typeof candidate.createdAt === "string"
+    );
+  });
+}
+
+function touchProject(project: FilmProject): FilmProject {
+  return { ...project, updatedAt: new Date().toISOString() };
+}
+
 function scriptOf(project: FilmProject): FilmScript {
   return Array.isArray(project.script) ? emptyScript() : project.script;
 }
@@ -111,6 +150,7 @@ export function normalizeFilmProject(project: StoredFilmProject): FilmProject {
   const { service: legacyService, ...currentProject } = project;
   const videoServiceId =
     project.videoServiceId?.trim() || legacyService?.trim() || DEFAULT_VIDEO_SERVICE_ID;
+  const chatMessages = normalizeChatMessages(project.chatMessages);
   return {
     ...currentProject,
     assetServiceId: "gpt-image-2",
@@ -135,6 +175,10 @@ export function normalizeFilmProject(project: StoredFilmProject): FilmProject {
     stylePrefix: project.stylePrefix ?? "",
     lookMasterPath: project.lookMasterPath ?? null,
     lookMasterDescription: project.lookMasterDescription ?? "",
+    chatMessages,
+    postingTarget: project.postingTarget ?? "",
+    updatedAt:
+      project.updatedAt ?? chatMessages[chatMessages.length - 1]?.createdAt,
   };
 }
 
@@ -231,19 +275,48 @@ async function showFileErrorToast(reason: string): Promise<void> {
   }
 }
 
-function persistProjects(projects: FilmProject[], allowEmpty = false): void {
+function makeFileData(
+  projects: FilmProject[],
+  planningChatMessages: FilmChatMessage[],
+  planningActive = false,
+): FilmProjectsFileData {
+  if (planningChatMessages.length === 0) return { version: 1, projects };
+  return {
+    version: 1,
+    projects,
+    planningChatMessages,
+    ...(planningActive ? { planningActive: true as const } : {}),
+  };
+}
+
+function persistProjects(
+  projects: FilmProject[],
+  planningChatMessages: FilmChatMessage[] = [],
+  allowEmpty = false,
+  planningActive = false,
+): void {
   if (!fileWriteUnlocked) {
     pendingBeforeUnlock = true;
     return;
   }
-  void writeToFile({ version: 1, projects }, allowEmpty);
+  void writeToFile(
+    makeFileData(projects, planningChatMessages, planningActive),
+    allowEmpty,
+  );
 }
 
-function unlockFileWrite(projects: FilmProject[]): void {
+function unlockFileWrite(
+  projects: FilmProject[],
+  planningChatMessages: FilmChatMessage[],
+  planningActive: boolean,
+): void {
   fileWriteUnlocked = true;
   if (!pendingBeforeUnlock) return;
   pendingBeforeUnlock = false;
-  void writeToFile({ version: 1, projects });
+  void writeToFile(
+    makeFileData(projects, planningChatMessages, planningActive),
+    projects.length === 0,
+  );
 }
 
 function generateProjectId(): string {
@@ -253,7 +326,12 @@ function generateProjectId(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function makeProject(title: string, theme: string, videoServiceId: string): FilmProject {
+function makeProject(
+  title: string,
+  theme: string,
+  videoServiceId: string,
+  options: CreateFilmProjectOptions = {},
+): FilmProject {
   const trimmedTitle = title.trim();
   const trimmedTheme = theme.trim();
   const trimmedVideoServiceId = videoServiceId.trim();
@@ -261,6 +339,16 @@ function makeProject(title: string, theme: string, videoServiceId: string): Film
     throw new Error("タイトル・伝えたいこと・生成サービスは必須です");
   }
 
+  const now = new Date().toISOString();
+  const settings = options.scriptSettings;
+  const initialScript: [] | FilmScript = settings
+    ? {
+        ...emptyScript(),
+        targetDurationSeconds: Math.max(1, Math.round(settings.targetDurationSeconds)),
+        topicMemo: settings.topicMemo.trim(),
+        characterNames: settings.characterNames.map((name) => name.trim()).filter(Boolean),
+      }
+    : [];
   return {
     id: generateProjectId(),
     title: trimmedTitle,
@@ -268,7 +356,7 @@ function makeProject(title: string, theme: string, videoServiceId: string): Film
     mode: "film",
     assetServiceId: "gpt-image-2",
     videoServiceId: trimmedVideoServiceId,
-    phase: 1,
+    phase: options.startInScript ? 2 : 1,
     approvals: {
       logline: null,
       beatsheet: null,
@@ -277,13 +365,16 @@ function makeProject(title: string, theme: string, videoServiceId: string): Film
       blocks: null,
       look: null,
     },
-    script: [],
+    script: initialScript,
     assets: [],
     foreshadow: [],
     stylePrefix: "",
     lookMasterPath: null,
     lookMasterDescription: "",
     takes: [],
+    chatMessages: options.chatMessages ?? [],
+    postingTarget: options.postingTarget?.trim() ?? "",
+    updatedAt: now,
   };
 }
 
@@ -341,19 +432,30 @@ async function readFilmProjectsFileIntoStore(
     if (pendingBeforeUnlock) return true;
 
     const projects = (parsed.projects as StoredFilmProject[]).map(normalizeFilmProject);
+    const planningChatMessages = normalizeChatMessages(parsed.planningChatMessages);
     const currentActiveId = get().activeProjectId;
-    const activeProjectId = projects.some((project) => project.id === currentActiveId)
-      ? currentActiveId
-      : (projects[0]?.id ?? null);
-    set({ projects, activeProjectId });
+    const activeProjectId = parsed.planningActive && planningChatMessages.length > 0
+      ? null
+      : projects.some((project) => project.id === currentActiveId)
+        ? currentActiveId
+        : (projects[0]?.id ?? null);
+    set({ projects, activeProjectId, planningChatMessages });
     return true;
   }
 
   if (!isCurrent()) return false;
   set({ filmProjectsFileState: "missing" });
   const projects = get().projects;
-  if (projects.length > 0) {
-    const ok = await writeToFile({ version: 1, projects });
+  const planningChatMessages = get().planningChatMessages;
+  if (projects.length > 0 || planningChatMessages.length > 0) {
+    const ok = await writeToFile(
+      makeFileData(
+        projects,
+        planningChatMessages,
+        get().activeProjectId === null,
+      ),
+      projects.length === 0,
+    );
     if (!ok) return false;
   }
   return true;
@@ -362,6 +464,7 @@ async function readFilmProjectsFileIntoStore(
 export const useFilmProjectStore = create<FilmProjectState>((set, get) => ({
   projects: [],
   activeProjectId: null,
+  planningChatMessages: [],
   filmProjectsFileState: "missing",
 
   initialize: async () => {
@@ -374,14 +477,23 @@ export const useFilmProjectStore = create<FilmProjectState>((set, get) => ({
     );
     if (myToken !== initializeToken) return;
     fileReadDecided = true;
-    if (readable) unlockFileWrite(get().projects);
+    if (readable) {
+      unlockFileWrite(
+        get().projects,
+        get().planningChatMessages,
+        get().activeProjectId === null,
+      );
+    }
   },
 
-  createProject: (title, theme, videoServiceId) => {
-    const project = makeProject(title, theme, videoServiceId);
+  createProject: (title, theme, videoServiceId, options) => {
+    const project = makeProject(title, theme, videoServiceId, options);
     const projects = [...get().projects, project];
-    persistProjects(projects);
-    set({ projects, activeProjectId: project.id });
+    const planningChatMessages = options?.chatMessages
+      ? []
+      : get().planningChatMessages;
+    persistProjects(projects, planningChatMessages);
+    set({ projects, activeProjectId: project.id, planningChatMessages });
     return project;
   },
 
@@ -389,7 +501,53 @@ export const useFilmProjectStore = create<FilmProjectState>((set, get) => ({
     if (projectId !== null && !get().projects.some((project) => project.id === projectId)) {
       return;
     }
+    persistProjects(
+      get().projects,
+      get().planningChatMessages,
+      get().projects.length === 0,
+      projectId === null && get().planningChatMessages.length > 0,
+    );
     set({ activeProjectId: projectId });
+  },
+
+  appendPlanningChatMessage: (message) => {
+    const planningChatMessages = [...get().planningChatMessages, message];
+    persistProjects(
+      get().projects,
+      planningChatMessages,
+      get().projects.length === 0,
+      get().activeProjectId === null,
+    );
+    set({ planningChatMessages });
+  },
+
+  resetPlanningChat: (messages = []) => {
+    const planningChatMessages = normalizeChatMessages(messages);
+    persistProjects(
+      get().projects,
+      planningChatMessages,
+      get().projects.length === 0,
+      get().activeProjectId === null,
+    );
+    set({ planningChatMessages });
+  },
+
+  appendChatMessage: (message) => {
+    const activeProjectId = get().activeProjectId;
+    if (!activeProjectId) return;
+    let changed = false;
+    const projects = get().projects.map((sourceProject) => {
+      if (sourceProject.id !== activeProjectId) return sourceProject;
+      changed = true;
+      const project = normalizeFilmProject(sourceProject);
+      return touchProject({
+        ...project,
+        chatMessages: [...(project.chatMessages ?? []), message],
+      });
+    });
+    if (!changed) return;
+    persistProjects(projects, get().planningChatMessages);
+    set({ projects });
   },
 
   setPhase: (phase) => {
@@ -400,10 +558,10 @@ export const useFilmProjectStore = create<FilmProjectState>((set, get) => ({
     const projects = get().projects.map((project) => {
       if (project.id !== activeProjectId || project.phase === phase) return project;
       changed = true;
-      return { ...project, phase };
+      return touchProject({ ...project, phase });
     });
     if (!changed) return;
-    persistProjects(projects);
+    persistProjects(projects, get().planningChatMessages);
     set({ projects });
   },
 
@@ -428,7 +586,7 @@ export const useFilmProjectStore = create<FilmProjectState>((set, get) => ({
         : targetChanged
           ? "beatsheet"
           : "treatment";
-      return {
+      return touchProject({
         ...project,
         approvals: invalidateApprovalsFrom(project, earliestStage),
         script: {
@@ -437,10 +595,10 @@ export const useFilmProjectStore = create<FilmProjectState>((set, get) => ({
           topicMemo,
           characterNames,
         },
-      };
+      });
     });
     if (!changed) return;
-    persistProjects(projects);
+    persistProjects(projects, get().planningChatMessages);
     set({ projects });
   },
 
@@ -502,16 +660,16 @@ export const useFilmProjectStore = create<FilmProjectState>((set, get) => ({
               : Boolean(script.blockScriptText?.trim()) && script.blocks.length > 0;
       if (!hasContent) return sourceProject;
       approved = true;
-      return {
+      return touchProject({
         ...project,
         approvals: {
           ...project.approvals,
           [stage]: { approvedAt: new Date().toISOString() },
         },
-      };
+      });
     });
     if (!approved) return false;
-    persistProjects(projects);
+    persistProjects(projects, get().planningChatMessages);
     set({ projects });
     return true;
   },
@@ -551,10 +709,10 @@ export const useFilmProjectStore = create<FilmProjectState>((set, get) => ({
       const project = normalizeFilmProject(sourceProject);
       if (!getAssetFactoryGateState(project.assets).canProceed) return sourceProject;
       completed = true;
-      return { ...project, phase: 5 as const };
+      return touchProject({ ...project, phase: 5 as const });
     });
     if (!completed) return false;
-    persistProjects(projects);
+    persistProjects(projects, get().planningChatMessages);
     set({ projects });
     return true;
   },
@@ -602,17 +760,17 @@ export const useFilmProjectStore = create<FilmProjectState>((set, get) => ({
         return sourceProject;
       }
       approved = true;
-      return {
+      return touchProject({
         ...project,
         phase: 4 as const,
         approvals: {
           ...project.approvals,
           look: { approvedAt: new Date().toISOString() },
         },
-      };
+      });
     });
     if (!approved) return false;
-    persistProjects(projects);
+    persistProjects(projects, get().planningChatMessages);
     set({ projects });
     return true;
   },
@@ -632,13 +790,13 @@ function updateActiveDesign(
     const nextProject = update(project);
     if (JSON.stringify(project) === JSON.stringify(nextProject)) return sourceProject;
     changed = true;
-    return {
+    return touchProject({
       ...nextProject,
       approvals: { ...nextProject.approvals, look: null },
-    };
+    });
   });
   if (!changed) return;
-  persistProjects(projects);
+  persistProjects(projects, get().planningChatMessages);
   set({ projects });
 }
 
@@ -657,10 +815,10 @@ function updateActiveFactory(
     const nextProject = update(project);
     if (JSON.stringify(project) === JSON.stringify(nextProject)) return sourceProject;
     changed = true;
-    return nextProject;
+    return touchProject(nextProject);
   });
   if (!changed) return;
-  persistProjects(projects);
+  persistProjects(projects, get().planningChatMessages);
   set({ projects });
 }
 
@@ -680,14 +838,14 @@ function updateActiveScript(
     const nextScript = update(currentScript);
     if (JSON.stringify(currentScript) === JSON.stringify(nextScript)) return sourceProject;
     changed = true;
-    return {
+    return touchProject({
       ...project,
       approvals: invalidateApprovalsFrom(project, stage),
       script: nextScript,
-    };
+    });
   });
   if (!changed) return;
-  persistProjects(projects);
+  persistProjects(projects, get().planningChatMessages);
   set({ projects });
 }
 

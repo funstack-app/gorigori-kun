@@ -143,7 +143,7 @@ function parseFailureMessage(failure: ScriptParseFailure): string {
   return `${failure.error.line}行目: ${failure.error.reason}`;
 }
 
-function ProgressCard({
+export function ProgressCard({
   label,
   progress,
   onCancel,
@@ -181,7 +181,7 @@ function ProgressCard({
   );
 }
 
-function IssueList({ issues }: { issues: ScriptCheckIssue[] }) {
+export function IssueList({ issues }: { issues: ScriptCheckIssue[] }) {
   if (issues.length === 0) return null;
   return (
     <div className="mt-4 rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3">

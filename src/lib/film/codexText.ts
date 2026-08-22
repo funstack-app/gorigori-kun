@@ -17,7 +17,8 @@ export type FilmTextTurnLabel =
   | "アセット台帳"
   | "アセットプロンプト"
   | "ルック提案"
-  | "Style Prefix";
+  | "Style Prefix"
+  | "フィルム相談";
 
 export type FilmTextTurnProgress = {
   phase: "waiting" | "streaming" | "stalled";

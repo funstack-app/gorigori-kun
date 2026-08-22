@@ -1,0 +1,701 @@
+import { useEffect, useMemo, useRef, useState } from "react";
+
+import {
+  createFilmChatMessage,
+  FilmTextTurnAbortedError,
+  FilmTextTurnTimeoutError,
+  INITIAL_FILM_ADVISOR_MESSAGE,
+  projectResumeMessage,
+  runFilmAdvisorTurn,
+} from "../../../lib/film/advisor";
+import {
+  parseAdvisorResponse,
+  type AdvisorArtifact,
+  type AdvisorArtifactType,
+} from "../../../lib/film/advisorParse";
+import {
+  detectCharacterNameVariations,
+  parseBlockScript,
+  parseSceneList,
+  validateBeatsheetDuration,
+  validateBlockScript,
+  validateSceneDuration,
+  type ScriptCheckIssue,
+} from "../../../lib/film/scriptParse";
+import {
+  DEFAULT_VIDEO_SERVICE_ID,
+  findVideoServiceProfile,
+  VIDEO_SERVICE_PROFILES,
+} from "../../../lib/film/serviceProfiles";
+import type { FilmProject, FilmScript } from "../../../lib/film/types";
+import {
+  useFilmProjectStore,
+  type FilmScriptApprovalStage,
+} from "../../../lib/store/filmProject";
+import { useToasts } from "../../../lib/store/toasts";
+import { IssueList, ProgressCard } from "./ScriptPhasePanel";
+
+const ARTIFACT_LABELS: Record<AdvisorArtifactType, string> = {
+  premise: "企画の確定値",
+  logline: "ログライン＝一文のあらすじ",
+  beatsheet: "ビートシート＝物語の拍",
+  treatment: "トリートメント＝最初から最後までの物語",
+  scenelist: "シーンリスト＝場面一覧",
+  blocks: "ブロック脚本＝動画生成1回ごとの脚本",
+};
+
+const STAGE_BY_ARTIFACT: Partial<Record<AdvisorArtifactType, FilmScriptApprovalStage>> = {
+  logline: "logline",
+  beatsheet: "beatsheet",
+  treatment: "treatment",
+  scenelist: "scenelist",
+  blocks: "blocks",
+};
+
+function scriptOf(project: FilmProject): FilmScript {
+  return Array.isArray(project.script)
+    ? {
+        logline: "",
+        beatsheet: "",
+        treatment: "",
+        scenes: [],
+        blocks: [],
+        scenelistText: "",
+        blockScriptText: "",
+        targetDurationSeconds: 90,
+        topicMemo: "",
+        characterNames: [],
+      }
+    : project.script;
+}
+
+function fieldValue(
+  fields: Record<string, string>,
+  aliases: string[],
+): string | undefined {
+  for (const alias of aliases) {
+    const entry = Object.entries(fields).find(([key]) => key.replace(/\s+/gu, "") === alias);
+    if (entry?.[1]?.trim()) return entry[1].trim();
+  }
+  return undefined;
+}
+
+function splitNames(value: string | undefined): string[] {
+  if (!value || /^(なし|無し|いない)$/u.test(value.trim())) return [];
+  return value
+    .split(/[、,／/]/u)
+    .map((name) => name.trim())
+    .filter(Boolean)
+    .filter((name, index, names) => names.indexOf(name) === index);
+}
+
+function resolveServiceId(value: string | undefined): string | null {
+  if (!value) return null;
+  const normalized = value.trim().toLowerCase();
+  const profile = VIDEO_SERVICE_PROFILES.find(
+    (candidate) =>
+      candidate.id.toLowerCase() === normalized ||
+      candidate.label.toLowerCase() === normalized,
+  );
+  return profile?.id ?? null;
+}
+
+type PremiseDraft = {
+  title: string;
+  theme: string;
+  targetDurationSeconds: number;
+  characterNames: string[];
+  topicMemo: string;
+  postingTarget: string;
+  videoServiceId: string;
+};
+
+function readPremise(artifact: AdvisorArtifact): {
+  value: PremiseDraft | null;
+  missing: string[];
+} {
+  const fields = artifact.premiseFields ?? {};
+  const title = fieldValue(fields, ["タイトル", "作品タイトル"]);
+  const theme = fieldValue(fields, ["伝えたいこと", "一番伝えたいこと", "テーマ"]);
+  const durationText = fieldValue(fields, ["目標尺", "目標尺（秒）", "目標の長さ"]);
+  const durationMatch = durationText?.match(/\d+/u);
+  const targetDurationSeconds = durationMatch ? Number(durationMatch[0]) : 0;
+  const characterText = fieldValue(fields, ["登場人物", "人物"]);
+  const topicMemo = fieldValue(fields, ["題材", "題材メモ"]);
+  const postingTarget = fieldValue(fields, ["投稿先", "公開先"]);
+  const serviceText = fieldValue(fields, ["動画サービス", "生成サービス"]);
+  const videoServiceId = resolveServiceId(serviceText);
+  const missing = [
+    !title ? "タイトル" : "",
+    !theme ? "伝えたいこと" : "",
+    !(targetDurationSeconds >= 1 && targetDurationSeconds <= 3600) ? "目標尺（1〜3600秒）" : "",
+    characterText === undefined ? "登場人物（いなければ「なし」）" : "",
+    topicMemo === undefined ? "題材（なければ「なし」）" : "",
+    !postingTarget ? "投稿先" : "",
+    !videoServiceId ? "対応する動画サービス" : "",
+  ].filter(Boolean);
+  if (missing.length > 0 || !title || !theme || !postingTarget || !videoServiceId) {
+    return { value: null, missing };
+  }
+  return {
+    value: {
+      title,
+      theme,
+      targetDurationSeconds,
+      characterNames: splitNames(characterText),
+      topicMemo: /^(なし|無し)$/u.test(topicMemo ?? "") ? "" : (topicMemo ?? ""),
+      postingTarget,
+      videoServiceId,
+    },
+    missing: [],
+  };
+}
+
+function artifactReview(
+  artifact: AdvisorArtifact,
+  project: FilmProject | null,
+): { parseError: string | null; issues: ScriptCheckIssue[] } {
+  if (!project || artifact.type === "premise" || artifact.type === "logline") {
+    return { parseError: null, issues: [] };
+  }
+  const script = scriptOf(project);
+  const targetDurationSeconds = script.targetDurationSeconds ?? 90;
+  const characterNames = script.characterNames ?? [];
+  if (artifact.type === "beatsheet") {
+    return {
+      parseError: null,
+      issues: validateBeatsheetDuration(artifact.content, targetDurationSeconds),
+    };
+  }
+  if (artifact.type === "treatment") {
+    return {
+      parseError: null,
+      issues: detectCharacterNameVariations(artifact.content, characterNames),
+    };
+  }
+  if (artifact.type === "scenelist") {
+    const parsed = parseSceneList(artifact.content);
+    if (!parsed.ok) {
+      return {
+        parseError: `${parsed.error.line}行目: ${parsed.error.reason}`,
+        issues: [],
+      };
+    }
+    return {
+      parseError: null,
+      issues: [
+        ...validateSceneDuration(parsed.value, targetDurationSeconds),
+        ...detectCharacterNameVariations(artifact.content, characterNames),
+      ],
+    };
+  }
+  const parsed = parseBlockScript(artifact.content);
+  if (!parsed.ok) {
+    return {
+      parseError: `${parsed.error.line}行目: ${parsed.error.reason}`,
+      issues: [],
+    };
+  }
+  const profile = findVideoServiceProfile(project.videoServiceId);
+  const serviceMaxSeconds = profile?.maxBlockSeconds ?? 15;
+  const issues = validateBlockScript(
+    artifact.content,
+    parsed.value.blocks,
+    serviceMaxSeconds,
+  );
+  if (profile?.maxBlockSeconds === null) {
+    issues.unshift({
+      code: "block-duration-limit",
+      severity: "warning",
+      message: `${profile.label}は未実測のため、仮の上限15秒で検算しています。`,
+    });
+  }
+  return { parseError: null, issues };
+}
+
+function savedArtifactText(
+  type: AdvisorArtifactType,
+  project: FilmProject,
+): string {
+  const script = scriptOf(project);
+  switch (type) {
+    case "logline":
+      return script.logline;
+    case "beatsheet":
+      return script.beatsheet;
+    case "treatment":
+      return script.treatment;
+    case "scenelist":
+      return script.scenelistText ?? "";
+    case "blocks":
+      return script.blockScriptText ?? "";
+    case "premise":
+      return "";
+  }
+}
+
+function ArtifactCard({
+  artifact,
+  project,
+  busy,
+  onApprove,
+  onRevise,
+}: {
+  artifact: AdvisorArtifact;
+  project: FilmProject | null;
+  busy: boolean;
+  onApprove: () => void;
+  onRevise: () => void;
+}) {
+  const premise = artifact.type === "premise" ? readPremise(artifact) : null;
+  const review = artifactReview(artifact, project);
+  const stage = STAGE_BY_ARTIFACT[artifact.type];
+  const approved = Boolean(
+    project &&
+      stage &&
+      project.approvals[stage] &&
+      savedArtifactText(artifact.type, project).trim() === artifact.content.trim(),
+  );
+  const premiseLocked = artifact.type === "premise" && Boolean(project);
+  const blocked =
+    Boolean(review.parseError) ||
+    review.issues.some((issue) => issue.severity === "blocking") ||
+    Boolean(premise && premise.missing.length > 0);
+
+  return (
+    <section className="mt-3 overflow-hidden rounded-lg border border-pink-500/30 bg-[#151515]">
+      <header className="flex items-center justify-between gap-3 border-b border-[#2b2b2b] bg-pink-500/5 px-4 py-2.5">
+        <div>
+          <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-pink-400">
+            成果物
+          </p>
+          <h3 className="mt-0.5 text-xs font-semibold text-zinc-200">
+            {ARTIFACT_LABELS[artifact.type]}
+          </h3>
+        </div>
+        {approved || premiseLocked ? (
+          <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 text-[10px] font-semibold text-emerald-300">
+            {premiseLocked ? "企画を固定しました" : "承認済み"}
+          </span>
+        ) : null}
+      </header>
+
+      {artifact.type === "premise" && artifact.premiseFields ? (
+        <dl className="grid gap-2 px-4 py-4 text-xs">
+          {Object.entries(artifact.premiseFields).map(([key, value]) => (
+            <div key={key} className="grid grid-cols-[8rem_1fr] gap-3">
+              <dt className="text-zinc-500">{key}</dt>
+              <dd className="text-zinc-200">{value}</dd>
+            </div>
+          ))}
+        </dl>
+      ) : (
+        <div className="max-h-80 overflow-y-auto whitespace-pre-wrap px-4 py-4 font-mono text-xs leading-6 text-zinc-200">
+          {artifact.content}
+        </div>
+      )}
+
+      {premise && premise.missing.length > 0 ? (
+        <div className="mx-4 mb-4 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+          確定値が足りません: {premise.missing.join("、")}
+        </div>
+      ) : null}
+      {review.parseError ? (
+        <div className="mx-4 mb-4 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs leading-5 text-amber-200">
+          書式を読み取れません（{review.parseError}）。原文は残しています。
+        </div>
+      ) : null}
+      <div className="px-4 pb-1">
+        <IssueList issues={review.issues} />
+      </div>
+
+      {!approved && !premiseLocked ? (
+        <footer className="flex flex-wrap gap-2 border-t border-[#2b2b2b] px-4 py-3">
+          <button
+            type="button"
+            onClick={onApprove}
+            disabled={busy || blocked || artifact.type === "premise"}
+            className="rounded-md bg-pink-500 px-3 py-2 text-xs font-semibold text-white transition hover:bg-pink-400 disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-400"
+          >
+            これでOK
+          </button>
+          <button
+            type="button"
+            onClick={onRevise}
+            disabled={busy}
+            className="rounded-md border border-[#3a3a3a] px-3 py-2 text-xs font-semibold text-zinc-300 transition hover:border-pink-500/40 hover:text-pink-200 disabled:opacity-40"
+          >
+            一言で直す
+          </button>
+        </footer>
+      ) : null}
+    </section>
+  );
+}
+
+export function FilmChatPanel({ project }: { project: FilmProject | null }) {
+  const planningChatMessages = useFilmProjectStore((state) => state.planningChatMessages);
+  const appendPlanningChatMessage = useFilmProjectStore((state) => state.appendPlanningChatMessage);
+  const appendChatMessage = useFilmProjectStore((state) => state.appendChatMessage);
+  const createProject = useFilmProjectStore((state) => state.createProject);
+  const saveLogline = useFilmProjectStore((state) => state.saveLogline);
+  const saveBeatsheet = useFilmProjectStore((state) => state.saveBeatsheet);
+  const saveTreatment = useFilmProjectStore((state) => state.saveTreatment);
+  const saveScenelist = useFilmProjectStore((state) => state.saveScenelist);
+  const saveBlocks = useFilmProjectStore((state) => state.saveBlocks);
+  const approveStage = useFilmProjectStore((state) => state.approveStage);
+  const pushToast = useToasts((state) => state.push);
+
+  const messages = project ? (project.chatMessages ?? []) : planningChatMessages;
+  const [draft, setDraft] = useState("");
+  const [sending, setSending] = useState(false);
+  const [revisionTarget, setRevisionTarget] = useState<AdvisorArtifactType | null>(null);
+  const [progress, setProgress] = useState<Parameters<typeof ProgressCard>[0]["progress"]>();
+  const abortRef = useRef<AbortController | null>(null);
+  const runTokenRef = useRef(0);
+  const scrollerRef = useRef<HTMLDivElement | null>(null);
+  const inputRef = useRef<HTMLTextAreaElement | null>(null);
+
+  useEffect(() => {
+    if (messages.length > 0) return;
+    const first = createFilmChatMessage(
+      "assistant",
+      project ? projectResumeMessage(project) : INITIAL_FILM_ADVISOR_MESSAGE,
+    );
+    if (project) appendChatMessage(first);
+    else appendPlanningChatMessage(first);
+  }, [appendChatMessage, appendPlanningChatMessage, messages.length, project]);
+
+  useEffect(() => {
+    const element = scrollerRef.current;
+    if (element) element.scrollTop = element.scrollHeight;
+  }, [messages.length, sending]);
+
+  useEffect(() => {
+    setDraft("");
+    setRevisionTarget(null);
+    runTokenRef.current += 1;
+    abortRef.current?.abort();
+    abortRef.current = null;
+    setSending(false);
+    setProgress(undefined);
+  }, [project?.id]);
+
+  useEffect(() => () => {
+    runTokenRef.current += 1;
+    abortRef.current?.abort();
+  }, []);
+
+  async function requestTurn(
+    text: string,
+    revisionOverride: AdvisorArtifactType | null = revisionTarget,
+  ) {
+    const userText = text.trim();
+    if (!userText || sending) return;
+    const revisionAtStart = revisionOverride;
+    const advisorUserMessage = revisionAtStart
+      ? `${ARTIFACT_LABELS[revisionAtStart]}を直してください。修正希望: ${userText}`
+      : userText;
+    const stateAtStart = useFilmProjectStore.getState();
+    const projectAtStart = stateAtStart.projects.find(
+      (candidate) => candidate.id === stateAtStart.activeProjectId,
+    ) ?? null;
+    const conversationId = projectAtStart?.id ?? "planning";
+    const previousMessages = projectAtStart?.chatMessages ?? stateAtStart.planningChatMessages;
+    const userMessage = createFilmChatMessage("user", userText);
+    if (projectAtStart) stateAtStart.appendChatMessage(userMessage);
+    else stateAtStart.appendPlanningChatMessage(userMessage);
+    setDraft("");
+    setRevisionTarget(null);
+    setSending(true);
+    setProgress({ phase: "waiting", receivedChars: 0 });
+    const abort = new AbortController();
+    abortRef.current = abort;
+    const runToken = runTokenRef.current + 1;
+    runTokenRef.current = runToken;
+
+    try {
+      const response = await runFilmAdvisorTurn(
+        {
+          project: projectAtStart,
+          messages: previousMessages,
+          userMessage: advisorUserMessage,
+        },
+        {
+          signal: abort.signal,
+          onProgress: (next) => {
+            if (runTokenRef.current === runToken) setProgress(next);
+          },
+        },
+      );
+      if (runTokenRef.current !== runToken) return;
+      const currentState = useFilmProjectStore.getState();
+      const currentConversationId = currentState.activeProjectId ?? "planning";
+      if (currentConversationId !== conversationId) {
+        pushToast({
+          kind: "info",
+          text: "別の企画へ切り替わったため、前のAI応答は追加しませんでした。",
+          ttlMs: 5000,
+        });
+        return;
+      }
+
+      const assistantMessage = createFilmChatMessage("assistant", response.raw);
+      if (projectAtStart) {
+        currentState.appendChatMessage(assistantMessage);
+      } else {
+        currentState.appendPlanningChatMessage(assistantMessage);
+        const premiseArtifact = response.artifacts.find((artifact) => artifact.type === "premise");
+        if (premiseArtifact) {
+          const premise = readPremise(premiseArtifact);
+          if (premise.value) {
+            const chatMessages = [...previousMessages, userMessage, assistantMessage];
+            createProject(
+              premise.value.title,
+              premise.value.theme,
+              premise.value.videoServiceId,
+              {
+                chatMessages,
+                postingTarget: premise.value.postingTarget,
+                scriptSettings: {
+                  targetDurationSeconds: premise.value.targetDurationSeconds,
+                  topicMemo: premise.value.topicMemo,
+                  characterNames: premise.value.characterNames,
+                },
+                startInScript: true,
+              },
+            );
+            useFilmProjectStore.getState().appendChatMessage(
+              createFilmChatMessage(
+                "assistant",
+                "企画を固定しました。次はログライン＝一文のあらすじです。避けたい雰囲気があれば一言だけ教えてください。なければ「お任せ」で、こちらから3案出します。",
+              ),
+            );
+          } else {
+            pushToast({
+              kind: "warn",
+              text: `企画の確定値が足りません: ${premise.missing.join("、")}`,
+              ttlMs: 7000,
+            });
+          }
+        }
+      }
+    } catch (error) {
+      if (runTokenRef.current !== runToken) return;
+      if (error instanceof FilmTextTurnAbortedError) {
+        pushToast({ kind: "info", text: error.message, ttlMs: 3000 });
+      } else {
+        pushToast({
+          kind: "error",
+          text:
+            error instanceof FilmTextTurnTimeoutError
+              ? error.message
+              : `AIアドバイザーの応答に失敗しました: ${(error as Error)?.message ?? error}`,
+          ttlMs: 7000,
+        });
+      }
+    } finally {
+      if (runTokenRef.current === runToken) {
+        setSending(false);
+        setProgress(undefined);
+        if (abortRef.current === abort) abortRef.current = null;
+      }
+    }
+  }
+
+  function approveArtifact(artifact: AdvisorArtifact) {
+    const currentState = useFilmProjectStore.getState();
+    const currentProject = currentState.projects.find(
+      (candidate) => candidate.id === currentState.activeProjectId,
+    ) ?? null;
+    if (!currentProject || artifact.type === "premise") return;
+    const stage = STAGE_BY_ARTIFACT[artifact.type];
+    if (!stage) return;
+    const review = artifactReview(artifact, currentProject);
+    if (review.parseError || review.issues.some((issue) => issue.severity === "blocking")) {
+      pushToast({
+        kind: "warn",
+        text: "読み取りエラーか上限超過を直してからOKにしてください。",
+        ttlMs: 5000,
+      });
+      return;
+    }
+    if (artifact.type === "logline") saveLogline(artifact.content);
+    else if (artifact.type === "beatsheet") saveBeatsheet(artifact.content);
+    else if (artifact.type === "treatment") saveTreatment(artifact.content);
+    else if (artifact.type === "scenelist") {
+      const parsed = parseSceneList(artifact.content);
+      if (!parsed.ok) return;
+      saveScenelist(artifact.content, parsed.value);
+    } else if (artifact.type === "blocks") {
+      const parsed = parseBlockScript(artifact.content);
+      if (!parsed.ok) return;
+      saveBlocks(artifact.content, parsed.value.blocks);
+    }
+    if (!approveStage(stage)) {
+      pushToast({
+        kind: "warn",
+        text: "前の成果物のOKが必要です。ひとつ前から確認してください。",
+        ttlMs: 5000,
+      });
+      return;
+    }
+    setRevisionTarget(null);
+    void requestTurn(
+      `この${ARTIFACT_LABELS[artifact.type]}でOKです。次の工程へ進めてください。`,
+      null,
+    );
+  }
+
+  const lastMessageText = messages[messages.length - 1]?.text ?? "";
+  const hasMalformedLastResponse = useMemo(() => {
+    if (!lastMessageText) return false;
+    return parseAdvisorResponse(lastMessageText).malformed;
+  }, [lastMessageText]);
+
+  return (
+    <div className="mx-auto flex h-full min-h-[620px] w-full max-w-5xl flex-col gap-3">
+      <header className="flex items-center justify-between gap-4 rounded-md border border-[#242424] bg-[#161616] px-4 py-3">
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-pink-400">
+            ①企画・②脚本
+          </p>
+          <h2 className="mt-1 text-sm font-semibold text-zinc-200">
+            AIアドバイザーと話して決める
+          </h2>
+          <p className="mt-1 text-xs text-zinc-500">
+            AIが次の一歩を提案します。あなたはOKか、一言の修正だけで進められます。
+          </p>
+        </div>
+        {project ? (
+          <div className="text-right text-[11px] text-zinc-500">
+            <p>{project.title}</p>
+            <p>{findVideoServiceProfile(project.videoServiceId)?.label ?? DEFAULT_VIDEO_SERVICE_ID}</p>
+          </div>
+        ) : null}
+      </header>
+
+      <div
+        ref={scrollerRef}
+        className="min-h-0 flex-1 overflow-y-auto rounded-md border border-[#242424] bg-[#101010] p-4"
+      >
+        <ul className="space-y-3">
+          {messages.map((message) => {
+            const parsed = message.role === "assistant"
+              ? parseAdvisorResponse(message.text)
+              : null;
+            return (
+              <li
+                key={message.id}
+                className={[
+                  "rounded-md px-3 py-2 text-sm",
+                  message.role === "user"
+                    ? "ml-auto max-w-[82%] bg-pink-500/15 text-pink-100"
+                    : "max-w-[88%] bg-[#1c1c1c] text-zinc-200",
+                ].join(" ")}
+              >
+                <div className="mb-1 text-[10px] uppercase tracking-wider text-zinc-500">
+                  {message.role === "user" ? "あなた" : "AIアドバイザー"}
+                </div>
+                {parsed?.text ? (
+                  <div className="whitespace-pre-wrap leading-6">{parsed.text}</div>
+                ) : message.role === "user" ? (
+                  <div className="whitespace-pre-wrap leading-6">{message.text}</div>
+                ) : null}
+                {parsed?.malformed ? (
+                  <div className="mt-3 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs leading-5 text-amber-200">
+                    成果物の囲み方を読み取れませんでした。返事は上に丸ごと残しています。
+                  </div>
+                ) : null}
+                {!parsed?.malformed
+                  ? parsed?.artifacts.map((artifact, index) => (
+                      <ArtifactCard
+                        key={`${message.id}-${artifact.type}-${index}`}
+                        artifact={artifact}
+                        project={project}
+                        busy={sending}
+                        onApprove={() => approveArtifact(artifact)}
+                        onRevise={() => {
+                          setRevisionTarget(artifact.type);
+                          setDraft("");
+                          requestAnimationFrame(() => inputRef.current?.focus());
+                        }}
+                      />
+                    ))
+                  : null}
+              </li>
+            );
+          })}
+          {sending ? (
+            <li className="max-w-[88%] rounded-md bg-[#1c1c1c] px-3 py-2">
+              <div className="mb-1 text-[10px] uppercase tracking-wider text-zinc-500">
+                AIアドバイザー
+              </div>
+              <ProgressCard
+                label="返事"
+                progress={progress}
+                onCancel={() => abortRef.current?.abort()}
+              />
+            </li>
+          ) : null}
+        </ul>
+      </div>
+
+      {hasMalformedLastResponse && !sending ? (
+        <button
+          type="button"
+          onClick={() => void requestTurn("さきほどの地の文は変えず、成果物フェンスだけ正しい形でもう一度お願いします。", null)}
+          className="w-fit rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs font-semibold text-amber-200 transition hover:bg-amber-500/20"
+        >
+          もう一度お願いする
+        </button>
+      ) : null}
+
+      <div className="flex flex-col gap-2 rounded-md border border-[#242424] bg-[#161616] px-3 py-2">
+        {revisionTarget ? (
+          <div className="flex items-center justify-between gap-3 rounded-md bg-pink-500/10 px-3 py-2 text-xs text-pink-200">
+            <span>
+              {ARTIFACT_LABELS[revisionTarget]}を直します。一言で大丈夫です（例: もっと切なく）
+            </span>
+            <button
+              type="button"
+              onClick={() => setRevisionTarget(null)}
+              className="shrink-0 text-zinc-400 hover:text-white"
+            >
+              閉じる
+            </button>
+          </div>
+        ) : null}
+        <textarea
+          ref={inputRef}
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          onKeyDown={(event) => {
+            const isComposing =
+              (event.nativeEvent as KeyboardEvent).isComposing || event.keyCode === 229;
+            if (event.key !== "Enter" || event.shiftKey || isComposing) return;
+            event.preventDefault();
+            void requestTurn(draft);
+          }}
+          rows={3}
+          placeholder={
+            revisionTarget
+              ? "例: もっと切なく（Enterで送信・改行はShift+Enter）"
+              : "思ったことを一言で…（Enterで送信・改行はShift+Enter）"
+          }
+          className="w-full resize-none bg-transparent text-sm text-zinc-200 outline-none placeholder:text-zinc-600"
+        />
+        <div className="flex justify-end">
+          <button
+            type="button"
+            onClick={() => void requestTurn(draft)}
+            disabled={!draft.trim() || sending}
+            className="rounded-md bg-pink-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-pink-400 disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-400"
+          >
+            {sending ? "送信中…" : "送信"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
