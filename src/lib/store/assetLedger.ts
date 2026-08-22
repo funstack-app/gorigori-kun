@@ -20,6 +20,11 @@ export type AssetLedgerState = {
     filmProjectId: string,
     asset: FilmAsset,
   ) => Promise<AssetLedgerEntry>;
+  upsertCharacterRegisterOutput: (
+    sourcePresetId: string,
+    name: string,
+    sheetImagePaths: string[],
+  ) => Promise<AssetLedgerEntry>;
   delete: (id: string) => Promise<void>;
 };
 
@@ -88,6 +93,39 @@ function uniquePaths(paths: Array<string | undefined>): string[] {
 
 function toIsoTime(epochMs: number): string {
   return new Date(epochMs).toISOString();
+}
+
+/**
+ * キャラ登録で確定した生成物だけを台帳へ写す。
+ * 元プリセットIDから台帳IDを決めるため、再登録・作り直しでも同じ1件を更新する。
+ */
+export function characterRegisterOutputToLedgerAsset(
+  sourcePresetId: string,
+  name: string,
+  sheetImagePaths: string[],
+  existing: AssetLedgerEntry | undefined,
+  now = new Date(),
+): AssetLedgerEntry {
+  const images = uniquePaths(sheetImagePaths);
+  if (images.length === 0) {
+    throw new Error("キャラクターシート画像がないため台帳へ登録できません");
+  }
+  const timestamp = now.toISOString();
+  return {
+    id: characterRegisterAssetId(sourcePresetId),
+    type: "character",
+    name: name.trim(),
+    createdAt: existing?.createdAt ?? timestamp,
+    updatedAt: timestamp,
+    primaryImagePath: images[0],
+    imagePaths: images.slice(1),
+    // §6訂正: キャラ登録からは生成指示や元画像を持ち込まず、確定シートだけを保存する。
+    prompt: "",
+    negativePrompt: null,
+    source: "character-register",
+    locked: false,
+    tags: [],
+  };
 }
 
 /** presets.json の character 1件を、元データを変えず台帳形式へ読み替える。 */
@@ -220,6 +258,21 @@ export const useAssetLedger = create<AssetLedgerState>((set, get) => ({
     const existing = get().assets.find((asset) => asset.id === id);
     return get().upsert(
       filmAssetToLedgerAsset(filmProjectId, filmAsset, existing),
+    );
+  },
+
+  upsertCharacterRegisterOutput: async (sourcePresetId, name, sheetImagePaths) => {
+    // キャラ登録が台帳画面より先でも、既存ブリッジを読み切ってから同じIDを更新する。
+    if (!get().loaded) await get().load();
+    const id = characterRegisterAssetId(sourcePresetId);
+    const existing = get().assets.find((asset) => asset.id === id);
+    return get().upsert(
+      characterRegisterOutputToLedgerAsset(
+        sourcePresetId,
+        name,
+        sheetImagePaths,
+        existing,
+      ),
     );
   },
 

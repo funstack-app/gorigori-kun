@@ -8,6 +8,7 @@ import { extractDropped, fileToUploadReference, isImageDrop } from "../lib/dragR
 import { sendCharacterPresetToSheetRegenerate } from "../lib/character/sendImageToCharacterRegister";
 import type { AssetLedgerEntry, AssetLedgerType } from "../lib/ipc";
 import { useAssetLedger } from "../lib/store/assetLedger";
+import { useComposer, type ReferenceRole } from "../lib/store/composer";
 import {
   focusToImageStyle,
   presetKind,
@@ -45,7 +46,8 @@ const ASSET_LEDGER_TYPES: Array<{ type: AssetLedgerType; label: string }> = [
   { type: "scene", label: "シーン" },
   { type: "look", label: "ルック" },
   { type: "prop", label: "小物" },
-  { type: "custom", label: "自由" },
+  // 既存の custom データを見失わないよう、自由枠はアセット内の「その他」として残す。
+  { type: "custom", label: "その他" },
 ];
 
 /**
@@ -81,7 +83,12 @@ export function PresetsDrawer({
   const removePreset = usePresets((s) => s.removePreset);
   const toggleFavorite = usePresets((s) => s.toggleFavorite);
   const reorderPresets = usePresets((s) => s.reorderPresets);
+  const ledgerAssets = useAssetLedger((s) => s.assets);
+  const loadAssetLedger = useAssetLedger((s) => s.load);
+  const assetLoadStarted = useRef(false);
   const [dragId, setDragId] = useState<string | null>(null);
+  const [activeSection, setActiveSection] = useState<"asset" | "prompt">("asset");
+  const [activeAssetType, setActiveAssetType] = useState<AssetLedgerType>("character");
 
   /*
    * 初期表示カテゴリ。
@@ -129,6 +136,14 @@ export function PresetsDrawer({
   const [sortKey, setSortKey] = useState<SortKey>("updatedDesc");
   /** キャラ絞り込み。true のときは kind === "character" のプリセットだけ表示。 */
   const [characterOnly, setCharacterOnly] = useState<boolean>(false);
+
+  useEffect(() => {
+    if (assetLoadStarted.current) return;
+    assetLoadStarted.current = true;
+    void loadAssetLedger().catch(() => {
+      // 読み込みエラーはアセット一覧側で表示する。
+    });
+  }, [loadAssetLedger]);
 
   const visiblePresets = useMemo<Preset[]>(() => {
     const inCategory = presets.filter((p) => p.categoryId === activeCategoryId);
@@ -328,21 +343,38 @@ export function PresetsDrawer({
     removePreset(id);
   };
 
-  const categoryList = (
-    <CategoryList
-      categories={categories}
-      presets={presets}
-      activeCategoryId={activeCategoryId}
-      onSelect={setActiveCategoryId}
-      onRename={(id, name) => updateCategory(id, { name })}
-      onChangeColor={(id, color) => updateCategory(id, { color })}
-      onRemove={handleRemoveCategory}
-      newCategoryName={newCategoryName}
-      newCategoryColor={newCategoryColor}
-      onChangeNewCategory={setNewCategoryName}
-      onChangeNewCategoryColor={setNewCategoryColor}
-      onAddCategory={handleAddCategory}
-    />
+  const navigation = (
+    <div className="space-y-5">
+      <AssetNavigation
+        assets={ledgerAssets}
+        active={activeSection === "asset"}
+        activeType={activeAssetType}
+        onSelect={(type) => {
+          setActiveSection("asset");
+          setActiveAssetType(type);
+          setQuery("");
+        }}
+      />
+      <CategoryList
+        categories={categories}
+        presets={presets}
+        sectionActive={activeSection === "prompt"}
+        activeCategoryId={activeCategoryId}
+        onSelect={(id) => {
+          setActiveSection("prompt");
+          setActiveCategoryId(id);
+          setQuery("");
+        }}
+        onRename={(id, name) => updateCategory(id, { name })}
+        onChangeColor={(id, color) => updateCategory(id, { color })}
+        onRemove={handleRemoveCategory}
+        newCategoryName={newCategoryName}
+        newCategoryColor={newCategoryColor}
+        onChangeNewCategory={setNewCategoryName}
+        onChangeNewCategoryColor={setNewCategoryColor}
+        onAddCategory={handleAddCategory}
+      />
+    </div>
   );
 
   const activeCategoryName = activeCategoryId
@@ -453,22 +485,33 @@ export function PresetsDrawer({
       </div>
     );
 
-  // ページ版: 既存2カラムを保ち、広い画面では台帳を右に並べる。
+  // ページ版: 左ナビで「アセット / プロンプト」を選び、中央は選択中の一覧だけを出す。
   if (fullPage) {
     return (
       <>
-        <div className="grid h-full min-h-0 gap-5 lg:grid-cols-[260px_minmax(0,1fr)] xl:grid-cols-[240px_minmax(0,1fr)_380px]">
+        <div className="grid h-full min-h-0 gap-5 lg:grid-cols-[260px_minmax(0,1fr)]">
           <aside
             data-tour="preset-categories"
             className="min-h-0 overflow-y-auto rounded-xl border border-[#2a2a2a] bg-[#181818] p-4"
           >
-            {categoryList}
+            {navigation}
           </aside>
           <main
             data-tour="preset-list"
             className="flex min-h-0 flex-col gap-3 rounded-xl border border-[#2a2a2a] bg-[#181818] p-4"
           >
-            <div className="flex items-center justify-between gap-3">
+            {activeSection === "asset" ? (
+              <AssetLedgerPanel
+                activeType={activeAssetType}
+                query={query}
+                onChangeQuery={setQuery}
+                viewMode={viewMode}
+                onChangeViewMode={setViewMode}
+                onReferenceAttached={onNavigateToSkill}
+              />
+            ) : (
+              <>
+              <div className="flex items-center justify-between gap-3">
               <h4 className="text-sm font-black text-white">{activeCategoryName} のプリセット</h4>
               <div className="flex shrink-0 items-center gap-2">
                 <select
@@ -541,15 +584,14 @@ export function PresetsDrawer({
                 ].join(" ")}
                 title="キャラクター登録のみ表示"
               >
-                <span aria-hidden>👤</span>
+                <CharacterIcon className="h-3 w-3" />
                 <span>キャラ</span>
               </button>
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto pr-1">{presetGrid}</div>
+              </>
+            )}
           </main>
-          <div className="min-h-0 overflow-y-auto lg:col-span-2 xl:col-span-1">
-            <AssetLedgerPanel />
-          </div>
         </div>
         {presetFormModal}
       </>
@@ -560,9 +602,20 @@ export function PresetsDrawer({
   return (
     <>
       <div className="flex h-full min-h-0 flex-col gap-3 overflow-y-auto pr-1">
-        {categoryList}
+        {navigation}
         <div className="flex min-h-[240px] flex-1 flex-col border-t border-[#242424] pt-3">
-          <div className="mb-2 flex items-center justify-between gap-2">
+          {activeSection === "asset" ? (
+            <AssetLedgerPanel
+              activeType={activeAssetType}
+              query={query}
+              onChangeQuery={setQuery}
+              viewMode={viewMode}
+              onChangeViewMode={setViewMode}
+              onReferenceAttached={onNavigateToSkill}
+            />
+          ) : (
+            <>
+            <div className="mb-2 flex items-center justify-between gap-2">
             <h4 className="text-xs font-black text-white">
               {activeCategoryName} のプリセット
             </h4>
@@ -575,8 +628,9 @@ export function PresetsDrawer({
             </button>
           </div>
           <div className="min-h-0 flex-1 overflow-y-auto pr-1">{presetGrid}</div>
+            </>
+          )}
         </div>
-        <AssetLedgerPanel />
       </div>
       {presetFormModal}
     </>
@@ -590,22 +644,45 @@ function createPresetLedgerAssetId(): string {
   return `al-preset-${suffix}`;
 }
 
-/**
- * 既存プリセットを残したまま、同じ画面に共通アセット台帳の登録・一覧を足す。
- * この画面には composer への適用操作が無いため、呼び出しはクリップボード経由に
- * 絞り、別系統の状態更新を増やさない。
- */
-function AssetLedgerPanel() {
+function assetReferenceRole(type: AssetLedgerType): ReferenceRole {
+  if (type === "scene") return "background";
+  if (type === "look") return "look";
+  if (type === "prop") return "product";
+  return "subject";
+}
+
+function assetImagePaths(asset: AssetLedgerEntry): string[] {
+  return Array.from(
+    new Set(
+      [asset.primaryImagePath, ...asset.imagePaths]
+        .map((path) => path?.trim())
+        .filter((path): path is string => Boolean(path)),
+    ),
+  );
+}
+
+/** 左ナビで選んだ種類だけを、プリセットと同じ中央一覧へ表示する。 */
+function AssetLedgerPanel({
+  activeType,
+  query,
+  onChangeQuery,
+  viewMode,
+  onChangeViewMode,
+  onReferenceAttached,
+}: {
+  activeType: AssetLedgerType;
+  query: string;
+  onChangeQuery: (next: string) => void;
+  viewMode: "grid" | "list";
+  onChangeViewMode: (next: "grid" | "list") => void;
+  onReferenceAttached?: () => void;
+}) {
   const assets = useAssetLedger((state) => state.assets);
   const loading = useAssetLedger((state) => state.loading);
   const loaded = useAssetLedger((state) => state.loaded);
   const error = useAssetLedger((state) => state.error);
-  const load = useAssetLedger((state) => state.load);
   const upsertAsset = useAssetLedger((state) => state.upsert);
   const deleteAsset = useAssetLedger((state) => state.delete);
-  const loadStarted = useRef(false);
-  const [activeType, setActiveType] = useState<AssetLedgerType>("character");
-  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [formOpen, setFormOpen] = useState(false);
   const [draftName, setDraftName] = useState("");
@@ -615,24 +692,33 @@ function AssetLedgerPanel() {
   const [uploadingImage, setUploadingImage] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (loadStarted.current) return;
-    loadStarted.current = true;
-    void load().catch(() => {
-      // 読み込みエラーは store.error を画面に表示する。
-    });
-  }, [load]);
-
-  const visibleAssets = useMemo(
-    () => assets
+  const visibleAssets = useMemo(() => {
+    const normalizedQuery = query.trim().toLowerCase();
+    return assets
       .filter((asset) => asset.type === activeType)
-      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
-    [activeType, assets],
-  );
-  const selectedAsset = visibleAssets.find((asset) => asset.id === selectedId) ?? null;
+      .filter((asset) =>
+        !normalizedQuery ||
+        `${asset.name} ${asset.prompt} ${asset.tags.join(" ")} ${assetImagePaths(asset).join(" ")}`
+          .toLowerCase()
+          .includes(normalizedQuery),
+      )
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }, [activeType, assets, query]);
   const canSave = Boolean(
     draftName.trim() && (draftPrompt.trim() || draftImagePath?.trim()),
   );
+  const activeTypeLabel =
+    ASSET_LEDGER_TYPES.find((item) => item.type === activeType)?.label ?? "アセット";
+
+  useEffect(() => {
+    // 左ナビで種類を替えたら、前の種類の入力途中データを新しい種類へ誤登録しない。
+    setFormOpen(false);
+    setEditingId(null);
+    setDraftName("");
+    setDraftPrompt("");
+    setDraftImagePath(null);
+    setNotice(null);
+  }, [activeType]);
 
   const closeForm = () => {
     setFormOpen(false);
@@ -697,8 +783,7 @@ function AssetLedgerPanel() {
     setSaving(true);
     setNotice(null);
     try {
-      const saved = await upsertAsset(entry);
-      setSelectedId(saved.id);
+      await upsertAsset(entry);
       setNotice(editingId ? "更新しました" : "登録しました");
       closeForm();
     } catch (saveError) {
@@ -735,63 +820,96 @@ function AssetLedgerPanel() {
     if (!ok) return;
     try {
       await deleteAsset(asset.id);
-      if (selectedId === asset.id) setSelectedId(null);
       setNotice("削除しました");
     } catch (deleteError) {
       setNotice(`削除できませんでした: ${String(deleteError)}`);
     }
   };
 
-  const copyForUse = async (text: string, label: string) => {
-    try {
-      await navigator.clipboard.writeText(text);
-      setNotice(`${label}をコピーしました`);
-    } catch (copyError) {
-      setNotice(`コピーできませんでした: ${String(copyError)}`);
+  const useAsReference = (asset: AssetLedgerEntry) => {
+    const paths = assetImagePaths(asset);
+    if (paths.length === 0) {
+      setNotice("参照に使える画像がありません");
+      return;
     }
+    const composer = useComposer.getState();
+    const existingPaths = new Set(composer.references.map((reference) => reference.path));
+    const freshPaths = paths.filter((path) => !existingPaths.has(path));
+    composer.addReferences(
+      paths.map((path, index) => ({
+        path,
+        name: index === 0 ? asset.name : `${asset.name} ${index + 1}`,
+        source: "gallery" as const,
+        role: assetReferenceRole(asset.type),
+        ...(paths.length > 1
+          ? { groupId: `asset:${asset.id}`, groupLabel: asset.name }
+          : {}),
+      })),
+    );
+    setNotice(
+      freshPaths.length > 0
+        ? `${freshPaths.length}枚を制作欄の参照に追加しました`
+        : "この画像はすでに制作欄の参照にあります",
+    );
+    if (freshPaths.length > 0) onReferenceAttached?.();
   };
 
   return (
-    <section className="rounded-xl border border-[#2a2a2a] bg-[#181818] p-4">
+    <>
       <div className="flex items-center justify-between gap-3">
         <div>
-          <h4 className="text-sm font-black text-white">アセット（使い回せる素材）</h4>
-          <p className="mt-1 text-[11px] text-neutral-500">種類ごとに登録して、あとから何度でも呼び出せます。</p>
+          <h4 className="text-sm font-black text-white">{activeTypeLabel} のアセット</h4>
+          <p className="mt-1 text-[11px] text-neutral-500">
+            画像だけを制作欄の参照へ渡します。指示文は送りません。
+          </p>
         </div>
-        <button
-          type="button"
-          onClick={formOpen ? closeForm : startCreate}
-          disabled={!loaded}
-          className="h-8 rounded-md bg-pink-500 px-3 text-xs font-bold text-white hover:bg-pink-600 disabled:bg-neutral-700 disabled:text-neutral-500"
-        >
-          {formOpen ? "閉じる" : "登録"}
-        </button>
+        <div className="flex shrink-0 items-center gap-2">
+          <div className="flex h-8 overflow-hidden rounded-md border border-[#343434] bg-[#101010]">
+            <button
+              type="button"
+              onClick={() => onChangeViewMode("grid")}
+              className={[
+                "w-9 text-xs font-black transition",
+                viewMode === "grid"
+                  ? "bg-pink-500 text-white"
+                  : "text-neutral-400 hover:text-white",
+              ].join(" ")}
+              title="グリッド表示"
+            >
+              ▦
+            </button>
+            <button
+              type="button"
+              onClick={() => onChangeViewMode("list")}
+              className={[
+                "w-9 border-l border-[#343434] text-xs font-black transition",
+                viewMode === "list"
+                  ? "bg-pink-500 text-white"
+                  : "text-neutral-400 hover:text-white",
+              ].join(" ")}
+              title="リスト表示"
+            >
+              ☰
+            </button>
+          </div>
+          <button
+            type="button"
+            onClick={formOpen ? closeForm : startCreate}
+            disabled={!loaded}
+            className="h-8 rounded-md bg-pink-500 px-3 text-xs font-bold text-white hover:bg-pink-600 disabled:bg-neutral-700 disabled:text-neutral-500"
+          >
+            {formOpen ? "閉じる" : "登録"}
+          </button>
+        </div>
       </div>
 
-      <div className="mt-3 flex flex-wrap gap-1.5" role="tablist" aria-label="素材の種類">
-        {ASSET_LEDGER_TYPES.map((item) => (
-          <button
-            key={item.type}
-            type="button"
-            role="tab"
-            aria-selected={activeType === item.type}
-            onClick={() => {
-              setActiveType(item.type);
-              setSelectedId(null);
-              closeForm();
-              setNotice(null);
-            }}
-            className={[
-              "rounded-full border px-3 py-1 text-[11px] font-bold transition",
-              activeType === item.type
-                ? "border-pink-400 bg-pink-500/10 text-white"
-                : "border-[#343434] bg-[#101010] text-neutral-400 hover:text-neutral-200",
-            ].join(" ")}
-          >
-            {item.label}
-          </button>
-        ))}
-      </div>
+      <input
+        type="search"
+        value={query}
+        onChange={(event) => onChangeQuery(event.target.value)}
+        placeholder="検索（名前 / 画像名 / メモ）"
+        className="h-9 w-full rounded-md border border-[#343434] bg-[#101010] px-3 text-xs text-neutral-100 outline-none focus:border-pink-400"
+      />
 
       {formOpen ? (
         <div className="mt-3 space-y-2 rounded-lg border border-[#303030] bg-[#111111] p-3">
@@ -819,7 +937,7 @@ function AssetLedgerPanel() {
           <textarea
             value={draftPrompt}
             onChange={(event) => setDraftPrompt(event.target.value)}
-            placeholder="指示文（任意）"
+            placeholder="作成時のメモ（任意・参照には送りません）"
             rows={3}
             className="w-full resize-none rounded-md border border-[#343434] bg-[#0b0b0b] p-2 text-[11px] leading-5 text-neutral-100 outline-none focus:border-pink-400"
           />
@@ -837,78 +955,62 @@ function AssetLedgerPanel() {
         </div>
       ) : null}
 
-      {loading ? <p className="mt-3 text-[11px] text-neutral-500">素材を読み込んでいます。</p> : null}
+      {loading ? <p className="text-[11px] text-neutral-500">素材を読み込んでいます。</p> : null}
       {error && !loading ? (
-        <p className="mt-3 rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-200">
+        <p className="rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-200">
           台帳を読み込めませんでした: {error}
         </p>
       ) : null}
-      {notice ? <p className="mt-3 text-[11px] text-neutral-300">{notice}</p> : null}
+      {notice ? <p className="text-[11px] text-neutral-300">{notice}</p> : null}
 
       {!loading && loaded ? (
         visibleAssets.length > 0 ? (
-          <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+          <div
+            className={
+              viewMode === "grid"
+                ? "grid min-h-0 flex-1 gap-2.5 overflow-y-auto pr-1 grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-7"
+                : "min-h-0 flex-1 space-y-1.5 overflow-y-auto pr-1"
+            }
+          >
             {visibleAssets.map((asset) => {
-              const selected = selectedAsset?.id === asset.id;
+              const images = assetImagePaths(asset);
               return (
                 <article
                   key={asset.id}
-                  className={[
-                    "rounded-lg border bg-[#111111] p-2",
-                    selected ? "border-pink-400" : "border-[#303030]",
-                  ].join(" ")}
+                  className="flex min-w-0 flex-col rounded-lg border border-[#303030] bg-[#111111] p-2"
                 >
+                  {asset.primaryImagePath ? (
+                    <SafeImage
+                      path={asset.primaryImagePath}
+                      alt={asset.name}
+                      className="mb-2 aspect-video w-full rounded bg-black object-cover"
+                    />
+                  ) : (
+                    <div className="mb-2 flex aspect-video w-full items-center justify-center rounded bg-black text-[10px] text-neutral-600">
+                      参照画像なし
+                    </div>
+                  )}
+                  <span className="flex items-center justify-between gap-2">
+                    <span className="truncate text-xs font-bold text-neutral-100">{asset.name}</span>
+                    {asset.locked ? (
+                      <span className="shrink-0 rounded bg-emerald-500/10 px-1.5 py-0.5 text-[9px] font-bold text-emerald-300">確定済み</span>
+                    ) : null}
+                  </span>
+                  <span className="mt-1 block text-[10px] leading-4 text-neutral-500">
+                    {images.length > 0 ? `参照画像 ${images.length}枚` : "参照に使える画像はありません"}
+                  </span>
+
                   <button
                     type="button"
-                    onClick={() => setSelectedId(selected ? null : asset.id)}
-                    className="w-full text-left"
-                    title="選んで使い方を表示"
+                    onClick={() => useAsReference(asset)}
+                    disabled={images.length === 0}
+                    className="mt-2 rounded-md border border-pink-400/60 px-2 py-1.5 text-[10px] font-bold text-pink-200 transition hover:bg-pink-500/10 disabled:cursor-not-allowed disabled:border-[#343434] disabled:text-neutral-600"
                   >
-                    {asset.primaryImagePath ? (
-                      <SafeImage
-                        path={asset.primaryImagePath}
-                        alt={asset.name}
-                        className="mb-2 aspect-video w-full rounded bg-black object-cover"
-                      />
-                    ) : null}
-                    <span className="flex items-center justify-between gap-2">
-                      <span className="truncate text-xs font-bold text-neutral-100">{asset.name}</span>
-                      {asset.locked ? (
-                        <span className="shrink-0 rounded bg-emerald-500/10 px-1.5 py-0.5 text-[9px] font-bold text-emerald-300">確定済み</span>
-                      ) : null}
-                    </span>
-                    <span className="mt-1 block line-clamp-2 text-[10px] leading-4 text-neutral-500">
-                      {asset.prompt.trim() || "指示文なし"}
-                    </span>
+                    参照に使う（画像を渡す）
                   </button>
 
-                  {selected ? (
-                    <div className="mt-2 flex flex-wrap gap-1.5 border-t border-[#2a2a2a] pt-2">
-                      {asset.prompt.trim() ? (
-                        <button
-                          type="button"
-                          onClick={() => void copyForUse(asset.prompt, "指示文")}
-                          className="rounded border border-[#3a3a3a] px-2 py-1 text-[10px] font-bold text-neutral-300 hover:text-white"
-                        >
-                          指示文をコピー
-                        </button>
-                      ) : (
-                        <span className="px-1 py-1 text-[10px] text-neutral-500">指示文なし</span>
-                      )}
-                      {asset.primaryImagePath ? (
-                        <button
-                          type="button"
-                          onClick={() => void copyForUse(asset.primaryImagePath as string, "画像の場所")}
-                          className="rounded border border-[#3a3a3a] px-2 py-1 text-[10px] font-bold text-neutral-300 hover:text-white"
-                        >
-                          画像の場所をコピー
-                        </button>
-                      ) : null}
-                    </div>
-                  ) : null}
-
                   {!asset.locked ? (
-                    <div className="mt-2 flex justify-end gap-2">
+                    <div className="mt-auto flex justify-end gap-2 pt-2">
                       <button
                         type="button"
                         onClick={() => startEdit(asset)}
@@ -930,11 +1032,57 @@ function AssetLedgerPanel() {
             })}
           </div>
         ) : (
-          <p className="mt-3 rounded-md border border-dashed border-[#343434] bg-[#101010] p-4 text-center text-[11px] text-neutral-500">
-            この種類の素材はまだありません。
+          <p className="rounded-md border border-dashed border-[#343434] bg-[#101010] p-4 text-center text-[11px] text-neutral-500">
+            {query.trim() ? "検索条件に一致するアセットがありません。" : "この種類の素材はまだありません。"}
           </p>
         )
       ) : null}
+    </>
+  );
+}
+
+function AssetNavigation({
+  assets,
+  active,
+  activeType,
+  onSelect,
+}: {
+  assets: AssetLedgerEntry[];
+  active: boolean;
+  activeType: AssetLedgerType;
+  onSelect: (type: AssetLedgerType) => void;
+}) {
+  return (
+    <section>
+      <h4 className="mb-2 text-xs font-black text-white">
+        アセット（使い回せる素材）
+      </h4>
+      <div className="space-y-1">
+        {ASSET_LEDGER_TYPES.map((item) => {
+          const selected = active && activeType === item.type;
+          return (
+            <button
+              key={item.type}
+              type="button"
+              onClick={() => onSelect(item.type)}
+              className={[
+                "flex w-full items-center justify-between gap-2 rounded-md px-2 py-1.5 text-[11px] transition",
+                selected
+                  ? "bg-[#1f1f1f] text-white"
+                  : "text-neutral-400 hover:bg-[#181818] hover:text-neutral-200",
+              ].join(" ")}
+            >
+              <span className="flex min-w-0 flex-1 items-center gap-2">
+                <span className="h-2 w-2 shrink-0 rounded-full bg-pink-400" />
+                <span className="truncate text-left">{item.label}</span>
+              </span>
+              <span className="shrink-0 rounded bg-[#0f0f0f] px-1.5 py-0.5 text-[10px] font-bold text-neutral-400">
+                {assets.filter((asset) => asset.type === item.type).length}
+              </span>
+            </button>
+          );
+        })}
+      </div>
     </section>
   );
 }
@@ -942,6 +1090,7 @@ function AssetLedgerPanel() {
 function CategoryList({
   categories,
   presets,
+  sectionActive,
   activeCategoryId,
   onSelect,
   onRename,
@@ -955,6 +1104,7 @@ function CategoryList({
 }: {
   categories: PresetCategory[];
   presets: Preset[];
+  sectionActive: boolean;
   activeCategoryId: string | null;
   onSelect: (id: string | null) => void;
   onRename: (id: string, name: string) => void;
@@ -969,7 +1119,7 @@ function CategoryList({
   const uncategorizedCount = presets.filter((p) => p.categoryId === null).length;
   return (
     <section>
-      <h4 className="mb-2 text-xs font-black text-white">カテゴリ</h4>
+      <h4 className="mb-2 text-xs font-black text-white">プロンプト（指示文）</h4>
 
       {/* カテゴリ追加フォームを最上部に配置（リストの上）。
           Enter は意図せぬ確定を防ぐためここでは反応させない。
@@ -1030,7 +1180,7 @@ function CategoryList({
             key={cat.id}
             category={cat}
             count={presets.filter((p) => p.categoryId === cat.id).length}
-            active={cat.id === activeCategoryId}
+            active={sectionActive && cat.id === activeCategoryId}
             onSelect={() => onSelect(cat.id)}
             onRename={(name) => onRename(cat.id, name)}
             onChangeColor={(color) => onChangeColor(cat.id, color)}
@@ -1042,7 +1192,7 @@ function CategoryList({
           onClick={() => onSelect(null)}
           className={[
             "flex w-full items-center justify-between gap-2 rounded-md px-2 py-1.5 text-[11px] transition",
-            activeCategoryId === null
+            sectionActive && activeCategoryId === null
               ? "bg-[#1f1f1f] text-white"
               : "text-neutral-400 hover:bg-[#181818] hover:text-neutral-200",
           ].join(" ")}

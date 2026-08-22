@@ -21,6 +21,7 @@ import {
 import type { SheetJob, SheetJobPhase } from "../../../lib/store/characterSheetRun";
 import { cancelGeneration, type CharacterSheetRunParams } from "../../../lib/ipc";
 import { usePresets } from "../../../lib/store/presets";
+import { useAssetLedger } from "../../../lib/store/assetLedger";
 import { ensureCharacterSheetEventListener } from "../../../lib/character/events";
 import type { SheetBackground, SheetCutState, SheetPromptMode } from "../../../lib/character/types";
 import {
@@ -1256,6 +1257,20 @@ function StepRegister({
           ttlMs: 4000,
         });
         return; // saving は finally で解除する
+      }
+      try {
+        await useAssetLedger.getState().upsertCharacterRegisterOutput(
+          preset.id,
+          preset.name,
+          completedPaths,
+        );
+      } catch {
+        // 台帳だけの失敗で、完了済みのキャラ登録を失敗扱いに戻さない。
+        pushToast({
+          kind: "warn",
+          text: "キャラ登録は完了しましたが、アセットへの追加だけできませんでした。",
+          ttlMs: 5000,
+        });
       }
       // どこに入ったかを伝える。2026-07-25 に登録先を「キャラクター」カテゴリへ
       // 変更したので、場所を言わないと「登録したのに見つからない」になる。

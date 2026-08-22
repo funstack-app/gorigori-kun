@@ -32,6 +32,8 @@ vi.mock("../src/lib/store/presets", () => ({
 }));
 
 import {
+  characterRegisterAssetId,
+  characterRegisterOutputToLedgerAsset,
   filmAssetLedgerId,
   filmAssetToLedgerAsset,
   useAssetLedger,
@@ -185,6 +187,58 @@ describe("assetLedger store", () => {
     expect(harness.delete).toHaveBeenCalledWith(first.id);
     expect(useAssetLedger.getState().assets).toEqual([]);
     expect(useAssetLedger.getState().error).toBeNull();
+  });
+
+  it("キャラ登録の元IDを同じ台帳行へ対応付け、確定シート画像と名前だけを保存する", async () => {
+    const sourcePresetId = "preset/char 1";
+    const now = new Date("2026-08-22T12:00:00.000Z");
+    const existing = asset(characterRegisterAssetId(sourcePresetId));
+    existing.createdAt = "2026-08-20T00:00:00.000Z";
+    existing.prompt = "以前の指示文";
+    existing.imagePaths = ["/old/source.png"];
+
+    const converted = characterRegisterOutputToLedgerAsset(
+      sourcePresetId,
+      " 文子 ",
+      ["/sheets/fumiko.png", "/sheets/fumiko.png", "/sheets/fumiko-face.png"],
+      existing,
+      now,
+    );
+
+    expect(converted).toEqual({
+      id: "al-character-register-preset%2Fchar%201",
+      type: "character",
+      name: "文子",
+      createdAt: "2026-08-20T00:00:00.000Z",
+      updatedAt: now.toISOString(),
+      primaryImagePath: "/sheets/fumiko.png",
+      imagePaths: ["/sheets/fumiko-face.png"],
+      prompt: "",
+      negativePrompt: null,
+      source: "character-register",
+      locked: false,
+      tags: [],
+    });
+
+    // 先に既存プリセットの読み込みブリッジが同じIDを作っても、完成シートの登録は
+    // 2件目を増やさず、その1件を画像だけの内容へ更新する。
+    harness.presetState.presets = [characterPreset(sourcePresetId)];
+    await useAssetLedger.getState().upsertCharacterRegisterOutput(
+      sourcePresetId,
+      "文子（更新）",
+      ["/sheets/fumiko-v2.png"],
+    );
+
+    expect(harness.upsert).toHaveBeenCalledTimes(2);
+    expect(useAssetLedger.getState().assets).toHaveLength(1);
+    expect(useAssetLedger.getState().assets[0]).toMatchObject({
+      id: characterRegisterAssetId(sourcePresetId),
+      name: "文子（更新）",
+      primaryImagePath: "/sheets/fumiko-v2.png",
+      imagePaths: [],
+      prompt: "",
+      source: "character-register",
+    });
   });
 
   it("フィルム種別を台帳種別へ対応させ、採用画像と指示文全文を保つ", () => {
