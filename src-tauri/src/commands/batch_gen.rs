@@ -991,8 +991,7 @@ fn short_id() -> String {
     format!("{:016x}", nanos)
 }
 
-/// 常駐 `codex-home-gen` のミラー入口。Windows ではビルドせず、旧 exec 経路だけを使う。
-#[cfg(unix)]
+/// `codex-home-gen` のミラー入口。Unix の常駐経路と Windows の exec 経路で共有する。
 pub(crate) fn mirror_resident_codex_home(
     codex_home_orig: &Path,
     worker_home: &Path,

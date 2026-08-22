@@ -14,10 +14,14 @@ use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::{AsyncBufReadExt, BufReader};
+#[cfg(windows)]
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command as TokioCommand};
 use tokio::sync::{broadcast, watch};
 use tokio::time::{interval, timeout, MissedTickBehavior};
 
+#[cfg(windows)]
+use crate::codex::process::resolve_codex_cli_binary;
 use crate::codex::process::{
     enriched_path, no_window_flag, resolve_codex_binary, AppServerProcess, StderrBuffer,
 };
@@ -37,6 +41,10 @@ const INTERRUPT_TIMEOUT: Duration = Duration::from_secs(5);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 const STALE_SERVER_ERROR: &str =
     "生成サーバーが応答しません（接続が古くなっている可能性があります）。別の経路で再試行します。";
+#[cfg(any(windows, test))]
+const EXEC_DIAGNOSTIC_LIMIT_CHARS: usize = 2_000;
+#[cfg(windows)]
+const EXEC_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// LLM が MCP ツールを選んで実行した1ターンの機械可読な結果。
 ///
@@ -57,6 +65,187 @@ impl LlmToolTurnOutput {
             terminal_error: None,
         }
     }
+}
+
+#[cfg(any(windows, test))]
+enum ExecTurnState {
+    Exited {
+        success: bool,
+        code: Option<i32>,
+    },
+    TimedOut {
+        stop_error: Option<String>,
+    },
+    WaitFailed {
+        error: String,
+        stop_error: Option<String>,
+    },
+}
+
+/// `codex exec` の自由文出力に含まれる HTTPS URL だけを取り出す。
+/// Windows の exec 経路でも、app-server の mcpToolCall と同じ形へ正規化するために使う。
+#[cfg(any(windows, test))]
+fn https_urls_in_exec_stdout(text: &str) -> Vec<String> {
+    let mut urls = Vec::new();
+    let mut offset = 0;
+    while let Some(relative) = text[offset..].find("https://") {
+        let start = offset + relative;
+        let tail = &text[start..];
+        let end = tail
+            .char_indices()
+            .skip(1)
+            .find_map(|(index, character)| {
+                (character.is_whitespace()
+                    || matches!(
+                        character,
+                        '"' | '\'' | '<' | '>' | '`' | ')' | ']' | '}' | ',' | ';'
+                    ))
+                .then_some(index)
+            })
+            .unwrap_or(tail.len());
+        let candidate = tail[..end].trim_end_matches(['.', ';', ':', '!', '?']);
+        if let Ok(parsed) = reqwest::Url::parse(candidate) {
+            if parsed.scheme() == "https" && parsed.host_str().is_some() {
+                let normalized = parsed.to_string();
+                if !urls.contains(&normalized) {
+                    urls.push(normalized);
+                }
+            }
+        }
+        offset = start + end.max("https://".len());
+    }
+    urls
+}
+
+#[cfg(any(windows, test))]
+fn mcp_tool_calls_in_exec_output(text: &str) -> Vec<(String, String)> {
+    let mut calls = Vec::new();
+    for line in text.lines() {
+        let Some((_, after_marker)) = line.split_once("mcp:") else {
+            continue;
+        };
+        let token = after_marker
+            .trim_start()
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .trim_matches(|character: char| {
+                matches!(
+                    character,
+                    '`' | '"' | '\'' | '(' | ')' | '[' | ']' | '{' | '}'
+                )
+            });
+        let Some((server, tool)) = token.split_once('/') else {
+            continue;
+        };
+        let server = server.trim();
+        let tool = tool.trim_matches(|character: char| {
+            matches!(
+                character,
+                '`' | '"' | '\'' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';'
+            )
+        });
+        if server.is_empty() || tool.is_empty() {
+            continue;
+        }
+        let call = (server.to_string(), tool.to_string());
+        if !calls.contains(&call) {
+            calls.push(call);
+        }
+    }
+    calls
+}
+
+#[cfg(any(windows, test))]
+fn redacted_exec_tail(raw: &str, home: Option<&Path>) -> Option<String> {
+    let mut without_urls = raw.to_string();
+    for url in https_urls_in_exec_stdout(raw) {
+        without_urls = without_urls.replace(&url, "[URLを除外]");
+    }
+    let sanitized = crate::commands::diagnostics::redact_text(&without_urls, home);
+    let sanitized = sanitized.trim();
+    if sanitized.is_empty() {
+        return None;
+    }
+    let char_count = sanitized.chars().count();
+    let tail = sanitized
+        .chars()
+        .rev()
+        .take(EXEC_DIAGNOSTIC_LIMIT_CHARS)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>();
+    Some(if char_count > EXEC_DIAGNOSTIC_LIMIT_CHARS {
+        format!("…{tail}")
+    } else {
+        tail
+    })
+}
+
+#[cfg(any(windows, test))]
+fn exec_failure_message(summary: &str, stdout: &str, stderr: &str, home: Option<&Path>) -> String {
+    let mut parts = vec![summary.to_string()];
+    if let Some(stdout) = redacted_exec_tail(stdout, home) {
+        parts.push(format!("stdout末尾: {stdout}"));
+    }
+    if let Some(stderr) = redacted_exec_tail(stderr, home) {
+        parts.push(format!("stderr末尾: {stderr}"));
+    }
+    parts.join("\n")
+}
+
+#[cfg(any(windows, test))]
+fn normalize_exec_turn(
+    state: ExecTurnState,
+    stdout: &str,
+    stderr: &str,
+    turn_timeout: Duration,
+    home: Option<&Path>,
+) -> LlmToolTurnOutput {
+    let urls = https_urls_in_exec_stdout(stdout);
+    let mut output = LlmToolTurnOutput::new();
+    if urls.is_empty() {
+        output.final_message = redacted_exec_tail(stdout, home).unwrap_or_default();
+    } else {
+        output.final_message = urls.join("\n");
+        output.completed_items.push(json!({
+            "type": "mcpToolCall",
+            "status": "completed",
+            "result": {
+                "content": [{ "type": "text", "text": output.final_message.clone() }]
+            }
+        }));
+    }
+
+    let summary = match state {
+        ExecTurnState::Exited { success: true, .. } => None,
+        ExecTurnState::Exited {
+            success: false,
+            code,
+        } => Some(format!("codex exec が異常終了しました (code={code:?})")),
+        ExecTurnState::TimedOut { stop_error } => {
+            let mut message = format!(
+                "生成がタイムアウトしました（{}秒）。子プロセスを停止しました",
+                turn_timeout.as_secs()
+            );
+            if let Some(error) = stop_error {
+                message.push_str(&format!("（停止確認エラー: {error}）"));
+            }
+            Some(message)
+        }
+        ExecTurnState::WaitFailed { error, stop_error } => {
+            let mut message = format!("codex exec の終了待機に失敗しました: {error}");
+            if let Some(error) = stop_error {
+                message.push_str(&format!("（停止確認エラー: {error}）"));
+            }
+            Some(message)
+        }
+    };
+    if let Some(summary) = summary {
+        output.terminal_error = Some(exec_failure_message(&summary, stdout, stderr, home));
+    }
+    output
 }
 
 /// 画像1枚がいまどの段階にいるか (設計書 S1)。
@@ -199,18 +388,166 @@ impl Drop for ActiveTurnGuard {
 /// このターン数を超えたら次の ensure_client でプロセスを入れ替える。
 const MAX_TURNS_PER_SERVER: u64 = 60;
 
-/// 生成専用 app-server で、LLM に MCP ツール選択を任せる1ターンを実行する。
+/// 生成専用 Codex で、LLM に MCP ツール選択を任せる1ターンを実行する。
 ///
-/// 通常画像生成と同じ `approvalPolicy=never` を使い、開始前に通知を購読する。
-/// タイムアウトや turn 失敗も、受信済みツール結果を捨てず `terminal_error` と共に返す。
+/// 非Windowsは常駐 app-server、Windowsは既存画像生成と同じ `codex exec` を使う。
+/// タイムアウトや turn 失敗は `terminal_error` に入れ、成功として扱わない。
 #[cfg(windows)]
 pub(crate) async fn run_llm_tool_turn(
     _app: &AppHandle,
     _state: &AppState,
-    _prompt: &str,
-    _turn_timeout: Duration,
+    prompt: &str,
+    turn_timeout: Duration,
 ) -> Result<LlmToolTurnOutput, String> {
-    Err("resident path disabled on windows".to_string())
+    let source_home = crate::codex::home::resolve_command_codex_home()
+        .ok_or_else(|| "生成用 CODEX_HOME のミラー元を解決できません".to_string())?;
+    let generation_home = crate::codex::home::gen_codex_home_path()
+        .ok_or_else(|| "生成用 CODEX_HOME の場所を解決できません".to_string())?;
+    crate::commands::batch_gen::mirror_resident_codex_home(&source_home, &generation_home)?;
+
+    let codex_bin = resolve_codex_cli_binary()
+        .map_err(|error| format!("生成用 Codex CLI の解決に失敗: {error:#}"))?;
+    let mut cmd = TokioCommand::new(&codex_bin);
+    // Windows の既存画像生成 exec 経路と同じ設定。workspace-write は同梱の
+    // sandbox-setup 不足で起動不能になる版があるため、対話承認も含めて無効化する。
+    cmd.args([
+        "exec",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--skip-git-repo-check",
+        "-",
+    ]);
+    cmd.env("CODEX_HOME", &generation_home)
+        .env("PATH", enriched_path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    no_window_flag(&mut cmd);
+
+    let mut child = cmd.spawn().map_err(|error| {
+        format!(
+            "codex exec の起動に失敗 (CODEX_HOME={}): {error}",
+            generation_home.display()
+        )
+    })?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "codex exec の stdin を取得できません".to_string())?;
+    stdin
+        .write_all(prompt.as_bytes())
+        .await
+        .map_err(|error| format!("codex exec への指示送信に失敗: {error}"))?;
+    drop(stdin);
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "codex exec の stdout を取得できません".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "codex exec の stderr を取得できません".to_string())?;
+    let stdout_task = tokio::spawn(read_exec_pipe(stdout));
+    let stderr_task = tokio::spawn(read_exec_pipe(stderr));
+
+    let state = match timeout(turn_timeout, child.wait()).await {
+        Ok(Ok(status)) => ExecTurnState::Exited {
+            success: status.success(),
+            code: status.code(),
+        },
+        Ok(Err(error)) => ExecTurnState::WaitFailed {
+            error: error.to_string(),
+            stop_error: stop_exec_child(&mut child).await,
+        },
+        Err(_) => ExecTurnState::TimedOut {
+            stop_error: stop_exec_child(&mut child).await,
+        },
+    };
+
+    let (stdout, stdout_error) = collect_exec_pipe(stdout_task, "stdout").await;
+    let (stderr, stderr_error) = collect_exec_pipe(stderr_task, "stderr").await;
+    let stdout = String::from_utf8_lossy(&stdout).into_owned();
+    let mut stderr = String::from_utf8_lossy(&stderr).into_owned();
+    for error in [stdout_error, stderr_error].into_iter().flatten() {
+        if !stderr.is_empty() {
+            stderr.push('\n');
+        }
+        stderr.push_str(&error);
+    }
+
+    for (server, tool) in mcp_tool_calls_in_exec_output(&format!("{stdout}\n{stderr}")) {
+        tracing::info!(
+            target: "codex.gen_server",
+            server,
+            tool,
+            "Windows の codex exec が MCP ツールを呼び出しました"
+        );
+    }
+
+    Ok(normalize_exec_turn(
+        state,
+        &stdout,
+        &stderr,
+        turn_timeout,
+        dirs::home_dir().as_deref(),
+    ))
+}
+
+#[cfg(windows)]
+async fn read_exec_pipe<R>(mut pipe: R) -> std::io::Result<Vec<u8>>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut bytes = Vec::new();
+    pipe.read_to_end(&mut bytes).await?;
+    Ok(bytes)
+}
+
+#[cfg(windows)]
+async fn collect_exec_pipe(
+    mut task: tokio::task::JoinHandle<std::io::Result<Vec<u8>>>,
+    label: &str,
+) -> (Vec<u8>, Option<String>) {
+    match timeout(EXEC_STOP_TIMEOUT, &mut task).await {
+        Ok(Ok(Ok(bytes))) => (bytes, None),
+        Ok(Ok(Err(error))) => (
+            Vec::new(),
+            Some(format!("codex exec の {label} 読み取りに失敗: {error}")),
+        ),
+        Ok(Err(error)) => (
+            Vec::new(),
+            Some(format!("codex exec の {label} 収集処理に失敗: {error}")),
+        ),
+        Err(_) => {
+            task.abort();
+            (
+                Vec::new(),
+                Some(format!(
+                    "codex exec の {label} 収集が{}秒でタイムアウト",
+                    EXEC_STOP_TIMEOUT.as_secs()
+                )),
+            )
+        }
+    }
+}
+
+#[cfg(windows)]
+async fn stop_exec_child(child: &mut Child) -> Option<String> {
+    match timeout(EXEC_STOP_TIMEOUT, child.kill()).await {
+        Ok(Ok(())) => None,
+        Ok(Err(error)) => match child.try_wait() {
+            Ok(Some(_)) => None,
+            _ => Some(error.to_string()),
+        },
+        Err(_) => {
+            let _ = child.start_kill();
+            Some(format!(
+                "停止完了を{}秒以内に確認できませんでした",
+                EXEC_STOP_TIMEOUT.as_secs()
+            ))
+        }
+    }
 }
 
 #[cfg(not(windows))]
@@ -1745,9 +2082,11 @@ fn send_terminate(_pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_thread_id, extract_turn_id, gen_queue, is_gen_server_command,
-        is_sqlite_state_corruption_error, is_stale_server_error, notification_matches,
-        should_replace_server, spawn_permit_watchdog_with_timeout, GenPhase, MAX_TURNS_PER_SERVER,
+        exec_failure_message, extract_thread_id, extract_turn_id, gen_queue,
+        https_urls_in_exec_stdout, is_gen_server_command, is_sqlite_state_corruption_error,
+        is_stale_server_error, mcp_tool_calls_in_exec_output, normalize_exec_turn,
+        notification_matches, should_replace_server, spawn_permit_watchdog_with_timeout,
+        ExecTurnState, GenPhase, MAX_TURNS_PER_SERVER,
     };
     use serde_json::{json, Value};
     use std::sync::Arc;
@@ -1766,6 +2105,79 @@ mod tests {
         assert_eq!(
             extract_turn_id(&json!({ "turn": { "id": "turn-1" } })).as_deref(),
             Some("turn-1")
+        );
+    }
+
+    #[test]
+    fn extracts_unique_https_urls_from_exec_stdout() {
+        let urls = https_urls_in_exec_stdout(
+            "結果: https://cdn.example.test/a.png, 再掲 https://cdn.example.test/a.png\n\
+             http://unsafe.example.test/a.png https://cdn.example.test/b.mp4?x=1",
+        );
+        assert_eq!(
+            urls,
+            vec![
+                "https://cdn.example.test/a.png".to_string(),
+                "https://cdn.example.test/b.mp4?x=1".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn normalizes_exec_urls_as_completed_mcp_tool_result() {
+        let output = normalize_exec_turn(
+            ExecTurnState::Exited {
+                success: true,
+                code: Some(0),
+            },
+            "https://cdn.example.test/result.png",
+            "mcp: krea/generate_image",
+            Duration::from_secs(30),
+            None,
+        );
+        assert_eq!(output.final_message, "https://cdn.example.test/result.png");
+        assert_eq!(output.completed_items.len(), 1);
+        assert!(output.terminal_error.is_none());
+    }
+
+    #[test]
+    fn timeout_is_terminal_even_if_stdout_contains_a_url() {
+        let output = normalize_exec_turn(
+            ExecTurnState::TimedOut { stop_error: None },
+            "https://cdn.example.test/incomplete.png",
+            "",
+            Duration::from_secs(12),
+            None,
+        );
+        assert_eq!(output.completed_items.len(), 1);
+        assert!(output
+            .terminal_error
+            .as_deref()
+            .is_some_and(|error| error.contains("12秒")));
+    }
+
+    #[test]
+    fn exec_failure_redacts_urls_and_bounds_output_tails() {
+        let noisy = format!(
+            "{} https://secret.example.test/download?token=abc 最後の失敗",
+            "x".repeat(3_000)
+        );
+        let message = exec_failure_message("異常終了", &noisy, &noisy, None);
+        assert!(message.contains("異常終了"));
+        assert!(message.contains("[URLを除外]"));
+        assert!(message.contains("最後の失敗"));
+        assert!(!message.contains("token=abc"));
+        assert!(message.chars().count() < 4_200);
+    }
+
+    #[test]
+    fn recognizes_mcp_tool_lines_for_logging() {
+        assert_eq!(
+            mcp_tool_calls_in_exec_output("mcp: krea/list_models\ninfo mcp: krea/generate_image,"),
+            vec![
+                ("krea".to_string(), "list_models".to_string()),
+                ("krea".to_string(), "generate_image".to_string()),
+            ]
         );
     }
 
