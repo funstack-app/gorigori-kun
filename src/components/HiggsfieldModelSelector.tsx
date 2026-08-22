@@ -613,7 +613,7 @@ function ModelPickerPopover({
             clearMagnific();
             setSelectedRemote(null);
           }}
-          className={`rounded-t-md px-2.5 py-1 text-[11px] font-bold ${providerTab === "default" ? "bg-[#1e1e1e] text-white" : "text-neutral-500 hover:text-white"}`}
+          className={`shrink-0 whitespace-nowrap rounded-t-md px-2.5 py-1 text-[11px] font-bold ${providerTab === "default" ? "bg-[#1e1e1e] text-white" : "text-neutral-500 hover:text-white"}`}
         >
           デフォルト
         </button>
@@ -624,7 +624,7 @@ function ModelPickerPopover({
             clearMagnific();
             setSelectedRemote(null);
           }}
-          className={`rounded-t-md px-2.5 py-1 text-[11px] font-bold ${providerTab === "higgsfield" ? "bg-pink-500/20 text-pink-100" : "text-neutral-500 hover:text-white"}`}
+          className={`shrink-0 whitespace-nowrap rounded-t-md px-2.5 py-1 text-[11px] font-bold ${providerTab === "higgsfield" ? "bg-pink-500/20 text-pink-100" : "text-neutral-500 hover:text-white"}`}
         >
           HiggsField
         </button>
@@ -636,7 +636,7 @@ function ModelPickerPopover({
               setSelectedModels([]);
               setSelectedRemote(null);
             }}
-            className={`rounded-t-md px-2.5 py-1 text-[11px] font-bold ${providerTab === "magnific" ? "bg-violet-500/20 text-violet-100" : "text-neutral-500 hover:text-white"}`}
+            className={`shrink-0 whitespace-nowrap rounded-t-md px-2.5 py-1 text-[11px] font-bold ${providerTab === "magnific" ? "bg-violet-500/20 text-violet-100" : "text-neutral-500 hover:text-white"}`}
           >
             Magnific
           </button>
@@ -649,7 +649,7 @@ function ModelPickerPopover({
               setProviderTab(provider.id);
               if (selectedRemote?.providerId !== provider.id) setSelectedRemote(null);
             }}
-            className={`shrink-0 rounded-t-md px-2.5 py-1 text-[11px] font-bold ${providerTab === provider.id ? "bg-sky-500/20 text-sky-100" : "text-neutral-500 hover:text-white"}`}
+            className={`shrink-0 whitespace-nowrap rounded-t-md px-2.5 py-1 text-[11px] font-bold ${providerTab === provider.id ? "bg-sky-500/20 text-sky-100" : "text-neutral-500 hover:text-white"}`}
           >
             {provider.label}
           </button>
