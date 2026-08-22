@@ -30,6 +30,7 @@ import { staticModelsFor } from "../lib/higgsfield/staticCatalog";
 import { useHiggsfieldModel, type SelectedModel } from "../lib/store/higgsfieldModel";
 import { useMagnificModel, MAX_MAGNIFIC_COMPARE } from "../lib/store/magnificModel";
 import { useAccounts } from "../lib/store/accounts";
+import { useToasts } from "../lib/store/toasts";
 import { FEATURED_MAGNIFIC_IMAGE_MODELS, getMagnificModelName } from "../lib/magnific/models";
 import {
   REMOTE_MCP_PROVIDERS,
@@ -48,6 +49,7 @@ import {
   type RemoteMcpVideoSpecs,
 } from "../lib/remoteMcpModels";
 import {
+  reconcileRemoteMcpSelections,
   useRemoteMcpGen,
   type RemoteMcpSelection,
 } from "../lib/store/remoteMcpGen";
@@ -157,6 +159,7 @@ export function HiggsfieldModelSelector({
   const remoteSelection = useRemoteMcpGen((s) => s.selections[media]);
   const remoteVideoSelections = useRemoteMcpGen((s) => s.videoSelections);
   const setRemoteVideoSelections = useRemoteMcpGen((s) => s.setVideoSelections);
+  const pushToast = useToasts((s) => s.push);
   const [models, setModels] = useState<HiggsfieldModelInfo[]>([]);
   const [planType, setPlanType] = useState<string | null>(null);
   const [loadState, setLoadState] = useState<LoadState>("idle");
@@ -202,6 +205,25 @@ export function HiggsfieldModelSelector({
       ]);
       const fetchedAt = Date.now();
       const nextPlanType = account?.subscriptionPlanType ?? null;
+      if (media === "video") {
+        const catalog = buildHiggsfieldVideoModelCatalog(nextModels, {
+          fallback: false,
+          fetchedAt,
+        });
+        const currentSelections = useRemoteMcpGen.getState().videoSelections;
+        const reconciled = reconcileRemoteMcpSelections(
+          currentSelections,
+          "higgsfield",
+          catalog,
+        );
+        if (reconciled.removed.length > 0) {
+          setRemoteVideoSelections(reconciled.selections);
+          pushToast({
+            kind: "error",
+            text: `再取得した一覧から消えた${reconciled.removed.length}モデルの選択を外しました。`,
+          });
+        }
+      }
       setModels(nextModels);
       setPlanType(nextPlanType);
       setUsingFallback(false);
@@ -220,7 +242,7 @@ export function HiggsfieldModelSelector({
       }
       setLoadState("error");
     }
-  }, [higgsfieldAuthed, media]);
+  }, [higgsfieldAuthed, media, pushToast, setRemoteVideoSelections]);
 
   useEffect(() => {
     setOpen(false);
@@ -468,6 +490,7 @@ function ModelPickerPopover({
   const setRemoteVideoSelections = useRemoteMcpGen((s) => s.setVideoSelections);
   const modelCatalogs = useRemoteMcpGen((s) => s.modelCatalogs);
   const setModelCatalog = useRemoteMcpGen((s) => s.setModelCatalog);
+  const pushToast = useToasts((s) => s.push);
   const connectedRemoteProviders = useMemo(
     () =>
       REMOTE_MCP_PROVIDERS.filter(
@@ -507,6 +530,34 @@ function ModelPickerPopover({
   const activeRemoteProvider = connectedRemoteProviders.find(
     (provider) => provider.id === providerTab,
   );
+
+  const removeUnavailableSelections = (
+    providerId: string,
+    catalog: RemoteMcpModelCatalog,
+  ) => {
+    const state = useRemoteMcpGen.getState();
+    const currentSelection = state.selections[media];
+    const currentSelections = media === "video"
+      ? state.videoSelections
+      : currentSelection
+        ? [currentSelection]
+        : [];
+    const reconciled = reconcileRemoteMcpSelections(
+      currentSelections,
+      providerId,
+      catalog,
+    );
+    if (reconciled.removed.length === 0) return;
+    if (media === "video") {
+      setRemoteVideoSelections(reconciled.selections);
+    } else {
+      setRemoteSelection(media, reconciled.selections[0] ?? null);
+    }
+    pushToast({
+      kind: "error",
+      text: `再取得した一覧から消えた${reconciled.removed.length}モデルの選択を外しました。`,
+    });
+  };
 
   // プロバイダタブを開いた時点で、保存済みツール/モデルを再利用する。
   // 未取得なら「モデル一覧ツール → 保存済み一覧 → model enum」の順で自動取得する。
@@ -614,21 +665,7 @@ function ModelPickerPopover({
         ...current,
         [providerId]: { kind: "ready", tools, catalog },
       }));
-      const selected = useRemoteMcpGen.getState().selections[media];
-      if (
-        selected?.providerId === providerId &&
-        !tools.tools.some((tool) => tool.name === selected.toolName)
-      ) {
-        if (media === "video") {
-          setRemoteVideoSelections(
-            useRemoteMcpGen
-              .getState()
-              .videoSelections.filter((selection) => selection.providerId !== providerId),
-          );
-        } else {
-          setRemoteSelection(media, null);
-        }
-      }
+      removeUnavailableSelections(providerId, catalog);
     } catch (error) {
       const cached = useRemoteMcpGen.getState().modelCatalogs[
         remoteMcpCatalogKey(providerId, media)
@@ -678,6 +715,7 @@ function ModelPickerPopover({
       }
       setModelCatalog(remoteMcpCatalogKey("magnific", "video"), catalog);
       setMagnificVideoState({ kind: "ready", catalog });
+      removeUnavailableSelections("magnific", catalog);
     } catch (error) {
       const cached = useRemoteMcpGen.getState().modelCatalogs[
         remoteMcpCatalogKey("magnific", "video")
@@ -916,6 +954,7 @@ function ModelPickerPopover({
   };
 
   const confirmSelection = () => {
+    if (media === "video" && selectedVideoCount === 0) return;
     if (activeRemoteProvider || isMagnificVideoTab || isHiggsfieldVideoTab) {
       if (media === "image" && !selectedActiveCatalog) return;
       onClose();
@@ -1020,7 +1059,7 @@ function ModelPickerPopover({
       {/*
         接続先タブ (2026-06-08 STΛCK構想)。デフォルト(コア)の下にタブを置き、
         接続済みの拡張ごとにモデルを切り替える。未接続の拡張はタブが出ない(degrade)。
-        タブ切替時は他providerの選択をクリアして排他にする(コアを壊さない)。
+        動画はタブを見ただけでは選択を変えず、モデル行の明示操作だけで追加・解除する。
       */}
       <div
         className="flex shrink-0 flex-wrap gap-1 border-b border-[#242424] px-2 pt-2"
@@ -1045,8 +1084,10 @@ function ModelPickerPopover({
             type="button"
             onClick={() => {
               setProviderTab("higgsfield");
-              clearMagnific();
-              setRemoteSelection(media, null);
+              if (media === "image") {
+                clearMagnific();
+                setRemoteSelection(media, null);
+              }
             }}
             className={`shrink-0 whitespace-nowrap rounded-t-md px-2.5 py-1 text-[11px] font-bold ${providerTab === "higgsfield" ? "bg-pink-500/20 text-pink-100" : "text-neutral-500 hover:text-white"}`}
           >
@@ -1376,13 +1417,14 @@ function ModelPickerPopover({
           type="button"
           onClick={confirmSelection}
           disabled={Boolean(
-            hasActiveCatalogTab &&
-              media === "image" &&
-              !selectedActiveCatalog,
+            (media === "video" && selectedVideoCount === 0) ||
+              (hasActiveCatalogTab && media === "image" && !selectedActiveCatalog),
           )}
           className="h-8 w-full rounded-md bg-pink-500 px-3 text-xs font-semibold text-white transition hover:bg-pink-600 disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-400"
         >
-          {hasActiveCatalogTab
+          {media === "video" && selectedVideoCount === 0
+            ? "モデルを選択してください"
+            : hasActiveCatalogTab
             ? media === "video"
               ? selectedVideoCount >= 2
                 ? `${selectedVideoCount}モデルで比較生成`

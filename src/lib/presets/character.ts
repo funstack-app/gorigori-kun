@@ -37,6 +37,17 @@ export function composePresetPrompt(
   return preset.prompt.trim();
 }
 
+/** 空のキャラ本文では区切り文字を足さず、現在のプロンプトをそのまま保つ。 */
+export function appendPresetPrompt(
+  current: string,
+  preset: Preset,
+  separator = ", ",
+): string {
+  return [current.trim(), composePresetPrompt(preset, separator)]
+    .filter(Boolean)
+    .join(separator);
+}
+
 /**
  * キャラ型プリセットが記録している「生成元の参照画像」を全量で読む。
  *

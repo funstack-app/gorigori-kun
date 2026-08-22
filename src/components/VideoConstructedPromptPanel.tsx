@@ -36,7 +36,7 @@ import {
   type Preset,
 } from "../lib/store/presets";
 import {
-  composePresetPrompt,
+  appendPresetPrompt,
   selectCharacterReferences,
 } from "../lib/presets/character";
 import { PresetPickerPopover } from "./PresetPickerPopover";
@@ -104,6 +104,13 @@ function remoteSelectionLabel(selection: RemoteMcpSelection): string {
   return `${selection.providerLabel}: ${
     selection.model?.label ?? selection.model?.name ?? selection.toolTitle ?? selection.toolName
   }`;
+}
+
+function remoteJobPhaseLabel(phase: "running" | "saving" | "done" | "error"): string {
+  if (phase === "running") return "生成中";
+  if (phase === "saving") return "登録中";
+  if (phase === "done") return "完了";
+  return "失敗";
 }
 
 /**
@@ -174,13 +181,18 @@ export function VideoConstructedPromptPanel() {
   const setExtraParam = useVideoGen((s) => s.setExtraParam);
   const remoteSelection = useRemoteMcpGen((s) => s.selections.video);
   const remoteVideoSelections = useRemoteMcpGen((s) => s.videoSelections);
-  const latestRemoteRequestId = useRemoteMcpGen((s) => s.latestRequestId.video);
-  const latestRemoteJob = useRemoteMcpGen((s) => {
-    const requestId = s.latestRequestId.video;
-    return requestId ? (s.jobs[requestId] ?? null) : null;
-  });
+  const latestRemoteBatchId = useRemoteMcpGen((s) => s.latestBatchId.video);
   const remoteValidationMessage = useRemoteMcpGen((s) => s.validationMessage.video);
   const remoteJobs = useRemoteMcpGen((s) => s.jobs);
+  const latestRemoteJobs = useMemo(
+    () =>
+      latestRemoteBatchId
+        ? Object.values(remoteJobs)
+            .filter((job) => job.kind === "video" && job.batchId === latestRemoteBatchId)
+            .sort((left, right) => left.createdAt - right.createdAt)
+        : [],
+    [latestRemoteBatchId, remoteJobs],
+  );
   const startRemoteGeneration = useRemoteMcpGen((s) => s.startSelectedVideos);
   const retryRemoteGeneration = useRemoteMcpGen((s) => s.retry);
 
@@ -258,9 +270,7 @@ export function VideoConstructedPromptPanel() {
 
   const appendPreset = (preset: Preset) => {
     const current = (isOverriding ? draft : generatedPrompt).trim();
-    // キャラ型プリセットは属性テキストも合成 (プロンプト型は preset.prompt のまま)。
-    const presetBody = composePresetPrompt(preset, ", ");
-    const next = current ? `${current}, ${presetBody}` : presetBody;
+    const next = appendPresetPrompt(current, preset);
     onChangeDraft(next);
     // F-#6/#7: プリセットの参照画像を composer.references に自動追加。
     // キャラ型は既定3枚に絞り、同一キャラを1チップに畳む groupId/groupLabel を付ける。
@@ -547,9 +557,8 @@ export function VideoConstructedPromptPanel() {
     await Promise.all(tasks);
   };
 
-  const retryRemote = async () => {
-    if (!latestRemoteRequestId) return;
-    const result = await retryRemoteGeneration(latestRemoteRequestId);
+  const retryRemote = async (requestId: string) => {
+    const result = await retryRemoteGeneration(requestId);
     if (!result.ok) pushToast({ kind: "error", text: result.message });
   };
 
@@ -741,7 +750,7 @@ export function VideoConstructedPromptPanel() {
           className="h-9 w-full rounded-md bg-pink-500 px-4 py-1.5 text-sm font-black text-white transition hover:bg-pink-600 disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-500"
         >
           {remoteSelection && remoteRunning
-            ? latestRemoteJob?.phase === "saving"
+            ? latestRemoteJobs.some((job) => job.phase === "saving")
               ? "保存中…"
               : "生成中…"
             : selectedModelCount === 0
@@ -755,29 +764,50 @@ export function VideoConstructedPromptPanel() {
                 : "動画を生成"}
         </button>
 
-        {(latestRemoteJob || remoteValidationMessage) && (
+        {remoteValidationMessage && (
           <div
-            data-request-id={latestRemoteJob?.requestId}
-            className={
-              latestRemoteJob?.phase === "error" || (!latestRemoteJob && remoteValidationMessage)
-                ? "rounded-md border border-red-500/30 bg-red-500/5 px-2.5 py-2 text-xs font-semibold text-red-300"
-                : "rounded-md border border-[#2a2a2a] bg-[#101010] px-2.5 py-2 text-xs font-semibold text-neutral-400"
-            }
+            className="rounded-md border border-red-500/30 bg-red-500/5 px-2.5 py-2 text-xs font-semibold text-red-300"
           >
-            <p>
-              {latestRemoteJob?.phase === "done"
-                ? "保存が完了しました。動画はギャラリー・履歴へ自動登録されます。"
-                : latestRemoteJob?.message ?? remoteValidationMessage}
-            </p>
-            {latestRemoteJob?.phase === "error" && (
-              <button
-                type="button"
-                onClick={() => void retryRemote()}
-                className="mt-2 rounded border border-red-300/30 px-2 py-1 text-[11px] font-bold text-red-200 hover:bg-red-500/10"
-              >
-                再試行
-              </button>
+            <p>{remoteValidationMessage}</p>
+          </div>
+        )}
+
+        {latestRemoteJobs.length > 0 && (
+          <div className="space-y-1.5" data-remote-job-count={latestRemoteJobs.length}>
+            {compareMode && (
+              <p className="text-[10px] font-bold text-neutral-500">
+                比較生成 {latestRemoteJobs.length}モデルの状況
+              </p>
             )}
+            {latestRemoteJobs.map((job) => (
+              <div
+                key={job.requestId}
+                data-request-id={job.requestId}
+                data-phase={job.phase}
+                className={
+                  job.phase === "error"
+                    ? "rounded-md border border-red-500/30 bg-red-500/5 px-2.5 py-2 text-xs font-semibold text-red-300"
+                    : "rounded-md border border-[#2a2a2a] bg-[#101010] px-2.5 py-2 text-xs font-semibold text-neutral-400"
+                }
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <span className="min-w-0 truncate text-neutral-200">
+                    {remoteSelectionLabel(job.selection)}
+                  </span>
+                  <span className="shrink-0 text-[10px]">{remoteJobPhaseLabel(job.phase)}</span>
+                </div>
+                <p className="mt-1 whitespace-pre-wrap">{job.message}</p>
+                {job.phase === "error" && !job.savedPaths?.length && (
+                  <button
+                    type="button"
+                    onClick={() => void retryRemote(job.requestId)}
+                    className="mt-2 rounded border border-red-300/30 px-2 py-1 text-[11px] font-bold text-red-200 hover:bg-red-500/10"
+                  >
+                    再試行
+                  </button>
+                )}
+              </div>
+            ))}
           </div>
         )}
 

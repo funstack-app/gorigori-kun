@@ -34,6 +34,8 @@ export type RemoteMcpRunInput = RemoteMcpParamInput & {
 
 export type RemoteMcpGenJob = {
   requestId: string;
+  /** 比較生成で同時に開始したジョブを、表示上ひとまとまりにするためのID。 */
+  batchId: string;
   providerId: string;
   providerLabel: string;
   toolName: string;
@@ -61,6 +63,7 @@ type RemoteMcpGenState = {
   videoSelections: RemoteMcpSelection[];
   jobs: Record<string, RemoteMcpGenJob>;
   latestRequestId: Record<RemoteMcpGenerationKind, string | null>;
+  latestBatchId: Record<RemoteMcpGenerationKind, string | null>;
   validationMessage: Record<RemoteMcpGenerationKind, string | null>;
   modelCatalogs: Record<string, RemoteMcpModelCatalog>;
   setSelection: (
@@ -74,6 +77,36 @@ type RemoteMcpGenState = {
   retry: (requestId: string) => Promise<RemoteMcpStartResult>;
   applyEvent: (event: RemoteMcpGenEvent) => void;
 };
+
+export type RemoteMcpSelectionReconcileResult = {
+  selections: RemoteMcpSelection[];
+  removed: RemoteMcpSelection[];
+};
+
+/** 再取得した実モデル一覧に残っている選択だけを保つ。 */
+export function reconcileRemoteMcpSelections(
+  selections: readonly RemoteMcpSelection[],
+  providerId: string,
+  catalog: RemoteMcpModelCatalog,
+): RemoteMcpSelectionReconcileResult {
+  const modelIds = new Set(catalog.models.map((model) => model.id));
+  const generationToolName = catalog.generationTool?.name;
+  const kept: RemoteMcpSelection[] = [];
+  const removed: RemoteMcpSelection[] = [];
+
+  for (const selection of selections) {
+    const belongsToProvider = selection.providerId === providerId;
+    const toolStillExists = selection.toolName === generationToolName;
+    const modelStillExists = selection.model ? modelIds.has(selection.model.id) : false;
+    if (!belongsToProvider || (toolStillExists && modelStillExists)) {
+      kept.push(selection);
+    } else {
+      removed.push(selection);
+    }
+  }
+
+  return { selections: kept, removed };
+}
 
 const MODEL_CATALOG_CACHE_KEY = "gori.remoteMcp.modelCatalogs.v1";
 
@@ -209,7 +242,7 @@ export const useRemoteMcpGen = create<RemoteMcpGenState>((set, get) => {
             ...state.jobs,
             [requestId]: {
               ...current,
-              phase: "done",
+              phase: "error",
               message: warning,
               savedPaths,
               registrationCompleted: true,
@@ -225,6 +258,7 @@ export const useRemoteMcpGen = create<RemoteMcpGenState>((set, get) => {
   const launch = async (
     selection: RemoteMcpSelection,
     input: RemoteMcpRunInput,
+    requestedBatchId?: string,
   ): Promise<RemoteMcpStartResult> => {
     const validationMessage = validationFailure(input);
     if (validationMessage) {
@@ -243,9 +277,11 @@ export const useRemoteMcpGen = create<RemoteMcpGenState>((set, get) => {
     ].filter((path): path is string => Boolean(path?.trim()));
 
     const requestId = createRequestId();
+    const batchId = requestedBatchId ?? requestId;
     const now = Date.now();
     const job: RemoteMcpGenJob = {
       requestId,
+      batchId,
       providerId: selection.providerId,
       providerLabel: selection.providerLabel,
       toolName: selection.toolName,
@@ -261,6 +297,7 @@ export const useRemoteMcpGen = create<RemoteMcpGenState>((set, get) => {
     set((state) => ({
       jobs: { ...state.jobs, [requestId]: job },
       latestRequestId: { ...state.latestRequestId, [input.kind]: requestId },
+      latestBatchId: { ...state.latestBatchId, [input.kind]: batchId },
       validationMessage: { ...state.validationMessage, [input.kind]: null },
     }));
 
@@ -337,6 +374,7 @@ export const useRemoteMcpGen = create<RemoteMcpGenState>((set, get) => {
     videoSelections: [],
     jobs: {},
     latestRequestId: { image: null, video: null },
+    latestBatchId: { image: null, video: null },
     validationMessage: { image: null, video: null },
     modelCatalogs: readModelCatalogCache(),
 
@@ -403,9 +441,10 @@ export const useRemoteMcpGen = create<RemoteMcpGenState>((set, get) => {
         return get().start(input);
       }
       const compare = selections.length >= 2 || input.compareEach === true;
+      const batchId = createRequestId();
       const results = await Promise.all(
         selections.map((selection) =>
-          launch(selection, compare ? { ...input, count: 1 } : input),
+          launch(selection, compare ? { ...input, count: 1 } : input, batchId),
         ),
       );
       const failed = results.filter((result) => !result.ok);
@@ -427,7 +466,7 @@ export const useRemoteMcpGen = create<RemoteMcpGenState>((set, get) => {
     retry: async (requestId) => {
       const job = get().jobs[requestId];
       if (!job) return { ok: false, message: "再試行する生成情報が見つかりません。" };
-      return launch(job.selection, job.input);
+      return launch(job.selection, job.input, job.batchId);
     },
 
     applyEvent: (event) => {
