@@ -1,5 +1,6 @@
 import { create } from "zustand";
 
+import { requestAutomaticDiagnostics } from "./diagnosticsRun";
 import { createPersistGuard, describeOutcome } from "./persistGuard";
 
 /**
@@ -145,6 +146,7 @@ export const useErrorLog = create<ErrorLogState>((set, get) => ({
     const entries = [...get().entries, entry].slice(-ERROR_LOG_LIMIT);
     set({ entries, unreadCount: get().unreadCount + 1 });
     void persist(entries);
+    void requestAutomaticDiagnostics();
     return entry.id;
   },
 
