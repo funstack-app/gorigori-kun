@@ -4,6 +4,7 @@ pub mod batch_gen;
 pub mod cloud_supabase;
 pub mod codex_text;
 pub mod codex_vision;
+pub mod diagnostics;
 pub mod edit_export;
 pub mod edit_fonts;
 // ort (ONNX Runtime) を使う編集コマンド群は Windows 限定 (2026-07-28)。

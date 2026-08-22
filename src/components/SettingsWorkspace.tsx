@@ -33,6 +33,7 @@ import { useWorldContexts } from "../lib/store/worldContexts";
 // SettingsCloudSection は v0.6.13 でα版非表示。β以降で復活予定。
 // import { SettingsCloudSection } from "./SettingsCloudSection";
 import { SettingsConnections } from "./SettingsConnections";
+import { SettingsDiagnostics } from "./SettingsDiagnostics";
 import { UpdateChecker } from "./UpdateChecker";
 import { FONT_SCALE_OPTIONS, useFontScale } from "../lib/store/fontScale";
 
@@ -41,6 +42,7 @@ const TABS: Array<{ id: SettingsWorkspaceTab; label: string }> = [
   { id: "storage", label: "保存先" },
   { id: "accounts", label: "アカウント" },
   { id: "connections", label: "接続先 (拡張機能)" },
+  { id: "diagnostics", label: "診断" },
 ];
 const PLAN_LABELS: Record<CodexPlan, string> = {
   free: "Free",
@@ -111,6 +113,7 @@ export function SettingsWorkspace() {
           )}
           {tab === "accounts" && <AccountSettings />}
           {tab === "connections" && <SettingsConnections />}
+          {tab === "diagnostics" && <SettingsDiagnostics />}
         </div>
       </div>
     </section>
@@ -1268,7 +1271,8 @@ function StorageBreakdownSection() {
     if (!breakdown || selected.length === 0) return;
     const message =
       `選んだ一時データ ${formatStorageBytes(selectedTotal)} を削除します。\n\n` +
-      "作品・画像・登録データは削除しません。続けますか？";
+      "作品・画像・登録データは削除しません。\n" +
+      "共通Codexのデータは対象外です。続けますか？";
     let ok = false;
     try {
       const { ask } = await import("@tauri-apps/plugin-dialog");
@@ -1382,6 +1386,38 @@ function StorageBreakdownSection() {
               </label>
             );
           })}
+          <div className="flex cursor-not-allowed gap-3 px-3 py-2.5">
+            <input
+              type="checkbox"
+              checked={false}
+              disabled
+              readOnly
+              className="mt-0.5 h-4 w-4 shrink-0 accent-pink-500 opacity-40"
+            />
+            <span className="min-w-0 flex-1">
+              <span className="flex items-baseline justify-between gap-3">
+                <span className="text-xs font-bold text-neutral-200">
+                  共通Codexの領域（削除対象外）
+                </span>
+                <span className="shrink-0 font-mono text-xs font-bold text-neutral-100">
+                  {breakdown
+                    ? formatStorageBytes(
+                        (
+                          breakdown as StorageBreakdown & {
+                            commonCodex?: StorageBreakdown["appData"];
+                          }
+                        ).commonCodex?.bytes ?? 0,
+                      )
+                    : scanning
+                      ? "計算中…"
+                      : "—"}
+                </span>
+              </span>
+              <span className="mt-0.5 block text-[11px] leading-relaxed text-neutral-400">
+                共通のCodex CLIが使う履歴・設定です。GORI GORI KUNからは削除しません
+              </span>
+            </span>
+          </div>
         </div>
 
         {breakdown && breakdown.errors.length > 0 ? (

@@ -2,7 +2,12 @@ import { create } from "zustand";
 
 export type WorkspaceTab = "plan" | "generate" | "video" | "edit";
 export type WorkspacePurpose = "artwork" | "ad" | "videoStory";
-export type SettingsWorkspaceTab = "basic" | "storage" | "accounts" | "connections";
+export type SettingsWorkspaceTab =
+  | "basic"
+  | "storage"
+  | "accounts"
+  | "connections"
+  | "diagnostics";
 
 /**
  * 生成タイムラインのサムネサイズ。
