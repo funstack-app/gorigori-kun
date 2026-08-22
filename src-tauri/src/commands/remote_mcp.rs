@@ -3,13 +3,16 @@
 //! このモジュールは登録・認証・切断・状態表示だけを担当する。各サービスの
 //! ツール名や引数は実アカウントでの確認前に推測せず、専用生成 UI には配線しない。
 
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::process::Stdio;
 use std::time::Duration;
 
-use serde::Serialize;
-use tauri::State;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use tauri::{AppHandle, Manager, State};
 
-use crate::codex::mcp_direct::reload_mcp_servers;
+use crate::codex::mcp_direct::{call_tool, reload_mcp_servers, ToolCallOutput};
 use crate::codex::mcp_shared::{
     entry_is_authenticated, find_mcp_entry, gori_codex_command, run_codex_capture,
 };
@@ -17,6 +20,9 @@ use crate::state::AppState;
 
 const STATUS_TIMEOUT_SECS: u64 = 30;
 const LOGIN_TIMEOUT_SECS: u64 = 180;
+const DISCOVERY_RAW_LIMIT_CHARS: usize = 4_000;
+const DISCOVERY_DIR_NAME: &str = "provider-discovery";
+const DISCOVERY_PROBE_TOOL: &str = "__gori_probe__";
 
 /// 接続可能なリモート MCP の正本。
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -87,6 +93,48 @@ pub struct RemoteMcpStatus {
     pub authenticated: bool,
 }
 
+/// 1回の実測結果。UI向けキャッシュでは raw を4,000文字までに抑える。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteMcpDiscoveryAttempt {
+    pub tool: String,
+    pub ok: bool,
+    pub raw: String,
+}
+
+/// MCP応答から、推測せずに読み取れたモデル名だけを保持する。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteMcpDiscoveredModel {
+    pub id: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+/// 1プロバイダ分のディスカバリ結果。app data_dir に同じ形で保存する。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteMcpDiscovery {
+    pub provider_id: String,
+    pub attempts: Vec<RemoteMcpDiscoveryAttempt>,
+    pub models: Vec<RemoteMcpDiscoveredModel>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RawDiscoveryLog<'a> {
+    provider_id: &'a str,
+    recorded_at_ms: u128,
+    attempts: &'a [RemoteMcpDiscoveryAttempt],
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DiscoveryTool {
+    name: &'static str,
+    is_model_list: bool,
+}
+
 fn unavailable_statuses() -> Vec<RemoteMcpStatus> {
     REMOTE_PROVIDERS
         .iter()
@@ -117,6 +165,209 @@ fn provider_by_id(provider_id: &str) -> Result<&'static RemoteProviderDef, Strin
         .iter()
         .find(|provider| provider.id == provider_id)
         .ok_or_else(|| format!("未対応のリモート MCP プロバイダです: {provider_id}"))
+}
+
+/// 読み取り専用の候補だけを返す。生成系ツールは課金防止のため絶対に含めない。
+fn discovery_tools(provider_id: &str) -> Vec<DiscoveryTool> {
+    let (model_tools, balance_tools): (&[&str], &[&str]) = match provider_id {
+        "krea" => (&["list_models"], &["account_balance", "balance"]),
+        "pollo" => (&["list_models", "models"], &["balance", "credits"]),
+        "runway" => (
+            &["list_models", "models", "get_models"],
+            &["credits", "balance", "organization"],
+        ),
+        _ => (
+            &["list_models", "models_explore", "models_list"],
+            &["balance", "account_balance", "credits"],
+        ),
+    };
+
+    model_tools
+        .iter()
+        .map(|name| DiscoveryTool {
+            name,
+            is_model_list: true,
+        })
+        .chain(balance_tools.iter().map(|name| DiscoveryTool {
+            name,
+            is_model_list: false,
+        }))
+        .collect()
+}
+
+fn scalar_string(value: &Value) -> Option<String> {
+    match value {
+        Value::String(value) => {
+            let trimmed = value.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        }
+        Value::Number(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn first_field(object: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| object.get(*key).and_then(scalar_string))
+}
+
+fn model_from_value(value: &Value) -> Option<RemoteMcpDiscoveredModel> {
+    if let Some(value) = scalar_string(value) {
+        return Some(RemoteMcpDiscoveredModel {
+            id: value.clone(),
+            name: value,
+            label: None,
+        });
+    }
+
+    let object = value.as_object()?;
+    let id = first_field(
+        object,
+        &[
+            "id",
+            "modelId",
+            "model_id",
+            "slug",
+            "value",
+            "name",
+            "displayName",
+            "display_name",
+            "label",
+        ],
+    );
+    let name = first_field(
+        object,
+        &[
+            "name",
+            "displayName",
+            "display_name",
+            "label",
+            "title",
+            "id",
+            "modelId",
+            "model_id",
+            "slug",
+            "value",
+        ],
+    );
+    let label = first_field(object, &["label", "displayName", "display_name", "title"]);
+    let id = id.or_else(|| name.clone())?;
+    let name = name.unwrap_or_else(|| id.clone());
+
+    Some(RemoteMcpDiscoveredModel { id, name, label })
+}
+
+fn collect_model_values(value: &Value, models: &mut Vec<RemoteMcpDiscoveredModel>) {
+    match value {
+        Value::Array(values) => models.extend(values.iter().filter_map(model_from_value)),
+        Value::Object(object) => {
+            if let Some(model) = model_from_value(value) {
+                models.push(model);
+            }
+            for key in ["models", "data", "results", "items"] {
+                if let Some(nested) = object.get(key) {
+                    collect_model_values(nested, models);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// models/data/results/items の多様な応答形から、明示された文字列だけを抽出する。
+/// 説明文からモデル名を推測することはしない。
+fn extract_models(value: &Value) -> Vec<RemoteMcpDiscoveredModel> {
+    let mut models = Vec::new();
+    match value {
+        Value::Array(_) => collect_model_values(value, &mut models),
+        Value::Object(object) => {
+            for key in ["models", "data", "results", "items"] {
+                if let Some(nested) = object.get(key) {
+                    collect_model_values(nested, &mut models);
+                }
+            }
+        }
+        _ => {}
+    }
+
+    let mut unique = std::collections::HashSet::new();
+    models.retain(|model| unique.insert((model.id.clone(), model.name.clone())));
+    models
+}
+
+fn extract_models_from_output(output: &ToolCallOutput) -> Vec<RemoteMcpDiscoveredModel> {
+    let mut models = output
+        .structured
+        .as_ref()
+        .map(extract_models)
+        .unwrap_or_default();
+    if let Ok(text_json) = serde_json::from_str::<Value>(&output.text) {
+        models.extend(extract_models(&text_json));
+    }
+    let mut unique = std::collections::HashSet::new();
+    models.retain(|model| unique.insert((model.id.clone(), model.name.clone())));
+    models
+}
+
+fn tool_output_raw(output: &ToolCallOutput) -> String {
+    serde_json::to_string(&json!({
+        "isError": output.is_error,
+        "structuredContent": output.structured,
+        "contentText": output.text,
+    }))
+    .unwrap_or_else(|error| format!("tool/call 応答のJSON化に失敗しました: {error}"))
+}
+
+fn truncate_raw(raw: &str) -> String {
+    raw.chars().take(DISCOVERY_RAW_LIMIT_CHARS).collect()
+}
+
+fn discovery_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map(|dir| dir.join(DISCOVERY_DIR_NAME))
+        .map_err(|error| format!("プロバイダ実測結果の保存先を取得できませんでした: {error}"))
+}
+
+fn persist_discovery(
+    app: &AppHandle,
+    discovery: &RemoteMcpDiscovery,
+    raw_attempts: &[RemoteMcpDiscoveryAttempt],
+) -> Result<(), String> {
+    let dir = discovery_dir(app)?;
+    fs::create_dir_all(&dir)
+        .map_err(|error| format!("プロバイダ実測結果の保存先を作成できませんでした: {error}"))?;
+
+    let raw_path = dir.join(format!("{}.raw.jsonl", discovery.provider_id));
+    let mut raw_file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&raw_path)
+        .map_err(|error| format!("プロバイダ実測ログを開けませんでした: {error}"))?;
+    let recorded_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    serde_json::to_writer(
+        &mut raw_file,
+        &RawDiscoveryLog {
+            provider_id: &discovery.provider_id,
+            recorded_at_ms,
+            attempts: raw_attempts,
+        },
+    )
+    .map_err(|error| format!("プロバイダ実測ログをJSON化できませんでした: {error}"))?;
+    raw_file
+        .write_all(b"\n")
+        .map_err(|error| format!("プロバイダ実測ログを保存できませんでした: {error}"))?;
+
+    // 一次資料の追記に成功した後で、UI向けの短いキャッシュを差し替える。
+    let cache_path = dir.join(format!("{}.json", discovery.provider_id));
+    let cache = serde_json::to_vec_pretty(discovery)
+        .map_err(|error| format!("プロバイダ実測結果をJSON化できませんでした: {error}"))?;
+    fs::write(&cache_path, cache)
+        .map_err(|error| format!("プロバイダ実測結果を保存できませんでした: {error}"))?;
+    Ok(())
 }
 
 fn remove_output_is_already_absent(stdout: &str, stderr: &str) -> bool {
@@ -170,6 +421,87 @@ pub async fn remote_mcp_status_all() -> Vec<RemoteMcpStatus> {
     };
 
     statuses_from_stdout(&output.stdout)
+}
+
+/// 不正ツール名と読み取り専用候補を実際に call し、モデル一覧を推測なしで抽出する。
+#[tauri::command]
+pub async fn remote_mcp_discover(
+    provider_id: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<RemoteMcpDiscovery, String> {
+    let provider = provider_by_id(&provider_id)?;
+    let tools = std::iter::once(DiscoveryTool {
+        name: DISCOVERY_PROBE_TOOL,
+        is_model_list: false,
+    })
+    .chain(discovery_tools(provider.id));
+    let mut attempts = Vec::new();
+    let mut raw_attempts = Vec::new();
+    let mut models = Vec::new();
+
+    for tool in tools {
+        let (ok, raw, extracted) = match call_tool(&state, provider.id, tool.name, json!({})).await
+        {
+            Ok(output) => {
+                let ok = !output.is_error;
+                let extracted = if ok && tool.is_model_list {
+                    extract_models_from_output(&output)
+                } else {
+                    Vec::new()
+                };
+                (ok, tool_output_raw(&output), extracted)
+            }
+            Err(error) => (false, error, Vec::new()),
+        };
+        models.extend(extracted);
+        raw_attempts.push(RemoteMcpDiscoveryAttempt {
+            tool: tool.name.to_string(),
+            ok,
+            raw: raw.clone(),
+        });
+        attempts.push(RemoteMcpDiscoveryAttempt {
+            tool: tool.name.to_string(),
+            ok,
+            raw: truncate_raw(&raw),
+        });
+    }
+
+    let mut unique = std::collections::HashSet::new();
+    models.retain(|model| unique.insert((model.id.clone(), model.name.clone())));
+    let discovery = RemoteMcpDiscovery {
+        provider_id,
+        attempts,
+        models,
+    };
+    persist_discovery(&app, &discovery, &raw_attempts)?;
+    Ok(discovery)
+}
+
+/// 前回の実測キャッシュを返す。未実測なら null、壊れたキャッシュは明示エラーにする。
+#[tauri::command]
+pub fn remote_mcp_discovery_cached(
+    provider_id: String,
+    app: AppHandle,
+) -> Result<Option<RemoteMcpDiscovery>, String> {
+    let provider = provider_by_id(&provider_id)?;
+    let path = discovery_dir(&app)?.join(format!("{}.json", provider.id));
+    let raw = match fs::read(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "{} の保存済み実測結果を読めませんでした: {error}",
+                provider.label
+            ))
+        }
+    };
+    serde_json::from_slice(&raw).map(Some).map_err(|error| {
+        format!(
+            "{} の保存済み実測結果が壊れています: {error}",
+            provider.label
+        )
+    })
 }
 
 async fn login_provider(provider_id: &str, state: &AppState) -> Result<String, String> {
@@ -274,6 +606,14 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
+    fn discovered_model(id: &str, name: &str, label: Option<&str>) -> RemoteMcpDiscoveredModel {
+        RemoteMcpDiscoveredModel {
+            id: id.to_string(),
+            name: name.to_string(),
+            label: label.map(str::to_string),
+        }
+    }
+
     #[test]
     fn registry_ids_are_unique() {
         let mut ids = HashSet::new();
@@ -307,6 +647,46 @@ mod tests {
             "",
             "permission denied while updating config"
         ));
+    }
+
+    #[test]
+    fn extract_models_supports_models_object_array() {
+        assert_eq!(
+            extract_models(&json!({"models": [{"id": "flux-1", "name": "FLUX 1"}]})),
+            vec![discovered_model("flux-1", "FLUX 1", None)]
+        );
+    }
+
+    #[test]
+    fn extract_models_supports_data_array_and_alternate_keys() {
+        assert_eq!(
+            extract_models(&json!({"data": [{"model_id": "gen-4", "display_name": "Gen-4"}]})),
+            vec![discovered_model("gen-4", "Gen-4", Some("Gen-4"))]
+        );
+    }
+
+    #[test]
+    fn extract_models_supports_string_arrays() {
+        assert_eq!(
+            extract_models(&json!(["model-a", "model-b"])),
+            vec![
+                discovered_model("model-a", "model-a", None),
+                discovered_model("model-b", "model-b", None),
+            ]
+        );
+    }
+
+    #[test]
+    fn extract_models_returns_empty_for_unknown_shape() {
+        assert!(extract_models(&json!({"message": "no model list here"})).is_empty());
+    }
+
+    #[test]
+    fn raw_response_is_truncated_by_unicode_character_count() {
+        let raw = "餅".repeat(DISCOVERY_RAW_LIMIT_CHARS + 10);
+        let truncated = truncate_raw(&raw);
+        assert_eq!(truncated.chars().count(), DISCOVERY_RAW_LIMIT_CHARS);
+        assert!(truncated.chars().all(|character| character == '餅'));
     }
 
     #[tokio::test]

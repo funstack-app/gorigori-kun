@@ -1,5 +1,11 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import { higgsfieldMcp, type HiggsfieldModelInfo } from "../lib/ipc";
+import {
+  higgsfieldMcp,
+  remoteMcp,
+  type HiggsfieldModelInfo,
+  type RemoteMcpDiscoveredModel,
+  type RemoteMcpDiscovery,
+} from "../lib/ipc";
 import { buildPrompt } from "../lib/scene/buildPrompt";
 import { resolveImageMentions } from "../lib/scene/resolveImageMentions";
 import {
@@ -16,12 +22,23 @@ import { useHiggsfieldModel, type SelectedModel } from "../lib/store/higgsfieldM
 import { useMagnificModel, MAX_MAGNIFIC_COMPARE } from "../lib/store/magnificModel";
 import { useAccounts } from "../lib/store/accounts";
 import { FEATURED_MAGNIFIC_IMAGE_MODELS, getMagnificModelName } from "../lib/magnific/models";
+import {
+  REMOTE_MCP_PROVIDERS,
+  type RemoteMcpProviderCatalogEntry,
+} from "../lib/remoteMcpProviders";
 import { useSceneStore } from "../lib/store/scene";
 import { useScenePromptOverride } from "../lib/store/scenePrompt";
 import { useToasts } from "../lib/store/toasts";
 
-// 接続先タブ (2026-06-08)。デフォルト(コア)の下にタブを置き、接続先ごとにモデルを切り替える。
-type ProviderTab = "default" | "higgsfield" | "magnific";
+// 接続先タブ。接続済みの汎用リモートMCPも同じ列へ動的に加える。
+type RemoteProviderId = RemoteMcpProviderCatalogEntry["id"];
+type ProviderTab = "default" | "higgsfield" | "magnific" | RemoteProviderId;
+
+type RemoteDiscoveryUiState =
+  | { kind: "idle" }
+  | { kind: "loading" }
+  | { kind: "ready"; result: RemoteMcpDiscovery }
+  | { kind: "error"; message: string };
 
 type LoadState = "idle" | "loading" | "ready" | "missing" | "needsAuth" | "error";
 type CostState =
@@ -342,10 +359,97 @@ function ModelPickerPopover({
   const selectedMagnificModels = useMagnificModel((s) => s.selectedModels);
   const toggleMagnific = useMagnificModel((s) => s.toggleModel);
   const clearMagnific = useMagnificModel((s) => s.clear);
+  const pushToast = useToasts((s) => s.push);
+  const remoteMcpState = useAccounts((s) => s.remoteMcp);
+  const connectedRemoteProviders = useMemo(
+    () =>
+      REMOTE_MCP_PROVIDERS.filter(
+        (provider) => remoteMcpState[provider.id]?.authenticated,
+      ),
+    [remoteMcpState],
+  );
+  const [remoteDiscovery, setRemoteDiscovery] = useState<
+    Partial<Record<RemoteProviderId, RemoteDiscoveryUiState>>
+  >({});
+  const [selectedRemote, setSelectedRemote] = useState<{
+    providerId: RemoteProviderId;
+    model: RemoteMcpDiscoveredModel;
+  } | null>(null);
+  const cacheRequestedRef = useRef(new Set<RemoteProviderId>());
   const magnificCount = selectedMagnificModels.length;
   const [providerTab, setProviderTab] = useState<ProviderTab>(
     magnificCount > 0 ? "magnific" : selectedCount > 0 ? "higgsfield" : "default",
   );
+
+  // ピッカーを開いたら、接続中サービスの前回実測だけをローカルから復元する。
+  // ネットワーク実測はユーザーが「モデル一覧を取得」を押すまで開始しない。
+  useEffect(() => {
+    let cancelled = false;
+    const requested: RemoteProviderId[] = [];
+    for (const provider of connectedRemoteProviders) {
+      if (cacheRequestedRef.current.has(provider.id)) continue;
+      cacheRequestedRef.current.add(provider.id);
+      requested.push(provider.id);
+      setRemoteDiscovery((current) => ({
+        ...current,
+        [provider.id]: { kind: "loading" },
+      }));
+      void remoteMcp
+        .discoveryCached(provider.id)
+        .then((result) => {
+          if (cancelled) return;
+          setRemoteDiscovery((current) => ({
+            ...current,
+            [provider.id]: result ? { kind: "ready", result } : { kind: "idle" },
+          }));
+        })
+        .catch((error) => {
+          if (cancelled) return;
+          setRemoteDiscovery((current) => ({
+            ...current,
+            [provider.id]: { kind: "error", message: String(error) },
+          }));
+        });
+    }
+    return () => {
+      cancelled = true;
+      // 接続一覧が変わっただけなら、次の effect で取り直せるように戻す。
+      for (const providerId of requested) cacheRequestedRef.current.delete(providerId);
+    };
+  }, [connectedRemoteProviders]);
+
+  // 接続解除でタブが消えたら、安全なデフォルト表示へ戻す。既定モデル自体は変更しない。
+  useEffect(() => {
+    if (
+      providerTab !== "default" &&
+      providerTab !== "higgsfield" &&
+      providerTab !== "magnific" &&
+      !remoteMcpState[providerTab]?.authenticated
+    ) {
+      setProviderTab("default");
+      setSelectedRemote(null);
+    }
+  }, [providerTab, remoteMcpState]);
+
+  const discoverRemoteModels = async (providerId: RemoteProviderId) => {
+    setSelectedRemote((current) => (current?.providerId === providerId ? null : current));
+    setRemoteDiscovery((current) => ({
+      ...current,
+      [providerId]: { kind: "loading" },
+    }));
+    try {
+      const result = await remoteMcp.discover(providerId);
+      setRemoteDiscovery((current) => ({
+        ...current,
+        [providerId]: { kind: "ready", result },
+      }));
+    } catch (error) {
+      setRemoteDiscovery((current) => ({
+        ...current,
+        [providerId]: { kind: "error", message: String(error) },
+      }));
+    }
+  };
 
   // Magnific 未接続なのに magnific タブが開いたままだと、タブボタンは消えるのに
   // 中身 (モデル一覧+選択チェック) だけ残る (2026-06-10 実機FB)。強制的に default へ戻す。
@@ -409,6 +513,47 @@ function ModelPickerPopover({
     };
   }, [selectedModels, prompt, aspect]);
 
+  const activeRemoteProvider = connectedRemoteProviders.find(
+    (provider) => provider.id === providerTab,
+  );
+  const activeRemoteState = activeRemoteProvider
+    ? (remoteDiscovery[activeRemoteProvider.id] ?? { kind: "idle" as const })
+    : null;
+  const normalizedRemoteQuery = query.trim().toLowerCase();
+  const activeRemoteModels =
+    activeRemoteState?.kind === "ready"
+      ? activeRemoteState.result.models.filter((model) =>
+          `${model.name} ${model.id} ${model.label ?? ""}`
+            .toLowerCase()
+            .includes(normalizedRemoteQuery),
+        )
+      : [];
+  const selectedActiveRemote =
+    activeRemoteProvider && selectedRemote?.providerId === activeRemoteProvider.id
+      ? selectedRemote
+      : null;
+  const displayedModelCount = activeRemoteProvider
+    ? activeRemoteModels.length
+    : providerTab === "magnific"
+      ? FEATURED_MAGNIFIC_IMAGE_MODELS.length
+      : providerTab === "default"
+        ? 1
+        : totalVisibleModels;
+
+  const confirmSelection = () => {
+    if (activeRemoteProvider) {
+      if (!selectedActiveRemote) return;
+      pushToast({
+        kind: "info",
+        text: "このモデルでの生成は次のアップデートで対応します",
+        ttlMs: 4500,
+      });
+      onClose();
+      return;
+    }
+    onClose();
+  };
+
   // ボタン下に出すと画面下端で隠れる場合は、ボタン上 (上方向にフリップ) に出す。
   // anchorRect が無い場合 (初回 mount 等) は画面中央に表示するフォールバック。
   const placement = anchorRect ? computePlacement(anchorRect) : null;
@@ -441,7 +586,7 @@ function ModelPickerPopover({
       <div className="flex shrink-0 items-center justify-between border-b border-[#242424] px-3 py-2">
         <h3 className="text-[13px] font-black text-neutral-100">生成モデル</h3>
         <span className="text-[10px] font-medium tabular-nums text-neutral-500">
-          {totalVisibleModels} 件
+          {displayedModelCount} 件
         </span>
       </div>
       <div className="shrink-0 border-b border-[#242424] p-3">
@@ -459,13 +604,14 @@ function ModelPickerPopover({
         接続済みの拡張ごとにモデルを切り替える。未接続の拡張はタブが出ない(degrade)。
         タブ切替時は他providerの選択をクリアして排他にする(コアを壊さない)。
       */}
-      <div className="flex shrink-0 gap-1 border-b border-[#242424] px-2 pt-2">
+      <div className="flex shrink-0 gap-1 overflow-x-auto border-b border-[#242424] px-2 pt-2">
         <button
           type="button"
           onClick={() => {
             setProviderTab("default");
             setSelectedModels([]);
             clearMagnific();
+            setSelectedRemote(null);
           }}
           className={`rounded-t-md px-2.5 py-1 text-[11px] font-bold ${providerTab === "default" ? "bg-[#1e1e1e] text-white" : "text-neutral-500 hover:text-white"}`}
         >
@@ -476,6 +622,7 @@ function ModelPickerPopover({
           onClick={() => {
             setProviderTab("higgsfield");
             clearMagnific();
+            setSelectedRemote(null);
           }}
           className={`rounded-t-md px-2.5 py-1 text-[11px] font-bold ${providerTab === "higgsfield" ? "bg-pink-500/20 text-pink-100" : "text-neutral-500 hover:text-white"}`}
         >
@@ -487,12 +634,26 @@ function ModelPickerPopover({
             onClick={() => {
               setProviderTab("magnific");
               setSelectedModels([]);
+              setSelectedRemote(null);
             }}
             className={`rounded-t-md px-2.5 py-1 text-[11px] font-bold ${providerTab === "magnific" ? "bg-violet-500/20 text-violet-100" : "text-neutral-500 hover:text-white"}`}
           >
             Magnific
           </button>
         )}
+        {connectedRemoteProviders.map((provider) => (
+          <button
+            key={provider.id}
+            type="button"
+            onClick={() => {
+              setProviderTab(provider.id);
+              if (selectedRemote?.providerId !== provider.id) setSelectedRemote(null);
+            }}
+            className={`shrink-0 rounded-t-md px-2.5 py-1 text-[11px] font-bold ${providerTab === provider.id ? "bg-sky-500/20 text-sky-100" : "text-neutral-500 hover:text-white"}`}
+          >
+            {provider.label}
+          </button>
+        ))}
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto p-2">
         {providerTab === "default" && (
@@ -591,11 +752,105 @@ function ModelPickerPopover({
             })}
           </div>
         )}
+
+        {activeRemoteProvider && activeRemoteState?.kind === "loading" && (
+          <div className="flex items-center justify-center gap-2 rounded-md px-2 py-6 text-[11px] text-neutral-400">
+            <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-sky-300/30 border-t-sky-300" />
+            保存済み結果を確認中、または実測中…
+          </div>
+        )}
+
+        {activeRemoteProvider && activeRemoteState?.kind === "idle" && (
+          <div className="rounded-lg border border-sky-400/20 bg-sky-500/5 p-3 text-center">
+            <p className="mb-3 text-[10px] leading-relaxed text-neutral-400">
+              実際のMCP応答を確認して、取得できたモデルだけを表示します。
+            </p>
+            <button
+              type="button"
+              onClick={() => void discoverRemoteModels(activeRemoteProvider.id)}
+              className="h-8 rounded-md bg-sky-500 px-3 text-xs font-bold text-white transition hover:bg-sky-400"
+            >
+              モデル一覧を取得
+            </button>
+          </div>
+        )}
+
+        {activeRemoteProvider && activeRemoteState?.kind === "error" && (
+          <div className="rounded-lg border border-amber-400/30 bg-amber-500/5 p-3">
+            <p className="text-[11px] font-bold text-amber-200">モデル一覧を取得できませんでした</p>
+            <p className="mt-1 line-clamp-4 break-all text-[10px] leading-relaxed text-neutral-400">
+              {summarizeRawError(activeRemoteState.message)}
+            </p>
+            <button
+              type="button"
+              onClick={() => void discoverRemoteModels(activeRemoteProvider.id)}
+              className="mt-3 h-8 w-full rounded-md border border-amber-300/30 bg-amber-500/10 px-3 text-xs font-bold text-amber-100 hover:bg-amber-500/20"
+            >
+              再試行
+            </button>
+          </div>
+        )}
+
+        {activeRemoteProvider &&
+          activeRemoteState?.kind === "ready" &&
+          (activeRemoteState.result.models.length === 0 ? (
+            <div className="rounded-lg border border-amber-400/30 bg-amber-500/5 p-3">
+              <p className="text-[11px] font-bold text-amber-200">
+                応答からモデル名を確認できませんでした
+              </p>
+              <p className="mt-1 line-clamp-4 break-all text-[10px] leading-relaxed text-neutral-400">
+                {summarizeDiscoveryFailure(activeRemoteState.result)}
+              </p>
+              <button
+                type="button"
+                onClick={() => void discoverRemoteModels(activeRemoteProvider.id)}
+                className="mt-3 h-8 w-full rounded-md border border-amber-300/30 bg-amber-500/10 px-3 text-xs font-bold text-amber-100 hover:bg-amber-500/20"
+              >
+                再試行
+              </button>
+            </div>
+          ) : activeRemoteModels.length === 0 ? (
+            <p className="rounded-md px-2 py-3 text-center text-[11px] text-neutral-600">
+              該当モデルがありません
+            </p>
+          ) : (
+            <div>
+              <p className="mb-2 rounded-md bg-sky-500/5 px-2 py-1.5 text-[10px] text-sky-200">
+                モデル名は実測済みです。生成への接続は次のアップデートで対応します。
+              </p>
+              <div className="space-y-1">
+                {activeRemoteModels.map((model) => {
+                  const isSelected = selectedActiveRemote?.model.id === model.id;
+                  return (
+                    <ModelRow
+                      key={`${model.id}:${model.name}`}
+                      title={model.label ?? model.name}
+                      description={model.id === model.name ? "実測で取得" : `ID: ${model.id}`}
+                      icon={activeRemoteProvider.label.trim().charAt(0).toUpperCase() || "M"}
+                      selected={isSelected}
+                      disabled={false}
+                      onToggle={() =>
+                        setSelectedRemote(
+                          isSelected
+                            ? null
+                            : { providerId: activeRemoteProvider.id, model },
+                        )
+                      }
+                    />
+                  );
+                })}
+              </div>
+            </div>
+          ))}
       </div>
       <div className="shrink-0 border-t border-[#242424] p-3">
         <div className="mb-2 flex items-center justify-between gap-2 text-[11px]">
           <span className="font-medium text-neutral-300">
-            {magnificCount === 1
+            {activeRemoteProvider
+              ? selectedActiveRemote
+                ? `${activeRemoteProvider.label}: ${selectedActiveRemote.model.label ?? selectedActiveRemote.model.name}`
+                : `${activeRemoteProvider.label}: 未選択`
+              : magnificCount === 1
               ? `Magnific: ${getMagnificModelName(selectedMagnificModels[0])}`
               : magnificCount >= 2
                 ? `Magnific: ${magnificCount} 件選択 (最大 ${MAX_MAGNIFIC_COMPARE})`
@@ -603,15 +858,20 @@ function ModelPickerPopover({
           </span>
           <span className="font-semibold text-neutral-500">
             {/* Magnificはクレジット情報をMCPが返さないため推定は出さない(嘘の数字を出さない)。 */}
-            推定: {magnificCount > 0 ? "—" : formatCost(cost)}
+            推定: {activeRemoteProvider || magnificCount > 0 ? "—" : formatCost(cost)}
           </span>
         </div>
         <button
           type="button"
-          onClick={onClose}
-          className="h-8 w-full rounded-md bg-pink-500 px-3 text-xs font-semibold text-white transition hover:bg-pink-600"
+          onClick={confirmSelection}
+          disabled={Boolean(activeRemoteProvider && !selectedActiveRemote)}
+          className="h-8 w-full rounded-md bg-pink-500 px-3 text-xs font-semibold text-white transition hover:bg-pink-600 disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-400"
         >
-          {magnificCount >= 2
+          {activeRemoteProvider
+            ? selectedActiveRemote
+              ? "このモデルを選択"
+              : "モデルを選択してください"
+            : magnificCount >= 2
             ? `Magnific ${magnificCount} モデルで比較生成`
             : magnificCount === 1
               ? "Magnific で生成"
@@ -830,6 +1090,22 @@ function formatCost(cost: CostState): string {
   return `${cost.credits} credits`;
 }
 
+function summarizeRawError(raw: string): string {
+  const compact = raw.replace(/\s+/g, " ").trim();
+  if (!compact) return "生応答に説明がありませんでした。再試行できます。";
+  return compact.length > 320 ? `${compact.slice(0, 320)}…` : compact;
+}
+
+function summarizeDiscoveryFailure(discovery: RemoteMcpDiscovery): string {
+  const failed = discovery.attempts.find(
+    (attempt) => !attempt.ok && attempt.raw.trim().length > 0,
+  );
+  const fallback = discovery.attempts.find((attempt) => attempt.raw.trim().length > 0);
+  return summarizeRawError(
+    failed?.raw ?? fallback?.raw ?? "モデル名として読める項目が応答にありませんでした。",
+  );
+}
+
 /**
  * ピッカーの実幅。狭い window (13インチ / 分割表示) では PICKER_WIDTH が
  * viewport を超えて横にはみ出すため、左右 8px の余白を残して詰める。
@@ -886,4 +1162,3 @@ function getModelIcon(model: HiggsfieldModelInfo): string {
   const firstLetter = model.displayName.trim().charAt(0).toUpperCase();
   return firstLetter || (model.type === "video" ? "V" : "I");
 }
-
