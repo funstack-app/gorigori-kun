@@ -39,6 +39,9 @@ describe("画像詳細パネルのメタ情報", () => {
       canRecreate: true,
       recreateDisabledReason: null,
       canSave: true,
+      canMakeVideo: true,
+      canEditImage: true,
+      canRegisterAsset: true,
     });
   });
 
@@ -58,6 +61,9 @@ describe("画像詳細パネルのメタ情報", () => {
       recreateDisabledReason:
         "生成履歴がないため、同じ設定を読み込めません。",
       canSave: true,
+      canMakeVideo: true,
+      canEditImage: true,
+      canRegisterAsset: true,
     });
   });
 
@@ -76,11 +82,14 @@ describe("画像詳細パネルのメタ情報", () => {
     expect(getImagePreviewPrimaryActions(meta).canRecreate).toBe(false);
   });
 
-  it("動画は参照画像に使えないが、ローカル保存はできる", () => {
+  it("動画には画像専用の生成・編集・台帳アクションを出さない", () => {
     const meta = buildImagePreviewMetadata(generation());
     const actions = getImagePreviewPrimaryActions(meta, "video");
 
     expect(actions.canUseAsReference).toBe(false);
     expect(actions.canSave).toBe(true);
+    expect(actions.canMakeVideo).toBe(false);
+    expect(actions.canEditImage).toBe(false);
+    expect(actions.canRegisterAsset).toBe(false);
   });
 });

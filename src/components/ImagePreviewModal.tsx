@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useImagePreview } from "../lib/store/imagePreview";
+import { useAssetLedger } from "../lib/store/assetLedger";
 import { useComposer } from "../lib/store/composer";
 import { useImages } from "../lib/store/images";
 import { useMaskEditor } from "../lib/store/maskEditor";
 import { useProjects } from "../lib/store/projects";
 import { useSnsExport } from "../lib/store/snsExport";
 import { useToasts } from "../lib/store/toasts";
+import { useVideoGen } from "../lib/store/videoGen";
 import { useWorkspace } from "../lib/store/workspace";
-import { sendImageToPlanForRediscuss } from "../lib/sendToPlan";
 import { setDragRef } from "../lib/dragRef";
 import { ContextMenu, type ContextMenuItem } from "./ContextMenu";
 import { useEditor } from "./edit/editor/editorStore";
@@ -17,9 +18,23 @@ import {
   resolveImagePreviewMetadata,
   type ImagePreviewMetadata,
 } from "./galleryItemMenu";
-import { RegisterPresetDialog } from "./RegisterPresetDialog";
 import { SafeImage, SafeVideo } from "./SafeImage";
 import { SceneFromImageDialog } from "./skills/scene3d/SceneFromImageDialog";
+
+type LedgerUpsertInput = Parameters<
+  ReturnType<typeof useAssetLedger.getState>["upsert"]
+>[0];
+type LedgerAssetType = LedgerUpsertInput["type"];
+
+const ASSET_TYPE_OPTIONS: ReadonlyArray<{
+  value: LedgerAssetType;
+  label: string;
+}> = [
+  { value: "character", label: "人物" },
+  { value: "scene", label: "場所" },
+  { value: "prop", label: "小物" },
+  { value: "custom", label: "その他" },
+];
 
 export function ImagePreviewModal() {
   const path = useImagePreview((s) => s.path);
@@ -57,8 +72,13 @@ export function ImagePreviewModal() {
   const closeBtnRef = useRef<HTMLButtonElement | null>(null);
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
-  /** F-#1: プリセット登録ダイアログの開閉。null なら閉じ、文字列なら対象画像 path。 */
-  const [presetTarget, setPresetTarget] = useState<string | null>(null);
+  const [panelTab, setPanelTab] = useState<"info" | "edit">("info");
+  const [imageDimensions, setImageDimensions] = useState<{
+    width: number;
+    height: number;
+  } | null>(null);
+  const [assetRegisterOpen, setAssetRegisterOpen] = useState(false);
+  const [assetRegisterBusy, setAssetRegisterBusy] = useState(false);
   const [previewMetadata, setPreviewMetadata] =
     useState<ImagePreviewMetadata | null>(null);
   // 3Dシーン化 (Slice D)。写真は元画像のほうがポーズ検出精度が高いので正規化はスキップ可
@@ -177,6 +197,12 @@ export function ImagePreviewModal() {
     };
   }, [path]);
 
+  useEffect(() => {
+    setPanelTab("info");
+    setImageDimensions(null);
+    setAssetRegisterOpen(false);
+  }, [path]);
+
   if (!path) return null;
 
   const name = item?.name ?? path.split("/").pop() ?? "";
@@ -193,6 +219,9 @@ export function ImagePreviewModal() {
         canRecreate: false,
         recreateDisabledReason: "生成情報を読み込み中です。",
         canSave: true,
+        canMakeVideo: !isVideo,
+        canEditImage: !isVideo,
+        canRegisterAsset: !isVideo,
       };
 
   const useAsReference = () => {
@@ -227,6 +256,87 @@ export function ImagePreviewModal() {
       ttlMs: 2800,
     });
     close();
+  };
+
+  const makeVideoFromImage = () => {
+    if (!primaryActions.canMakeVideo) return;
+    useVideoGen.getState().setSourceImage(path);
+    useWorkspace.getState().setActiveTab("video");
+    pushToast({
+      kind: "success",
+      text: "動画タブの開始画像に設定しました",
+      ttlMs: 2600,
+    });
+    close();
+  };
+
+  const openEditStudio = () => {
+    if (!primaryActions.canEditImage) return;
+    useEditor.getState().setPendingOpenPath(path);
+    useWorkspace.getState().setActiveTab("edit");
+    close();
+  };
+
+  const openMaskEditor = () => {
+    if (!primaryActions.canEditImage) return;
+    openMask({ path, name });
+    close();
+  };
+
+  const removeImageBackground = () => {
+    if (!primaryActions.canEditImage) return;
+    void useImages.getState().removeBackground(path);
+    close();
+  };
+
+  const openSnsExport = () => {
+    if (!primaryActions.canEditImage) return;
+    useSnsExport.getState().open([path]);
+    close();
+  };
+
+  const registerInAssetLedger = async (type: LedgerAssetType) => {
+    if (!primaryActions.canRegisterAsset || assetRegisterBusy) return;
+    setAssetRegisterBusy(true);
+    try {
+      let ledger = useAssetLedger.getState();
+      if (!ledger.loaded) {
+        await ledger.load();
+        ledger = useAssetLedger.getState();
+      }
+      const id = `al-gallery-${encodeURIComponent(path)}`;
+      const existing = ledger.assets.find((asset) => asset.id === id);
+      const timestamp = new Date().toISOString();
+      const asset: LedgerUpsertInput = {
+        id,
+        type,
+        name: name.replace(/\.[^.]+$/, "") || name,
+        createdAt: existing?.createdAt ?? timestamp,
+        updatedAt: timestamp,
+        primaryImagePath: path,
+        imagePaths: existing?.imagePaths ?? [],
+        prompt: previewMetadata?.prompt ?? "",
+        negativePrompt: existing?.negativePrompt ?? null,
+        source: "library",
+        locked: existing?.locked ?? false,
+        tags: existing?.tags ?? [],
+      };
+      await ledger.upsert(asset);
+      setAssetRegisterOpen(false);
+      pushToast({
+        kind: "success",
+        text: "アセット台帳に登録しました",
+        ttlMs: 2600,
+      });
+    } catch (error) {
+      pushToast({
+        kind: "error",
+        text: `アセット登録に失敗しました: ${String(error)}`,
+        ttlMs: 5000,
+      });
+    } finally {
+      setAssetRegisterBusy(false);
+    }
   };
 
   const copyPreviewPrompt = async () => {
@@ -329,6 +439,15 @@ export function ImagePreviewModal() {
                 : "max-h-full max-w-full cursor-zoom-in object-contain"
             }
             draggable
+            onLoad={(event) => {
+              const image = event.currentTarget;
+              if (image.naturalWidth > 0 && image.naturalHeight > 0) {
+                setImageDimensions({
+                  width: image.naturalWidth,
+                  height: image.naturalHeight,
+                });
+              }
+            }}
             onDragStart={(e) => {
               setDragRef(e.dataTransfer, {
                 path,
@@ -431,134 +550,181 @@ export function ImagePreviewModal() {
             </button>
           </div>
 
-          <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
-            {/* 採用 / ボツは判断だけを素早く付けられる小さなトグルとして上部に維持。 */}
-            <div className="flex gap-1.5 px-4 pt-3">
-              <JudgementToggle
-                label="採用"
-                active={judgement === "adopted"}
-                activeClass="border-white/30 bg-white/10 text-white"
-                onClick={() =>
-                  void setJudgement(
-                    path,
-                    judgement === "adopted" ? null : "adopted",
-                  )
-                }
-              />
-              <JudgementToggle
-                label="ボツ"
-                active={judgement === "rejected"}
-                activeClass="border-neutral-400 bg-neutral-500/25 text-neutral-100"
-                onClick={() =>
-                  void setJudgement(
-                    path,
-                    judgement === "rejected" ? null : "rejected",
-                  )
-                }
-              />
-            </div>
+          <div
+            className="grid h-11 shrink-0 grid-cols-2 border-b border-white/10 px-4"
+            role="tablist"
+            aria-label="詳細パネル"
+          >
+            {(["info", "edit"] as const).map((tab) => {
+              const active = panelTab === tab;
+              return (
+                <button
+                  key={tab}
+                  type="button"
+                  role="tab"
+                  aria-selected={active}
+                  onClick={() => setPanelTab(tab)}
+                  className={[
+                    "relative text-xs font-bold outline-none transition",
+                    active
+                      ? "text-white after:absolute after:inset-x-5 after:bottom-0 after:h-px after:bg-white"
+                      : "text-neutral-500 hover:text-neutral-200",
+                  ].join(" ")}
+                >
+                  {tab === "info" ? "情報" : "編集"}
+                </button>
+              );
+            })}
+          </div>
 
-            {/* 生成情報。長いプロンプトだけを内部スクロールさせる。 */}
-            <div className="flex min-h-[240px] max-h-[44vh] flex-col overflow-hidden px-4 py-3">
+          {panelTab === "info" ? (
+            <div className="flex min-h-0 flex-1 flex-col overflow-y-auto px-4 py-4">
               <PreviewMetadataPanel
+                key={path}
                 metadata={previewMetadata}
+                dimensions={imageDimensions}
                 onCopyPrompt={() => void copyPreviewPrompt()}
               />
-            </div>
 
-            {/* Higgsfield の Reference / Recreate / Download 相当。 */}
-            <section className="border-t border-white/10 px-4 py-3">
-              <p className="mb-2 text-[10px] font-black uppercase tracking-[0.16em] text-neutral-500">
-                アクション
-              </p>
-              <div className="grid grid-cols-3 gap-2">
-                <PrimaryActionButton
-                  icon={<ReferenceIcon />}
-                  label="参照に使う"
-                  disabled={!primaryActions.canUseAsReference}
-                  title={
-                    primaryActions.canUseAsReference
-                      ? "制作タブの参照画像に追加"
-                      : "動画は参照画像に追加できません"
-                  }
-                  onClick={useAsReference}
-                />
-                <PrimaryActionButton
-                  icon={<RecreateIcon />}
-                  label="生成時の指示文を読み込む"
-                  disabled={!primaryActions.canRecreate}
-                  title={primaryActions.recreateDisabledReason ?? undefined}
-                  onClick={recreateWithSameSettings}
-                />
-                <PrimaryActionButton
-                  icon={<DownloadIcon />}
-                  label="保存"
-                  disabled={!primaryActions.canSave}
-                  title="名前を付けてローカル保存"
-                  onClick={() => downloadImageAs(path, name)}
-                />
-              </div>
-              {!primaryActions.canRecreate &&
-                primaryActions.recreateDisabledReason && (
-                  <p className="mt-2 text-[10px] leading-relaxed text-neutral-500">
-                    {primaryActions.recreateDisabledReason}
-                  </p>
+              <section className="mt-5 border-t border-white/10 pt-4">
+                {primaryActions.canMakeVideo && (
+                  <button
+                    type="button"
+                    onClick={makeVideoFromImage}
+                    className="flex h-12 w-full items-center justify-center gap-2 rounded-lg bg-pink-500 px-4 text-sm font-black text-white shadow-[0_10px_30px_-12px_rgba(236,72,153,0.9)] transition hover:bg-pink-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-pink-300/60"
+                  >
+                    <VideoIcon />
+                    動画にする
+                  </button>
                 )}
-            </section>
 
-            {/* 既存機能は消さず、必要な時だけ開く二段目へ集約。 */}
-            <details className="group border-t border-white/10 px-4 py-3">
-              <summary className="flex cursor-pointer list-none items-center justify-between text-xs font-bold text-neutral-300 outline-none hover:text-white focus-visible:text-white">
-                <span>その他</span>
-                <span className="text-neutral-600 transition group-open:rotate-180">
-                  <ChevronDownIcon />
-                </span>
-              </summary>
-              <div className="mt-2 flex flex-col gap-1">
-                <ActionRow
-                  icon={<ChatIcon />}
-                  label="企画で再検討"
-                  onClick={() => {
-                    void sendImageToPlanForRediscuss(path);
-                    close();
-                  }}
-                />
-                <ActionRow
-                  icon={<EditStudioIcon />}
-                  label="編集スタジオで開く"
-                  onClick={() => {
-                    useEditor.getState().setPendingOpenPath(path);
-                    useWorkspace.getState().setActiveTab("edit");
-                    close();
-                  }}
-                />
-                <ActionRow
-                  icon={<MaskIcon />}
-                  label="マスクで編集"
-                  onClick={() => {
-                    openMask({ path, name });
-                    close();
-                  }}
-                />
-                <ActionRow
-                  icon={<BookmarkIcon />}
-                  label="プリセットに登録"
-                  onClick={() => setPresetTarget(path)}
-                />
-                <ActionRow
-                  icon={<SnsExportIcon />}
-                  label="SNS用に書き出し"
-                  onClick={() => useSnsExport.getState().open([path])}
-                />
-                <SaveToProjectAction path={path} />
-                <ActionRow
-                  icon={<FinderIcon />}
-                  label="Finder で表示"
-                  onClick={() => useImages.getState().revealInFinder(path)}
-                />
-              </div>
-            </details>
-          </div>
+                <div className="mt-2 grid grid-cols-2 gap-2">
+                  <StackActionButton
+                    icon={<RecreateIcon />}
+                    label="もう一度作る"
+                    disabled={!primaryActions.canRecreate}
+                    title={primaryActions.recreateDisabledReason ?? undefined}
+                    onClick={recreateWithSameSettings}
+                  />
+                  <StackActionButton
+                    icon={<ReferenceIcon />}
+                    label="参照に使う"
+                    disabled={!primaryActions.canUseAsReference}
+                    title={
+                      primaryActions.canUseAsReference
+                        ? "制作タブの参照画像に追加"
+                        : "動画は参照画像に追加できません"
+                    }
+                    onClick={useAsReference}
+                  />
+                </div>
+                {!primaryActions.canRecreate &&
+                  primaryActions.recreateDisabledReason && (
+                    <p className="mt-2 text-[10px] leading-relaxed text-neutral-500">
+                      {primaryActions.recreateDisabledReason}
+                    </p>
+                  )}
+
+                <div className="mt-2">
+                  <StackActionButton
+                    icon={<DownloadIcon />}
+                    label="保存"
+                    disabled={!primaryActions.canSave}
+                    title="名前を付けてローカル保存"
+                    onClick={() => downloadImageAs(path, name)}
+                    wide
+                  />
+                </div>
+
+                <div className="mt-3 grid grid-cols-5 gap-1 border-t border-white/[0.07] pt-3">
+                  <CompactActionButton
+                    icon={<AdoptIcon />}
+                    label="採用"
+                    active={judgement === "adopted"}
+                    onClick={() =>
+                      void setJudgement(
+                        path,
+                        judgement === "adopted" ? null : "adopted",
+                      )
+                    }
+                  />
+                  <CompactActionButton
+                    icon={<RejectIcon />}
+                    label="ボツ"
+                    active={judgement === "rejected"}
+                    onClick={() =>
+                      void setJudgement(
+                        path,
+                        judgement === "rejected" ? null : "rejected",
+                      )
+                    }
+                  />
+                  {primaryActions.canRegisterAsset && (
+                    <AssetRegisterAction
+                      open={assetRegisterOpen}
+                      busy={assetRegisterBusy}
+                      onToggle={() => setAssetRegisterOpen((value) => !value)}
+                      onSelect={(type) => void registerInAssetLedger(type)}
+                    />
+                  )}
+                  <SaveToProjectAction path={path} />
+                  <CompactActionButton
+                    icon={<FinderIcon />}
+                    label="Finderで表示"
+                    title="Finderで表示"
+                    onClick={() => useImages.getState().revealInFinder(path)}
+                  />
+                </div>
+              </section>
+            </div>
+          ) : (
+            <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+              {primaryActions.canEditImage ? (
+                <div className="flex flex-col gap-1.5">
+                  <ActionRow
+                    icon={<EditStudioIcon />}
+                    label="ことばで直す"
+                    hint="編集スタジオで画像を開く"
+                    onClick={openEditStudio}
+                  />
+                  <ActionRow
+                    icon={<MaskIcon />}
+                    label="部分を塗って直す（マスク）"
+                    hint="マスク編集を開く"
+                    onClick={openMaskEditor}
+                  />
+                  <ActionRow
+                    icon={<CropIcon />}
+                    label="切り抜き・サイズ変更"
+                    hint="編集スタジオの切り抜きを使う"
+                    onClick={openEditStudio}
+                  />
+                  <ActionRow
+                    icon={<TextIcon />}
+                    label="文字を入れる"
+                    hint="編集スタジオの文字編集を使う"
+                    onClick={openEditStudio}
+                  />
+                  <ActionRow
+                    icon={<BackgroundIcon />}
+                    label="背景を透過"
+                    hint="被写体を切り抜いて透過画像を作る"
+                    onClick={removeImageBackground}
+                  />
+                  <ActionRow
+                    icon={<SnsExportIcon />}
+                    label="SNS用に書き出し"
+                    hint="SNS向けサイズの書き出しを開く"
+                    onClick={openSnsExport}
+                  />
+                </div>
+              ) : (
+                <p className="rounded-lg border border-white/[0.08] bg-white/[0.025] p-4 text-xs leading-relaxed text-neutral-500">
+                  この動画に使える画像編集機能はありません。
+                </p>
+              )}
+            </div>
+          )}
         </aside>
       )}
       </div>
@@ -569,14 +735,6 @@ export function ImagePreviewModal() {
           y={menu.y}
           items={
             [
-              {
-                label: "企画で再検討",
-                icon: "T",
-                onClick: () => {
-                  void sendImageToPlanForRediscuss(path);
-                  close();
-                },
-              },
               // 添付画像→3Dシーン再構成の主導線 (Slice D)。
               // 動画は入力にできないので項目ごと出さない (押せるのに必ず失敗する導線を作らない)。
               ...(isVideo
@@ -587,13 +745,15 @@ export function ImagePreviewModal() {
                       icon: "3",
                       onClick: () => setScene3dTarget(path),
                     },
+                    {
+                      label: "アセットに登録…",
+                      icon: "A",
+                      onClick: () => {
+                        setPanelTab("info");
+                        setAssetRegisterOpen(true);
+                      },
+                    },
                   ]),
-              { kind: "separator" },
-              {
-                label: "プリセットに登録…",
-                icon: "P",
-                onClick: () => setPresetTarget(path),
-              },
               { kind: "separator" },
               {
                 label: "名前を付けて保存…",
@@ -626,13 +786,6 @@ export function ImagePreviewModal() {
           onClose={() => setMenu(null)}
         />
       )}
-      {presetTarget && (
-        <RegisterPresetDialog
-          imagePath={presetTarget}
-          defaultName={name}
-          onClose={() => setPresetTarget(null)}
-        />
-      )}
       <SceneFromImageDialog
         open={scene3dTarget !== null}
         imagePath={scene3dTarget}
@@ -645,11 +798,15 @@ export function ImagePreviewModal() {
 /* ── 生成メタ情報 ─────────────────────────────────────── */
 function PreviewMetadataPanel({
   metadata,
+  dimensions,
   onCopyPrompt,
 }: {
   metadata: ImagePreviewMetadata | null;
+  dimensions: { width: number; height: number } | null;
   onCopyPrompt: () => void;
 }) {
+  const [promptExpanded, setPromptExpanded] = useState(false);
+
   if (!metadata) {
     return (
       <p className="text-[11px] text-neutral-500">生成情報を読み込み中...</p>
@@ -658,67 +815,126 @@ function PreviewMetadataPanel({
 
   const hasPrompt = !!metadata.prompt?.trim();
   const hasGenerationDetails = metadata.source === "history";
+  const prompt = metadata.prompt ?? "";
+  const canExpandPrompt =
+    prompt.length > 100 || prompt.split(/\r?\n/).length > 4;
 
   return (
-    <div className="flex h-full min-h-0 flex-col gap-3 text-xs text-neutral-300">
-      {hasGenerationDetails && (
-        <dl className="grid shrink-0 grid-cols-[72px_1fr] gap-x-3 gap-y-1.5 rounded-lg border border-white/[0.08] bg-white/[0.025] p-3 text-[11px]">
-          <dt className="text-neutral-500">モデル</dt>
-          <dd className="min-w-0 break-words text-neutral-200">
-            {metadata.modelLabel ?? "未記録"}
-          </dd>
-          <dt className="text-neutral-500">生成日時</dt>
-          <dd className="text-neutral-200">
-            {metadata.generatedAt
-              ? new Date(metadata.generatedAt).toLocaleString("ja-JP")
-              : "未記録"}
-          </dd>
-        </dl>
-      )}
-
-      {metadata.notice && (
-        <p className="shrink-0 text-[11px] leading-relaxed text-neutral-500">
-          {metadata.notice}
-        </p>
-      )}
-
-      {hasPrompt && (
-        <div className="flex min-h-0 flex-1 flex-col gap-1.5">
-          <div className="flex shrink-0 items-center justify-between gap-2">
-            <span className="text-[10px] font-bold uppercase tracking-[0.14em] text-neutral-500">
-              プロンプト
-            </span>
+    <div className="flex flex-col gap-5 text-xs text-neutral-300">
+      <section>
+        <div className="flex items-center justify-between gap-2">
+          <h3 className="text-xs font-black text-white">プロンプト</h3>
+          {hasPrompt && (
             <button
               type="button"
               onClick={onCopyPrompt}
-              className="rounded-md border border-white/10 bg-white/[0.03] px-2 py-1 text-[10px] font-bold text-neutral-300 transition hover:border-white/20 hover:text-white"
+              className="text-[10px] font-bold text-neutral-400 transition hover:text-white"
               title="プロンプトをコピー"
             >
               コピー
             </button>
-          </div>
-          <pre className="m-0 min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-white/[0.08] bg-black/35 p-3 font-sans text-[12px] leading-relaxed text-neutral-200">
-            {metadata.prompt}
-          </pre>
+          )}
         </div>
-      )}
+        <div className="mt-2 rounded-lg border border-white/[0.08] bg-white/[0.025] p-3">
+          {hasPrompt ? (
+            <p
+              className="whitespace-pre-wrap break-words text-[12px] leading-[1.65] text-neutral-200"
+              style={
+                promptExpanded
+                  ? undefined
+                  : {
+                      display: "-webkit-box",
+                      WebkitBoxOrient: "vertical",
+                      WebkitLineClamp: 4,
+                      overflow: "hidden",
+                    }
+              }
+            >
+              {prompt}
+            </p>
+          ) : (
+            <p className="text-[11px] text-neutral-500">
+              プロンプトは記録されていません。
+            </p>
+          )}
+          {hasPrompt && canExpandPrompt && (
+            <button
+              type="button"
+              onClick={() => setPromptExpanded((value) => !value)}
+              className="mt-2 text-[11px] font-bold text-neutral-300 transition hover:text-white"
+            >
+              {promptExpanded ? "閉じる" : "すべて見る"}
+            </button>
+          )}
+        </div>
+      </section>
+
+      <section>
+        <h3 className="text-xs font-black text-white">詳細</h3>
+        <div className="mt-2 rounded-lg border border-white/[0.08] bg-white/[0.025] p-3">
+          {(hasGenerationDetails || dimensions) && (
+            <dl className="grid grid-cols-[72px_1fr] gap-x-3 gap-y-2 text-[11px]">
+              {hasGenerationDetails && (
+                <>
+                  <dt className="text-neutral-500">モデル</dt>
+                  <dd className="min-w-0 break-words text-neutral-200">
+                    {metadata.modelLabel ?? "未記録"}
+                  </dd>
+                </>
+              )}
+              {dimensions && (
+                <>
+                  <dt className="text-neutral-500">サイズ</dt>
+                  <dd className="text-neutral-200">
+                    {dimensions.width} × {dimensions.height} px
+                  </dd>
+                </>
+              )}
+              {hasGenerationDetails && (
+                <>
+                  <dt className="text-neutral-500">生成日時</dt>
+                  <dd className="text-neutral-200">
+                    {metadata.generatedAt
+                      ? new Date(metadata.generatedAt).toLocaleString("ja-JP")
+                      : "未記録"}
+                  </dd>
+                </>
+              )}
+            </dl>
+          )}
+          {metadata.notice && (
+            <p
+              className={[
+                "text-[11px] leading-relaxed text-neutral-500",
+                hasGenerationDetails || dimensions
+                  ? "mt-3 border-t border-white/[0.07] pt-3"
+                  : "",
+              ].join(" ")}
+            >
+              {metadata.notice}
+            </p>
+          )}
+        </div>
+      </section>
     </div>
   );
 }
 
-/* ── 主要3アクション ───────────────────────────────────── */
-function PrimaryActionButton({
+/* ── 情報タブのアクション ─────────────────────────────── */
+function StackActionButton({
   icon,
   label,
   disabled,
   title,
   onClick,
+  wide = false,
 }: {
   icon: React.ReactNode;
   label: string;
   disabled?: boolean;
   title?: string;
   onClick: () => void;
+  wide?: boolean;
 }) {
   return (
     <button
@@ -726,40 +942,96 @@ function PrimaryActionButton({
       disabled={disabled}
       title={title}
       onClick={onClick}
-      className="flex min-h-[82px] flex-col items-center justify-center gap-2 rounded-lg border border-pink-400/45 bg-pink-500/10 px-2 py-3 text-center text-[11px] font-bold leading-tight text-pink-100 outline-none transition hover:border-pink-300 hover:bg-pink-500/20 focus-visible:ring-2 focus-visible:ring-pink-400/40 disabled:cursor-not-allowed disabled:border-white/10 disabled:bg-white/[0.025] disabled:text-neutral-600 disabled:ring-0"
+      className={[
+        "flex h-11 items-center justify-center gap-2 rounded-lg border border-white/10 bg-white/[0.035] px-3 text-center text-[11px] font-bold text-neutral-200 outline-none transition hover:border-white/20 hover:bg-white/[0.07] focus-visible:ring-2 focus-visible:ring-white/15 disabled:cursor-not-allowed disabled:border-white/[0.06] disabled:bg-white/[0.015] disabled:text-neutral-600 disabled:ring-0",
+        wide ? "w-full" : "",
+      ].join(" ")}
     >
-      <span className="flex h-7 w-7 items-center justify-center">{icon}</span>
+      <span className="flex h-5 w-5 items-center justify-center">{icon}</span>
       <span>{label}</span>
     </button>
   );
 }
 
-/* ── 判定 (採用/ボツ) トグルボタン ───────────────────── */
-function JudgementToggle({
+function CompactActionButton({
+  icon,
   label,
-  active,
-  activeClass,
+  active = false,
+  disabled = false,
+  title,
   onClick,
 }: {
+  icon: React.ReactNode;
   label: string;
-  active: boolean;
-  activeClass: string;
+  active?: boolean;
+  disabled?: boolean;
+  title?: string;
   onClick: () => void;
 }) {
   return (
     <button
       type="button"
       aria-pressed={active}
+      disabled={disabled}
+      title={title}
       onClick={onClick}
       className={[
-        "flex-1 rounded-md border px-3 py-2 text-sm font-bold transition",
+        "flex min-h-14 w-full min-w-0 flex-col items-center justify-center gap-1 rounded-md border px-1 py-1.5 text-[9px] font-bold leading-tight transition disabled:cursor-not-allowed disabled:opacity-40",
         active
-          ? activeClass
-          : "border-[#262626] bg-[#141414] text-neutral-400 hover:border-pink-400/40 hover:text-neutral-100",
+          ? "border-white/25 bg-white/10 text-white"
+          : "border-transparent bg-transparent text-neutral-500 hover:border-white/10 hover:bg-white/[0.04] hover:text-neutral-200",
       ].join(" ")}
     >
+      <span className="flex h-5 w-5 items-center justify-center">{icon}</span>
       {label}
     </button>
+  );
+}
+
+function AssetRegisterAction({
+  open,
+  busy,
+  onToggle,
+  onSelect,
+}: {
+  open: boolean;
+  busy: boolean;
+  onToggle: () => void;
+  onSelect: (type: LedgerAssetType) => void;
+}) {
+  return (
+    <div className="relative min-w-0">
+      <CompactActionButton
+        icon={<AssetIcon />}
+        label="アセットに登録"
+        active={open}
+        disabled={busy}
+        title="種類を選んでアセット台帳に登録"
+        onClick={onToggle}
+      />
+      {open && (
+        <div
+          className="absolute bottom-full left-1/2 z-50 mb-2 w-40 -translate-x-1/2 rounded-lg border border-[#343434] bg-[#161616] p-1.5 shadow-2xl"
+          onClick={(event) => event.stopPropagation()}
+        >
+          <p className="px-2 py-1 text-[10px] font-bold text-neutral-500">
+            種類を選ぶ
+          </p>
+          {ASSET_TYPE_OPTIONS.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              disabled={busy}
+              onClick={() => onSelect(option.value)}
+              className="flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-[11px] font-bold text-neutral-200 hover:bg-white/[0.07] disabled:opacity-40"
+            >
+              {option.label}
+              <ChevronRightSmallIcon />
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -798,15 +1070,7 @@ function ActionRow({
   );
 }
 
-/** 「プロジェクトに保存」だけは既存ポップオーバーUIを活かしたいので別行に */
-/**
- * 「プロジェクトに保存」アクション行。
- *
- * STΛCK 指示 (2026-05-19): 他の ActionRow と完全に同じ見た目で、クリックすると
- * 既存の SaveToProjectButton のポップオーバー (プロジェクト選択UI) を行の下に
- * 開く。旧版は ActionRow 内に SaveToProjectButton をめり込ませていたため、
- * テキストが改行されて統一感が崩れていた。
- */
+/** 小アイコン行から既存のプロジェクト選択UIを開く。 */
 function SaveToProjectAction({ path }: { path: string }) {
   const [open, setOpen] = useState(false);
   const projects = useProjects((s) => s.projects);
@@ -814,6 +1078,10 @@ function SaveToProjectAction({ path }: { path: string }) {
   const addItem = useProjects((s) => s.addItem);
   const pushToast = useToasts((s) => s.push);
   const [draftName, setDraftName] = useState("");
+
+  useEffect(() => {
+    setOpen(false);
+  }, [path]);
 
   const handleSave = (projectId: string, projectName: string) => {
     const item = addItem(projectId, { imagePath: path });
@@ -836,16 +1104,17 @@ function SaveToProjectAction({ path }: { path: string }) {
   };
 
   return (
-    <div className="relative">
-      <ActionRow
+    <div className="relative min-w-0">
+      <CompactActionButton
         icon={<ProjectIcon />}
         label="プロジェクトに保存"
-        hint="作品の箱に追加して整理"
+        active={open}
+        title="プロジェクトに保存"
         onClick={() => setOpen((v) => !v)}
       />
       {open && (
         <div
-          className="mt-1 rounded-md border border-[#343434] bg-[#161616] p-2 shadow-2xl"
+          className="absolute bottom-full right-0 z-50 mb-2 w-72 rounded-md border border-[#343434] bg-[#161616] p-2 shadow-2xl"
           onClick={(e) => e.stopPropagation()}
         >
           <div className="mb-2 px-1 text-[10px] font-bold uppercase tracking-wide text-neutral-500">
@@ -893,13 +1162,13 @@ function SaveToProjectAction({ path }: { path: string }) {
                   }
                 }}
                 placeholder="プロジェクト名"
-                className="h-7 flex-1 rounded-md border border-[#343434] bg-[#101010] px-2 text-xs text-neutral-100 outline-none focus:border-pink-400"
+                className="h-7 flex-1 rounded-md border border-[#343434] bg-[#101010] px-2 text-xs text-neutral-100 outline-none focus:border-white/40"
               />
               <button
                 type="button"
                 onClick={handleCreateAndSave}
                 disabled={!draftName.trim()}
-                className="h-7 rounded-md bg-pink-500 px-2 text-[11px] font-bold text-white hover:bg-pink-400 disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-500"
+                className="h-7 rounded-md bg-white px-2 text-[11px] font-bold text-black hover:bg-neutral-200 disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-500"
               >
                 作成
               </button>
@@ -938,10 +1207,10 @@ function ChevronRightIcon() {
   );
 }
 
-function ChevronDownIcon() {
+function ChevronRightSmallIcon() {
   return (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <polyline points="6 9 12 15 18 9" />
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="9 18 15 12 9 6" />
     </svg>
   );
 }
@@ -957,10 +1226,11 @@ function MinimizeIcon() {
   );
 }
 
-function ChatIcon() {
+function VideoIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+      <rect x="3" y="5" width="14" height="14" rx="2" />
+      <path d="m17 10 4-2v8l-4-2z" />
     </svg>
   );
 }
@@ -985,10 +1255,59 @@ function MaskIcon() {
   );
 }
 
-function BookmarkIcon() {
+function CropIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" />
+      <path d="M6 2v14a2 2 0 0 0 2 2h14" />
+      <path d="M18 22V8a2 2 0 0 0-2-2H2" />
+    </svg>
+  );
+}
+
+function TextIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 7V4h16v3" />
+      <path d="M9 20h6" />
+      <path d="M12 4v16" />
+    </svg>
+  );
+}
+
+function BackgroundIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M3 3h7v7H3z" />
+      <path d="M14 3h7v7h-7z" />
+      <path d="M3 14h7v7H3z" />
+      <path d="M14 14h7v7h-7z" />
+    </svg>
+  );
+}
+
+function AssetIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="m12 2 9 5-9 5-9-5z" />
+      <path d="m3 12 9 5 9-5" />
+      <path d="m3 17 9 5 9-5" />
+    </svg>
+  );
+}
+
+function AdoptIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="20 6 9 17 4 12" />
+    </svg>
+  );
+}
+
+function RejectIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <line x1="18" y1="6" x2="6" y2="18" />
+      <line x1="6" y1="6" x2="18" y2="18" />
     </svg>
   );
 }

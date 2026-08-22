@@ -18,7 +18,6 @@ import { useThreads } from "../lib/store/threads";
 import { useToasts } from "../lib/store/toasts";
 import { useWorkspace } from "../lib/store/workspace";
 import { useEditor } from "./edit/editor/editorStore";
-import { sendImageToPlanForRediscuss } from "../lib/sendToPlan";
 import type { ContextMenuItem } from "./ContextMenu";
 
 /** 履歴 turn の逆引き上限。ImageMetaPanel と揃える (Rust 側 clamp(1, 2000))。 */
@@ -37,6 +36,9 @@ export type ImagePreviewPrimaryActions = {
   canRecreate: boolean;
   recreateDisabledReason: string | null;
   canSave: boolean;
+  canMakeVideo: boolean;
+  canEditImage: boolean;
+  canRegisterAsset: boolean;
 };
 
 function previewModelLabel(meta: GenerationInfo): string | null {
@@ -92,7 +94,7 @@ export function buildImagePreviewMetadata(
   };
 }
 
-/** 主要3アクションの活性条件。UIとテストが同じ判断を使う。 */
+/** 詳細パネルの主要アクション活性条件。UIとテストが同じ判断を使う。 */
 export function getImagePreviewPrimaryActions(
   metadata: ImagePreviewMetadata,
   mediaType: "image" | "video" = "image",
@@ -110,6 +112,9 @@ export function getImagePreviewPrimaryActions(
           ? "生成情報を取得できないため、同じ設定を読み込めません。"
           : "生成履歴がないため、同じ設定を読み込めません。",
     canSave: true,
+    canMakeVideo: mediaType === "image",
+    canEditImage: mediaType === "image",
+    canRegisterAsset: mediaType === "image",
   };
 }
 
@@ -374,16 +379,6 @@ export function buildGalleryItemMenu(
     ((path: string, value: Judgement | null) =>
       void useImages.getState().setJudgement(path, value));
   const menu: ContextMenuItem[] = [
-    /*
-     * STΛCK 指示 (2026-05-19, NRC さん要望): 最上位の特別アクションとして
-     * 「企画で再検討」を配置。お気に入りの生成画像をベースに、企画タブで
-     * GPT-5.5 と対話しながらプロンプトを練り直す導線。
-     */
-    {
-      label: "企画で再検討",
-      icon: "T",
-      onClick: () => void sendImageToPlanForRediscuss(item.path),
-    },
     {
       // W3-1 (Command Dock): この画像の生成時プロンプトを制作コマンド入力欄へ
       // 読み込み、同じ設定で微修正・再実行できるようにする。
