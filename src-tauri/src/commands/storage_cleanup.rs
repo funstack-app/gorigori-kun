@@ -1,6 +1,6 @@
 use crate::storage_cleanup::{
-    cleanup_storage_categories, inspect_storage_breakdown, run_cleanup, CleanupReport,
-    StorageBreakdown, StorageCleanupCategoriesReport,
+    cleanup_storage_categories, gori_cleanup_codex_homes, inspect_storage_breakdown, run_cleanup,
+    webkit_cache_candidates, CleanupReport, StorageBreakdown, StorageCleanupCategoriesReport,
 };
 
 /// 手動でストレージ掃除を実行する。
@@ -12,20 +12,13 @@ pub async fn storage_cleanup_run() -> Result<CleanupReport, String> {
 
 /// 現在のキャッシュ使用量を取得する (掃除前に表示する用)。
 ///
-/// FB#19: run_cleanup と整合させる。sessions/logs は GORI 専用 CODEX_HOME と
-/// 旧 ~/.codex の両方を集計し、generated_images は run_cleanup が削除する
-/// 旧 ~/.codex/generated_images のみを表示する (専用 HOME の生成画像は消さないため
-/// 集計しない)。
+/// run_cleanup と同じく、GORI が所有する2つの CODEX_HOME と名指しキャッシュだけを
+/// 集計する。共通 `~/.codex` と生成画像は削除対象外なので、この合計には混ぜない。
 #[tauri::command]
 pub async fn storage_cleanup_inspect() -> Result<CleanupInspection, String> {
-    use std::path::PathBuf;
-
     let home = dirs::home_dir().ok_or_else(|| "$HOME 解決失敗".to_string())?;
 
-    // 集計対象は run_cleanup と同じ正本を使う (codex-home / codex-home-gen / ~/.codex)。
-    // 2026-07-25: ここに手書きで列挙していたため codex-home-gen が漏れ、実測 2.5GB が
-    // 「一時データ」の合計に1バイトも出てこなかった。掃除側と集計側で必ず同じ列挙を使う。
-    let homes: Vec<PathBuf> = crate::codex::home::cleanup_target_codex_homes();
+    let homes = gori_cleanup_codex_homes();
 
     let mut sessions_bytes = 0u64;
     let mut logs_bytes = 0u64;
@@ -36,16 +29,9 @@ pub async fn storage_cleanup_inspect() -> Result<CleanupInspection, String> {
             + file_size(&ch.join("logs_2.sqlite-shm")).await;
     }
 
-    // 掃除対象は旧 ~/.codex/generated_images のみ (専用 HOME の生成画像は保持)。
-    let generated_bytes = match crate::codex::home::legacy_codex_home() {
-        Some(legacy) => dir_size(&legacy.join("generated_images")).await,
-        None => 0,
-    };
-    let thumbnail_bytes = match crate::storage_cleanup::thumbnail_cache_dir() {
-        Some(dir) => dir_size(&dir).await,
-        None => 0,
-    };
-    let cache_bytes = mac_cache_size(&home).await + thumbnail_bytes;
+    // 生成画像と一覧サムネイルは今回の削除許可リスト外。
+    let generated_bytes = 0;
+    let cache_bytes = mac_cache_size(&home).await;
 
     Ok(CleanupInspection {
         sessions_bytes,
@@ -108,21 +94,13 @@ async fn file_size(path: &std::path::Path) -> u64 {
         .unwrap_or(0)
 }
 
-// 2026-07-25 修正: ディレクトリ名は bundle identifier (app.codexframefactory)。
-// 以前は "gori-gori-kun" をハードコードしており、実体 (WebKit/app.codexframefactory)
-// を見ていなかったため表示が常に 0B だった。掃除側 (storage_cleanup.rs) と同じ
-// 組み立て方に揃える。旧名は空ディレクトリが残る環境向けに加算しても無害。
+// 掃除側と同じ名指しキャッシュだけを集計する。WebKit ルート全体を数えると、
+// 削除対象外の WebsiteData / LocalStorage まで「消せる容量」に混ざってしまう。
 #[cfg(target_os = "macos")]
 async fn mac_cache_size(home: &std::path::Path) -> u64 {
-    let service = crate::secrets::SERVICE_NAME;
     let mut total = 0u64;
-    for rel in [
-        format!("Library/Caches/{service}"),
-        format!("Library/WebKit/{service}"),
-        "Library/Caches/gori-gori-kun".to_string(),
-        "Library/WebKit/gori-gori-kun".to_string(),
-    ] {
-        total += dir_size(&home.join(rel)).await;
+    for path in webkit_cache_candidates(home) {
+        total += dir_size(&path).await;
     }
     total
 }

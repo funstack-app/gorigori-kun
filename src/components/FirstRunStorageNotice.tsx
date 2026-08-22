@@ -70,7 +70,7 @@ function DotMark() {
  * 初回起動時に1度だけ表示するストレージ運用説明ダイアログ。
  *
  * - ユーザーの作品データ(画像/プリセット/スキル)は絶対に自動削除しない
- * - Codex の作業履歴だけ3日で自動整理する
+ * - Codex の作業履歴だけ24時間で自動整理する
  *
  * 「わかった」を押した時点で LocalStorage にフラグを保存、以降表示しない。
  */
@@ -139,7 +139,7 @@ export function FirstRunStorageNotice() {
             <ul className="mt-2.5 space-y-1 border-t border-sky-500/15 pt-2.5 text-[11px] text-neutral-300">
               <li className="flex gap-1.5">
                 <DotMark />
-                <span>Codex の作業履歴(3日以上前)</span>
+                <span>Codex の作業履歴(24時間以上前)</span>
               </li>
               <li className="flex gap-1.5">
                 <DotMark />

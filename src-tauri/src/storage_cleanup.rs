@@ -3,19 +3,18 @@
 //! 起動時 + 24時間ごとに、Codex の一時データを軽量化・削除する。
 //! 設定画面から明示選択された場合だけ、カテゴリ単位の追加削除も行う。
 //!
-//! 軽量化対象 (GORI 専用 CODEX_HOME と 旧 ~/.codex の両方):
+//! 軽量化対象 (GORI 専用 CODEX_HOME / 生成専用 CODEX_HOME のみ):
 //! - <CODEX_HOME>/sessions/**/*.jsonl : 24時間より古い rollout の画像ペイロードのみ除去
 //!
 //! 削除対象 (再生成できるキャッシュのみ):
-//! - GORI 専用 CODEX_HOME/.tmp/marketplaces/
-//! - <CODEX_HOME>/logs_2.sqlite*
+//! - <CODEX_HOME>/logs_<数字>.sqlite (-wal / -shm を含む)
 //! - GORI の WebView キャッシュ
-//! - <app_data>/thumb-cache/ (一覧用の再生成可能な縮小画像)
 //!
 //! FB#19 対応で GORI は専用 CODEX_HOME
 //! (~/Library/Application Support/app.codexframefactory/codex-home) を使うように
 //! なった。今後 GORI が吐く sessions はこの専用 HOME 配下に溜まるため、専用 HOME と
-//! 旧 ~/.codex の sessions を対象にする。バックグラウンド掃除では sessions 自体を
+//! 生成専用 HOME の sessions を対象にする。旧 ~/.codex は共通 Codex CLI の領域なので
+//! 容量の参考表示以外では走査・変更しない。バックグラウンド掃除では sessions 自体を
 //! 削除せず、画像ペイロードのみ除去する。手動のカテゴリ選択削除では、ユーザー確認後に
 //! 最終更新24時間以上の sessions ファイルだけを削除できる。
 //!
@@ -76,7 +75,7 @@ pub struct CleanupReport {
     pub stripped_bytes_freed: u64,
     pub generated_images_deleted: u64,
     pub generated_images_bytes_freed: u64,
-    /// Codex ログ (logs_2.sqlite*) と WebView キャッシュの解放バイト数。
+    /// Codex ログ (logs_<数字>.sqlite*) と WebView キャッシュの解放バイト数。
     /// FB-A4: 掃除前 inspect で表示していたのに run_cleanup が消していなかった分。
     pub cache_bytes_freed: u64,
     pub errors: Vec<String>,
@@ -104,6 +103,8 @@ pub struct StorageBreakdown {
     pub backups: StorageCategoryStats,
     pub broken_quarantine: StorageCategoryStats,
     pub app_data: StorageCategoryStats,
+    /// 共通 `~/.codex` の参考容量。GORI の削除対象には絶対に入れない。
+    pub common_codex: StorageCategoryStats,
     pub total_bytes: u64,
     pub errors: Vec<String>,
 }
@@ -155,7 +156,10 @@ impl StorageCategory {
 
 #[derive(Debug, Clone)]
 struct StorageScanContext {
-    codex_homes: Vec<PathBuf>,
+    /// GORI が所有する2つの CODEX_HOME だけ。共通 `~/.codex` は含めない。
+    gori_codex_homes: Vec<PathBuf>,
+    generation_codex_home: Option<PathBuf>,
+    legacy_codex_home: Option<PathBuf>,
     app_data_dir: Option<PathBuf>,
     cache_roots: Vec<PathBuf>,
 }
@@ -209,7 +213,9 @@ impl StorageBreakdown {
 pub async fn inspect_storage_breakdown() -> Result<StorageBreakdown, String> {
     tokio::task::spawn_blocking(|| {
         let context = storage_scan_context()?;
-        Ok(scan_storage(&context, SystemTime::now()).breakdown)
+        let mut breakdown = scan_storage(&context, SystemTime::now()).breakdown;
+        add_common_codex_reference(&mut breakdown, context.legacy_codex_home.as_deref());
+        Ok(breakdown)
     })
     .await
     .map_err(|err| format!("ストレージ走査タスクに失敗: {err}"))?
@@ -240,21 +246,22 @@ fn parse_cleanup_categories(values: &[String]) -> Result<BTreeSet<StorageCategor
 }
 
 fn storage_scan_context() -> Result<StorageScanContext, String> {
-    let codex_homes = crate::codex::home::cleanup_target_codex_homes();
+    let gori_codex_homes = gori_cleanup_codex_homes();
+    let generation_codex_home = crate::codex::home::gen_codex_home_path();
+    let legacy_codex_home = crate::codex::home::legacy_codex_home();
     let app_data_dir = dirs::data_dir().map(|dir| dir.join(crate::secrets::SERVICE_NAME));
-    let mut cache_roots = dirs::home_dir()
+    let cache_roots = dirs::home_dir()
         .map(|home| webkit_cache_candidates(&home))
         .unwrap_or_default();
-    if let Some(thumbs) = thumbnail_cache_dir() {
-        cache_roots.push(thumbs);
-    }
 
-    if codex_homes.is_empty() && app_data_dir.is_none() && cache_roots.is_empty() {
+    if gori_codex_homes.is_empty() && app_data_dir.is_none() && cache_roots.is_empty() {
         return Err("ストレージの保存場所を解決できません".to_string());
     }
 
     Ok(StorageScanContext {
-        codex_homes,
+        gori_codex_homes,
+        generation_codex_home,
+        legacy_codex_home,
         app_data_dir,
         cache_roots,
     })
@@ -262,7 +269,7 @@ fn storage_scan_context() -> Result<StorageScanContext, String> {
 
 fn scan_storage(context: &StorageScanContext, now: SystemTime) -> StorageScan {
     let mut scan = StorageScan::default();
-    let mut roots = context.codex_homes.clone();
+    let mut roots = context.gori_codex_homes.clone();
     if let Some(app_data) = &context.app_data_dir {
         roots.push(app_data.clone());
     }
@@ -293,7 +300,7 @@ fn scan_storage(context: &StorageScanContext, now: SystemTime) -> StorageScan {
         }
 
         if metadata.is_dir() {
-            if is_broken_quarantine_root(&path, context.app_data_dir.as_deref()) {
+            if is_broken_quarantine_root(&path, context.generation_codex_home.as_deref()) {
                 let (bytes, count, errors) = tree_stats_without_following_links(&path);
                 scan.breakdown.errors.extend(errors);
                 scan.breakdown
@@ -335,7 +342,8 @@ fn scan_storage(context: &StorageScanContext, now: SystemTime) -> StorageScan {
         }
         let Some(category) = classify_storage_path(
             &path,
-            &context.codex_homes,
+            &context.gori_codex_homes,
+            context.generation_codex_home.as_deref(),
             context.app_data_dir.as_deref(),
             &context.cache_roots,
         ) else {
@@ -366,7 +374,8 @@ fn scan_storage(context: &StorageScanContext, now: SystemTime) -> StorageScan {
 /// codex-home も `appData` へ埋もれない。
 fn classify_storage_path(
     path: &Path,
-    codex_homes: &[PathBuf],
+    gori_codex_homes: &[PathBuf],
+    generation_codex_home: Option<&Path>,
     app_data_dir: Option<&Path>,
     cache_roots: &[PathBuf],
 ) -> Option<StorageCategory> {
@@ -382,19 +391,17 @@ fn classify_storage_path(
         }
         return Some(StorageCategory::WebviewCache);
     }
-    if path_is_in_broken_quarantine(path, app_data_dir) {
+    if path_is_in_broken_quarantine(path, generation_codex_home) {
         return Some(StorageCategory::BrokenQuarantine);
     }
-    if codex_homes
+    if gori_codex_homes
         .iter()
         .any(|home| path.starts_with(home.join("sessions")))
     {
         return Some(StorageCategory::Sessions);
     }
 
-    let in_managed_root = codex_homes.iter().any(|home| path.starts_with(home))
-        || app_data_dir.is_some_and(|root| path.starts_with(root));
-    if in_managed_root && is_engine_log(path) {
+    if is_engine_log(path, gori_codex_homes) {
         return Some(StorageCategory::Logs);
     }
     if app_data_dir.is_some_and(|root| path.starts_with(root)) && is_generation_backup(path) {
@@ -406,44 +413,75 @@ fn classify_storage_path(
     None
 }
 
-fn is_engine_log(path: &Path) -> bool {
+fn is_engine_log(path: &Path, gori_codex_homes: &[PathBuf]) -> bool {
+    if !gori_codex_homes
+        .iter()
+        .any(|home| path.parent() == Some(home.as_path()))
+    {
+        return false;
+    }
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
         return false;
     };
-    let name = name.to_ascii_lowercase();
-    name.ends_with(".log") || (name.starts_with("logs") && name.contains(".sqlite"))
+    let sqlite_name = name
+        .strip_suffix("-wal")
+        .or_else(|| name.strip_suffix("-shm"))
+        .unwrap_or(name);
+    let Some(index) = sqlite_name
+        .strip_prefix("logs_")
+        .and_then(|value| value.strip_suffix(".sqlite"))
+    else {
+        return false;
+    };
+    !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 fn is_generation_backup(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
         return false;
     };
-    let name = name.to_ascii_lowercase();
-    name.contains(".bak-")
-        && (name.starts_with("presets") || name.starts_with("projects") || name.starts_with("film"))
+    [
+        "presets.json.bak-",
+        "projects.json.bak-",
+        "film-projects.json.bak-",
+    ]
+    .iter()
+    .any(|prefix| {
+        name.strip_prefix(prefix)
+            .is_some_and(|suffix| !suffix.is_empty())
+    })
 }
 
-fn is_broken_quarantine_root(path: &Path, app_data_dir: Option<&Path>) -> bool {
-    app_data_dir.is_some_and(|root| path.starts_with(root))
+fn is_broken_quarantine_name(name: &str) -> bool {
+    name.strip_prefix("broken-").is_some_and(|suffix| {
+        !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+    })
+}
+
+fn is_broken_quarantine_root(path: &Path, generation_codex_home: Option<&Path>) -> bool {
+    generation_codex_home.is_some_and(|home| path.parent() == Some(home))
         && path
             .file_name()
             .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("broken-"))
+            .is_some_and(is_broken_quarantine_name)
 }
 
-fn path_is_in_broken_quarantine(path: &Path, app_data_dir: Option<&Path>) -> bool {
-    let Some(root) = app_data_dir else {
+fn path_is_in_broken_quarantine(path: &Path, generation_codex_home: Option<&Path>) -> bool {
+    let Some(root) = generation_codex_home else {
         return false;
     };
     let Ok(relative) = path.strip_prefix(root) else {
         return false;
     };
-    relative.components().any(|component| {
-        component
-            .as_os_str()
-            .to_str()
-            .is_some_and(|name| name.starts_with("broken-"))
-    })
+    let mut components = relative.components();
+    let Some(quarantine_name) = components.next() else {
+        return false;
+    };
+    quarantine_name
+        .as_os_str()
+        .to_str()
+        .is_some_and(is_broken_quarantine_name)
+        && components.next().is_some()
 }
 
 /// app-server が現在書き込んでいる可能性があるため、最終更新24時間以内の
@@ -489,6 +527,34 @@ fn tree_stats_without_following_links(path: &Path) -> (u64, u64, Vec<String>) {
         }
     }
     (bytes, count, errors)
+}
+
+/// 共通 Codex CLI の領域は参考容量だけを読み、削除候補へは渡さない。
+fn add_common_codex_reference(breakdown: &mut StorageBreakdown, legacy_home: Option<&Path>) {
+    let Some(path) = legacy_home else {
+        return;
+    };
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == ErrorKind::NotFound => return,
+        Err(err) => {
+            breakdown
+                .errors
+                .push(format!("共通 Codex {}: {err}", path.display()));
+            return;
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return;
+    }
+    let (bytes, count, errors) = tree_stats_without_following_links(path);
+    breakdown.common_codex.bytes = bytes;
+    breakdown.common_codex.count = count;
+    breakdown.errors.extend(
+        errors
+            .into_iter()
+            .map(|error| format!("共通 Codex: {error}")),
+    );
 }
 
 fn delete_scan_targets(
@@ -556,7 +622,8 @@ fn delete_classified_file(
     }
     let actual_category = classify_storage_path(
         path,
-        &context.codex_homes,
+        &context.gori_codex_homes,
+        context.generation_codex_home.as_deref(),
         context.app_data_dir.as_deref(),
         &context.cache_roots,
     );
@@ -585,7 +652,7 @@ fn delete_classified_tree(
     context: &StorageScanContext,
 ) -> Result<(u64, u64), String> {
     if expected_category != StorageCategory::BrokenQuarantine
-        || !is_broken_quarantine_root(path, context.app_data_dir.as_deref())
+        || !is_broken_quarantine_root(path, context.generation_codex_home.as_deref())
     {
         return Err(format!(
             "安全な退避フォルダではありません: {}",
@@ -661,11 +728,9 @@ pub fn spawn_background_cleanup() {
 pub async fn run_cleanup() -> Result<CleanupReport, String> {
     let mut report = CleanupReport::default();
 
-    // 掃除対象の sessions ディレクトリ候補は codex::home::cleanup_target_codex_homes()
-    // が唯一の正本 (GORI 専用 / 生成専用 codex-home-gen / 旧 ~/.codex)。
-    // 2026-07-25: 以前ここに手書きで列挙していたため codex-home-gen が漏れ、
-    // sessions 1.5GB が掃除にも容量表示にも現れていなかった。
-    let codex_homes = crate::codex::home::cleanup_target_codex_homes();
+    // 削除・書換対象は GORI が所有する2つの CODEX_HOME だけ。
+    // 共通 ~/.codex は Codex CLI の対話履歴なので、容量表示以外では触らない。
+    let codex_homes = gori_cleanup_codex_homes();
     let session_dirs: Vec<PathBuf> = codex_homes
         .iter()
         .map(|home| home.join("sessions"))
@@ -689,29 +754,17 @@ pub async fn run_cleanup() -> Result<CleanupReport, String> {
         }
     }
 
-    // 2. Codex ログ (logs_2.sqlite*)、marketplaces、WebView キャッシュ。
+    // 2. Codex ログ (logs_2.sqlite*) と WebView キャッシュ。
     //    FB-A4: これらは掃除前の inspect では合計に表示されていたのに run_cleanup が
     //    一切消していなかったため、「今すぐ整理する」を押しても合計がほとんど減らず
     //    「効かない」と見えていた。いずれも再生成される一時データだけを対象にする。
     if let Some(home) = dirs::home_dir() {
-        // Codex ログ。対象ホームは session_dirs と同じ正本 (codex_homes) を使う。
+        // Codex ログ。GORI 所有 HOME 直下の既知名だけを消す。
         // 2026-07-25: codex-home-gen/logs_2.sqlite が実測 866MB あったが、
         // ここの列挙漏れで一切回収されていなかった。
         for ch in &codex_homes {
             for name in ["logs_2.sqlite", "logs_2.sqlite-wal", "logs_2.sqlite-shm"] {
                 report.cache_bytes_freed += remove_file_if_exists(&ch.join(name)).await;
-            }
-        }
-
-        // デスクトップ版から複製されたプラグインカタログのキャッシュ。
-        // auth/config/skills/memories には触れず、このディレクトリだけを対象にする。
-        if let Some(gori) = gori_codex_home_dir() {
-            let marketplaces = gori.join(".tmp/marketplaces");
-            if marketplaces.exists() {
-                match remove_dir_contents(&marketplaces).await {
-                    Ok((_, bytes)) => report.cache_bytes_freed += bytes,
-                    Err(err) => report.errors.push(format!("marketplaces cache: {err}")),
-                }
             }
         }
 
@@ -735,17 +788,6 @@ pub async fn run_cleanup() -> Result<CleanupReport, String> {
                     Ok((_, bytes)) => report.cache_bytes_freed += bytes,
                     Err(err) => report.errors.push(format!("cache: {err}")),
                 }
-            }
-        }
-    }
-
-    // 一覧用サムネイルは元画像から再生成できるため、通常キャッシュと同じ掃除対象。
-    // app_data の直下だけを名指しし、history.db やユーザー作品には触れない。
-    if let Some(dir) = thumbnail_cache_dir() {
-        if dir.exists() {
-            match remove_dir_contents(&dir).await {
-                Ok((_, bytes)) => report.cache_bytes_freed += bytes,
-                Err(err) => report.errors.push(format!("thumbnail cache: {err}")),
             }
         }
     }
@@ -798,7 +840,7 @@ const WEBKIT_PROTECTED_SUBDIRS: &[&str] =
 /// `Library/Caches/` 配下 (OS が再生成する純キャッシュ) のどちらかであり、
 /// `WEBKIT_PROTECTED_SUBDIRS` を含むパスは**絶対に返さない**。
 /// この契約は `webkit_candidates_never_include_localstorage` テストが固定する。
-fn webkit_cache_candidates(home: &std::path::Path) -> Vec<PathBuf> {
+pub(crate) fn webkit_cache_candidates(home: &std::path::Path) -> Vec<PathBuf> {
     let service = crate::secrets::SERVICE_NAME;
     let mut out: Vec<PathBuf> = Vec::new();
 
@@ -827,19 +869,27 @@ fn webkit_cache_candidates(home: &std::path::Path) -> Vec<PathBuf> {
     out
 }
 
-/// 旧 ambient `~/.codex`。sessions の後方互換軽量化とログ掃除に使う。
-fn legacy_codex_home_dir() -> Option<PathBuf> {
-    crate::codex::home::legacy_codex_home()
+/// GORI が所有する CODEX_HOME だけを重複なしで返す。
+/// `cleanup_target_codex_homes()` は容量表示向けに共通 `~/.codex` も含むため、
+/// 削除・書換処理からは意図的に使わない。
+pub(crate) fn gori_cleanup_codex_homes() -> Vec<PathBuf> {
+    let mut homes = Vec::new();
+    for candidate in [
+        crate::codex::home::gori_codex_home_path(),
+        crate::codex::home::gen_codex_home_path(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if !homes.contains(&candidate) {
+            homes.push(candidate);
+        }
+    }
+    homes
 }
 
-/// GORI 専用 CODEX_HOME。sessions の軽量化と一時キャッシュ掃除に使う。
-/// パス解決のみ (作成・移行はしない)。
-fn gori_codex_home_dir() -> Option<PathBuf> {
-    crate::codex::home::gori_codex_home_path()
-}
-
-/// Tauri の app_data_dir と同じ `<OS data dir>/<bundle identifier>` を返す。
-/// 生成・容量表示・掃除で同じディレクトリ名を使い、集計漏れを防ぐ。
+/// Tauri の app_data_dir と同じ `<OS data dir>/<bundle identifier>` 配下にある
+/// サムネイル保存先を返す。現在は削除許可リスト外なので、掃除には使わない。
 pub(crate) fn thumbnail_cache_dir() -> Option<PathBuf> {
     dirs::data_dir().map(|dir| {
         dir.join(crate::secrets::SERVICE_NAME)
@@ -1454,8 +1504,9 @@ async fn dir_size_recursive(path: &std::path::Path) -> u64 {
 mod tests {
     use super::strip_image_payloads_from_line;
     use super::{
-        classify_storage_path, parse_cleanup_categories, session_is_outside_safety_margin,
-        webkit_cache_candidates, StorageCategory, WEBKIT_PROTECTED_SUBDIRS,
+        classify_storage_path, gori_cleanup_codex_homes, is_broken_quarantine_root,
+        parse_cleanup_categories, session_is_outside_safety_margin, webkit_cache_candidates,
+        StorageCategory, WEBKIT_PROTECTED_SUBDIRS,
     };
     use std::path::PathBuf;
     use std::time::{Duration, SystemTime};
@@ -1463,21 +1514,25 @@ mod tests {
     #[test]
     fn storage_paths_are_classified_by_the_shared_rules() {
         let app_data = PathBuf::from("/tmp/app.codexframefactory");
-        let codex_homes = vec![
-            app_data.join("codex-home"),
-            PathBuf::from("/tmp/legacy-codex"),
-        ];
+        let gori_home = app_data.join("codex-home");
+        let generation_home = app_data.join("codex-home-gen");
+        let codex_homes = vec![gori_home.clone(), generation_home.clone()];
         let cache_roots = vec![PathBuf::from(
             "/tmp/home/Library/WebKit/app.codexframefactory/NetworkCache",
         )];
 
         let cases = [
             (
-                app_data.join("codex-home/sessions/2026/rollout.jsonl"),
+                gori_home.join("sessions/2026/rollout.jsonl"),
                 StorageCategory::Sessions,
             ),
             (
-                PathBuf::from("/tmp/legacy-codex/logs_2.sqlite-wal"),
+                generation_home.join("sessions/2026/rollout.jsonl"),
+                StorageCategory::Sessions,
+            ),
+            (gori_home.join("logs_2.sqlite"), StorageCategory::Logs),
+            (
+                generation_home.join("logs_17.sqlite-wal"),
                 StorageCategory::Logs,
             ),
             (
@@ -1489,7 +1544,15 @@ mod tests {
                 StorageCategory::Backups,
             ),
             (
-                app_data.join("broken-presets-20260822/presets.json"),
+                app_data.join("presets.json.bak-20260822"),
+                StorageCategory::Backups,
+            ),
+            (
+                app_data.join("film-projects.json.bak-20260822"),
+                StorageCategory::Backups,
+            ),
+            (
+                generation_home.join("broken-1724313600/logs_2.sqlite"),
                 StorageCategory::BrokenQuarantine,
             ),
             (app_data.join("projects.json"), StorageCategory::AppData),
@@ -1497,7 +1560,13 @@ mod tests {
 
         for (path, expected) in cases {
             assert_eq!(
-                classify_storage_path(&path, &codex_homes, Some(&app_data), &cache_roots),
+                classify_storage_path(
+                    &path,
+                    &codex_homes,
+                    Some(&generation_home),
+                    Some(&app_data),
+                    &cache_roots,
+                ),
                 Some(expected),
                 "分類が不正: {}",
                 path.display()
@@ -1508,11 +1577,119 @@ mod tests {
             classify_storage_path(
                 &cache_roots[0].join("LocalStorage/should-never-delete.db"),
                 &codex_homes,
+                Some(&generation_home),
                 Some(&app_data),
                 &cache_roots,
             ),
             None,
             "キャッシュ候補配下でも保護名を含むパスは削除対象にしない"
+        );
+    }
+
+    #[test]
+    fn log_extension_outside_known_direct_name_is_not_deletable() {
+        let app_data = PathBuf::from("/tmp/app.codexframefactory");
+        let gori_home = app_data.join("codex-home");
+        let generation_home = app_data.join("codex-home-gen");
+        let codex_homes = vec![gori_home.clone(), generation_home.clone()];
+
+        for path in [
+            gori_home.join("skills/foo.log"),
+            gori_home.join("skills/logs_2.sqlite"),
+            gori_home.join("memories/notes.log"),
+            gori_home.join("logs_2.sqlite.backup"),
+            gori_home.join("logs_latest.sqlite"),
+            app_data.join("film-notes.json.bak-20260822"),
+        ] {
+            assert_eq!(
+                classify_storage_path(
+                    &path,
+                    &codex_homes,
+                    Some(&generation_home),
+                    Some(&app_data),
+                    &[],
+                ),
+                Some(StorageCategory::AppData),
+                "既知名でないログを削除対象にしてはいけない: {}",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn broken_name_outside_generated_quarantine_is_not_deletable() {
+        let app_data = PathBuf::from("/tmp/app.codexframefactory");
+        let gori_home = app_data.join("codex-home");
+        let generation_home = app_data.join("codex-home-gen");
+        let codex_homes = vec![gori_home, generation_home.clone()];
+        let memory_file = app_data.join("memories/broken-メモ/note.md");
+
+        assert_eq!(
+            classify_storage_path(
+                &memory_file,
+                &codex_homes,
+                Some(&generation_home),
+                Some(&app_data),
+                &[],
+            ),
+            Some(StorageCategory::AppData)
+        );
+        assert!(!is_broken_quarantine_root(
+            &app_data.join("memories/broken-メモ"),
+            Some(&generation_home)
+        ));
+        assert!(!is_broken_quarantine_root(
+            &generation_home.join("broken-memo"),
+            Some(&generation_home)
+        ));
+        assert!(is_broken_quarantine_root(
+            &generation_home.join("broken-1724313600"),
+            Some(&generation_home)
+        ));
+    }
+
+    #[test]
+    fn legacy_codex_sessions_are_not_cleanup_targets() {
+        let app_data = PathBuf::from("/tmp/app.codexframefactory");
+        let gori_home = app_data.join("codex-home");
+        let generation_home = app_data.join("codex-home-gen");
+        let codex_homes = vec![gori_home, generation_home.clone()];
+        let legacy_session = PathBuf::from("/tmp/home/.codex/sessions/rollout.jsonl");
+
+        assert_eq!(
+            classify_storage_path(
+                &legacy_session,
+                &codex_homes,
+                Some(&generation_home),
+                Some(&app_data),
+                &[],
+            ),
+            None,
+            "共通 ~/.codex の対話履歴は削除走査に入れてはいけない"
+        );
+    }
+
+    #[test]
+    fn actual_gori_cleanup_homes_exclude_legacy_codex() {
+        let Some(legacy_home) = crate::codex::home::legacy_codex_home() else {
+            return;
+        };
+        let homes = gori_cleanup_codex_homes();
+        assert!(
+            !homes.contains(&legacy_home),
+            "共通 ~/.codex を GORI の削除ホームへ戻してはいけない"
+        );
+        assert_eq!(
+            classify_storage_path(
+                &legacy_home.join("sessions/rollout.jsonl"),
+                &homes,
+                crate::codex::home::gen_codex_home_path().as_deref(),
+                dirs::data_dir()
+                    .map(|dir| dir.join(crate::secrets::SERVICE_NAME))
+                    .as_deref(),
+                &[],
+            ),
+            None
         );
     }
 
