@@ -26,7 +26,7 @@ export type TextExtraction = {
 const NORMALIZED_SCALE = 1000;
 
 /** 画像の実寸を取得する。Rust 側プロンプトに渡す必要があるため先に測る。 */
-async function measureImage(imagePath: string): Promise<{ width: number; height: number }> {
+export async function measureImage(imagePath: string): Promise<{ width: number; height: number }> {
   const url = convertFileSrc(imagePath);
   const img = new Image();
   await new Promise<void>((resolve, reject) => {

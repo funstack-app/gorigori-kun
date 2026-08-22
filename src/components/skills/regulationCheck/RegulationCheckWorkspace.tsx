@@ -10,14 +10,20 @@ import { useToasts } from "../../../lib/store/toasts";
 import {
   checkImage,
   formatResultsAsText,
+  runMachineChecks,
   type RegulationImageResult,
 } from "../../../lib/regulationCheck/check";
+import type {
+  MachineCheckResult,
+  MachineCheckStatus,
+} from "../../../lib/regulationCheck/imageSpecs";
 import {
   DEFAULT_RULE_SETS,
   findRule,
   resolveRules,
   type RegulationRule,
   type RegulationRuleSet,
+  type RegulationRuleKind,
   type RegulationSeverity,
 } from "../../../lib/regulationCheck/rules";
 
@@ -30,6 +36,22 @@ const SEVERITY_STYLE: Record<
   high: { label: "重大", className: "bg-red-500/15 text-red-300 border-red-500/40" },
   mid: { label: "要修正", className: "bg-amber-500/15 text-amber-300 border-amber-500/40" },
   low: { label: "軽微", className: "bg-sky-500/15 text-sky-300 border-sky-500/40" },
+};
+
+const RULE_KIND_LABEL: Record<RegulationRuleKind, string> = {
+  machine: "機械チェック",
+  ai: "AI判定",
+  legal: "法務注意",
+};
+
+const MACHINE_STATUS_STYLE: Record<
+  MachineCheckStatus,
+  { label: string; className: string }
+> = {
+  pass: { label: "合格", className: "bg-emerald-500/15 text-emerald-300 border-emerald-500/40" },
+  fail: { label: "不合格", className: "bg-red-500/15 text-red-300 border-red-500/40" },
+  warning: { label: "注意", className: "bg-amber-500/15 text-amber-300 border-amber-500/40" },
+  "not-checked": { label: "未判定", className: "bg-neutral-500/15 text-neutral-400 border-neutral-500/40" },
 };
 
 function basename(p: string): string {
@@ -70,7 +92,13 @@ function formatReportAsMarkdown(state: CheckResultsState): string {
   ];
 
   for (const rule of state.ruleSet.rules) {
-    lines.push("", `### ${rule.name}`, "", rule.criteria);
+    const metadata = [
+      `種別: ${RULE_KIND_LABEL[rule.kind ?? "ai"]}`,
+      rule.sourceUrl ? `出典: ${rule.sourceUrl}` : null,
+      rule.checkedAt ? `確認日: ${rule.checkedAt}` : null,
+      rule.confidence ? `確度: ${rule.confidence}` : null,
+    ].filter((item): item is string => Boolean(item));
+    lines.push("", `### ${rule.name}`, "", ...metadata.map((item) => `- ${item}`), "", rule.criteria);
   }
 
   lines.push(
@@ -174,16 +202,51 @@ export function RegulationCheckWorkspace() {
       const rules = ruleSnapshot.rules;
       const paths = [...imagePaths];
       const collected: RegulationImageResult[] = [];
-      // 画像は1枚ずつ Codex に渡す（description 取得は画像入力の実処理）。
-      // 逐次実行で結果を順に積み上げ、途中経過を表示する。
+      // 画像は1枚ずつ、機械チェック→画面表示→Codex の順で進める。
       for (const path of paths) {
+        let machineChecks: MachineCheckResult[];
+        try {
+          machineChecks = await runMachineChecks(path, ruleSnapshot.id);
+        } catch (err) {
+          if (runTokenRef.current !== runToken) return;
+          collected.push({
+            imagePath: path,
+            machineChecks: [],
+            aiPending: false,
+            issues: [],
+            description: "",
+            error: `画像規格の確認に失敗しました: ${(err as Error)?.message ?? err}`,
+          });
+          setResultState({ ruleSet: ruleSnapshot, results: [...collected] });
+          continue;
+        }
+        if (runTokenRef.current !== runToken) return;
+        collected.push({
+          imagePath: path,
+          machineChecks,
+          aiPending: true,
+          issues: [],
+          description: "",
+          error: null,
+        });
+        // ここで先に画面へ出す。Codexの応答待ちでも寸法等の結果を確認できる。
+        setResultState({ ruleSet: ruleSnapshot, results: [...collected] });
+
         const result = await checkImage(path, rules);
         if (runTokenRef.current !== runToken) return;
-        collected.push(result);
+        collected[collected.length - 1] = {
+          ...result,
+          machineChecks,
+          aiPending: false,
+        };
         setResultState({ ruleSet: ruleSnapshot, results: [...collected] });
       }
       const failed = collected.filter((r) => r.error).length;
-      const flagged = collected.filter((r) => r.issues.length > 0).length;
+      const flagged = collected.filter(
+        (r) =>
+          r.issues.length > 0 ||
+          r.machineChecks?.some((check) => check.status === "fail" || check.status === "warning"),
+      ).length;
       if (failed > 0) {
         pushToast({
           kind: "warn",
@@ -269,9 +332,12 @@ export function RegulationCheckWorkspace() {
         {/* 左: 設定パネル */}
         <div className="flex w-80 shrink-0 flex-col gap-4 overflow-y-auto border-r border-[#242424] p-4">
           <PageHelp
-            what="入稿前のクリエイティブを渡すと、文字の占める割合・入れ忘れてはいけない表記・ロゴの扱い・使ってはいけない表現を見て、引っかかる箇所を理由つきで指摘します。"
+            what="入稿前の画像を渡すと、媒体の画像規格を機械で測り、表現上の注意をCodexが理由つきで指摘します。"
             first="まずは出す先の媒体を下から選び、検査したい画像を入れてください。"
           />
+          <p className="rounded border border-amber-500/25 bg-amber-500/5 px-2.5 py-2 text-[11px] leading-relaxed text-amber-200/80">
+            この検査は審査通過や適法性を保証しません。未確認項目と法務注意は、媒体の最新画面や専門家でも確認してください。
+          </p>
 
           <SceneCompactCard
             number="01"
@@ -305,6 +371,14 @@ export function RegulationCheckWorkspace() {
                   ))}
                 </select>
                 <p className="text-[11px] leading-relaxed text-neutral-500">{ruleSet.description}</p>
+                {ruleSet.notes.map((note) => (
+                  <p
+                    key={note}
+                    className="rounded border border-amber-500/25 bg-amber-500/5 px-2 py-1.5 text-[11px] leading-relaxed text-amber-300/80"
+                  >
+                    {note}
+                  </p>
+                ))}
               </div>
 
               {/* 適用中ルール一覧 */}
@@ -318,8 +392,26 @@ export function RegulationCheckWorkspace() {
                       key={r.id}
                       className="rounded border border-[#242424] bg-[#171717] px-2 py-1.5 text-[11px]"
                     >
-                      <span className="font-medium text-neutral-300">{r.name}</span>
-                      <span className="ml-1 text-neutral-500">— {r.description}</span>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="font-medium text-neutral-300">{r.name}</span>
+                        <span className="rounded border border-[#333] px-1 py-0.5 text-[9px] text-neutral-400">
+                          {RULE_KIND_LABEL[r.kind ?? "ai"]}
+                        </span>
+                        {r.checkedAt && (
+                          <span className="text-[9px] text-neutral-600">確認 {r.checkedAt}</span>
+                        )}
+                      </div>
+                      <p className="mt-0.5 text-neutral-500">{r.description}</p>
+                      {r.sourceUrl && (
+                        <a
+                          href={r.sourceUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="mt-0.5 inline-block text-[10px] text-sky-400 hover:text-sky-300"
+                        >
+                          出典を開く（確度: {r.confidence ?? "未設定"}）
+                        </a>
+                      )}
                     </li>
                   ))}
                 </ul>
@@ -419,7 +511,7 @@ export function RegulationCheckWorkspace() {
               <button
                 type="button"
                 onClick={copyResults}
-                disabled={results.length === 0}
+                disabled={results.length === 0 || running}
                 className="rounded border border-[#2c2c2c] px-2 py-1 text-[11px] text-neutral-300 hover:bg-[#222] disabled:opacity-40"
               >
                 テキストでコピー
@@ -427,7 +519,7 @@ export function RegulationCheckWorkspace() {
               <button
                 type="button"
                 onClick={() => void saveReport()}
-                disabled={results.length === 0}
+                disabled={results.length === 0 || running}
                 className="rounded border border-[#2c2c2c] px-2 py-1 text-[11px] text-neutral-300 hover:bg-[#222] disabled:opacity-40"
               >
                 レポートをファイルに保存
@@ -455,7 +547,8 @@ export function RegulationCheckWorkspace() {
                 {running && (
                   <p className="flex items-center gap-2 text-xs text-neutral-500">
                     <span className="h-4 w-4 animate-spin rounded-full border-2 border-pink-500/30 border-t-pink-400" />
-                    Codex が画像を解析しています…（{results.length}/{imagePaths.length}）
+                    機械チェック後にCodexが画像を解析しています…（
+                    {results.filter((result) => !result.aiPending).length}/{imagePaths.length}）
                   </p>
                 )}
               </div>
@@ -475,6 +568,10 @@ function ResultCard({
   ruleName: (ruleId: string) => string;
 }) {
   const hasIssues = result.issues.length > 0;
+  const machineChecks = result.machineChecks ?? [];
+  const machineAlerts = machineChecks.filter(
+    (check) => check.status === "fail" || check.status === "warning",
+  ).length;
   return (
     <div className="rounded-lg border border-[#242424] bg-[#161616] p-3">
       <div className="flex items-start gap-3">
@@ -487,15 +584,55 @@ function ResultCard({
           <p className="truncate text-xs font-medium text-neutral-200">
             {basename(result.imagePath)}
           </p>
-          {result.error ? (
+          {result.aiPending ? (
+            <p className="mt-0.5 text-[11px] text-sky-400">機械チェック完了 / Codex判定中</p>
+          ) : result.error ? (
             <p className="mt-1 text-xs text-red-400">検査エラー: {result.error}</p>
-          ) : hasIssues ? (
-            <p className="mt-0.5 text-[11px] text-amber-400">{result.issues.length} 件の指摘</p>
+          ) : hasIssues || machineAlerts > 0 ? (
+            <p className="mt-0.5 text-[11px] text-amber-400">
+              機械 {machineAlerts} 件 / Codex {result.issues.length} 件の注意
+            </p>
           ) : (
-            <p className="mt-0.5 text-[11px] text-emerald-400">問題なし</p>
+            <p className="mt-0.5 text-[11px] text-emerald-400">確認できた範囲で問題なし</p>
           )}
         </div>
       </div>
+
+      {machineChecks.length > 0 && (
+        <div className="mt-2">
+          <p className="mb-1 text-[10px] font-medium uppercase tracking-wide text-neutral-500">
+            Codex前の機械チェック
+          </p>
+          <ul className="flex flex-col gap-1.5">
+            {machineChecks.map((check) => {
+              const style = MACHINE_STATUS_STYLE[check.status];
+              return (
+                <li
+                  key={check.id}
+                  className="rounded border border-[#242424] bg-[#111] p-2"
+                >
+                  <div className="flex items-center gap-2">
+                    <span
+                      className={`rounded border px-1.5 py-0.5 text-[10px] font-medium ${style.className}`}
+                    >
+                      {style.label}
+                    </span>
+                    <span className="text-[11px] font-medium text-neutral-300">{check.name}</span>
+                  </div>
+                  <p className="mt-1 text-xs text-neutral-300">{check.message}</p>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
+
+      {result.aiPending && (
+        <p className="mt-2 flex items-center gap-2 text-[11px] text-neutral-500">
+          <span className="h-3 w-3 animate-spin rounded-full border-2 border-sky-500/30 border-t-sky-400" />
+          表現と法務注意をCodexが確認しています…
+        </p>
+      )}
 
       {hasIssues && (
         <ul className="mt-2 flex flex-col gap-1.5">

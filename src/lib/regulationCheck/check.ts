@@ -22,7 +22,11 @@
 
 import { codexVision } from "../ipc";
 import { codexTextQuery } from "../agents/codexQuery";
-import { extractTextInfo, formatTextInfoForPrompt } from "./textBlocks";
+import { extractTextInfo, formatTextInfoForPrompt, measureImage } from "./textBlocks";
+import {
+  checkImageSpecification,
+  type MachineCheckResult,
+} from "./imageSpecs";
 import {
   type RegulationRule,
   type RegulationSeverity,
@@ -45,6 +49,10 @@ export type RegulationIssue = {
 /** 画像1枚ぶんの検査結果。 */
 export type RegulationImageResult = {
   imagePath: string;
+  /** Codex より先に終わる、寸法・比率・形式・容量の決定論チェック。 */
+  machineChecks?: MachineCheckResult[];
+  /** true の間は機械チェックだけを先に表示し、Codex の完了を待っている。 */
+  aiPending?: boolean;
   /** 検出された指摘。空配列 = 問題なし。 */
   issues: RegulationIssue[];
   /** Codex が返した生の description（デバッグ・根拠確認用）。 */
@@ -108,9 +116,39 @@ export function formatRulesForPrompt(rules: readonly RegulationRule[]): string {
   return rules
     .map(
       (r) =>
-        `- ruleId="${r.id}" 【${r.name}】: ${r.criteria}`,
+        `- ruleId="${r.id}" 種別=${r.kind ?? "ai"} 【${r.name}】: ${r.criteria}`,
     )
     .join("\n");
+}
+
+function extensionOf(path: string): string {
+  const filename = path.split(/[\\/]/).pop() ?? path;
+  const dot = filename.lastIndexOf(".");
+  return dot >= 0 ? filename.slice(dot + 1) : "";
+}
+
+/** 画像を実測し、AIを呼ぶ前に媒体の画像規格へ照合する。 */
+export async function runMachineChecks(
+  imagePath: string,
+  ruleSetId: string,
+): Promise<MachineCheckResult[]> {
+  const { width, height } = await measureImage(imagePath);
+  let fileSizeBytes: number | null = null;
+  try {
+    const { stat } = await import("@tauri-apps/plugin-fs");
+    const info = await stat(imagePath);
+    if (typeof info.size === "number" && Number.isFinite(info.size)) {
+      fileSizeBytes = info.size;
+    }
+  } catch {
+    // 容量だけ取れなくても、実寸・比率・形式の決定論チェックは継続する。
+  }
+  return checkImageSpecification(ruleSetId, {
+    width,
+    height,
+    extension: extensionOf(imagePath),
+    fileSizeBytes,
+  });
 }
 
 /**
@@ -189,6 +227,9 @@ export async function checkImage(
   signal?: AbortSignal,
 ): Promise<RegulationImageResult> {
   try {
+    // 寸法・比率・形式は runMachineChecks で先に判定済み。Codex には
+    // 見た目・文字・法務注意だけを渡し、同じ規格を推測で再判定させない。
+    const codexRules = rules.filter((rule) => rule.kind !== "machine");
     // 画像の見た目 (description) と 画像内の文字 (textInfo) は別経路で取る。
     // description は AI 画像生成用の英語プロンプトで文字を一切含まないため、
     // 文字前提のルール (面積 / NG表現 / 必須表記 / ロゴ) はこれだけでは判定できない
@@ -201,7 +242,7 @@ export async function checkImage(
       description,
       formatTextInfoForPrompt(textExtraction),
       imagePath,
-      rules,
+      codexRules,
       signal,
     );
     return { imagePath, issues, description, error: null };
@@ -233,6 +274,22 @@ export function formatResultsAsText(
   const lines: string[] = ["レギュレーション検査結果", ""];
   for (const r of results) {
     lines.push(`■ ${basename(r.imagePath)}`);
+    if (r.machineChecks?.length) {
+      const statusLabel = {
+        pass: "合格",
+        fail: "不合格",
+        warning: "注意",
+        "not-checked": "未判定",
+      } as const;
+      for (const check of r.machineChecks) {
+        lines.push(`  [機械/${statusLabel[check.status]}] ${check.name}: ${check.message}`);
+      }
+    }
+    if (r.aiPending) {
+      lines.push("  [Codex] 判定中");
+      lines.push("");
+      continue;
+    }
     if (r.error) {
       lines.push(`  検査エラー: ${r.error}`);
     } else if (r.issues.length === 0) {
