@@ -3,7 +3,6 @@ import {
   type GenPhaseEvent,
   type GenPhaseName,
   type ImageBatchEvent,
-  type ImageBatchProvider,
 } from "../ipc";
 import {
   recordGenerationDuration,
@@ -15,6 +14,7 @@ import { stallFromFailure, useGenerationStatus } from "./generationStatus";
 
 // P0-1 mediaType 導入 (2026-05-28 動画タブ準備)
 export type MediaType = "image" | "video";
+export type BatchSource = "remoteMcp";
 
 /**
  * 生成1枚の進み具合 (設計書 S1)。
@@ -92,11 +92,15 @@ export type Batch = {
   workers: BatchWorker[];
   status: "running" | "completed" | "cancelling" | "cancelled";
   failedCount: number;
-  provider?: ImageBatchProvider;
+  provider?: string;
+  /** 接続先の表示名。未指定なら既存 provider 名から表示用ラベルを決める。 */
+  providerLabel?: string;
   modelJobSetType?: string;
   modelDisplayName?: string;
   mediaType?: MediaType;
   compareMode?: boolean;
+  /** 既存経路の表示を変えず、経路固有の失敗操作だけを出し分ける。 */
+  source?: BatchSource;
 };
 
 type BatchesState = {
@@ -109,11 +113,13 @@ type BatchesState = {
     prompt: string;
     references: { path: string; name: string }[];
     count: number;
-    provider?: ImageBatchProvider;
+    provider?: string;
+    providerLabel?: string;
     modelJobSetType?: string;
     modelDisplayName?: string;
     mediaType?: MediaType;
     compareMode?: boolean;
+    source?: BatchSource;
     workerModels?: { jobSetType: string; displayName: string }[];
   }) => void;
   /** Remove a batch by id. Used to clean up optimistic entries that never
@@ -135,10 +141,12 @@ export const useBatches = create<BatchesState>((set, _get) => ({
     references,
     count,
     provider,
+    providerLabel,
     modelJobSetType,
     modelDisplayName,
     mediaType,
     compareMode,
+    source,
     workerModels,
   }) => {
     const resolvedMediaType = mediaType ?? "image";
@@ -167,10 +175,12 @@ export const useBatches = create<BatchesState>((set, _get) => ({
       status: "running",
       failedCount: 0,
       provider,
+      providerLabel,
       modelJobSetType,
       modelDisplayName,
       mediaType: resolvedMediaType,
       compareMode,
+      source,
     };
     set((s) => ({ batches: [...s.batches, batch] }));
   },
@@ -502,7 +512,7 @@ export const useBatches = create<BatchesState>((set, _get) => ({
  * 再レンダー抑制のため、Zustand の selector には provider (文字列) を返させて
  * primitive 比較にする。batch オブジェクトを返すと参照が毎回変わって不要再描画になる。
  */
-export function isStoppableProvider(provider: ImageBatchProvider | undefined): boolean {
+export function isStoppableProvider(provider: string | undefined): boolean {
   // allow-list で書く (2026-07-27 評価指摘で deny-list から変更)。
   //
   // deny-list (「止められない provider の集合に無ければ true」) だと、
@@ -521,7 +531,7 @@ export function isStoppableProvider(provider: ImageBatchProvider | undefined): b
 export function selectBatchProvider(
   state: BatchesState,
   batchId: string,
-): ImageBatchProvider | undefined {
+): string | undefined {
   return state.batches.find((b) => b.batchId === batchId)?.provider;
 }
 

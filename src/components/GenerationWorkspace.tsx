@@ -316,16 +316,24 @@ export function Timeline() {
               <div className="space-y-4">
                 {orderedBatches.map((batch) => (
                   <BatchBlock
-                    key={`${batch.startedAt}-${batch.count}`}
+                    key={
+                      batch.source === "remoteMcp"
+                        ? batch.batchId
+                        : `${batch.startedAt}-${batch.count}`
+                    }
+                    batchId={batch.batchId}
                     workers={batch.workers}
                     count={batch.count}
                     startedAt={batch.startedAt}
                     prompt={batch.prompt}
                     size={timelineSize}
                     provider={batch.provider}
+                    providerLabel={batch.providerLabel}
                     modelDisplayName={batch.modelDisplayName}
                     compareMode={batch.compareMode}
                     batchStatus={batch.status}
+                    mediaType={batch.mediaType}
+                    source={batch.source}
                   />
                 ))}
               </div>
@@ -688,35 +696,53 @@ function gridColsClass(size: TimelineSize): string {
 }
 
 function BatchBlock({
+  batchId,
   workers,
   count,
   startedAt,
   prompt,
   size,
   provider,
+  providerLabel,
   modelDisplayName,
   compareMode,
   batchStatus,
+  mediaType,
+  source,
 }: {
+  batchId: string;
   workers: BatchWorker[];
   count: number;
   startedAt?: number;
   prompt?: string;
   size: TimelineSize;
   provider?: string;
+  providerLabel?: string;
   modelDisplayName?: string;
   compareMode?: boolean;
   batchStatus: "running" | "completed" | "cancelling" | "cancelled";
+  mediaType?: "image" | "video";
+  source?: "remoteMcp";
 }) {
   const completed = workers.filter((w) => w.status === "completed").length;
   const failed = workers.filter((w) => w.status === "failed").length;
   const total = count;
+  const remoteMcpUnit = mediaType === "video" ? "本" : "枚";
+  const remoteMcpFailure =
+    source === "remoteMcp"
+      ? workers.find((worker) => worker.status === "failed")?.error
+      : undefined;
 
   let status: string;
   // credits は外部 provider の語彙。中止できるのは codex 経路だけなので、
   // ここで credits に言及すると codex 経路にだけ嘘をつくことになる (2026-07-28)。
   if (batchStatus === "cancelled") status = "中止しました";
   else if (batchStatus === "cancelling") status = "中止中...";
+  else if (source === "remoteMcp" && completed === total)
+    status = `完了 ${completed}${remoteMcpUnit}`;
+  else if (source === "remoteMcp" && failed > 0 && completed + failed === total)
+    status = `${completed}${remoteMcpUnit}成功 / ${failed}件失敗`;
+  else if (source === "remoteMcp") status = `生成中 ${completed}/${total}${remoteMcpUnit}`;
   else if (completed === total) status = `完了 ${completed}枚`;
   else if (failed > 0 && completed + failed === total)
     status = `${completed}枚成功 / ${failed}件失敗`;
@@ -729,6 +755,7 @@ function BatchBlock({
           <span className="text-[11px] font-bold text-neutral-300">{status}</span>
           <ModelTagPill
             provider={provider}
+            providerLabel={providerLabel}
             modelDisplayName={modelDisplayName}
             compareMode={compareMode}
             count={count}
@@ -751,6 +778,17 @@ function BatchBlock({
               中止しました
             </span>
           )}
+          {remoteMcpFailure && (
+            <button
+              type="button"
+              onClick={() => useBatches.getState().removeBatch(batchId)}
+              className="flex h-5 w-5 items-center justify-center rounded text-sm leading-none text-neutral-500 hover:bg-[#242424] hover:text-white"
+              aria-label="失敗した生成を閉じる"
+              title="閉じる"
+            >
+              ×
+            </button>
+          )}
           {startedAt && (
             <span className="text-[10px] font-medium text-neutral-500">
               {formatTime(startedAt)}
@@ -761,6 +799,11 @@ function BatchBlock({
       {prompt && (
         <p className="mb-2 line-clamp-2 text-[10px] text-neutral-500">
           {prompt}
+        </p>
+      )}
+      {remoteMcpFailure && (
+        <p className="mb-2 rounded border border-red-500/30 bg-red-950/20 px-2 py-1.5 text-[10px] leading-relaxed text-red-300">
+          {remoteMcpFailure}
         </p>
       )}
       <div className={`grid gap-2 ${gridColsClass(size)}`}>
@@ -787,27 +830,32 @@ function BatchBlock({
 
 function ModelTagPill({
   provider,
+  providerLabel,
   modelDisplayName,
   compareMode,
   count,
 }: {
   provider?: string | null;
+  providerLabel?: string | null;
   modelDisplayName?: string | null;
   compareMode?: boolean;
   count?: number;
 }) {
-  if (!provider) return null;
-  const providerLabel =
-    provider === "magnific"
+  if (!provider && !providerLabel) return null;
+  const resolvedProviderLabel =
+    providerLabel ??
+    (provider === "magnific"
       ? "Magnific"
       : provider === "higgsfield"
         ? "Higgsfield"
-        : "Codex";
+        : provider === "codex"
+          ? "Codex"
+          : provider);
   const label =
     compareMode && (provider === "higgsfield" || provider === "magnific")
-      ? `${providerLabel} · ${count ?? 0} models compared`
+      ? `${resolvedProviderLabel} · ${count ?? 0} models compared`
       : modelDisplayName
-        ? `${providerLabel} · ${modelDisplayName}`
+        ? `${resolvedProviderLabel} · ${modelDisplayName}`
         : null;
   if (!label) return null;
   return (

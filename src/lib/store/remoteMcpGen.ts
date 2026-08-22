@@ -12,6 +12,7 @@ import type {
   RemoteMcpGenEvent,
   RemoteMcpGenerateArgs,
 } from "../ipc";
+import { useBatches } from "./batches";
 import { registerGeneratedMedia } from "./images";
 
 export type RemoteMcpGenerationKind = Exclude<RemoteMcpToolKind, "other">;
@@ -163,6 +164,103 @@ function validationFailure(input: RemoteMcpRunInput): string | null {
   return null;
 }
 
+function remoteMcpModelDisplayName(selection: RemoteMcpSelection): string {
+  return (
+    selection.model?.label ??
+    selection.model?.name ??
+    selection.toolTitle ??
+    selection.toolName
+  );
+}
+
+function startRemoteTimelineBatch(
+  requestId: string,
+  selection: RemoteMcpSelection,
+  input: RemoteMcpRunInput,
+  referencePaths: string[],
+): void {
+  const count = Math.max(1, Math.trunc(input.count ?? 1));
+  const modelDisplayName = remoteMcpModelDisplayName(selection);
+  const batches = useBatches.getState();
+  batches.startBatch({
+    batchId: requestId,
+    prompt: input.prompt,
+    references: referencePaths.map((path) => ({
+      path,
+      name: path.split(/[\\/]/).pop() ?? path,
+    })),
+    count,
+    provider: selection.providerId,
+    providerLabel: selection.providerLabel,
+    modelJobSetType: selection.model?.id,
+    modelDisplayName,
+    mediaType: input.kind,
+    source: "remoteMcp",
+  });
+  for (let idx = 1; idx <= count; idx += 1) {
+    useBatches.getState().applyEvent({
+      kind: "workerStarted",
+      batchId: requestId,
+      idx,
+      modelJobSetType: selection.model?.id,
+      modelDisplayName,
+      mediaType: input.kind,
+    });
+  }
+}
+
+function completeRemoteTimelineBatch(
+  requestId: string,
+  mediaType: RemoteMcpGenerationKind,
+  savedPaths: string[],
+  warnings: string[],
+): void {
+  const batch = useBatches.getState().batches.find((item) => item.batchId === requestId);
+  if (!batch || batch.status !== "running") return;
+
+  const missingCount = Math.max(0, batch.count - savedPaths.length);
+  for (let offset = 0; offset < missingCount; offset += 1) {
+    const idx = savedPaths.length + offset + 1;
+    const detail = warnings[offset] ?? "生成結果を保存できませんでした。";
+    useBatches.getState().applyEvent({
+      kind: "workerFailed",
+      batchId: requestId,
+      idx,
+      error: friendlyRemoteMcpError(detail),
+      mediaType,
+    });
+  }
+  useBatches.getState().applyEvent({
+    kind: "completed",
+    batchId: requestId,
+    generatedPaths: savedPaths,
+    failedCount: missingCount,
+    mediaType,
+  });
+}
+
+function failRemoteTimelineBatch(requestId: string, message: string): void {
+  const batch = useBatches.getState().batches.find((item) => item.batchId === requestId);
+  if (!batch || batch.status !== "running") return;
+
+  for (const worker of batch.workers) {
+    useBatches.getState().applyEvent({
+      kind: "workerFailed",
+      batchId: requestId,
+      idx: worker.idx,
+      error: message,
+      mediaType: worker.mediaType ?? batch.mediaType,
+    });
+  }
+  useBatches.getState().applyEvent({
+    kind: "completed",
+    batchId: requestId,
+    generatedPaths: Array.from({ length: batch.count }, () => ""),
+    failedCount: batch.count,
+    mediaType: batch.mediaType,
+  });
+}
+
 let remoteMcpGenListener: Promise<() => void> | null = null;
 
 /** remote-mcp-gen の購読をストア内で1本だけ維持する。 */
@@ -201,7 +299,7 @@ export const useRemoteMcpGen = create<RemoteMcpGenState>((set, get) => {
         providerId: selection.providerId,
         providerLabel: selection.providerLabel,
         modelId: selection.model?.id,
-        modelLabel: selection.toolTitle || selection.model?.id,
+        modelLabel: remoteMcpModelDisplayName(selection),
         refImagePaths: [...new Set(refImagePaths)],
         durationSeconds: input.durationSeconds,
       });
@@ -231,6 +329,12 @@ export const useRemoteMcpGen = create<RemoteMcpGenState>((set, get) => {
           },
         };
       });
+      completeRemoteTimelineBatch(
+        requestId,
+        input.kind,
+        savedPaths,
+        warnings,
+      );
     } catch (error) {
       const warning = `${noun}は保存しましたが、ライブラリ・履歴への登録処理に失敗しました: ${String(error)}`;
       console.warn("[remote-mcp-registration]", warning);
@@ -252,6 +356,7 @@ export const useRemoteMcpGen = create<RemoteMcpGenState>((set, get) => {
           },
         };
       });
+      failRemoteTimelineBatch(requestId, warning);
     }
   };
 
@@ -300,6 +405,7 @@ export const useRemoteMcpGen = create<RemoteMcpGenState>((set, get) => {
       latestBatchId: { ...state.latestBatchId, [input.kind]: batchId },
       validationMessage: { ...state.validationMessage, [input.kind]: null },
     }));
+    startRemoteTimelineBatch(requestId, selection, input, referencePaths);
 
     const args: RemoteMcpGenerateArgs = {
       requestId,
@@ -365,6 +471,7 @@ export const useRemoteMcpGen = create<RemoteMcpGenState>((set, get) => {
           },
         };
       });
+      failRemoteTimelineBatch(requestId, message);
       return { ok: false, requestId, message };
     }
   };
@@ -530,6 +637,9 @@ export const useRemoteMcpGen = create<RemoteMcpGenState>((set, get) => {
           },
         },
       }));
+      if (event.phase === "error" || (event.phase === "done" && !event.savedPaths?.length)) {
+        failRemoteTimelineBatch(event.requestId, message);
+      }
     },
   };
 });
