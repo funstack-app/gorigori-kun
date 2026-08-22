@@ -485,7 +485,7 @@ export function ImagePreviewModal() {
                 />
                 <PrimaryActionButton
                   icon={<RecreateIcon />}
-                  label="同じ設定でもう一度"
+                  label="生成時の指示文を読み込む"
                   disabled={!primaryActions.canRecreate}
                   title={primaryActions.recreateDisabledReason ?? undefined}
                   onClick={recreateWithSameSettings}
