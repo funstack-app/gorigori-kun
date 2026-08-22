@@ -17,7 +17,7 @@ export function LibrarySelectionBar({
       className="pointer-events-none absolute inset-x-0 bottom-5 z-30 flex justify-center px-4"
     >
       <div className="pointer-events-auto flex max-w-full flex-wrap items-center justify-center gap-2 rounded-2xl border border-white/15 bg-[#171717]/85 px-3 py-2 shadow-2xl shadow-black/40 backdrop-blur-2xl">
-        <span className="shrink-0 border-r border-white/10 pr-3 text-[11px] font-bold text-pink-200">
+        <span className="shrink-0 border-r border-white/10 pr-3 text-[11px] font-bold text-neutral-200">
           {count}件選択
         </span>
         {children}

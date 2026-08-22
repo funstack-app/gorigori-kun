@@ -1829,7 +1829,7 @@ function AssetsWorkspace() {
         <button
           type="button"
           onClick={favoriteSelected}
-          className="flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-pink-400/30 bg-pink-500/10 px-3 text-[11px] font-bold text-pink-200 transition hover:bg-pink-500 hover:text-white"
+          className="flex h-7 shrink-0 items-center gap-1.5 rounded-md bg-white/10 px-3 text-[11px] font-bold text-neutral-100 transition hover:bg-white/20"
         >
           <FavoriteActionIcon />
           {Array.from(selected).every((path) => favorites.has(path))
@@ -1890,7 +1890,7 @@ function LibraryDeleteButton() {
           "flex h-7 items-center gap-1.5 rounded-md px-3 text-[11px] font-bold transition",
           disabled
             ? "cursor-not-allowed bg-neutral-800 text-neutral-600"
-            : "bg-rose-600 text-white hover:bg-rose-500",
+            : "bg-white/10 text-rose-300 hover:bg-rose-600 hover:text-white",
         ].join(" ")}
       >
         {running ? (
@@ -2082,8 +2082,8 @@ function LibraryAddToProjectButton() {
           disabled
             ? "cursor-not-allowed bg-neutral-800 text-neutral-600"
             : open
-              ? "bg-pink-400 text-white"
-              : "bg-pink-500 text-white hover:bg-pink-400",
+              ? "bg-white/20 text-white"
+              : "bg-white/10 text-neutral-100 hover:bg-white/20",
         ].join(" ")}
         title="選択中の素材をプロジェクトへ移動"
       >

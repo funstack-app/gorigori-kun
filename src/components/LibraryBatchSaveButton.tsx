@@ -209,7 +209,7 @@ export function LibraryBatchSaveButton() {
           "h-7 rounded-md px-3 text-[11px] font-bold transition",
           disabled
             ? "cursor-not-allowed bg-neutral-800 text-neutral-600"
-            : "bg-emerald-600 text-white hover:bg-emerald-500",
+            : "bg-white/10 text-neutral-100 hover:bg-white/20",
         ].join(" ")}
       >
         <span className="flex items-center justify-center gap-1.5">
@@ -332,7 +332,7 @@ export function LibraryBatchSaveButton() {
 
               <div className="rounded-md border border-[#2a2a2a] bg-[#0b0b0b] px-3 py-2">
                 <span className="text-[10px] text-neutral-500">プレビュー</span>
-                <p className="mt-0.5 font-mono text-[12px] text-emerald-300">
+                <p className="mt-0.5 font-mono text-[12px] text-neutral-200">
                   {previewName}
                 </p>
               </div>
@@ -354,7 +354,7 @@ export function LibraryBatchSaveButton() {
                   running ||
                   (namingMode === "serial" && prefix.trim().length === 0)
                 }
-                className="h-8 rounded-md bg-emerald-600 px-4 text-[11px] font-bold text-white hover:bg-emerald-500 disabled:cursor-not-allowed disabled:bg-neutral-800 disabled:text-neutral-600"
+                className="h-8 rounded-md bg-pink-500 px-4 text-[11px] font-bold text-white hover:bg-pink-400 disabled:cursor-not-allowed disabled:bg-neutral-800 disabled:text-neutral-600"
               >
                 {running ? "保存中…" : "フォルダを選んで保存"}
               </button>
