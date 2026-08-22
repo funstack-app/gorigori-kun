@@ -14,13 +14,11 @@ use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::{AsyncBufReadExt, BufReader};
-#[cfg(windows)]
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command as TokioCommand};
 use tokio::sync::{broadcast, watch};
 use tokio::time::{interval, timeout, MissedTickBehavior};
 
-#[cfg(windows)]
 use crate::codex::process::resolve_codex_cli_binary;
 use crate::codex::process::{
     enriched_path, no_window_flag, resolve_codex_binary, AppServerProcess, StderrBuffer,
@@ -41,9 +39,7 @@ const INTERRUPT_TIMEOUT: Duration = Duration::from_secs(5);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 const STALE_SERVER_ERROR: &str =
     "生成サーバーが応答しません（接続が古くなっている可能性があります）。別の経路で再試行します。";
-#[cfg(any(windows, test))]
 const EXEC_DIAGNOSTIC_LIMIT_CHARS: usize = 2_000;
-#[cfg(windows)]
 const EXEC_STOP_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// LLM が MCP ツールを選んで実行した1ターンの機械可読な結果。
@@ -67,7 +63,6 @@ impl LlmToolTurnOutput {
     }
 }
 
-#[cfg(any(windows, test))]
 enum ExecTurnState {
     Exited {
         success: bool,
@@ -84,7 +79,6 @@ enum ExecTurnState {
 
 /// `codex exec` の自由文出力に含まれる HTTPS URL だけを取り出す。
 /// Windows の exec 経路でも、app-server の mcpToolCall と同じ形へ正規化するために使う。
-#[cfg(any(windows, test))]
 fn https_urls_in_exec_stdout(text: &str) -> Vec<String> {
     let mut urls = Vec::new();
     let mut offset = 0;
@@ -117,7 +111,6 @@ fn https_urls_in_exec_stdout(text: &str) -> Vec<String> {
     urls
 }
 
-#[cfg(any(windows, test))]
 fn mcp_tool_calls_in_exec_output(text: &str) -> Vec<(String, String)> {
     let mut calls = Vec::new();
     for line in text.lines() {
@@ -156,7 +149,6 @@ fn mcp_tool_calls_in_exec_output(text: &str) -> Vec<(String, String)> {
     calls
 }
 
-#[cfg(any(windows, test))]
 fn redacted_exec_tail(raw: &str, home: Option<&Path>) -> Option<String> {
     let mut without_urls = raw.to_string();
     for url in https_urls_in_exec_stdout(raw) {
@@ -183,7 +175,6 @@ fn redacted_exec_tail(raw: &str, home: Option<&Path>) -> Option<String> {
     })
 }
 
-#[cfg(any(windows, test))]
 fn exec_failure_message(summary: &str, stdout: &str, stderr: &str, home: Option<&Path>) -> String {
     let mut parts = vec![summary.to_string()];
     if let Some(stdout) = redacted_exec_tail(stdout, home) {
@@ -195,7 +186,6 @@ fn exec_failure_message(summary: &str, stdout: &str, stderr: &str, home: Option<
     parts.join("\n")
 }
 
-#[cfg(any(windows, test))]
 fn normalize_exec_turn(
     state: ExecTurnState,
     stdout: &str,
@@ -390,9 +380,10 @@ const MAX_TURNS_PER_SERVER: u64 = 60;
 
 /// 生成専用 Codex で、LLM に MCP ツール選択を任せる1ターンを実行する。
 ///
-/// 非Windowsは常駐 app-server、Windowsは既存画像生成と同じ `codex exec` を使う。
-/// タイムアウトや turn 失敗は `terminal_error` に入れ、成功として扱わない。
-#[cfg(windows)]
+/// 全プラットフォームで既存画像生成と同型の `codex exec` を使う。
+/// 常駐 app-server 経由は approvalPolicy=never が MCP ツール呼び出しを自動拒否する
+/// （実機 2026-08-22: "Krea MCP tool call requires approval, but approval policy is
+/// never"）ため使わない。exec 経路は MCP ツールが承認なしで通ることを実測済み。
 pub(crate) async fn run_llm_tool_turn(
     _app: &AppHandle,
     _state: &AppState,
@@ -494,7 +485,6 @@ pub(crate) async fn run_llm_tool_turn(
     ))
 }
 
-#[cfg(windows)]
 async fn read_exec_pipe<R>(mut pipe: R) -> std::io::Result<Vec<u8>>
 where
     R: AsyncRead + Unpin,
@@ -504,7 +494,6 @@ where
     Ok(bytes)
 }
 
-#[cfg(windows)]
 async fn collect_exec_pipe(
     mut task: tokio::task::JoinHandle<std::io::Result<Vec<u8>>>,
     label: &str,
@@ -532,7 +521,6 @@ async fn collect_exec_pipe(
     }
 }
 
-#[cfg(windows)]
 async fn stop_exec_child(child: &mut Child) -> Option<String> {
     match timeout(EXEC_STOP_TIMEOUT, child.kill()).await {
         Ok(Ok(())) => None,
@@ -546,171 +534,6 @@ async fn stop_exec_child(child: &mut Child) -> Option<String> {
                 "停止完了を{}秒以内に確認できませんでした",
                 EXEC_STOP_TIMEOUT.as_secs()
             ))
-        }
-    }
-}
-
-#[cfg(not(windows))]
-pub(crate) async fn run_llm_tool_turn(
-    app: &AppHandle,
-    state: &AppState,
-    prompt: &str,
-    turn_timeout: Duration,
-) -> Result<LlmToolTurnOutput, String> {
-    let server = ensure_client(app, state).await?;
-    let client = &server.client;
-
-    let thread_result = client
-        .request_raw(
-            "thread/start",
-            json!({
-                "approvalPolicy": "never",
-                "sandbox": "workspace-write",
-            }),
-        )
-        .await
-        .map_err(|error| format!("生成用 thread/start に失敗: {error}"))?;
-    let thread_id = extract_thread_id(&thread_result)
-        .ok_or_else(|| "生成用 thread/start の応答から threadId を取得できません".to_string())?;
-
-    // turn/start より先に購読し、短い MCP 呼び出しの完了通知も取りこぼさない。
-    let mut notifications = client.subscribe();
-    let turn_result = client
-        .request_raw(
-            "turn/start",
-            json!({
-                "threadId": thread_id.clone(),
-                "input": [{ "type": "text", "text": prompt }],
-            }),
-        )
-        .await
-        .map_err(|error| format!("生成用 turn/start に失敗: {error}"))?;
-    let turn_id = extract_turn_id(&turn_result)
-        .ok_or_else(|| "生成用 turn/start の応答から turnId を取得できません".to_string())?;
-
-    let mut output = LlmToolTurnOutput::new();
-    let wait_result = timeout(
-        turn_timeout,
-        wait_for_llm_tool_turn(
-            client,
-            &mut notifications,
-            &thread_id,
-            &turn_id,
-            &mut output,
-        ),
-    )
-    .await;
-
-    match wait_result {
-        Ok(Ok(terminal_error)) => output.terminal_error = terminal_error,
-        Ok(Err(error)) => {
-            server.poisoned.store(true, Ordering::Release);
-            let _ = interrupt_or_poison(
-                client,
-                &mut notifications,
-                &thread_id,
-                &turn_id,
-                &server.poisoned,
-            )
-            .await;
-            output.terminal_error = Some(error);
-        }
-        Err(_) => {
-            let _ = interrupt_or_poison(
-                client,
-                &mut notifications,
-                &thread_id,
-                &turn_id,
-                &server.poisoned,
-            )
-            .await;
-            output.terminal_error = Some(format!(
-                "生成がタイムアウトしました（{}秒）",
-                turn_timeout.as_secs()
-            ));
-        }
-    }
-
-    Ok(output)
-}
-
-#[cfg(not(windows))]
-async fn wait_for_llm_tool_turn(
-    client: &RpcClient,
-    notifications: &mut broadcast::Receiver<RpcNotification>,
-    thread_id: &str,
-    turn_id: &str,
-    output: &mut LlmToolTurnOutput,
-) -> Result<Option<String>, String> {
-    let mut first_signal_seen = false;
-    let first_signal_deadline = tokio::time::sleep(FIRST_SIGNAL_TIMEOUT);
-    tokio::pin!(first_signal_deadline);
-    let mut health_tick = interval(Duration::from_secs(5));
-    health_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
-
-    loop {
-        tokio::select! {
-            _ = &mut first_signal_deadline, if !first_signal_seen => {
-                return Err(STALE_SERVER_ERROR.to_string());
-            }
-            notification = notifications.recv() => {
-                match notification {
-                    Ok(notification) => {
-                        let matches_item = notification_matches(&notification.params, thread_id, turn_id);
-                        let matches_turn = turn_notification_matches(&notification.params, thread_id, turn_id);
-                        if matches_item || matches_turn {
-                            first_signal_seen = true;
-                        }
-
-                        if notification.method == "item/completed" && matches_item {
-                            if let Some(item) = notification.params.get("item") {
-                                if item.get("type").and_then(Value::as_str) == Some("agentMessage") {
-                                    if let Some(text) = item
-                                        .get("text")
-                                        .and_then(Value::as_str)
-                                        .filter(|text| !text.trim().is_empty())
-                                    {
-                                        output.final_message = text.to_string();
-                                    }
-                                }
-                                output.completed_items.push(item.clone());
-                            }
-                        }
-
-                        if notification.method == "turn/completed" && matches_turn {
-                            let turn = notification.params.get("turn").unwrap_or(&Value::Null);
-                            let status = turn
-                                .get("status")
-                                .and_then(Value::as_str)
-                                .unwrap_or("unknown");
-                            if status == "completed" {
-                                return Ok(None);
-                            }
-                            let message = turn
-                                .get("error")
-                                .and_then(|error| error.get("message"))
-                                .and_then(Value::as_str)
-                                .filter(|message| !message.trim().is_empty())
-                                .map(str::to_string)
-                                .unwrap_or_else(|| format!("生成用 turn が終了しました (status={status})"));
-                            return Ok(Some(message));
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                        return Err(format!(
-                            "生成用 app-server の通知が混雑し、{skipped}件を取りこぼしました"
-                        ));
-                    }
-                    Err(broadcast::error::RecvError::Closed) => {
-                        return Err("生成用 app-server の通知接続が閉じました".to_string());
-                    }
-                }
-            }
-            _ = health_tick.tick() => {
-                if !client.is_alive() {
-                    return Err("生成用 app-server が生成中に終了しました".to_string());
-                }
-            }
         }
     }
 }
