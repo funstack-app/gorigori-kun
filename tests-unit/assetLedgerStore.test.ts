@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AssetLedgerEntry, AssetLedgerFile } from "../src/lib/ipc";
+import type { FilmAsset } from "../src/lib/film/types";
 import type { Preset } from "../src/lib/store/presets";
 
 const harness = vi.hoisted(() => ({
@@ -30,7 +31,11 @@ vi.mock("../src/lib/store/presets", () => ({
   },
 }));
 
-import { useAssetLedger } from "../src/lib/store/assetLedger";
+import {
+  filmAssetLedgerId,
+  filmAssetToLedgerAsset,
+  useAssetLedger,
+} from "../src/lib/store/assetLedger";
 
 function asset(id = "al-1"): AssetLedgerEntry {
   return {
@@ -67,6 +72,27 @@ function characterPreset(id = "preset-char-1"): Preset {
     },
     createdAt: Date.parse("2026-08-20T00:00:00.000Z"),
     updatedAt: Date.parse("2026-08-21T00:00:00.000Z"),
+  };
+}
+
+function filmAsset(overrides: Partial<FilmAsset> = {}): FilmAsset {
+  return {
+    id: "CH-01",
+    name: "美咲",
+    type: "character",
+    importance: "primary",
+    blockIds: ["B-01"],
+    status: "reviewed",
+    pairKey: null,
+    pairSide: null,
+    promptDraft: "人物シートの生成指示文\n全文",
+    generatedImagePaths: ["/film/misaki-a.png"],
+    lastGeneratedPrompt: "人物シートの生成指示文\n全文",
+    canonicalImagePath: "/film/misaki-a.png",
+    ngNotes: [],
+    stressTest: null,
+    locked: false,
+    ...overrides,
   };
 }
 
@@ -159,5 +185,57 @@ describe("assetLedger store", () => {
     expect(harness.delete).toHaveBeenCalledWith(first.id);
     expect(useAssetLedger.getState().assets).toEqual([]);
     expect(useAssetLedger.getState().error).toBeNull();
+  });
+
+  it("フィルム種別を台帳種別へ対応させ、採用画像と指示文全文を保つ", () => {
+    const now = new Date("2026-08-22T12:34:56.000Z");
+    const mappings = [
+      ["character", "character"],
+      ["location", "scene"],
+      ["prop", "prop"],
+      ["text", "custom"],
+    ] as const;
+
+    for (const [filmType, ledgerType] of mappings) {
+      const converted = filmAssetToLedgerAsset(
+        "film-1",
+        filmAsset({ type: filmType }),
+        undefined,
+        now,
+      );
+      expect(converted).toMatchObject({
+        id: "al-film-film-1-CH-01",
+        type: ledgerType,
+        name: "美咲",
+        primaryImagePath: "/film/misaki-a.png",
+        prompt: "人物シートの生成指示文\n全文",
+        source: "film",
+        createdAt: now.toISOString(),
+        updatedAt: now.toISOString(),
+      });
+    }
+  });
+
+  it("同じ作品の同じフィルム素材を再登録しても1件を更新する", async () => {
+    const first = filmAsset();
+    await useAssetLedger.getState().upsertFilmAsset("film-1", first);
+    const firstSaved = useAssetLedger.getState().assets[0];
+
+    await useAssetLedger.getState().upsertFilmAsset(
+      "film-1",
+      filmAsset({
+        canonicalImagePath: "/film/misaki-b.png",
+        promptDraft: "修正後の生成指示文全文",
+      }),
+    );
+
+    expect(harness.upsert).toHaveBeenCalledTimes(2);
+    expect(useAssetLedger.getState().assets).toHaveLength(1);
+    expect(useAssetLedger.getState().assets[0]).toMatchObject({
+      id: filmAssetLedgerId("film-1", "CH-01"),
+      createdAt: firstSaved?.createdAt,
+      primaryImagePath: "/film/misaki-b.png",
+      prompt: "修正後の生成指示文全文",
+    });
   });
 });

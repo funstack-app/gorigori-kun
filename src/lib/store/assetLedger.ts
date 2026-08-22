@@ -4,7 +4,9 @@ import {
   assetLedger,
   type AssetLedgerEntry,
   type AssetLedgerFile,
+  type AssetLedgerType,
 } from "../ipc";
+import type { AssetType, FilmAsset } from "../film/types";
 import { presetKind, usePresets, type Preset } from "./presets";
 
 export type AssetLedgerState = {
@@ -14,8 +16,55 @@ export type AssetLedgerState = {
   error: string | null;
   load: () => Promise<void>;
   upsert: (asset: AssetLedgerEntry) => Promise<AssetLedgerEntry>;
+  upsertFilmAsset: (
+    filmProjectId: string,
+    asset: FilmAsset,
+  ) => Promise<AssetLedgerEntry>;
   delete: (id: string) => Promise<void>;
 };
+
+const FILM_ASSET_TYPE_TO_LEDGER_TYPE: Record<AssetType, AssetLedgerType> = {
+  character: "character",
+  location: "scene",
+  prop: "prop",
+  text: "custom",
+};
+
+/** 作品と素材の元IDを残し、再採用でも同じ台帳行を更新する。 */
+export function filmAssetLedgerId(
+  filmProjectId: string,
+  filmAssetId: string,
+): string {
+  return `al-film-${encodeURIComponent(filmProjectId)}-${encodeURIComponent(filmAssetId)}`;
+}
+
+/** AIフィルムで採用した1件を、共通のアセット台帳形式へ変換する。 */
+export function filmAssetToLedgerAsset(
+  filmProjectId: string,
+  filmAsset: FilmAsset,
+  existing: AssetLedgerEntry | undefined,
+  now = new Date(),
+): AssetLedgerEntry {
+  if (!filmAsset.canonicalImagePath?.trim()) {
+    throw new Error("採用画像がないため台帳へ登録できません");
+  }
+  const id = filmAssetLedgerId(filmProjectId, filmAsset.id);
+  const timestamp = now.toISOString();
+  return {
+    id,
+    type: FILM_ASSET_TYPE_TO_LEDGER_TYPE[filmAsset.type],
+    name: filmAsset.name.trim(),
+    createdAt: existing?.createdAt ?? timestamp,
+    updatedAt: timestamp,
+    primaryImagePath: filmAsset.canonicalImagePath,
+    imagePaths: [],
+    prompt: filmAsset.promptDraft,
+    negativePrompt: existing?.negativePrompt ?? null,
+    source: "film",
+    locked: filmAsset.locked,
+    tags: [...(existing?.tags ?? [])],
+  };
+}
 
 /**
  * 既存キャラの元IDを失わず、台帳IDへ決定的に読み替える。
@@ -162,6 +211,16 @@ export const useAssetLedger = create<AssetLedgerState>((set, get) => ({
       set({ error: String(error) });
       throw error;
     }
+  },
+
+  upsertFilmAsset: async (filmProjectId, filmAsset) => {
+    // 採用画面から先に来ても、正本を読んで既存の作成日時や他の素材を保つ。
+    if (!get().loaded) await get().load();
+    const id = filmAssetLedgerId(filmProjectId, filmAsset.id);
+    const existing = get().assets.find((asset) => asset.id === id);
+    return get().upsert(
+      filmAssetToLedgerAsset(filmProjectId, filmAsset, existing),
+    );
   },
 
   delete: async (id) => {

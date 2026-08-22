@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { PresetCard } from "./PresetCard";
 import { CharacterIcon } from "./SkillIcon";
@@ -6,6 +6,8 @@ import { PresetThumbnailFocusModal } from "./PresetThumbnailFocus";
 import { SafeImage } from "./SafeImage";
 import { extractDropped, fileToUploadReference, isImageDrop } from "../lib/dragRef";
 import { sendCharacterPresetToSheetRegenerate } from "../lib/character/sendImageToCharacterRegister";
+import type { AssetLedgerEntry, AssetLedgerType } from "../lib/ipc";
+import { useAssetLedger } from "../lib/store/assetLedger";
 import {
   focusToImageStyle,
   presetKind,
@@ -36,6 +38,14 @@ const SORT_OPTIONS: { key: SortKey; label: string }[] = [
   { key: "nameAsc", label: "名前 A→Z" },
   { key: "nameDesc", label: "名前 Z→A" },
   { key: "tagCountDesc", label: "タグ数 ↓" },
+];
+
+const ASSET_LEDGER_TYPES: Array<{ type: AssetLedgerType; label: string }> = [
+  { type: "character", label: "キャラ" },
+  { type: "scene", label: "シーン" },
+  { type: "look", label: "ルック" },
+  { type: "prop", label: "小物" },
+  { type: "custom", label: "自由" },
 ];
 
 /**
@@ -443,11 +453,11 @@ export function PresetsDrawer({
       </div>
     );
 
-  // ページ版: 2 カラムレイアウト（左カテゴリ / 右プリセット + 検索）
+  // ページ版: 既存2カラムを保ち、広い画面では台帳を右に並べる。
   if (fullPage) {
     return (
       <>
-        <div className="grid h-full min-h-0 gap-5 lg:grid-cols-[260px_minmax(0,1fr)]">
+        <div className="grid h-full min-h-0 gap-5 lg:grid-cols-[260px_minmax(0,1fr)] xl:grid-cols-[240px_minmax(0,1fr)_380px]">
           <aside
             data-tour="preset-categories"
             className="min-h-0 overflow-y-auto rounded-xl border border-[#2a2a2a] bg-[#181818] p-4"
@@ -537,6 +547,9 @@ export function PresetsDrawer({
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto pr-1">{presetGrid}</div>
           </main>
+          <div className="min-h-0 overflow-y-auto lg:col-span-2 xl:col-span-1">
+            <AssetLedgerPanel />
+          </div>
         </div>
         {presetFormModal}
       </>
@@ -546,9 +559,9 @@ export function PresetsDrawer({
   // サイドバー版（互換性のため残す。今は使ってない、念のため残置）
   return (
     <>
-      <div className="flex h-full min-h-0 flex-col gap-3">
+      <div className="flex h-full min-h-0 flex-col gap-3 overflow-y-auto pr-1">
         {categoryList}
-        <div className="flex min-h-0 flex-1 flex-col border-t border-[#242424] pt-3">
+        <div className="flex min-h-[240px] flex-1 flex-col border-t border-[#242424] pt-3">
           <div className="mb-2 flex items-center justify-between gap-2">
             <h4 className="text-xs font-black text-white">
               {activeCategoryName} のプリセット
@@ -563,9 +576,366 @@ export function PresetsDrawer({
           </div>
           <div className="min-h-0 flex-1 overflow-y-auto pr-1">{presetGrid}</div>
         </div>
+        <AssetLedgerPanel />
       </div>
       {presetFormModal}
     </>
+  );
+}
+
+function createPresetLedgerAssetId(): string {
+  const suffix = typeof globalThis.crypto?.randomUUID === "function"
+    ? globalThis.crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  return `al-preset-${suffix}`;
+}
+
+/**
+ * 既存プリセットを残したまま、同じ画面に共通アセット台帳の登録・一覧を足す。
+ * この画面には composer への適用操作が無いため、呼び出しはクリップボード経由に
+ * 絞り、別系統の状態更新を増やさない。
+ */
+function AssetLedgerPanel() {
+  const assets = useAssetLedger((state) => state.assets);
+  const loading = useAssetLedger((state) => state.loading);
+  const loaded = useAssetLedger((state) => state.loaded);
+  const error = useAssetLedger((state) => state.error);
+  const load = useAssetLedger((state) => state.load);
+  const upsertAsset = useAssetLedger((state) => state.upsert);
+  const deleteAsset = useAssetLedger((state) => state.delete);
+  const loadStarted = useRef(false);
+  const [activeType, setActiveType] = useState<AssetLedgerType>("character");
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [formOpen, setFormOpen] = useState(false);
+  const [draftName, setDraftName] = useState("");
+  const [draftPrompt, setDraftPrompt] = useState("");
+  const [draftImagePath, setDraftImagePath] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [uploadingImage, setUploadingImage] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (loadStarted.current) return;
+    loadStarted.current = true;
+    void load().catch(() => {
+      // 読み込みエラーは store.error を画面に表示する。
+    });
+  }, [load]);
+
+  const visibleAssets = useMemo(
+    () => assets
+      .filter((asset) => asset.type === activeType)
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
+    [activeType, assets],
+  );
+  const selectedAsset = visibleAssets.find((asset) => asset.id === selectedId) ?? null;
+  const canSave = Boolean(
+    draftName.trim() && (draftPrompt.trim() || draftImagePath?.trim()),
+  );
+
+  const closeForm = () => {
+    setFormOpen(false);
+    setEditingId(null);
+    setDraftName("");
+    setDraftPrompt("");
+    setDraftImagePath(null);
+  };
+
+  const startCreate = () => {
+    setEditingId(null);
+    setDraftName("");
+    setDraftPrompt("");
+    setDraftImagePath(null);
+    setNotice(null);
+    setFormOpen(true);
+  };
+
+  const startEdit = (asset: AssetLedgerEntry) => {
+    if (asset.locked) return;
+    setEditingId(asset.id);
+    setDraftName(asset.name);
+    setDraftPrompt(asset.prompt);
+    setDraftImagePath(asset.primaryImagePath);
+    setNotice(null);
+    setFormOpen(true);
+  };
+
+  const saveAsset = async () => {
+    if (!canSave || saving || !loaded) return;
+    const existing = editingId
+      ? assets.find((asset) => asset.id === editingId)
+      : undefined;
+    if (existing?.locked) {
+      closeForm();
+      return;
+    }
+    const now = new Date().toISOString();
+    const entry: AssetLedgerEntry = existing
+      ? {
+          ...existing,
+          name: draftName.trim(),
+          updatedAt: now,
+          primaryImagePath: draftImagePath,
+          prompt: draftPrompt.trim(),
+        }
+      : {
+          id: createPresetLedgerAssetId(),
+          type: activeType,
+          name: draftName.trim(),
+          createdAt: now,
+          updatedAt: now,
+          primaryImagePath: draftImagePath,
+          imagePaths: [],
+          prompt: draftPrompt.trim(),
+          negativePrompt: null,
+          source: "preset",
+          locked: false,
+          tags: [],
+        };
+
+    setSaving(true);
+    setNotice(null);
+    try {
+      const saved = await upsertAsset(entry);
+      setSelectedId(saved.id);
+      setNotice(editingId ? "更新しました" : "登録しました");
+      closeForm();
+    } catch (saveError) {
+      setNotice(`保存できませんでした: ${String(saveError)}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const pickImage = async (file: File | null) => {
+    if (!file) return;
+    setUploadingImage(true);
+    setNotice(null);
+    try {
+      const uploaded = await fileToUploadReference(file);
+      setDraftImagePath(uploaded.path);
+    } catch (uploadError) {
+      setNotice(`画像を取り込めませんでした: ${String(uploadError)}`);
+    } finally {
+      setUploadingImage(false);
+    }
+  };
+
+  const removeAsset = async (asset: AssetLedgerEntry) => {
+    if (asset.locked) return;
+    const message = `「${asset.name}」を台帳から削除しますか?`;
+    let ok = false;
+    try {
+      const { ask } = await import("@tauri-apps/plugin-dialog");
+      ok = await ask(message, { title: "素材の削除", kind: "warning" });
+    } catch {
+      ok = window.confirm(message);
+    }
+    if (!ok) return;
+    try {
+      await deleteAsset(asset.id);
+      if (selectedId === asset.id) setSelectedId(null);
+      setNotice("削除しました");
+    } catch (deleteError) {
+      setNotice(`削除できませんでした: ${String(deleteError)}`);
+    }
+  };
+
+  const copyForUse = async (text: string, label: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setNotice(`${label}をコピーしました`);
+    } catch (copyError) {
+      setNotice(`コピーできませんでした: ${String(copyError)}`);
+    }
+  };
+
+  return (
+    <section className="rounded-xl border border-[#2a2a2a] bg-[#181818] p-4">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <h4 className="text-sm font-black text-white">アセット（使い回せる素材）</h4>
+          <p className="mt-1 text-[11px] text-neutral-500">種類ごとに登録して、あとから何度でも呼び出せます。</p>
+        </div>
+        <button
+          type="button"
+          onClick={formOpen ? closeForm : startCreate}
+          disabled={!loaded}
+          className="h-8 rounded-md bg-pink-500 px-3 text-xs font-bold text-white hover:bg-pink-600 disabled:bg-neutral-700 disabled:text-neutral-500"
+        >
+          {formOpen ? "閉じる" : "登録"}
+        </button>
+      </div>
+
+      <div className="mt-3 flex flex-wrap gap-1.5" role="tablist" aria-label="素材の種類">
+        {ASSET_LEDGER_TYPES.map((item) => (
+          <button
+            key={item.type}
+            type="button"
+            role="tab"
+            aria-selected={activeType === item.type}
+            onClick={() => {
+              setActiveType(item.type);
+              setSelectedId(null);
+              closeForm();
+              setNotice(null);
+            }}
+            className={[
+              "rounded-full border px-3 py-1 text-[11px] font-bold transition",
+              activeType === item.type
+                ? "border-pink-400 bg-pink-500/10 text-white"
+                : "border-[#343434] bg-[#101010] text-neutral-400 hover:text-neutral-200",
+            ].join(" ")}
+          >
+            {item.label}
+          </button>
+        ))}
+      </div>
+
+      {formOpen ? (
+        <div className="mt-3 space-y-2 rounded-lg border border-[#303030] bg-[#111111] p-3">
+          <input
+            type="text"
+            value={draftName}
+            onChange={(event) => setDraftName(event.target.value)}
+            placeholder="名前"
+            className="h-8 w-full rounded-md border border-[#343434] bg-[#0b0b0b] px-2 text-xs text-neutral-100 outline-none focus:border-pink-400"
+          />
+          <label className="block text-[11px] text-neutral-400">
+            画像（任意）
+            <input
+              type="file"
+              accept="image/*"
+              onChange={(event) => void pickImage(event.target.files?.[0] ?? null)}
+              className="mt-1 block w-full text-[11px] text-neutral-400 file:mr-2 file:rounded file:border-0 file:bg-neutral-800 file:px-2 file:py-1 file:text-[11px] file:text-neutral-200"
+            />
+          </label>
+          {draftImagePath ? (
+            <p className="truncate text-[10px] text-emerald-300" title={draftImagePath}>
+              画像: {draftImagePath.split(/[\\/]/).pop() || draftImagePath}
+            </p>
+          ) : null}
+          <textarea
+            value={draftPrompt}
+            onChange={(event) => setDraftPrompt(event.target.value)}
+            placeholder="指示文（任意）"
+            rows={3}
+            className="w-full resize-none rounded-md border border-[#343434] bg-[#0b0b0b] p-2 text-[11px] leading-5 text-neutral-100 outline-none focus:border-pink-400"
+          />
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-[10px] text-neutral-500">画像か指示文のどちらかが必要です。</p>
+            <button
+              type="button"
+              onClick={() => void saveAsset()}
+              disabled={!canSave || saving || uploadingImage || !loaded}
+              className="rounded-md bg-pink-500 px-3 py-1.5 text-[11px] font-bold text-white hover:bg-pink-600 disabled:bg-neutral-700 disabled:text-neutral-500"
+            >
+              {uploadingImage ? "画像を取込中" : saving ? "保存中" : editingId ? "更新" : "登録"}
+            </button>
+          </div>
+        </div>
+      ) : null}
+
+      {loading ? <p className="mt-3 text-[11px] text-neutral-500">素材を読み込んでいます。</p> : null}
+      {error && !loading ? (
+        <p className="mt-3 rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-200">
+          台帳を読み込めませんでした: {error}
+        </p>
+      ) : null}
+      {notice ? <p className="mt-3 text-[11px] text-neutral-300">{notice}</p> : null}
+
+      {!loading && loaded ? (
+        visibleAssets.length > 0 ? (
+          <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+            {visibleAssets.map((asset) => {
+              const selected = selectedAsset?.id === asset.id;
+              return (
+                <article
+                  key={asset.id}
+                  className={[
+                    "rounded-lg border bg-[#111111] p-2",
+                    selected ? "border-pink-400" : "border-[#303030]",
+                  ].join(" ")}
+                >
+                  <button
+                    type="button"
+                    onClick={() => setSelectedId(selected ? null : asset.id)}
+                    className="w-full text-left"
+                    title="選んで使い方を表示"
+                  >
+                    {asset.primaryImagePath ? (
+                      <SafeImage
+                        path={asset.primaryImagePath}
+                        alt={asset.name}
+                        className="mb-2 aspect-video w-full rounded bg-black object-cover"
+                      />
+                    ) : null}
+                    <span className="flex items-center justify-between gap-2">
+                      <span className="truncate text-xs font-bold text-neutral-100">{asset.name}</span>
+                      {asset.locked ? (
+                        <span className="shrink-0 rounded bg-emerald-500/10 px-1.5 py-0.5 text-[9px] font-bold text-emerald-300">確定済み</span>
+                      ) : null}
+                    </span>
+                    <span className="mt-1 block line-clamp-2 text-[10px] leading-4 text-neutral-500">
+                      {asset.prompt.trim() || "指示文なし"}
+                    </span>
+                  </button>
+
+                  {selected ? (
+                    <div className="mt-2 flex flex-wrap gap-1.5 border-t border-[#2a2a2a] pt-2">
+                      {asset.prompt.trim() ? (
+                        <button
+                          type="button"
+                          onClick={() => void copyForUse(asset.prompt, "指示文")}
+                          className="rounded border border-[#3a3a3a] px-2 py-1 text-[10px] font-bold text-neutral-300 hover:text-white"
+                        >
+                          指示文をコピー
+                        </button>
+                      ) : (
+                        <span className="px-1 py-1 text-[10px] text-neutral-500">指示文なし</span>
+                      )}
+                      {asset.primaryImagePath ? (
+                        <button
+                          type="button"
+                          onClick={() => void copyForUse(asset.primaryImagePath as string, "画像の場所")}
+                          className="rounded border border-[#3a3a3a] px-2 py-1 text-[10px] font-bold text-neutral-300 hover:text-white"
+                        >
+                          画像の場所をコピー
+                        </button>
+                      ) : null}
+                    </div>
+                  ) : null}
+
+                  {!asset.locked ? (
+                    <div className="mt-2 flex justify-end gap-2">
+                      <button
+                        type="button"
+                        onClick={() => startEdit(asset)}
+                        className="text-[10px] text-neutral-500 hover:text-white"
+                      >
+                        編集
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void removeAsset(asset)}
+                        className="text-[10px] text-neutral-500 hover:text-red-400"
+                      >
+                        削除
+                      </button>
+                    </div>
+                  ) : null}
+                </article>
+              );
+            })}
+          </div>
+        ) : (
+          <p className="mt-3 rounded-md border border-dashed border-[#343434] bg-[#101010] p-4 text-center text-[11px] text-neutral-500">
+            この種類の素材はまだありません。
+          </p>
+        )
+      ) : null}
+    </section>
   );
 }
 

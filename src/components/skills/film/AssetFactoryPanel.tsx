@@ -40,6 +40,7 @@ import type {
   FilmProject,
 } from "../../../lib/film/types";
 import { images } from "../../../lib/ipc";
+import { useAssetLedger } from "../../../lib/store/assetLedger";
 import { beginDirectRun } from "../../../lib/store/generationStatus";
 import { useFilmProjectStore } from "../../../lib/store/filmProject";
 import { useToasts } from "../../../lib/store/toasts";
@@ -441,6 +442,7 @@ function StressTestSection({
 
 export function AssetFactoryPanel({ project }: { project: FilmProject }) {
   const updateAsset = useFilmProjectStore((state) => state.updateAssetFactoryAsset);
+  const upsertFilmAsset = useAssetLedger((state) => state.upsertFilmAsset);
   const pushToast = useToasts((state) => state.push);
   const assets = useMemo(() => sortAssetsForFactory(project.assets), [project.assets]);
   const allDrafted = areAllAssetPromptsDrafted(project.assets);
@@ -691,7 +693,15 @@ export function AssetFactoryPanel({ project }: { project: FilmProject }) {
                 asset={asset}
                 onZoom={setZoomPath}
                 onAdopt={(path) => {
-                  persist(asset.id, (current) => adoptAssetCandidate(current, path));
+                  const adopted = adoptAssetCandidate(asset, path);
+                  persist(asset.id, () => adopted);
+                  void upsertFilmAsset(project.id, adopted).catch((error) => {
+                    pushToast({
+                      kind: "warn",
+                      text: `${asset.name}は採用できましたが、アセット台帳への登録に失敗しました: ${(error as Error)?.message ?? error}`,
+                      ttlMs: 7000,
+                    });
+                  });
                   pushToast({
                     kind: "success",
                     text: asset.type === "character"
