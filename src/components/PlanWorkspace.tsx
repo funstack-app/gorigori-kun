@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
 
 import { SafeImage } from "./SafeImage";
-import { PageHelp } from "./PageHelp";
 import { useActiveProject } from "../lib/store/activeProject";
 import { useComposer } from "../lib/store/composer";
 import { images } from "../lib/ipc";
@@ -385,18 +384,6 @@ export function PlanWorkspace() {
       data-tour="planning-workspace"
       className="relative flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-[#2a2a2a] bg-[#181818]"
     >
-      {/*
-        ページヘルプ (ui-placement-grammar §4)。本タブは常時表示のヘッダー行を
-        持たないため、右上のステータス列と対になる左上へ常設で置く
-        (右上の列は messages 件数などの条件付き表示なので、ヘルプの到達性を
-        そこに乗せない)。
-      */}
-      <div className="absolute left-4 top-2 z-20">
-        <PageHelp
-          what="作りたいものを相談すると、AI が対話でプロンプトに仕上げ、そのまま画像生成に渡せます。"
-          first="まずは入力欄に、作りたいものを思いつきの一言で書いてください。"
-        />
-      </div>
       {/*
         ステータスバッジとリセットは右上にフローティング配置。
         ・チャットバブルと被らないよう、scroll エリア外側の上端にオーバーレイ。

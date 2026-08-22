@@ -3,7 +3,6 @@ import { SafeImage } from "./SafeImage";
 import { VideoSceneBuilder } from "./scene/VideoSceneBuilder";
 import { VideoConstructedPromptPanel } from "./VideoConstructedPromptPanel";
 import { VideoStoryQueuePanel } from "./VideoStoryQueuePanel";
-import { PageHelp } from "./PageHelp";
 import { useVideoGen } from "../lib/store/videoGen";
 import { useImagePreview } from "../lib/store/imagePreview";
 
@@ -72,10 +71,6 @@ export function VideoGenerationWorkspace({ timeline }: VideoGenerationWorkspaceP
         <div className="shrink-0 border-b border-[#242424] px-4 py-3">
           <div className="flex items-center justify-between gap-2">
             <h3 className="text-sm font-black text-white">シーン構築</h3>
-            <PageHelp
-              what="要素を選ぶかプロンプトを書くと、その内容で動画を生成します。画像タブの生成画像を元画像（i2v)にもできます。"
-              first="まずは左で要素を選ぶか、入力欄に作りたい動きを書いてください。"
-            />
           </div>
         </div>
         <I2vSourceBanner />

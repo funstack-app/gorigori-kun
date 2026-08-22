@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -67,5 +69,14 @@ describe("tour definitions", () => {
     expect(findAvailableStepIndex(steps, 0, 1, resolve)).toBe(1);
     expect(findAvailableStepIndex(steps, 2, -1, resolve)).toBe(1);
     expect(findAvailableStepIndex(steps, 2, 1, resolve)).toBeNull();
+  });
+
+  it("has a real target for the image-generation scene builder step", () => {
+    const target = '[data-tour="generation-scene-builder"]';
+    const step = PAGE_TOURS.artworkGeneration.steps.find((item) => item.target === target);
+    const source = readFileSync(resolve("src/components/GenerationWorkspace.tsx"), "utf8");
+
+    expect(step).toBeDefined();
+    expect(source).toContain('data-tour="generation-scene-builder"');
   });
 });

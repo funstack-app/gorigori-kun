@@ -28,7 +28,6 @@ import { CSS } from "@dnd-kit/utilities";
 import { ActiveProjectSelector } from "../../ActiveProjectSelector";
 import { useSkillVisible } from "../../SkillWorkspaceRouter";
 import { WorkspaceTabs } from "../../WorkspaceTabs";
-import { PageHelp } from "../../PageHelp";
 import { getShotMove, totalDurationFrames } from "../../../lib/scene3d/evaluateScene";
 import {
   getBuiltinTemplate,
@@ -3649,11 +3648,6 @@ export function Scene3dWorkspace() {
         <div className="flex items-center gap-3">
           <WorkspaceTabs />
           <ActiveProjectSelector />
-          <PageHelp
-            what="人物や小物を3D空間に置き、カメラの動きを付けて、そのまま画像・動画生成の下絵にします。"
-            first="まずは「+ シーンに置く」で人物か小物を置いてください。"
-            note="写真や絵から「画像からシーンを起こす…」で自動配置もできます。"
-          />
         </div>
       </div>
 

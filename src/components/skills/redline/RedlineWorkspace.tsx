@@ -2,7 +2,6 @@ import { useEffect, useRef, useState, type ChangeEvent } from "react";
 
 import { ActiveProjectSelector } from "../../ActiveProjectSelector";
 import { WorkspaceTabs } from "../../WorkspaceTabs";
-import { PageHelp } from "../../PageHelp";
 import { SafeImage } from "../../SafeImage";
 import { useEditorActions } from "../../edit/editor/useEditor";
 import { images } from "../../../lib/ipc";
@@ -189,11 +188,6 @@ export function RedlineWorkspace() {
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-4 py-4">
-        <PageHelp
-          what="赤ペンや注釈の入った画像を渡すと、どこを何色でどう直せと言われているのかを読み取って、日本語の直し指示に起こします。"
-          first="まず左に修正前の元画像、右に赤入れを入れてください"
-        />
-
         {/* 入力エリア: 元画像（推奨） + 赤入れ（必須） */}
         <div
           data-tour="redline-inputs"

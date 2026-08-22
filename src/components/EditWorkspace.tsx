@@ -6,7 +6,6 @@ import { beginDirectRun } from "../lib/store/generationStatus";
 import { useThreads } from "../lib/store/threads";
 import { useToasts } from "../lib/store/toasts";
 import { ReferenceLibraryModal } from "./ReferenceLibraryModal";
-import { PageHelp } from "./PageHelp";
 import { AdjustPanel } from "./edit/AdjustPanel";
 import { CropPanel } from "./edit/CropPanel";
 import { EditorCanvas } from "./edit/EditorCanvas";
@@ -671,10 +670,6 @@ export function EditWorkspace() {
         data-tour="editing-toolbar"
         className="flex h-10 shrink-0 items-center gap-2 border-b border-[#2a2a2a] bg-[#252525] px-3"
       >
-        <PageHelp
-          what="生成した画像を選んで、部分修正・背景透過などの編集ができます。"
-          first="まずは編集したい画像を選んでください。"
-        />
         <span
           className="min-w-0 flex-1 truncate text-xs font-bold text-neutral-300"
           title={sourceImagePath ?? undefined}

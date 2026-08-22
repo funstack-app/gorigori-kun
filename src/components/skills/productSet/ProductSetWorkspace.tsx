@@ -7,8 +7,6 @@ import { ensureProductSetEventListener } from "../../../lib/productSet/events";
 import { useProductSetRun } from "../../../lib/productSet/store";
 import { useToasts } from "../../../lib/store/toasts";
 
-import { PageHelp } from "../../PageHelp";
-
 import { ProductSetSettingsPanel } from "./ProductSetSettingsPanel";
 import { ProductSetGridPanel } from "./ProductSetGridPanel";
 
@@ -48,13 +46,6 @@ export function ProductSetWorkspace() {
           <WorkspaceTabs />
           <ActiveProjectSelector />
         </div>
-      </div>
-
-      <div className="px-4 pt-3">
-        <PageHelp
-          what="商品写真を1枚渡すと、白背景の商品単体・使っている場面・寄りのディテールを一式にして作ります。撮り直しなしで、ECに載せる用の絵がひととおりそろいます。"
-          first="まずは左から、商品が写った写真を1枚選んでください。"
-        />
       </div>
 
       <div className="flex min-h-0 flex-1 overflow-hidden">

@@ -2,7 +2,6 @@ import { useMemo, useState } from "react";
 
 import { ActiveProjectSelector } from "../../ActiveProjectSelector";
 import { WorkspaceTabs } from "../../WorkspaceTabs";
-import { PageHelp } from "../../PageHelp";
 import { SafeImage } from "../../SafeImage";
 import { SceneCompactCard } from "../../scene/SceneCompactCard";
 import { SceneSectionModal } from "../../scene/SceneSectionModal";
@@ -327,10 +326,6 @@ export function RegulationCheckWorkspace() {
           data-tour="regulation-settings"
           className="flex w-80 shrink-0 flex-col gap-4 overflow-y-auto border-r border-[#242424] p-4"
         >
-          <PageHelp
-            what="入稿前の画像を渡すと、媒体の画像規格を機械で測り、表現上の注意をCodexが理由つきで指摘します。"
-            first="まずは出す先の媒体を下から選び、検査したい画像を入れてください。"
-          />
           <p className="rounded border border-amber-500/25 bg-amber-500/5 px-2.5 py-2 text-[11px] leading-relaxed text-amber-200/80">
             この検査は審査通過や適法性を保証しません。未確認項目と法務注意は、媒体の最新画面や専門家でも確認してください。
           </p>

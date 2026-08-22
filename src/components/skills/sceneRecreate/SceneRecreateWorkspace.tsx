@@ -2,7 +2,6 @@ import { useMemo, useRef, useState } from "react";
 
 import { ActiveProjectSelector } from "../../ActiveProjectSelector";
 import { WorkspaceTabs } from "../../WorkspaceTabs";
-import { PageHelp } from "../../PageHelp";
 import { SafeImage } from "../../SafeImage";
 import { GenerationGauge } from "../../GenerationGauge";
 import { ClapperIcon, FilmIcon } from "../../SkillIcon";
@@ -175,7 +174,7 @@ export function SceneRecreateWorkspace() {
    * ローカル動画ファイルからキーフレームを自動抽出して列へ合流させる。
    *
    * URL 直接入力は持たない（設計 §2.1: 外部バイナリ同梱が配布ブロッカー）。
-   * ユーザーには PageHelp の note で「いったんファイルとして保存してから」と案内する。
+   * ユーザーには画面ガイドで「いったんファイルとして保存してから」と案内する。
    */
   async function importFromVideo(file: File) {
     try {
@@ -317,12 +316,6 @@ export function SceneRecreateWorkspace() {
           data-tour="scene-recreate-input"
           className="flex w-96 shrink-0 flex-col gap-4 overflow-y-auto border-r border-[#242424] bg-[#141414] px-4 py-4"
         >
-          <PageHelp
-            what="気になった映像のスクショを数枚渡すと、構図・光・被写体の置き方を読み解いて言葉にし、自分のキャラや商品で同じ画作りをするための指示文を出します。"
-            first="まずは下から、真似したい場面のスクショを時系列の順に数枚選んでください。動画ファイルがあれば「動画から取り込む」で自動的に切り出せます。"
-            note="YouTube等のURLは直接読み込めません。いったん動画ファイルとしてPCに保存してから「動画から取り込む」を使ってください。"
-          />
-
           <input
             ref={videoInputRef}
             type="file"

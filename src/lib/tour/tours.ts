@@ -28,6 +28,12 @@ export const PAGE_TOURS = {
     id: "artwork-generation",
     steps: [
       {
+        target: '[data-tour="generation-scene-builder"]',
+        title: "シーンを組み立てる",
+        body: "構図（画面の見せ方）、光、カメラなどを選ぶと、下の指示文へまとまります。参照画像・プリセット・スキルで狙いを固定でき、鉛筆ボタンでは自分のスケッチを参考画像や3Dシーンにできます。",
+        placement: "right",
+      },
+      {
         target: '[data-tour="generation-prompt"]',
         title: "作りたい絵を書く",
         body: "選んだ要素がここにまとまります。自分の言葉で書き足しても、その内容で画像を作れます。",
@@ -350,7 +356,7 @@ export const PAGE_TOURS = {
       {
         target: '[data-tour="storyboard-content"]',
         title: "まず作りたい映像を話す",
-        body: "最初はAIが質問しながら、誰が何をする映像かを整理します。短い答えでも大丈夫です。",
+        body: "最初はAIが質問しながら、誰が何をする映像かを整理します。短い答えでも大丈夫です。同じ人物を保つには、参照画像を一枚以上入れてください。",
         placement: "left",
       },
       {
@@ -408,19 +414,19 @@ export const PAGE_TOURS = {
       {
         target: '[data-tour="sticker-setup"]',
         title: "まず元画像と枚数を決める",
-        body: "登録キャラか手元の画像を選び、作る枚数と内容の方向を決めます。セリフ文字は入れず、絵だけを生成します。",
+        body: "登録キャラか手元の画像を選び、作る枚数と内容の方向を決めます。セリフ文字は入れず、絵だけを生成します。背景はクロマキー（緑色を消して透明にする方法）で抜くため、白いキャラにも使えます。",
         placement: "right",
       },
       {
         target: '[data-tour="sticker-pick"]',
         title: "使う絵だけを選ぶ",
-        body: "生成後は一覧で採用を決めます。気になる一枚だけを直したり、採用した絵へ後から文字を置いたりできます。",
+        body: "生成後は一覧で採用を決め、気になる一枚だけを直せます。文字は書き出した画像を編集タブで開いて置けます。",
         placement: "top",
       },
       {
         target: '[data-tour="sticker-export"]',
         title: "画像規格を点検して書き出す",
-        body: "サイズ、透過、余白、容量を機械で点検します。審査に通るかはLINE側の判断なので、公式ガイドラインも確認してください。",
+        body: "サイズ、透過、余白、容量を機械で点検します。過去セットとの重複は自動判定できません。審査はLINE側の判断なので公式ガイドラインを確認し、AIで作ったことは申請フォームで申告してください。",
         placement: "top",
       },
     ],
@@ -460,7 +466,7 @@ export const PAGE_TOURS = {
       {
         target: '[data-tour="product-set-workspace"]',
         title: "商品写真からEC用の一式を作る",
-        body: "一枚の商品写真から、白背景、使用場面、細部の寄りなど、販売ページに使う画像をまとめて作る画面です。",
+        body: "一枚の商品写真から、撮り直しなしで白背景、使用場面、細部の寄りなど、販売ページに使う画像をまとめて作る画面です。",
         placement: "bottom",
       },
       {
@@ -594,7 +600,7 @@ export const PAGE_TOURS = {
       {
         target: '[data-tour="scene-recreate-input"]',
         title: "まず場面を時間順に入れる",
-        body: "左へ画像を数枚追加するか、動画ファイルから場面を切り出します。YouTubeなどのURLは直接読めません。",
+        body: "左へ画像を数枚追加するか、動画ファイルから場面を切り出します。YouTubeなどのURLは直接読めないため、いったん動画ファイルとしてパソコンへ保存してから取り込みます。",
         placement: "right",
       },
       {
@@ -617,7 +623,7 @@ export const PAGE_TOURS = {
       {
         target: '[data-tour="redline-workspace"]',
         title: "赤入れを直しの指示に変える",
-        body: "赤ペンや注釈が入った画像を読み、どこをどう直すかを日本語の一覧にする画面です。",
+        body: "赤ペンや注釈が入った画像を読み、どこを何色でどう直すかを日本語の一覧にする画面です。",
         placement: "bottom",
       },
       {
@@ -681,7 +687,7 @@ export const PAGE_TOURS = {
       {
         target: 'nav button:nth-of-type(1)[class*="bg-[#303030]"]',
         title: "基本設定を整える",
-        body: "文字サイズ、既定のAIモデル、作業フォルダなどを決めます。文字サイズ以外は、変更後に保存ボタンを押してください。",
+        body: "文字サイズ、はじめてガイド、既定のAIモデル、作業フォルダなどを決めます。文字サイズとはじめてガイドは、変更するとすぐ反映されます。",
         placement: "right",
       },
       {

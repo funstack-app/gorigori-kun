@@ -3,7 +3,6 @@ import { SafeImage, SafeVideo } from "./SafeImage";
 import { WorkspaceTabs } from "./WorkspaceTabs";
 import { SceneBuilder, VideoSceneBuilder } from "./scene";
 import { ConstructedPromptPanel } from "./ConstructedPromptPanel";
-import { PageHelp } from "./PageHelp";
 import { useSceneGeneration } from "../lib/scene/useSceneGeneration";
 import { AdAgentPanel } from "./agents";
 import { EditWorkspace } from "./EditWorkspace";
@@ -106,17 +105,12 @@ function LeftPanel({ purpose }: { purpose: "artwork" | "ad" | "videoStory" }) {
       <div className="shrink-0 border-b border-[#242424] px-4 py-3">
         <div className="flex items-center justify-between gap-2">
           <h3 className="text-sm font-black text-white">{title}</h3>
-          <PageHelp
-            what="左の要素を選ぶかプロンプトを書くと、その内容で画像を生成します。参照画像・プリセット・スキルで狙いを固定できます。"
-            first="まずは左でシーンの要素を選ぶか、下の入力欄に作りたい絵を書いてください。"
-            note="鉛筆アイコンから、自分で描いたスケッチを参照や3Dシーンにできます。"
-          />
         </div>
       </div>
 
       {purpose === "artwork" && (
         <>
-          <div className="shrink-0 p-3">
+          <div data-tour="generation-scene-builder" className="shrink-0 p-3">
             <SceneBuilder />
           </div>
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden border-t border-[#242424] bg-[#181818]">

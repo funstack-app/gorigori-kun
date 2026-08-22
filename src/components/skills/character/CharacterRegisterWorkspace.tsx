@@ -5,7 +5,6 @@ import { ActiveProjectSelector } from "../../ActiveProjectSelector";
 import { SafeImage } from "../../SafeImage";
 import { useSkillVisible } from "../../SkillWorkspaceRouter";
 import { WorkspaceTabs } from "../../WorkspaceTabs";
-import { PageHelp } from "../../PageHelp";
 import { GenerationGauge } from "../../GenerationGauge";
 import { CharacterIcon } from "../../SkillIcon";
 import { useImagePreview } from "../../../lib/store/imagePreview";
@@ -218,12 +217,6 @@ export function CharacterRegisterWorkspace() {
       <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
         <StepIndicator />
         <JobRail />
-        <div className="px-4 pt-3">
-          <PageHelp
-            what="キャラの絵を1〜6枚渡すと、正面・横・後ろ姿と表情、顔アップをまとめて作り、「このキャラ」として登録します。登録しておくと、他のスキルからも同じ顔のまま呼び出せます。"
-            first="まずは下から、そのキャラが写った絵を選んでください。2枚目以降は角度違いや衣装の資料として使われます。"
-          />
-        </div>
         <div className="min-h-0 flex-1 overflow-hidden">
           <CharacterRegisterBody onPreview={(path, all) => openPreview(path, all)} />
         </div>

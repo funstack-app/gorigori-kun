@@ -36,6 +36,7 @@ import { SettingsConnections } from "./SettingsConnections";
 import { SettingsDiagnostics } from "./SettingsDiagnostics";
 import { UpdateChecker } from "./UpdateChecker";
 import { FONT_SCALE_OPTIONS, useFontScale } from "../lib/store/fontScale";
+import { useGuidePreference } from "../lib/store/guidePreference";
 
 const TABS: Array<{ id: SettingsWorkspaceTab; label: string }> = [
   { id: "basic", label: "基本" },
@@ -127,6 +128,8 @@ function BasicSettings() {
   // (保存ボタンを押さなくても押した瞬間に効く)。
   const fontScale = useFontScale((s) => s.scale);
   const setFontScale = useFontScale((s) => s.setScale);
+  const guideEnabled = useGuidePreference((s) => s.enabled);
+  const setGuideEnabled = useGuidePreference((s) => s.setEnabled);
   const [draft, setDraft] = useState(settings);
   useEffect(() => {
     if (!loaded) void load();
@@ -187,6 +190,38 @@ function BasicSettings() {
         <p className="mt-1.5 text-[10px] leading-relaxed text-neutral-500">
           画面の大きさに応じた自動調整に、この倍率を掛けます。押すとすぐ反映されます。
           小さい画面で「特大」にすると、ボタンが収まらない場合があります。
+        </p>
+      </Field>
+      <Field label="はじめてガイド">
+        <div className="flex items-center justify-between gap-4 rounded-md border border-[#343434] bg-[#101010] px-3 py-2.5">
+          <p className="text-[11px] leading-relaxed text-neutral-400">
+            初回の案内と、いつでも画面ガイドを開ける左下の「?」を表示します。
+          </p>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={guideEnabled}
+            onClick={() => setGuideEnabled(!guideEnabled)}
+            className={`relative h-7 w-14 shrink-0 rounded-full border transition ${
+              guideEnabled
+                ? "border-pink-400 bg-pink-500/25"
+                : "border-[#444] bg-[#1e1e1e]"
+            }`}
+          >
+            <span
+              className={`absolute top-1/2 h-5 w-5 -translate-y-1/2 rounded-full transition ${
+                guideEnabled ? "left-8 bg-pink-300" : "left-1 bg-neutral-500"
+              }`}
+              aria-hidden
+            />
+            <span className="sr-only">{guideEnabled ? "オン" : "オフ"}</span>
+          </button>
+        </div>
+        <p className="mt-1.5 text-[10px] leading-relaxed text-neutral-500">
+          {guideEnabled
+            ? "オン: はじめてガイドと左下の「?」を表示します。"
+            : "オフ: 自動の案内と左下の「?」を表示しません。"}
+          変更はすぐ反映されます。
         </p>
       </Field>
       <Field label="Codex 本体のパス (空欄で自動検出)">

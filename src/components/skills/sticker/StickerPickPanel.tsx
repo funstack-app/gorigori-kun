@@ -82,7 +82,7 @@ export function StickerPickPanel({
     <section className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#121212]">
       <header className="flex flex-wrap items-center gap-3 border-b border-[#242424] px-4 py-3">
         {/*
-          「全部を並べて見て、気になる1枚だけ直せます」は PageHelp の what へ移した
+          「全部を並べて見て、気になる1枚だけ直せます」は画面ガイドへ移した
           （B2 / ui-placement-grammar §4「常時表示の説明文は禁止」）。
         */}
         <span className="text-[11px] font-black uppercase tracking-wider text-neutral-500">

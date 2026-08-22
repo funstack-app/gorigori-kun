@@ -78,6 +78,7 @@ import { useSnsExport } from "./lib/store/snsExport";
 import { useStoryboardRun } from "./lib/store/storyboardRun";
 import { useThreads } from "./lib/store/threads";
 import { useErrorLog } from "./lib/store/errorLog";
+import { useGuidePreference } from "./lib/store/guidePreference";
 import { useToasts } from "./lib/store/toasts";
 import { useWorkspace } from "./lib/store/workspace";
 import { ensureStoryboardEventListener } from "./lib/storyboard/events";
@@ -165,6 +166,7 @@ function SignedInScaffold() {
   const activeUiMode = useSkillUiMode((state) => state.activeUiMode);
   const activeWorkspaceTab = useWorkspace((state) => state.activeTab);
   const errorLogOpen = useErrorLog((state) => state.panelOpen);
+  const guideEnabled = useGuidePreference((state) => state.enabled);
   const [activeTour, setActiveTour] = useState<TourDefinition | null>(null);
   const welcomeStartedRef = useRef(false);
 
@@ -216,6 +218,7 @@ function SignedInScaffold() {
 
   useEffect(() => {
     if (
+      !guideEnabled ||
       !settings.loaded ||
       settings.settings.navigationWelcomeSeen ||
       welcomeStartedRef.current
@@ -225,7 +228,11 @@ function SignedInScaffold() {
     welcomeStartedRef.current = true;
     setActiveTour(WELCOME_TOUR);
     void settings.save({ navigationWelcomeSeen: true });
-  }, [settings.loaded, settings.save, settings.settings.navigationWelcomeSeen]);
+  }, [guideEnabled, settings.loaded, settings.save, settings.settings.navigationWelcomeSeen]);
+
+  useEffect(() => {
+    if (!guideEnabled) setActiveTour(null);
+  }, [guideEnabled]);
 
   // 960px 未満ではサイドバーを自動 collapse。ユーザー操作後は手動状態を優先する。
   useEffect(() => {
@@ -689,14 +696,16 @@ function SignedInScaffold() {
         navCollapsed={navCollapsed}
         onSetNavCollapsed={handleSetNavCollapsed}
       />
-      <HelpButton
-        hasCurrentTour={currentTour !== null}
-        onStartCurrent={() => {
-          if (currentTour) setActiveTour(currentTour);
-        }}
-        onStartWelcome={() => setActiveTour(WELCOME_TOUR)}
-      />
-      {activeTour ? (
+      {guideEnabled ? (
+        <HelpButton
+          hasCurrentTour={currentTour !== null}
+          onStartCurrent={() => {
+            if (currentTour) setActiveTour(currentTour);
+          }}
+          onStartWelcome={() => setActiveTour(WELCOME_TOUR)}
+        />
+      ) : null}
+      {guideEnabled && activeTour ? (
         <TourOverlay
           key={activeTour.id}
           tour={activeTour}

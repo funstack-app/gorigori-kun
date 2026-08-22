@@ -25,7 +25,6 @@ import { ReferenceLibraryModal } from "../../ReferenceLibraryModal";
 import { PresetPickerPopover } from "../../PresetPickerPopover";
 import { selectCharacterReferences } from "../../../lib/presets/character";
 import { ReferenceRoleToggle } from "../../ReferenceRoleToggle";
-import { PageHelp } from "../../PageHelp";
 import { SafeImage } from "../../SafeImage";
 import { CandidatesSelect } from "./CandidatesSelect";
 
@@ -343,15 +342,6 @@ export function GoalChatPanel() {
         <div>
           <div className="flex items-center gap-2">
             <h2 className="text-sm font-semibold text-zinc-200">Phase 1: ゴール深掘り</h2>
-            {/*
-              2026-07-27: 説明を見出しの横のヘルプボタンに畳んだ (STΛCK 指摘
-              「貴重なUIを説明で取りすぎている」)。旧: 見出しの下に常時4行のボックス。
-            */}
-            <PageHelp
-              what="作りたい話を伝えると、AI が聞き返しながら絵コンテに起こし、そのままカットを続けて作ります。登録キャラと画風を固定するので、話が進んでも同じ人物・同じ絵柄のまま並びます。"
-              first="まずは下の入力欄に、作りたい映像を思いつきの一言で書いてください。足りないところは AI が聞き返します。"
-              note="同じ人物のまま並べるには、参照画像を1枚以上入れてください。"
-            />
             {messages.length > 0 && (
               <button
                 type="button"

@@ -66,7 +66,6 @@ import { ReferenceLibraryModal } from "../../ReferenceLibraryModal";
 import { useImagePreview } from "../../../lib/store/imagePreview";
 import { SafeImage } from "../../SafeImage";
 import { WorkspaceTabs } from "../../WorkspaceTabs";
-import { PageHelp } from "../../PageHelp";
 import { ComicSpreadPreviewModal } from "./ComicSpreadPreviewModal";
 import {
   ArtStyleSection,
@@ -2124,12 +2123,6 @@ function ComicFlow() {
         className="min-h-0 flex-1 overflow-y-auto px-4 py-4"
       >
         <div className="mx-auto flex max-w-4xl flex-col gap-4 text-neutral-200">
-          <PageHelp
-            what="話を渡すと、AI がページ構成からコマ割り・セリフまで設計し、吹き出しや擬音も絵として描いた漫画ページを一気に生成します。複数ページの連続ストーリーも作れます。"
-            first="まずは下の「話（あらすじ）」に、どんな話にしたいかを書いてください。"
-            note="セリフの文字は絵として描かれるため、まれに崩れることがあります。"
-          />
-
           {phase === "input" && (
             <InputPhase
               synopsis={synopsis}

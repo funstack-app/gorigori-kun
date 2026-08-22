@@ -43,7 +43,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { ActiveProjectSelector } from "../../ActiveProjectSelector";
 import { GenerationGauge } from "../../GenerationGauge";
-import { PageHelp } from "../../PageHelp";
 import { SafeImage } from "../../SafeImage";
 import { CharacterIcon } from "../../SkillIcon";
 import { WorkspaceTabs } from "../../WorkspaceTabs";
@@ -919,17 +918,6 @@ function StickerBody() {
 
       <div className="px-4 pt-3">
         {/*
-          note は各1文にそろえる（B3・他スキルの PageHelp と同じ形）。4項目を詰め込むと
-          「できないことを正直に伝える」枠が読み飛ばされる。ここに残すのは
-          **この機能が原理的にできないこと**の1点だけにし、手順の説明や
-          常時表示から逃がした文（クロマキー・採否・重複判定）は下の3行へ分けて置く。
-        */}
-        <PageHelp
-          what="キャラや画像を1枚選ぶと、挨拶や返事のスタンプをまとめて作ります。背景はクロマキー用のグリーンで作ってから機械で透過に抜くので、白いキャラクターでも抜けます。全部を並べて見ながら使うものを選び、気になる1枚だけ塗って直せます。「ありがとう」などのセリフ文字は入れずに絵だけを作ります（AIに日本語を描かせると崩れるため）。文字を入れたいときは、書き出したあとの画像を編集タブで開くと、文字を置く道具で自分で入れられます。"
-          first="まずは下から、スタンプにしたいキャラか画像を選んでください。次に枚数と中身の方向を決めます。"
-          note="点検できるのは画像の規格（サイズ・透過・余白・容量）までで、審査に通るかどうかはLINEの判断になります。過去に作ったセットとの重複も自動では判定できません。AIで作ったことの申告は、LINE Creators Market の申請フォームで行ってください。"
-        />
-        {/*
           規約URLは文字列で置くと読み上げても押せない。既存の `openUrl` 流儀
           （UpdateChecker.tsx / SettingsCloudSection.tsx と同じ）でリンクにする。
         */}
@@ -1353,7 +1341,7 @@ function SetupPanel({
       </aside>
 
       {/*
-        クロマキーの説明は PageHelp の what へ移した（B2 / ui-placement-grammar §4）。
+        クロマキーの説明は画面ガイドへ移した（B2 / ui-placement-grammar §4）。
         ここに残すのは「次に何をすればいいか」の1行だけ。
       */}
       <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 px-6 text-center text-neutral-500">
@@ -1803,7 +1791,7 @@ function ExportPanel({
               </button>
             </div>
           )}
-          {/* 重複を自動判定できない旨は PageHelp の note へ移した（B2）。 */}
+          {/* 重複を自動判定できない旨は画面ガイドへ移した（B2）。 */}
         </section>
 
         {/* ⑦ 出口。ここで初めて2択になる（それまでの手順は1本）。 */}

@@ -2,7 +2,6 @@ import { useEffect } from "react";
 
 import { ActiveProjectSelector } from "../../ActiveProjectSelector";
 import { WorkspaceTabs } from "../../WorkspaceTabs";
-import { PageHelp } from "../../PageHelp";
 import { useImagePreview } from "../../../lib/store/imagePreview";
 import { ensureMultiAngleEventListener } from "../../../lib/multiangle/events";
 import { useMultiAngleRun } from "../../../lib/store/multiAngleRun";
@@ -93,10 +92,6 @@ export function MultiAngleWorkspace() {
         <div className="flex items-center gap-3">
           <WorkspaceTabs />
           <ActiveProjectSelector />
-          <PageHelp
-            what="1枚の画像から、位置関係を保ったまま別アングルのカットをまとめて作ります。"
-            first="まずは元になる画像を1枚選んでください。"
-          />
           <button
             type="button"
             onClick={handleNewRun}
