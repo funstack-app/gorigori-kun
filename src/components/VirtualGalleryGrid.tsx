@@ -159,7 +159,11 @@ export function VirtualGalleryGrid(props: CellProps) {
   };
 
   return (
-    <div ref={containerRef} className="min-h-0 flex-1 overflow-hidden">
+    <div
+      ref={containerRef}
+      data-tour={isLibrary ? "library-grid" : undefined}
+      className="min-h-0 flex-1 overflow-hidden"
+    >
       {size.width > 0 && size.height > 0 && (
         <Grid<CellPropsInternal>
           columnCount={columns}
@@ -485,7 +489,7 @@ function LibraryCell({
                 ? isSelected
                   ? "選択中（クリックで外す）"
                   : "クリックで選択"
-                : "クリックで参照 / ダブルクリックで拡大"}
+                : "クリックで拡大プレビュー"}
             </p>
           </div>
           {judgement && (
@@ -555,7 +559,7 @@ function LibraryCell({
                 ? isSelected
                   ? "選択中（クリックで外す）"
                   : "クリックで選択"
-                : "クリックで参照 / ダブルクリックで拡大"}
+                : "クリックで拡大プレビュー"}
             </p>
           </div>
         </button>

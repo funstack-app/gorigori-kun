@@ -20,13 +20,14 @@ export type SheetTemplateFillInput = {
 };
 
 /**
- * `_work/update-2026-08-22/design/asset-factory-knowledge.md` の正典全文。
- * 失敗対策を含むため、要約・言い換え・並び替えをしない。
+ * `_work/update-2026-08-22/design/asset-factory-knowledge.md` の正典を、
+ * GORI の参照画像あり登録向けに適応した全文。
  */
 export const IDENTITY_5VIEW_PROMPT_TEMPLATE = `【氏名 / ROMAJI CHARACTER IDENTITY SHEET】
-モデル: GPT Image 2 / アスペクト比: 16:9 / 品質: high / 参照画像なし（新規キャスティング）
+モデル: GPT Image 2 / アスペクト比: 16:9 / 品質: high
 
 **【この画像で最も重要な指定 — 先に読むこと】**
+添付の参照画像の人物と完全に同一人物として描く。顔立ち・髪・体格を参照から変えない。
 左側に並べる2体の全身ビューのうち、
 - **正面（LEFT BODY 01）は、首から上をフレームの外に出す**（顔を写さない）
 - **背面（LEFT BODY 02）は、頭のてっぺんまで全部写す**（後頭部・髪型・襟足を見せる。切らない）

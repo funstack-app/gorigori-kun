@@ -104,12 +104,12 @@ type CutState = {
   /** 通し番号（1始まり）。波の概念を出さないので常に通し番号。 */
   index: number;
   entry: StickerEntry;
-  status: "pending" | "running" | "completed" | "failed";
+  status: "pending" | "running" | "cuttingOut" | "completed" | "failed";
   imagePath?: string;
   reason?: string;
 };
 
-/** 1バッチ内で、生成結果が届いたカットと失敗したカットを数える台帳。 */
+/** 1バッチ内で、透過処理まで決着したカットと失敗したカットを数える台帳。 */
 type WaveProgress = {
   expectedCutIds: Set<string>;
   settledCutIds: Set<string>;
@@ -143,7 +143,10 @@ async function listDirNames(dir: string): Promise<Set<string>> {
 
 export function StickerWorkspace() {
   return (
-    <section className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#121212]">
+    <section
+      data-tour="sticker-workspace"
+      className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#121212]"
+    >
       <div className="border-b border-[#242424] bg-[#121212] px-4 py-3">
         <div className="flex items-center gap-3">
           <WorkspaceTabs />
@@ -253,12 +256,13 @@ function StickerBody() {
    * 返すので、`await invoke()` は「起動できた」までしか待たない。そのまま次の波を
    * 投げると32/40枚が一斉に走り、直列2波にならない（設計書 §1.2 の前提が崩れる）。
    *
-   * 完了は `completed` イベントでしか分からないため、runId ごとに resolver を置いて
-   * イベント側から解決する。**失敗しても解決する**（1枚も完成しなくても次の波は投げる。
-   * 波をまたぐロールバックは作らない設計なので、止めると残りが永久に来ない）。
+   * 生成イベントと、その後の `cutOut` の両方が決着した時点を完了とするため、
+   * runId ごとに resolver を置いてカット単位の台帳から解決する。
+   * **失敗しても解決する**（1枚も完成しなくても次の波は投げる。波をまたぐ
+   * ロールバックは作らない設計なので、止めると残りが永久に来ない）。
    */
   const waveWaitersRef = useRef<Map<string, () => void>>(new Map());
-  /** `completed` が欠けても全カットの決着で待ちを解けるよう、runごとに数える。 */
+  /** 全カットの生成・透過処理の決着で待ちを解けるよう、runごとに数える。 */
   const waveProgressRef = useRef<Map<string, WaveProgress>>(new Map());
   /**
    * クロマキーで抜いたときの統計（抜いた結果のパス → 統計）。
@@ -400,7 +404,7 @@ function StickerBody() {
       resolve();
     };
 
-    /** 成功・失敗を数え、全カットが決着したら completed が無くても次へ進める。 */
+    /** 透過成功・処理失敗を数え、全カットが決着したら次へ進める。 */
     const settleWaveCut = (runId: string, cutId: string, failed: boolean) => {
       const progress = waveProgressRef.current.get(runId);
       if (!progress) return;
@@ -431,10 +435,14 @@ function StickerBody() {
           ),
         );
       } else if (event.kind === "cutCompleted") {
-        settleWaveCut(event.runId, event.cutId, false);
         // 生成物は**まだ緑背景**。透過に抜いてから採否リストへ載せる（設計書 §1.4）。
         // 抜かずに出すと層Aの `no-alpha` が全枚数をブロックし、1枚も完走しない。
         const cutId = event.cutId;
+        setCuts((prev) =>
+          prev.map((c) =>
+            c.entry.id === cutId ? { ...c, status: "cuttingOut" } : c,
+          ),
+        );
         void cutOut(event.imagePath)
           .then((cutPath) => {
             setCuts((prev) =>
@@ -444,6 +452,8 @@ function StickerBody() {
                   : c,
               ),
             );
+            // W24: 波待ちは、生成画像が届いた時点ではなく透過処理の決着後に進める。
+            settleWaveCut(event.runId, cutId, false);
           })
           .catch((err) => {
             const reason = humanizeError(err);
@@ -454,6 +464,8 @@ function StickerBody() {
                   : c,
               ),
             );
+            // 透過失敗も決着として数え、失敗時に波が永久待ちになる防御は維持する。
+            settleWaveCut(event.runId, cutId, true);
             pushToast({
               kind: "error",
               text: `背景の切り抜きに失敗しました。理由: ${reason}。この1枚をもう一度お試しください。`,
@@ -475,8 +487,9 @@ function StickerBody() {
         );
         settleWaveCut(event.runId, event.cutId, true);
       } else if (event.kind === "completed") {
-        // この波が終わった。待っている次の波を解放する（B4）。
-        releaseWave(event.runId);
+        // 生成側の完了通知だけでは、非同期の透過処理はまだ終わっていない。
+        // 次の波は各カットの settleWaveCut がすべて揃った時だけ解放する。
+        return;
       }
     };
 
@@ -664,18 +677,27 @@ function StickerBody() {
             throw err;
           }
 
-          // ⚠️ `await invoke()` は「起動できた」までしか待たない（Rust 側は
-          // tokio::spawn して即 return する）。**完了イベントを待つ**（B4）。
-          // これを省くと32/40枚の第2波が第1波の完了前に走り出す。
+          // `await invoke()` は「起動できた」までしか待たない（Rust 側は
+          // tokio::spawn して即 return する）。生成だけでなく、全カットの透過処理が
+          // 決着するまで待ち、第2波を早く走らせない（W24）。
           await finished;
         }
         pushToast({
           kind: "success",
-          text: `${targets.length} 枚の生成が終わりました。`,
+          text: `${targets.length} 枚の生成と透過処理が終わりました。`,
           ttlMs: 3000,
         });
       } catch (err) {
-        // 起動に失敗した分は pending のまま残る。作り直しは工程④から行える。
+        // 起動できなかった対象も失敗として決着させ、全体待ちと再試行導線を止めない。
+        const targetIds = new Set(targets.map((entry) => entry.id));
+        setCuts((prev) =>
+          prev.map((cut) =>
+            targetIds.has(cut.entry.id) &&
+            (cut.status === "pending" || cut.status === "running")
+              ? { ...cut, status: "failed", reason: "生成を始められませんでした" }
+              : cut,
+          ),
+        );
         pushToast({
           kind: "error",
           text: formatStickerError(
@@ -687,7 +709,7 @@ function StickerBody() {
           ttlMs: 6000,
         });
       } finally {
-        // 連打ガードは**生成の完了まで**効かせる（invoke が返るまでではない）。
+        // 連打ガードは**生成と透過処理の完了まで**効かせる（invoke が返るまでではない）。
         // ここが finally なので、失敗しても必ず解除される（押せないまま固まらない）。
         startingRef.current = false;
         setRunning(false);
@@ -1214,7 +1236,7 @@ function StickerBody() {
         )}
 
         {phase === "pick" && (
-          <div className="flex h-full min-h-0 flex-col">
+          <div data-tour="sticker-pick" className="flex h-full min-h-0 flex-col">
             <StickerPickPanel
               items={pickItems}
               keptIndexes={keptIndexes}
@@ -1332,7 +1354,10 @@ function StepIndicator({ phase }: { phase: Phase }) {
         - `min-w-0` + `gap-1.5` で詰め、ラベルは `whitespace-nowrap` で
           単語途中の改行を防ぐ
     */
-    <div className="flex min-w-0 flex-wrap items-center gap-1.5 border-b border-[#242424] px-4 py-2">
+    <div
+      data-tour="sticker-phases"
+      className="flex min-w-0 flex-wrap items-center gap-1.5 border-b border-[#242424] px-4 py-2"
+    >
       {PHASE_LABELS.map((p, i) => (
         <div
           key={p.phase}
@@ -1392,7 +1417,7 @@ function SetupPanel({
     Boolean(sourceImage) && !running && eventSubscriptionStatus === "ready";
 
   return (
-    <div className="flex h-full min-h-0">
+    <div data-tour="sticker-setup" className="flex h-full min-h-0">
       {/*
         狭幅対応（B1）。旧実装は `w-96 shrink-0`（固定 384px）だったため、
         パネル自体が 280px しか無い状況で 384px を要求し、確実にはみ出していた。
@@ -1606,6 +1631,7 @@ function GeneratePanel({
   // 成功だけを数えると、失敗が出た瞬間にゲージが最後まで進まず止まって見える。
   const settled = doneCount + failed;
   const total = cuts.length;
+  const allSettled = total > 0 && settled >= total;
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex items-center gap-3 border-b border-[#242424] px-4 py-3">
@@ -1628,7 +1654,7 @@ function GeneratePanel({
         <button
           type="button"
           onClick={onGoPick}
-          disabled={doneCount === 0}
+          disabled={busy || !allSettled || doneCount === 0}
           className="ml-auto rounded bg-[#2a2a2a] px-4 py-2 text-[12px] font-bold text-neutral-100 transition hover:bg-[#333] disabled:opacity-40"
         >
           使うものを選ぶ →
@@ -1646,7 +1672,7 @@ function GeneratePanel({
           startedAt={startedAt}
           mode="batch"
           progress={total > 0 ? settled / total : 0}
-          done={total > 0 && settled >= total}
+          done={allSettled}
         />
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto p-4">
@@ -1665,7 +1691,11 @@ function GeneratePanel({
                   />
                 ) : c.status === "failed" ? (
                   <div className="flex flex-col items-center gap-1.5 px-2 text-center">
-                    <span className="text-red-300">生成に失敗しました</span>
+                    <span className="text-red-300">
+                      {c.reason?.startsWith("背景の切り抜き失敗")
+                        ? "透過処理に失敗しました"
+                        : "生成に失敗しました"}
+                    </span>
                     {/* 1枚だけ作り直せるようにする（B6）。全部やり直す必要はない。 */}
                     <button
                       type="button"
@@ -1675,6 +1705,11 @@ function GeneratePanel({
                     >
                       この1枚を作り直す
                     </button>
+                  </div>
+                ) : c.status === "cuttingOut" ? (
+                  <div className="flex flex-col items-center gap-2 text-neutral-300">
+                    <span className="h-6 w-6 animate-spin rounded-full border-2 border-pink-300 border-t-transparent" />
+                    <span>透過処理中…</span>
                   </div>
                 ) : c.status === "running" ? (
                   <span className="h-6 w-6 animate-spin rounded-full border-2 border-pink-300 border-t-transparent" />
@@ -1744,7 +1779,10 @@ function ExportPanel({
   const setBlockers = setIssues.filter((x) => x.severity === "blocker");
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-y-auto">
+    <div
+      data-tour="sticker-export"
+      className="flex h-full min-h-0 flex-col overflow-y-auto"
+    >
       <div className="flex items-center gap-3 border-b border-[#242424] px-4 py-3">
         <button
           type="button"

@@ -24,6 +24,13 @@ describe("首なし5面図の正典テンプレート", () => {
     );
   });
 
+  it("参照画像の人物を変えず、新規キャスティングを指示しない", () => {
+    expect(IDENTITY_5VIEW_PROMPT_TEMPLATE).not.toContain("参照画像なし");
+    expect(IDENTITY_5VIEW_PROMPT_TEMPLATE).toContain(
+      "添付の参照画像の人物と完全に同一人物として描く。顔立ち・髪・体格を参照から変えない。",
+    );
+  });
+
   it("登録フォームの名前と属性で記入穴を埋める", () => {
     const prompt = buildIdentity5ViewPrompt({
       name: "山田ハル / HARU YAMADA",

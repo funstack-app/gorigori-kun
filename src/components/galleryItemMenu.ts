@@ -146,19 +146,25 @@ export async function deleteGalleryImage(
  *
  * 1 件失敗しても残りは続行する Rust 側 (images_delete_many) に合わせ、
  * 成功したパスだけ表示 (useImages.items) から外す。返り値は削除した件数。
+ * サムネ付き確認画面を先に出す呼び出し側だけ、確認の重複を避けられる。
  */
-export async function deleteGalleryImages(paths: string[]): Promise<number> {
+export async function deleteGalleryImages(
+  paths: string[],
+  options: { skipConfirmation?: boolean } = {},
+): Promise<number> {
   if (paths.length === 0) return 0;
 
-  const message = `${paths.length}件の素材を削除します。元に戻せません。よろしいですか？`;
-  let ok = false;
-  try {
-    const { ask } = await import("@tauri-apps/plugin-dialog");
-    ok = await ask(message, { title: "没作品の一括削除", kind: "warning" });
-  } catch {
-    ok = window.confirm(message);
+  if (!options.skipConfirmation) {
+    const message = `${paths.length}件の素材を削除します。元に戻せません。よろしいですか？`;
+    let ok = false;
+    try {
+      const { ask } = await import("@tauri-apps/plugin-dialog");
+      ok = await ask(message, { title: "没作品の一括削除", kind: "warning" });
+    } catch {
+      ok = window.confirm(message);
+    }
+    if (!ok) return 0;
   }
-  if (!ok) return 0;
 
   try {
     const result = await imagesIpc.deleteFiles(paths);

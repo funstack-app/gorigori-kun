@@ -37,8 +37,6 @@ const VIDEO_EXTENSIONS = new Set([
   "mov",
   "m4v",
   "webm",
-  "avi",
-  "mkv",
 ]);
 
 /** watcher の旧イベントには mediaType が無いため、拡張子から安全に補完する。 */
