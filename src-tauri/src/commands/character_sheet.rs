@@ -612,9 +612,10 @@ async fn run_character_sheet_orchestrator(
                     reference_paths.len(),
                     params.sheet_background,
                 ),
-                None => {
-                    build_custom_character_sheet_prompt(&params.custom_prompt, params.sheet_background)
-                }
+                None => build_custom_character_sheet_prompt(
+                    &params.custom_prompt,
+                    params.sheet_background,
+                ),
             };
             match generate_one_cut_for_run_with_slot_hook(
                 &app,

@@ -1039,7 +1039,12 @@ fn latest_backup_stamp(path: &Path) -> Option<u64> {
 ///
 /// なぜ純関数に切り出すか: 実 I/O と時刻に依存させるとテストで固定できないため
 /// (projects_decrease_rejected と同じ理由)。`now_ms` / `latest` を引数で受ける。
-fn daily_backup_due(exists_nonempty: bool, latest: Option<u64>, now_ms: u64, interval_ms: u64) -> bool {
+fn daily_backup_due(
+    exists_nonempty: bool,
+    latest: Option<u64>,
+    now_ms: u64,
+    interval_ms: u64,
+) -> bool {
     if !exists_nonempty {
         return false;
     }
@@ -2433,7 +2438,10 @@ mod tests {
     fn presets_shrink_guard_rejects_only_large_drops() {
         let make = |n: usize| {
             let items: Vec<String> = (0..n).map(|i| format!("{{\"id\":\"x{i}\"}}")).collect();
-            format!(r#"{{"version":1,"categories":[],"presets":[{}]}}"#, items.join(","))
+            format!(
+                r#"{{"version":1,"categories":[],"presets":[{}]}}"#,
+                items.join(",")
+            )
         };
 
         // 30 件 → 1 件: 実被害と同じ形。必ず拒否する
@@ -2801,7 +2809,10 @@ mod tests {
 
         // 中身が正本と一致する (空ファイルを作って満足しない)
         let content = fs::read_to_string(baks[0].path()).unwrap();
-        assert!(content.contains("\"id\":\"a\""), "バックアップ中身が正本と一致");
+        assert!(
+            content.contains("\"id\":\"a\""),
+            "バックアップ中身が正本と一致"
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -2850,8 +2861,11 @@ mod tests {
 
         let now_ms = 1_700_000_000_000u64;
         // 1時間前の .bak を仕込む
-        fs::write(dir.join(format!("presets.json.bak-{}", now_ms - 3_600_000)), "{}")
-            .expect(".bak 仕込み");
+        fs::write(
+            dir.join(format!("presets.json.bak-{}", now_ms - 3_600_000)),
+            "{}",
+        )
+        .expect(".bak 仕込み");
 
         let created = ensure_daily_backup_for(&path, now_ms);
         assert!(!created, "直近に .bak があれば作らない");
@@ -2880,12 +2894,7 @@ mod tests {
         let day = DAY_MS;
         let base = 1_700_000_000_000u64;
         // 4日前・3日前・2日前・1日前に1世代ずつ (過去の日次スナップショット)
-        let mut stamps: Vec<u64> = vec![
-            base - 4 * day,
-            base - 3 * day,
-            base - 2 * day,
-            base - day,
-        ];
+        let mut stamps: Vec<u64> = vec![base - 4 * day, base - 3 * day, base - 2 * day, base - day];
         // 今日、連続で12回保存 (1分間隔)
         for i in 0..12 {
             stamps.push(base + i * 60_000);
