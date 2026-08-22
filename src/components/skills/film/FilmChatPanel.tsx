@@ -994,9 +994,6 @@ export function FilmChatPanel({ project }: { project: FilmProject | null }) {
             ))}
           </div>
         ) : null}
-        <p className="rounded-md border border-sky-500/20 bg-sky-500/5 px-3 py-2 text-[11px] leading-5 text-sky-100/80">
-          このAI会話は文字だけです。画像の内容はAIへ直接送りません。画像はアプリ内に保存し、企画確定後に③設計のお手本へ選べます。③で決めた見た目は④素材づくりへ引き継ぎます。
-        </p>
         <textarea
           ref={inputRef}
           value={draft}
@@ -1017,31 +1014,47 @@ export function FilmChatPanel({ project }: { project: FilmProject | null }) {
           className="w-full min-w-0 resize-none bg-transparent text-sm text-zinc-200 outline-none placeholder:text-zinc-600"
         />
         <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
-          <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-            <span className="mr-1 text-[11px] font-semibold text-zinc-400">画像を追加</span>
+          {/* 企画チャットと同じ丸アイコン作法（2026-08-22 STΛCK指示: UIの感じを揃える）。
+              説明はツールチップに退避し、常設バナーは出さない。 */}
+          <div className="flex min-w-0 items-center gap-1">
             <button
               type="button"
               onClick={() => setCharacterPickerOpen(true)}
               disabled={sending || savingReferences}
-              className="rounded-md border border-[#343434] px-2.5 py-1.5 text-[11px] font-semibold text-zinc-300 transition hover:border-pink-500/40 hover:text-pink-200 disabled:cursor-not-allowed disabled:opacity-40"
+              title="登録キャラから画像を追加（AIには文字で伝わり、画像は③設計のお手本になります）"
+              aria-label="登録キャラから画像を追加"
+              className="flex h-8 w-8 items-center justify-center rounded-full text-neutral-400 hover:bg-[#1a1a1a] hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
             >
-              登録キャラ
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                <circle cx="12" cy="8" r="4" />
+                <path d="M4 21v-1a7 7 0 0 1 16 0v1" />
+              </svg>
             </button>
             <button
               type="button"
               onClick={() => setLibraryOpen(true)}
               disabled={sending || savingReferences}
-              className="rounded-md border border-[#343434] px-2.5 py-1.5 text-[11px] font-semibold text-zinc-300 transition hover:border-pink-500/40 hover:text-pink-200 disabled:cursor-not-allowed disabled:opacity-40"
+              title="ライブラリから選ぶ"
+              aria-label="ライブラリから選ぶ"
+              className="flex h-8 w-8 items-center justify-center rounded-full text-neutral-400 hover:bg-[#1a1a1a] hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
             >
-              ライブラリ
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                <rect x="3" y="3" width="18" height="18" rx="2" />
+                <circle cx="8.5" cy="8.5" r="1.5" />
+                <path d="M21 15l-5-5L5 21" />
+              </svg>
             </button>
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
               disabled={sending || savingReferences}
-              className="rounded-md border border-[#343434] px-2.5 py-1.5 text-[11px] font-semibold text-zinc-300 transition hover:border-pink-500/40 hover:text-pink-200 disabled:cursor-not-allowed disabled:opacity-40"
+              title="ファイルを添付"
+              aria-label="ファイルを添付"
+              className="flex h-8 w-8 items-center justify-center rounded-full text-neutral-400 hover:bg-[#1a1a1a] hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
             >
-              ローカル
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+              </svg>
             </button>
             {savingReferences ? (
               <span className="text-[10px] text-zinc-500">保存中…</span>
