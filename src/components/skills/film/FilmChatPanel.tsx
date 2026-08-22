@@ -399,6 +399,11 @@ export function FilmChatPanel({ project }: { project: FilmProject | null }) {
   const [progress, setProgress] = useState<Parameters<typeof ProgressCard>[0]["progress"]>();
   const abortRef = useRef<AbortController | null>(null);
   const runTokenRef = useRef(0);
+  const failedUserMessageRef = useRef<{
+    conversationId: string;
+    message: ReturnType<typeof createFilmChatMessage>;
+    revisionTarget: AdvisorArtifactType | null;
+  } | null>(null);
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -426,6 +431,7 @@ export function FilmChatPanel({ project }: { project: FilmProject | null }) {
     setSending(false);
     setSendFailure(null);
     setProgress(undefined);
+    failedUserMessageRef.current = null;
   }, [project?.id]);
 
   useEffect(() => () => {
@@ -449,11 +455,26 @@ export function FilmChatPanel({ project }: { project: FilmProject | null }) {
     ) ?? null;
     const conversationId = projectAtStart?.id ?? "planning";
     const previousMessages = projectAtStart?.chatMessages ?? stateAtStart.planningChatMessages;
-    const userMessage = createFilmChatMessage("user", userText);
-    // 送った文は会話履歴にも先に残す。失敗時は同じ文を入力欄へ戻すため、
-    // 「何を送ったか」と「何を再送するか」の両方を失わない。
-    if (projectAtStart) stateAtStart.appendChatMessage(userMessage);
-    else stateAtStart.appendPlanningChatMessage(userMessage);
+    const failedMessage = failedUserMessageRef.current;
+    const isRetry = Boolean(
+      failedMessage
+      && failedMessage.conversationId === conversationId
+      && failedMessage.message.text === userText
+      && failedMessage.revisionTarget === revisionAtStart,
+    );
+    const userMessage = isRetry && failedMessage
+      ? failedMessage.message
+      : createFilmChatMessage("user", userText);
+    // 失敗した同じ文の再送では、履歴に残っている発言をそのまま再利用する。
+    // AIへ渡す過去履歴からだけ一度外し、userMessage として1回分を送る。
+    const requestMessages = isRetry
+      ? previousMessages.filter((message) => message.id !== userMessage.id)
+      : previousMessages;
+    if (!isRetry) {
+      if (projectAtStart) stateAtStart.appendChatMessage(userMessage);
+      else stateAtStart.appendPlanningChatMessage(userMessage);
+    }
+    failedUserMessageRef.current = null;
     setDraft("");
     setRevisionTarget(null);
     setSendFailure(null);
@@ -468,7 +489,7 @@ export function FilmChatPanel({ project }: { project: FilmProject | null }) {
       const response = await runFilmAdvisorTurn(
         {
           project: projectAtStart,
-          messages: previousMessages,
+          messages: requestMessages,
           userMessage: advisorUserMessage,
         },
         {
@@ -499,7 +520,7 @@ export function FilmChatPanel({ project }: { project: FilmProject | null }) {
         if (premiseArtifact) {
           const premise = readPremise(premiseArtifact);
           if (premise.value) {
-            const chatMessages = [...previousMessages, userMessage, assistantMessage];
+            const chatMessages = [...requestMessages, userMessage, assistantMessage];
             createProject(
               premise.value.title,
               premise.value.theme,
@@ -534,6 +555,11 @@ export function FilmChatPanel({ project }: { project: FilmProject | null }) {
       if (runTokenRef.current !== runToken) return;
       setDraft(userText);
       setRevisionTarget(revisionAtStart);
+      failedUserMessageRef.current = {
+        conversationId,
+        message: userMessage,
+        revisionTarget: revisionAtStart,
+      };
       setSendFailure(describeChatFailure(error));
       requestAnimationFrame(() => inputRef.current?.focus());
     } finally {

@@ -1659,6 +1659,7 @@ function AssetsWorkspace() {
   const selectionMode = useLibrarySelection((s) => s.selectionMode);
   const toggle = useLibrarySelection((s) => s.toggle);
   const toggleMany = useLibrarySelection((s) => s.toggleMany);
+  const retainVisible = useLibrarySelection((s) => s.retainVisible);
   const clear = useLibrarySelection((s) => s.clear);
   const projects = useProjects((s) => s.projects);
   const favorites = useImages((s) => s.favorites);
@@ -1668,11 +1669,6 @@ function AssetsWorkspace() {
 
   const [query, setQuery] = useState("");
   const [scope, setScope] = useState<LibraryScope>("all");
-  // 検索・種別・お気に入り・プロジェクトの表示条件が変わったら、
-  // 画面から消えた素材を選択したまま一括操作しないよう必ず解除する。
-  useEffect(() => {
-    clear();
-  }, [clear, query, scope]);
   // 見た目だけの設定なので localStorage で十分。作品メタのお気に入りは
   // images.ts の favorites.json に保存され、ここには置かない。
   const [tileSize, setTileSize] = useState<number>(() => {
@@ -1731,6 +1727,12 @@ function AssetsWorkspace() {
       return true;
     });
   }, [favorites, items, projectPathSets, query, scope]);
+  // 検索や絞り込みだけでなく、お気に入り解除・削除・プロジェクト帰属変更などで
+  // 表示結果だけが変わった場合も、見えなくなった素材を一括操作から外す。
+  // 同じ条件内で見え続ける素材の選択は維持する。
+  useEffect(() => {
+    retainVisible(visibleItems.map((item) => item.path));
+  }, [retainVisible, visibleItems]);
   const dateGroups = useMemo(
     () => groupLibraryItemsByDate(visibleItems),
     [visibleItems],
@@ -1855,10 +1857,11 @@ function LibraryDeleteButton() {
   const [pendingDeletePaths, setPendingDeletePaths] = useState<string[] | null>(null);
 
   const disabled = selected.size === 0 || running || pendingDeletePaths !== null;
-  const previewItems = (pendingDeletePaths ?? []).slice(0, 5).map((path) => ({
+  const deleteItems = (pendingDeletePaths ?? []).map((path) => ({
     path,
     item: items.find((item) => item.path === path),
   }));
+  const hiddenPreviewCount = Math.max(0, deleteItems.length - 5);
 
   const handleClick = () => {
     if (disabled) return;
@@ -1923,8 +1926,8 @@ function LibraryDeleteButton() {
               元に戻せません。削除する内容を確認してください。
             </p>
 
-            <ul className="mt-4 space-y-2">
-              {previewItems.map(({ path, item }) => {
+            <ul className="mt-4 max-h-80 space-y-2 overflow-y-auto pr-1">
+              {deleteItems.map(({ path, item }) => {
                 const thumbnailPath =
                   item && galleryItemMediaType(item) === "video"
                     ? item.thumbnailPath
@@ -1953,9 +1956,9 @@ function LibraryDeleteButton() {
                 );
               })}
             </ul>
-            {pendingDeletePaths.length > previewItems.length && (
+            {hiddenPreviewCount > 0 && (
               <p className="mt-2 text-[11px] text-neutral-500">
-                ほか {pendingDeletePaths.length - previewItems.length} 件
+                ほか {hiddenPreviewCount} 件（一覧をスクロールして全件確認できます）
               </p>
             )}
 

@@ -118,6 +118,12 @@ type WaveProgress = {
 
 type EventSubscriptionStatus = "connecting" | "ready" | "failed";
 
+/** 1枚の透過処理を待つ上限。推論やOS APIが停止しても次の波を塞がない。 */
+const CUTOUT_TIMEOUT_MS = 90_000;
+
+/** 全体完了後、遅れて届く個別結果を待つ猶予。 */
+const COMPLETED_GRACE_MS = 10_000;
+
 const IMAGE_EXTS = ["png", "jpg", "jpeg", "webp"];
 
 /** キャラの参照画像を解決する（表情差分と同じ規則）。 */
@@ -385,6 +391,66 @@ function StickerBody() {
   useEffect(() => {
     let unlisten: (() => void) | null = null;
     let cancelled = false;
+    const cutoutWaits = new Map<
+      string,
+      { timer: ReturnType<typeof setTimeout>; reject: (reason: Error) => void }
+    >();
+    const completedGraceTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+    const cutoutTimerKey = (runId: string, cutId: string) => `${runId}\u0000${cutId}`;
+
+    /** 終了済みカットの遅い透過結果が状態を上書きしないための確認。 */
+    const isWaveCutPending = (runId: string, cutId: string) => {
+      const progress = waveProgressRef.current.get(runId);
+      return Boolean(
+        progress
+        && progress.expectedCutIds.has(cutId)
+        && !progress.settledCutIds.has(cutId),
+      );
+    };
+
+    /** 透過処理自体を止められなくても、その結果待ちだけは時間内に決着させる。 */
+    const cutOutWithTimeout = (
+      runId: string,
+      cutId: string,
+      task: Promise<string>,
+    ): Promise<string> =>
+      new Promise((resolve, reject) => {
+        const key = cutoutTimerKey(runId, cutId);
+        const wait = {
+          timer: setTimeout(() => {
+            if (cutoutWaits.get(key) !== wait) return;
+            cutoutWaits.delete(key);
+            reject(new Error("背景の切り抜きが90秒以内に終わりませんでした"));
+          }, CUTOUT_TIMEOUT_MS),
+          reject,
+        };
+        cutoutWaits.set(key, wait);
+
+        void task.then(
+          (path) => {
+            if (cutoutWaits.get(key) !== wait) return;
+            cutoutWaits.delete(key);
+            clearTimeout(wait.timer);
+            resolve(path);
+          },
+          (error) => {
+            if (cutoutWaits.get(key) !== wait) return;
+            cutoutWaits.delete(key);
+            clearTimeout(wait.timer);
+            reject(error);
+          },
+        );
+      });
+
+    const cancelCutoutWait = (runId: string, cutId: string) => {
+      const key = cutoutTimerKey(runId, cutId);
+      const wait = cutoutWaits.get(key);
+      if (!wait) return;
+      cutoutWaits.delete(key);
+      clearTimeout(wait.timer);
+      wait.reject(new Error("背景の切り抜き待ちを終了しました"));
+    };
 
     /** 待ちを1回だけ解放し、失敗があれば件数を必ず知らせる。 */
     const releaseWave = (runId: string) => {
@@ -392,6 +458,12 @@ function StickerBody() {
       if (!resolve) return;
 
       const progress = waveProgressRef.current.get(runId);
+      const graceTimer = completedGraceTimers.get(runId);
+      if (graceTimer) clearTimeout(graceTimer);
+      completedGraceTimers.delete(runId);
+      if (progress) {
+        for (const cutId of progress.expectedCutIds) cancelCutoutWait(runId, cutId);
+      }
       waveWaitersRef.current.delete(runId);
       waveProgressRef.current.delete(runId);
       if (progress && progress.failedCutIds.size > 0) {
@@ -438,13 +510,16 @@ function StickerBody() {
         // 生成物は**まだ緑背景**。透過に抜いてから採否リストへ載せる（設計書 §1.4）。
         // 抜かずに出すと層Aの `no-alpha` が全枚数をブロックし、1枚も完走しない。
         const cutId = event.cutId;
+        if (!isWaveCutPending(event.runId, cutId)) return;
+        if (cutoutWaits.has(cutoutTimerKey(event.runId, cutId))) return;
         setCuts((prev) =>
           prev.map((c) =>
             c.entry.id === cutId ? { ...c, status: "cuttingOut" } : c,
           ),
         );
-        void cutOut(event.imagePath)
+        void cutOutWithTimeout(event.runId, cutId, cutOut(event.imagePath))
           .then((cutPath) => {
+            if (!isWaveCutPending(event.runId, cutId)) return;
             setCuts((prev) =>
               prev.map((c) =>
                 c.entry.id === cutId
@@ -456,6 +531,7 @@ function StickerBody() {
             settleWaveCut(event.runId, cutId, false);
           })
           .catch((err) => {
+            if (!isWaveCutPending(event.runId, cutId)) return;
             const reason = humanizeError(err);
             setCuts((prev) =>
               prev.map((c) =>
@@ -478,6 +554,7 @@ function StickerBody() {
           progress && !progress.expectedCutIds.has(event.cutId)
             ? progress.expectedCutIds
             : new Set([event.cutId]);
+        for (const cutId of failedCutIds) cancelCutoutWait(event.runId, cutId);
         setCuts((prev) =>
           prev.map((c) =>
             failedCutIds.has(c.entry.id)
@@ -488,8 +565,41 @@ function StickerBody() {
         settleWaveCut(event.runId, event.cutId, true);
       } else if (event.kind === "completed") {
         // 生成側の完了通知だけでは、非同期の透過処理はまだ終わっていない。
-        // 次の波は各カットの settleWaveCut がすべて揃った時だけ解放する。
-        return;
+        // ただし個別イベントや透過処理が欠けた場合は、猶予後に未決着分を失敗として
+        // 数え、W24の「失敗しても波が解ける」性質を維持する。
+        const progress = waveProgressRef.current.get(event.runId);
+        if (!progress || completedGraceTimers.has(event.runId)) return;
+        const timer = setTimeout(() => {
+          completedGraceTimers.delete(event.runId);
+          const current = waveProgressRef.current.get(event.runId);
+          if (!current) return;
+          const unsettledCutIds = Array.from(current.expectedCutIds).filter(
+            (cutId) => !current.settledCutIds.has(cutId),
+          );
+          if (unsettledCutIds.length === 0) {
+            releaseWave(event.runId);
+            return;
+          }
+          const unsettled = new Set(unsettledCutIds);
+          for (const cutId of unsettled) {
+            cancelCutoutWait(event.runId, cutId);
+            current.settledCutIds.add(cutId);
+            current.failedCutIds.add(cutId);
+          }
+          setCuts((prev) =>
+            prev.map((cut) =>
+              unsettled.has(cut.entry.id)
+                ? {
+                    ...cut,
+                    status: "failed",
+                    reason: "全体完了後も処理結果を受け取れませんでした",
+                  }
+                : cut,
+            ),
+          );
+          releaseWave(event.runId);
+        }, COMPLETED_GRACE_MS);
+        completedGraceTimers.set(event.runId, timer);
       }
     };
 
@@ -536,6 +646,13 @@ function StickerBody() {
       for (const resolve of waiters.values()) resolve();
       waiters.clear();
       waveProgressRef.current.clear();
+      for (const wait of cutoutWaits.values()) {
+        clearTimeout(wait.timer);
+        wait.reject(new Error("画面を閉じたため背景の切り抜き待ちを終了しました"));
+      }
+      cutoutWaits.clear();
+      for (const timer of completedGraceTimers.values()) clearTimeout(timer);
+      completedGraceTimers.clear();
     };
   }, [pushToast, cutOut]);
 

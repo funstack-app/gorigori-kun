@@ -21,6 +21,8 @@ type LibrarySelectionState = {
   /** 日付見出しなど、複数 path をまとめて選択/解除する。 */
   toggleMany: (paths: string[]) => void;
   selectAll: (paths: string[]) => void;
+  /** 現在表示中の path だけを残し、画面外の選択を一括操作から外す。 */
+  retainVisible: (paths: readonly string[]) => void;
   clear: () => void;
 };
 
@@ -41,6 +43,14 @@ export const useLibrarySelection = create<LibrarySelectionState>((set, get) => (
   },
   selectAll: (paths) => {
     set({ selected: new Set(paths) });
+  },
+  retainVisible: (paths) => {
+    const selected = get().selected;
+    if (selected.size === 0) return;
+    const visible = new Set(paths);
+    const next = new Set(Array.from(selected).filter((path) => visible.has(path)));
+    if (next.size === selected.size) return;
+    set({ selected: next, selectionMode: next.size > 0 });
   },
   clear: () => set({ selected: new Set(), selectionMode: false }),
 }));

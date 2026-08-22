@@ -135,7 +135,7 @@ export const PAGE_TOURS = {
       {
         target: '[data-tour="library-grid"]',
         title: "日付順に素材を見る",
-        body: "素材は日付ごとに並びます。クリックで参照に使い、ダブルクリックで大きく確認できます。",
+        body: "素材は日付ごとに並びます。クリックすると大きなプレビューで確認できます。",
         placement: "left",
       },
       {

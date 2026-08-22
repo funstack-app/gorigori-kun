@@ -39,12 +39,22 @@ const VIDEO_EXTENSIONS = new Set([
   "webm",
 ]);
 
-/** watcher の旧イベントには mediaType が無いため、拡張子から安全に補完する。 */
-export function inferGalleryMediaType(path: string): "image" | "video" {
+/** 過去版では一覧へ混入し得たが、現在は再生を保証しない動画形式。 */
+const UNSUPPORTED_VIDEO_EXTENSIONS = new Set(["avi", "mkv"]);
+
+function galleryExtension(path: string): string {
   const cleanPath = path.split(/[?#]/, 1)[0];
   const dot = cleanPath.lastIndexOf(".");
-  const extension = dot >= 0 ? cleanPath.slice(dot + 1).toLowerCase() : "";
-  return VIDEO_EXTENSIONS.has(extension) ? "video" : "image";
+  return dot >= 0 ? cleanPath.slice(dot + 1).toLowerCase() : "";
+}
+
+function isUnsupportedGalleryVideo(path: string): boolean {
+  return UNSUPPORTED_VIDEO_EXTENSIONS.has(galleryExtension(path));
+}
+
+/** watcher の旧イベントには mediaType が無いため、拡張子から安全に補完する。 */
+export function inferGalleryMediaType(path: string): "image" | "video" {
+  return VIDEO_EXTENSIONS.has(galleryExtension(path)) ? "video" : "image";
 }
 
 /** 明示された種別を優先し、旧データだけ拡張子で補う。 */
@@ -263,6 +273,8 @@ export const useImages = create<ImagesState>((set, get) => ({
     listenerHandle?.();
     listenerHandle = await onImageGenerated((ev: ImageEvent) => {
       set((state) => {
+        // 起動時に届く旧履歴も含め、再生非対応の AVI / MKV は画像として混ぜない。
+        if (isUnsupportedGalleryVideo(ev.path)) return state;
         if (state.knownPaths.has(ev.path)) return state;
         const known = new Set(state.knownPaths);
         known.add(ev.path);
