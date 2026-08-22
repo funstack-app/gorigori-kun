@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -38,10 +39,12 @@ import { useSceneStore } from "../lib/store/scene";
 import { useScenePromptOverride } from "../lib/store/scenePrompt";
 import {
   buildRemoteMcpModelCatalog,
+  buildHiggsfieldVideoModelCatalog,
   fetchRemoteMcpModelCatalog,
   remoteMcpCatalogKey,
   type RemoteMcpCatalogModel,
   type RemoteMcpModelCatalog,
+  type RemoteMcpVideoSpecSource,
   type RemoteMcpVideoSpecs,
 } from "../lib/remoteMcpModels";
 import {
@@ -50,13 +53,7 @@ import {
 } from "../lib/store/remoteMcpGen";
 import {
   VIDEO_MODELS,
-  clampAspectForModel,
-  clampDurationForModel,
-  findVideoModel,
-  videoModelSpecItems,
-  type VideoModelId,
 } from "../lib/videoModels";
-import { useVideoGen } from "../lib/store/videoGen";
 
 // 接続先タブ。接続済みの汎用リモートMCPも同じ列へ動的に加える。
 type RemoteProviderId = RemoteMcpProviderCatalogEntry["id"];
@@ -101,9 +98,8 @@ const MAX_VIDEO_COMPARE_MODELS = 3;
  */
 const MAGNIFIC_UNAUTH_STRIKES = 2;
 
-// モデル一覧の localStorage キャッシュ (2026-06-10)。
-// 直接呼び出し化で取得は1-2秒に縮んだが、キャッシュがあれば開いた瞬間に表示し、
-// 裏で最新を取得して差し替える (stale-while-revalidate)。
+// モデル一覧の localStorage キャッシュ。
+// 初回接続時だけ自動取得し、以後は保存値を即表示する。更新通信は「再取得」だけで行う。
 const MODEL_CACHE_PREFIX = "gori.higgsfield.models.";
 
 type ModelCache = {
@@ -112,12 +108,23 @@ type ModelCache = {
   savedAt: number;
 };
 
+function fallbackHiggsfieldModels(media: "image" | "video"): HiggsfieldModelInfo[] {
+  if (media === "video") {
+    return VIDEO_MODELS.map((model) => ({
+      displayName: model.label,
+      jobSetType: model.jobSetType,
+      type: "video" as const,
+    }));
+  }
+  return staticModelsFor(media);
+}
+
 function readModelCache(media: "image" | "video"): ModelCache | null {
   try {
     const raw = localStorage.getItem(MODEL_CACHE_PREFIX + media);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as ModelCache;
-    if (!Array.isArray(parsed.models) || parsed.models.length === 0) return null;
+    if (!Array.isArray(parsed.models)) return null;
     return parsed;
   } catch {
     return null;
@@ -149,18 +156,23 @@ export function HiggsfieldModelSelector({
   const higgsfieldAuthed = useAccounts((s) => s.higgsfield.authenticated);
   const remoteSelection = useRemoteMcpGen((s) => s.selections[media]);
   const remoteVideoSelections = useRemoteMcpGen((s) => s.videoSelections);
-  const videoModelId = useVideoGen((s) => s.modelId);
-  const videoCompareModelIds = useVideoGen((s) => s.compareModelIds);
-  const setVideoModel = useVideoGen((s) => s.setModel);
-  const toggleVideoCompareModel = useVideoGen((s) => s.toggleCompareModel);
+  const setRemoteVideoSelections = useRemoteMcpGen((s) => s.setVideoSelections);
   const [models, setModels] = useState<HiggsfieldModelInfo[]>([]);
   const [planType, setPlanType] = useState<string | null>(null);
   const [loadState, setLoadState] = useState<LoadState>("idle");
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [usingFallback, setUsingFallback] = useState(false);
+  const [lastFetchedAt, setLastFetchedAt] = useState<number | null>(null);
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [anchorRect, setAnchorRect] = useState<DOMRect | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const buttonRef = useRef<HTMLButtonElement | null>(null);
+  const modelsRef = useRef<HiggsfieldModelInfo[]>([]);
+
+  useEffect(() => {
+    modelsRef.current = models;
+  }, [models]);
 
   const subjectFraming = useSceneStore((state) => state.subjectFraming);
   const lightingMood = useSceneStore((state) => state.lightingMood);
@@ -178,64 +190,77 @@ export function HiggsfieldModelSelector({
   }, [promptOverride, subjectFraming, lightingMood, camera, style, reference]);
   const aspectForCost = subjectFraming.aspectRatio;
 
-  useEffect(() => {
-    let cancelled = false;
+  const refreshHiggsfieldModels = useCallback(async () => {
+    if (!higgsfieldAuthed) return;
+    setLoadState("loading");
+    setLoadError(null);
+    try {
+      // 初回接続後、または利用者が「再取得」を押した時だけ通信する。
+      const [nextModels, account] = await Promise.all([
+        higgsfieldMcp.listModels(media),
+        higgsfieldMcp.account().catch(() => null),
+      ]);
+      const fetchedAt = Date.now();
+      const nextPlanType = account?.subscriptionPlanType ?? null;
+      setModels(nextModels);
+      setPlanType(nextPlanType);
+      setUsingFallback(false);
+      setLastFetchedAt(fetchedAt);
+      setLoadState("ready");
+      writeModelCache(media, {
+        models: nextModels,
+        planType: nextPlanType,
+        savedAt: fetchedAt,
+      });
+    } catch (error) {
+      setLoadError(String(error));
+      if (modelsRef.current.length === 0) {
+        setUsingFallback(true);
+        setModels(fallbackHiggsfieldModels(media));
+      }
+      setLoadState("error");
+    }
+  }, [higgsfieldAuthed, media]);
 
-    const load = async () => {
-      setLoadState("loading");
-      setOpen(false);
+  useEffect(() => {
+    setOpen(false);
+    setLoadError(null);
+    setUsingFallback(false);
+    if (!higgsfieldAuthed) {
       setModels([]);
       setPlanType(null);
-      // 段階7: installed 概念を廃止。接続済み判定は MCP status 由来の
-      // accounts.higgsfield.authenticated を正とする。未認証なら拡張未接続
-      // (= GPT Image 2 デフォルトで動く正常状態) として needsAuth で抜ける。
-      if (!higgsfieldAuthed) {
-        if (cancelled) return;
-        setLoadState("needsAuth");
-        return;
-      }
+      setLastFetchedAt(null);
+      setLoadState("needsAuth");
+      return;
+    }
+    const cached = readModelCache(media);
+    if (cached) {
+      setModels(cached.models);
+      setPlanType(cached.planType);
+      setLastFetchedAt(cached.savedAt);
+      setLoadState("ready");
+      return;
+    }
+    setModels([]);
+    setPlanType(null);
+    setLastFetchedAt(null);
+    void refreshHiggsfieldModels();
+  }, [higgsfieldAuthed, media, refreshHiggsfieldModels]);
 
-      // キャッシュ (なければ静的カタログ) を即表示し、裏で最新を取得して差し替える
-      // (stale-while-revalidate)。「モデル一覧を確認中...」でピッカーがブロックされる
-      // 時間をゼロにする (2026-06-10 実機FB)。
-      const cached = readModelCache(media);
-      if (!cancelled) {
-        setModels(cached ? cached.models : staticModelsFor(media));
-        setPlanType(cached?.planType ?? null);
-        setLoadState("ready");
-      }
-
-      try {
-        // モデル一覧 / アカウント情報は mcpServer/tool/call の直接呼び出し
-        // (models_explore / balance、実測1-2秒。LLM 仲介は 2026-06-10 に全廃)。
-        const [nextModels, account] = await Promise.all([
-          higgsfieldMcp.listModels(media),
-          higgsfieldMcp.account().catch((err) => {
-            // account は任意なので失敗しても null で degrade し、一覧表示は止めない。
-            console.error("[HiggsfieldModelSelector] account fetch failed:", err);
-            return null;
-          }),
-        ]);
-        if (cancelled) return;
-        const planType = account?.subscriptionPlanType ?? null;
-        setModels(nextModels);
-        setPlanType(planType);
-        setLoadState("ready");
-        writeModelCache(media, { models: nextModels, planType, savedAt: Date.now() });
-      } catch (err) {
-        if (cancelled) return;
-        // キャッシュ or 静的カタログを既に表示しているので、UI は止めず静かに degrade。
-        // (静的カタログの model id でも生成は通る。サーバ側で検証される)
-        console.error("[HiggsfieldModelSelector] model list refresh failed:", err);
-      }
-    };
-
-    void load();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [media, higgsfieldAuthed]);
+  useEffect(() => {
+    if (media !== "video" || higgsfieldAuthed) return;
+    const nextSelections = remoteVideoSelections.filter(
+      (selection) => selection.providerId !== "higgsfield",
+    );
+    if (nextSelections.length !== remoteVideoSelections.length) {
+      setRemoteVideoSelections(nextSelections);
+    }
+  }, [
+    higgsfieldAuthed,
+    media,
+    remoteVideoSelections,
+    setRemoteVideoSelections,
+  ]);
 
   useEffect(() => {
     if (!open) return;
@@ -267,22 +292,15 @@ export function HiggsfieldModelSelector({
     if (!open) setQuery("");
   }, [open]);
 
-  // HiggsField 未接続でも GPT Image 2 (デフォルト) を使えるので、
-  // picker を開けるようにする。読み込み中だけ disabled。
-  const disabled = loadState === "loading" || loadState === "idle";
+  // 取得中でも他の接続先へ切り替えられるよう、ピッカー自体は開ける。
+  const disabled = false;
   const selectedJobSetTypes = useMemo(
     () => new Set(selectedModels.map((model) => model.jobSetType)),
     [selectedModels],
   );
-  const selectedBuiltInVideoIds =
-    remoteVideoSelections.length > 0
-      ? videoCompareModelIds
-      : videoCompareModelIds.length >= 2
-        ? videoCompareModelIds
-        : [videoModelId];
   const triggerText =
     media === "video"
-      ? getVideoTriggerText(selectedBuiltInVideoIds, remoteVideoSelections)
+      ? getVideoTriggerText(remoteVideoSelections)
       : getTriggerText(selectedModels, selectedMagnificForTrigger, remoteSelection);
   const helperText = getHelperText(loadState, selectedModels.length);
   const sections = useMemo(() => buildSections(media, models, query), [media, models, query]);
@@ -333,11 +351,11 @@ export function HiggsfieldModelSelector({
         </span>
         <span className="min-w-0 flex-1 truncate text-right">{triggerText}</span>
         {(media === "video"
-          ? remoteVideoSelections.length + selectedBuiltInVideoIds.length
+          ? remoteVideoSelections.length
           : selectedModels.length) > 1 && (
           <span className="shrink-0 rounded bg-pink-500/20 px-1.5 py-0.5 text-xs font-semibold text-pink-200">
             {media === "video"
-              ? remoteVideoSelections.length + selectedBuiltInVideoIds.length
+              ? remoteVideoSelections.length
               : selectedModels.length}
           </span>
         )}
@@ -364,26 +382,20 @@ export function HiggsfieldModelSelector({
           query={query}
           onQueryChange={setQuery}
           sections={sections}
+          higgsfieldModels={models}
           totalVisibleModels={totalVisibleModels}
           selectedModels={selectedModels}
           selectedJobSetTypes={selectedJobSetTypes}
           planType={planType}
+          higgsfieldAuthed={higgsfieldAuthed}
+          higgsfieldLoadError={loadError}
+          higgsfieldUsingFallback={usingFallback}
+          higgsfieldLastFetchedAt={lastFetchedAt}
+          onRefreshHiggsfield={refreshHiggsfieldModels}
           prompt={promptForCost}
           aspect={aspectForCost}
           onPickCodex={() => setSelectedModels([])}
           onToggleModel={toggleModel}
-          selectedBuiltInVideoIds={selectedBuiltInVideoIds}
-          onReplaceBuiltInVideoIds={(nextIds) => {
-            for (const id of videoCompareModelIds) toggleVideoCompareModel(id);
-            if (nextIds.length === 0) return;
-            setVideoModel(nextIds[0]);
-            const currentVideo = useVideoGen.getState();
-            useVideoGen.setState({
-              duration: clampDurationForModel(nextIds[0], currentVideo.duration),
-              aspectRatio: clampAspectForModel(nextIds[0], currentVideo.aspectRatio),
-            });
-            for (const id of nextIds) toggleVideoCompareModel(id);
-          }}
           onClose={() => setOpen(false)}
         />
       )}
@@ -401,16 +413,20 @@ function ModelPickerPopover({
   query,
   onQueryChange,
   sections,
+  higgsfieldModels,
   totalVisibleModels,
   selectedModels,
   selectedJobSetTypes,
   planType,
+  higgsfieldAuthed,
+  higgsfieldLoadError,
+  higgsfieldUsingFallback,
+  higgsfieldLastFetchedAt,
+  onRefreshHiggsfield,
   prompt,
   aspect,
   onPickCodex,
   onToggleModel,
-  selectedBuiltInVideoIds,
-  onReplaceBuiltInVideoIds,
   onClose,
 }: {
   media: "image" | "video";
@@ -420,16 +436,20 @@ function ModelPickerPopover({
   query: string;
   onQueryChange: (query: string) => void;
   sections: ModelSection[];
+  higgsfieldModels: HiggsfieldModelInfo[];
   totalVisibleModels: number;
   selectedModels: SelectedModel[];
   selectedJobSetTypes: Set<string>;
   planType: string | null;
+  higgsfieldAuthed: boolean;
+  higgsfieldLoadError: string | null;
+  higgsfieldUsingFallback: boolean;
+  higgsfieldLastFetchedAt: number | null;
+  onRefreshHiggsfield: () => Promise<void>;
   prompt: string;
   aspect: string;
   onPickCodex: () => void;
   onToggleModel: (model: SelectedModel) => void;
-  selectedBuiltInVideoIds: VideoModelId[];
-  onReplaceBuiltInVideoIds: (ids: VideoModelId[]) => void;
   onClose: () => void;
 }) {
   const [cost, setCost] = useState<CostState>({ kind: "idle" });
@@ -463,7 +483,7 @@ function ModelPickerPopover({
   });
   const toolsRequestedRef = useRef(new Set<RemoteProviderId>());
   const magnificCount = selectedMagnificModels.length;
-  const selectedVideoCount = selectedBuiltInVideoIds.length + remoteVideoSelections.length;
+  const selectedVideoCount = remoteVideoSelections.length;
   const [providerTab, setProviderTab] = useState<ProviderTab>(() => {
     const selectedVideoProvider = remoteVideoSelections[0]?.providerId;
     if (media === "video" && selectedVideoProvider === "magnific" && magnificAuthed) {
@@ -476,7 +496,11 @@ function ModelPickerPopover({
     if (selectedProvider && remoteMcpState[selectedProvider.id]?.authenticated) {
       return selectedProvider.id;
     }
-    if (media === "video") return "default";
+    if (media === "video") {
+      if (higgsfieldAuthed) return "higgsfield";
+      if (magnificAuthed) return "magnific";
+      return connectedRemoteProviders[0]?.id ?? "default";
+    }
     if (fallbackLabel) return "default";
     return magnificCount > 0 ? "magnific" : selectedCount > 0 ? "higgsfield" : "default";
   });
@@ -498,6 +522,27 @@ function ModelPickerPopover({
     }));
 
     const load = async () => {
+      const catalogKey = remoteMcpCatalogKey(providerId, media);
+      const storedCatalog = modelCatalogs[catalogKey];
+      if (
+        storedCatalog &&
+        storedCatalog.source !== "standard" &&
+        storedCatalog.source !== "unavailable"
+      ) {
+        setRemoteModels((current) => ({
+          ...current,
+          [providerId]: {
+            kind: "ready",
+            tools: {
+              providerId,
+              authStatus: "cached",
+              tools: storedCatalog.generationTool ? [storedCatalog.generationTool] : [],
+            },
+            catalog: { ...storedCatalog, loadedFromCache: true },
+          },
+        }));
+        return;
+      }
       const [cachedTools, cachedCatalog] = await Promise.all([
         remoteMcp.listToolsCached(providerId).catch(() => null),
         remoteMcp.discoveryCached(providerId).catch(() => null),
@@ -506,19 +551,20 @@ function ModelPickerPopover({
       try {
         const tools = cachedTools ?? (await remoteMcp.listTools(providerId));
         if (cancelled) return;
-        const catalogKey = remoteMcpCatalogKey(providerId, media);
-        const storedCatalog = modelCatalogs[catalogKey];
-        const catalog =
-          storedCatalog &&
-          storedCatalog.source !== "standard" &&
-          storedCatalog.source !== "unavailable"
-            ? storedCatalog
-            : await fetchRemoteMcpModelCatalog({
+        const catalog = cachedCatalog?.models.length
+          ? buildRemoteMcpModelCatalog({
+              providerId,
+              providerLabel: activeRemoteProvider.label,
+              kind: media,
+              tools: tools.tools,
+              cachedModels: cachedCatalog.models,
+              loadedFromCache: true,
+            })
+          : await fetchRemoteMcpModelCatalog({
                 providerId,
                 providerLabel: activeRemoteProvider.label,
                 kind: media,
                 tools: tools.tools,
-                cachedModels: cachedCatalog?.models,
               });
         if (cancelled) return;
         setModelCatalog(catalogKey, catalog);
@@ -584,9 +630,26 @@ function ModelPickerPopover({
         }
       }
     } catch (error) {
+      const cached = useRemoteMcpGen.getState().modelCatalogs[
+        remoteMcpCatalogKey(providerId, media)
+      ];
       setRemoteModels((current) => ({
         ...current,
-        [providerId]: { kind: "error", message: String(error) },
+        [providerId]: cached
+          ? {
+              kind: "ready",
+              tools: {
+                providerId,
+                authStatus: "cached",
+                tools: cached.generationTool ? [cached.generationTool] : [],
+              },
+              catalog: {
+                ...cached,
+                loadedFromCache: true,
+                warning: `再取得できませんでした: ${String(error)}`,
+              },
+            }
+          : { kind: "error", message: String(error) },
       }));
     }
   };
@@ -616,7 +679,21 @@ function ModelPickerPopover({
       setModelCatalog(remoteMcpCatalogKey("magnific", "video"), catalog);
       setMagnificVideoState({ kind: "ready", catalog });
     } catch (error) {
-      setMagnificVideoState({ kind: "error", message: String(error) });
+      const cached = useRemoteMcpGen.getState().modelCatalogs[
+        remoteMcpCatalogKey("magnific", "video")
+      ];
+      setMagnificVideoState(
+        cached
+          ? {
+              kind: "ready",
+              catalog: {
+                ...cached,
+                loadedFromCache: true,
+                warning: `再取得できませんでした: ${String(error)}`,
+              },
+            }
+          : { kind: "error", message: String(error) },
+      );
     }
   };
 
@@ -657,6 +734,22 @@ function ModelPickerPopover({
     remoteVideoSelections,
     setRemoteSelection,
     setRemoteVideoSelections,
+  ]);
+
+  // 動画では未接続の HiggsField タブを出さず、以前の選択も生成へ残さない。
+  useEffect(() => {
+    if (media !== "video" || higgsfieldAuthed) return;
+    if (providerTab === "higgsfield") {
+      setProviderTab(
+        magnificAuthed ? "magnific" : connectedRemoteProviders[0]?.id ?? "default",
+      );
+    }
+  }, [
+    connectedRemoteProviders,
+    higgsfieldAuthed,
+    magnificAuthed,
+    media,
+    providerTab,
   ]);
 
   // Magnific 未接続なのに magnific タブが開いたままだと、タブボタンは消えるのに
@@ -742,32 +835,58 @@ function ModelPickerPopover({
     ? (remoteModels[activeRemoteProvider.id] ?? { kind: "idle" as const })
     : null;
   const isMagnificVideoTab = media === "video" && providerTab === "magnific";
-  const activeCatalog = activeRemoteProvider
+  const isHiggsfieldVideoTab = media === "video" && providerTab === "higgsfield";
+  const higgsfieldVideoCatalog = useMemo(
+    () =>
+      media === "video" && (loadState === "ready" || loadState === "error")
+        ? buildHiggsfieldVideoModelCatalog(higgsfieldModels, {
+            fallback: higgsfieldUsingFallback,
+            fetchedAt: higgsfieldLastFetchedAt ?? undefined,
+          })
+        : null,
+    [
+      media,
+      loadState,
+      higgsfieldModels,
+      higgsfieldUsingFallback,
+      higgsfieldLastFetchedAt,
+    ],
+  );
+  const activeCatalog = isHiggsfieldVideoTab
+    ? higgsfieldVideoCatalog
+    : activeRemoteProvider
     ? activeRemoteState?.kind === "ready"
       ? activeRemoteState.catalog
       : null
     : isMagnificVideoTab && magnificVideoState.kind === "ready"
       ? magnificVideoState.catalog
       : null;
-  const activeCatalogUiState = activeRemoteProvider
+  const activeCatalogUiState = isHiggsfieldVideoTab
+    ? loadState === "loading" && !higgsfieldVideoCatalog
+      ? ({ kind: "loading" } as const)
+      : higgsfieldVideoCatalog
+        ? ({ kind: "ready", catalog: higgsfieldVideoCatalog } as const)
+        : loadState === "error"
+          ? ({ kind: "error", message: higgsfieldLoadError ?? "取得できませんでした" } as const)
+          : ({ kind: "idle" } as const)
+    : activeRemoteProvider
     ? activeRemoteState
     : isMagnificVideoTab
       ? magnificVideoState
       : null;
   const normalizedRemoteQuery = query.trim().toLowerCase();
-  const builtInVideoModels = VIDEO_MODELS.filter((model) =>
-    `${model.label} ${model.id} ${model.jobSetType} ${model.description}`
-      .toLowerCase()
-      .includes(normalizedRemoteQuery),
-  );
   const activeCatalogModels = (activeCatalog?.models ?? []).filter((model) =>
     `${model.name} ${model.id} ${model.label ?? ""}`
       .toLowerCase()
       .includes(normalizedRemoteQuery),
   );
-  const activeCatalogProviderId = activeRemoteProvider?.id ?? (isMagnificVideoTab ? "magnific" : null);
+  const activeCatalogProviderId = isHiggsfieldVideoTab
+    ? "higgsfield"
+    : activeRemoteProvider?.id ?? (isMagnificVideoTab ? "magnific" : null);
   const activeCatalogProviderLabel =
-    activeRemoteProvider?.label ?? (isMagnificVideoTab ? "Magnific" : null);
+    isHiggsfieldVideoTab
+      ? "HiggsField"
+      : activeRemoteProvider?.label ?? (isMagnificVideoTab ? "Magnific" : null);
   const selectedActiveCatalog =
     activeCatalogProviderId && media === "video"
       ? remoteVideoSelections.find(
@@ -776,20 +895,28 @@ function ModelPickerPopover({
       : activeCatalogProviderId && remoteSelection?.providerId === activeCatalogProviderId
         ? remoteSelection
         : null;
-  const displayedModelCount = activeRemoteProvider
+  const displayedModelCount = isHiggsfieldVideoTab
+    ? activeCatalogModels.length
+    : activeRemoteProvider
     ? activeCatalogModels.length
     : providerTab === "magnific"
       ? media === "video"
         ? activeCatalogModels.length
         : FEATURED_MAGNIFIC_IMAGE_MODELS.length
       : providerTab === "default"
-        ? media === "video"
-          ? builtInVideoModels.length
-          : 1
+        ? 1
         : totalVisibleModels;
+  const hasActiveCatalogTab = Boolean(
+    activeRemoteProvider || isMagnificVideoTab || isHiggsfieldVideoTab,
+  );
+  const refreshActiveCatalog = () => {
+    if (isHiggsfieldVideoTab) return void onRefreshHiggsfield();
+    if (activeRemoteProvider) return void refreshRemoteModels(activeRemoteProvider.id);
+    return void refreshMagnificVideoModels();
+  };
 
   const confirmSelection = () => {
-    if (activeRemoteProvider || isMagnificVideoTab) {
+    if (activeRemoteProvider || isMagnificVideoTab || isHiggsfieldVideoTab) {
       if (media === "image" && !selectedActiveCatalog) return;
       onClose();
       return;
@@ -822,10 +949,6 @@ function ModelPickerPopover({
           remoteVideoSelections.filter((_, index) => index !== selectedIndex),
         );
       } else if (selectedVideoCount < MAX_VIDEO_COMPARE_MODELS) {
-        // 単一内蔵モデルも compareModelIds に写し、接続先との混在選択を保持する。
-        if (remoteVideoSelections.length === 0 && selectedBuiltInVideoIds.length > 0) {
-          onReplaceBuiltInVideoIds(selectedBuiltInVideoIds);
-        }
         setRemoteVideoSelections([...remoteVideoSelections, nextSelection]);
       }
       setSelectedModels([]);
@@ -902,20 +1025,22 @@ function ModelPickerPopover({
       <div
         className="flex shrink-0 flex-wrap gap-1 border-b border-[#242424] px-2 pt-2"
       >
-        <button
-          type="button"
-          onClick={() => {
-            setProviderTab("default");
-            if (media === "image" && !fallbackLabel) {
-              setSelectedModels([]);
-              clearMagnific();
-            }
-          }}
-          className={`shrink-0 whitespace-nowrap rounded-t-md px-2.5 py-1 text-[11px] font-bold ${providerTab === "default" ? "bg-[#1e1e1e] text-white" : "text-neutral-500 hover:text-white"}`}
-        >
-          {media === "video" ? "内蔵" : fallbackLabel ? "既存" : "デフォルト"}
-        </button>
-        {!fallbackLabel && (
+        {media === "image" && (
+          <button
+            type="button"
+            onClick={() => {
+              setProviderTab("default");
+              if (!fallbackLabel) {
+                setSelectedModels([]);
+                clearMagnific();
+              }
+            }}
+            className={`shrink-0 whitespace-nowrap rounded-t-md px-2.5 py-1 text-[11px] font-bold ${providerTab === "default" ? "bg-[#1e1e1e] text-white" : "text-neutral-500 hover:text-white"}`}
+          >
+            {fallbackLabel ? "既存" : "デフォルト"}
+          </button>
+        )}
+        {((media === "image" && !fallbackLabel) || (media === "video" && higgsfieldAuthed)) && (
           <button
             type="button"
             onClick={() => {
@@ -973,49 +1098,48 @@ function ModelPickerPopover({
           </div>
         )}
 
-        {providerTab === "default" && media === "video" && (
-          <section className="mb-3">
-            <div className="mb-1 flex items-center justify-between gap-2 px-1">
-              <h4 className="text-[10px] font-semibold uppercase tracking-wide text-neutral-500">
-                内蔵 Higgsfield
-              </h4>
-              <span className="text-[10px] font-medium tabular-nums text-neutral-600">
-                {builtInVideoModels.length}
-              </span>
+        {providerTab === "default" &&
+          media === "video" &&
+          !higgsfieldAuthed &&
+          !magnificAuthed &&
+          connectedRemoteProviders.length === 0 && (
+            <div className="rounded-md border border-amber-500/30 bg-amber-500/5 px-2.5 py-2.5">
+              <p className="text-[11px] font-bold text-amber-200">動画の接続先がありません</p>
+              <p className="mt-1 text-[10px] leading-relaxed text-neutral-400">
+                設定の「接続先」で、使っている動画サービスを接続してください。
+              </p>
             </div>
-            <div className="space-y-1">
-              {builtInVideoModels.map((videoModel) => {
-                const selected = selectedBuiltInVideoIds.includes(videoModel.id);
-                return (
-                  <ModelRow
-                    key={videoModel.id}
-                    title={videoModel.label}
-                    description={videoModel.description}
-                    details={videoModelSpecItems(videoModel)}
-                    icon="H"
-                    selected={selected}
-                    disabled={!selected && selectedVideoCount >= MAX_VIDEO_COMPARE_MODELS}
-                    onToggle={() => {
-                      if (selected && selectedVideoCount === 1) return;
-                      const next = selected
-                        ? selectedBuiltInVideoIds.filter((id) => id !== videoModel.id)
-                        : [...selectedBuiltInVideoIds, videoModel.id].slice(
-                            0,
-                            MAX_VIDEO_COMPARE_MODELS,
-                          );
-                      onReplaceBuiltInVideoIds(next);
-                    }}
-                  />
-                );
-              })}
+          )}
+
+        {providerTab === "higgsfield" && media === "image" && higgsfieldAuthed && (
+          <div className="mb-2 rounded-md bg-pink-500/5 px-2 py-1.5">
+            <div className="flex items-center justify-between gap-2">
+              <div>
+                <p className="text-[10px] text-pink-200">生成モデルを選択</p>
+                <p className="text-[9px] text-neutral-500">
+                  最終取得: {formatFetchedAt(higgsfieldLastFetchedAt ?? undefined)}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => void onRefreshHiggsfield()}
+                className="text-[10px] font-bold text-pink-200 hover:text-white"
+              >
+                再取得
+              </button>
             </div>
-            <p className="mt-2 text-[10px] leading-relaxed text-neutral-500">
-              最大3モデル。2つ以上選ぶと、各モデルのおすすめ設定で比較生成します。
-            </p>
-          </section>
+            {higgsfieldLoadError && (
+              <p className="mt-1 text-[9px] leading-relaxed text-amber-200">
+                取得できませんでした。
+                {higgsfieldUsingFallback
+                  ? "実測済みの補完一覧を表示しています。"
+                  : "保存済み一覧を表示しています。"}
+              </p>
+            )}
+          </div>
         )}
 
-        {providerTab === "higgsfield" &&
+        {providerTab === "higgsfield" && media === "image" &&
           (sections.length === 0 ? (
             // API-02 (2026-07-25): 「モデルが無い」と「未接続」を区別する。
             // 未接続のときは次にやること (設定 → 接続先) を明記する。
@@ -1098,25 +1222,21 @@ function ModelPickerPopover({
           </div>
         )}
 
-        {(activeRemoteProvider || isMagnificVideoTab) && activeCatalogUiState?.kind === "loading" && (
+        {hasActiveCatalogTab && activeCatalogUiState?.kind === "loading" && (
           <div className="flex items-center justify-center gap-2 rounded-md px-2 py-6 text-[11px] text-neutral-400">
             <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-sky-300/30 border-t-sky-300" />
             モデル一覧を確認中…
           </div>
         )}
 
-        {(activeRemoteProvider || isMagnificVideoTab) && activeCatalogUiState?.kind === "idle" && (
+        {hasActiveCatalogTab && activeCatalogUiState?.kind === "idle" && (
           <div className="rounded-lg border border-sky-400/20 bg-sky-500/5 p-3 text-center">
             <p className="mb-3 text-[10px] leading-relaxed text-neutral-400">
               契約中のモデル一覧を取得します。
             </p>
             <button
               type="button"
-              onClick={() =>
-                activeRemoteProvider
-                  ? void refreshRemoteModels(activeRemoteProvider.id)
-                  : void refreshMagnificVideoModels()
-              }
+              onClick={refreshActiveCatalog}
               className="h-8 rounded-md bg-sky-500 px-3 text-xs font-bold text-white transition hover:bg-sky-400"
             >
               モデル一覧を取得
@@ -1124,7 +1244,7 @@ function ModelPickerPopover({
           </div>
         )}
 
-        {(activeRemoteProvider || isMagnificVideoTab) && activeCatalogUiState?.kind === "error" && (
+        {hasActiveCatalogTab && activeCatalogUiState?.kind === "error" && (
           <div className="rounded-lg border border-amber-400/30 bg-amber-500/5 p-3">
             <p className="text-[11px] font-bold text-amber-200">モデル一覧を取得できませんでした</p>
             <p className="mt-1 line-clamp-4 break-all text-[10px] leading-relaxed text-neutral-400">
@@ -1132,11 +1252,7 @@ function ModelPickerPopover({
             </p>
             <button
               type="button"
-              onClick={() =>
-                activeRemoteProvider
-                  ? void refreshRemoteModels(activeRemoteProvider.id)
-                  : void refreshMagnificVideoModels()
-              }
+              onClick={refreshActiveCatalog}
               className="mt-3 h-8 w-full rounded-md border border-amber-300/30 bg-amber-500/10 px-3 text-xs font-bold text-amber-100 hover:bg-amber-500/20"
             >
               再試行
@@ -1144,24 +1260,42 @@ function ModelPickerPopover({
           </div>
         )}
 
-        {(activeRemoteProvider || isMagnificVideoTab) &&
+        {hasActiveCatalogTab &&
           activeCatalogUiState?.kind === "ready" &&
           activeCatalog && (
             <div>
               <div className="mb-2 flex items-center justify-between gap-2 rounded-md bg-sky-500/5 px-2 py-1.5">
-                <p className="text-[10px] text-sky-200">生成モデルを選択</p>
+                <div>
+                  <p className="text-[10px] text-sky-200">生成モデルを選択</p>
+                  <p className="text-[9px] text-neutral-500">
+                    最終取得: {formatFetchedAt(activeCatalog.fetchedAt)}
+                  </p>
+                </div>
                 <button
                   type="button"
-                  onClick={() =>
-                    activeRemoteProvider
-                      ? void refreshRemoteModels(activeRemoteProvider.id)
-                      : void refreshMagnificVideoModels()
-                  }
+                  onClick={refreshActiveCatalog}
                   className="shrink-0 text-[10px] font-bold text-sky-200 hover:text-white"
                 >
                   再取得
                 </button>
               </div>
+              {((isHiggsfieldVideoTab && higgsfieldLoadError) || activeCatalog.warning) && (
+                <div className="mb-2 rounded-md border border-amber-400/30 bg-amber-500/5 px-2 py-2">
+                  <p className="text-[10px] font-bold text-amber-200">
+                    {isHiggsfieldVideoTab && higgsfieldLoadError
+                      ? "モデル一覧を取得できませんでした"
+                      : "一部の情報を取得できませんでした"}
+                  </p>
+                  <p className="mt-0.5 text-[9px] leading-relaxed text-neutral-400">
+                    {activeCatalog.warning ?? summarizeRawError(higgsfieldLoadError ?? "")}
+                  </p>
+                  {activeCatalog.source === "fallback" && (
+                    <p className="mt-1 text-[9px] font-bold text-amber-100">
+                      実測済みの補完一覧を表示中です。実取得一覧ではありません。
+                    </p>
+                  )}
+                </div>
+              )}
               {activeCatalogModels.length === 0 ? (
                 <p className="rounded-md px-2 py-3 text-center text-[11px] text-neutral-600">
                   該当するモデルがありません
@@ -1206,7 +1340,7 @@ function ModelPickerPopover({
               )}
               {!activeCatalog.generationTool?.inputSchemaJson.trim() && (
                 <p className="mt-2 rounded-md border border-amber-400/20 px-2 py-2 text-[10px] text-amber-200">
-                  生成に必要な入力形式を取得できないため、現在は選択できません。
+                  テキストから生成できるツールの入力形式を取得できないため、現在は選択できません。
                 </p>
               )}
             </div>
@@ -1215,7 +1349,7 @@ function ModelPickerPopover({
       <div className="shrink-0 border-t border-[#242424] p-3">
         <div className="mb-2 flex items-center justify-between gap-2 text-[11px]">
           <span className="font-medium text-neutral-300">
-            {activeRemoteProvider || isMagnificVideoTab
+            {hasActiveCatalogTab
               ? media === "video" && selectedVideoCount >= 2
                 ? `${selectedVideoCount}モデル選択（最大${MAX_VIDEO_COMPARE_MODELS}）`
                 : selectedActiveCatalog
@@ -1233,7 +1367,7 @@ function ModelPickerPopover({
           </span>
           <span className="max-w-[190px] text-right font-semibold leading-tight text-neutral-500">
             {/* 不明な消費量を0や無制限に見せず、接続先での確認を案内する。 */}
-            {activeRemoteProvider || isMagnificVideoTab || magnificCount > 0
+            {hasActiveCatalogTab || magnificCount > 0
               ? "消費量は各サービスの表示を確認"
               : formatCost(cost)}
           </span>
@@ -1242,13 +1376,13 @@ function ModelPickerPopover({
           type="button"
           onClick={confirmSelection}
           disabled={Boolean(
-            (activeRemoteProvider || isMagnificVideoTab) &&
+            hasActiveCatalogTab &&
               media === "image" &&
               !selectedActiveCatalog,
           )}
           className="h-8 w-full rounded-md bg-pink-500 px-3 text-xs font-semibold text-white transition hover:bg-pink-600 disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-400"
         >
-          {activeRemoteProvider || isMagnificVideoTab
+          {hasActiveCatalogTab
             ? media === "video"
               ? selectedVideoCount >= 2
                 ? `${selectedVideoCount}モデルで比較生成`
@@ -1259,13 +1393,7 @@ function ModelPickerPopover({
                 ? "このモデルを選択"
                 : "モデルを選択してください"
             : fallbackLabel && providerTab === "default"
-              ? media === "video" && selectedVideoCount >= 2
-                ? `${selectedVideoCount}モデルで比較生成`
-                : media === "video" && remoteVideoSelections.length === 1
-                  ? "このモデルで生成"
-                  : media === "video" && selectedBuiltInVideoIds.length >= 2
-                    ? `${selectedBuiltInVideoIds.length}モデルで比較生成`
-                    : "このモデルで生成"
+              ? "このモデルで生成"
             : magnificCount >= 2
             ? `Magnific ${magnificCount} モデルで比較生成`
             : magnificCount === 1
@@ -1465,7 +1593,15 @@ function remoteCatalogModelDescription(
   }
   if (source === "enum") return "生成設定から取得";
   if (source === "cache") return "保存済みのモデル一覧から取得";
+  if (source === "fallback") return "実取得失敗時の実測補完データ";
   return "接続先のモデル一覧から取得";
+}
+
+function withSpecSource(
+  value: string,
+  source: RemoteMcpVideoSpecSource | undefined,
+): string {
+  return source === "measured-fallback" ? `${value}（実測補完）` : value;
 }
 
 function remoteVideoSpecDetails(
@@ -1477,24 +1613,37 @@ function remoteVideoSpecDetails(
       : specs.startEndImages === "unsupported"
         ? "非対応"
         : "未取得";
-  const references = specs.referenceTypes
+  const referencesValue = specs.referenceTypes
     ? specs.referenceTypes.length > 0
       ? specs.referenceTypes
           .map((type) => (type === "image" ? "画像" : type === "video" ? "動画" : "モーション"))
           .join(" / ")
       : "なし"
     : "未取得";
+  const references = specs.referenceTypes
+    ? withSpecSource(referencesValue, specs.sources?.referenceTypes)
+    : referencesValue;
   const details = [
     { label: "開始・終了画像 (Start/End)", value: status },
     { label: "参照できる素材 (Reference)", value: references },
     {
       label: "参照上限 (Limit)",
-      value: specs.referenceLimit === null ? "未取得" : `${specs.referenceLimit}件`,
+      value:
+        specs.referenceLimit === null
+          ? "未取得"
+          : withSpecSource(`${specs.referenceLimit}件`, specs.sources?.referenceLimit),
     },
-    { label: "尺 (Duration)", value: specs.duration ?? "未取得" },
+    {
+      label: "尺 (Duration)",
+      value: specs.duration
+        ? withSpecSource(specs.duration, specs.sources?.duration)
+        : "未取得",
+    },
     {
       label: "比率 (Aspect ratio)",
-      value: specs.aspectRatios?.join(" / ") ?? "未取得",
+      value: specs.aspectRatios
+        ? withSpecSource(specs.aspectRatios.join(" / "), specs.sources?.aspectRatios)
+        : "未取得",
     },
   ];
   if (specs.modes) details.push({ label: "モード", value: specs.modes.join(" / ") });
@@ -1537,18 +1686,16 @@ function getTriggerText(
 }
 
 function getVideoTriggerText(
-  builtInIds: readonly VideoModelId[],
   remoteSelections: readonly RemoteMcpSelection[],
 ): string {
-  const total = builtInIds.length + remoteSelections.length;
+  const total = remoteSelections.length;
   if (total >= 2) return `${total}モデルで比較`;
   if (remoteSelections.length === 1) {
     const selected = remoteSelections[0];
     const name = selected.model?.label ?? selected.model?.name ?? selected.toolTitle ?? selected.toolName;
     return `${selected.providerLabel}: ${name}`;
   }
-  if (builtInIds.length >= 2) return `${builtInIds.length}モデルで比較`;
-  return findVideoModel(builtInIds[0])?.label ?? VIDEO_MODELS[0].label;
+  return "モデルを選択してください";
 }
 
 function getHelperText(loadState: LoadState, _selectedCount: number): string | null {
@@ -1572,6 +1719,20 @@ function summarizeRawError(raw: string): string {
   const compact = raw.replace(/\s+/g, " ").trim();
   if (!compact) return "生応答に説明がありませんでした。再試行できます。";
   return compact.length > 320 ? `${compact.slice(0, 320)}…` : compact;
+}
+
+function formatFetchedAt(value: number | undefined): string {
+  if (!value || !Number.isFinite(value)) return "日時不明";
+  try {
+    return new Intl.DateTimeFormat("ja-JP", {
+      month: "numeric",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    }).format(new Date(value));
+  } catch {
+    return "日時不明";
+  }
 }
 
 /**

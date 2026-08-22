@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   VIDEO_MODELS,
   durationValuesForConstraint,
+  durationValuesForConstraintOrGeneric,
   intersectVideoModelCapabilities,
   videoModelCapabilities,
   type VideoModelCapabilities,
@@ -19,6 +20,12 @@ describe("video model capabilities", () => {
         default: 6,
       }),
     ).toEqual([4, 6, 8, 10]);
+  });
+
+  it("仕様未取得では汎用の2〜15秒をプルダウン候補にする", () => {
+    expect(durationValuesForConstraintOrGeneric(null)).toEqual([
+      2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+    ]);
   });
 
   it("複数の内蔵モデルでは全モデル共通の尺と比率だけを残す", () => {

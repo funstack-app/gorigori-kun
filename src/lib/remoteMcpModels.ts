@@ -1,25 +1,45 @@
 import {
   remoteMcp,
+  type HiggsfieldModelInfo,
   type RemoteMcpDiscoveredModel,
   type RemoteMcpQueryResult,
   type RemoteMcpToolInfo,
 } from "./ipc";
 import {
   classifyRemoteMcpTool,
+  buildRemoteMcpParams,
   type RemoteMcpToolKind,
   type RemoteMcpToolLike,
 } from "./remoteMcpTools";
-import type { VideoDurationConstraint } from "./videoModels";
+import {
+  findVideoModelByJobSetType,
+  type VideoDurationConstraint,
+} from "./videoModels";
 
 export type RemoteMcpModelKind = RemoteMcpToolKind;
 export type RemoteMcpCatalogSource =
   | "catalog"
   | "cache"
   | "enum"
+  | "fallback"
   | "standard"
   | "unavailable";
 export type RemoteMcpSpecStatus = "supported" | "unsupported" | "unknown";
 export type RemoteMcpReferenceType = "image" | "video" | "motion";
+export type RemoteMcpVideoSpecField =
+  | "startEndImages"
+  | "referenceTypes"
+  | "referenceLimit"
+  | "duration"
+  | "aspectRatios"
+  | "modes"
+  | "audio"
+  | "multiCut";
+export type RemoteMcpVideoSpecSource =
+  | "catalog"
+  | "model-info"
+  | "generation-schema"
+  | "measured-fallback";
 
 export type RemoteMcpVideoSpecs = {
   startEndImages: RemoteMcpSpecStatus;
@@ -32,6 +52,8 @@ export type RemoteMcpVideoSpecs = {
   modes: string[] | null;
   audio: RemoteMcpSpecStatus;
   multiCut: RemoteMcpSpecStatus;
+  /** 値ごとの出所。値が未取得の項目は持たない。 */
+  sources?: Partial<Record<RemoteMcpVideoSpecField, RemoteMcpVideoSpecSource>>;
 };
 
 export type RemoteMcpCatalogModel = {
@@ -53,6 +75,10 @@ export type RemoteMcpModelCatalog = {
   sourceToolName?: string;
   generationTool: RemoteMcpToolInfo | null;
   models: RemoteMcpCatalogModel[];
+  /** 実サービスへ問い合わせた日時。古い保存値を現在取得と見せないため任意。 */
+  fetchedAt?: number;
+  /** localStorage / ディスクから即表示した一覧か。 */
+  loadedFromCache?: boolean;
   /** 一覧ツールが失敗して enum/cache/標準へ退避した場合だけ保持する。 */
   warning?: string;
 };
@@ -68,6 +94,8 @@ type BuildCatalogInput = {
   warning?: string;
   /** 一覧ツールが存在する接続先では、読めない応答を標準1件へ置き換えない。 */
   requireExplicitModels?: boolean;
+  fetchedAt?: number;
+  loadedFromCache?: boolean;
 };
 
 function normalized(value: unknown): string {
@@ -103,6 +131,30 @@ export function findRemoteMcpModelListTool<T extends RemoteMcpToolLike>(
       else if (name.endsWith("modelslist")) score = 85;
       else if (name === "modelsexplore" || name.endsWith("modelsexplore")) score = 80;
       if (score > 0 && kind && normalized(tool.name).includes(kind)) score += 30;
+      return { tool, index, score };
+    })
+    .filter((entry) => entry.score > 0)
+    .sort((left, right) => right.score - left.score || left.index - right.index);
+  return scored[0]?.tool ?? null;
+}
+
+/** 1モデルの尺・比率・参照上限を返す、課金の無い情報ツールを選ぶ。 */
+export function findRemoteMcpModelInfoTool<T extends RemoteMcpToolLike>(
+  tools: readonly T[],
+): T | null {
+  const scored = tools
+    .map((tool, index) => {
+      const name = compactName(tool.name);
+      const description = normalized(`${tool.title ?? ""} ${tool.description ?? ""}`);
+      let score = 0;
+      if (name === "getmodelinfo" || name === "modelinfo") score = 100;
+      else if (name === "fetchmodelinfo" || name === "modeldetails") score = 95;
+      else if (name === "getmodeldetails" || name === "modelsget") score = 90;
+      else if (name.includes("model") && /\b(info|details|specifications|capabilities)\b/.test(description)) {
+        score = 75;
+      }
+      if (/seedance|kling/.test(description)) score += 10;
+      if (/list|explore|generate|create|render/.test(name)) score = 0;
       return { tool, index, score };
     })
     .filter((entry) => entry.score > 0)
@@ -466,6 +518,17 @@ function booleanMetadata(metadata: Record<string, unknown> | undefined, keys: re
   return typeof value === "boolean" ? value : null;
 }
 
+function modelInfoText(metadata: Record<string, unknown> | undefined): string {
+  const value = deepMetadataValue(metadata, ["modelInfoText"]);
+  return typeof value === "string" ? value : "";
+}
+
+function metadataSpecSource(
+  metadata: Record<string, unknown> | undefined,
+): RemoteMcpVideoSpecSource {
+  return metadata?.__specSource === "model-info" ? "model-info" : "catalog";
+}
+
 function stringList(value: unknown): string[] | null {
   const values = Array.isArray(value) ? value : typeof value === "string" ? value.split(/[,|]/) : [];
   const clean = values.map(scalarString).filter((item): item is string => Boolean(item));
@@ -479,14 +542,52 @@ function referenceTypesFromMetadata(
     "referenceTypes",
     "supportedReferenceTypes",
     "referenceInputs",
+    "referenceInputTypes",
   ]);
   const list = stringList(value);
-  if (!list) return null;
-  const text = normalized(list.join(" "));
+  const rawText = list?.join(" ") ?? modelInfoText(metadata);
+  const supportsImage = booleanMetadata(metadata, [
+    "supportsReferenceImages",
+    "supportsImageReference",
+  ]);
+  const supportsVideo = booleanMetadata(metadata, [
+    "supportsReferenceVideos",
+    "supportsVideoReference",
+  ]);
+  const supportsMotion = booleanMetadata(metadata, ["supportsMotionReference"]);
+  if (
+    !list &&
+    supportsImage !== true &&
+    supportsVideo !== true &&
+    supportsMotion !== true &&
+    !/reference|input\s+(?:image|video|media)|keyframe|start frame|end frame/i.test(rawText)
+  ) {
+    return null;
+  }
+  const text = normalized(rawText);
+  if (!text) return null;
   const result: RemoteMcpReferenceType[] = [];
   if (/\b(image|photo|frame|keyframe)\b/.test(text)) result.push("image");
   if (/\b(video|clip)\b/.test(text)) result.push("video");
   if (/\bmotion\b/.test(text)) result.push("motion");
+  if (
+    supportsImage === true &&
+    !result.includes("image")
+  ) {
+    result.push("image");
+  }
+  if (
+    supportsVideo === true &&
+    !result.includes("video")
+  ) {
+    result.push("video");
+  }
+  if (
+    supportsMotion === true &&
+    !result.includes("motion")
+  ) {
+    result.push("motion");
+  }
   return result;
 }
 
@@ -496,9 +597,19 @@ function referenceLimitFromMetadata(metadata: Record<string, unknown> | undefine
     "maxReferences",
     "maximumReferences",
     "maxReferenceCount",
+    "maxReferenceImages",
+    "referenceImageLimit",
+    "maxInputImages",
+    "maxImages",
+    "maxMedias",
   ]);
   const number = typeof value === "number" ? value : Number(value);
-  return Number.isFinite(number) && number >= 0 ? number : null;
+  if (Number.isFinite(number) && number >= 0) return number;
+  const text = modelInfoText(metadata);
+  const match =
+    text.match(/(?:up to|max(?:imum)?|limit(?:ed)? to)\s*(\d+)\s*(?:reference|input)?\s*(?:image|images|media|references)/i) ??
+    text.match(/(?:reference|input)\s*(?:image|images|media|references)[^\d]{0,24}(\d+)/i);
+  return match ? Number(match[1]) : null;
 }
 
 function formatDurationValue(value: unknown): string | null {
@@ -572,6 +683,73 @@ function durationConstraintFromValue(value: unknown): VideoDurationConstraint | 
     : null;
 }
 
+function durationConstraintFromText(text: string): VideoDurationConstraint | null {
+  if (!text) return null;
+  const durationLine =
+    text.match(/(?:duration|length|clip length)[^\n.]{0,140}/i)?.[0] ?? "";
+  if (!durationLine) return null;
+  const range = durationLine.match(/(\d+(?:\.\d+)?)\s*(?:s|sec(?:onds?)?)?\s*(?:-|–|—|〜|~|to)\s*(\d+(?:\.\d+)?)/i);
+  if (range) {
+    const min = Number(range[1]);
+    const max = Number(range[2]);
+    const stepMatch = durationLine.match(/(?:step|increments? of)\s*(\d+(?:\.\d+)?)/i);
+    const step = stepMatch ? Number(stepMatch[1]) : 1;
+    if (Number.isFinite(min) && Number.isFinite(max) && max >= min && step > 0) {
+      return { kind: "integer", min, max, step, default: min };
+    }
+  }
+  const values = [...durationLine.matchAll(/(\d+(?:\.\d+)?)\s*(?:s|sec(?:onds?)?)/gi)]
+    .map((match) => Number(match[1]))
+    .filter((value) => Number.isFinite(value));
+  const unique = [...new Set(values)].sort((left, right) => left - right);
+  return unique.length > 0 ? { kind: "enum", values: unique, default: unique[0] } : null;
+}
+
+function durationConstraintFromMetadata(
+  metadata: Record<string, unknown> | undefined,
+): { constraint: VideoDurationConstraint | null; raw: unknown } {
+  const raw = deepMetadataValue(metadata, [
+    "durations",
+    "durationOptions",
+    "supportedDurations",
+    "durationRange",
+    "duration",
+  ]);
+  const direct = durationConstraintFromValue(raw);
+  if (direct) return { constraint: direct, raw };
+
+  const minimum = numericList(
+    deepMetadataValue(metadata, ["minDuration", "minimumDuration", "durationMin"]),
+  )?.[0];
+  const maximum = numericList(
+    deepMetadataValue(metadata, ["maxDuration", "maximumDuration", "durationMax"]),
+  )?.[0];
+  if (minimum !== undefined && maximum !== undefined && maximum >= minimum) {
+    const step =
+      numericList(deepMetadataValue(metadata, ["durationStep", "durationIncrement"]))?.[0] ?? 1;
+    const requestedDefault = numericList(
+      deepMetadataValue(metadata, ["defaultDuration", "durationDefault"]),
+    )?.[0];
+    return {
+      raw,
+      constraint: {
+        kind: "integer",
+        min: minimum,
+        max: maximum,
+        step,
+        default:
+          requestedDefault !== undefined && requestedDefault >= minimum && requestedDefault <= maximum
+            ? requestedDefault
+            : minimum,
+      },
+    };
+  }
+  return {
+    raw,
+    constraint: durationConstraintFromText(modelInfoText(metadata)),
+  };
+}
+
 function durationConstraintFromSchema(fields: SchemaField[]): VideoDurationConstraint | null {
   const field = fields.find(({ normalizedName }) =>
     ["duration", "durationseconds", "seconds", "lengthseconds"].includes(normalizedName),
@@ -630,6 +808,25 @@ function aspectRatiosFromSchema(fields: SchemaField[]): string[] | null {
   return field ? stringList(field.property.enum) : null;
 }
 
+function aspectRatiosFromMetadata(
+  metadata: Record<string, unknown> | undefined,
+): string[] | null {
+  const direct = stringList(
+    deepMetadataValue(metadata, [
+      "aspectRatios",
+      "supportedAspectRatios",
+      "aspectRatioOptions",
+      "supportedRatios",
+      "ratios",
+    ]),
+  );
+  if (direct) return direct;
+  const ratios = [...modelInfoText(metadata).matchAll(/\b\d{1,2}:\d{1,2}\b/g)].map(
+    (match) => match[0],
+  );
+  return ratios.length > 0 ? [...new Set(ratios)] : null;
+}
+
 function schemaFeatureStatus(
   parsed: { valid: boolean; fields: SchemaField[] },
   pattern: RegExp,
@@ -658,6 +855,8 @@ export function deriveRemoteMcpVideoSpecs(
   model: Pick<RemoteMcpCatalogModel, "metadata">,
   generationTool: Pick<RemoteMcpToolLike, "inputSchemaJson"> | null,
 ): RemoteMcpVideoSpecs {
+  const sources: Partial<Record<RemoteMcpVideoSpecField, RemoteMcpVideoSpecSource>> = {};
+  const metadataSource = metadataSpecSource(model.metadata);
   const parsed = generationTool
     ? schemaFields(generationTool.inputSchemaJson)
     : { valid: false, fields: [] as SchemaField[] };
@@ -688,51 +887,61 @@ export function deriveRemoteMcpVideoSpecs(
             ? "supported"
             : "unsupported"
           : "unknown";
+  if (startEnd !== null || start !== null || end !== null) {
+    sources.startEndImages = metadataSource;
+  } else if (parsed.valid) {
+    sources.startEndImages = "generation-schema";
+  }
 
   let referenceTypes = referenceTypesFromMetadata(model.metadata);
+  if (referenceTypes) sources.referenceTypes = metadataSource;
   if (!referenceTypes && parsed.valid) {
     const result: RemoteMcpReferenceType[] = [];
     for (const field of parsed.fields) {
       const text = normalized(
         `${field.name} ${field.property.title ?? ""} ${field.property.description ?? ""}`,
       );
-      if (!/reference|keyframe|first frame|last frame|start frame|end frame/.test(text)) continue;
+      if (!/reference|keyframe|first frame|last frame|start frame|end frame|input image|input media/.test(text)) continue;
       if (/image|photo|frame|keyframe/.test(text) && !result.includes("image")) result.push("image");
       if (/video|clip/.test(text) && !result.includes("video")) result.push("video");
       if (/motion/.test(text) && !result.includes("motion")) result.push("motion");
     }
     referenceTypes = result;
+    sources.referenceTypes = "generation-schema";
   }
 
   let referenceLimit = referenceLimitFromMetadata(model.metadata);
+  if (referenceLimit !== null) sources.referenceLimit = metadataSource;
   if (referenceLimit === null && parsed.valid) {
-    const limits = parsed.fields
-      .filter(({ name, property }) => /reference|keyframe/i.test(`${name} ${property.description ?? ""}`))
-      .map(({ property }) => Number(property.maxItems))
+    const referenceFields = parsed.fields.filter(({ name, property }) =>
+      /reference|keyframe|input.?image|input.?media/i.test(`${name} ${property.description ?? ""}`),
+    );
+    const limits = referenceFields
+      .map(({ property }) => {
+        const maxItems = Number(property.maxItems);
+        if (Number.isFinite(maxItems) && maxItems >= 0) return maxItems;
+        const type = property.type;
+        return type === "array" || property.items ? Number.NaN : 1;
+      })
       .filter((value) => Number.isFinite(value) && value >= 0);
     if (limits.length > 0) referenceLimit = Math.max(...limits);
+    if (referenceLimit !== null) sources.referenceLimit = "generation-schema";
   }
 
-  const durationMetadata = deepMetadataValue(model.metadata, [
-    "durations",
-    "durationOptions",
-    "supportedDurations",
-    "duration",
-  ]);
+  const durationMetadataResult = durationConstraintFromMetadata(model.metadata);
+  const durationMetadata = durationMetadataResult.raw;
   const durationConstraint =
-    durationConstraintFromValue(durationMetadata) ?? durationConstraintFromSchema(parsed.fields);
+    durationMetadataResult.constraint ?? durationConstraintFromSchema(parsed.fields);
+  if (durationMetadataResult.constraint) sources.duration = metadataSource;
+  else if (durationConstraint) sources.duration = "generation-schema";
   const duration =
     durationConstraintLabel(durationConstraint) ??
     formatDurationValue(durationMetadata) ??
     durationFromSchema(parsed.fields);
-  const aspectRatios =
-    stringList(
-      deepMetadataValue(model.metadata, [
-        "aspectRatios",
-        "supportedAspectRatios",
-        "ratios",
-      ]),
-    ) ?? aspectRatiosFromSchema(parsed.fields);
+  const aspectRatiosFromCatalog = aspectRatiosFromMetadata(model.metadata);
+  const aspectRatios = aspectRatiosFromCatalog ?? aspectRatiosFromSchema(parsed.fields);
+  if (aspectRatiosFromCatalog) sources.aspectRatios = metadataSource;
+  else if (aspectRatios) sources.aspectRatios = "generation-schema";
 
   const modes =
     stringList(
@@ -744,6 +953,11 @@ export function deriveRemoteMcpVideoSpecs(
       );
       return field ? stringList(field.property.enum) : null;
     })();
+  if (modes) {
+    sources.modes = deepMetadataValue(model.metadata, ["modes", "supportedModes", "generationModes"])
+      ? metadataSource
+      : "generation-schema";
+  }
   const audio = featureStatus(
     model.metadata,
     ["supportsAudio", "supportsSound", "nativeAudio", "audioGeneration"],
@@ -756,6 +970,22 @@ export function deriveRemoteMcpVideoSpecs(
     parsed,
     /\b(multi cut|multicut|multi shot|multishot|shot count)\b/,
   );
+  if (audio !== "unknown") {
+    sources.audio = booleanMetadata(
+      model.metadata,
+      ["supportsAudio", "supportsSound", "nativeAudio", "audioGeneration"],
+    ) !== null
+      ? metadataSource
+      : "generation-schema";
+  }
+  if (multiCut !== "unknown") {
+    sources.multiCut = booleanMetadata(
+      model.metadata,
+      ["supportsMultiCut", "supportsMultishot", "multiCut", "multiShot"],
+    ) !== null
+      ? metadataSource
+      : "generation-schema";
+  }
 
   return {
     startEndImages,
@@ -767,6 +997,7 @@ export function deriveRemoteMcpVideoSpecs(
     modes,
     audio,
     multiCut,
+    sources,
   };
 }
 
@@ -790,6 +1021,169 @@ function hintedKindFromToolName(toolName: string | undefined): "image" | "video"
   if (name.includes("video")) return "video";
   if (name.includes("image")) return "image";
   return undefined;
+}
+
+function modelInfoMetadata(output: RemoteMcpQueryResult): Record<string, unknown> {
+  const parsedText = parseTextJson(output.contentText);
+  const structured = objectRecord(output.structuredContent);
+  const parsedRecord = objectRecord(parsedText);
+  return {
+    __specSource: "model-info",
+    ...(structured ? { modelInfo: structured } : {}),
+    ...(parsedRecord ? { modelInfoTextJson: parsedRecord } : {}),
+    ...(!structured && !parsedRecord && output.contentText.trim()
+      ? { modelInfoText: output.contentText.trim() }
+      : {}),
+  };
+}
+
+async function enrichKreaVideoModelInfo(
+  catalog: RemoteMcpModelCatalog,
+  tools: readonly RemoteMcpToolInfo[],
+): Promise<RemoteMcpModelCatalog> {
+  const infoTool = findRemoteMcpModelInfoTool(tools);
+  if (!infoTool) return catalog;
+  const candidates = catalog.models.filter((model) => /seedance|kling/i.test(`${model.id} ${model.name}`));
+  if (candidates.length === 0) return catalog;
+
+  let failures = 0;
+  const enriched = await Promise.all(
+    catalog.models.map(async (model) => {
+      if (!candidates.includes(model)) return model;
+      const built = buildRemoteMcpParams(infoTool.inputSchemaJson, {
+        prompt: "",
+        model: model.id,
+      });
+      if (built.schemaError || built.missingRequired.length > 0) {
+        failures += 1;
+        return model;
+      }
+      try {
+        const output = await remoteMcp.query({
+          providerId: catalog.providerId,
+          toolName: infoTool.name,
+          paramsJson: built.paramsJson,
+        });
+        const next: RemoteMcpCatalogModel = {
+          ...model,
+          metadata: {
+            ...(model.metadata ?? {}),
+            ...modelInfoMetadata(output),
+          },
+        };
+        next.videoSpecs = deriveRemoteMcpVideoSpecs(next, catalog.generationTool);
+        return next;
+      } catch {
+        failures += 1;
+        return model;
+      }
+    }),
+  );
+  return {
+    ...catalog,
+    models: enriched,
+    warning:
+      failures > 0
+        ? [catalog.warning, `${failures}件のモデル仕様を追加取得できませんでした。`]
+            .filter(Boolean)
+            .join(" ")
+        : catalog.warning,
+  };
+}
+
+const HIGGSFIELD_VIDEO_GENERATION_TOOL: RemoteMcpToolInfo = {
+  name: "generate_video",
+  title: "HiggsField 動画生成",
+  description: "テキストと任意の参照画像から動画を生成します",
+  inputSchemaJson: JSON.stringify({
+    type: "object",
+    properties: {
+      prompt: { type: "string" },
+      model: { type: "string" },
+      aspect: { type: "string" },
+      duration: { type: "integer" },
+      count: { type: "integer", default: 1 },
+      reference_images: { type: "array", items: { type: "string" } },
+    },
+    required: ["prompt", "model"],
+  }),
+};
+
+function withMeasuredHiggsfieldFallback(
+  model: RemoteMcpCatalogModel,
+): RemoteMcpCatalogModel {
+  const measured = findVideoModelByJobSetType(model.id);
+  const videoSpecs = deriveRemoteMcpVideoSpecs(model, null);
+  if (!measured) return { ...model, videoSpecs };
+  const sources = { ...(videoSpecs.sources ?? {}) };
+  if (!videoSpecs.durationConstraint) {
+    videoSpecs.durationConstraint = { ...measured.duration };
+    videoSpecs.duration =
+      measured.duration.kind === "enum"
+        ? measured.duration.values.map((value) => `${value}秒`).join(" / ")
+        : `${measured.duration.min}〜${measured.duration.max}秒`;
+    sources.duration = "measured-fallback";
+  }
+  if (!videoSpecs.aspectRatios) {
+    videoSpecs.aspectRatios = [...measured.aspectRatios];
+    sources.aspectRatios = "measured-fallback";
+  }
+  if (!videoSpecs.referenceTypes) {
+    videoSpecs.referenceTypes = measured.inputMode === "t2v" ? [] : ["image"];
+    sources.referenceTypes = "measured-fallback";
+  }
+  const mode = measured.extraParams.find(
+    (param) => param.kind === "enum" && param.name === "mode",
+  );
+  if (!videoSpecs.modes && mode?.kind === "enum") {
+    videoSpecs.modes = [...mode.values];
+    sources.modes = "measured-fallback";
+  }
+  if (
+    videoSpecs.audio === "unknown" &&
+    measured.extraParams.some((param) => param.name === "sound")
+  ) {
+    videoSpecs.audio = "supported";
+    sources.audio = "measured-fallback";
+  }
+  videoSpecs.sources = sources;
+  return { ...model, videoSpecs };
+}
+
+/** models_explore の実名一覧を、共通の動画カタログへ変換する。 */
+export function buildHiggsfieldVideoModelCatalog(
+  models: readonly HiggsfieldModelInfo[],
+  options: { fallback: boolean; fetchedAt?: number },
+): RemoteMcpModelCatalog {
+  const uniqueModels = new Map<string, HiggsfieldModelInfo>();
+  for (const model of models) {
+    if (model.type !== "video") continue;
+    if (!uniqueModels.has(model.jobSetType)) uniqueModels.set(model.jobSetType, model);
+  }
+  const catalogModels = [...uniqueModels.values()].map((item) =>
+    withMeasuredHiggsfieldFallback({
+      id: item.jobSetType,
+      name: item.displayName,
+      label: item.displayName,
+      kind: "video",
+      passModel: true,
+      metadata: { ...(item as unknown as Record<string, unknown>), type: "video" },
+    }),
+  );
+  return {
+    providerId: "higgsfield",
+    providerLabel: "HiggsField",
+    kind: "video",
+    source: options.fallback ? "fallback" : "catalog",
+    sourceToolName: "models_explore",
+    generationTool: HIGGSFIELD_VIDEO_GENERATION_TOOL,
+    models: catalogModels,
+    fetchedAt: options.fetchedAt,
+    loadedFromCache: false,
+    warning: options.fallback
+      ? "実モデル一覧を取得できなかったため、実測済みの補完一覧を表示しています。"
+      : undefined,
+  };
 }
 
 export function remoteMcpCatalogKey(providerId: string, kind: "image" | "video") {
@@ -855,6 +1249,8 @@ export function buildRemoteMcpModelCatalog(input: BuildCatalogInput): RemoteMcpM
     sourceToolName: input.catalogToolName,
     generationTool,
     models: [...unique.values()],
+    fetchedAt: input.fetchedAt ?? (input.loadedFromCache ? undefined : Date.now()),
+    loadedFromCache: input.loadedFromCache ?? false,
     warning:
       input.warning ??
       (source === "unavailable"
@@ -876,7 +1272,7 @@ export async function fetchRemoteMcpModelCatalog(
       toolName: listTool.name,
       paramsJson: "{}",
     });
-    const catalog = buildRemoteMcpModelCatalog({
+    let catalog = buildRemoteMcpModelCatalog({
       ...input,
       catalogOutput: output,
       catalogToolName: listTool.name,
@@ -884,6 +1280,9 @@ export async function fetchRemoteMcpModelCatalog(
     });
     if (catalog.source === "unavailable") {
       throw new Error(catalog.warning);
+    }
+    if (input.providerId === "krea" && input.kind === "video") {
+      catalog = await enrichKreaVideoModelInfo(catalog, input.tools);
     }
     return catalog;
   } catch (error) {

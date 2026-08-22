@@ -1,12 +1,8 @@
 /**
  * P0-2 動画モデル静的定義 (2026-05-28)。
  *
- * 設計判断: higgsfield CLI の `model get <id> --json` 動的取得ではなく、
- * 静的TS定義を採用。理由は Codex Verifier クロスレビュー:
- *   - CLI JSON 仕様変化に UI が直撃しない
- *   - 型安全
- *   - オフライン・認証不安定時にもフォーム描画可能
- *   - 非エンジニアユーザー向け説明文・推奨値を作りやすい
+ * 現在の位置づけ: モデル一覧の正本ではなく、実取得に失敗した時の明示フォールバックと、
+ * models_explore に無い仕様を補う実測データ。通常表示は接続中アカウントの実取得一覧を使う。
  *
  * 新モデル追加時はこのファイルに定義を追加する。
  */
@@ -142,6 +138,15 @@ export function findVideoModel(id: VideoModelId | string): VideoModelDefinition 
   return VIDEO_MODELS.find((m) => m.id === id);
 }
 
+/** 実取得した HiggsField の job_set_type と実測補完データを結び付ける。 */
+export function findVideoModelByJobSetType(
+  jobSetType: string,
+): VideoModelDefinition | undefined {
+  return VIDEO_MODELS.find(
+    (model) => model.jobSetType === jobSetType || model.id === jobSetType,
+  );
+}
+
 /**
  * 尺 (秒) をモデルの制約に丸める。
  *
@@ -250,6 +255,20 @@ export function durationValuesForConstraint(
     values.push(Number(value.toFixed(6)));
   }
   return values;
+}
+
+/** 仕様を取得できないモデルでだけ使う、明示された汎用候補。 */
+export const GENERIC_VIDEO_DURATION_VALUES = Array.from(
+  { length: 14 },
+  (_, index) => index + 2,
+);
+
+export function durationValuesForConstraintOrGeneric(
+  constraint: VideoDurationConstraint | null,
+): number[] {
+  return constraint
+    ? durationValuesForConstraint(constraint)
+    : [...GENERIC_VIDEO_DURATION_VALUES];
 }
 
 /**

@@ -106,6 +106,10 @@ export function classifyRemoteMcpTool(tool: RemoteMcpToolLike): RemoteMcpToolKin
   const schemaText = schemaSearchText(tool.inputSchemaJson);
   const combined = `${identity} ${schemaText}`;
 
+  // 元画像・元動画が required のツールは編集用。テキスト起点の生成候補には入れない。
+  // required が object ラッパーの場合は schemaInputTarget が中へ降りるため除外しない。
+  if (remoteMcpSchemaRequiresSourceMedia(tool.inputSchemaJson)) return "other";
+
   // image_to_video は入力側にも image が現れるので、変換先を最優先する。
   if (TO_VIDEO_PATTERN.test(combined)) return "video";
   if (TO_IMAGE_PATTERN.test(combined)) return "image";
@@ -323,9 +327,17 @@ function putMappedPaths(
 }
 
 type SchemaInputTarget = {
-  wrapper?: string;
+  /** 共通入力が入っている object までのキー。最大2段。 */
+  path: string[];
   properties: Record<string, JsonSchemaProperty>;
   required: string[];
+  /** root から target の親まで。各段の required/default を検査するため保持する。 */
+  ancestors: Array<{
+    path: string[];
+    properties: Record<string, JsonSchemaProperty>;
+    required: string[];
+    child: string;
+  }>;
 };
 
 function stringRequired(value: unknown): string[] {
@@ -345,30 +357,151 @@ function hasKnownInput(properties: Record<string, JsonSchemaProperty>): boolean 
   );
 }
 
-/** `params` など1段のラッパーを持つ schema でも、実際の入力欄を選ぶ。 */
+function hasGenerationInput(properties: Record<string, JsonSchemaProperty>): boolean {
+  return Boolean(
+    promptField(properties) ||
+      aspectField(properties) ||
+      durationField(properties) ||
+      startImageField(properties) ||
+      endImageField(properties) ||
+      imageReferencesField(properties) ||
+      videoReferencesField(properties) ||
+      motionReferencesField(properties),
+  );
+}
+
+function preferredWrapperIndex(name: string): number {
+  const preferred = ["input", "params", "request", "arguments"];
+  const index = preferred.indexOf(name.toLowerCase());
+  return index < 0 ? preferred.length : index;
+}
+
+/**
+ * `input` / `params` などの object を最大2段まで降り、実際の共通入力欄を選ぶ。
+ * object の「入れ物」自体を prompt と誤認せず、中の prompt/model/尺などへ割り当てる。
+ */
 function schemaInputTarget(schema: JsonSchema): SchemaInputTarget {
   const properties = schema.properties ?? {};
-  if (hasKnownInput(properties)) {
-    return { properties, required: stringRequired(schema.required) };
+  if (hasGenerationInput(properties)) {
+    return {
+      path: [],
+      properties,
+      required: stringRequired(schema.required),
+      ancestors: [],
+    };
   }
 
-  const preferred = ["params", "arguments", "request", "input"];
-  const nested = Object.entries(properties)
-    .filter(([, property]) => property.properties && hasKnownInput(property.properties))
-    .sort(([left], [right]) => {
-      const leftIndex = preferred.indexOf(left.toLowerCase());
-      const rightIndex = preferred.indexOf(right.toLowerCase());
-      return (leftIndex < 0 ? preferred.length : leftIndex) -
-        (rightIndex < 0 ? preferred.length : rightIndex);
-    })[0];
-  if (!nested?.[1].properties) {
-    return { properties, required: stringRequired(schema.required) };
+  type Candidate = {
+    path: string[];
+    property: JsonSchemaProperty;
+    ancestors: SchemaInputTarget["ancestors"];
+  };
+  const candidates: Candidate[] = [];
+  const visit = (
+    currentProperties: Record<string, JsonSchemaProperty>,
+    currentRequired: string[],
+    path: string[],
+    ancestors: SchemaInputTarget["ancestors"],
+  ) => {
+    if (path.length >= 2) return;
+    const entries = Object.entries(currentProperties)
+      .filter(([, property]) => Boolean(property.properties))
+      .sort(
+        ([left], [right]) =>
+          preferredWrapperIndex(left) - preferredWrapperIndex(right),
+      );
+    for (const [name, property] of entries) {
+      const nextPath = [...path, name];
+      const nextAncestors = [
+        ...ancestors,
+        {
+          path,
+          properties: currentProperties,
+          required: currentRequired,
+          child: name,
+        },
+      ];
+      if (property.properties && hasKnownInput(property.properties)) {
+        candidates.push({ path: nextPath, property, ancestors: nextAncestors });
+      }
+      if (property.properties) {
+        visit(
+          property.properties,
+          stringRequired(property.required),
+          nextPath,
+          nextAncestors,
+        );
+      }
+    }
+  };
+  visit(properties, stringRequired(schema.required), [], []);
+
+  const nested = candidates.sort((left, right) => {
+    for (let index = 0; index < Math.max(left.path.length, right.path.length); index += 1) {
+      const difference =
+        preferredWrapperIndex(left.path[index] ?? "") -
+        preferredWrapperIndex(right.path[index] ?? "");
+      if (difference !== 0) return difference;
+    }
+    return left.path.length - right.path.length;
+  })[0];
+  if (!nested?.property.properties) {
+    return {
+      path: [],
+      properties,
+      required: stringRequired(schema.required),
+      ancestors: [],
+    };
   }
   return {
-    wrapper: nested[0],
-    properties: nested[1].properties,
-    required: stringRequired(nested[1].required),
+    path: nested.path,
+    properties: nested.property.properties,
+    required: stringRequired(nested.property.required),
+    ancestors: nested.ancestors,
   };
+}
+
+function missingValue(value: unknown): boolean {
+  return value === undefined || value === null || (typeof value === "string" && !value.trim());
+}
+
+function defaultsForRequired(
+  properties: Record<string, JsonSchemaProperty>,
+  required: readonly string[],
+  omittedChild?: string,
+): Record<string, unknown> {
+  const values: Record<string, unknown> = {};
+  for (const [name, property] of Object.entries(properties)) {
+    if (name === omittedChild) continue;
+    if (property.const !== undefined) values[name] = property.const;
+    else if (required.includes(name) && property.default !== undefined) {
+      values[name] = property.default;
+    }
+  }
+  return values;
+}
+
+function requiredSourceMediaField(target: SchemaInputTarget): string | null {
+  for (const name of target.required) {
+    const property = target.properties[name];
+    if (!property || property.properties) continue;
+    const normalized = normalizedFieldName(name);
+    if (
+      /^(video|videos|inputvideo|sourcevideo|referencevideo|videourl|videopath|videoid|clip|inputclip)$/.test(
+        normalized,
+      ) ||
+      /^(image|images|inputimage|sourceimage|imageurl|imagepath|imageid)$/.test(normalized)
+    ) {
+      return name;
+    }
+  }
+  return null;
+}
+
+/** テキスト起点で使えず、元画像・元動画が必須の編集ツールか。 */
+export function remoteMcpSchemaRequiresSourceMedia(schemaJson: string): boolean {
+  const { schema } = parseSchema(schemaJson);
+  return Boolean(schema && requiredSourceMediaField(schemaInputTarget(schema)));
 }
 
 /** モデル選択を組み合わせられる inputSchema かを返す。 */
@@ -396,21 +529,11 @@ export function buildRemoteMcpParams(
   }
 
   const rootProperties = parsed.schema.properties ?? {};
-  const rootRequired = stringRequired(parsed.schema.required);
   const target = schemaInputTarget(parsed.schema);
   const properties = target.properties;
   const required = target.required;
   const mapped: Record<string, unknown> = {};
-  const params: Record<string, unknown> = {};
-
-  // トップレベルの const / required default はラッパー形式でも保持する。
-  for (const [name, property] of Object.entries(rootProperties)) {
-    if (name === target.wrapper) continue;
-    if (property.const !== undefined) params[name] = property.const;
-    else if (rootRequired.includes(name) && property.default !== undefined) {
-      params[name] = property.default;
-    }
-  }
+  let params: Record<string, unknown> = {};
 
   // const と required の default は schema が明示した値なので、推測せず利用できる。
   for (const [name, property] of Object.entries(properties)) {
@@ -446,24 +569,37 @@ export function buildRemoteMcpParams(
     input.motionReferencePaths,
   );
 
-  if (target.wrapper) params[target.wrapper] = mapped;
-  else Object.assign(params, mapped);
+  if (target.path.length === 0) {
+    params = { ...defaultsForRequired(rootProperties, required), ...mapped };
+  } else {
+    let nested: Record<string, unknown> = mapped;
+    for (let index = target.ancestors.length - 1; index >= 0; index -= 1) {
+      const ancestor = target.ancestors[index];
+      nested = {
+        ...defaultsForRequired(
+          ancestor.properties,
+          ancestor.required,
+          ancestor.child,
+        ),
+        [ancestor.child]: nested,
+      };
+    }
+    params = nested;
+  }
 
-  const missingRequired = required.filter((name) => {
-    const value = mapped[name];
-    return value === undefined || value === null || (typeof value === "string" && !value.trim());
-  });
-  if (target.wrapper) {
-    for (const name of rootRequired) {
-      if (name === target.wrapper) continue;
-      const value = params[name];
-      if (
-        value === undefined ||
-        value === null ||
-        (typeof value === "string" && !value.trim())
-      ) {
-        missingRequired.push(name);
-      }
+  const targetPrefix = target.path.length > 0 ? `${target.path.join(".")}.` : "";
+  const missingRequired = required
+    .filter((name) => missingValue(mapped[name]))
+    .map((name) => `${targetPrefix}${name}`);
+  for (const ancestor of target.ancestors) {
+    const values = defaultsForRequired(
+      ancestor.properties,
+      ancestor.required,
+      ancestor.child,
+    );
+    for (const name of ancestor.required) {
+      if (name === ancestor.child || !missingValue(values[name])) continue;
+      missingRequired.push([...ancestor.path, name].join("."));
     }
   }
 

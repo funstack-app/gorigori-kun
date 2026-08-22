@@ -3,12 +3,15 @@ import { describe, expect, it } from "vitest";
 import type { RemoteMcpToolInfo } from "../src/lib/ipc";
 import {
   buildRemoteMcpModelCatalog,
+  buildHiggsfieldVideoModelCatalog,
   classifyRemoteMcpModel,
   deriveRemoteMcpVideoSpecs,
   extractRemoteMcpCatalogModels,
   findRemoteMcpModelListTool,
+  findRemoteMcpModelInfoTool,
   selectPrimaryRemoteMcpGenerationTool,
 } from "../src/lib/remoteMcpModels";
+import { buildRemoteMcpParams } from "../src/lib/remoteMcpTools";
 
 function tool(
   name: string,
@@ -48,6 +51,33 @@ describe("remote MCP model catalog", () => {
     ];
     expect(selectPrimaryRemoteMcpGenerationTool(tools, "video")?.name).toBe("video_generate");
     expect(selectPrimaryRemoteMcpGenerationTool(tools, "image")?.name).toBe("generate_image");
+  });
+
+  it("元動画が必須の編集ツールを生成候補から外す", () => {
+    const editor = tool("video_generate", {}, {
+      inputSchemaJson: JSON.stringify({
+        type: "object",
+        properties: {
+          prompt: { type: "string" },
+          video: { type: "string" },
+        },
+        required: ["prompt", "video"],
+      }),
+    });
+    const textToVideo = tool("create_video", { prompt: { type: "string" } });
+    expect(selectPrimaryRemoteMcpGenerationTool([editor, textToVideo], "video")?.name).toBe(
+      "create_video",
+    );
+  });
+
+  it("Krea型のモデル情報ツールを説明と実名から選ぶ", () => {
+    const selected = findRemoteMcpModelInfoTool([
+      tool("list_models"),
+      tool("get_model_info", { model: { type: "string" } }, {
+        description: "For Seedance 2 and Kling 3.0 models, fetch model specifications",
+      }),
+    ]);
+    expect(selected?.name).toBe("get_model_info");
   });
 
   it("type系メタデータを名前より優先して画像・動画へ分類する", () => {
@@ -182,6 +212,53 @@ describe("remote MCP model catalog", () => {
   });
 });
 
+describe("remote MCP nested params", () => {
+  it("Krea形式の2段inputラッパー内へ共通入力を包む", () => {
+    const result = buildRemoteMcpParams(
+      JSON.stringify({
+        type: "object",
+        properties: {
+          request: {
+            type: "object",
+            properties: {
+              input: {
+                type: "object",
+                properties: {
+                  prompt: { type: "string" },
+                  model: { type: "string" },
+                  duration: { type: "integer" },
+                  aspect_ratio: { type: "string" },
+                },
+                required: ["prompt", "model", "duration", "aspect_ratio"],
+              },
+            },
+            required: ["input"],
+          },
+        },
+        required: ["request"],
+      }),
+      {
+        prompt: "走る犬",
+        model: "kling-3.0",
+        durationSeconds: 6,
+        aspectRatio: "16:9",
+      },
+    );
+
+    expect(result.params).toEqual({
+      request: {
+        input: {
+          prompt: "走る犬",
+          model: "kling-3.0",
+          duration: 6,
+          aspect_ratio: "16:9",
+        },
+      },
+    });
+    expect(result.missingRequired).toEqual([]);
+  });
+});
+
 describe("remote MCP video specs", () => {
   it("inputSchema の有無・maxItems・enum/range から取得できた仕様だけを返す", () => {
     const specs = deriveRemoteMcpVideoSpecs(
@@ -209,6 +286,13 @@ describe("remote MCP video specs", () => {
       modes: null,
       audio: "unknown",
       multiCut: "unknown",
+      sources: {
+        startEndImages: "generation-schema",
+        referenceTypes: "generation-schema",
+        referenceLimit: "generation-schema",
+        duration: "generation-schema",
+        aspectRatios: "generation-schema",
+      },
     });
   });
 
@@ -240,6 +324,7 @@ describe("remote MCP video specs", () => {
       modes: null,
       audio: "unknown",
       multiCut: "unknown",
+      sources: {},
     });
   });
 
@@ -265,5 +350,57 @@ describe("remote MCP video specs", () => {
       step: 2,
       default: 6,
     });
+  });
+
+  it("モデル情報の実応答から尺・比率・参照上限を読み、出所を区別する", () => {
+    const specs = deriveRemoteMcpVideoSpecs(
+      {
+        metadata: {
+          __specSource: "model-info",
+          modelInfo: {
+            duration_range: { min: 4, max: 10, step: 2, default: 6 },
+            supported_aspect_ratios: ["16:9", "9:16"],
+            supported_reference_types: ["image"],
+            max_reference_images: 3,
+          },
+        },
+      },
+      null,
+    );
+    expect(specs.durationConstraint).toEqual({
+      kind: "integer",
+      min: 4,
+      max: 10,
+      step: 2,
+      default: 6,
+    });
+    expect(specs.aspectRatios).toEqual(["16:9", "9:16"]);
+    expect(specs.referenceTypes).toEqual(["image"]);
+    expect(specs.referenceLimit).toBe(3);
+    expect(specs.sources).toMatchObject({
+      duration: "model-info",
+      aspectRatios: "model-info",
+      referenceTypes: "model-info",
+      referenceLimit: "model-info",
+    });
+  });
+
+  it("HiggsField実名一覧へ、既知モデルだけ実測仕様を補完して出所を残す", () => {
+    const catalog = buildHiggsfieldVideoModelCatalog(
+      [
+        { displayName: "Kling 3.0", jobSetType: "kling3_0", type: "video" },
+        { displayName: "Future Video", jobSetType: "future_video", type: "video" },
+      ],
+      { fallback: false, fetchedAt: 123 },
+    );
+    expect(catalog.models.map((model) => model.name)).toEqual(["Kling 3.0", "Future Video"]);
+    expect(catalog.models[0].videoSpecs?.durationConstraint).toEqual({
+      kind: "integer",
+      default: 5,
+      min: 2,
+      max: 10,
+    });
+    expect(catalog.models[0].videoSpecs?.sources?.duration).toBe("measured-fallback");
+    expect(catalog.models[1].videoSpecs?.durationConstraint).toBeNull();
   });
 });

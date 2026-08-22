@@ -24,9 +24,8 @@ import {
 import {
   ALL_VIDEO_ASPECT_RATIOS,
   durationValuesForConstraint,
-  findVideoModel,
+  durationValuesForConstraintOrGeneric,
   intersectVideoModelCapabilities,
-  videoModelCapabilities,
   type VideoDurationConstraint,
   type VideoModelCapabilities,
   type VideoModelDefinition,
@@ -112,12 +111,11 @@ function remoteSelectionLabel(selection: RemoteMcpSelection): string {
  * 構成は画像タブと統一する:
  *   [ReferenceRack: ライブラリ/素材/追加/プリセット/スキル]
  *   [要素別編集ボタン + プロンプト textarea]
- *   [下部コントロール: モデル / 尺± / 比率 / Cost / 生成ボタン]
+ *   [下部コントロール: モデル / 尺プルダウン / 比率 / Cost / 生成ボタン]
  *
  * 画像版との違い:
  * - 生成ロジックは useVideoSceneGeneration (mediaType=video)
- * - モデル/尺/比率は VIDEO_MODELS 静的定義 + useVideoGen を使う
- *   (動画モデルは Higgsfield の動的 model/list ではなく静的定義が正)
+ * - モデルは接続先から実取得し、尺/比率は取得仕様を useVideoGen に反映する
  */
 export function VideoConstructedPromptPanel() {
   const {
@@ -174,10 +172,8 @@ export function VideoConstructedPromptPanel() {
   const setCount = useVideoGen((s) => s.setCount);
   const extraParamValues = useVideoGen((s) => s.extraParamValues);
   const setExtraParam = useVideoGen((s) => s.setExtraParam);
-  const compareModelIds = useVideoGen((s) => s.compareModelIds);
   const remoteSelection = useRemoteMcpGen((s) => s.selections.video);
   const remoteVideoSelections = useRemoteMcpGen((s) => s.videoSelections);
-  const builtInCompareMode = compareModelIds.length >= 2;
   const latestRemoteRequestId = useRemoteMcpGen((s) => s.latestRequestId.video);
   const latestRemoteJob = useRemoteMcpGen((s) => {
     const requestId = s.latestRequestId.video;
@@ -188,28 +184,18 @@ export function VideoConstructedPromptPanel() {
   const startRemoteGeneration = useRemoteMcpGen((s) => s.startSelectedVideos);
   const retryRemoteGeneration = useRemoteMcpGen((s) => s.retry);
 
-  const selectedBuiltInModels = useMemo(() => {
-    const ids =
-      remoteVideoSelections.length > 0
-        ? compareModelIds
-        : builtInCompareMode
-          ? compareModelIds
-          : [model.id];
-    return ids
-      .map((id) => findVideoModel(id))
-      .filter((item): item is VideoModelDefinition => Boolean(item));
-  }, [builtInCompareMode, compareModelIds, model.id, remoteVideoSelections.length]);
+  // 「内蔵」区分は廃止。動画は接続先から実取得したモデルだけを選択扱いにする。
+  const selectedBuiltInModels = useMemo<VideoModelDefinition[]>(() => [], []);
   const selectedModelCount = selectedBuiltInModels.length + remoteVideoSelections.length;
   const compareMode = selectedModelCount >= 2;
   const selectedCapabilities = useMemo(
     () =>
       intersectVideoModelCapabilities(
         [
-          ...selectedBuiltInModels.map(videoModelCapabilities),
           ...remoteVideoSelections.map(remoteSelectionCapabilities),
         ],
       ),
-    [remoteVideoSelections, selectedBuiltInModels],
+    [remoteVideoSelections],
   );
   const hasUnknownRemoteSpecs =
     remoteVideoSelections.length > 0 &&
@@ -243,6 +229,11 @@ export function VideoConstructedPromptPanel() {
           setDuration(preferred);
         }
       }
+    } else if (selectedModelCount > 0) {
+      const genericValues = durationValuesForConstraintOrGeneric(null);
+      if (!genericValues.includes(duration)) {
+        useVideoGen.setState({ duration: genericValues[0] });
+      }
     }
     if (
       selectedCapabilities.aspectRatios &&
@@ -259,6 +250,7 @@ export function VideoConstructedPromptPanel() {
     aspectRatio,
     duration,
     remoteVideoSelections.length,
+    selectedModelCount,
     selectedCapabilities,
     setAspectRatio,
     setDuration,
@@ -458,7 +450,7 @@ export function VideoConstructedPromptPanel() {
   useEffect(() => {
     let cancelled = false;
     const fallback = model.costEstimate;
-    if (remoteSelection) {
+    if (remoteSelection || selectedModelCount === 0) {
       setCost({ kind: "idle", value: null, source: null });
       return () => {
         cancelled = true;
@@ -502,6 +494,7 @@ export function VideoConstructedPromptPanel() {
     extraParamValues,
     higgsfieldAuthed,
     remoteSelection,
+    selectedModelCount,
   ]);
 
   const runSelectedGeneration = async () => {
@@ -580,9 +573,11 @@ export function VideoConstructedPromptPanel() {
         `${duration}秒`,
         aspectRatio,
       ].join(" · ")
-    : compareMode
-      ? [`${selectedBuiltInModels.length} モデルで比較`, `${duration}秒`, aspectRatio].join(" · ")
-      : [
+    : selectedModelCount === 0
+      ? "モデル未選択"
+      : compareMode
+        ? [`${selectedModelCount} モデルで比較`, `${duration}秒`, aspectRatio].join(" · ")
+        : [
           model.label,
           `${duration}秒`,
           aspectRatio,
@@ -668,10 +663,7 @@ export function VideoConstructedPromptPanel() {
       </div>
 
       <div className="shrink-13-controls shrink-0 space-y-1 border-t border-[#2a2a2a] p-2">
-        <HiggsfieldModelSelector
-          media="video"
-          fallbackLabel="Higgsfield（既存の動画生成）"
-        />
+        <HiggsfieldModelSelector media="video" />
 
         {/* 設定サマリ行 (モデル/尺/比率/モデル別パラメータ) → タップでモーダル */}
         <button
@@ -732,12 +724,15 @@ export function VideoConstructedPromptPanel() {
           type="button"
           onClick={() => void runSelectedGeneration()}
           disabled={
+            selectedModelCount === 0 ||
             hasNoCommonSettings ||
             (selectedBuiltInModels.length > 0 && (disabled || !higgsfieldAuthed)) ||
             (remoteVideoSelections.length > 0 && (remoteRunning || !effectivePrompt.trim()))
           }
           title={
-            hasNoCommonSettings
+            selectedModelCount === 0
+              ? "生成モデルを選択してください"
+              : hasNoCommonSettings
               ? "全モデルで共通する尺または比率がありません"
               : selectedBuiltInModels.length === 0 || higgsfieldAuthed
                 ? undefined
@@ -749,6 +744,8 @@ export function VideoConstructedPromptPanel() {
             ? latestRemoteJob?.phase === "saving"
               ? "保存中…"
               : "生成中…"
+            : selectedModelCount === 0
+            ? "モデルを選択してください"
             : selectedBuiltInModels.length > 0 && !higgsfieldAuthed
             ? "Higgsfield 未接続"
             : selectedBuiltInModels.length > 0 && isQueueFull
@@ -866,61 +863,34 @@ function DurationControl({
   value: number;
   onChange: (duration: number) => void;
 }) {
-  if (constraint) {
-    const values = durationValuesForConstraint(constraint);
-    return (
-      <div className="space-y-0.5">
-        <p className="block h-3.5 text-[10px] font-black leading-[14px] tracking-wide text-neutral-500">尺</p>
-        {values.length > 0 ? (
-          <div className="grid grid-cols-4 gap-1">
-            {values.map((seconds) => (
-              <button
-                key={seconds}
-                type="button"
-                onClick={() => onChange(seconds)}
-                className={[
-                  "h-8 rounded-md border px-1 text-[10px] font-black transition",
-                  value === seconds
-                    ? "border-pink-400 bg-pink-500/10 text-white"
-                    : "border-[#2a2a2a] bg-[#101010] text-neutral-400 hover:border-neutral-500",
-                ].join(" ")}
-              >
-                {seconds}秒
-              </button>
-            ))}
-          </div>
-        ) : (
-          <p className="rounded-md border border-amber-400/20 px-2 py-2 text-[10px] text-amber-200">
-            全モデルで共通する尺がありません。モデルの選択を減らしてください。
-          </p>
-        )}
-      </div>
-    );
-  }
-
+  const values = durationValuesForConstraintOrGeneric(constraint);
   return (
-    <div className="space-y-0.5">
-      <p className="block h-3.5 text-[10px] font-black leading-[14px] tracking-wide text-neutral-500">尺</p>
-      <div className="flex h-8 items-center rounded-md border border-[#343434] bg-[#101010]">
-        <button
-          type="button"
-          onClick={() => onChange(Math.max(1, value - 1))}
-          disabled={value <= 1}
-          className="h-8 w-8 rounded-l-md text-sm font-black text-neutral-300 hover:bg-[#222] hover:text-white disabled:cursor-not-allowed disabled:text-neutral-700"
-          aria-label="尺を短くする"
+    <div className="space-y-1">
+      <label className="block text-[10px] font-black tracking-wide text-neutral-500">
+        尺
+      </label>
+      {values.length > 0 ? (
+        <select
+          value={values.includes(value) ? value : values[0]}
+          onChange={(event) => onChange(Number(event.currentTarget.value))}
+          className="h-8 w-full rounded-md border border-[#343434] bg-[#101010] px-2 text-xs font-bold text-neutral-100 outline-none transition hover:border-[#444] focus:border-pink-500"
         >
-          −
-        </button>
-        <div className="flex-1 text-center text-xs font-black text-white">{value}秒</div>
-        <button
-          type="button"
-          onClick={() => onChange(value + 1)}
-          className="h-8 w-8 rounded-r-md text-sm font-black text-neutral-300 hover:bg-[#222] hover:text-white"
-          aria-label="尺を長くする"
-        >
-          +
-        </button>
-      </div>
+          {values.map((seconds) => (
+            <option key={seconds} value={seconds}>
+              {seconds}秒
+            </option>
+          ))}
+        </select>
+      ) : (
+        <p className="rounded-md border border-amber-400/20 px-2 py-2 text-[10px] text-amber-200">
+          全モデルで共通する尺がありません。モデルの選択を減らしてください。
+        </p>
+      )}
+      {!constraint && (
+        <p className="text-[9px] leading-relaxed text-amber-300">
+          対応範囲は未取得です。汎用の2〜15秒を表示しています。
+        </p>
+      )}
     </div>
   );
 }
@@ -1255,7 +1225,7 @@ function VideoSettingsModal({
               value={aspectRatio}
               onChange={onAspectRatioChange}
             />
-            {remoteSelections.length === 0 && aspectAdjustment && (
+            {selectedLabels.length > 0 && remoteSelections.length === 0 && aspectAdjustment && (
               <p className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[10px] font-bold leading-snug text-amber-300">
                 モデル変更のため {aspectAdjustment.to} に調整しました（{aspectAdjustment.from} は{" "}
                 {model.label} 未対応）
@@ -1265,7 +1235,10 @@ function VideoSettingsModal({
 
           {/* モデル別パラメータ(mode/resolution/genre等)は単一モード時のみ
               (比較時はモデルごとに項目が違うため各デフォルトを使う) */}
-          {remoteSelections.length === 0 && !compareMode && model.extraParams.length > 0 && (
+          {selectedLabels.length > 0 &&
+            remoteSelections.length === 0 &&
+            !compareMode &&
+            model.extraParams.length > 0 && (
             <div className="grid grid-cols-2 items-end gap-1.5">
               {model.extraParams.map((param) => (
                 <ExtraParamControl
