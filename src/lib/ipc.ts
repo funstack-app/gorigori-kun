@@ -684,8 +684,11 @@ export type RemoteMcpToolsResult = {
 export type RemoteMcpGenerateArgs = {
   requestId: string;
   providerId: string;
-  toolName: string;
-  paramsJson: string;
+  prompt: string;
+  model?: string;
+  durationSeconds?: number;
+  aspect?: string;
+  referencePaths: string[];
   kind: "image" | "video";
 };
 
@@ -736,7 +739,7 @@ export const remoteMcp = {
   /** モデル一覧などの読み取り専用ツールを、結果を保存せず直接呼ぶ。 */
   query: (args: RemoteMcpQueryArgs) =>
     invoke<RemoteMcpQueryResult>("remote_mcp_query", args),
-  /** 生成を依頼する。画面の進捗・完了・失敗は remote-mcp-gen イベントを正とする。 */
+  /** Codex が MCP ツールを選んで生成する。進捗・完了・失敗はイベントを正とする。 */
   generate: (args: RemoteMcpGenerateArgs) =>
     invoke<RemoteMcpGenerateResult>("remote_mcp_generate", args),
 };

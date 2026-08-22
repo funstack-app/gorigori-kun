@@ -38,6 +38,27 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 const STALE_SERVER_ERROR: &str =
     "生成サーバーが応答しません（接続が古くなっている可能性があります）。別の経路で再試行します。";
 
+/// LLM が MCP ツールを選んで実行した1ターンの機械可読な結果。
+///
+/// `completed_items` は `item/completed` の生JSONを保持する。呼び出し側は
+/// agentMessage ではなく、ここに含まれる mcpToolCall の result を正として扱う。
+#[derive(Debug)]
+pub(crate) struct LlmToolTurnOutput {
+    pub completed_items: Vec<Value>,
+    pub final_message: String,
+    pub terminal_error: Option<String>,
+}
+
+impl LlmToolTurnOutput {
+    fn new() -> Self {
+        Self {
+            completed_items: Vec::new(),
+            final_message: String::new(),
+            terminal_error: None,
+        }
+    }
+}
+
 /// 画像1枚がいまどの段階にいるか (設計書 S1)。
 ///
 /// 「順番待ち → AI準備中 → 描画中 → 完成」の4段。表示文言はフロント側が持ち、
@@ -177,6 +198,185 @@ impl Drop for ActiveTurnGuard {
 
 /// このターン数を超えたら次の ensure_client でプロセスを入れ替える。
 const MAX_TURNS_PER_SERVER: u64 = 60;
+
+/// 生成専用 app-server で、LLM に MCP ツール選択を任せる1ターンを実行する。
+///
+/// 通常画像生成と同じ `approvalPolicy=never` を使い、開始前に通知を購読する。
+/// タイムアウトや turn 失敗も、受信済みツール結果を捨てず `terminal_error` と共に返す。
+#[cfg(windows)]
+pub(crate) async fn run_llm_tool_turn(
+    _app: &AppHandle,
+    _state: &AppState,
+    _prompt: &str,
+    _turn_timeout: Duration,
+) -> Result<LlmToolTurnOutput, String> {
+    Err("resident path disabled on windows".to_string())
+}
+
+#[cfg(not(windows))]
+pub(crate) async fn run_llm_tool_turn(
+    app: &AppHandle,
+    state: &AppState,
+    prompt: &str,
+    turn_timeout: Duration,
+) -> Result<LlmToolTurnOutput, String> {
+    let server = ensure_client(app, state).await?;
+    let client = &server.client;
+
+    let thread_result = client
+        .request_raw(
+            "thread/start",
+            json!({
+                "approvalPolicy": "never",
+                "sandbox": "workspace-write",
+            }),
+        )
+        .await
+        .map_err(|error| format!("生成用 thread/start に失敗: {error}"))?;
+    let thread_id = extract_thread_id(&thread_result)
+        .ok_or_else(|| "生成用 thread/start の応答から threadId を取得できません".to_string())?;
+
+    // turn/start より先に購読し、短い MCP 呼び出しの完了通知も取りこぼさない。
+    let mut notifications = client.subscribe();
+    let turn_result = client
+        .request_raw(
+            "turn/start",
+            json!({
+                "threadId": thread_id.clone(),
+                "input": [{ "type": "text", "text": prompt }],
+            }),
+        )
+        .await
+        .map_err(|error| format!("生成用 turn/start に失敗: {error}"))?;
+    let turn_id = extract_turn_id(&turn_result)
+        .ok_or_else(|| "生成用 turn/start の応答から turnId を取得できません".to_string())?;
+
+    let mut output = LlmToolTurnOutput::new();
+    let wait_result = timeout(
+        turn_timeout,
+        wait_for_llm_tool_turn(
+            client,
+            &mut notifications,
+            &thread_id,
+            &turn_id,
+            &mut output,
+        ),
+    )
+    .await;
+
+    match wait_result {
+        Ok(Ok(terminal_error)) => output.terminal_error = terminal_error,
+        Ok(Err(error)) => {
+            server.poisoned.store(true, Ordering::Release);
+            let _ = interrupt_or_poison(
+                client,
+                &mut notifications,
+                &thread_id,
+                &turn_id,
+                &server.poisoned,
+            )
+            .await;
+            output.terminal_error = Some(error);
+        }
+        Err(_) => {
+            let _ = interrupt_or_poison(
+                client,
+                &mut notifications,
+                &thread_id,
+                &turn_id,
+                &server.poisoned,
+            )
+            .await;
+            output.terminal_error = Some(format!(
+                "生成がタイムアウトしました（{}秒）",
+                turn_timeout.as_secs()
+            ));
+        }
+    }
+
+    Ok(output)
+}
+
+#[cfg(not(windows))]
+async fn wait_for_llm_tool_turn(
+    client: &RpcClient,
+    notifications: &mut broadcast::Receiver<RpcNotification>,
+    thread_id: &str,
+    turn_id: &str,
+    output: &mut LlmToolTurnOutput,
+) -> Result<Option<String>, String> {
+    let mut first_signal_seen = false;
+    let first_signal_deadline = tokio::time::sleep(FIRST_SIGNAL_TIMEOUT);
+    tokio::pin!(first_signal_deadline);
+    let mut health_tick = interval(Duration::from_secs(5));
+    health_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
+    loop {
+        tokio::select! {
+            _ = &mut first_signal_deadline, if !first_signal_seen => {
+                return Err(STALE_SERVER_ERROR.to_string());
+            }
+            notification = notifications.recv() => {
+                match notification {
+                    Ok(notification) => {
+                        let matches_item = notification_matches(&notification.params, thread_id, turn_id);
+                        let matches_turn = turn_notification_matches(&notification.params, thread_id, turn_id);
+                        if matches_item || matches_turn {
+                            first_signal_seen = true;
+                        }
+
+                        if notification.method == "item/completed" && matches_item {
+                            if let Some(item) = notification.params.get("item") {
+                                if item.get("type").and_then(Value::as_str) == Some("agentMessage") {
+                                    if let Some(text) = item
+                                        .get("text")
+                                        .and_then(Value::as_str)
+                                        .filter(|text| !text.trim().is_empty())
+                                    {
+                                        output.final_message = text.to_string();
+                                    }
+                                }
+                                output.completed_items.push(item.clone());
+                            }
+                        }
+
+                        if notification.method == "turn/completed" && matches_turn {
+                            let turn = notification.params.get("turn").unwrap_or(&Value::Null);
+                            let status = turn
+                                .get("status")
+                                .and_then(Value::as_str)
+                                .unwrap_or("unknown");
+                            if status == "completed" {
+                                return Ok(None);
+                            }
+                            let message = turn
+                                .get("error")
+                                .and_then(|error| error.get("message"))
+                                .and_then(Value::as_str)
+                                .filter(|message| !message.trim().is_empty())
+                                .map(str::to_string)
+                                .unwrap_or_else(|| format!("生成用 turn が終了しました (status={status})"));
+                            return Ok(Some(message));
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        return Err(format!(
+                            "生成用 app-server の通知が混雑し、{skipped}件を取りこぼしました"
+                        ));
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        return Err("生成用 app-server の通知接続が閉じました".to_string());
+                    }
+                }
+            }
+            _ = health_tick.tick() => {
+                if !client.is_alive() {
+                    return Err("生成用 app-server が生成中に終了しました".to_string());
+                }
+            }
+        }
+    }
+}
 
 /// 1 turn で画像を生成し、app-server が通知した保存元パスを返す。
 ///

@@ -1,7 +1,6 @@
 import { create } from "zustand";
 
 import {
-  buildRemoteMcpParams,
   type RemoteMcpParamInput,
   type RemoteMcpToolKind,
 } from "../remoteMcpTools";
@@ -43,7 +42,6 @@ export type RemoteMcpGenJob = {
   phase: RemoteMcpGenEvent["phase"];
   message?: string;
   savedPaths?: string[];
-  paramsJson: string;
   selection: RemoteMcpSelection;
   input: RemoteMcpRunInput;
   /** 保存後のライブラリ・履歴・プロジェクト登録まで試行済みか。 */
@@ -125,34 +123,11 @@ function friendlyRemoteMcpError(error: unknown): string {
   return `生成に失敗しました。接続状態や入力内容を確認してください。詳細: ${detail}`;
 }
 
-function validationFailure(
-  selection: RemoteMcpSelection,
-  input: RemoteMcpRunInput,
-): { ok: false; message: string } | { ok: true; paramsJson: string } {
+function validationFailure(input: RemoteMcpRunInput): string | null {
   if (!input.prompt.trim()) {
-    return { ok: false, message: "プロンプトが空です。作りたい内容を入力してください。" };
+    return "プロンプトが空です。作りたい内容を入力してください。";
   }
-  const built = buildRemoteMcpParams(selection.inputSchemaJson, {
-    prompt: input.prompt,
-    model: selection.model?.passModel === false ? undefined : selection.model?.id,
-    aspectRatio: input.aspectRatio,
-    count: input.count,
-    durationSeconds: input.durationSeconds,
-    startImagePath: input.startImagePath,
-    endImagePath: input.endImagePath,
-    referenceImagePaths: input.referenceImagePaths,
-    referenceVideoPaths: input.referenceVideoPaths,
-    motionReferencePaths: input.motionReferencePaths,
-  });
-  if (built.schemaError) return { ok: false, message: built.schemaError };
-  if (built.missingRequired.length > 0) {
-    const toolLabel = selection.toolTitle?.trim() || selection.toolName;
-    return {
-      ok: false,
-      message: `ツール「${toolLabel}」を選択中です。足りない必須入力: ${built.missingRequired.join("、")}`,
-    };
-  }
-  return { ok: true, paramsJson: built.paramsJson };
+  return null;
 }
 
 let remoteMcpGenListener: Promise<() => void> | null = null;
@@ -251,13 +226,21 @@ export const useRemoteMcpGen = create<RemoteMcpGenState>((set, get) => {
     selection: RemoteMcpSelection,
     input: RemoteMcpRunInput,
   ): Promise<RemoteMcpStartResult> => {
-    const validation = validationFailure(selection, input);
-    if (!validation.ok) {
+    const validationMessage = validationFailure(input);
+    if (validationMessage) {
       set((state) => ({
-        validationMessage: { ...state.validationMessage, [input.kind]: validation.message },
+        validationMessage: { ...state.validationMessage, [input.kind]: validationMessage },
       }));
-      return { ok: false, message: validation.message };
+      return { ok: false, message: validationMessage };
     }
+
+    const referencePaths = [
+      input.startImagePath,
+      input.endImagePath,
+      ...(input.referenceImagePaths ?? []),
+      ...(input.referenceVideoPaths ?? []),
+      ...(input.motionReferencePaths ?? []),
+    ].filter((path): path is string => Boolean(path?.trim()));
 
     const requestId = createRequestId();
     const now = Date.now();
@@ -270,7 +253,6 @@ export const useRemoteMcpGen = create<RemoteMcpGenState>((set, get) => {
       kind: input.kind,
       phase: "running",
       message: "生成を開始しています…",
-      paramsJson: validation.paramsJson,
       selection,
       input,
       createdAt: now,
@@ -285,8 +267,11 @@ export const useRemoteMcpGen = create<RemoteMcpGenState>((set, get) => {
     const args: RemoteMcpGenerateArgs = {
       requestId,
       providerId: selection.providerId,
-      toolName: selection.toolName,
-      paramsJson: validation.paramsJson,
+      prompt: input.prompt,
+      model: selection.model?.passModel === false ? undefined : selection.model?.id,
+      durationSeconds: input.durationSeconds,
+      aspect: input.aspectRatio,
+      referencePaths: [...new Set(referencePaths)],
       kind: input.kind,
     };
 
@@ -309,30 +294,6 @@ export const useRemoteMcpGen = create<RemoteMcpGenState>((set, get) => {
         });
         if (result.generatedPaths.length === 0) {
           throw new Error(result.errors.join(" ") || "HiggsField の動画を保存できませんでした。");
-        }
-        await completeRegistration(
-          requestId,
-          selection,
-          input,
-          result.generatedPaths,
-          result.errors,
-        );
-        return { ok: true, requestId };
-      }
-
-      if (selection.providerId === "magnific" && input.kind === "video") {
-        const { magnific } = await import("../ipc");
-        const localImagePaths = [
-          input.startImagePath,
-          input.endImagePath,
-          ...(input.referenceImagePaths ?? []),
-        ].filter((path): path is string => Boolean(path?.trim()));
-        const result = await magnific.videoGenerate({
-          paramsJson: validation.paramsJson,
-          localImagePaths: [...new Set(localImagePaths)],
-        });
-        if (result.generatedPaths.length === 0) {
-          throw new Error(result.errors.join(" ") || "Magnific の動画を保存できませんでした。");
         }
         await completeRegistration(
           requestId,

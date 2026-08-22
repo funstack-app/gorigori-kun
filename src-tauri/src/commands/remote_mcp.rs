@@ -217,6 +217,7 @@ enum RemoteArtifactSource {
         data_base64: String,
     },
     Url(String),
+    LocalPath(String),
 }
 
 #[derive(Debug, Serialize)]
@@ -263,6 +264,15 @@ fn provider_by_id(provider_id: &str) -> Result<&'static RemoteProviderDef, Strin
         .iter()
         .find(|provider| provider.id == provider_id)
         .ok_or_else(|| format!("未対応のリモート MCP プロバイダです: {provider_id}"))
+}
+
+/// 統一生成一覧にだけ存在する専用接続も含め、生成ターンで使える MCP 名を検証する。
+/// Magnific を `REMOTE_PROVIDERS` に足すと接続UIへ重複表示されるため、ここだけで扱う。
+fn generation_provider(provider_id: &str) -> Result<(&'static str, &'static str), String> {
+    if provider_id == "magnific" {
+        return Ok(("magnific", "Magnific"));
+    }
+    provider_by_id(provider_id).map(|provider| (provider.id, provider.label))
 }
 
 /// 読み取り専用の候補だけを返す。生成系ツールは課金防止のため絶対に含めない。
@@ -604,8 +614,105 @@ fn collect_value_sources(
             }
         }
         Value::Object(object) => {
+            if kind == RemoteMcpMediaKind::Image
+                && object.get("type").and_then(Value::as_str) == Some("image")
+            {
+                let data = object.get("data").and_then(Value::as_str);
+                let mime_type = object
+                    .get("mimeType")
+                    .or_else(|| object.get("mime_type"))
+                    .and_then(Value::as_str);
+                if let (Some(data_base64), Some(mime_type)) = (data, mime_type) {
+                    let source = data_uri_source(data_base64).unwrap_or_else(|| {
+                        RemoteArtifactSource::InlineImage {
+                            mime_type: mime_type.to_string(),
+                            data_base64: data_base64.to_string(),
+                        }
+                    });
+                    push_unique_source(sources, source);
+                }
+            }
             for value in object.values() {
                 collect_value_sources(value, kind, sources);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn extension_from_local_path(kind: RemoteMcpMediaKind, path: &Path) -> Option<&'static str> {
+    let extension = path.extension().and_then(|value| value.to_str())?;
+    match (kind, extension.to_ascii_lowercase().as_str()) {
+        (RemoteMcpMediaKind::Image, "png") => Some("png"),
+        (RemoteMcpMediaKind::Image, "jpg" | "jpeg") => Some("jpg"),
+        (RemoteMcpMediaKind::Image, "webp") => Some("webp"),
+        (RemoteMcpMediaKind::Video, "mp4") => Some("mp4"),
+        (RemoteMcpMediaKind::Video, "mov") => Some("mov"),
+        (RemoteMcpMediaKind::Video, "webm") => Some("webm"),
+        (RemoteMcpMediaKind::Video, "m4v") => Some("m4v"),
+        _ => None,
+    }
+}
+
+fn normalized_local_path(path: &Path) -> String {
+    fs::canonicalize(path)
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn push_local_path_if_artifact(
+    value: &str,
+    kind: RemoteMcpMediaKind,
+    excluded_paths: &std::collections::HashSet<String>,
+    sources: &mut Vec<RemoteArtifactSource>,
+) {
+    let trimmed = value.trim().trim_matches(|character| {
+        matches!(
+            character,
+            '"' | '\'' | '`' | '<' | '>' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';'
+        )
+    });
+    let path = if let Some(file_url) = trimmed.strip_prefix("file://") {
+        Path::new(file_url)
+    } else {
+        Path::new(trimmed)
+    };
+    if !path.is_absolute() || !path.is_file() || extension_from_local_path(kind, path).is_none() {
+        return;
+    }
+    let normalized = normalized_local_path(path);
+    if !excluded_paths.contains(&normalized) {
+        push_unique_source(sources, RemoteArtifactSource::LocalPath(normalized));
+    }
+}
+
+fn collect_local_artifact_sources(
+    value: &Value,
+    kind: RemoteMcpMediaKind,
+    excluded_paths: &std::collections::HashSet<String>,
+    sources: &mut Vec<RemoteArtifactSource>,
+) {
+    match value {
+        Value::String(text) => {
+            push_local_path_if_artifact(text, kind, excluded_paths, sources);
+            for token in text.split_whitespace() {
+                push_local_path_if_artifact(token, kind, excluded_paths, sources);
+            }
+            if matches!(text.trim().as_bytes().first(), Some(b'{') | Some(b'[')) {
+                if let Ok(nested) = serde_json::from_str::<Value>(text) {
+                    collect_local_artifact_sources(&nested, kind, excluded_paths, sources);
+                }
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_local_artifact_sources(value, kind, excluded_paths, sources);
+            }
+        }
+        Value::Object(object) => {
+            for value in object.values() {
+                collect_local_artifact_sources(value, kind, excluded_paths, sources);
             }
         }
         _ => {}
@@ -668,6 +775,207 @@ fn extract_remote_artifacts(
     } else {
         Ok(sources)
     }
+}
+
+fn tool_call_output_from_value(value: &Value) -> ToolCallOutput {
+    if let Value::String(text) = value {
+        if matches!(text.trim().as_bytes().first(), Some(b'{') | Some(b'[')) {
+            if let Ok(nested) = serde_json::from_str::<Value>(text) {
+                return tool_call_output_from_value(&nested);
+            }
+        }
+        return ToolCallOutput {
+            content: Vec::new(),
+            structured: None,
+            text: text.to_string(),
+            is_error: false,
+        };
+    }
+
+    let content = value
+        .get("content")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let text = content
+        .iter()
+        .filter_map(|item| item.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let structured = value
+        .get("structuredContent")
+        .or_else(|| value.get("structured_content"))
+        .cloned()
+        .filter(|value| !value.is_null())
+        .or_else(|| Some(value.clone()));
+    let is_error = value
+        .get("isError")
+        .or_else(|| value.get("is_error"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    ToolCallOutput {
+        content,
+        structured,
+        text,
+        is_error,
+    }
+}
+
+fn is_provider_tool_item(item: &Value, provider_id: &str) -> bool {
+    match item.get("type").and_then(Value::as_str) {
+        Some("mcpToolCall") => item
+            .get("server")
+            .and_then(Value::as_str)
+            .map(|server| server.eq_ignore_ascii_case(provider_id))
+            .unwrap_or(true),
+        Some("dynamicToolCall") => item
+            .get("tool")
+            .or_else(|| item.get("name"))
+            .and_then(Value::as_str)
+            .map(|tool| {
+                tool.to_ascii_lowercase()
+                    .contains(&provider_id.to_ascii_lowercase())
+            })
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+fn tool_result_values(item: &Value) -> Vec<&Value> {
+    ["result", "output", "contentItems"]
+        .into_iter()
+        .filter_map(|key| item.get(key))
+        .collect()
+}
+
+fn compact_tool_error(value: &Value) -> String {
+    for key in ["message", "error", "text", "detail"] {
+        if let Some(text) = value.get(key).and_then(Value::as_str) {
+            if !text.trim().is_empty() {
+                return text.trim().to_string();
+            }
+        }
+        if let Some(nested) = value.get(key) {
+            let text = compact_tool_error(nested);
+            if !text.is_empty() {
+                return text;
+            }
+        }
+    }
+    match value {
+        Value::String(text) => text.trim().to_string(),
+        Value::Null => String::new(),
+        _ => serde_json::to_string(value).unwrap_or_default(),
+    }
+}
+
+/// app-server の item 列から、MCP ツール結果だけを機械的に走査する。
+/// 引数や agentMessage は混ぜず、参照素材そのものを成果物と誤認しない。
+fn extract_llm_tool_artifacts(
+    items: &[Value],
+    provider_id: &str,
+    kind: RemoteMcpMediaKind,
+    reference_paths: &[String],
+) -> (Vec<RemoteArtifactSource>, Vec<String>) {
+    let excluded_paths = reference_paths
+        .iter()
+        .map(Path::new)
+        .map(normalized_local_path)
+        .collect::<std::collections::HashSet<_>>();
+    let mut sources = Vec::new();
+    let mut errors = Vec::new();
+
+    for item in items
+        .iter()
+        .filter(|item| is_provider_tool_item(item, provider_id))
+    {
+        let item_failed = item.get("status").and_then(Value::as_str) == Some("failed");
+        let results = tool_result_values(item);
+        if item_failed && results.is_empty() {
+            let error = compact_tool_error(item);
+            if !error.is_empty() && !errors.contains(&error) {
+                errors.push(error);
+            }
+        }
+
+        for result in results {
+            let output = tool_call_output_from_value(result);
+            let result_failed = output.is_error
+                || item_failed
+                || result.get("error").is_some_and(|error| !error.is_null());
+            if result_failed {
+                let error = if output.text.trim().is_empty() {
+                    compact_tool_error(result)
+                } else {
+                    provider_output_error(&output)
+                };
+                if !error.is_empty() && !errors.contains(&error) {
+                    errors.push(error);
+                }
+                continue;
+            }
+            if let Ok(found) = extract_remote_artifacts(&output, kind) {
+                for source in found {
+                    push_unique_source(&mut sources, source);
+                }
+            }
+            collect_local_artifact_sources(result, kind, &excluded_paths, &mut sources);
+        }
+    }
+
+    (sources, errors)
+}
+
+fn llm_failure_message(summary: &str, final_message: &str, tool_errors: &[String]) -> String {
+    let mut parts = vec![summary.to_string()];
+    if !final_message.trim().is_empty() {
+        parts.push(format!("LLM報告: {}", final_message.trim()));
+    }
+    if !tool_errors.is_empty() {
+        parts.push(format!("ツールエラー: {}", tool_errors.join(" / ")));
+    }
+    parts.join("\n")
+}
+
+fn apply_final_report_url_fallback(sources: &mut Vec<RemoteArtifactSource>, final_message: &str) {
+    if !sources.is_empty() {
+        return;
+    }
+    for url in https_urls_in_text(final_message) {
+        push_unique_source(sources, RemoteArtifactSource::Url(url));
+    }
+}
+
+fn display_optional(value: Option<&str>) -> &str {
+    value
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("指定なし")
+}
+
+fn build_remote_mcp_llm_prompt(
+    provider_label: &str,
+    kind: RemoteMcpMediaKind,
+    instruction: &str,
+    model: Option<&str>,
+    duration_seconds: Option<f64>,
+    aspect: Option<&str>,
+    reference_paths: &[String],
+) -> String {
+    let duration = duration_seconds
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .map(|value| format!("{value}秒"))
+        .unwrap_or_else(|| "指定なし".to_string());
+    let references = if reference_paths.is_empty() {
+        "なし".to_string()
+    } else {
+        reference_paths.join("、")
+    };
+    format!(
+        "あなたは生成実行係。{provider_label} のMCPツールを検索して使い、{}を生成せよ。指示文: {instruction} / モデル: {} / 尺: {duration} / 比率: {} / 参照画像: {references}。必要なツールを自分で選び、正しい引数で呼べ。生成完了まで待ち、成果物のURLまたは保存先だけを報告せよ。ツール呼び出し以外の創作はするな",
+        kind.noun(),
+        display_optional(model),
+        display_optional(aspect),
+    )
 }
 
 fn extension_from_mime(kind: RemoteMcpMediaKind, mime_type: &str) -> Option<&'static str> {
@@ -849,6 +1157,7 @@ async fn save_remote_artifacts(
         let source_label = match &source {
             RemoteArtifactSource::InlineImage { .. } => "base64画像",
             RemoteArtifactSource::Url(_) => "HTTPS URL",
+            RemoteArtifactSource::LocalPath(_) => "ローカル保存先",
         };
         let result = match source {
             RemoteArtifactSource::InlineImage {
@@ -922,6 +1231,36 @@ async fn save_remote_artifacts(
                     Err(_) => Err(format!("{}のダウンロード通信に失敗しました", kind.noun())),
                 },
             },
+            RemoteArtifactSource::LocalPath(path) => {
+                let source_path = Path::new(&path);
+                match extension_from_local_path(kind, source_path) {
+                    None => Err(format!("未対応の{}形式です", kind.noun())),
+                    Some(extension) => match fs::metadata(source_path) {
+                        Ok(metadata) if metadata.len() > REMOTE_DOWNLOAD_MAX_BYTES => Err(format!(
+                            "{}が大きすぎます（1ファイル512MBまで）",
+                            kind.noun()
+                        )),
+                        Ok(_) => match fs::read(source_path) {
+                            Ok(bytes) => write_remote_file(
+                                &directory,
+                                provider_id,
+                                request_id,
+                                index + 1,
+                                extension,
+                                &bytes,
+                            ),
+                            Err(error) => Err(format!(
+                                "{}のローカル保存先を読み取れませんでした: {error}",
+                                kind.noun()
+                            )),
+                        },
+                        Err(error) => Err(format!(
+                            "{}のローカル保存先を確認できませんでした: {error}",
+                            kind.noun()
+                        )),
+                    },
+                }
+            }
         };
         match result {
             Ok(path) => saved_paths.push(path),
@@ -1283,14 +1622,17 @@ pub async fn remote_mcp_query(
     result.map_err(|error| sanitize_generation_message(&error))
 }
 
-/// MCP プロバイダの任意生成ツールを LLM なしで直接呼び、成果物を既存保存経路へ合流する。
+/// 生成専用 Codex に MCP ツール選択を任せ、成果物を既存保存経路へ合流する。
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn remote_mcp_generate(
     request_id: String,
     provider_id: String,
-    tool_name: String,
-    params_json: String,
+    prompt: String,
+    model: Option<String>,
+    duration_seconds: Option<f64>,
+    aspect: Option<String>,
+    reference_paths: Vec<String>,
     kind: RemoteMcpMediaKind,
     state: State<'_, AppState>,
     app: AppHandle,
@@ -1298,26 +1640,61 @@ pub async fn remote_mcp_generate(
     emit_generation_event(&app, &request_id, &provider_id, "running", None, None);
 
     let result = async {
-        let provider = provider_by_id(&provider_id)?;
+        let (provider_id, provider_label) = generation_provider(&provider_id)?;
         if request_id.trim().is_empty() {
             return Err("requestId が空です".to_string());
         }
-        let tool_name = tool_name.trim();
-        if tool_name.is_empty() {
-            return Err("toolName が空です".to_string());
+        let prompt = prompt.trim();
+        if prompt.is_empty() {
+            return Err("プロンプトが空です。作りたい内容を入力してください。".to_string());
         }
-        let arguments: Value = serde_json::from_str(&params_json)
-            .map_err(|error| format!("paramsJson が正しいJSONではありません: {error}"))?;
-        if !arguments.is_object() {
-            return Err("paramsJson はJSONオブジェクトで指定してください".to_string());
+        let reference_paths = reference_paths
+            .into_iter()
+            .map(|path| path.trim().to_string())
+            .filter(|path| !path.is_empty())
+            .collect::<Vec<_>>();
+        let llm_prompt = build_remote_mcp_llm_prompt(
+            provider_label,
+            kind,
+            prompt,
+            model.as_deref(),
+            duration_seconds,
+            aspect.as_deref(),
+            &reference_paths,
+        );
+
+        let output =
+            crate::codex::gen_server::run_llm_tool_turn(&app, &state, &llm_prompt, kind.timeout())
+                .await?;
+        let (mut sources, tool_errors) = extract_llm_tool_artifacts(
+            &output.completed_items,
+            provider_id,
+            kind,
+            &reference_paths,
+        );
+        if let Some(error) = output.terminal_error.as_deref() {
+            return Err(llm_failure_message(
+                error,
+                &output.final_message,
+                &tool_errors,
+            ));
         }
 
-        let timeout = kind.timeout();
-        let output =
-            call_tool_with_timeout(&state, provider.id, tool_name, arguments, timeout).await?;
-        let sources = extract_remote_artifacts(&output, kind)?;
-        emit_generation_event(&app, &request_id, provider.id, "saving", None, None);
-        save_remote_artifacts(provider.id, &request_id, kind, sources).await
+        // 正本はツール結果。そこに成果物が無い場合だけ、LLMの最終報告からURLを拾う。
+        apply_final_report_url_fallback(&mut sources, &output.final_message);
+        if sources.is_empty() {
+            return Err(llm_failure_message(
+                &format!(
+                    "Codex のツール実行結果に保存できる{}がありませんでした",
+                    kind.noun()
+                ),
+                &output.final_message,
+                &tool_errors,
+            ));
+        }
+
+        emit_generation_event(&app, &request_id, provider_id, "saving", None, None);
+        save_remote_artifacts(provider_id, &request_id, kind, sources).await
     }
     .await;
 
@@ -1703,6 +2080,154 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    #[test]
+    fn llm_artifact_parser_uses_matching_mcp_tool_result_only() {
+        let items = vec![
+            json!({
+                "type": "agentMessage",
+                "text": "https://cdn.example.com/final-fallback.png"
+            }),
+            json!({
+                "type": "mcpToolCall",
+                "server": "runway",
+                "tool": "generate",
+                "status": "completed",
+                "result": {"structuredContent": {"url": "https://cdn.example.com/wrong.mp4"}}
+            }),
+            json!({
+                "type": "mcpToolCall",
+                "server": "krea",
+                "tool": "generate",
+                "status": "completed",
+                "result": {"structuredContent": {"url": "https://cdn.example.com/tool.png"}}
+            }),
+        ];
+        let (sources, errors) =
+            extract_llm_tool_artifacts(&items, "krea", RemoteMcpMediaKind::Image, &[]);
+
+        assert_eq!(
+            sources,
+            vec![RemoteArtifactSource::Url(
+                "https://cdn.example.com/tool.png".to_string()
+            )]
+        );
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn llm_artifact_parser_reads_base64_and_tool_errors() {
+        let items = vec![
+            json!({
+                "type": "mcpToolCall",
+                "server": "krea",
+                "tool": "generate",
+                "status": "failed",
+                "result": {
+                    "isError": true,
+                    "content": [{"type": "text", "text": "残高が不足しています"}]
+                }
+            }),
+            json!({
+                "type": "mcpToolCall",
+                "server": "krea",
+                "tool": "generate",
+                "status": "completed",
+                "result": {
+                    "content": [{
+                        "type": "image",
+                        "data": "aW1hZ2U=",
+                        "mimeType": "image/png"
+                    }]
+                }
+            }),
+        ];
+        let (sources, errors) =
+            extract_llm_tool_artifacts(&items, "krea", RemoteMcpMediaKind::Image, &[]);
+
+        assert_eq!(
+            sources,
+            vec![RemoteArtifactSource::InlineImage {
+                mime_type: "image/png".to_string(),
+                data_base64: "aW1hZ2U=".to_string(),
+            }]
+        );
+        assert_eq!(errors, vec!["残高が不足しています".to_string()]);
+    }
+
+    #[test]
+    fn llm_artifact_parser_reads_local_path_but_excludes_reference() {
+        let path = std::env::temp_dir().join(format!(
+            "gori-remote-mcp-{}-{}.png",
+            std::process::id(),
+            REMOTE_FILE_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        fs::write(&path, b"image").expect("temporary image");
+        let path_text = path.to_string_lossy().into_owned();
+        let items = vec![json!({
+            "type": "mcpToolCall",
+            "server": "krea",
+            "status": "completed",
+            "result": {
+                "content": [{"type": "text", "text": format!("保存先: {path_text}")}]
+            }
+        })];
+
+        let (sources, _) =
+            extract_llm_tool_artifacts(&items, "krea", RemoteMcpMediaKind::Image, &[]);
+        assert_eq!(
+            sources,
+            vec![RemoteArtifactSource::LocalPath(normalized_local_path(
+                &path
+            ))]
+        );
+
+        let (excluded, _) = extract_llm_tool_artifacts(
+            &items,
+            "krea",
+            RemoteMcpMediaKind::Image,
+            std::slice::from_ref(&path_text),
+        );
+        assert!(excluded.is_empty());
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn final_report_url_is_only_a_fallback() {
+        let mut tool_sources = vec![RemoteArtifactSource::Url(
+            "https://cdn.example.com/tool.png".to_string(),
+        )];
+        apply_final_report_url_fallback(&mut tool_sources, "https://cdn.example.com/final.png");
+        assert_eq!(tool_sources.len(), 1);
+
+        let mut empty = Vec::new();
+        apply_final_report_url_fallback(&mut empty, "https://cdn.example.com/final.png");
+        assert_eq!(
+            empty,
+            vec![RemoteArtifactSource::Url(
+                "https://cdn.example.com/final.png".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn llm_prompt_requires_tool_search_and_fixed_generation_contract() {
+        let prompt = build_remote_mcp_llm_prompt(
+            "Krea",
+            RemoteMcpMediaKind::Video,
+            "白い餅が跳ねる",
+            Some("Flux 3 Video"),
+            Some(5.0),
+            Some("16:9"),
+            &["/tmp/reference.png".to_string()],
+        );
+
+        assert!(prompt.contains("Krea のMCPツールを検索して使い、動画を生成せよ"));
+        assert!(prompt.contains("指示文: 白い餅が跳ねる"));
+        assert!(prompt.contains("モデル: Flux 3 Video / 尺: 5秒 / 比率: 16:9"));
+        assert!(prompt.contains("成果物のURLまたは保存先だけを報告せよ"));
+        assert!(prompt.ends_with("ツール呼び出し以外の創作はするな"));
     }
 
     #[test]
