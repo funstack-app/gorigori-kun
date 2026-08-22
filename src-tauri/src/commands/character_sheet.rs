@@ -242,6 +242,9 @@ pub struct CharacterSheetParams {
     /// multi-cut 経路(表情差分)・regenerate_cut では読まない。
     #[serde(default)]
     pub custom_prompt: String,
+    /// 選択式テンプレートの任意プロンプト上書き。未指定なら従来経路をそのまま使う。
+    #[serde(default)]
+    pub sheet_prompt_override: Option<String>,
 }
 
 /// この run を識別するトークン。全バリアントに載せてフロントで照合し、
@@ -592,18 +595,26 @@ async fn run_character_sheet_orchestrator(
                 );
             };
             let slot_hook = SlotHook::new(&slot_hook_fn);
-            // custom_prompt が trim 後非空なら「自分で作る」モード。
-            // モードフラグを別に持たないのは、正が2箇所になる drift を避けるため。
-            // プロンプト選択と受領時正規化ゲートの両方がこの1変数を見る。
-            let is_default_template = params.custom_prompt.trim().is_empty();
-            let prompt = if is_default_template {
-                build_composite_character_sheet_prompt(
+            // 選択式テンプレートの override を最優先し、無ければ従来の custom_prompt、
+            // どちらも空なら規定シートにする。正規化ゲートも同じ判定を使う。
+            let prompt_override = params
+                .sheet_prompt_override
+                .as_deref()
+                .filter(|prompt| !prompt.trim().is_empty());
+            let is_default_template =
+                prompt_override.is_none() && params.custom_prompt.trim().is_empty();
+            let prompt = match prompt_override {
+                Some(override_prompt) => {
+                    build_custom_character_sheet_prompt(override_prompt, params.sheet_background)
+                }
+                None if is_default_template => build_composite_character_sheet_prompt(
                     &attributes,
                     reference_paths.len(),
                     params.sheet_background,
-                )
-            } else {
-                build_custom_character_sheet_prompt(&params.custom_prompt, params.sheet_background)
+                ),
+                None => {
+                    build_custom_character_sheet_prompt(&params.custom_prompt, params.sheet_background)
+                }
             };
             match generate_one_cut_for_run_with_slot_hook(
                 &app,
@@ -1058,6 +1069,7 @@ mod tests {
             run_id: None,
             sheet_background: SheetBackground::Auto,
             custom_prompt: String::new(),
+            sheet_prompt_override: None,
         }
     }
 

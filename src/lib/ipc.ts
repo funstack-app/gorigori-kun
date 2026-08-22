@@ -15,6 +15,7 @@ import type {
   WordsSegmentResult,
 } from "./edit/types";
 import type { StoryboardEvent, StoryboardRunParams } from "./storyboard/types";
+import type { CharacterSheetParams } from "./character/types";
 
 // ──────────── Event names (must match src-tauri/src/events.rs) ────────────
 export const EVENT_NOTIFICATION = "codex://notification";
@@ -34,6 +35,11 @@ export type ServerRequest = {
 export type AppServerStatus = {
   state: "starting" | "ready" | "exited";
   error?: string;
+};
+
+/** `character_sheet_run` の追加上書き。未指定なら既存経路を完全に維持する。 */
+export type CharacterSheetRunParams = CharacterSheetParams & {
+  sheetPromptOverride?: string;
 };
 
 export async function startAppServer(binaryOverride?: string): Promise<unknown> {

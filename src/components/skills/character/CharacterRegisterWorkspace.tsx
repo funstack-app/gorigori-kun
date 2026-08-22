@@ -12,7 +12,6 @@ import { useImagePreview } from "../../../lib/store/imagePreview";
 import { useToasts } from "../../../lib/store/toasts";
 import {
   MAX_CHARACTER_REFERENCE_IMAGES,
-  MAX_CUSTOM_SHEET_PROMPT_CHARS,
   MAX_OUTSTANDING_SHEET_JOBS,
   ensureSheetSlotPhaseListener,
   selectModeJobs,
@@ -21,15 +20,16 @@ import {
   useFocusedSheetJob,
 } from "../../../lib/store/characterSheetRun";
 import type { SheetJob, SheetJobPhase } from "../../../lib/store/characterSheetRun";
-import { cancelGeneration } from "../../../lib/ipc";
+import { cancelGeneration, type CharacterSheetRunParams } from "../../../lib/ipc";
 import { usePresets } from "../../../lib/store/presets";
 import { ensureCharacterSheetEventListener } from "../../../lib/character/events";
-import type {
-  CharacterSheetParams,
-  SheetBackground,
-  SheetCutState,
-  SheetPromptMode,
-} from "../../../lib/character/types";
+import type { SheetBackground, SheetCutState, SheetPromptMode } from "../../../lib/character/types";
+import {
+  BUILT_IN_SHEET_TEMPLATES,
+  IDENTITY_5VIEW_PROMPT_TEMPLATE,
+  fillSheetTemplatePrompt,
+  type UserSheetTemplate,
+} from "../../../lib/character/sheetTemplates";
 import { defaultIdentityChecker } from "../../../lib/character/identityCheck";
 import type { IdentityCheckResult } from "../../../lib/character/identityCheck";
 import { registerCharacter } from "../../../lib/character/registerCharacter";
@@ -38,6 +38,7 @@ import {
   openSkillWithCharacter,
 } from "../../../lib/character/openSkillWithCharacter";
 import { GORI_SKILLS } from "../../../lib/skills/catalog";
+import { SheetTemplatePickerModal } from "./SheetTemplatePickerModal";
 
 const IMAGE_EXTS = ["png", "jpg", "jpeg", "webp", "gif", "bmp"];
 const COMPOSITE_ASPECT_RATIO = "3:4";
@@ -55,11 +56,70 @@ const SHEET_BACKGROUND_OPTIONS: { value: SheetBackground; label: string }[] = [
   { value: "blue", label: "ブルーバック" },
 ];
 
-/** シートの作り方セレクタの選択肢。 */
-const SHEET_PROMPT_MODE_OPTIONS: { value: SheetPromptMode; label: string }[] = [
-  { value: "default", label: "既定シート" },
-  { value: "custom", label: "自分で作る" },
-];
+const SAVED_CUSTOM_TEMPLATE_ID = "saved-custom-template";
+const USER_TEMPLATE_MARKER_PREFIX = "<!-- gori-sheet-template-id:";
+
+type ResolvedSheetTemplate = {
+  id: string;
+  name: string;
+  description: string;
+  prompt: string | null;
+};
+
+function encodeUserTemplatePrompt(id: string, prompt: string): string {
+  return `${USER_TEMPLATE_MARKER_PREFIX}${id} -->\n${prompt}`;
+}
+
+function decodeUserTemplatePrompt(rawPrompt: string): { id: string | null; prompt: string } {
+  if (!rawPrompt.startsWith(USER_TEMPLATE_MARKER_PREFIX)) {
+    return { id: null, prompt: rawPrompt };
+  }
+  const markerEnd = rawPrompt.indexOf(" -->\n");
+  if (markerEnd < 0) return { id: null, prompt: rawPrompt };
+  return {
+    id: rawPrompt.slice(USER_TEMPLATE_MARKER_PREFIX.length, markerEnd),
+    prompt: rawPrompt.slice(markerEnd + " -->\n".length),
+  };
+}
+
+function resolveSheetTemplate(
+  mode: SheetPromptMode,
+  prompt: string,
+  userTemplates: UserSheetTemplate[],
+): ResolvedSheetTemplate {
+  if (mode === "default" || !prompt.trim()) return BUILT_IN_SHEET_TEMPLATES[0];
+  const decoded = decodeUserTemplatePrompt(prompt);
+  const userTemplate = decoded.id
+    ? userTemplates.find((template) => template.id === decoded.id)
+    : undefined;
+  if (userTemplate) {
+    return {
+      ...userTemplate,
+      description: userTemplate.name,
+    };
+  }
+  if (decoded.prompt === IDENTITY_5VIEW_PROMPT_TEMPLATE) return BUILT_IN_SHEET_TEMPLATES[1];
+  // 旧「自分で作る」で保存済みのキャラも、作り直し経路を壊さず使えるようにする。
+  return {
+    id: SAVED_CUSTOM_TEMPLATE_ID,
+    name: "登録済みテンプレート",
+    description: "以前に登録したシート設定",
+    prompt: decoded.prompt,
+  };
+}
+
+function resolveSheetPromptOverride(
+  mode: SheetPromptMode,
+  rawPrompt: string,
+  characterName: string,
+  attributes: string,
+): string | undefined {
+  if (mode === "default" || !rawPrompt.trim()) return undefined;
+  return fillSheetTemplatePrompt(decodeUserTemplatePrompt(rawPrompt).prompt, {
+    name: characterName,
+    attributes,
+  });
+}
 
 /** セグメント型ボタンの共通クラス (選択中 / 非選択)。参照ラックのボタンと同系トーン。 */
 function segmentButtonClass(selected: boolean): string {
@@ -76,9 +136,8 @@ function buildCompositeSheetParams(
   attributes: string,
   runId: string,
   sheetBackground: SheetBackground,
-  /** 既定シートモードでは "" を渡す (Rust 側は trim 後非空を custom と判定する)。 */
-  customPrompt: string,
-): CharacterSheetParams {
+  sheetPromptOverride?: string,
+): CharacterSheetRunParams {
   return {
     // 単数 characterImage は後方互換のため常にメイン(先頭)を入れて送る。
     characterImage: characterImages[0],
@@ -88,7 +147,8 @@ function buildCompositeSheetParams(
     generationMode: "composite",
     runId,
     sheetBackground,
-    customPrompt,
+    customPrompt: "",
+    ...(sheetPromptOverride ? { sheetPromptOverride } : {}),
   };
 }
 
@@ -402,10 +462,12 @@ function StepInput() {
   const regenTarget = usePresets(
     (s) => s.presets.find((p) => p.id === regenerateTargetPresetId) ?? null,
   );
+  const sheetTemplates = usePresets((s) => s.sheetTemplates);
 
   const pushToast = useToasts((s) => s.push);
   const openPreview = useImagePreview((s) => s.open);
   const [extracting, setExtracting] = useState(false);
+  const [templatePickerOpen, setTemplatePickerOpen] = useState(false);
   /**
    * invoke の往復中だけ立つ連打ガード (SQ2 / 2026-08-04)。
    *
@@ -416,10 +478,27 @@ function StepInput() {
    */
   const [submitting, setSubmitting] = useState(false);
 
-  const canRun =
-    characterImagePaths.length >= 1 &&
-    !submitting &&
-    (sheetPromptMode === "default" || customSheetPrompt.trim().length > 0);
+  const selectedTemplate = resolveSheetTemplate(
+    sheetPromptMode,
+    customSheetPrompt,
+    sheetTemplates,
+  );
+  const canRun = characterImagePaths.length >= 1 && !submitting;
+
+  function selectSheetTemplate(template: { id: string; prompt: string | null }) {
+    if (template.prompt == null) {
+      setSheetPromptMode("default");
+      setCustomSheetPrompt("");
+      return;
+    }
+    setSheetPromptMode("custom");
+    // 生の雛形を保持し、名前・属性の穴埋めは生成の直前に行う。
+    setCustomSheetPrompt(
+      template.id === "identity-5view"
+        ? template.prompt
+        : encodeUserTemplatePrompt(template.id, template.prompt),
+    );
+  }
 
   async function pickCharacterImage() {
     try {
@@ -520,15 +599,6 @@ function StepInput() {
       pushToast({ kind: "info", text: "先に参照画像を選んでください。", ttlMs: 3000 });
       return;
     }
-    if (sheetPromptMode === "custom" && customSheetPrompt.trim().length === 0) {
-      pushToast({
-        kind: "info",
-        text: "先にシート生成プロンプトを入力してください。",
-        ttlMs: 3000,
-      });
-      return;
-    }
-
     // 全体ガードを撤去した代わりの3本柱のうち2本 (残り1本は上の submitting)。
     // 走行中でも仕込めるようにすると、この2つが新たに現実の事故になる。
     const runState = useCharacterSheetRun.getState();
@@ -561,13 +631,19 @@ function StepInput() {
     // 全イベントが同じ run_id を載せ、画面往復後の別 run 後着通知を照合で捨てられる
     // (B1 混線対策)。バックエンドは params.runId をそのまま使う。
     const runId = crypto.randomUUID();
+    const sheetPromptOverride = resolveSheetPromptOverride(
+      sheetPromptMode,
+      customSheetPrompt,
+      characterName,
+      attributes,
+    );
 
     const params = buildCompositeSheetParams(
       characterImagePaths,
       attributes,
       runId,
       sheetBackground,
-      sheetPromptMode === "custom" ? customSheetPrompt.trim() : "",
+      sheetPromptOverride,
     );
 
     // 先に1枚分の pending 状態を作り、開始直後の通知も取りこぼさない。
@@ -703,41 +779,21 @@ function StepInput() {
           <div className="mb-1.5 text-[11px] font-black uppercase tracking-wider text-neutral-500">
             シートの作り方
           </div>
-          <div className="flex flex-wrap gap-1.5">
-            {SHEET_PROMPT_MODE_OPTIONS.map((option) => (
-              <button
-                key={option.value}
-                type="button"
-                onClick={() => setSheetPromptMode(option.value)}
-                className={segmentButtonClass(sheetPromptMode === option.value)}
-              >
-                {option.label}
-              </button>
-            ))}
-          </div>
-          <p className="mt-1 text-[10px] text-neutral-600">
-            {sheetPromptMode === "custom"
-              ? "下に入力したプロンプトが、そのまま生成の指示になります。"
-              : "決まったレイアウト(全身三面図+シーンショット)でシートを作ります。"}
-          </p>
-          {sheetPromptMode === "custom" && (
-            <div className="mt-2">
-              <div className="mb-1.5 text-[11px] font-black uppercase tracking-wider text-neutral-500">
-                シート生成プロンプト
-              </div>
-              <textarea
-                value={customSheetPrompt}
-                onChange={(e) => setCustomSheetPrompt(e.target.value)}
-                placeholder="例: 添付画像のキャラクターの全身立ち絵を、正面・側面・背面の3方向で1枚の縦長シートにまとめてください。画風・配色・衣装は添付画像のまま変えないでください。"
-                rows={8}
-                maxLength={MAX_CUSTOM_SHEET_PROMPT_CHARS}
-                className="w-full resize-none rounded-lg border border-[#2a2a2a] bg-[#0d0d0d] px-3 py-2 text-[12px] text-neutral-200 placeholder:text-neutral-600 focus:border-pink-400/60 focus:outline-none"
-              />
-              <p className="mt-1 text-[10px] text-neutral-600">
-                参考画像は自動で添付されます。「添付画像のキャラクター」のように書いてください。参考画像が複数あるときの扱い(どれを基準にするか)もプロンプトに書けます。
-              </p>
-            </div>
-          )}
+          <button
+            type="button"
+            onClick={() => setTemplatePickerOpen(true)}
+            className="w-full rounded-xl border border-pink-500/40 bg-pink-500/10 px-3 py-2.5 text-left transition hover:border-pink-400 hover:bg-pink-500/15"
+          >
+            <span className="block text-[12px] font-black text-pink-100">
+              選択中: {selectedTemplate.name}
+            </span>
+            <span className="mt-1 block text-[10px] leading-relaxed text-neutral-500">
+              {selectedTemplate.description}
+            </span>
+            <span className="mt-1.5 block text-[10px] font-bold text-pink-300">
+              種類を変更する →
+            </span>
+          </button>
         </div>
 
         <div>
@@ -757,7 +813,7 @@ function StepInput() {
             ))}
           </div>
           <p className="mt-1 text-[10px] text-neutral-600">
-            {sheetPromptMode === "custom"
+            {selectedTemplate.id !== "standard"
               ? "既定はプロンプトの指示に従います。色を選ぶと、プロンプト内の背景指定より優先してその背景になります。"
               : "既定はこれまで通りの背景です。色を選ぶと、上段(三面図エリア)の背景がその色になります。下段のシーンショットは変わりません。"}
           </p>
@@ -785,9 +841,7 @@ function StepInput() {
             className="w-full resize-none rounded-lg border border-[#2a2a2a] bg-[#0d0d0d] px-3 py-2 text-[12px] text-neutral-200 placeholder:text-neutral-600 focus:border-pink-400/60 focus:outline-none"
           />
           <p className="mt-1 text-[10px] text-neutral-600">
-            {sheetPromptMode === "custom"
-              ? "このモードではシート生成には使いません。登録後、他のスキルがこのキャラの見た目を保つための説明として保存されます。"
-              : "シート全体に反映します。空欄なら参照画像の見た目を踏襲します。"}
+            シート全体に反映します。テンプレート内の【記入欄】も、この属性で埋めます。空欄なら参照画像の見た目を踏襲します。
           </p>
         </div>
 
@@ -796,9 +850,9 @@ function StepInput() {
             生成: <span className="text-pink-300">統合シート 1枚</span>
           </div>
           <div className="mt-1 text-center text-[10px] text-neutral-600">
-            {sheetPromptMode === "custom"
-              ? "入力したプロンプトの内容で1枚生成します"
-              : "縦長 3:4・全身三面図とシーンショットを1枚にまとめます"}
+            {selectedTemplate.id === "standard"
+              ? "縦長 3:4・全身三面図とシーンショットを1枚にまとめます"
+              : `${selectedTemplate.name}の内容で1枚生成します`}
           </div>
         </div>
 
@@ -846,10 +900,10 @@ function StepInput() {
               </div>
             )}
             <p className="mt-4 text-[12px]">
-              {sheetPromptMode === "custom"
+              {selectedTemplate.id !== "standard"
                 ? characterImagePaths.length > 1
-                  ? `${characterImagePaths.length}枚の参照画像と、入力したプロンプトからキャラクターシートを生成します。`
-                  : "この参照画像と、入力したプロンプトからキャラクターシートを生成します。"
+                  ? `${characterImagePaths.length}枚の参照画像から「${selectedTemplate.name}」を生成します。`
+                  : `この参照画像から「${selectedTemplate.name}」を生成します。`
                 : characterImagePaths.length > 1
                   ? `1枚目をメインの見た目として、${characterImagePaths.length}枚の参照からキャラクターシートを生成します。`
                   : "この1枚から、全身三面図とシーンショットをまとめたキャラクターシートを生成します。"}
@@ -863,6 +917,13 @@ function StepInput() {
           </>
         )}
       </div>
+      {templatePickerOpen && (
+        <SheetTemplatePickerModal
+          selectedId={selectedTemplate.id}
+          onSelect={selectSheetTemplate}
+          onClose={() => setTemplatePickerOpen(false)}
+        />
+      )}
     </div>
   );
 }
@@ -885,6 +946,7 @@ function StepGenerate({
   const cutOrder = job.cutOrder;
   // 2026-07-27: 生成中ゲージ用。カット開始時刻から経過を測る。
   const cutStartedAt = job.cutStartedAt;
+  const characterName = job.input.characterName;
   const characterImagePaths = job.input.characterImagePaths;
   const attributes = job.input.attributes;
   const sheetPromptMode = job.input.sheetPromptMode;
@@ -894,6 +956,12 @@ function StepGenerate({
   const setStep = useCharacterSheetRun((s) => s.setStep);
   const prepareNextCharacter = useCharacterSheetRun((s) => s.prepareNextCharacter);
   const pushToast = useToasts((s) => s.push);
+  const sheetTemplates = usePresets((s) => s.sheetTemplates);
+  const selectedTemplate = resolveSheetTemplate(
+    sheetPromptMode,
+    customSheetPrompt,
+    sheetTemplates,
+  );
 
   const sheet = cutOrder
     .map((id) => cuts[id])
@@ -914,7 +982,12 @@ function StepGenerate({
       attributes,
       nextRunId,
       sheetBackground,
-      sheetPromptMode === "custom" ? customSheetPrompt.trim() : "",
+      resolveSheetPromptOverride(
+        sheetPromptMode,
+        customSheetPrompt,
+        characterName,
+        attributes,
+      ),
     );
     replaceJobRun(job.jobId, nextRunId, [COMPOSITE_SHEET_CUT]);
 
@@ -939,14 +1012,19 @@ function StepGenerate({
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex items-center justify-between border-b border-[#242424] px-4 py-3">
-        <div className="text-[12px] font-bold text-neutral-300">
-          {sheet?.status === "failed"
-            ? "生成失敗"
-            : sheet?.status === "completed"
-              ? "生成完了"
-              : sheet?.status === "running"
-                ? "生成中…"
-                : "待機中"}
+        <div className="flex flex-wrap items-center gap-2 text-[12px] font-bold text-neutral-300">
+          <span>
+            {sheet?.status === "failed"
+              ? "生成失敗"
+              : sheet?.status === "completed"
+                ? "生成完了"
+                : sheet?.status === "running"
+                  ? "生成中…"
+                  : "待機中"}
+          </span>
+          <span className="rounded-full bg-pink-500/15 px-2 py-0.5 text-[10px] text-pink-200">
+            シート: {selectedTemplate.name}
+          </span>
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -1034,9 +1112,7 @@ function StepGenerate({
           </div>
           <div className="flex items-center justify-between gap-3 px-3 py-3">
             <div className="text-[12px] font-bold text-neutral-200">
-              {sheetPromptMode === "custom"
-                ? "キャラクターシート"
-                : "キャラクターシート（3:4）"}
+              キャラクターシート（{selectedTemplate.name}）
             </div>
             <button
               type="button"
@@ -1080,7 +1156,13 @@ function StepRegister({
     (s) =>
       s.presets.find((p) => p.id === job.input.regenerateTargetPresetId) ?? null,
   );
+  const sheetTemplates = usePresets((s) => s.sheetTemplates);
   const pushToast = useToasts((s) => s.push);
+  const selectedTemplate = resolveSheetTemplate(
+    sheetPromptMode,
+    customSheetPrompt,
+    sheetTemplates,
+  );
 
   const orderedCuts = useMemo(
     () =>
@@ -1219,8 +1301,13 @@ function StepRegister({
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="flex items-center justify-between border-b border-[#242424] px-4 py-3">
-        <div className="text-[12px] font-bold text-neutral-300">
-          登録内容の確認 <span className="text-neutral-500">(シート 1枚)</span>
+        <div className="flex flex-wrap items-center gap-2 text-[12px] font-bold text-neutral-300">
+          <span>
+            登録内容の確認 <span className="text-neutral-500">(シート 1枚)</span>
+          </span>
+          <span className="rounded-full bg-pink-500/15 px-2 py-0.5 text-[10px] text-pink-200">
+            シート: {selectedTemplate.name}
+          </span>
         </div>
         <button
           type="button"

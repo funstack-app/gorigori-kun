@@ -3,6 +3,11 @@ import { create } from "zustand";
 
 import type { SheetBackground, SheetPromptMode } from "../character/types";
 import {
+  createUserSheetTemplate,
+  parseUserSheetTemplates,
+  type UserSheetTemplate,
+} from "../character/sheetTemplates";
+import {
   type BackupListResult,
   ensureDailyBackupsSafe,
   toBackupListResult,
@@ -250,6 +255,7 @@ type PresetsFileData = {
   version: 1;
   categories: PresetCategory[];
   presets: Preset[];
+  sheetTemplates: UserSheetTemplate[];
 };
 
 export type PresetsFileState = "ok" | "missing" | "corrupted" | "unreadable";
@@ -339,11 +345,13 @@ function writeToFile(data: PresetsFileData, allowEmpty = false): Promise<boolean
 
 /**
  * 全 mutate 共通の永続化。ファイル (正本) + localStorage (冗長バックアップ) 併記。
- * allowEmpty: presets 0 件での上書きを許可するか (明示的な全削除時のみ true)。
+ * allowEmpty: presets 0 件での上書きを許可するか
+ * (明示的な全削除、またはテンプレートだけを保存する操作のみ true)。
  */
 function persistAll(
   categories: PresetCategory[],
   presets: Preset[],
+  sheetTemplates: UserSheetTemplate[],
   allowEmpty = false,
 ) {
   persist(CATEGORIES_LS_KEY, categories);
@@ -356,7 +364,7 @@ function persistAll(
     pendingBeforeUnlock = true;
     return;
   }
-  void writeToFile({ version: 1, categories, presets }, allowEmpty);
+  void writeToFile({ version: 1, categories, presets, sheetTemplates }, allowEmpty);
 }
 
 /**
@@ -427,7 +435,11 @@ function hasTauriInvoke(): boolean {
  * ファイル書き込みを解禁し、解禁前の mutate を1回だけ反映する。
  * initialize が「読めた」または「ファイルなし」を確認した経路からのみ呼ぶ。
  */
-function unlockFileWrite(next: { categories: PresetCategory[]; presets: Preset[] }) {
+function unlockFileWrite(next: {
+  categories: PresetCategory[];
+  presets: Preset[];
+  sheetTemplates: UserSheetTemplate[];
+}) {
   fileWriteUnlocked = true;
   if (!pendingBeforeUnlock) return;
   pendingBeforeUnlock = false;
@@ -566,6 +578,7 @@ const DEFAULT_CATEGORIES: PresetCategory[] = [
 type PresetsState = {
   categories: PresetCategory[];
   presets: Preset[];
+  sheetTemplates: UserSheetTemplate[];
   presetsFileState: PresetsFileState;
 
   addCategory: (name: string, color?: string, tags?: string[]) => PresetCategory;
@@ -575,6 +588,9 @@ type PresetsState = {
   addPreset: (data: Omit<Preset, "id" | "createdAt" | "updatedAt">) => Preset;
   updatePreset: (id: string, updates: Partial<Omit<Preset, "id" | "createdAt">>) => void;
   removePreset: (id: string) => void;
+
+  addSheetTemplate: (data: { name: string; prompt: string }) => UserSheetTemplate;
+  removeSheetTemplate: (id: string) => void;
 
   /** お気に入り toggle。Code Manager と同じ仕様。 */
   toggleFavorite: (id: string) => void;
@@ -671,6 +687,9 @@ export const usePresets = create<PresetsState>((set, get) => ({
     persist(PRESETS_LS_KEY, merged);
     return merged;
   })(),
+  // テンプレートは presets.json を正本にする。ビルドごとに領域が分かれる
+  // localStorage からは読まず、initialize でファイル内容を反映する。
+  sheetTemplates: [],
   // 読み込み前は警告しない。initialize が正本の実状態へ更新する。
   presetsFileState: "missing",
 
@@ -731,8 +750,13 @@ export const usePresets = create<PresetsState>((set, get) => ({
     }
     const categories = ensureCharacterCategory(parsed.categories as PresetCategory[]);
     const presets = parsed.presets as Preset[];
+    const sheetTemplates = parseUserSheetTemplates(parsed.sheetTemplates ?? []);
     // 復元前の現在値。保存に失敗したら画面をここへ戻す (下記)。
-    const before = { categories: get().categories, presets: get().presets };
+    const before = {
+      categories: get().categories,
+      presets: get().presets,
+      sheetTemplates: get().sheetTemplates,
+    };
     // 正本ファイルへ書き戻す。復元前の現状も presets_write 側で自動バックアップ
     // される（二重に安全。projects の restoreFromBackup と同じ思想）。
     //
@@ -744,7 +768,7 @@ export const usePresets = create<PresetsState>((set, get) => ({
     // 先に書くと、失敗して画面を戻したのに localStorage だけバックアップの内容が
     // 残り、次回起動の「多い方を勝たせる」判定 (readPresetsFileIntoStore) が
     // 取り消したはずの復元を蘇らせる。
-    const ok = await writeToFile({ version: 1, categories, presets });
+    const ok = await writeToFile({ version: 1, categories, presets, sheetTemplates });
     if (!ok) {
       set(before);
       throw new Error(
@@ -753,7 +777,7 @@ export const usePresets = create<PresetsState>((set, get) => ({
     }
     persist(CATEGORIES_LS_KEY, categories);
     persist(PRESETS_LS_KEY, presets);
-    set({ categories, presets, presetsFileState: "ok" });
+    set({ categories, presets, sheetTemplates, presetsFileState: "ok" });
     return presets.length;
   },
 
@@ -765,14 +789,14 @@ export const usePresets = create<PresetsState>((set, get) => ({
       tags: tags && tags.length > 0 ? tags : undefined,
     };
     const next = [...get().categories, category];
-    persistAll(next, get().presets);
+    persistAll(next, get().presets, get().sheetTemplates);
     set({ categories: next });
     return category;
   },
 
   updateCategory: (id, updates) => {
     const next = get().categories.map((c) => (c.id === id ? { ...c, ...updates } : c));
-    persistAll(next, get().presets);
+    persistAll(next, get().presets, get().sheetTemplates);
     set({ categories: next });
   },
 
@@ -783,7 +807,7 @@ export const usePresets = create<PresetsState>((set, get) => ({
       p.categoryId === id ? { ...p, categoryId: null, updatedAt: Date.now() } : p,
     );
     // presets が 0 件になる操作ではない (未分類へ付け替え) ので allowEmpty 不要。
-    persistAll(nextCategories, nextPresets);
+    persistAll(nextCategories, nextPresets, get().sheetTemplates);
     set({ categories: nextCategories, presets: nextPresets });
   },
 
@@ -816,7 +840,7 @@ export const usePresets = create<PresetsState>((set, get) => ({
       updatedAt: now,
     };
     const next = [...get().presets, preset];
-    persistAll(get().categories, next);
+    persistAll(get().categories, next, get().sheetTemplates);
     set({ presets: next });
     return preset;
   },
@@ -834,7 +858,7 @@ export const usePresets = create<PresetsState>((set, get) => ({
           }
         : p,
     );
-    persistAll(get().categories, next);
+    persistAll(get().categories, next, get().sheetTemplates);
     set({ presets: next });
   },
 
@@ -847,8 +871,36 @@ export const usePresets = create<PresetsState>((set, get) => ({
     const removed = next.length < before.length;
     // 本当に最後の1件を消したときだけ allowEmpty で空上書きガードを通す
     // (「消したのに再起動で復活」する退行を防ぐ)。
-    persistAll(get().categories, next, removed && next.length === 0);
+    persistAll(
+      get().categories,
+      next,
+      get().sheetTemplates,
+      removed && next.length === 0,
+    );
     set({ presets: next });
+  },
+
+  addSheetTemplate: (data) => {
+    if (!data.name.trim() || !data.prompt.trim()) {
+      throw new Error("テンプレート名とプロンプトは必須です");
+    }
+    const template = createUserSheetTemplate(data, {
+      id: `sheet-template-${generateId()}`,
+    });
+    const next = [...get().sheetTemplates, template];
+    // Rust 側の空判定の分母は従来どおり presets。プリセットが元から0件の
+    // 正常状態でもテンプレートだけは保存できるよう、この操作に限り明示許可する。
+    persistAll(get().categories, get().presets, next, get().presets.length === 0);
+    set({ sheetTemplates: next });
+    return template;
+  },
+
+  removeSheetTemplate: (id) => {
+    const before = get().sheetTemplates;
+    const next = before.filter((template) => template.id !== id);
+    if (next.length === before.length) return;
+    persistAll(get().categories, get().presets, next, get().presets.length === 0);
+    set({ sheetTemplates: next });
   },
 
   toggleFavorite: (id) => {
@@ -857,7 +909,7 @@ export const usePresets = create<PresetsState>((set, get) => ({
         ? { ...p, favorite: !p.favorite, updatedAt: Date.now() }
         : p,
     );
-    persistAll(get().categories, next);
+    persistAll(get().categories, next, get().sheetTemplates);
     set({ presets: next });
   },
 
@@ -921,7 +973,7 @@ export const usePresets = create<PresetsState>((set, get) => ({
       return { ...p, attachedImages, characterMeta };
     });
     if (!changed) return;
-    persistAll(get().categories, nextPresets);
+    persistAll(get().categories, nextPresets, get().sheetTemplates);
     set({ presets: nextPresets });
   },
 
@@ -990,7 +1042,7 @@ export const usePresets = create<PresetsState>((set, get) => ({
       return { ...p, attachedImages, characterMeta };
     });
     if (!changed) return;
-    persistAll(get().categories, nextPresets);
+    persistAll(get().categories, nextPresets, get().sheetTemplates);
     set({ presets: nextPresets });
   },
 
@@ -1003,7 +1055,7 @@ export const usePresets = create<PresetsState>((set, get) => ({
     const next = [...current];
     const [moved] = next.splice(fromIdx, 1);
     next.splice(toIdx, 0, moved);
-    persistAll(get().categories, next);
+    persistAll(get().categories, next, get().sheetTemplates);
     set({ presets: next });
   },
 }));
@@ -1067,6 +1119,7 @@ async function readPresetsFileIntoStore(
 
     const savedCategories = parsed.categories as PresetCategory[];
     const categories = ensureCharacterCategory(savedCategories);
+    const sheetTemplates = parseUserSheetTemplates(parsed.sheetTemplates ?? []);
     // loadPresets と同じ focus マイグレートを通す。
     const presets = (parsed.presets as Preset[]).map((p) => {
       const migrated = migrateLegacyFocus(p.thumbnailFocus as unknown);
@@ -1104,13 +1157,14 @@ async function readPresetsFileIntoStore(
       const backupCategories = ensureCharacterCategory(
         readPersisted<PresetCategory[]>(CATEGORIES_LS_KEY, DEFAULT_CATEGORIES),
       );
-      set({ categories: backupCategories, presets: backupPresets });
+      set({ categories: backupCategories, presets: backupPresets, sheetTemplates });
       // 復元内容をファイルへ書き戻す。少ない件数を多い件数で上書きする方向なので
       // Rust 側の激減ガード (S4) には当たらない。
       void writeToFile({
         version: 1,
         categories: backupCategories,
         presets: backupPresets,
+        sheetTemplates,
       });
       void (async () => {
         try {
@@ -1137,14 +1191,14 @@ async function readPresetsFileIntoStore(
       return true; // 解禁だけする。unlockFileWrite が保留分をフラッシュする
     }
 
-    set({ categories, presets });
+    set({ categories, presets, sheetTemplates });
     // localStorage の冗長バックアップを最新化する。
     persist(CATEGORIES_LS_KEY, categories);
     persist(PRESETS_LS_KEY, presets);
     // ensureCharacterCategory が配列を変えたときだけファイルへ書き戻す
     // (無変化時は書かない = 起動ごとの無用な書き込みとバックアップ世代の消費を避ける)。
     if (categories !== savedCategories) {
-      void writeToFile({ version: 1, categories, presets });
+      void writeToFile({ version: 1, categories, presets, sheetTemplates });
     }
     return true; // 正常に読めた = 以後ファイルへ書いてよい
   }
@@ -1152,17 +1206,20 @@ async function readPresetsFileIntoStore(
   // ファイル未作成 = localStorage からの移行 or 新規ユーザー。
   // 現在の in-memory state (localStorage 由来 + legacy 移行済み) を正とする。
   if (isCurrent()) set({ presetsFileState: "missing" });
-  const { categories, presets } = get();
+  const { categories, presets, sheetTemplates } = get();
   const categoriesAreDefault =
     categories.length === DEFAULT_CATEGORIES.length &&
     categories.every((c, i) => c.id === DEFAULT_CATEGORIES[i].id);
-  if (presets.length > 0 || !categoriesAreDefault) {
+  if (presets.length > 0 || sheetTemplates.length > 0 || !categoriesAreDefault) {
     console.info(
       "[presets] localStorage から",
       presets.length,
       "件のプリセットをファイルへ移行",
     );
-    const ok = await writeToFile({ version: 1, categories, presets });
+    const ok = await writeToFile(
+      { version: 1, categories, presets, sheetTemplates },
+      presets.length === 0,
+    );
     if (!ok) {
       // **2026-08-06 重大修正 (実ユーザーのプリセット30体消失)**: ここで移行が
       // 失敗しても成功扱いで解禁していた。解禁されると以後の mutate がファイルへ
