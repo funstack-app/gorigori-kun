@@ -13,6 +13,7 @@ import type {
   RemoteMcpGenEvent,
   RemoteMcpGenerateArgs,
 } from "../ipc";
+import { registerGeneratedMedia } from "./images";
 
 export type RemoteMcpGenerationKind = Exclude<RemoteMcpToolKind, "other">;
 
@@ -45,6 +46,9 @@ export type RemoteMcpGenJob = {
   paramsJson: string;
   selection: RemoteMcpSelection;
   input: RemoteMcpRunInput;
+  /** 保存後のライブラリ・履歴・プロジェクト登録まで試行済みか。 */
+  registrationCompleted?: boolean;
+  registrationWarnings?: string[];
   createdAt: number;
   updatedAt: number;
 };
@@ -72,6 +76,35 @@ type RemoteMcpGenState = {
   retry: (requestId: string) => Promise<RemoteMcpStartResult>;
   applyEvent: (event: RemoteMcpGenEvent) => void;
 };
+
+const MODEL_CATALOG_CACHE_KEY = "gori.remoteMcp.modelCatalogs.v1";
+
+function readModelCatalogCache(): Record<string, RemoteMcpModelCatalog> {
+  if (typeof localStorage === "undefined") return {};
+  try {
+    const parsed = JSON.parse(localStorage.getItem(MODEL_CATALOG_CACHE_KEY) ?? "{}") as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    const catalogs: Record<string, RemoteMcpModelCatalog> = {};
+    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+      const catalog = value as RemoteMcpModelCatalog;
+      if (!Array.isArray(catalog.models) || !catalog.providerId || !catalog.kind) continue;
+      catalogs[key] = { ...catalog, loadedFromCache: true };
+    }
+    return catalogs;
+  } catch {
+    return {};
+  }
+}
+
+function writeModelCatalogCache(catalogs: Record<string, RemoteMcpModelCatalog>) {
+  if (typeof localStorage === "undefined") return;
+  try {
+    localStorage.setItem(MODEL_CATALOG_CACHE_KEY, JSON.stringify(catalogs));
+  } catch {
+    // 保存できない環境では、その起動中のメモリ表示だけを使う。
+  }
+}
 
 function createRequestId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -113,9 +146,10 @@ function validationFailure(
   });
   if (built.schemaError) return { ok: false, message: built.schemaError };
   if (built.missingRequired.length > 0) {
+    const toolLabel = selection.toolTitle?.trim() || selection.toolName;
     return {
       ok: false,
-      message: `このツールには追加の必須入力が必要です: ${built.missingRequired.join("、")}`,
+      message: `ツール「${toolLabel}」を選択中です。足りない必須入力: ${built.missingRequired.join("、")}`,
     };
   }
   return { ok: true, paramsJson: built.paramsJson };
@@ -138,6 +172,81 @@ export function ensureRemoteMcpGenListener(): Promise<() => void> {
 }
 
 export const useRemoteMcpGen = create<RemoteMcpGenState>((set, get) => {
+  const completeRegistration = async (
+    requestId: string,
+    selection: RemoteMcpSelection,
+    input: RemoteMcpRunInput,
+    savedPaths: string[],
+    saveWarnings: string[] = [],
+  ): Promise<void> => {
+    const noun = input.kind === "video" ? "動画" : "画像";
+    try {
+      const refImagePaths = [
+        input.startImagePath,
+        input.endImagePath,
+        ...(input.referenceImagePaths ?? []),
+      ].filter((path): path is string => Boolean(path?.trim()));
+      const registration = await registerGeneratedMedia({
+        paths: savedPaths,
+        mediaType: input.kind,
+        prompt: input.prompt,
+        providerId: selection.providerId,
+        providerLabel: selection.providerLabel,
+        modelId: selection.model?.id,
+        modelLabel: selection.toolTitle || selection.model?.id,
+        refImagePaths: [...new Set(refImagePaths)],
+        durationSeconds: input.durationSeconds,
+      });
+      const warnings = [...saveWarnings, ...registration.warnings].filter(Boolean);
+      const projectText = registration.hadActiveProject
+        ? `・プロジェクト${registration.projectCount}件`
+        : "";
+      const message =
+        warnings.length > 0
+          ? `${noun}は保存しました。ライブラリ${registration.libraryCount}件・履歴${registration.historyCount}件${projectText}を登録しました。注意: ${warnings.join(" ")}`
+          : `${noun}を保存し、ライブラリ${registration.libraryCount}件・履歴${registration.historyCount}件${projectText}へ登録しました。`;
+      set((state) => {
+        const current = state.jobs[requestId];
+        if (!current) return state;
+        return {
+          jobs: {
+            ...state.jobs,
+            [requestId]: {
+              ...current,
+              phase: "done",
+              message,
+              savedPaths,
+              registrationCompleted: true,
+              registrationWarnings: warnings,
+              updatedAt: Date.now(),
+            },
+          },
+        };
+      });
+    } catch (error) {
+      const warning = `${noun}は保存しましたが、ライブラリ・履歴への登録処理に失敗しました: ${String(error)}`;
+      console.warn("[remote-mcp-registration]", warning);
+      set((state) => {
+        const current = state.jobs[requestId];
+        if (!current) return state;
+        return {
+          jobs: {
+            ...state.jobs,
+            [requestId]: {
+              ...current,
+              phase: "done",
+              message: warning,
+              savedPaths,
+              registrationCompleted: true,
+              registrationWarnings: [warning],
+              updatedAt: Date.now(),
+            },
+          },
+        };
+      });
+    }
+  };
+
   const launch = async (
     selection: RemoteMcpSelection,
     input: RemoteMcpRunInput,
@@ -182,6 +291,35 @@ export const useRemoteMcpGen = create<RemoteMcpGenState>((set, get) => {
     };
 
     try {
+      if (selection.providerId === "higgsfield" && input.kind === "video") {
+        const { higgsfieldMcp } = await import("../ipc");
+        const refImagePaths = [
+          input.startImagePath,
+          input.endImagePath,
+          ...(input.referenceImagePaths ?? []),
+        ].filter((path): path is string => Boolean(path?.trim()));
+        const result = await higgsfieldMcp.generateBatch({
+          prompt: input.prompt,
+          model: selection.model?.passModel === false ? undefined : selection.model?.id,
+          aspect: input.aspectRatio,
+          count: input.count,
+          refImagePaths: [...new Set(refImagePaths)],
+          mediaType: "video",
+          duration: input.durationSeconds,
+        });
+        if (result.generatedPaths.length === 0) {
+          throw new Error(result.errors.join(" ") || "HiggsField の動画を保存できませんでした。");
+        }
+        await completeRegistration(
+          requestId,
+          selection,
+          input,
+          result.generatedPaths,
+          result.errors,
+        );
+        return { ok: true, requestId };
+      }
+
       if (selection.providerId === "magnific" && input.kind === "video") {
         const { magnific } = await import("../ipc");
         const localImagePaths = [
@@ -196,25 +334,13 @@ export const useRemoteMcpGen = create<RemoteMcpGenState>((set, get) => {
         if (result.generatedPaths.length === 0) {
           throw new Error(result.errors.join(" ") || "Magnific の動画を保存できませんでした。");
         }
-        set((state) => {
-          const current = state.jobs[requestId];
-          if (!current) return state;
-          return {
-            jobs: {
-              ...state.jobs,
-              [requestId]: {
-                ...current,
-                phase: "done",
-                message:
-                  result.errors.length > 0
-                    ? `保存は完了しました。一部の処理に失敗しました: ${result.errors.join(" ")}`
-                    : "保存が完了しました。",
-                savedPaths: result.generatedPaths,
-                updatedAt: Date.now(),
-              },
-            },
-          };
-        });
+        await completeRegistration(
+          requestId,
+          selection,
+          input,
+          result.generatedPaths,
+          result.errors,
+        );
         return { ok: true, requestId };
       }
 
@@ -251,7 +377,7 @@ export const useRemoteMcpGen = create<RemoteMcpGenState>((set, get) => {
     jobs: {},
     latestRequestId: { image: null, video: null },
     validationMessage: { image: null, video: null },
-    modelCatalogs: {},
+    modelCatalogs: readModelCatalogCache(),
 
     setSelection: (kind, selection) =>
       set((state) => {
@@ -289,7 +415,14 @@ export const useRemoteMcpGen = create<RemoteMcpGenState>((set, get) => {
       }),
 
     setModelCatalog: (key, catalog) =>
-      set((state) => ({ modelCatalogs: { ...state.modelCatalogs, [key]: catalog } })),
+      set((state) => {
+        const modelCatalogs = {
+          ...state.modelCatalogs,
+          [key]: { ...catalog, loadedFromCache: false },
+        };
+        writeModelCatalogCache(modelCatalogs);
+        return { modelCatalogs };
+      }),
 
     start: async (input) => {
       const selection = get().selections[input.kind];
@@ -336,32 +469,68 @@ export const useRemoteMcpGen = create<RemoteMcpGenState>((set, get) => {
       return launch(job.selection, job.input);
     },
 
-    applyEvent: (event) =>
-      set((state) => {
-        const current = state.jobs[event.requestId];
-        if (!current || current.providerId !== event.providerId) return state;
-        const message =
-          event.phase === "error"
-            ? friendlyRemoteMcpError(event.message)
-            : event.message ??
-              (event.phase === "saving"
-                ? "生成結果を保存しています…"
-                : event.phase === "done"
-                  ? "保存が完了しました。"
-                  : "生成しています…");
-        return {
+    applyEvent: (event) => {
+      const current = get().jobs[event.requestId];
+      if (!current || current.providerId !== event.providerId) return;
+
+      if (event.phase === "done" && event.savedPaths?.length) {
+        // 同じ done が再送されても履歴 turn を二重に作らない。
+        if (
+          current.registrationCompleted ||
+          (current.phase === "saving" && current.savedPaths?.length)
+        ) {
+          return;
+        }
+        set((state) => ({
           jobs: {
             ...state.jobs,
             [event.requestId]: {
               ...current,
-              phase: event.phase,
-              message,
+              phase: "saving",
+              message: "保存した生成物をライブラリ・履歴へ登録しています…",
               savedPaths: event.savedPaths,
               updatedAt: Date.now(),
             },
           },
-        };
-      }),
+        }));
+        void completeRegistration(
+          event.requestId,
+          current.selection,
+          current.input,
+          event.savedPaths,
+          event.message ? [event.message] : [],
+        );
+        return;
+      }
+
+      const message =
+        event.phase === "error"
+          ? friendlyRemoteMcpError(event.message)
+          : event.message ??
+            (event.phase === "saving"
+              ? "生成結果を保存しています…"
+              : event.phase === "done"
+                ? "保存は完了しましたが、登録できる生成物が見つかりませんでした。"
+                : "生成しています…");
+      set((state) => ({
+        jobs: {
+          ...state.jobs,
+          [event.requestId]: {
+            ...current,
+            phase: event.phase,
+            message,
+            savedPaths: event.savedPaths,
+            registrationCompleted:
+              event.phase === "done" ? true : current.registrationCompleted,
+            registrationWarnings:
+              event.phase === "done" && !event.savedPaths?.length
+                ? [message]
+                : current.registrationWarnings,
+            updatedAt: Date.now(),
+          },
+        },
+      }));
+    },
   };
 });
 

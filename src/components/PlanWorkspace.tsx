@@ -1074,10 +1074,12 @@ function ChatInput({
         anchorRect={presetAnchor}
         onPick={(preset) => {
           const current = value.trim();
-          // キャラ型プリセットは属性テキストも合成 (プロンプト型は preset.prompt のまま)。
+          // キャラ型は画像添付だけ。文字を足すのはプロンプト型だけ。
           const presetBody = composePresetPrompt(preset, "\n");
-          const next = current ? `${current}\n${presetBody}` : presetBody;
-          onChange(next);
+          if (presetBody) {
+            const next = current ? `${current}\n${presetBody}` : presetBody;
+            onChange(next);
+          }
           // キャラ型は速度対策で既定3枚に絞る (selectCharacterReferences)。
           // 企画タブは path 配列で添付するので、絞った参照の path を流す。
           const paths = selectCharacterReferences(preset)

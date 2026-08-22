@@ -8,8 +8,8 @@ use tauri::{AppHandle, Emitter};
 
 use crate::events::EVENT_IMAGE_GENERATED;
 
-/// Payload emitted on every new image we observe under the legacy Codex
-/// generated-images directory and the configured local storage root.
+/// Payload emitted on every supported image/video we observe under the legacy
+/// Codex generated-images directory and the configured local storage root.
 #[derive(Debug, Clone, Serialize)]
 pub struct ImageEvent {
     pub path: String,
@@ -50,10 +50,18 @@ pub fn legacy_generated_images_dir() -> Option<PathBuf> {
     legacy_generated_images_parent().map(|home| home.join("generated_images"))
 }
 
-fn is_image(path: &Path) -> bool {
+fn is_supported_media(path: &Path) -> bool {
     matches!(
         path.extension().and_then(|s| s.to_str()).map(str::to_ascii_lowercase),
-        Some(ref ext) if ext == "png" || ext == "jpg" || ext == "jpeg" || ext == "webp"
+        Some(ref ext)
+            if ext == "png"
+                || ext == "jpg"
+                || ext == "jpeg"
+                || ext == "webp"
+                || ext == "mp4"
+                || ext == "mov"
+                || ext == "m4v"
+                || ext == "webm"
     )
 }
 
@@ -100,26 +108,26 @@ fn payload(path: &Path, kind: &'static str) -> Option<ImageEvent> {
     })
 }
 
-/// Walk `dir` and emit one event per existing image, sorted by mtime ascending
-/// so the gallery loads chronologically.
+/// Walk `dir` and emit one event per existing supported image/video, sorted by
+/// mtime ascending so the gallery loads chronologically.
 pub fn scan_existing(app: &AppHandle, dir: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
-    let mut images = Vec::new();
+    let mut media = Vec::new();
     for entry in entries.flatten() {
         let p = entry.path();
         if p.is_dir() {
             if p.file_name().and_then(|s| s.to_str()) == Some(".masks") {
                 continue;
             }
-            collect_images_recursive(&p, &mut images);
-        } else if is_image(&p) {
-            images.push(p);
+            collect_media_recursive(&p, &mut media);
+        } else if is_supported_media(&p) {
+            media.push(p);
         }
     }
     // sort oldest → newest by mtime
-    images.sort_by_key(|p| {
+    media.sort_by_key(|p| {
         std::fs::metadata(p)
             .and_then(|m| m.modified())
             .ok()
@@ -127,14 +135,14 @@ pub fn scan_existing(app: &AppHandle, dir: &Path) {
             .map(|d| d.as_millis())
             .unwrap_or(0)
     });
-    for p in images {
+    for p in media {
         if let Some(ev) = payload(&p, "initial") {
             let _ = app.emit(EVENT_IMAGE_GENERATED, ev);
         }
     }
 }
 
-fn collect_images_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
+fn collect_media_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -152,8 +160,8 @@ fn collect_images_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
             if p.file_name().and_then(|s| s.to_str()) == Some(".masks") {
                 continue;
             }
-            collect_images_recursive(&p, out);
-        } else if ft.is_file() && is_image(&p) {
+            collect_media_recursive(&p, out);
+        } else if ft.is_file() && is_supported_media(&p) {
             out.push(p);
         }
     }
@@ -182,7 +190,7 @@ pub fn start_watcher(
             Ok(events) => {
                 for ev in events {
                     for p in &ev.event.paths {
-                        if !is_image(p) {
+                        if !is_supported_media(p) {
                             continue;
                         }
                         if is_in_masks_dir(p) {
@@ -221,4 +229,41 @@ pub fn start_watcher(
         tracing::info!(target: "codex.watcher", "watching {}", dir.display());
     }
     Ok(debouncer)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_in_masks_dir, is_supported_media};
+    use std::path::Path;
+
+    #[test]
+    fn watcher_accepts_gallery_images_and_supported_videos() {
+        for path in [
+            "image.png",
+            "image.JPG",
+            "image.webp",
+            "movie.mp4",
+            "movie.MOV",
+            "movie.m4v",
+            "movie.webm",
+        ] {
+            assert!(is_supported_media(Path::new(path)), "未対応扱い: {path}");
+        }
+    }
+
+    #[test]
+    fn watcher_rejects_unsupported_or_unrelated_files() {
+        for path in ["movie.avi", "movie.mkv", "notes.txt", "no-extension"] {
+            assert!(
+                !is_supported_media(Path::new(path)),
+                "誤って対応扱い: {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn watcher_still_excludes_hidden_masks() {
+        assert!(is_in_masks_dir(Path::new("/gallery/.masks/edit.png")));
+        assert!(!is_in_masks_dir(Path::new("/gallery/movie.mp4")));
+    }
 }

@@ -1201,6 +1201,9 @@ export type ImageRow = {
   mtimeMs: number;
   size: number;
   kind: "created" | "initial";
+  mediaType?: MediaType;
+  durationSeconds?: number;
+  thumbnailPath?: string;
   createdAt: number;
 };
 
@@ -1226,6 +1229,9 @@ export type ImageRecordArgs = {
   mtimeMs: number;
   size: number;
   kind: string;
+  mediaType?: MediaType;
+  durationSeconds?: number;
+  thumbnailPath?: string;
 };
 
 export type ExportSummary = {

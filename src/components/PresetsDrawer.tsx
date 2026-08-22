@@ -1572,15 +1572,15 @@ function PresetForm({
         onKeyDown={onInputKey}
         placeholder={
           isCharacter
-            ? "プロンプト本文（任意。属性だけでも保存できます）"
+            ? "キャラ作成用メモ（参照利用時には自動追加されません）"
             : "プロンプト本文（プリセットを呼ぶと末尾に追記されます）"
         }
         rows={5}
         className="w-full resize-none rounded-md border border-[#343434] bg-[#0b0b0b] p-2 font-mono text-[11px] leading-5 text-neutral-100 outline-none focus:border-pink-400"
       />
 
-      {/* キャラ型プリセットのみ: 属性テキスト（髪色・目・服装・体型など）を編集する。
-          生成時に characterPromptText() でプロンプトへ自動合成される。 */}
+      {/* キャラ型プリセットのみ: 属性テキスト（髪色・目・服装・体型など）を管理する。
+          参照利用時は画像だけを渡し、この文字列はプロンプトへ自動合成しない。 */}
       {isCharacter && (
         <div className="space-y-1.5">
           <span className="text-[10px] font-black uppercase tracking-wide text-neutral-500">
@@ -1590,7 +1590,7 @@ function PresetForm({
             value={characterAttributes}
             onChange={(event) => onChangeCharacterAttributes(event.target.value)}
             onKeyDown={onInputKey}
-            placeholder="髪色・目の色・服装・体型など（生成時にプロンプトへ自動で足されます）"
+            placeholder="髪色・目の色・服装・体型など（管理用。生成文へは自動追加されません）"
             rows={3}
             className="w-full resize-none rounded-md border border-[#343434] bg-[#0b0b0b] p-2 text-[11px] leading-5 text-neutral-100 outline-none focus:border-pink-400"
           />

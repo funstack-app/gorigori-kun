@@ -2,6 +2,7 @@ import { create } from "zustand";
 import {
   images as imagesIpc,
   onImageGenerated,
+  sessions as sessionsIpc,
   type ImageEvent,
 } from "../ipc";
 import { createPersistGuard, describeOutcome } from "./persistGuard";
@@ -30,6 +31,26 @@ export type GalleryItem = {
   thumbnailPath?: string;
   /** AI 自動命名などで付いた表示題名。未設定なら name を使う。 */
   aiTitle?: string;
+};
+
+export type GeneratedMediaRegistrationInput = {
+  paths: string[];
+  mediaType: "image" | "video";
+  prompt: string;
+  providerId: string;
+  providerLabel: string;
+  modelId?: string;
+  modelLabel?: string;
+  refImagePaths?: string[];
+  durationSeconds?: number;
+};
+
+export type GeneratedMediaRegistrationResult = {
+  libraryCount: number;
+  historyCount: number;
+  projectCount: number;
+  hadActiveProject: boolean;
+  warnings: string[];
 };
 
 const VIDEO_EXTENSIONS = new Set([
@@ -749,6 +770,142 @@ async function statFileFallback(
   } catch {
     return { mtimeMs: Date.now(), size: 0 };
   }
+}
+
+/**
+ * watcher の到着順に依存せず、保存済みの生成物を資産管理の3面へ明示登録する。
+ *
+ * - ライブラリ: images ストアへ即時追加（watcher と重なっても path で重複排除）
+ * - 履歴: 生成 turn と各ファイルを history.db へ登録
+ * - プロジェクト: 選択中のプロジェクトがある場合だけ、その箱へ追加
+ *
+ * ファイルは移動・削除しない。履歴やプロジェクトの登録失敗は生成成功と混同せず、
+ * warnings と console.warn の両方へ残して呼び出し側が画面表示できるようにする。
+ */
+export async function registerGeneratedMedia(
+  input: GeneratedMediaRegistrationInput,
+): Promise<GeneratedMediaRegistrationResult> {
+  const warnings: string[] = [];
+  const uniquePaths = Array.from(
+    new Set(input.paths.map((path) => path.trim()).filter(Boolean)),
+  ).filter((path) => {
+    if (isUnsupportedGalleryVideo(path)) {
+      warnings.push(`再生非対応の動画形式は登録しませんでした: ${path}`);
+      return false;
+    }
+    return true;
+  });
+
+  const galleryItems = await Promise.all(
+    uniquePaths.map(async (path): Promise<GalleryItem> => {
+      const stat = await statFileFallback(path);
+      const parts = path.split(/[\\/]/);
+      const name = parts[parts.length - 1] || path;
+      const bucket = parts[parts.length - 2] || "generated";
+      return {
+        path,
+        name,
+        bucket,
+        mtimeMs: stat.mtimeMs,
+        size: stat.size,
+        kind: "created",
+        mediaType: input.mediaType,
+        durationSeconds: input.durationSeconds,
+      };
+    }),
+  );
+
+  useImages.setState((state) => {
+    const added = galleryItems.filter((item) => !state.knownPaths.has(item.path));
+    if (added.length === 0) return state;
+    return {
+      items: [...added, ...state.items],
+      knownPaths: new Set([
+        ...added.map((item) => item.path),
+        ...state.knownPaths,
+      ]),
+    };
+  });
+
+  let historyCount = 0;
+  let dbTurnId = "";
+  let sourceSessionId: string | undefined;
+  try {
+    const { useSessions } = await import("./sessions");
+    const sessionStore = useSessions.getState();
+    sourceSessionId = sessionStore.activeSessionId;
+    const provider =
+      input.providerId === "higgsfield" || input.providerId === "magnific"
+        ? input.providerId
+        : null;
+    dbTurnId = await sessionStore.recordTurn({
+      sessionId: sessionStore.activeSessionId ?? "",
+      prompt: input.prompt,
+      model: input.modelId,
+      provider,
+      modelJobSetType: input.modelId,
+      modelDisplayName: input.modelLabel || input.providerLabel,
+      refImagePaths: input.refImagePaths ?? [],
+      count: uniquePaths.length,
+      kind: "batch",
+    });
+    sourceSessionId = useSessions.getState().activeSessionId;
+    if (!dbTurnId) {
+      warnings.push("生成物は保存しましたが、履歴の生成記録を作れませんでした。");
+    } else {
+      for (const item of galleryItems) {
+        try {
+          await sessionsIpc.recordImage({
+            turnId: dbTurnId,
+            path: item.path,
+            mtimeMs: item.mtimeMs,
+            size: item.size,
+            kind: item.kind,
+            mediaType: input.mediaType,
+            durationSeconds: input.durationSeconds,
+          });
+          historyCount += 1;
+        } catch (error) {
+          warnings.push(`履歴へ登録できませんでした: ${item.name} (${String(error)})`);
+        }
+      }
+    }
+  } catch (error) {
+    warnings.push(`履歴の登録処理に失敗しました: ${String(error)}`);
+  }
+
+  let projectCount = 0;
+  let hadActiveProject = false;
+  try {
+    const { useActiveProject } = await import("./activeProject");
+    const activeProjectId = useActiveProject.getState().activeProjectId;
+    hadActiveProject = Boolean(activeProjectId);
+    if (activeProjectId) {
+      for (const path of uniquePaths) {
+        const added = useProjects.getState().addItem(activeProjectId, {
+          imagePath: path,
+          prompt: input.prompt,
+          sourceSessionId,
+        });
+        if (added) projectCount += 1;
+        else warnings.push(`選択中のプロジェクトへ登録できませんでした: ${path}`);
+      }
+    }
+  } catch (error) {
+    warnings.push(`プロジェクトの登録処理に失敗しました: ${String(error)}`);
+  }
+
+  if (warnings.length > 0) {
+    console.warn("[generated-media-registration]", warnings.join("\n"));
+  }
+
+  return {
+    libraryCount: uniquePaths.length,
+    historyCount,
+    projectCount,
+    hadActiveProject,
+    warnings,
+  };
 }
 
 if (typeof import.meta !== "undefined" && (import.meta as any).hot) {

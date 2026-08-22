@@ -130,11 +130,12 @@ export function ConstructedPromptPanel() {
    */
   const appendPreset = (preset: Preset) => {
     const current = (isOverriding ? draft : generatedPrompt).trim();
-    // キャラ型プリセットは preset.prompt に加えて属性テキスト (characterMeta.attributes)
-    // を合成する (プロンプト型は composePresetPrompt が preset.prompt をそのまま返す)。
+    // キャラ型は画像参照だけを追加する。文字を足すのはプロンプト型だけ。
     const presetBody = composePresetPrompt(preset, ", ");
-    const next = current ? `${current}, ${presetBody}` : presetBody;
-    onChangeDraft(next);
+    if (presetBody) {
+      const next = current ? `${current}, ${presetBody}` : presetBody;
+      onChangeDraft(next);
+    }
     // F-#6/#7: プリセットに参照画像があれば composer.references にも自動追加。
     // role 検証は presetAttachedImagesToReferences 側で済み (不正値は undefined)。
     // キャラ型は速度対策で既定3枚に絞り (selectCharacterReferences)、
@@ -629,7 +630,7 @@ export function ConstructedPromptPanel() {
           >
             <p>
               {latestRemoteJob?.phase === "done"
-                ? `保存が完了しました。${modelMedia === "image" ? "画像" : "動画"}はギャラリー・履歴へ自動登録されます。`
+                ? latestRemoteJob.message ?? "保存と登録が完了しました。"
                 : latestRemoteJob?.message ?? remoteValidationMessage}
             </p>
             {latestRemoteJob?.phase === "error" && (

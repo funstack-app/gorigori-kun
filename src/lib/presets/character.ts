@@ -13,40 +13,28 @@ import {
  * 持つ。参照画像は presetAttachedImagesToReferences を土台に、キャラ型のみ
  * selectCharacterReferences で既定3枚へ絞ってから生成へ流す（速度対策）。
  *
- * このファイルが担うのは「属性テキスト → プロンプト断片」の変換と
- * 「キャラ参照の枚数選抜」の2つ。プロンプト型プリセットの挙動は変えない。
+ * キャラ型は画像アセットとしてだけ扱い、属性や保存プロンプトを生成文へ自動注入しない。
+ * このファイルは「キャラ参照の枚数選抜」と、プロンプト型プリセットとの境界を担う。
  */
 
 /**
- * キャラ型プリセットの属性テキストを、生成プロンプトに合成する断片へ変換する。
- *
- * - kind !== "character" なら undefined（プロンプト型は一切変化させない）
- * - attributes が空/未設定なら undefined（合成する内容が無い）
- * - それ以外は `キャラクター設定: <attributes>` を返す
+ * 後方互換のため公開名は残すが、キャラ説明文の自動注入は廃止済み。
+ * キャラの見た目は selectCharacterReferences() が返す画像だけでモデルへ渡す。
  */
-export function characterPromptText(preset: Preset): string | undefined {
-  if (presetKind(preset) !== "character") return undefined;
-  const attributes = preset.characterMeta?.attributes?.trim();
-  if (!attributes) return undefined;
-  return `キャラクター設定: ${attributes}`;
+export function characterPromptText(_preset: Preset): undefined {
+  return undefined;
 }
 
 /**
- * プリセット本文（preset.prompt）とキャラ属性テキストを合成する。
- * プロンプト型（characterPromptText が undefined）なら preset.prompt をそのまま返す。
- * 区切りは呼び出し側の既存流儀（", " / "\n"）に合わせられるよう separator で受ける。
+ * プロンプト型だけ本文を返す。キャラ型は画像アセットなので常に空文字を返す。
+ * separator は旧呼び出しとの互換のため残す（自動合成には使わない）。
  */
 export function composePresetPrompt(
   preset: Preset,
-  separator = ", ",
+  _separator = ", ",
 ): string {
-  const character = characterPromptText(preset);
-  const body = preset.prompt.trim();
-  // 属性テキストが無ければプロンプト本文だけを返す（空/空白のみなら空文字）。
-  // これで「preset.prompt が空白のみ」でも区切りだけが付く事故は起きない。
-  if (!character) return body;
-  // 本文が空/空白のみなら属性テキストのみ（先頭に区切りが付かない）。
-  return body ? `${body}${separator}${character}` : character;
+  if (presetKind(preset) === "character") return "";
+  return preset.prompt.trim();
 }
 
 /**

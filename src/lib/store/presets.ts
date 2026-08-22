@@ -173,7 +173,7 @@ export type PresetKind = "prompt" | "character";
  * attachedImages に格納し、既存の composer 流し込み経路をそのまま使う。
  */
 export type CharacterMeta = {
-  /** 属性テキスト（髪色・目・服装・体型など）。生成プロンプトに自動合成する */
+  /** 属性テキスト（髪色・目・服装・体型など）。管理用で、生成文へは自動合成しない */
   attributes?: string;
   /** 正本画像の役割マップ: path -> "front" | "side" | "back" | "face-detail" | "expression-*" 等 */
   sheetRoles?: Record<string, string>;
