@@ -6,6 +6,7 @@ import {
   normalizeFilmAsset,
 } from "../film/assetFactory";
 import { validateAssetLedger } from "../film/assetParse";
+import { DEFAULT_VIDEO_SERVICE_ID } from "../film/serviceProfiles";
 import type {
   AssetLedgerEntry,
   AssetType,
@@ -42,7 +43,7 @@ type FilmProjectState = {
   activeProjectId: string | null;
   filmProjectsFileState: FilmProjectsFileState;
   initialize: () => Promise<void>;
-  createProject: (title: string, theme: string, service: string) => FilmProject;
+  createProject: (title: string, theme: string, videoServiceId: string) => FilmProject;
   setActiveProjectId: (projectId: string | null) => void;
   setPhase: (phase: FilmPhase) => void;
   saveScriptSettings: (settings: FilmScriptSettings) => void;
@@ -99,9 +100,21 @@ function assetTypeFromId(id: string): AssetType {
   return "prop";
 }
 
-function normalizedProject(project: FilmProject): FilmProject {
+type StoredFilmProject = Omit<FilmProject, "assetServiceId" | "videoServiceId"> & {
+  assetServiceId?: "gpt-image-2";
+  videoServiceId?: string;
+  /** S1で保存された旧フィールド。読み込み時だけ参照する。 */
+  service?: string;
+};
+
+export function normalizeFilmProject(project: StoredFilmProject): FilmProject {
+  const { service: legacyService, ...currentProject } = project;
+  const videoServiceId =
+    project.videoServiceId?.trim() || legacyService?.trim() || DEFAULT_VIDEO_SERVICE_ID;
   return {
-    ...project,
+    ...currentProject,
+    assetServiceId: "gpt-image-2",
+    videoServiceId,
     approvals: {
       ...project.approvals,
       blocks: project.approvals.blocks ?? null,
@@ -240,11 +253,11 @@ function generateProjectId(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function makeProject(title: string, theme: string, service: string): FilmProject {
+function makeProject(title: string, theme: string, videoServiceId: string): FilmProject {
   const trimmedTitle = title.trim();
   const trimmedTheme = theme.trim();
-  const trimmedService = service.trim();
-  if (!trimmedTitle || !trimmedTheme || !trimmedService) {
+  const trimmedVideoServiceId = videoServiceId.trim();
+  if (!trimmedTitle || !trimmedTheme || !trimmedVideoServiceId) {
     throw new Error("タイトル・伝えたいこと・生成サービスは必須です");
   }
 
@@ -253,7 +266,8 @@ function makeProject(title: string, theme: string, service: string): FilmProject
     title: trimmedTitle,
     theme: trimmedTheme,
     mode: "film",
-    service: trimmedService,
+    assetServiceId: "gpt-image-2",
+    videoServiceId: trimmedVideoServiceId,
     phase: 1,
     approvals: {
       logline: null,
@@ -326,7 +340,7 @@ async function readFilmProjectsFileIntoStore(
     // 読み込み中の入力を、到着した古いスナップショットで消さない。
     if (pendingBeforeUnlock) return true;
 
-    const projects = (parsed.projects as FilmProject[]).map(normalizedProject);
+    const projects = (parsed.projects as StoredFilmProject[]).map(normalizeFilmProject);
     const currentActiveId = get().activeProjectId;
     const activeProjectId = projects.some((project) => project.id === currentActiveId)
       ? currentActiveId
@@ -363,8 +377,8 @@ export const useFilmProjectStore = create<FilmProjectState>((set, get) => ({
     if (readable) unlockFileWrite(get().projects);
   },
 
-  createProject: (title, theme, service) => {
-    const project = makeProject(title, theme, service);
+  createProject: (title, theme, videoServiceId) => {
+    const project = makeProject(title, theme, videoServiceId);
     const projects = [...get().projects, project];
     persistProjects(projects);
     set({ projects, activeProjectId: project.id });
@@ -402,7 +416,7 @@ export const useFilmProjectStore = create<FilmProjectState>((set, get) => ({
     let changed = false;
     const projects = get().projects.map((sourceProject) => {
       if (sourceProject.id !== activeProjectId) return sourceProject;
-      const project = normalizedProject(sourceProject);
+      const project = normalizeFilmProject(sourceProject);
       const script = scriptOf(project);
       const targetChanged = (script.targetDurationSeconds ?? 90) !== targetDurationSeconds;
       const topicChanged = (script.topicMemo ?? "") !== topicMemo;
@@ -472,7 +486,7 @@ export const useFilmProjectStore = create<FilmProjectState>((set, get) => ({
     let approved = false;
     const projects = get().projects.map((sourceProject) => {
       if (sourceProject.id !== activeProjectId) return sourceProject;
-      const project = normalizedProject(sourceProject);
+      const project = normalizeFilmProject(sourceProject);
       const script = scriptOf(project);
       const stageIndex = SCRIPT_STAGE_ORDER.indexOf(stage);
       const previousStage = SCRIPT_STAGE_ORDER[stageIndex - 1];
@@ -534,7 +548,7 @@ export const useFilmProjectStore = create<FilmProjectState>((set, get) => ({
     let completed = false;
     const projects = get().projects.map((sourceProject) => {
       if (sourceProject.id !== activeProjectId) return sourceProject;
-      const project = normalizedProject(sourceProject);
+      const project = normalizeFilmProject(sourceProject);
       if (!getAssetFactoryGateState(project.assets).canProceed) return sourceProject;
       completed = true;
       return { ...project, phase: 5 as const };
@@ -572,7 +586,7 @@ export const useFilmProjectStore = create<FilmProjectState>((set, get) => ({
     let approved = false;
     const projects = get().projects.map((sourceProject) => {
       if (sourceProject.id !== activeProjectId) return sourceProject;
-      const project = normalizedProject(sourceProject);
+      const project = normalizeFilmProject(sourceProject);
       const script = scriptOf(project);
       const assetIssues = validateAssetLedger(
         project.assets,
@@ -614,7 +628,7 @@ function updateActiveDesign(
   let changed = false;
   const projects = get().projects.map((sourceProject) => {
     if (sourceProject.id !== activeProjectId) return sourceProject;
-    const project = normalizedProject(sourceProject);
+    const project = normalizeFilmProject(sourceProject);
     const nextProject = update(project);
     if (JSON.stringify(project) === JSON.stringify(nextProject)) return sourceProject;
     changed = true;
@@ -639,7 +653,7 @@ function updateActiveFactory(
   let changed = false;
   const projects = get().projects.map((sourceProject) => {
     if (sourceProject.id !== activeProjectId) return sourceProject;
-    const project = normalizedProject(sourceProject);
+    const project = normalizeFilmProject(sourceProject);
     const nextProject = update(project);
     if (JSON.stringify(project) === JSON.stringify(nextProject)) return sourceProject;
     changed = true;
@@ -661,7 +675,7 @@ function updateActiveScript(
   let changed = false;
   const projects = get().projects.map((sourceProject) => {
     if (sourceProject.id !== activeProjectId) return sourceProject;
-    const project = normalizedProject(sourceProject);
+    const project = normalizeFilmProject(sourceProject);
     const currentScript = scriptOf(project);
     const nextScript = update(currentScript);
     if (JSON.stringify(currentScript) === JSON.stringify(nextScript)) return sourceProject;

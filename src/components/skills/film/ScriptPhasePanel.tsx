@@ -27,6 +27,7 @@ import {
   formatBlocksAsScript,
   formatScenesAsScenelist,
 } from "../../../lib/film/scriptPrompts";
+import { findVideoServiceProfile } from "../../../lib/film/serviceProfiles";
 import type { FilmProject, FilmScript } from "../../../lib/film/types";
 import {
   useFilmProjectStore,
@@ -80,8 +81,6 @@ const STAGES: StageDefinition[] = [
   },
 ];
 
-const SERVICE_MAX_SECONDS = 25;
-
 function emptyScript(): FilmScript {
   return {
     logline: "",
@@ -95,6 +94,14 @@ function emptyScript(): FilmScript {
     topicMemo: "",
     characterNames: [],
   };
+}
+
+function parseTargetDuration(value: string): number | null {
+  const normalized = value.trim();
+  if (!/^\d+$/u.test(normalized)) return null;
+  const seconds = Number(normalized);
+  if (!Number.isSafeInteger(seconds) || seconds < 1 || seconds > 3600) return null;
+  return seconds;
 }
 
 function splitCharacterNames(value: string): string[] {
@@ -204,7 +211,13 @@ export function ScriptPhasePanel({ project }: { project: FilmProject }) {
   const pushToast = useToasts((state) => state.push);
 
   const script = Array.isArray(project.script) ? emptyScript() : project.script;
-  const [targetDuration, setTargetDuration] = useState(script.targetDurationSeconds ?? 90);
+  const selectedVideoService = findVideoServiceProfile(project.videoServiceId);
+  const serviceMaxSeconds = selectedVideoService?.maxBlockSeconds ?? 15;
+  const usesProvisionalServiceLimit = selectedVideoService?.maxBlockSeconds === null;
+  const [targetDuration, setTargetDuration] = useState(
+    String(script.targetDurationSeconds ?? 90),
+  );
+  const [targetDurationError, setTargetDurationError] = useState<string | null>(null);
   const [topicMemo, setTopicMemo] = useState(script.topicMemo ?? "");
   const [characterNamesText, setCharacterNamesText] = useState(
     (script.characterNames ?? []).join("、"),
@@ -220,7 +233,8 @@ export function ScriptPhasePanel({ project }: { project: FilmProject }) {
 
   useEffect(() => {
     const currentScript = Array.isArray(project.script) ? emptyScript() : project.script;
-    setTargetDuration(currentScript.targetDurationSeconds ?? 90);
+    setTargetDuration(String(currentScript.targetDurationSeconds ?? 90));
+    setTargetDurationError(null);
     setTopicMemo(currentScript.topicMemo ?? "");
     setCharacterNamesText((currentScript.characterNames ?? []).join("、"));
     setLoglineOptions([]);
@@ -240,20 +254,31 @@ export function ScriptPhasePanel({ project }: { project: FilmProject }) {
     () => splitCharacterNames(characterNamesText),
     [characterNamesText],
   );
+  const targetDurationForChecks =
+    parseTargetDuration(targetDuration) ?? script.targetDurationSeconds ?? 90;
 
-  function persistSettings() {
+  function persistSettings(): number | null {
+    const parsedTargetDuration = parseTargetDuration(targetDuration);
+    const savedTargetDuration = script.targetDurationSeconds ?? 90;
+    if (parsedTargetDuration === null) {
+      setTargetDurationError("1〜3600の整数で入力してください。");
+    } else {
+      setTargetDurationError(null);
+      setTargetDuration(String(parsedTargetDuration));
+    }
     saveScriptSettings({
-      targetDurationSeconds: Math.max(1, Math.round(Number(targetDuration) || 90)),
+      targetDurationSeconds: parsedTargetDuration ?? savedTargetDuration,
       topicMemo,
       characterNames,
     });
+    return parsedTargetDuration;
   }
 
   function stageIssues(stage: FilmScriptApprovalStage): ScriptCheckIssue[] {
     const text = getStageText(stage, script);
     if (!text.trim()) return [];
     if (stage === "beatsheet") {
-      return validateBeatsheetDuration(text, Math.max(1, targetDuration));
+      return validateBeatsheetDuration(text, targetDurationForChecks);
     }
     if (stage === "treatment") {
       return detectCharacterNameVariations(text, characterNames);
@@ -262,14 +287,23 @@ export function ScriptPhasePanel({ project }: { project: FilmProject }) {
       const parsed = parseSceneList(text);
       if (!parsed.ok) return [];
       return [
-        ...validateSceneDuration(parsed.value, Math.max(1, targetDuration)),
+        ...validateSceneDuration(parsed.value, targetDurationForChecks),
         ...detectCharacterNameVariations(text, characterNames),
       ];
     }
     if (stage === "blocks") {
       const parsed = parseBlockScript(text);
       if (!parsed.ok) return [];
-      return validateBlockScript(text, parsed.value.blocks, SERVICE_MAX_SECONDS);
+      const issues = validateBlockScript(text, parsed.value.blocks, serviceMaxSeconds);
+      if (!usesProvisionalServiceLimit) return issues;
+      return [
+        {
+          code: "block-duration-limit",
+          severity: "warning",
+          message: `${selectedVideoService?.label ?? "選択サービス"}は未実測のため仮の上限15秒で検算しています。生成前に公式ガイドからプロファイルを作ってください。`,
+        },
+        ...issues,
+      ];
     }
     return [];
   }
@@ -314,7 +348,15 @@ export function ScriptPhasePanel({ project }: { project: FilmProject }) {
 
   async function generateStage(definition: StageDefinition) {
     if (runningStage) return;
-    persistSettings();
+    const targetDurationSeconds = persistSettings();
+    if (targetDurationSeconds === null) {
+      pushToast({
+        kind: "warn",
+        text: "目標の長さを1〜3600の整数で入力してください。",
+        ttlMs: 5000,
+      });
+      return;
+    }
     const revisionNote = revisionNotes[definition.id]?.trim();
     const runToken = runTokenRef.current + 1;
     runTokenRef.current = runToken;
@@ -345,7 +387,7 @@ export function ScriptPhasePanel({ project }: { project: FilmProject }) {
         case "beatsheet":
           prompt = buildBeatsheetPrompt({
             approvedLogline: script.logline,
-            targetDurationSeconds: Math.max(1, targetDuration),
+            targetDurationSeconds,
             revisionNote,
           });
           break;
@@ -359,7 +401,7 @@ export function ScriptPhasePanel({ project }: { project: FilmProject }) {
         case "scenelist":
           prompt = buildScenelistPrompt({
             approvedTreatment: script.treatment,
-            targetDurationSeconds: Math.max(1, targetDuration),
+            targetDurationSeconds,
             characterNames,
             revisionNote,
           });
@@ -368,7 +410,7 @@ export function ScriptPhasePanel({ project }: { project: FilmProject }) {
           prompt = buildBlockScriptPrompt({
             approvedScenes: script.scenes,
             approvedScenelistText: script.scenelistText ?? "",
-            serviceMaxSeconds: SERVICE_MAX_SECONDS,
+            serviceMaxSeconds,
             revisionNote,
           });
           break;
@@ -483,11 +525,23 @@ export function ScriptPhasePanel({ project }: { project: FilmProject }) {
             <input
               type="number"
               min={1}
+              max={3600}
+              step={1}
               value={targetDuration}
-              onChange={(event) => setTargetDuration(Number(event.target.value))}
+              onChange={(event) => {
+                setTargetDuration(event.target.value);
+                setTargetDurationError(null);
+              }}
               onBlur={persistSettings}
+              aria-invalid={Boolean(targetDurationError)}
+              aria-describedby={targetDurationError ? "film-target-duration-error" : undefined}
               className="h-10 rounded-md border border-[#303030] bg-[#121212] px-3 text-sm text-zinc-100 outline-none focus:border-pink-500"
             />
+            {targetDurationError ? (
+              <span id="film-target-duration-error" role="alert" className="text-xs text-amber-300">
+                {targetDurationError}
+              </span>
+            ) : null}
           </label>
           <label className="grid gap-1.5">
             <span className="text-xs font-medium text-zinc-300">登場人物名</span>

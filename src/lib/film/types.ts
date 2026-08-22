@@ -146,7 +146,8 @@ export type FilmProject = {
   /** この作品で一番伝えたいこと。以降の全判断の親になる。 */
   theme: string;
   mode: "film";
-  service: string;
+  assetServiceId: "gpt-image-2";
+  videoServiceId: string;
   phase: FilmPhase;
   approvals: FilmApprovals;
   /** S1 は空配列。S2 で FilmScript へ置き換える。 */

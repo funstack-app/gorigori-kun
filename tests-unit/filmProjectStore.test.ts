@@ -43,7 +43,9 @@ describe("filmProject store", () => {
       title: "春の駅",
       theme: "言えなかった気持ちを渡す",
       mode: "film",
-      service: "seedance-2.5",
+      // 2026-08-22 サービス選択の分離: アセット(画像)と動画を別フィールドで持つ
+      videoServiceId: "seedance-2.5",
+      assetServiceId: "gpt-image-2",
       phase: 1,
       approvals: {
         logline: null,
