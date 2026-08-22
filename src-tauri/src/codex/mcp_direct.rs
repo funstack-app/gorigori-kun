@@ -23,11 +23,16 @@
 //!   各ツールの inputSchema に従う (このモジュールは形を強制しない)。
 //! - threadId は `thread/start` で発行。スレッドは MCP 呼び出しだけなら turn を作らない。
 
+use std::time::Duration;
+
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
 
-use crate::codex::rpc::RpcClient;
+use crate::codex::rpc::{RpcClient, RpcError};
 use crate::state::AppState;
+
+/// 古い app-server が正規の MCP 一覧 API を持たない場合に返す識別子。
+pub const MCP_STATUS_LIST_UPDATE_REQUIRED: &str = "REMOTE_MCP_CODEX_UPDATE_REQUIRED";
 
 /// MCP ユーティリティ呼び出し専用 threadId のキャッシュ。
 ///
@@ -40,6 +45,8 @@ static UTILITY_THREAD: Mutex<Option<String>> = Mutex::const_new(None);
 /// text を結合したものをフォールバックに使う。
 #[derive(Debug, Clone)]
 pub struct ToolCallOutput {
+    /// MCP の content[] を型を落とさず保持する。画像データや resource URI の解釈に使う。
+    pub content: Vec<Value>,
     /// MCP ツールが返した structuredContent (あれば)。
     pub structured: Option<Value>,
     /// content[] 内の text を改行結合したもの。
@@ -100,25 +107,60 @@ fn parse_tool_result(result: Value) -> ToolCallOutput {
         .get("isError")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    let text = result
+    let content = result
         .get("content")
         .and_then(|v| v.as_array())
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| item.get("text").and_then(|t| t.as_str()))
-                .collect::<Vec<_>>()
-                .join("\n")
-        })
+        .cloned()
         .unwrap_or_default();
+    let text = content
+        .iter()
+        .filter_map(|item| item.get("text").and_then(|t| t.as_str()))
+        .collect::<Vec<_>>()
+        .join("\n");
     let structured = result
         .get("structuredContent")
         .cloned()
         .filter(|v| !v.is_null());
     ToolCallOutput {
+        content,
         structured,
         text,
         is_error,
+    }
+}
+
+fn status_list_needs_update(error: &RpcError) -> bool {
+    match error {
+        RpcError::Remote { code, message, .. } => {
+            let lower = message.to_ascii_lowercase();
+            *code == -32601
+                || lower.contains("method not found")
+                || lower.contains("unknown method")
+                || (lower.contains("mcpserverstatus/list") && lower.contains("unsupported"))
+        }
+        _ => false,
+    }
+}
+
+/// app-server v2 の正規 API から MCP サーバー状態を 1 ページ取得する。
+/// ツール名を推測する旧ディスカバリとは異なり、inputSchema を含む公式一覧を返す。
+pub async fn list_mcp_server_status_page(
+    state: &AppState,
+    cursor: Option<&str>,
+) -> Result<Value, String> {
+    let client = rpc_client(state).await?;
+    let params = json!({
+        "cursor": cursor,
+        "detail": "toolsAndAuthOnly",
+    });
+    match client.request_raw("mcpServerStatus/list", params).await {
+        Ok(result) => Ok(result),
+        Err(error) if status_list_needs_update(&error) => Err(format!(
+            "{MCP_STATUS_LIST_UPDATE_REQUIRED}: この機能には新しい Codex が必要です。Codex を更新してから、もう一度お試しください。"
+        )),
+        Err(error) => Err(format!(
+            "MCP ツール一覧の取得に失敗しました: {error}"
+        )),
     }
 }
 
@@ -137,6 +179,27 @@ pub async fn call_tool(
     tool: &str,
     arguments: Value,
 ) -> Result<ToolCallOutput, String> {
+    call_tool_inner(state, server, tool, arguments, None).await
+}
+
+/// 画像・動画生成向けに、app-server の応答待ち時間を明示して MCP ツールを直接呼ぶ。
+pub async fn call_tool_with_timeout(
+    state: &AppState,
+    server: &str,
+    tool: &str,
+    arguments: Value,
+    request_timeout: Duration,
+) -> Result<ToolCallOutput, String> {
+    call_tool_inner(state, server, tool, arguments, Some(request_timeout)).await
+}
+
+async fn call_tool_inner(
+    state: &AppState,
+    server: &str,
+    tool: &str,
+    arguments: Value,
+    request_timeout: Option<Duration>,
+) -> Result<ToolCallOutput, String> {
     let client = rpc_client(state).await?;
 
     for attempt in 0..2 {
@@ -147,9 +210,24 @@ pub async fn call_tool(
             "tool": tool,
             "arguments": arguments,
         });
-        match client.request_raw("mcpServer/tool/call", params).await {
+        let result = match request_timeout {
+            Some(limit) => {
+                client
+                    .request_raw_with_timeout("mcpServer/tool/call", params, limit)
+                    .await
+            }
+            None => client.request_raw("mcpServer/tool/call", params).await,
+        };
+        match result {
             Ok(result) => return Ok(parse_tool_result(result)),
             Err(e) => {
+                // 明示タイムアウトを使う生成呼び出しは、同じ重い処理を自動再実行しない。
+                // 二重課金を避け、image=5分 / video=15分 の上限も守る。
+                if request_timeout.is_some() && matches!(e, RpcError::Timeout) {
+                    invalidate_utility_thread().await;
+                    return Err(format!("{server} の {tool} 呼び出しがタイムアウトしました"));
+                }
+
                 // threadId が無効 (app-server 再起動等) の可能性があるときだけ、
                 // スレッドを作り直して 1 回リトライする。2 回目も失敗なら諦める。
                 invalidate_utility_thread().await;
@@ -256,6 +334,8 @@ mod tests {
             "structuredContent": {"credits": 445.77},
             "isError": false
         }));
+        assert_eq!(out.content.len(), 3);
+        assert_eq!(out.content[1]["type"], "resource_link");
         assert_eq!(out.text, "line1\nline2");
         assert!(!out.is_error);
         assert_eq!(

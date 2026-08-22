@@ -7,13 +7,18 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
-use crate::codex::mcp_direct::{call_tool, reload_mcp_servers, ToolCallOutput};
+use crate::codex::mcp_direct::{
+    call_tool, call_tool_with_timeout, list_mcp_server_status_page, reload_mcp_servers,
+    ToolCallOutput,
+};
 use crate::codex::mcp_shared::{
     entry_is_authenticated, find_mcp_entry, gori_codex_command, run_codex_capture,
 };
@@ -26,6 +31,14 @@ const DISCOVERY_RAW_RECORD_MAX_BYTES: usize = 64 * 1024;
 const DISCOVERY_RAW_FILE_MAX_BYTES: u64 = 512 * 1024;
 const DISCOVERY_DIR_NAME: &str = "provider-discovery";
 const DISCOVERY_PROBE_TOOL: &str = "__gori_probe__";
+const REMOTE_MCP_GEN_EVENT: &str = "remote-mcp-gen";
+const IMAGE_GENERATION_TIMEOUT_SECS: u64 = 5 * 60;
+const VIDEO_GENERATION_TIMEOUT_SECS: u64 = 15 * 60;
+const REMOTE_DOWNLOAD_TIMEOUT_SECS: u64 = 120;
+const REMOTE_DOWNLOAD_MAX_BYTES: u64 = 512 * 1024 * 1024;
+const REMOTE_DOWNLOAD_REDIRECT_LIMIT: usize = 5;
+const GENERATION_MESSAGE_LIMIT_CHARS: usize = 4_000;
+static REMOTE_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// 接続可能なリモート MCP の正本。
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -122,6 +135,78 @@ pub struct RemoteMcpDiscovery {
     pub provider_id: String,
     pub attempts: Vec<RemoteMcpDiscoveryAttempt>,
     pub models: Vec<RemoteMcpDiscoveredModel>,
+}
+
+/// app-server が返す MCP ツール定義のフロント向け最小形。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteMcpToolDefinition {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub input_schema_json: String,
+}
+
+/// 1プロバイダ分の正規ツール一覧。provider-discovery/{id}.tools.json にも保存する。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteMcpToolList {
+    pub provider_id: String,
+    pub auth_status: String,
+    pub tools: Vec<RemoteMcpToolDefinition>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum RemoteMcpMediaKind {
+    Image,
+    Video,
+}
+
+impl RemoteMcpMediaKind {
+    fn timeout(self) -> Duration {
+        Duration::from_secs(match self {
+            Self::Image => IMAGE_GENERATION_TIMEOUT_SECS,
+            Self::Video => VIDEO_GENERATION_TIMEOUT_SECS,
+        })
+    }
+
+    fn noun(self) -> &'static str {
+        match self {
+            Self::Image => "画像",
+            Self::Video => "動画",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteMcpGenerateResult {
+    pub saved_paths: Vec<String>,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteMcpGenerateEvent {
+    request_id: String,
+    provider_id: String,
+    phase: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    saved_paths: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RemoteArtifactSource {
+    InlineImage {
+        mime_type: String,
+        data_base64: String,
+    },
+    Url(String),
 }
 
 #[derive(Debug, Serialize)]
@@ -368,6 +453,522 @@ fn discovery_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
         .map_err(|error| format!("プロバイダ実測結果の保存先を取得できませんでした: {error}"))
 }
 
+fn tool_list_from_server(provider_id: &str, server: &Value) -> Result<RemoteMcpToolList, String> {
+    let auth_status = server
+        .get("authStatus")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "MCP 一覧の authStatus が不正です".to_string())?
+        .to_string();
+    let tool_map = server
+        .get("tools")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "MCP 一覧の tools が不正です".to_string())?;
+    let mut tools = Vec::with_capacity(tool_map.len());
+    for (map_name, tool) in tool_map {
+        let name = tool
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.trim().is_empty())
+            .ok_or_else(|| format!("MCP ツール {map_name} の name が不正です"))?;
+        let input_schema = tool
+            .get("inputSchema")
+            .ok_or_else(|| format!("MCP ツール {name} に inputSchema がありません"))?;
+        tools.push(RemoteMcpToolDefinition {
+            name: name.to_string(),
+            title: tool
+                .get("title")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            description: tool
+                .get("description")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            input_schema_json: serde_json::to_string(input_schema).map_err(|error| {
+                format!("MCP ツール {name} の inputSchema をJSON化できませんでした: {error}")
+            })?,
+        });
+    }
+    tools.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(RemoteMcpToolList {
+        provider_id: provider_id.to_string(),
+        auth_status,
+        tools,
+    })
+}
+
+fn persist_tool_list(app: &AppHandle, list: &RemoteMcpToolList) -> Result<(), String> {
+    let dir = discovery_dir(app)?;
+    fs::create_dir_all(&dir)
+        .map_err(|error| format!("MCP ツール一覧の保存先を作成できませんでした: {error}"))?;
+    let path = dir.join(format!("{}.tools.json", list.provider_id));
+    let cache = serde_json::to_vec_pretty(list)
+        .map_err(|error| format!("MCP ツール一覧をJSON化できませんでした: {error}"))?;
+    fs::write(path, cache).map_err(|error| format!("MCP ツール一覧を保存できませんでした: {error}"))
+}
+
+fn push_unique_source(sources: &mut Vec<RemoteArtifactSource>, source: RemoteArtifactSource) {
+    if !sources.contains(&source) {
+        sources.push(source);
+    }
+}
+
+fn data_uri_source(value: &str) -> Option<RemoteArtifactSource> {
+    let value = value.trim();
+    let rest = value.strip_prefix("data:image/")?;
+    let (subtype, data_base64) = rest.split_once(";base64,")?;
+    if subtype.is_empty() || data_base64.trim().is_empty() {
+        return None;
+    }
+    Some(RemoteArtifactSource::InlineImage {
+        mime_type: format!("image/{subtype}"),
+        data_base64: data_base64.trim().to_string(),
+    })
+}
+
+/// 自由文に含まれる https URL を抽出する。ネットワークには触れない純粋な解析関数。
+fn https_urls_in_text(text: &str) -> Vec<String> {
+    let mut urls = Vec::new();
+    let mut offset = 0;
+    while let Some(relative) = text[offset..].find("https://") {
+        let start = offset + relative;
+        let tail = &text[start..];
+        let end = tail
+            .char_indices()
+            .skip(1)
+            .find_map(|(index, character)| {
+                (character.is_whitespace()
+                    || matches!(
+                        character,
+                        '"' | '\'' | '<' | '>' | '`' | ')' | ']' | '}' | ',' | ';'
+                    ))
+                .then_some(index)
+            })
+            .unwrap_or(tail.len());
+        let candidate = tail[..end].trim_end_matches(['.', ';', ':', '!', '?']);
+        if let Ok(parsed) = reqwest::Url::parse(candidate) {
+            if parsed.scheme() == "https" && parsed.host_str().is_some() {
+                let normalized = parsed.to_string();
+                if !urls.contains(&normalized) {
+                    urls.push(normalized);
+                }
+            }
+        }
+        offset = start + end.max("https://".len());
+    }
+    urls
+}
+
+fn validated_https_url(value: &str) -> Result<reqwest::Url, String> {
+    let parsed = reqwest::Url::parse(value)
+        .map_err(|_| "ダウンロードURLの形式が正しくありません".to_string())?;
+    if parsed.scheme() != "https" || parsed.host_str().is_none() {
+        return Err("HTTPS以外のダウンロードURLは拒否しました".to_string());
+    }
+    Ok(parsed)
+}
+
+fn collect_value_sources(
+    value: &Value,
+    kind: RemoteMcpMediaKind,
+    sources: &mut Vec<RemoteArtifactSource>,
+) {
+    match value {
+        Value::String(text) => {
+            if kind == RemoteMcpMediaKind::Image {
+                if let Some(source) = data_uri_source(text) {
+                    push_unique_source(sources, source);
+                }
+            }
+            for url in https_urls_in_text(text) {
+                push_unique_source(sources, RemoteArtifactSource::Url(url));
+            }
+            if matches!(text.trim().as_bytes().first(), Some(b'{') | Some(b'[')) {
+                if let Ok(nested) = serde_json::from_str::<Value>(text) {
+                    collect_value_sources(&nested, kind, sources);
+                }
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_value_sources(value, kind, sources);
+            }
+        }
+        Value::Object(object) => {
+            for value in object.values() {
+                collect_value_sources(value, kind, sources);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn provider_output_error(output: &ToolCallOutput) -> String {
+    if !output.text.trim().is_empty() {
+        return output.text.trim().to_string();
+    }
+    output
+        .structured
+        .as_ref()
+        .and_then(|value| serde_json::to_string(value).ok())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "プロバイダがエラーを返しました".to_string())
+}
+
+/// MCP content / resource / structuredContent から保存候補だけを取り出す。
+fn extract_remote_artifacts(
+    output: &ToolCallOutput,
+    kind: RemoteMcpMediaKind,
+) -> Result<Vec<RemoteArtifactSource>, String> {
+    if output.is_error {
+        return Err(provider_output_error(output));
+    }
+
+    let mut sources = Vec::new();
+    for item in &output.content {
+        if kind == RemoteMcpMediaKind::Image
+            && item.get("type").and_then(Value::as_str) == Some("image")
+        {
+            let data = item.get("data").and_then(Value::as_str);
+            let mime_type = item
+                .get("mimeType")
+                .or_else(|| item.get("mime_type"))
+                .and_then(Value::as_str);
+            if let (Some(data_base64), Some(mime_type)) = (data, mime_type) {
+                let source = data_uri_source(data_base64).unwrap_or_else(|| {
+                    RemoteArtifactSource::InlineImage {
+                        mime_type: mime_type.to_string(),
+                        data_base64: data_base64.to_string(),
+                    }
+                });
+                push_unique_source(&mut sources, source);
+            }
+        }
+        collect_value_sources(item, kind, &mut sources);
+    }
+    if let Some(structured) = output.structured.as_ref() {
+        collect_value_sources(structured, kind, &mut sources);
+    }
+    collect_value_sources(&Value::String(output.text.clone()), kind, &mut sources);
+
+    if sources.is_empty() {
+        Err(format!(
+            "MCP 応答に保存できる{}データまたは https URL がありませんでした",
+            kind.noun()
+        ))
+    } else {
+        Ok(sources)
+    }
+}
+
+fn extension_from_mime(kind: RemoteMcpMediaKind, mime_type: &str) -> Option<&'static str> {
+    let mime_type = mime_type
+        .split(';')
+        .next()
+        .unwrap_or(mime_type)
+        .trim()
+        .to_ascii_lowercase();
+    match (kind, mime_type.as_str()) {
+        (RemoteMcpMediaKind::Image, "image/png") => Some("png"),
+        (RemoteMcpMediaKind::Image, "image/jpeg" | "image/jpg") => Some("jpg"),
+        (RemoteMcpMediaKind::Image, "image/webp") => Some("webp"),
+        (RemoteMcpMediaKind::Video, "video/mp4") => Some("mp4"),
+        (RemoteMcpMediaKind::Video, "video/quicktime") => Some("mov"),
+        (RemoteMcpMediaKind::Video, "video/webm") => Some("webm"),
+        (RemoteMcpMediaKind::Video, "video/x-m4v" | "video/m4v") => Some("m4v"),
+        _ => None,
+    }
+}
+
+fn extension_from_url(kind: RemoteMcpMediaKind, url: &str) -> Option<&'static str> {
+    let parsed = reqwest::Url::parse(url).ok()?;
+    let extension = Path::new(parsed.path())
+        .extension()
+        .and_then(|value| value.to_str())?;
+    match (kind, extension.to_ascii_lowercase().as_str()) {
+        (RemoteMcpMediaKind::Image, "png") => Some("png"),
+        (RemoteMcpMediaKind::Image, "jpg" | "jpeg") => Some("jpg"),
+        (RemoteMcpMediaKind::Image, "webp") => Some("webp"),
+        (RemoteMcpMediaKind::Video, "mp4") => Some("mp4"),
+        (RemoteMcpMediaKind::Video, "mov") => Some("mov"),
+        (RemoteMcpMediaKind::Video, "webm") => Some("webm"),
+        (RemoteMcpMediaKind::Video, "m4v") => Some("m4v"),
+        _ => None,
+    }
+}
+
+fn extension_from_content_type_or_url(
+    kind: RemoteMcpMediaKind,
+    content_type: Option<&str>,
+    url: &str,
+) -> Option<&'static str> {
+    content_type
+        .and_then(|mime_type| extension_from_mime(kind, mime_type))
+        .or_else(|| extension_from_url(kind, url))
+}
+
+fn https_redirect_policy() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        if attempt.url().scheme() != "https" {
+            attempt.error("HTTPS以外へのリダイレクトを拒否しました")
+        } else if attempt.previous().len() >= REMOTE_DOWNLOAD_REDIRECT_LIMIT {
+            attempt.error("リダイレクト回数が上限を超えました")
+        } else {
+            attempt.follow()
+        }
+    })
+}
+
+async fn download_response_bytes(
+    response: reqwest::Response,
+    kind: RemoteMcpMediaKind,
+) -> Result<Vec<u8>, String> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > REMOTE_DOWNLOAD_MAX_BYTES)
+    {
+        return Err(format!(
+            "{}が大きすぎます（1ファイル512MBまで）",
+            kind.noun()
+        ));
+    }
+
+    use futures::StreamExt;
+    let mut bytes = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| format!("{}データの受信が中断しました", kind.noun()))?;
+        let next_length = (bytes.len() as u64).saturating_add(chunk.len() as u64);
+        if next_length > REMOTE_DOWNLOAD_MAX_BYTES {
+            return Err(format!(
+                "{}が大きすぎます（1ファイル512MBまで）",
+                kind.noun()
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    if bytes.is_empty() {
+        return Err(format!("{}データが空でした", kind.noun()));
+    }
+    Ok(bytes)
+}
+
+fn sanitize_filename_part(value: &str) -> String {
+    let mut out = String::new();
+    let mut previous_dash = false;
+    for character in value.chars().take(64) {
+        let safe = character.is_ascii_alphanumeric() || matches!(character, '-' | '_');
+        if safe {
+            out.push(character);
+            previous_dash = false;
+        } else if !previous_dash {
+            out.push('-');
+            previous_dash = true;
+        }
+    }
+    let trimmed = out.trim_matches('-');
+    if trimmed.is_empty() {
+        "request".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn write_remote_file(
+    directory: &Path,
+    provider_id: &str,
+    request_id: &str,
+    index: usize,
+    extension: &str,
+    bytes: &[u8],
+) -> Result<String, String> {
+    if bytes.is_empty() {
+        return Err("生成物データが空でした".to_string());
+    }
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let request_id = sanitize_filename_part(request_id);
+    for _ in 0..100 {
+        let sequence = REMOTE_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let path = directory.join(format!(
+            "remote-{provider_id}-{request_id}-{timestamp}-{sequence}-{index}.{extension}"
+        ));
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                file.write_all(bytes)
+                    .map_err(|error| format!("生成物を保存できませんでした: {error}"))?;
+                return Ok(path.to_string_lossy().into_owned());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("生成物の保存先を作れませんでした: {error}")),
+        }
+    }
+    Err("生成物の重複しないファイル名を作れませんでした".to_string())
+}
+
+fn generation_output_dir(kind: RemoteMcpMediaKind) -> Result<std::path::PathBuf, String> {
+    let base = crate::images::watcher::generated_images_dir()
+        .ok_or_else(|| "generated_images ディレクトリの解決に失敗しました".to_string())?;
+    // 動画は既存 Higgsfield 生成・video_concat と同じ保存経路へ合流させる。
+    let directory = match kind {
+        RemoteMcpMediaKind::Image => base,
+        RemoteMcpMediaKind::Video => base.join("higgsfield"),
+    };
+    fs::create_dir_all(&directory)
+        .map_err(|error| format!("生成物の保存先を作成できませんでした: {error}"))?;
+    Ok(directory)
+}
+
+async fn save_remote_artifacts(
+    provider_id: &str,
+    request_id: &str,
+    kind: RemoteMcpMediaKind,
+    sources: Vec<RemoteArtifactSource>,
+) -> Result<RemoteMcpGenerateResult, String> {
+    let directory = generation_output_dir(kind)?;
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(REMOTE_DOWNLOAD_TIMEOUT_SECS))
+        .redirect(https_redirect_policy())
+        .build()
+        .map_err(|error| format!("生成物ダウンロードの準備に失敗しました: {error}"))?;
+    let mut saved_paths = Vec::new();
+    let mut errors = Vec::new();
+
+    for (index, source) in sources.into_iter().enumerate() {
+        let source_label = match &source {
+            RemoteArtifactSource::InlineImage { .. } => "base64画像",
+            RemoteArtifactSource::Url(_) => "HTTPS URL",
+        };
+        let result = match source {
+            RemoteArtifactSource::InlineImage {
+                mime_type,
+                data_base64,
+            } => {
+                let extension = extension_from_mime(RemoteMcpMediaKind::Image, &mime_type)
+                    .ok_or_else(|| format!("未対応の画像形式です: {mime_type}"));
+                match extension {
+                    Ok(extension) => match general_purpose::STANDARD.decode(data_base64.trim()) {
+                        Ok(bytes) => write_remote_file(
+                            &directory,
+                            provider_id,
+                            request_id,
+                            index + 1,
+                            extension,
+                            &bytes,
+                        ),
+                        Err(error) => Err(format!("base64 画像を読み取れませんでした: {error}")),
+                    },
+                    Err(error) => Err(error),
+                }
+            }
+            RemoteArtifactSource::Url(url) => match validated_https_url(&url) {
+                Err(error) => Err(error),
+                Ok(url) => match http.get(url).send().await {
+                    Ok(response) if response.status().is_success() => {
+                        let content_type = response
+                            .headers()
+                            .get(reqwest::header::CONTENT_TYPE)
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_string);
+                        let final_url = response.url().to_string();
+                        match extension_from_content_type_or_url(
+                            kind,
+                            content_type.as_deref(),
+                            &final_url,
+                        ) {
+                            Some(extension) => {
+                                match download_response_bytes(response, kind).await {
+                                    Ok(bytes) => write_remote_file(
+                                        &directory,
+                                        provider_id,
+                                        request_id,
+                                        index + 1,
+                                        extension,
+                                        &bytes,
+                                    ),
+                                    Err(error) => Err(error),
+                                }
+                            }
+                            None => Err(format!(
+                                "ダウンロード結果が未対応の{}形式でした",
+                                kind.noun()
+                            )),
+                        }
+                    }
+                    Ok(response) => Err(format!(
+                        "{}の取得に失敗しました (HTTP {})",
+                        kind.noun(),
+                        response.status()
+                    )),
+                    Err(error) if error.is_timeout() => Err(format!(
+                        "{}のダウンロードが120秒以内に完了しませんでした",
+                        kind.noun()
+                    )),
+                    Err(error) if error.is_redirect() => Err(format!(
+                        "{}のリダイレクトが安全条件（HTTPS・5回まで）を満たしませんでした",
+                        kind.noun()
+                    )),
+                    Err(_) => Err(format!("{}のダウンロード通信に失敗しました", kind.noun())),
+                },
+            },
+        };
+        match result {
+            Ok(path) => saved_paths.push(path),
+            Err(error) => errors.push(format!(
+                "保存対象 {}（{}）: {error}",
+                index + 1,
+                source_label
+            )),
+        }
+    }
+
+    if saved_paths.is_empty() {
+        Err(if errors.is_empty() {
+            format!("{}を1件も保存できませんでした", kind.noun())
+        } else {
+            errors.join("\n")
+        })
+    } else {
+        Ok(RemoteMcpGenerateResult {
+            saved_paths,
+            errors,
+        })
+    }
+}
+
+fn sanitize_generation_message(message: &str) -> String {
+    let sanitized = super::diagnostics::redact_text(message, dirs::home_dir().as_deref());
+    let mut without_urls = sanitized;
+    for url in https_urls_in_text(&without_urls) {
+        without_urls = without_urls.replace(&url, "[URLを除外]");
+    }
+    without_urls
+        .chars()
+        .take(GENERATION_MESSAGE_LIMIT_CHARS)
+        .collect()
+}
+
+fn emit_generation_event(
+    app: &AppHandle,
+    request_id: &str,
+    provider_id: &str,
+    phase: &'static str,
+    message: Option<String>,
+    saved_paths: Option<Vec<String>>,
+) {
+    let _ = app.emit(
+        REMOTE_MCP_GEN_EVENT,
+        RemoteMcpGenerateEvent {
+            request_id: request_id.to_string(),
+            provider_id: provider_id.to_string(),
+            phase,
+            message,
+            saved_paths,
+        },
+    );
+}
+
 fn persist_discovery(
     app: &AppHandle,
     discovery: &RemoteMcpDiscovery,
@@ -554,6 +1155,147 @@ pub fn remote_mcp_discovery_cached(
             provider.label
         )
     })
+}
+
+/// app-server v2 の正規 API から、指定プロバイダが公開しているツール一覧を取得する。
+#[tauri::command]
+pub async fn remote_mcp_list_tools(
+    provider_id: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<RemoteMcpToolList, String> {
+    let provider = provider_by_id(&provider_id)?;
+    let mut cursor: Option<String> = None;
+    let mut seen_cursors = std::collections::HashSet::new();
+
+    loop {
+        let page = list_mcp_server_status_page(&state, cursor.as_deref()).await?;
+        let servers = page
+            .get("data")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "mcpServerStatus/list の応答に data がありません".to_string())?;
+        if let Some(server) = servers
+            .iter()
+            .find(|server| server.get("name").and_then(Value::as_str) == Some(provider.id))
+        {
+            let list = tool_list_from_server(provider.id, server)?;
+            persist_tool_list(&app, &list)?;
+            return Ok(list);
+        }
+
+        let next_cursor = page
+            .get("nextCursor")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        let Some(next_cursor) = next_cursor else {
+            return Err(format!(
+                "{} の MCP サーバーが app-server の一覧にありません。先に接続を確認してください。",
+                provider.label
+            ));
+        };
+        if !seen_cursors.insert(next_cursor.clone()) {
+            return Err("MCP ツール一覧のページ情報が循環したため中止しました".to_string());
+        }
+        cursor = Some(next_cursor);
+    }
+}
+
+/// 前回成功した正規ツール一覧キャッシュを返す。未取得なら null。
+#[tauri::command]
+pub fn remote_mcp_list_tools_cached(
+    provider_id: String,
+    app: AppHandle,
+) -> Result<Option<RemoteMcpToolList>, String> {
+    let provider = provider_by_id(&provider_id)?;
+    let path = discovery_dir(&app)?.join(format!("{}.tools.json", provider.id));
+    let raw = match fs::read(path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "{} の保存済みツール一覧を読めませんでした: {error}",
+                provider.label
+            ))
+        }
+    };
+    serde_json::from_slice(&raw).map(Some).map_err(|error| {
+        format!(
+            "{} の保存済みツール一覧が壊れています: {error}",
+            provider.label
+        )
+    })
+}
+
+/// MCP プロバイダの任意生成ツールを LLM なしで直接呼び、成果物を既存保存経路へ合流する。
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn remote_mcp_generate(
+    request_id: String,
+    provider_id: String,
+    tool_name: String,
+    params_json: String,
+    kind: RemoteMcpMediaKind,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<RemoteMcpGenerateResult, String> {
+    emit_generation_event(&app, &request_id, &provider_id, "running", None, None);
+
+    let result = async {
+        let provider = provider_by_id(&provider_id)?;
+        if request_id.trim().is_empty() {
+            return Err("requestId が空です".to_string());
+        }
+        let tool_name = tool_name.trim();
+        if tool_name.is_empty() {
+            return Err("toolName が空です".to_string());
+        }
+        let arguments: Value = serde_json::from_str(&params_json)
+            .map_err(|error| format!("paramsJson が正しいJSONではありません: {error}"))?;
+        if !arguments.is_object() {
+            return Err("paramsJson はJSONオブジェクトで指定してください".to_string());
+        }
+
+        let timeout = kind.timeout();
+        let output =
+            call_tool_with_timeout(&state, provider.id, tool_name, arguments, timeout).await?;
+        let sources = extract_remote_artifacts(&output, kind)?;
+        emit_generation_event(&app, &request_id, provider.id, "saving", None, None);
+        save_remote_artifacts(provider.id, &request_id, kind, sources).await
+    }
+    .await;
+
+    match result {
+        Ok(mut result) => {
+            result.errors = result
+                .errors
+                .into_iter()
+                .map(|error| sanitize_generation_message(&error))
+                .collect();
+            let message = (!result.errors.is_empty()).then(|| result.errors.join("\n"));
+            emit_generation_event(
+                &app,
+                &request_id,
+                &provider_id,
+                "done",
+                message,
+                Some(result.saved_paths.clone()),
+            );
+            Ok(result)
+        }
+        Err(error) => {
+            let message = sanitize_generation_message(&error);
+            emit_generation_event(
+                &app,
+                &request_id,
+                &provider_id,
+                "error",
+                Some(message.clone()),
+                None,
+            );
+            Err(message)
+        }
+    }
 }
 
 async fn login_provider(provider_id: &str, state: &AppState) -> Result<String, String> {
@@ -770,6 +1512,188 @@ mod tests {
         assert!(
             value["attempts"].as_array().expect("attempts").len() < attempts.len(),
             "上限を超える応答は記録から切り詰める"
+        );
+    }
+
+    fn tool_output(
+        content: Vec<Value>,
+        structured: Option<Value>,
+        text: &str,
+        is_error: bool,
+    ) -> ToolCallOutput {
+        ToolCallOutput {
+            content,
+            structured,
+            text: text.to_string(),
+            is_error,
+        }
+    }
+
+    #[test]
+    fn content_parser_accepts_base64_image() {
+        let output = tool_output(
+            vec![json!({
+                "type": "image",
+                "data": "aW1hZ2U=",
+                "mimeType": "image/png"
+            })],
+            None,
+            "",
+            false,
+        );
+        assert_eq!(
+            extract_remote_artifacts(&output, RemoteMcpMediaKind::Image).unwrap(),
+            vec![RemoteArtifactSource::InlineImage {
+                mime_type: "image/png".to_string(),
+                data_base64: "aW1hZ2U=".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn content_parser_collects_text_resource_and_structured_urls() {
+        let output = tool_output(
+            vec![
+                json!({"type": "text", "text": "結果: https://cdn.example.com/a.png"}),
+                json!({
+                    "type": "resource",
+                    "resource": {"uri": "https://cdn.example.com/b.png"}
+                }),
+            ],
+            Some(json!({
+                "results": [
+                    {"url": "https://cdn.example.com/c.png"},
+                    {"url": "https://cdn.example.com/a.png"}
+                ]
+            })),
+            "結果: https://cdn.example.com/a.png",
+            false,
+        );
+        assert_eq!(
+            extract_remote_artifacts(&output, RemoteMcpMediaKind::Image).unwrap(),
+            vec![
+                RemoteArtifactSource::Url("https://cdn.example.com/a.png".to_string()),
+                RemoteArtifactSource::Url("https://cdn.example.com/b.png".to_string()),
+                RemoteArtifactSource::Url("https://cdn.example.com/c.png".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn url_parser_accepts_only_https_and_trims_sentence_punctuation() {
+        let urls = https_urls_in_text(
+            "http://cdn.example.com/unsafe.png https://cdn.example.com/result.webp).",
+        );
+        assert_eq!(
+            urls,
+            vec!["https://cdn.example.com/result.webp".to_string()]
+        );
+        assert!(validated_https_url("https://cdn.example.com/result.webp").is_ok());
+        assert!(validated_https_url("http://cdn.example.com/unsafe.png").is_err());
+    }
+
+    #[test]
+    fn download_format_prefers_content_type_then_falls_back_to_url() {
+        assert_eq!(
+            extension_from_content_type_or_url(
+                RemoteMcpMediaKind::Image,
+                Some("image/png; charset=binary"),
+                "https://cdn.example.com/result.webp",
+            ),
+            Some("png")
+        );
+        assert_eq!(
+            extension_from_content_type_or_url(
+                RemoteMcpMediaKind::Video,
+                Some("application/octet-stream"),
+                "https://cdn.example.com/result.MOV?download=1",
+            ),
+            Some("mov")
+        );
+        assert_eq!(
+            extension_from_content_type_or_url(
+                RemoteMcpMediaKind::Video,
+                None,
+                "https://cdn.example.com/result.bin",
+            ),
+            None
+        );
+        assert_eq!(
+            extension_from_content_type_or_url(
+                RemoteMcpMediaKind::Video,
+                Some("video/m4v"),
+                "https://cdn.example.com/result.bin",
+            ),
+            Some("m4v")
+        );
+    }
+
+    #[test]
+    fn content_parser_supports_multiple_data_urls_in_structured_json() {
+        let output = tool_output(
+            Vec::new(),
+            Some(json!({
+                "images": [
+                    "data:image/png;base64,YQ==",
+                    "data:image/webp;base64,Yg=="
+                ]
+            })),
+            "",
+            false,
+        );
+        assert_eq!(
+            extract_remote_artifacts(&output, RemoteMcpMediaKind::Image)
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn content_parser_returns_provider_error_instead_of_success() {
+        let output = tool_output(
+            vec![json!({"type": "text", "text": "残高が不足しています"})],
+            None,
+            "残高が不足しています",
+            true,
+        );
+        let error = extract_remote_artifacts(&output, RemoteMcpMediaKind::Image).unwrap_err();
+        assert!(error.contains("残高が不足"));
+    }
+
+    #[test]
+    fn generation_error_is_redacted_and_truncated() {
+        let raw = format!(
+            "token=sk-must-not-leak\n{}",
+            "長".repeat(GENERATION_MESSAGE_LIMIT_CHARS + 100)
+        );
+        let sanitized = sanitize_generation_message(&raw);
+        assert!(!sanitized.contains("sk-must-not-leak"));
+        assert!(sanitized.chars().count() <= GENERATION_MESSAGE_LIMIT_CHARS);
+    }
+
+    #[test]
+    fn tool_list_uses_official_input_schema() {
+        let list = tool_list_from_server(
+            "runway",
+            &json!({
+                "authStatus": "oAuth",
+                "tools": {
+                    "generate": {
+                        "name": "generate",
+                        "title": "Generate",
+                        "description": "動画を生成",
+                        "inputSchema": {"type": "object", "required": ["prompt"]}
+                    }
+                }
+            }),
+        )
+        .unwrap();
+        assert_eq!(list.auth_status, "oAuth");
+        assert_eq!(list.tools[0].name, "generate");
+        assert_eq!(
+            list.tools[0].input_schema_json,
+            r#"{"required":["prompt"],"type":"object"}"#
         );
     }
 

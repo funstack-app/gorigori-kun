@@ -189,6 +189,21 @@ impl RpcClient {
     }
 
     pub async fn request_raw(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+        self.request_raw_with_timeout(method, params, Duration::from_secs(REQUEST_TIMEOUT_SECS))
+            .await
+    }
+
+    /// 応答待ち時間を呼び出し側で指定する JSON-RPC リクエスト。
+    ///
+    /// 通常の app-server 呼び出しは [`request_raw`](Self::request_raw) の 120 秒上限を
+    /// 使う。画像・動画生成のように正規に長時間かかる処理だけ、この入口から明示的な
+    /// 上限を渡す。
+    pub async fn request_raw_with_timeout(
+        &self,
+        method: &str,
+        params: Value,
+        request_timeout: Duration,
+    ) -> Result<Value, RpcError> {
         if !self.is_alive() {
             return Err(RpcError::TransportClosed);
         }
@@ -219,7 +234,7 @@ impl RpcClient {
             return Err(RpcError::TransportClosed);
         }
 
-        match timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS), rx).await {
+        match timeout(request_timeout, rx).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => Err(RpcError::TransportClosed),
             Err(_) => {
