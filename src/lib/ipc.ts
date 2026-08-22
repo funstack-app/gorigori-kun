@@ -54,6 +54,52 @@ export async function appServerReady(): Promise<boolean> {
   return invoke<boolean>("codex_status");
 }
 
+export type DiagnosticCommand = {
+  status: "ok" | "unavailable";
+  path?: string | null;
+  version: string;
+  reason?: string | null;
+};
+
+export type DiagnosticEnvironment = {
+  appVersion: string;
+  os: string;
+  arch: string;
+  codex: DiagnosticCommand;
+  ffmpeg: DiagnosticCommand;
+  disk: {
+    status: "ok" | "unsupported" | "unavailable";
+    freeBytes?: number | null;
+    reason: string;
+  };
+  temporaryStorage: {
+    status: "ok" | "unsupported" | "unavailable";
+    totalBytes?: number | null;
+    warning: boolean;
+    errorCount: number;
+    reason?: string | null;
+  };
+  reportText: string;
+};
+
+export type NetworkEndpointDiagnostic = {
+  id: string;
+  label: string;
+  status: "ok" | "unavailable";
+  statusCode?: number | null;
+  reason?: string | null;
+};
+
+export type DiagnosticNetwork = {
+  codex: NetworkEndpointDiagnostic;
+  updates: NetworkEndpointDiagnostic;
+};
+
+export const diagnostics = {
+  environment: () => invoke<DiagnosticEnvironment>("diag_environment"),
+  network: () => invoke<DiagnosticNetwork>("diag_network"),
+};
+
 export async function rpcRequest<R = unknown>(method: string, params?: unknown): Promise<R> {
   return invoke<R>("codex_request", { method, params: params ?? null });
 }
@@ -579,12 +625,37 @@ export type RemoteMcpStatus = {
   authenticated: boolean;
 };
 
+export type RemoteMcpDiscoveryAttempt = {
+  tool: string;
+  ok: boolean;
+  /** tool/call の生応答。UI向け結果では Rust 側で4,000文字までに制限される。 */
+  raw: string;
+};
+
+export type RemoteMcpDiscoveredModel = {
+  id: string;
+  name: string;
+  label?: string;
+};
+
+export type RemoteMcpDiscovery = {
+  providerId: string;
+  attempts: RemoteMcpDiscoveryAttempt[];
+  models: RemoteMcpDiscoveredModel[];
+};
+
 /** OAuth 対応リモート HTTP MCP の共通接続層。専用生成 UI とは独立している。 */
 export const remoteMcp = {
   providers: () => invoke<RemoteMcpProvider[]>("remote_mcp_providers"),
   statusAll: () => invoke<RemoteMcpStatus[]>("remote_mcp_status_all"),
   login: (id: string) => invoke<string>("remote_mcp_login", { providerId: id }),
   logout: (id: string) => invoke<void>("remote_mcp_logout", { providerId: id }),
+  /** 読み取り系ツールだけを実測し、モデル候補と全試行結果を保存する。 */
+  discover: (id: string) =>
+    invoke<RemoteMcpDiscovery>("remote_mcp_discover", { providerId: id }),
+  /** app data_dir に保存された前回結果。未実測なら null。 */
+  discoveryCached: (id: string) =>
+    invoke<RemoteMcpDiscovery | null>("remote_mcp_discovery_cached", { providerId: id }),
 };
 
 // Higgsfield リモートMCP拡張 (2026-06-10 段階3)。CLI同梱方式の作り直し。
@@ -815,6 +886,12 @@ export const filmProjects = {
   read: () => invoke<string>("film_projects_read"),
   write: (content: string, allowEmpty = false) =>
     invoke<void>("film_projects_write", { content, allowEmpty }),
+  /** film-projects.json の世代バックアップ一覧（新しい順）。 */
+  listBackups: () =>
+    invoke<[string, number, number][]>("film_projects_list_backups"),
+  /** 一覧から選んだバックアップの JSON を、安全なパス検査つきで読む。 */
+  readBackup: (backupPath: string) =>
+    invoke<string>("film_projects_read_backup", { backupPath }),
 };
 
 // ──────────── Storage Settings ────────────
