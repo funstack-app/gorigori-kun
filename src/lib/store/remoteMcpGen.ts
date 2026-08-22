@@ -6,7 +6,10 @@ import {
   type RemoteMcpToolKind,
 } from "../remoteMcpTools";
 import type {
-  RemoteMcpDiscoveredModel,
+  RemoteMcpCatalogModel,
+  RemoteMcpModelCatalog,
+} from "../remoteMcpModels";
+import type {
   RemoteMcpGenEvent,
   RemoteMcpGenerateArgs,
 } from "../ipc";
@@ -20,7 +23,7 @@ export type RemoteMcpSelection = {
   toolTitle?: string;
   inputSchemaJson: string;
   kind: RemoteMcpGenerationKind;
-  model?: RemoteMcpDiscoveredModel;
+  model?: RemoteMcpCatalogModel;
 };
 
 export type RemoteMcpRunInput = RemoteMcpParamInput & {
@@ -53,10 +56,12 @@ type RemoteMcpGenState = {
   jobs: Record<string, RemoteMcpGenJob>;
   latestRequestId: Record<RemoteMcpGenerationKind, string | null>;
   validationMessage: Record<RemoteMcpGenerationKind, string | null>;
+  modelCatalogs: Record<string, RemoteMcpModelCatalog>;
   setSelection: (
     kind: RemoteMcpGenerationKind,
     selection: RemoteMcpSelection | null,
   ) => void;
+  setModelCatalog: (key: string, catalog: RemoteMcpModelCatalog) => void;
   start: (input: RemoteMcpRunInput) => Promise<RemoteMcpStartResult>;
   retry: (requestId: string) => Promise<RemoteMcpStartResult>;
   applyEvent: (event: RemoteMcpGenEvent) => void;
@@ -90,9 +95,15 @@ function validationFailure(
   }
   const built = buildRemoteMcpParams(selection.inputSchemaJson, {
     prompt: input.prompt,
-    model: selection.model?.id,
+    model: selection.model?.passModel === false ? undefined : selection.model?.id,
     aspectRatio: input.aspectRatio,
     count: input.count,
+    durationSeconds: input.durationSeconds,
+    startImagePath: input.startImagePath,
+    endImagePath: input.endImagePath,
+    referenceImagePaths: input.referenceImagePaths,
+    referenceVideoPaths: input.referenceVideoPaths,
+    motionReferencePaths: input.motionReferencePaths,
   });
   if (built.schemaError) return { ok: false, message: built.schemaError };
   if (built.missingRequired.length > 0) {
@@ -165,6 +176,42 @@ export const useRemoteMcpGen = create<RemoteMcpGenState>((set, get) => {
     };
 
     try {
+      if (selection.providerId === "magnific" && input.kind === "video") {
+        const { magnific } = await import("../ipc");
+        const localImagePaths = [
+          input.startImagePath,
+          input.endImagePath,
+          ...(input.referenceImagePaths ?? []),
+        ].filter((path): path is string => Boolean(path?.trim()));
+        const result = await magnific.videoGenerate({
+          paramsJson: validation.paramsJson,
+          localImagePaths: [...new Set(localImagePaths)],
+        });
+        if (result.generatedPaths.length === 0) {
+          throw new Error(result.errors.join(" ") || "Magnific の動画を保存できませんでした。");
+        }
+        set((state) => {
+          const current = state.jobs[requestId];
+          if (!current) return state;
+          return {
+            jobs: {
+              ...state.jobs,
+              [requestId]: {
+                ...current,
+                phase: "done",
+                message:
+                  result.errors.length > 0
+                    ? `保存は完了しました。一部の処理に失敗しました: ${result.errors.join(" ")}`
+                    : "保存が完了しました。",
+                savedPaths: result.generatedPaths,
+                updatedAt: Date.now(),
+              },
+            },
+          };
+        });
+        return { ok: true, requestId };
+      }
+
       // イベントを取りこぼさないよう、購読完了後にだけ生成を開始する。
       await ensureRemoteMcpGenListener();
       const { remoteMcp } = await import("../ipc");
@@ -197,6 +244,7 @@ export const useRemoteMcpGen = create<RemoteMcpGenState>((set, get) => {
     jobs: {},
     latestRequestId: { image: null, video: null },
     validationMessage: { image: null, video: null },
+    modelCatalogs: {},
 
     setSelection: (kind, selection) =>
       set((state) => ({
@@ -207,10 +255,13 @@ export const useRemoteMcpGen = create<RemoteMcpGenState>((set, get) => {
         validationMessage: { ...state.validationMessage, [kind]: null },
       })),
 
+    setModelCatalog: (key, catalog) =>
+      set((state) => ({ modelCatalogs: { ...state.modelCatalogs, [key]: catalog } })),
+
     start: async (input) => {
       const selection = get().selections[input.kind];
       if (!selection) {
-        const message = "生成に使うツールを選択してください。";
+        const message = "生成に使うモデルを選択してください。";
         set((state) => ({
           validationMessage: { ...state.validationMessage, [input.kind]: message },
         }));

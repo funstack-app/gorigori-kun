@@ -143,6 +143,7 @@ export function VideoConstructedPromptPanel() {
   const duration = useVideoGen((s) => s.duration);
   const setDuration = useVideoGen((s) => s.setDuration);
   const aspectRatio = useVideoGen((s) => s.aspectRatio);
+  const sourceImagePath = useVideoGen((s) => s.sourceImagePath);
   const pushToast = useToasts((s) => s.push);
   /** 「AIで整える」の出力形式。画像と動画で独立に記憶する。 */
   const format = useRefineFormat((s) => s.video);
@@ -417,6 +418,9 @@ export function VideoConstructedPromptPanel() {
       prompt: effectivePrompt,
       aspectRatio,
       count,
+      durationSeconds: duration,
+      startImagePath: sourceImagePath ?? undefined,
+      referenceImagePaths: references.map((reference) => reference.path),
     });
     if (!result.ok) pushToast({ kind: "error", text: result.message });
   };

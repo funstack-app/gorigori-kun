@@ -34,7 +34,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::State;
 
-use crate::codex::mcp_direct::{call_tool, reload_mcp_servers};
+use crate::codex::mcp_direct::{
+    call_tool, call_tool_with_timeout, list_mcp_server_status_page, reload_mcp_servers,
+};
 use crate::codex::mcp_shared::{
     entry_is_authenticated, find_mcp_entry, gori_codex_command, run_codex_capture,
 };
@@ -207,6 +209,125 @@ pub struct MagnificGenArgs {
     pub count: Option<u32>,
     #[serde(default)]
     pub ref_image_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MagnificVideoModelsResult {
+    pub content_text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub structured_content: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_schema_json: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MagnificVideoGenArgs {
+    pub params_json: String,
+    #[serde(default)]
+    pub local_image_paths: Vec<String>,
+}
+
+const MAGNIFIC_VIDEO_QUERY_TIMEOUT_SECS: u64 = 60;
+const MAGNIFIC_VIDEO_GENERATION_TIMEOUT_SECS: u64 = 15 * 60;
+const MAGNIFIC_VIDEO_DOWNLOAD_TIMEOUT_SECS: u64 = 120;
+const MAGNIFIC_VIDEO_DOWNLOAD_MAX_BYTES: usize = 512 * 1024 * 1024;
+const MAGNIFIC_VIDEO_ERROR_LIMIT_CHARS: usize = 4_000;
+
+fn sanitize_magnific_video_message(message: &str) -> String {
+    super::diagnostics::redact_text(message, dirs::home_dir().as_deref())
+        .chars()
+        .take(MAGNIFIC_VIDEO_ERROR_LIMIT_CHARS)
+        .collect()
+}
+
+/// app-server の正規一覧から Magnific の1ツールの inputSchema を取る。
+/// 取得不能でもモデル一覧自体は返し、UIでは仕様を「未取得」と表示する。
+async fn magnific_tool_input_schema(
+    state: &AppState,
+    tool_name: &str,
+) -> Result<Option<String>, String> {
+    let mut cursor: Option<String> = None;
+    let mut seen = std::collections::HashSet::new();
+    loop {
+        let page = list_mcp_server_status_page(state, cursor.as_deref()).await?;
+        let servers = page
+            .get("data")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "MCP 一覧の data が不正です".to_string())?;
+        if let Some(server) = servers
+            .iter()
+            .find(|server| server.get("name").and_then(Value::as_str) == Some(MAGNIFIC_MCP_NAME))
+        {
+            let tools = server.get("tools").and_then(Value::as_object);
+            let tool = tools.and_then(|tools| {
+                tools.get(tool_name).or_else(|| {
+                    tools
+                        .values()
+                        .find(|tool| tool.get("name").and_then(Value::as_str) == Some(tool_name))
+                })
+            });
+            return tool
+                .and_then(|tool| tool.get("inputSchema"))
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(|error| {
+                    format!("{tool_name} の入力形式をJSON化できませんでした: {error}")
+                });
+        }
+
+        let next = page
+            .get("nextCursor")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        let Some(next) = next else {
+            return Ok(None);
+        };
+        if !seen.insert(next.clone()) {
+            return Err("MCP 一覧のページ情報が循環しました".to_string());
+        }
+        cursor = Some(next);
+    }
+}
+
+/// Magnific MCP の動画モデル一覧を保存せず、そのままフロントへ返す。
+#[tauri::command]
+pub async fn magnific_video_models_list(
+    state: State<'_, AppState>,
+) -> Result<MagnificVideoModelsResult, String> {
+    let output = call_tool_with_timeout(
+        &state,
+        MAGNIFIC_MCP_NAME,
+        "video_models_list",
+        json!({}),
+        Duration::from_secs(MAGNIFIC_VIDEO_QUERY_TIMEOUT_SECS),
+    )
+    .await
+    .map_err(|error| sanitize_magnific_video_message(&error))?;
+    if output.is_error {
+        return Err(sanitize_magnific_video_message(
+            if output.text.trim().is_empty() {
+                "Magnific の動画モデル一覧を取得できませんでした"
+            } else {
+                &output.text
+            },
+        ));
+    }
+
+    let input_schema_json = match magnific_tool_input_schema(&state, "video_generate").await {
+        Ok(schema) => schema,
+        Err(error) => {
+            tracing::warn!(target: "magnific", "video_generate の入力形式を取得できませんでした: {}", sanitize_magnific_video_message(&error));
+            None
+        }
+    };
+    Ok(MagnificVideoModelsResult {
+        content_text: output.text,
+        structured_content: output.structured,
+        input_schema_json,
+    })
 }
 
 /// ローカル参照画像の拡張子から Magnific が受け付ける MIME type を返す。
@@ -609,6 +730,351 @@ pub async fn magnific_generate_batch(
         failed_count,
         errors,
     })
+}
+
+fn replace_local_image_paths(
+    value: &mut Value,
+    replacements: &std::collections::HashMap<String, String>,
+) {
+    match value {
+        Value::String(text) => {
+            if let Some(identifier) = replacements.get(text) {
+                *text = identifier.clone();
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                replace_local_image_paths(value, replacements);
+            }
+        }
+        Value::Object(object) => {
+            for value in object.values_mut() {
+                replace_local_image_paths(value, replacements);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_video_creation_ids(value: &Value, into: &mut Vec<String>) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                collect_video_creation_ids(value, into);
+            }
+        }
+        Value::Object(object) => {
+            for key in ["identifier", "creationId", "creation_id"] {
+                if let Some(identifier) = object.get(key).and_then(Value::as_str) {
+                    if !identifier.trim().is_empty() && !into.iter().any(|item| item == identifier)
+                    {
+                        into.push(identifier.to_string());
+                    }
+                }
+            }
+            for key in ["creations", "data", "results", "items"] {
+                if let Some(nested) = object.get(key) {
+                    collect_video_creation_ids(nested, into);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn looks_like_https_url(value: &str) -> bool {
+    reqwest::Url::parse(value)
+        .ok()
+        .is_some_and(|url| url.scheme() == "https" && url.host_str().is_some())
+}
+
+fn collect_video_urls(value: &Value, into: &mut Vec<String>, url_context: bool) {
+    match value {
+        Value::String(text) => {
+            let trimmed = text.trim();
+            let has_video_extension = [".mp4", ".mov", ".webm", ".m4v"]
+                .iter()
+                .any(|extension| trimmed.to_ascii_lowercase().contains(extension));
+            if (url_context || has_video_extension) && looks_like_https_url(trimmed) {
+                if !into.iter().any(|item| item == trimmed) {
+                    into.push(trimmed.to_string());
+                }
+            }
+            if matches!(trimmed.as_bytes().first(), Some(b'{') | Some(b'[')) {
+                if let Ok(parsed) = serde_json::from_str::<Value>(trimmed) {
+                    collect_video_urls(&parsed, into, false);
+                }
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_video_urls(value, into, url_context);
+            }
+        }
+        Value::Object(object) => {
+            for (key, value) in object {
+                let normalized = key.to_ascii_lowercase().replace(['_', '-'], "");
+                let child_context = url_context
+                    || normalized.contains("url")
+                    || normalized.contains("video")
+                    || matches!(
+                        normalized.as_str(),
+                        "output" | "generated" | "result" | "results"
+                    );
+                collect_video_urls(value, into, child_context);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn video_extension(content_type: Option<&str>, final_url: &str) -> Option<&'static str> {
+    let mime = content_type
+        .unwrap_or_default()
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    match mime.as_str() {
+        "video/mp4" => return Some("mp4"),
+        "video/quicktime" => return Some("mov"),
+        "video/webm" => return Some("webm"),
+        "video/x-m4v" | "video/m4v" => return Some("m4v"),
+        _ => {}
+    }
+    let path = reqwest::Url::parse(final_url)
+        .ok()?
+        .path()
+        .to_ascii_lowercase();
+    ["mp4", "mov", "webm", "m4v"]
+        .into_iter()
+        .find(|extension| path.ends_with(&format!(".{extension}")))
+}
+
+fn requested_video_count(value: &Value) -> u32 {
+    match value {
+        Value::Object(object) => {
+            for key in ["count", "n", "numVideos", "numberOfVideos"] {
+                if let Some(value) = object.get(key).and_then(Value::as_u64) {
+                    return value.clamp(1, 8) as u32;
+                }
+            }
+            for nested in object.values() {
+                let count = requested_video_count(nested);
+                if count > 1 {
+                    return count;
+                }
+            }
+            1
+        }
+        _ => 1,
+    }
+}
+
+async fn save_magnific_video_urls(urls: &[String]) -> Result<(Vec<String>, Vec<String>), String> {
+    let base = crate::images::watcher::generated_images_dir()
+        .ok_or_else(|| "generated_images ディレクトリの解決に失敗しました".to_string())?;
+    // F8 の既存動画 (Higgsfield / リモートMCP動画) と同じ合流先。
+    let directory = base.join("higgsfield");
+    std::fs::create_dir_all(&directory)
+        .map_err(|error| format!("動画保存先を作成できませんでした: {error}"))?;
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(MAGNIFIC_VIDEO_DOWNLOAD_TIMEOUT_SECS))
+        .build()
+        .map_err(|error| format!("動画ダウンロードの準備に失敗しました: {error}"))?;
+    let mut generated_paths = Vec::new();
+    let mut errors = Vec::new();
+
+    for (index, url) in urls.iter().enumerate() {
+        if !looks_like_https_url(url) {
+            errors.push(format!("動画 {} のURLがHTTPSではありません", index + 1));
+            continue;
+        }
+        let result = async {
+            let response = http
+                .get(url)
+                .send()
+                .await
+                .map_err(|_| "動画のダウンロード通信に失敗しました".to_string())?;
+            if !response.status().is_success() {
+                return Err(format!(
+                    "動画の取得に失敗しました (HTTP {})",
+                    response.status()
+                ));
+            }
+            if response
+                .content_length()
+                .is_some_and(|size| size > MAGNIFIC_VIDEO_DOWNLOAD_MAX_BYTES as u64)
+            {
+                return Err("動画が保存上限の512MBを超えています".to_string());
+            }
+            let content_type = response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_string);
+            let final_url = response.url().to_string();
+            let extension = video_extension(content_type.as_deref(), &final_url)
+                .ok_or_else(|| "動画形式を確認できませんでした".to_string())?;
+            let bytes = response
+                .bytes()
+                .await
+                .map_err(|_| "動画データを読み取れませんでした".to_string())?;
+            if bytes.is_empty() {
+                return Err("動画データが空でした".to_string());
+            }
+            if bytes.len() > MAGNIFIC_VIDEO_DOWNLOAD_MAX_BYTES {
+                return Err("動画が保存上限の512MBを超えています".to_string());
+            }
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0);
+            let destination = directory.join(format!(
+                "magnific-video-{timestamp}-{}.{extension}",
+                index + 1
+            ));
+            std::fs::write(&destination, &bytes)
+                .map_err(|error| format!("動画を保存できませんでした: {error}"))?;
+            Ok(destination.to_string_lossy().into_owned())
+        }
+        .await;
+        match result {
+            Ok(path) => generated_paths.push(path),
+            Err(error) => errors.push(format!("動画 {}: {error}", index + 1)),
+        }
+    }
+    Ok((generated_paths, errors))
+}
+
+/// 選択した Magnific 動画モデルで生成し、F8 の既存動画保存先へ合流する。
+#[tauri::command]
+pub async fn magnific_video_generate(
+    state: State<'_, AppState>,
+    args: MagnificVideoGenArgs,
+) -> Result<MagnificGenResult, String> {
+    let result = async {
+        let mut arguments: Value = serde_json::from_str(&args.params_json)
+            .map_err(|error| format!("paramsJson が正しいJSONではありません: {error}"))?;
+        if !arguments.is_object() {
+            return Err("paramsJson はJSONオブジェクトで指定してください".to_string());
+        }
+        let count = requested_video_count(&arguments);
+        let http = reqwest::Client::new();
+        let mut replacements = std::collections::HashMap::new();
+        for path in args
+            .local_image_paths
+            .iter()
+            .filter(|path| !path.trim().is_empty())
+        {
+            if replacements.contains_key(path) {
+                continue;
+            }
+            let identifier = upload_magnific_reference(&state, &http, path).await?;
+            replacements.insert(path.clone(), identifier);
+        }
+        replace_local_image_paths(&mut arguments, &replacements);
+
+        let output = call_tool_with_timeout(
+            &state,
+            MAGNIFIC_MCP_NAME,
+            "video_generate",
+            arguments,
+            Duration::from_secs(MAGNIFIC_VIDEO_GENERATION_TIMEOUT_SECS),
+        )
+        .await?;
+        if output.is_error {
+            return Err(if output.text.trim().is_empty() {
+                "Magnific 動画生成がエラーで終了しました".to_string()
+            } else {
+                output.text
+            });
+        }
+
+        let mut urls = Vec::new();
+        if let Some(structured) = output.structured.as_ref() {
+            collect_video_urls(structured, &mut urls, false);
+        }
+        for content in &output.content {
+            collect_video_urls(content, &mut urls, false);
+        }
+        collect_video_urls(&Value::String(output.text.clone()), &mut urls, false);
+
+        let mut creation_ids = Vec::new();
+        if let Some(structured) = output.structured.as_ref() {
+            collect_video_creation_ids(structured, &mut creation_ids);
+        }
+        if !creation_ids.is_empty() && urls.len() < count as usize {
+            let deadline =
+                Instant::now() + Duration::from_secs(MAGNIFIC_VIDEO_GENERATION_TIMEOUT_SECS);
+            let mut pending = creation_ids;
+            while !pending.is_empty() && Instant::now() < deadline {
+                let wait = call_tool(
+                    &state,
+                    MAGNIFIC_MCP_NAME,
+                    "creations_wait",
+                    json!({ "identifiers": pending, "timeoutSeconds": 25 }),
+                )
+                .await?;
+                if wait.is_error {
+                    return Err(if wait.text.trim().is_empty() {
+                        "Magnific 動画生成の完了待ちに失敗しました".to_string()
+                    } else {
+                        wait.text
+                    });
+                }
+                let entries = parse_wait_results(wait.structured.as_ref());
+                if entries.is_empty() {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    continue;
+                }
+                for entry in entries {
+                    if !entry.terminal {
+                        continue;
+                    }
+                    pending.retain(|identifier| identifier != &entry.identifier);
+                    if let Some(url) = entry.url {
+                        if !urls.contains(&url) {
+                            urls.push(url);
+                        }
+                    } else if let Some(error) = entry.error {
+                        return Err(error);
+                    }
+                }
+            }
+            if !pending.is_empty() {
+                return Err(format!(
+                    "Magnific 動画生成が15分以内に完了しませんでした ({}件処理中)",
+                    pending.len()
+                ));
+            }
+        }
+        if urls.is_empty() {
+            return Err("Magnific 動画生成の結果URLを取得できませんでした".to_string());
+        }
+
+        let (generated_paths, errors) = save_magnific_video_urls(&urls).await?;
+        if generated_paths.is_empty() {
+            return Err(if errors.is_empty() {
+                "Magnific の動画を保存できませんでした".to_string()
+            } else {
+                errors.join("\n")
+            });
+        }
+        let failed_count = count.saturating_sub(generated_paths.len() as u32);
+        Ok(MagnificGenResult {
+            generated_paths,
+            failed_count,
+            errors: errors
+                .into_iter()
+                .map(|error| sanitize_magnific_video_message(&error))
+                .collect(),
+        })
+    }
+    .await;
+
+    result.map_err(|error| sanitize_magnific_video_message(&error))
 }
 
 /// Magnific のアカウント残高。フロントの接続カードでクレジット表示に使う。

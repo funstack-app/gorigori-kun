@@ -598,6 +598,19 @@ export type MagnificAccount = {
   unlimited: boolean;
 };
 
+export type MagnificVideoModelsResult = {
+  contentText: string;
+  structuredContent?: unknown;
+  /** app-server の正規ツール一覧から取れた video_generate の入力形式。 */
+  inputSchemaJson?: string;
+};
+
+export type MagnificVideoGenArgs = {
+  paramsJson: string;
+  /** paramsJson 内のローカル画像を、Rust側でMagnific識別子へ安全に置換する。 */
+  localImagePaths?: string[];
+};
+
 export const magnific = {
   status: () => invoke<MagnificStatus>("magnific_status"),
   /** codex mcp add で MCP登録+OAuthフロー開始。ブラウザでログイン完了する。 */
@@ -612,6 +625,16 @@ export const magnific = {
     }>("magnific_generate_batch", { args }),
   /** account_balance で残高+プランを取得 (接続済みのときだけ呼ぶ)。 */
   account: () => invoke<MagnificAccount>("magnific_account"),
+  /** Magnific MCP が現在公開している動画モデルを実取得する。 */
+  videoModelsList: () =>
+    invoke<MagnificVideoModelsResult>("magnific_video_models_list"),
+  /** 選択モデルを video_generate へ渡し、動画を既存の動画保存先へ保存する。 */
+  videoGenerate: (args: MagnificVideoGenArgs) =>
+    invoke<{
+      generatedPaths: string[];
+      failedCount: number;
+      errors: string[];
+    }>("magnific_video_generate", { args }),
 };
 
 export type RemoteMcpProvider = {
@@ -679,6 +702,19 @@ export type RemoteMcpGenerateResult = {
   errors: string[];
 };
 
+export type RemoteMcpQueryArgs = {
+  providerId: string;
+  toolName: string;
+  paramsJson: string;
+};
+
+export type RemoteMcpQueryResult = {
+  /** MCP content[] の text を順番どおり改行結合した値。 */
+  contentText: string;
+  /** MCP が返した structuredContent。無い場合だけ undefined。 */
+  structuredContent?: unknown;
+};
+
 /** OAuth 対応リモート HTTP MCP の共通接続層。専用生成 UI とは独立している。 */
 export const remoteMcp = {
   providers: () => invoke<RemoteMcpProvider[]>("remote_mcp_providers"),
@@ -697,6 +733,9 @@ export const remoteMcp = {
   /** app data_dir に保存された前回のツール一覧。未取得なら null。 */
   listToolsCached: (id: string) =>
     invoke<RemoteMcpToolsResult | null>("remote_mcp_list_tools_cached", { providerId: id }),
+  /** モデル一覧などの読み取り専用ツールを、結果を保存せず直接呼ぶ。 */
+  query: (args: RemoteMcpQueryArgs) =>
+    invoke<RemoteMcpQueryResult>("remote_mcp_query", args),
   /** 生成を依頼する。画面の進捗・完了・失敗は remote-mcp-gen イベントを正とする。 */
   generate: (args: RemoteMcpGenerateArgs) =>
     invoke<RemoteMcpGenerateResult>("remote_mcp_generate", args),

@@ -18,6 +18,12 @@ export type RemoteMcpParamInput = {
   model?: string;
   aspectRatio?: string;
   count?: number;
+  durationSeconds?: number;
+  startImagePath?: string;
+  endImagePath?: string;
+  referenceImagePaths?: string[];
+  referenceVideoPaths?: string[];
+  motionReferencePaths?: string[];
 };
 
 export type BuildRemoteMcpParamsResult = {
@@ -37,6 +43,10 @@ type JsonSchemaProperty = {
   const?: unknown;
   enum?: unknown[];
   readOnly?: boolean;
+  properties?: Record<string, JsonSchemaProperty>;
+  required?: unknown;
+  items?: JsonSchemaProperty;
+  maxItems?: number;
 };
 
 type JsonSchema = {
@@ -159,6 +169,8 @@ function modelField(properties: Record<string, JsonSchemaProperty>): string | un
   return findField(properties, [
     (name) => name === "model" || name === "modelid" || name === "modelname",
     (name) => name.includes("model"),
+    // Magnific の一部ツールはモデル slug の欄を mode と呼ぶ。model系が無い時だけ使う。
+    (name) => name === "mode",
   ]);
 }
 
@@ -188,6 +200,92 @@ function countField(properties: Record<string, JsonSchemaProperty>): string | un
   ]);
 }
 
+function durationField(properties: Record<string, JsonSchemaProperty>): string | undefined {
+  return findField(properties, [
+    (name) =>
+      name === "duration" ||
+      name === "durationseconds" ||
+      name === "seconds" ||
+      name === "lengthseconds",
+    (name) => name.includes("duration") && !name.includes("max"),
+  ]);
+}
+
+function startImageField(properties: Record<string, JsonSchemaProperty>): string | undefined {
+  return findField(properties, [
+    (name) =>
+      name === "firstframe" ||
+      name === "startframe" ||
+      name === "firstimage" ||
+      name === "startimage" ||
+      name === "initialframe" ||
+      name === "initialimage",
+    (name) =>
+      (name.includes("first") || name.includes("start") || name.includes("initial")) &&
+      (name.includes("frame") || name.includes("image")),
+    (name) => name === "inputimage" || name === "imageurl",
+  ]);
+}
+
+function endImageField(properties: Record<string, JsonSchemaProperty>): string | undefined {
+  return findField(properties, [
+    (name) =>
+      name === "lastframe" ||
+      name === "endframe" ||
+      name === "lastimage" ||
+      name === "endimage" ||
+      name === "finalframe" ||
+      name === "finalimage",
+    (name) =>
+      (name.includes("last") || name.includes("end") || name.includes("final")) &&
+      (name.includes("frame") || name.includes("image")),
+  ]);
+}
+
+function collectionField(
+  properties: Record<string, JsonSchemaProperty>,
+  exact: ReadonlySet<string>,
+  includes: readonly string[],
+): string | undefined {
+  const entries = Object.entries(properties).filter(([, property]) => !property.readOnly);
+  const exactMatch = entries.find(([name]) => exact.has(normalizedFieldName(name)));
+  if (exactMatch) return exactMatch[0];
+  return entries.find(([name]) => {
+    const normalized = normalizedFieldName(name);
+    return normalized.includes("reference") && includes.some((part) => normalized.includes(part));
+  })?.[0];
+}
+
+function imageReferencesField(
+  properties: Record<string, JsonSchemaProperty>,
+): string | undefined {
+  return collectionField(
+    properties,
+    new Set(["referenceimages", "referenceimage", "inputimages", "images", "references"]),
+    ["image", "frame", "keyframe"],
+  );
+}
+
+function videoReferencesField(
+  properties: Record<string, JsonSchemaProperty>,
+): string | undefined {
+  return collectionField(
+    properties,
+    new Set(["referencevideos", "referencevideo", "inputvideos", "videos"]),
+    ["video", "clip"],
+  );
+}
+
+function motionReferencesField(
+  properties: Record<string, JsonSchemaProperty>,
+): string | undefined {
+  return collectionField(
+    properties,
+    new Set(["motionreferences", "motionreference", "motionvideos"]),
+    ["motion"],
+  );
+}
+
 function coerceScalar(value: string | number, property: JsonSchemaProperty): string | number {
   const types = Array.isArray(property.type) ? property.type : [property.type];
   if (types.includes("integer") || types.includes("number")) {
@@ -207,10 +305,76 @@ function putMappedValue(
   params[field] = coerceScalar(value, properties[field]);
 }
 
+function propertyAcceptsArray(property: JsonSchemaProperty): boolean {
+  const types = Array.isArray(property.type) ? property.type : [property.type];
+  return types.includes("array") || Boolean(property.items);
+}
+
+function putMappedPaths(
+  params: Record<string, unknown>,
+  properties: Record<string, JsonSchemaProperty>,
+  field: string | undefined,
+  paths: readonly string[] | undefined,
+) {
+  if (!field || !paths) return;
+  const clean = paths.map((path) => path.trim()).filter(Boolean);
+  if (clean.length === 0) return;
+  params[field] = propertyAcceptsArray(properties[field]) ? clean : clean[0];
+}
+
+type SchemaInputTarget = {
+  wrapper?: string;
+  properties: Record<string, JsonSchemaProperty>;
+  required: string[];
+};
+
+function stringRequired(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((name): name is string => typeof name === "string")
+    : [];
+}
+
+function hasKnownInput(properties: Record<string, JsonSchemaProperty>): boolean {
+  return Boolean(
+    promptField(properties) ||
+      modelField(properties) ||
+      aspectField(properties) ||
+      durationField(properties) ||
+      startImageField(properties) ||
+      endImageField(properties),
+  );
+}
+
+/** `params` など1段のラッパーを持つ schema でも、実際の入力欄を選ぶ。 */
+function schemaInputTarget(schema: JsonSchema): SchemaInputTarget {
+  const properties = schema.properties ?? {};
+  if (hasKnownInput(properties)) {
+    return { properties, required: stringRequired(schema.required) };
+  }
+
+  const preferred = ["params", "arguments", "request", "input"];
+  const nested = Object.entries(properties)
+    .filter(([, property]) => property.properties && hasKnownInput(property.properties))
+    .sort(([left], [right]) => {
+      const leftIndex = preferred.indexOf(left.toLowerCase());
+      const rightIndex = preferred.indexOf(right.toLowerCase());
+      return (leftIndex < 0 ? preferred.length : leftIndex) -
+        (rightIndex < 0 ? preferred.length : rightIndex);
+    })[0];
+  if (!nested?.[1].properties) {
+    return { properties, required: stringRequired(schema.required) };
+  }
+  return {
+    wrapper: nested[0],
+    properties: nested[1].properties,
+    required: stringRequired(nested[1].required),
+  };
+}
+
 /** モデル選択を組み合わせられる inputSchema かを返す。 */
 export function remoteMcpSchemaHasModelField(schemaJson: string): boolean {
   const { schema } = parseSchema(schemaJson);
-  return Boolean(schema?.properties && modelField(schema.properties));
+  return Boolean(schema && modelField(schemaInputTarget(schema).properties));
 }
 
 /**
@@ -231,29 +395,77 @@ export function buildRemoteMcpParams(
     };
   }
 
-  const properties = parsed.schema.properties ?? {};
-  const required = Array.isArray(parsed.schema.required)
-    ? parsed.schema.required.filter((name): name is string => typeof name === "string")
-    : [];
+  const rootProperties = parsed.schema.properties ?? {};
+  const rootRequired = stringRequired(parsed.schema.required);
+  const target = schemaInputTarget(parsed.schema);
+  const properties = target.properties;
+  const required = target.required;
+  const mapped: Record<string, unknown> = {};
   const params: Record<string, unknown> = {};
 
-  // const と required の default は schema が明示した値なので、推測せず利用できる。
-  for (const [name, property] of Object.entries(properties)) {
+  // トップレベルの const / required default はラッパー形式でも保持する。
+  for (const [name, property] of Object.entries(rootProperties)) {
+    if (name === target.wrapper) continue;
     if (property.const !== undefined) params[name] = property.const;
-    else if (required.includes(name) && property.default !== undefined) {
+    else if (rootRequired.includes(name) && property.default !== undefined) {
       params[name] = property.default;
     }
   }
 
-  putMappedValue(params, properties, promptField(properties), input.prompt);
-  putMappedValue(params, properties, modelField(properties), input.model);
-  putMappedValue(params, properties, aspectField(properties), input.aspectRatio);
-  putMappedValue(params, properties, countField(properties), input.count);
+  // const と required の default は schema が明示した値なので、推測せず利用できる。
+  for (const [name, property] of Object.entries(properties)) {
+    if (property.const !== undefined) mapped[name] = property.const;
+    else if (required.includes(name) && property.default !== undefined) {
+      mapped[name] = property.default;
+    }
+  }
+
+  putMappedValue(mapped, properties, promptField(properties), input.prompt);
+  putMappedValue(mapped, properties, modelField(properties), input.model);
+  putMappedValue(mapped, properties, aspectField(properties), input.aspectRatio);
+  putMappedValue(mapped, properties, countField(properties), input.count);
+  putMappedValue(mapped, properties, durationField(properties), input.durationSeconds);
+  putMappedValue(mapped, properties, startImageField(properties), input.startImagePath);
+  putMappedValue(mapped, properties, endImageField(properties), input.endImagePath);
+  putMappedPaths(
+    mapped,
+    properties,
+    imageReferencesField(properties),
+    input.referenceImagePaths,
+  );
+  putMappedPaths(
+    mapped,
+    properties,
+    videoReferencesField(properties),
+    input.referenceVideoPaths,
+  );
+  putMappedPaths(
+    mapped,
+    properties,
+    motionReferencesField(properties),
+    input.motionReferencePaths,
+  );
+
+  if (target.wrapper) params[target.wrapper] = mapped;
+  else Object.assign(params, mapped);
 
   const missingRequired = required.filter((name) => {
-    const value = params[name];
+    const value = mapped[name];
     return value === undefined || value === null || (typeof value === "string" && !value.trim());
   });
+  if (target.wrapper) {
+    for (const name of rootRequired) {
+      if (name === target.wrapper) continue;
+      const value = params[name];
+      if (
+        value === undefined ||
+        value === null ||
+        (typeof value === "string" && !value.trim())
+      ) {
+        missingRequired.push(name);
+      }
+    }
+  }
 
   return {
     paramsJson: JSON.stringify(params),

@@ -375,6 +375,7 @@ export function ConstructedPromptPanel() {
       prompt: effectivePrompt,
       aspectRatio,
       count,
+      referenceImagePaths: references.map((reference) => reference.path),
     });
     if (!result.ok) {
       pushToast({ kind: "error", text: result.message });

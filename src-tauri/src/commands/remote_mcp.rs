@@ -34,6 +34,7 @@ const DISCOVERY_PROBE_TOOL: &str = "__gori_probe__";
 const REMOTE_MCP_GEN_EVENT: &str = "remote-mcp-gen";
 const IMAGE_GENERATION_TIMEOUT_SECS: u64 = 5 * 60;
 const VIDEO_GENERATION_TIMEOUT_SECS: u64 = 15 * 60;
+const REMOTE_QUERY_TIMEOUT_SECS: u64 = 60;
 const REMOTE_DOWNLOAD_TIMEOUT_SECS: u64 = 120;
 const REMOTE_DOWNLOAD_MAX_BYTES: u64 = 512 * 1024 * 1024;
 const REMOTE_DOWNLOAD_REDIRECT_LIMIT: usize = 5;
@@ -186,6 +187,15 @@ impl RemoteMcpMediaKind {
 pub struct RemoteMcpGenerateResult {
     pub saved_paths: Vec<String>,
     pub errors: Vec<String>,
+}
+
+/// モデル一覧など、読み取り用途の tool/call 応答。ディスクには保存しない。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteMcpQueryResult {
+    pub content_text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub structured_content: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1225,6 +1235,52 @@ pub fn remote_mcp_list_tools_cached(
             provider.label
         )
     })
+}
+
+/// モデル一覧などの読み取り系ツールを LLM なしで直接呼ぶ。
+/// 成功応答は加工・保存せず返し、失敗文だけ既存の伏せ字と長さ制限を通す。
+#[tauri::command]
+pub async fn remote_mcp_query(
+    provider_id: String,
+    tool_name: String,
+    params_json: String,
+    state: State<'_, AppState>,
+) -> Result<RemoteMcpQueryResult, String> {
+    let result = async {
+        let provider = provider_by_id(&provider_id)?;
+        let tool_name = tool_name.trim();
+        if tool_name.is_empty() {
+            return Err("toolName が空です".to_string());
+        }
+        let arguments: Value = serde_json::from_str(&params_json)
+            .map_err(|error| format!("paramsJson が正しいJSONではありません: {error}"))?;
+        if !arguments.is_object() {
+            return Err("paramsJson はJSONオブジェクトで指定してください".to_string());
+        }
+
+        let output = call_tool_with_timeout(
+            &state,
+            provider.id,
+            tool_name,
+            arguments,
+            Duration::from_secs(REMOTE_QUERY_TIMEOUT_SECS),
+        )
+        .await?;
+        if output.is_error {
+            return Err(if output.text.trim().is_empty() {
+                format!("{} の {tool_name} がエラーを返しました", provider.label)
+            } else {
+                output.text
+            });
+        }
+        Ok(RemoteMcpQueryResult {
+            content_text: output.text,
+            structured_content: output.structured,
+        })
+    }
+    .await;
+
+    result.map_err(|error| sanitize_generation_message(&error))
 }
 
 /// MCP プロバイダの任意生成ツールを LLM なしで直接呼び、成果物を既存保存経路へ合流する。

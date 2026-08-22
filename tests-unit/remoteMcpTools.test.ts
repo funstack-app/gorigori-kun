@@ -108,6 +108,87 @@ describe("buildRemoteMcpParams", () => {
     });
   });
 
+  it("model系の欄が無い場合は Magnific 互換の mode へモデルを渡す", () => {
+    const result = buildRemoteMcpParams(
+      JSON.stringify({
+        properties: {
+          prompt: { type: "string" },
+          mode: { type: "string", enum: ["video-a", "video-b"] },
+        },
+        required: ["prompt", "mode"],
+      }),
+      { prompt: "scene", model: "video-b" },
+    );
+    expect(result.params).toEqual({ prompt: "scene", mode: "video-b" });
+    expect(result.missingRequired).toEqual([]);
+  });
+
+  it("動画の尺・開始終了画像・参照素材を明示された欄へ割り当てる", () => {
+    const result = buildRemoteMcpParams(
+      JSON.stringify({
+        properties: {
+          prompt: { type: "string" },
+          model: { type: "string" },
+          duration_seconds: { type: "integer" },
+          first_frame: { type: "string" },
+          last_frame: { type: "string" },
+          reference_images: { type: "array", items: { type: "string" } },
+          reference_videos: { type: "array", items: { type: "string" } },
+          motion_references: { type: "array", items: { type: "string" } },
+        },
+        required: ["prompt", "model"],
+      }),
+      {
+        prompt: "お餅がゆっくり膨らむ",
+        model: "video-1",
+        durationSeconds: 8,
+        startImagePath: "/tmp/start.png",
+        endImagePath: "/tmp/end.png",
+        referenceImagePaths: ["/tmp/ref-1.png", "/tmp/ref-2.png"],
+        referenceVideoPaths: ["/tmp/ref.mov"],
+        motionReferencePaths: ["/tmp/motion.mp4"],
+      },
+    );
+    expect(result.params).toEqual({
+      prompt: "お餅がゆっくり膨らむ",
+      model: "video-1",
+      duration_seconds: 8,
+      first_frame: "/tmp/start.png",
+      last_frame: "/tmp/end.png",
+      reference_images: ["/tmp/ref-1.png", "/tmp/ref-2.png"],
+      reference_videos: ["/tmp/ref.mov"],
+      motion_references: ["/tmp/motion.mp4"],
+    });
+    expect(result.missingRequired).toEqual([]);
+  });
+
+  it("params ラッパー内のモデル欄と入力欄へ割り当てる", () => {
+    const result = buildRemoteMcpParams(
+      JSON.stringify({
+        properties: {
+          params: {
+            type: "object",
+            properties: {
+              prompt: { type: "string" },
+              model_id: { type: "string" },
+              aspect_ratio: { type: "string" },
+            },
+            required: ["prompt", "model_id"],
+          },
+        },
+        required: ["params"],
+      }),
+      { prompt: "scene", model: "m-3", aspectRatio: "9:16" },
+    );
+    expect(result.params).toEqual({
+      params: { prompt: "scene", model_id: "m-3", aspect_ratio: "9:16" },
+    });
+    expect(result.missingRequired).toEqual([]);
+    expect(remoteMcpSchemaHasModelField(JSON.stringify({
+      properties: { params: { type: "object", properties: { model: { type: "string" } } } },
+    }))).toBe(true);
+  });
+
   it("description/input もプロンプト候補として使う", () => {
     const description = buildRemoteMcpParams(
       JSON.stringify({ properties: { description: { type: "string" } }, required: ["description"] }),
