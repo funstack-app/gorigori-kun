@@ -803,6 +803,19 @@ const FAITHFUL_PANEL_FINAL_CLAUSE =
   "the edited panel must be indistinguishable in style from the untouched panels around it";
 
 /**
+ * 作品に固定した画風のお手本へ一致させる句。
+ * ページ丸ごと生成・旧コマ生成・1コマ再編集で同じ関数を使い、要求の強さを揃える。
+ */
+export function comicStyleAnchorMatchClause(referenceIndex: number): string {
+  return `reference image ${referenceIndex} is the approved art-style anchor for this manga work — it is the sole authority for rendering style and is exempt from any instruction to ignore reference rendering styles; match its style precisely, including its line work, shading, coloring, texture, and level of detail`;
+}
+
+/** 既存の faithful 再編集と同じく、末尾でも「見分けがつかない一致」を要求する。 */
+function comicStyleAnchorFinalClause(referenceIndex: number): string {
+  return `the generated artwork must be indistinguishable in style from the approved art-style anchor in reference image ${referenceIndex}`;
+}
+
+/**
  * ページの形（縦長）と、全ページで同じ大きさに揃えることを念押しする句。
  *
  * 生成サイズがページごとにバラつく実機FB (2026-07-28 STΛCK) への対応。
@@ -1036,6 +1049,10 @@ export type FullPageContext = {
   charRefCount?: number;
   /** 絵柄テキスト（qvs）。空/未指定は従来どおり。faithful では呼び出し側が渡さない。 */
   styleText?: string;
+  /** 作品に固定した画風のお手本が、プロンプト上で何番目の参照画像か。 */
+  styleAnchorReferenceIndex?: number;
+  /** scaffold 等、キャラ参照より前に呼び出し側が置く参照画像の枚数。 */
+  referenceIndexOffset?: number;
 };
 
 /**
@@ -1052,15 +1069,18 @@ function environmentReferenceClauses(
   envReferences: PromptEnvReference[],
   charRefCount: number,
   hasCharReferences: boolean,
+  referenceIndexOffset = 0,
 ): string[] {
   const clauses: string[] = [];
   if (hasCharReferences && envReferences.length > 0) {
+    const firstCharacterIndex = referenceIndexOffset + 1;
+    const lastCharacterIndex = referenceIndexOffset + charRefCount;
     clauses.push(
-      `reference images 1-${charRefCount} are character references — the character identity instructions apply only to these images`,
+      `reference images ${firstCharacterIndex}-${lastCharacterIndex} are character references — the character identity instructions apply only to these images`,
     );
   }
   envReferences.forEach((reference, index) => {
-    const refIndex = charRefCount + 1 + index;
+    const refIndex = referenceIndexOffset + charRefCount + 1 + index;
     clauses.push(
       reference.kind === "item"
         ? `reference image ${refIndex}: 「${reference.name}」 — a fixed prop reference; whenever this object appears in any panel on any page, reproduce this exact design: same shape, proportions, colors, materials, and details; never redesign or restyle it between panels or pages`
@@ -1161,6 +1181,9 @@ export function buildFullPagePrompt(
   if (styleText && colorMode !== "faithful") {
     parts.push(STYLE_TEXT_CLAUSE(styleText));
   }
+  if (context.styleAnchorReferenceIndex !== undefined) {
+    parts.push(comicStyleAnchorMatchClause(context.styleAnchorReferenceIndex));
+  }
 
   // 2. レイアウト句
   if (template) {
@@ -1252,7 +1275,14 @@ export function buildFullPagePrompt(
     );
     parts.push(REFERENCE_POSE_CLAUSE);
   }
-  parts.push(...environmentReferenceClauses(envRefs, charRefCount, hasReferences));
+  parts.push(
+    ...environmentReferenceClauses(
+      envRefs,
+      charRefCount,
+      hasReferences,
+      context.referenceIndexOffset ?? 0,
+    ),
+  );
   // 画風支配句は「どちらかの参照があれば」出す（環境参照の写真調が画風に勝つ事故対策）。
   if (hasReferences || envRefs.length > 0) {
     parts.push(
@@ -1287,6 +1317,9 @@ export function buildFullPagePrompt(
   parts.push(
     colorMode === "faithful" ? FAITHFUL_FINAL_CLAUSE : finalStyleClause(colorMode),
   );
+  if (context.styleAnchorReferenceIndex !== undefined) {
+    parts.push(comicStyleAnchorFinalClause(context.styleAnchorReferenceIndex));
+  }
 
   // 6c. ページの形・大きさを全ページで揃える（生成サイズのバラつき対策）。
   parts.push(PAGE_SIZE_CLAUSE);
@@ -1341,6 +1374,10 @@ export function buildStructurePanelPrompt(args: {
   hasCharRefs: boolean;
   envReferences?: PromptEnvReference[];
   charRefCount?: number;
+  /** 作品に固定した画風のお手本が、プロンプト上で何番目の参照画像か。 */
+  styleAnchorReferenceIndex?: number;
+  /** キャラ参照より前に置く、お手本等の参照画像の枚数。 */
+  referenceIndexOffset?: number;
   direction: ComicReadingDirection;
   pageContext: { panelNo: number; panelTotal: number; synopsis: string };
 }): string {
@@ -1367,6 +1404,9 @@ export function buildStructurePanelPrompt(args: {
   if (styleText && colorMode !== "faithful") {
     parts.push(STYLE_TEXT_CLAUSE(styleText));
   }
+  if (args.styleAnchorReferenceIndex !== undefined) {
+    parts.push(comicStyleAnchorMatchClause(args.styleAnchorReferenceIndex));
+  }
 
   if (hasCharRefs) {
     parts.push(
@@ -1381,6 +1421,7 @@ export function buildStructurePanelPrompt(args: {
       envReferences,
       charRefCount,
       hasCharRefs,
+      args.referenceIndexOffset ?? 0,
     ),
   );
   if (hasCharRefs || envReferences.length > 0) {
@@ -1421,6 +1462,9 @@ export function buildStructurePanelPrompt(args: {
       ? STRUCTURE_PANEL_FAITHFUL_FINAL_CLAUSE
       : finalStyleClause(colorMode),
   );
+  if (args.styleAnchorReferenceIndex !== undefined) {
+    parts.push(comicStyleAnchorFinalClause(args.styleAnchorReferenceIndex));
+  }
   parts.push(NO_META_TEXT_CLAUSE);
 
   return parts.filter(Boolean).join(", ");
@@ -1449,6 +1493,7 @@ export function buildPanelImagePrompt(
   colorMode: ComicColorMode = "mono",
   hasReferences = false,
   styleText = "",
+  options: { styleAnchorReferenceIndex?: number } = {},
 ): string {
   const base = panel.prompt.trim() || panel.composition.trim();
 
@@ -1465,6 +1510,11 @@ export function buildPanelImagePrompt(
   // styleText・finalStyleClause・PAGE_SIZE_CLAUSE は混ぜない。
   if (colorMode === "faithful") {
     const faithfulParts = [FAITHFUL_PANEL_BASE_CLAUSE];
+    if (options.styleAnchorReferenceIndex !== undefined) {
+      faithfulParts.push(
+        comicStyleAnchorMatchClause(options.styleAnchorReferenceIndex),
+      );
+    }
     if (hasReferences) {
       faithfulParts.push(REFERENCE_FAITHFUL_IDENTITY_CLAUSE);
       faithfulParts.push(REFERENCE_POSE_CLAUSE);
@@ -1474,6 +1524,11 @@ export function buildPanelImagePrompt(
     if (attrBlock) faithfulParts.push(`character design — ${attrBlock}`);
     if (panel.acting.trim()) faithfulParts.push(panel.acting.trim());
     faithfulParts.push(FAITHFUL_PANEL_FINAL_CLAUSE);
+    if (options.styleAnchorReferenceIndex !== undefined) {
+      faithfulParts.push(
+        comicStyleAnchorFinalClause(options.styleAnchorReferenceIndex),
+      );
+    }
     faithfulParts.push(NO_META_TEXT_CLAUSE);
     return faithfulParts.filter(Boolean).join(", ");
   }
@@ -1488,6 +1543,9 @@ export function buildPanelImagePrompt(
   if (trimmedStyle) {
     parts.push(STYLE_TEXT_CLAUSE(trimmedStyle));
   }
+  if (options.styleAnchorReferenceIndex !== undefined) {
+    parts.push(comicStyleAnchorMatchClause(options.styleAnchorReferenceIndex));
+  }
   if (hasReferences) {
     parts.push(REFERENCE_IDENTITY_CLAUSE);
     parts.push(REFERENCE_POSE_CLAUSE);
@@ -1499,6 +1557,9 @@ export function buildPanelImagePrompt(
 
   // 最終出力の画風を末尾で念押しする（参照画像のフォト/3D調に勝たせる）。
   parts.push(finalStyleClause(colorMode));
+  if (options.styleAnchorReferenceIndex !== undefined) {
+    parts.push(comicStyleAnchorFinalClause(options.styleAnchorReferenceIndex));
+  }
 
   // 一気生成はコマ経路を通るため、ページ経路と同じ形・大きさへ揃える句を足す
   // （生成サイズのバラつき対策。aspect も同じ COMIC_PAGE_ASPECT を渡している）。

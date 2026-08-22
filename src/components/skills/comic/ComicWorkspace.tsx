@@ -76,6 +76,7 @@ import {
   CastSection,
   FormatSection,
   LayoutSection,
+  type ComicStyleAnchorOption,
 } from "./ComicInputSections";
 import { SceneCompactCard } from "../../scene/SceneCompactCard";
 import { SceneSectionModal } from "../../scene/SceneSectionModal";
@@ -131,6 +132,15 @@ import {
 } from "../../../lib/comic/panelLayoutOps";
 import { recomposePageToTemplate } from "../../../lib/comic/pageAssembly";
 import {
+  MAX_COMIC_PAGE_REFERENCE_IMAGES,
+  planStyleAnchoredReferences,
+} from "../../../lib/comic/styleAnchor";
+import {
+  formatReferenceSnapshotError,
+  snapshotReference,
+} from "../../../lib/referenceSnapshot";
+import { useAssetLedger } from "../../../lib/store/assetLedger";
+import {
   assertStencilFrames,
   compositeStencilResult,
   renderPanelMask,
@@ -156,6 +166,15 @@ const PANEL_REEDIT_BUSY_MESSAGE =
 /** 設計書 §1 A-a 修正1で確定した、正規化を止めずに出す警告。 */
 const COMIC_PAGE_ASPECT_WARN_MESSAGE =
   "生成画像の比率が想定(3:4)と大きく違います。作り直しをおすすめします";
+
+/** 上限で外した参照を、パス丸出しにせずファイル名で伝える。 */
+function displacedReferenceMessage(page: number, paths: string[]): string {
+  const names = paths
+    .slice(0, 3)
+    .map((path) => path.split(/[\\/]/).filter(Boolean).pop() ?? "参照画像");
+  const rest = paths.length - names.length;
+  return `画風のお手本を優先したため、ページ ${page} のほかの参照を ${paths.length} 枚外しました（${names.join("、")}${rest > 0 ? `、ほか${rest}枚` : ""}）`;
+}
 
 /**
  * きっちりコマ割りの生成方式（設計書 S1）。既定は塗り絵（stencil）。
@@ -340,10 +359,26 @@ export function ComicWorkspace() {
 function ComicFlow() {
   const presets = usePresets((s) => s.presets);
   const pushToast = useToasts((s) => s.push);
+  const ledgerAssets = useAssetLedger((s) => s.assets);
+  const assetLedgerLoaded = useAssetLedger((s) => s.loaded);
+  const loadAssetLedger = useAssetLedger((s) => s.load);
 
   const characterPresets = useMemo(
     () => presets.filter((p) => presetKind(p) === "character"),
     [presets],
+  );
+  const styleAnchorOptions = useMemo<ComicStyleAnchorOption[]>(
+    () =>
+      ledgerAssets.flatMap((asset) => {
+        if (asset.type !== "look") return [];
+        const imagePath =
+          asset.primaryImagePath?.trim() ||
+          asset.imagePaths.find((path) => path.trim())?.trim();
+        return imagePath
+          ? [{ id: asset.id, name: asset.name, imagePath }]
+          : [];
+      }),
+    [ledgerAssets],
   );
 
   const phase = useComicRun((s) => s.phase);
@@ -364,10 +399,20 @@ function ComicFlow() {
   const nextEnvRefNoRef = useRef(1);
   /** 環境参照用ライブラリモーダルの開閉（キャラ用 libraryOpen とは別）。 */
   const [envLibraryOpen, setEnvLibraryOpen] = useState(false);
-  /** コマ絵の画風（白黒/カラー/キャラ忠実）。生成プロンプトのベース句・画風句に効く。 */
-  const [colorMode, setColorMode] = useState<ComicColorMode>("mono");
-  /** 絵柄テキスト（qvs）。空=従来どおり。faithful では生成に渡さない（UIも無効化）。 */
-  const [styleText, setStyleText] = useState("");
+  /** 画風のお手本用ライブラリモーダル。既存の画像ピッカーを再利用する。 */
+  const [styleAnchorLibraryOpen, setStyleAnchorLibraryOpen] = useState(false);
+  const [styleAnchorBusy, setStyleAnchorBusy] = useState(false);
+  /** 手動変更が始まったら、飛行中の自動設定は採用しない。 */
+  const styleAnchorOperationRef = useRef(0);
+  const automaticStyleAnchorRef = useRef<Promise<void> | null>(null);
+  /** 作品単位で保存する画風。旧データは comicRun 側で既定値に補完する。 */
+  const colorMode = useComicRun((s) => s.colorMode);
+  const setColorMode = useComicRun((s) => s.setColorMode);
+  const styleText = useComicRun((s) => s.styleText);
+  const setStyleText = useComicRun((s) => s.setStyleText);
+  const styleAnchorImagePath = useComicRun((s) => s.styleAnchorImagePath);
+  const setStyleAnchorImagePath = useComicRun((s) => s.setStyleAnchorImagePath);
+  const loadWorkStyle = useComicRun((s) => s.loadWorkStyle);
   /** コマの読み方向 (B-1)。既定は右→左 (日本式)。プロンプトの空間指示に効く。 */
   const [readingDirection, setReadingDirection] = useState<ComicReadingDirection>("rtl");
   /** 枠線の太さ (B-4b)。プロンプト近似・保証なし。 */
@@ -439,6 +484,120 @@ function ComicFlow() {
     invalidateAll: invalidatePanelReeditLock,
   } = usePanelReeditLock();
   const [panelReeditHistory, setPanelReeditHistory] = useState<PanelReeditHistoryEntry[]>([]);
+
+  useEffect(() => {
+    void loadWorkStyle();
+  }, [loadWorkStyle]);
+
+  useEffect(() => {
+    if (assetLedgerLoaded) return;
+    void loadAssetLedger().catch((error) => {
+      console.warn("comic: asset ledger load failed", error);
+    });
+  }, [assetLedgerLoaded, loadAssetLedger]);
+
+  /** 手動で選んだ画像を、消えない管理領域へ複製してから作品のお手本にする。 */
+  const setManualStyleAnchor = async (sourcePath: string) => {
+    const operation = styleAnchorOperationRef.current + 1;
+    styleAnchorOperationRef.current = operation;
+    setStyleAnchorBusy(true);
+    try {
+      const snapshotPath = await snapshotReference(sourcePath);
+      if (styleAnchorOperationRef.current !== operation) return;
+      await setStyleAnchorImagePath(snapshotPath);
+      if (styleAnchorOperationRef.current !== operation) return;
+      pushToast({
+        kind: "success",
+        text: "画風のお手本を設定しました。以後のページとコマに使います。",
+        ttlMs: 4000,
+      });
+    } catch (error) {
+      if (styleAnchorOperationRef.current !== operation) return;
+      pushToast({
+        kind: "error",
+        text: formatReferenceSnapshotError(error),
+        ttlMs: 6500,
+      });
+    } finally {
+      if (styleAnchorOperationRef.current === operation) setStyleAnchorBusy(false);
+    }
+  };
+
+  /** 作品の先頭ページを人が保存した時だけ、自動で画風のお手本にする。 */
+  const ensureAutomaticStyleAnchor = async (sourcePath: string, pageNo: number) => {
+    const firstPageNo = storyPagesRef.current[0]?.page;
+    if (firstPageNo === undefined || pageNo !== firstPageNo) return;
+    // 起動直後の保存で、読み込み途中だった既存のお手本を上書きしない。
+    await loadWorkStyle();
+    if (useComicRun.getState().styleAnchorImagePath) return;
+    if (automaticStyleAnchorRef.current) return automaticStyleAnchorRef.current;
+    const operationAtStart = styleAnchorOperationRef.current;
+    const run = (async () => {
+      try {
+        const snapshotPath = await snapshotReference(sourcePath);
+        if (
+          styleAnchorOperationRef.current !== operationAtStart ||
+          useComicRun.getState().styleAnchorImagePath
+        ) {
+          return;
+        }
+        await setStyleAnchorImagePath(snapshotPath);
+        if (
+          styleAnchorOperationRef.current !== operationAtStart ||
+          useComicRun.getState().styleAnchorImagePath !== snapshotPath
+        ) {
+          return;
+        }
+        pushToast({
+          kind: "success",
+          text: "この作品の画風のお手本に設定しました。変更もできます",
+          ttlMs: 5000,
+        });
+      } catch (error) {
+        if (styleAnchorOperationRef.current !== operationAtStart) return;
+        pushToast({
+          kind: "error",
+          text: formatReferenceSnapshotError(error),
+          ttlMs: 6500,
+        });
+      }
+    })();
+    automaticStyleAnchorRef.current = run;
+    try {
+      await run;
+    } finally {
+      if (automaticStyleAnchorRef.current === run) automaticStyleAnchorRef.current = null;
+    }
+  };
+
+  const clearStyleAnchor = async () => {
+    styleAnchorOperationRef.current += 1;
+    setStyleAnchorBusy(false);
+    await setStyleAnchorImagePath(null);
+    pushToast({
+      kind: "info",
+      text: "画風のお手本を解除しました。文章だけの指定に戻ります。",
+      ttlMs: 4000,
+    });
+  };
+
+  const pickStyleAnchorFile = async () => {
+    try {
+      const { open: openDialog } = await import("@tauri-apps/plugin-dialog");
+      const selected = await openDialog({
+        multiple: false,
+        filters: [{ name: "画像", extensions: IMAGE_EXTS }],
+      });
+      if (!selected || Array.isArray(selected) || typeof selected !== "string") return;
+      await setManualStyleAnchor(selected);
+    } catch (error) {
+      pushToast({
+        kind: "error",
+        text: `画像の選択に失敗しました: ${(error as Error)?.message ?? error}`,
+        ttlMs: 5000,
+      });
+    }
+  };
 
   /**
    * おまかせ構成は、現在のlayoutPlanを反転せず、正本のrowsから新方向で作り直す。
@@ -1007,16 +1166,38 @@ function ComicFlow() {
       if (!stillMine()) return { adopted: false, error: "再生成は中止されました。元ページは変更していません。必要なら範囲を確認して再実行してください。" };
 
       const resolution = resolvePanelReeditReferences(draftPanel, characters);
+      // 元ページが reference image 1。作品のお手本があれば次の最優先枠へ置き、
+      // 残りだけをキャラ参照へ使う。総数はページ生成と同じ上限を超えない。
+      const styleReferences = planStyleAnchoredReferences({
+        styleAnchorImagePath,
+        charRefPaths: resolution.refPaths,
+        maxReferences: MAX_COMIC_PAGE_REFERENCE_IMAGES - 1,
+        referenceIndexOffset: 1,
+      });
+      if (styleReferences.displacedPaths.length > 0) {
+        pushToast({
+          kind: "info",
+          text: displacedReferenceMessage(
+            page.page,
+            styleReferences.displacedPaths,
+          ),
+          ttlMs: 6000,
+        });
+      }
       const balloonSfxClause = buildPanelBalloonSfxClause(draftPanel);
       const prompt = [
         buildPanelImagePrompt(
           draftPanel,
           resolution.characters,
           pageColorMode,
-          resolution.refPaths.length > 0,
+          styleReferences.charRefPaths.length > 0,
           // qvs: 入力欄の現在値ではなく「そのページを生成した時の記録値」を使う
           // （ページと再編集コマの絵柄割れを防ぐ）。
           pageStyleText,
+          {
+            styleAnchorReferenceIndex:
+              styleReferences.styleAnchorReferenceIndex,
+          },
         ),
         `Edit only panel ${draftPanel.index} of this existing manga page. Page context: ${currentPage.synopsis}. Keep every pixel outside the supplied white mask unchanged. The visible panel border and gutter are protected and must remain unchanged.`,
         ...(balloonSfxClause
@@ -1031,7 +1212,7 @@ function ComicFlow() {
         prompt,
         originalPath,
         maskPath,
-        resolution.refPaths,
+        styleReferences.refImagePaths,
         track.id,
       );
       let composite: Awaited<ReturnType<typeof compositePanelImages>> | null = null;
@@ -1585,14 +1766,39 @@ function ComicFlow() {
 
       // このページの cast だけを参照・属性・限定句の基準にする（PageCastRow と同じ判定）。
       const resolution = resolvePageCast(page, characters, envReferences);
-      const refPaths = resolution.refPaths;
+      // stencil では機械枠が reference image 1 に先置きされる。その分も含めて
+      // お手本・キャラ・環境のプロンプト上の番号を実際の添付順と一致させる。
+      const stencilReferenceOffset =
+        shouldAlign && ALIGNED_PIPELINE === "stencil" ? 1 : 0;
+      const styleReferences = planStyleAnchoredReferences({
+        styleAnchorImagePath,
+        charRefPaths: resolution.refPaths.slice(0, resolution.charRefCount),
+        envReferences: resolution.envReferences,
+        maxReferences: MAX_COMIC_PAGE_REFERENCE_IMAGES,
+        referenceIndexOffset: stencilReferenceOffset,
+      });
+      const hasStyleAnchor =
+        styleReferences.styleAnchorReferenceIndex !== undefined;
+      const promptReferenceOffset =
+        stencilReferenceOffset + (hasStyleAnchor ? 1 : 0);
+      const refPaths = styleReferences.refImagePaths;
+      if (styleReferences.displacedPaths.length > 0) {
+        pushToast({
+          kind: "info",
+          text: displacedReferenceMessage(
+            page.page,
+            styleReferences.displacedPaths,
+          ),
+          ttlMs: 6000,
+        });
+      }
       const idx = storyPages.findIndex((item) => item.page === page.page);
       const prompt = buildFullPagePrompt(
         page.panels,
         template,
         resolution.castCharacters,
         colorMode,
-        resolution.charRefCount > 0,
+        styleReferences.charRefPaths.length > 0,
         {
           pageNumber: page.page,
           totalPages: storyPages.length,
@@ -1610,12 +1816,15 @@ function ComicFlow() {
           readingDirection,
           frameStyle,
           gutterStyle,
-          envReferences: resolution.envReferences.map(({ name, kind }) => ({
+          envReferences: styleReferences.envReferences.map(({ name, kind }) => ({
             name,
             kind,
           })),
-          charRefCount: resolution.charRefCount,
+          charRefCount: styleReferences.charRefPaths.length,
           styleText: colorMode === "faithful" ? undefined : styleText,
+          styleAnchorReferenceIndex:
+            styleReferences.styleAnchorReferenceIndex,
+          referenceIndexOffset: promptReferenceOffset,
         },
       );
       /** 生成直後の1080x1440正規化。中止・比率警告の扱いを全経路で1本にする。 */
@@ -2133,6 +2342,13 @@ function ComicFlow() {
               setColorMode={setColorMode}
               styleText={styleText}
               setStyleText={setStyleText}
+              styleAnchorImagePath={styleAnchorImagePath}
+              styleAnchorOptions={styleAnchorOptions}
+              styleAnchorBusy={styleAnchorBusy}
+              onPickStyleAnchorFromLedger={(path) => void setManualStyleAnchor(path)}
+              onOpenStyleAnchorLibrary={() => setStyleAnchorLibraryOpen(true)}
+              onPickStyleAnchorFile={() => void pickStyleAnchorFile()}
+              onClearStyleAnchor={() => void clearStyleAnchor()}
               envReferences={envReferences}
               onPickEnvFiles={() => void pickEnvImageFiles()}
               onOpenEnvLibrary={() => setEnvLibraryOpen(true)}
@@ -2208,6 +2424,7 @@ function ComicFlow() {
               onSplitPanel={splitStoryPanelOnImage}
               onMergePanels={mergeStoryPanelsOnImage}
               onRecoverSlots={recoverAndAdoptSlots}
+              onApprovePage={ensureAutomaticStyleAnchor}
             />
           )}
 
@@ -2225,6 +2442,11 @@ function ComicFlow() {
         onClose={() => setEnvLibraryOpen(false)}
         onPick={(path) => addEnvReferences([path], "library")}
       />
+      <ReferenceLibraryModal
+        open={styleAnchorLibraryOpen}
+        onClose={() => setStyleAnchorLibraryOpen(false)}
+        onPick={(path) => void setManualStyleAnchor(path)}
+      />
     </>
   );
 }
@@ -2238,6 +2460,13 @@ function InputPhase({
   setColorMode,
   styleText,
   setStyleText,
+  styleAnchorImagePath,
+  styleAnchorOptions,
+  styleAnchorBusy,
+  onPickStyleAnchorFromLedger,
+  onOpenStyleAnchorLibrary,
+  onPickStyleAnchorFile,
+  onClearStyleAnchor,
   envReferences,
   onPickEnvFiles,
   onOpenEnvLibrary,
@@ -2278,6 +2507,13 @@ function InputPhase({
   setColorMode: (v: ComicColorMode) => void;
   styleText: string;
   setStyleText: (v: string) => void;
+  styleAnchorImagePath: string | null;
+  styleAnchorOptions: ComicStyleAnchorOption[];
+  styleAnchorBusy: boolean;
+  onPickStyleAnchorFromLedger: (path: string) => void;
+  onOpenStyleAnchorLibrary: () => void;
+  onPickStyleAnchorFile: () => void;
+  onClearStyleAnchor: () => void;
   envReferences: ComicEnvReference[];
   onPickEnvFiles: () => void;
   onOpenEnvLibrary: () => void;
@@ -2404,7 +2640,11 @@ function InputPhase({
         <SceneCompactCard
           number="02"
           title="画風と絵柄"
-          summary={buildArtStyleSummary(colorMode, styleText)}
+          summary={buildArtStyleSummary(
+            colorMode,
+            styleText,
+            Boolean(styleAnchorImagePath),
+          )}
           onClick={() => setOpenSection("artStyle")}
         />
         <SceneCompactCard
@@ -2452,6 +2692,13 @@ function InputPhase({
           setColorMode={setColorMode}
           styleText={styleText}
           setStyleText={setStyleText}
+          styleAnchorImagePath={styleAnchorImagePath}
+          styleAnchorOptions={styleAnchorOptions}
+          styleAnchorBusy={styleAnchorBusy}
+          onPickStyleAnchorFromLedger={onPickStyleAnchorFromLedger}
+          onOpenStyleAnchorLibrary={onOpenStyleAnchorLibrary}
+          onPickStyleAnchorFile={onPickStyleAnchorFile}
+          onClearStyleAnchor={onClearStyleAnchor}
         />
       </SceneSectionModal>
       <SceneSectionModal
@@ -2807,6 +3054,7 @@ function PagesPhase({
   onSplitPanel,
   onMergePanels,
   onRecoverSlots,
+  onApprovePage,
 }: {
   /**
    * 作品のテーマ（＝入力されたあらすじ）。保存ファイル名の先頭に載せる
@@ -2843,6 +3091,8 @@ function PagesPhase({
     neighborIndex: number,
   ) => Promise<PanelReeditOutcome>;
   onRecoverSlots: (page: ComicStoryPage) => Promise<SlotRecoveryOutcome>;
+  /** 最初に人が保存したページを、作品の画風のお手本へ自動設定する。 */
+  onApprovePage: (imagePath: string, pageNo: number) => Promise<void>;
 }) {
   const pushToast = useToasts((s) => s.push);
   const comicCardSize = useWorkspace((s) => s.comicCardSize);
@@ -2956,6 +3206,7 @@ function PagesPhase({
         ? `漫画 ページ${page.page}（${modeLabel}）`
         : `漫画 ページ${page.page}`,
     });
+    await onApprovePage(imagePath, page.page);
     pushToast({
       kind: "success",
       text: `ページ ${page.page} を ${activeProject?.name ?? "プロジェクト"} に保存しました。`,
@@ -2973,6 +3224,7 @@ function PagesPhase({
       return;
     }
     let saved = 0;
+    let firstApprovedPage: { imagePath: string; pageNo: number } | null = null;
     for (const page of storyPages) {
       const result = pageResults.find((item) => item.page === page.page);
       const imagePath = result?.imagePath;
@@ -2986,7 +3238,11 @@ function PagesPhase({
           ? `漫画 ページ${page.page}（${modeLabel}）`
           : `漫画 ページ${page.page}`,
       });
+      firstApprovedPage ??= { imagePath, pageNo: page.page };
       saved += 1;
+    }
+    if (firstApprovedPage) {
+      await onApprovePage(firstApprovedPage.imagePath, firstApprovedPage.pageNo);
     }
     pushToast({
       kind: saved > 0 ? "success" : "info",
@@ -3006,6 +3262,7 @@ function PagesPhase({
         totalPages: storyPages.length,
       });
       if (!saved) return;
+      await onApprovePage(imagePath, pageNo);
       pushToast({
         kind: "success",
         text: `ページ ${pageNo} を保存しました。`,
@@ -3037,6 +3294,23 @@ function PagesPhase({
       );
       // フォルダ選択のキャンセルは失敗ではない（トーストを出さない）。
       if (!outcome) return;
+      if (outcome.saved > 0) {
+        const firstApprovedPage = storyPages
+          .map((page) => ({
+            pageNo: page.page,
+            imagePath: pageResults.find((result) => result.page === page.page)?.imagePath,
+          }))
+          .find(
+            (item): item is { pageNo: number; imagePath: string } =>
+              Boolean(item.imagePath),
+          );
+        if (firstApprovedPage) {
+          await onApprovePage(
+            firstApprovedPage.imagePath,
+            firstApprovedPage.pageNo,
+          );
+        }
+      }
       // 内訳は「保存 / 失敗 / 未生成スキップ」の3つ。0 件のものは書かない。
       // 失敗が1件でもあれば error 扱いにする（成功トーストに紛れさせない）。
       const notes = [

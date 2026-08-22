@@ -77,11 +77,23 @@ export function buildLayoutSummary(
 export function buildArtStyleSummary(
   colorMode: ComicColorMode,
   styleText: string,
+  hasStyleAnchor = false,
 ): string {
-  if (colorMode === "faithful") return "キャラ忠実（参照の画風を維持）";
+  if (colorMode === "faithful") {
+    return compact(
+      "キャラ忠実（参照の画風を維持）",
+      hasStyleAnchor ? "画風のお手本あり" : "",
+    );
+  }
   const colorLabel = colorMode === "mono" ? "白黒（標準）" : "カラー";
-  return compact(colorLabel, styleText);
+  return compact(colorLabel, styleText, hasStyleAnchor ? "画風のお手本あり" : "");
 }
+
+export type ComicStyleAnchorOption = {
+  id: string;
+  name: string;
+  imagePath: string;
+};
 
 export function buildFormatSummary(
   readingDirection: ComicReadingDirection,
@@ -376,11 +388,25 @@ export function ArtStyleSection({
   setColorMode,
   styleText,
   setStyleText,
+  styleAnchorImagePath,
+  styleAnchorOptions,
+  styleAnchorBusy,
+  onPickStyleAnchorFromLedger,
+  onOpenStyleAnchorLibrary,
+  onPickStyleAnchorFile,
+  onClearStyleAnchor,
 }: {
   colorMode: ComicColorMode;
   setColorMode: (v: ComicColorMode) => void;
   styleText: string;
   setStyleText: (v: string) => void;
+  styleAnchorImagePath: string | null;
+  styleAnchorOptions: ComicStyleAnchorOption[];
+  styleAnchorBusy: boolean;
+  onPickStyleAnchorFromLedger: (path: string) => void;
+  onOpenStyleAnchorLibrary: () => void;
+  onPickStyleAnchorFile: () => void;
+  onClearStyleAnchor: () => void;
 }) {
   return (
     <div className="flex flex-col gap-4">
@@ -420,6 +446,80 @@ export function ArtStyleSection({
             リファレンス画像の画風・質感をそのまま保って作ります（漫画調への変換をしません）。
           </p>
         )}
+      </div>
+
+      <div>
+        <label className="mb-1.5 block text-xs font-medium text-neutral-400">
+          画風のお手本（任意）
+        </label>
+        {styleAnchorImagePath ? (
+          <div className="mb-2 flex items-center gap-3 rounded-md border border-pink-500/30 bg-pink-500/5 p-2.5">
+            <SafeImage
+              path={styleAnchorImagePath}
+              alt="画風のお手本"
+              className="h-16 w-12 shrink-0 rounded bg-[#101010] object-cover"
+            />
+            <div className="min-w-0 flex-1">
+              <p className="text-xs font-semibold text-pink-200">設定済み</p>
+              <p className="mt-1 text-[11px] leading-4 text-neutral-500">
+                以後のページとコマは、この画像の線・塗り・質感へ合わせます。
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={onClearStyleAnchor}
+              disabled={styleAnchorBusy}
+              className="rounded border border-[#343434] px-2 py-1 text-[11px] text-neutral-300 transition hover:border-rose-400/60 hover:text-rose-300 disabled:opacity-40"
+            >
+              解除
+            </button>
+          </div>
+        ) : (
+          <p className="mb-2 rounded-md border border-dashed border-[#2a2a2a] bg-[#1a1a1a] px-3 py-2.5 text-[11px] leading-4 text-neutral-500">
+            未設定では、これまでどおり文章だけで画風を指定します。最初のページを保存すると、そのページを自動でお手本にします。
+          </p>
+        )}
+        <div className="flex flex-wrap gap-2">
+          <select
+            value=""
+            onChange={(event) => {
+              if (event.target.value) onPickStyleAnchorFromLedger(event.target.value);
+            }}
+            disabled={styleAnchorBusy || styleAnchorOptions.length === 0}
+            aria-label="台帳のルックから画風のお手本を選ぶ"
+            className="rounded-md border border-[#2a2a2a] bg-[#1a1a1a] px-3 py-1.5 text-xs font-medium text-neutral-300 outline-none transition focus:border-pink-500/50 disabled:opacity-40"
+          >
+            <option value="">
+              {styleAnchorOptions.length > 0
+                ? "台帳のルックから選ぶ"
+                : "台帳のルックはありません"}
+            </option>
+            {styleAnchorOptions.map((option) => (
+              <option key={option.id} value={option.imagePath}>
+                {option.name}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            onClick={onOpenStyleAnchorLibrary}
+            disabled={styleAnchorBusy}
+            className="rounded-md border border-[#2a2a2a] bg-[#1a1a1a] px-3 py-1.5 text-xs font-medium text-neutral-300 transition hover:border-pink-500/40 hover:text-white disabled:opacity-40"
+          >
+            ライブラリから選ぶ
+          </button>
+          <button
+            type="button"
+            onClick={onPickStyleAnchorFile}
+            disabled={styleAnchorBusy}
+            className="rounded-md border border-[#2a2a2a] bg-[#1a1a1a] px-3 py-1.5 text-xs font-medium text-neutral-300 transition hover:border-pink-500/40 hover:text-white disabled:opacity-40"
+          >
+            ローカルから選ぶ
+          </button>
+        </div>
+        <p className="mt-1 text-[11px] text-neutral-500">
+          選んだ画像はアプリ内へ複製するため、元画像を移動しても使えます。
+        </p>
       </div>
 
       {/* qvs (2026-08-03): 絵柄をキャラ参照と分離したテキスト項目で指定する。

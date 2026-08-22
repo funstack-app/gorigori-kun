@@ -17,6 +17,7 @@ import {
   MAX_PAGE_REFERENCES,
   resolvePanelReferences,
 } from "./references";
+import { planStyleAnchoredReferences } from "./styleAnchor";
 import type {
   ComicCharacter,
   ComicColorMode,
@@ -42,6 +43,8 @@ export type StructureGenerateBatchRequest = {
 export type StructurePanelRequest = {
   panelIndex: number;
   request: StructureGenerateBatchRequest;
+  /** 画風のお手本を優先したため上限から外れた参照。呼び出し側が画面で報告する。 */
+  displacedReferencePaths: string[];
 };
 
 /** U4が生成と成功記録に使う、1ページ分の決定済み計画。 */
@@ -126,6 +129,7 @@ export function buildStructurePanelRequest(args: {
   characters: ComicCharacter[];
   colorMode: ComicColorMode;
   styleText?: string;
+  styleAnchorImagePath?: string | null;
   envReferences?: ComicEnvReference[];
   direction: ComicReadingDirection;
   pageContext: { panelNo: number; panelTotal: number; synopsis: string };
@@ -137,16 +141,17 @@ export function buildStructurePanelRequest(args: {
     args.envReferences ?? [],
   );
   const panelReferences = resolvePanelReferences(args.panel, args.characters);
-  // 合計9枚の中で環境参照を先に確保し、残りだけをキャラ参照へ配る。
-  const charBudget = Math.max(
-    0,
-    MAX_PAGE_REFERENCES - environmentReferences.length,
-  );
-  const charRefPaths = panelReferences.refPaths.slice(0, charBudget);
-  const refImagePaths = [
-    ...charRefPaths,
-    ...environmentReferences.map((reference) => reference.imagePath),
-  ];
+  // 旧コマ生成の合計9枚は増やさず、お手本があれば先頭1枠へ固定する。
+  // お手本なしでは planner が既存のキャラ→環境順をそのまま返す。
+  const charBudget = Math.max(0, MAX_PAGE_REFERENCES - environmentReferences.length);
+  const styleReferences = planStyleAnchoredReferences({
+    styleAnchorImagePath: args.styleAnchorImagePath,
+    charRefPaths: panelReferences.refPaths.slice(0, charBudget),
+    envReferences: environmentReferences,
+    maxReferences: MAX_PAGE_REFERENCES,
+  });
+  const referenceIndexOffset =
+    styleReferences.styleAnchorReferenceIndex === undefined ? 0 : 1;
   const page = structurePageSize(args.pageAspect);
   const slotRatio = (args.slot.w * page.w) / (args.slot.h * page.h);
 
@@ -158,20 +163,23 @@ export function buildStructurePanelRequest(args: {
         characters: args.characters,
         colorMode: args.colorMode,
         styleText: args.styleText,
-        hasCharRefs: charRefPaths.length > 0,
-        envReferences: environmentReferences.map(({ name, kind }) => ({
+        hasCharRefs: styleReferences.charRefPaths.length > 0,
+        envReferences: styleReferences.envReferences.map(({ name, kind }) => ({
           name,
           kind,
         })),
-        charRefCount: charRefPaths.length,
+        charRefCount: styleReferences.charRefPaths.length,
+        styleAnchorReferenceIndex: styleReferences.styleAnchorReferenceIndex,
+        referenceIndexOffset,
         direction: args.direction,
         pageContext: args.pageContext,
       }),
       count: 1,
-      refImagePaths,
+      refImagePaths: styleReferences.refImagePaths,
       aspect: nearestAspectLabel(slotRatio),
       sourceTag: args.sourceTag,
     },
+    displacedReferencePaths: styleReferences.displacedPaths,
   };
 }
 
@@ -186,6 +194,7 @@ export function buildStructureRunPlan(args: {
   characters: ComicCharacter[];
   colorMode: ComicColorMode;
   styleText?: string;
+  styleAnchorImagePath?: string | null;
   envReferences?: ComicEnvReference[];
   sourceTag: string;
 }): StructureRunPlan {
@@ -214,6 +223,7 @@ export function buildStructureRunPlan(args: {
         characters: args.characters,
         colorMode: args.colorMode,
         styleText: args.styleText,
+        styleAnchorImagePath: args.styleAnchorImagePath,
         envReferences: args.envReferences,
         direction: args.direction,
         pageContext: {
