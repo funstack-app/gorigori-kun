@@ -25,7 +25,7 @@ import { parseSceneLayout, type SceneLayoutDraft } from "../scene3d/layoutAnalys
 import { MIXAMO_BONES, type GeneratedMotionSpec } from "../scene3d/motionGen";
 import { BLOCKOUT_PRESET_PROMPT } from "../sketch/presets";
 import { useScene3d, type ImageSceneApplyResult } from "./scene3d";
-import { useSkillUiMode } from "./skillUiMode";
+import { useSkillMode } from "./skillMode";
 import { useThreads } from "./threads";
 import { useToasts } from "./toasts";
 
@@ -332,7 +332,9 @@ export const useSceneFromImage = create<SceneFromImageState>((set) => ({
       const applied = useScene3d.getState().applyImageScene(draft, poseClipId, sourceAspect);
 
       // scene3d スキルへ遷移 (追加したカメラのビューは applyImageScene が開いている)。
-      useSkillUiMode.getState().enterSkill("gori-scene-3d", "scene3d");
+      // selectedSkillId を先に置くことで、続く enabled=true の同期が正しいスキルIDを見る。
+      useSkillMode.getState().setSelectedSkillId("gori-scene-3d");
+      useSkillMode.getState().setEnabled(true);
 
       set({
         job: null,

@@ -123,9 +123,9 @@ export async function sendShotsToScene3d(shots: ShotAnalysis[]): Promise<number>
 
   // 純関数だけを使うテストや分析画面の表示時には、Scene 3D の保存データを読まない。
   // 実際に書き出す瞬間だけ各ストアを読み込み、既存シーンの末尾へ追加する。
-  const [{ useScene3d }, { useSkillUiMode }, { useToasts }] = await Promise.all([
+  const [{ useScene3d }, { useSkillMode }, { useToasts }] = await Promise.all([
     import("../store/scene3d"),
-    import("../store/skillUiMode"),
+    import("../store/skillMode"),
     import("../store/toasts"),
   ]);
   const added = useScene3d
@@ -133,7 +133,9 @@ export async function sendShotsToScene3d(shots: ShotAnalysis[]): Promise<number>
     .appendCamerasFromSpecs(shots.map((shot) => shotToCameraSpec(shot)));
   if (added === 0) return 0;
 
-  useSkillUiMode.getState().enterSkill("gori-scene-3d", "scene3d");
+  // selectedSkillId を先に置くことで、続く enabled=true の同期が正しいスキルIDを見る。
+  useSkillMode.getState().setSelectedSkillId("gori-scene-3d");
+  useSkillMode.getState().setEnabled(true);
   useToasts.getState().push({
     kind: "success",
     text: `${added}台のカメラを Scene 3D に追加しました`,

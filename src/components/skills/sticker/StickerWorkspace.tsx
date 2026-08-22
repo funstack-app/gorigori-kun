@@ -109,6 +109,15 @@ type CutState = {
   reason?: string;
 };
 
+/** 1バッチ内で、生成結果が届いたカットと失敗したカットを数える台帳。 */
+type WaveProgress = {
+  expectedCutIds: Set<string>;
+  settledCutIds: Set<string>;
+  failedCutIds: Set<string>;
+};
+
+type EventSubscriptionStatus = "connecting" | "ready" | "failed";
+
 const IMAGE_EXTS = ["png", "jpg", "jpeg", "webp"];
 
 /** キャラの参照画像を解決する（表情差分と同じ規則）。 */
@@ -168,6 +177,8 @@ function StickerBody() {
   const [cuts, setCuts] = useState<CutState[]>([]);
   const [dropped, setDropped] = useState<ReadonlySet<number>>(new Set());
   const [running, setRunning] = useState(false);
+  const [eventSubscriptionStatus, setEventSubscriptionStatus] =
+    useState<EventSubscriptionStatus>("connecting");
   /**
    * 生成を開始した時刻。`GenerationGauge` に渡す。
    *
@@ -247,6 +258,8 @@ function StickerBody() {
    * 波をまたぐロールバックは作らない設計なので、止めると残りが永久に来ない）。
    */
   const waveWaitersRef = useRef<Map<string, () => void>>(new Map());
+  /** `completed` が欠けても全カットの決着で待ちを解けるよう、runごとに数える。 */
+  const waveProgressRef = useRef<Map<string, WaveProgress>>(new Map());
   /**
    * クロマキーで抜いたときの統計（抜いた結果のパス → 統計）。
    *
@@ -369,7 +382,47 @@ function StickerBody() {
     let unlisten: (() => void) | null = null;
     let cancelled = false;
 
-    void onCharacterSheetEvent((event) => {
+    /** 待ちを1回だけ解放し、失敗があれば件数を必ず知らせる。 */
+    const releaseWave = (runId: string) => {
+      const resolve = waveWaitersRef.current.get(runId);
+      if (!resolve) return;
+
+      const progress = waveProgressRef.current.get(runId);
+      waveWaitersRef.current.delete(runId);
+      waveProgressRef.current.delete(runId);
+      if (progress && progress.failedCutIds.size > 0) {
+        pushToast({
+          kind: "error",
+          text: `${progress.failedCutIds.size}枚の生成に失敗しました。もう一度お試しください`,
+          ttlMs: 6000,
+        });
+      }
+      resolve();
+    };
+
+    /** 成功・失敗を数え、全カットが決着したら completed が無くても次へ進める。 */
+    const settleWaveCut = (runId: string, cutId: string, failed: boolean) => {
+      const progress = waveProgressRef.current.get(runId);
+      if (!progress) return;
+
+      if (progress.expectedCutIds.has(cutId)) {
+        progress.settledCutIds.add(cutId);
+        if (failed) progress.failedCutIds.add(cutId);
+      } else if (failed) {
+        // validate_params などのrun全体エラーは、個別cutIdへ対応しない場合がある。
+        // その場合はこのバッチ全体を失敗として決着させ、永久待ちを防ぐ。
+        for (const expectedCutId of progress.expectedCutIds) {
+          progress.settledCutIds.add(expectedCutId);
+          progress.failedCutIds.add(expectedCutId);
+        }
+      }
+
+      if (progress.settledCutIds.size >= progress.expectedCutIds.size) {
+        releaseWave(runId);
+      }
+    };
+
+    const handleEvent: Parameters<typeof onCharacterSheetEvent>[0] = (event) => {
       if (!runIdsRef.current.has(event.runId)) return;
       if (event.kind === "cutStarted") {
         setCuts((prev) =>
@@ -378,51 +431,84 @@ function StickerBody() {
           ),
         );
       } else if (event.kind === "cutCompleted") {
+        settleWaveCut(event.runId, event.cutId, false);
         // 生成物は**まだ緑背景**。透過に抜いてから採否リストへ載せる（設計書 §1.4）。
         // 抜かずに出すと層Aの `no-alpha` が全枚数をブロックし、1枚も完走しない。
         const cutId = event.cutId;
-        void cutOut(event.imagePath).then((cutPath) => {
-          setCuts((prev) =>
-            prev.map((c) =>
-              c.entry.id === cutId
-                ? { ...c, status: "completed", imagePath: cutPath }
-                : c,
-            ),
-          );
-        });
+        void cutOut(event.imagePath)
+          .then((cutPath) => {
+            setCuts((prev) =>
+              prev.map((c) =>
+                c.entry.id === cutId
+                  ? { ...c, status: "completed", imagePath: cutPath }
+                  : c,
+              ),
+            );
+          })
+          .catch((err) => {
+            const reason = humanizeError(err);
+            setCuts((prev) =>
+              prev.map((c) =>
+                c.entry.id === cutId
+                  ? { ...c, status: "failed", reason: `背景の切り抜き失敗: ${reason}` }
+                  : c,
+              ),
+            );
+            pushToast({
+              kind: "error",
+              text: `背景の切り抜きに失敗しました。理由: ${reason}。この1枚をもう一度お試しください。`,
+              ttlMs: 6000,
+            });
+          });
       } else if (event.kind === "cutFailed") {
+        const progress = waveProgressRef.current.get(event.runId);
+        const failedCutIds =
+          progress && !progress.expectedCutIds.has(event.cutId)
+            ? progress.expectedCutIds
+            : new Set([event.cutId]);
         setCuts((prev) =>
           prev.map((c) =>
-            c.entry.id === event.cutId
+            failedCutIds.has(c.entry.id)
               ? { ...c, status: "failed", reason: event.reason }
               : c,
           ),
         );
+        settleWaveCut(event.runId, event.cutId, true);
       } else if (event.kind === "completed") {
         // この波が終わった。待っている次の波を解放する（B4）。
-        const resolve = waveWaitersRef.current.get(event.runId);
-        if (resolve) {
-          waveWaitersRef.current.delete(event.runId);
-          resolve();
+        releaseWave(event.runId);
+      }
+    };
+
+    const subscribeWithRetry = async () => {
+      let lastError: unknown = null;
+      // 初回 + 自動リトライ1回。2回とも失敗した時だけ生成を止めて案内する。
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          const fn = await onCharacterSheetEvent(handleEvent);
+          if (cancelled) {
+            fn();
+            return;
+          }
+          unlisten = fn;
+          setEventSubscriptionStatus("ready");
+          return;
+        } catch (err) {
+          lastError = err;
         }
       }
-    })
-      .then((fn) => {
-        if (cancelled) {
-          fn();
-          return;
-        }
-        unlisten = fn;
-      })
-      .catch((err) => {
-        if (cancelled) return;
-        // 生エラーを直に連結しない（B4）。
-        pushToast({
-          kind: "error",
-          text: `進捗の受信を始められませんでした。生成の状況が画面に出ないことがあります。この画面を開き直してください。（詳しい内容: ${humanizeError(err)}）`,
-          ttlMs: 6000,
-        });
+
+      if (cancelled) return;
+      setEventSubscriptionStatus("failed");
+      // 生エラーを直に連結しない（B4）。
+      pushToast({
+        kind: "error",
+        text: `進捗を受け取れない状態です。アプリを再起動してください。（詳しい内容: ${humanizeError(lastError)}）`,
+        ttlMs: 6000,
       });
+    };
+
+    void subscribeWithRetry();
 
     return () => {
       cancelled = true;
@@ -436,6 +522,7 @@ function StickerBody() {
       const waiters = waveWaitersRef.current;
       for (const resolve of waiters.values()) resolve();
       waiters.clear();
+      waveProgressRef.current.clear();
     };
   }, [pushToast, cutOut]);
 
@@ -494,6 +581,17 @@ function StickerBody() {
    */
   const startGeneration = useCallback(
     async (targets: StickerEntry[], startIndex: number) => {
+      if (eventSubscriptionStatus !== "ready") {
+        pushToast({
+          kind: eventSubscriptionStatus === "failed" ? "error" : "info",
+          text:
+            eventSubscriptionStatus === "failed"
+              ? "進捗を受け取れない状態です。アプリを再起動してください"
+              : "進捗の受信を準備しています。少し待ってからお試しください。",
+          ttlMs: 5000,
+        });
+        return;
+      }
       if (!sourceImage) {
         pushToast({ kind: "info", text: "先に素材を選んでください。", ttlMs: 3000 });
         return;
@@ -551,12 +649,18 @@ function StickerBody() {
           const finished = new Promise<void>((resolve) => {
             waveWaitersRef.current.set(runId, resolve);
           });
+          waveProgressRef.current.set(runId, {
+            expectedCutIds: new Set(slice.map((entry) => entry.id)),
+            settledCutIds: new Set(),
+            failedCutIds: new Set(),
+          });
 
           try {
             await invoke<string>("character_sheet_run", { params });
           } catch (err) {
             // 起動に失敗した波の待ちは自分で外す（誰も completed を出さないため）。
             waveWaitersRef.current.delete(runId);
+            waveProgressRef.current.delete(runId);
             throw err;
           }
 
@@ -590,7 +694,7 @@ function StickerBody() {
       }
       void startIndex;
     },
-    [sourceImage, attributes, pushToast],
+    [sourceImage, attributes, pushToast, eventSubscriptionStatus],
   );
 
   /** ② → ③。生成対象を確定して投入する。 */
@@ -1076,6 +1180,7 @@ function StickerBody() {
             tone={tone}
             shortfall={shortfall}
             running={running}
+            eventSubscriptionStatus={eventSubscriptionStatus}
             onPickCharacter={(c) => {
               const src = resolveCharacterSource(c);
               if (!src) {
@@ -1260,6 +1365,7 @@ function SetupPanel({
   tone,
   shortfall,
   running,
+  eventSubscriptionStatus,
   onPickCharacter,
   onPickLocal,
   onCount,
@@ -1275,13 +1381,15 @@ function SetupPanel({
   tone: StickerToneId;
   shortfall: number;
   running: boolean;
+  eventSubscriptionStatus: EventSubscriptionStatus;
   onPickCharacter: (preset: Preset) => void;
   onPickLocal: () => void;
   onCount: (count: StickerCount) => void;
   onTone: (tone: StickerToneId) => void;
   onRun: () => void;
 }) {
-  const canRun = Boolean(sourceImage) && !running;
+  const canRun =
+    Boolean(sourceImage) && !running && eventSubscriptionStatus === "ready";
 
   return (
     <div className="flex h-full min-h-0">
@@ -1451,6 +1559,11 @@ function SetupPanel({
           {/* 枚数とコストを隠さない（設計書 §1.2）。 */}
           {count} 枚を生成します
         </button>
+        {eventSubscriptionStatus === "failed" && (
+          <p role="alert" className="text-[11px] leading-relaxed text-red-300">
+            進捗を受け取れない状態です。アプリを再起動してください
+          </p>
+        )}
       </aside>
 
       {/*
