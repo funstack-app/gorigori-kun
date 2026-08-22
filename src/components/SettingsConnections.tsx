@@ -16,6 +16,7 @@ import {
 } from "../lib/remoteMcpProviders";
 import { useAccounts, type SecretsState } from "../lib/store/accounts";
 import { useToasts } from "../lib/store/toasts";
+import { ProviderIcon } from "./ProviderIcon";
 
 const PRIMARY_BUTTON = "rounded-md bg-pink-500 font-bold text-white hover:bg-pink-600";
 const MUTED_BUTTON =
@@ -702,7 +703,7 @@ function HiggsfieldConnectionCard() {
   return (
     <div className="space-y-3 rounded-xl border border-pink-400/30 bg-pink-500/5 p-3">
       <div className="flex items-center gap-2">
-        <span className="grid h-8 w-8 place-items-center rounded-md border border-pink-400/20 bg-[#101010] text-xs font-black text-pink-200">HF</span>
+        <ProviderIcon id="higgsfield" />
         <div className="flex-1">
           <div className="flex items-center gap-2">
             <p className="text-sm font-black text-pink-100">HiggsField</p>
@@ -839,19 +840,19 @@ function MagnificConnectionCard() {
   };
 
   return (
-    <div className="space-y-3 rounded-xl border border-violet-400/30 bg-violet-500/5 p-3">
+    <div className="space-y-3 rounded-xl border border-pink-400/30 bg-pink-500/5 p-3">
       <div className="flex items-center gap-2">
-        <span className="grid h-8 w-8 place-items-center rounded-md border border-violet-400/20 bg-[#101010] text-xs font-black text-violet-200">M</span>
+        <ProviderIcon id="magnific" />
         <div className="flex-1">
           <div className="flex items-center gap-2">
-            <p className="text-sm font-black text-violet-100">Magnific</p>
+            <p className="text-sm font-black text-pink-100">Magnific</p>
             {authed && (
               <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-black text-emerald-200">
                 接続済み
               </span>
             )}
             {authed && account && (
-              <span className="rounded-full bg-violet-500/15 px-2 py-0.5 text-[10px] font-black text-violet-200">
+              <span className="rounded-full bg-pink-500/15 px-2 py-0.5 text-[10px] font-black text-pink-200">
                 {account.unlimited
                   ? `${account.plan ?? "Unlimited"} (無制限)`
                   : `${Math.floor(account.credits).toLocaleString()} クレジット`}
@@ -886,7 +887,7 @@ function MagnificConnectionCard() {
           type="button"
           disabled={busy}
           onClick={connect}
-          className="h-9 w-full rounded-lg bg-violet-500 px-3 text-xs font-black text-white transition hover:bg-violet-400 disabled:opacity-60"
+          className="h-9 w-full rounded-lg bg-pink-500 px-3 text-xs font-black text-white transition hover:bg-pink-400 disabled:opacity-60"
         >
           {busy ? "接続中…" : "接続する (ブラウザでログイン)"}
         </button>
@@ -983,18 +984,12 @@ function RemoteMcpConnectionCard({
   };
 
   return (
-    <div className={`space-y-3 rounded-xl border p-3 ${provider.accentClasses.card}`}>
+    <div className="space-y-3 rounded-xl border border-pink-400/30 bg-pink-500/5 p-3">
       <div className="flex items-start gap-2">
-        <span
-          className={`grid h-8 min-w-8 place-items-center rounded-md border bg-[#101010] px-1 text-[10px] font-black ${provider.accentClasses.icon}`}
-        >
-          {provider.initials}
-        </span>
+        <ProviderIcon id={provider.id} />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
-            <p className={`text-sm font-black ${provider.accentClasses.title}`}>
-              {provider.label}
-            </p>
+            <p className="text-sm font-black text-pink-100">{provider.label}</p>
             {authed && (
               <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-black text-emerald-200">
                 接続済み
@@ -1015,7 +1010,7 @@ function RemoteMcpConnectionCard({
           type="button"
           disabled={busy}
           onClick={connect}
-          className={`h-9 w-full rounded-lg px-3 text-xs font-black text-white transition disabled:opacity-60 ${provider.accentClasses.button}`}
+          className="h-9 w-full rounded-lg bg-pink-500 px-3 text-xs font-black text-white transition hover:bg-pink-400 disabled:opacity-60"
         >
           {busy ? "接続中…" : "接続する (ブラウザでログイン)"}
         </button>
