@@ -108,6 +108,12 @@ import { PANEL_SIZE_MISMATCH_PREFIX } from "../../../lib/imageReedit/maskReedit"
 import { normalizeComicPage } from "../../../lib/comic/pageNormalize";
 import { usePanelReeditLock } from "../../../lib/comic/panelReeditLock";
 import {
+  abortComicStoryGeneration,
+  clearComicStoryAbortController,
+  setComicStoryAbortController,
+  useComicRun,
+} from "../../../lib/store/comicRun";
+import {
   alignSlotsToTemplate,
   recoverPanelSlots,
 } from "../../../lib/comic/panelSlotRecovery";
@@ -341,7 +347,8 @@ function ComicFlow() {
     [presets],
   );
 
-  const [phase, setPhase] = useState<ComicPhase>("input");
+  const phase = useComicRun((s) => s.phase);
+  const setPhase = useComicRun((s) => s.setPhase);
   const [synopsis, setSynopsis] = useState("");
   /** 話とキャラ画面で選んでいるコマ割りテンプレ。既定は「おまかせ（AI最適化）」。 */
   const [templateId, setTemplateId] = useState<string>(AUTO_TEMPLATE_ID);
@@ -372,9 +379,11 @@ function ComicFlow() {
   const [pageGenMode, setPageGenMode] = useState<ComicPageGenMode>("direct");
 
   /** 構成フェーズが確定させたページ割り。plan/pages 工程の正本。 */
-  const [storyPages, setStoryPages] = useState<ComicStoryPage[]>([]);
+  const storyPages = useComicRun((s) => s.storyPages);
+  const setStoryPages = useComicRun((s) => s.setStoryPages);
   /** ページ単位の生成結果（コマ別の results のページ版）。 */
-  const [pageResults, setPageResults] = useState<ComicPageResult[]>([]);
+  const pageResults = useComicRun((s) => s.pageResults);
+  const setPageResults = useComicRun((s) => s.setPageResults);
   /**
    * D-2: コマ割り認識（recoverAndAdoptSlots）は画像読み込みで await が入るため、
    * その間にページ再生成が走ると「旧画像から求めた座標」を新画像へ書き戻し得る。
@@ -388,16 +397,17 @@ function ComicFlow() {
   useEffect(() => {
     pageResultsRef.current = pageResults;
   }, [pageResults]);
-  const [generatingStory, setGeneratingStory] = useState(false);
+  const generatingStory = useComicRun((s) => s.generatingStory);
+  const setGeneratingStory = useComicRun((s) => s.setGeneratingStory);
   /** 構成生成の開始時刻（推定進捗ゲージの基準）。 */
-  const [storyStartedAt, setStoryStartedAt] = useState<number | undefined>(undefined);
+  const storyStartedAt = useComicRun((s) => s.storyStartedAt);
+  const setStoryStartedAt = useComicRun((s) => s.setStoryStartedAt);
   /**
    * 構成生成の「いま何が起きているか」(9qm 2026-08-04)。
    * 待ちの実態を正直に出すために使う。undefined は開始直後（まだ通知ゼロ）。
    */
-  const [storyProgress, setStoryProgress] = useState<ComicTextTurnProgress | undefined>(
-    undefined,
-  );
+  const storyProgress = useComicRun((s) => s.storyProgress);
+  const setStoryProgress = useComicRun((s) => s.setStoryProgress);
   /**
    * 構成生成の中止ハンドル（実装契約M 2026-08-05）。
    *
@@ -405,12 +415,13 @@ function ComicFlow() {
    * その手を用意するのがこれ。ref で持つのは、飛行中の generateStory の
    * クロージャからも同じハンドルを掴めるようにするため。
    */
-  const storyAbortRef = useRef<AbortController | null>(null);
-  const [generatingPages, setGeneratingPages] = useState(false);
+  const generatingPages = useComicRun((s) => s.generatingPages);
+  const setGeneratingPages = useComicRun((s) => s.setGeneratingPages);
   /** ページ保存の形式（セッション内のみ）。 */
   const [saveFormat, setSaveFormat] = useState<ComicSaveFormat>("png");
   /** 構成生成が使ったテンプレ（null=おまかせ）。選択だけ変えて戻っても構成と食い違わないよう凍結する。 */
-  const [storyTemplateId, setStoryTemplateId] = useState<string | null>(null);
+  const storyTemplateId = useComicRun((s) => s.storyTemplateId);
+  const setStoryTemplateId = useComicRun((s) => s.setStoryTemplateId);
   /** ページ数の指定。"auto" = AI が決める（目安 MAX_STORY_PAGES）／数値は上限なし。 */
   const [pageCountChoice, setPageCountChoice] = useState<PageCountChoice>("auto");
   /** 全ページ一括の走行トークン。 */
@@ -458,18 +469,6 @@ function ComicFlow() {
     }
     setPhase(next);
   };
-
-  useEffect(
-    () => () => {
-      // アンマウント時は構成生成・全ページ一括・ページ単体をすべて無効化する。
-      storyTokenRef.current += 1;
-      pagesRunTokenRef.current += 1;
-      invalidatePanelReeditLock();
-      const pageTokens = pageTokensRef.current;
-      for (const [page, token] of pageTokens) pageTokens.set(page, token + 1);
-    },
-    [invalidatePanelReeditLock],
-  );
 
   // 選択されたキャラプリセット + 画像から追加したキャラを ComicCharacter に合流
   const characters = useMemo<ComicCharacter[]>(() => {
@@ -703,7 +702,7 @@ function ComicFlow() {
     setStoryProgress(undefined);
     // 前回の中止ハンドルは捨てて、この走行専用のものを立てる。
     const abort = new AbortController();
-    storyAbortRef.current = abort;
+    setComicStoryAbortController(abort);
     setGeneratingStory(true);
     try {
       const template =
@@ -801,13 +800,13 @@ function ComicFlow() {
         setStoryProgress(undefined);
       }
       // このハンドルが今もカレントなら外す（新しい走行のものは消さない）。
-      if (storyAbortRef.current === abort) storyAbortRef.current = null;
+      clearComicStoryAbortController(abort);
     }
   };
 
   /** 構成生成をやめる。押した時点で飛行中のものだけに効く。 */
   const cancelStoryGeneration = () => {
-    storyAbortRef.current?.abort();
+    abortComicStoryGeneration();
   };
 
   /** 構成のページ属性（あらすじ・コマ割り方針）を直す。 */
@@ -2855,31 +2854,17 @@ function PagesPhase({
   const pushToast = useToasts((s) => s.push);
   const comicCardSize = useWorkspace((s) => s.comicCardSize);
   const setComicCardSize = useWorkspace((s) => s.setComicCardSize);
-  const [editingPage, setEditingPage] = useState<number | null>(null);
+  const editingPage = useComicRun((s) => s.editingPage);
+  const setEditingPage = useComicRun((s) => s.setEditingPage);
   /** Kindle 風・見開きプレビュー（読み取り専用）の開閉。常に1ページ目から開く。 */
   const [previewOpen, setPreviewOpen] = useState(false);
   /**
    * コマ割り認識中のページ番号。読み取り専用処理なのでグローバルの
    * 1コマ再編集ロックは取らず、二重クリックだけをここで防ぐ。
    */
-  const [recoveringPage, setRecoveringPage] = useState<number | null>(null);
-  /**
-   * 認識中フラグの**同期版**。多重起動を防ぐ実体はこちらで、`recoveringPage`(state) は
-   * 表示専用（ボタン文言・disabled）。
-   *
-   * state だけで塞ぐと失敗トーストが1クリックで複数個出る（実測: 4連発）。
-   * 理由は state 更新が非同期だから:
-   *   click → `recoveringPage` は null のまま関数に入る
-   *        → `setRecoveringPage` は**次のレンダーまで反映されない**
-   *        → `await onRecoverSlots` で制御を手放す（画像読み込みで数百ms）
-   *        → 再レンダー前の追加クリックが全て `recoveringPage === null` を見て素通り
-   * ボタンの `disabled` も再レンダー後にしか効かないので、この隙間を塞げない。
-   * ref なら代入即時なので、同一 tick 内の2回目以降を確実に弾ける。
-   *
-   * トースト側での重複除去（dedupe）にはしない。それでは「認識処理自体が複数回走る」
-   * 実害（画像を何度も読み直す）が残り、通知だけを隠すことになるため。
-   */
-  const recoveringRef = useRef(false);
+  const recoveringPage = useComicRun((s) => s.recoveringPage);
+  const tryBeginPageRecovery = useComicRun((s) => s.tryBeginPageRecovery);
+  const endPageRecovery = useComicRun((s) => s.endPageRecovery);
   const modeSwitchDisabled =
     generatingPages ||
     pageResults.some((result) => result.generating) ||
@@ -2890,7 +2875,7 @@ function PagesPhase({
    * 採用できたらモーダルを開く。失敗時はトーストで理由を出し、ページには触れない。
    */
   const openPanelReedit = async (page: ComicStoryPage) => {
-    if (recoveringRef.current) return;
+    if (recoveringPage !== null) return;
     if (panelReeditBlocked) {
       pushToast({ kind: "info", text: PANEL_REEDIT_BUSY_MESSAGE, ttlMs: 4000 });
       return;
@@ -2903,14 +2888,17 @@ function PagesPhase({
       contentRect: result?.contentRect,
     });
     if (slots) {
+      useComicRun.getState().setPanelReeditRunError(null);
       setEditingPage(page.page);
       return;
     }
-    recoveringRef.current = true;
-    setRecoveringPage(page.page);
+    if (!tryBeginPageRecovery(page.page)) return;
     try {
       const outcome = await onRecoverSlots(page);
-      if (outcome.adopted) setEditingPage(page.page);
+      if (outcome.adopted) {
+        useComicRun.getState().setPanelReeditRunError(null);
+        setEditingPage(page.page);
+      }
       else if (!outcome.silent) pushToast({ kind: "info", text: outcome.error, ttlMs: 9000 });
     } catch (error) {
       pushToast({
@@ -2919,8 +2907,7 @@ function PagesPhase({
         ttlMs: 9000,
       });
     } finally {
-      recoveringRef.current = false;
-      setRecoveringPage(null);
+      endPageRecovery(page.page);
     }
   };
 
@@ -3482,10 +3469,15 @@ function PanelReeditModal({
   const [manualValidated, setManualValidated] = useState(false);
   const [detectionFailed, setDetectionFailed] = useState(false);
   const [rangeError, setRangeError] = useState<string | null>(null);
-  const [reeditError, setReeditError] = useState<string | null>(null);
-  const [submitting, setSubmitting] = useState(false);
+  const [localReeditError, setLocalReeditError] = useState<string | null>(null);
+  const runError = useComicRun((s) => s.panelReeditRunError);
+  const setRunError = useComicRun((s) => s.setPanelReeditRunError);
+  const reeditError = runError ?? localReeditError;
+  const submitting = useComicRun((s) => s.panelReeditSubmitting);
+  const setSubmitting = useComicRun((s) => s.setPanelReeditSubmitting);
   /** モーダル内の進行ゲージの基準時刻（カードのゲージと同じ mode="batch"）。 */
-  const [submitStartedAt, setSubmitStartedAt] = useState<number | undefined>(undefined);
+  const submitStartedAt = useComicRun((s) => s.panelReeditStartedAt);
+  const setSubmitStartedAt = useComicRun((s) => s.setPanelReeditStartedAt);
   const [draggingPoint, setDraggingPoint] = useState<number | null>(null);
   /** 統合の相手コマ（未選択は null。候補が1つのときはその1つを即使う）。 */
   const [mergeTarget, setMergeTarget] = useState<number | null>(null);
@@ -3513,7 +3505,8 @@ function PanelReeditModal({
     setManualValidated(false);
     setDetectionFailed(false);
     setRangeError(null);
-    setReeditError(null);
+    setLocalReeditError(null);
+    setRunError(null);
     setMergeTarget(null);
   };
   const updatePanel = (patch: Partial<ComicPanel>) => {
@@ -3555,7 +3548,8 @@ function PanelReeditModal({
     setPoints((previous) => previous.map((item, index) => (index === draggingPoint ? point : item)));
     setManualValidated(false);
     setRangeError(null);
-    setReeditError(null);
+    setLocalReeditError(null);
+    setRunError(null);
   };
   const confirmRange = () => {
     if (locked) return;
@@ -3567,7 +3561,8 @@ function PanelReeditModal({
       }
       setManualValidated(true);
       setRangeError(null);
-      setReeditError(null);
+      setLocalReeditError(null);
+      setRunError(null);
     } catch (error) {
       setManualValidated(false);
       setRangeError((error as Error)?.message ?? "編集範囲を確認できませんでした。");
@@ -3577,16 +3572,17 @@ function PanelReeditModal({
     if (!selectedPanel || !generationAllowed || locked) return;
     setSubmitting(true);
     setSubmitStartedAt(Date.now());
-    setReeditError(null);
+    setLocalReeditError(null);
+    setRunError(null);
     try {
       const outcome = await onRegenerate(page, selectedPanel, points);
       if (outcome.adopted) {
         onClose();
         return;
       }
-      setReeditError(outcome.error);
+      setRunError(outcome.error);
     } catch (error) {
-      setReeditError(`再生成を開始できませんでした: ${(error as Error)?.message ?? error}。元ページは変更していません。もう一度お試しください。`);
+      setRunError(`再生成を開始できませんでした: ${(error as Error)?.message ?? error}。元ページは変更していません。もう一度お試しください。`);
     } finally {
       setSubmitting(false);
       setSubmitStartedAt(undefined);
@@ -3596,18 +3592,21 @@ function PanelReeditModal({
   const runLayoutOp = async (operation: () => Promise<PanelReeditOutcome>) => {
     if (locked) return;
     setSubmitting(true);
-    setReeditError(null);
+    setSubmitStartedAt(Date.now());
+    setLocalReeditError(null);
+    setRunError(null);
     try {
       const outcome = await operation();
       if (outcome.adopted) {
         onClose();
         return;
       }
-      setReeditError(outcome.error);
+      setRunError(outcome.error);
     } catch (error) {
-      setReeditError(`コマ割りを変更できませんでした: ${(error as Error)?.message ?? error}。元ページは変更していません。`);
+      setRunError(`コマ割りを変更できませんでした: ${(error as Error)?.message ?? error}。元ページは変更していません。`);
     } finally {
       setSubmitting(false);
+      setSubmitStartedAt(undefined);
     }
   };
   useEffect(() => {
@@ -3621,7 +3620,7 @@ function PanelReeditModal({
       setDetectionFailed(false);
       setPoints(guideForPanel(selectedIndex));
       setRangeError(null);
-      setReeditError(null);
+      setLocalReeditError(null);
       return;
     }
     setDetecting(true);
@@ -3640,17 +3639,17 @@ function PanelReeditModal({
           // ドラッグ可能な頂点が出るので「次に何をするか」が画面上で自明になる。
           setManualAdjust(true);
           setDetectionFailed(true);
-          setReeditError("自動で枠の内側を特定できなかったため、手動調整モードにしました。頂点をドラッグして枠に合わせ、「調整した範囲を確認」を押してください。");
+          setLocalReeditError("自動で枠の内側を特定できなかったため、手動調整モードにしました。頂点をドラッグして枠に合わせ、「調整した範囲を確認」を押してください。");
         } else {
           setDetectionFailed(false);
-          setReeditError(null);
+          setLocalReeditError(null);
         }
       })
       .catch((error) => {
         if (detectionTokenRef.current !== token) return;
         setDetection(null);
         setDetectionFailed(true);
-        setReeditError(`自動選択に失敗しました: ${(error as Error)?.message ?? error}。ページを開き直して、もう一度お試しください。`);
+        setLocalReeditError(`自動選択に失敗しました: ${(error as Error)?.message ?? error}。ページを開き直して、もう一度お試しください。`);
       })
       .finally(() => {
         if (detectionTokenRef.current === token) setDetecting(false);

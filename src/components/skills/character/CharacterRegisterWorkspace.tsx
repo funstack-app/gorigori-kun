@@ -472,7 +472,8 @@ function StepInput() {
 
   const pushToast = useToasts((s) => s.push);
   const openPreview = useImagePreview((s) => s.open);
-  const [extracting, setExtracting] = useState(false);
+  const extracting = useCharacterSheetRun((s) => s.attributeExtracting);
+  const setExtracting = useCharacterSheetRun((s) => s.setAttributeExtracting);
   const [templatePickerOpen, setTemplatePickerOpen] = useState(false);
   /**
    * invoke の往復中だけ立つ連打ガード (SQ2 / 2026-08-04)。
@@ -482,7 +483,8 @@ function StepInput() {
    * 全体ガードは撤去する。各ジョブは独立した runId を持つので衝突しない。
    * ここで防ぎたいのは「1回の押下が2本のジョブになる」ことだけ。
    */
-  const [submitting, setSubmitting] = useState(false);
+  const submitting = useCharacterSheetRun((s) => s.characterSubmitting);
+  const setSubmitting = useCharacterSheetRun((s) => s.setCharacterSubmitting);
 
   const selectedTemplate = resolveSheetTemplate(
     sheetPromptMode,

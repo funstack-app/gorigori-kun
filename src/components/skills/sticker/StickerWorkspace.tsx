@@ -26,8 +26,8 @@
  * ジョブを台帳から外す**。3つ目の mode を足すと、キャラ登録・表情差分の
  * 入退場の挙動まで変わる（S8 の書き込み許可外であり、既存2スキルの回帰リスクを負う）。
  *
- * ここは生成の粒度が違う（最大40枚・2波直列）ので、**この画面のローカル状態**で持ち、
- * イベントは `onCharacterSheetEvent` を runId で絞って直接購読する。
+ * ここは生成の粒度が違う（最大40枚・2波直列）ので、専用のメモリ内ストアで持ち、
+ * イベントはストア側のシングルトン購読で runId を絞って受け取る。
  * 生成の同時実行制御は `gen_queue.rs` の既存セマフォに乗るので、
  * **sticker 側で独自の並列制御は作らない**（設計書 §1.2 末尾）。
  *
@@ -47,7 +47,6 @@ import { PageHelp } from "../../PageHelp";
 import { SafeImage } from "../../SafeImage";
 import { CharacterIcon } from "../../SkillIcon";
 import { WorkspaceTabs } from "../../WorkspaceTabs";
-import { onCharacterSheetEvent } from "../../../lib/character/events";
 import type { CharacterSheetParams, SheetCutSpec } from "../../../lib/character/types";
 import { humanizeError } from "../../../lib/humanizeError";
 import {
@@ -92,37 +91,21 @@ import {
 } from "../../../lib/sticker/exportDir";
 import { usePresets, presetKind, type Preset } from "../../../lib/store/presets";
 import { useToasts } from "../../../lib/store/toasts";
+import {
+  beginStickerWave,
+  discardStickerWave,
+  endStickerGeneration,
+  ensureStickerRunEventListener,
+  stickerRunMemory,
+  tryBeginStickerGeneration,
+  useStickerRun,
+  type StickerCutState as CutState,
+  type StickerEventSubscriptionStatus as EventSubscriptionStatus,
+  type StickerPhase as Phase,
+} from "../../../lib/store/stickerRun";
 import { StickerPickPanel, type StickerPickItem } from "./StickerPickPanel";
 import { StickerReeditModal } from "./StickerReeditModal";
 import { StickerTextPanel, defaultStickerTextStyle } from "./StickerTextPanel";
-
-/** 画面の工程。④採否を飛ばす導線は作らない（設計書 §1.6 / K6）。 */
-type Phase = "setup" | "generate" | "pick" | "export";
-
-/** 生成中の1カット。 */
-type CutState = {
-  /** 通し番号（1始まり）。波の概念を出さないので常に通し番号。 */
-  index: number;
-  entry: StickerEntry;
-  status: "pending" | "running" | "cuttingOut" | "completed" | "failed";
-  imagePath?: string;
-  reason?: string;
-};
-
-/** 1バッチ内で、透過処理まで決着したカットと失敗したカットを数える台帳。 */
-type WaveProgress = {
-  expectedCutIds: Set<string>;
-  settledCutIds: Set<string>;
-  failedCutIds: Set<string>;
-};
-
-type EventSubscriptionStatus = "connecting" | "ready" | "failed";
-
-/** 1枚の透過処理を待つ上限。推論やOS APIが停止しても次の波を塞がない。 */
-const CUTOUT_TIMEOUT_MS = 90_000;
-
-/** 全体完了後、遅れて届く個別結果を待つ猶予。 */
-const COMPLETED_GRACE_MS = 10_000;
 
 const IMAGE_EXTS = ["png", "jpg", "jpeg", "webp"];
 
@@ -182,19 +165,21 @@ function StickerBody() {
   const [tone, setTone] = useState<StickerToneId>(DEFAULT_STICKER_TONE);
 
   // ③④ 生成・採否
-  const [phase, setPhase] = useState<Phase>("setup");
-  const [cuts, setCuts] = useState<CutState[]>([]);
+  const phase = useStickerRun((s) => s.phase);
+  const setPhase = useStickerRun((s) => s.setPhase);
+  const cuts = useStickerRun((s) => s.cuts);
+  const setCuts = useStickerRun((s) => s.setCuts);
   const [dropped, setDropped] = useState<ReadonlySet<number>>(new Set());
-  const [running, setRunning] = useState(false);
-  const [eventSubscriptionStatus, setEventSubscriptionStatus] =
-    useState<EventSubscriptionStatus>("connecting");
+  const running = useStickerRun((s) => s.running);
+  const eventSubscriptionStatus = useStickerRun((s) => s.eventSubscriptionStatus);
   /**
    * 生成を開始した時刻。`GenerationGauge` に渡す。
    *
    * スタンプは実測 k/N を渡すのでゲージの幅計算には使われないが、
    * 他スキルと同じ props で呼ぶために持つ（将来 progress を外しても壊れない）。
    */
-  const [generationStartedAt, setGenerationStartedAt] = useState(() => Date.now());
+  const generationStartedAt = useStickerRun((s) => s.generationStartedAt);
+  const setGenerationStartedAt = useStickerRun((s) => s.setGenerationStartedAt);
   /**
    * 直前に書き出したファイル（申請モードなら ZIP、それ以外は1枚目の画像）。
    * 「保存先を開く」で Finder / エクスプローラーを開くために持つ。
@@ -255,21 +240,6 @@ function StickerBody() {
    */
   const [mainPath, setMainPath] = useState<string | null>(null);
 
-  // 生成中の run を追う。イベントは runId で絞る（他スキルの run が混ざらない）。
-  const runIdsRef = useRef<Set<string>>(new Set());
-  /**
-   * 波の完了待ち（B4）。`character_sheet_run` は `tokio::spawn` して**即座に** runId を
-   * 返すので、`await invoke()` は「起動できた」までしか待たない。そのまま次の波を
-   * 投げると32/40枚が一斉に走り、直列2波にならない（設計書 §1.2 の前提が崩れる）。
-   *
-   * 生成イベントと、その後の `cutOut` の両方が決着した時点を完了とするため、
-   * runId ごとに resolver を置いてカット単位の台帳から解決する。
-   * **失敗しても解決する**（1枚も完成しなくても次の波は投げる。波をまたぐ
-   * ロールバックは作らない設計なので、止めると残りが永久に来ない）。
-   */
-  const waveWaitersRef = useRef<Map<string, () => void>>(new Map());
-  /** 全カットの生成・透過処理の決着で待ちを解けるよう、runごとに数える。 */
-  const waveProgressRef = useRef<Map<string, WaveProgress>>(new Map());
   /**
    * クロマキーで抜いたときの統計（抜いた結果のパス → 統計）。
    *
@@ -283,9 +253,6 @@ function StickerBody() {
    * 個別編集で差し替わったパスには、`adoptReedit` が**その差し替えで測り直した統計**を
    * 登録する（前の絵の統計は引き継がない。測っていない画像の縁の品質を語らない）。
    */
-  const chromaStatsRef = useRef<Map<string, StickerChromaSample>>(new Map());
-  /** 抜いた時点で「縁のにじみが多い」と判定された画像（点検画面に並べて出す用）。 */
-  const fringeWarnPathsRef = useRef<Set<string>>(new Set());
   /**
    * どの経路で背景を抜いたか（I2）。パス → `"ai" | "chroma" | "none"`。
    *
@@ -294,7 +261,6 @@ function StickerBody() {
    * 経路を覚えていないと、片方の説明を全部に当てることになる（測っていない
    * 経路の話をしない）。
    */
-  const cutoutMethodRef = useRef<Map<string, "ai" | "chroma" | "none">>(new Map());
   /**
    * 「緑が1画素も抜けなかった」画像（R5）。採否一覧のバッジで可視化する。
    *
@@ -303,48 +269,17 @@ function StickerBody() {
    * 救済だけでは半分しか満たさない。規格としての判定は層Aの
    * `chroma-not-cleared` が行い、ここは採否の段階で気づけるようにするだけ。
    */
-  const [notClearedPaths, setNotClearedPaths] = useState<ReadonlySet<string>>(
-    () => new Set(),
-  );
-  // 「生成枠の連打ガード」。既存スキルと同じ同期 CAS（setState の非同期を待たない）。
-  const startingRef = useRef(false);
+  const notClearedPaths = useStickerRun((s) => s.notClearedPaths);
+  const setNotClearedPaths = useStickerRun((s) => s.setNotClearedPaths);
+  // 走行状態はストア、決着判定の材料は同じストアモジュールのメモリを参照する。
+  const chromaStatsRef = useRef(stickerRunMemory.chromaStats);
+  const fringeWarnPathsRef = useRef(stickerRunMemory.fringeWarnPaths);
+  const cutoutMethodRef = useRef(stickerRunMemory.cutoutMethods);
 
-  const entries = useMemo(() => pickEntries(tone, count), [tone, count]);
-  // カタログが枚数に足りない場合、**黙って埋めない**（欠落は可視化する）。
-  const shortfall = count - entries.length;
-
-  /**
-   * 生成直後のカットの背景を抜く（設計書 §1.4 / §9 J4 / S2）。
-   *
-   * ## 既定はAI抜き、クロマキーは保険（I2 / 2026-08-05 J4発動）
-   *
-   * STΛCK実機FB「切り抜きにばらつきがある」を受けて、設計書 §9 J4 に用意されていた
-   * 分岐を引いた。**Mac=Vision / Windows通常版=BiRefNet が既定**で、
-   * 互換版（`edit-ai` 無効ビルド）と失敗時だけクロマキーへ落ちる。
-   * 経路の実装は `cutout.ts`（個別再生成と共有する。同じ経路には同じ関所）。
-   *
-   * **抜けなかった場合も元のパスを返して先へ進める**。理由は2つ:
-   *
-   * 1. ここで止めると、抜けなかった1枚のせいでそのカットが採否リストから
-   *    消える。**欠落を欠落のまま可視化する**なら、絵は見せて「透過されていない」
-   *    という判定は層A（`no-alpha` / `chroma-not-cleared`）に任せるのが筋
-   *    （判断を2箇所に置かない）
-   * 2. 抜きは何度でもやり直せる。元の緑背景が残っていれば復帰できる
-   *
-   * ## 統計はクロマキー経路のときだけ登録する（R2 の維持 + I2）
-   *
-   * `cleared === 0` でも統計を登録するのは R2 の修正どおり（「抜きを試みて 0 だった」
-   * という事実を層Aへ運ぶ）。ただし**AI抜き経路では統計を作らない** —
-   * クロマキーを通していないのだから `cleared` も `fringe` も存在しない。
-   * 偽の統計を置くと、層Aの縁の検査が測っていない値で動く（測ったふりをしない）。
-   */
+  /** 生成直後のカットを、既存の決着規則のまま透過処理する。 */
   const cutOut = useCallback(
     async (imagePath: string): Promise<string> => {
       const outcome = await cutOutBackground(imagePath);
-
-      // 抜きの統計は**クロマキー経路にしか存在しない**（A5 / I2）。
-      // 縁の品質は抜いた瞬間にしか測れないので、測った側が覚えておいて
-      // 点検・書き出しの両方へ同じ材料として渡す。
       if (outcome.chroma) {
         chromaStatsRef.current.set(outcome.path, {
           path: outcome.path,
@@ -353,308 +288,31 @@ function StickerBody() {
           opaque: outcome.chroma.opaque,
           despilled: outcome.chroma.despilled,
         });
-        // 縁の品質は抜けた画像に対してだけ語れる（`chroma.fringeWarn` は
-        // `cleared === 0` のとき常に false になっている）。
         if (outcome.chroma.fringeWarn) fringeWarnPathsRef.current.add(outcome.path);
       }
-
-      // どの経路で抜いたかを覚えておく（採否画面のバッジの文言を出し分ける）。
       cutoutMethodRef.current.set(outcome.path, outcome.method);
-
       if (outcome.notCleared) {
-        // 救済した事実を画面へ出す（R5）。黙って進めない。
-        setNotClearedPaths((prev) => {
-          const next = new Set(prev);
+        setNotClearedPaths((previous) => {
+          const next = new Set(previous);
           next.add(outcome.path);
           return next;
         });
       }
       return outcome.path;
     },
-    [],
+    [setNotClearedPaths],
   );
 
-  // ── イベント購読。自分が投げた run のカットだけを反映する ──
-  //
-  // ## なぜ `visible` に連動させないか（F1 / 2026-08-05）
-  //
-  // 旧実装は `if (!visible) return;` で購読を張っていた。だが `visible`
-  // （`useSkillVisible`）は「ライブラリ/設定 drawer を開いた」「他スキルへ切り替えた」
-  // 「生成タブ以外を開いた」で false になる。生成中に画面を離れるだけで購読が外れ、
-  // `cutCompleted` / `completed` を取りこぼす。取りこぼすと採否リストに画像が載らず、
-  // 波待ち（`waveWaitersRef`）も cleanup で強制解放されるので**生成ループが崩れる**。
-  //
-  // S2 の mount-pool 化（`SkillWorkspaceRouter`）で、この Workspace は非アクティブでも
-  // unmount されず `display:none` で残り続ける。つまり購読を可視性へ結ぶ理由が無い。
-  // 重い RAF 描画ループ（scene3d）と違い、ここはイベントを受けて setState するだけなので
-  // 裏で回り続けても負荷にならない。**マウントしている間は常駐**させる。
+  const entries = useMemo(() => pickEntries(tone, count), [tone, count]);
+  // カタログが枚数に足りない場合、**黙って埋めない**（欠落は可視化する）。
+  const shortfall = count - entries.length;
+
+  // 購読はストア側で一度だけ登録し、タブ切替では解除しない。
   useEffect(() => {
-    let unlisten: (() => void) | null = null;
-    let cancelled = false;
-    const cutoutWaits = new Map<
-      string,
-      { timer: ReturnType<typeof setTimeout>; reject: (reason: Error) => void }
-    >();
-    const completedGraceTimers = new Map<string, ReturnType<typeof setTimeout>>();
-
-    const cutoutTimerKey = (runId: string, cutId: string) => `${runId}\u0000${cutId}`;
-
-    /** 終了済みカットの遅い透過結果が状態を上書きしないための確認。 */
-    const isWaveCutPending = (runId: string, cutId: string) => {
-      const progress = waveProgressRef.current.get(runId);
-      return Boolean(
-        progress
-        && progress.expectedCutIds.has(cutId)
-        && !progress.settledCutIds.has(cutId),
-      );
-    };
-
-    /** 透過処理自体を止められなくても、その結果待ちだけは時間内に決着させる。 */
-    const cutOutWithTimeout = (
-      runId: string,
-      cutId: string,
-      task: Promise<string>,
-    ): Promise<string> =>
-      new Promise((resolve, reject) => {
-        const key = cutoutTimerKey(runId, cutId);
-        const wait = {
-          timer: setTimeout(() => {
-            if (cutoutWaits.get(key) !== wait) return;
-            cutoutWaits.delete(key);
-            reject(new Error("背景の切り抜きが90秒以内に終わりませんでした"));
-          }, CUTOUT_TIMEOUT_MS),
-          reject,
-        };
-        cutoutWaits.set(key, wait);
-
-        void task.then(
-          (path) => {
-            if (cutoutWaits.get(key) !== wait) return;
-            cutoutWaits.delete(key);
-            clearTimeout(wait.timer);
-            resolve(path);
-          },
-          (error) => {
-            if (cutoutWaits.get(key) !== wait) return;
-            cutoutWaits.delete(key);
-            clearTimeout(wait.timer);
-            reject(error);
-          },
-        );
-      });
-
-    const cancelCutoutWait = (runId: string, cutId: string) => {
-      const key = cutoutTimerKey(runId, cutId);
-      const wait = cutoutWaits.get(key);
-      if (!wait) return;
-      cutoutWaits.delete(key);
-      clearTimeout(wait.timer);
-      wait.reject(new Error("背景の切り抜き待ちを終了しました"));
-    };
-
-    /** 待ちを1回だけ解放し、失敗があれば件数を必ず知らせる。 */
-    const releaseWave = (runId: string) => {
-      const resolve = waveWaitersRef.current.get(runId);
-      if (!resolve) return;
-
-      const progress = waveProgressRef.current.get(runId);
-      const graceTimer = completedGraceTimers.get(runId);
-      if (graceTimer) clearTimeout(graceTimer);
-      completedGraceTimers.delete(runId);
-      if (progress) {
-        for (const cutId of progress.expectedCutIds) cancelCutoutWait(runId, cutId);
-      }
-      waveWaitersRef.current.delete(runId);
-      waveProgressRef.current.delete(runId);
-      if (progress && progress.failedCutIds.size > 0) {
-        pushToast({
-          kind: "error",
-          text: `${progress.failedCutIds.size}枚の生成に失敗しました。もう一度お試しください`,
-          ttlMs: 6000,
-        });
-      }
-      resolve();
-    };
-
-    /** 透過成功・処理失敗を数え、全カットが決着したら次へ進める。 */
-    const settleWaveCut = (runId: string, cutId: string, failed: boolean) => {
-      const progress = waveProgressRef.current.get(runId);
-      if (!progress) return;
-
-      if (progress.expectedCutIds.has(cutId)) {
-        progress.settledCutIds.add(cutId);
-        if (failed) progress.failedCutIds.add(cutId);
-      } else if (failed) {
-        // validate_params などのrun全体エラーは、個別cutIdへ対応しない場合がある。
-        // その場合はこのバッチ全体を失敗として決着させ、永久待ちを防ぐ。
-        for (const expectedCutId of progress.expectedCutIds) {
-          progress.settledCutIds.add(expectedCutId);
-          progress.failedCutIds.add(expectedCutId);
-        }
-      }
-
-      if (progress.settledCutIds.size >= progress.expectedCutIds.size) {
-        releaseWave(runId);
-      }
-    };
-
-    const handleEvent: Parameters<typeof onCharacterSheetEvent>[0] = (event) => {
-      if (!runIdsRef.current.has(event.runId)) return;
-      if (event.kind === "cutStarted") {
-        setCuts((prev) =>
-          prev.map((c) =>
-            c.entry.id === event.cutId ? { ...c, status: "running" } : c,
-          ),
-        );
-      } else if (event.kind === "cutCompleted") {
-        // 生成物は**まだ緑背景**。透過に抜いてから採否リストへ載せる（設計書 §1.4）。
-        // 抜かずに出すと層Aの `no-alpha` が全枚数をブロックし、1枚も完走しない。
-        const cutId = event.cutId;
-        if (!isWaveCutPending(event.runId, cutId)) return;
-        if (cutoutWaits.has(cutoutTimerKey(event.runId, cutId))) return;
-        setCuts((prev) =>
-          prev.map((c) =>
-            c.entry.id === cutId ? { ...c, status: "cuttingOut" } : c,
-          ),
-        );
-        void cutOutWithTimeout(event.runId, cutId, cutOut(event.imagePath))
-          .then((cutPath) => {
-            if (!isWaveCutPending(event.runId, cutId)) return;
-            setCuts((prev) =>
-              prev.map((c) =>
-                c.entry.id === cutId
-                  ? { ...c, status: "completed", imagePath: cutPath }
-                  : c,
-              ),
-            );
-            // W24: 波待ちは、生成画像が届いた時点ではなく透過処理の決着後に進める。
-            settleWaveCut(event.runId, cutId, false);
-          })
-          .catch((err) => {
-            if (!isWaveCutPending(event.runId, cutId)) return;
-            const reason = humanizeError(err);
-            setCuts((prev) =>
-              prev.map((c) =>
-                c.entry.id === cutId
-                  ? { ...c, status: "failed", reason: `背景の切り抜き失敗: ${reason}` }
-                  : c,
-              ),
-            );
-            // 透過失敗も決着として数え、失敗時に波が永久待ちになる防御は維持する。
-            settleWaveCut(event.runId, cutId, true);
-            pushToast({
-              kind: "error",
-              text: `背景の切り抜きに失敗しました。理由: ${reason}。この1枚をもう一度お試しください。`,
-              ttlMs: 6000,
-            });
-          });
-      } else if (event.kind === "cutFailed") {
-        const progress = waveProgressRef.current.get(event.runId);
-        const failedCutIds =
-          progress && !progress.expectedCutIds.has(event.cutId)
-            ? progress.expectedCutIds
-            : new Set([event.cutId]);
-        for (const cutId of failedCutIds) cancelCutoutWait(event.runId, cutId);
-        setCuts((prev) =>
-          prev.map((c) =>
-            failedCutIds.has(c.entry.id)
-              ? { ...c, status: "failed", reason: event.reason }
-              : c,
-          ),
-        );
-        settleWaveCut(event.runId, event.cutId, true);
-      } else if (event.kind === "completed") {
-        // 生成側の完了通知だけでは、非同期の透過処理はまだ終わっていない。
-        // ただし個別イベントや透過処理が欠けた場合は、猶予後に未決着分を失敗として
-        // 数え、W24の「失敗しても波が解ける」性質を維持する。
-        const progress = waveProgressRef.current.get(event.runId);
-        if (!progress || completedGraceTimers.has(event.runId)) return;
-        const timer = setTimeout(() => {
-          completedGraceTimers.delete(event.runId);
-          const current = waveProgressRef.current.get(event.runId);
-          if (!current) return;
-          const unsettledCutIds = Array.from(current.expectedCutIds).filter(
-            (cutId) => !current.settledCutIds.has(cutId),
-          );
-          if (unsettledCutIds.length === 0) {
-            releaseWave(event.runId);
-            return;
-          }
-          const unsettled = new Set(unsettledCutIds);
-          for (const cutId of unsettled) {
-            cancelCutoutWait(event.runId, cutId);
-            current.settledCutIds.add(cutId);
-            current.failedCutIds.add(cutId);
-          }
-          setCuts((prev) =>
-            prev.map((cut) =>
-              unsettled.has(cut.entry.id)
-                ? {
-                    ...cut,
-                    status: "failed",
-                    reason: "全体完了後も処理結果を受け取れませんでした",
-                  }
-                : cut,
-            ),
-          );
-          releaseWave(event.runId);
-        }, COMPLETED_GRACE_MS);
-        completedGraceTimers.set(event.runId, timer);
-      }
-    };
-
-    const subscribeWithRetry = async () => {
-      let lastError: unknown = null;
-      // 初回 + 自動リトライ1回。2回とも失敗した時だけ生成を止めて案内する。
-      for (let attempt = 0; attempt < 2; attempt += 1) {
-        try {
-          const fn = await onCharacterSheetEvent(handleEvent);
-          if (cancelled) {
-            fn();
-            return;
-          }
-          unlisten = fn;
-          setEventSubscriptionStatus("ready");
-          return;
-        } catch (err) {
-          lastError = err;
-        }
-      }
-
-      if (cancelled) return;
-      setEventSubscriptionStatus("failed");
-      // 生エラーを直に連結しない（B4）。
-      pushToast({
-        kind: "error",
-        text: `進捗を受け取れない状態です。アプリを再起動してください。（詳しい内容: ${humanizeError(lastError)}）`,
-        ttlMs: 6000,
-      });
-    };
-
-    void subscribeWithRetry();
-
-    return () => {
-      cancelled = true;
-      unlisten?.();
-      // 購読が外れると completed を受け取れない。待っている波を解放しないと
-      // 生成ループが永久に止まり、連打ガードも解除されない（押せないまま固まる）。
-      //
-      // この cleanup は**アンマウント時にだけ**走る（`visible` を依存から外したため）。
-      // 画面切替では走らないので、生成中に離席しても波は解放されず、戻ってくれば
-      // 続きがそのまま反映される。
-      const waiters = waveWaitersRef.current;
-      for (const resolve of waiters.values()) resolve();
-      waiters.clear();
-      waveProgressRef.current.clear();
-      for (const wait of cutoutWaits.values()) {
-        clearTimeout(wait.timer);
-        wait.reject(new Error("画面を閉じたため背景の切り抜き待ちを終了しました"));
-      }
-      cutoutWaits.clear();
-      for (const timer of completedGraceTimers.values()) clearTimeout(timer);
-      completedGraceTimers.clear();
-    };
-  }, [pushToast, cutOut]);
+    void ensureStickerRunEventListener(cutOut).catch(() => {
+      // 失敗理由と案内は、重複を避けるためストア側で1回だけ通知する。
+    });
+  }, [cutOut]);
 
   const doneCount = cuts.filter((c) => c.status === "completed").length;
 
@@ -727,10 +385,8 @@ function StickerBody() {
         return;
       }
       if (targets.length === 0) return;
-      // 連打ガード。setState は非同期なので ref で同期的に取る。
-      if (startingRef.current) return;
-      startingRef.current = true;
-      setRunning(true);
+      // Zustand の更新は同期的なので、画面をまたいでも同じ連打ガードを共有できる。
+      if (!tryBeginStickerGeneration()) return;
 
       try {
         const batches = splitIntoBatches(targets.length);
@@ -740,8 +396,6 @@ function StickerBody() {
           offset += size;
 
           const runId = crypto.randomUUID();
-          runIdsRef.current.add(runId);
-
           const cutSpecs: SheetCutSpec[] = slice.map((entry) => ({
             cutId: entry.id,
             role: entry.role,
@@ -776,21 +430,16 @@ function StickerBody() {
 
           // この波の完了を待つ約束を**投げる前に**置く。invoke より後だと、
           // 短い波が completed を先に出したときに取りこぼす（待ちが永久に解けない）。
-          const finished = new Promise<void>((resolve) => {
-            waveWaitersRef.current.set(runId, resolve);
-          });
-          waveProgressRef.current.set(runId, {
-            expectedCutIds: new Set(slice.map((entry) => entry.id)),
-            settledCutIds: new Set(),
-            failedCutIds: new Set(),
-          });
+          const finished = beginStickerWave(
+            runId,
+            slice.map((entry) => entry.id),
+          );
 
           try {
             await invoke<string>("character_sheet_run", { params });
           } catch (err) {
             // 起動に失敗した波の待ちは自分で外す（誰も completed を出さないため）。
-            waveWaitersRef.current.delete(runId);
-            waveProgressRef.current.delete(runId);
+            discardStickerWave(runId);
             throw err;
           }
 
@@ -828,8 +477,7 @@ function StickerBody() {
       } finally {
         // 連打ガードは**生成と透過処理の完了まで**効かせる（invoke が返るまでではない）。
         // ここが finally なので、失敗しても必ず解除される（押せないまま固まらない）。
-        startingRef.current = false;
-        setRunning(false);
+        endStickerGeneration();
       }
       void startIndex;
     },
@@ -914,7 +562,6 @@ function StickerBody() {
       setReview(null);
 
       if (cutout.chroma) {
-        // 今回測った統計を、差し替え後のパスに紐づけて登録する。
         chromaStatsRef.current.set(newImagePath, {
           path: newImagePath,
           cleared: cutout.chroma.cleared,
@@ -922,15 +569,12 @@ function StickerBody() {
           opaque: cutout.chroma.opaque,
           despilled: cutout.chroma.despilled,
         });
-        // 縁の品質は抜けた画像に対してだけ語れる（`cutOut` と同じ規則）。
         if (cutout.chroma.fringeWarn) fringeWarnPathsRef.current.add(newImagePath);
         else fringeWarnPathsRef.current.delete(newImagePath);
       } else {
-        // AI経路（または全経路失敗）。統計は存在しない。前の絵の値を残さない。
         chromaStatsRef.current.delete(newImagePath);
         fringeWarnPathsRef.current.delete(newImagePath);
       }
-
       cutoutMethodRef.current.set(newImagePath, cutout.method);
 
       setNotClearedPaths((prev) => {
@@ -1062,8 +706,8 @@ function StickerBody() {
   const chromaSamplesFor = useCallback(
     (paths: readonly string[]): StickerChromaSample[] =>
       paths
-        .map((p) => chromaStatsRef.current.get(p))
-        .filter((s): s is StickerChromaSample => s !== undefined),
+        .map((path) => chromaStatsRef.current.get(path))
+        .filter((sample): sample is StickerChromaSample => sample !== undefined),
     [],
   );
 

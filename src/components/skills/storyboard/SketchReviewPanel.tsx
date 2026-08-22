@@ -78,10 +78,8 @@ export function SketchReviewPanel() {
   const [cursor, setCursor] = useState(0);
   const [editing, setEditing] = useState(false);
   const [draftOverride, setDraftOverride] = useState("");
-  // 絵コンテ生成 (sketch_mode=true) の起動状態
-  // P1修正 (2026-05-20): Phase切替でアンマウントされても保持できるようストア管理に変更。
-  // ローカルuseStateだと Phase 2↔3 往復で重複 run が起動するバグの原因になっていた。
-  const [sketchStarting, setSketchStarting] = useState(false);
+  // 絵コンテ生成 (sketch_mode=true) の起動状態。描画ローカルには持たず、
+  // タブ復帰後も残る run ストアから導く。
   const sketchRunStartedAt = useStoryboardRun((s) => s.sketchRunStartedAt);
   const setSketchRunStartedAt = useStoryboardRun((s) => s.setSketchRunStartedAt);
   const sketchStarted = sketchRunStartedAt !== null;
@@ -96,6 +94,13 @@ export function SketchReviewPanel() {
   // P19a (2026-05-21): 絵コンテ run 専用の sketchCuts を購読する (本生成 cuts と完全分離)
   const storeCuts = useStoryboardRun((s) => s.sketchCuts);
   const storeStatus = useStoryboardRun((s) => s.status);
+  const activeRunId = useStoryboardRun((s) => s.activeRunId);
+  const activeRunParams = useStoryboardRun((s) => s.params);
+  const sketchStarting =
+    storeStatus === "running" &&
+    activeRunId !== null &&
+    activeRunParams?.sketchMode === true &&
+    !sketchStarted;
 
   const activeVersion: StoryboardSketchVersion | null = useMemo(() => {
     if (sketchVersions.length === 0) return null;
@@ -200,7 +205,9 @@ export function SketchReviewPanel() {
       return;
     }
 
-    setSketchStarting(true);
+    const currentRun = useStoryboardRun.getState();
+    if (currentRun.activeRunId && currentRun.status === "running") return;
+    useStoryboardRun.setState({ lastError: null });
     let issuedRunId: string | null = null;
     try {
       const runId = crypto.randomUUID();
@@ -248,8 +255,6 @@ export function SketchReviewPanel() {
         text: `絵コンテ生成の起動に失敗: ${message}`,
         ttlMs: 6000,
       });
-    } finally {
-      setSketchStarting(false);
     }
   }
 

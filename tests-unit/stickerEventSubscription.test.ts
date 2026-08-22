@@ -33,6 +33,7 @@ async function readSrc(relative: string): Promise<string> {
 }
 
 const WORKSPACE = "src/components/skills/sticker/StickerWorkspace.tsx";
+const RUN_STORE = "src/lib/store/stickerRun.ts";
 
 /**
  * コメントを落として実コードだけにする。
@@ -80,14 +81,22 @@ describe("F1: 生成中に画面を離れても購読が切れない", () => {
     ).not.toMatch(/\bvisible\b/);
   });
 
-  it("購読と波待ちの解放は残っている（常駐化で救済まで消していない）", async () => {
-    const effect = subscriptionEffect(codeOnly(await readSrc(WORKSPACE)));
-    // アンマウント時には解放が要る。無くすと本当に永久に固まる。
-    expect(effect, "unlisten を呼んでいない").toContain("unlisten?.()");
-    expect(effect, "波待ちの解放が消えている").toContain("waveWaitersRef.current");
-    // 受け取るイベントの種類は変えていない。
+  it("購読と波待ちの解放はストア側に残っている（常駐化で救済まで消していない）", async () => {
+    // 2026-08-22 タブ切替耐性の移設（STΛCK指示「生成中を消さないで」）で、
+    // イベント購読は Workspace の useEffect から stickerRun.ts の
+    // モジュール常駐シングルトンへ移った。旧仕様の「アンマウントで unlisten」は
+    // 新仕様では誤り（解除すると別タブ滞在中のイベントを取りこぼす）。
+    // 守るべき本質はこの3つで、検査対象をストアへ付け替えて固定する。
+    const store = codeOnly(await readSrc(RUN_STORE));
+    // 1) 二重登録ガード（何度呼んでも購読は1組だけ）
+    expect(store, "リスナー登録のシングルトンガードが消えている").toContain(
+      "if (listenerPromise) return",
+    );
+    // 2) 波待ちの解放（無くすと本当に永久に固まる）
+    expect(store, "波待ちの解放が消えている").toContain("waveWaiters.delete");
+    // 3) 受け取るイベントの種類は変えていない。
     for (const kind of ["cutStarted", "cutCompleted", "cutFailed", "completed"]) {
-      expect(effect, `${kind} の処理が消えている`).toContain(kind);
+      expect(store, `${kind} の処理が消えている`).toContain(kind);
     }
   });
 

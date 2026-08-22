@@ -192,11 +192,19 @@ test("生成完了時に背景抜きを通してから採否リストへ載せ�
   // 保険のクロマキー経路が cutout.ts 側に現存すること。
   const cutout = read("src/lib/sticker/cutout.ts");
   expect(cutout, "クロマキー保険経路が消えている").toContain("sticker.chromaKey(");
-  // cutCompleted の処理から抜きが呼ばれていること。
-  const completedAt = workspace.indexOf('event.kind === "cutCompleted"');
-  const failedAt = workspace.indexOf('event.kind === "cutFailed"');
-  expect(completedAt).toBeGreaterThan(0);
-  expect(workspace.slice(completedAt, failedAt)).toContain("cutOut(");
+  // 2026-08-22 タブ切替耐性の移設で、cutCompleted の処理は Workspace から
+  // stickerRun.ts（モジュール常駐ストア）へ移った。契約は不変:
+  // 「cutCompleted で必ず抜き（cutOutHandler）を通してから決着させる」。
+  const runStore = read("src/lib/store/stickerRun.ts");
+  const completedAt = runStore.indexOf('event.kind === "cutCompleted"');
+  expect(completedAt, "cutCompleted の処理がストアに無い").toBeGreaterThan(0);
+  const completedBlock = runStore.slice(completedAt, completedAt + 800);
+  expect(completedBlock, "cutCompleted から抜きが呼ばれていない").toContain("cutOutHandler(");
+  // Workspace 側は実抜き関数（cutOutBackground を包む cutOut）をストアへ登録していること。
+  expect(
+    workspace,
+    "抜き関数がストアのリスナーへ登録されていない（イベントが来ても抜けない）",
+  ).toContain("ensureStickerRunEventListener(cutOut)");
 });
 
 test("クロマキーに失敗しても生成物を捨てない（元パスへ退避する）", () => {

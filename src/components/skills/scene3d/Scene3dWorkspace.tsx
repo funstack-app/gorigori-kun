@@ -83,6 +83,7 @@ import {
 import type { PaneNode, StoryboardCutImport } from "../../../lib/store/scene3d";
 import { useStoryboardRun } from "../../../lib/store/storyboardRun";
 import { useToasts } from "../../../lib/store/toasts";
+import { useScene3dRun } from "../../../lib/store/scene3dRun";
 import type { StoryboardSketchCut } from "../../../lib/storyboard/types";
 import { sendCutToVideoTab } from "../../../lib/storyboard/sendCutToVideo";
 import { requestViewPreset, Scene3dViewport } from "./Scene3dViewport";
@@ -750,7 +751,8 @@ function ShelfPanel() {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [ctxMenu, setCtxMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   // 画像からシーンを起こす (Slice D)。ファイル選択入口
-  const [sceneImagePath, setSceneImagePath] = useState<string | null>(null);
+  const sceneImagePath = useScene3dRun((s) => s.sceneImagePath);
+  const setSceneImagePath = useScene3dRun((s) => s.setSceneImagePath);
   const pickSceneImage = async () => {
     const selected = await openFileDialog({
       multiple: false,
@@ -957,10 +959,13 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
   const [reviseTarget, setReviseTarget] = useState<{ id: string; name: string } | null>(null);
   // 動画から取り込み(完全ローカル・無料)
   const videoRef = useRef<HTMLInputElement>(null);
-  const [capBusy, setCapBusy] = useState<string | null>(null);
-  const [capError, setCapError] = useState<string | null>(null);
+  const capBusy = useScene3dRun((s) => s.captureBusy);
+  const setCapBusy = useScene3dRun((s) => s.setCaptureBusy);
+  const capError = useScene3dRun((s) => s.captureError);
+  const setCapError = useScene3dRun((s) => s.setCaptureError);
   // 待ち時間の推定ゲージ用の開始時刻(実進捗が取れない処理なので経過時間で見せる)
-  const [capStartedAt, setCapStartedAt] = useState<number | null>(null);
+  const capStartedAt = useScene3dRun((s) => s.captureStartedAt);
+  const setCapStartedAt = useScene3dRun((s) => s.setCaptureStartedAt);
 
   const captureFromFile = async (file: File) => {
     setCapBusy("準備中…");
@@ -1021,10 +1026,13 @@ function MotionLibraryPopup({ entityId, onClose }: { entityId: string; onClose: 
     setCapUrl("");
     await captureFromFile(file);
   };
-  const [genBusy, setGenBusy] = useState(false);
-  const [genError, setGenError] = useState<string | null>(null);
+  const genBusy = useScene3dRun((s) => s.motionGenerating);
+  const setGenBusy = useScene3dRun((s) => s.setMotionGenerating);
+  const genError = useScene3dRun((s) => s.motionGenerationError);
+  const setGenError = useScene3dRun((s) => s.setMotionGenerationError);
   // AIモーション生成も実進捗が取れないため、開始時刻から推定ゲージを出す
-  const [genStartedAt, setGenStartedAt] = useState<number | null>(null);
+  const genStartedAt = useScene3dRun((s) => s.motionGenerationStartedAt);
+  const setGenStartedAt = useScene3dRun((s) => s.setMotionGenerationStartedAt);
 
   // 標準ライブラリ(同梱CC0・46種)を初回に自動読み込み
   useEffect(() => {
@@ -1613,7 +1621,8 @@ function SelectedObjectSection() {
   const setEntityMotion = useScene3d((s) => s.setEntityMotion);
   const importedMotions = useScene3d((s) => s.importedMotions);
   const [detailOpen, setDetailOpen] = useState(false);
-  const [motionLibOpen, setMotionLibOpen] = useState(false);
+  const motionLibOpen = useScene3dRun((s) => s.motionLibraryOpen);
+  const setMotionLibOpen = useScene3dRun((s) => s.setMotionLibraryOpen);
   const [arrivalPickerOpen, setArrivalPickerOpen] = useState(false);
   const [arrivalAppendOpen, setArrivalAppendOpen] = useState(false);
   const removeEntityArrivalStep = useScene3d((s) => s.removeEntityArrivalStep);
@@ -3252,12 +3261,17 @@ function DirectorChat() {
   const project = useScene3d((s) => s.project);
   const importedMotions = useScene3d((s) => s.importedMotions);
   const [text, setText] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [note, setNote] = useState<string | null>(null);
-  const [progress, setProgress] = useState<string | null>(null);
+  const busy = useScene3dRun((s) => s.directorBusy);
+  const setBusy = useScene3dRun((s) => s.setDirectorBusy);
+  const error = useScene3dRun((s) => s.directorError);
+  const setError = useScene3dRun((s) => s.setDirectorError);
+  const note = useScene3dRun((s) => s.directorNote);
+  const setNote = useScene3dRun((s) => s.setDirectorNote);
+  const progress = useScene3dRun((s) => s.directorProgress);
+  const setProgress = useScene3dRun((s) => s.setDirectorProgress);
   // カット割り設計も実進捗が取れないため、開始時刻から推定ゲージを出す
-  const [startedAt, setStartedAt] = useState<number | null>(null);
+  const startedAt = useScene3dRun((s) => s.directorStartedAt);
+  const setStartedAt = useScene3dRun((s) => s.setDirectorStartedAt);
   // @メンション: シーン内の物体・カメラを候補から挿入する
   const taRef = useRef<HTMLTextAreaElement>(null);
   const [mention, setMention] = useState<{ query: string; start: number } | null>(null);

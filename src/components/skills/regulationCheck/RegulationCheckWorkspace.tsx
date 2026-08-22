@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 
 import { ActiveProjectSelector } from "../../ActiveProjectSelector";
 import { WorkspaceTabs } from "../../WorkspaceTabs";
@@ -7,6 +7,11 @@ import { SafeImage } from "../../SafeImage";
 import { SceneCompactCard } from "../../scene/SceneCompactCard";
 import { SceneSectionModal } from "../../scene/SceneSectionModal";
 import { useToasts } from "../../../lib/store/toasts";
+import {
+  useRegulationCheckRun,
+  type RegulationCheckResultsState,
+  type RegulationRuleSetSnapshot,
+} from "../../../lib/store/regulationCheckRun";
 import {
   checkImage,
   formatResultsAsText,
@@ -21,7 +26,6 @@ import {
   DEFAULT_RULE_SETS,
   findRule,
   resolveRules,
-  type RegulationRule,
   type RegulationRuleSet,
   type RegulationRuleKind,
   type RegulationSeverity,
@@ -58,17 +62,6 @@ function basename(p: string): string {
   return p.split(/[\\/]/).pop() ?? p;
 }
 
-type RuleSetSnapshot = {
-  id: string;
-  name: string;
-  rules: RegulationRule[];
-};
-
-type CheckResultsState = {
-  ruleSet: RuleSetSnapshot;
-  results: RegulationImageResult[];
-};
-
 function fileTimestamp(date = new Date()): string {
   const pad = (value: number) => String(value).padStart(2, "0");
   return [
@@ -81,7 +74,7 @@ function fileTimestamp(date = new Date()): string {
   ].join("");
 }
 
-function formatReportAsMarkdown(state: CheckResultsState): string {
+function formatReportAsMarkdown(state: RegulationCheckResultsState): string {
   const lines = [
     "# レギュレーション検査レポート",
     "",
@@ -120,20 +113,19 @@ function formatReportAsMarkdown(state: CheckResultsState): string {
 export function RegulationCheckWorkspace() {
   const pushToast = useToasts((s) => s.push);
 
-  const [imagePaths, setImagePaths] = useState<string[]>([]);
-  const [ruleSetId, setRuleSetId] = useState<string>(DEFAULT_RULE_SETS[0].id);
+  const imagePaths = useRegulationCheckRun((s) => s.imagePaths);
+  const setImagePaths = useRegulationCheckRun((s) => s.setImagePaths);
+  const ruleSetId = useRegulationCheckRun((s) => s.ruleSetId);
+  const setRuleSetId = useRegulationCheckRun((s) => s.setRuleSetId);
   const [customRule, setCustomRule] = useState("");
   const [open, setOpen] = useState(false);
-  const [running, setRunning] = useState(false);
-  const [resultState, setResultState] = useState<CheckResultsState | null>(null);
-  const runTokenRef = useRef(0);
-
-  useEffect(
-    () => () => {
-      runTokenRef.current += 1;
-    },
-    [],
-  );
+  const running = useRegulationCheckRun((s) => s.running);
+  const setRunning = useRegulationCheckRun((s) => s.setRunning);
+  const resultState = useRegulationCheckRun((s) => s.resultState);
+  const setResultState = useRegulationCheckRun((s) => s.setResultState);
+  const beginRun = useRegulationCheckRun((s) => s.beginRun);
+  const invalidateRun = useRegulationCheckRun((s) => s.invalidateRun);
+  const isCurrentRun = useRegulationCheckRun((s) => s.isCurrentRun);
 
   const ruleSet: RegulationRuleSet = useMemo(
     () => DEFAULT_RULE_SETS.find((r) => r.id === ruleSetId) ?? DEFAULT_RULE_SETS[0],
@@ -178,8 +170,7 @@ export function RegulationCheckWorkspace() {
   }
 
   function clearAll() {
-    runTokenRef.current += 1;
-    setRunning(false);
+    invalidateRun();
     setImagePaths([]);
     setResultState(null);
   }
@@ -189,9 +180,8 @@ export function RegulationCheckWorkspace() {
       pushToast({ kind: "info", text: "先に検査する画像を選んでください。", ttlMs: 3000 });
       return;
     }
-    const runToken = runTokenRef.current + 1;
-    runTokenRef.current = runToken;
-    const ruleSnapshot: RuleSetSnapshot = {
+    const runToken = beginRun();
+    const ruleSnapshot: RegulationRuleSetSnapshot = {
       id: ruleSet.id,
       name: ruleSet.name,
       rules: activeRules.map((rule) => ({ ...rule })),
@@ -208,7 +198,7 @@ export function RegulationCheckWorkspace() {
         try {
           machineChecks = await runMachineChecks(path, ruleSnapshot.id);
         } catch (err) {
-          if (runTokenRef.current !== runToken) return;
+          if (!isCurrentRun(runToken)) return;
           collected.push({
             imagePath: path,
             machineChecks: [],
@@ -220,7 +210,7 @@ export function RegulationCheckWorkspace() {
           setResultState({ ruleSet: ruleSnapshot, results: [...collected] });
           continue;
         }
-        if (runTokenRef.current !== runToken) return;
+        if (!isCurrentRun(runToken)) return;
         collected.push({
           imagePath: path,
           machineChecks,
@@ -233,7 +223,7 @@ export function RegulationCheckWorkspace() {
         setResultState({ ruleSet: ruleSnapshot, results: [...collected] });
 
         const result = await checkImage(path, rules);
-        if (runTokenRef.current !== runToken) return;
+        if (!isCurrentRun(runToken)) return;
         collected[collected.length - 1] = {
           ...result,
           machineChecks,
@@ -264,14 +254,14 @@ export function RegulationCheckWorkspace() {
         });
       }
     } catch (err) {
-      if (runTokenRef.current !== runToken) return;
+      if (!isCurrentRun(runToken)) return;
       pushToast({
         kind: "error",
         text: `検査に失敗しました: ${(err as Error)?.message ?? err}`,
         ttlMs: 6000,
       });
     } finally {
-      if (runTokenRef.current === runToken) setRunning(false);
+      if (isCurrentRun(runToken)) setRunning(false);
     }
   }
 

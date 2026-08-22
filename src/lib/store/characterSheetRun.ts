@@ -152,6 +152,12 @@ type CharacterSheetRunState = SkillJobLedger<SheetJob> & {
   // ===== ウィザード =====
   step: RegisterStep;
   setStep: (step: RegisterStep) => void;
+  /** キャラ登録の属性自動抽出。タブ移動中も二重起動を防ぐ。 */
+  attributeExtracting: boolean;
+  setAttributeExtracting: (extracting: boolean) => void;
+  /** character_sheet_run の起動要求中だけ立つ同期ガード。 */
+  characterSubmitting: boolean;
+  setCharacterSubmitting: (submitting: boolean) => void;
 
   // ===== 下書き(ジョブを跨いで保持・常に編集可) =====
   characterName: string;
@@ -377,6 +383,10 @@ export const useCharacterSheetRun = create<CharacterSheetRunState>((set, get) =>
 
   step: 1,
   setStep: (step) => set({ step }),
+  attributeExtracting: false,
+  setAttributeExtracting: (attributeExtracting) => set({ attributeExtracting }),
+  characterSubmitting: false,
+  setCharacterSubmitting: (characterSubmitting) => set({ characterSubmitting }),
 
   jobs: {},
   jobOrder: [],

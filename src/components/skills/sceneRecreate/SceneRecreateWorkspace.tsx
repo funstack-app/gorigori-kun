@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 
 import { ActiveProjectSelector } from "../../ActiveProjectSelector";
 import { WorkspaceTabs } from "../../WorkspaceTabs";
@@ -8,6 +8,7 @@ import { GenerationGauge } from "../../GenerationGauge";
 import { ClapperIcon, FilmIcon } from "../../SkillIcon";
 import { useImagePreview } from "../../../lib/store/imagePreview";
 import { useToasts } from "../../../lib/store/toasts";
+import { useSceneRecreateRun } from "../../../lib/store/sceneRecreateRun";
 import { usePresets, presetKind, type Preset } from "../../../lib/store/presets";
 import { composePresetPrompt } from "../../../lib/presets/character";
 import { analyzeScene } from "../../../lib/sceneRecreate/analyze";
@@ -24,8 +25,6 @@ import {
   CAMERA_ANGLE_LABELS,
   CAMERA_WORK_LABELS,
   SHOT_SIZE_LABELS,
-  type AnalyzeStatus,
-  type Keyframe,
   type RecreateShotPrompt,
   type SceneAnalysis,
 } from "../../../lib/sceneRecreate/types";
@@ -117,31 +116,30 @@ export function SceneRecreateWorkspace() {
   const openPreview = useImagePreview((s) => s.open);
   const pushToast = useToasts((s) => s.push);
 
-  const [keyframes, setKeyframes] = useState<Keyframe[]>([]);
+  const keyframes = useSceneRecreateRun((s) => s.keyframes);
+  const setKeyframes = useSceneRecreateRun((s) => s.setKeyframes);
   const [userNote, setUserNote] = useState("");
-  const [status, setStatus] = useState<AnalyzeStatus>("idle");
-  const [describeDone, setDescribeDone] = useState(0);
-  const [analysis, setAnalysis] = useState<SceneAnalysis | null>(null);
+  const status = useSceneRecreateRun((s) => s.status);
+  const setStatus = useSceneRecreateRun((s) => s.setStatus);
+  const describeDone = useSceneRecreateRun((s) => s.describeDone);
+  const setDescribeDone = useSceneRecreateRun((s) => s.setDescribeDone);
+  const analysis = useSceneRecreateRun((s) => s.analysis);
+  const setAnalysis = useSceneRecreateRun((s) => s.setAnalysis);
   // 2026-07-27: 解析中ゲージ用の開始時刻。本スキルは専用ストアを持たない
   // (解析はこのコンポーネントのローカル state で完結する) ため、
   // 分析開始時に Date.now() をここへ入れる。
-  const [startedAt, setStartedAt] = useState<number | null>(null);
+  const startedAt = useSceneRecreateRun((s) => s.startedAt);
+  const setStartedAt = useSceneRecreateRun((s) => s.setStartedAt);
   // 動画取り込みの進捗（null = 取り込んでいない）。分析中ゲージとは別軸。
-  const [extractMsg, setExtractMsg] = useState<string | null>(null);
+  const extractMsg = useSceneRecreateRun((s) => s.extractMsg);
+  const setExtractMsg = useSceneRecreateRun((s) => s.setExtractMsg);
+  const beginRun = useSceneRecreateRun((s) => s.beginRun);
+  const isCurrentRun = useSceneRecreateRun((s) => s.isCurrentRun);
   // 動画の選択は Tauri ダイアログ（パスを返す）でなく input[type=file] を使う。
   // ダイアログのパスを readFile するには fs スコープに全ドライブの許可が要り、
   // ユーザーが任意の場所に置いた動画で失敗する。Scene 3D の動画取り込みも
   // 同じ理由で input[type=file] を使っており、そちらは配布実績がある。
   const videoInputRef = useRef<HTMLInputElement>(null);
-  const runTokenRef = useRef(0);
-
-  useEffect(
-    () => () => {
-      runTokenRef.current += 1;
-    },
-    [],
-  );
-
   const extracting = extractMsg !== null;
   const running = status === "describing" || status === "analyzing" || extracting;
   const allPaths = useMemo(() => keyframes.map((k) => k.path), [keyframes]);
@@ -259,8 +257,7 @@ export function SceneRecreateWorkspace() {
       pushToast({ kind: "info", text: "先にキーフレームを投入してください。", ttlMs: 3000 });
       return;
     }
-    const runToken = runTokenRef.current + 1;
-    runTokenRef.current = runToken;
+    const runToken = beginRun();
     const targetKeyframes = [...keyframes];
     const targetNote = userNote;
     setAnalysis(null);
@@ -270,12 +267,12 @@ export function SceneRecreateWorkspace() {
     try {
       const result = await analyzeScene(targetKeyframes, targetNote, {
         onDescribeProgress: (done, total) => {
-          if (runTokenRef.current !== runToken) return;
+          if (!isCurrentRun(runToken)) return;
           setDescribeDone(done);
           if (done === total) setStatus("analyzing");
         },
         onDescribePartialFailure: (failed, total) => {
-          if (runTokenRef.current !== runToken) return;
+          if (!isCurrentRun(runToken)) return;
           pushToast({
             kind: "warn",
             text: `${failed}/${total}枚の解析に失敗しました。成功した画像だけで続けます。`,
@@ -283,7 +280,7 @@ export function SceneRecreateWorkspace() {
           });
         },
       });
-      if (runTokenRef.current !== runToken) return;
+      if (!isCurrentRun(runToken)) return;
       setAnalysis(result);
       setStatus("done");
       pushToast({
@@ -292,7 +289,7 @@ export function SceneRecreateWorkspace() {
         ttlMs: 3000,
       });
     } catch (err) {
-      if (runTokenRef.current !== runToken) return;
+      if (!isCurrentRun(runToken)) return;
       setStatus("error");
       pushToast({
         kind: "error",

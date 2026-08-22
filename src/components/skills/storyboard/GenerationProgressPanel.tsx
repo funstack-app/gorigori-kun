@@ -30,6 +30,8 @@ export function GenerationProgressPanel() {
   const totalCuts = useStoryboardRun((s) => s.totalCuts);
   const status = useStoryboardRun((s) => s.status);
   const activeRunId = useStoryboardRun((s) => s.activeRunId);
+  const activeRunParams = useStoryboardRun((s) => s.params);
+  const lastError = useStoryboardRun((s) => s.lastError);
   const beginRun = useStoryboardRun((s) => s.beginRun);
   const setPhase = useStoryboardRun((s) => s.setPhase);
   const adoptTake = useStoryboardRun((s) => s.adoptTake);
@@ -41,8 +43,6 @@ export function GenerationProgressPanel() {
   const setKeyVisualPath = useStoryboardRun((s) => s.setKeyVisualPath);
   // 共有 planChat が消えていても storyboard 側の控えから読む (Sol 評価 blocking#3)。
   const sceneConstruction = useSceneConstruction();
-  const [starting, setStarting] = useState(false);
-  const [startError, setStartError] = useState<string | null>(null);
   // STΛCK指示(2026-06-07): カードサイズ。1=大きく/2=既定/3=小さく。
   // 2026-07-28: ローカル useState から workspace ストアへ移行 (永続 + 他2画面と共有)。
   const storyboardCardSize = useWorkspace((s) => s.storyboardCardSize);
@@ -54,6 +54,13 @@ export function GenerationProgressPanel() {
   const lastEventAt = useStoryboardRun((s) => s.lastEventAt);
   const setGenerationRunStartedAt = useStoryboardRun((s) => s.setGenerationRunStartedAt);
   const generationStarted = generationRunStartedAt !== null;
+  const starting =
+    status === "running" &&
+    activeRunId !== null &&
+    activeRunParams !== null &&
+    !activeRunParams.sketchMode &&
+    !generationStarted;
+  const startError = status === "failed" ? lastError : null;
   const [now, setNow] = useState(() => Date.now());
   const previousCutStatusesRef = useRef<Record<string, string>>(
     Object.fromEntries(Array.from(cuts, ([cutId, cut]) => [cutId, cut.status])),
@@ -127,16 +134,17 @@ export function GenerationProgressPanel() {
     if (generationStarted) return;
     if (!goal || !sceneConstruction) return;
     if (starting) return;
-    // 既に本番 run が走っているなら既起動済みマーク
-    if (activeRunId) {
-      const cur = useStoryboardRun.getState().params;
+    // 既に本番 run が走っているなら既起動済みマーク。
+    // getState で同期的に見るため、タブ復帰直後や連打でも古い描画値を使わない。
+    const currentRun = useStoryboardRun.getState();
+    if (currentRun.activeRunId) {
+      const cur = currentRun.params;
       if (cur && !cur.sketchMode) {
         setGenerationRunStartedAt(Date.now());
-        return;
       }
+      return;
     }
-    setStarting(true);
-    setStartError(null);
+    useStoryboardRun.setState({ lastError: null });
     let issuedRunId: string | null = null;
     try {
       // S3 (2026-07-28): params 組み立ては buildProductionParams に集約した
@@ -177,14 +185,11 @@ export function GenerationProgressPanel() {
           lastError: msg,
         });
       }
-      setStartError(msg);
       useToasts.getState().push({
         kind: "error",
         text: `生成起動に失敗しました: ${msg}`,
         ttlMs: 6000,
       });
-    } finally {
-      setStarting(false);
     }
   }
 
