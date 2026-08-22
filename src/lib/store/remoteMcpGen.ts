@@ -28,6 +28,8 @@ export type RemoteMcpSelection = {
 
 export type RemoteMcpRunInput = RemoteMcpParamInput & {
   kind: RemoteMcpGenerationKind;
+  /** 内蔵モデルとの混在比較でも、接続先モデルは1モデル1本に固定する。 */
+  compareEach?: boolean;
 };
 
 export type RemoteMcpGenJob = {
@@ -53,6 +55,8 @@ export type RemoteMcpStartResult =
 
 type RemoteMcpGenState = {
   selections: Record<RemoteMcpGenerationKind, RemoteMcpSelection | null>;
+  /** 動画だけは同じモデル一覧から最大3件を比較選択できる。 */
+  videoSelections: RemoteMcpSelection[];
   jobs: Record<string, RemoteMcpGenJob>;
   latestRequestId: Record<RemoteMcpGenerationKind, string | null>;
   validationMessage: Record<RemoteMcpGenerationKind, string | null>;
@@ -61,8 +65,10 @@ type RemoteMcpGenState = {
     kind: RemoteMcpGenerationKind,
     selection: RemoteMcpSelection | null,
   ) => void;
+  setVideoSelections: (selections: RemoteMcpSelection[]) => void;
   setModelCatalog: (key: string, catalog: RemoteMcpModelCatalog) => void;
   start: (input: RemoteMcpRunInput) => Promise<RemoteMcpStartResult>;
+  startSelectedVideos: (input: RemoteMcpRunInput) => Promise<RemoteMcpStartResult>;
   retry: (requestId: string) => Promise<RemoteMcpStartResult>;
   applyEvent: (event: RemoteMcpGenEvent) => void;
 };
@@ -241,19 +247,46 @@ export const useRemoteMcpGen = create<RemoteMcpGenState>((set, get) => {
 
   return {
     selections: { image: null, video: null },
+    videoSelections: [],
     jobs: {},
     latestRequestId: { image: null, video: null },
     validationMessage: { image: null, video: null },
     modelCatalogs: {},
 
     setSelection: (kind, selection) =>
-      set((state) => ({
-        selections: {
-          ...state.selections,
-          [kind]: selection?.kind === kind ? selection : null,
-        },
-        validationMessage: { ...state.validationMessage, [kind]: null },
-      })),
+      set((state) => {
+        const valid = selection?.kind === kind ? selection : null;
+        return {
+          selections: {
+            ...state.selections,
+            [kind]: valid,
+          },
+          videoSelections:
+            kind === "video" ? (valid ? [valid] : []) : state.videoSelections,
+          validationMessage: { ...state.validationMessage, [kind]: null },
+        };
+      }),
+
+    setVideoSelections: (selections) =>
+      set((state) => {
+        const valid = selections
+          .filter((selection) => selection.kind === "video")
+          .filter(
+            (selection, index, all) =>
+              all.findIndex(
+                (candidate) =>
+                  candidate.providerId === selection.providerId &&
+                  candidate.toolName === selection.toolName &&
+                  candidate.model?.id === selection.model?.id,
+              ) === index,
+          )
+          .slice(0, 3);
+        return {
+          videoSelections: valid,
+          selections: { ...state.selections, video: valid[0] ?? null },
+          validationMessage: { ...state.validationMessage, video: null },
+        };
+      }),
 
     setModelCatalog: (key, catalog) =>
       set((state) => ({ modelCatalogs: { ...state.modelCatalogs, [key]: catalog } })),
@@ -268,6 +301,33 @@ export const useRemoteMcpGen = create<RemoteMcpGenState>((set, get) => {
         return { ok: false, message };
       }
       return launch(selection, input);
+    },
+
+    startSelectedVideos: async (input) => {
+      const selections = get().videoSelections;
+      if (input.kind !== "video" || selections.length === 0) {
+        return get().start(input);
+      }
+      const compare = selections.length >= 2 || input.compareEach === true;
+      const results = await Promise.all(
+        selections.map((selection) =>
+          launch(selection, compare ? { ...input, count: 1 } : input),
+        ),
+      );
+      const failed = results.filter((result) => !result.ok);
+      if (failed.length > 0) {
+        return {
+          ok: false,
+          message: `${failed.length}/${results.length}モデルの生成を開始できませんでした。${failed
+            .map((result) => (result.ok ? "" : result.message))
+            .filter(Boolean)
+            .join(" ")}`,
+        };
+      }
+      return results[results.length - 1] ?? {
+        ok: false,
+        message: "生成に使うモデルを選択してください。",
+      };
     },
 
     retry: async (requestId) => {

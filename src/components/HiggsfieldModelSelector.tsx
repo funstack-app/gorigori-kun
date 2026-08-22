@@ -48,6 +48,15 @@ import {
   useRemoteMcpGen,
   type RemoteMcpSelection,
 } from "../lib/store/remoteMcpGen";
+import {
+  VIDEO_MODELS,
+  clampAspectForModel,
+  clampDurationForModel,
+  findVideoModel,
+  videoModelSpecItems,
+  type VideoModelId,
+} from "../lib/videoModels";
+import { useVideoGen } from "../lib/store/videoGen";
 
 // 接続先タブ。接続済みの汎用リモートMCPも同じ列へ動的に加える。
 type RemoteProviderId = RemoteMcpProviderCatalogEntry["id"];
@@ -80,6 +89,7 @@ type ModelSection = {
 const CODEX_STANDARD_LABEL = "GPT Image 2 (デフォルト)";
 const PICKER_WIDTH = 390;
 const MAX_COMPARE_MODELS = 4;
+const MAX_VIDEO_COMPARE_MODELS = 3;
 
 /**
  * Magnific 未接続と断定するまでに必要な「連続 false 観測回数」(2026-08-05)。
@@ -138,6 +148,11 @@ export function HiggsfieldModelSelector({
   // 接続済み判定は accounts.higgsfield.authenticated (MCP status 由来) を正とする。
   const higgsfieldAuthed = useAccounts((s) => s.higgsfield.authenticated);
   const remoteSelection = useRemoteMcpGen((s) => s.selections[media]);
+  const remoteVideoSelections = useRemoteMcpGen((s) => s.videoSelections);
+  const videoModelId = useVideoGen((s) => s.modelId);
+  const videoCompareModelIds = useVideoGen((s) => s.compareModelIds);
+  const setVideoModel = useVideoGen((s) => s.setModel);
+  const toggleVideoCompareModel = useVideoGen((s) => s.toggleCompareModel);
   const [models, setModels] = useState<HiggsfieldModelInfo[]>([]);
   const [planType, setPlanType] = useState<string | null>(null);
   const [loadState, setLoadState] = useState<LoadState>("idle");
@@ -259,9 +274,15 @@ export function HiggsfieldModelSelector({
     () => new Set(selectedModels.map((model) => model.jobSetType)),
     [selectedModels],
   );
+  const selectedBuiltInVideoIds =
+    remoteVideoSelections.length > 0
+      ? videoCompareModelIds
+      : videoCompareModelIds.length >= 2
+        ? videoCompareModelIds
+        : [videoModelId];
   const triggerText =
-    fallbackLabel && !remoteSelection
-      ? fallbackLabel
+    media === "video"
+      ? getVideoTriggerText(selectedBuiltInVideoIds, remoteVideoSelections)
       : getTriggerText(selectedModels, selectedMagnificForTrigger, remoteSelection);
   const helperText = getHelperText(loadState, selectedModels.length);
   const sections = useMemo(() => buildSections(media, models, query), [media, models, query]);
@@ -311,9 +332,13 @@ export function HiggsfieldModelSelector({
           モデル
         </span>
         <span className="min-w-0 flex-1 truncate text-right">{triggerText}</span>
-        {selectedModels.length > 1 && (
+        {(media === "video"
+          ? remoteVideoSelections.length + selectedBuiltInVideoIds.length
+          : selectedModels.length) > 1 && (
           <span className="shrink-0 rounded bg-pink-500/20 px-1.5 py-0.5 text-xs font-semibold text-pink-200">
-            {selectedModels.length}
+            {media === "video"
+              ? remoteVideoSelections.length + selectedBuiltInVideoIds.length
+              : selectedModels.length}
           </span>
         )}
         <ChevronDownIcon />
@@ -347,6 +372,18 @@ export function HiggsfieldModelSelector({
           aspect={aspectForCost}
           onPickCodex={() => setSelectedModels([])}
           onToggleModel={toggleModel}
+          selectedBuiltInVideoIds={selectedBuiltInVideoIds}
+          onReplaceBuiltInVideoIds={(nextIds) => {
+            for (const id of videoCompareModelIds) toggleVideoCompareModel(id);
+            if (nextIds.length === 0) return;
+            setVideoModel(nextIds[0]);
+            const currentVideo = useVideoGen.getState();
+            useVideoGen.setState({
+              duration: clampDurationForModel(nextIds[0], currentVideo.duration),
+              aspectRatio: clampAspectForModel(nextIds[0], currentVideo.aspectRatio),
+            });
+            for (const id of nextIds) toggleVideoCompareModel(id);
+          }}
           onClose={() => setOpen(false)}
         />
       )}
@@ -372,6 +409,8 @@ function ModelPickerPopover({
   aspect,
   onPickCodex,
   onToggleModel,
+  selectedBuiltInVideoIds,
+  onReplaceBuiltInVideoIds,
   onClose,
 }: {
   media: "image" | "video";
@@ -389,6 +428,8 @@ function ModelPickerPopover({
   aspect: string;
   onPickCodex: () => void;
   onToggleModel: (model: SelectedModel) => void;
+  selectedBuiltInVideoIds: VideoModelId[];
+  onReplaceBuiltInVideoIds: (ids: VideoModelId[]) => void;
   onClose: () => void;
 }) {
   const [cost, setCost] = useState<CostState>({ kind: "idle" });
@@ -403,6 +444,8 @@ function ModelPickerPopover({
   const remoteMcpState = useAccounts((s) => s.remoteMcp);
   const remoteSelection = useRemoteMcpGen((s) => s.selections[media]);
   const setRemoteSelection = useRemoteMcpGen((s) => s.setSelection);
+  const remoteVideoSelections = useRemoteMcpGen((s) => s.videoSelections);
+  const setRemoteVideoSelections = useRemoteMcpGen((s) => s.setVideoSelections);
   const modelCatalogs = useRemoteMcpGen((s) => s.modelCatalogs);
   const setModelCatalog = useRemoteMcpGen((s) => s.setModelCatalog);
   const connectedRemoteProviders = useMemo(
@@ -420,16 +463,20 @@ function ModelPickerPopover({
   });
   const toolsRequestedRef = useRef(new Set<RemoteProviderId>());
   const magnificCount = selectedMagnificModels.length;
+  const selectedVideoCount = selectedBuiltInVideoIds.length + remoteVideoSelections.length;
   const [providerTab, setProviderTab] = useState<ProviderTab>(() => {
-    if (media === "video" && remoteSelection?.providerId === "magnific" && magnificAuthed) {
+    const selectedVideoProvider = remoteVideoSelections[0]?.providerId;
+    if (media === "video" && selectedVideoProvider === "magnific" && magnificAuthed) {
       return "magnific";
     }
     const selectedProvider = REMOTE_MCP_PROVIDERS.find(
-      (provider) => provider.id === remoteSelection?.providerId,
+      (provider) =>
+        provider.id === (media === "video" ? selectedVideoProvider : remoteSelection?.providerId),
     );
     if (selectedProvider && remoteMcpState[selectedProvider.id]?.authenticated) {
       return selectedProvider.id;
     }
+    if (media === "video") return "default";
     if (fallbackLabel) return "default";
     return magnificCount > 0 ? "magnific" : selectedCount > 0 ? "higgsfield" : "default";
   });
@@ -438,7 +485,7 @@ function ModelPickerPopover({
   );
 
   // プロバイダタブを開いた時点で、保存済みツール/モデルを再利用する。
-  // 未取得なら「モデル一覧ツール → model enum → 標準1件」の順で自動取得する。
+  // 未取得なら「モデル一覧ツール → 保存済み一覧 → model enum」の順で自動取得する。
   useEffect(() => {
     if (!activeRemoteProvider) return;
     const providerId = activeRemoteProvider.id;
@@ -460,15 +507,19 @@ function ModelPickerPopover({
         const tools = cachedTools ?? (await remoteMcp.listTools(providerId));
         if (cancelled) return;
         const catalogKey = remoteMcpCatalogKey(providerId, media);
+        const storedCatalog = modelCatalogs[catalogKey];
         const catalog =
-          modelCatalogs[catalogKey] ??
-          (await fetchRemoteMcpModelCatalog({
-            providerId,
-            providerLabel: activeRemoteProvider.label,
-            kind: media,
-            tools: tools.tools,
-            cachedModels: cachedCatalog?.models,
-          }));
+          storedCatalog &&
+          storedCatalog.source !== "standard" &&
+          storedCatalog.source !== "unavailable"
+            ? storedCatalog
+            : await fetchRemoteMcpModelCatalog({
+                providerId,
+                providerLabel: activeRemoteProvider.label,
+                kind: media,
+                tools: tools.tools,
+                cachedModels: cachedCatalog?.models,
+              });
         if (cancelled) return;
         setModelCatalog(catalogKey, catalog);
         setRemoteModels((current) => ({
@@ -522,7 +573,15 @@ function ModelPickerPopover({
         selected?.providerId === providerId &&
         !tools.tools.some((tool) => tool.name === selected.toolName)
       ) {
-        setRemoteSelection(media, null);
+        if (media === "video") {
+          setRemoteVideoSelections(
+            useRemoteMcpGen
+              .getState()
+              .videoSelections.filter((selection) => selection.providerId !== providerId),
+          );
+        } else {
+          setRemoteSelection(media, null);
+        }
       }
     } catch (error) {
       setRemoteModels((current) => ({
@@ -549,7 +608,11 @@ function ModelPickerPopover({
         tools: [generationTool],
         catalogOutput: result,
         catalogToolName: "video_models_list",
+        requireExplicitModels: true,
       });
+      if (catalog.source === "unavailable") {
+        throw new Error(catalog.warning ?? "Magnific の実モデル一覧を読み取れませんでした");
+      }
       setModelCatalog(remoteMcpCatalogKey("magnific", "video"), catalog);
       setMagnificVideoState({ kind: "ready", catalog });
     } catch (error) {
@@ -560,7 +623,7 @@ function ModelPickerPopover({
   useEffect(() => {
     if (media !== "video" || providerTab !== "magnific" || !magnificAuthed) return;
     const cached = modelCatalogs[remoteMcpCatalogKey("magnific", "video")];
-    if (cached) {
+    if (cached && cached.source !== "standard" && cached.source !== "unavailable") {
       setMagnificVideoState({ kind: "ready", catalog: cached });
       return;
     }
@@ -578,9 +641,23 @@ function ModelPickerPopover({
       !remoteMcpState[providerTab]?.authenticated
     ) {
       setProviderTab("default");
-      if (remoteSelection?.providerId === providerTab) setRemoteSelection(media, null);
+      if (media === "video") {
+        setRemoteVideoSelections(
+          remoteVideoSelections.filter((selection) => selection.providerId !== providerTab),
+        );
+      } else if (remoteSelection?.providerId === providerTab) {
+        setRemoteSelection(media, null);
+      }
     }
-  }, [media, providerTab, remoteMcpState, remoteSelection, setRemoteSelection]);
+  }, [
+    media,
+    providerTab,
+    remoteMcpState,
+    remoteSelection,
+    remoteVideoSelections,
+    setRemoteSelection,
+    setRemoteVideoSelections,
+  ]);
 
   // Magnific 未接続なのに magnific タブが開いたままだと、タブボタンは消えるのに
   // 中身 (モデル一覧+選択チェック) だけ残る (2026-06-10 実機FB)。強制的に default へ戻す。
@@ -610,7 +687,13 @@ function ModelPickerPopover({
     if (unauthStrikesRef.current < MAGNIFIC_UNAUTH_STRIKES) return;
     setProviderTab("default");
     if (magnificCount > 0) clearMagnific();
-    if (remoteSelection?.providerId === "magnific") setRemoteSelection(media, null);
+    if (media === "video") {
+      setRemoteVideoSelections(
+        remoteVideoSelections.filter((selection) => selection.providerId !== "magnific"),
+      );
+    } else if (remoteSelection?.providerId === "magnific") {
+      setRemoteSelection(media, null);
+    }
   }, [
     magnificAuthed,
     providerTab,
@@ -618,7 +701,9 @@ function ModelPickerPopover({
     clearMagnific,
     media,
     remoteSelection,
+    remoteVideoSelections,
     setRemoteSelection,
+    setRemoteVideoSelections,
   ]);
 
   useEffect(() => {
@@ -670,6 +755,11 @@ function ModelPickerPopover({
       ? magnificVideoState
       : null;
   const normalizedRemoteQuery = query.trim().toLowerCase();
+  const builtInVideoModels = VIDEO_MODELS.filter((model) =>
+    `${model.label} ${model.id} ${model.jobSetType} ${model.description}`
+      .toLowerCase()
+      .includes(normalizedRemoteQuery),
+  );
   const activeCatalogModels = (activeCatalog?.models ?? []).filter((model) =>
     `${model.name} ${model.id} ${model.label ?? ""}`
       .toLowerCase()
@@ -679,9 +769,13 @@ function ModelPickerPopover({
   const activeCatalogProviderLabel =
     activeRemoteProvider?.label ?? (isMagnificVideoTab ? "Magnific" : null);
   const selectedActiveCatalog =
-    activeCatalogProviderId && remoteSelection?.providerId === activeCatalogProviderId
-      ? remoteSelection
-      : null;
+    activeCatalogProviderId && media === "video"
+      ? remoteVideoSelections.find(
+          (selection) => selection.providerId === activeCatalogProviderId,
+        ) ?? null
+      : activeCatalogProviderId && remoteSelection?.providerId === activeCatalogProviderId
+        ? remoteSelection
+        : null;
   const displayedModelCount = activeRemoteProvider
     ? activeCatalogModels.length
     : providerTab === "magnific"
@@ -689,12 +783,14 @@ function ModelPickerPopover({
         ? activeCatalogModels.length
         : FEATURED_MAGNIFIC_IMAGE_MODELS.length
       : providerTab === "default"
-        ? 1
+        ? media === "video"
+          ? builtInVideoModels.length
+          : 1
         : totalVisibleModels;
 
   const confirmSelection = () => {
     if (activeRemoteProvider || isMagnificVideoTab) {
-      if (!selectedActiveCatalog) return;
+      if (media === "image" && !selectedActiveCatalog) return;
       onClose();
       return;
     }
@@ -705,21 +801,39 @@ function ModelPickerPopover({
     if (!activeCatalog || !activeCatalogProviderId || !activeCatalogProviderLabel) return;
     const tool = activeCatalog.generationTool;
     if (!tool || !tool.inputSchemaJson.trim()) return;
+    const nextSelection: RemoteMcpSelection = {
+      providerId: activeCatalogProviderId,
+      providerLabel: activeCatalogProviderLabel,
+      toolName: tool.name,
+      toolTitle: tool.title,
+      inputSchemaJson: tool.inputSchemaJson,
+      kind: media,
+      model,
+    };
+    if (media === "video") {
+      const selectedIndex = remoteVideoSelections.findIndex(
+        (selection) =>
+          selection.providerId === activeCatalogProviderId &&
+          selection.toolName === tool.name &&
+          selection.model?.id === model.id,
+      );
+      if (selectedIndex >= 0) {
+        setRemoteVideoSelections(
+          remoteVideoSelections.filter((_, index) => index !== selectedIndex),
+        );
+      } else if (selectedVideoCount < MAX_VIDEO_COMPARE_MODELS) {
+        // 単一内蔵モデルも compareModelIds に写し、接続先との混在選択を保持する。
+        if (remoteVideoSelections.length === 0 && selectedBuiltInVideoIds.length > 0) {
+          onReplaceBuiltInVideoIds(selectedBuiltInVideoIds);
+        }
+        setRemoteVideoSelections([...remoteVideoSelections, nextSelection]);
+      }
+      setSelectedModels([]);
+      clearMagnific();
+      return;
+    }
     const isSelected = selectedActiveCatalog?.model?.id === model.id;
-    setRemoteSelection(
-      media,
-      isSelected
-        ? null
-        : {
-            providerId: activeCatalogProviderId,
-            providerLabel: activeCatalogProviderLabel,
-            toolName: tool.name,
-            toolTitle: tool.title,
-            inputSchemaJson: tool.inputSchemaJson,
-            kind: media,
-            model,
-          },
-    );
+    setRemoteSelection(media, isSelected ? null : nextSelection);
     if (!isSelected) {
       setSelectedModels([]);
       clearMagnific();
@@ -792,15 +906,14 @@ function ModelPickerPopover({
           type="button"
           onClick={() => {
             setProviderTab("default");
-            if (!fallbackLabel) {
+            if (media === "image" && !fallbackLabel) {
               setSelectedModels([]);
               clearMagnific();
             }
-            setRemoteSelection(media, null);
           }}
           className={`shrink-0 whitespace-nowrap rounded-t-md px-2.5 py-1 text-[11px] font-bold ${providerTab === "default" ? "bg-[#1e1e1e] text-white" : "text-neutral-500 hover:text-white"}`}
         >
-          {fallbackLabel ? "既存" : "デフォルト"}
+          {media === "video" ? "内蔵" : fallbackLabel ? "既存" : "デフォルト"}
         </button>
         {!fallbackLabel && (
           <button
@@ -820,8 +933,8 @@ function ModelPickerPopover({
             type="button"
             onClick={() => {
               setProviderTab("magnific");
-              setSelectedModels([]);
-              if (media === "image" || remoteSelection?.providerId !== "magnific") {
+              if (media === "image") {
+                setSelectedModels([]);
                 setRemoteSelection(media, null);
               }
             }}
@@ -846,7 +959,7 @@ function ModelPickerPopover({
         style={{ overscrollBehavior: "contain", touchAction: "pan-y" }}
         onWheel={containHorizontalModelSwipe}
       >
-        {providerTab === "default" && (
+        {providerTab === "default" && media === "image" && (
           <div className="mb-3">
             <ModelRow
               title={fallbackLabel ?? CODEX_STANDARD_LABEL}
@@ -858,6 +971,48 @@ function ModelPickerPopover({
               variant="muted"
             />
           </div>
+        )}
+
+        {providerTab === "default" && media === "video" && (
+          <section className="mb-3">
+            <div className="mb-1 flex items-center justify-between gap-2 px-1">
+              <h4 className="text-[10px] font-semibold uppercase tracking-wide text-neutral-500">
+                内蔵 Higgsfield
+              </h4>
+              <span className="text-[10px] font-medium tabular-nums text-neutral-600">
+                {builtInVideoModels.length}
+              </span>
+            </div>
+            <div className="space-y-1">
+              {builtInVideoModels.map((videoModel) => {
+                const selected = selectedBuiltInVideoIds.includes(videoModel.id);
+                return (
+                  <ModelRow
+                    key={videoModel.id}
+                    title={videoModel.label}
+                    description={videoModel.description}
+                    details={videoModelSpecItems(videoModel)}
+                    icon="H"
+                    selected={selected}
+                    disabled={!selected && selectedVideoCount >= MAX_VIDEO_COMPARE_MODELS}
+                    onToggle={() => {
+                      if (selected && selectedVideoCount === 1) return;
+                      const next = selected
+                        ? selectedBuiltInVideoIds.filter((id) => id !== videoModel.id)
+                        : [...selectedBuiltInVideoIds, videoModel.id].slice(
+                            0,
+                            MAX_VIDEO_COMPARE_MODELS,
+                          );
+                      onReplaceBuiltInVideoIds(next);
+                    }}
+                  />
+                );
+              })}
+            </div>
+            <p className="mt-2 text-[10px] leading-relaxed text-neutral-500">
+              最大3モデル。2つ以上選ぶと、各モデルのおすすめ設定で比較生成します。
+            </p>
+          </section>
         )}
 
         {providerTab === "higgsfield" &&
@@ -1014,7 +1169,14 @@ function ModelPickerPopover({
               ) : (
                 <div className="space-y-1">
                   {activeCatalogModels.map((model) => {
-                    const selected = selectedActiveCatalog?.model?.id === model.id;
+                    const selected =
+                      media === "video"
+                        ? remoteVideoSelections.some(
+                            (selection) =>
+                              selection.providerId === activeCatalogProviderId &&
+                              selection.model?.id === model.id,
+                          )
+                        : selectedActiveCatalog?.model?.id === model.id;
                     const selectable = Boolean(
                       activeCatalog.generationTool?.inputSchemaJson.trim(),
                     );
@@ -1030,7 +1192,12 @@ function ModelPickerPopover({
                         }
                         icon={activeCatalogProviderLabel?.trim().charAt(0).toUpperCase() || "M"}
                         selected={selected}
-                        disabled={!selectable}
+                        disabled={
+                          !selectable ||
+                          (media === "video" &&
+                            !selected &&
+                            selectedVideoCount >= MAX_VIDEO_COMPARE_MODELS)
+                        }
                         onToggle={() => selectCatalogModel(model)}
                       />
                     );
@@ -1049,11 +1216,15 @@ function ModelPickerPopover({
         <div className="mb-2 flex items-center justify-between gap-2 text-[11px]">
           <span className="font-medium text-neutral-300">
             {activeRemoteProvider || isMagnificVideoTab
-              ? selectedActiveCatalog
-                ? `${activeCatalogProviderLabel}: ${selectedActiveCatalog.model?.label ?? selectedActiveCatalog.model?.name ?? "標準"}`
-                : `${activeCatalogProviderLabel}: 未選択`
+              ? media === "video" && selectedVideoCount >= 2
+                ? `${selectedVideoCount}モデル選択（最大${MAX_VIDEO_COMPARE_MODELS}）`
+                : selectedActiveCatalog
+                  ? `${activeCatalogProviderLabel}: ${selectedActiveCatalog.model?.label ?? selectedActiveCatalog.model?.name ?? "標準"}`
+                  : `${activeCatalogProviderLabel}: 未選択`
               : fallbackLabel && providerTab === "default"
-                ? fallbackLabel
+                ? media === "video"
+                  ? `${selectedVideoCount}モデル選択（最大${MAX_VIDEO_COMPARE_MODELS}）`
+                  : fallbackLabel
               : magnificCount === 1
               ? `Magnific: ${getMagnificModelName(selectedMagnificModels[0])}`
               : magnificCount >= 2
@@ -1070,15 +1241,31 @@ function ModelPickerPopover({
         <button
           type="button"
           onClick={confirmSelection}
-          disabled={Boolean((activeRemoteProvider || isMagnificVideoTab) && !selectedActiveCatalog)}
+          disabled={Boolean(
+            (activeRemoteProvider || isMagnificVideoTab) &&
+              media === "image" &&
+              !selectedActiveCatalog,
+          )}
           className="h-8 w-full rounded-md bg-pink-500 px-3 text-xs font-semibold text-white transition hover:bg-pink-600 disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-400"
         >
           {activeRemoteProvider || isMagnificVideoTab
-            ? selectedActiveCatalog
-              ? "このモデルを選択"
-              : "モデルを選択してください"
+            ? media === "video"
+              ? selectedVideoCount >= 2
+                ? `${selectedVideoCount}モデルで比較生成`
+                : remoteVideoSelections.length === 1
+                  ? "このモデルで生成"
+                  : "モデルを選択してください"
+              : selectedActiveCatalog
+                ? "このモデルを選択"
+                : "モデルを選択してください"
             : fallbackLabel && providerTab === "default"
-              ? "既存の動画設定を使う"
+              ? media === "video" && selectedVideoCount >= 2
+                ? `${selectedVideoCount}モデルで比較生成`
+                : media === "video" && remoteVideoSelections.length === 1
+                  ? "このモデルで生成"
+                  : media === "video" && selectedBuiltInVideoIds.length >= 2
+                    ? `${selectedBuiltInVideoIds.length}モデルで比較生成`
+                    : "このモデルで生成"
             : magnificCount >= 2
             ? `Magnific ${magnificCount} モデルで比較生成`
             : magnificCount === 1
@@ -1297,7 +1484,7 @@ function remoteVideoSpecDetails(
           .join(" / ")
       : "なし"
     : "未取得";
-  return [
+  const details = [
     { label: "開始・終了画像 (Start/End)", value: status },
     { label: "参照できる素材 (Reference)", value: references },
     {
@@ -1310,6 +1497,10 @@ function remoteVideoSpecDetails(
       value: specs.aspectRatios?.join(" / ") ?? "未取得",
     },
   ];
+  if (specs.modes) details.push({ label: "モード", value: specs.modes.join(" / ") });
+  if (specs.audio === "supported") details.push({ label: "音声", value: "対応" });
+  if (specs.multiCut === "supported") details.push({ label: "マルチカット", value: "対応" });
+  return details;
 }
 
 // このアプリの MOST は Codex 経由 GPT Image 2 で生成すること。
@@ -1343,6 +1534,21 @@ function getTriggerText(
   // 未選択時は常にデフォルト表示。loading/idle は静的カタログ即表示 (2026-06-10) に
   // より一瞬で ready になるため、「確認中」でトリガーを占有しない。
   return CODEX_STANDARD_LABEL;
+}
+
+function getVideoTriggerText(
+  builtInIds: readonly VideoModelId[],
+  remoteSelections: readonly RemoteMcpSelection[],
+): string {
+  const total = builtInIds.length + remoteSelections.length;
+  if (total >= 2) return `${total}モデルで比較`;
+  if (remoteSelections.length === 1) {
+    const selected = remoteSelections[0];
+    const name = selected.model?.label ?? selected.model?.name ?? selected.toolTitle ?? selected.toolName;
+    return `${selected.providerLabel}: ${name}`;
+  }
+  if (builtInIds.length >= 2) return `${builtInIds.length}モデルで比較`;
+  return findVideoModel(builtInIds[0])?.label ?? VIDEO_MODELS[0].label;
 }
 
 function getHelperText(loadState: LoadState, _selectedCount: number): string | null {

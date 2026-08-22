@@ -9,9 +9,15 @@ import {
   type RemoteMcpToolKind,
   type RemoteMcpToolLike,
 } from "./remoteMcpTools";
+import type { VideoDurationConstraint } from "./videoModels";
 
 export type RemoteMcpModelKind = RemoteMcpToolKind;
-export type RemoteMcpCatalogSource = "catalog" | "cache" | "enum" | "standard";
+export type RemoteMcpCatalogSource =
+  | "catalog"
+  | "cache"
+  | "enum"
+  | "standard"
+  | "unavailable";
 export type RemoteMcpSpecStatus = "supported" | "unsupported" | "unknown";
 export type RemoteMcpReferenceType = "image" | "video" | "motion";
 
@@ -21,7 +27,11 @@ export type RemoteMcpVideoSpecs = {
   referenceTypes: RemoteMcpReferenceType[] | null;
   referenceLimit: number | null;
   duration: string | null;
+  durationConstraint: VideoDurationConstraint | null;
   aspectRatios: string[] | null;
+  modes: string[] | null;
+  audio: RemoteMcpSpecStatus;
+  multiCut: RemoteMcpSpecStatus;
 };
 
 export type RemoteMcpCatalogModel = {
@@ -56,6 +66,8 @@ type BuildCatalogInput = {
   catalogToolName?: string;
   cachedModels?: readonly RemoteMcpDiscoveredModel[];
   warning?: string;
+  /** 一覧ツールが存在する接続先では、読めない応答を標準1件へ置き換えない。 */
+  requireExplicitModels?: boolean;
 };
 
 function normalized(value: unknown): string {
@@ -229,6 +241,26 @@ function modelFromValue(value: unknown): RemoteMcpCatalogModel | null {
   return model;
 }
 
+const MODEL_COLLECTION_KEYS = new Set([
+  "models",
+  "videomodels",
+  "imagemodels",
+  "availablemodels",
+  "modellist",
+  "data",
+  "results",
+  "items",
+]);
+const MODEL_WRAPPER_KEYS = new Set(["result", "output", "response", "catalog", "payload"]);
+
+function modelFromKeyedValue(key: string, value: unknown): RemoteMcpCatalogModel | null {
+  const record = objectRecord(value);
+  if (record) return modelFromValue({ id: key, ...record });
+  const name = scalarString(value);
+  if (!name) return null;
+  return modelFromValue({ id: key, name });
+}
+
 function collectModelValues(value: unknown, into: RemoteMcpCatalogModel[], inCollection = false) {
   if (Array.isArray(value)) {
     for (const item of value) {
@@ -242,10 +274,20 @@ function collectModelValues(value: unknown, into: RemoteMcpCatalogModel[], inCol
   if (!record) return;
   if (inCollection) {
     const model = modelFromValue(record);
-    if (model) into.push(model);
+    if (model) {
+      into.push(model);
+      return;
+    }
+    // { models: { "kling-3": { name: "Kling 3" } } } のような slug キー形式。
+    for (const [key, nested] of Object.entries(record)) {
+      if (MODEL_COLLECTION_KEYS.has(compactName(key))) continue;
+      const keyedModel = modelFromKeyedValue(key, nested);
+      if (keyedModel) into.push(keyedModel);
+    }
   }
-  for (const key of ["models", "data", "results", "items"]) {
-    if (record[key] !== undefined) collectModelValues(record[key], into, true);
+  for (const [key, nested] of Object.entries(record)) {
+    if (MODEL_COLLECTION_KEYS.has(compactName(key))) collectModelValues(nested, into, true);
+    else if (MODEL_WRAPPER_KEYS.has(compactName(key))) collectModelValues(nested, into, false);
   }
 }
 
@@ -259,6 +301,95 @@ function parseTextJson(text: string): unknown | null {
   }
 }
 
+function unquoteMarkdown(value: string): string {
+  return value
+    .trim()
+    .replace(/^[`*_"']+|[`*_"']+$/g, "")
+    .trim();
+}
+
+function markdownTextModels(text: string): RemoteMcpCatalogModel[] {
+  const models: RemoteMcpCatalogModel[] = [];
+  const lines = text.split(/\r?\n/);
+  let tableIdIndex = -1;
+  let tableNameIndex = -1;
+  let pendingYaml: Record<string, unknown> | null = null;
+  const flushYaml = () => {
+    if (!pendingYaml) return;
+    const model = modelFromValue(pendingYaml);
+    if (model) models.push(model);
+    pendingYaml = null;
+  };
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line) {
+      flushYaml();
+      continue;
+    }
+
+    const yamlField = line.match(/^[-*]?\s*(id|model[_ -]?id|slug|name|label|display[_ -]?name)\s*:\s*(.+)$/i);
+    if (yamlField) {
+      const key = compactName(yamlField[1]);
+      if ((key === "id" || key === "modelid" || key === "slug") && pendingYaml?.id) {
+        flushYaml();
+      }
+      pendingYaml ??= {};
+      const value = unquoteMarkdown(yamlField[2]);
+      if (key === "id" || key === "modelid" || key === "slug") pendingYaml.id = value;
+      else if (key === "label" || key === "displayname") pendingYaml.label = value;
+      else pendingYaml.name = value;
+      continue;
+    }
+    flushYaml();
+
+    if (line.startsWith("|") && line.endsWith("|")) {
+      const cells = line
+        .slice(1, -1)
+        .split("|")
+        .map(unquoteMarkdown);
+      if (cells.every((cell) => /^:?-{3,}:?$/.test(cell))) continue;
+      const normalizedCells = cells.map(compactName);
+      const nextIdIndex = normalizedCells.findIndex((cell) =>
+        ["id", "modelid", "slug", "model"].includes(cell),
+      );
+      const nextNameIndex = normalizedCells.findIndex((cell) =>
+        ["name", "label", "displayname", "modelname"].includes(cell),
+      );
+      if (nextIdIndex >= 0) {
+        tableIdIndex = nextIdIndex;
+        tableNameIndex = nextNameIndex;
+        continue;
+      }
+      if (tableIdIndex >= 0 && cells[tableIdIndex]) {
+        const model = modelFromValue({
+          id: cells[tableIdIndex],
+          name: cells[tableNameIndex >= 0 ? tableNameIndex : tableIdIndex],
+        });
+        if (model) models.push(model);
+      }
+      continue;
+    }
+
+    // Magnific を含む MCP 一覧でよく使われる Markdown 箇条書き:
+    // - **Kling 3.0** (`kling-3.0`) / - `kling-3.0` — Kling 3.0
+    if (!/^[-*+]\s+/.test(line)) continue;
+    const codeValues = [...line.matchAll(/`([^`]+)`/g)].map((match) => match[1].trim());
+    const id = codeValues.find((value) => /^[a-z0-9][a-z0-9._/-]{1,100}$/i.test(value));
+    if (!id) continue;
+    const bold = line.match(/\*\*([^*]+)\*\*/)?.[1]?.trim();
+    const afterCode = line
+      .replace(/^[-*+]\s+/, "")
+      .replace(/`[^`]+`/, "")
+      .replace(/^[\s:()\[\]—–-]+|[\s:()\[\]—–-]+$/g, "")
+      .trim();
+    const model = modelFromValue({ id, name: bold || afterCode || id, label: bold || undefined });
+    if (model) models.push(model);
+  }
+  flushYaml();
+  return models;
+}
+
 export function extractRemoteMcpCatalogModels(
   output: Pick<RemoteMcpQueryResult, "contentText" | "structuredContent">,
   hintedKind?: "image" | "video",
@@ -269,6 +400,7 @@ export function extractRemoteMcpCatalogModels(
   }
   const textJson = parseTextJson(output.contentText);
   if (textJson !== null) collectModelValues(textJson, models);
+  else models.push(...markdownTextModels(output.contentText));
 
   const unique = new Map<string, RemoteMcpCatalogModel>();
   for (const model of models) {
@@ -379,6 +511,105 @@ function formatDurationValue(value: unknown): string | null {
   return /秒|s$|sec/i.test(scalar) ? scalar : `${scalar}秒`;
 }
 
+function numericList(value: unknown): number[] | null {
+  const source = Array.isArray(value)
+    ? value
+    : typeof value === "string"
+      ? value.split(/[,|/]/)
+      : [value];
+  const numbers = source
+    .map((item) => {
+      if (typeof item === "number") return item;
+      const match = scalarString(item)?.match(/-?\d+(?:\.\d+)?/);
+      return match ? Number(match[0]) : Number.NaN;
+    })
+    .filter((item) => Number.isFinite(item));
+  return numbers.length > 0 ? [...new Set(numbers)].sort((a, b) => a - b) : null;
+}
+
+function durationConstraintFromValue(value: unknown): VideoDurationConstraint | null {
+  const record = objectRecord(value);
+  if (record) {
+    const values = numericList(record.values ?? record.options ?? record.enum);
+    if (values) {
+      const requestedDefault = numericList(record.default)?.[0];
+      return {
+        kind: "enum",
+        values,
+        default: requestedDefault && values.includes(requestedDefault) ? requestedDefault : values[0],
+      };
+    }
+    const minimum = numericList(record.min ?? record.minimum)?.[0];
+    const maximum = numericList(record.max ?? record.maximum)?.[0];
+    if (minimum !== undefined && maximum !== undefined) {
+      const step = numericList(record.step ?? record.multipleOf)?.[0] ?? 1;
+      const requestedDefault = numericList(record.default)?.[0];
+      return {
+        kind: "integer",
+        min: minimum,
+        max: maximum,
+        step,
+        default:
+          requestedDefault !== undefined && requestedDefault >= minimum && requestedDefault <= maximum
+            ? requestedDefault
+            : minimum,
+      };
+    }
+  }
+  if (typeof value === "string") {
+    const range = value.match(/(\d+(?:\.\d+)?)\s*(?:-|〜|~|to)\s*(\d+(?:\.\d+)?)/i);
+    if (range) {
+      const min = Number(range[1]);
+      const max = Number(range[2]);
+      if (Number.isFinite(min) && Number.isFinite(max) && max >= min) {
+        return { kind: "integer", min, max, step: 1, default: min };
+      }
+    }
+  }
+  const values = numericList(value);
+  return values
+    ? { kind: "enum", values, default: values[0] }
+    : null;
+}
+
+function durationConstraintFromSchema(fields: SchemaField[]): VideoDurationConstraint | null {
+  const field = fields.find(({ normalizedName }) =>
+    ["duration", "durationseconds", "seconds", "lengthseconds"].includes(normalizedName),
+  );
+  if (!field) return null;
+  const values = numericList(field.property.enum);
+  if (values) {
+    const requestedDefault = numericList(field.property.default)?.[0];
+    return {
+      kind: "enum",
+      values,
+      default: requestedDefault && values.includes(requestedDefault) ? requestedDefault : values[0],
+    };
+  }
+  const minimum = numericList(field.property.minimum)?.[0];
+  const maximum = numericList(field.property.maximum)?.[0];
+  if (minimum === undefined || maximum === undefined) return null;
+  const step = numericList(field.property.multipleOf)?.[0] ?? 1;
+  const requestedDefault = numericList(field.property.default)?.[0];
+  return {
+    kind: "integer",
+    min: minimum,
+    max: maximum,
+    step,
+    default:
+      requestedDefault !== undefined && requestedDefault >= minimum && requestedDefault <= maximum
+        ? requestedDefault
+        : minimum,
+  };
+}
+
+function durationConstraintLabel(constraint: VideoDurationConstraint | null): string | null {
+  if (!constraint) return null;
+  return constraint.kind === "enum"
+    ? constraint.values.map((value) => `${value}秒`).join(" / ")
+    : `${constraint.min}〜${constraint.max}秒${(constraint.step ?? 1) !== 1 ? `（${constraint.step}秒刻み）` : ""}`;
+}
+
 function durationFromSchema(fields: SchemaField[]): string | null {
   const field = fields.find(({ normalizedName }) =>
     ["duration", "durationseconds", "seconds", "lengthseconds"].includes(normalizedName),
@@ -397,6 +628,29 @@ function aspectRatiosFromSchema(fields: SchemaField[]): string[] | null {
     ["aspect", "aspectratio", "ratio"].includes(normalizedName),
   );
   return field ? stringList(field.property.enum) : null;
+}
+
+function schemaFeatureStatus(
+  parsed: { valid: boolean; fields: SchemaField[] },
+  pattern: RegExp,
+): RemoteMcpSpecStatus {
+  if (!parsed.valid) return "unknown";
+  return parsed.fields.some(({ normalizedName, property }) =>
+    pattern.test(normalized(`${normalizedName} ${property.title ?? ""} ${property.description ?? ""}`)),
+  )
+    ? "supported"
+    : "unknown";
+}
+
+function featureStatus(
+  metadata: Record<string, unknown> | undefined,
+  keys: readonly string[],
+  parsed: { valid: boolean; fields: SchemaField[] },
+  pattern: RegExp,
+): RemoteMcpSpecStatus {
+  const explicit = booleanMetadata(metadata, keys);
+  if (explicit !== null) return explicit ? "supported" : "unsupported";
+  return schemaFeatureStatus(parsed, pattern);
 }
 
 /** カタログのメタデータを優先し、不足分だけ生成ツール schema から読む。 */
@@ -459,15 +713,18 @@ export function deriveRemoteMcpVideoSpecs(
     if (limits.length > 0) referenceLimit = Math.max(...limits);
   }
 
+  const durationMetadata = deepMetadataValue(model.metadata, [
+    "durations",
+    "durationOptions",
+    "supportedDurations",
+    "duration",
+  ]);
+  const durationConstraint =
+    durationConstraintFromValue(durationMetadata) ?? durationConstraintFromSchema(parsed.fields);
   const duration =
-    formatDurationValue(
-      deepMetadataValue(model.metadata, [
-        "durations",
-        "durationOptions",
-        "supportedDurations",
-        "duration",
-      ]),
-    ) ?? durationFromSchema(parsed.fields);
+    durationConstraintLabel(durationConstraint) ??
+    formatDurationValue(durationMetadata) ??
+    durationFromSchema(parsed.fields);
   const aspectRatios =
     stringList(
       deepMetadataValue(model.metadata, [
@@ -477,7 +734,40 @@ export function deriveRemoteMcpVideoSpecs(
       ]),
     ) ?? aspectRatiosFromSchema(parsed.fields);
 
-  return { startEndImages, referenceTypes, referenceLimit, duration, aspectRatios };
+  const modes =
+    stringList(
+      deepMetadataValue(model.metadata, ["modes", "supportedModes", "generationModes"]),
+    ) ??
+    (() => {
+      const field = parsed.fields.find(({ normalizedName }) =>
+        ["generationmode", "qualitymode"].includes(normalizedName),
+      );
+      return field ? stringList(field.property.enum) : null;
+    })();
+  const audio = featureStatus(
+    model.metadata,
+    ["supportsAudio", "supportsSound", "nativeAudio", "audioGeneration"],
+    parsed,
+    /\b(audio|sound|native audio)\b/,
+  );
+  const multiCut = featureStatus(
+    model.metadata,
+    ["supportsMultiCut", "supportsMultishot", "multiCut", "multiShot"],
+    parsed,
+    /\b(multi cut|multicut|multi shot|multishot|shot count)\b/,
+  );
+
+  return {
+    startEndImages,
+    referenceTypes,
+    referenceLimit,
+    duration,
+    durationConstraint,
+    aspectRatios,
+    modes,
+    audio,
+    multiCut,
+  };
 }
 
 function modelEnumFromTool(tool: RemoteMcpToolInfo | null): RemoteMcpCatalogModel[] {
@@ -494,9 +784,11 @@ function modelEnumFromTool(tool: RemoteMcpToolInfo | null): RemoteMcpCatalogMode
 }
 
 function hintedKindFromToolName(toolName: string | undefined): "image" | "video" | undefined {
-  const name = normalized(toolName);
-  if (/\bvideo\b/.test(name)) return "video";
-  if (/\bimage\b/.test(name)) return "image";
+  // MCP のツール名は video_models_list のように `_` 区切りが多い。
+  // `_` は正規表現上の単語文字なので \b では区切れず、該当媒体を見失っていた。
+  const name = compactName(toolName ?? "");
+  if (name.includes("video")) return "video";
+  if (name.includes("image")) return "image";
   return undefined;
 }
 
@@ -532,15 +824,19 @@ export function buildRemoteMcpModelCatalog(input: BuildCatalogInput): RemoteMcpM
 
   models = models.filter((model) => model.kind === input.kind);
   if (models.length === 0) {
-    source = "standard";
-    models = [
-      {
-        id: `${input.providerId}-standard`,
-        name: `${input.providerLabel} 標準`,
-        kind: input.kind,
-        passModel: false,
-      },
-    ];
+    if (input.requireExplicitModels) {
+      source = "unavailable";
+    } else {
+      source = "standard";
+      models = [
+        {
+          id: `${input.providerId}-standard`,
+          name: `${input.providerLabel} 標準`,
+          kind: input.kind,
+          passModel: false,
+        },
+      ];
+    }
   }
 
   const unique = new Map<string, RemoteMcpCatalogModel>();
@@ -559,11 +855,15 @@ export function buildRemoteMcpModelCatalog(input: BuildCatalogInput): RemoteMcpM
     sourceToolName: input.catalogToolName,
     generationTool,
     models: [...unique.values()],
-    warning: input.warning,
+    warning:
+      input.warning ??
+      (source === "unavailable"
+        ? "モデル一覧の応答から実モデルを読み取れませんでした。"
+        : undefined),
   };
 }
 
-/** 一覧ツール→enum→標準1件の順で、1プロバイダ分のモデル一覧を取得する。 */
+/** 一覧ツール→cache→enum の順で取得。一覧ツール自体が無い時だけ標準1件へ退避する。 */
 export async function fetchRemoteMcpModelCatalog(
   input: Omit<BuildCatalogInput, "catalogOutput" | "catalogToolName" | "warning">,
 ): Promise<RemoteMcpModelCatalog> {
@@ -576,16 +876,17 @@ export async function fetchRemoteMcpModelCatalog(
       toolName: listTool.name,
       paramsJson: "{}",
     });
-    return buildRemoteMcpModelCatalog({
+    const catalog = buildRemoteMcpModelCatalog({
       ...input,
       catalogOutput: output,
       catalogToolName: listTool.name,
+      requireExplicitModels: true,
     });
+    if (catalog.source === "unavailable") {
+      throw new Error(catalog.warning);
+    }
+    return catalog;
   } catch (error) {
-    return buildRemoteMcpModelCatalog({
-      ...input,
-      catalogToolName: listTool.name,
-      warning: String(error),
-    });
+    throw new Error(`モデル一覧を取得できませんでした: ${String(error)}`);
   }
 }

@@ -21,6 +21,20 @@ export type VideoModelParam =
   | { kind: "integer"; name: string; label: string; min: number; max: number; default: number }
   | { kind: "boolean"; name: string; label: string; default: boolean };
 
+export type VideoDurationConstraint =
+  | { kind: "enum"; values: number[]; default: number }
+  | { kind: "integer"; default: number; min: number; max: number; step?: number };
+
+/** 内蔵モデルと接続先モデルを同じ設定 UI で扱うための最小共通仕様。 */
+export type VideoModelCapabilities = {
+  /** null は未取得。空配列は対応値なし。 */
+  duration: VideoDurationConstraint | null;
+  /** null は未取得。空配列は対応値なし。 */
+  aspectRatios: string[] | null;
+  /** null は未取得。比較時はおすすめ値を使うため空配列に絞る。 */
+  extraParams: VideoModelParam[] | null;
+};
+
 export type VideoModelDefinition = {
   id: VideoModelId;
   label: string;
@@ -30,9 +44,7 @@ export type VideoModelDefinition = {
   aspectRatios: string[];
   defaultAspectRatio: string;
   /** duration の制約 */
-  duration:
-    | { kind: "enum"; values: number[]; default: number }
-    | { kind: "integer"; default: number; min: number; max: number };
+  duration: VideoDurationConstraint;
   /** モデル固有パラメータ (mode/quality/resolution/sound/genre/model_variant 等) */
   extraParams: VideoModelParam[];
   /** i2v 入力フィールド名 (CLI フラグ名) */
@@ -197,6 +209,100 @@ export const ALL_VIDEO_ASPECT_RATIOS: string[] = (() => {
 /** モデルがその比率に対応しているか。未対応ならセレクタで disabled 表示する。 */
 export function modelSupportsAspect(model: VideoModelDefinition, ratio: string): boolean {
   return model.aspectRatios.includes(ratio);
+}
+
+/** 内蔵モデルの定義を、統一設定 UI 用の仕様へ変換する。 */
+export function videoModelCapabilities(
+  model: VideoModelDefinition,
+): VideoModelCapabilities {
+  return {
+    duration: model.duration,
+    aspectRatios: [...model.aspectRatios],
+    extraParams: [...model.extraParams],
+  };
+}
+
+/**
+ * 尺の制約を、画面で実際に選べる秒数へ展開する。
+ * integer は step 未指定なら1秒刻み。壊れた範囲は空配列にして偽の値を作らない。
+ */
+export function durationValuesForConstraint(
+  constraint: VideoDurationConstraint,
+): number[] {
+  if (constraint.kind === "enum") {
+    return [...new Set(constraint.values)]
+      .filter((value) => Number.isFinite(value))
+      .sort((left, right) => left - right);
+  }
+  const step = constraint.step ?? 1;
+  if (
+    !Number.isFinite(constraint.min) ||
+    !Number.isFinite(constraint.max) ||
+    !Number.isFinite(step) ||
+    step <= 0 ||
+    constraint.max < constraint.min
+  ) {
+    return [];
+  }
+  const values: number[] = [];
+  // 外部 schema の異常値で UI を固めないため、最大300候補で止める。
+  for (let value = constraint.min; value <= constraint.max && values.length < 300; value += step) {
+    values.push(Number(value.toFixed(6)));
+  }
+  return values;
+}
+
+/**
+ * 選択中モデルすべてが使える設定だけを返す。
+ * 1件でも仕様未取得なら、その項目は null のままにして汎用 UI + 注意書きへ回す。
+ */
+export function intersectVideoModelCapabilities(
+  capabilities: readonly VideoModelCapabilities[],
+): VideoModelCapabilities {
+  if (capabilities.length === 0) {
+    return { duration: null, aspectRatios: null, extraParams: null };
+  }
+
+  const duration = capabilities.some((item) => item.duration === null)
+    ? null
+    : (() => {
+        const lists = capabilities.map((item) =>
+          durationValuesForConstraint(item.duration as VideoDurationConstraint),
+        );
+        const common = lists[0].filter((value) =>
+          lists.slice(1).every((values) => values.includes(value)),
+        );
+        const target = capabilities[0].duration?.default ?? common[0] ?? 1;
+        const preferred = common.reduce(
+          (best, value) => {
+            const distance = Math.abs(value - target);
+            const bestDistance = Math.abs(best - target);
+            return distance < bestDistance || (distance === bestDistance && value < best)
+              ? value
+              : best;
+          },
+          common[0] ?? 1,
+        );
+        return { kind: "enum" as const, values: common, default: preferred };
+      })();
+
+  const aspectRatios = capabilities.some((item) => item.aspectRatios === null)
+    ? null
+    : (capabilities[0].aspectRatios ?? []).filter((ratio) =>
+        capabilities.slice(1).every((item) => item.aspectRatios?.includes(ratio)),
+      );
+
+  return {
+    duration,
+    aspectRatios,
+    // 比較生成はモデル固有項目を各モデルのおすすめ値へ任せる。
+    extraParams:
+      capabilities.length === 1
+        ? capabilities[0].extraParams === null
+          ? null
+          : [...capabilities[0].extraParams]
+        : [],
+  };
 }
 
 /**

@@ -82,6 +82,42 @@ describe("remote MCP model catalog", () => {
     ]);
   });
 
+  it("slug をキーにしたモデル辞書と Markdown 一覧から実モデル名を抽出する", () => {
+    const keyed = extractRemoteMcpCatalogModels(
+      {
+        structuredContent: {
+          result: {
+            videoModels: {
+              "kling-3.0": { name: "Kling 3.0", durations: [5, 10] },
+              "seedance-2.5": { label: "Seedance 2.5" },
+            },
+          },
+        },
+        contentText: "",
+      },
+      "video",
+    );
+    expect(keyed.map((model) => [model.id, model.name])).toEqual([
+      ["kling-3.0", "Kling 3.0"],
+      ["seedance-2.5", "Seedance 2.5"],
+    ]);
+
+    const markdown = extractRemoteMcpCatalogModels(
+      {
+        contentText: [
+          "Available video models:",
+          "- **Kling 3.0** (`kling-3.0`)",
+          "- `seedance-2.5` — Seedance 2.5",
+        ].join("\n"),
+      },
+      "video",
+    );
+    expect(markdown.map((model) => [model.id, model.name])).toEqual([
+      ["kling-3.0", "Kling 3.0"],
+      ["seedance-2.5", "Seedance 2.5"],
+    ]);
+  });
+
   it("一覧が無ければ主生成ツールの model enum を使う", () => {
     const catalog = buildRemoteMcpModelCatalog({
       providerId: "runway",
@@ -110,6 +146,40 @@ describe("remote MCP model catalog", () => {
     expect(catalog.models).toHaveLength(1);
     expect(catalog.models[0]).toMatchObject({ name: "Krea 標準", passModel: false });
   });
+
+  it("一覧ツールがある接続先では、読めない応答を標準1件へ置き換えない", () => {
+    const catalog = buildRemoteMcpModelCatalog({
+      providerId: "magnific",
+      providerLabel: "Magnific",
+      kind: "video",
+      tools: [tool("video_generate", { prompt: { type: "string" } })],
+      catalogOutput: { contentText: "モデル一覧を表示しました" },
+      catalogToolName: "video_models_list",
+      requireExplicitModels: true,
+    });
+    expect(catalog.source).toBe("unavailable");
+    expect(catalog.models).toEqual([]);
+    expect(catalog.warning).toContain("実モデル");
+  });
+
+  it("video_models_list の媒体ヒントで未知名の実モデルも動画一覧へ残す", () => {
+    const catalog = buildRemoteMcpModelCatalog({
+      providerId: "magnific",
+      providerLabel: "Magnific",
+      kind: "video",
+      tools: [tool("video_generate", { prompt: { type: "string" } })],
+      catalogOutput: {
+        structuredContent: { models: [{ id: "future-v1", name: "Future V1" }] },
+        contentText: "",
+      },
+      catalogToolName: "video_models_list",
+      requireExplicitModels: true,
+    });
+    expect(catalog.source).toBe("catalog");
+    expect(catalog.models.map((model) => [model.id, model.kind])).toEqual([
+      ["future-v1", "video"],
+    ]);
+  });
 });
 
 describe("remote MCP video specs", () => {
@@ -134,7 +204,11 @@ describe("remote MCP video specs", () => {
       referenceTypes: ["image", "motion"],
       referenceLimit: 4,
       duration: "3〜10秒",
+      durationConstraint: { kind: "integer", default: 3, min: 3, max: 10, step: 1 },
       aspectRatios: ["16:9", "9:16"],
+      modes: null,
+      audio: "unknown",
+      multiCut: "unknown",
     });
   });
 
@@ -161,7 +235,35 @@ describe("remote MCP video specs", () => {
       referenceTypes: null,
       referenceLimit: null,
       duration: null,
+      durationConstraint: null,
       aspectRatios: null,
+      modes: null,
+      audio: "unknown",
+      multiCut: "unknown",
+    });
+  });
+
+  it("モード・音声・マルチカットは明示された対応だけを仕様として返す", () => {
+    const specs = deriveRemoteMcpVideoSpecs(
+      {
+        metadata: {
+          supported_modes: ["standard", "fast"],
+          supports_audio: true,
+          supports_multi_cut: true,
+          duration: { min: 4, max: 12, step: 2, default: 6 },
+        },
+      },
+      null,
+    );
+    expect(specs.modes).toEqual(["standard", "fast"]);
+    expect(specs.audio).toBe("supported");
+    expect(specs.multiCut).toBe("supported");
+    expect(specs.durationConstraint).toEqual({
+      kind: "integer",
+      min: 4,
+      max: 12,
+      step: 2,
+      default: 6,
     });
   });
 });
