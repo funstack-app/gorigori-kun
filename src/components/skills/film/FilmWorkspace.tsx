@@ -101,7 +101,9 @@ function ProjectControls({
     setRestoringPath(backup.path);
     setRestoreError(null);
     try {
-      const count = await restoreFromBackup(backup.path);
+      const backupId = backup.path.split(/[\\/]/).pop();
+      if (!backupId) throw new Error("バックアップIDを確認できませんでした");
+      const count = await restoreFromBackup(backupId);
       setBackupsOpen(false);
       pushToast({
         kind: "success",

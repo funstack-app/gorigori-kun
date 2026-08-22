@@ -247,7 +247,8 @@ fn parse_cleanup_categories(values: &[String]) -> Result<BTreeSet<StorageCategor
 
 fn storage_scan_context() -> Result<StorageScanContext, String> {
     let gori_codex_homes = gori_cleanup_codex_homes();
-    let generation_codex_home = crate::codex::home::gen_codex_home_path();
+    let generation_codex_home = crate::codex::home::gen_codex_home_path()
+        .filter(|candidate| gori_codex_homes.contains(candidate));
     let legacy_codex_home = crate::codex::home::legacy_codex_home();
     let app_data_dir = dirs::data_dir().map(|dir| dir.join(crate::secrets::SERVICE_NAME));
     let cache_roots = dirs::home_dir()
@@ -404,7 +405,7 @@ fn classify_storage_path(
     if is_engine_log(path, gori_codex_homes) {
         return Some(StorageCategory::Logs);
     }
-    if app_data_dir.is_some_and(|root| path.starts_with(root)) && is_generation_backup(path) {
+    if app_data_dir.is_some_and(|root| is_generation_backup(path, root)) {
         return Some(StorageCategory::Backups);
     }
     if app_data_dir.is_some_and(|root| path.starts_with(root)) {
@@ -436,7 +437,10 @@ fn is_engine_log(path: &Path, gori_codex_homes: &[PathBuf]) -> bool {
     !index.is_empty() && index.bytes().all(|byte| byte.is_ascii_digit())
 }
 
-fn is_generation_backup(path: &Path) -> bool {
+fn is_generation_backup(path: &Path, app_data_dir: &Path) -> bool {
+    if path.parent() != Some(app_data_dir) {
+        return false;
+    }
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
         return false;
     };
@@ -447,8 +451,9 @@ fn is_generation_backup(path: &Path) -> bool {
     ]
     .iter()
     .any(|prefix| {
-        name.strip_prefix(prefix)
-            .is_some_and(|suffix| !suffix.is_empty())
+        name.strip_prefix(prefix).is_some_and(|suffix| {
+            !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+        })
     })
 }
 
@@ -670,29 +675,24 @@ fn delete_classified_tree(
 }
 
 fn remove_tree_without_following_links(path: &Path) -> Result<(u64, u64), String> {
-    let mut bytes = 0u64;
-    let mut count = 0u64;
-    let entries = std::fs::read_dir(path).map_err(|err| format!("read_dir: {err}"))?;
-    for entry in entries {
-        let entry = entry.map_err(|err| format!("directory entry: {err}"))?;
-        let item = entry.path();
-        let metadata = std::fs::symlink_metadata(&item)
-            .map_err(|err| format!("{} metadata: {err}", item.display()))?;
-        if metadata.file_type().is_symlink() {
-            // リンク先には触れず、退避フォルダ内のリンクそのものだけを外す。
-            std::fs::remove_file(&item)
-                .map_err(|err| format!("{} symlink: {err}", item.display()))?;
-        } else if metadata.is_dir() {
-            let (child_bytes, child_count) = remove_tree_without_following_links(&item)?;
-            bytes = bytes.saturating_add(child_bytes);
-            count = count.saturating_add(child_count);
-        } else if metadata.is_file() {
-            std::fs::remove_file(&item).map_err(|err| format!("{}: {err}", item.display()))?;
-            bytes = bytes.saturating_add(metadata.len());
-            count = count.saturating_add(1);
-        }
+    let metadata = std::fs::symlink_metadata(path).map_err(|err| format!("metadata: {err}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(format!(
+            "通常フォルダではないためスキップ: {}",
+            path.display()
+        ));
     }
-    std::fs::remove_dir(path).map_err(|err| format!("{}: {err}", path.display()))?;
+
+    // 容量計測は各項目を symlink_metadata で確認し、リンク先を一度も辿らない。
+    let (bytes, count, errors) = tree_stats_without_following_links(path);
+    if let Some(error) = errors.first() {
+        return Err(format!("削除前の安全確認に失敗: {error}"));
+    }
+
+    // std の remove_dir_all は Unix/Windows ともディレクトリハンドル基準で実装され、
+    // 削除途中に子フォルダがリンクへ置換されてもリンク先を再帰削除しない。
+    // 自前で子パスを組み直して再帰するより、この保証をそのまま使う。
+    std::fs::remove_dir_all(path).map_err(|err| format!("{}: {err}", path.display()))?;
     Ok((bytes, count.max(1)))
 }
 
@@ -873,16 +873,36 @@ pub(crate) fn webkit_cache_candidates(home: &std::path::Path) -> Vec<PathBuf> {
 /// `cleanup_target_codex_homes()` は容量表示向けに共通 `~/.codex` も含むため、
 /// 削除・書換処理からは意図的に使わない。
 pub(crate) fn gori_cleanup_codex_homes() -> Vec<PathBuf> {
-    let mut homes = Vec::new();
-    for candidate in [
+    let Some(app_data_dir) = dirs::data_dir().map(|dir| dir.join(crate::secrets::SERVICE_NAME))
+    else {
+        tracing::warn!(
+            target: "storage.cleanup",
+            "専用 app data を解決できないため CODEX_HOME の掃除をスキップ"
+        );
+        return Vec::new();
+    };
+    let candidates: Vec<PathBuf> = [
         crate::codex::home::gori_codex_home_path(),
         crate::codex::home::gen_codex_home_path(),
     ]
     .into_iter()
     .flatten()
-    {
-        if !homes.contains(&candidate) {
-            homes.push(candidate);
+    .collect();
+    validated_cleanup_codex_homes(candidates, &app_data_dir)
+}
+
+fn validated_cleanup_codex_homes(candidates: Vec<PathBuf>, app_data_dir: &Path) -> Vec<PathBuf> {
+    let mut homes = Vec::new();
+    for candidate in candidates {
+        match crate::codex::home::validate_cleanup_codex_home(&candidate, &app_data_dir) {
+            Ok(true) if !homes.contains(&candidate) => homes.push(candidate),
+            Ok(_) => {}
+            Err(reason) => tracing::warn!(
+                target: "storage.cleanup",
+                path = %candidate.display(),
+                reason = %reason,
+                "安全な専用 CODEX_HOME ではないため掃除・削除をスキップ"
+            ),
         }
     }
     homes
@@ -1504,12 +1524,26 @@ async fn dir_size_recursive(path: &std::path::Path) -> u64 {
 mod tests {
     use super::strip_image_payloads_from_line;
     use super::{
-        classify_storage_path, gori_cleanup_codex_homes, is_broken_quarantine_root,
-        parse_cleanup_categories, session_is_outside_safety_margin, webkit_cache_candidates,
-        StorageCategory, WEBKIT_PROTECTED_SUBDIRS,
+        classify_storage_path, delete_scan_targets, gori_cleanup_codex_homes,
+        is_broken_quarantine_root, parse_cleanup_categories, remove_tree_without_following_links,
+        scan_storage, session_is_outside_safety_margin, validated_cleanup_codex_homes,
+        webkit_cache_candidates, StorageCategory, StorageScanContext, WEBKIT_PROTECTED_SUBDIRS,
     };
+    use std::collections::BTreeSet;
+    use std::fs;
     use std::path::PathBuf;
-    use std::time::{Duration, SystemTime};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    fn unique_test_dir(label: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "gori-storage-{label}-{}-{nonce}",
+            std::process::id()
+        ))
+    }
 
     #[test]
     fn storage_paths_are_classified_by_the_shared_rules() {
@@ -1614,6 +1648,96 @@ mod tests {
                 path.display()
             );
         }
+    }
+
+    #[test]
+    fn backup_cleanup_keeps_lookalikes_under_skills_and_memories() {
+        let app_data = unique_test_dir("backup-scope");
+        let skills_backup = app_data.join("codex-home/skills/demo/projects.json.bak-20260822");
+        let memories_backup = app_data.join("codex-home/memories/film-projects.json.bak-note");
+        let valid_backup = app_data.join("film-projects.json.bak-20260822");
+        for path in [&skills_backup, &memories_backup, &valid_backup] {
+            fs::create_dir_all(path.parent().expect("parent")).expect("create parent");
+            fs::write(path, b"keep-or-delete").expect("write fixture");
+        }
+
+        let context = StorageScanContext {
+            gori_codex_homes: Vec::new(),
+            generation_codex_home: None,
+            legacy_codex_home: None,
+            app_data_dir: Some(app_data.clone()),
+            cache_roots: Vec::new(),
+        };
+        let scan = scan_storage(&context, SystemTime::now());
+        let selected = BTreeSet::from([StorageCategory::Backups]);
+        let report = delete_scan_targets(scan, &context, &selected);
+
+        assert!(
+            report.errors.is_empty(),
+            "unexpected errors: {:?}",
+            report.errors
+        );
+        assert!(!valid_backup.exists(), "正規バックアップは削除される");
+        assert!(skills_backup.exists(), "skills 配下の類似名は残す");
+        assert!(memories_backup.exists(), "memories 配下の類似名は残す");
+        let _ = fs::remove_dir_all(&app_data);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_codex_home_never_reaches_common_codex() {
+        use std::os::unix::fs::symlink;
+
+        let root = unique_test_dir("linked-home");
+        let app_data = root.join("app.codexframefactory");
+        let common_home = root.join("home/.codex");
+        let common_session = common_home.join("sessions/2026/rollout.jsonl");
+        fs::create_dir_all(common_session.parent().expect("session parent"))
+            .expect("create common");
+        fs::create_dir_all(&app_data).expect("create app data");
+        fs::write(&common_session, b"common history").expect("write common session");
+        let linked_home = app_data.join("codex-home");
+        symlink(&common_home, &linked_home).expect("create home symlink");
+
+        let homes = validated_cleanup_codex_homes(vec![linked_home], &app_data);
+        assert!(homes.is_empty(), "リンク HOME は掃除候補に入れない");
+
+        let context = StorageScanContext {
+            gori_codex_homes: homes,
+            generation_codex_home: None,
+            legacy_codex_home: Some(common_home),
+            app_data_dir: Some(app_data),
+            cache_roots: Vec::new(),
+        };
+        let scan = scan_storage(&context, SystemTime::now());
+        let selected = BTreeSet::from([StorageCategory::Sessions, StorageCategory::Logs]);
+        let _ = delete_scan_targets(scan, &context, &selected);
+        assert!(common_session.exists(), "共通 ~/.codex の実体は変更しない");
+        assert_eq!(
+            fs::read(&common_session).expect("read common session"),
+            b"common history"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn broken_cleanup_removes_only_symlink_not_its_target() {
+        use std::os::unix::fs::symlink;
+
+        let root = unique_test_dir("broken-link");
+        let quarantine = root.join("codex-home-gen/broken-1724313600");
+        let outside = root.join("outside");
+        let outside_file = outside.join("must-stay.txt");
+        fs::create_dir_all(&quarantine).expect("create quarantine");
+        fs::create_dir_all(&outside).expect("create outside");
+        fs::write(&outside_file, b"keep").expect("write outside");
+        symlink(&outside, quarantine.join("swapped-child")).expect("create child symlink");
+
+        remove_tree_without_following_links(&quarantine).expect("remove quarantine safely");
+        assert!(!quarantine.exists(), "退避フォルダは削除する");
+        assert!(outside_file.exists(), "リンク先の外部ファイルは残す");
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

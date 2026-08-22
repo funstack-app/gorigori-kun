@@ -28,7 +28,8 @@
 //! ある。さらに、旧 `~/.codex/generated_images` に残る過去画像も引き続き見える
 //! よう、watcher は旧ディレクトリも **読み取り専用で監視対象に含める** (消さない)。
 
-use std::path::PathBuf;
+use std::io::ErrorKind;
+use std::path::{Path, PathBuf};
 
 /// 専用 CODEX_HOME のサブディレクトリ名。
 /// `~/Library/Application Support/app.codexframefactory/codex-home` (macOS) /
@@ -77,6 +78,41 @@ pub fn gen_codex_home_path() -> Option<PathBuf> {
         data.join(crate::secrets::SERVICE_NAME)
             .join(GEN_CODEX_HOME_LEAF)
     })
+}
+
+/// 掃除対象の CODEX_HOME が、リンクではない専用 app data 直下の通常フォルダか確認する。
+///
+/// `canonicalize` だけでは末尾のシンボリックリンクを辿ってしまうため、先に
+/// `symlink_metadata` でリンク自体を拒否する。存在しない HOME は掃除対象が無いだけ
+/// なので `Ok(false)`、不審な実体は理由つき `Err` として呼び出し側で警告する。
+pub(crate) fn validate_cleanup_codex_home(
+    path: &Path,
+    app_data_dir: &Path,
+) -> Result<bool, String> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(format!("情報を確認できません: {err}")),
+    };
+    if metadata.file_type().is_symlink() {
+        return Err("シンボリックリンクのため対象外です".to_string());
+    }
+    if !metadata.is_dir() {
+        return Err("通常フォルダではないため対象外です".to_string());
+    }
+    if path.parent() != Some(app_data_dir) {
+        return Err("専用 app data 直下ではないため対象外です".to_string());
+    }
+
+    let canonical_app_data = std::fs::canonicalize(app_data_dir)
+        .map_err(|err| format!("専用 app data の実体を確認できません: {err}"))?;
+    let canonical_home = std::fs::canonicalize(path)
+        .map_err(|err| format!("CODEX_HOME の実体を確認できません: {err}"))?;
+    if canonical_home.parent() != Some(canonical_app_data.as_path()) {
+        return Err("CODEX_HOME の実体が専用 app data 直下にありません".to_string());
+    }
+
+    Ok(true)
 }
 
 /// 掃除・容量集計の対象になる CODEX_HOME を **1箇所で** 列挙する。

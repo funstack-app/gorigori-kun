@@ -5,6 +5,7 @@
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
+use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -21,6 +22,8 @@ use crate::state::AppState;
 const STATUS_TIMEOUT_SECS: u64 = 30;
 const LOGIN_TIMEOUT_SECS: u64 = 180;
 const DISCOVERY_RAW_LIMIT_CHARS: usize = 4_000;
+const DISCOVERY_RAW_RECORD_MAX_BYTES: usize = 64 * 1024;
+const DISCOVERY_RAW_FILE_MAX_BYTES: u64 = 512 * 1024;
 const DISCOVERY_DIR_NAME: &str = "provider-discovery";
 const DISCOVERY_PROBE_TOOL: &str = "__gori_probe__";
 
@@ -322,6 +325,42 @@ fn truncate_raw(raw: &str) -> String {
     raw.chars().take(DISCOVERY_RAW_LIMIT_CHARS).collect()
 }
 
+fn sanitize_discovery_raw(raw: &str, home: Option<&Path>) -> String {
+    super::diagnostics::redact_text(raw, home)
+}
+
+fn bounded_raw_log_line(
+    provider_id: &str,
+    recorded_at_ms: u128,
+    attempts: &[RemoteMcpDiscoveryAttempt],
+) -> Result<Vec<u8>, String> {
+    let mut bounded = Vec::new();
+    for attempt in attempts {
+        let mut attempt = attempt.clone();
+        attempt.raw = truncate_raw(&attempt.raw);
+        bounded.push(attempt);
+        let candidate = serde_json::to_vec(&RawDiscoveryLog {
+            provider_id,
+            recorded_at_ms,
+            attempts: &bounded,
+        })
+        .map_err(|error| format!("プロバイダ実測ログをJSON化できませんでした: {error}"))?;
+        if candidate.len().saturating_add(1) > DISCOVERY_RAW_RECORD_MAX_BYTES {
+            bounded.pop();
+            break;
+        }
+    }
+
+    let mut line = serde_json::to_vec(&RawDiscoveryLog {
+        provider_id,
+        recorded_at_ms,
+        attempts: &bounded,
+    })
+    .map_err(|error| format!("プロバイダ実測ログをJSON化できませんでした: {error}"))?;
+    line.push(b'\n');
+    Ok(line)
+}
+
 fn discovery_dir(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     app.path()
         .app_data_dir()
@@ -338,27 +377,38 @@ fn persist_discovery(
     fs::create_dir_all(&dir)
         .map_err(|error| format!("プロバイダ実測結果の保存先を作成できませんでした: {error}"))?;
 
-    let raw_path = dir.join(format!("{}.raw.jsonl", discovery.provider_id));
-    let mut raw_file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&raw_path)
-        .map_err(|error| format!("プロバイダ実測ログを開けませんでした: {error}"))?;
     let recorded_at_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis())
         .unwrap_or(0);
-    serde_json::to_writer(
-        &mut raw_file,
-        &RawDiscoveryLog {
-            provider_id: &discovery.provider_id,
-            recorded_at_ms,
-            attempts: raw_attempts,
-        },
-    )
-    .map_err(|error| format!("プロバイダ実測ログをJSON化できませんでした: {error}"))?;
+    let raw_line = bounded_raw_log_line(&discovery.provider_id, recorded_at_ms, raw_attempts)?;
+    let raw_path = dir.join(format!("{}.raw.jsonl", discovery.provider_id));
+    let existing_len = match fs::symlink_metadata(&raw_path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            return Err("プロバイダ実測ログが通常ファイルではありません".to_string());
+        }
+        Ok(metadata) => metadata.len(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(error) => {
+            return Err(format!(
+                "プロバイダ実測ログの情報を確認できませんでした: {error}"
+            ));
+        }
+    };
+    let reset_log =
+        existing_len.saturating_add(raw_line.len() as u64) > DISCOVERY_RAW_FILE_MAX_BYTES;
+    let mut options = OpenOptions::new();
+    options.create(true).write(true);
+    if reset_log {
+        options.truncate(true);
+    } else {
+        options.append(true);
+    }
+    let mut raw_file = options
+        .open(&raw_path)
+        .map_err(|error| format!("プロバイダ実測ログを開けませんでした: {error}"))?;
     raw_file
-        .write_all(b"\n")
+        .write_all(&raw_line)
         .map_err(|error| format!("プロバイダ実測ログを保存できませんでした: {error}"))?;
 
     // 一次資料の追記に成功した後で、UI向けの短いキャッシュを差し替える。
@@ -439,6 +489,7 @@ pub async fn remote_mcp_discover(
     let mut attempts = Vec::new();
     let mut raw_attempts = Vec::new();
     let mut models = Vec::new();
+    let home = dirs::home_dir();
 
     for tool in tools {
         let (ok, raw, extracted) = match call_tool(&state, provider.id, tool.name, json!({})).await
@@ -454,6 +505,7 @@ pub async fn remote_mcp_discover(
             }
             Err(error) => (false, error, Vec::new()),
         };
+        let raw = sanitize_discovery_raw(&raw, home.as_deref());
         models.extend(extracted);
         raw_attempts.push(RemoteMcpDiscoveryAttempt {
             tool: tool.name.to_string(),
@@ -687,6 +739,38 @@ mod tests {
         let truncated = truncate_raw(&raw);
         assert_eq!(truncated.chars().count(), DISCOVERY_RAW_LIMIT_CHARS);
         assert!(truncated.chars().all(|character| character == '餅'));
+    }
+
+    #[test]
+    fn discovery_raw_hides_secrets_and_home_path() {
+        let home = Path::new("/Users/example-user");
+        let raw = "file=/Users/example-user/work/output.json\ntoken=sk-must-not-leak\nAPI key: must-not-leak";
+        let sanitized = sanitize_discovery_raw(raw, Some(home));
+        let lower = sanitized.to_ascii_lowercase();
+
+        assert!(sanitized.contains("~/work/output.json"));
+        assert!(!sanitized.contains("/Users/example-user"));
+        assert!(!lower.contains("token"));
+        assert!(!lower.contains("sk-"));
+    }
+
+    #[test]
+    fn raw_log_record_has_a_hard_size_limit() {
+        let attempts: Vec<RemoteMcpDiscoveryAttempt> = (0..100)
+            .map(|index| RemoteMcpDiscoveryAttempt {
+                tool: format!("tool-{index}"),
+                ok: false,
+                raw: "餅".repeat(DISCOVERY_RAW_LIMIT_CHARS * 2),
+            })
+            .collect();
+        let line = bounded_raw_log_line("runway", 1, &attempts).expect("bounded log");
+
+        assert!(line.len() <= DISCOVERY_RAW_RECORD_MAX_BYTES);
+        let value: serde_json::Value = serde_json::from_slice(&line).expect("valid JSONL record");
+        assert!(
+            value["attempts"].as_array().expect("attempts").len() < attempts.len(),
+            "上限を超える応答は記録から切り詰める"
+        );
     }
 
     #[tokio::test]

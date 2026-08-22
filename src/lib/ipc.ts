@@ -889,9 +889,9 @@ export const filmProjects = {
   /** film-projects.json の世代バックアップ一覧（新しい順）。 */
   listBackups: () =>
     invoke<[string, number, number][]>("film_projects_list_backups"),
-  /** 一覧から選んだバックアップの JSON を、安全なパス検査つきで読む。 */
-  readBackup: (backupPath: string) =>
-    invoke<string>("film_projects_read_backup", { backupPath }),
+  /** 一覧から選んだバックアップの JSON を、ファイル名IDの検査つきで読む。 */
+  readBackup: (backupId: string) =>
+    invoke<string>("film_projects_read_backup", { backupId }),
 };
 
 // ──────────── Storage Settings ────────────

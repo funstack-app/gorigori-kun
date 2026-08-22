@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::storage::{
@@ -97,6 +97,51 @@ static FILM_PROJECTS_WRITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::co
 /// tmp 名のプロセス内ユニーク化カウンタ (film-projects 専用、epochナノ秒と併用)。
 static FILM_PROJECTS_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
+fn film_backup_stamp(file_name: &str, backup_id: &str) -> Option<u64> {
+    let suffix = backup_id.strip_prefix(&format!("{file_name}.bak-"))?;
+    if suffix.is_empty() || !suffix.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    suffix.parse().ok()
+}
+
+fn resolve_film_backup_path(projects_path: &Path, backup_id: &str) -> Result<PathBuf, String> {
+    let mut components = Path::new(backup_id).components();
+    let Some(Component::Normal(name)) = components.next() else {
+        return Err("不正なバックアップIDです".to_string());
+    };
+    if components.next().is_some() || name.to_str() != Some(backup_id) {
+        return Err("不正なバックアップIDです".to_string());
+    }
+
+    let file_name = projects_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "film-projects.json パス解決失敗".to_string())?;
+    if film_backup_stamp(file_name, backup_id).is_none() {
+        return Err("不正なバックアップIDです".to_string());
+    }
+    let dir = projects_path
+        .parent()
+        .ok_or_else(|| "film-projects.json 親ディレクトリ解決失敗".to_string())?;
+    let backup_path = dir.join(backup_id);
+    let metadata = fs::symlink_metadata(&backup_path)
+        .map_err(|_| "バックアップが見つかりません".to_string())?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err("バックアップが通常ファイルではありません".to_string());
+    }
+
+    let canonical_dir =
+        fs::canonicalize(dir).map_err(|err| format!("バックアップフォルダの確認に失敗: {err}"))?;
+    let canonical_backup =
+        fs::canonicalize(&backup_path).map_err(|err| format!("バックアップの確認に失敗: {err}"))?;
+    if canonical_backup.parent() != Some(canonical_dir.as_path()) {
+        return Err("バックアップフォルダ直下のファイルではありません".to_string());
+    }
+
+    Ok(backup_path)
+}
+
 /// film-projects.json を読み出す。存在しなければ**空文字列**を返す。
 #[tauri::command]
 pub async fn film_projects_read() -> Result<String, String> {
@@ -119,7 +164,6 @@ pub async fn film_projects_list_backups() -> Result<Vec<(String, u64, usize)>, S
     let dir = path
         .parent()
         .ok_or_else(|| "film-projects.json 親ディレクトリ解決失敗".to_string())?;
-    let prefix = format!("{file_name}.bak-");
     let mut out: Vec<(String, u64, usize)> = Vec::new();
     if let Ok(rd) = fs::read_dir(dir) {
         for entry in rd.filter_map(|e| e.ok()) {
@@ -128,10 +172,18 @@ pub async fn film_projects_list_backups() -> Result<Vec<(String, u64, usize)>, S
                 Some(n) => n.to_string(),
                 None => continue,
             };
-            if !name.starts_with(&prefix) {
+            let Some(stamp) = film_backup_stamp(file_name, &name) else {
+                continue;
+            };
+            let metadata = match fs::symlink_metadata(&p) {
+                Ok(metadata) if !metadata.file_type().is_symlink() && metadata.is_file() => {
+                    metadata
+                }
+                _ => continue,
+            };
+            if metadata.len() == 0 {
                 continue;
             }
-            let stamp: u64 = name[prefix.len()..].parse().unwrap_or(0);
             let count = fs::read_to_string(&p)
                 .ok()
                 .and_then(|c| count_film_projects(&c))
@@ -148,23 +200,12 @@ pub async fn film_projects_list_backups() -> Result<Vec<(String, u64, usize)>, S
 }
 
 /// 指定したバックアップファイルの中身 (JSON文字列) を返す。
-/// パスは film_projects_list_backups が返した命名に限定する。
+/// 絶対パスは受け取らず、一覧から取り出したファイル名だけをバックアップIDとして使う。
 #[tauri::command]
-pub async fn film_projects_read_backup(backup_path: String) -> Result<String, String> {
-    let path = film_projects_file_path()?;
-    let file_name = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .ok_or_else(|| "film-projects.json パス解決失敗".to_string())?;
-    let dir = path
-        .parent()
-        .ok_or_else(|| "film-projects.json 親ディレクトリ解決失敗".to_string())?;
-    let prefix = dir.join(format!("{file_name}.bak-"));
-    let bak = PathBuf::from(&backup_path);
-    if !backup_path.starts_with(&*prefix.to_string_lossy()) || !bak.exists() {
-        return Err("不正なバックアップパスです".to_string());
-    }
-    fs::read_to_string(&bak).map_err(|err| format!("バックアップ読込失敗: {err}"))
+pub async fn film_projects_read_backup(backup_id: String) -> Result<String, String> {
+    let projects_path = film_projects_file_path()?;
+    let backup_path = resolve_film_backup_path(&projects_path, &backup_id)?;
+    fs::read_to_string(&backup_path).map_err(|err| format!("バックアップ読込失敗: {err}"))
 }
 
 /// film-projects.json に書き込む。
@@ -203,7 +244,21 @@ pub async fn film_projects_write(content: String, allow_empty: Option<bool>) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::{count_film_projects, guard_film_projects_write};
+    use super::{count_film_projects, guard_film_projects_write, resolve_film_backup_path};
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_test_dir(label: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "gori-film-storage-{label}-{}-{nonce}",
+            std::process::id()
+        ))
+    }
 
     fn film_projects_json(count: usize) -> String {
         let projects: Vec<serde_json::Value> = (0..count)
@@ -246,5 +301,51 @@ mod tests {
             .expect_err("corrupt incoming JSON must be treated as zero items");
 
         assert!(error.contains("空のフィルムプロジェクト"));
+    }
+
+    #[test]
+    fn film_backup_id_accepts_only_direct_known_regular_file() {
+        let dir = unique_test_dir("backup-id");
+        fs::create_dir_all(&dir).expect("create backup dir");
+        let projects_path = dir.join("film-projects.json");
+        let backup_id = "film-projects.json.bak-1724313600000";
+        let backup_path = dir.join(backup_id);
+        fs::write(&backup_path, film_projects_json(2)).expect("write backup");
+
+        assert_eq!(
+            resolve_film_backup_path(&projects_path, backup_id).expect("valid backup"),
+            backup_path
+        );
+        for invalid in [
+            "../film-projects.json.bak-1724313600000",
+            "/tmp/film-projects.json.bak-1724313600000",
+            "nested/film-projects.json.bak-1724313600000",
+            "film-projects.json.bak-note",
+            "projects.json.bak-1724313600000",
+        ] {
+            assert!(
+                resolve_film_backup_path(&projects_path, invalid).is_err(),
+                "不正IDを拒否する: {invalid}"
+            );
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn film_backup_reader_rejects_symlink_file() {
+        use std::os::unix::fs::symlink;
+
+        let root = unique_test_dir("backup-link");
+        let dir = root.join("data");
+        fs::create_dir_all(&dir).expect("create backup dir");
+        let projects_path = dir.join("film-projects.json");
+        let outside = root.join("outside.json");
+        fs::write(&outside, film_projects_json(2)).expect("write outside");
+        let backup_id = "film-projects.json.bak-1724313600000";
+        symlink(&outside, dir.join(backup_id)).expect("create backup symlink");
+
+        assert!(resolve_film_backup_path(&projects_path, backup_id).is_err());
+        let _ = fs::remove_dir_all(&root);
     }
 }

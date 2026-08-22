@@ -80,7 +80,7 @@ fn display_path_without_username(path: &Path, home: Option<&Path>) -> String {
     path.display().to_string()
 }
 
-fn redact_text(value: &str, home: Option<&Path>) -> String {
+pub(crate) fn redact_text(value: &str, home: Option<&Path>) -> String {
     let home_text = home.map(|path| path.display().to_string());
     value
         .lines()
@@ -90,10 +90,14 @@ fn redact_text(value: &str, home: Option<&Path>) -> String {
                 "sk-",
                 "token",
                 "api_key",
+                "api-key",
+                "api key",
                 "apikey",
                 "authorization",
                 "bearer",
                 "secret",
+                "password",
+                "credential",
             ]
             .iter()
             .any(|marker| lower.contains(marker))
@@ -204,35 +208,18 @@ async fn diagnose_ffmpeg() -> CommandDiagnostic {
 
 async fn diagnose_temporary_storage() -> TemporaryStorageDiagnostic {
     match super::storage_cleanup::storage_breakdown().await {
-        Ok(breakdown) => match serde_json::to_value(breakdown) {
-            Ok(value) => {
-                let total_bytes = value.get("totalBytes").and_then(serde_json::Value::as_u64);
-                let error_count = value
-                    .get("errors")
-                    .and_then(serde_json::Value::as_array)
-                    .map_or(0, Vec::len);
-                TemporaryStorageDiagnostic {
-                    status: if total_bytes.is_some() {
-                        "ok".to_string()
-                    } else {
-                        "unsupported".to_string()
-                    },
-                    total_bytes,
-                    warning: total_bytes.is_some_and(|bytes| bytes > 10 * 1024 * 1024 * 1024),
-                    error_count,
-                    reason: total_bytes
-                        .is_none()
-                        .then(|| "一時データの合計を読み取れませんでした".to_string()),
-                }
+        Ok(breakdown) => {
+            // 診断の「一時データ」は、画面から実際に削除できる量だけを合計する。
+            // appData の作品・登録データや共通 ~/.codex は混ぜない。
+            let total_bytes = deletable_temporary_storage_bytes(&breakdown);
+            TemporaryStorageDiagnostic {
+                status: "ok".to_string(),
+                total_bytes: Some(total_bytes),
+                warning: total_bytes > 10 * 1024 * 1024 * 1024,
+                error_count: breakdown.errors.len(),
+                reason: None,
             }
-            Err(_) => TemporaryStorageDiagnostic {
-                status: "unsupported".to_string(),
-                total_bytes: None,
-                warning: false,
-                error_count: 0,
-                reason: Some("一時データの結果を整形できませんでした".to_string()),
-            },
-        },
+        }
         Err(_) => TemporaryStorageDiagnostic {
             status: "unavailable".to_string(),
             total_bytes: None,
@@ -241,6 +228,18 @@ async fn diagnose_temporary_storage() -> TemporaryStorageDiagnostic {
             reason: Some("一時データを確認できませんでした".to_string()),
         },
     }
+}
+
+fn deletable_temporary_storage_bytes(breakdown: &crate::storage_cleanup::StorageBreakdown) -> u64 {
+    [
+        breakdown.sessions.deletable_bytes,
+        breakdown.logs.deletable_bytes,
+        breakdown.webview_cache.deletable_bytes,
+        breakdown.backups.deletable_bytes,
+        breakdown.broken_quarantine.deletable_bytes,
+    ]
+    .into_iter()
+    .fold(0u64, u64::saturating_add)
 }
 
 fn format_environment_report(environment: &DiagnosticEnvironment, home: Option<&Path>) -> String {
@@ -393,5 +392,20 @@ mod tests {
         assert!(!report.contains("/Users/example-user"));
         assert!(!lower.contains("sk-"));
         assert!(!lower.contains("token"));
+    }
+
+    #[test]
+    fn temporary_storage_total_excludes_non_deletable_app_data() {
+        let mut breakdown = crate::storage_cleanup::StorageBreakdown::default();
+        breakdown.sessions.deletable_bytes = 10;
+        breakdown.logs.deletable_bytes = 20;
+        breakdown.webview_cache.deletable_bytes = 30;
+        breakdown.backups.deletable_bytes = 40;
+        breakdown.broken_quarantine.deletable_bytes = 50;
+        breakdown.app_data.bytes = 9_000;
+        breakdown.common_codex.bytes = 8_000;
+        breakdown.total_bytes = 17_150;
+
+        assert_eq!(deletable_temporary_storage_bytes(&breakdown), 150);
     }
 }
