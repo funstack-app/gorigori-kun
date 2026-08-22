@@ -983,6 +983,52 @@ export const filmProjects = {
     invoke<string>("film_projects_read_backup", { backupId }),
 };
 
+// ──────────── Asset Ledger ────────────
+
+export type AssetLedgerType = "character" | "scene" | "look" | "prop" | "custom";
+
+export type AssetLedgerSource =
+  | "character-register"
+  | "preset"
+  | "film"
+  | "library"
+  | "import";
+
+export type AssetLedgerEntry = {
+  id: string;
+  type: AssetLedgerType;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+  primaryImagePath: string | null;
+  imagePaths: string[];
+  /** 空文字列は「生成指示文なし」を表す。推測した文は入れない。 */
+  prompt: string;
+  negativePrompt: string | null;
+  source: AssetLedgerSource;
+  locked: boolean;
+  tags: string[];
+};
+
+export type AssetLedgerFile = {
+  version: 1;
+  assets: AssetLedgerEntry[];
+};
+
+export type AssetLedgerBackupRow = [backupId: string, at: number, count: number];
+
+/** assets-ledger.json の正本を扱う薄い IPC 境界。 */
+export const assetLedger = {
+  read: () => invoke<AssetLedgerFile>("assets_ledger_read"),
+  upsert: (asset: AssetLedgerEntry) =>
+    invoke<AssetLedgerEntry>("assets_ledger_upsert", { asset }),
+  delete: (id: string) => invoke<void>("assets_ledger_delete", { id }),
+  listBackups: () =>
+    invoke<AssetLedgerBackupRow[]>("assets_ledger_list_backups"),
+  readBackup: (backupId: string) =>
+    invoke<AssetLedgerFile>("assets_ledger_read_backup", { backupId }),
+};
+
 // ──────────── Storage Settings ────────────
 // 生成画像のローカル保存先。デフォルトは ~/Pictures/GORI GORI/。
 // 設定ファイルは ~/Library/Application Support/app.codexframefactory/storage-settings.json。

@@ -1,3 +1,4 @@
+pub mod assets_ledger;
 pub mod audio_probe;
 pub mod auth;
 pub mod batch_gen;
