@@ -142,10 +142,12 @@ function StatusLine({ ok, children }: { ok: boolean; children: string }) {
 function BlockIdListInput({
   blockIds,
   placeholder,
+  disabled = false,
   onCommit,
 }: {
   blockIds: string[];
   placeholder: string;
+  disabled?: boolean;
   onCommit: (blockIds: string[]) => void;
 }) {
   const joined = blockIds.join(", ");
@@ -158,6 +160,7 @@ function BlockIdListInput({
   return (
     <input
       value={draft}
+      disabled={disabled}
       onChange={(event) => setDraft(event.target.value)}
       onBlur={() => onCommit(splitBlockIds(draft))}
       onKeyDown={(event) => {
@@ -438,6 +441,13 @@ export function DesignPhasePanel({ project }: { project: FilmProject }) {
         status: "unplanned",
         pairKey: null,
         pairSide: null,
+        promptDraft: "",
+        generatedImagePaths: [],
+        lastGeneratedPrompt: null,
+        canonicalImagePath: null,
+        ngNotes: [],
+        stressTest: null,
+        locked: false,
       },
     ]);
   }
@@ -519,7 +529,7 @@ export function DesignPhasePanel({ project }: { project: FilmProject }) {
           <button
             type="button"
             onClick={() => void generateAssetLedger()}
-            disabled={!scriptReady || Boolean(runningText) || generatingLooks}
+            disabled={!scriptReady || Boolean(runningText) || generatingLooks || project.assets.some((asset) => asset.locked)}
             className="rounded-md bg-pink-500 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-pink-400 disabled:cursor-not-allowed disabled:opacity-40"
           >
             {project.assets.length > 0 ? "台帳を作り直す" : "台帳を作る"}
@@ -552,6 +562,7 @@ export function DesignPhasePanel({ project }: { project: FilmProject }) {
                     <td className="border-b border-[#252525] px-2 py-2">
                       <input
                         value={asset.name}
+                        disabled={asset.locked}
                         onChange={(event) => updateAsset(index, { name: event.target.value })}
                         className="h-9 w-48 rounded border border-[#303030] bg-[#111111] px-2 outline-none focus:border-pink-500"
                       />
@@ -559,6 +570,7 @@ export function DesignPhasePanel({ project }: { project: FilmProject }) {
                     <td className="border-b border-[#252525] px-2 py-2">
                       <select
                         value={asset.type}
+                        disabled={asset.locked}
                         onChange={(event) => changeAssetType(index, event.target.value as AssetType)}
                         className="h-9 rounded border border-[#303030] bg-[#111111] px-2 outline-none focus:border-pink-500"
                       >
@@ -570,6 +582,7 @@ export function DesignPhasePanel({ project }: { project: FilmProject }) {
                     <td className="border-b border-[#252525] px-2 py-2">
                       <select
                         value={asset.importance}
+                        disabled={asset.locked}
                         onChange={(event) => updateAsset(index, { importance: event.target.value as AssetImportance })}
                         className="h-9 rounded border border-[#303030] bg-[#111111] px-2 outline-none focus:border-pink-500"
                       >
@@ -581,6 +594,7 @@ export function DesignPhasePanel({ project }: { project: FilmProject }) {
                     <td className="border-b border-[#252525] px-2 py-2">
                       <BlockIdListInput
                         blockIds={asset.blockIds}
+                        disabled={asset.locked}
                         placeholder={blockIds.join(", ")}
                         onCommit={(nextBlockIds) => updateAsset(index, { blockIds: nextBlockIds })}
                       />
@@ -589,12 +603,14 @@ export function DesignPhasePanel({ project }: { project: FilmProject }) {
                       <div className="flex gap-1.5">
                         <input
                           value={asset.pairKey ?? ""}
+                          disabled={asset.locked}
                           onChange={(event) => updateAsset(index, { pairKey: event.target.value || null })}
                           placeholder="組名"
                           className="h-9 w-24 rounded border border-[#303030] bg-[#111111] px-2 outline-none placeholder:text-zinc-700 focus:border-pink-500"
                         />
                         <select
                           value={asset.pairSide ?? ""}
+                          disabled={asset.locked}
                           onChange={(event) => updateAsset(index, { pairSide: (event.target.value || null) as AssetPairSide })}
                           className="h-9 rounded border border-[#303030] bg-[#111111] px-2 outline-none focus:border-pink-500"
                         >
@@ -607,8 +623,9 @@ export function DesignPhasePanel({ project }: { project: FilmProject }) {
                     <td className="border-b border-[#252525] px-2 py-2">
                       <button
                         type="button"
+                        disabled={asset.locked}
                         onClick={() => saveAssets(project.assets.filter((_, assetIndex) => assetIndex !== index))}
-                        className="rounded px-2 py-1.5 text-zinc-500 transition hover:bg-red-500/10 hover:text-red-300"
+                        className="rounded px-2 py-1.5 text-zinc-500 transition hover:bg-red-500/10 hover:text-red-300 disabled:cursor-not-allowed disabled:opacity-30"
                       >
                         削除
                       </button>
@@ -635,7 +652,7 @@ export function DesignPhasePanel({ project }: { project: FilmProject }) {
         <button
           type="button"
           onClick={renumberAssetIds}
-          disabled={project.assets.length === 0}
+          disabled={project.assets.length === 0 || project.assets.some((asset) => asset.locked)}
           className="ml-2 mt-3 rounded-md border border-[#3a3a3a] px-3 py-2 text-xs font-semibold text-zinc-300 transition hover:bg-[#242424] disabled:opacity-40"
         >
           IDを自動で振り直す
@@ -643,6 +660,11 @@ export function DesignPhasePanel({ project }: { project: FilmProject }) {
         <p className="mt-3 text-[11px] leading-5 text-zinc-500">
           同じ物の別状態は①②でそろえます。片方だけ作ると、伏線の回収が壊れます。
         </p>
+        {project.assets.some((asset) => asset.locked) ? (
+          <p className="mt-2 text-[11px] leading-5 text-amber-200">
+            ロック済みの行は編集・削除・ID振り直しができません。変える場合は、そのアセットを使った生成物を全部作り直す必要があります。
+          </p>
+        ) : null}
 
         {assetIssues.length > 0 || pairWarnings.length > 0 ? (
           <div className="mt-4 rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3">

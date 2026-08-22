@@ -187,6 +187,13 @@ export function parseAssetLedgerResponse(raw: string): AssetParseResult {
       status: "unplanned",
       pairKey: null,
       pairSide: null,
+      promptDraft: "",
+      generatedImagePaths: [],
+      lastGeneratedPrompt: null,
+      canonicalImagePath: null,
+      ngNotes: [],
+      stressTest: null,
+      locked: false,
     });
   }
 

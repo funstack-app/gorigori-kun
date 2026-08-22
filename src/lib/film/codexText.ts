@@ -15,6 +15,7 @@ export type FilmTextTurnLabel =
   | "シーンリスト"
   | "ブロック脚本"
   | "アセット台帳"
+  | "アセットプロンプト"
   | "ルック提案"
   | "Style Prefix";
 

@@ -1,6 +1,10 @@
 import { create } from "zustand";
 
 import { filmProjects } from "../ipc";
+import {
+  getAssetFactoryGateState,
+  normalizeFilmAsset,
+} from "../film/assetFactory";
 import { validateAssetLedger } from "../film/assetParse";
 import type {
   AssetLedgerEntry,
@@ -50,6 +54,11 @@ type FilmProjectState = {
   saveBlocks: (blockScriptText: string, blocks: FilmBlock[]) => void;
   approveStage: (stage: FilmScriptApprovalStage) => boolean;
   saveAssets: (assets: AssetLedgerEntry[]) => void;
+  updateAssetFactoryAsset: (
+    assetId: string,
+    update: (asset: AssetLedgerEntry) => AssetLedgerEntry,
+  ) => void;
+  completeAssetFactory: () => boolean;
   saveForeshadow: (entries: ForeshadowEntry[]) => void;
   saveLookMaster: (path: string | null, description?: string) => void;
   saveStylePrefix: (stylePrefix: string) => void;
@@ -98,7 +107,7 @@ function normalizedProject(project: FilmProject): FilmProject {
       blocks: project.approvals.blocks ?? null,
       look: project.approvals.look ?? null,
     },
-    assets: (project.assets ?? []).map((asset) => ({
+    assets: (project.assets ?? []).map((asset) => normalizeFilmAsset({
       ...asset,
       type: asset.type ?? assetTypeFromId(asset.id),
       status: asset.status ?? "unplanned",
@@ -494,7 +503,46 @@ export const useFilmProjectStore = create<FilmProjectState>((set, get) => ({
   },
 
   saveAssets: (assets) => {
-    updateActiveDesign(get, set, (project) => ({ ...project, assets }));
+    updateActiveDesign(get, set, (project) => {
+      const currentById = new Map(project.assets.map((asset) => [asset.id, normalizeFilmAsset(asset)]));
+      const nextAssets = assets.map((asset) => {
+        const current = currentById.get(asset.id);
+        return current?.locked ? current : asset;
+      });
+      // ③へ戻って台帳から消そうとしても、正典ロック済みのアセットは残す。
+      for (const current of currentById.values()) {
+        if (current.locked && !nextAssets.some((asset) => asset.id === current.id)) {
+          nextAssets.push(current);
+        }
+      }
+      return { ...project, assets: nextAssets };
+    });
+  },
+
+  updateAssetFactoryAsset: (assetId, update) => {
+    updateActiveFactory(get, set, (project) => ({
+      ...project,
+      assets: project.assets.map((asset) =>
+        asset.id === assetId ? normalizeFilmAsset(update(normalizeFilmAsset(asset))) : asset,
+      ),
+    }));
+  },
+
+  completeAssetFactory: () => {
+    const activeProjectId = get().activeProjectId;
+    if (!activeProjectId) return false;
+    let completed = false;
+    const projects = get().projects.map((sourceProject) => {
+      if (sourceProject.id !== activeProjectId) return sourceProject;
+      const project = normalizedProject(sourceProject);
+      if (!getAssetFactoryGateState(project.assets).canProceed) return sourceProject;
+      completed = true;
+      return { ...project, phase: 5 as const };
+    });
+    if (!completed) return false;
+    persistProjects(projects);
+    set({ projects });
+    return true;
   },
 
   saveForeshadow: (foreshadow) => {
@@ -574,6 +622,28 @@ function updateActiveDesign(
       ...nextProject,
       approvals: { ...nextProject.approvals, look: null },
     };
+  });
+  if (!changed) return;
+  persistProjects(projects);
+  set({ projects });
+}
+
+/** S4の検品状態は③の承認済み設計の上に積むため、look承認を消さずに保存する。 */
+function updateActiveFactory(
+  get: () => FilmProjectState,
+  set: (partial: Partial<FilmProjectState>) => void,
+  update: (project: FilmProject) => FilmProject,
+): void {
+  const activeProjectId = get().activeProjectId;
+  if (!activeProjectId) return;
+  let changed = false;
+  const projects = get().projects.map((sourceProject) => {
+    if (sourceProject.id !== activeProjectId) return sourceProject;
+    const project = normalizedProject(sourceProject);
+    const nextProject = update(project);
+    if (JSON.stringify(project) === JSON.stringify(nextProject)) return sourceProject;
+    changed = true;
+    return nextProject;
   });
   if (!changed) return;
   persistProjects(projects);

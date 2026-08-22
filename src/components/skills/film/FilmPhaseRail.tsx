@@ -77,9 +77,11 @@ function PhaseIcon({ phase }: { phase: FilmPhase }) {
 export function FilmPhaseRail({
   phase,
   onSelect,
+  isEnabled = () => true,
 }: {
   phase: FilmPhase;
   onSelect: (phase: FilmPhase) => void;
+  isEnabled?: (phase: FilmPhase) => boolean;
 }) {
   return (
     <nav
@@ -88,17 +90,21 @@ export function FilmPhaseRail({
     >
       {PHASES.map((item) => {
         const active = phase === item.id;
+        const enabled = isEnabled(item.id);
         return (
           <button
             key={item.id}
             type="button"
             aria-current={active ? "step" : undefined}
+            disabled={!enabled}
             onClick={() => onSelect(item.id)}
             className={[
               "flex items-center gap-3 rounded-md border px-3 py-2.5 text-left transition",
               active
                 ? "border-pink-500 bg-pink-500/10 text-pink-200"
-                : "border-[#2a2a2a] bg-transparent text-zinc-300 hover:border-pink-500/40 hover:bg-pink-500/5",
+                : enabled
+                  ? "border-[#2a2a2a] bg-transparent text-zinc-300 hover:border-pink-500/40 hover:bg-pink-500/5"
+                  : "cursor-not-allowed border-[#242424] bg-transparent text-zinc-600 opacity-50",
             ].join(" ")}
           >
             <span className={active ? "text-pink-400" : "text-zinc-500"}>

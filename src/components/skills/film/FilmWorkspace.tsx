@@ -1,7 +1,9 @@
 import { useEffect, useState, type FormEvent } from "react";
 
+import { getAssetFactoryGateState } from "../../../lib/film/assetFactory";
 import type { FilmPhase } from "../../../lib/film/types";
 import { useFilmProjectStore } from "../../../lib/store/filmProject";
+import { AssetFactoryPanel } from "./AssetFactoryPanel";
 import { DesignPhasePanel } from "./DesignPhasePanel";
 import { FilmPhaseRail } from "./FilmPhaseRail";
 import { ScriptPhasePanel } from "./ScriptPhasePanel";
@@ -9,8 +11,7 @@ import { ScriptPhasePanel } from "./ScriptPhasePanel";
 const INITIAL_SERVICE = "seedance-2.5";
 const INITIAL_SERVICE_LABEL = "Seedance 2.5（Higgsfield Web・無制限枠）";
 
-const LOCKED_PHASES: Record<Exclude<FilmPhase, 1 | 2 | 3>, { stage: string; name: string }> = {
-  4: { stage: "S4", name: "アセット" },
+const LOCKED_PHASES: Record<Exclude<FilmPhase, 1 | 2 | 3 | 4>, { stage: string; name: string }> = {
   5: { stage: "S5", name: "生成" },
   6: { stage: "S6", name: "仕上げ" },
 };
@@ -188,7 +189,7 @@ function PlanningPanel() {
   );
 }
 
-function LockedPhasePanel({ phase }: { phase: Exclude<FilmPhase, 1 | 2 | 3> }) {
+function LockedPhasePanel({ phase }: { phase: Exclude<FilmPhase, 1 | 2 | 3 | 4> }) {
   const detail = LOCKED_PHASES[phase];
   return (
     <div className="mx-auto flex w-full max-w-2xl items-center justify-center py-16">
@@ -226,6 +227,9 @@ export function FilmWorkspace() {
     projects.find((project) => project.id === activeProjectId) ?? null;
   const [uncreatedPhase, setUncreatedPhase] = useState<FilmPhase>(1);
   const phase = activeProject?.phase ?? uncreatedPhase;
+  const canEnterLaterPhases = activeProject
+    ? getAssetFactoryGateState(activeProject.assets).canProceed
+    : false;
 
   useEffect(() => {
     void initialize();
@@ -233,6 +237,7 @@ export function FilmWorkspace() {
 
   function selectPhase(nextPhase: FilmPhase) {
     if (activeProject) {
+      if (nextPhase >= 5 && !canEnterLaterPhases) return;
       setPhase(nextPhase);
     } else {
       setUncreatedPhase(nextPhase);
@@ -252,7 +257,11 @@ export function FilmWorkspace() {
       </header>
 
       <div className="flex min-h-0 flex-1 overflow-hidden">
-        <FilmPhaseRail phase={phase} onSelect={selectPhase} />
+        <FilmPhaseRail
+          phase={phase}
+          onSelect={selectPhase}
+          isEnabled={(candidate) => candidate < 5 || canEnterLaterPhases}
+        />
         <main className="min-h-0 flex-1 overflow-y-auto px-8 py-8">
           {phase === 1 ? (
             <PlanningPanel />
@@ -260,8 +269,10 @@ export function FilmWorkspace() {
             <ScriptPhasePanel project={activeProject} />
           ) : phase === 3 && activeProject ? (
             <DesignPhasePanel project={activeProject} />
-          ) : phase >= 4 ? (
-            <LockedPhasePanel phase={phase as Exclude<FilmPhase, 1 | 2 | 3>} />
+          ) : phase === 4 && activeProject ? (
+            <AssetFactoryPanel project={activeProject} />
+          ) : phase >= 5 ? (
+            <LockedPhasePanel phase={phase as Exclude<FilmPhase, 1 | 2 | 3 | 4>} />
           ) : (
             <PlanningPanel />
           )}
