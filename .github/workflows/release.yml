@@ -129,7 +129,7 @@ jobs:
           # 2026-08-15: 0.147.0 (安定版・2026-08-07 公開) へ更新し、**一本化**した。
           # issuer バグ修正 (openai/codex PR #35720) が安定版に入ったため、
           # 認可専用の補助バイナリ (codex-auth) による二段構えを撤去した。
-          codexVer="rust-v0.147.0"
+          codexVer="rust-v0.148.0"
           base="https://github.com/openai/codex/releases/download/$codexVer"
           # matrix.target からファイル名を逆引き
           codex_arch="${{ matrix.target }}"
@@ -262,7 +262,7 @@ jobs:
           # リリースゲートとする。
           #
           # 2026-08-15: 0.147.0 (安定版) へ更新し一本化 (macOS ジョブの同位置コメント参照)。
-          $codexVer = "rust-v0.147.0"
+          $codexVer = "rust-v0.148.0"
           $base = "https://github.com/openai/codex/releases/download/$codexVer"
 
           New-Item -ItemType Directory -Force -Path "src-tauri/resources" | Out-Null
@@ -396,7 +396,7 @@ jobs:
         shell: pwsh
         run: |
           # 通常の windows ジョブと同じ版を使う (同梱 CLI は ort と無関係)。
-          $codexVer = "rust-v0.147.0"
+          $codexVer = "rust-v0.148.0"
           $base = "https://github.com/openai/codex/releases/download/$codexVer"
 
           New-Item -ItemType Directory -Force -Path "src-tauri/resources" | Out-Null
