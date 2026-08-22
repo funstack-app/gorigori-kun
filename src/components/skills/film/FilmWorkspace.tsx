@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import type { FilmPhase, FilmProject } from "../../../lib/film/types";
+import { getAssetFactoryGateState } from "../../../lib/film/assetFactory";
 import {
   useFilmProjectStore,
   type FilmProjectBackup,
@@ -11,10 +12,10 @@ import { AssetFactoryPanel } from "./AssetFactoryPanel";
 import { DesignPhasePanel } from "./DesignPhasePanel";
 import { FilmChatPanel } from "./FilmChatPanel";
 import { FilmPhaseRail } from "./FilmPhaseRail";
+import { GenerationPhasePanel } from "./GenerationPhasePanel";
 import { ScriptPhasePanel } from "./ScriptPhasePanel";
 
-const LOCKED_PHASES: Record<Exclude<FilmPhase, 1 | 2 | 3 | 4>, { stage: string; name: string }> = {
-  5: { stage: "S5", name: "生成" },
+const LOCKED_PHASES: Record<Exclude<FilmPhase, 1 | 2 | 3 | 4 | 5>, { stage: string; name: string }> = {
   6: { stage: "S6", name: "仕上げ" },
 };
 
@@ -284,7 +285,7 @@ function ProjectControls({
   );
 }
 
-function LockedPhasePanel({ phase }: { phase: Exclude<FilmPhase, 1 | 2 | 3 | 4> }) {
+function LockedPhasePanel({ phase }: { phase: Exclude<FilmPhase, 1 | 2 | 3 | 4 | 5> }) {
   const detail = LOCKED_PHASES[phase];
   return (
     <div className="mx-auto flex w-full min-w-0 max-w-2xl items-center justify-center py-16">
@@ -364,7 +365,8 @@ export function FilmWorkspace() {
     if (candidate === 1 || candidate === 2) return true;
     if (candidate === 3) return Boolean(activeProject.approvals.blocks);
     if (candidate === 4) return Boolean(activeProject.approvals.look);
-    // ⑤⑥は未実装。完了条件を満たしていても偽の画面へ進ませない。
+    if (candidate === 5) return getAssetFactoryGateState(activeProject.assets).canProceed;
+    // ⑥は未実装。完了条件を満たしていても偽の画面へ進ませない。
     return false;
   }
 
@@ -420,9 +422,9 @@ export function FilmWorkspace() {
           onSelect={selectPhase}
           isEnabled={phaseEnabled}
         />
-        <main className="relative min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-8 py-6">
+        <main className="relative min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-3 py-4 sm:px-4">
           {saveError ? (
-            <div className="mx-auto mb-4 flex max-w-5xl flex-wrap items-center gap-3 rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-100">
+            <div className="mb-4 flex w-full min-w-0 flex-wrap items-center gap-3 rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-100">
               <div className="min-w-0 flex-1">
                 <p className="font-semibold">フィルムの変更をまだ保存できていません。</p>
                 <p className="mt-1 text-xs leading-5 text-red-200/80">
@@ -444,7 +446,7 @@ export function FilmWorkspace() {
             </div>
           ) : null}
           {(fileState === "corrupted" || fileState === "unreadable") ? (
-            <div className="mx-auto mb-4 max-w-5xl rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
+            <div className="mb-4 w-full min-w-0 rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
               保存ファイルを安全に読み込めなかったため、いまはいつもの保存先への保存を止めています。上の「バックアップから復元」から過去の状態を選べます。
             </div>
           ) : null}
@@ -455,7 +457,7 @@ export function FilmWorkspace() {
             </div>
           ) : showScriptReview && activeProject ? (
             <div className="min-w-0">
-              <div className="mx-auto mb-4 flex w-full min-w-0 max-w-4xl justify-end">
+              <div className="mb-4 flex w-full min-w-0 justify-end">
                 <button
                   type="button"
                   onClick={() => {
@@ -472,7 +474,7 @@ export function FilmWorkspace() {
           ) : showChat ? (
             <div className="flex h-full min-h-[680px] min-w-0 flex-col">
               {activeProject ? (
-                <div className="mx-auto mb-3 flex w-full min-w-0 max-w-5xl justify-end">
+                <div className="mb-3 flex w-full min-w-0 justify-end">
                   <button
                     type="button"
                     onClick={() => setShowScriptReview(true)}
@@ -488,8 +490,10 @@ export function FilmWorkspace() {
             <DesignPhasePanel project={activeProject} />
           ) : phase === 4 && activeProject ? (
             <AssetFactoryPanel project={activeProject} />
-          ) : phase >= 5 ? (
-            <LockedPhasePanel phase={phase as Exclude<FilmPhase, 1 | 2 | 3 | 4>} />
+          ) : phase === 5 && activeProject ? (
+            <GenerationPhasePanel project={activeProject} />
+          ) : phase >= 6 ? (
+            <LockedPhasePanel phase={phase as Exclude<FilmPhase, 1 | 2 | 3 | 4 | 5>} />
           ) : (
             <FilmChatPanel project={activeProject} />
           )}

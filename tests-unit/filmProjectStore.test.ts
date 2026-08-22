@@ -13,6 +13,7 @@ vi.mock("../src/lib/ipc", () => ({
 }));
 
 import { useFilmProjectStore } from "../src/lib/store/filmProject";
+import { createFilmChatMessage } from "../src/lib/film/advisor";
 
 async function waitForLatestWrite(): Promise<string> {
   await vi.waitFor(() => expect(ipcMocks.write).toHaveBeenCalled());
@@ -98,5 +99,30 @@ describe("filmProject store", () => {
 
     expect(useFilmProjectStore.getState().projects).toEqual([created]);
     expect(useFilmProjectStore.getState().activeProjectId).toBe(created.id);
+  });
+
+  it("チャットに付けた管理済み参照画像を保存し、再読込後も残す", async () => {
+    const userMessage = createFilmChatMessage("user", "この画像は③設計で使う", [
+      "/app-data/film-references/look.png",
+    ]);
+    const created = useFilmProjectStore.getState().createProject(
+      "春の駅",
+      "気持ちを渡す",
+      "seedance-2.5",
+      { chatMessages: [userMessage] },
+    );
+    const serialized = await waitForLatestWrite();
+
+    useFilmProjectStore.setState({ projects: [], activeProjectId: null });
+    ipcMocks.read.mockResolvedValue(serialized);
+    await useFilmProjectStore.getState().initialize();
+
+    const restoredMessage = useFilmProjectStore
+      .getState()
+      .projects.find((project) => project.id === created.id)
+      ?.chatMessages?.[0] as typeof userMessage | undefined;
+    expect(restoredMessage?.attachedImagePaths).toEqual([
+      "/app-data/film-references/look.png",
+    ]);
   });
 });

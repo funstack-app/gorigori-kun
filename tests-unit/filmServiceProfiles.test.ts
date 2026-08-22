@@ -37,6 +37,38 @@ describe("動画サービスプロファイル", () => {
       }
     }
   });
+
+  it("正典にある参照種類・上限・開始終了フレーム対応を推測せず保持する", () => {
+    const profiles = Object.fromEntries(
+      VIDEO_SERVICE_PROFILES.map((profile) => [profile.id, profile.referenceRules]),
+    );
+
+    expect(profiles["seedance-2.5"]).toMatchObject({
+      startEndFrames: { start: null, end: null, combined: null },
+      kinds: ["image", "video", "audio"],
+      limits: { images: 30, videos: 10, audio: 10, total: 50 },
+    });
+    expect(profiles["seedance-2.0"]).toMatchObject({
+      kinds: ["image", "video", "audio"],
+      limits: { images: 9, videos: 3, audio: 3, total: 12 },
+    });
+    expect(profiles["kling-3.0"]).toMatchObject({
+      startEndFrames: { start: true, end: null, combined: null },
+      kinds: ["image", "video"],
+      limits: { images: null, videos: null, audio: null, total: null },
+    });
+    expect(profiles["minimax-h3"]).toMatchObject({
+      startEndFrames: { start: true, end: true, combined: true },
+      kinds: ["image", "video", "audio"],
+      limits: { images: 9, videos: 3, audio: 3, total: 12 },
+    });
+    expect(profiles.flux3).toMatchObject({
+      startEndFrames: { start: true, end: true, combined: true },
+      kinds: ["image", "video"],
+      limits: { images: null, videos: null, audio: null, total: null },
+    });
+    expect(profiles["veo-3.1"]).toBeNull();
+  });
 });
 
 describe("旧フィルムプロジェクトの読み替え", () => {

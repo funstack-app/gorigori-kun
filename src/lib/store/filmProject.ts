@@ -100,6 +100,12 @@ type FilmProjectState = {
   saveLookMaster: (path: string | null, description?: string) => void;
   saveStylePrefix: (stylePrefix: string) => void;
   approveLook: () => boolean;
+  saveBlockVideoTake: (
+    blockId: string,
+    path: string,
+    adopted: boolean,
+    verdictNote: string,
+  ) => boolean;
 };
 
 const SCRIPT_STAGE_ORDER: FilmScriptApprovalStage[] = [
@@ -184,8 +190,8 @@ export function normalizeFilmProject(
     ...currentProject,
     assetServiceId: "gpt-image-2",
     videoServiceId,
-    // ⑤⑥は未実装。過去版の偽導線で進んだ保存データも④へ安全に戻す。
-    phase: project.phase >= 5 ? 4 : project.phase,
+    // ⑤は実装済み。⑥へ進んだ過去データだけ、最後に使える⑤へ安全に戻す。
+    phase: project.phase >= 6 ? 5 : project.phase,
     approvals: {
       ...project.approvals,
       blocks: project.approvals.blocks ?? null,
@@ -211,6 +217,7 @@ export function normalizeFilmProject(
     stylePrefix: project.stylePrefix ?? "",
     lookMasterPath: project.lookMasterPath ?? null,
     lookMasterDescription: project.lookMasterDescription ?? "",
+    takes: Array.isArray(project.takes) ? project.takes : [],
     chatMessages,
     postingTarget: project.postingTarget ?? "",
     updatedAt:
@@ -316,7 +323,7 @@ function makeFileData(
 }
 
 function projectNeedsHydrationRepair(project: StoredFilmProject): boolean {
-  if (project.phase >= 5) return true;
+  if (project.phase >= 6) return true;
   return (project.assets ?? []).some((asset) => {
     if (
       asset.status === "generating"
@@ -482,7 +489,7 @@ async function readFilmProjectsFileIntoStore(
         ? currentActiveId
         : (projects[0]?.id ?? null);
     set({ projects, activeProjectId, planningChatMessages });
-    // 走行中のまま残った状態と、過去版で⑤⑥へ進んだ状態は、④の再試行可能な
+    // 走行中のまま残った状態と、過去版で⑥へ進んだ状態は、再試行可能な
     // スナップショットへ直して正本にも反映する。
     if (needsHydrationRepair) pendingBeforeUnlock = true;
     return true;
@@ -676,8 +683,8 @@ export const useFilmProjectStore = create<FilmProjectState>((set, get) => ({
   },
 
   setPhase: (phase) => {
-    // ⑤⑥は近日対応。未実装画面へ状態だけ進める経路も閉じておく。
-    if (!Number.isInteger(phase) || phase < 1 || phase > 4) return;
+    // ⑤までは実装済み。⑥は未実装なので状態だけ進める経路も閉じておく。
+    if (!Number.isInteger(phase) || phase < 1 || phase > 5) return;
     const activeProjectId = get().activeProjectId;
     if (!activeProjectId) return;
     let changed = false;
@@ -901,6 +908,48 @@ export const useFilmProjectStore = create<FilmProjectState>((set, get) => ({
       });
     });
     if (!approved) return false;
+    persistProjects(projects, get().planningChatMessages);
+    set({ projects });
+    return true;
+  },
+
+  saveBlockVideoTake: (blockId, path, adopted, verdictNote) => {
+    const activeProjectId = get().activeProjectId;
+    const trimmedBlockId = blockId.trim();
+    const trimmedPath = path.trim();
+    const trimmedNote = verdictNote.trim();
+    if (!activeProjectId || !trimmedBlockId || !trimmedPath || !trimmedNote) return false;
+    let saved = false;
+    const projects = get().projects.map((sourceProject) => {
+      if (sourceProject.id !== activeProjectId) return sourceProject;
+      const project = normalizeFilmProject(sourceProject);
+      const script = scriptOf(project);
+      if (!script.blocks.some((block) => block.id === trimmedBlockId)) return sourceProject;
+
+      const currentIndex = project.takes.findIndex(
+        (take) => take.blockId === trimmedBlockId && take.path === trimmedPath,
+      );
+      const nextVersion = project.takes
+        .filter((take) => take.blockId === trimmedBlockId)
+        .reduce((max, take) => Math.max(max, take.version), 0) + 1;
+      let takes = adopted
+        ? project.takes.map((take) =>
+            take.blockId === trimmedBlockId ? { ...take, adopted: false } : take,
+          )
+        : [...project.takes];
+      const nextTake = {
+        blockId: trimmedBlockId,
+        path: trimmedPath,
+        adopted,
+        version: currentIndex >= 0 ? project.takes[currentIndex].version : nextVersion,
+        verdictNote: trimmedNote,
+      };
+      if (currentIndex >= 0) takes[currentIndex] = nextTake;
+      else takes.push(nextTake);
+      saved = true;
+      return touchProject({ ...project, takes });
+    });
+    if (!saved) return false;
     persistProjects(projects, get().planningChatMessages);
     set({ projects });
     return true;
