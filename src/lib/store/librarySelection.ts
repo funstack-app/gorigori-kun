@@ -18,6 +18,8 @@ type LibrarySelectionState = {
   enterMode: () => void;
   exitMode: () => void;
   toggle: (path: string) => void;
+  /** 日付見出しなど、複数 path をまとめて選択/解除する。 */
+  toggleMany: (paths: string[]) => void;
   selectAll: (paths: string[]) => void;
   clear: () => void;
 };
@@ -31,10 +33,33 @@ export const useLibrarySelection = create<LibrarySelectionState>((set, get) => (
     const next = new Set(get().selected);
     if (next.has(path)) next.delete(path);
     else next.add(path);
-    set({ selected: next });
+    set({ selected: next, selectionMode: next.size > 0 });
+  },
+  toggleMany: (paths) => {
+    const next = toggleSelectionPaths(get().selected, paths);
+    set({ selected: next, selectionMode: next.size > 0 });
   },
   selectAll: (paths) => {
     set({ selected: new Set(paths) });
   },
-  clear: () => set({ selected: new Set() }),
+  clear: () => set({ selected: new Set(), selectionMode: false }),
 }));
+
+/**
+ * paths がすべて選択済みなら全解除、1件でも未選択なら全追加する純関数。
+ * 元の Set は変更しない。
+ */
+export function toggleSelectionPaths(
+  selected: ReadonlySet<string>,
+  paths: readonly string[],
+): Set<string> {
+  const uniquePaths = Array.from(new Set(paths));
+  const next = new Set(selected);
+  if (uniquePaths.length === 0) return next;
+  const allSelected = uniquePaths.every((path) => next.has(path));
+  for (const path of uniquePaths) {
+    if (allSelected) next.delete(path);
+    else next.add(path);
+  }
+  return next;
+}

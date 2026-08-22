@@ -1,11 +1,22 @@
-import { type MouseEvent, useEffect, useRef, useState } from "react";
+import {
+  type MouseEvent,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { Grid, type CellComponentProps } from "react-window";
-import { SafeImage } from "./SafeImage";
-import { type GalleryItem, type Judgement } from "../lib/store/images";
+import { SafeImage, SafeVideo } from "./SafeImage";
+import {
+  galleryItemMediaType,
+  type GalleryItem,
+  type Judgement,
+} from "../lib/store/images";
 import { useImagePreview } from "../lib/store/imagePreview";
 import { ContextMenu } from "./ContextMenu";
 import { buildGalleryItemMenu } from "./galleryItemMenu";
 import { RegisterPresetDialog } from "./RegisterPresetDialog";
+import type { LibraryDateGroup } from "./library/libraryGrouping";
 
 const COLUMNS = 3;
 const GAP = 8; // px (matches Tailwind gap-2)
@@ -47,7 +58,17 @@ type CellProps = {
   tileSize?: number;
   /** ライブラリ本画面が複数選択モードか。 */
   selectionMode?: boolean;
+  /** ライブラリの日付グループ。見出しも同じ仮想スクロール内で描画する。 */
+  dateGroups?: LibraryDateGroup[];
+  /** タイル左上の選択チェック用。 */
+  onToggleSelection?: (path: string) => void;
+  /** 日付見出し横のチェック用。 */
+  onToggleDateSelection?: (paths: string[]) => void;
 };
+
+type LibraryVirtualRow =
+  | { kind: "header"; group: LibraryDateGroup }
+  | { kind: "items"; items: GalleryItem[] };
 
 /**
  * Virtualized image grid. Renders only rows currently in view, so it stays
@@ -116,11 +137,24 @@ export function VirtualGalleryGrid(props: CellProps) {
             LIBRARY_GAP,
         )
     : cellSize;
-  const rowCount = Math.ceil(props.items.length / columns);
+  const libraryRows = useMemo(
+    () => buildLibraryRows(props.dateGroups, columns),
+    [columns, props.dateGroups],
+  );
+  const hasDateGroups = isLibrary && props.dateGroups !== undefined;
+  const rowCount = hasDateGroups
+    ? libraryRows.length
+    : Math.ceil(props.items.length / columns);
+  const virtualRowHeight = hasDateGroups
+    ? (rowIndex: number) =>
+        libraryRows[rowIndex]?.kind === "header" ? 48 : rowHeight
+    : rowHeight;
 
   const cellPropsWithMenu: CellPropsInternal = {
     ...props,
     columns,
+    libraryRows: hasDateGroups ? libraryRows : undefined,
+    libraryFullWidth: size.width,
     onContextMenu: (item, x, y) => setMenu({ item, x, y }),
   };
 
@@ -131,7 +165,7 @@ export function VirtualGalleryGrid(props: CellProps) {
           columnCount={columns}
           columnWidth={cellSize}
           rowCount={rowCount}
-          rowHeight={rowHeight}
+          rowHeight={virtualRowHeight}
           cellComponent={isLibrary ? LibraryCell : Cell}
           cellProps={cellPropsWithMenu}
           overscanCount={isLibrary ? 2 : undefined}
@@ -176,8 +210,25 @@ export function VirtualGalleryGrid(props: CellProps) {
 type CellPropsInternal = CellProps & {
   /** 実際に描画に使う列数 (minCellWidth 指定時は可変、未指定なら COLUMNS)。 */
   columns: number;
+  libraryRows?: LibraryVirtualRow[];
+  libraryFullWidth: number;
   onContextMenu: (item: GalleryItem, x: number, y: number) => void;
 };
+
+function buildLibraryRows(
+  groups: LibraryDateGroup[] | undefined,
+  columns: number,
+): LibraryVirtualRow[] {
+  if (!groups) return [];
+  const rows: LibraryVirtualRow[] = [];
+  for (const group of groups) {
+    rows.push({ kind: "header", group });
+    for (let index = 0; index < group.items.length; index += columns) {
+      rows.push({ kind: "items", items: group.items.slice(index, index + columns) });
+    }
+  }
+  return rows;
+}
 
 function Cell({
   columnIndex,
@@ -245,16 +296,10 @@ function Cell({
             onContextMenu(it, e.clientX, e.clientY);
           }}
           className="block h-full w-full"
-          title={`${it.name}\nダブルクリックまたは右下の🔍で拡大`}
+          title={`${it.name}\nダブルクリックまたは右下の検索ボタンで拡大`}
           aria-label={`${it.name} — ダブルクリック=拡大 / 右クリック=メニュー / Cmd+クリック=複数選択`}
         >
-          <SafeImage
-            path={it.path}
-            thumbnail
-            alt={it.name}
-            className="h-full w-full object-cover"
-            loading="lazy"
-          />
+          <GalleryMedia item={it} className="h-full w-full object-cover" />
         </button>
         {isInMultiSelection && (
           <span
@@ -291,7 +336,7 @@ function Cell({
               : "bg-black/60 text-neutral-300 opacity-0 transition group-hover:opacity-100 hover:bg-rose-500 hover:text-white"
           }`}
         >
-          ♥
+          <HeartIcon filled={isFav} />
         </button>
         {/*
           F-#3 修正 (2026-05-19): むぎさん要望対応。「クリックで拡大できる」発見性向上。
@@ -337,28 +382,80 @@ function LibraryCell({
   style,
   items,
   selection,
+  favorites,
   judgements,
   columns,
   viewMode = "grid",
   selectionMode = false,
   onSelectClick,
+  onToggleSelection,
+  onToggleFavorite,
+  onToggleDateSelection,
   onContextMenu,
+  libraryRows,
+  libraryFullWidth,
 }: CellComponentProps<CellPropsInternal>) {
+  const virtualRow = libraryRows?.[rowIndex];
+  if (virtualRow?.kind === "header") {
+    if (columnIndex > 0) return <div style={style} />;
+    const paths = virtualRow.group.items.map((item) => item.path);
+    const selectedCount = paths.filter((path) => selection.has(path)).length;
+    const allSelected = paths.length > 0 && selectedCount === paths.length;
+    const partlySelected = selectedCount > 0 && !allSelected;
+    return (
+      <div
+        style={{ ...style, width: libraryFullWidth, zIndex: 2 }}
+        className="flex items-center pr-3"
+      >
+        <div className="flex w-full items-center gap-3 border-b border-white/10 pb-2 pt-2">
+          <button
+            type="button"
+            onClick={() => onToggleDateSelection?.(paths)}
+            className={[
+              "flex h-5 w-5 shrink-0 items-center justify-center rounded-md border transition",
+              allSelected || partlySelected
+                ? "border-pink-400 bg-pink-500 text-white"
+                : "border-white/20 bg-white/[0.04] text-transparent hover:border-pink-400",
+            ].join(" ")}
+            aria-label={`${virtualRow.group.label}の${paths.length}件を一括選択`}
+            aria-pressed={allSelected}
+          >
+            {partlySelected ? <MinusIcon /> : <CheckIcon />}
+          </button>
+          <h3 className="text-[12px] font-bold text-neutral-200">
+            {virtualRow.group.label}
+          </h3>
+          <span className="text-[10px] tabular-nums text-neutral-600">
+            {virtualRow.group.items.length}件
+          </span>
+        </div>
+      </div>
+    );
+  }
+
   const i = rowIndex * columns + columnIndex;
-  const item = items[i];
+  const item =
+    virtualRow?.kind === "items" ? virtualRow.items[columnIndex] : items[i];
   if (!item) return <div style={style} />;
 
   const isSelected = selection.has(item.path);
+  const isFavorite = favorites.has(item.path);
   const judgement = judgements.get(item.path);
-  const handleClick = (event: MouseEvent<HTMLButtonElement>) =>
+  const handleClick = (event: MouseEvent<HTMLButtonElement>) => {
+    if (selectionMode && onToggleSelection) {
+      onToggleSelection(item.path);
+      return;
+    }
+    if (!selectionMode) {
+      useImagePreview.getState().open(item.path);
+      return;
+    }
     onSelectClick(
       item.path,
-      {
-        meta: event.metaKey || event.ctrlKey,
-        shift: event.shiftKey,
-      },
+      { meta: event.metaKey || event.ctrlKey, shift: event.shiftKey },
       item,
     );
+  };
   const handleContextMenu = (event: MouseEvent<HTMLButtonElement>) => {
     event.preventDefault();
     onContextMenu(item, event.clientX, event.clientY);
@@ -366,10 +463,9 @@ function LibraryCell({
 
   if (viewMode === "list") {
     return (
-      <div style={{ ...style, paddingBottom: 4 }}>
+      <div className="relative" style={{ ...style, paddingBottom: 4 }}>
         <button
           type="button"
-          onDoubleClick={() => useImagePreview.getState().open(item.path)}
           onContextMenu={handleContextMenu}
           onClick={handleClick}
           className={[
@@ -379,12 +475,7 @@ function LibraryCell({
               : "border-[#2a2a2a] hover:border-pink-400",
           ].join(" ")}
         >
-          <SafeImage
-            path={item.path}
-            thumbnail
-            alt=""
-            className="h-10 w-16 shrink-0 rounded object-cover"
-          />
+          <GalleryMedia item={item} className="h-10 w-16 shrink-0 rounded object-cover" />
           <div className="min-w-0 flex-1">
             <p className="truncate text-[12px] font-medium text-neutral-200">
               {item.name}
@@ -415,6 +506,19 @@ function LibraryCell({
             </span>
           )}
         </button>
+        <button
+          type="button"
+          onClick={() => onToggleFavorite(item.path)}
+          className={[
+            "absolute right-9 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-lg transition",
+            isFavorite
+              ? "bg-pink-500 text-white"
+              : "text-neutral-500 hover:bg-white/10 hover:text-pink-300",
+          ].join(" ")}
+          aria-label={isFavorite ? "お気に入りから外す" : "お気に入りに追加"}
+        >
+          <HeartIcon filled={isFavorite} />
+        </button>
       </div>
     );
   }
@@ -437,17 +541,11 @@ function LibraryCell({
       >
         <button
           type="button"
-          onDoubleClick={() => useImagePreview.getState().open(item.path)}
           onContextMenu={handleContextMenu}
           onClick={handleClick}
           className="block h-full w-full text-left"
         >
-          <SafeImage
-            path={item.path}
-            thumbnail
-            alt=""
-            className="aspect-[16/9] w-full object-cover"
-          />
+          <GalleryMedia item={item} className="aspect-[16/9] w-full object-cover" />
           <div className="p-2">
             <p className="truncate text-[11px] font-bold text-neutral-200">
               {item.name}
@@ -462,16 +560,47 @@ function LibraryCell({
           </div>
         </button>
         {selectionMode && (
-          <div
+          <button
+            type="button"
+            onClick={() => onToggleSelection?.(item.path)}
             className={[
-              "pointer-events-none absolute left-2 top-2 flex h-6 w-6 items-center justify-center rounded-md border-2",
+              "absolute left-2 top-2 flex h-6 w-6 items-center justify-center rounded-md border-2",
               isSelected
                 ? "border-pink-400 bg-pink-500 text-white"
                 : "border-white/70 bg-black/60 text-transparent",
             ].join(" ")}
+            aria-label={isSelected ? "選択から外す" : "選択する"}
           >
             <CheckIcon />
-          </div>
+          </button>
+        )}
+        {!selectionMode && (
+          <button
+            type="button"
+            onClick={() => onToggleSelection?.(item.path)}
+            className="absolute left-2 top-2 flex h-6 w-6 items-center justify-center rounded-md border-2 border-white/60 bg-black/60 text-transparent opacity-0 transition hover:border-pink-400 group-hover:opacity-100"
+            aria-label="選択する"
+          >
+            <CheckIcon />
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={() => onToggleFavorite(item.path)}
+          className={[
+            "absolute right-2 bottom-[52px] flex h-7 w-7 items-center justify-center rounded-full shadow transition",
+            isFavorite
+              ? "bg-pink-500 text-white"
+              : "bg-black/60 text-neutral-300 opacity-0 hover:bg-pink-500 hover:text-white group-hover:opacity-100",
+          ].join(" ")}
+          aria-label={isFavorite ? "お気に入りから外す" : "お気に入りに追加"}
+        >
+          <HeartIcon filled={isFavorite} />
+        </button>
+        {galleryItemMediaType(item) === "video" && (
+          <span className="pointer-events-none absolute bottom-[54px] left-2 rounded-md bg-black/65 px-1.5 py-0.5 text-[9px] font-bold text-white backdrop-blur">
+            動画
+          </span>
         )}
         {judgement && (
           <span
@@ -501,5 +630,53 @@ function CheckIcon() {
         strokeLinejoin="round"
       />
     </svg>
+  );
+}
+
+function MinusIcon() {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" className="h-4 w-4" aria-hidden>
+      <path d="M5 10h10" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function HeartIcon({ filled }: { filled: boolean }) {
+  return (
+    <svg viewBox="0 0 24 24" fill={filled ? "currentColor" : "none"} className="h-3.5 w-3.5" aria-hidden>
+      <path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1.1-1.1a5.5 5.5 0 0 0-7.8 7.8L12 21l8.8-8.6a5.5 5.5 0 0 0 0-7.8Z" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function GalleryMedia({ item, className }: { item: GalleryItem; className: string }) {
+  if (galleryItemMediaType(item) === "video") {
+    if (item.thumbnailPath) {
+      return (
+        <SafeImage
+          path={item.thumbnailPath}
+          alt={item.name}
+          className={className}
+          loading="lazy"
+        />
+      );
+    }
+    // 仮想グリッドで画面内の要素だけが mount される。自動再生せず metadata のみ
+    // 読むため、大量動画でも全ファイルを同時に開かない。
+    return (
+      <SafeVideo
+        path={item.path}
+        className={`${className} pointer-events-none bg-black`}
+      />
+    );
+  }
+  return (
+    <SafeImage
+      path={item.path}
+      thumbnail
+      alt={item.name}
+      className={className}
+      loading="lazy"
+    />
   );
 }

@@ -104,7 +104,7 @@ export async function deleteGalleryImage(
   path: string,
   name?: string,
 ): Promise<boolean> {
-  const label = name ?? path.split(/[\\/]/).pop() ?? "この画像";
+  const label = name ?? path.split(/[\\/]/).pop() ?? "この素材";
   let ok = false;
   try {
     const { ask } = await import("@tauri-apps/plugin-dialog");
@@ -150,7 +150,7 @@ export async function deleteGalleryImage(
 export async function deleteGalleryImages(paths: string[]): Promise<number> {
   if (paths.length === 0) return 0;
 
-  const message = `${paths.length} 枚を削除します。元に戻せません。よろしいですか？`;
+  const message = `${paths.length}件の素材を削除します。元に戻せません。よろしいですか？`;
   let ok = false;
   try {
     const { ask } = await import("@tauri-apps/plugin-dialog");
@@ -179,14 +179,14 @@ export async function deleteGalleryImages(paths: string[]): Promise<number> {
         kind: result.deleted > 0 ? "warn" : "error",
         text:
           result.deleted > 0
-            ? `${result.deleted} 枚を削除しました（${result.failed.length} 枚は失敗）`
-            : `削除に失敗しました（${result.failed.length} 枚）`,
+            ? `${result.deleted}件を削除しました（${result.failed.length}件は失敗）`
+            : `削除に失敗しました（${result.failed.length}件）`,
         ttlMs: 5000,
       });
     } else {
       useToasts.getState().push({
         kind: "success",
-        text: `${result.deleted} 枚を削除しました`,
+        text: `${result.deleted}件を削除しました`,
         ttlMs: 2500,
       });
     }

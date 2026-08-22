@@ -1,7 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { Project } from "../lib/store/projects";
 import { useProjects } from "../lib/store/projects";
-import { useImages, type GalleryItem } from "../lib/store/images";
+import {
+  inferGalleryMediaType,
+  useImages,
+  type GalleryItem,
+} from "../lib/store/images";
 import { useComposer } from "../lib/store/composer";
 import { useSnsExport } from "../lib/store/snsExport";
 import { useToasts } from "../lib/store/toasts";
@@ -44,6 +48,7 @@ export function ProjectGallery({ project }: { project: Project }) {
         mtimeMs: it.generation?.generatedAt ?? it.addedAt,
         size: 0,
         kind: "created" as const,
+        mediaType: inferGalleryMediaType(it.imagePath),
       })),
     [project.items],
   );

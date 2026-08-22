@@ -28,7 +28,31 @@ export type GalleryItem = {
   durationSeconds?: number;
   /** 動画サムネイルのパス。 */
   thumbnailPath?: string;
+  /** AI 自動命名などで付いた表示題名。未設定なら name を使う。 */
+  aiTitle?: string;
 };
+
+const VIDEO_EXTENSIONS = new Set([
+  "mp4",
+  "mov",
+  "m4v",
+  "webm",
+  "avi",
+  "mkv",
+]);
+
+/** watcher の旧イベントには mediaType が無いため、拡張子から安全に補完する。 */
+export function inferGalleryMediaType(path: string): "image" | "video" {
+  const cleanPath = path.split(/[?#]/, 1)[0];
+  const dot = cleanPath.lastIndexOf(".");
+  const extension = dot >= 0 ? cleanPath.slice(dot + 1).toLowerCase() : "";
+  return VIDEO_EXTENSIONS.has(extension) ? "video" : "image";
+}
+
+/** 明示された種別を優先し、旧データだけ拡張子で補う。 */
+export function galleryItemMediaType(item: GalleryItem): "image" | "video" {
+  return item.mediaType ?? inferGalleryMediaType(item.path);
+}
 
 export type GalleryFilter = "all" | "favorites" | "adopted" | "rejected";
 
@@ -69,6 +93,8 @@ type ImagesState = {
   clearSelection: () => void;
   setFilter: (f: GalleryFilter) => void;
   toggleFavorite: (path: string) => Promise<void>;
+  /** 複数素材のお気に入りを1回の永続化でまとめて変更する。 */
+  setFavorites: (paths: string[], favorite: boolean) => Promise<void>;
   loadFavorites: () => Promise<void>;
   /** 単一画像の判定を設定する。value=null で判定を外す (候補に戻す)。Persisted. */
   setJudgement: (path: string, value: Judgement | null) => Promise<void>;
@@ -256,6 +282,9 @@ export const useImages = create<ImagesState>((set, get) => ({
           size: ev.size,
           kind: ev.kind,
           turnId,
+          // ImageEvent の旧形式には種別フィールドが無い。動画拡張子をここで
+          // mediaType="video" に補完し、画像と同じ仮想一覧へ載せる。
+          mediaType: inferGalleryMediaType(ev.path),
         };
         return { items: [item, ...state.items], knownPaths: known };
       });
@@ -341,6 +370,23 @@ export const useImages = create<ImagesState>((set, get) => ({
     const next = new Set(get().favorites);
     if (next.has(path)) next.delete(path);
     else next.add(path);
+    set({ favorites: next });
+    await persistFavorites(next);
+  },
+
+  setFavorites: async (paths, favorite) => {
+    if (!get().favoritesLoaded) await get().loadFavorites();
+    const next = new Set(get().favorites);
+    let changed = false;
+    for (const path of new Set(paths)) {
+      if (favorite && !next.has(path)) {
+        next.add(path);
+        changed = true;
+      } else if (!favorite && next.delete(path)) {
+        changed = true;
+      }
+    }
+    if (!changed) return;
     set({ favorites: next });
     await persistFavorites(next);
   },
