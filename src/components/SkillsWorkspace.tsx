@@ -2,7 +2,11 @@ import { useEffect, useMemo, useState } from "react";
 import { open as openFileDialog, save as saveFileDialog } from "@tauri-apps/plugin-dialog";
 
 import { skills as skillsIpc, type InstalledSkill } from "../lib/ipc";
-import { GORI_SKILLS, type GoriSkill } from "../lib/skills/catalog";
+import {
+  GORI_SKILLS,
+  VISIBLE_GORI_SKILLS,
+  type GoriSkill,
+} from "../lib/skills/catalog";
 import { useSkillMode } from "../lib/store/skillMode";
 import { useToasts } from "../lib/store/toasts";
 import { useWorkspace } from "../lib/store/workspace";
@@ -75,6 +79,10 @@ export function SkillsWorkspace({ onUseSkill }: { onUseSkill?: () => void }) {
     activateSkill(skill);
     onUseSkill?.();
   };
+
+  const legacyStoryboardSkill = GORI_SKILLS.find(
+    (skill) => skill.id === "gori-storyboard",
+  );
 
   // スキルを「停止する」= 作品モード (default UI) に戻す。
   // STΛCK 指示 (2026-05-20):
@@ -192,7 +200,7 @@ export function SkillsWorkspace({ onUseSkill }: { onUseSkill?: () => void }) {
 
       <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-          {GORI_SKILLS.map((skill) => {
+          {VISIBLE_GORI_SKILLS.map((skill) => {
             // ygn: 実パスは Rust が返したものだけを出す。実体が無い組み込み
             // スキルにありもしないパス (~/.codex/...) を表示しない。
             const realPath = installedPathById.get(skill.id) ?? null;
@@ -277,6 +285,15 @@ export function SkillsWorkspace({ onUseSkill }: { onUseSkill?: () => void }) {
                   <p className="text-[10px] leading-relaxed text-neutral-500">
                     {skill.launchHint}
                   </p>
+                  {skill.id === "film" && legacyStoryboardSkill && (
+                    <button
+                      type="button"
+                      onClick={() => useSkill(legacyStoryboardSkill)}
+                      className="text-left text-[10px] text-neutral-600 underline decoration-neutral-700 underline-offset-2 transition hover:text-neutral-400"
+                    >
+                      旧ストーリーカットを開く
+                    </button>
+                  )}
                 </div>
               </article>
             );

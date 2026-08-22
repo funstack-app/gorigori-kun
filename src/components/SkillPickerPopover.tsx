@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 
-import { GORI_SKILLS, type GoriSkill } from "../lib/skills/catalog";
+import { VISIBLE_GORI_SKILLS, type GoriSkill } from "../lib/skills/catalog";
 import { useSkillMode } from "../lib/store/skillMode";
 import { activateSkill } from "./SkillBadge";
 import { SkillIcon } from "./SkillIcon";
@@ -114,7 +114,7 @@ export function SkillPickerPopover({ open, onClose, onPick, anchorRect }: Props)
             スキルモードを解除
           </button>
         )}
-        {GORI_SKILLS.map((skill) => {
+        {VISIBLE_GORI_SKILLS.map((skill) => {
           const isActive = enabled && selectedSkillId === skill.id;
           const isLocked = !skill.availableInApp;
           return (

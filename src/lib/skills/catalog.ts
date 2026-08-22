@@ -30,6 +30,8 @@ export type GoriSkill = {
   availableInApp: boolean;
   /** 近日公開予定。グレイアウト + 「近日公開」ラベル表示。 */
   comingSoon?: boolean;
+  /** 通常のスキル一覧から隠す。省略時は false。起動経路やデータは維持する。 */
+  hidden?: boolean;
   launchHint: string;
 };
 
@@ -67,12 +69,13 @@ export const GORI_SKILLS: GoriSkill[] = [
     launchHint: "まずはここから · 絵1枚 → 登録キャラ",
   },
   {
-    // 2026-08-22 追加: run-ai-film の設計先行・承認ゲート駆動を移植した
-    // 6工程の専用 Workspace。旧ストーリーカットとは S7 まで並存する。
+    // 2026-08-22 追加: 旧ストーリーカットの一覧上の位置と役を引き継ぐ。
+    // run-ai-film の設計先行・承認ゲート駆動を移植した6工程の専用 Workspace。
     id: "film",
     name: "フィルム",
     shortName: "Film",
-    description: "企画から完成動画まで、設計を固めてから作る映像制作",
+    description:
+      "企画から完成動画まで。設計を固めてから作る映像制作（旧: ストーリーカット生成）",
     path: "~/.codex/skills/film",
     availableInApp: true,
     launchHint: "企画 → 設計 → 生成 → 完成",
@@ -89,6 +92,7 @@ export const GORI_SKILLS: GoriSkill[] = [
       "作りたい話を伝えると、AIが聞き返しながら絵コンテに起こし、そのままカットを連続生成します。登録キャラと画風を固定するので、話が進んでも同じ人物・同じ絵柄のまま並びます。",
     path: "~/.codex/skills/gori-storyboard",
     availableInApp: true,
+    hidden: true,
     launchHint: "話す → 絵コンテ → カット一式",
   },
   {
@@ -234,6 +238,11 @@ export const GORI_SKILLS: GoriSkill[] = [
     launchHint: "Blender不要でカメラワークを作る",
   },
 ];
+
+/** 通常のスキル一覧に表示する項目。hidden は旧作業の退避導線からのみ開く。 */
+export const VISIBLE_GORI_SKILLS: GoriSkill[] = GORI_SKILLS.filter(
+  (skill) => skill.hidden !== true,
+);
 
 export function getGoriSkill(id: string | null | undefined): GoriSkill | undefined {
   return GORI_SKILLS.find((skill) => skill.id === id);
