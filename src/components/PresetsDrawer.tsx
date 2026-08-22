@@ -448,10 +448,16 @@ export function PresetsDrawer({
     return (
       <>
         <div className="grid h-full min-h-0 gap-5 lg:grid-cols-[260px_minmax(0,1fr)]">
-          <aside className="min-h-0 overflow-y-auto rounded-xl border border-[#2a2a2a] bg-[#181818] p-4">
+          <aside
+            data-tour="preset-categories"
+            className="min-h-0 overflow-y-auto rounded-xl border border-[#2a2a2a] bg-[#181818] p-4"
+          >
             {categoryList}
           </aside>
-          <main className="flex min-h-0 flex-col gap-3 rounded-xl border border-[#2a2a2a] bg-[#181818] p-4">
+          <main
+            data-tour="preset-list"
+            className="flex min-h-0 flex-col gap-3 rounded-xl border border-[#2a2a2a] bg-[#181818] p-4"
+          >
             <div className="flex items-center justify-between gap-3">
               <h4 className="text-sm font-black text-white">{activeCategoryName} のプリセット</h4>
               <div className="flex shrink-0 items-center gap-2">
@@ -496,6 +502,7 @@ export function PresetsDrawer({
                   </button>
                 </div>
                 <button
+                  data-tour="preset-new"
                   type="button"
                   onClick={startNew}
                   className="h-8 rounded-md bg-pink-500 px-3 text-xs font-bold text-white hover:bg-pink-600"
@@ -506,6 +513,7 @@ export function PresetsDrawer({
             </div>
             <div className="flex items-center gap-2">
               <input
+                data-tour="preset-search"
                 type="search"
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}

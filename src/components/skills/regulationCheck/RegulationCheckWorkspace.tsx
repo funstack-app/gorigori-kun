@@ -320,7 +320,10 @@ export function RegulationCheckWorkspace() {
   }
 
   return (
-    <section className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#121212]">
+    <section
+      data-tour="regulation-workspace"
+      className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#121212]"
+    >
       <div className="border-b border-[#242424] bg-[#121212] px-4 py-3">
         <div className="flex items-center gap-3">
           <WorkspaceTabs />
@@ -330,7 +333,10 @@ export function RegulationCheckWorkspace() {
 
       <div className="flex min-h-0 flex-1 overflow-hidden">
         {/* 左: 設定パネル */}
-        <div className="flex w-80 shrink-0 flex-col gap-4 overflow-y-auto border-r border-[#242424] p-4">
+        <div
+          data-tour="regulation-settings"
+          className="flex w-80 shrink-0 flex-col gap-4 overflow-y-auto border-r border-[#242424] p-4"
+        >
           <PageHelp
             what="入稿前の画像を渡すと、媒体の画像規格を機械で測り、表現上の注意をCodexが理由つきで指摘します。"
             first="まずは出す先の媒体を下から選び、検査したい画像を入れてください。"
@@ -488,6 +494,7 @@ export function RegulationCheckWorkspace() {
 
           {/* 実行 */}
           <button
+            data-tour="regulation-run"
             type="button"
             onClick={runCheck}
             disabled={!canRun}
@@ -501,7 +508,10 @@ export function RegulationCheckWorkspace() {
         </div>
 
         {/* 右: 結果パネル */}
-        <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+        <div
+          data-tour="regulation-results"
+          className="flex min-h-0 flex-1 flex-col overflow-hidden"
+        >
           <div className="flex items-center justify-between border-b border-[#242424] px-4 py-2.5">
             <span className="text-xs font-medium text-neutral-300">
               検査結果

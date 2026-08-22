@@ -204,7 +204,10 @@ export function CharacterRegisterWorkspace() {
   }, [visible, enterMode, pushToast]);
 
   return (
-    <section className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#121212]">
+    <section
+      data-tour="character-register-workspace"
+      className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#121212]"
+    >
       <div className="border-b border-[#242424] bg-[#121212] px-4 py-3">
         <div className="flex items-center gap-3">
           <WorkspaceTabs />
@@ -238,7 +241,10 @@ const STEP_LABELS: { step: 1 | 2 | 3; label: string }[] = [
 function StepIndicator() {
   const step = useCharacterSheetRun((s) => s.step);
   return (
-    <div className="flex items-center gap-2 border-b border-[#242424] px-4 py-2">
+    <div
+      data-tour="character-register-steps"
+      className="flex items-center gap-2 border-b border-[#242424] px-4 py-2"
+    >
       {STEP_LABELS.map((s) => (
         <div
           key={s.step}
@@ -674,7 +680,10 @@ function StepInput() {
 
   return (
     <div className="flex h-full min-h-0">
-      <aside className="flex w-80 shrink-0 flex-col gap-4 overflow-y-auto border-r border-[#242424] bg-[#141414] px-4 py-4">
+      <aside
+        data-tour="character-register-input"
+        className="flex w-80 shrink-0 flex-col gap-4 overflow-y-auto border-r border-[#242424] bg-[#141414] px-4 py-4"
+      >
         {regenTarget && (
           <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2.5">
             <p className="text-[11px] leading-relaxed text-amber-200">
@@ -780,6 +789,7 @@ function StepInput() {
             シートの作り方
           </div>
           <button
+            data-tour="character-sheet-type"
             type="button"
             onClick={() => setTemplatePickerOpen(true)}
             className="w-full rounded-xl border border-pink-500/40 bg-pink-500/10 px-3 py-2.5 text-left transition hover:border-pink-400 hover:bg-pink-500/15"
@@ -1010,7 +1020,10 @@ function StepGenerate({
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div
+      data-tour="character-register-result"
+      className="flex h-full min-h-0 flex-col"
+    >
       <div className="flex items-center justify-between border-b border-[#242424] px-4 py-3">
         <div className="flex flex-wrap items-center gap-2 text-[12px] font-bold text-neutral-300">
           <span>
@@ -1299,7 +1312,10 @@ function StepRegister({
       : null;
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div
+      data-tour="character-register-result"
+      className="flex h-full min-h-0 flex-col"
+    >
       <div className="flex items-center justify-between border-b border-[#242424] px-4 py-3">
         <div className="flex flex-wrap items-center gap-2 text-[12px] font-bold text-neutral-300">
           <span>

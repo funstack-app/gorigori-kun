@@ -662,9 +662,15 @@ export function EditWorkspace() {
   };
 
   return (
-    <div className="relative flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-[#2a2a2a] bg-[#1e1e1e]">
+    <div
+      data-tour="editing-workspace"
+      className="relative flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-[#2a2a2a] bg-[#1e1e1e]"
+    >
       {/* 上部バー: 画像名と、画像の入れ替え・書き出しだけ。 */}
-      <header className="flex h-10 shrink-0 items-center gap-2 border-b border-[#2a2a2a] bg-[#252525] px-3">
+      <header
+        data-tour="editing-toolbar"
+        className="flex h-10 shrink-0 items-center gap-2 border-b border-[#2a2a2a] bg-[#252525] px-3"
+      >
         <PageHelp
           what="生成した画像を選んで、部分修正・背景透過などの編集ができます。"
           first="まずは編集したい画像を選んでください。"
@@ -729,7 +735,10 @@ export function EditWorkspace() {
         タスクチップ列。「なにをしたい?」を先に選ばせる。道具名 (インペイント等) は出さない。
       */}
       {sourceImagePath ? (
-        <div className="flex h-9 shrink-0 items-center gap-2 border-b border-[#2a2a2a] bg-[#1e1e1e] px-3">
+        <div
+          data-tour="editing-tools"
+          className="flex h-9 shrink-0 items-center gap-2 border-b border-[#2a2a2a] bg-[#1e1e1e] px-3"
+        >
           <span className="shrink-0 text-[10px] font-black text-neutral-500">なにをしたい?</span>
           {/*
             先頭は素の状態 (選択・移動)。囲みオーバーレイを敷かないので、置いた文字を
@@ -778,7 +787,10 @@ export function EditWorkspace() {
       ) : null}
 
       {/* 本体: キャンバス (主役) + 右に指示欄だけ。左レールは廃止。 */}
-      <div className="flex min-h-0 flex-1 overflow-hidden">
+      <div
+        data-tour="editing-canvas"
+        className="flex min-h-0 flex-1 overflow-hidden"
+      >
         {sourceImagePath ? (
           <>
             {/*
@@ -809,7 +821,10 @@ export function EditWorkspace() {
                 },
               }}
             />
-            <aside className="flex min-h-0 w-[320px] shrink-0 flex-col border-l border-[#2a2a2a] bg-[#252525]">
+            <aside
+              data-tour="editing-options"
+              className="flex min-h-0 w-[320px] shrink-0 flex-col border-l border-[#2a2a2a] bg-[#252525]"
+            >
               {/*
                 右パネルの出し分け:
                   - 「素材を重ねる」    → 画像の選び先2つ (AI 不使用)

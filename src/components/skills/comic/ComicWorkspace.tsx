@@ -314,7 +314,10 @@ type SlotRecoveryOutcome =
  */
 export function ComicWorkspace() {
   return (
-    <section className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#121212]">
+    <section
+      data-tour="comic-workspace"
+      className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#121212]"
+    >
       <div className="border-b border-[#242424] bg-[#121212] px-4 py-3">
         <div className="flex items-center gap-3">
           <WorkspaceTabs />
@@ -2117,7 +2120,10 @@ function ComicFlow() {
         completed={pageResults.filter((r) => r.imagePath).length}
         total={storyPages.length}
       />
-      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+      <div
+        data-tour="comic-content"
+        className="min-h-0 flex-1 overflow-y-auto px-4 py-4"
+      >
         <div className="mx-auto flex max-w-4xl flex-col gap-4 text-neutral-200">
           <PageHelp
             what="話を渡すと、AI がページ構成からコマ割り・セリフまで設計し、吹き出しや擬音も絵として描いた漫画ページを一気に生成します。複数ページの連続ストーリーも作れます。"

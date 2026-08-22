@@ -43,7 +43,10 @@ export function ComicPhaseRail({
   const progressPercent = total > 0 ? Math.min(100, (completed / total) * 100) : 0;
 
   return (
-    <nav className="flex h-full w-44 shrink-0 flex-col gap-2 border-r border-[#242424] bg-[#161616] px-3 py-4">
+    <nav
+      data-tour="comic-phases"
+      className="flex h-full w-44 shrink-0 flex-col gap-2 border-r border-[#242424] bg-[#161616] px-3 py-4"
+    >
       {RAIL_PHASES.map((p) => {
         const active = phase === p.id;
         // 入場可否は旧 PhaseNav の disabled 条件をそのまま移植する（ロジック追加なし）。

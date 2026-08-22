@@ -39,7 +39,10 @@ export function ProductSetWorkspace() {
   }, [pushToast]);
 
   return (
-    <section className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#121212]">
+    <section
+      data-tour="product-set-workspace"
+      className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#121212]"
+    >
       <div className="border-b border-[#242424] bg-[#121212] px-4 py-3">
         <div className="flex items-center gap-3">
           <WorkspaceTabs />
@@ -56,7 +59,10 @@ export function ProductSetWorkspace() {
 
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <ProductSetSettingsPanel />
-        <div className="min-h-0 flex-1 overflow-hidden">
+        <div
+          data-tour="product-set-results"
+          className="min-h-0 flex-1 overflow-hidden"
+        >
           <ProductSetGridPanel onPreview={(path, all) => openPreview(path, all)} />
         </div>
       </div>

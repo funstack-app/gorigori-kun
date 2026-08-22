@@ -66,7 +66,10 @@ export function StoryboardWorkspace() {
   // 「画像生成」タブを押してストーリーカットの Phase フローに戻れる。
   if (activeTab !== "generate") {
     return (
-      <section className="relative flex min-h-0 flex-1 flex-col overflow-hidden bg-[#121212]">
+      <section
+        data-tour="storyboard-workspace"
+        className="relative flex min-h-0 flex-1 flex-col overflow-hidden bg-[#121212]"
+      >
         <div className="border-b border-[#242424] bg-[#121212] px-4 py-3">
           <div className="flex items-center gap-3">
             <WorkspaceTabs />
@@ -83,7 +86,10 @@ export function StoryboardWorkspace() {
   }
 
   return (
-    <section className="relative flex min-h-0 flex-1 flex-col overflow-hidden bg-[#121212]">
+    <section
+      data-tour="storyboard-workspace"
+      className="relative flex min-h-0 flex-1 flex-col overflow-hidden bg-[#121212]"
+    >
       <div className="border-b border-[#242424] bg-[#121212] px-4 py-3">
         <div className="flex items-center gap-3">
           <WorkspaceTabs />
@@ -95,7 +101,10 @@ export function StoryboardWorkspace() {
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <PhaseRail />
 
-        <div className="min-h-0 flex-1 overflow-hidden px-4 py-4">
+        <div
+          data-tour="storyboard-content"
+          className="min-h-0 flex-1 overflow-hidden px-4 py-4"
+        >
           {phase === "goal" && <GoalChatPanel />}
           {phase === "sketch" && <SketchReviewPanel />}
           {phase === "generation" && <GenerationProgressPanel />}

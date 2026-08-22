@@ -61,7 +61,10 @@ export function PhaseRail() {
   }
 
   return (
-    <nav className="flex h-full w-44 shrink-0 flex-col gap-2 border-r border-[#242424] bg-[#161616] px-3 py-4">
+    <nav
+      data-tour="storyboard-phases"
+      className="flex h-full w-44 shrink-0 flex-col gap-2 border-r border-[#242424] bg-[#161616] px-3 py-4"
+    >
       {PHASES.map((p) => {
         const active = phase === p.id;
         const enabled = canEnter(p.id);

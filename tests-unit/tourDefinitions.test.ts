@@ -8,7 +8,7 @@ import {
 } from "../src/lib/tour";
 
 describe("tour definitions", () => {
-  it("has unique ids, non-empty steps, and all four approved page tours", () => {
+  it("has unique ids, non-empty steps, and tours for every guided page", () => {
     const pageTours = Object.values(PAGE_TOURS);
     const tours = [...pageTours, WELCOME_TOUR];
     const ids = tours.map((tour) => tour.id);
@@ -16,13 +16,36 @@ describe("tour definitions", () => {
     expect(new Set(ids).size).toBe(ids.length);
     expect(ids).toEqual(
       expect.arrayContaining([
+        "planning",
         "artwork-generation",
+        "video-generation",
+        "editing",
+        "library",
+        "projects",
+        "presets",
+        "chat-history",
+        "error-log",
         "skills",
         "film",
+        "storyboard",
+        "comic",
+        "sticker",
+        "multi-angle",
+        "product-set",
+        "character-register",
+        "expression-set",
+        "scene-3d",
+        "scene-recreate",
+        "redline",
+        "regulation-check",
         "settings-connections",
       ]),
     );
-    expect(pageTours).toHaveLength(4);
+    expect(pageTours.length).toBeGreaterThanOrEqual(23);
+    for (const tour of pageTours) {
+      expect(tour.steps.length).toBeGreaterThanOrEqual(3);
+      expect(tour.steps.length).toBeLessThanOrEqual(7);
+    }
     for (const tour of tours) {
       expect(tour.steps.length).toBeGreaterThan(0);
       for (const step of tour.steps) {

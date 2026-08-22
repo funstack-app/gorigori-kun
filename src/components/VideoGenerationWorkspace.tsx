@@ -61,8 +61,14 @@ function I2vSourceBanner() {
  */
 export function VideoGenerationWorkspace({ timeline }: VideoGenerationWorkspaceProps) {
   return (
-    <div className="grid h-full min-h-0 gap-4 md:grid-cols-[minmax(280px,340px)_minmax(0,1fr)]">
-      <section className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-[#2a2a2a] bg-[#181818]">
+    <div
+      data-tour="video-generation-workspace"
+      className="grid h-full min-h-0 gap-4 md:grid-cols-[minmax(280px,340px)_minmax(0,1fr)]"
+    >
+      <section
+        data-tour="video-generation-builder"
+        className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-[#2a2a2a] bg-[#181818]"
+      >
         <div className="shrink-0 border-b border-[#242424] px-4 py-3">
           <div className="flex items-center justify-between gap-2">
             <h3 className="text-sm font-black text-white">シーン構築</h3>

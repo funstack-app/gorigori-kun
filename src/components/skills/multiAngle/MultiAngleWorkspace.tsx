@@ -85,7 +85,10 @@ export function MultiAngleWorkspace() {
   }, [pushToast]);
 
   return (
-    <section className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#121212]">
+    <section
+      data-tour="multi-angle-workspace"
+      className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#121212]"
+    >
       <div className="border-b border-[#242424] bg-[#121212] px-4 py-3">
         <div className="flex items-center gap-3">
           <WorkspaceTabs />
@@ -114,7 +117,10 @@ export function MultiAngleWorkspace() {
 
       <div className="flex min-h-0 flex-1 overflow-hidden">
         <AngleSettingsPanel />
-        <div className="min-h-0 flex-1 overflow-hidden">
+        <div
+          data-tour="multi-angle-results"
+          className="min-h-0 flex-1 overflow-hidden"
+        >
           <AngleGridPanel
             onPreview={(path, all) => openPreview(path, all)}
           />

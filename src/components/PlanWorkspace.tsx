@@ -381,7 +381,10 @@ export function PlanWorkspace() {
   };
 
   return (
-    <section className="relative flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-[#2a2a2a] bg-[#181818]">
+    <section
+      data-tour="planning-workspace"
+      className="relative flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-[#2a2a2a] bg-[#181818]"
+    >
       {/*
         ページヘルプ (ui-placement-grammar §4)。本タブは常時表示のヘッダー行を
         持たないため、右上のステータス列と対になる左上へ常設で置く
@@ -978,6 +981,7 @@ function ChatInput({
           className="hidden"
         />
         <textarea
+          data-tour="planning-input"
           value={value}
           onChange={(event) => onChange(event.target.value)}
           onKeyDown={(event) => {

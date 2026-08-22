@@ -177,7 +177,10 @@ export function RedlineWorkspace() {
   const canInterpret = Boolean(redlinePath) && !running;
 
   return (
-    <section className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#121212]">
+    <section
+      data-tour="redline-workspace"
+      className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#121212]"
+    >
       <div className="border-b border-[#242424] bg-[#121212] px-4 py-3">
         <div className="flex items-center gap-3">
           <WorkspaceTabs />
@@ -192,7 +195,10 @@ export function RedlineWorkspace() {
         />
 
         {/* 入力エリア: 元画像（推奨） + 赤入れ（必須） */}
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <div
+          data-tour="redline-inputs"
+          className="grid grid-cols-1 gap-3 sm:grid-cols-2"
+        >
           <ImageDropSlot
             label="元画像（推奨）"
             hint="修正前のデザイン。これが無いと差分の言語化ができません"
@@ -221,7 +227,7 @@ export function RedlineWorkspace() {
         )}
 
         {/* アクション */}
-        <div className="flex items-center gap-2">
+        <div data-tour="redline-run" className="flex items-center gap-2">
           <button
             type="button"
             onClick={() => void interpret()}
@@ -259,7 +265,7 @@ export function RedlineWorkspace() {
 
         {/* 結果: 修正指示カード一覧 */}
         {result && (
-          <div className="space-y-3">
+          <div data-tour="redline-results" className="space-y-3">
             <div className="flex items-center justify-between">
               <p className="text-xs font-black text-neutral-300">
                 修正指示 {result.instructions.length} 件

@@ -90,6 +90,7 @@ export function ErrorLogPanel({ open, onClose }: Props) {
   return (
     <div
       ref={dialogRef}
+      data-tour="error-log-dialog"
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
       role="dialog"
       aria-modal="true"
@@ -102,7 +103,7 @@ export function ErrorLogPanel({ open, onClose }: Props) {
       >
         <div className="flex items-center justify-between border-b border-neutral-800 px-5 py-3">
           <h3 className="text-base font-semibold text-neutral-100">エラーログ</h3>
-          <div className="flex items-center gap-2">
+          <div data-tour="error-log-actions" className="flex items-center gap-2">
             <button
               type="button"
               onClick={() => void copyText(ordered.map(entryToText).join("\n\n"))}
@@ -131,7 +132,10 @@ export function ErrorLogPanel({ open, onClose }: Props) {
           </div>
         </div>
 
-        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+        <div
+          data-tour="error-log-list"
+          className="min-h-0 flex-1 overflow-y-auto px-5 py-4"
+        >
           {ordered.length === 0 ? (
             <p className="py-10 text-center text-xs text-neutral-500">
               エラーはまだありません

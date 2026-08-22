@@ -160,7 +160,10 @@ export function ProductSetSettingsPanel() {
   }
 
   return (
-    <aside className="flex w-80 shrink-0 flex-col gap-4 overflow-y-auto border-r border-[#242424] bg-[#141414] px-4 py-4">
+    <aside
+      data-tour="product-set-settings"
+      className="flex w-80 shrink-0 flex-col gap-4 overflow-y-auto border-r border-[#242424] bg-[#141414] px-4 py-4"
+    >
       <div>
         <div className="mb-1.5 text-[11px] font-black uppercase tracking-wider text-neutral-500">
           商品写真

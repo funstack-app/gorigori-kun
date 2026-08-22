@@ -14,6 +14,7 @@ import { SnsExportModal } from "./components/SnsExportModal";
 import { SafeImage } from "./components/SafeImage";
 import { VirtualGalleryGrid } from "./components/VirtualGalleryGrid";
 import { ProjectGallery } from "./components/ProjectGallery";
+import { ProviderIcon, type ProviderIconId } from "./components/ProviderIcon";
 import {
   LibrarySidebar,
   type LibraryScope,
@@ -33,6 +34,7 @@ import { TourOverlay } from "./components/TourOverlay";
 import { Badge } from "./components/ui";
 import { attachWindowDragDrop } from "./lib/dragDrop";
 import { humanizeError } from "./lib/humanizeError";
+import { REMOTE_MCP_PROVIDERS } from "./lib/remoteMcpProviders";
 import {
   type AuthAccount,
   images as imagesIpc,
@@ -162,19 +164,55 @@ function SignedInScaffold() {
   const navCollapseManualOverrideRef = useRef(false);
   const activeUiMode = useSkillUiMode((state) => state.activeUiMode);
   const activeWorkspaceTab = useWorkspace((state) => state.activeTab);
+  const errorLogOpen = useErrorLog((state) => state.panelOpen);
   const [activeTour, setActiveTour] = useState<TourDefinition | null>(null);
   const welcomeStartedRef = useRef(false);
 
   const currentTour = useMemo<TourDefinition | null>(() => {
+    if (errorLogOpen) return PAGE_TOURS.errorLog;
+    if (drawer === "assets") return PAGE_TOURS.library;
+    if (drawer === "history") return PAGE_TOURS.projects;
+    if (drawer === "presets") return PAGE_TOURS.presets;
     if (drawer === "skills") return PAGE_TOURS.skills;
+    if (drawer === "export") return PAGE_TOURS.chatHistory;
     if (drawer === "settings") return PAGE_TOURS.settingsConnections;
     if (drawer !== null) return null;
+
     if (activeUiMode === "film") return PAGE_TOURS.film;
-    if (activeUiMode === "default" && activeWorkspaceTab === "generate") {
-      return PAGE_TOURS.artworkGeneration;
+    if (activeWorkspaceTab === "plan") return PAGE_TOURS.planning;
+    if (activeWorkspaceTab === "video") return PAGE_TOURS.videoGeneration;
+    if (activeWorkspaceTab === "edit") return PAGE_TOURS.editing;
+    if (activeWorkspaceTab !== "generate") return null;
+
+    switch (activeUiMode) {
+      case "default":
+        return PAGE_TOURS.artworkGeneration;
+      case "storyboard":
+        return PAGE_TOURS.storyboard;
+      case "comic":
+        return PAGE_TOURS.comic;
+      case "sticker":
+        return PAGE_TOURS.sticker;
+      case "multiAngle":
+        return PAGE_TOURS.multiAngle;
+      case "productSet":
+        return PAGE_TOURS.productSet;
+      case "characterRegister":
+        return PAGE_TOURS.characterRegister;
+      case "expressionSet":
+        return PAGE_TOURS.expressionSet;
+      case "scene3d":
+        return PAGE_TOURS.scene3d;
+      case "sceneRecreate":
+        return PAGE_TOURS.sceneRecreate;
+      case "redline":
+        return PAGE_TOURS.redline;
+      case "regulationCheck":
+        return PAGE_TOURS.regulationCheck;
+      default:
+        return null;
     }
-    return null;
-  }, [activeUiMode, activeWorkspaceTab, drawer]);
+  }, [activeUiMode, activeWorkspaceTab, drawer, errorLogOpen]);
 
   useEffect(() => {
     if (
@@ -1476,6 +1514,7 @@ function UsageGauges() {
   const hfAuthed = useAccounts((s) => s.higgsfield.authenticated);
   // Magnific オプショナル拡張 (2026-06-08)。接続済みならバッジを出す(degrade)。
   const magnificAuthed = useAccounts((s) => s.magnific.authenticated);
+  const remoteMcpState = useAccounts((s) => s.remoteMcp);
 
   // Higgsfield credits を取得 (認証済みのときだけ)。起動時 + 5 分ごとに refresh。
   // Magnific の接続状態も同タイミングで refresh する。
@@ -1491,6 +1530,10 @@ function UsageGauges() {
         .getState()
         .refreshMagnific()
         .catch(() => undefined);
+      await useAccounts
+        .getState()
+        .refreshRemoteMcp()
+        .catch(() => undefined);
     };
     void fetchCredits();
     const id = setInterval(fetchCredits, 5 * 60 * 1000);
@@ -1500,36 +1543,111 @@ function UsageGauges() {
     };
   }, []);
 
-  const showHf = hfAuthed && hfCredits !== undefined;
-  // どちらの拡張も未接続なら何も表示しない (コアだけの素の状態)。
-  if (!showHf && !magnificAuthed) {
+  const connectedProviders: Array<{
+    id: ProviderIconId;
+    label: string;
+    tone: "higgsfield" | "magnific" | "remote";
+    credits?: number;
+  }> = [
+    ...(hfAuthed
+      ? [
+          {
+            id: "higgsfield" as const,
+            label: "HiggsField",
+            tone: "higgsfield" as const,
+            credits: hfCredits,
+          },
+        ]
+      : []),
+    ...(magnificAuthed
+      ? [
+          {
+            id: "magnific" as const,
+            label: "Magnific",
+            tone: "magnific" as const,
+          },
+        ]
+      : []),
+    ...REMOTE_MCP_PROVIDERS.filter(
+      (provider) => remoteMcpState[provider.id]?.authenticated,
+    ).map((provider) => ({
+      id: provider.id,
+      label: provider.label,
+      tone: "remote" as const,
+    })),
+  ];
+
+  // 接続サービスが無ければ何も表示しない (コアだけの素の状態)。
+  if (connectedProviders.length === 0) {
     return null;
   }
 
+  const visibleProviders = connectedProviders.slice(0, 3);
+  const overflowProviders = connectedProviders.slice(3);
+
   return (
     <div className="flex items-center gap-2">
-      {showHf && (
-        <div
-          className="flex items-center gap-1.5 rounded-md border border-pink-400/40 bg-pink-500/10 px-2.5 py-1 text-[11px] font-bold text-pink-100"
-          title={`HiggsField credits: ${Math.round(hfCredits)}`}
-        >
-          <span className="flex items-center gap-1 text-pink-300">
-            <BoltIcon />
-            HiggsField
-          </span>
-          <span className="tabular-nums text-white">{Math.round(hfCredits)}</span>
-        </div>
+      {visibleProviders.map((provider) => (
+        <HeaderProviderPill key={provider.id} provider={provider} />
+      ))}
+      {overflowProviders.length > 0 && (
+        <details className="group relative">
+          <summary className="cursor-pointer list-none rounded-md border border-[#3a3a3a] bg-[#1b1b1b] px-2.5 py-1 text-[11px] font-bold text-neutral-200 hover:bg-[#242424] [&::-webkit-details-marker]:hidden">
+            +{overflowProviders.length}
+          </summary>
+          <div className="absolute right-0 top-full z-50 mt-2 flex min-w-44 flex-col gap-1.5 rounded-lg border border-[#333] bg-[#151515] p-2 shadow-2xl">
+            {overflowProviders.map((provider) => (
+              <HeaderProviderPill key={provider.id} provider={provider} wide />
+            ))}
+          </div>
+        </details>
       )}
-      {magnificAuthed && (
-        <div
-          className="flex items-center gap-1.5 rounded-md border border-violet-400/40 bg-violet-500/10 px-2.5 py-1 text-[11px] font-bold text-violet-100"
-          title="Magnific 接続済み"
-        >
-          <span className="flex items-center gap-1 text-violet-300">
-            <BoltIcon />
-            Magnific
-          </span>
-        </div>
+    </div>
+  );
+}
+
+function HeaderProviderPill({
+  provider,
+  wide = false,
+}: {
+  provider: {
+    id: ProviderIconId;
+    label: string;
+    tone: "higgsfield" | "magnific" | "remote";
+    credits?: number;
+  };
+  wide?: boolean;
+}) {
+  const colors =
+    provider.tone === "higgsfield"
+      ? "border-pink-400/40 bg-pink-500/10 text-pink-100"
+      : provider.tone === "magnific"
+        ? "border-violet-400/40 bg-violet-500/10 text-violet-100"
+        : "border-sky-400/30 bg-sky-500/10 text-sky-100";
+  const measuredCredits =
+    provider.credits !== undefined && Number.isFinite(provider.credits)
+      ? Math.round(provider.credits)
+      : null;
+
+  return (
+    <div
+      className={`flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[11px] font-bold ${colors} ${wide ? "w-full" : ""}`}
+      title={
+        measuredCredits === null
+          ? `${provider.label} 接続済み`
+          : `${provider.label} credits: ${measuredCredits}`
+      }
+    >
+      <span className="flex min-w-0 items-center gap-1">
+        {provider.tone === "remote" ? (
+          <ProviderIcon id={provider.id} className="!h-4 !w-4 !rounded-sm !border-0" />
+        ) : (
+          <BoltIcon />
+        )}
+        <span className="truncate">{provider.label}</span>
+      </span>
+      {measuredCredits !== null && (
+        <span className="ml-auto tabular-nums text-white">{measuredCredits}</span>
       )}
     </div>
   );
@@ -1550,6 +1668,11 @@ function AssetsWorkspace() {
 
   const [query, setQuery] = useState("");
   const [scope, setScope] = useState<LibraryScope>("all");
+  // 検索・種別・お気に入り・プロジェクトの表示条件が変わったら、
+  // 画面から消えた素材を選択したまま一括操作しないよう必ず解除する。
+  useEffect(() => {
+    clear();
+  }, [clear, query, scope]);
   // 見た目だけの設定なので localStorage で十分。作品メタのお気に入りは
   // images.ts の favorites.json に保存され、ここには置かない。
   const [tileSize, setTileSize] = useState<number>(() => {
@@ -1727,43 +1850,137 @@ function AssetsWorkspace() {
 function LibraryDeleteButton() {
   const selected = useLibrarySelection((s) => s.selected);
   const exitMode = useLibrarySelection((s) => s.exitMode);
+  const items = useImages((s) => s.items);
   const [running, setRunning] = useState(false);
+  const [pendingDeletePaths, setPendingDeletePaths] = useState<string[] | null>(null);
 
-  const disabled = selected.size === 0 || running;
+  const disabled = selected.size === 0 || running || pendingDeletePaths !== null;
+  const previewItems = (pendingDeletePaths ?? []).slice(0, 5).map((path) => ({
+    path,
+    item: items.find((item) => item.path === path),
+  }));
 
-  const handleClick = async () => {
+  const handleClick = () => {
     if (disabled) return;
+    setPendingDeletePaths(Array.from(selected));
+  };
+
+  const handleConfirm = async () => {
+    if (!pendingDeletePaths || running) return;
     setRunning(true);
     try {
-      const deleted = await deleteGalleryImages(Array.from(selected));
+      const deleted = await deleteGalleryImages(pendingDeletePaths, {
+        skipConfirmation: true,
+      });
       // 1 枚でも消えたら選択モードを抜ける (残った失敗分を再選択させない)。
       if (deleted > 0) exitMode();
     } finally {
       setRunning(false);
+      setPendingDeletePaths(null);
     }
   };
 
   return (
-    <button
-      type="button"
-      onClick={handleClick}
-      disabled={disabled}
-      className={[
-        "flex h-7 items-center gap-1.5 rounded-md px-3 text-[11px] font-bold transition",
-        disabled
-          ? "cursor-not-allowed bg-neutral-800 text-neutral-600"
-          : "bg-rose-600 text-white hover:bg-rose-500",
-      ].join(" ")}
-    >
-      {running ? (
-        "削除中…"
-      ) : (
-        <>
-          <TrashIcon />
-          <span>削除{selected.size > 0 ? ` (${selected.size})` : ""}</span>
-        </>
+    <>
+      <button
+        type="button"
+        onClick={handleClick}
+        disabled={disabled}
+        className={[
+          "flex h-7 items-center gap-1.5 rounded-md px-3 text-[11px] font-bold transition",
+          disabled
+            ? "cursor-not-allowed bg-neutral-800 text-neutral-600"
+            : "bg-rose-600 text-white hover:bg-rose-500",
+        ].join(" ")}
+      >
+        {running ? (
+          "削除中…"
+        ) : (
+          <>
+            <TrashIcon />
+            <span>削除{selected.size > 0 ? ` (${selected.size})` : ""}</span>
+          </>
+        )}
+      </button>
+
+      {pendingDeletePaths && (
+        <div
+          className="fixed inset-0 z-[80] flex items-center justify-center bg-black/80 p-5 backdrop-blur-sm"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="library-delete-title"
+          onClick={(event) => {
+            if (event.target === event.currentTarget && !running) {
+              setPendingDeletePaths(null);
+            }
+          }}
+        >
+          <div className="w-full max-w-md rounded-2xl border border-rose-400/30 bg-[#181818] p-5 shadow-2xl">
+            <h3 id="library-delete-title" className="text-base font-black text-white">
+              {pendingDeletePaths.length}件の素材を削除しますか？
+            </h3>
+            <p className="mt-1 text-[12px] text-neutral-400">
+              元に戻せません。削除する内容を確認してください。
+            </p>
+
+            <ul className="mt-4 space-y-2">
+              {previewItems.map(({ path, item }) => {
+                const thumbnailPath =
+                  item && galleryItemMediaType(item) === "video"
+                    ? item.thumbnailPath
+                    : path;
+                const name = item?.name ?? path.split(/[\\/]/).pop() ?? path;
+                return (
+                  <li
+                    key={path}
+                    className="flex items-center gap-3 rounded-lg border border-white/10 bg-black/20 p-2"
+                  >
+                    <div className="flex h-12 w-16 shrink-0 items-center justify-center overflow-hidden rounded bg-[#0d0d0d] text-[10px] text-neutral-500">
+                      {thumbnailPath ? (
+                        <SafeImage
+                          path={thumbnailPath}
+                          alt=""
+                          className="h-full w-full object-cover"
+                        />
+                      ) : (
+                        "動画"
+                      )}
+                    </div>
+                    <span className="min-w-0 truncate text-[12px] text-neutral-200" title={path}>
+                      {name}
+                    </span>
+                  </li>
+                );
+              })}
+            </ul>
+            {pendingDeletePaths.length > previewItems.length && (
+              <p className="mt-2 text-[11px] text-neutral-500">
+                ほか {pendingDeletePaths.length - previewItems.length} 件
+              </p>
+            )}
+
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setPendingDeletePaths(null)}
+                disabled={running}
+                className="rounded-lg border border-white/15 px-4 py-2 text-[12px] font-bold text-neutral-300 transition hover:bg-white/10 disabled:opacity-40"
+              >
+                キャンセル
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleConfirm()}
+                disabled={running}
+                className="rounded-lg bg-rose-600 px-4 py-2 text-[12px] font-bold text-white transition hover:bg-rose-500 disabled:opacity-50"
+              >
+                {running ? "削除中…" : `${pendingDeletePaths.length}件を削除`}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
-    </button>
+    </>
   );
 }
 

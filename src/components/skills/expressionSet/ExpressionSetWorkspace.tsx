@@ -88,7 +88,10 @@ export function ExpressionSetWorkspace() {
   }, [visible, enterMode, pushToast]);
 
   return (
-    <section className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#121212]">
+    <section
+      data-tour="expression-set-workspace"
+      className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#121212]"
+    >
       <div className="border-b border-[#242424] bg-[#121212] px-4 py-3">
         <div className="flex items-center gap-3">
           <WorkspaceTabs />
@@ -121,7 +124,10 @@ const STEP_LABELS: { step: 1 | 2; label: string }[] = [
 function StepIndicator() {
   const step = useCharacterSheetRun((s) => s.step);
   return (
-    <div className="flex items-center gap-2 border-b border-[#242424] px-4 py-2">
+    <div
+      data-tour="expression-set-steps"
+      className="flex items-center gap-2 border-b border-[#242424] px-4 py-2"
+    >
       {STEP_LABELS.map((s) => (
         <div
           key={s.step}
@@ -305,7 +311,10 @@ function StepSelect() {
 
   return (
     <div className="flex h-full min-h-0">
-      <aside className="flex w-80 shrink-0 flex-col gap-4 overflow-y-auto border-r border-[#242424] bg-[#141414] px-4 py-4">
+      <aside
+        data-tour="expression-set-settings"
+        className="flex w-80 shrink-0 flex-col gap-4 overflow-y-auto border-r border-[#242424] bg-[#141414] px-4 py-4"
+      >
         <div>
           <div className="mb-1.5 text-[11px] font-black uppercase tracking-wider text-neutral-500">
             登録キャラを選ぶ
@@ -634,7 +643,10 @@ function StepGenerate({
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div
+      data-tour="expression-set-results"
+      className="flex h-full min-h-0 flex-col"
+    >
       <div className="flex items-center justify-between border-b border-[#242424] px-4 py-3">
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-1.5 text-[12px] font-bold text-neutral-300">

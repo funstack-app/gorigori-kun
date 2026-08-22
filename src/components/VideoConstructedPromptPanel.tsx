@@ -403,7 +403,10 @@ export function VideoConstructedPromptPanel() {
       ].join(" · ");
 
   return (
-    <section className="flex h-full min-h-0 flex-col bg-[#181818]">
+    <section
+      data-tour="video-generation-controls"
+      className="flex h-full min-h-0 flex-col bg-[#181818]"
+    >
       <div className="shrink-0">
         <ReferenceRack
           references={references}
@@ -418,7 +421,10 @@ export function VideoConstructedPromptPanel() {
         />
       </div>
 
-      <div className="shrink-13-textarea flex min-h-[80px] flex-1 flex-col p-3">
+      <div
+        data-tour="video-generation-prompt"
+        className="shrink-13-textarea flex min-h-[80px] flex-1 flex-col p-3"
+      >
         <div className="mb-1.5 flex items-center justify-end gap-1.5">
           {/*
             「AIで整える」— 要素別編集の左 (STΛCK指示 2026-07-25)。
@@ -528,6 +534,7 @@ export function VideoConstructedPromptPanel() {
         )}
 
         <button
+          data-tour="video-generation-submit"
           type="button"
           onClick={() => void generate()}
           disabled={disabled || !higgsfieldAuthed}

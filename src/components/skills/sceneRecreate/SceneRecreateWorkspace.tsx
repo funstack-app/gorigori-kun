@@ -303,7 +303,10 @@ export function SceneRecreateWorkspace() {
   }
 
   return (
-    <section className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#121212]">
+    <section
+      data-tour="scene-recreate-workspace"
+      className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#121212]"
+    >
       <div className="border-b border-[#242424] bg-[#121212] px-4 py-3">
         <div className="flex items-center gap-3">
           <WorkspaceTabs />
@@ -313,7 +316,10 @@ export function SceneRecreateWorkspace() {
 
       <div className="flex min-h-0 flex-1 overflow-hidden">
         {/* 左: 入力 */}
-        <aside className="flex w-96 shrink-0 flex-col gap-4 overflow-y-auto border-r border-[#242424] bg-[#141414] px-4 py-4">
+        <aside
+          data-tour="scene-recreate-input"
+          className="flex w-96 shrink-0 flex-col gap-4 overflow-y-auto border-r border-[#242424] bg-[#141414] px-4 py-4"
+        >
           <PageHelp
             what="気になった映像のスクショを数枚渡すと、構図・光・被写体の置き方を読み解いて言葉にし、自分のキャラや商品で同じ画作りをするための指示文を出します。"
             first="まずは下から、真似したい場面のスクショを時系列の順に数枚選んでください。動画ファイルがあれば「動画から取り込む」で自動的に切り出せます。"
@@ -459,6 +465,7 @@ export function SceneRecreateWorkspace() {
           </div>
 
           <button
+            data-tour="scene-recreate-run"
             type="button"
             onClick={() => void runAnalysis()}
             disabled={running || keyframes.length === 0}
@@ -482,7 +489,10 @@ export function SceneRecreateWorkspace() {
         </aside>
 
         {/* 右: 結果 */}
-        <div className="min-h-0 flex-1 overflow-y-auto">
+        <div
+          data-tour="scene-recreate-results"
+          className="min-h-0 flex-1 overflow-y-auto"
+        >
           {analysis ? (
             <AnalysisResult analysis={analysis} canSendToScene3d={status === "done"} />
           ) : status === "describing" || status === "analyzing" ? (

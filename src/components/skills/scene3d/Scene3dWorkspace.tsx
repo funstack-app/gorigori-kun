@@ -3627,7 +3627,10 @@ export function Scene3dWorkspace() {
   const rightW = Math.max(150, Math.round((rowW * rightPct) / 100));
 
   return (
-    <section className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#121212] [&_input[type=range]]:accent-neutral-400">
+    <section
+      data-tour="scene-3d-workspace"
+      className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#121212] [&_input[type=range]]:accent-neutral-400"
+    >
       <div className="border-b border-[#242424] bg-[#121212] px-4 py-3">
         <div className="flex items-center gap-3">
           <WorkspaceTabs />
@@ -3643,7 +3646,11 @@ export function Scene3dWorkspace() {
       <div ref={rowRef} className="flex min-h-0 flex-1 overflow-hidden">
         {leftOpen ? (
           <>
-            <div style={{ width: leftW, minWidth: 140 }} className="relative flex overflow-hidden">
+            <div
+              data-tour="scene-3d-assets"
+              style={{ width: leftW, minWidth: 140 }}
+              className="relative flex overflow-hidden"
+            >
               <ShelfPanel />
               <button
                 className="absolute -right-0 top-2 z-10 rounded-l-md px-1 py-1 text-[10px] text-neutral-500 hover:text-pink-300"
@@ -3658,7 +3665,10 @@ export function Scene3dWorkspace() {
         ) : (
           <CollapsedRail side="left" onOpen={toggleLeft} />
         )}
-        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        <div
+          data-tour="scene-3d-camera"
+          className="flex min-h-0 min-w-0 flex-1 flex-col"
+        >
           <ViewportWithFrame />
           <ShotReadback />
           <ShotTimeline />
@@ -3666,7 +3676,11 @@ export function Scene3dWorkspace() {
         {rightOpen ? (
           <>
             <PanelResizer onDelta={(dx) => setRightPct(rowW > 0 ? (-dx / rowW) * 100 : 0, leftPct)} />
-            <div style={{ width: rightW, minWidth: 200 }} className="relative flex overflow-hidden">
+            <div
+              data-tour="scene-3d-director"
+              style={{ width: rightW, minWidth: 200 }}
+              className="relative flex overflow-hidden"
+            >
               <button
                 className="absolute left-0 top-2 z-10 rounded-r-md px-1 py-1 text-[10px] text-neutral-500 hover:text-pink-300"
                 onClick={toggleRight}
