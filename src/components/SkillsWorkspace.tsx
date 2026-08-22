@@ -80,10 +80,6 @@ export function SkillsWorkspace({ onUseSkill }: { onUseSkill?: () => void }) {
     onUseSkill?.();
   };
 
-  const legacyStoryboardSkill = GORI_SKILLS.find(
-    (skill) => skill.id === "gori-storyboard",
-  );
-
   // スキルを「停止する」= 作品モード (default UI) に戻す。
   // STΛCK 指示 (2026-05-20):
   //  - チャット履歴 / 引き継ぎセクションは保持 (planChat.messages や
@@ -285,15 +281,6 @@ export function SkillsWorkspace({ onUseSkill }: { onUseSkill?: () => void }) {
                   <p className="text-[10px] leading-relaxed text-neutral-500">
                     {skill.launchHint}
                   </p>
-                  {skill.id === "film" && legacyStoryboardSkill && (
-                    <button
-                      type="button"
-                      onClick={() => useSkill(legacyStoryboardSkill)}
-                      className="text-left text-[10px] text-neutral-600 underline decoration-neutral-700 underline-offset-2 transition hover:text-neutral-400"
-                    >
-                      旧ストーリーカットを開く
-                    </button>
-                  )}
                 </div>
               </article>
             );

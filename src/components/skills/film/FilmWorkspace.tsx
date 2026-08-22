@@ -404,7 +404,7 @@ export function FilmWorkspace() {
           <FilmMarkIcon />
         </span>
         <div className="min-w-0">
-          <h1 className="text-sm font-semibold">フィルム</h1>
+          <h1 className="text-sm font-semibold">AIフィルム</h1>
           <p className="text-xs text-zinc-500">AIと話して、完成まで迷わず進める映像制作</p>
         </div>
         <ProjectControls

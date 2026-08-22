@@ -72,10 +72,10 @@ export const GORI_SKILLS: GoriSkill[] = [
     // 2026-08-22 追加: 旧ストーリーカットの一覧上の位置と役を引き継ぐ。
     // run-ai-film の設計先行・承認ゲート駆動を移植した6工程の専用 Workspace。
     id: "film",
-    name: "フィルム",
-    shortName: "Film",
+    name: "AIフィルム",
+    shortName: "AI Film",
     description:
-      "企画から完成動画まで。設計を固めてから作る映像制作（旧: ストーリーカット生成）",
+      "企画から完成動画まで。AIと話しながら設計を固めてから作る映像制作",
     path: "~/.codex/skills/film",
     availableInApp: true,
     launchHint: "企画 → 設計 → 生成 → 完成",
@@ -92,7 +92,8 @@ export const GORI_SKILLS: GoriSkill[] = [
       "作りたい話を伝えると、AIが聞き返しながら絵コンテに起こし、そのままカットを連続生成します。登録キャラと画風を固定するので、話が進んでも同じ人物・同じ絵柄のまま並びます。",
     path: "~/.codex/skills/gori-storyboard",
     availableInApp: true,
-    hidden: true,
+    // 2026-08-22 STΛCK指示: AIフィルムとは別スキルとして両方表示する
+    // （hidden を解除し、フィルムカード内の退避リンクは廃止）。
     launchHint: "話す → 絵コンテ → カット一式",
   },
   {
