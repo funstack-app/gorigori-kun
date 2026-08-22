@@ -76,6 +76,11 @@ import {
   DEFAULT_PROMPT_STYLE,
 } from "../../../lib/sticker/promptStyles";
 import {
+  formatReferenceSnapshotError,
+  isMissingReferenceError,
+  snapshotStickerReference,
+} from "../../../lib/sticker/referenceSnapshot";
+import {
   DEFAULT_STICKER_COUNT,
   isValidStickerCount,
   NORMAL_STICKER_SPEC,
@@ -338,6 +343,40 @@ function StickerBody() {
     [pickItems, keptIndexes],
   );
 
+  /** 原本をアプリ管理下へ複製する。失敗時は原本パスを状態へ入れず、その場で知らせる。 */
+  async function snapshotReference(path: string): Promise<string | null> {
+    try {
+      return await snapshotStickerReference(path);
+    } catch (err) {
+      pushToast({
+        kind: "error",
+        text: formatReferenceSnapshotError(err),
+        ttlMs: 6000,
+      });
+      return null;
+    }
+  }
+
+  async function adoptReference(path: string, label: string, nextAttributes: string) {
+    const snapshotPath = await snapshotReference(path);
+    if (!snapshotPath) return;
+    setSourceImage(snapshotPath);
+    setSourceLabel(label);
+    setAttributes(nextAttributes);
+  }
+
+  /** 保存済みの旧外部パスも、初回生成の直前に管理フォルダへ昇格させる。 */
+  async function prepareReferenceForGeneration(): Promise<string | null> {
+    if (!sourceImage) {
+      pushToast({ kind: "info", text: "先に素材を選んでください。", ttlMs: 3000 });
+      return null;
+    }
+    const snapshotPath = await snapshotReference(sourceImage);
+    if (!snapshotPath) return null;
+    if (snapshotPath !== sourceImage) setSourceImage(snapshotPath);
+    return snapshotPath;
+  }
+
   /** 素材を手持ち画像から選ぶ。 */
   async function pickLocalImage() {
     try {
@@ -347,9 +386,7 @@ function StickerBody() {
         filters: [{ name: "画像", extensions: IMAGE_EXTS }],
       });
       if (!r || typeof r !== "string") return;
-      setSourceImage(r);
-      setSourceLabel(r.split(/[\\/]/).pop() ?? "手持ち画像");
-      setAttributes("");
+      await adoptReference(r, r.split(/[\\/]/).pop() ?? "手持ち画像", "");
     } catch (err) {
       // 生エラーを直に連結しない（B4）。
       pushToast({
@@ -367,7 +404,7 @@ function StickerBody() {
    * カットは独立しているので、途中で失敗しても成功分はそのまま採否リストに乗る。
    */
   const startGeneration = useCallback(
-    async (targets: StickerEntry[], startIndex: number) => {
+    async (targets: StickerEntry[], startIndex: number, referenceImage: string) => {
       if (eventSubscriptionStatus !== "ready") {
         pushToast({
           kind: eventSubscriptionStatus === "failed" ? "error" : "info",
@@ -377,10 +414,6 @@ function StickerBody() {
               : "進捗の受信を準備しています。少し待ってからお試しください。",
           ttlMs: 5000,
         });
-        return;
-      }
-      if (!sourceImage) {
-        pushToast({ kind: "info", text: "先に素材を選んでください。", ttlMs: 3000 });
         return;
       }
       if (targets.length === 0) return;
@@ -412,12 +445,12 @@ function StickerBody() {
               // いる（下の `params.characterImage`）ので、ここは常に true になる。
               // 真偽で渡すのは、参照が無い経路が将来できたときに黙って
               // 「参照に一致させろ」と書き続けないため。
-              hasReference: Boolean(sourceImage),
+              hasReference: Boolean(referenceImage),
             }),
           }));
 
           const params: CharacterSheetParams = {
-            characterImage: sourceImage,
+            characterImage: referenceImage,
             attributes,
             aspectRatio: "1:1",
             cutSpecs,
@@ -447,11 +480,17 @@ function StickerBody() {
           // 決着するまで待ち、第2波を早く走らせない（W24）。
           await finished;
         }
-        pushToast({
-          kind: "success",
-          text: `${targets.length} 枚の生成と透過処理が終わりました。`,
-          ttlMs: 3000,
-        });
+        const targetIds = new Set(targets.map((entry) => entry.id));
+        const hasFailure = useStickerRun
+          .getState()
+          .cuts.some((cut) => targetIds.has(cut.entry.id) && cut.status === "failed");
+        if (!hasFailure) {
+          pushToast({
+            kind: "success",
+            text: `${targets.length} 枚の生成と透過処理が終わりました。`,
+            ttlMs: 3000,
+          });
+        }
       } catch (err) {
         // 起動できなかった対象も失敗として決着させ、全体待ちと再試行導線を止めない。
         const targetIds = new Set(targets.map((entry) => entry.id));
@@ -465,12 +504,14 @@ function StickerBody() {
         );
         pushToast({
           kind: "error",
-          text: formatStickerError(
-            "生成を始められませんでした。",
-            err,
-            "少し待ってから、もう一度お試しください。",
-            { dataSafe: "できあがっている分はそのまま残っています。" },
-          ),
+          text: isMissingReferenceError(err)
+            ? formatReferenceSnapshotError(err)
+            : formatStickerError(
+                "生成を始められませんでした。",
+                err,
+                "理由を確認してから、もう一度実行してください。",
+                { dataSafe: "できあがっている分はそのまま残っています。" },
+              ),
           ttlMs: 6000,
         });
       } finally {
@@ -480,12 +521,14 @@ function StickerBody() {
       }
       void startIndex;
     },
-    [sourceImage, attributes, pushToast, eventSubscriptionStatus],
+    [attributes, pushToast, eventSubscriptionStatus],
   );
 
   /** ② → ③。生成対象を確定して投入する。 */
   async function runAll() {
     if (entries.length === 0) return;
+    const referenceImage = await prepareReferenceForGeneration();
+    if (!referenceImage) return;
     setCuts(
       entries.map((entry, i) => ({
         index: i + 1,
@@ -498,13 +541,15 @@ function StickerBody() {
     setReview(null);
     setGenerationStartedAt(Date.now());
     setPhase("generate");
-    await startGeneration(entries, 1);
+    await startGeneration(entries, 1, referenceImage);
   }
 
   /** ④ 「使わない N枚を作り直す」。失敗したカットIDだけを再投入する。 */
   async function regenerate(indexes: number[]) {
     const targets = cuts.filter((c) => indexes.includes(c.index));
     if (targets.length === 0) return;
+    const referenceImage = await prepareReferenceForGeneration();
+    if (!referenceImage) return;
     setCuts((prev) =>
       prev.map((c) =>
         indexes.includes(c.index)
@@ -520,6 +565,7 @@ function StickerBody() {
     await startGeneration(
       targets.map((c) => c.entry),
       targets[0]?.index ?? 1,
+      referenceImage,
     );
   }
 
@@ -962,9 +1008,7 @@ function StickerBody() {
                 });
                 return;
               }
-              setSourceImage(src);
-              setSourceLabel(c.name);
-              setAttributes(c.characterMeta?.attributes ?? "");
+              void adoptReference(src, c.name, c.characterMeta?.attributes ?? "");
             }}
             onPickLocal={() => void pickLocalImage()}
             onCount={setCount}

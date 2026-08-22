@@ -225,8 +225,11 @@ test("Workspace が層Aと層Bを別セクションとして描く（事実と�
   expect(workspace).not.toContain("LINEの規格を満たして");
 });
 
-test("Workspace に ?ヘルプ が設置されている（説明を本文へ常駐させない）", () => {
+test("Workspace が画面ガイド(ツアー)に接続されている（説明を本文へ常駐させない）", () => {
+  // 2026-08-22 STΛCK指示: PageHelp は全廃しスポットライトツアーへ一本化した。
+  // 「説明を本文へ常駐させない」という契約は不変で、検査対象をツアー接続に変えた。
   const workspace = read("src/components/skills/sticker/StickerWorkspace.tsx");
-  expect(workspace).toContain("<PageHelp");
-  expect(workspace).toContain("PageHelp");
+  expect(workspace).toContain("data-tour");
+  const tours = read("src/lib/tour/tours.ts");
+  expect(tours, "スタンプ画面のツアー定義が消えている").toContain("sticker");
 });

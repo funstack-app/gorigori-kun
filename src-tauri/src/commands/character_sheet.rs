@@ -6,11 +6,13 @@
 //! 生成の下部構造 (セマフォ / PID台帳 / PNG回収 / リトライ / timeout) は
 //! commands/gen_worker.rs を multiangle と共用する。
 
+use std::fs::OpenOptions;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::codex::process::resolve_codex_cli_binary;
 use crate::commands::gen_queue;
@@ -35,6 +37,107 @@ const MAX_CHARACTER_REFERENCE_IMAGES: usize = 6;
 /// 「自分で作る」プロンプトの上限文字数。
 /// フロント側 MAX_CUSTOM_SHEET_PROMPT_CHARS(8000) と一致させる二重柵。
 const MAX_CUSTOM_SHEET_PROMPT_CHARS: usize = 8000;
+
+/// 選んだ参照画像をアプリ管理下へ退避するフォルダ。
+///
+/// Downloads などの原本は、ユーザーが後で消したり移動したりできる。選択した時点で
+/// app data 配下へ複製し、生成にはこちらだけを渡すことで、原本の寿命から切り離す。
+const REFERENCE_SNAPSHOT_DIR: &str = "reference-snapshots";
+
+/// 参照画像が無いときに UI へそのまま渡せる日常語の案内を作る。
+fn missing_reference_message(path: &Path) -> String {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or("選択した画像");
+    format!("参照画像が見つかりません（{file_name}）。画像を選び直してください")
+}
+
+/// ファイル名に使えない／扱いづらい文字を `_` へ畳む。
+/// 元の拡張子は残すので、画像ビューアや生成側の形式判定は従来どおり動く。
+fn safe_snapshot_source_name(source: &Path) -> String {
+    let original = source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("reference.png");
+    let mut safe = String::with_capacity(original.len().min(96));
+    for ch in original.chars().take(96) {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
+            safe.push(ch);
+        } else {
+            safe.push('_');
+        }
+    }
+    if safe.is_empty() || safe == "." || safe == ".." {
+        "reference.png".to_string()
+    } else {
+        safe
+    }
+}
+
+/// 参照画像1枚を、上書きなしの `remote-*` 名で管理フォルダへ複製する。
+///
+/// `create_new(true)` を使うため、同名候補が既にあっても既存ファイルは一切触らない。
+/// 複製途中で失敗した空／不完全ファイルは、その候補だけを片付ける。
+fn copy_reference_snapshot(source: &Path, snapshot_dir: &Path) -> Result<PathBuf, String> {
+    if !source.is_file() {
+        return Err(missing_reference_message(source));
+    }
+
+    std::fs::create_dir_all(snapshot_dir)
+        .map_err(|e| format!("参照画像の保存フォルダを作れませんでした: {e}"))?;
+
+    let source = std::fs::canonicalize(source)
+        .map_err(|e| format!("{}（詳しい内容: {e}）", missing_reference_message(source)))?;
+    let snapshot_dir = std::fs::canonicalize(snapshot_dir)
+        .map_err(|e| format!("参照画像の保存フォルダを確認できませんでした: {e}"))?;
+
+    // 生成直前の再確認では、既に管理フォルダ内ならコピーを増やさず同じパスを返す。
+    if source.parent() == Some(snapshot_dir.as_path()) {
+        return Ok(source);
+    }
+
+    let source_name = safe_snapshot_source_name(&source);
+    for attempt in 0..32_u8 {
+        let destination = snapshot_dir.join(format!(
+            "remote-{}-{}-{attempt:02}-{source_name}",
+            timestamp_id(),
+            short_id()
+        ));
+        let mut destination_file = match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&destination)
+        {
+            Ok(file) => file,
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(err) => {
+                return Err(format!(
+                    "参照画像をアプリ内に保存できませんでした（{source_name}）: {err}"
+                ));
+            }
+        };
+
+        let copied = (|| -> io::Result<()> {
+            let mut source_file = std::fs::File::open(&source)?;
+            io::copy(&mut source_file, &mut destination_file)?;
+            destination_file.flush()?;
+            destination_file.sync_all()?;
+            Ok(())
+        })();
+        if let Err(err) = copied {
+            drop(destination_file);
+            let _ = std::fs::remove_file(&destination);
+            return Err(format!(
+                "参照画像をアプリ内に保存できませんでした（{source_name}）: {err}"
+            ));
+        }
+        return Ok(destination);
+    }
+
+    Err("参照画像の保存名を確保できませんでした。画像を選び直してください".into())
+}
 
 /// 参照 1 枚のときの composite プロンプト冒頭。
 /// 旧 COMPOSITE_CHARACTER_SHEET_PROMPT の第 1 段落そのまま(1 枚時のバイト一致を守る)。
@@ -283,12 +386,41 @@ pub enum CharacterSheetEvent {
     },
 }
 
+/// 選択された参照画像を app data 配下へ複製し、以後使う管理パスを返す。
+///
+/// 保存済みデータが持つ旧外部パスもここへそのまま渡せる。実在すれば初回利用時に
+/// スナップショットへ昇格し、既に管理フォルダ内なら同じパスを返す。
+#[tauri::command]
+pub async fn character_sheet_snapshot_reference(
+    app: AppHandle,
+    source_path: String,
+) -> Result<String, String> {
+    let source = PathBuf::from(source_path);
+    if !source.is_file() {
+        return Err(missing_reference_message(&source));
+    }
+    let snapshot_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("アプリの保存場所を確認できませんでした: {e}"))?
+        .join(REFERENCE_SNAPSHOT_DIR);
+
+    tauri::async_runtime::spawn_blocking(move || copy_reference_snapshot(&source, &snapshot_dir))
+        .await
+        .map_err(|e| format!("参照画像の保存処理を完了できませんでした: {e}"))?
+        .map(|path| path.to_string_lossy().into_owned())
+}
+
 #[tauri::command]
 pub async fn character_sheet_run(
     app: AppHandle,
     state: State<'_, AppState>,
     params: CharacterSheetParams,
 ) -> Result<String, String> {
+    // spawn より前に確認する。ここで返せば生成枠・出力先・カット処理には一切進まず、
+    // invoke の呼び出し元へ具体的な理由を直接返せる。orchestrator 内の二重柵も残す。
+    validate_params(&params)?;
+
     // app-server と同じ GORI 専用 CODEX_HOME を使う。worker は mirror_codex_home で
     // この HOME から auth/config/skills を一時 HOME に複製する。
     let codex_home_orig = crate::codex::home::resolve_command_codex_home()
@@ -406,7 +538,7 @@ pub async fn character_sheet_regenerate_cut(
     }
     for path in &reference_paths {
         if !path.is_file() {
-            return Err(format!("参照画像が見つかりません: {}", path.display()));
+            return Err(missing_reference_message(path));
         }
     }
 
@@ -832,7 +964,7 @@ fn validate_params(params: &CharacterSheetParams) -> Result<(), String> {
             return Err("characterImage must not be empty".into());
         }
         if !Path::new(path).is_file() {
-            return Err(format!("参照画像が見つかりません: {path}"));
+            return Err(missing_reference_message(Path::new(path)));
         }
     }
     // multi-cut 経路では custom_prompt は常に空なので、経路を問わず一律で検査してよい。
@@ -1262,6 +1394,52 @@ mod tests {
             "{}/src/commands/character_sheet.rs",
             env!("CARGO_MANIFEST_DIR")
         )
+    }
+
+    #[test]
+    fn reference_snapshot_survives_source_deletion_and_never_overwrites() {
+        let root = std::env::temp_dir().join(format!(
+            "character-reference-snapshot-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let source_dir = root.join("Downloads");
+        let snapshot_dir = root.join(REFERENCE_SNAPSHOT_DIR);
+        std::fs::create_dir_all(&source_dir).unwrap();
+        let source = source_dir.join("ig_b02_test.png");
+        std::fs::write(&source, b"first image bytes").unwrap();
+
+        let first = copy_reference_snapshot(&source, &snapshot_dir).unwrap();
+        let second = copy_reference_snapshot(&source, &snapshot_dir).unwrap();
+        assert_ne!(
+            first, second,
+            "同じ原本でも既存スナップショットを上書きしない"
+        );
+        assert!(
+            first
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("remote-"),
+            "管理ファイルは既存 remote-* の命名にそろえる"
+        );
+
+        std::fs::remove_file(&source).unwrap();
+        assert_eq!(std::fs::read(&first).unwrap(), b"first image bytes");
+        assert_eq!(std::fs::read(&second).unwrap(), b"first image bytes");
+
+        // 生成直前の再確認では、管理済みパスをさらに複製しない。
+        let promoted_again = copy_reference_snapshot(&first, &snapshot_dir).unwrap();
+        assert_eq!(promoted_again, std::fs::canonicalize(&first).unwrap());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn missing_reference_message_shows_only_the_file_name_and_next_action() {
+        assert_eq!(
+            missing_reference_message(Path::new("/Users/example/Downloads/ig_b02_missing.png")),
+            "参照画像が見つかりません（ig_b02_missing.png）。画像を選び直してください"
+        );
     }
 
     /// 上限超過の custom プロンプトは validate で弾く。

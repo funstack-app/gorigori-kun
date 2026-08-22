@@ -3,6 +3,7 @@ import { create } from "zustand";
 import { onCharacterSheetEvent } from "../character/events";
 import type { StickerChromaSample } from "../ipc";
 import type { StickerEntry } from "../sticker/catalog";
+import { formatStickerGenerationFailure } from "../sticker/referenceSnapshot";
 import { humanizeError } from "../humanizeError";
 import { useToasts } from "./toasts";
 
@@ -23,6 +24,7 @@ type WaveProgress = {
   expectedCutIds: Set<string>;
   settledCutIds: Set<string>;
   failedCutIds: Set<string>;
+  failureReasons: Map<string, string>;
 };
 
 type StickerRunState = {
@@ -153,24 +155,31 @@ function releaseWave(runId: string): void {
   if (progress && progress.failedCutIds.size > 0) {
     useToasts.getState().push({
       kind: "error",
-      text: `${progress.failedCutIds.size}枚の生成に失敗しました。もう一度お試しください`,
+      text: formatStickerGenerationFailure(
+        progress.failedCutIds.size,
+        Array.from(progress.failureReasons.values()),
+      ),
       ttlMs: 6000,
     });
   }
   resolve();
 }
 
-function settleWaveCut(runId: string, cutId: string, failed: boolean): void {
+function settleWaveCut(runId: string, cutId: string, failed: boolean, reason?: string): void {
   const progress = waveProgress.get(runId);
   if (!progress) return;
 
   if (progress.expectedCutIds.has(cutId)) {
     progress.settledCutIds.add(cutId);
-    if (failed) progress.failedCutIds.add(cutId);
+    if (failed) {
+      progress.failedCutIds.add(cutId);
+      if (reason) progress.failureReasons.set(cutId, reason);
+    }
   } else if (failed) {
     for (const expectedCutId of progress.expectedCutIds) {
       progress.settledCutIds.add(expectedCutId);
       progress.failedCutIds.add(expectedCutId);
+      if (reason) progress.failureReasons.set(expectedCutId, reason);
     }
   }
 
@@ -224,7 +233,7 @@ const handleEvent: Parameters<typeof onCharacterSheetEvent>[0] = (event) => {
               : cut,
           ),
         );
-        settleWaveCut(event.runId, cutId, true);
+        settleWaveCut(event.runId, cutId, true, `背景の切り抜き失敗: ${reason}`);
         useToasts.getState().push({
           kind: "error",
           text: `背景の切り抜きに失敗しました。理由: ${reason}。この1枚をもう一度お試しください。`,
@@ -248,7 +257,7 @@ const handleEvent: Parameters<typeof onCharacterSheetEvent>[0] = (event) => {
           : cut,
       ),
     );
-    settleWaveCut(event.runId, event.cutId, true);
+    settleWaveCut(event.runId, event.cutId, true, event.reason);
     return;
   }
 
@@ -271,6 +280,7 @@ const handleEvent: Parameters<typeof onCharacterSheetEvent>[0] = (event) => {
       cancelCutoutWait(event.runId, cutId);
       current.settledCutIds.add(cutId);
       current.failedCutIds.add(cutId);
+      current.failureReasons.set(cutId, "全体完了後も処理結果を受け取れませんでした");
     }
     useStickerRun.getState().setCuts((previous) =>
       previous.map((cut) =>
@@ -321,6 +331,7 @@ export function beginStickerWave(runId: string, expectedCutIds: string[]): Promi
     expectedCutIds: new Set(expectedCutIds),
     settledCutIds: new Set(),
     failedCutIds: new Set(),
+    failureReasons: new Map(),
   });
   return new Promise((resolve) => {
     waveWaiters.set(runId, resolve);
