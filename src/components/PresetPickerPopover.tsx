@@ -1,5 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import type { AssetLedgerEntry, AssetLedgerType } from "../lib/ipc";
+import { useAssetLedger } from "../lib/store/assetLedger";
+import { useComposer, type ReferenceRole } from "../lib/store/composer";
 import {
   focusToImageStyle,
   presetKind,
@@ -7,6 +10,7 @@ import {
   type Preset,
   type PresetCategory,
 } from "../lib/store/presets";
+import { SafeImage } from "./SafeImage";
 import { CharacterIcon } from "./SkillIcon";
 
 type Props = {
@@ -35,6 +39,81 @@ type Props = {
  * - "_uncat" = 未分類
  */
 type CategoryFilter = string | null | "_fav" | "_uncat";
+
+export type PresetPickerSection = "asset" | "prompt";
+export type PresetPickerAssetType = Extract<
+  AssetLedgerType,
+  "character" | "scene" | "look" | "prop"
+>;
+
+const ASSET_TYPES: Array<{ type: PresetPickerAssetType; label: string }> = [
+  { type: "character", label: "キャラ" },
+  { type: "scene", label: "シーン" },
+  { type: "look", label: "ルック" },
+  { type: "prop", label: "小物" },
+];
+
+const VIDEO_PATH_PATTERN = /\.(?:mp4|mov|m4v|webm|avi|mkv)(?:[?#].*)?$/i;
+
+/** 区分を替えたとき、前の区分の検索語を持ち越さない。 */
+export function changePresetPickerSection(next: PresetPickerSection): {
+  section: PresetPickerSection;
+  query: string;
+} {
+  return { section: next, query: "" };
+}
+
+/** 台帳全体と表示中の種類を区別し、空欄のままにしない。 */
+export function getAssetPickerEmptyMessage(
+  totalCount: number,
+  visibleCount: number,
+  query: string,
+): string | null {
+  if (totalCount === 0) {
+    return "アセットはまだありません。プリセット画面やライブラリから登録できます";
+  }
+  if (visibleCount > 0) return null;
+  return query.trim()
+    ? "検索条件に一致するアセットがありません"
+    : "この種類のアセットはまだありません";
+}
+
+function assetReferenceRole(type: AssetLedgerType): ReferenceRole {
+  if (type === "scene") return "background";
+  if (type === "look") return "look";
+  if (type === "prop") return "product";
+  return "subject";
+}
+
+function assetMediaPaths(asset: AssetLedgerEntry): string[] {
+  return Array.from(
+    new Set(
+      [asset.primaryImagePath, ...asset.imagePaths]
+        .map((path) => path?.trim())
+        .filter((path): path is string => Boolean(path)),
+    ),
+  );
+}
+
+function assetReferenceImagePaths(asset: AssetLedgerEntry): string[] {
+  return assetMediaPaths(asset).filter((path) => !VIDEO_PATH_PATTERN.test(path));
+}
+
+function assetUnavailableReason(asset: AssetLedgerEntry): string | null {
+  const mediaPaths = assetMediaPaths(asset);
+  if (mediaPaths.some((path) => !VIDEO_PATH_PATTERN.test(path))) return null;
+  return mediaPaths.some((path) => VIDEO_PATH_PATTERN.test(path))
+    ? "動画は参照画像として添付できません"
+    : "参照に使える画像がありません";
+}
+
+function matchesAssetQuery(asset: AssetLedgerEntry, query: string): boolean {
+  const normalizedQuery = query.trim().toLowerCase();
+  if (!normalizedQuery) return true;
+  return `${asset.name} ${asset.prompt} ${asset.tags.join(" ")} ${assetMediaPaths(asset).join(" ")}`
+    .toLowerCase()
+    .includes(normalizedQuery);
+}
 
 type ParsedPresetQuery = {
   tagTokens: string[];
@@ -86,6 +165,16 @@ function replaceTrailingTagToken(query: string, tag: string): string {
 export function PresetPickerPopover({ open, onClose, onPick, anchorRect }: Props) {
   const categories = usePresets((s) => s.categories);
   const presets = usePresets((s) => s.presets);
+  const assets = useAssetLedger((s) => s.assets);
+  const assetLoading = useAssetLedger((s) => s.loading);
+  const assetLoaded = useAssetLedger((s) => s.loaded);
+  const assetError = useAssetLedger((s) => s.error);
+  const loadAssetLedger = useAssetLedger((s) => s.load);
+  const assetLoadStarted = useRef(false);
+  const [activeSection, setActiveSection] =
+    useState<PresetPickerSection>("asset");
+  const [activeAssetType, setActiveAssetType] =
+    useState<PresetPickerAssetType>("character");
   const [query, setQuery] = useState<string>("");
   const containerRef = useRef<HTMLDivElement | null>(null);
   const parsedQuery = useMemo(() => parsePresetQuery(query), [query]);
@@ -100,6 +189,18 @@ export function PresetPickerPopover({ open, onClose, onPick, anchorRect }: Props
   );
   const activeFilter: CategoryFilter =
     filter === "_fav" && favoriteCount === 0 ? null : filter;
+
+  useEffect(() => {
+    if (!open) {
+      assetLoadStarted.current = false;
+      return;
+    }
+    if (assetLoadStarted.current || assetLoaded || assetLoading) return;
+    assetLoadStarted.current = true;
+    void loadAssetLedger().catch(() => {
+      // 読み込みエラーはアセット区分内で表示する。
+    });
+  }, [open, assetLoaded, assetLoading, loadAssetLedger]);
 
   useEffect(() => {
     if (!open) return;
@@ -192,6 +293,49 @@ export function PresetPickerPopover({ open, onClose, onPick, anchorRect }: Props
     return sections;
   }, [categories, presets, parsedQuery, activeFilter]);
 
+  const visibleAssets = useMemo(
+    () =>
+      assets
+        .filter((asset) => asset.type === activeAssetType)
+        .filter((asset) => matchesAssetQuery(asset, query))
+        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
+    [activeAssetType, assets, query],
+  );
+
+  const assetTypeCounts = useMemo(() => {
+    const countsByType = new Map<PresetPickerAssetType, number>();
+    for (const item of ASSET_TYPES) countsByType.set(item.type, 0);
+    for (const asset of assets) {
+      const type = asset.type as PresetPickerAssetType;
+      if (!countsByType.has(type) || !matchesAssetQuery(asset, query)) continue;
+      countsByType.set(type, (countsByType.get(type) ?? 0) + 1);
+    }
+    return countsByType;
+  }, [assets, query]);
+
+  const handleSectionChange = (next: PresetPickerSection) => {
+    const state = changePresetPickerSection(next);
+    setActiveSection(state.section);
+    setQuery(state.query);
+  };
+
+  const attachAssetReference = (asset: AssetLedgerEntry) => {
+    const paths = assetReferenceImagePaths(asset);
+    if (paths.length === 0) return;
+    useComposer.getState().addReferences(
+      paths.map((path, index) => ({
+        path,
+        name: index === 0 ? asset.name : `${asset.name} ${index + 1}`,
+        source: "gallery" as const,
+        role: assetReferenceRole(asset.type),
+        ...(paths.length > 1
+          ? { groupId: `asset:${asset.id}`, groupLabel: asset.name }
+          : {}),
+      })),
+    );
+    onClose();
+  };
+
   if (!open) return null;
 
   // anchorRect があればそのすぐ下、なければ画面中央。
@@ -241,6 +385,11 @@ export function PresetPickerPopover({ open, onClose, onPick, anchorRect }: Props
   const totalCount = presets.length;
   const visibleCount = grouped.reduce((acc, s) => acc + s.items.length, 0);
   const uncatCount = counts.byCat.get("_uncat") ?? 0;
+  const assetEmptyMessage = getAssetPickerEmptyMessage(
+    assets.length,
+    visibleAssets.length,
+    query,
+  );
 
   return (
     <div
@@ -249,21 +398,47 @@ export function PresetPickerPopover({ open, onClose, onPick, anchorRect }: Props
       className="flex min-h-0 flex-col overflow-hidden rounded-xl border border-[#2a2a2a] bg-[#141414] shadow-2xl"
     >
       <div className="flex shrink-0 items-center justify-between border-b border-[#242424] px-3 py-2">
-        <h3 className="text-xs font-black text-white">プリセット</h3>
+        <h3 className="text-xs font-black text-white">
+          {activeSection === "asset" ? "アセット" : "プリセット"}
+        </h3>
         <span className="text-[10px] font-medium text-neutral-500">
-          {activeFilter === null && !query ? `${totalCount} 件` : `${visibleCount} / ${totalCount} 件`}
+          {activeSection === "asset"
+            ? `${visibleAssets.length} / ${assets.length} 件`
+            : activeFilter === null && !query
+              ? `${totalCount} 件`
+              : `${visibleCount} / ${totalCount} 件`}
         </span>
       </div>
       <div className="shrink-0 space-y-2 border-b border-[#242424] p-3">
+        <div className="flex items-center gap-1 overflow-x-auto">
+          <CategoryChip
+            label="アセット"
+            count={assets.length}
+            color="#f472b6"
+            active={activeSection === "asset"}
+            onClick={() => handleSectionChange("asset")}
+          />
+          <CategoryChip
+            label="プロンプト"
+            count={presets.length}
+            color="#737373"
+            active={activeSection === "prompt"}
+            onClick={() => handleSectionChange("prompt")}
+          />
+        </div>
         <input
           type="search"
           value={query}
           autoFocus
           onChange={(event) => setQuery(event.target.value)}
-          placeholder="検索（名前 / 本文 / メモ / #タグ）"
+          placeholder={
+            activeSection === "asset"
+              ? "検索（名前 / 画像名 / メモ）"
+              : "検索（名前 / 本文 / メモ / #タグ）"
+          }
           className="h-8 w-full rounded-md border border-[#343434] bg-[#101010] px-2 text-xs text-neutral-100 outline-none focus:border-pink-400"
         />
-        {tagSuggestions.length > 0 && (
+        {activeSection === "prompt" && tagSuggestions.length > 0 && (
           <div className="flex flex-wrap gap-1">
             {tagSuggestions.map((tag) => (
               <button
@@ -278,45 +453,83 @@ export function PresetPickerPopover({ open, onClose, onPick, anchorRect }: Props
             ))}
           </div>
         )}
-        {/* カテゴリチップ。お気に入りを最左、その右にすべて、カテゴリ、未分類。
-            横スクロールでカテゴリが多くても収まる。
-            pb-2 を入れて、横スクロールバーが下のリストとくっつかないようにする。 */}
-        <div className="flex items-center gap-1 overflow-x-auto pb-2">
-          <FavoriteChip
-            count={counts.fav}
-            active={activeFilter === "_fav"}
-            onClick={() => setFilter("_fav")}
-          />
-          <CategoryChip
-            label="すべて"
-            count={counts.all}
-            color="#737373"
-            active={activeFilter === null}
-            onClick={() => setFilter(null)}
-          />
-          {categories.map((cat) => (
-            <CategoryChip
-              key={cat.id}
-              label={cat.name}
-              count={counts.byCat.get(cat.id) ?? 0}
-              color={cat.color}
-              active={activeFilter === cat.id}
-              onClick={() => setFilter(cat.id)}
+        {activeSection === "asset" ? (
+          <div className="flex items-center gap-1 overflow-x-auto pb-2">
+            {ASSET_TYPES.map((item) => (
+              <CategoryChip
+                key={item.type}
+                label={item.label}
+                count={assetTypeCounts.get(item.type) ?? 0}
+                color="#f472b6"
+                active={activeAssetType === item.type}
+                onClick={() => setActiveAssetType(item.type)}
+              />
+            ))}
+          </div>
+        ) : (
+          /* カテゴリチップ。お気に入りを最左、その右にすべて、カテゴリ、未分類。
+             横スクロールでカテゴリが多くても収まる。 */
+          <div className="flex items-center gap-1 overflow-x-auto pb-2">
+            <FavoriteChip
+              count={counts.fav}
+              active={activeFilter === "_fav"}
+              onClick={() => setFilter("_fav")}
             />
-          ))}
-          {uncatCount > 0 && (
             <CategoryChip
-              label="未分類"
-              count={uncatCount}
-              color="#525252"
-              active={activeFilter === "_uncat"}
-              onClick={() => setFilter("_uncat")}
+              label="すべて"
+              count={counts.all}
+              color="#737373"
+              active={activeFilter === null}
+              onClick={() => setFilter(null)}
             />
-          )}
-        </div>
+            {categories.map((cat) => (
+              <CategoryChip
+                key={cat.id}
+                label={cat.name}
+                count={counts.byCat.get(cat.id) ?? 0}
+                color={cat.color}
+                active={activeFilter === cat.id}
+                onClick={() => setFilter(cat.id)}
+              />
+            ))}
+            {uncatCount > 0 && (
+              <CategoryChip
+                label="未分類"
+                count={uncatCount}
+                color="#525252"
+                active={activeFilter === "_uncat"}
+                onClick={() => setFilter("_uncat")}
+              />
+            )}
+          </div>
+        )}
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto p-2">
-        {totalCount === 0 ? (
+        {activeSection === "asset" ? (
+          assetLoading || (!assetLoaded && !assetError) ? (
+            <p className="px-3 py-6 text-center text-[11px] text-neutral-500">
+              アセットを読み込んでいます
+            </p>
+          ) : assetError && !assetLoaded ? (
+            <p className="px-3 py-6 text-center text-[11px] text-amber-300">
+              アセットを読み込めませんでした
+            </p>
+          ) : assetEmptyMessage ? (
+            <p className="px-3 py-6 text-center text-[11px] text-neutral-500">
+              {assetEmptyMessage}
+            </p>
+          ) : (
+            <div className="space-y-1">
+              {visibleAssets.map((asset) => (
+                <AssetPickerRow
+                  key={asset.id}
+                  asset={asset}
+                  onPick={() => attachAssetReference(asset)}
+                />
+              ))}
+            </div>
+          )
+        ) : totalCount === 0 ? (
           <p className="px-3 py-6 text-center text-[11px] text-neutral-500">
             まだプリセットがありません。<br />
             左サイドバー「プリセット」から登録できます。
@@ -355,6 +568,53 @@ export function PresetPickerPopover({ open, onClose, onPick, anchorRect }: Props
         )}
       </div>
     </div>
+  );
+}
+
+/** アセットの1行。選択時は画像だけを制作欄へ渡し、指示文は使わない。 */
+function AssetPickerRow({
+  asset,
+  onPick,
+}: {
+  asset: AssetLedgerEntry;
+  onPick: () => void;
+}) {
+  const imagePaths = assetReferenceImagePaths(asset);
+  const unavailableReason = assetUnavailableReason(asset);
+  const previewPath = imagePaths[0] ?? null;
+  return (
+    <button
+      type="button"
+      onClick={onPick}
+      disabled={Boolean(unavailableReason)}
+      title={unavailableReason ?? `${asset.name}の画像を参照に追加`}
+      className="flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left text-xs text-neutral-200 hover:bg-[#1f1f1f] disabled:cursor-not-allowed disabled:text-neutral-600 disabled:hover:bg-transparent"
+    >
+      <span className="relative aspect-[16/9] h-10 shrink-0 overflow-hidden rounded-md border border-[#242424] bg-[#0d0d0d]">
+        {previewPath ? (
+          <SafeImage
+            path={previewPath}
+            alt=""
+            className="h-full w-full object-cover"
+          />
+        ) : (
+          <span className="flex h-full w-full items-center justify-center text-[8px] font-bold text-neutral-600">
+            {assetMediaPaths(asset).length > 0 ? "動画" : "画像なし"}
+          </span>
+        )}
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block truncate font-bold">{asset.name}</span>
+        <span
+          className={[
+            "block truncate text-[10px]",
+            unavailableReason ? "text-amber-400/80" : "text-neutral-500",
+          ].join(" ")}
+        >
+          {unavailableReason ?? `参照画像 ${imagePaths.length}枚`}
+        </span>
+      </span>
+    </button>
   );
 }
 
