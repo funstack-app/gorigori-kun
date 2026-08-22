@@ -1,5 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 
+import { ReferenceLibraryModal } from "../../ReferenceLibraryModal";
+import { SafeImage } from "../../SafeImage";
 import {
   createFilmChatMessage,
   FilmTextTurnAbortedError,
@@ -29,12 +31,56 @@ import {
 } from "../../../lib/film/serviceProfiles";
 import type { FilmProject, FilmScript } from "../../../lib/film/types";
 import { humanizeError } from "../../../lib/humanizeError";
+import { images } from "../../../lib/ipc";
+import {
+  formatReferenceSnapshotError,
+  snapshotReference,
+} from "../../../lib/referenceSnapshot";
 import {
   useFilmProjectStore,
   type FilmScriptApprovalStage,
 } from "../../../lib/store/filmProject";
 import { useToasts } from "../../../lib/store/toasts";
+import { CharacterPresetPickerModal } from "../multiAngle/CharacterPresetPickerModal";
 import { IssueList, ProgressCard } from "./ScriptPhasePanel";
+
+const IMAGE_EXTS = new Set(["png", "jpg", "jpeg", "webp", "gif", "bmp"]);
+
+function basename(path: string): string {
+  return path.split(/[\\/]/).pop() ?? path;
+}
+
+function isImageFileName(name: string): boolean {
+  return IMAGE_EXTS.has(name.split(".").pop()?.toLowerCase() ?? "");
+}
+
+function isImageFile(file: File): boolean {
+  const directPath = (file as File & { path?: string }).path;
+  return directPath
+    ? isImageFileName(file.name) || isImageFileName(directPath)
+    : file.type.startsWith("image/") || isImageFileName(file.name);
+}
+
+async function fileToImagePath(file: File): Promise<string | null> {
+  if (!isImageFile(file)) return null;
+  const directPath = (file as File & { path?: string }).path;
+  if (directPath) return directPath;
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  return images.writeUpload(file.name || `film-chat-${Date.now()}.png`, bytes);
+}
+
+function attachedImagePaths(message: unknown): string[] {
+  const value = (message as { attachedImagePaths?: unknown } | null)?.attachedImagePaths;
+  return Array.isArray(value)
+    ? value.filter(
+        (path): path is string => typeof path === "string" && path.trim().length > 0,
+      )
+    : [];
+}
+
+function samePaths(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((path, index) => path === right[index]);
+}
 
 const ARTIFACT_LABELS: Record<AdvisorArtifactType, string> = {
   premise: "企画で決めたこと",
@@ -340,7 +386,7 @@ function ArtifactCard({
             "min-w-0 max-h-80 overflow-y-auto px-4 py-4 font-mono text-xs leading-6 text-zinc-200",
             artifact.type === "scenelist"
               ? "overflow-x-auto whitespace-pre"
-              : "overflow-x-hidden whitespace-pre-wrap break-words",
+              : "max-w-[90ch] overflow-x-hidden whitespace-pre-wrap break-words",
           ].join(" ")}
         >
           {artifact.content}
@@ -406,6 +452,7 @@ export function FilmChatPanel({ project }: { project: FilmProject | null }) {
   const saveTreatment = useFilmProjectStore((state) => state.saveTreatment);
   const saveScenelist = useFilmProjectStore((state) => state.saveScenelist);
   const saveBlocks = useFilmProjectStore((state) => state.saveBlocks);
+  const saveLookMaster = useFilmProjectStore((state) => state.saveLookMaster);
   const approveStage = useFilmProjectStore((state) => state.approveStage);
   const revokeStageApproval = useFilmProjectStore((state) => state.revokeStageApproval);
   const pushToast = useToasts((state) => state.push);
@@ -415,6 +462,10 @@ export function FilmChatPanel({ project }: { project: FilmProject | null }) {
   const [sending, setSending] = useState(false);
   const [sendFailure, setSendFailure] = useState<FilmChatSendFailure | null>(null);
   const [revisionTarget, setRevisionTarget] = useState<AdvisorArtifactType | null>(null);
+  const [pendingReferences, setPendingReferences] = useState<string[]>([]);
+  const [characterPickerOpen, setCharacterPickerOpen] = useState(false);
+  const [libraryOpen, setLibraryOpen] = useState(false);
+  const [savingReferences, setSavingReferences] = useState(false);
   const [progress, setProgress] = useState<Parameters<typeof ProgressCard>[0]["progress"]>();
   const abortRef = useRef<AbortController | null>(null);
   const runTokenRef = useRef(0);
@@ -425,6 +476,7 @@ export function FilmChatPanel({ project }: { project: FilmProject | null }) {
   } | null>(null);
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     // StrictMode の二重 effect でも挨拶が二重にならないよう、
@@ -450,6 +502,9 @@ export function FilmChatPanel({ project }: { project: FilmProject | null }) {
   useEffect(() => {
     setDraft("");
     setRevisionTarget(null);
+    setPendingReferences([]);
+    setCharacterPickerOpen(false);
+    setLibraryOpen(false);
     runTokenRef.current += 1;
     abortRef.current?.abort();
     abortRef.current = null;
@@ -464,12 +519,94 @@ export function FilmChatPanel({ project }: { project: FilmProject | null }) {
     abortRef.current?.abort();
   }, []);
 
+  async function addReferencePaths(sourcePaths: readonly string[]) {
+    const uniquePaths = Array.from(new Set(sourcePaths.map((path) => path.trim()).filter(Boolean)));
+    if (uniquePaths.length === 0 || savingReferences) return;
+    setSavingReferences(true);
+    const saved: string[] = [];
+    const failures: unknown[] = [];
+    for (const sourcePath of uniquePaths) {
+      try {
+        saved.push(await snapshotReference(sourcePath));
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+    if (saved.length > 0) {
+      setPendingReferences((current) => Array.from(new Set([...current, ...saved])));
+      pushToast({
+        kind: "success",
+        text: `参照画像を${saved.length}枚、アプリ内に保存しました。`,
+        ttlMs: 3000,
+      });
+    }
+    if (failures.length > 0) {
+      pushToast({
+        kind: "error",
+        text: formatReferenceSnapshotError(failures[0]),
+        ttlMs: 7000,
+      });
+    }
+    setSavingReferences(false);
+  }
+
+  async function addLocalFiles(files: FileList | File[]) {
+    const paths: string[] = [];
+    const failures: unknown[] = [];
+    for (const file of Array.from(files)) {
+      try {
+        const path = await fileToImagePath(file);
+        if (path) paths.push(path);
+      } catch (error) {
+        failures.push(error);
+      }
+    }
+    if (paths.length > 0) await addReferencePaths(paths);
+    if (paths.length === 0 && failures.length === 0) {
+      pushToast({ kind: "warn", text: "画像ファイルを選んでください。", ttlMs: 3500 });
+    } else if (failures.length > 0) {
+      pushToast({
+        kind: "error",
+        text: formatReferenceSnapshotError(failures[0]),
+        ttlMs: 7000,
+      });
+    }
+  }
+
+  function onLocalFilePick(event: ChangeEvent<HTMLInputElement>) {
+    const files = event.currentTarget.files;
+    if (files && files.length > 0) void addLocalFiles(files);
+    event.currentTarget.value = "";
+  }
+
+  function useAsLookMaster(path: string) {
+    if (!project) return;
+    if (
+      project.lookMasterPath
+      && project.lookMasterPath !== path
+      && !window.confirm(
+        "③設計ですでに選んだお手本画像を、この画像へ差し替えますか？\n\n共通の見た目指定は、この画像に合わせて作り直します。",
+      )
+    ) {
+      return;
+    }
+    saveLookMaster(path, "フィルムチャットで追加し、③設計のお手本に選んだ画像");
+    pushToast({
+      kind: "success",
+      text: "③設計のお手本画像にしました。④素材づくりへ見た目を引き継げます。",
+      ttlMs: 4000,
+    });
+  }
+
   async function requestTurn(
     text: string,
     revisionOverride: AdvisorArtifactType | null = revisionTarget,
+    referenceOverride: readonly string[] | null = null,
   ) {
-    const userText = text.trim();
-    if (!userText || sending) return;
+    const referencesAtStart = referenceOverride ?? pendingReferences;
+    const usesPendingReferences = referenceOverride === null;
+    const userText = text.trim() || (referencesAtStart.length > 0 ? "参照画像を追加しました。" : "");
+    if (!userText || sending || savingReferences) return;
     const revisionAtStart = revisionOverride;
     const advisorUserMessage = revisionAtStart
       ? `${ARTIFACT_LABELS[revisionAtStart]}を直してください。修正希望: ${userText}`
@@ -485,11 +622,12 @@ export function FilmChatPanel({ project }: { project: FilmProject | null }) {
       failedMessage
       && failedMessage.conversationId === conversationId
       && failedMessage.message.text === userText
-      && failedMessage.revisionTarget === revisionAtStart,
+      && failedMessage.revisionTarget === revisionAtStart
+      && samePaths(attachedImagePaths(failedMessage.message), referencesAtStart)
     );
     const userMessage = isRetry && failedMessage
       ? failedMessage.message
-      : createFilmChatMessage("user", userText);
+      : createFilmChatMessage("user", userText, referencesAtStart);
     // 失敗した同じ文の再送では、履歴に残っている発言をそのまま再利用する。
     // AIへ渡す過去履歴からだけ一度外し、userMessage として1回分を送る。
     const requestMessages = isRetry
@@ -501,6 +639,7 @@ export function FilmChatPanel({ project }: { project: FilmProject | null }) {
     }
     failedUserMessageRef.current = null;
     setDraft("");
+    if (usesPendingReferences) setPendingReferences([]);
     setRevisionTarget(null);
     setSendFailure(null);
     setSending(true);
@@ -516,6 +655,7 @@ export function FilmChatPanel({ project }: { project: FilmProject | null }) {
           project: projectAtStart,
           messages: requestMessages,
           userMessage: advisorUserMessage,
+          referenceImageCount: referencesAtStart.length,
         },
         {
           signal: abort.signal,
@@ -579,6 +719,7 @@ export function FilmChatPanel({ project }: { project: FilmProject | null }) {
     } catch (error) {
       if (runTokenRef.current !== runToken) return;
       setDraft(userText);
+      if (usesPendingReferences) setPendingReferences(referencesAtStart.slice());
       setRevisionTarget(revisionAtStart);
       failedUserMessageRef.current = {
         conversationId,
@@ -637,6 +778,7 @@ export function FilmChatPanel({ project }: { project: FilmProject | null }) {
     void requestTurn(
       `この${ARTIFACT_LABELS[artifact.type]}でOKです。次の工程へ進めてください。`,
       null,
+      [],
     );
   }
 
@@ -659,7 +801,7 @@ export function FilmChatPanel({ project }: { project: FilmProject | null }) {
   }, [lastMessageText]);
 
   return (
-    <div className="mx-auto flex h-full min-h-[620px] w-full min-w-0 max-w-5xl flex-col gap-3">
+    <div className="flex h-full min-h-[620px] w-full min-w-0 flex-col gap-3">
       <header className="flex min-w-0 items-center justify-between gap-4 rounded-md border border-[#242424] bg-[#161616] px-4 py-3">
         <div className="min-w-0">
           <p className="text-xs font-semibold uppercase tracking-[0.18em] text-pink-400">
@@ -689,23 +831,59 @@ export function FilmChatPanel({ project }: { project: FilmProject | null }) {
             const parsed = message.role === "assistant"
               ? parseAdvisorResponse(message.text)
               : null;
+            const messageReferences = attachedImagePaths(message);
             return (
               <li
                 key={message.id}
                 className={[
                   "min-w-0 rounded-md px-3 py-2 text-sm",
                   message.role === "user"
-                    ? "ml-auto max-w-[82%] bg-pink-500/15 text-pink-100"
-                    : "max-w-[88%] bg-[#1c1c1c] text-zinc-200",
+                    ? "ml-auto max-w-[92%] bg-pink-500/15 text-pink-100"
+                    : "w-full max-w-full bg-[#1c1c1c] text-zinc-200",
                 ].join(" ")}
               >
                 <div className="mb-1 text-[10px] uppercase tracking-wider text-zinc-500">
                   {message.role === "user" ? "あなた" : "AIアドバイザー"}
                 </div>
                 {parsed?.text ? (
-                  <div className="min-w-0 whitespace-pre-wrap break-words leading-6">{parsed.text}</div>
+                  <div className="min-w-0 max-w-[78ch] whitespace-pre-wrap break-words leading-6">{parsed.text}</div>
                 ) : message.role === "user" ? (
-                  <div className="min-w-0 whitespace-pre-wrap break-words leading-6">{message.text}</div>
+                  <div className="min-w-0 max-w-[78ch] whitespace-pre-wrap break-words leading-6">{message.text}</div>
+                ) : null}
+                {messageReferences.length > 0 ? (
+                  <div className="mt-3 flex min-w-0 flex-wrap gap-2">
+                    {messageReferences.map((path) => {
+                      const selected = project?.lookMasterPath === path;
+                      return (
+                        <div
+                          key={path}
+                          className="w-40 min-w-0 overflow-hidden rounded-md border border-pink-400/20 bg-black/20 p-1.5"
+                        >
+                          <SafeImage
+                            path={path}
+                            alt={basename(path)}
+                            className="h-24 w-full rounded object-contain"
+                            fallbackLabel="画像なし"
+                          />
+                          <p className="mt-1.5 truncate text-[10px] text-zinc-400">{basename(path)}</p>
+                          {project ? (
+                            <button
+                              type="button"
+                              disabled={selected}
+                              onClick={() => useAsLookMaster(path)}
+                              className="mt-1.5 w-full rounded border border-pink-500/30 px-2 py-1 text-[10px] font-semibold text-pink-200 transition hover:bg-pink-500/10 disabled:border-emerald-500/30 disabled:text-emerald-300"
+                            >
+                              {selected ? "③設計のお手本に設定済み" : "③設計のお手本にする"}
+                            </button>
+                          ) : (
+                            <p className="mt-1.5 text-[10px] leading-4 text-zinc-500">
+                              企画確定後に③設計のお手本へ選べます
+                            </p>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
                 ) : null}
                 {parsed?.malformed ? (
                   <div className="mt-3 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs leading-5 text-amber-200">
@@ -733,7 +911,7 @@ export function FilmChatPanel({ project }: { project: FilmProject | null }) {
             );
           })}
           {sending ? (
-            <li className="min-w-0 max-w-[88%] rounded-md bg-[#1c1c1c] px-3 py-2">
+            <li className="w-full min-w-0 max-w-full rounded-md bg-[#1c1c1c] px-3 py-2">
               <div className="mb-1 text-[10px] uppercase tracking-wider text-zinc-500">
                 AIアドバイザー
               </div>
@@ -750,7 +928,7 @@ export function FilmChatPanel({ project }: { project: FilmProject | null }) {
       {hasMalformedLastResponse && !sending ? (
         <button
           type="button"
-          onClick={() => void requestTurn("さきほどの説明文は変えず、できあがった内容を決められた囲み方でもう一度お願いします。", null)}
+          onClick={() => void requestTurn("さきほどの説明文は変えず、できあがった内容を決められた囲み方でもう一度お願いします。", null, [])}
           className="w-fit rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs font-semibold text-amber-200 transition hover:bg-amber-500/20"
         >
           もう一度お願いする
@@ -782,6 +960,43 @@ export function FilmChatPanel({ project }: { project: FilmProject | null }) {
             </button>
           </div>
         ) : null}
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/*,.png,.jpg,.jpeg,.webp,.gif,.bmp"
+          multiple
+          onChange={onLocalFilePick}
+          className="hidden"
+        />
+        {pendingReferences.length > 0 ? (
+          <div className="flex min-w-0 flex-wrap gap-2 rounded-md border border-[#303030] bg-[#111111] p-2">
+            {pendingReferences.map((path) => (
+              <div key={path} className="flex min-w-0 max-w-52 items-center gap-2 rounded border border-[#343434] bg-[#0b0b0b] p-1.5">
+                <SafeImage
+                  path={path}
+                  alt={basename(path)}
+                  className="h-10 w-10 shrink-0 rounded object-cover"
+                  fallbackLabel="なし"
+                />
+                <span className="min-w-0 flex-1 truncate text-[10px] text-zinc-300">
+                  {basename(path)}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setPendingReferences((current) => current.filter((item) => item !== path))}
+                  disabled={sending}
+                  aria-label={`${basename(path)}を外す`}
+                  className="shrink-0 px-1 text-sm text-zinc-500 hover:text-white disabled:opacity-40"
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+        ) : null}
+        <p className="rounded-md border border-sky-500/20 bg-sky-500/5 px-3 py-2 text-[11px] leading-5 text-sky-100/80">
+          このAI会話は文字だけです。画像の内容はAIへ直接送りません。画像はアプリ内に保存し、企画確定後に③設計のお手本へ選べます。③で決めた見た目は④素材づくりへ引き継ぎます。
+        </p>
         <textarea
           ref={inputRef}
           value={draft}
@@ -801,17 +1016,58 @@ export function FilmChatPanel({ project }: { project: FilmProject | null }) {
           }
           className="w-full min-w-0 resize-none bg-transparent text-sm text-zinc-200 outline-none placeholder:text-zinc-600"
         />
-        <div className="flex justify-end">
+        <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+          <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+            <span className="mr-1 text-[11px] font-semibold text-zinc-400">画像を追加</span>
+            <button
+              type="button"
+              onClick={() => setCharacterPickerOpen(true)}
+              disabled={sending || savingReferences}
+              className="rounded-md border border-[#343434] px-2.5 py-1.5 text-[11px] font-semibold text-zinc-300 transition hover:border-pink-500/40 hover:text-pink-200 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              登録キャラ
+            </button>
+            <button
+              type="button"
+              onClick={() => setLibraryOpen(true)}
+              disabled={sending || savingReferences}
+              className="rounded-md border border-[#343434] px-2.5 py-1.5 text-[11px] font-semibold text-zinc-300 transition hover:border-pink-500/40 hover:text-pink-200 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              ライブラリ
+            </button>
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={sending || savingReferences}
+              className="rounded-md border border-[#343434] px-2.5 py-1.5 text-[11px] font-semibold text-zinc-300 transition hover:border-pink-500/40 hover:text-pink-200 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              ローカル
+            </button>
+            {savingReferences ? (
+              <span className="text-[10px] text-zinc-500">保存中…</span>
+            ) : null}
+          </div>
           <button
             type="button"
             onClick={() => void requestTurn(draft)}
-            disabled={!draft.trim() || sending}
+            disabled={(!draft.trim() && pendingReferences.length === 0) || sending || savingReferences}
             className="rounded-md bg-pink-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-pink-400 disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-400"
           >
             {sending ? "送信中…" : "送信"}
           </button>
         </div>
       </div>
+      {characterPickerOpen ? (
+        <CharacterPresetPickerModal
+          onClose={() => setCharacterPickerOpen(false)}
+          onPick={(path) => void addReferencePaths([path])}
+        />
+      ) : null}
+      <ReferenceLibraryModal
+        open={libraryOpen}
+        onClose={() => setLibraryOpen(false)}
+        onPick={(path) => void addReferencePaths([path])}
+      />
     </div>
   );
 }

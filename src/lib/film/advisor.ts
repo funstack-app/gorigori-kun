@@ -37,12 +37,22 @@ export function projectResumeMessage(project: FilmProject): string {
 export function createFilmChatMessage(
   role: FilmChatMessage["role"],
   text: string,
-): FilmChatMessage {
+  attachedImagePaths: readonly string[] = [],
+): FilmChatMessage & { attachedImagePaths?: string[] } {
   const createdAt = new Date().toISOString();
   const id = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
     ? crypto.randomUUID()
     : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-  return { id, role, text: text.trim(), createdAt };
+  const paths = Array.from(
+    new Set(attachedImagePaths.map((path) => path.trim()).filter(Boolean)),
+  );
+  return {
+    id,
+    role,
+    text: text.trim(),
+    createdAt,
+    ...(paths.length > 0 ? { attachedImagePaths: paths } : {}),
+  };
 }
 
 export async function runFilmAdvisorTurn(
@@ -50,6 +60,8 @@ export async function runFilmAdvisorTurn(
     project: FilmProject | null;
     messages: FilmChatMessage[];
     userMessage: string;
+    /** 現在の文字専用経路では内容を渡せない。見たふり防止の指示にだけ使う。 */
+    referenceImageCount?: number;
   },
   options: {
     signal?: AbortSignal;

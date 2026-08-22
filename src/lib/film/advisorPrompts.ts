@@ -144,8 +144,12 @@ export function buildFilmAdvisorPrompt(input: {
   project: FilmProject | null;
   messages: FilmChatMessage[];
   userMessage: string;
+  referenceImageCount?: number;
 }): string {
   const stage = getFilmAdvisorStage(input.project);
+  const referenceImageNotice = (input.referenceImageCount ?? 0) > 0
+    ? `${input.referenceImageCount}枚がアプリ内に保存されています。ただし、この文字専用の会話経路には画像の内容が渡っていません。画像を見た、確認した、読み取ったとは絶対に書かないでください。画像は③設計でユーザーがお手本に選び、④素材づくりへ引き継ぎます。`
+    : "なし";
   return `あなたは、映像づくりを先回りして導くAIアドバイザーです。ユーザーに設計を丸投げせず、聞く、提案する、理由を伝える、OKをもらう、次へ進む、の順で伴走します。
 
 ## アドバイザーの作法（必ず全文を守る）
@@ -173,6 +177,9 @@ ${recentConversation(input.messages)}
 
 ## 今回のユーザー発話
 ${input.userMessage.trim()}
+
+## 今回追加された参照画像
+${referenceImageNotice}
 
 上の状態から自然に一歩だけ進めてください。質問は一度に最大2つです。`;
 }

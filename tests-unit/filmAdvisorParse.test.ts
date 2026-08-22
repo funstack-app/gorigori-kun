@@ -4,6 +4,8 @@ import {
   parseAdvisorResponse,
   parsePremiseFields,
 } from "../src/lib/film/advisorParse";
+import { createFilmChatMessage } from "../src/lib/film/advisor";
+import { buildFilmAdvisorPrompt } from "../src/lib/film/advisorPrompts";
 
 describe("フィルムアドバイザー成果物パーサ", () => {
   it("地の文と正常な成果物フェンスを分ける", () => {
@@ -17,6 +19,22 @@ describe("フィルムアドバイザー成果物パーサ", () => {
         content: "雨の駅で、少女が届かなかった手紙の持ち主を探す。",
       },
     ]);
+  });
+
+  it("参照画像は会話へ保存し、文字専用経路では見たふりを禁止する", () => {
+    const message = createFilmChatMessage("user", "この雰囲気で", [
+      "/app-data/references/look.png",
+    ]);
+    expect(message.attachedImagePaths).toEqual(["/app-data/references/look.png"]);
+
+    const prompt = buildFilmAdvisorPrompt({
+      project: null,
+      messages: [],
+      userMessage: message.text,
+      referenceImageCount: 1,
+    });
+    expect(prompt).toContain("この文字専用の会話経路には画像の内容が渡っていません");
+    expect(prompt).toContain("画像を見た、確認した、読み取ったとは絶対に書かないでください");
   });
 
   it("閉じ忘れたフェンスを黙って捨てず、原文と壊れ状態を返す", () => {
