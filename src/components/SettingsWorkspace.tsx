@@ -74,7 +74,10 @@ export function SettingsWorkspace() {
   return (
     <section className="flex h-full min-h-0 flex-col overflow-hidden bg-[#121212]">
       <div className="flex min-h-0 flex-1 overflow-hidden">
-        <nav className="w-48 shrink-0 border-r border-[#242424] bg-[#151515] p-3">
+        <nav
+          data-tour="settings-tabs"
+          className="w-48 shrink-0 border-r border-[#242424] bg-[#151515] p-3"
+        >
           <div className="space-y-1">
             {TABS.map((item) => (
               <button
@@ -94,14 +97,14 @@ export function SettingsWorkspace() {
         </nav>
         <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
           {tab === "basic" && (
-            <div className="space-y-6">
+            <div data-tour="settings-panel-basic" className="space-y-6">
               <BasicSettings />
               <WorldContextSettings />
               <UpdateChecker />
             </div>
           )}
           {tab === "storage" && (
-            <div className="space-y-6">
+            <div data-tour="settings-panel-storage" className="space-y-6">
               {/*
                 v0.6.13 STΛCK 指示:
                 クラウドストレージ連携 (Supabase) はβ以降で公開予定。
@@ -112,9 +115,15 @@ export function SettingsWorkspace() {
               <StorageSettingsTab />
             </div>
           )}
-          {tab === "accounts" && <AccountSettings />}
-          {tab === "connections" && <SettingsConnections />}
-          {tab === "diagnostics" && <SettingsDiagnostics />}
+          {tab === "accounts" && (
+            <div data-tour="settings-panel-accounts"><AccountSettings /></div>
+          )}
+          {tab === "connections" && (
+            <div data-tour="settings-panel-connections"><SettingsConnections /></div>
+          )}
+          {tab === "diagnostics" && (
+            <div data-tour="settings-panel-diagnostics"><SettingsDiagnostics /></div>
+          )}
         </div>
       </div>
     </section>

@@ -442,6 +442,7 @@ function StressTestSection({
 
 export function AssetFactoryPanel({ project }: { project: FilmProject }) {
   const updateAsset = useFilmProjectStore((state) => state.updateAssetFactoryAsset);
+  const setPhase = useFilmProjectStore((state) => state.setPhase);
   const upsertFilmAsset = useAssetLedger((state) => state.upsertFilmAsset);
   const pushToast = useToasts((state) => state.push);
   const assets = useMemo(() => sortAssetsForFactory(project.assets), [project.assets]);
@@ -458,6 +459,17 @@ export function AssetFactoryPanel({ project }: { project: FilmProject }) {
 
   function persist(assetId: string, next: (asset: AssetLedgerEntry) => AssetLedgerEntry) {
     updateAsset(assetId, next);
+  }
+
+  function syncFinalizedAssetToLedger(asset: FilmAsset) {
+    if (!asset.locked) return;
+    void upsertFilmAsset(project.id, asset).catch((error) => {
+      pushToast({
+        kind: "warn",
+        text: `${asset.name}は確定できましたが、アセット台帳の確定状態を更新できませんでした: ${(error as Error)?.message ?? error}`,
+        ttlMs: 7000,
+      });
+    });
   }
 
   async function draftOne(asset: FilmAsset, controller?: AbortController): Promise<boolean> {
@@ -743,13 +755,18 @@ export function AssetFactoryPanel({ project }: { project: FilmProject }) {
                 onRun={(round) => void runStress(asset, round)}
                 onVerdict={(round, index, verdict) => persist(asset.id, (current) => setStressTestVerdict(current, index, verdict, round))}
                 onEvaluate={(round) => {
-                  persist(asset.id, (current) => evaluateStressTest(current, round));
+                  const evaluated = evaluateStressTest(asset, round);
+                  persist(asset.id, () => evaluated);
+                  syncFinalizedAssetToLedger(evaluated);
                 }}
                 onChooseExtra={(decision) => {
                   const chosen = chooseExtraStressRound(asset, decision);
                   persist(asset.id, () => chosen);
                   if (decision === "run") void runStress(chosen, "extra");
-                  else pushToast({ kind: "success", text: `${asset.name}を確定しました。`, ttlMs: 4000 });
+                  else {
+                    syncFinalizedAssetToLedger(chosen);
+                    pushToast({ kind: "success", text: `${asset.name}を確定しました。`, ttlMs: 4000 });
+                  }
                 }}
               />
 
@@ -779,10 +796,11 @@ export function AssetFactoryPanel({ project }: { project: FilmProject }) {
         ) : null}
         <button
           type="button"
-          disabled
+          onClick={() => setPhase(5)}
+          disabled={!gate.canProceed}
           className="mt-4 rounded-md bg-emerald-500 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-400"
         >
-          ⑤映像づくりは近日対応（次の更新）
+          ⑤映像づくりへ進む
         </button>
       </section>
       {zoomPath ? <ImageZoomOverlay path={zoomPath} onClose={() => setZoomPath(null)} /> : null}

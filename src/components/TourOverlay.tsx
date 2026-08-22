@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -11,7 +12,9 @@ import {
   findAvailableStepIndex,
   type TourDefinition,
   type TourPlacement,
+  type TourStep,
 } from "../lib/tour";
+import { useWorkspace } from "../lib/store/workspace";
 
 type HighlightRect = {
   top: number;
@@ -37,6 +40,12 @@ function resolveVisibleTarget(selector: string): HTMLElement | null {
     );
   } catch {
     return null;
+  }
+}
+
+function runBeforeStepAction(step: TourStep): void {
+  if (step.beforeAction?.type === "settings-tab") {
+    useWorkspace.getState().requestSettingsTab(step.beforeAction.tab);
   }
 }
 
@@ -112,16 +121,67 @@ export function TourOverlay({
   const [stepIndex, setStepIndex] = useState<number | null>(null);
   const [rect, setRect] = useState<HighlightRect | null>(null);
   const closeRef = useRef(onClose);
+  const navigationRunRef = useRef(0);
+  const pendingFrameRef = useRef<number | null>(null);
   closeRef.current = onClose;
 
-  useEffect(() => {
-    const first = findAvailableStepIndex(tour.steps, 0, 1, resolveVisibleTarget);
-    if (first === null) {
-      closeRef.current();
-      return;
+  const activateStep = useCallback((startIndex: number, direction: 1 | -1) => {
+    const runId = navigationRunRef.current + 1;
+    navigationRunRef.current = runId;
+    if (pendingFrameRef.current !== null) {
+      window.cancelAnimationFrame(pendingFrameRef.current);
+      pendingFrameRef.current = null;
     }
-    setStepIndex(first);
-  }, [tour]);
+    setRect(null);
+
+    const tryCandidate = (candidateIndex: number) => {
+      if (navigationRunRef.current !== runId) return;
+      if (candidateIndex < 0 || candidateIndex >= tour.steps.length) {
+        closeRef.current();
+        return;
+      }
+
+      const candidate = tour.steps[candidateIndex];
+      runBeforeStepAction(candidate);
+      const resolveCandidate = () => {
+        if (navigationRunRef.current !== runId) return;
+        const available = findAvailableStepIndex(
+          [candidate],
+          0,
+          1,
+          resolveVisibleTarget,
+        );
+        if (available === 0) {
+          pendingFrameRef.current = null;
+          setStepIndex(candidateIndex);
+          return;
+        }
+        tryCandidate(candidateIndex + direction);
+      };
+
+      if (!candidate.beforeAction) {
+        resolveCandidate();
+        return;
+      }
+      // タブ要求が React の画面へ反映されてから、切替後の対象を探す。
+      pendingFrameRef.current = window.requestAnimationFrame(() => {
+        pendingFrameRef.current = window.requestAnimationFrame(resolveCandidate);
+      });
+    };
+
+    tryCandidate(startIndex);
+  }, [tour.steps]);
+
+  useEffect(() => {
+    activateStep(0, 1);
+    return () => {
+      navigationRunRef.current += 1;
+      if (pendingFrameRef.current !== null) {
+        window.cancelAnimationFrame(pendingFrameRef.current);
+        pendingFrameRef.current = null;
+      }
+    };
+  }, [activateStep]);
 
   const currentStep = stepIndex === null ? null : tour.steps[stepIndex];
   const currentTarget = useMemo(
@@ -133,14 +193,7 @@ export function TourOverlay({
     if (stepIndex === null || !currentStep) return;
     const target = resolveVisibleTarget(currentStep.target);
     if (!target) {
-      const next = findAvailableStepIndex(
-        tour.steps,
-        stepIndex + 1,
-        1,
-        resolveVisibleTarget,
-      );
-      if (next === null) closeRef.current();
-      else setStepIndex(next);
+      activateStep(stepIndex + 1, 1);
       return;
     }
 
@@ -157,7 +210,7 @@ export function TourOverlay({
       window.removeEventListener("resize", update);
       window.removeEventListener("scroll", update, true);
     };
-  }, [currentStep, stepIndex, tour.steps]);
+  }, [activateStep, currentStep, stepIndex]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -169,18 +222,8 @@ export function TourOverlay({
 
   if (!currentStep || !currentTarget || !rect || stepIndex === null) return null;
 
-  const previousIndex = findAvailableStepIndex(
-    tour.steps,
-    stepIndex - 1,
-    -1,
-    resolveVisibleTarget,
-  );
-  const nextIndex = findAvailableStepIndex(
-    tour.steps,
-    stepIndex + 1,
-    1,
-    resolveVisibleTarget,
-  );
+  const hasPreviousStep = stepIndex > 0;
+  const hasNextStep = stepIndex < tour.steps.length - 1;
 
   return (
     <div className="fixed inset-0 z-[200]" role="presentation">
@@ -229,9 +272,9 @@ export function TourOverlay({
         <div className="mt-4 flex items-center justify-end gap-2">
           <button
             type="button"
-            disabled={previousIndex === null}
+            disabled={!hasPreviousStep}
             onClick={() => {
-              if (previousIndex !== null) setStepIndex(previousIndex);
+              if (hasPreviousStep) activateStep(stepIndex - 1, -1);
             }}
             className="h-8 rounded-md border border-[#343434] px-3 text-xs font-bold text-neutral-300 hover:border-[#555] hover:text-white disabled:cursor-not-allowed disabled:opacity-35"
           >
@@ -240,12 +283,12 @@ export function TourOverlay({
           <button
             type="button"
             onClick={() => {
-              if (nextIndex === null) onClose();
-              else setStepIndex(nextIndex);
+              if (!hasNextStep) onClose();
+              else activateStep(stepIndex + 1, 1);
             }}
             className="h-8 rounded-md bg-pink-500 px-4 text-xs font-bold text-white hover:bg-pink-400"
           >
-            {nextIndex === null ? "終了" : "次へ"}
+            {hasNextStep ? "次へ" : "終了"}
           </button>
         </div>
       </section>

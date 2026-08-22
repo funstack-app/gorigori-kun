@@ -7,6 +7,7 @@ import { SafeImage } from "./SafeImage";
 import { extractDropped, fileToUploadReference, isImageDrop } from "../lib/dragRef";
 import { sendCharacterPresetToSheetRegenerate } from "../lib/character/sendImageToCharacterRegister";
 import type { AssetLedgerEntry, AssetLedgerType } from "../lib/ipc";
+import { humanizeError } from "../lib/humanizeError";
 import { useAssetLedger } from "../lib/store/assetLedger";
 import { useComposer, type ReferenceRole } from "../lib/store/composer";
 import {
@@ -787,7 +788,8 @@ function AssetLedgerPanel({
       setNotice(editingId ? "更新しました" : "登録しました");
       closeForm();
     } catch (saveError) {
-      setNotice(`保存できませんでした: ${String(saveError)}`);
+      console.warn("asset ledger save failed", saveError);
+      setNotice(`保存できませんでした: ${humanizeError(saveError)}`);
     } finally {
       setSaving(false);
     }
@@ -822,7 +824,8 @@ function AssetLedgerPanel({
       await deleteAsset(asset.id);
       setNotice("削除しました");
     } catch (deleteError) {
-      setNotice(`削除できませんでした: ${String(deleteError)}`);
+      console.warn("asset ledger delete failed", deleteError);
+      setNotice(`削除できませんでした: ${humanizeError(deleteError)}`);
     }
   };
 
@@ -956,9 +959,9 @@ function AssetLedgerPanel({
       ) : null}
 
       {loading ? <p className="text-[11px] text-neutral-500">素材を読み込んでいます。</p> : null}
-      {error && !loading ? (
+      {error && !loading && !notice ? (
         <p className="rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-200">
-          台帳を読み込めませんでした: {error}
+          台帳を読み込めませんでした: {humanizeError(error)}
         </p>
       ) : null}
       {notice ? <p className="text-[11px] text-neutral-300">{notice}</p> : null}

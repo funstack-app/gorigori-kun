@@ -3,6 +3,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AssetLedgerEntry, AssetLedgerFile } from "../src/lib/ipc";
 import type { FilmAsset } from "../src/lib/film/types";
 import type { Preset } from "../src/lib/store/presets";
+import {
+  chooseExtraStressRound,
+  evaluateStressTest,
+} from "../src/lib/film/assetFactory";
 
 const harness = vi.hoisted(() => ({
   read: vi.fn(),
@@ -291,5 +295,80 @@ describe("assetLedger store", () => {
       primaryImagePath: "/film/misaki-b.png",
       prompt: "修正後の生成指示文全文",
     });
+  });
+
+  it.each([
+    [
+      "必須5枚に合格した補助人物",
+      () => evaluateStressTest(filmAsset({
+        importance: "supporting",
+        stressTest: {
+          conditions: ["真顔", "完全な横顔", "他の人物と同フレーム", "逆光", "しゃがみ"],
+          primaryRound: {
+            status: "review",
+            imagePaths: ["s1.png", "s2.png", "s3.png", "s4.png", "s5.png"],
+            verdicts: ["pass", "pass", "pass", "pass", "pass"],
+          },
+          extraRound: null,
+          needsPromptRevision: false,
+          extraRoundOffered: false,
+          extraRoundDecision: null,
+        },
+      })),
+    ],
+    [
+      "追加5枚に合格した主要人物",
+      () => evaluateStressTest(filmAsset({
+        stressTest: {
+          conditions: ["真顔", "完全な横顔", "他の人物と同フレーム", "逆光", "しゃがみ"],
+          primaryRound: {
+            status: "passed",
+            imagePaths: ["p1.png", "p2.png", "p3.png", "p4.png", "p5.png"],
+            verdicts: ["pass", "pass", "pass", "pass", "pass"],
+          },
+          extraRound: {
+            status: "review",
+            imagePaths: ["e1.png", "e2.png", "e3.png", "e4.png", "e5.png"],
+            verdicts: ["pass", "pass", "pass", "pass", "pass"],
+          },
+          needsPromptRevision: false,
+          extraRoundOffered: true,
+          extraRoundDecision: "run",
+        },
+      }), "extra"),
+    ],
+    [
+      "追加確認をスキップした主要人物",
+      () => chooseExtraStressRound(filmAsset({
+        stressTest: {
+          conditions: ["真顔", "完全な横顔", "他の人物と同フレーム", "逆光", "しゃがみ"],
+          primaryRound: {
+            status: "passed",
+            imagePaths: ["p1.png", "p2.png", "p3.png", "p4.png", "p5.png"],
+            verdicts: ["pass", "pass", "pass", "pass", "pass"],
+          },
+          extraRound: null,
+          needsPromptRevision: false,
+          extraRoundOffered: false,
+          extraRoundDecision: null,
+        },
+      }), "skip"),
+    ],
+  ])("%sの確定時に同じ台帳行を最終画像つきでロックする", async (_label, finalize) => {
+    const provisional = filmAsset();
+    await useAssetLedger.getState().upsertFilmAsset("film-1", provisional);
+
+    const finalized = finalize();
+    await useAssetLedger.getState().upsertFilmAsset("film-1", finalized);
+
+    expect(finalized).toMatchObject({ status: "locked", locked: true });
+    expect(harness.upsert).toHaveBeenCalledTimes(2);
+    expect(useAssetLedger.getState().assets).toEqual([
+      expect.objectContaining({
+        id: filmAssetLedgerId("film-1", "CH-01"),
+        primaryImagePath: "/film/misaki-a.png",
+        locked: true,
+      }),
+    ]);
   });
 });

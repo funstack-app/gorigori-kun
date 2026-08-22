@@ -71,6 +71,31 @@ describe("tour definitions", () => {
     expect(findAvailableStepIndex(steps, 2, 1, resolve)).toBeNull();
   });
 
+  it("設定ツアーは各ステップ前に対象タブを開くと7件すべてへ到達できる", () => {
+    const steps = PAGE_TOURS.settingsConnections.steps;
+    let activeTab = "basic";
+    const reached = steps.map((step, index) => {
+      if (step.beforeAction?.type === "settings-tab") {
+        activeTab = step.beforeAction.tab;
+      }
+      return findAvailableStepIndex(steps, index, 1, (selector) => {
+        if (selector === '[data-tour="settings-tabs"]') return {};
+        return selector === `[data-tour="settings-panel-${activeTab}"]` ? {} : null;
+      });
+    });
+
+    expect(steps).toHaveLength(7);
+    expect(reached).toEqual([0, 1, 2, 3, 4, 5, 6]);
+    expect(steps.slice(1).map((step) => step.beforeAction?.tab)).toEqual([
+      "basic",
+      "storage",
+      "storage",
+      "accounts",
+      "connections",
+      "diagnostics",
+    ]);
+  });
+
   it("has a real target for the image-generation scene builder step", () => {
     const target = '[data-tour="generation-scene-builder"]';
     const step = PAGE_TOURS.artworkGeneration.steps.find((item) => item.target === target);
