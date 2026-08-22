@@ -531,7 +531,7 @@ export function AssetFactoryPanel({ project }: { project: FilmProject }) {
   }
 
   return (
-    <div className="mx-auto flex w-full max-w-6xl flex-col gap-6">
+    <div className="mx-auto flex w-full min-w-0 max-w-6xl flex-col gap-6">
       <header>
         <p className="text-xs font-semibold uppercase tracking-[0.18em] text-pink-400">④ アセット工場</p>
         <h2 className="mt-2 text-2xl font-semibold text-zinc-100">設計を全部書いてから、素材を固定する</h2>

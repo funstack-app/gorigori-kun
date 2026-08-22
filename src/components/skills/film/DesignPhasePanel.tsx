@@ -502,7 +502,7 @@ export function DesignPhasePanel({ project }: { project: FilmProject }) {
   }
 
   return (
-    <div className="mx-auto flex w-full max-w-6xl flex-col gap-6">
+    <div className="mx-auto flex w-full min-w-0 max-w-6xl flex-col gap-6">
       <div>
         <p className="text-xs font-semibold uppercase tracking-[0.18em] text-pink-400">③ 設計</p>
         <h2 className="mt-2 text-2xl font-semibold text-zinc-100">作る前に、必要なものを全部書く</h2>
@@ -542,7 +542,7 @@ export function DesignPhasePanel({ project }: { project: FilmProject }) {
         {assetFailure ? <AssetParseErrorCard failure={assetFailure} raw={assetRaw} /> : null}
 
         {project.assets.length > 0 ? (
-          <div className="mt-5 overflow-x-auto">
+          <div className="mt-5 min-w-0 overflow-x-auto">
             <table className="min-w-[1060px] w-full border-separate border-spacing-0 text-left text-xs">
               <thead className="text-zinc-500">
                 <tr>
@@ -687,7 +687,7 @@ export function DesignPhasePanel({ project }: { project: FilmProject }) {
         </div>
 
         {project.foreshadow.length > 0 ? (
-          <div className="mt-5 overflow-x-auto">
+          <div className="mt-5 min-w-0 overflow-x-auto">
             <table className="min-w-[1080px] w-full border-separate border-spacing-0 text-left text-xs">
               <thead className="text-zinc-500">
                 <tr>

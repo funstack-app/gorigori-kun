@@ -287,7 +287,7 @@ function ProjectControls({
 function LockedPhasePanel({ phase }: { phase: Exclude<FilmPhase, 1 | 2 | 3 | 4> }) {
   const detail = LOCKED_PHASES[phase];
   return (
-    <div className="mx-auto flex w-full max-w-2xl items-center justify-center py-16">
+    <div className="mx-auto flex w-full min-w-0 max-w-2xl items-center justify-center py-16">
       <section className="w-full rounded-xl border border-[#242424] bg-[#171717] p-8 text-center">
         <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-full border border-[#303030] bg-[#121212] text-zinc-500">
           <svg
@@ -398,12 +398,12 @@ export function FilmWorkspace() {
     !activeProject || showEarlyChat || (!showScriptReview && phase <= 2);
 
   return (
-    <section className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#121212] text-zinc-100">
-      <header className="flex items-center gap-3 border-b border-[#242424] px-5 py-3.5">
+    <section className="flex min-h-0 min-w-0 flex-1 flex-col overflow-x-hidden overflow-y-hidden bg-[#121212] text-zinc-100">
+      <header className="flex min-w-0 items-center gap-3 border-b border-[#242424] px-5 py-3.5">
         <span className="text-pink-400">
           <FilmMarkIcon />
         </span>
-        <div>
+        <div className="min-w-0">
           <h1 className="text-sm font-semibold">フィルム</h1>
           <p className="text-xs text-zinc-500">AIと話して、完成まで迷わず進める映像制作</p>
         </div>
@@ -414,13 +414,13 @@ export function FilmWorkspace() {
         />
       </header>
 
-      <div className="flex min-h-0 flex-1 overflow-hidden">
+      <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
         <FilmPhaseRail
           phase={phase}
           onSelect={selectPhase}
           isEnabled={phaseEnabled}
         />
-        <main className="relative min-h-0 flex-1 overflow-y-auto px-8 py-6">
+        <main className="relative min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto px-8 py-6">
           {saveError ? (
             <div className="mx-auto mb-4 flex max-w-5xl flex-wrap items-center gap-3 rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-100">
               <div className="min-w-0 flex-1">
@@ -454,8 +454,8 @@ export function FilmWorkspace() {
               保存した企画を読み込んでいます…
             </div>
           ) : showScriptReview && activeProject ? (
-            <div>
-              <div className="mx-auto mb-4 flex max-w-4xl justify-end">
+            <div className="min-w-0">
+              <div className="mx-auto mb-4 flex w-full min-w-0 max-w-4xl justify-end">
                 <button
                   type="button"
                   onClick={() => {
@@ -470,9 +470,9 @@ export function FilmWorkspace() {
               <ScriptPhasePanel project={activeProject} />
             </div>
           ) : showChat ? (
-            <div className="flex h-full min-h-[680px] flex-col">
+            <div className="flex h-full min-h-[680px] min-w-0 flex-col">
               {activeProject ? (
-                <div className="mx-auto mb-3 flex w-full max-w-5xl justify-end">
+                <div className="mx-auto mb-3 flex w-full min-w-0 max-w-5xl justify-end">
                   <button
                     type="button"
                     onClick={() => setShowScriptReview(true)}

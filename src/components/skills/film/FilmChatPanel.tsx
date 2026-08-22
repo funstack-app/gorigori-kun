@@ -296,9 +296,9 @@ function ArtifactCard({
     Boolean(premise && premise.missing.length > 0);
 
   return (
-    <section className="mt-3 overflow-hidden rounded-lg border border-pink-500/30 bg-[#151515]">
-      <header className="flex items-center justify-between gap-3 border-b border-[#2b2b2b] bg-pink-500/5 px-4 py-2.5">
-        <div>
+    <section className="mt-3 min-w-0 overflow-hidden rounded-lg border border-pink-500/30 bg-[#151515]">
+      <header className="flex min-w-0 items-center justify-between gap-3 border-b border-[#2b2b2b] bg-pink-500/5 px-4 py-2.5">
+        <div className="min-w-0">
           <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-pink-400">
             成果物
           </p>
@@ -314,16 +314,23 @@ function ArtifactCard({
       </header>
 
       {artifact.type === "premise" && artifact.premiseFields ? (
-        <dl className="grid gap-2 px-4 py-4 text-xs">
+        <dl className="grid min-w-0 gap-2 px-4 py-4 text-xs">
           {Object.entries(artifact.premiseFields).map(([key, value]) => (
-            <div key={key} className="grid grid-cols-[8rem_1fr] gap-3">
-              <dt className="text-zinc-500">{key}</dt>
-              <dd className="text-zinc-200">{value}</dd>
+            <div key={key} className="grid min-w-0 grid-cols-[minmax(0,8rem)_minmax(0,1fr)] gap-3">
+              <dt className="break-words text-zinc-500">{key}</dt>
+              <dd className="min-w-0 break-words text-zinc-200">{value}</dd>
             </div>
           ))}
         </dl>
       ) : (
-        <div className="max-h-80 overflow-y-auto whitespace-pre-wrap px-4 py-4 font-mono text-xs leading-6 text-zinc-200">
+        <div
+          className={[
+            "min-w-0 max-h-80 overflow-y-auto px-4 py-4 font-mono text-xs leading-6 text-zinc-200",
+            artifact.type === "scenelist"
+              ? "overflow-x-auto whitespace-pre"
+              : "overflow-x-hidden whitespace-pre-wrap break-words",
+          ].join(" ")}
+        >
           {artifact.content}
         </div>
       )}
@@ -634,9 +641,9 @@ export function FilmChatPanel({ project }: { project: FilmProject | null }) {
   }, [lastMessageText]);
 
   return (
-    <div className="mx-auto flex h-full min-h-[620px] w-full max-w-5xl flex-col gap-3">
-      <header className="flex items-center justify-between gap-4 rounded-md border border-[#242424] bg-[#161616] px-4 py-3">
-        <div>
+    <div className="mx-auto flex h-full min-h-[620px] w-full min-w-0 max-w-5xl flex-col gap-3">
+      <header className="flex min-w-0 items-center justify-between gap-4 rounded-md border border-[#242424] bg-[#161616] px-4 py-3">
+        <div className="min-w-0">
           <p className="text-xs font-semibold uppercase tracking-[0.18em] text-pink-400">
             ①企画・②脚本
           </p>
@@ -648,18 +655,18 @@ export function FilmChatPanel({ project }: { project: FilmProject | null }) {
           </p>
         </div>
         {project ? (
-          <div className="text-right text-[11px] text-zinc-500">
-            <p>{project.title}</p>
-            <p>{findVideoServiceProfile(project.videoServiceId)?.label ?? DEFAULT_VIDEO_SERVICE_ID}</p>
+          <div className="min-w-0 break-words text-right text-[11px] text-zinc-500">
+            <p className="break-words">{project.title}</p>
+            <p className="break-words">{findVideoServiceProfile(project.videoServiceId)?.label ?? DEFAULT_VIDEO_SERVICE_ID}</p>
           </div>
         ) : null}
       </header>
 
       <div
         ref={scrollerRef}
-        className="min-h-0 flex-1 overflow-y-auto rounded-md border border-[#242424] bg-[#101010] p-4"
+        className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto rounded-md border border-[#242424] bg-[#101010] p-4"
       >
-        <ul className="space-y-3">
+        <ul className="min-w-0 space-y-3">
           {messages.map((message) => {
             const parsed = message.role === "assistant"
               ? parseAdvisorResponse(message.text)
@@ -668,7 +675,7 @@ export function FilmChatPanel({ project }: { project: FilmProject | null }) {
               <li
                 key={message.id}
                 className={[
-                  "rounded-md px-3 py-2 text-sm",
+                  "min-w-0 rounded-md px-3 py-2 text-sm",
                   message.role === "user"
                     ? "ml-auto max-w-[82%] bg-pink-500/15 text-pink-100"
                     : "max-w-[88%] bg-[#1c1c1c] text-zinc-200",
@@ -678,9 +685,9 @@ export function FilmChatPanel({ project }: { project: FilmProject | null }) {
                   {message.role === "user" ? "あなた" : "AIアドバイザー"}
                 </div>
                 {parsed?.text ? (
-                  <div className="whitespace-pre-wrap leading-6">{parsed.text}</div>
+                  <div className="min-w-0 whitespace-pre-wrap break-words leading-6">{parsed.text}</div>
                 ) : message.role === "user" ? (
-                  <div className="whitespace-pre-wrap leading-6">{message.text}</div>
+                  <div className="min-w-0 whitespace-pre-wrap break-words leading-6">{message.text}</div>
                 ) : null}
                 {parsed?.malformed ? (
                   <div className="mt-3 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs leading-5 text-amber-200">
@@ -708,7 +715,7 @@ export function FilmChatPanel({ project }: { project: FilmProject | null }) {
             );
           })}
           {sending ? (
-            <li className="max-w-[88%] rounded-md bg-[#1c1c1c] px-3 py-2">
+            <li className="min-w-0 max-w-[88%] rounded-md bg-[#1c1c1c] px-3 py-2">
               <div className="mb-1 text-[10px] uppercase tracking-wider text-zinc-500">
                 AIアドバイザー
               </div>
@@ -742,10 +749,10 @@ export function FilmChatPanel({ project }: { project: FilmProject | null }) {
         </div>
       ) : null}
 
-      <div className="flex flex-col gap-2 rounded-md border border-[#242424] bg-[#161616] px-3 py-2">
+      <div className="flex min-w-0 flex-col gap-2 rounded-md border border-[#242424] bg-[#161616] px-3 py-2">
         {revisionTarget ? (
-          <div className="flex items-center justify-between gap-3 rounded-md bg-pink-500/10 px-3 py-2 text-xs text-pink-200">
-            <span>
+          <div className="flex min-w-0 items-center justify-between gap-3 rounded-md bg-pink-500/10 px-3 py-2 text-xs text-pink-200">
+            <span className="min-w-0 break-words">
               {ARTIFACT_LABELS[revisionTarget]}を直します。一言で大丈夫です（例: もっと切なく）
             </span>
             <button
@@ -774,7 +781,7 @@ export function FilmChatPanel({ project }: { project: FilmProject | null }) {
               ? "例: もっと切なく（Enterで送信・改行はShift+Enter）"
               : "思ったことを一言で…（Enterで送信・改行はShift+Enter）"
           }
-          className="w-full resize-none bg-transparent text-sm text-zinc-200 outline-none placeholder:text-zinc-600"
+          className="w-full min-w-0 resize-none bg-transparent text-sm text-zinc-200 outline-none placeholder:text-zinc-600"
         />
         <div className="flex justify-end">
           <button

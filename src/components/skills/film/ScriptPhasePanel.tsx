@@ -507,8 +507,8 @@ export function ScriptPhasePanel({ project }: { project: FilmProject }) {
   }
 
   return (
-    <div className="mx-auto flex w-full max-w-4xl flex-col gap-6">
-      <div>
+    <div className="mx-auto flex w-full min-w-0 max-w-4xl flex-col gap-6">
+      <div className="min-w-0">
         <p className="text-xs font-semibold uppercase tracking-[0.18em] text-pink-400">② 脚本</p>
         <h2 className="mt-2 text-2xl font-semibold text-zinc-100">五つのOKで物語を固める</h2>
         <p className="mt-2 text-sm leading-6 text-zinc-400">
@@ -516,11 +516,11 @@ export function ScriptPhasePanel({ project }: { project: FilmProject }) {
         </p>
       </div>
 
-      <section className="rounded-xl border border-[#292929] bg-[#171717] p-5">
+      <section className="min-w-0 rounded-xl border border-[#292929] bg-[#171717] p-5">
         <h3 className="text-sm font-semibold text-zinc-200">脚本の前提</h3>
         <p className="mt-1 text-xs text-zinc-500">AIが秒数と人名をそろえるための基準です。</p>
-        <div className="mt-4 grid gap-4 md:grid-cols-2">
-          <label className="grid gap-1.5">
+        <div className="mt-4 grid min-w-0 gap-4 md:grid-cols-2">
+          <label className="grid min-w-0 gap-1.5">
             <span className="text-xs font-medium text-zinc-300">目標の長さ（秒）</span>
             <input
               type="number"
@@ -535,7 +535,7 @@ export function ScriptPhasePanel({ project }: { project: FilmProject }) {
               onBlur={persistSettings}
               aria-invalid={Boolean(targetDurationError)}
               aria-describedby={targetDurationError ? "film-target-duration-error" : undefined}
-              className="h-10 rounded-md border border-[#303030] bg-[#121212] px-3 text-sm text-zinc-100 outline-none focus:border-pink-500"
+              className="h-10 min-w-0 rounded-md border border-[#303030] bg-[#121212] px-3 text-sm text-zinc-100 outline-none focus:border-pink-500"
             />
             {targetDurationError ? (
               <span id="film-target-duration-error" role="alert" className="text-xs text-amber-300">
@@ -543,30 +543,30 @@ export function ScriptPhasePanel({ project }: { project: FilmProject }) {
               </span>
             ) : null}
           </label>
-          <label className="grid gap-1.5">
+          <label className="grid min-w-0 gap-1.5">
             <span className="text-xs font-medium text-zinc-300">登場人物名</span>
             <input
               value={characterNamesText}
               onChange={(event) => setCharacterNamesText(event.target.value)}
               onBlur={persistSettings}
               placeholder="例：美咲、蓮"
-              className="h-10 rounded-md border border-[#303030] bg-[#121212] px-3 text-sm text-zinc-100 outline-none placeholder:text-zinc-600 focus:border-pink-500"
+              className="h-10 min-w-0 rounded-md border border-[#303030] bg-[#121212] px-3 text-sm text-zinc-100 outline-none placeholder:text-zinc-600 focus:border-pink-500"
             />
           </label>
         </div>
-        <label className="mt-4 grid gap-1.5">
+        <label className="mt-4 grid min-w-0 gap-1.5">
           <span className="text-xs font-medium text-zinc-300">題材メモ（任意）</span>
           <input
             value={topicMemo}
             onChange={(event) => setTopicMemo(event.target.value)}
             onBlur={persistSettings}
             placeholder="例：雨上がりの駅、渡せなかった封筒"
-            className="h-10 rounded-md border border-[#303030] bg-[#121212] px-3 text-sm text-zinc-100 outline-none placeholder:text-zinc-600 focus:border-pink-500"
+            className="h-10 min-w-0 rounded-md border border-[#303030] bg-[#121212] px-3 text-sm text-zinc-100 outline-none placeholder:text-zinc-600 focus:border-pink-500"
           />
         </label>
       </section>
 
-      <div className="grid gap-4">
+      <div className="grid min-w-0 gap-4">
         {STAGES.map((definition, index) => {
           const previousStage = STAGES[index - 1]?.id;
           const available = index === 0 || Boolean(project.approvals[previousStage]);
@@ -585,7 +585,7 @@ export function ScriptPhasePanel({ project }: { project: FilmProject }) {
                 key={definition.id}
                 type="button"
                 onClick={() => setExpanded((current) => ({ ...current, [definition.id]: true }))}
-                className="flex w-full items-center gap-3 rounded-xl border border-emerald-500/30 bg-emerald-500/5 px-5 py-4 text-left transition hover:border-emerald-500/50"
+                className="flex w-full min-w-0 items-center gap-3 rounded-xl border border-emerald-500/30 bg-emerald-500/5 px-5 py-4 text-left transition hover:border-emerald-500/50"
               >
                 <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-emerald-500/15 text-sm text-emerald-300">✓</span>
                 <span className="min-w-0 flex-1">
@@ -600,11 +600,11 @@ export function ScriptPhasePanel({ project }: { project: FilmProject }) {
           }
 
           return (
-            <section key={definition.id} className="rounded-xl border border-[#2b2b2b] bg-[#171717] p-5">
-              <div className="flex items-start justify-between gap-3">
-                <div>
+            <section key={definition.id} className="min-w-0 rounded-xl border border-[#2b2b2b] bg-[#171717] p-5">
+              <div className="flex min-w-0 items-start justify-between gap-3">
+                <div className="min-w-0">
                   <p className="text-xs font-semibold text-pink-400">脚本 {index + 1}/5</p>
-                  <h3 className="mt-1 text-lg font-semibold text-zinc-100">
+                  <h3 className="mt-1 break-words text-lg font-semibold text-zinc-100">
                     {definition.name}（{definition.translation}）
                   </h3>
                 </div>
@@ -640,7 +640,7 @@ export function ScriptPhasePanel({ project }: { project: FilmProject }) {
               ) : null}
 
               {definition.id === "logline" && loglineOptions.length > 0 ? (
-                <div className="mt-5 grid gap-3">
+                <div className="mt-5 grid min-w-0 gap-3">
                   <p className="text-xs font-medium text-zinc-300">3案から、いちばん観たい案を選んでください。</p>
                   {loglineOptions.map((option, optionIndex) => (
                     <button
@@ -650,7 +650,7 @@ export function ScriptPhasePanel({ project }: { project: FilmProject }) {
                         saveLogline(option);
                         setLoglineOptions([]);
                       }}
-                      className="rounded-lg border border-[#323232] bg-[#121212] px-4 py-3 text-left text-sm leading-6 text-zinc-200 transition hover:border-pink-500/70 hover:bg-pink-500/5"
+                      className="min-w-0 break-words rounded-lg border border-[#323232] bg-[#121212] px-4 py-3 text-left text-sm leading-6 text-zinc-200 transition hover:border-pink-500/70 hover:bg-pink-500/5"
                     >
                       <span className="mr-2 font-semibold text-pink-300">案{optionIndex + 1}</span>
                       {option}
@@ -660,15 +660,15 @@ export function ScriptPhasePanel({ project }: { project: FilmProject }) {
               ) : null}
 
               {text.trim() ? (
-                <div className="mt-5">
-                  <label className="grid gap-2">
+                <div className="mt-5 min-w-0">
+                  <label className="grid min-w-0 gap-2">
                     <span className="text-xs font-medium text-zinc-400">成果物（そのまま編集できます）</span>
                     <textarea
                       value={text}
                       onChange={(event) => saveStageText(definition.id, event.target.value)}
                       rows={definition.id === "logline" ? 4 : definition.id === "blocks" ? 22 : 13}
                       spellCheck={false}
-                      className="w-full resize-y rounded-lg border border-[#303030] bg-[#111111] px-4 py-3 font-mono text-sm leading-6 text-zinc-200 outline-none transition focus:border-pink-500 focus:ring-1 focus:ring-pink-500/30"
+                      className="w-full min-w-0 resize-y whitespace-pre-wrap break-words rounded-lg border border-[#303030] bg-[#111111] px-4 py-3 font-mono text-sm leading-6 text-zinc-200 outline-none transition focus:border-pink-500 focus:ring-1 focus:ring-pink-500/30"
                     />
                   </label>
 
@@ -705,8 +705,8 @@ export function ScriptPhasePanel({ project }: { project: FilmProject }) {
               ) : null}
 
               {revisionStage === definition.id ? (
-                <div className="mt-4 rounded-lg border border-[#303030] bg-[#121212] p-4">
-                  <label className="grid gap-2">
+                <div className="mt-4 min-w-0 rounded-lg border border-[#303030] bg-[#121212] p-4">
+                  <label className="grid min-w-0 gap-2">
                     <span className="text-xs font-medium text-zinc-300">どう直したいですか？</span>
                     <input
                       value={revisionNotes[definition.id] ?? ""}
@@ -714,7 +714,7 @@ export function ScriptPhasePanel({ project }: { project: FilmProject }) {
                         setRevisionNotes((notes) => ({ ...notes, [definition.id]: event.target.value }))
                       }
                       placeholder="もっと切なく"
-                      className="h-10 rounded-md border border-[#303030] bg-[#171717] px-3 text-sm text-zinc-100 outline-none placeholder:text-zinc-600 focus:border-pink-500"
+                      className="h-10 min-w-0 rounded-md border border-[#303030] bg-[#171717] px-3 text-sm text-zinc-100 outline-none placeholder:text-zinc-600 focus:border-pink-500"
                     />
                   </label>
                   <p className="mt-2 text-[11px] text-zinc-500">
