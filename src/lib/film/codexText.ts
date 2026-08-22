@@ -13,7 +13,10 @@ export type FilmTextTurnLabel =
   | "ビートシート"
   | "トリートメント"
   | "シーンリスト"
-  | "ブロック脚本";
+  | "ブロック脚本"
+  | "アセット台帳"
+  | "ルック提案"
+  | "Style Prefix";
 
 export type FilmTextTurnProgress = {
   phase: "waiting" | "streaming" | "stalled";

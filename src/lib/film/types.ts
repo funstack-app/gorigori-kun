@@ -48,6 +48,10 @@ export type FilmScript = {
 
 export type AssetImportance = "primary" | "supporting" | "background";
 
+export type AssetType = "character" | "location" | "prop" | "text";
+
+export type AssetPairSide = "①" | "②" | null;
+
 export type AssetLedgerStatus =
   | "unplanned"
   | "planned"
@@ -58,14 +62,20 @@ export type AssetLedgerStatus =
 export type AssetLedgerEntry = {
   id: string;
   name: string;
+  type: AssetType;
   importance: AssetImportance;
   blockIds: string[];
   status: AssetLedgerStatus;
+  /** 同じ物の別状態を結ぶ任意の組名。同じ組名で ① / ② をそろえる。 */
+  pairKey?: string | null;
+  pairSide?: AssetPairSide;
 };
 
 export type ForeshadowEntry = {
   id: string;
   description: string;
+  initialMeaning?: string;
+  trueMeaning?: string;
   plantedInBlockId: string;
   paidOffInBlockId: string;
 };
@@ -93,5 +103,7 @@ export type FilmProject = {
   foreshadow: ForeshadowEntry[];
   stylePrefix: string;
   lookMasterPath: string | null;
+  /** AI生成ルックを選んだ場合に、Style Prefix起草へ渡す設計文。 */
+  lookMasterDescription?: string;
   takes: FilmTake[];
 };

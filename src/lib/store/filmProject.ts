@@ -1,8 +1,12 @@
 import { create } from "zustand";
 
 import { filmProjects } from "../ipc";
+import { validateAssetLedger } from "../film/assetParse";
 import type {
+  AssetLedgerEntry,
+  AssetType,
   FilmBlock,
+  ForeshadowEntry,
   FilmPhase,
   FilmProject,
   FilmScene,
@@ -45,6 +49,11 @@ type FilmProjectState = {
   saveSceneList: (scenelistText: string, scenes: FilmScene[]) => void;
   saveBlocks: (blockScriptText: string, blocks: FilmBlock[]) => void;
   approveStage: (stage: FilmScriptApprovalStage) => boolean;
+  saveAssets: (assets: AssetLedgerEntry[]) => void;
+  saveForeshadow: (entries: ForeshadowEntry[]) => void;
+  saveLookMaster: (path: string | null, description?: string) => void;
+  saveStylePrefix: (stylePrefix: string) => void;
+  approveLook: () => boolean;
 };
 
 const SCRIPT_STAGE_ORDER: FilmScriptApprovalStage[] = [
@@ -74,13 +83,36 @@ function scriptOf(project: FilmProject): FilmScript {
   return Array.isArray(project.script) ? emptyScript() : project.script;
 }
 
+function assetTypeFromId(id: string): AssetType {
+  if (id.startsWith("CH-")) return "character";
+  if (id.startsWith("LO-")) return "location";
+  if (id.startsWith("TX-")) return "text";
+  return "prop";
+}
+
 function normalizedProject(project: FilmProject): FilmProject {
   return {
     ...project,
     approvals: {
       ...project.approvals,
       blocks: project.approvals.blocks ?? null,
+      look: project.approvals.look ?? null,
     },
+    assets: (project.assets ?? []).map((asset) => ({
+      ...asset,
+      type: asset.type ?? assetTypeFromId(asset.id),
+      status: asset.status ?? "unplanned",
+      pairKey: asset.pairKey ?? null,
+      pairSide: asset.pairSide ?? null,
+    })),
+    foreshadow: (project.foreshadow ?? []).map((entry) => ({
+      ...entry,
+      initialMeaning: entry.initialMeaning ?? "",
+      trueMeaning: entry.trueMeaning ?? "",
+    })),
+    stylePrefix: project.stylePrefix ?? "",
+    lookMasterPath: project.lookMasterPath ?? null,
+    lookMasterDescription: project.lookMasterDescription ?? "",
   };
 }
 
@@ -227,6 +259,7 @@ function makeProject(title: string, theme: string, service: string): FilmProject
     foreshadow: [],
     stylePrefix: "",
     lookMasterPath: null,
+    lookMasterDescription: "",
     takes: [],
   };
 }
@@ -459,7 +492,93 @@ export const useFilmProjectStore = create<FilmProjectState>((set, get) => ({
     set({ projects });
     return true;
   },
+
+  saveAssets: (assets) => {
+    updateActiveDesign(get, set, (project) => ({ ...project, assets }));
+  },
+
+  saveForeshadow: (foreshadow) => {
+    updateActiveDesign(get, set, (project) => ({ ...project, foreshadow }));
+  },
+
+  saveLookMaster: (lookMasterPath, description = "") => {
+    updateActiveDesign(get, set, (project) => {
+      const lookChanged = project.lookMasterPath !== lookMasterPath;
+      return {
+        ...project,
+        lookMasterPath,
+        lookMasterDescription: description,
+        // 固定文は決定ルックの上に建つ。画像を替えた時だけ、旧ルック用の文を残さない。
+        stylePrefix: lookChanged ? "" : project.stylePrefix,
+      };
+    });
+  },
+
+  saveStylePrefix: (stylePrefix) => {
+    updateActiveDesign(get, set, (project) => ({ ...project, stylePrefix }));
+  },
+
+  approveLook: () => {
+    const activeProjectId = get().activeProjectId;
+    if (!activeProjectId) return false;
+    let approved = false;
+    const projects = get().projects.map((sourceProject) => {
+      if (sourceProject.id !== activeProjectId) return sourceProject;
+      const project = normalizedProject(sourceProject);
+      const script = scriptOf(project);
+      const assetIssues = validateAssetLedger(
+        project.assets,
+        script.blocks.map((block) => block.id),
+      );
+      if (
+        !project.approvals.blocks ||
+        !project.lookMasterPath?.trim() ||
+        !project.stylePrefix.trim() ||
+        project.assets.length === 0 ||
+        assetIssues.length > 0
+      ) {
+        return sourceProject;
+      }
+      approved = true;
+      return {
+        ...project,
+        phase: 4 as const,
+        approvals: {
+          ...project.approvals,
+          look: { approvedAt: new Date().toISOString() },
+        },
+      };
+    });
+    if (!approved) return false;
+    persistProjects(projects);
+    set({ projects });
+    return true;
+  },
 }));
+
+function updateActiveDesign(
+  get: () => FilmProjectState,
+  set: (partial: Partial<FilmProjectState>) => void,
+  update: (project: FilmProject) => FilmProject,
+): void {
+  const activeProjectId = get().activeProjectId;
+  if (!activeProjectId) return;
+  let changed = false;
+  const projects = get().projects.map((sourceProject) => {
+    if (sourceProject.id !== activeProjectId) return sourceProject;
+    const project = normalizedProject(sourceProject);
+    const nextProject = update(project);
+    if (JSON.stringify(project) === JSON.stringify(nextProject)) return sourceProject;
+    changed = true;
+    return {
+      ...nextProject,
+      approvals: { ...nextProject.approvals, look: null },
+    };
+  });
+  if (!changed) return;
+  persistProjects(projects);
+  set({ projects });
+}
 
 function updateActiveScript(
   get: () => FilmProjectState,

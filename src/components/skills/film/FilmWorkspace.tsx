@@ -2,14 +2,14 @@ import { useEffect, useState, type FormEvent } from "react";
 
 import type { FilmPhase } from "../../../lib/film/types";
 import { useFilmProjectStore } from "../../../lib/store/filmProject";
+import { DesignPhasePanel } from "./DesignPhasePanel";
 import { FilmPhaseRail } from "./FilmPhaseRail";
 import { ScriptPhasePanel } from "./ScriptPhasePanel";
 
 const INITIAL_SERVICE = "seedance-2.5";
 const INITIAL_SERVICE_LABEL = "Seedance 2.5（Higgsfield Web・無制限枠）";
 
-const LOCKED_PHASES: Record<Exclude<FilmPhase, 1 | 2>, { stage: string; name: string }> = {
-  3: { stage: "S3", name: "設計" },
+const LOCKED_PHASES: Record<Exclude<FilmPhase, 1 | 2 | 3>, { stage: string; name: string }> = {
   4: { stage: "S4", name: "アセット" },
   5: { stage: "S5", name: "生成" },
   6: { stage: "S6", name: "仕上げ" },
@@ -188,7 +188,7 @@ function PlanningPanel() {
   );
 }
 
-function LockedPhasePanel({ phase }: { phase: Exclude<FilmPhase, 1 | 2> }) {
+function LockedPhasePanel({ phase }: { phase: Exclude<FilmPhase, 1 | 2 | 3> }) {
   const detail = LOCKED_PHASES[phase];
   return (
     <div className="mx-auto flex w-full max-w-2xl items-center justify-center py-16">
@@ -258,8 +258,10 @@ export function FilmWorkspace() {
             <PlanningPanel />
           ) : phase === 2 && activeProject ? (
             <ScriptPhasePanel project={activeProject} />
-          ) : phase >= 3 ? (
-            <LockedPhasePanel phase={phase as Exclude<FilmPhase, 1 | 2>} />
+          ) : phase === 3 && activeProject ? (
+            <DesignPhasePanel project={activeProject} />
+          ) : phase >= 4 ? (
+            <LockedPhasePanel phase={phase as Exclude<FilmPhase, 1 | 2 | 3>} />
           ) : (
             <PlanningPanel />
           )}

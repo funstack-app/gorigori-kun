@@ -702,7 +702,7 @@ export function ScriptPhasePanel({ project }: { project: FilmProject }) {
         <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-5 py-4">
           <p className="text-sm font-semibold text-emerald-200">脚本の5段階が承認されました</p>
           <p className="mt-1 text-xs leading-5 text-zinc-400">
-            ③設計は次のステージで実装します。今は脚本を安全に保存した状態です。
+            左のレールから③設計へ進めます（ルック決定・アセット台帳・Style Prefix）。
           </p>
         </div>
       ) : null}
