@@ -1,6 +1,10 @@
-use font_kit::source::{Source, SystemSource};
+use font_kit::source::SystemSource;
 use serde::Serialize;
 use std::collections::HashSet;
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::time::Duration;
+
+const FONT_LIST_TIMEOUT: Duration = Duration::from_secs(4);
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -18,6 +22,33 @@ pub async fn edit_fonts_list(language_hint: Option<String>) -> Result<Vec<FontIn
         .map(normalize_hint)
         .filter(|value| !value.is_empty());
 
+    // システムフォントには、実体がクラウド上にしか無いものや壊れたものも混ざり得る。
+    // 別スレッドへ隔離し、OS 側が返さなくても画面を待たせ続けない。
+    let (sender, receiver) = mpsc::sync_channel(1);
+    std::thread::Builder::new()
+        .name("edit-font-list".to_string())
+        .spawn(move || {
+            let _ = sender.send(collect_fonts(hint));
+        })
+        .map_err(|e| format!("フォント一覧の読み込みを始められませんでした: {e}"))?;
+
+    let received =
+        tauri::async_runtime::spawn_blocking(move || receiver.recv_timeout(FONT_LIST_TIMEOUT))
+            .await
+            .map_err(|e| format!("フォント一覧の読み込み処理が停止しました: {e}"))?;
+
+    match received {
+        Ok(result) => result,
+        Err(RecvTimeoutError::Timeout) => {
+            Err("フォント一覧の読み込みに時間がかかりすぎました".to_string())
+        }
+        Err(RecvTimeoutError::Disconnected) => {
+            Err("フォント一覧の読み込みが途中で終了しました".to_string())
+        }
+    }
+}
+
+fn collect_fonts(hint: Option<String>) -> Result<Vec<FontInfo>, String> {
     let source = SystemSource::new();
     let mut families = source
         .all_families()
@@ -40,7 +71,9 @@ pub async fn edit_fonts_list(language_hint: Option<String>) -> Result<Vec<FontIn
             continue;
         }
         let language_tags = language_tags_for_family(&family);
-        let style = best_effort_style(&source, &family).unwrap_or_else(|| "Regular".to_string());
+        // 旧実装は全familyの先頭フォントを `load()` していた。クラウドフォント等で
+        // ここが返らないと一覧全体が止まるため、一覧ではファイルを開かない。
+        let style = "Regular".to_string();
         fonts.push(FontInfo {
             display_name: if style == "Regular" {
                 family.clone()
@@ -105,25 +138,6 @@ fn language_tags_for_family(family: &str) -> Vec<String> {
         vec!["ja".to_string(), "en".to_string()]
     } else {
         vec!["en".to_string()]
-    }
-}
-
-fn best_effort_style<S: Source>(source: &S, family: &str) -> Option<String> {
-    let handle = source.select_family_by_name(family).ok()?;
-    let font = handle.fonts().first()?.load().ok()?;
-    let properties = font.properties();
-    let mut parts = Vec::new();
-    if properties.weight.0 >= 650.0 {
-        parts.push("Bold");
-    }
-    let style = format!("{}", properties.style);
-    if style != "Normal" {
-        parts.push(style.as_str());
-    }
-    if parts.is_empty() {
-        Some("Regular".to_string())
-    } else {
-        Some(parts.join(" "))
     }
 }
 

@@ -233,3 +233,42 @@ test("Workspace が画面ガイド(ツアー)に接続されている（説明�
   const tours = read("src/lib/tour/tours.ts");
   expect(tours, "スタンプ画面のツアー定義が消えている").toContain("sticker");
 });
+
+test("文字と装飾の操作が3ステップ順で、5つの見本から選べる", () => {
+  const panel = read("src/components/skills/sticker/StickerTextPanel.tsx");
+  const first = panel.indexOf("① スタイルを選ぶ");
+  const second = panel.indexOf("② 言葉を入れる");
+  const third = panel.indexOf("③ 全部に適用");
+  expect(first).toBeGreaterThan(0);
+  expect(second).toBeGreaterThan(first);
+  expect(third).toBeGreaterThan(second);
+
+  const text = read("src/lib/sticker/text.ts");
+  for (const label of [
+    "文字だけ（白フチ太文字）",
+    "丸吹き出し",
+    "角丸吹き出し",
+    "叫び（トゲトゲ）",
+    "下帯（テロップ風）",
+  ]) {
+    expect(text, `${label} が見本一覧から消えている`).toContain(label);
+  }
+});
+
+test("フォント一覧が止まっても標準フォントと再読み込み導線を残す", () => {
+  const panel = read("src/components/skills/sticker/StickerTextPanel.tsx");
+  expect(panel).toContain("FONT_LOAD_TIMEOUT_MS");
+  expect(panel).toContain("SYSTEM_FONT");
+  expect(panel).toContain("フォント一覧を再読み込み");
+  expect(panel).not.toContain("読み込み中…");
+});
+
+test("文字入れ状態をストアに保持し、元画像から再合成する", () => {
+  const store = read("src/lib/store/stickerRun.ts");
+  const workspace = read("src/components/skills/sticker/StickerWorkspace.tsx");
+  expect(store).toContain("stickerTextBasePaths");
+  expect(store).toContain("stickerTextStyle");
+  expect(store).toContain("stickerTexts");
+  expect(workspace).toContain("textBaseRef.current.get(item.index) ?? item.imagePath");
+  expect(workspace).toContain("setTextBasePaths(textBaseRecord(nextBases))");
+});

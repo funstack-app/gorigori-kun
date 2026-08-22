@@ -109,7 +109,7 @@ import {
 } from "../../../lib/store/stickerRun";
 import { StickerPickPanel, type StickerPickItem } from "./StickerPickPanel";
 import { StickerReeditModal } from "./StickerReeditModal";
-import { StickerTextPanel, defaultStickerTextStyle } from "./StickerTextPanel";
+import { StickerTextPanel } from "./StickerTextPanel";
 
 const IMAGE_EXTS = ["png", "jpg", "jpeg", "webp"];
 
@@ -132,6 +132,12 @@ async function listDirNames(dir: string): Promise<Set<string>> {
   } catch {
     return new Set();
   }
+}
+
+function textBaseRecord(
+  paths: ReadonlyMap<number, string>,
+): Readonly<Record<number, string>> {
+  return Object.fromEntries(paths) as Readonly<Record<number, string>>;
 }
 
 export function StickerWorkspace() {
@@ -197,8 +203,12 @@ function StickerBody() {
    * 入力中の文字は index で持つ（パスで持つと、個別再生成で差し替わった瞬間に
    * 入力が迷子になる）。焼き込みは押したときにまとめて行う。
    */
-  const [texts, setTexts] = useState<Readonly<Record<number, string>>>({});
-  const [textStyle, setTextStyle] = useState(() => defaultStickerTextStyle());
+  const texts = useStickerRun((s) => s.stickerTexts);
+  const setTexts = useStickerRun((s) => s.setStickerTexts);
+  const textStyle = useStickerRun((s) => s.stickerTextStyle);
+  const setTextStyle = useStickerRun((s) => s.setStickerTextStyle);
+  const textBasePaths = useStickerRun((s) => s.stickerTextBasePaths);
+  const setTextBasePaths = useStickerRun((s) => s.setStickerTextBasePaths);
   const [applyingText, setApplyingText] = useState(false);
   /**
    * 文字を焼く前の元画像（index → パス）。
@@ -207,7 +217,17 @@ function StickerBody() {
    * 重なる（`text.ts` の `renderStickerText` が記録している呼び出し側の責務）。
    * 「後から直せる」という要件は、この控えを持つことでしか満たせない。
    */
-  const textBaseRef = useRef<Map<number, string>>(new Map());
+  const textBaseRef = useRef<Map<number, string>>(
+    new Map(
+      Object.entries(textBasePaths).map(([index, path]) => [Number(index), path]),
+    ),
+  );
+
+  useEffect(() => {
+    textBaseRef.current = new Map(
+      Object.entries(textBasePaths).map(([index, path]) => [Number(index), path]),
+    );
+  }, [textBasePaths]);
 
   // ⑥ 検査
   const [inspectIssues, setInspectIssues] = useState<
@@ -524,11 +544,26 @@ function StickerBody() {
     [attributes, pushToast, eventSubscriptionStatus],
   );
 
+  /** 絵を作り直した番号は、以前の「文字なし原本」と結び付けない。 */
+  const forgetTextBases = useCallback(
+    (indexes: readonly number[]) => {
+      if (indexes.length === 0) return;
+      const next = new Map(textBaseRef.current);
+      for (const index of indexes) next.delete(index);
+      textBaseRef.current = next;
+      setTextBasePaths(textBaseRecord(next));
+    },
+    [setTextBasePaths],
+  );
+
   /** ② → ③。生成対象を確定して投入する。 */
   async function runAll() {
     if (entries.length === 0) return;
     const referenceImage = await prepareReferenceForGeneration();
     if (!referenceImage) return;
+    // 新しい一式に前の言葉・装飾・原本パスを持ち越さない。
+    useStickerRun.getState().resetStickerTextState();
+    textBaseRef.current.clear();
     setCuts(
       entries.map((entry, i) => ({
         index: i + 1,
@@ -550,6 +585,7 @@ function StickerBody() {
     if (targets.length === 0) return;
     const referenceImage = await prepareReferenceForGeneration();
     if (!referenceImage) return;
+    forgetTextBases(indexes);
     setCuts((prev) =>
       prev.map((c) =>
         indexes.includes(c.index)
@@ -640,9 +676,9 @@ function StickerBody() {
 
       // 個別再生成で絵が変われば、文字の下敷きも新しい絵になる。古い控えを残すと
       // 「差し替えたのに文字を消したら前の絵に戻る」という事故になる。
-      textBaseRef.current.delete(index);
+      forgetTextBases([index]);
     },
-    [],
+    [forgetTextBases],
   );
 
   /**
@@ -662,26 +698,38 @@ function StickerBody() {
    * **同じ統計をそのまま使うのが事実に合う**。
    */
   async function applyTexts() {
-    const targets = pickItems.filter(
-      (i) => (texts[i.index] ?? "").trim().length > 0,
-    );
+    const targets = pickItems.filter((item) => keptIndexes.has(item.index));
     if (targets.length === 0) return;
 
     setApplyingText(true);
     try {
       const results: { index: number; path: string }[] = [];
       const failures: number[] = [];
+      const nextBases = new Map(textBaseRef.current);
+      let appliedCount = 0;
+      let removedCount = 0;
 
       for (const item of targets) {
         // 控えが無ければ今のパスが「文字なしの絵」。あるならそれを下敷きにする。
         const base = textBaseRef.current.get(item.index) ?? item.imagePath;
+        const text = (texts[item.index] ?? "").trim();
+        // 入力を空にした1枚は、同じ一括適用の中で文字なしへ戻す。
+        if (!text) {
+          if (nextBases.has(item.index)) {
+            results.push({ index: item.index, path: base });
+            nextBases.delete(item.index);
+            removedCount += 1;
+          }
+          continue;
+        }
         try {
           const out = await applyStickerTextToFile(base, {
             ...textStyle,
-            text: texts[item.index] ?? "",
+            text,
           });
-          textBaseRef.current.set(item.index, base);
+          nextBases.set(item.index, base);
           results.push({ index: item.index, path: out });
+          appliedCount += 1;
 
           // 縁の統計を新しいパスへ引き継ぐ（文字は縁を変えない）。
           const sample = chromaStatsRef.current.get(base);
@@ -695,12 +743,25 @@ function StickerBody() {
         }
       }
 
+      // Ref は同じ画面内の即時再適用用、ストアは画面を離れて戻る場合の保持用。
+      textBaseRef.current = nextBases;
+      setTextBasePaths(textBaseRecord(nextBases));
+
       if (results.length > 0) {
         const byIndex = new Map(results.map((r) => [r.index, r.path]));
+        const oldToNewPath = new Map(
+          results.flatMap((result) => {
+            const old = pickItems.find((item) => item.index === result.index)?.imagePath;
+            return old ? [[old, result.path] as const] : [];
+          }),
+        );
         setCuts((prev) =>
           prev.map((c) =>
             byIndex.has(c.index) ? { ...c, imagePath: byIndex.get(c.index) } : c,
           ),
+        );
+        setMainPath((previous) =>
+          previous ? oldToNewPath.get(previous) ?? previous : previous,
         );
         // 絵が変わったら検査結果は古い。黙って残さない（`adoptReedit` と同じ規則）。
         setInspectIssues(null);
@@ -710,13 +771,19 @@ function StickerBody() {
       if (failures.length > 0) {
         pushToast({
           kind: "warn",
-          text: `${results.length} 枚に文字を入れました。${failures.length} 枚は入れられませんでした。`,
+          text: `${appliedCount} 枚に文字と装飾を入れました。${failures.length} 枚は入れられませんでした。`,
           ttlMs: 7000,
+        });
+      } else if (appliedCount === 0 && removedCount > 0) {
+        pushToast({
+          kind: "success",
+          text: "文字と装飾を外しました。",
+          ttlMs: 4000,
         });
       } else {
         pushToast({
           kind: "success",
-          text: `${results.length} 枚に文字を入れました。`,
+          text: `${appliedCount} 枚に文字と装飾を入れました。`,
           ttlMs: 4000,
         });
       }
@@ -734,10 +801,20 @@ function StickerBody() {
   function resetTexts() {
     const base = textBaseRef.current;
     if (base.size === 0) return;
+    const oldToBasePath = new Map(
+      pickItems.flatMap((item) => {
+        const basePath = base.get(item.index);
+        return basePath ? [[item.imagePath, basePath] as const] : [];
+      }),
+    );
     setCuts((prev) =>
       prev.map((c) => (base.has(c.index) ? { ...c, imagePath: base.get(c.index) } : c)),
     );
+    setMainPath((previous) =>
+      previous ? oldToBasePath.get(previous) ?? previous : previous,
+    );
     base.clear();
+    setTextBasePaths({});
     setInspectIssues(null);
     setReview(null);
   }
@@ -1043,7 +1120,13 @@ function StickerBody() {
                 })
               }
               onKeepAll={() => setDropped(new Set())}
-              onReedit={(item) => setReeditTarget(item)}
+              onReedit={(item) =>
+                setReeditTarget({
+                  ...item,
+                  // 個別修正も文字入り画像ではなく、切り抜き直後の原本から始める。
+                  imagePath: textBaseRef.current.get(item.index) ?? item.imagePath,
+                })
+              }
               onRegenerate={(indexes) => void regenerate(indexes)}
               notClearedPaths={notClearedPaths}
             />
@@ -1065,7 +1148,7 @@ function StickerBody() {
                   onApply={() => void applyTexts()}
                   onReset={resetTexts}
                   busy={applyingText || running}
-                  applied={textBaseRef.current.size > 0}
+                  applied={Object.keys(textBasePaths).length > 0}
                 />
               </div>
             )}

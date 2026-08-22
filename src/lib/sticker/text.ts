@@ -39,14 +39,57 @@ import { STICKER_SPECS, type StickerCategory } from "./spec";
 /** 文字の縦位置。ドラッグ自由配置は作らない（過剰。設計の粒度を守る）。 */
 export type StickerTextPosition = "top" | "bottom";
 
+/** 文字と、その後ろへ置く装飾をまとめた見た目。 */
+export type StickerTextStyleId =
+  | "outline"
+  | "roundBubble"
+  | "roundedBubble"
+  | "shoutBubble"
+  | "captionBand";
+
+/** 初心者が名前と見本だけで選べる5種類。並び順は画面の順番でもある。 */
+export const STICKER_TEXT_STYLE_PRESETS: ReadonlyArray<{
+  id: StickerTextStyleId;
+  label: string;
+}> = [
+  { id: "outline", label: "文字だけ（白フチ太文字）" },
+  { id: "roundBubble", label: "丸吹き出し" },
+  { id: "roundedBubble", label: "角丸吹き出し" },
+  { id: "shoutBubble", label: "叫び（トゲトゲ）" },
+  { id: "captionBand", label: "下帯（テロップ風）" },
+];
+
+/** プリセットを選んだ直後に成立する色。細かな色選びは必須にしない。 */
+export function defaultColorsForStickerTextStyle(styleId: StickerTextStyleId): {
+  backgroundColor: string;
+  color: string;
+  outlineColor: string;
+} {
+  if (styleId === "outline") {
+    return {
+      backgroundColor: "#ffffff",
+      color: "#222222",
+      outlineColor: "#ffffff",
+    };
+  }
+  return {
+    backgroundColor: "#ffffff",
+    color: "#222222",
+    outlineColor: "#222222",
+  };
+}
+
 /** 1枚に焼く文字の指定。 */
 export type StickerTextSpec = {
   text: string;
+  styleId: StickerTextStyleId;
   /** システムフォントの family 名（`editFonts.list` の `family`）。 */
   fontFamily: string;
   /** 文字の高さ（作業画像のピクセル基準ではなく、画像の短辺に対する比で持つ）。 */
   sizeRatio: number;
   color: string;
+  /** 吹き出し・帯の地色。文字だけのときは使わない。 */
+  backgroundColor: string;
   /** 縁取り（白フチ）。既定ON。透過PNGの上に乗るので、無いとトーク背景で読めない。 */
   outline: boolean;
   outlineColor: string;
@@ -64,9 +107,11 @@ export type StickerTextSizeId = keyof typeof STICKER_TEXT_SIZE_RATIOS;
 
 /** 既定値。**縁取りは既定ON**（LINEスタンプの実務標準）。 */
 export const DEFAULT_STICKER_TEXT: Omit<StickerTextSpec, "text"> = {
+  styleId: "outline",
   fontFamily: "system-ui",
   sizeRatio: STICKER_TEXT_SIZE_RATIOS.medium,
   color: "#222222",
+  backgroundColor: "#ffffff",
   outline: true,
   outlineColor: "#ffffff",
   position: "bottom",
@@ -79,6 +124,11 @@ export const DEFAULT_STICKER_TEXT: Omit<StickerTextSpec, "text"> = {
  * 画数の多い漢字でも内側が埋まらない範囲に置く。
  */
 export const OUTLINE_WIDTH_RATIO = 0.18;
+
+/** 吹き出しの余白と線幅。すべて文字サイズに連動させる。 */
+const DECORATION_PADDING_Y_RATIO = 0.34;
+const CAPTION_PADDING_Y_RATIO = 0.28;
+const DECORATION_STROKE_RATIO = 0.08;
 
 /**
  * 作業画像の側で確保すべき安全余白（px）。
@@ -122,6 +172,8 @@ export type StickerTextLayout = {
   y: number;
   fontSizePx: number;
   outlineWidthPx: number;
+  decorationStrokePx: number;
+  decorationPaddingYPx: number;
   /** 実際に確保した安全余白（検査・テスト用に返す）。 */
   marginPx: number;
   /** 文字が占める帯の上端・下端（余白判定に使う）。 */
@@ -144,7 +196,8 @@ export type StickerTextLayout = {
 export function layoutStickerText(
   imageWidth: number,
   imageHeight: number,
-  spec: Pick<StickerTextSpec, "sizeRatio" | "position">,
+  spec: Pick<StickerTextSpec, "sizeRatio" | "position"> &
+    Partial<Pick<StickerTextSpec, "styleId">>,
   category: StickerCategory = "normal",
 ): StickerTextLayout {
   const marginPx = safeMarginPx(imageWidth, imageHeight, category);
@@ -169,30 +222,45 @@ export function layoutStickerText(
    *
    * 縁取りも文字サイズ比なので、0 なら自動的に 0 になる（外へはみ出さない）。
    */
+  const styleId = spec.styleId ?? "outline";
+  const decorated = styleId !== "outline";
+  const paddingRatio = styleId === "captionBand"
+    ? CAPTION_PADDING_Y_RATIO
+    : DECORATION_PADDING_Y_RATIO;
+  const heightRatio = decorated
+    ? 1 + paddingRatio * 2 + DECORATION_STROKE_RATIO
+    : 1 + OUTLINE_WIDTH_RATIO;
   const available = Math.floor(safeH);
-  const fontSizePx = available <= 0 ? 0 : Math.max(1, Math.min(requested, available));
+  const maxFontSize = Math.floor(available / heightRatio);
+  const fontSizePx = maxFontSize <= 0 ? 0 : Math.max(1, Math.min(requested, maxFontSize));
   const outlineWidthPx = fontSizePx * OUTLINE_WIDTH_RATIO;
+  const decorationStrokePx = decorated && fontSizePx > 0
+    ? Math.max(1, fontSizePx * DECORATION_STROKE_RATIO)
+    : 0;
+  const decorationPaddingYPx = decorated ? fontSizePx * paddingRatio : 0;
 
-  // 縁取りは文字の外側へ半分はみ出す（`strokeText` は線幅の中心が輪郭）。
-  // 帯の上下端はその分だけ外へ広がるので、余白の判定に必ず含める。
-  const halfStroke = outlineWidthPx / 2;
-
-  const topLimit = marginPx + halfStroke;
-  const bottomLimit = imageHeight - marginPx - halfStroke - fontSizePx;
-
-  const rawY = spec.position === "top" ? topLimit : bottomLimit;
-  // 安全域が文字より狭いときは topLimit が bottomLimit を上回る。その場合も
-  // 上端側へ寄せて必ず安全域の内側に留める（はみ出すくらいなら詰める）。
-  const y = Math.min(Math.max(rawY, topLimit), Math.max(topLimit, bottomLimit));
+  const renderedHeight = decorated
+    ? fontSizePx + decorationPaddingYPx * 2 + decorationStrokePx
+    : fontSizePx + outlineWidthPx;
+  const bandTop = spec.position === "top"
+    ? marginPx
+    : Math.max(marginPx, imageHeight - marginPx - renderedHeight);
+  const bandBottom = bandTop + renderedHeight;
+  // y は文字の上端。装飾ありなら、外周線と内側余白のぶんだけ下げる。
+  const y = decorated
+    ? bandTop + decorationStrokePx / 2 + decorationPaddingYPx
+    : bandTop + outlineWidthPx / 2;
 
   return {
     x: imageWidth / 2,
     y,
     fontSizePx,
     outlineWidthPx,
+    decorationStrokePx,
+    decorationPaddingYPx,
     marginPx,
-    bandTop: y - halfStroke,
-    bandBottom: y + fontSizePx + halfStroke,
+    bandTop,
+    bandBottom,
   };
 }
 
@@ -214,6 +282,102 @@ export function textFitsWithinMargin(
   );
 }
 
+export type StickerDecorationBounds = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /** 文字を横へつぶさず置ける最大幅。長文だけは Canvas がここまで縮める。 */
+  textMaxWidthPx: number;
+};
+
+/**
+ * 実測した文字幅から、後ろの吹き出し・帯の大きさを決める純関数。
+ * 外枠は必ず `safeMarginPx` の内側に収める。
+ */
+export function layoutStickerDecoration(
+  imageWidth: number,
+  styleId: StickerTextStyleId,
+  measuredTextWidth: number,
+  layout: StickerTextLayout,
+): StickerDecorationBounds | null {
+  if (styleId === "outline" || layout.fontSizePx <= 0) return null;
+
+  const safeWidth = Math.max(0, imageWidth - layout.marginPx * 2);
+  if (safeWidth <= 0) return null;
+  const measured = Number.isFinite(measuredTextWidth)
+    ? Math.max(0, measuredTextWidth)
+    : 0;
+  const horizontalPaddingRatio = styleId === "roundBubble"
+    ? 0.62
+    : styleId === "shoutBubble"
+      ? 0.72
+      : 0.46;
+  const paddingX = layout.fontSizePx * horizontalPaddingRatio;
+
+  const width = styleId === "captionBand"
+    ? safeWidth
+    : Math.min(
+        safeWidth,
+        Math.max(
+          layout.fontSizePx * 1.8,
+          measured + paddingX * 2 + layout.decorationStrokePx,
+        ),
+      );
+  const height = Math.max(0, layout.bandBottom - layout.bandTop);
+  return {
+    x: layout.marginPx + (safeWidth - width) / 2,
+    y: layout.bandTop,
+    width,
+    height,
+    textMaxWidthPx: Math.max(
+      1,
+      width - paddingX * 2 - layout.decorationStrokePx,
+    ),
+  };
+}
+
+/** 装飾の外枠が規格由来の安全余白から出ていないか。 */
+export function decorationFitsWithinMargin(
+  imageWidth: number,
+  imageHeight: number,
+  marginPx: number,
+  bounds: StickerDecorationBounds | null,
+): boolean {
+  if (!bounds) return true;
+  return (
+    bounds.x >= marginPx
+    && bounds.y >= marginPx
+    && bounds.x + bounds.width <= imageWidth - marginPx
+    && bounds.y + bounds.height <= imageHeight - marginPx
+  );
+}
+
+export type StickerPoint = { x: number; y: number };
+
+/** 「叫び」のトゲトゲ外周。入力だけで結果が決まるので Canvas 無しで検査できる。 */
+export function buildShoutBubblePoints(
+  bounds: Pick<StickerDecorationBounds, "x" | "y" | "width" | "height">,
+  inset = 0,
+  spikes = 12,
+): StickerPoint[] {
+  const count = Math.max(4, Math.floor(spikes));
+  const cx = bounds.x + bounds.width / 2;
+  const cy = bounds.y + bounds.height / 2;
+  const outerX = Math.max(0, bounds.width / 2 - inset);
+  const outerY = Math.max(0, bounds.height / 2 - inset);
+  const points: StickerPoint[] = [];
+  for (let index = 0; index < count * 2; index += 1) {
+    const angle = -Math.PI / 2 + (Math.PI * index) / count;
+    const radius = index % 2 === 0 ? 1 : 0.76;
+    points.push({
+      x: cx + Math.cos(angle) * outerX * radius,
+      y: cy + Math.sin(angle) * outerY * radius,
+    });
+  }
+  return points;
+}
+
 /** `drawStickerText` が受ける最小の Canvas インターフェース（テストで差し替える継ぎ目）。 */
 export type TextCanvas2D = Pick<
   CanvasRenderingContext2D,
@@ -222,6 +386,15 @@ export type TextCanvas2D = Pick<
   | "fillText"
   | "strokeText"
   | "measureText"
+  | "beginPath"
+  | "closePath"
+  | "moveTo"
+  | "lineTo"
+  | "quadraticCurveTo"
+  | "ellipse"
+  | "rect"
+  | "fill"
+  | "stroke"
 > & {
   font: string;
   fillStyle: unknown;
@@ -232,6 +405,72 @@ export type TextCanvas2D = Pick<
   textAlign: CanvasTextAlign;
   textBaseline: CanvasTextBaseline;
 };
+
+function roundedRectPath(
+  ctx: TextCanvas2D,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  radius: number,
+): void {
+  const r = Math.max(0, Math.min(radius, width / 2, height / 2));
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + width - r, y);
+  ctx.quadraticCurveTo(x + width, y, x + width, y + r);
+  ctx.lineTo(x + width, y + height - r);
+  ctx.quadraticCurveTo(x + width, y + height, x + width - r, y + height);
+  ctx.lineTo(x + r, y + height);
+  ctx.quadraticCurveTo(x, y + height, x, y + height - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+}
+
+/** 文字より先に、吹き出しまたは帯を描く。 */
+function drawStickerDecoration(
+  ctx: TextCanvas2D,
+  spec: StickerTextSpec,
+  layout: StickerTextLayout,
+  bounds: StickerDecorationBounds,
+): void {
+  const halfStroke = layout.decorationStrokePx / 2;
+  const x = bounds.x + halfStroke;
+  const y = bounds.y + halfStroke;
+  const width = Math.max(0, bounds.width - layout.decorationStrokePx);
+  const height = Math.max(0, bounds.height - layout.decorationStrokePx);
+  if (width <= 0 || height <= 0) return;
+
+  ctx.beginPath();
+  if (spec.styleId === "roundBubble") {
+    ctx.ellipse(
+      x + width / 2,
+      y + height / 2,
+      width / 2,
+      height / 2,
+      0,
+      0,
+      Math.PI * 2,
+    );
+  } else if (spec.styleId === "roundedBubble") {
+    roundedRectPath(ctx, x, y, width, height, height * 0.28);
+  } else if (spec.styleId === "shoutBubble") {
+    const points = buildShoutBubblePoints(bounds, halfStroke);
+    const first = points[0];
+    if (!first) return;
+    ctx.moveTo(first.x, first.y);
+    for (const point of points.slice(1)) ctx.lineTo(point.x, point.y);
+  } else {
+    ctx.rect(x, y, width, height);
+  }
+  ctx.closePath();
+  ctx.fillStyle = spec.backgroundColor;
+  ctx.fill();
+  ctx.strokeStyle = spec.outlineColor;
+  ctx.lineWidth = layout.decorationStrokePx;
+  ctx.lineJoin = "round";
+  ctx.miterLimit = 2;
+  ctx.stroke();
+}
 
 /**
  * 文字を1本描く（縁取り → 塗りの順）。
@@ -254,13 +493,22 @@ export function drawStickerText(
   // `layoutStickerText` が 0 を返した場合だけここへ来る。
   if (layout.fontSizePx <= 0) return;
 
-  const maxTextWidth = Math.max(1, imageWidth - layout.marginPx * 2);
-
   ctx.save();
   ctx.font = `bold ${layout.fontSizePx}px "${spec.fontFamily}"`;
   ctx.textAlign = "center";
   ctx.textBaseline = "top";
-  if (spec.outline) {
+  const measuredTextWidth = ctx.measureText(text).width;
+  const decoration = layoutStickerDecoration(
+    imageWidth,
+    spec.styleId,
+    measuredTextWidth,
+    layout,
+  );
+  if (decoration) drawStickerDecoration(ctx, spec, layout, decoration);
+
+  const maxTextWidth = decoration?.textMaxWidthPx
+    ?? Math.max(1, imageWidth - layout.marginPx * 2);
+  if (spec.styleId === "outline" && spec.outline) {
     ctx.strokeStyle = spec.outlineColor;
     ctx.lineWidth = layout.outlineWidthPx;
     // 角を丸めないと、画数の多い字で線の交点が尖って飛び出す。
@@ -330,8 +578,33 @@ export async function renderStickerText(
  *
  * 拡張子の有無に関わらず末尾を `-text.png` に揃える（クロマキー後は必ず PNG）。
  */
-export function textOutputPath(basePath: string): string {
-  return `${basePath.replace(/\.[^.\\/]+$/, "")}-text.png`;
+export function textOutputPath(basePath: string, variant?: string): string {
+  const suffix = variant ? `-${variant}` : "";
+  return `${basePath.replace(/\.[^.\\/]+$/, "")}${suffix}-text.png`;
+}
+
+/**
+ * 同じ原本へ見た目を入れ直したときも、サムネイルのパスが変わる短い識別子。
+ * 画像内容の秘密性には使わず、ブラウザの画像キャッシュを避けるためだけに使う。
+ */
+export function stickerTextVariant(spec: StickerTextSpec): string {
+  const value = JSON.stringify([
+    spec.text,
+    spec.styleId,
+    spec.fontFamily,
+    spec.sizeRatio,
+    spec.color,
+    spec.backgroundColor,
+    spec.outline,
+    spec.outlineColor,
+    spec.position,
+  ]);
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(36);
 }
 
 /**
@@ -361,7 +634,7 @@ export async function applyStickerTextToFile(
 
   const rendered = await renderStickerText(baseBlob, spec, category);
 
-  const dest = textOutputPath(basePath);
+  const dest = textOutputPath(basePath, stickerTextVariant(spec));
   await writeFile(dest, new Uint8Array(await rendered.arrayBuffer()));
   return dest;
 }

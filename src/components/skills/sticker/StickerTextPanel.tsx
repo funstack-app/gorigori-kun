@@ -1,34 +1,21 @@
 /**
- * 工程⑤ 文字入れ（2026-08-05 STΛCK直指示）。
- *
- * ## AIに描かせず、エンジンで描く
- *
- * 生成プロンプトは `NO_TEXT_CLAUSE` で文字を禁じたままにする（設計書 §1.3。
- * 審査NG「テキストのみ画像」と日本語崩れの実測）。文字は**抜いたあとの透過PNGへ
- * Canvas 2D で焼く**（`lib/sticker/text.ts`）。決定論なので崩れない。
- *
- * ## フォントは同梱しない
- *
- * 編集タブと同じ `FontPicker` をそのまま使う。中身は `editFonts.list`
- * （Rust の `edit_fonts_list`）が返す**システムにインストール済みのフォント**。
- * 同梱すると配布サイズが増えるうえ、ライセンスの判断が要る。
- *
- * ## 一等地にボタンを増やさない（UI配置文法）
- *
- * 採否一覧のタイルには「使う / 直す」しか置かない。文字入れは
- * **採否のあとの1セクション**として置き、開いている間だけ操作面が出る。
+ * 切り抜き後のスタンプへ、文字と装飾をまとめてあと入れする画面。
+ * 操作順は「①見た目 → ②言葉 → ③適用」に固定し、初めてでも上から進められる。
  */
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { FontPicker } from "../../edit/FontPicker";
-import { SafeImage } from "../../SafeImage";
+import { editFonts } from "../../../lib/ipc";
 import {
   DEFAULT_STICKER_TEXT,
+  defaultColorsForStickerTextStyle,
   STICKER_TEXT_SIZE_RATIOS,
+  STICKER_TEXT_STYLE_PRESETS,
   type StickerTextPosition,
   type StickerTextSizeId,
   type StickerTextSpec,
+  type StickerTextStyleId,
 } from "../../../lib/sticker/text";
+import { SafeImage } from "../../SafeImage";
 import type { StickerPickItem } from "./StickerPickPanel";
 
 /** 1枚に入れる文字（未入力なら文字を焼かない）。 */
@@ -39,20 +26,24 @@ export type StickerTextEntry = {
 
 type Props = {
   items: StickerPickItem[];
-  /** index → 入力中の文字。空文字・未登録は「入れない」。 */
   texts: Readonly<Record<number, string>>;
   onText: (index: number, text: string) => void;
-  /** 全カット共通の見た目（フォント・色・大きさ・位置・フチ）。 */
   style: Omit<StickerTextSpec, "text">;
   onStyle: (style: Omit<StickerTextSpec, "text">) => void;
-  /** 入力した文字を焼き込む。焼き込み後の画像が採否リストの正本になる。 */
   onApply: () => void;
-  /** 焼き込みを取り消して文字なしへ戻す。 */
   onReset: () => void;
   busy: boolean;
-  /** 1枚でも文字を焼き込んだ状態か（「元に戻す」を出す条件）。 */
   applied: boolean;
 };
+
+type FontOption = { family: string; displayName: string };
+type FontLoadStatus = "loading" | "ready" | "failed";
+
+const SYSTEM_FONT: FontOption = {
+  family: "system-ui",
+  displayName: "標準フォント",
+};
+const FONT_LOAD_TIMEOUT_MS = 5_000;
 
 const SIZE_LABELS: { id: StickerTextSizeId; label: string }[] = [
   { id: "small", label: "小" },
@@ -65,6 +56,79 @@ const POSITION_LABELS: { id: StickerTextPosition; label: string }[] = [
   { id: "bottom", label: "下" },
 ];
 
+async function listFontsWithTimeout(): Promise<FontOption[]> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const fonts = await Promise.race([
+      editFonts.list("ja"),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error("font list timeout")),
+          FONT_LOAD_TIMEOUT_MS,
+        );
+      }),
+    ]);
+    const unique = new Map<string, FontOption>();
+    unique.set(SYSTEM_FONT.family, SYSTEM_FONT);
+    for (const font of fonts) {
+      if (!unique.has(font.family)) {
+        unique.set(font.family, {
+          family: font.family,
+          displayName: font.displayName || font.family,
+        });
+      }
+    }
+    return Array.from(unique.values());
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function StylePreview({
+  styleId,
+  selected,
+}: {
+  styleId: StickerTextStyleId;
+  selected: boolean;
+}) {
+  const edge = selected ? "#f472b6" : "#555555";
+  return (
+    <svg viewBox="0 0 76 38" aria-hidden="true" className="h-10 w-full">
+      {styleId === "roundBubble" && (
+        <ellipse cx="38" cy="19" rx="28" ry="14" fill="#ffffff" stroke={edge} strokeWidth="2" />
+      )}
+      {styleId === "roundedBubble" && (
+        <rect x="8" y="6" width="60" height="26" rx="7" fill="#ffffff" stroke={edge} strokeWidth="2" />
+      )}
+      {styleId === "shoutBubble" && (
+        <path
+          d="M38 2 44 8 54 4 56 12 69 13 63 20 70 27 57 27 54 35 44 30 38 36 32 30 22 35 19 27 6 27 13 20 7 13 20 12 22 4 32 8Z"
+          fill="#ffffff"
+          stroke={edge}
+          strokeWidth="2"
+          strokeLinejoin="round"
+        />
+      )}
+      {styleId === "captionBand" && (
+        <rect x="4" y="9" width="68" height="24" fill="#ffffff" stroke={edge} strokeWidth="2" />
+      )}
+      <text
+        x="38"
+        y="25"
+        textAnchor="middle"
+        fontSize="16"
+        fontWeight="900"
+        fill="#222222"
+        stroke={styleId === "outline" ? "#ffffff" : "none"}
+        strokeWidth={styleId === "outline" ? "4" : "0"}
+        paintOrder="stroke fill"
+      >
+        Aa
+      </text>
+    </svg>
+  );
+}
+
 export function StickerTextPanel({
   items,
   texts,
@@ -76,23 +140,55 @@ export function StickerTextPanel({
   busy,
   applied,
 }: Props) {
-  /**
-   * 全カットに同じ文字を入れるための入力欄（量産用）。
-   *
-   * 40枚に1枚ずつ打つのは現実的でない一方、スタンプは「ありがとう」「OK」など
-   * カットごとに違う言葉を入れるのが普通。**両方置く** — 一括は下書きとして
-   * 流し込み、あとから1枚ずつ直せるようにする（上書きしたあとも個別欄は生きる）。
-   */
   const [bulk, setBulk] = useState("");
+  const [fonts, setFonts] = useState<FontOption[]>([SYSTEM_FONT]);
+  const [fontStatus, setFontStatus] = useState<FontLoadStatus>("loading");
+  const fontRequestId = useRef(0);
+  const styleRef = useRef(style);
+
+  useEffect(() => {
+    styleRef.current = style;
+  }, [style]);
+
+  const reloadFonts = useCallback(async () => {
+    const requestId = ++fontRequestId.current;
+    setFontStatus("loading");
+    try {
+      const loaded = await listFontsWithTimeout();
+      if (fontRequestId.current !== requestId) return;
+      setFonts(loaded);
+      setFontStatus("ready");
+    } catch {
+      if (fontRequestId.current !== requestId) return;
+      // 一覧が失敗しても、文字入れそのものは標準フォントですぐ使える。
+      const currentFamily = styleRef.current.fontFamily;
+      setFonts(
+        currentFamily === SYSTEM_FONT.family
+          ? [SYSTEM_FONT]
+          : [
+              SYSTEM_FONT,
+              { family: currentFamily, displayName: currentFamily },
+            ],
+      );
+      setFontStatus("failed");
+    }
+  }, []);
+
+  useEffect(() => {
+    void reloadFonts();
+    return () => {
+      fontRequestId.current += 1;
+    };
+  }, [reloadFonts]);
 
   const filledCount = useMemo(
-    () => items.filter((i) => (texts[i.index] ?? "").trim().length > 0).length,
+    () => items.filter((item) => (texts[item.index] ?? "").trim().length > 0).length,
     [items, texts],
   );
 
   const currentSizeId = useMemo<StickerTextSizeId>(() => {
     const found = SIZE_LABELS.find(
-      (s) => STICKER_TEXT_SIZE_RATIOS[s.id] === style.sizeRatio,
+      (size) => STICKER_TEXT_SIZE_RATIOS[size.id] === style.sizeRatio,
     );
     return found?.id ?? "medium";
   }, [style.sizeRatio]);
@@ -100,196 +196,255 @@ export function StickerTextPanel({
   return (
     <section className="rounded-lg border border-[#2a2a2a] bg-[#141414] p-4">
       <div className="flex flex-wrap items-center gap-3">
-        <h3 className="text-[12px] font-black text-neutral-200">文字を入れる</h3>
+        <h3 className="text-[12px] font-black text-neutral-200">文字と吹き出しをあと入れ</h3>
         <span className="text-[11px] text-neutral-500">
-          入れたい言葉だけ書いてください（空のカットには入りません）
-        </span>
-        <span className="ml-auto text-[11px] text-neutral-400">
-          {filledCount} / {items.length} 枚
+          切り抜いた画像はそのまま残るので、何度でも入れ直せます
         </span>
       </div>
 
-      {/* 見た目の設定は全カット共通。1枚ずつ変えられるようにすると設定が40組になる。 */}
-      <div className="mt-3 grid gap-3 md:grid-cols-2">
-        <div>
-          <FontPicker
-            value={style.fontFamily}
-            onChange={(fontFamily) => onStyle({ ...style, fontFamily })}
-            languageHint="ja"
-          />
+      <div className="mt-3 rounded-lg border border-[#292929] bg-[#101010] p-3">
+        <h4 className="text-[12px] font-black text-neutral-200">① スタイルを選ぶ</h4>
+        <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5">
+          {STICKER_TEXT_STYLE_PRESETS.map((preset) => {
+            const selected = style.styleId === preset.id;
+            return (
+              <button
+                key={preset.id}
+                type="button"
+                aria-pressed={selected}
+                onClick={() => {
+                  const colors = defaultColorsForStickerTextStyle(preset.id);
+                  onStyle({
+                    ...style,
+                    ...colors,
+                    styleId: preset.id,
+                    outline: true,
+                  });
+                }}
+                disabled={busy}
+                className={`rounded-lg border p-2 text-left transition disabled:opacity-40 ${
+                  selected
+                    ? "border-pink-400/70 bg-pink-400/10 text-neutral-100"
+                    : "border-[#303030] bg-[#161616] text-neutral-400 hover:bg-[#1d1d1d]"
+                }`}
+              >
+                <StylePreview styleId={preset.id} selected={selected} />
+                <span className="mt-1 block text-center text-[10px] font-bold leading-tight">
+                  {preset.label}
+                </span>
+              </button>
+            );
+          })}
         </div>
 
-        <div className="flex flex-col gap-2">
-          <div className="flex items-center gap-2">
-            <span className="w-16 text-[11px] text-neutral-500">大きさ</span>
-            <div className="flex gap-1">
-              {SIZE_LABELS.map((s) => (
+        <div className="mt-3 grid gap-3 md:grid-cols-2">
+          <div className="flex flex-col gap-1.5">
+            <label className="text-[11px] text-neutral-500" htmlFor="sticker-text-font">
+              フォント
+            </label>
+            <select
+              id="sticker-text-font"
+              value={style.fontFamily}
+              onChange={(event) => onStyle({ ...style, fontFamily: event.target.value })}
+              disabled={busy}
+              className="rounded border border-[#2f2f2f] bg-[#0e0e0e] px-2.5 py-1.5 text-[11px] text-neutral-200 focus:border-[#4a4a4a] focus:outline-none disabled:opacity-40"
+            >
+              {fonts.map((font) => (
+                <option key={font.family} value={font.family}>
+                  {font.displayName}
+                </option>
+              ))}
+            </select>
+            {fontStatus === "loading" && (
+              <span className="text-[10px] text-neutral-500">
+                標準フォントは使えます。ほかのフォントを探しています。
+              </span>
+            )}
+            {fontStatus === "failed" && (
+              <div className="flex flex-wrap items-center gap-2 text-[10px] text-amber-200/80">
+                <span>標準フォントで使えます。</span>
                 <button
-                  key={s.id}
                   type="button"
-                  onClick={() =>
-                    onStyle({ ...style, sizeRatio: STICKER_TEXT_SIZE_RATIOS[s.id] })
-                  }
+                  onClick={() => void reloadFonts()}
+                  className="rounded border border-[#3a3a3a] px-2 py-1 text-neutral-300 hover:bg-[#1d1d1d]"
+                >
+                  フォント一覧を再読み込み
+                </button>
+              </div>
+            )}
+          </div>
+
+          <div className="flex flex-col gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="w-14 text-[11px] text-neutral-500">大きさ</span>
+              {SIZE_LABELS.map((size) => (
+                <button
+                  key={size.id}
+                  type="button"
+                  onClick={() => onStyle({
+                    ...style,
+                    sizeRatio: STICKER_TEXT_SIZE_RATIOS[size.id],
+                  })}
                   className={`rounded px-2.5 py-1 text-[11px] font-bold transition ${
-                    currentSizeId === s.id
+                    currentSizeId === size.id
                       ? "bg-[#2a2a2a] text-neutral-100"
                       : "border border-[#2f2f2f] text-neutral-500 hover:bg-[#1a1a1a]"
                   }`}
                 >
-                  {s.label}
+                  {size.label}
                 </button>
               ))}
             </div>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <span className="w-16 text-[11px] text-neutral-500">位置</span>
-            <div className="flex gap-1">
-              {POSITION_LABELS.map((p) => (
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="w-14 text-[11px] text-neutral-500">位置</span>
+              {POSITION_LABELS.map((position) => (
                 <button
-                  key={p.id}
+                  key={position.id}
                   type="button"
-                  onClick={() => onStyle({ ...style, position: p.id })}
+                  onClick={() => onStyle({ ...style, position: position.id })}
                   className={`rounded px-2.5 py-1 text-[11px] font-bold transition ${
-                    style.position === p.id
+                    style.position === position.id
                       ? "bg-[#2a2a2a] text-neutral-100"
                       : "border border-[#2f2f2f] text-neutral-500 hover:bg-[#1a1a1a]"
                   }`}
                 >
-                  {p.label}
+                  {position.label}
                 </button>
               ))}
             </div>
           </div>
+        </div>
 
-          <div className="flex items-center gap-2">
-            <span className="w-16 text-[11px] text-neutral-500">文字の色</span>
+        <div className="mt-3 flex flex-wrap gap-4">
+          {style.styleId !== "outline" && (
+            <label className="flex items-center gap-2 text-[11px] text-neutral-400">
+              地色
+              <input
+                type="color"
+                value={style.backgroundColor}
+                onChange={(event) => onStyle({ ...style, backgroundColor: event.target.value })}
+                className="h-7 w-10 cursor-pointer rounded border border-[#2f2f2f] bg-[#0e0e0e]"
+              />
+            </label>
+          )}
+          <label className="flex items-center gap-2 text-[11px] text-neutral-400">
+            文字色
             <input
               type="color"
               value={style.color}
-              onChange={(e) => onStyle({ ...style, color: e.target.value })}
-              className="h-7 w-12 cursor-pointer rounded border border-[#2f2f2f] bg-[#0e0e0e]"
+              onChange={(event) => onStyle({ ...style, color: event.target.value })}
+              className="h-7 w-10 cursor-pointer rounded border border-[#2f2f2f] bg-[#0e0e0e]"
             />
-            {/*
-              白フチは既定ON。透過PNGの上に乗るので、トーク画面の背景（白・黒・写真）
-              次第で文字が消える。これは実務標準であって好みではない。
-            */}
-            <label className="flex items-center gap-1.5 text-[11px] text-neutral-400">
-              <input
-                type="checkbox"
-                checked={style.outline}
-                onChange={(e) => onStyle({ ...style, outline: e.target.checked })}
-                className="accent-pink-500"
-              />
-              フチをつける
-            </label>
-            {style.outline && (
-              <input
-                type="color"
-                value={style.outlineColor}
-                onChange={(e) => onStyle({ ...style, outlineColor: e.target.value })}
-                title="フチの色"
-                className="h-7 w-12 cursor-pointer rounded border border-[#2f2f2f] bg-[#0e0e0e]"
-              />
-            )}
-          </div>
+          </label>
+          <label className="flex items-center gap-2 text-[11px] text-neutral-400">
+            フチ色
+            <input
+              type="color"
+              value={style.outlineColor}
+              onChange={(event) => onStyle({ ...style, outlineColor: event.target.value })}
+              className="h-7 w-10 cursor-pointer rounded border border-[#2f2f2f] bg-[#0e0e0e]"
+            />
+          </label>
         </div>
       </div>
 
-      {/* 量産用の一括入力。流し込んだあとも1枚ずつ直せる。 */}
-      <div className="mt-3 flex flex-wrap items-center gap-2">
-        <input
-          type="text"
-          value={bulk}
-          onChange={(e) => setBulk(e.target.value)}
-          disabled={busy}
-          placeholder="全部に同じ言葉を入れる（例: ありがとう）"
-          className="min-w-0 flex-1 rounded border border-[#2f2f2f] bg-[#0e0e0e] px-3 py-1.5 text-[12px] text-neutral-200 placeholder:text-neutral-600 focus:border-[#3f3f3f] focus:outline-none disabled:opacity-40"
-        />
-        <button
-          type="button"
-          onClick={() => {
-            for (const item of items) onText(item.index, bulk);
-          }}
-          disabled={busy || bulk.trim().length === 0}
-          className="rounded border border-[#2f2f2f] px-3 py-1.5 text-[11px] text-neutral-300 transition hover:bg-[#1e1e1e] disabled:opacity-40"
-        >
-          全部に入れる
-        </button>
-      </div>
+      <div className="mt-3 rounded-lg border border-[#292929] bg-[#101010] p-3">
+        <div className="flex flex-wrap items-center gap-3">
+          <h4 className="text-[12px] font-black text-neutral-200">② 言葉を入れる</h4>
+          <span className="ml-auto text-[11px] text-neutral-400">
+            {filledCount} / {items.length} 枚
+          </span>
+        </div>
 
-      {/* 1枚ずつの入力。絵を見ながら言葉を決められるよう、サムネと並べる。 */}
-      <ul className="mt-3 grid grid-cols-[repeat(auto-fill,minmax(11rem,1fr))] gap-2">
-        {items.map((item) => (
-          <li
-            key={item.index}
-            className="flex items-center gap-2 rounded border border-[#242424] bg-[#101010] p-2"
-          >
-            <SafeImage
-              path={item.imagePath}
-              alt={item.label}
-              className="h-10 w-10 shrink-0 bg-[#0d0d0d] object-contain"
-            />
-            <input
-              type="text"
-              value={texts[item.index] ?? ""}
-              onChange={(e) => onText(item.index, e.target.value)}
-              disabled={busy}
-              placeholder={item.label}
-              className="min-w-0 flex-1 rounded border border-[#2f2f2f] bg-[#0e0e0e] px-2 py-1 text-[11px] text-neutral-200 placeholder:text-neutral-600 focus:border-[#3f3f3f] focus:outline-none disabled:opacity-40"
-            />
-          </li>
-        ))}
-      </ul>
-
-      <div className="mt-3 flex flex-wrap items-center gap-2">
-        <button
-          type="button"
-          onClick={onApply}
-          disabled={busy || filledCount === 0}
-          className="rounded bg-[#2a2a2a] px-4 py-2 text-[12px] font-bold text-neutral-100 transition hover:bg-[#333] disabled:opacity-40"
-        >
-          {busy ? "入れています…" : `${filledCount} 枚に文字を入れる`}
-        </button>
-        {/*
-          焼き直せることが要件（「後から直せる」）。元画像を保持しているので、
-          文字を変えて押し直せば常に**文字なしの状態から**焼き直される。
-        */}
-        {applied && (
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <input
+            type="text"
+            value={bulk}
+            onChange={(event) => setBulk(event.target.value)}
+            disabled={busy}
+            placeholder="全部に同じ言葉（例: ありがとう）"
+            className="min-w-0 flex-1 rounded border border-[#2f2f2f] bg-[#0e0e0e] px-3 py-1.5 text-[12px] text-neutral-200 placeholder:text-neutral-600 focus:border-[#3f3f3f] focus:outline-none disabled:opacity-40"
+          />
           <button
             type="button"
-            onClick={onReset}
-            disabled={busy}
-            className="rounded border border-[#2f2f2f] px-3 py-1.5 text-[11px] text-neutral-400 transition hover:bg-[#1e1e1e] disabled:opacity-40"
+            onClick={() => {
+              for (const item of items) onText(item.index, bulk);
+            }}
+            disabled={busy || bulk.trim().length === 0}
+            className="rounded border border-[#2f2f2f] px-3 py-1.5 text-[11px] text-neutral-300 transition hover:bg-[#1e1e1e] disabled:opacity-40"
           >
-            文字を消す（元に戻す）
+            同じ言葉を全部へ
           </button>
-        )}
-        <span className="text-[11px] text-neutral-500">
-          入れ直すときは、文字を書き換えてもう一度押してください。
-        </span>
+        </div>
+
+        <ul className="mt-3 grid grid-cols-[repeat(auto-fill,minmax(11rem,1fr))] gap-2">
+          {items.map((item) => (
+            <li
+              key={item.index}
+              className="flex items-center gap-2 rounded border border-[#242424] bg-[#0d0d0d] p-2"
+            >
+              <SafeImage
+                path={item.imagePath}
+                alt={item.label}
+                className="h-10 w-10 shrink-0 bg-[#0d0d0d] object-contain"
+              />
+              <input
+                type="text"
+                value={texts[item.index] ?? ""}
+                onChange={(event) => onText(item.index, event.target.value)}
+                disabled={busy}
+                placeholder={item.label}
+                className="min-w-0 flex-1 rounded border border-[#2f2f2f] bg-[#0e0e0e] px-2 py-1 text-[11px] text-neutral-200 placeholder:text-neutral-600 focus:border-[#3f3f3f] focus:outline-none disabled:opacity-40"
+              />
+            </li>
+          ))}
+        </ul>
+      </div>
+
+      <div className="mt-3 rounded-lg border border-[#292929] bg-[#101010] p-3">
+        <h4 className="text-[12px] font-black text-neutral-200">③ 全部に適用</h4>
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={onApply}
+            disabled={busy || (filledCount === 0 && !applied)}
+            className="rounded bg-pink-500 px-4 py-2 text-[12px] font-black text-white transition hover:bg-pink-400 disabled:opacity-40"
+          >
+            {busy ? "適用中…" : "全部に適用"}
+          </button>
+          {applied && (
+            <button
+              type="button"
+              onClick={onReset}
+              disabled={busy}
+              className="rounded border border-[#2f2f2f] px-3 py-1.5 text-[11px] text-neutral-400 transition hover:bg-[#1e1e1e] disabled:opacity-40"
+            >
+              文字と装飾をすべて外す
+            </button>
+          )}
+          <span className="text-[11px] text-neutral-500">
+            適用後も言葉やスタイルを変えて、もう一度押せます。
+          </span>
+        </div>
       </div>
     </section>
   );
 }
 
-/** 既定の見た目。呼び出し側の初期値に使う。 */
 export function defaultStickerTextStyle(): Omit<StickerTextSpec, "text"> {
   return { ...DEFAULT_STICKER_TEXT };
 }
 
-/** 未使用の import を避けるための再エクスポート（呼び出し側が型を使う）。 */
 export type { StickerTextSpec };
 
-/** 入力欄の初期化に使う（`useEffect` 依存で使い回す）。 */
 export function useResetTextsOnItemsChange(
   items: StickerPickItem[],
   reset: () => void,
 ) {
-  const key = items.map((i) => i.index).join(",");
+  const key = items.map((item) => item.index).join(",");
   useEffect(() => {
     reset();
-    // reset は呼び出し側で `useCallback` 済みの前提。key が変わったときだけ走らせる。
+    // reset は呼び出し側で useCallback 済みの前提。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [key]);
 }

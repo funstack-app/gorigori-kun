@@ -4,6 +4,10 @@ import { onCharacterSheetEvent } from "../character/events";
 import type { StickerChromaSample } from "../ipc";
 import type { StickerEntry } from "../sticker/catalog";
 import { formatStickerGenerationFailure } from "../sticker/referenceSnapshot";
+import {
+  DEFAULT_STICKER_TEXT,
+  type StickerTextSpec,
+} from "../sticker/text";
 import { humanizeError } from "../humanizeError";
 import { useToasts } from "./toasts";
 
@@ -34,10 +38,20 @@ type StickerRunState = {
   eventSubscriptionStatus: StickerEventSubscriptionStatus;
   generationStartedAt: number;
   notClearedPaths: ReadonlySet<string>;
+  /** 文字入れ画面を離れても、入力・見た目・文字なし原本を失わない。 */
+  stickerTexts: Readonly<Record<number, string>>;
+  stickerTextStyle: Omit<StickerTextSpec, "text">;
+  stickerTextBasePaths: Readonly<Record<number, string>>;
   setPhase: (update: StateUpdate<StickerPhase>) => void;
   setCuts: (update: StateUpdate<StickerCutState[]>) => void;
   setGenerationStartedAt: (update: StateUpdate<number>) => void;
   setNotClearedPaths: (update: StateUpdate<ReadonlySet<string>>) => void;
+  setStickerTexts: (update: StateUpdate<Readonly<Record<number, string>>>) => void;
+  setStickerTextStyle: (update: StateUpdate<Omit<StickerTextSpec, "text">>) => void;
+  setStickerTextBasePaths: (
+    update: StateUpdate<Readonly<Record<number, string>>>,
+  ) => void;
+  resetStickerTextState: () => void;
 };
 
 function resolveUpdate<T>(previous: T, update: StateUpdate<T>): T {
@@ -53,12 +67,29 @@ export const useStickerRun = create<StickerRunState>((set) => ({
   eventSubscriptionStatus: "connecting",
   generationStartedAt: Date.now(),
   notClearedPaths: new Set(),
+  stickerTexts: {},
+  stickerTextStyle: { ...DEFAULT_STICKER_TEXT },
+  stickerTextBasePaths: {},
   setPhase: (update) => set((state) => ({ phase: resolveUpdate(state.phase, update) })),
   setCuts: (update) => set((state) => ({ cuts: resolveUpdate(state.cuts, update) })),
   setGenerationStartedAt: (update) =>
     set((state) => ({ generationStartedAt: resolveUpdate(state.generationStartedAt, update) })),
   setNotClearedPaths: (update) =>
     set((state) => ({ notClearedPaths: resolveUpdate(state.notClearedPaths, update) })),
+  setStickerTexts: (update) =>
+    set((state) => ({ stickerTexts: resolveUpdate(state.stickerTexts, update) })),
+  setStickerTextStyle: (update) =>
+    set((state) => ({ stickerTextStyle: resolveUpdate(state.stickerTextStyle, update) })),
+  setStickerTextBasePaths: (update) =>
+    set((state) => ({
+      stickerTextBasePaths: resolveUpdate(state.stickerTextBasePaths, update),
+    })),
+  resetStickerTextState: () =>
+    set({
+      stickerTexts: {},
+      stickerTextStyle: { ...DEFAULT_STICKER_TEXT },
+      stickerTextBasePaths: {},
+    }),
 }));
 
 /** タブを離れても必要な、ディスク保存しない実行中メモリ。 */
