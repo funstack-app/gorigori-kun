@@ -415,7 +415,13 @@ export function FilmChatPanel({ project }: { project: FilmProject | null }) {
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
 
   useEffect(() => {
-    if (messages.length > 0) return;
+    // StrictMode の二重 effect でも挨拶が二重にならないよう、
+    // レンダ時のスナップショットでなくストアの現在値で空判定する。
+    const state = useFilmProjectStore.getState();
+    const current = project
+      ? (state.projects.find((candidate) => candidate.id === project.id)?.chatMessages ?? [])
+      : state.planningChatMessages;
+    if (current.length > 0) return;
     const first = createFilmChatMessage(
       "assistant",
       project ? projectResumeMessage(project) : INITIAL_FILM_ADVISOR_MESSAGE,

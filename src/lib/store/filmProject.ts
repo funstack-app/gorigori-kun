@@ -127,7 +127,7 @@ function emptyScript(): FilmScript {
 
 function normalizeChatMessages(value: unknown): FilmChatMessage[] {
   if (!Array.isArray(value)) return [];
-  return value.filter((message): message is FilmChatMessage => {
+  const valid = value.filter((message): message is FilmChatMessage => {
     if (!message || typeof message !== "object") return false;
     const candidate = message as Partial<FilmChatMessage>;
     return (
@@ -135,6 +135,17 @@ function normalizeChatMessages(value: unknown): FilmChatMessage[] {
       (candidate.role === "assistant" || candidate.role === "user") &&
       typeof candidate.text === "string" &&
       typeof candidate.createdAt === "string"
+    );
+  });
+  // 冒頭挨拶の二重差し込み(StrictModeの二重effect)で保存済みデータに
+  // 同文の連続assistantが残ることがある。連続する同文assistantは1つに畳む。
+  return valid.filter((message, index) => {
+    if (index === 0) return true;
+    const prev = valid[index - 1];
+    return !(
+      message.role === "assistant" &&
+      prev.role === "assistant" &&
+      message.text === prev.text
     );
   });
 }
