@@ -875,7 +875,7 @@ function ExtraParamControl({
   );
 }
 
-/** 生成数 (1〜4) + 合計コスト (単価 × 本数)。「約N credits」だけ表示。 */
+/** 生成数 (1〜4) + 合計コスト (単価 × 本数)。不明なら接続先での確認を案内する。 */
 function CountAndCostControl({
   count,
   onChangeCount,
@@ -893,7 +893,11 @@ function CountAndCostControl({
       <div className="flex items-center justify-between gap-2">
         <p className="text-[10px] font-black tracking-wide text-neutral-500">生成数</p>
         <span className="text-[11px] font-black text-pink-200">
-          {loading ? "確認中…" : total === null ? "—" : `約${total} credits`}
+          {loading
+            ? "確認中…"
+            : total === null
+              ? "消費量は各サービスの表示を確認"
+              : `約${total}cr`}
         </span>
       </div>
       <div className="grid grid-cols-4 gap-1">

@@ -860,9 +860,8 @@ function MagnificConnectionCard() {
             )}
             {authed && account && (
               <span className="rounded-full bg-pink-500/15 px-2 py-0.5 text-[10px] font-black text-pink-200">
-                {account.unlimited
-                  ? `${account.plan ?? "Unlimited"} (無制限)`
-                  : `${Math.floor(account.credits).toLocaleString()} クレジット`}
+                {account.plan ? `${account.plan} · ` : ""}
+                {Math.floor(account.credits).toLocaleString()} クレジット
               </span>
             )}
             {authed && !account && accountLoading && (
@@ -884,7 +883,7 @@ function MagnificConnectionCard() {
             )}
           </div>
           <p className="mt-0.5 text-[11px] text-neutral-400">
-            画像・動画 AI 生成 + 高精細アップスケール (無制限モデル対応)
+            画像・動画 AI 生成 + 高精細アップスケール (MCP/API経由はクレジット消費)
           </p>
         </div>
       </div>

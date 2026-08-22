@@ -7,11 +7,13 @@ import {
 
 describe("skill catalog visibility", () => {
   it("hidden スキルを通常一覧の描画対象から除外する", () => {
+    // 2026-08-22 STΛCK指示: ストーリーカットは AIフィルムと別スキルとして
+    // 両方表示する（hidden 解除）。hidden の仕組み自体の検査は維持する。
     const storyboard = GORI_SKILLS.find((skill) => skill.id === "gori-storyboard");
 
-    expect(storyboard?.hidden).toBe(true);
+    expect(storyboard?.hidden).not.toBe(true);
     expect(VISIBLE_GORI_SKILLS.some((skill) => skill.id === "gori-storyboard")).toBe(
-      false,
+      true,
     );
     expect(VISIBLE_GORI_SKILLS.every((skill) => skill.hidden !== true)).toBe(true);
   });

@@ -1,12 +1,16 @@
 /**
- * Higgsfield プラン × モデルラベル table。
+ * Higgsfield Web版のプラン × モデルラベル table。
  *
  * 公式 UI (higgsfield.ai のモデル選択ピッカー) を直接観察して構築 (2026-05 時点)。
- * - "UNLIMITED": そのプランで無制限利用可
+ * - "WEB_UNLIMITED": そのプランでWeb版から使う場合のみ無制限対象
  * - "EXCLUSIVE": そのプランでのみ使える特別モデル (年契約縛り含む)
  * - キー: subscription_plan_type (lowercase)、未知のプランはラベルなし
  *
- * 重要: ラベル付きで居ないモデルは「クレジット消費する通常扱い」。
+ * 重要 (2026-08-22 調査): 無制限は higgsfield.ai のWeb版限定。
+ * MCP/CLI/その他の自動生成は、Web版の無制限対象モデルでも常にクレジットを消費する。
+ * 出典: _work/update-2026-08-22/research/provider-credit-survey.md
+ * この表とラベルはWeb版での扱いだけを表し、アプリ経由の課金区分には使わない。
+ * ラベル付きでないモデルは、Web版でもクレジット消費する通常扱い。
  * 過去 commit b4a8c19 では "creator は全画像モデル無制限" と推測したが、
  * 公式 UI を確認したら**ホワイトリスト方式**だったので個別列挙に修正。
  *
@@ -14,7 +18,7 @@
  * 突き合わせ済み。
  */
 
-export type ModelLabel = "UNLIMITED" | "EXCLUSIVE" | "NEW";
+export type HiggsfieldWebModelLabel = "WEB_UNLIMITED" | "EXCLUSIVE" | "NEW";
 
 /**
  * 公式 UI の「Featured models」順序。
@@ -77,17 +81,17 @@ export const MODEL_DESCRIPTIONS: Record<string, string> = {
   soul_location: "風景・ロケーション専用",
 };
 
-type PlanLabels = {
-  /** 無制限対象モデル (job_set_type) */
-  unlimited: ReadonlySet<string>;
+type HiggsfieldWebPlanLabels = {
+  /** Web版でのみ無制限対象となるモデル (job_set_type) */
+  webUnlimited: ReadonlySet<string>;
   /** プラン専用モデル (job_set_type) */
   exclusive?: ReadonlySet<string>;
-  /** NEW バッジ対象 (job_set_type) — UNLIMITED とは独立の表示ラベル */
+  /** NEW バッジ対象 (job_set_type) — Web版の無制限区分とは独立の表示ラベル */
   new?: ReadonlySet<string>;
 };
 
 /**
- * creator プランの UNLIMITED 対象。
+ * creator プランでWeb版の UNLIMITED 対象となるモデル。
  * 公式 UI のスクショを再読 (Featured + All models) して 2026-05-11 に再校正。
  *
  *   公式 UI 名 + ラベル              → CLI job_set_type     → ラベル
@@ -113,7 +117,7 @@ type PlanLabels = {
  * Higgsfield Soul (UNLIMITED) は公式に存在するが CLI からは text2image_soul_v2
  * (= Soul 2.0) しか出ないので、Soul UNLIMITED は対応モデルなしとして扱う。
  */
-const CREATOR_UNLIMITED = new Set<string>([
+const CREATOR_WEB_UNLIMITED = new Set<string>([
   "image_auto",
   "nano_banana",
   "nano_banana_2",
@@ -126,7 +130,7 @@ const CREATOR_UNLIMITED = new Set<string>([
 
 /**
  * creator プランの NEW 表示対象 (公式 UI で NEW バッジ)。
- * UNLIMITED とは別カテゴリ。
+ * Web版の UNLIMITED とは別カテゴリ。
  */
 const CREATOR_NEW = new Set<string>([
   "gpt_image_2",
@@ -141,14 +145,14 @@ const CREATOR_NEW = new Set<string>([
  */
 const CREATOR_EXCLUSIVE = new Set<string>(["kling_3"]);
 
-export const PLAN_LABELS: Record<string, PlanLabels> = {
-  free: { unlimited: new Set() },
-  starter: { unlimited: new Set() },
-  basic: { unlimited: new Set() },
+export const HIGGSFIELD_WEB_PLAN_LABELS: Record<string, HiggsfieldWebPlanLabels> = {
+  free: { webUnlimited: new Set() },
+  starter: { webUnlimited: new Set() },
+  basic: { webUnlimited: new Set() },
   // plus / pro / ultra / ultimate は公式 UI 未確認なので推測値で残す
   // (要 pricing ページ確認後に正確化)
   plus: {
-    unlimited: new Set([
+    webUnlimited: new Set([
       "seedream_v5_lite",
       "flux_2",
       "gpt_image_2",
@@ -156,7 +160,7 @@ export const PLAN_LABELS: Record<string, PlanLabels> = {
     ]),
   },
   pro: {
-    unlimited: new Set([
+    webUnlimited: new Set([
       "seedream_v5_lite",
       "flux_2",
       "gpt_image_2",
@@ -164,7 +168,7 @@ export const PLAN_LABELS: Record<string, PlanLabels> = {
     ]),
   },
   ultra: {
-    unlimited: new Set([
+    webUnlimited: new Set([
       "seedream_v5_lite",
       "flux_2",
       "gpt_image_2",
@@ -175,7 +179,7 @@ export const PLAN_LABELS: Record<string, PlanLabels> = {
     exclusive: new Set(["kling_3"]),
   },
   ultimate: {
-    unlimited: new Set([
+    webUnlimited: new Set([
       "seedream_v5_lite",
       "flux_2",
       "gpt_image_2",
@@ -186,24 +190,25 @@ export const PLAN_LABELS: Record<string, PlanLabels> = {
     exclusive: new Set(["kling_3"]),
   },
   creator: {
-    unlimited: CREATOR_UNLIMITED,
+    webUnlimited: CREATOR_WEB_UNLIMITED,
     exclusive: CREATOR_EXCLUSIVE,
     new: CREATOR_NEW,
   },
 };
 
 /**
- * 与えられた jobSetType に対応するラベル (UNLIMITED / EXCLUSIVE / なし) を返す。
+ * 与えられた jobSetType に対応するHiggsfield Web版のラベルを返す。
+ * WEB_UNLIMITED はアプリ経由の無制限を意味せず、MCP生成では常にクレジットを消費する。
  * 不明プラン or 該当なしは null。
  */
-export function getModelLabel(
+export function getHiggsfieldWebModelLabel(
   plan: string | null | undefined,
   jobSetType: string,
-): ModelLabel | null {
+): HiggsfieldWebModelLabel | null {
   if (!plan) return null;
-  const labels = PLAN_LABELS[plan.toLowerCase()];
+  const labels = HIGGSFIELD_WEB_PLAN_LABELS[plan.toLowerCase()];
   if (!labels) return null;
-  if (labels.unlimited.has(jobSetType)) return "UNLIMITED";
+  if (labels.webUnlimited.has(jobSetType)) return "WEB_UNLIMITED";
   if (labels.exclusive?.has(jobSetType)) return "EXCLUSIVE";
   if (labels.new?.has(jobSetType)) return "NEW";
   return null;
@@ -243,14 +248,14 @@ export function dedupeModels<T extends { displayName: string; jobSetType: string
 }
 
 /**
- * 後方互換: 既存の isModelUnlimited 呼び出しを維持する。
- * 新規コードは getModelLabel を使う。
+ * Web版での無制限対象かを返す。
+ * アプリのMCP生成が無制限という意味ではない。
  */
-export function isModelUnlimited(
+export function isWebModelUnlimited(
   plan: string | null | undefined,
   jobSetType: string,
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   _modelType: "image" | "video",
 ): boolean {
-  return getModelLabel(plan, jobSetType) === "UNLIMITED";
+  return getHiggsfieldWebModelLabel(plan, jobSetType) === "WEB_UNLIMITED";
 }

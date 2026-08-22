@@ -216,7 +216,7 @@ body {
  * 明示的に `style={{ fontWeight: 700 }}` か別 utility (font-extrabold 等) を使う。
  * → これにより視認性は維持しつつ、全体トーンが Geist 寄りになる。
  *
- * UNLIMITED / NEW ピル (bg-lime-300 + black 文字) など、コントラスト確保のために
+ * EXCLUSIVE などの小ピル (bg-lime-300 + black 文字) は、コントラスト確保のために
  * 強く効かせたい箇所は別途調整する。
  */
 .font-black {
@@ -262,7 +262,7 @@ body {
  *   --color-accent    主要 CTA (ピンク)
  *   --color-accent-hover ホバー時
  *   --color-accent-fg ボタン前景 (白固定)
- *   --color-success   UNLIMITED/成功 (黄緑)
+ *   --color-success   成功/比較 (黄緑)
  *   --color-success-fg success の前景 (黒)
  *
  * 5 案テーマスイッチャは A 確定により撤去。
@@ -328,7 +328,7 @@ button:disabled.bg-pink-500 {
   border-color: var(--color-accent) !important;
 }
 
-/* Success/Compare = bg-lime-300 を上書き (UNLIMITED/NEW ピルは黄緑+黒のまま) */
+/* Success/Compare = bg-lime-300 を上書き (小ピルも黄緑+黒のまま) */
 .bg-lime-300 {
   background-color: var(--color-success) !important;
   color: var(--color-success-fg) !important;

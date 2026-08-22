@@ -22,8 +22,8 @@ import {
   MODEL_DESCRIPTIONS,
   dedupeModels,
   getDisplayName,
-  getModelLabel,
-  type ModelLabel,
+  getHiggsfieldWebModelLabel,
+  type HiggsfieldWebModelLabel,
 } from "../lib/higgsfield/unlimited";
 import { staticModelsFor } from "../lib/higgsfield/staticCatalog";
 import { useHiggsfieldModel, type SelectedModel } from "../lib/store/higgsfieldModel";
@@ -786,8 +786,7 @@ function ModelPickerPopover({
         タブ切替時は他providerの選択をクリアして排他にする(コアを壊さない)。
       */}
       <div
-        className="flex shrink-0 gap-1 overflow-x-auto border-b border-[#242424] px-2 pt-2"
-        style={{ overscrollBehaviorX: "contain" }}
+        className="flex shrink-0 flex-wrap gap-1 border-b border-[#242424] px-2 pt-2"
       >
         <button
           type="button"
@@ -902,7 +901,7 @@ function ModelPickerPopover({
                           title={shownName}
                           description={MODEL_DESCRIPTIONS[model.jobSetType] ?? ""}
                           icon={getModelIcon(model)}
-                          label={getModelLabel(planType, model.jobSetType)}
+                          label={getHiggsfieldWebModelLabel(planType, model.jobSetType)}
                           selected={selected}
                           disabled={!selected && selectedCount >= MAX_COMPARE_MODELS}
                           onToggle={() =>
@@ -1061,9 +1060,11 @@ function ModelPickerPopover({
                 ? `Magnific: ${magnificCount} 件選択 (最大 ${MAX_MAGNIFIC_COMPARE})`
                 : `${selectedCount} 件選択 (最大 ${MAX_COMPARE_MODELS})`}
           </span>
-          <span className="font-semibold text-neutral-500">
-            {/* Magnificはクレジット情報をMCPが返さないため推定は出さない(嘘の数字を出さない)。 */}
-            推定: {activeRemoteProvider || isMagnificVideoTab || magnificCount > 0 ? "—" : formatCost(cost)}
+          <span className="max-w-[190px] text-right font-semibold leading-tight text-neutral-500">
+            {/* 不明な消費量を0や無制限に見せず、接続先での確認を案内する。 */}
+            {activeRemoteProvider || isMagnificVideoTab || magnificCount > 0
+              ? "消費量は各サービスの表示を確認"
+              : formatCost(cost)}
           </span>
         </div>
         <button
@@ -1109,7 +1110,7 @@ function ModelRow({
   details?: Array<{ label: string; value: string }>;
   /** 1 文字のアイコンプレースホルダ (Higgsfield 公式 UI と同じ位置の枠) */
   icon: string;
-  label?: ModelLabel | null;
+  label?: HiggsfieldWebModelLabel | null;
   selected: boolean;
   disabled: boolean;
   onToggle: () => void;
@@ -1151,7 +1152,7 @@ function ModelRow({
           <span className="min-w-0 flex-1 truncate font-medium text-neutral-100">
             {title}
           </span>
-          {label && <ModelLabelPill label={label} />}
+          {label && <HiggsfieldWebModelLabelView label={label} />}
         </span>
         <span className="line-clamp-2 text-[10px] leading-snug text-neutral-500">
           {description || "説明なし"}
@@ -1176,19 +1177,19 @@ function ModelRow({
   );
 }
 
-function ModelLabelPill({ label }: { label: ModelLabel }) {
+function HiggsfieldWebModelLabelView({ label }: { label: HiggsfieldWebModelLabel }) {
   // STΛCK 指示 (2026-05-14):
   // - NEW ラベルは表示しない (新旧の区別はユーザーに不要)
-  // - UNLIMITED は ∞ シンボルだけにシンプル化
+  // - Web版の無制限対象は、アプリ経由の消費と混同しない中立表示にする
   // - EXCLUSIVE はそのまま (該当する場合)
   if (label === "NEW") return null;
-  if (label === "UNLIMITED") {
+  if (label === "WEB_UNLIMITED") {
     return (
       <span
-        className="inline-flex h-[16px] shrink-0 items-center self-center rounded-md bg-lime-300 px-1.5 text-[12px] font-black leading-none text-black shadow-sm"
-        title="無制限利用可"
+        className="shrink-0 self-center whitespace-nowrap text-[9px] font-medium text-neutral-500"
+        title="Web版の対象プランのみ。アプリ経由の生成はクレジットを消費します"
       >
-        ∞
+        Web版なら無制限対象
       </span>
     );
   }
@@ -1355,10 +1356,10 @@ function getHelperText(loadState: LoadState, _selectedCount: number): string | n
 }
 
 function formatCost(cost: CostState): string {
-  if (cost.kind === "idle") return "-";
-  if (cost.kind === "loading") return "checking...";
-  if (cost.kind === "error") return "unknown";
-  return `${cost.credits} credits`;
+  if (cost.kind === "idle") return "推定: —";
+  if (cost.kind === "loading") return "推定: 確認中…";
+  if (cost.kind === "error") return "消費量はHiggsfieldの表示を確認";
+  return `推定: 約${cost.credits}cr`;
 }
 
 function summarizeRawError(raw: string): string {
