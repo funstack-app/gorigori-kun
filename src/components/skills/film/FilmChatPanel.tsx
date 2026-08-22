@@ -28,6 +28,7 @@ import {
   VIDEO_SERVICE_PROFILES,
 } from "../../../lib/film/serviceProfiles";
 import type { FilmProject, FilmScript } from "../../../lib/film/types";
+import { humanizeError } from "../../../lib/humanizeError";
 import {
   useFilmProjectStore,
   type FilmScriptApprovalStage,
@@ -109,6 +110,36 @@ type PremiseDraft = {
   postingTarget: string;
   videoServiceId: string;
 };
+
+type FilmChatSendFailure = {
+  message: string;
+  detail: string;
+};
+
+function describeChatFailure(error: unknown): FilmChatSendFailure {
+  const detail = error instanceof Error
+    ? `${error.name}: ${error.message}`
+    : String(error);
+  if (error instanceof FilmTextTurnAbortedError) {
+    return {
+      message: "送信を中止しました。入力内容は戻してあります。",
+      detail,
+    };
+  }
+  if (error instanceof FilmTextTurnTimeoutError) {
+    return {
+      message: "AIの返事に時間がかかりすぎました。入力内容は戻したので、もう一度送れます。",
+      detail,
+    };
+  }
+  const humanized = humanizeError(error);
+  return {
+    message: humanized.includes("AIの利用枠")
+      ? humanized
+      : "AIアドバイザーと通信できませんでした。入力内容は戻したので、もう一度お試しください。",
+    detail,
+  };
+}
 
 function readPremise(artifact: AdvisorArtifact): {
   value: PremiseDraft | null;
@@ -239,12 +270,14 @@ function ArtifactCard({
   project,
   busy,
   onApprove,
+  onRevoke,
   onRevise,
 }: {
   artifact: AdvisorArtifact;
   project: FilmProject | null;
   busy: boolean;
   onApprove: () => void;
+  onRevoke: () => void;
   onRevise: () => void;
 }) {
   const premise = artifact.type === "premise" ? readPremise(artifact) : null;
@@ -309,7 +342,18 @@ function ArtifactCard({
         <IssueList issues={review.issues} />
       </div>
 
-      {!approved && !premiseLocked ? (
+      {approved ? (
+        <footer className="flex flex-wrap gap-2 border-t border-[#2b2b2b] px-4 py-3">
+          <button
+            type="button"
+            onClick={onRevoke}
+            disabled={busy}
+            className="rounded-md border border-amber-500/40 px-3 py-2 text-xs font-semibold text-amber-200 transition hover:bg-amber-500/10 disabled:opacity-40"
+          >
+            承認を取り消す
+          </button>
+        </footer>
+      ) : !premiseLocked ? (
         <footer className="flex flex-wrap gap-2 border-t border-[#2b2b2b] px-4 py-3">
           <button
             type="button"
@@ -344,11 +388,13 @@ export function FilmChatPanel({ project }: { project: FilmProject | null }) {
   const saveScenelist = useFilmProjectStore((state) => state.saveScenelist);
   const saveBlocks = useFilmProjectStore((state) => state.saveBlocks);
   const approveStage = useFilmProjectStore((state) => state.approveStage);
+  const revokeStageApproval = useFilmProjectStore((state) => state.revokeStageApproval);
   const pushToast = useToasts((state) => state.push);
 
   const messages = project ? (project.chatMessages ?? []) : planningChatMessages;
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
+  const [sendFailure, setSendFailure] = useState<FilmChatSendFailure | null>(null);
   const [revisionTarget, setRevisionTarget] = useState<AdvisorArtifactType | null>(null);
   const [progress, setProgress] = useState<Parameters<typeof ProgressCard>[0]["progress"]>();
   const abortRef = useRef<AbortController | null>(null);
@@ -378,6 +424,7 @@ export function FilmChatPanel({ project }: { project: FilmProject | null }) {
     abortRef.current?.abort();
     abortRef.current = null;
     setSending(false);
+    setSendFailure(null);
     setProgress(undefined);
   }, [project?.id]);
 
@@ -403,10 +450,13 @@ export function FilmChatPanel({ project }: { project: FilmProject | null }) {
     const conversationId = projectAtStart?.id ?? "planning";
     const previousMessages = projectAtStart?.chatMessages ?? stateAtStart.planningChatMessages;
     const userMessage = createFilmChatMessage("user", userText);
+    // 送った文は会話履歴にも先に残す。失敗時は同じ文を入力欄へ戻すため、
+    // 「何を送ったか」と「何を再送するか」の両方を失わない。
     if (projectAtStart) stateAtStart.appendChatMessage(userMessage);
     else stateAtStart.appendPlanningChatMessage(userMessage);
     setDraft("");
     setRevisionTarget(null);
+    setSendFailure(null);
     setSending(true);
     setProgress({ phase: "waiting", receivedChars: 0 });
     const abort = new AbortController();
@@ -482,18 +532,10 @@ export function FilmChatPanel({ project }: { project: FilmProject | null }) {
       }
     } catch (error) {
       if (runTokenRef.current !== runToken) return;
-      if (error instanceof FilmTextTurnAbortedError) {
-        pushToast({ kind: "info", text: error.message, ttlMs: 3000 });
-      } else {
-        pushToast({
-          kind: "error",
-          text:
-            error instanceof FilmTextTurnTimeoutError
-              ? error.message
-              : `AIアドバイザーの応答に失敗しました: ${(error as Error)?.message ?? error}`,
-          ttlMs: 7000,
-        });
-      }
+      setDraft(userText);
+      setRevisionTarget(revisionAtStart);
+      setSendFailure(describeChatFailure(error));
+      requestAnimationFrame(() => inputRef.current?.focus());
     } finally {
       if (runTokenRef.current === runToken) {
         setSending(false);
@@ -545,6 +587,18 @@ export function FilmChatPanel({ project }: { project: FilmProject | null }) {
       `この${ARTIFACT_LABELS[artifact.type]}でOKです。次の工程へ進めてください。`,
       null,
     );
+  }
+
+  function revokeArtifact(artifact: AdvisorArtifact) {
+    const stage = STAGE_BY_ARTIFACT[artifact.type];
+    if (!stage) return;
+    const confirmed = window.confirm(
+      `「${ARTIFACT_LABELS[artifact.type]}」の承認を取り消します。\n\nこの成果物より後の脚本と③設計の承認も無効になります。④アセット以降へは、前段階を承認し直すまで進めません。\n\n成果物の本文や作成済み画像は消えません。続けますか？`,
+    );
+    if (!confirmed) return;
+    if (!revokeStageApproval(stage)) {
+      pushToast({ kind: "warn", text: "承認状態を更新できませんでした。", ttlMs: 4000 });
+    }
   }
 
   const lastMessageText = messages[messages.length - 1]?.text ?? "";
@@ -615,6 +669,7 @@ export function FilmChatPanel({ project }: { project: FilmProject | null }) {
                         project={project}
                         busy={sending}
                         onApprove={() => approveArtifact(artifact)}
+                        onRevoke={() => revokeArtifact(artifact)}
                         onRevise={() => {
                           setRevisionTarget(artifact.type);
                           setDraft("");
@@ -649,6 +704,16 @@ export function FilmChatPanel({ project }: { project: FilmProject | null }) {
         >
           もう一度お願いする
         </button>
+      ) : null}
+
+      {sendFailure && !sending ? (
+        <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs leading-5 text-amber-100">
+          <p className="font-semibold">{sendFailure.message}</p>
+          <details className="mt-1 text-[10px] text-zinc-500">
+            <summary className="cursor-pointer">詳しい内容</summary>
+            <p className="mt-1 break-all">{sendFailure.detail}</p>
+          </details>
+        </div>
       ) : null}
 
       <div className="flex flex-col gap-2 rounded-md border border-[#242424] bg-[#161616] px-3 py-2">

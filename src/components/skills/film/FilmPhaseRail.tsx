@@ -9,8 +9,8 @@ const PHASES: Array<{
   { id: 2, label: "② 脚本", subLabel: "物語を書く" },
   { id: 3, label: "③ 設計", subLabel: "見た目を決める" },
   { id: 4, label: "④ アセット", subLabel: "素材をそろえる" },
-  { id: 5, label: "⑤ 生成", subLabel: "ブロックで作る" },
-  { id: 6, label: "⑥ 仕上げ", subLabel: "一本に完成" },
+  { id: 5, label: "⑤ 生成", subLabel: "近日対応" },
+  { id: 6, label: "⑥ 仕上げ", subLabel: "近日対応" },
 ];
 
 function PhaseIcon({ phase }: { phase: FilmPhase }) {

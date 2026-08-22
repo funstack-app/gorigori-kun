@@ -86,6 +86,31 @@ export function normalizeFilmAsset(asset: AssetLedgerEntry): FilmAsset {
   };
 }
 
+/**
+ * アプリ終了で応答を受け取れなかった走行中状態だけを、再実行できる状態へ戻す。
+ * 通常の normalizeFilmAsset へ混ぜると実行直後にも中断扱いになるため、hydrate 専用。
+ */
+export function recoverInterruptedFilmAsset(source: AssetLedgerEntry): FilmAsset {
+  const asset = normalizeFilmAsset(source);
+  const interruptedStatus =
+    asset.status === "generating" && asset.generatedImagePaths.length === 0
+      ? "interrupted"
+      : asset.status;
+  if (!asset.stressTest) return { ...asset, status: interruptedStatus };
+
+  const primaryRound = asset.stressTest.primaryRound.status === "generating"
+    ? { ...asset.stressTest.primaryRound, status: "interrupted" as const }
+    : asset.stressTest.primaryRound;
+  const extraRound = asset.stressTest.extraRound?.status === "generating"
+    ? { ...asset.stressTest.extraRound, status: "interrupted" as const }
+    : asset.stressTest.extraRound;
+  return {
+    ...asset,
+    status: interruptedStatus,
+    stressTest: { ...asset.stressTest, primaryRound, extraRound },
+  };
+}
+
 function isFailedStressTest(asset: FilmAsset): boolean {
   return asset.stressTest?.primaryRound.status === "failed"
     || asset.stressTest?.extraRound?.status === "failed";
@@ -256,10 +281,14 @@ export function canStartStressTest(
   ) {
     return false;
   }
-  if (round === "primary") return asset.stressTest.primaryRound.status === "idle";
+  if (round === "primary") {
+    return asset.stressTest.primaryRound.status === "idle"
+      || asset.stressTest.primaryRound.status === "interrupted";
+  }
   return asset.stressTest.primaryRound.status === "passed"
     && asset.stressTest.extraRoundDecision === "run"
-    && asset.stressTest.extraRound?.status === "idle";
+    && (asset.stressTest.extraRound?.status === "idle"
+      || asset.stressTest.extraRound?.status === "interrupted");
 }
 
 export function beginStressTest(

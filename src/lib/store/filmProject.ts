@@ -2,8 +2,8 @@ import { create } from "zustand";
 
 import { filmProjects } from "../ipc";
 import {
-  getAssetFactoryGateState,
   normalizeFilmAsset,
+  recoverInterruptedFilmAsset,
 } from "../film/assetFactory";
 import { validateAssetLedger } from "../film/assetParse";
 import { DEFAULT_VIDEO_SERVICE_ID } from "../film/serviceProfiles";
@@ -50,12 +50,27 @@ export type CreateFilmProjectOptions = {
   startInScript?: boolean;
 };
 
+export type FilmProjectBackup = {
+  path: string;
+  at: number;
+  count: number;
+};
+
+export type FilmProjectBackupListResult =
+  | { ok: true; items: FilmProjectBackup[] }
+  | { ok: false; error: string };
+
 type FilmProjectState = {
   projects: FilmProject[];
   activeProjectId: string | null;
   planningChatMessages: FilmChatMessage[];
   filmProjectsFileState: FilmProjectsFileState;
+  /** null 以外なら、画面内の最新状態がまだ正本へ保存できていない。 */
+  filmProjectsSaveError: string | null;
   initialize: () => Promise<void>;
+  retrySave: () => Promise<boolean>;
+  listBackups: () => Promise<FilmProjectBackupListResult>;
+  restoreFromBackup: (backupPath: string) => Promise<number>;
   createProject: (
     title: string,
     theme: string,
@@ -75,12 +90,12 @@ type FilmProjectState = {
   saveSceneList: (scenelistText: string, scenes: FilmScene[]) => void;
   saveBlocks: (blockScriptText: string, blocks: FilmBlock[]) => void;
   approveStage: (stage: FilmScriptApprovalStage) => boolean;
+  revokeStageApproval: (stage: FilmScriptApprovalStage) => boolean;
   saveAssets: (assets: AssetLedgerEntry[]) => void;
   updateAssetFactoryAsset: (
     assetId: string,
     update: (asset: AssetLedgerEntry) => AssetLedgerEntry,
   ) => void;
-  completeAssetFactory: () => boolean;
   saveForeshadow: (entries: ForeshadowEntry[]) => void;
   saveLookMaster: (path: string | null, description?: string) => void;
   saveStylePrefix: (stylePrefix: string) => void;
@@ -146,7 +161,10 @@ type StoredFilmProject = Omit<FilmProject, "assetServiceId" | "videoServiceId"> 
   service?: string;
 };
 
-export function normalizeFilmProject(project: StoredFilmProject): FilmProject {
+export function normalizeFilmProject(
+  project: StoredFilmProject,
+  recoverInterruptedRuns = false,
+): FilmProject {
   const { service: legacyService, ...currentProject } = project;
   const videoServiceId =
     project.videoServiceId?.trim() || legacyService?.trim() || DEFAULT_VIDEO_SERVICE_ID;
@@ -155,18 +173,25 @@ export function normalizeFilmProject(project: StoredFilmProject): FilmProject {
     ...currentProject,
     assetServiceId: "gpt-image-2",
     videoServiceId,
+    // ⑤⑥は未実装。過去版の偽導線で進んだ保存データも④へ安全に戻す。
+    phase: project.phase >= 5 ? 4 : project.phase,
     approvals: {
       ...project.approvals,
       blocks: project.approvals.blocks ?? null,
       look: project.approvals.look ?? null,
     },
-    assets: (project.assets ?? []).map((asset) => normalizeFilmAsset({
-      ...asset,
-      type: asset.type ?? assetTypeFromId(asset.id),
-      status: asset.status ?? "unplanned",
-      pairKey: asset.pairKey ?? null,
-      pairSide: asset.pairSide ?? null,
-    })),
+    assets: (project.assets ?? []).map((asset) => {
+      const normalizedSource = {
+        ...asset,
+        type: asset.type ?? assetTypeFromId(asset.id),
+        status: asset.status ?? "unplanned",
+        pairKey: asset.pairKey ?? null,
+        pairSide: asset.pairSide ?? null,
+      };
+      return recoverInterruptedRuns
+        ? recoverInterruptedFilmAsset(normalizedSource)
+        : normalizeFilmAsset(normalizedSource);
+    }),
     foreshadow: (project.foreshadow ?? []).map((entry) => ({
       ...entry,
       initialMeaning: entry.initialMeaning ?? "",
@@ -200,27 +225,13 @@ async function writeToFileNow(
   data: FilmProjectsFileData,
   allowEmpty: boolean,
 ): Promise<void> {
-  try {
-    await filmProjects.write(JSON.stringify(data), allowEmpty);
-  } catch (err) {
-    console.error("[film-projects] ファイル書き込み失敗:", err);
-    try {
-      const { useToasts } = await import("./toasts");
-      useToasts.getState().push({
-        kind: "error",
-        text: `フィルムの保存先ファイルに書き込めませんでした。アプリを再起動すると再試行します: ${String(err)}`,
-        ttlMs: 8000,
-      });
-    } catch {
-      // 通知に失敗しても、書き込み失敗は呼び出し側へ返す。
-    }
-    throw err;
-  }
+  await filmProjects.write(JSON.stringify(data), allowEmpty);
 }
 
 /** 全量スナップショットを直列化する、最後勝ちの保存キュー。 */
 let pendingWrite: { data: FilmProjectsFileData; allowEmpty: boolean } | null = null;
 let writeInFlight: Promise<boolean> | null = null;
+let reportSaveError: (error: string | null) => void = () => {};
 
 function writeToFile(
   data: FilmProjectsFileData,
@@ -235,9 +246,13 @@ function writeToFile(
         pendingWrite = null;
         try {
           await writeToFileNow(job.data, job.allowEmpty);
+          reportSaveError(null);
           lastOk = true;
-        } catch {
-          // 失敗通知は writeToFileNow で済んでいる。最新ジョブまで処理は続ける。
+        } catch (error) {
+          console.error("[film-projects] ファイル書き込み失敗:", error);
+          reportSaveError(String(error));
+          // ストア上の最新内容は消さない。後続ジョブがあれば処理を続け、
+          // 無ければ画面内の「再試行」から現在の全量をもう一度保存する。
           lastOk = false;
         }
       }
@@ -287,6 +302,20 @@ function makeFileData(
     planningChatMessages,
     ...(planningActive ? { planningActive: true as const } : {}),
   };
+}
+
+function projectNeedsHydrationRepair(project: StoredFilmProject): boolean {
+  if (project.phase >= 5) return true;
+  return (project.assets ?? []).some((asset) => {
+    if (
+      asset.status === "generating"
+      && (!Array.isArray(asset.generatedImagePaths) || asset.generatedImagePaths.length === 0)
+    ) {
+      return true;
+    }
+    return asset.stressTest?.primaryRound.status === "generating"
+      || asset.stressTest?.extraRound?.status === "generating";
+  });
 }
 
 function persistProjects(
@@ -431,7 +460,9 @@ async function readFilmProjectsFileIntoStore(
     // 読み込み中の入力を、到着した古いスナップショットで消さない。
     if (pendingBeforeUnlock) return true;
 
-    const projects = (parsed.projects as StoredFilmProject[]).map(normalizeFilmProject);
+    const storedProjects = parsed.projects as StoredFilmProject[];
+    const needsHydrationRepair = storedProjects.some(projectNeedsHydrationRepair);
+    const projects = storedProjects.map((project) => normalizeFilmProject(project, true));
     const planningChatMessages = normalizeChatMessages(parsed.planningChatMessages);
     const currentActiveId = get().activeProjectId;
     const activeProjectId = parsed.planningActive && planningChatMessages.length > 0
@@ -440,6 +471,9 @@ async function readFilmProjectsFileIntoStore(
         ? currentActiveId
         : (projects[0]?.id ?? null);
     set({ projects, activeProjectId, planningChatMessages });
+    // 走行中のまま残った状態と、過去版で⑤⑥へ進んだ状態は、④の再試行可能な
+    // スナップショットへ直して正本にも反映する。
+    if (needsHydrationRepair) pendingBeforeUnlock = true;
     return true;
   }
 
@@ -466,6 +500,7 @@ export const useFilmProjectStore = create<FilmProjectState>((set, get) => ({
   activeProjectId: null,
   planningChatMessages: [],
   filmProjectsFileState: "missing",
+  filmProjectsSaveError: null,
 
   initialize: async () => {
     const myToken = ++initializeToken;
@@ -484,6 +519,85 @@ export const useFilmProjectStore = create<FilmProjectState>((set, get) => ({
         get().activeProjectId === null,
       );
     }
+  },
+
+  retrySave: async () => {
+    const state = get();
+    const ok = await writeToFile(
+      makeFileData(
+        state.projects,
+        state.planningChatMessages,
+        state.activeProjectId === null && state.planningChatMessages.length > 0,
+      ),
+      state.projects.length === 0,
+    );
+    if (ok) {
+      fileWriteUnlocked = true;
+      set({ filmProjectsFileState: "ok" });
+    }
+    return ok;
+  },
+
+  listBackups: async () => {
+    try {
+      const rows = await filmProjects.listBackups();
+      return {
+        ok: true,
+        items: rows.map(([path, at, count]) => ({ path, at, count })),
+      };
+    } catch (error) {
+      return { ok: false, error: String(error) };
+    }
+  },
+
+  restoreFromBackup: async (backupPath) => {
+    const content = await filmProjects.readBackup(backupPath);
+    let parsed: Partial<FilmProjectsFileData> | null;
+    try {
+      parsed = JSON.parse(content) as Partial<FilmProjectsFileData> | null;
+    } catch {
+      throw new Error("バックアップの内容を読み取れませんでした");
+    }
+    if (
+      !parsed
+      || typeof parsed !== "object"
+      || parsed.version !== 1
+      || !Array.isArray(parsed.projects)
+    ) {
+      throw new Error("バックアップの形式が正しくありません");
+    }
+
+    let projects: FilmProject[];
+    try {
+      projects = (parsed.projects as StoredFilmProject[]).map((project) =>
+        normalizeFilmProject(project, true));
+    } catch {
+      throw new Error("バックアップ内のプロジェクトを読み取れませんでした");
+    }
+    if (projects.length === 0) {
+      throw new Error("復元できるプロジェクトが入っていません");
+    }
+    const planningChatMessages = normalizeChatMessages(parsed.planningChatMessages);
+    const planningActive = parsed.planningActive === true && planningChatMessages.length > 0;
+    const ok = await writeToFile(
+      makeFileData(projects, planningChatMessages, planningActive),
+      // 過去の少ない件数へ戻す操作は意図的なので、激減ガードだけ明示解除する。
+      true,
+    );
+    if (!ok) throw new Error("バックアップを保存先へ書き戻せませんでした");
+
+    fileWriteUnlocked = true;
+    fileReadDecided = true;
+    pendingBeforeUnlock = false;
+    fileErrorToastShown = false;
+    set({
+      projects,
+      activeProjectId: planningActive ? null : (projects[0]?.id ?? null),
+      planningChatMessages,
+      filmProjectsFileState: "ok",
+      filmProjectsSaveError: null,
+    });
+    return projects.length;
   },
 
   createProject: (title, theme, videoServiceId, options) => {
@@ -551,7 +665,8 @@ export const useFilmProjectStore = create<FilmProjectState>((set, get) => ({
   },
 
   setPhase: (phase) => {
-    if (!Number.isInteger(phase) || phase < 1 || phase > 6) return;
+    // ⑤⑥は近日対応。未実装画面へ状態だけ進める経路も閉じておく。
+    if (!Number.isInteger(phase) || phase < 1 || phase > 4) return;
     const activeProjectId = get().activeProjectId;
     if (!activeProjectId) return;
     let changed = false;
@@ -674,6 +789,28 @@ export const useFilmProjectStore = create<FilmProjectState>((set, get) => ({
     return true;
   },
 
+  revokeStageApproval: (stage) => {
+    const activeProjectId = get().activeProjectId;
+    if (!activeProjectId) return false;
+    let revoked = false;
+    const projects = get().projects.map((sourceProject) => {
+      if (sourceProject.id !== activeProjectId) return sourceProject;
+      const project = normalizeFilmProject(sourceProject);
+      if (!project.approvals[stage]) return sourceProject;
+      revoked = true;
+      return touchProject({
+        ...project,
+        // 脚本工程の承認を外した後は②へ戻す。成果物本文は消さない。
+        phase: 2,
+        approvals: invalidateApprovalsFrom(project, stage),
+      });
+    });
+    if (!revoked) return false;
+    persistProjects(projects, get().planningChatMessages);
+    set({ projects });
+    return true;
+  },
+
   saveAssets: (assets) => {
     updateActiveDesign(get, set, (project) => {
       const currentById = new Map(project.assets.map((asset) => [asset.id, normalizeFilmAsset(asset)]));
@@ -698,23 +835,6 @@ export const useFilmProjectStore = create<FilmProjectState>((set, get) => ({
         asset.id === assetId ? normalizeFilmAsset(update(normalizeFilmAsset(asset))) : asset,
       ),
     }));
-  },
-
-  completeAssetFactory: () => {
-    const activeProjectId = get().activeProjectId;
-    if (!activeProjectId) return false;
-    let completed = false;
-    const projects = get().projects.map((sourceProject) => {
-      if (sourceProject.id !== activeProjectId) return sourceProject;
-      const project = normalizeFilmProject(sourceProject);
-      if (!getAssetFactoryGateState(project.assets).canProceed) return sourceProject;
-      completed = true;
-      return touchProject({ ...project, phase: 5 as const });
-    });
-    if (!completed) return false;
-    persistProjects(projects, get().planningChatMessages);
-    set({ projects });
-    return true;
   },
 
   saveForeshadow: (foreshadow) => {
@@ -775,6 +895,10 @@ export const useFilmProjectStore = create<FilmProjectState>((set, get) => ({
     return true;
   },
 }));
+
+reportSaveError = (error) => {
+  useFilmProjectStore.setState({ filmProjectsSaveError: error });
+};
 
 function updateActiveDesign(
   get: () => FilmProjectState,

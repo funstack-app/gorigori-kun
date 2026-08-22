@@ -68,6 +68,7 @@ function statusLabel(asset: FilmAsset): string {
   if (asset.status === "reviewed") return "検品済";
   if (asset.status === "generating" && asset.generatedImagePaths.length > 0) return "検品待ち";
   if (asset.status === "generating") return "生成中";
+  if (asset.status === "interrupted") return "中断されました";
   if (asset.status === "planned") return "起草済";
   return "未起草";
 }
@@ -96,6 +97,7 @@ function PromptEditor({
   const dirty = draft.trim() !== asset.promptDraft.trim();
   const mustRevise = needsPromptRevisionBeforeRegeneration(asset);
   const generating = asset.status === "generating" && asset.generatedImagePaths.length === 0;
+  const interrupted = asset.status === "interrupted";
 
   return (
     <div className="mt-4">
@@ -140,6 +142,11 @@ function PromptEditor({
           直さずに回し直しません。NG理由を文面へ反映して保存すると、再生成できます。
         </p>
       ) : null}
+      {interrupted ? (
+        <p className="mt-3 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs leading-5 text-amber-200">
+          前回の生成はアプリ終了などで中断されました。保存済みの文面から再試行できます。
+        </p>
+      ) : null}
       {!asset.locked && asset.promptDraft ? (
         <button
           type="button"
@@ -147,7 +154,7 @@ function PromptEditor({
           disabled={generationLocked || generating || mustRevise || dirty || asset.status === "reviewed"}
           className="mt-3 rounded-md bg-pink-500 px-4 py-2 text-xs font-semibold text-white transition hover:bg-pink-400 disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-400"
         >
-          {generating ? "3枚を生成中…" : "このアセットを3枚生成"}
+          {generating ? "3枚を生成中…" : interrupted ? "再試行" : "このアセットを3枚生成"}
         </button>
       ) : null}
     </div>
@@ -278,15 +285,26 @@ function StressTestSection({
         ))}
       </div>
 
-      {round.status === "idle" ? (
-        <button
-          type="button"
-          onClick={() => onRun(roundName)}
-          disabled={running || !canStartStressTest(asset, roundName)}
-          className="mt-4 rounded-md bg-pink-500 px-4 py-2 text-xs font-semibold text-white transition hover:bg-pink-400 disabled:bg-zinc-700 disabled:text-zinc-400"
-        >
-          {roundName === "extra" ? "追加5枚を生成" : "5枚を生成してテスト"}
-        </button>
+      {round.status === "idle" || round.status === "interrupted" ? (
+        <div className="mt-4">
+          {round.status === "interrupted" ? (
+            <p className="mb-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs leading-5 text-amber-200">
+              前回の5枚テストは中断されました。同じ条件から再試行できます。
+            </p>
+          ) : null}
+          <button
+            type="button"
+            onClick={() => onRun(roundName)}
+            disabled={running || !canStartStressTest(asset, roundName)}
+            className="rounded-md bg-pink-500 px-4 py-2 text-xs font-semibold text-white transition hover:bg-pink-400 disabled:bg-zinc-700 disabled:text-zinc-400"
+          >
+            {round.status === "interrupted"
+              ? "再試行"
+              : roundName === "extra"
+                ? "追加5枚を生成"
+                : "5枚を生成してテスト"}
+          </button>
+        </div>
       ) : null}
 
       {round.status === "generating" || running ? (
@@ -367,7 +385,6 @@ function StressTestSection({
 
 export function AssetFactoryPanel({ project }: { project: FilmProject }) {
   const updateAsset = useFilmProjectStore((state) => state.updateAssetFactoryAsset);
-  const completeFactory = useFilmProjectStore((state) => state.completeAssetFactory);
   const pushToast = useToasts((state) => state.push);
   const assets = useMemo(() => sortAssetsForFactory(project.assets), [project.assets]);
   const allDrafted = areAllAssetPromptsDrafted(project.assets);
@@ -693,15 +710,10 @@ export function AssetFactoryPanel({ project }: { project: FilmProject }) {
         ) : null}
         <button
           type="button"
-          onClick={() => {
-            if (!completeFactory()) {
-              pushToast({ kind: "warn", text: "主要アセットをすべてロックしてから進みます。", ttlMs: 5000 });
-            }
-          }}
-          disabled={!gate.canProceed}
+          disabled
           className="mt-4 rounded-md bg-emerald-500 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-400"
         >
-          ⑤生成へ進む
+          ⑤生成は近日対応（次のアップデート）
         </button>
       </section>
     </div>

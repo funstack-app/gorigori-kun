@@ -1,8 +1,12 @@
 import { useEffect, useState } from "react";
 
-import { getAssetFactoryGateState } from "../../../lib/film/assetFactory";
 import type { FilmPhase, FilmProject } from "../../../lib/film/types";
-import { useFilmProjectStore } from "../../../lib/store/filmProject";
+import {
+  useFilmProjectStore,
+  type FilmProjectBackup,
+  type FilmProjectBackupListResult,
+} from "../../../lib/store/filmProject";
+import { useToasts } from "../../../lib/store/toasts";
 import { AssetFactoryPanel } from "./AssetFactoryPanel";
 import { DesignPhasePanel } from "./DesignPhasePanel";
 import { FilmChatPanel } from "./FilmChatPanel";
@@ -57,7 +61,17 @@ function ProjectControls({
   onSwitch: (projectId: string) => void;
 }) {
   const projects = useFilmProjectStore((state) => state.projects);
+  const fileState = useFilmProjectStore((state) => state.filmProjectsFileState);
+  const saveError = useFilmProjectStore((state) => state.filmProjectsSaveError);
+  const listBackups = useFilmProjectStore((state) => state.listBackups);
+  const restoreFromBackup = useFilmProjectStore((state) => state.restoreFromBackup);
+  const pushToast = useToasts((state) => state.push);
   const [switcherOpen, setSwitcherOpen] = useState(false);
+  const [backupsOpen, setBackupsOpen] = useState(false);
+  const [backupsLoading, setBackupsLoading] = useState(false);
+  const [backups, setBackups] = useState<FilmProjectBackupListResult | null>(null);
+  const [restoringPath, setRestoringPath] = useState<string | null>(null);
+  const [restoreError, setRestoreError] = useState<string | null>(null);
 
   function restart() {
     const message = activeProject
@@ -65,6 +79,40 @@ function ProjectControls({
       : "いまの相談内容を閉じて、新しい企画として最初からやり直しますか？";
     if (!window.confirm(message)) return;
     onStartNew();
+  }
+
+  async function openBackups() {
+    setBackupsOpen(true);
+    setBackupsLoading(true);
+    setRestoreError(null);
+    setBackups(await listBackups());
+    setBackupsLoading(false);
+  }
+
+  async function restoreBackup(backup: FilmProjectBackup) {
+    const unsavedWarning = saveError || fileState === "corrupted" || fileState === "unreadable"
+      ? "\n\nまだ保存できていない画面内の変更はバックアップされず、復元内容に置き換わります。"
+      : "";
+    const confirmed = window.confirm(
+      `${new Date(backup.at).toLocaleString("ja-JP")} のバックアップ（${backup.count}件）へ復元します。\n\n現在の保存済み状態も、書き換え前に自動バックアップされます。${unsavedWarning}\n\n続けますか？`,
+    );
+    if (!confirmed) return;
+
+    setRestoringPath(backup.path);
+    setRestoreError(null);
+    try {
+      const count = await restoreFromBackup(backup.path);
+      setBackupsOpen(false);
+      pushToast({
+        kind: "success",
+        text: `バックアップからフィルム ${count}件を復元しました。`,
+        ttlMs: 4000,
+      });
+    } catch (error) {
+      setRestoreError(String(error));
+    } finally {
+      setRestoringPath(null);
+    }
   }
 
   return (
@@ -127,6 +175,102 @@ function ProjectControls({
           </div>
         ) : null}
       </div>
+      <div className="relative">
+        <button
+          type="button"
+          onClick={() => {
+            if (backupsOpen) setBackupsOpen(false);
+            else void openBackups();
+          }}
+          aria-expanded={backupsOpen}
+          className="rounded-md border border-[#343434] bg-[#161616] px-3 py-2 text-xs font-semibold text-zinc-300 transition hover:border-pink-500/40 hover:text-pink-200"
+        >
+          バックアップから復元
+        </button>
+        {backupsOpen ? (
+          <div className="absolute right-0 z-30 mt-2 w-96 overflow-hidden rounded-lg border border-[#343434] bg-[#181818] shadow-2xl">
+            <div className="flex items-center justify-between border-b border-[#2a2a2a] px-3 py-2">
+              <div>
+                <p className="text-xs font-semibold text-zinc-200">復元する時点を選ぶ</p>
+                <p className="mt-0.5 text-[10px] text-zinc-500">新しい順・日時と件数を表示</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setBackupsOpen(false)}
+                className="text-[11px] text-zinc-500 hover:text-zinc-200"
+              >
+                閉じる
+              </button>
+            </div>
+            <div className="max-h-80 overflow-y-auto p-2">
+              {backupsLoading ? (
+                <p className="px-2 py-3 text-xs text-zinc-500">バックアップを確認しています…</p>
+              ) : backups?.ok ? (
+                backups.items.length > 0 ? (
+                  <ul className="space-y-1.5">
+                    {backups.items.map((backup) => (
+                      <li
+                        key={backup.path}
+                        className="flex items-center justify-between gap-3 rounded-md bg-[#121212] px-3 py-2"
+                      >
+                        <div className="min-w-0">
+                          <p className="text-xs text-zinc-200">
+                            {new Date(backup.at).toLocaleString("ja-JP")}
+                          </p>
+                          <p className="mt-0.5 text-[10px] text-zinc-500">
+                            フィルム {backup.count}件
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          disabled={restoringPath !== null}
+                          onClick={() => void restoreBackup(backup)}
+                          className="shrink-0 rounded-md border border-[#3a3a3a] px-2.5 py-1.5 text-[11px] font-semibold text-zinc-200 disabled:opacity-40"
+                        >
+                          {restoringPath === backup.path ? "復元中…" : "これで復元"}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="px-2 py-3 text-xs text-zinc-500">
+                    まだバックアップがありません。保存のたびに自動で作られます。
+                  </p>
+                )
+              ) : (
+                <div className="px-2 py-2 text-xs text-amber-200">
+                  <p>バックアップ一覧を取得できませんでした。保存先を確認して再試行してください。</p>
+                  {backups && !backups.ok ? (
+                    <details className="mt-2 text-[10px] text-zinc-500">
+                      <summary className="cursor-pointer">詳しい内容</summary>
+                      <p className="mt-1 break-all">{backups.error}</p>
+                    </details>
+                  ) : null}
+                  <button
+                    type="button"
+                    onClick={() => void openBackups()}
+                    className="mt-2 rounded-md border border-amber-500/40 px-2.5 py-1.5 text-[11px] font-semibold"
+                  >
+                    再試行
+                  </button>
+                </div>
+              )}
+              {restoreError ? (
+                <div className="mt-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+                  <p>復元できませんでした。保存先を確認して、もう一度お試しください。</p>
+                  <details className="mt-1 text-[10px] text-zinc-500">
+                    <summary className="cursor-pointer">詳しい内容</summary>
+                    <p className="mt-1 break-all">{restoreError}</p>
+                  </details>
+                </div>
+              ) : null}
+              <p className="px-2 pb-1 pt-2 text-[10px] leading-4 text-zinc-500">
+                復元直前の現在の保存済み状態も自動バックアップされるので、あとから戻せます。
+              </p>
+            </div>
+          </div>
+        ) : null}
+      </div>
       <button
         type="button"
         onClick={restart}
@@ -172,17 +316,18 @@ export function FilmWorkspace() {
   const projects = useFilmProjectStore((state) => state.projects);
   const activeProjectId = useFilmProjectStore((state) => state.activeProjectId);
   const fileState = useFilmProjectStore((state) => state.filmProjectsFileState);
+  const saveError = useFilmProjectStore((state) => state.filmProjectsSaveError);
+  const retrySave = useFilmProjectStore((state) => state.retrySave);
   const setActiveProjectId = useFilmProjectStore((state) => state.setActiveProjectId);
   const resetPlanningChat = useFilmProjectStore((state) => state.resetPlanningChat);
   const setPhase = useFilmProjectStore((state) => state.setPhase);
+  const pushToast = useToasts((state) => state.push);
   const activeProject = projects.find((project) => project.id === activeProjectId) ?? null;
   const [ready, setReady] = useState(false);
   const [showScriptReview, setShowScriptReview] = useState(false);
   const [showEarlyChat, setShowEarlyChat] = useState(false);
+  const [retryingSave, setRetryingSave] = useState(false);
   const phase = activeProject?.phase ?? 1;
-  const canEnterLaterPhases = activeProject
-    ? getAssetFactoryGateState(activeProject.assets).canProceed
-    : false;
 
   useEffect(() => {
     let active = true;
@@ -214,11 +359,20 @@ export function FilmWorkspace() {
 
   function phaseEnabled(candidate: FilmPhase): boolean {
     if (!activeProject) return candidate === 1;
-    if (candidate <= activeProject.phase) return true;
-    if (candidate === 2) return true;
+    if (candidate === 1 || candidate === 2) return true;
     if (candidate === 3) return Boolean(activeProject.approvals.blocks);
     if (candidate === 4) return Boolean(activeProject.approvals.look);
-    return canEnterLaterPhases;
+    // ⑤⑥は未実装。完了条件を満たしていても偽の画面へ進ませない。
+    return false;
+  }
+
+  async function retryFailedSave() {
+    setRetryingSave(true);
+    const ok = await retrySave();
+    setRetryingSave(false);
+    if (ok) {
+      pushToast({ kind: "success", text: "フィルムの変更を保存できました。", ttlMs: 3000 });
+    }
   }
 
   function selectPhase(nextPhase: FilmPhase) {
@@ -265,9 +419,31 @@ export function FilmWorkspace() {
           isEnabled={phaseEnabled}
         />
         <main className="relative min-h-0 flex-1 overflow-y-auto px-8 py-6">
+          {saveError ? (
+            <div className="mx-auto mb-4 flex max-w-5xl flex-wrap items-center gap-3 rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-100">
+              <div className="min-w-0 flex-1">
+                <p className="font-semibold">フィルムの変更をまだ保存できていません。</p>
+                <p className="mt-1 text-xs leading-5 text-red-200/80">
+                  画面内の内容は残っています。保存先を確認して、もう一度保存してください。
+                </p>
+                <details className="mt-1 text-[10px] text-zinc-500">
+                  <summary className="cursor-pointer">詳しい内容</summary>
+                  <p className="mt-1 break-all">{saveError}</p>
+                </details>
+              </div>
+              <button
+                type="button"
+                disabled={retryingSave}
+                onClick={() => void retryFailedSave()}
+                className="rounded-md bg-red-500 px-3 py-2 text-xs font-semibold text-white transition hover:bg-red-400 disabled:opacity-50"
+              >
+                {retryingSave ? "保存中…" : "再試行"}
+              </button>
+            </div>
+          ) : null}
           {(fileState === "corrupted" || fileState === "unreadable") ? (
             <div className="mx-auto mb-4 max-w-5xl rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
-              保存ファイルを安全に読み込めなかったため、いまは正本への保存を止めています。
+              保存ファイルを安全に読み込めなかったため、いまは正本への保存を止めています。上の「バックアップから復元」から過去の状態を選べます。
             </div>
           ) : null}
 

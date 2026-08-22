@@ -63,6 +63,7 @@ export type AssetLedgerStatus =
   | "unplanned"
   | "planned"
   | "generating"
+  | "interrupted"
   | "reviewed"
   | "locked";
 
@@ -71,6 +72,7 @@ export type FilmAssetStressVerdict = "pass" | "fail" | null;
 export type FilmAssetStressRoundStatus =
   | "idle"
   | "generating"
+  | "interrupted"
   | "review"
   | "passed"
   | "failed";
