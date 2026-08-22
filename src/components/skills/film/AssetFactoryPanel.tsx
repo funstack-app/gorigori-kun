@@ -58,6 +58,55 @@ const IMPORTANCE_LABELS: Record<AssetImportance, string> = {
   background: "背景",
 };
 
+/**
+ * 検品用の拡大表示。クリックで全画面、もう一度クリックか Esc で閉じる。
+ * STΛCK実機FB 2026-08-22:「拡大できないので検品がやりづらい」への対応。
+ */
+function ZoomableImage({
+  path,
+  alt,
+  className,
+  onZoom,
+}: {
+  path: string;
+  alt: string;
+  className: string;
+  onZoom: (path: string) => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => onZoom(path)}
+      className="block w-full cursor-zoom-in"
+      title="クリックで拡大"
+    >
+      <SafeImage path={path} alt={alt} className={className} />
+    </button>
+  );
+}
+
+function ImageZoomOverlay({ path, onClose }: { path: string; onClose: () => void }) {
+  useEffect(() => {
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", handleEscape);
+    return () => window.removeEventListener("keydown", handleEscape);
+  }, [onClose]);
+  return (
+    <div
+      className="fixed inset-0 z-[80] flex cursor-zoom-out flex-col items-center justify-center gap-2 bg-black/90 p-6"
+      onClick={onClose}
+      role="dialog"
+      aria-modal="true"
+      aria-label="画像の拡大表示"
+    >
+      <SafeImage path={path} alt="拡大表示" className="max-h-[85vh] w-auto max-w-full object-contain" />
+      <p className="text-xs text-zinc-400">{basename(path)}（クリックか Esc で閉じる）</p>
+    </div>
+  );
+}
+
 function basename(path: string): string {
   const parts = path.split(/[\\/]/u);
   return parts[parts.length - 1] || path;
@@ -165,10 +214,12 @@ function CandidateReview({
   asset,
   onAdopt,
   onReject,
+  onZoom,
 }: {
   asset: FilmAsset;
   onAdopt: (path: string) => void;
   onReject: (note: string) => void;
+  onZoom: (path: string) => void;
 }) {
   const [ngNote, setNgNote] = useState("");
   if (asset.status !== "generating" || asset.generatedImagePaths.length === 0) return null;
@@ -184,7 +235,7 @@ function CandidateReview({
       <div className="mt-3 grid gap-3 md:grid-cols-3">
         {asset.generatedImagePaths.map((path, index) => (
           <article key={path} className="overflow-hidden rounded-lg border border-[#303030] bg-[#111111]">
-            <SafeImage path={path} alt={`${asset.name} 候補${index + 1}`} className="aspect-video w-full bg-black object-contain" />
+            <ZoomableImage path={path} alt={`${asset.name} 候補${index + 1}`} className="aspect-video w-full bg-black object-contain" onZoom={onZoom} />
             <div className="p-3">
               <p className="truncate text-[11px] text-zinc-500">{basename(path)}</p>
               <button
@@ -235,6 +286,7 @@ function StressTestSection({
   onVerdict,
   onEvaluate,
   onChooseExtra,
+  onZoom,
 }: {
   asset: FilmAsset;
   running: boolean;
@@ -243,6 +295,7 @@ function StressTestSection({
   onVerdict: (round: "primary" | "extra", index: number, verdict: "pass" | "fail") => void;
   onEvaluate: (round: "primary" | "extra") => void;
   onChooseExtra: (decision: "run" | "skip") => void;
+  onZoom: (path: string) => void;
 }) {
   const stress = asset.stressTest;
   if (asset.type !== "character" || !asset.canonicalImagePath || !stress || asset.locked) return null;
@@ -320,7 +373,7 @@ function StressTestSection({
             const verdict = round.verdicts[index];
             return (
               <article key={path} className="overflow-hidden rounded-lg border border-[#303030] bg-[#101010]">
-                <SafeImage path={path} alt={`${stress.conditions[index]}のテスト`} className="aspect-video w-full bg-black object-contain" />
+                <ZoomableImage path={path} alt={`${stress.conditions[index]}のテスト`} className="aspect-video w-full bg-black object-contain" onZoom={onZoom} />
                 <div className="p-2">
                   <p className="truncate text-[11px] font-semibold text-zinc-300">{stress.conditions[index]}</p>
                   <div className="mt-2 grid grid-cols-2 gap-1">
@@ -393,6 +446,7 @@ export function AssetFactoryPanel({ project }: { project: FilmProject }) {
   const [draftingAll, setDraftingAll] = useState(false);
   const [draftProgress, setDraftProgress] = useState<FilmTextTurnProgress>();
   const [stressRunningAssetId, setStressRunningAssetId] = useState<string | null>(null);
+  const [zoomPath, setZoomPath] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => () => abortRef.current?.abort(), []);
@@ -632,6 +686,7 @@ export function AssetFactoryPanel({ project }: { project: FilmProject }) {
 
               <CandidateReview
                 asset={asset}
+                onZoom={setZoomPath}
                 onAdopt={(path) => {
                   persist(asset.id, (current) => adoptAssetCandidate(current, path));
                   pushToast({
@@ -652,7 +707,7 @@ export function AssetFactoryPanel({ project }: { project: FilmProject }) {
                 <section className="mt-5 rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-4">
                   <h4 className="text-xs font-semibold text-emerald-200">採用画像</h4>
                   <div className="mt-3 grid gap-3 md:grid-cols-[minmax(0,320px)_1fr]">
-                    <SafeImage path={asset.canonicalImagePath} alt={`${asset.name}の採用画像`} className="aspect-video w-full rounded-lg bg-black object-contain" />
+                    <ZoomableImage path={asset.canonicalImagePath} alt={`${asset.name}の採用画像`} className="aspect-video w-full rounded-lg bg-black object-contain" onZoom={setZoomPath} />
                     <div>
                       <p className="break-all text-xs text-zinc-400">{basename(asset.canonicalImagePath)}</p>
                       {asset.locked ? (
@@ -669,6 +724,7 @@ export function AssetFactoryPanel({ project }: { project: FilmProject }) {
 
               <StressTestSection
                 asset={asset}
+                onZoom={setZoomPath}
                 running={stressRunningAssetId === asset.id}
                 onUpdateConditions={(conditions) => persist(asset.id, (current) => updateStressConditions(current, conditions))}
                 onRun={(round) => void runStress(asset, round)}
@@ -716,6 +772,7 @@ export function AssetFactoryPanel({ project }: { project: FilmProject }) {
           ⑤生成は近日対応（次のアップデート）
         </button>
       </section>
+      {zoomPath ? <ImageZoomOverlay path={zoomPath} onClose={() => setZoomPath(null)} /> : null}
     </div>
   );
 }
