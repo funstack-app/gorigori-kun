@@ -10,12 +10,11 @@ export type RemoteMcpProviderCatalogEntry = {
     | "pollo"
     | "topview";
   label: string;
-  description: string;
+  /** サービスが何をしてくれるかの1行（説明の長文は置かない。2026-08-22 STΛCK指定）。 */
   capabilities: string;
+  /** 名前の横に出す短い注記バッジ（未検証・プラン条件など）。 */
+  note?: string;
 };
-
-const CONNECTION_NOTE =
-  "接続すると GORI のAIエージェント経路からこのサービスのツールを利用できます（専用の生成UIは今後追加）。";
 
 /**
  * 段階1のリモート MCP 表示カタログ。
@@ -25,55 +24,48 @@ export const REMOTE_MCP_PROVIDERS: readonly RemoteMcpProviderCatalogEntry[] = [
   {
     id: "krea",
     label: "Krea",
-    description: CONNECTION_NOTE,
-    capabilities: "画像・動画生成サービスとの連携",
+    capabilities: "画像・動画生成（多モデル集約）",
   },
   {
     id: "runway",
     label: "Runway",
-    description: CONNECTION_NOTE,
-    capabilities: "画像・動画生成サービスとの連携",
+    capabilities: "画像・動画生成",
   },
   {
     id: "bfl",
     label: "Black Forest Labs",
-    description: CONNECTION_NOTE,
-    capabilities: "FLUX系の画像・動画生成サービスとの連携",
+    capabilities: "FLUX系の画像・動画生成",
   },
   {
     id: "ideogram",
     label: "Ideogram",
-    description: CONNECTION_NOTE,
-    capabilities: "画像生成・編集サービスとの連携",
+    capabilities: "画像生成・編集",
   },
   {
     id: "openart",
     label: "OpenArt",
-    description: CONNECTION_NOTE,
-    capabilities: "画像・動画生成、編集サービスとの連携",
+    capabilities: "画像・動画生成、編集",
   },
   {
     id: "pika",
     label: "Pika",
-    description: CONNECTION_NOTE,
-    capabilities: "動画・画像・音声サービスとの連携",
+    capabilities: "動画・画像・音声生成",
   },
   {
     id: "kling",
     label: "Kling AI",
-    description: `${CONNECTION_NOTE} 接続は実験的です（動作未検証）。`,
-    capabilities: "画像・動画生成サービスとの連携",
+    capabilities: "画像・動画生成",
+    note: "動作未検証",
   },
   {
     id: "pollo",
     label: "Pollo AI",
-    description: CONNECTION_NOTE,
-    capabilities: "多モデル集約の画像・動画生成サービスとの連携",
+    capabilities: "画像・動画生成（多モデル集約）",
   },
   {
     id: "topview",
     label: "TopView",
-    description: `${CONNECTION_NOTE} MCP利用可否はプランにより異なります。`,
-    capabilities: "広告・SNS向けの動画・画像生成サービスとの連携",
+    capabilities: "広告・SNS向けの動画・画像生成",
+    note: "プランによる",
   },
 ];

@@ -19,6 +19,13 @@ import { useToasts } from "../lib/store/toasts";
 import { ProviderIcon } from "./ProviderIcon";
 
 const PRIMARY_BUTTON = "rounded-md bg-pink-500 font-bold text-white hover:bg-pink-600";
+/**
+ * 接続カードの共通コンテナ (2026-08-22 STΛCK指定)。
+ * カード本体は他のカードと同じ黒。ピンクはボタンのみ。min-h と justify-between で
+ * テキスト量が違ってもボタンの縦位置が全カードで揃う。
+ */
+const PROVIDER_CARD =
+  "flex min-h-36 flex-col justify-between gap-3 rounded-xl border border-[#2a2a2a] bg-[#151515] p-3";
 const MUTED_BUTTON =
   "rounded-md border border-[#343434] bg-[#1e1e1e] font-bold text-neutral-300 hover:border-[#555] hover:text-white";
 
@@ -701,12 +708,12 @@ function HiggsfieldConnectionCard() {
   };
 
   return (
-    <div className="space-y-3 rounded-xl border border-pink-400/30 bg-pink-500/5 p-3">
+    <div className={PROVIDER_CARD}>
       <div className="flex items-center gap-2">
         <ProviderIcon id="higgsfield" />
         <div className="flex-1">
           <div className="flex items-center gap-2">
-            <p className="text-sm font-black text-pink-100">HiggsField</p>
+            <p className="text-sm font-black text-white">HiggsField</p>
             {authed && (
               <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-black text-emerald-200">
                 接続済み
@@ -840,12 +847,12 @@ function MagnificConnectionCard() {
   };
 
   return (
-    <div className="space-y-3 rounded-xl border border-pink-400/30 bg-pink-500/5 p-3">
+    <div className={PROVIDER_CARD}>
       <div className="flex items-center gap-2">
         <ProviderIcon id="magnific" />
         <div className="flex-1">
           <div className="flex items-center gap-2">
-            <p className="text-sm font-black text-pink-100">Magnific</p>
+            <p className="text-sm font-black text-white">Magnific</p>
             {authed && (
               <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-black text-emerald-200">
                 接続済み
@@ -984,23 +991,25 @@ function RemoteMcpConnectionCard({
   };
 
   return (
-    <div className="space-y-3 rounded-xl border border-pink-400/30 bg-pink-500/5 p-3">
+    <div className={PROVIDER_CARD}>
       <div className="flex items-start gap-2">
         <ProviderIcon id={provider.id} />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
-            <p className="text-sm font-black text-pink-100">{provider.label}</p>
+            <p className="text-sm font-black text-white">{provider.label}</p>
             {authed && (
               <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-black text-emerald-200">
                 接続済み
               </span>
             )}
+            {provider.note && (
+              <span className="rounded-full bg-neutral-500/15 px-2 py-0.5 text-[10px] font-black text-neutral-400">
+                {provider.note}
+              </span>
+            )}
           </div>
-          <p className="mt-0.5 text-[11px] font-bold text-neutral-300">
+          <p className="mt-0.5 text-[11px] text-neutral-400">
             {provider.capabilities}
-          </p>
-          <p className="mt-1 text-[11px] leading-relaxed text-neutral-500">
-            {provider.description}
           </p>
         </div>
       </div>
