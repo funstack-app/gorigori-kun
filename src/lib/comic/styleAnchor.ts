@@ -4,6 +4,26 @@ import {
 } from "./references";
 import type { ComicEnvReference } from "./types";
 
+/** あらすじ未入力中だけ使う一時的な作品ID。 */
+export const COMIC_STYLE_ANCHOR_DRAFT_STORY_ID = "__draft__";
+
+/**
+ * あらすじから、画風のお手本を作品単位で保存するための安定IDを作る。
+ * 空白の違いだけなら同じ作品として扱い、本文そのものは保存キーへ露出しない。
+ */
+export function comicStyleAnchorStoryId(synopsis: string): string {
+  const normalized = synopsis.trim().replace(/\s+/g, " ");
+  if (!normalized) return COMIC_STYLE_ANCHOR_DRAFT_STORY_ID;
+  let first = 0x811c9dc5;
+  let second = 0x9e3779b9;
+  for (let index = 0; index < normalized.length; index += 1) {
+    const code = normalized.charCodeAt(index);
+    first = Math.imul(first ^ code, 0x01000193) >>> 0;
+    second = Math.imul(second ^ code, 0x85ebca6b) >>> 0;
+  }
+  return `story-${normalized.length.toString(36)}-${first.toString(36)}-${second.toString(36)}`;
+}
+
 /**
  * ページ丸ごと生成で使う参照画像の総上限。
  *

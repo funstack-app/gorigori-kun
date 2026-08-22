@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -6,6 +8,7 @@ import {
   comicStyleAnchorMatchClause,
 } from "../src/lib/comic/prompts";
 import {
+  comicStyleAnchorStoryId,
   MAX_COMIC_PAGE_REFERENCE_IMAGES,
   planStyleAnchoredReferences,
 } from "../src/lib/comic/styleAnchor";
@@ -15,10 +18,13 @@ import type {
   ComicPanel,
 } from "../src/lib/comic/types";
 import {
+  activateComicStyleAnchorStory,
+  COMIC_WORK_STYLE_ANCHORS_KEY,
   COMIC_WORK_STYLE_STORE_FILE,
   COMIC_WORK_STYLE_STORE_KEY,
   DEFAULT_COMIC_WORK_STYLE,
   parseComicWorkStyle,
+  parseComicWorkStyleStorage,
 } from "../src/lib/store/comicRun";
 
 const panel: ComicPanel = {
@@ -138,5 +144,78 @@ describe("作品の画風のお手本", () => {
     });
     expect(COMIC_WORK_STYLE_STORE_FILE).toBe("comic-run.json");
     expect(COMIC_WORK_STYLE_STORE_KEY).toBe("workStyle");
+  });
+
+  it("お手本の保存IDは空白差を吸収し、別の話は別IDにする", () => {
+    expect(comicStyleAnchorStoryId("  月で餅をつく話\n")).toBe(
+      comicStyleAnchorStoryId("月で餅をつく話"),
+    );
+    expect(comicStyleAnchorStoryId("月で餅をつく話")).not.toBe(
+      comicStyleAnchorStoryId("海で餅をつく話"),
+    );
+  });
+
+  it("旧共有お手本は最初の作品へ一度だけ移し、次の作品へ漏らさない", () => {
+    const legacy = parseComicWorkStyleStorage({
+      colorMode: "mono",
+      styleText: "",
+      styleAnchorImagePath: "/managed/legacy-style.png",
+    });
+    expect(legacy.ok).toBe(true);
+    if (!legacy.ok) return;
+
+    const storyA = activateComicStyleAnchorStory(legacy.value, "story-a");
+    expect(storyA.styleAnchorImagePath).toBe("/managed/legacy-style.png");
+    expect(storyA.storage.styleAnchorImagePath).toBeNull();
+    expect(storyA.storage.styleAnchorImagePathsByStory).toEqual({
+      "story-a": "/managed/legacy-style.png",
+    });
+
+    const storyB = activateComicStyleAnchorStory(storyA.storage, "story-b");
+    expect(storyB.styleAnchorImagePath).toBeNull();
+    expect(storyB.storage.styleAnchorImagePathsByStory).toEqual({
+      "story-a": "/managed/legacy-style.png",
+    });
+    expect(COMIC_WORK_STYLE_ANCHORS_KEY).toBe("styleAnchorImagePathsByStory");
+  });
+
+  it("新形式は作品ごとのお手本一覧をそのまま読む", () => {
+    const parsed = parseComicWorkStyleStorage({
+      colorMode: "color",
+      styleText: "やわらかい線",
+      styleAnchorImagePath: null,
+      styleAnchorImagePathsByStory: {
+        "story-a": "/managed/a.png",
+        "story-b": "/managed/b.png",
+      },
+    });
+
+    expect(parsed).toEqual({
+      ok: true,
+      value: {
+        colorMode: "color",
+        styleText: "やわらかい線",
+        styleAnchorImagePath: null,
+        styleAnchorImagePathsByStory: {
+          "story-a": "/managed/a.png",
+          "story-b": "/managed/b.png",
+        },
+      },
+    });
+  });
+
+  it("自動設定は先頭ページ番号ではなく、最初の保存・採用を受け付ける", () => {
+    const source = readFileSync(
+      resolve("src/components/skills/comic/ComicWorkspace.tsx"),
+      "utf8",
+    );
+    const start = source.indexOf("const ensureAutomaticStyleAnchor");
+    const end = source.indexOf("const clearStyleAnchor", start);
+    const functionSource = source.slice(start, end);
+
+    expect(source).toContain("人が最初に保存・採用したページ");
+    expect(functionSource).toContain("automaticStyleAnchorRef.current");
+    expect(functionSource).not.toContain("storyPagesRef.current[0]");
+    expect(functionSource).not.toContain("pageNo !==");
   });
 });

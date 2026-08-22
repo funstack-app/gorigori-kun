@@ -7,6 +7,7 @@ import {
 import { useComposer } from "../lib/store/composer";
 import { useImagePreview } from "../lib/store/imagePreview";
 import {
+  galleryItemMediaType,
   useImages,
   type GalleryItem,
   type Judgement,
@@ -370,6 +371,7 @@ export function buildGalleryItemMenu(
   },
 ): ContextMenuItem[] {
   const isFav = ctx.favorites.has(item.path);
+  const isImage = galleryItemMediaType(item) === "image";
   const cwd = useThreads.getState().cwd;
   // ctx.judgement 省略時は store から現在値を引く (candidate = undefined)。
   const judgement =
@@ -397,44 +399,44 @@ export function buildGalleryItemMenu(
       onClick: () =>
         useImagePreview.getState().open(item.path, ctx.previewSiblings),
     },
-    {
-      /*
-       * 編集タブ (編集スタジオ) への入口。ギャラリーから1手で編集へ入れる。
-       *
-       * ここで openImageForEditing を直接呼べないのは、非アクティブタブの
-       * EditWorkspace がアンマウントされている (GenerationWorkspace が activeTab で
-       * 出し分ける) ため。予約 (pendingOpenPath) を置いてタブを切り替え、
-       * マウントされた EditWorkspace 側に開かせる。
-       */
-      label: "編集スタジオで開く",
-      icon: "S",
-      onClick: () => {
-        useEditor.getState().setPendingOpenPath(item.path);
-        useWorkspace.getState().setActiveTab("edit");
-      },
-    },
-    {
-      label: "マスクで編集",
-      icon: "M",
-      onClick: () =>
-        useMaskEditor.getState().open({ path: item.path, name: item.name }),
-    },
-    {
-      label: "背景を透過 (Vision)",
-      icon: "B",
-      onClick: () => {
-        void useImages.getState().removeBackground(item.path);
-      },
-    },
-    {
-      // W2-2: SNS 用リサイズ書き出し。単一画像を対象に、各 SNS 推奨サイズへ
-      // 一括リサイズするモーダルを開く。useMaskEditor と同じく store 経由で開く。
-      label: "SNS用に書き出し…",
-      icon: "E",
-      onClick: () => useSnsExport.getState().open([item.path]),
-    },
   ];
-  if (ctx.onRegisterPreset) {
+  if (isImage) {
+    menu.push(
+      {
+        /*
+         * 編集タブ (編集スタジオ) への入口。ギャラリーから1手で編集へ入れる。
+         * 動画は編集スタジオの入力にできないため、画像だけに表示する。
+         */
+        label: "編集スタジオで開く",
+        icon: "S",
+        onClick: () => {
+          useEditor.getState().setPendingOpenPath(item.path);
+          useWorkspace.getState().setActiveTab("edit");
+        },
+      },
+      {
+        label: "マスクで編集",
+        icon: "M",
+        onClick: () =>
+          useMaskEditor.getState().open({ path: item.path, name: item.name }),
+      },
+      {
+        label: "背景を透過 (Vision)",
+        icon: "B",
+        onClick: () => {
+          void useImages.getState().removeBackground(item.path);
+        },
+      },
+      {
+        // W2-2: SNS 用リサイズ書き出し。単一画像を対象に、各 SNS 推奨サイズへ
+        // 一括リサイズするモーダルを開く。useMaskEditor と同じく store 経由で開く。
+        label: "SNS用に書き出し…",
+        icon: "E",
+        onClick: () => useSnsExport.getState().open([item.path]),
+      },
+    );
+  }
+  if (isImage && ctx.onRegisterPreset) {
     menu.push({
       label: "プリセットに登録…",
       icon: "P",

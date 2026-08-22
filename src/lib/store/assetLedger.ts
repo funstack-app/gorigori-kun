@@ -9,6 +9,18 @@ import {
 import type { AssetType, FilmAsset } from "../film/types";
 import { presetKind, usePresets, type Preset } from "./presets";
 
+/** アセット種類の表示順と名前。登録・呼び出しの両画面で同じ一覧を使う。 */
+export const ASSET_LEDGER_TYPE_OPTIONS: ReadonlyArray<{
+  value: AssetLedgerType;
+  label: string;
+}> = [
+  { value: "character", label: "キャラ" },
+  { value: "scene", label: "シーン" },
+  { value: "look", label: "ルック" },
+  { value: "prop", label: "小物" },
+  { value: "custom", label: "その他" },
+];
+
 export type AssetLedgerState = {
   assets: AssetLedgerEntry[];
   loading: boolean;

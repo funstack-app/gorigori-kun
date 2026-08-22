@@ -70,6 +70,37 @@ describe("remote MCP model catalog", () => {
     );
   });
 
+  it("開始画像が必須のimage_to_videoは動画生成に残し、元動画必須の編集は除外する", () => {
+    const imageToVideo = tool("image_to_video", {}, {
+      inputSchemaJson: JSON.stringify({
+        type: "object",
+        properties: {
+          prompt: { type: "string" },
+          start_image: { type: "string" },
+        },
+        required: ["prompt", "start_image"],
+      }),
+    });
+    const videoToVideo = tool("video_to_video", {}, {
+      inputSchemaJson: JSON.stringify({
+        type: "object",
+        properties: {
+          prompt: { type: "string" },
+          source_video: { type: "string" },
+        },
+        required: ["prompt", "source_video"],
+      }),
+    });
+
+    expect(selectPrimaryRemoteMcpGenerationTool([imageToVideo], "video")?.name).toBe(
+      "image_to_video",
+    );
+    expect(selectPrimaryRemoteMcpGenerationTool([videoToVideo], "video")).toBeNull();
+    expect(classifyRemoteMcpModel({ id: "i2v-kind", name: "I2V Kind" })).toBe(
+      "video",
+    );
+  });
+
   it("Krea型のモデル情報ツールを説明と実名から選ぶ", () => {
     const selected = findRemoteMcpModelInfoTool([
       tool("list_models"),

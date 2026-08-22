@@ -9,7 +9,11 @@ import { useImagePreview } from "../../../lib/store/imagePreview";
 import { useToasts } from "../../../lib/store/toasts";
 import { useSceneRecreateRun } from "../../../lib/store/sceneRecreateRun";
 import { usePresets, presetKind, type Preset } from "../../../lib/store/presets";
-import { composePresetPrompt } from "../../../lib/presets/character";
+import { useComposer, type Reference } from "../../../lib/store/composer";
+import {
+  composePresetPrompt,
+  selectCharacterReferences,
+} from "../../../lib/presets/character";
 import { analyzeScene } from "../../../lib/sceneRecreate/analyze";
 import { sendShotsToScene3d } from "../../../lib/sceneRecreate/toScene3dCameras";
 import {
@@ -637,6 +641,24 @@ function RecreatePanel({
     [characterPresets, selectedId],
   );
 
+  const selectCharacter = (nextId: string) => {
+    const composer = useComposer.getState();
+    if (selected) {
+      composer.removeReferenceGroup(`scene-recreate-character:${selected.id}`);
+    }
+    const next = characterPresets.find((preset) => preset.id === nextId);
+    if (next) {
+      const references = selectCharacterReferences(next).map((reference) => ({
+        ...reference,
+        groupId: `scene-recreate-character:${next.id}`,
+        groupLabel: next.name.trim() || "キャラ",
+      }));
+      composer.addReferences(references as Reference[]);
+    }
+    setSelectedId(nextId);
+  };
+
+  // キャラ型の文章は足さず、見た目は上で制作処理へ渡した画像参照だけに任せる。
   const subjectPrompt = selected ? composePresetPrompt(selected, " / ") : "";
 
   const recreatePrompts: RecreateShotPrompt[] = useMemo(
@@ -706,14 +728,14 @@ function RecreatePanel({
         </button>
       </div>
       <p className="mb-3 text-[11px] text-neutral-500">
-        キャラ型プリセットを選ぶと、上のショット割りをそのまま再現する
-        プロンプトをショットごとに生成します。
+        キャラ型プリセットを選ぶと、画像を制作処理の参照に渡します。
+        キャラの説明文は自動で足しません。
       </p>
 
       <div className="mb-3">
         <select
           value={selectedId}
-          onChange={(e) => setSelectedId(e.target.value)}
+          onChange={(e) => selectCharacter(e.target.value)}
           className="w-full rounded-lg border border-[#2a2a2a] bg-[#0d0d0d] px-3 py-2 text-[13px] text-neutral-200 focus:border-pink-400/60 focus:outline-none"
         >
           <option value="">被写体プリセットを選ぶ(任意)</option>

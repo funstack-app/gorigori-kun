@@ -1,7 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { AssetLedgerEntry, AssetLedgerType } from "../lib/ipc";
-import { useAssetLedger } from "../lib/store/assetLedger";
+import {
+  ASSET_LEDGER_TYPE_OPTIONS,
+  useAssetLedger,
+} from "../lib/store/assetLedger";
 import { useComposer, type ReferenceRole } from "../lib/store/composer";
 import {
   focusToImageStyle,
@@ -41,17 +44,7 @@ type Props = {
 type CategoryFilter = string | null | "_fav" | "_uncat";
 
 export type PresetPickerSection = "asset" | "prompt";
-export type PresetPickerAssetType = Extract<
-  AssetLedgerType,
-  "character" | "scene" | "look" | "prop"
->;
-
-const ASSET_TYPES: Array<{ type: PresetPickerAssetType; label: string }> = [
-  { type: "character", label: "キャラ" },
-  { type: "scene", label: "シーン" },
-  { type: "look", label: "ルック" },
-  { type: "prop", label: "小物" },
-];
+export type PresetPickerAssetType = (typeof ASSET_LEDGER_TYPE_OPTIONS)[number]["value"];
 
 const VIDEO_PATH_PATTERN = /\.(?:mp4|mov|m4v|webm|avi|mkv)(?:[?#].*)?$/i;
 
@@ -304,7 +297,7 @@ export function PresetPickerPopover({ open, onClose, onPick, anchorRect }: Props
 
   const assetTypeCounts = useMemo(() => {
     const countsByType = new Map<PresetPickerAssetType, number>();
-    for (const item of ASSET_TYPES) countsByType.set(item.type, 0);
+    for (const item of ASSET_LEDGER_TYPE_OPTIONS) countsByType.set(item.value, 0);
     for (const asset of assets) {
       const type = asset.type as PresetPickerAssetType;
       if (!countsByType.has(type) || !matchesAssetQuery(asset, query)) continue;
@@ -455,14 +448,14 @@ export function PresetPickerPopover({ open, onClose, onPick, anchorRect }: Props
         )}
         {activeSection === "asset" ? (
           <div className="flex items-center gap-1 overflow-x-auto pb-2">
-            {ASSET_TYPES.map((item) => (
+            {ASSET_LEDGER_TYPE_OPTIONS.map((item) => (
               <CategoryChip
-                key={item.type}
+                key={item.value}
                 label={item.label}
-                count={assetTypeCounts.get(item.type) ?? 0}
+                count={assetTypeCounts.get(item.value) ?? 0}
                 color="#f472b6"
-                active={activeAssetType === item.type}
-                onClick={() => setActiveAssetType(item.type)}
+                active={activeAssetType === item.value}
+                onClick={() => setActiveAssetType(item.value)}
               />
             ))}
           </div>

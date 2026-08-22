@@ -163,8 +163,21 @@ export function findRemoteMcpModelInfoTool<T extends RemoteMcpToolLike>(
 }
 
 function generationToolScore(tool: RemoteMcpToolLike, kind: "image" | "video"): number {
-  if (classifyRemoteMcpTool(tool) !== kind) return -1;
   const name = compactName(tool.name);
+  const identity = normalized(`${tool.name} ${tool.title ?? ""} ${tool.description ?? ""}`);
+  const classifiedKind = classifyRemoteMcpTool(tool);
+  // 開始画像が必須の image_to_video は編集ではなく正規の動画生成。
+  // 共通分類は「元メディア必須」を安全側で other にするため、ここだけ明示名で戻す。
+  // video_to_video など元動画を必要とする編集系は、この例外へ入れず除外を維持する。
+  const isImageToVideo =
+    /\b(image|photo|frame)\s*to\s*(video|movie|clip)\b|\bi2v\b/.test(identity) ||
+    name.includes("imagetovideo");
+  if (
+    classifiedKind !== kind &&
+    !(kind === "video" && classifiedKind === "other" && isImageToVideo)
+  ) {
+    return -1;
+  }
   const exact = kind === "image" ? ["generateimage", "imagegenerate"] : ["generatevideo", "videogenerate"];
   if (exact.includes(name)) return 100;
   if (name === `textto${kind}`) return 95;
@@ -209,7 +222,7 @@ function explicitKind(metadata: Record<string, unknown>): RemoteMcpModelKind | n
   visit(metadata, 0);
   const text = normalized(values.flatMap((value) => (Array.isArray(value) ? value : [value])).join(" "));
   if (!text) return null;
-  if (/\b(image|text|prompt)\s*to\s*video\b|\b(video|movie|clip)\b/.test(text)) return "video";
+  if (/\b(image|text|prompt)\s*to\s*video\b|\bi2v\b|\b(video|movie|clip)\b/.test(text)) return "video";
   if (/\b(text|prompt)\s*to\s*image\b|\b(image|picture|photo)\b/.test(text)) return "image";
   return null;
 }
@@ -222,7 +235,7 @@ export function classifyRemoteMcpModel(
   if (fromMetadata) return fromMetadata;
 
   const text = normalized(`${model.id} ${model.name} ${model.label ?? ""}`);
-  if (/\b(image|text|prompt)\s*to\s*video\b/.test(text)) return "video";
+  if (/\b(image|text|prompt)\s*to\s*video\b|\bi2v\b/.test(text)) return "video";
   if (/\b(text|prompt)\s*to\s*image\b/.test(text)) return "image";
 
   const video = /\b(video|veo|seedance|kling|runway|hailuo|minimax|wan|ltx|pika|ray|motion|movie|clip)\b/.test(

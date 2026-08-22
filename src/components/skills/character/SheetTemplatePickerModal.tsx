@@ -164,12 +164,12 @@ export function SheetTemplatePickerModal({ selectedId, onSelect, onClose }: Prop
                       onClick={() => selectTemplate(template)}
                       className="flex h-full w-full flex-col text-left"
                     >
-                      <div className="relative aspect-video w-full bg-[#0d0d0d]">
+                      <div className="relative aspect-video w-full bg-black">
                         {!broken ? (
                           <img
                             src={sampleSrc(template.id)}
                             alt={`${template.name}の見本`}
-                            className="h-full w-full object-cover"
+                            className="h-full w-full object-contain"
                             onError={() =>
                               setBrokenSamples((previous) =>
                                 new Set(previous).add(template.id),

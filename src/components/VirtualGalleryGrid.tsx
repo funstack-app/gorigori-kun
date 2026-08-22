@@ -191,7 +191,10 @@ export function VirtualGalleryGrid(props: CellProps) {
           items={buildGalleryItemMenu(menu.item, {
             favorites: props.favorites,
             onToggleFavorite: props.onToggleFavorite,
-            onRegisterPreset: () => setPresetTarget(menu.item),
+            onRegisterPreset:
+              galleryItemMediaType(menu.item) === "image"
+                ? () => setPresetTarget(menu.item)
+                : undefined,
             judgement: props.judgements.get(menu.item.path),
             onSetJudgement: props.onSetJudgement,
             projectScope: props.projectScope,
@@ -200,7 +203,7 @@ export function VirtualGalleryGrid(props: CellProps) {
           onClose={() => setMenu(null)}
         />
       )}
-      {presetTarget && (
+      {presetTarget && galleryItemMediaType(presetTarget) === "image" && (
         <RegisterPresetDialog
           imagePath={presetTarget.path}
           defaultName={isLibrary ? presetTarget.name : undefined}

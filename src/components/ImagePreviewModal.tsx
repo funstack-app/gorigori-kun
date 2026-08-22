@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useImagePreview } from "../lib/store/imagePreview";
-import { useAssetLedger } from "../lib/store/assetLedger";
+import {
+  ASSET_LEDGER_TYPE_OPTIONS,
+  useAssetLedger,
+} from "../lib/store/assetLedger";
 import { useComposer } from "../lib/store/composer";
 import { useImages } from "../lib/store/images";
 import { useMaskEditor } from "../lib/store/maskEditor";
@@ -25,16 +28,6 @@ type LedgerUpsertInput = Parameters<
   ReturnType<typeof useAssetLedger.getState>["upsert"]
 >[0];
 type LedgerAssetType = LedgerUpsertInput["type"];
-
-const ASSET_TYPE_OPTIONS: ReadonlyArray<{
-  value: LedgerAssetType;
-  label: string;
-}> = [
-  { value: "character", label: "人物" },
-  { value: "scene", label: "場所" },
-  { value: "prop", label: "小物" },
-  { value: "custom", label: "その他" },
-];
 
 export function ImagePreviewModal() {
   const path = useImagePreview((s) => s.path);
@@ -601,7 +594,7 @@ export function ImagePreviewModal() {
                 <div className="mt-2 grid grid-cols-2 gap-2">
                   <StackActionButton
                     icon={<RecreateIcon />}
-                    label="もう一度作る"
+                    label="生成時の指示文を読み込む"
                     disabled={!primaryActions.canRecreate}
                     title={primaryActions.recreateDisabledReason ?? undefined}
                     onClick={recreateWithSameSettings}
@@ -636,7 +629,7 @@ export function ImagePreviewModal() {
                   />
                 </div>
 
-                <div className="mt-3 grid grid-cols-5 gap-1 border-t border-white/[0.07] pt-3">
+                <div className="mt-3 grid grid-cols-3 gap-1.5 border-t border-white/[0.07] pt-3">
                   <CompactActionButton
                     icon={<AdoptIcon />}
                     label="採用"
@@ -976,7 +969,7 @@ function CompactActionButton({
       title={title}
       onClick={onClick}
       className={[
-        "flex min-h-14 w-full min-w-0 flex-col items-center justify-center gap-1 rounded-md border px-1 py-1.5 text-[9px] font-bold leading-tight transition disabled:cursor-not-allowed disabled:opacity-40",
+        "flex min-h-14 w-full min-w-0 flex-col items-center justify-center gap-1 rounded-md border px-1.5 py-1.5 text-[11px] font-bold leading-tight transition disabled:cursor-not-allowed disabled:opacity-40",
         active
           ? "border-white/25 bg-white/10 text-white"
           : "border-transparent bg-transparent text-neutral-500 hover:border-white/10 hover:bg-white/[0.04] hover:text-neutral-200",
@@ -1017,7 +1010,7 @@ function AssetRegisterAction({
           <p className="px-2 py-1 text-[10px] font-bold text-neutral-500">
             種類を選ぶ
           </p>
-          {ASSET_TYPE_OPTIONS.map((option) => (
+          {ASSET_LEDGER_TYPE_OPTIONS.map((option) => (
             <button
               key={option.value}
               type="button"

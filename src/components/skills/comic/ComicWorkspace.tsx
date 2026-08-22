@@ -132,6 +132,7 @@ import {
 } from "../../../lib/comic/panelLayoutOps";
 import { recomposePageToTemplate } from "../../../lib/comic/pageAssembly";
 import {
+  comicStyleAnchorStoryId,
   MAX_COMIC_PAGE_REFERENCE_IMAGES,
   planStyleAnchoredReferences,
 } from "../../../lib/comic/styleAnchor";
@@ -411,6 +412,7 @@ function ComicFlow() {
   const styleText = useComicRun((s) => s.styleText);
   const setStyleText = useComicRun((s) => s.setStyleText);
   const styleAnchorImagePath = useComicRun((s) => s.styleAnchorImagePath);
+  const setStyleAnchorStoryId = useComicRun((s) => s.setStyleAnchorStoryId);
   const setStyleAnchorImagePath = useComicRun((s) => s.setStyleAnchorImagePath);
   const loadWorkStyle = useComicRun((s) => s.loadWorkStyle);
   /** コマの読み方向 (B-1)。既定は右→左 (日本式)。プロンプトの空間指示に効く。 */
@@ -486,8 +488,11 @@ function ComicFlow() {
   const [panelReeditHistory, setPanelReeditHistory] = useState<PanelReeditHistoryEntry[]>([]);
 
   useEffect(() => {
-    void loadWorkStyle();
-  }, [loadWorkStyle]);
+    // 画面を開いた直後は、前回の作品ではなく新しい下書きとして始める。
+    void setStyleAnchorStoryId(comicStyleAnchorStoryId("")).catch((error) => {
+      console.warn("comic: style anchor draft load failed", error);
+    });
+  }, [setStyleAnchorStoryId]);
 
   useEffect(() => {
     if (assetLedgerLoaded) return;
@@ -502,6 +507,8 @@ function ComicFlow() {
     styleAnchorOperationRef.current = operation;
     setStyleAnchorBusy(true);
     try {
+      await setStyleAnchorStoryId(comicStyleAnchorStoryId(synopsis));
+      if (styleAnchorOperationRef.current !== operation) return;
       const snapshotPath = await snapshotReference(sourcePath);
       if (styleAnchorOperationRef.current !== operation) return;
       await setStyleAnchorImagePath(snapshotPath);
@@ -523,10 +530,9 @@ function ComicFlow() {
     }
   };
 
-  /** 作品の先頭ページを人が保存した時だけ、自動で画風のお手本にする。 */
-  const ensureAutomaticStyleAnchor = async (sourcePath: string, pageNo: number) => {
-    const firstPageNo = storyPagesRef.current[0]?.page;
-    if (firstPageNo === undefined || pageNo !== firstPageNo) return;
+  /** 人が最初に保存・採用したページを、その作品の画風のお手本にする。 */
+  const ensureAutomaticStyleAnchor = async (sourcePath: string, _pageNo: number) => {
+    await setStyleAnchorStoryId(comicStyleAnchorStoryId(synopsis));
     // 起動直後の保存で、読み込み途中だった既存のお手本を上書きしない。
     await loadWorkStyle();
     if (useComicRun.getState().styleAnchorImagePath) return;
@@ -573,6 +579,7 @@ function ComicFlow() {
   const clearStyleAnchor = async () => {
     styleAnchorOperationRef.current += 1;
     setStyleAnchorBusy(false);
+    await setStyleAnchorStoryId(comicStyleAnchorStoryId(synopsis));
     await setStyleAnchorImagePath(null);
     pushToast({
       kind: "info",
@@ -836,6 +843,8 @@ function ComicFlow() {
       pushToast({ kind: "error", text: "話（あらすじ）を入力してください", ttlMs: 4000 });
       return;
     }
+    // あらすじが確定した時点で作品IDを固定する。入力途中の文字列では保存先を増やさない。
+    await setStyleAnchorStoryId(comicStyleAnchorStoryId(synopsis));
     // B-3 (2026-07-30): 構成生成に入った話を自動で履歴へ積む (fire-and-forget)。
     void useComicStoryHistory.getState().add(synopsis);
     const runToken = storyTokenRef.current + 1;
@@ -2335,7 +2344,14 @@ function ComicFlow() {
           {phase === "input" && (
             <InputPhase
               synopsis={synopsis}
-              setSynopsis={setSynopsis}
+              setSynopsis={(next) => {
+                setSynopsis(next);
+                void setStyleAnchorStoryId(comicStyleAnchorStoryId(""));
+              }}
+              onSelectHistorySynopsis={(next) => {
+                setSynopsis(next);
+                void setStyleAnchorStoryId(comicStyleAnchorStoryId(next));
+              }}
               templateId={templateId}
               setTemplateId={setTemplateId}
               colorMode={colorMode}
@@ -2454,6 +2470,7 @@ function ComicFlow() {
 function InputPhase({
   synopsis,
   setSynopsis,
+  onSelectHistorySynopsis,
   templateId,
   setTemplateId,
   colorMode,
@@ -2501,6 +2518,7 @@ function InputPhase({
 }: {
   synopsis: string;
   setSynopsis: (v: string) => void;
+  onSelectHistorySynopsis: (v: string) => void;
   templateId: string;
   setTemplateId: (v: string) => void;
   colorMode: ComicColorMode;
@@ -2590,7 +2608,7 @@ function InputPhase({
                   <button
                     type="button"
                     onClick={() => {
-                      setSynopsis(item.text);
+                      onSelectHistorySynopsis(item.text);
                       setHistoryOpen(false);
                     }}
                     className="min-w-0 flex-1 text-left"

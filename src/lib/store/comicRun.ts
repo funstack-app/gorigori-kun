@@ -7,11 +7,13 @@ import type {
   ComicPhase,
   ComicStoryPage,
 } from "../comic/types";
+import { COMIC_STYLE_ANCHOR_DRAFT_STORY_ID } from "../comic/styleAnchor";
 import { createPersistGuard, describeOutcome } from "./persistGuard";
 
 /** 既存の `comic-stories.json/items` は変更せず、作品ラン用の別キー領域へ追加する。 */
 export const COMIC_WORK_STYLE_STORE_FILE = "comic-run.json";
 export const COMIC_WORK_STYLE_STORE_KEY = "workStyle";
+export const COMIC_WORK_STYLE_ANCHORS_KEY = "styleAnchorImagePathsByStory";
 
 export type ComicWorkStyle = {
   colorMode: ComicColorMode;
@@ -23,6 +25,16 @@ export const DEFAULT_COMIC_WORK_STYLE: ComicWorkStyle = {
   colorMode: "mono",
   styleText: "",
   styleAnchorImagePath: null,
+};
+
+export type ComicWorkStyleStorage = ComicWorkStyle & {
+  /** 新形式。画風のお手本だけを作品IDごとに分けて保存する。 */
+  styleAnchorImagePathsByStory: Record<string, string>;
+};
+
+export const DEFAULT_COMIC_WORK_STYLE_STORAGE: ComicWorkStyleStorage = {
+  ...DEFAULT_COMIC_WORK_STYLE,
+  styleAnchorImagePathsByStory: {},
 };
 
 /**
@@ -69,11 +81,86 @@ export function parseComicWorkStyle(
   };
 }
 
-const workStyleGuard = createPersistGuard<ComicWorkStyle>({
+/** 新形式を読み、旧形式の共有1件も移行用に残す。 */
+export function parseComicWorkStyleStorage(
+  raw: unknown,
+): { ok: true; value: ComicWorkStyleStorage } | { ok: false; reason: string } {
+  const base = parseComicWorkStyle(raw);
+  if (!base.ok) return base;
+  const data = raw as Record<string, unknown>;
+  const savedAnchors = data[COMIC_WORK_STYLE_ANCHORS_KEY];
+  if (
+    savedAnchors !== undefined &&
+    (!savedAnchors || typeof savedAnchors !== "object" || Array.isArray(savedAnchors))
+  ) {
+    return { ok: false, reason: "作品別の画風のお手本がオブジェクトではありません" };
+  }
+  const styleAnchorImagePathsByStory: Record<string, string> = {};
+  for (const [storyId, value] of Object.entries(
+    (savedAnchors ?? {}) as Record<string, unknown>,
+  )) {
+    if (!storyId.trim() || typeof value !== "string" || !value.trim()) {
+      return { ok: false, reason: "作品別の画風のお手本に不正な項目があります" };
+    }
+    styleAnchorImagePathsByStory[storyId] = value.trim();
+  }
+  return {
+    ok: true,
+    value: {
+      ...base.value,
+      styleAnchorImagePathsByStory,
+    },
+  };
+}
+
+/**
+ * 表示する作品を切り替える。旧共有値と下書き値は、最初の実作品へ一度だけ移す。
+ * 返した storage を次の保存へ使えば、別作品へ同じお手本が漏れない。
+ */
+export function activateComicStyleAnchorStory(
+  storage: ComicWorkStyleStorage,
+  storyId: string,
+): {
+  storage: ComicWorkStyleStorage;
+  styleAnchorImagePath: string | null;
+  migrated: boolean;
+} {
+  const normalizedStoryId = storyId.trim() || COMIC_STYLE_ANCHOR_DRAFT_STORY_ID;
+  const anchors = { ...storage.styleAnchorImagePathsByStory };
+  let legacy = storage.styleAnchorImagePath;
+  let nextAnchor = anchors[normalizedStoryId] ?? null;
+  let migrated = false;
+
+  if (!nextAnchor && normalizedStoryId !== COMIC_STYLE_ANCHOR_DRAFT_STORY_ID) {
+    const fallback = anchors[COMIC_STYLE_ANCHOR_DRAFT_STORY_ID] ?? legacy;
+    if (fallback) {
+      nextAnchor = fallback;
+      anchors[normalizedStoryId] = fallback;
+      delete anchors[COMIC_STYLE_ANCHOR_DRAFT_STORY_ID];
+      legacy = null;
+      migrated = true;
+    }
+  }
+  if (normalizedStoryId === COMIC_STYLE_ANCHOR_DRAFT_STORY_ID) {
+    nextAnchor = anchors[normalizedStoryId] ?? legacy;
+  }
+
+  return {
+    storage: {
+      ...storage,
+      styleAnchorImagePath: legacy,
+      styleAnchorImagePathsByStory: anchors,
+    },
+    styleAnchorImagePath: nextAnchor,
+    migrated,
+  };
+}
+
+const workStyleGuard = createPersistGuard<ComicWorkStyleStorage>({
   name: "comicWorkStyle",
   file: COMIC_WORK_STYLE_STORE_FILE,
   key: COMIC_WORK_STYLE_STORE_KEY,
-  parse: parseComicWorkStyle,
+  parse: parseComicWorkStyleStorage,
 });
 
 type StateUpdate<T> = T | ((previous: T) => T);
@@ -97,6 +184,9 @@ type ComicRunState = {
   colorMode: ComicColorMode;
   styleText: string;
   styleAnchorImagePath: string | null;
+  styleAnchorImagePathsByStory: Record<string, string>;
+  styleAnchorLegacyImagePath: string | null;
+  styleAnchorStoryId: string;
   workStyleLoaded: boolean;
   editingPage: number | null;
   recoveringPage: number | null;
@@ -114,6 +204,7 @@ type ComicRunState = {
   loadWorkStyle: () => Promise<void>;
   setColorMode: (update: StateUpdate<ComicColorMode>) => Promise<void>;
   setStyleText: (update: StateUpdate<string>) => Promise<void>;
+  setStyleAnchorStoryId: (storyId: string) => Promise<void>;
   setStyleAnchorImagePath: (update: StateUpdate<string | null>) => Promise<void>;
   setEditingPage: (update: StateUpdate<number | null>) => void;
   tryBeginPageRecovery: (page: number) => boolean;
@@ -123,11 +214,13 @@ type ComicRunState = {
   setPanelReeditRunError: (update: StateUpdate<string | null>) => void;
 };
 
-function currentWorkStyle(state: ComicRunState): ComicWorkStyle {
+function currentWorkStyle(state: ComicRunState): ComicWorkStyleStorage {
   return {
     colorMode: state.colorMode,
     styleText: state.styleText,
-    styleAnchorImagePath: state.styleAnchorImagePath,
+    // 旧形式の値は、作品へ移行し終えるまでだけ残す。新しい選択は作品別mapへ保存する。
+    styleAnchorImagePath: state.styleAnchorLegacyImagePath,
+    styleAnchorImagePathsByStory: state.styleAnchorImagePathsByStory,
   };
 }
 
@@ -144,6 +237,9 @@ export const useComicRun = create<ComicRunState>((set, get) => ({
   generatingPages: false,
   storyTemplateId: null,
   ...DEFAULT_COMIC_WORK_STYLE,
+  styleAnchorImagePathsByStory: {},
+  styleAnchorLegacyImagePath: null,
+  styleAnchorStoryId: COMIC_STYLE_ANCHOR_DRAFT_STORY_ID,
   workStyleLoaded: false,
   editingPage: null,
   recoveringPage: null,
@@ -171,7 +267,21 @@ export const useComicRun = create<ComicRunState>((set, get) => ({
     workStyleLoadInFlight = (async () => {
       const outcome = await workStyleGuard.load();
       if (outcome.status === "ok") {
-        set({ ...outcome.value, workStyleLoaded: true });
+        const currentStoryId = get().styleAnchorStoryId;
+        const currentAnchor =
+          outcome.value.styleAnchorImagePathsByStory[currentStoryId] ??
+          (currentStoryId === COMIC_STYLE_ANCHOR_DRAFT_STORY_ID
+            ? outcome.value.styleAnchorImagePath
+            : null);
+        set({
+          colorMode: outcome.value.colorMode,
+          styleText: outcome.value.styleText,
+          styleAnchorImagePath: currentAnchor,
+          styleAnchorImagePathsByStory:
+            outcome.value.styleAnchorImagePathsByStory,
+          styleAnchorLegacyImagePath: outcome.value.styleAnchorImagePath,
+          workStyleLoaded: true,
+        });
       } else {
         if (outcome.status !== "absent") {
           console.warn(`[comicWorkStyle] ${describeOutcome(outcome)}`);
@@ -205,12 +315,44 @@ export const useComicRun = create<ComicRunState>((set, get) => ({
       await workStyleGuard.save(currentWorkStyle(get()));
     }
   },
-  setStyleAnchorImagePath: async (update) => {
-    const next = resolveUpdate(get().styleAnchorImagePath, update);
-    const revision = ++workStylePersistRevision;
-    set({ styleAnchorImagePath: next });
+  setStyleAnchorStoryId: async (storyId) => {
+    const normalizedStoryId = storyId.trim() || COMIC_STYLE_ANCHOR_DRAFT_STORY_ID;
     await get().loadWorkStyle();
-    set({ styleAnchorImagePath: next });
+    if (get().styleAnchorStoryId === normalizedStoryId) return;
+    const revision = ++workStylePersistRevision;
+    const current = get();
+    const activated = activateComicStyleAnchorStory(
+      currentWorkStyle(current),
+      normalizedStoryId,
+    );
+
+    set({
+      styleAnchorStoryId: normalizedStoryId,
+      styleAnchorImagePath: activated.styleAnchorImagePath,
+      styleAnchorImagePathsByStory:
+        activated.storage.styleAnchorImagePathsByStory,
+      styleAnchorLegacyImagePath: activated.storage.styleAnchorImagePath,
+    });
+    if (activated.migrated && revision === workStylePersistRevision) {
+      await workStyleGuard.save(currentWorkStyle(get()));
+    }
+  },
+  setStyleAnchorImagePath: async (update) => {
+    const revision = ++workStylePersistRevision;
+    await get().loadWorkStyle();
+    if (revision !== workStylePersistRevision) return;
+    const current = get();
+    const rawNext = resolveUpdate(current.styleAnchorImagePath, update);
+    const next = rawNext?.trim() || null;
+    const anchors = { ...current.styleAnchorImagePathsByStory };
+    if (next) anchors[current.styleAnchorStoryId] = next;
+    else delete anchors[current.styleAnchorStoryId];
+    set({
+      styleAnchorImagePath: next,
+      styleAnchorImagePathsByStory: anchors,
+      // 手動変更後に旧共有値が別作品へ再移行しないよう、ここで役目を終える。
+      styleAnchorLegacyImagePath: null,
+    });
     if (revision === workStylePersistRevision) {
       await workStyleGuard.save(currentWorkStyle(get()));
     }

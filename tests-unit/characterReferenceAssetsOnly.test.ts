@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import type { Preset } from "../src/lib/store/presets";
@@ -43,5 +45,27 @@ describe("キャラ参照は画像だけを渡す", () => {
   it("通常のプロンプト型プリセットはこれまでどおり本文を返す", () => {
     const promptPreset = preset({ kind: "prompt", prompt: "  soft daylight  " });
     expect(composePresetPrompt(promptPreset)).toBe("soft daylight");
+  });
+
+  it("シーン再現は選択キャラの画像だけを制作処理へ渡す", () => {
+    const source = readFileSync(
+      resolve("src/components/skills/sceneRecreate/SceneRecreateWorkspace.tsx"),
+      "utf8",
+    );
+
+    expect(source).toContain("selectCharacterReferences(next)");
+    expect(source).toContain("composer.addReferences(references as Reference[])");
+    expect(source).toContain("キャラの説明文は自動で足しません");
+  });
+
+  it("縦長のシート見本は黒地に全体表示する", () => {
+    const source = readFileSync(
+      resolve("src/components/skills/character/SheetTemplatePickerModal.tsx"),
+      "utf8",
+    );
+
+    expect(source).toContain("aspect-video w-full bg-black");
+    expect(source).toContain('className="h-full w-full object-contain"');
+    expect(source).not.toContain('className="h-full w-full object-cover"');
   });
 });
