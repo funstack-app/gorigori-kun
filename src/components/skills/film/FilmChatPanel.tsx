@@ -37,12 +37,21 @@ import { useToasts } from "../../../lib/store/toasts";
 import { IssueList, ProgressCard } from "./ScriptPhasePanel";
 
 const ARTIFACT_LABELS: Record<AdvisorArtifactType, string> = {
-  premise: "企画の確定値",
-  logline: "ログライン＝一文のあらすじ",
-  beatsheet: "ビートシート＝物語の拍",
-  treatment: "トリートメント＝最初から最後までの物語",
-  scenelist: "シーンリスト＝場面一覧",
-  blocks: "ブロック脚本＝動画生成1回ごとの脚本",
+  premise: "企画で決めたこと",
+  logline: "一文のあらすじ",
+  beatsheet: "物語の流れ（起きることの順番）",
+  treatment: "最初から最後までの物語",
+  scenelist: "場面の一覧",
+  blocks: "動画1回分ずつの台本",
+};
+
+const ARTIFACT_PURPOSES: Record<AdvisorArtifactType, string> = {
+  premise: "これを決めると、作品の向かう先がそろいます。",
+  logline: "これを書くと、物語の魅力を一目で伝えられます。",
+  beatsheet: "これを書くと、起きることの順番と物語の山が決まります。",
+  treatment: "これを書くと、最初から最後までの映像を思い描けます。",
+  scenelist: "これを書くと、場所ごとの場面と長さが分かります。",
+  blocks: "これを書くと、AIが一度に作る動画ごとの内容が決まります。",
 };
 
 const STAGE_BY_ARTIFACT: Partial<Record<AdvisorArtifactType, FilmScriptApprovalStage>> = {
@@ -159,11 +168,11 @@ function readPremise(artifact: AdvisorArtifact): {
   const missing = [
     !title ? "タイトル" : "",
     !theme ? "伝えたいこと" : "",
-    !(targetDurationSeconds >= 1 && targetDurationSeconds <= 3600) ? "目標尺（1〜3600秒）" : "",
+    !(targetDurationSeconds >= 1 && targetDurationSeconds <= 3600) ? "目標の長さ（1〜3600秒）" : "",
     characterText === undefined ? "登場人物（いなければ「なし」）" : "",
     topicMemo === undefined ? "題材（なければ「なし」）" : "",
     !postingTarget ? "投稿先" : "",
-    !videoServiceId ? "対応する動画サービス" : "",
+    !videoServiceId ? "使う動画サービス" : "",
   ].filter(Boolean);
   if (missing.length > 0 || !title || !theme || !postingTarget || !videoServiceId) {
     return { value: null, missing };
@@ -238,7 +247,7 @@ function artifactReview(
     issues.unshift({
       code: "block-duration-limit",
       severity: "warning",
-      message: `${profile.label}は未実測のため、仮の上限15秒で検算しています。`,
+      message: `${profile.label}はまだ実際に試せていないため、仮の上限15秒で確認しています。`,
     });
   }
   return { parseError: null, issues };
@@ -300,15 +309,18 @@ function ArtifactCard({
       <header className="flex min-w-0 items-center justify-between gap-3 border-b border-[#2b2b2b] bg-pink-500/5 px-4 py-2.5">
         <div className="min-w-0">
           <p className="text-[10px] font-semibold uppercase tracking-[0.16em] text-pink-400">
-            成果物
+            できあがった内容
           </p>
           <h3 className="mt-0.5 text-xs font-semibold text-zinc-200">
             {ARTIFACT_LABELS[artifact.type]}
           </h3>
+          <p className="mt-1 text-[10px] leading-4 text-zinc-500">
+            {ARTIFACT_PURPOSES[artifact.type]}
+          </p>
         </div>
         {approved || premiseLocked ? (
           <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 text-[10px] font-semibold text-emerald-300">
-            {premiseLocked ? "企画を固定しました" : "承認済み"}
+            {premiseLocked ? "企画を決めました" : "OK済み"}
           </span>
         ) : null}
       </header>
@@ -342,7 +354,7 @@ function ArtifactCard({
       ) : null}
       {review.parseError ? (
         <div className="mx-4 mb-4 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs leading-5 text-amber-200">
-          書式を読み取れません（{review.parseError}）。原文は残しています。
+          書き方を読み取れません（{review.parseError}）。届いた文は残しています。
         </div>
       ) : null}
       <div className="px-4 pb-1">
@@ -357,7 +369,7 @@ function ArtifactCard({
             disabled={busy}
             className="rounded-md border border-amber-500/40 px-3 py-2 text-xs font-semibold text-amber-200 transition hover:bg-amber-500/10 disabled:opacity-40"
           >
-            承認を取り消す
+            OKを取り消す
           </button>
         </footer>
       ) : !premiseLocked ? (
@@ -552,7 +564,7 @@ export function FilmChatPanel({ project }: { project: FilmProject | null }) {
             useFilmProjectStore.getState().appendChatMessage(
               createFilmChatMessage(
                 "assistant",
-                "企画を固定しました。次はログライン＝一文のあらすじです。避けたい雰囲気があれば一言だけ教えてください。なければ「お任せ」で、こちらから3案出します。",
+                "企画を決めました。次は一文のあらすじです。避けたい雰囲気があれば一言だけ教えてください。なければ「お任せ」で、こちらから3案出します。",
               ),
             );
           } else {
@@ -616,7 +628,7 @@ export function FilmChatPanel({ project }: { project: FilmProject | null }) {
     if (!approveStage(stage)) {
       pushToast({
         kind: "warn",
-        text: "前の成果物のOKが必要です。ひとつ前から確認してください。",
+        text: "前のできあがった内容のOKが必要です。ひとつ前から確認してください。",
         ttlMs: 5000,
       });
       return;
@@ -632,11 +644,11 @@ export function FilmChatPanel({ project }: { project: FilmProject | null }) {
     const stage = STAGE_BY_ARTIFACT[artifact.type];
     if (!stage) return;
     const confirmed = window.confirm(
-      `「${ARTIFACT_LABELS[artifact.type]}」の承認を取り消します。\n\nこの成果物より後の脚本と③設計の承認も無効になります。④アセット以降へは、前段階を承認し直すまで進めません。\n\n成果物の本文や作成済み画像は消えません。続けますか？`,
+      `「${ARTIFACT_LABELS[artifact.type]}」のOKを取り消します。\n\nこの内容より後の脚本と③設計のOKも無効になります。④素材づくり以降へは、前の段階をOKにし直すまで進めません。\n\n書いた文や作成済み画像は消えません。続けますか？`,
     );
     if (!confirmed) return;
     if (!revokeStageApproval(stage)) {
-      pushToast({ kind: "warn", text: "承認状態を更新できませんでした。", ttlMs: 4000 });
+      pushToast({ kind: "warn", text: "OKの状態を更新できませんでした。", ttlMs: 4000 });
     }
   }
 
@@ -657,7 +669,7 @@ export function FilmChatPanel({ project }: { project: FilmProject | null }) {
             AIアドバイザーと話して決める
           </h2>
           <p className="mt-1 text-xs text-zinc-500">
-            AIが次の一歩を提案します。あなたはOKか、一言の修正だけで進められます。
+            今から企画と物語を順番に決めます。ここでOKにした内容が、あとの映像づくりの土台になります。
           </p>
         </div>
         {project ? (
@@ -697,7 +709,7 @@ export function FilmChatPanel({ project }: { project: FilmProject | null }) {
                 ) : null}
                 {parsed?.malformed ? (
                   <div className="mt-3 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs leading-5 text-amber-200">
-                    成果物の囲み方を読み取れませんでした。返事は上に丸ごと残しています。
+                    できあがった内容の表示方法を読み取れませんでした。返事は上に丸ごと残しています。
                   </div>
                 ) : null}
                 {!parsed?.malformed
@@ -738,7 +750,7 @@ export function FilmChatPanel({ project }: { project: FilmProject | null }) {
       {hasMalformedLastResponse && !sending ? (
         <button
           type="button"
-          onClick={() => void requestTurn("さきほどの地の文は変えず、成果物フェンスだけ正しい形でもう一度お願いします。", null)}
+          onClick={() => void requestTurn("さきほどの説明文は変えず、できあがった内容を決められた囲み方でもう一度お願いします。", null)}
           className="w-fit rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs font-semibold text-amber-200 transition hover:bg-amber-500/20"
         >
           もう一度お願いする

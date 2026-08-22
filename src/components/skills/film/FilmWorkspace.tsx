@@ -132,7 +132,7 @@ function ProjectControls({
         onClick={onStartNew}
         className="rounded-md border border-[#343434] bg-[#161616] px-3 py-2 text-xs font-semibold text-zinc-300 transition hover:border-pink-500/40 hover:text-pink-200"
       >
-        新しいプロジェクト
+        新しい企画
       </button>
       <div className="relative">
         <button
@@ -147,7 +147,7 @@ function ProjectControls({
         {switcherOpen ? (
           <div className="absolute right-0 z-30 mt-2 w-72 overflow-hidden rounded-lg border border-[#343434] bg-[#181818] shadow-2xl">
             <div className="border-b border-[#2a2a2a] px-3 py-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-zinc-500">
-              保存済みプロジェクト
+              保存済みの企画
             </div>
             <ul className="max-h-80 overflow-y-auto p-1.5">
               {projects.map((project) => (
@@ -306,7 +306,7 @@ function LockedPhasePanel({ phase }: { phase: Exclude<FilmPhase, 1 | 2 | 3 | 4> 
         </div>
         <h2 className="mt-4 text-lg font-semibold text-zinc-200">{detail.name}</h2>
         <p className="mt-2 text-sm leading-6 text-zinc-400">
-          この工程は次のアップデートで実装されます（{detail.stage}: {detail.name}）
+          この工程は次の更新で使えるようになります。
         </p>
       </section>
     </div>
@@ -445,7 +445,7 @@ export function FilmWorkspace() {
           ) : null}
           {(fileState === "corrupted" || fileState === "unreadable") ? (
             <div className="mx-auto mb-4 max-w-5xl rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
-              保存ファイルを安全に読み込めなかったため、いまは正本への保存を止めています。上の「バックアップから復元」から過去の状態を選べます。
+              保存ファイルを安全に読み込めなかったため、いまはいつもの保存先への保存を止めています。上の「バックアップから復元」から過去の状態を選べます。
             </div>
           ) : null}
 
@@ -478,7 +478,7 @@ export function FilmWorkspace() {
                     onClick={() => setShowScriptReview(true)}
                     className="rounded-md border border-[#343434] px-3 py-2 text-xs font-semibold text-zinc-300 transition hover:border-pink-500/40 hover:text-pink-200"
                   >
-                    成果物を見る・直接編集する
+                    できあがった内容を見る・直接直す
                   </button>
                 </div>
               ) : null}

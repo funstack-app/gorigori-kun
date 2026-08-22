@@ -46,15 +46,15 @@ import { useToasts } from "../../../lib/store/toasts";
 import { SafeImage } from "../../SafeImage";
 
 const TYPE_LABELS: Record<AssetType, string> = {
-  character: "キャラ",
-  location: "ロケ",
+  character: "登場人物",
+  location: "場所",
   text: "文字物",
   prop: "小道具",
 };
 
 const IMPORTANCE_LABELS: Record<AssetImportance, string> = {
   primary: "主要",
-  supporting: "準",
+  supporting: "補助",
   background: "背景",
 };
 
@@ -113,13 +113,13 @@ function basename(path: string): string {
 }
 
 function statusLabel(asset: FilmAsset): string {
-  if (asset.locked) return "ロック";
-  if (asset.status === "reviewed") return "検品済";
-  if (asset.status === "generating" && asset.generatedImagePaths.length > 0) return "検品待ち";
-  if (asset.status === "generating") return "生成中";
+  if (asset.locked) return "確定";
+  if (asset.status === "reviewed") return "確認済";
+  if (asset.status === "generating" && asset.generatedImagePaths.length > 0) return "確認待ち";
+  if (asset.status === "generating") return "作成中";
   if (asset.status === "interrupted") return "中断されました";
-  if (asset.status === "planned") return "起草済";
-  return "未起草";
+  if (asset.status === "planned") return "下書き済";
+  return "未下書き";
 }
 
 function PromptEditor({
@@ -151,7 +151,10 @@ function PromptEditor({
   return (
     <div className="mt-4">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <p className="text-xs font-semibold text-zinc-300">生成プロンプト全文</p>
+        <div>
+          <p className="text-xs font-semibold text-zinc-300">生成の指示文</p>
+          <p className="mt-1 text-[11px] leading-4 text-zinc-500">これを書くと、画像AIへ見た目や条件をそのまま伝えられます。</p>
+        </div>
         {!asset.locked ? (
           <button
             type="button"
@@ -159,7 +162,7 @@ function PromptEditor({
             disabled={drafting || generating}
             className="rounded-md border border-[#3a3a3a] px-3 py-1.5 text-[11px] font-semibold text-zinc-200 transition hover:bg-[#242424] disabled:opacity-40"
           >
-            {drafting ? "AIが起草中…" : asset.promptDraft ? "AIで起草し直す" : "AIで起草"}
+            {drafting ? "AIが下書き中…" : asset.promptDraft ? "AIで下書きし直す" : "AIで下書き"}
           </button>
         ) : null}
       </div>
@@ -168,7 +171,7 @@ function PromptEditor({
         onChange={(event) => setDraft(event.target.value)}
         disabled={asset.locked || drafting || generating}
         rows={asset.type === "character" ? 14 : 9}
-        placeholder="AIで起草すると、ここに画像生成へ渡す全文が入ります。"
+        placeholder="AIで下書きすると、ここに画像づくりへ渡す指示文が入ります。"
         className="mt-2 w-full resize-y rounded-lg border border-[#303030] bg-[#101010] px-3 py-3 font-mono text-xs leading-5 text-zinc-200 outline-none placeholder:text-zinc-700 focus:border-pink-500 disabled:cursor-not-allowed disabled:text-zinc-500"
       />
       <div className="mt-2 flex flex-wrap items-center gap-3">
@@ -179,16 +182,16 @@ function PromptEditor({
             disabled={!draft.trim() || !dirty || drafting || generating}
             className="rounded-md border border-[#3a3a3a] px-3 py-1.5 text-[11px] font-semibold text-zinc-200 transition hover:bg-[#242424] disabled:opacity-40"
           >
-            文面を保存
+            指示文を保存
           </button>
         ) : null}
         <span className={dirty ? "text-[11px] text-amber-300" : "text-[11px] text-zinc-600"}>
-          {asset.locked ? "ロック後は編集できません" : dirty ? "未保存の変更あり" : asset.promptDraft ? "保存済み" : "未起草"}
+          {asset.locked ? "確定後は編集できません" : dirty ? "未保存の変更あり" : asset.promptDraft ? "保存済み" : "未下書き"}
         </span>
       </div>
       {mustRevise ? (
         <p className="mt-3 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs leading-5 text-amber-200">
-          直さずに回し直しません。NG理由を文面へ反映して保存すると、再生成できます。
+          直さずに作り直しません。不採用の理由を指示文へ反映して保存すると、もう一度作れます。
         </p>
       ) : null}
       {interrupted ? (
@@ -203,7 +206,7 @@ function PromptEditor({
           disabled={generationLocked || generating || mustRevise || dirty || asset.status === "reviewed"}
           className="mt-3 rounded-md bg-pink-500 px-4 py-2 text-xs font-semibold text-white transition hover:bg-pink-400 disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-400"
         >
-          {generating ? "3枚を生成中…" : interrupted ? "再試行" : "このアセットを3枚生成"}
+          {generating ? "3枚を作成中…" : interrupted ? "再試行" : "この素材を3枚作る"}
         </button>
       ) : null}
     </div>
@@ -226,10 +229,10 @@ function CandidateReview({
 
   return (
     <section className="mt-5 rounded-lg border border-pink-500/30 bg-pink-500/5 p-4">
-      <h4 className="text-sm font-semibold text-zinc-100">3枚を人の目で検品</h4>
+      <h4 className="text-sm font-semibold text-zinc-100">3枚を人の目で確認</h4>
       {asset.type === "text" ? (
         <p className="mt-1 text-xs leading-5 text-amber-200">
-          文字物は3〜4枚から、文字が一字一句すべて正しいものだけを選びます。今回は既定の3枚です。
+          文字入りの物は3〜4枚から、文字が一字一句すべて正しいものだけを選びます。今回は3枚です。
         </p>
       ) : null}
       <div className="mt-3 grid gap-3 md:grid-cols-3">
@@ -250,9 +253,9 @@ function CandidateReview({
         ))}
       </div>
       <div className="mt-4 border-t border-[#303030] pt-4">
-        <p className="text-xs font-semibold text-zinc-300">全部NG</p>
+        <p className="text-xs font-semibold text-zinc-300">3枚とも不採用</p>
         <p className="mt-1 text-[11px] leading-5 text-zinc-500">
-          理由を一言残し、プロンプトを直してから再生成します。直さずに回し直しません。
+          理由を一言残し、生成の指示文を直してから作り直します。直さずにやり直しません。
         </p>
         <div className="mt-2 flex gap-2">
           <input
@@ -310,9 +313,9 @@ function StressTestSection({
     <section className="mt-5 rounded-lg border border-[#353535] bg-[#131313] p-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h4 className="text-sm font-semibold text-zinc-100">人物ストレステスト</h4>
+          <h4 className="text-sm font-semibold text-zinc-100">同一人物チェック（5つの条件で崩れないか確認）</h4>
           <p className="mt-1 text-xs leading-5 text-zinc-500">
-            採用シートを参照に、壊れやすい5条件で同じ人物を保てるか確認します。
+            採用した人物シートをお手本に、5つの条件でも同じ人物に見えるか確認します。
           </p>
         </div>
         <span className="rounded-full border border-[#3a3a3a] px-2.5 py-1 text-[11px] text-zinc-400">
@@ -342,7 +345,7 @@ function StressTestSection({
         <div className="mt-4">
           {round.status === "interrupted" ? (
             <p className="mb-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs leading-5 text-amber-200">
-              前回の5枚テストは中断されました。同じ条件から再試行できます。
+              前回の同一人物チェックは中断されました。同じ条件から再試行できます。
             </p>
           ) : null}
           <button
@@ -354,8 +357,8 @@ function StressTestSection({
             {round.status === "interrupted"
               ? "再試行"
               : roundName === "extra"
-                ? "追加5枚を生成"
-                : "5枚を生成してテスト"}
+                ? "追加5枚を作る"
+                : "5枚を作って確認"}
           </button>
         </div>
       ) : null}
@@ -363,7 +366,7 @@ function StressTestSection({
       {round.status === "generating" || running ? (
         <div className="mt-4 flex items-center gap-3 rounded-md border border-pink-500/30 bg-pink-500/5 px-3 py-3 text-xs text-pink-200">
           <span className="h-4 w-4 animate-spin rounded-full border-2 border-pink-300 border-t-transparent" />
-          5条件を1枚ずつ生成しています
+          5つの条件を1枚ずつ作っています
         </div>
       ) : null}
 
@@ -391,7 +394,7 @@ function StressTestSection({
                       onClick={() => onVerdict(roundName, index, "fail")}
                       className={`rounded px-2 py-1.5 text-[11px] font-semibold ${verdict === "fail" ? "bg-amber-500 text-black" : "border border-[#3a3a3a] text-zinc-400"}`}
                     >
-                      NG
+                      不採用
                     </button>
                   </div>
                 </div>
@@ -414,7 +417,7 @@ function StressTestSection({
 
       {round.status === "failed" ? (
         <div className="mt-4 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-3 text-xs leading-5 text-amber-200">
-          1枚でもNGなら、直すのはモデルでなくディスクリプタの言葉です。上の文面を直したら、5枚を最初からやり直します。
+          1枚でも不採用なら、画像AIを変えるのではなく、人物の特徴を書く言葉を直します。上の指示文を直したら、5枚を最初からやり直します。
         </div>
       ) : null}
 
@@ -424,11 +427,11 @@ function StressTestSection({
         && !stress.extraRoundOffered ? (
         <div className="mt-4 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-4 py-3">
           <p className="text-xs font-semibold text-emerald-200">
-            重要キャラはあと5枚（計10枚）で確度が上がります。やりますか？
+            主要人物はあと5枚（計10枚）確認すると、同じ人物を保てる安心度が上がります。やりますか？
           </p>
           <div className="mt-3 flex gap-2">
             <button type="button" onClick={() => onChooseExtra("run")} className="rounded-md bg-emerald-500 px-3 py-2 text-xs font-semibold text-white">やる</button>
-            <button type="button" onClick={() => onChooseExtra("skip")} className="rounded-md border border-[#3a3a3a] px-3 py-2 text-xs font-semibold text-zinc-300">やらないでロック</button>
+            <button type="button" onClick={() => onChooseExtra("skip")} className="rounded-md border border-[#3a3a3a] px-3 py-2 text-xs font-semibold text-zinc-300">やらずに確定</button>
           </div>
         </div>
       ) : null}
@@ -463,7 +466,7 @@ export function AssetFactoryPanel({ project }: { project: FilmProject }) {
     setDraftProgress({ phase: "waiting", receivedChars: 0 });
     try {
       const raw = await runFilmTextTurn(buildAssetPromptDraftPrompt(project, asset), {
-        label: "アセットプロンプト",
+        label: "素材の生成指示文",
         signal: ownController.signal,
         onProgress: setDraftProgress,
       });
@@ -475,7 +478,7 @@ export function AssetFactoryPanel({ project }: { project: FilmProject }) {
       if (!(error instanceof FilmTextTurnAbortedError)) {
         pushToast({
           kind: error instanceof FilmTextTurnTimeoutError ? "warn" : "error",
-          text: `${asset.name}の起草に失敗しました: ${(error as Error)?.message ?? error}`,
+          text: `${asset.name}の下書きに失敗しました: ${(error as Error)?.message ?? error}`,
           ttlMs: 7000,
         });
       }
@@ -502,7 +505,7 @@ export function AssetFactoryPanel({ project }: { project: FilmProject }) {
     setDraftingAll(false);
     abortRef.current = null;
     if (completed > 0) {
-      pushToast({ kind: "success", text: `${completed}件のプロンプトを起草して保存しました。`, ttlMs: 4000 });
+      pushToast({ kind: "success", text: `${completed}件の生成指示文を下書きして保存しました。`, ttlMs: 4000 });
     }
   }
 
@@ -529,13 +532,13 @@ export function AssetFactoryPanel({ project }: { project: FilmProject }) {
         sourceTag: tracker.id,
       }));
       if (result.generatedPaths.length !== 3) {
-        throw new Error(`3枚のうち${result.generatedPaths.length}枚だけ完成しました。3枚そろえてから検品します。`);
+        throw new Error(`3枚のうち${result.generatedPaths.length}枚だけ完成しました。3枚そろえてから確認します。`);
       }
       persist(asset.id, (current) => completeAssetGeneration(current, result.generatedPaths));
       pushToast({ kind: "success", text: `${asset.name}の候補3枚ができました。採用1枚を選んでください。`, ttlMs: 5000 });
     } catch (error) {
       persist(asset.id, failAssetGeneration);
-      pushToast({ kind: "error", text: `${asset.name}の生成に失敗しました: ${(error as Error)?.message ?? error}` });
+      pushToast({ kind: "error", text: `${asset.name}の作成に失敗しました: ${(error as Error)?.message ?? error}` });
     } finally {
       tracker.done();
     }
@@ -559,7 +562,7 @@ export function AssetFactoryPanel({ project }: { project: FilmProject }) {
     try {
       for (let index = 0; index < 5; index += 1) {
         const condition = started.stressTest?.conditions[index];
-        if (!condition || !started.canonicalImagePath) throw new Error("5条件または採用シートが不足しています");
+        if (!condition || !started.canonicalImagePath) throw new Error("5つの条件または採用した人物シートが不足しています");
         const result = await tracker.step(() => images.generateBatch({
           prompt: buildStressTestImagePrompt(started, condition, otherNames),
           count: 1,
@@ -577,7 +580,7 @@ export function AssetFactoryPanel({ project }: { project: FilmProject }) {
       pushToast({ kind: "success", text: `${asset.name}の5枚ができました。1枚ずつ合否を付けてください。`, ttlMs: 5000 });
     } catch (error) {
       persist(asset.id, (current) => failStressTestGeneration(current, round));
-      pushToast({ kind: "error", text: `ストレステスト生成に失敗しました: ${(error as Error)?.message ?? error}` });
+      pushToast({ kind: "error", text: `同一人物チェックの画像を作れませんでした: ${(error as Error)?.message ?? error}` });
     } finally {
       tracker.done();
       setStressRunningAssetId(null);
@@ -587,22 +590,22 @@ export function AssetFactoryPanel({ project }: { project: FilmProject }) {
   return (
     <div className="mx-auto flex w-full min-w-0 max-w-6xl flex-col gap-6">
       <header>
-        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-pink-400">④ アセット工場</p>
-        <h2 className="mt-2 text-2xl font-semibold text-zinc-100">設計を全部書いてから、素材を固定する</h2>
+        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-pink-400">④ 素材づくり</p>
+        <h2 className="mt-2 text-2xl font-semibold text-zinc-100">設計を全部書いてから、素材を確定する</h2>
         <p className="mt-2 max-w-3xl text-sm leading-6 text-zinc-400">
-          全キャラ・全ロケ・全小道具をロックし、人物はストレステストに通すまで、⑤の1ショットも生成しません。
+          今から人物・場所・小物のお手本画像を決めます。ここで確定すると、後の映像で見た目がぶれにくくなります。
         </p>
       </header>
 
       <section className="rounded-xl border border-[#303030] bg-[#171717] p-5">
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
-            <h3 className="text-sm font-semibold text-zinc-100">設計・生成の順序ガイド</h3>
+            <h3 className="text-sm font-semibold text-zinc-100">下書きと画像づくりの順番</h3>
             <p className="mt-2 text-xs font-semibold text-pink-200">
-              主要キャラ → 主要ロケ → 文字物 → 小道具 → 準キャラ
+              主要人物 → 主な場所 → 文字入りの物 → 小道具 → 補助の人物
             </p>
             <p className="mt-2 text-xs leading-5 text-zinc-500">
-              生成しながら設計すると、後半の設定が前半と食い違います。だから画像を1枚も作らないうちに、全プロンプトを書き切ります。
+              画像を作りながら考えると、後半の設定が前半と食い違います。だから画像を1枚も作らないうちに、すべての生成指示文を書き切ります。
             </p>
           </div>
           <button
@@ -611,14 +614,14 @@ export function AssetFactoryPanel({ project }: { project: FilmProject }) {
             disabled={draftingAll || Boolean(draftingAssetId) || allDrafted}
             className="rounded-md bg-pink-500 px-4 py-2 text-xs font-semibold text-white transition hover:bg-pink-400 disabled:bg-zinc-700 disabled:text-zinc-400"
           >
-            {draftingAll ? "未起草を順番に作成中…" : "未起草をすべてAIで起草"}
+            {draftingAll ? "未下書きを順番に作成中…" : "未下書きをすべてAIで作る"}
           </button>
         </div>
         {draftingAssetId ? (
           <div className="mt-4 flex items-center gap-3 rounded-md border border-[#303030] bg-[#121212] px-3 py-3">
             <span className="h-4 w-4 animate-spin rounded-full border-2 border-pink-300 border-t-transparent" />
             <div className="min-w-0 flex-1">
-              <p className="text-xs font-semibold text-pink-200">{draftingAssetId} の全文をAIが起草中</p>
+              <p className="text-xs font-semibold text-pink-200">{draftingAssetId} の指示文をAIが下書き中</p>
               <p className="mt-0.5 text-[11px] text-zinc-500">{draftProgress?.receivedChars ?? 0}文字を受信</p>
             </div>
             <button type="button" onClick={() => abortRef.current?.abort()} className="rounded border border-[#3a3a3a] px-3 py-1.5 text-[11px] text-zinc-300">中止</button>
@@ -631,17 +634,17 @@ export function AssetFactoryPanel({ project }: { project: FilmProject }) {
           />
         </div>
         <p className="mt-2 text-[11px] text-zinc-500">
-          起草済み {project.assets.filter((asset) => Boolean(asset.promptDraft?.trim())).length} / {project.assets.length}
+          下書き済み {project.assets.filter((asset) => Boolean(asset.promptDraft?.trim())).length} / {project.assets.length}
         </p>
       </section>
 
       {!allDrafted ? (
         <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
-          生成セクションはロック中です。全アセットのプロンプトを保存すると開きます。
+          画像づくりはまだ始められません。すべての素材の生成指示文を保存すると始められます。
         </div>
       ) : (
         <div className="rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-200">
-          全アセットの設計が揃いました。ここから1アセット3枚ずつ生成できます。
+          すべての素材の指示文がそろいました。ここから1素材につき3枚ずつ作れます。
         </div>
       )}
 
@@ -661,17 +664,17 @@ export function AssetFactoryPanel({ project }: { project: FilmProject }) {
                   <h3 className="mt-2 text-lg font-semibold text-zinc-100">{asset.name}</h3>
                   <p className="mt-1 text-[11px] text-zinc-600">登場: {asset.blockIds.join(", ") || "未設定"}</p>
                 </div>
-                {asset.locked ? <span className="text-xs font-semibold text-emerald-300">正典を固定済み</span> : null}
+                {asset.locked ? <span className="text-xs font-semibold text-emerald-300">決定版として確定済み</span> : null}
               </div>
 
               {asset.type === "prop" ? (
                 <p className="mt-3 rounded-md border border-sky-500/30 bg-sky-500/10 px-3 py-2 text-xs leading-5 text-sky-200">
-                  硬貨・記章・特殊な瓶など正確さが必要なら、生成前に実物写真を参照添付します。
+                  硬貨・記章・特殊な瓶など正確さが必要なら、作る前に実物写真をお手本として添えます。
                 </p>
               ) : null}
               {asset.type === "location" && asset.pairKey ? (
                 <p className="mt-3 rounded-md border border-violet-500/30 bg-violet-500/10 px-3 py-2 text-xs leading-5 text-violet-200">
-                  状態違いペア「{asset.pairKey}」{pairReference ? "の採用済み画像を参照に添付して生成します。" : "です。先に片方を採用すると、もう片方へ自動で参照添付します。"}
+                  同じ場所の状態違い「{asset.pairKey}」{pairReference ? "の採用済み画像をお手本として添えて作ります。" : "です。先に片方を採用すると、もう片方へ自動でお手本画像として添えます。"}
                 </p>
               ) : null}
 
@@ -692,14 +695,14 @@ export function AssetFactoryPanel({ project }: { project: FilmProject }) {
                   pushToast({
                     kind: "success",
                     text: asset.type === "character"
-                      ? `${asset.name}の正典シートを採用しました。次は5枚テストです。`
-                      : `${asset.name}を採用し、ロックしました。`,
+                      ? `${asset.name}の決定版となる人物シートを採用しました。次は同一人物チェックです。`
+                      : `${asset.name}を採用し、確定しました。`,
                     ttlMs: 5000,
                   });
                 }}
                 onReject={(note) => {
                   persist(asset.id, (current) => rejectAssetCandidates(current, note));
-                  pushToast({ kind: "warn", text: "NG理由を保存しました。文面を直してから再生成してください。", ttlMs: 6000 });
+                  pushToast({ kind: "warn", text: "不採用の理由を保存しました。指示文を直してから、もう一度作ってください。", ttlMs: 6000 });
                 }}
               />
 
@@ -712,10 +715,10 @@ export function AssetFactoryPanel({ project }: { project: FilmProject }) {
                       <p className="break-all text-xs text-zinc-400">{basename(asset.canonicalImagePath)}</p>
                       {asset.locked ? (
                         <p className="mt-3 text-xs leading-5 text-amber-200">
-                          ロック後は編集できません。変えたくなったら、このアセットを使った生成物を全部作り直す覚悟が要ります。
+                          確定後は編集できません。変える場合は、この素材を使った画像や映像を全部作り直す必要があります。
                         </p>
                       ) : (
-                        <p className="mt-3 text-xs leading-5 text-zinc-500">人物はまだ仮固定です。5枚テストを通るとロックされます。</p>
+                        <p className="mt-3 text-xs leading-5 text-zinc-500">人物はまだ仮の状態です。同一人物チェックに通ると確定されます。</p>
                       )}
                     </div>
                   </div>
@@ -736,13 +739,13 @@ export function AssetFactoryPanel({ project }: { project: FilmProject }) {
                   const chosen = chooseExtraStressRound(asset, decision);
                   persist(asset.id, () => chosen);
                   if (decision === "run") void runStress(chosen, "extra");
-                  else pushToast({ kind: "success", text: `${asset.name}をロックしました。`, ttlMs: 4000 });
+                  else pushToast({ kind: "success", text: `${asset.name}を確定しました。`, ttlMs: 4000 });
                 }}
               />
 
               {asset.ngNotes.length > 0 ? (
                 <details className="mt-4 rounded-md border border-[#303030] bg-[#121212] px-3 py-2 text-xs text-zinc-400">
-                  <summary className="cursor-pointer">NG記録 {asset.ngNotes.length}件</summary>
+                  <summary className="cursor-pointer">不採用の記録 {asset.ngNotes.length}件</summary>
                   <ul className="mt-2 list-disc space-y-1 pl-5">
                     {asset.ngNotes.map((note, index) => <li key={`${note}-${index}`}>{note}</li>)}
                   </ul>
@@ -754,14 +757,14 @@ export function AssetFactoryPanel({ project }: { project: FilmProject }) {
       </div>
 
       <section className="rounded-xl border border-[#303030] bg-[#141414] p-5">
-        <h3 className="text-sm font-semibold text-zinc-100">④完了ゲート</h3>
+        <h3 className="text-sm font-semibold text-zinc-100">④を終える前の確認</h3>
         <ul className="mt-3 grid gap-2 text-xs">
-          <li className={gate.undraftedAssetIds.length === 0 ? "text-emerald-300" : "text-zinc-500"}>全アセット起草済み {gate.undraftedAssetIds.length ? `（未: ${gate.undraftedAssetIds.join(", ")}）` : ""}</li>
-          <li className={gate.unlockedPrimaryAssetIds.length === 0 ? "text-emerald-300" : "text-zinc-500"}>主要アセット全点ロック {gate.unlockedPrimaryAssetIds.length ? `（未: ${gate.unlockedPrimaryAssetIds.join(", ")}）` : ""}</li>
+          <li className={gate.undraftedAssetIds.length === 0 ? "text-emerald-300" : "text-zinc-500"}>すべての素材を下書き済み {gate.undraftedAssetIds.length ? `（未: ${gate.undraftedAssetIds.join(", ")}）` : ""}</li>
+          <li className={gate.unlockedPrimaryAssetIds.length === 0 ? "text-emerald-300" : "text-zinc-500"}>主要素材をすべて確定済み {gate.unlockedPrimaryAssetIds.length ? `（未: ${gate.unlockedPrimaryAssetIds.join(", ")}）` : ""}</li>
         </ul>
         {gate.unlockedOptionalAssetIds.length > 0 ? (
           <p className="mt-3 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs leading-5 text-amber-200">
-            準・背景は未ロックでも進めます。未ロック: {gate.unlockedOptionalAssetIds.join(", ")}
+            補助・背景素材は未確定でも進めます。未確定: {gate.unlockedOptionalAssetIds.join(", ")}
           </p>
         ) : null}
         <button
@@ -769,7 +772,7 @@ export function AssetFactoryPanel({ project }: { project: FilmProject }) {
           disabled
           className="mt-4 rounded-md bg-emerald-500 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-400"
         >
-          ⑤生成は近日対応（次のアップデート）
+          ⑤映像づくりは近日対応（次の更新）
         </button>
       </section>
       {zoomPath ? <ImageZoomOverlay path={zoomPath} onClose={() => setZoomPath(null)} /> : null}

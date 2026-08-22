@@ -9,16 +9,16 @@ import type {
 const FILM_MODEL = "gpt-5.6-sol";
 
 export type FilmTextTurnLabel =
-  | "ログライン"
-  | "ビートシート"
-  | "トリートメント"
-  | "シーンリスト"
-  | "ブロック脚本"
-  | "アセット台帳"
-  | "アセットプロンプト"
-  | "ルック提案"
-  | "Style Prefix"
-  | "フィルム相談";
+  | "一文のあらすじ"
+  | "物語の流れ"
+  | "最初から最後までの物語"
+  | "場面の一覧"
+  | "動画1回分ずつの台本"
+  | "素材の一覧"
+  | "素材の生成指示文"
+  | "映像の見た目案"
+  | "共通の見た目指定"
+  | "映像づくり相談";
 
 export type FilmTextTurnProgress = {
   phase: "waiting" | "streaming" | "stalled";

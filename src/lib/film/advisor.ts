@@ -21,14 +21,14 @@ export const INITIAL_FILM_ADVISOR_MESSAGE = `一緒に、話の種から映像�
 export function projectResumeMessage(project: FilmProject): string {
   const stage = getFilmAdvisorStage(project);
   if (stage === "design") {
-    return "脚本の5工程は承認済みです。次は③設計です。ルックを決めましょう。参照画像が1枚あると速いです。";
+    return "物語づくりの5工程はOKになりました。次は③設計です。映像の見た目を決めましょう。お手本画像が1枚あると速いです。";
   }
   const labels = {
-    logline: "ログライン＝一文のあらすじ",
-    beatsheet: "ビートシート＝物語の拍",
-    treatment: "トリートメント＝最初から最後までの物語",
-    scenelist: "シーンリスト＝場面一覧",
-    blocks: "ブロック脚本＝動画生成1回ごとの脚本",
+    logline: "一文のあらすじ",
+    beatsheet: "物語の流れ（起きることの順番）",
+    treatment: "最初から最後までの物語",
+    scenelist: "場面の一覧",
+    blocks: "動画1回分ずつの台本",
     premise: "企画",
   } as const;
   return `「${project.title}」の続きから進めます。次は${labels[stage]}です。迷わないよう、こちらから順番に提案します。`;
@@ -57,7 +57,7 @@ export async function runFilmAdvisorTurn(
   } = {},
 ): Promise<AdvisorParseResult> {
   const raw = await runFilmTextTurn(buildFilmAdvisorPrompt(input), {
-    label: "フィルム相談",
+    label: "映像づくり相談",
     signal: options.signal,
     onProgress: options.onProgress,
   });

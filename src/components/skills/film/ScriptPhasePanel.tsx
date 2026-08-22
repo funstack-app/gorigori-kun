@@ -38,7 +38,7 @@ import { useToasts } from "../../../lib/store/toasts";
 type StageDefinition = {
   id: FilmScriptApprovalStage;
   name: string;
-  translation: string;
+  purpose: string;
   turnLabel: FilmTextTurnLabel;
   gateQuestion: string;
 };
@@ -46,38 +46,38 @@ type StageDefinition = {
 const STAGES: StageDefinition[] = [
   {
     id: "logline",
-    name: "ログライン",
-    translation: "一文のあらすじ",
-    turnLabel: "ログライン",
+    name: "一文のあらすじ",
+    purpose: "これを書くと、物語の魅力を一目で伝えられます。",
+    turnLabel: "一文のあらすじ",
     gateQuestion: "観たいと思えますか？",
   },
   {
     id: "beatsheet",
-    name: "ビートシート",
-    translation: "物語の拍",
-    turnLabel: "ビートシート",
+    name: "物語の流れ（起きることの順番）",
+    purpose: "今から起きることを順番に並べ、物語の山と終わりを決めます。",
+    turnLabel: "物語の流れ",
     gateQuestion: "物語の山と流れに納得できますか？",
   },
   {
     id: "treatment",
-    name: "トリートメント",
-    translation: "最初から最後までの物語",
-    turnLabel: "トリートメント",
+    name: "最初から最後までの物語",
+    purpose: "これを書くと、最初から最後までの映像を具体的に思い描けます。",
+    turnLabel: "最初から最後までの物語",
     gateQuestion: "最初から最後まで、映像が浮かびますか？",
   },
   {
     id: "scenelist",
-    name: "シーンリスト",
-    translation: "場面一覧",
-    turnLabel: "シーンリスト",
-    gateQuestion: "場所・目的・登場人物・尺に無理はありませんか？",
+    name: "場面の一覧",
+    purpose: "今から場所ごとに場面を分け、長さと登場人物を確かめます。",
+    turnLabel: "場面の一覧",
+    gateQuestion: "場所・目的・登場人物・長さに無理はありませんか？",
   },
   {
     id: "blocks",
-    name: "ブロック脚本",
-    translation: "動画生成1回ごとの脚本",
-    turnLabel: "ブロック脚本",
-    gateQuestion: "このブロック単位で映像を作れそうですか？",
+    name: "動画1回分ずつの台本",
+    purpose: "これを書くと、AIが一度に作る動画ごとの内容が決まります。",
+    turnLabel: "動画1回分ずつの台本",
+    gateQuestion: "この分け方で映像を作れそうですか？",
   },
 ];
 
@@ -185,7 +185,7 @@ export function IssueList({ issues }: { issues: ScriptCheckIssue[] }) {
   if (issues.length === 0) return null;
   return (
     <div className="mt-4 rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3">
-      <p className="text-xs font-semibold text-amber-200">機械検算からの確認メモ</p>
+      <p className="text-xs font-semibold text-amber-200">自動チェックからの確認メモ</p>
       <ul className="mt-2 grid gap-1.5 text-xs leading-5 text-amber-100/90">
         {issues.map((issue, index) => (
           <li key={`${issue.code}-${issue.location ?? "all"}-${index}`}>
@@ -194,7 +194,7 @@ export function IssueList({ issues }: { issues: ScriptCheckIssue[] }) {
         ))}
       </ul>
       <p className="mt-2 text-[11px] text-amber-200/70">
-        上限超過以外は警告だけです。内容を見て、問題なければ承認できます。
+        上限超過以外は注意のお知らせだけです。内容を見て、問題なければOKにできます。
       </p>
     </div>
   );
@@ -300,7 +300,7 @@ export function ScriptPhasePanel({ project }: { project: FilmProject }) {
         {
           code: "block-duration-limit",
           severity: "warning",
-          message: `${selectedVideoService?.label ?? "選択サービス"}は未実測のため仮の上限15秒で検算しています。生成前に公式ガイドからプロファイルを作ってください。`,
+          message: `${selectedVideoService?.label ?? "選んだサービス"}はまだ実際に試せていないため、仮の上限15秒で確認しています。映像を作る前に、公式案内に合わせた設定を用意してください。`,
         },
         ...issues,
       ];
@@ -425,7 +425,7 @@ export function ScriptPhasePanel({ project }: { project: FilmProject }) {
         if (options.length < 3) {
           pushToast({
             kind: "warn",
-            text: "ログラインを3案に分けきれませんでした。届いた文章は表示しています。必要ならもう一度お試しください。",
+            text: "一文のあらすじを3案に分けきれませんでした。届いた文章は表示しています。必要ならもう一度お試しください。",
             ttlMs: 6000,
           });
         }
@@ -440,7 +440,7 @@ export function ScriptPhasePanel({ project }: { project: FilmProject }) {
         if (!parsed.ok) {
           pushToast({
             kind: "warn",
-            text: `シーンリストの書式を読み取れませんでした（${parseFailureMessage(parsed)}）。原文を表示するので、その場で直せます。`,
+            text: `場面の一覧の書き方を読み取れませんでした（${parseFailureMessage(parsed)}）。届いた文を表示するので、その場で直せます。`,
             ttlMs: 7000,
           });
         }
@@ -460,7 +460,7 @@ export function ScriptPhasePanel({ project }: { project: FilmProject }) {
         if (!parsed.ok) {
           pushToast({
             kind: "warn",
-            text: `書式修復を1回試しましたが読み取れませんでした（${parseFailureMessage(parsed)}）。原文は消さずに表示しています。`,
+            text: `書き方の直しを1回試しましたが読み取れませんでした（${parseFailureMessage(parsed)}）。届いた文は消さずに表示しています。`,
             ttlMs: 8000,
           });
         }
@@ -477,7 +477,7 @@ export function ScriptPhasePanel({ project }: { project: FilmProject }) {
           text:
             error instanceof FilmTextTurnTimeoutError
               ? error.message
-              : `${definition.name}の生成に失敗しました: ${(error as Error)?.message ?? error}`,
+              : `${definition.name}の作成に失敗しました: ${(error as Error)?.message ?? error}`,
           ttlMs: 7000,
         });
       }
@@ -497,7 +497,7 @@ export function ScriptPhasePanel({ project }: { project: FilmProject }) {
     if (!approveStage(definition.id)) {
       pushToast({
         kind: "warn",
-        text: "前の段階のOKか、読み取れる成果物が必要です。ひとつ前から確認してください。",
+        text: "前の段階のOKか、読み取れる文が必要です。ひとつ前から確認してください。",
         ttlMs: 5000,
       });
       return;
@@ -512,7 +512,7 @@ export function ScriptPhasePanel({ project }: { project: FilmProject }) {
         <p className="text-xs font-semibold uppercase tracking-[0.18em] text-pink-400">② 脚本</p>
         <h2 className="mt-2 text-2xl font-semibold text-zinc-100">五つのOKで物語を固める</h2>
         <p className="mt-2 text-sm leading-6 text-zinc-400">
-          AIが下書きし、あなたが一段ずつ承認します。後ろの工程は、前のOKの上に積み上がります。
+          今から物語を固めます。ここでOKにした文が、すべての映像の土台になります。
         </p>
       </div>
 
@@ -590,7 +590,7 @@ export function ScriptPhasePanel({ project }: { project: FilmProject }) {
                 <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-emerald-500/15 text-sm text-emerald-300">✓</span>
                 <span className="min-w-0 flex-1">
                   <span className="text-sm font-semibold text-zinc-100">
-                    {index + 1}. {definition.name}（{definition.translation}）
+                    {index + 1}. {definition.name}
                   </span>
                   <span className="mt-0.5 block truncate text-xs text-zinc-500">{text}</span>
                 </span>
@@ -605,8 +605,9 @@ export function ScriptPhasePanel({ project }: { project: FilmProject }) {
                 <div className="min-w-0">
                   <p className="text-xs font-semibold text-pink-400">脚本 {index + 1}/5</p>
                   <h3 className="mt-1 break-words text-lg font-semibold text-zinc-100">
-                    {definition.name}（{definition.translation}）
+                    {definition.name}
                   </h3>
+                  <p className="mt-1 text-xs leading-5 text-zinc-500">{definition.purpose}</p>
                 </div>
                 {approved ? (
                   <button
@@ -621,7 +622,7 @@ export function ScriptPhasePanel({ project }: { project: FilmProject }) {
 
               {approved ? (
                 <div className="mt-4 rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-xs leading-5 text-amber-100">
-                  この承認済み内容を編集すると、この段階以降のOKをやり直します。原稿は消えません。
+                  このOK済みの内容を編集すると、この段階以降のOKをやり直します。書いた文は消えません。
                 </div>
               ) : null}
 
@@ -662,7 +663,7 @@ export function ScriptPhasePanel({ project }: { project: FilmProject }) {
               {text.trim() ? (
                 <div className="mt-5 min-w-0">
                   <label className="grid min-w-0 gap-2">
-                    <span className="text-xs font-medium text-zinc-400">成果物（そのまま編集できます）</span>
+                    <span className="text-xs font-medium text-zinc-400">できあがった文（そのまま直せます）</span>
                     <textarea
                       value={text}
                       onChange={(event) => saveStageText(definition.id, event.target.value)}
@@ -674,7 +675,7 @@ export function ScriptPhasePanel({ project }: { project: FilmProject }) {
 
                   {parseFailure ? (
                     <div className="mt-4 rounded-lg border border-amber-500/50 bg-amber-500/10 px-4 py-3 text-xs leading-5 text-amber-100">
-                      書式を読み取れません（{parseFailureMessage(parseFailure)}）。原文は残しています。行を直すと再検算します。
+                      書き方を読み取れません（{parseFailureMessage(parseFailure)}）。届いた文は残しています。行を直すともう一度確認します。
                     </div>
                   ) : null}
                   <IssueList issues={issues} />
@@ -686,7 +687,7 @@ export function ScriptPhasePanel({ project }: { project: FilmProject }) {
                         type="button"
                         onClick={() => approve(definition)}
                         disabled={blocking || Boolean(runningStage)}
-                        title={blocking ? "書式エラーまたはサービス上限超過を先に直してください" : undefined}
+                        title={blocking ? "書き方のエラーまたは動画サービスの長さ制限を先に直してください" : undefined}
                         className="rounded-md bg-emerald-500 px-4 py-2 text-sm font-semibold text-white transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-400"
                       >
                         OKで次へ
@@ -754,9 +755,9 @@ export function ScriptPhasePanel({ project }: { project: FilmProject }) {
 
       {project.approvals.blocks ? (
         <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-5 py-4">
-          <p className="text-sm font-semibold text-emerald-200">脚本の5段階が承認されました</p>
+          <p className="text-sm font-semibold text-emerald-200">物語づくりの5段階がすべてOKになりました</p>
           <p className="mt-1 text-xs leading-5 text-zinc-400">
-            左のレールから③設計へ進めます（ルック決定・アセット台帳・Style Prefix）。
+            左の工程一覧から③設計へ進めます（映像の見た目・素材の一覧・共通の見た目指定）。
           </p>
         </div>
       ) : null}

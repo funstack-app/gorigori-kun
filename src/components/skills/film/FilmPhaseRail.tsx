@@ -5,11 +5,11 @@ const PHASES: Array<{
   label: string;
   subLabel: string;
 }> = [
-  { id: 1, label: "① 企画", subLabel: "目的を固定" },
+  { id: 1, label: "① 企画", subLabel: "目的を決める" },
   { id: 2, label: "② 脚本", subLabel: "物語を書く" },
   { id: 3, label: "③ 設計", subLabel: "見た目を決める" },
-  { id: 4, label: "④ アセット", subLabel: "素材をそろえる" },
-  { id: 5, label: "⑤ 生成", subLabel: "近日対応" },
+  { id: 4, label: "④ 素材", subLabel: "お手本をそろえる" },
+  { id: 5, label: "⑤ 映像づくり", subLabel: "近日対応" },
   { id: 6, label: "⑥ 仕上げ", subLabel: "近日対応" },
 ];
 
