@@ -1,4 +1,7 @@
-use crate::storage_cleanup::{run_cleanup, CleanupReport};
+use crate::storage_cleanup::{
+    cleanup_storage_categories, inspect_storage_breakdown, run_cleanup, CleanupReport,
+    StorageBreakdown, StorageCleanupCategoriesReport,
+};
 
 /// 手動でストレージ掃除を実行する。
 /// 設定画面の「ストレージ管理」タブから呼ばれる想定。
@@ -51,6 +54,21 @@ pub async fn storage_cleanup_inspect() -> Result<CleanupInspection, String> {
         cache_bytes,
         total_bytes: sessions_bytes + logs_bytes + generated_bytes + cache_bytes,
     })
+}
+
+/// 一時データを、画面で判断できるカテゴリ別に実測する。
+#[tauri::command]
+pub async fn storage_breakdown() -> Result<StorageBreakdown, String> {
+    inspect_storage_breakdown().await
+}
+
+/// ユーザーが明示的に選んだカテゴリだけを削除する。
+/// appData は core 側でも拒否され、画面を迂回して呼んでも削除できない。
+#[tauri::command]
+pub async fn storage_cleanup_categories(
+    categories: Vec<String>,
+) -> Result<StorageCleanupCategoriesReport, String> {
+    cleanup_storage_categories(categories).await
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

@@ -1,6 +1,7 @@
 //! ストレージ自動掃除モジュール
 //!
 //! 起動時 + 24時間ごとに、Codex の一時データを軽量化・削除する。
+//! 設定画面から明示選択された場合だけ、カテゴリ単位の追加削除も行う。
 //!
 //! 軽量化対象 (GORI 専用 CODEX_HOME と 旧 ~/.codex の両方):
 //! - <CODEX_HOME>/sessions/**/*.jsonl : 24時間より古い rollout の画像ペイロードのみ除去
@@ -14,8 +15,9 @@
 //! FB#19 対応で GORI は専用 CODEX_HOME
 //! (~/Library/Application Support/app.codexframefactory/codex-home) を使うように
 //! なった。今後 GORI が吐く sessions はこの専用 HOME 配下に溜まるため、専用 HOME と
-//! 旧 ~/.codex の sessions を対象にする。ただし sessions 自体は絶対に削除しない。
-//! 画像ペイロードのみ除去し、会話・プロンプトは永久保存する。
+//! 旧 ~/.codex の sessions を対象にする。バックグラウンド掃除では sessions 自体を
+//! 削除せず、画像ペイロードのみ除去する。手動のカテゴリ選択削除では、ユーザー確認後に
+//! 最終更新24時間以上の sessions ファイルだけを削除できる。
 //!
 //! 絶対に触らないもの:
 //! - **~/Library/WebKit/<id>/WebsiteData/ (localStorage の実体)**
@@ -24,16 +26,16 @@
 //!   作成に失敗したときの唯一の生き残りになる。掃除が消してよいものではない。
 //! - ~/Pictures/GORI GORI/ (ユーザーの作品データ)
 //! - ~/Desktop/ (ユーザーデータ)
-//! - sessions のファイル・会話・プロンプト (画像ペイロード以外は**消さない**)
+//! - 直近24時間以内の sessions ファイル (稼働中 app-server の保護。手動でも消さない)
 //! - <CODEX_HOME>/generated_images/ / ~/.codex/generated_images/ (生成画像)
 //! - <CODEX_HOME>/history.db / projects/ (履歴・プロジェクト)
 //! - <CODEX_HOME>/skills/ / ~/.codex/skills/ (スキル本体)
 //! - <CODEX_HOME>/memories/ / ~/.codex/memories/ (メモリ本体)
 //! - <CODEX_HOME>/auth.json / config.toml (認証・設定)
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::ErrorKind;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::fs;
@@ -78,6 +80,553 @@ pub struct CleanupReport {
     /// FB-A4: 掃除前 inspect で表示していたのに run_cleanup が消していなかった分。
     pub cache_bytes_freed: u64,
     pub errors: Vec<String>,
+}
+
+/// ストレージ内訳の1カテゴリ分。
+///
+/// `bytes` / `count` は実際に存在する総量、`deletable_*` は現在の安全条件で
+/// 選択削除できる量。sessions は直近24時間を保護するため、この2組が異なる。
+#[derive(Debug, Clone, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageCategoryStats {
+    pub bytes: u64,
+    pub count: u64,
+    pub deletable_bytes: u64,
+    pub deletable_count: u64,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageBreakdown {
+    pub sessions: StorageCategoryStats,
+    pub logs: StorageCategoryStats,
+    pub webview_cache: StorageCategoryStats,
+    pub backups: StorageCategoryStats,
+    pub broken_quarantine: StorageCategoryStats,
+    pub app_data: StorageCategoryStats,
+    pub total_bytes: u64,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageCleanupCategoriesReport {
+    pub freed_bytes_by_category: BTreeMap<String, u64>,
+    pub deleted_counts_by_category: BTreeMap<String, u64>,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum StorageCategory {
+    Sessions,
+    Logs,
+    WebviewCache,
+    Backups,
+    BrokenQuarantine,
+    AppData,
+}
+
+impl StorageCategory {
+    fn key(self) -> &'static str {
+        match self {
+            Self::Sessions => "sessions",
+            Self::Logs => "logs",
+            Self::WebviewCache => "webviewCache",
+            Self::Backups => "backups",
+            Self::BrokenQuarantine => "brokenQuarantine",
+            Self::AppData => "appData",
+        }
+    }
+
+    fn parse_cleanup(value: &str) -> Result<Self, String> {
+        match value {
+            "sessions" => Ok(Self::Sessions),
+            "logs" => Ok(Self::Logs),
+            "webviewCache" => Ok(Self::WebviewCache),
+            "backups" => Ok(Self::Backups),
+            "brokenQuarantine" => Ok(Self::BrokenQuarantine),
+            // appData は作品・画像・登録データを含む。UIの状態に関係なく、
+            // Rust 境界で構造的に拒否して削除不能にする。
+            "appData" => Err("実データ (appData) は削除できません".to_string()),
+            other => Err(format!("不明なストレージカテゴリです: {other}")),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct StorageScanContext {
+    codex_homes: Vec<PathBuf>,
+    app_data_dir: Option<PathBuf>,
+    cache_roots: Vec<PathBuf>,
+}
+
+#[derive(Debug)]
+enum CleanupTarget {
+    File {
+        path: PathBuf,
+        category: StorageCategory,
+    },
+    Tree {
+        path: PathBuf,
+        category: StorageCategory,
+    },
+}
+
+#[derive(Debug, Default)]
+struct StorageScan {
+    breakdown: StorageBreakdown,
+    cleanup_targets: Vec<CleanupTarget>,
+}
+
+impl StorageBreakdown {
+    fn stats_mut(&mut self, category: StorageCategory) -> &mut StorageCategoryStats {
+        match category {
+            StorageCategory::Sessions => &mut self.sessions,
+            StorageCategory::Logs => &mut self.logs,
+            StorageCategory::WebviewCache => &mut self.webview_cache,
+            StorageCategory::Backups => &mut self.backups,
+            StorageCategory::BrokenQuarantine => &mut self.broken_quarantine,
+            StorageCategory::AppData => &mut self.app_data,
+        }
+    }
+
+    fn add_total(&mut self, category: StorageCategory, bytes: u64, count: u64) {
+        let stats = self.stats_mut(category);
+        stats.bytes = stats.bytes.saturating_add(bytes);
+        stats.count = stats.count.saturating_add(count);
+        self.total_bytes = self.total_bytes.saturating_add(bytes);
+    }
+
+    fn add_deletable(&mut self, category: StorageCategory, bytes: u64, count: u64) {
+        let stats = self.stats_mut(category);
+        stats.deletable_bytes = stats.deletable_bytes.saturating_add(bytes);
+        stats.deletable_count = stats.deletable_count.saturating_add(count);
+    }
+}
+
+/// カテゴリ別の実測容量を取得する。大きなディレクトリ走査は blocking thread へ逃がし、
+/// Tauri の非同期処理と画面描画を止めない。
+pub async fn inspect_storage_breakdown() -> Result<StorageBreakdown, String> {
+    tokio::task::spawn_blocking(|| {
+        let context = storage_scan_context()?;
+        Ok(scan_storage(&context, SystemTime::now()).breakdown)
+    })
+    .await
+    .map_err(|err| format!("ストレージ走査タスクに失敗: {err}"))?
+}
+
+/// 指定カテゴリだけを削除し、実際に解放できた量をカテゴリ別に返す。
+pub async fn cleanup_storage_categories(
+    categories: Vec<String>,
+) -> Result<StorageCleanupCategoriesReport, String> {
+    let selected = parse_cleanup_categories(&categories)?;
+    tokio::task::spawn_blocking(move || {
+        let context = storage_scan_context()?;
+        let scan = scan_storage(&context, SystemTime::now());
+        Ok(delete_scan_targets(scan, &context, &selected))
+    })
+    .await
+    .map_err(|err| format!("ストレージ削除タスクに失敗: {err}"))?
+}
+
+fn parse_cleanup_categories(values: &[String]) -> Result<BTreeSet<StorageCategory>, String> {
+    if values.is_empty() {
+        return Err("削除するカテゴリが選ばれていません".to_string());
+    }
+    values
+        .iter()
+        .map(|value| StorageCategory::parse_cleanup(value))
+        .collect()
+}
+
+fn storage_scan_context() -> Result<StorageScanContext, String> {
+    let codex_homes = crate::codex::home::cleanup_target_codex_homes();
+    let app_data_dir = dirs::data_dir().map(|dir| dir.join(crate::secrets::SERVICE_NAME));
+    let mut cache_roots = dirs::home_dir()
+        .map(|home| webkit_cache_candidates(&home))
+        .unwrap_or_default();
+    if let Some(thumbs) = thumbnail_cache_dir() {
+        cache_roots.push(thumbs);
+    }
+
+    if codex_homes.is_empty() && app_data_dir.is_none() && cache_roots.is_empty() {
+        return Err("ストレージの保存場所を解決できません".to_string());
+    }
+
+    Ok(StorageScanContext {
+        codex_homes,
+        app_data_dir,
+        cache_roots,
+    })
+}
+
+fn scan_storage(context: &StorageScanContext, now: SystemTime) -> StorageScan {
+    let mut scan = StorageScan::default();
+    let mut roots = context.codex_homes.clone();
+    if let Some(app_data) = &context.app_data_dir {
+        roots.push(app_data.clone());
+    }
+    roots.extend(context.cache_roots.iter().cloned());
+
+    // app_data_dir の中に専用 CODEX_HOME があるため、同じパスを複数の起点から
+    // 見つけても二重計上しない。
+    let mut seen = HashSet::<PathBuf>::new();
+    let mut stack = roots;
+    while let Some(path) = stack.pop() {
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(err) if err.kind() == ErrorKind::NotFound => continue,
+            Err(err) => {
+                scan.breakdown
+                    .errors
+                    .push(format!("{}: {err}", path.display()));
+                continue;
+            }
+        };
+
+        // 掃除対象外へ飛ぶ近道になり得るため、シンボリックリンクは辿らない。
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+
+        if metadata.is_dir() {
+            if is_broken_quarantine_root(&path, context.app_data_dir.as_deref()) {
+                let (bytes, count, errors) = tree_stats_without_following_links(&path);
+                scan.breakdown.errors.extend(errors);
+                scan.breakdown
+                    .add_total(StorageCategory::BrokenQuarantine, bytes, count.max(1));
+                scan.breakdown.add_deletable(
+                    StorageCategory::BrokenQuarantine,
+                    bytes,
+                    count.max(1),
+                );
+                scan.cleanup_targets.push(CleanupTarget::Tree {
+                    path,
+                    category: StorageCategory::BrokenQuarantine,
+                });
+                continue;
+            }
+
+            match std::fs::read_dir(&path) {
+                Ok(entries) => {
+                    for entry in entries {
+                        match entry {
+                            Ok(entry) => stack.push(entry.path()),
+                            Err(err) => scan
+                                .breakdown
+                                .errors
+                                .push(format!("{} の項目を読めません: {err}", path.display())),
+                        }
+                    }
+                }
+                Err(err) => scan
+                    .breakdown
+                    .errors
+                    .push(format!("{} を読めません: {err}", path.display())),
+            }
+            continue;
+        }
+
+        if !metadata.is_file() {
+            continue;
+        }
+        let Some(category) = classify_storage_path(
+            &path,
+            &context.codex_homes,
+            context.app_data_dir.as_deref(),
+            &context.cache_roots,
+        ) else {
+            continue;
+        };
+
+        scan.breakdown.add_total(category, metadata.len(), 1);
+        let deletable = category != StorageCategory::AppData
+            && (category != StorageCategory::Sessions
+                || metadata
+                    .modified()
+                    .ok()
+                    .is_some_and(|modified| session_is_outside_safety_margin(modified, now)));
+        if deletable {
+            scan.breakdown.add_deletable(category, metadata.len(), 1);
+            scan.cleanup_targets
+                .push(CleanupTarget::File { path, category });
+        }
+    }
+
+    scan
+}
+
+/// パスをカテゴリへ分類する唯一の判定表。
+///
+/// 優先順は「保護済みキャッシュの名指し → broken 退避 → sessions → logs →
+/// バックアップ → その他の app data」。この順序により app_data_dir 内にある
+/// codex-home も `appData` へ埋もれない。
+fn classify_storage_path(
+    path: &Path,
+    codex_homes: &[PathBuf],
+    app_data_dir: Option<&Path>,
+    cache_roots: &[PathBuf],
+) -> Option<StorageCategory> {
+    if cache_roots.iter().any(|root| path.starts_with(root)) {
+        // 候補ルートの組み立てに加え、個々の子パスでも保護名を再確認する。
+        // 将来キャッシュ配下の構造が変わっても WebsiteData / LocalStorage 等は消さない。
+        if path.components().any(|component| {
+            WEBKIT_PROTECTED_SUBDIRS
+                .iter()
+                .any(|protected| component.as_os_str() == *protected)
+        }) {
+            return None;
+        }
+        return Some(StorageCategory::WebviewCache);
+    }
+    if path_is_in_broken_quarantine(path, app_data_dir) {
+        return Some(StorageCategory::BrokenQuarantine);
+    }
+    if codex_homes
+        .iter()
+        .any(|home| path.starts_with(home.join("sessions")))
+    {
+        return Some(StorageCategory::Sessions);
+    }
+
+    let in_managed_root = codex_homes.iter().any(|home| path.starts_with(home))
+        || app_data_dir.is_some_and(|root| path.starts_with(root));
+    if in_managed_root && is_engine_log(path) {
+        return Some(StorageCategory::Logs);
+    }
+    if app_data_dir.is_some_and(|root| path.starts_with(root)) && is_generation_backup(path) {
+        return Some(StorageCategory::Backups);
+    }
+    if app_data_dir.is_some_and(|root| path.starts_with(root)) {
+        return Some(StorageCategory::AppData);
+    }
+    None
+}
+
+fn is_engine_log(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let name = name.to_ascii_lowercase();
+    name.ends_with(".log") || (name.starts_with("logs") && name.contains(".sqlite"))
+}
+
+fn is_generation_backup(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let name = name.to_ascii_lowercase();
+    name.contains(".bak-")
+        && (name.starts_with("presets") || name.starts_with("projects") || name.starts_with("film"))
+}
+
+fn is_broken_quarantine_root(path: &Path, app_data_dir: Option<&Path>) -> bool {
+    app_data_dir.is_some_and(|root| path.starts_with(root))
+        && path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("broken-"))
+}
+
+fn path_is_in_broken_quarantine(path: &Path, app_data_dir: Option<&Path>) -> bool {
+    let Some(root) = app_data_dir else {
+        return false;
+    };
+    let Ok(relative) = path.strip_prefix(root) else {
+        return false;
+    };
+    relative.components().any(|component| {
+        component
+            .as_os_str()
+            .to_str()
+            .is_some_and(|name| name.starts_with("broken-"))
+    })
+}
+
+/// app-server が現在書き込んでいる可能性があるため、最終更新24時間以内の
+/// sessions ファイルは削除しない。この安全マージンは手動削除でも必ず適用する。
+fn session_is_outside_safety_margin(modified: SystemTime, now: SystemTime) -> bool {
+    now.duration_since(modified)
+        .map(|age| age >= Duration::from_secs(STRIP_MIN_AGE_HOURS * 3_600))
+        .unwrap_or(false)
+}
+
+fn tree_stats_without_following_links(path: &Path) -> (u64, u64, Vec<String>) {
+    let mut bytes = 0u64;
+    let mut count = 0u64;
+    let mut errors = Vec::new();
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        let entries = match std::fs::read_dir(&current) {
+            Ok(entries) => entries,
+            Err(err) => {
+                errors.push(format!("{} を読めません: {err}", current.display()));
+                continue;
+            }
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(err) => {
+                    errors.push(format!("{} の項目を読めません: {err}", current.display()));
+                    continue;
+                }
+            };
+            let item = entry.path();
+            match std::fs::symlink_metadata(&item) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {}
+                Ok(metadata) if metadata.is_dir() => stack.push(item),
+                Ok(metadata) if metadata.is_file() => {
+                    bytes = bytes.saturating_add(metadata.len());
+                    count = count.saturating_add(1);
+                }
+                Ok(_) => {}
+                Err(err) => errors.push(format!("{}: {err}", item.display())),
+            }
+        }
+    }
+    (bytes, count, errors)
+}
+
+fn delete_scan_targets(
+    scan: StorageScan,
+    context: &StorageScanContext,
+    selected: &BTreeSet<StorageCategory>,
+) -> StorageCleanupCategoriesReport {
+    let mut report = StorageCleanupCategoriesReport {
+        errors: scan.breakdown.errors,
+        ..StorageCleanupCategoriesReport::default()
+    };
+    for category in selected {
+        report
+            .freed_bytes_by_category
+            .insert(category.key().to_string(), 0);
+        report
+            .deleted_counts_by_category
+            .insert(category.key().to_string(), 0);
+    }
+
+    for target in scan.cleanup_targets {
+        let category = match &target {
+            CleanupTarget::File { category, .. } | CleanupTarget::Tree { category, .. } => {
+                *category
+            }
+        };
+        if !selected.contains(&category) {
+            continue;
+        }
+
+        let result = match target {
+            CleanupTarget::File { path, category } => {
+                delete_classified_file(&path, category, context)
+            }
+            CleanupTarget::Tree { path, category } => {
+                delete_classified_tree(&path, category, context)
+            }
+        };
+        match result {
+            Ok((bytes, count)) => {
+                if let Some(total) = report.freed_bytes_by_category.get_mut(category.key()) {
+                    *total = total.saturating_add(bytes);
+                }
+                if let Some(total) = report.deleted_counts_by_category.get_mut(category.key()) {
+                    *total = total.saturating_add(count);
+                }
+            }
+            Err(err) => report.errors.push(format!("{}: {err}", category.key())),
+        }
+    }
+    report
+}
+
+fn delete_classified_file(
+    path: &Path,
+    expected_category: StorageCategory,
+    context: &StorageScanContext,
+) -> Result<(u64, u64), String> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|err| format!("metadata: {err}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(format!(
+            "通常ファイルではないためスキップ: {}",
+            path.display()
+        ));
+    }
+    let actual_category = classify_storage_path(
+        path,
+        &context.codex_homes,
+        context.app_data_dir.as_deref(),
+        &context.cache_roots,
+    );
+    if actual_category != Some(expected_category) || expected_category == StorageCategory::AppData {
+        return Err(format!("安全な削除対象ではありません: {}", path.display()));
+    }
+
+    if expected_category == StorageCategory::Sessions {
+        let modified = metadata
+            .modified()
+            .map_err(|err| format!("更新日時を確認できません: {err}"))?;
+        // 走査後に app-server が書き込んだ競合も守るため、削除直前に再判定する。
+        if !session_is_outside_safety_margin(modified, SystemTime::now()) {
+            return Ok((0, 0));
+        }
+    }
+
+    let bytes = metadata.len();
+    std::fs::remove_file(path).map_err(|err| format!("{}: {err}", path.display()))?;
+    Ok((bytes, 1))
+}
+
+fn delete_classified_tree(
+    path: &Path,
+    expected_category: StorageCategory,
+    context: &StorageScanContext,
+) -> Result<(u64, u64), String> {
+    if expected_category != StorageCategory::BrokenQuarantine
+        || !is_broken_quarantine_root(path, context.app_data_dir.as_deref())
+    {
+        return Err(format!(
+            "安全な退避フォルダではありません: {}",
+            path.display()
+        ));
+    }
+    let metadata = std::fs::symlink_metadata(path).map_err(|err| format!("metadata: {err}"))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(format!(
+            "通常フォルダではないためスキップ: {}",
+            path.display()
+        ));
+    }
+    remove_tree_without_following_links(path)
+}
+
+fn remove_tree_without_following_links(path: &Path) -> Result<(u64, u64), String> {
+    let mut bytes = 0u64;
+    let mut count = 0u64;
+    let entries = std::fs::read_dir(path).map_err(|err| format!("read_dir: {err}"))?;
+    for entry in entries {
+        let entry = entry.map_err(|err| format!("directory entry: {err}"))?;
+        let item = entry.path();
+        let metadata = std::fs::symlink_metadata(&item)
+            .map_err(|err| format!("{} metadata: {err}", item.display()))?;
+        if metadata.file_type().is_symlink() {
+            // リンク先には触れず、退避フォルダ内のリンクそのものだけを外す。
+            std::fs::remove_file(&item)
+                .map_err(|err| format!("{} symlink: {err}", item.display()))?;
+        } else if metadata.is_dir() {
+            let (child_bytes, child_count) = remove_tree_without_following_links(&item)?;
+            bytes = bytes.saturating_add(child_bytes);
+            count = count.saturating_add(child_count);
+        } else if metadata.is_file() {
+            std::fs::remove_file(&item).map_err(|err| format!("{}: {err}", item.display()))?;
+            bytes = bytes.saturating_add(metadata.len());
+            count = count.saturating_add(1);
+        }
+    }
+    std::fs::remove_dir(path).map_err(|err| format!("{}: {err}", path.display()))?;
+    Ok((bytes, count.max(1)))
 }
 
 /// バックグラウンド掃除タスクを起動する。
@@ -904,8 +1453,94 @@ async fn dir_size_recursive(path: &std::path::Path) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::strip_image_payloads_from_line;
-    use super::{webkit_cache_candidates, WEBKIT_PROTECTED_SUBDIRS};
+    use super::{
+        classify_storage_path, parse_cleanup_categories, session_is_outside_safety_margin,
+        webkit_cache_candidates, StorageCategory, WEBKIT_PROTECTED_SUBDIRS,
+    };
     use std::path::PathBuf;
+    use std::time::{Duration, SystemTime};
+
+    #[test]
+    fn storage_paths_are_classified_by_the_shared_rules() {
+        let app_data = PathBuf::from("/tmp/app.codexframefactory");
+        let codex_homes = vec![
+            app_data.join("codex-home"),
+            PathBuf::from("/tmp/legacy-codex"),
+        ];
+        let cache_roots = vec![PathBuf::from(
+            "/tmp/home/Library/WebKit/app.codexframefactory/NetworkCache",
+        )];
+
+        let cases = [
+            (
+                app_data.join("codex-home/sessions/2026/rollout.jsonl"),
+                StorageCategory::Sessions,
+            ),
+            (
+                PathBuf::from("/tmp/legacy-codex/logs_2.sqlite-wal"),
+                StorageCategory::Logs,
+            ),
+            (
+                cache_roots[0].join("Cache.db"),
+                StorageCategory::WebviewCache,
+            ),
+            (
+                app_data.join("projects.json.bak-20260822"),
+                StorageCategory::Backups,
+            ),
+            (
+                app_data.join("broken-presets-20260822/presets.json"),
+                StorageCategory::BrokenQuarantine,
+            ),
+            (app_data.join("projects.json"), StorageCategory::AppData),
+        ];
+
+        for (path, expected) in cases {
+            assert_eq!(
+                classify_storage_path(&path, &codex_homes, Some(&app_data), &cache_roots),
+                Some(expected),
+                "分類が不正: {}",
+                path.display()
+            );
+        }
+
+        assert_eq!(
+            classify_storage_path(
+                &cache_roots[0].join("LocalStorage/should-never-delete.db"),
+                &codex_homes,
+                Some(&app_data),
+                &cache_roots,
+            ),
+            None,
+            "キャッシュ候補配下でも保護名を含むパスは削除対象にしない"
+        );
+    }
+
+    #[test]
+    fn app_data_is_rejected_even_if_requested_directly() {
+        let result = parse_cleanup_categories(&["appData".to_string()]);
+        assert!(
+            result.is_err(),
+            "appData を削除カテゴリとして受理してはいけない"
+        );
+    }
+
+    #[test]
+    fn sessions_modified_within_24_hours_are_protected() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(100 * 3_600);
+        assert!(!session_is_outside_safety_margin(
+            now - Duration::from_secs(23 * 3_600 + 59 * 60),
+            now
+        ));
+        assert!(session_is_outside_safety_margin(
+            now - Duration::from_secs(24 * 3_600),
+            now
+        ));
+        assert!(!session_is_outside_safety_margin(
+            now + Duration::from_secs(60),
+            now
+        ));
+    }
 
     /// S1 の牙: 掃除候補に localStorage の実体が**一度も**現れないことを固定する。
     ///

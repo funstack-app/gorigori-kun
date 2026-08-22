@@ -221,9 +221,49 @@ export type CleanupInspection = {
   totalBytes: number;
 };
 
+export type StorageCategoryKey =
+  | "sessions"
+  | "logs"
+  | "webviewCache"
+  | "backups"
+  | "brokenQuarantine"
+  | "appData";
+
+/** appData は Rust 側でも拒否されるため、呼び出し側の型からも除外する。 */
+export type StorageCleanupCategory = Exclude<StorageCategoryKey, "appData">;
+
+export type StorageCategoryStats = {
+  /** カテゴリに存在する実測総量。 */
+  bytes: number;
+  count: number;
+  /** 現在の安全条件で削除できる量。sessions は直近24時間分を含まない。 */
+  deletableBytes: number;
+  deletableCount: number;
+};
+
+export type StorageBreakdown = {
+  sessions: StorageCategoryStats;
+  logs: StorageCategoryStats;
+  webviewCache: StorageCategoryStats;
+  backups: StorageCategoryStats;
+  brokenQuarantine: StorageCategoryStats;
+  appData: StorageCategoryStats;
+  totalBytes: number;
+  errors: string[];
+};
+
+export type StorageCleanupCategoriesReport = {
+  freedBytesByCategory: Partial<Record<StorageCleanupCategory, number>>;
+  deletedCountsByCategory: Partial<Record<StorageCleanupCategory, number>>;
+  errors: string[];
+};
+
 export const storageCleanup = {
   run: () => invoke<CleanupReport>("storage_cleanup_run"),
   inspect: () => invoke<CleanupInspection>("storage_cleanup_inspect"),
+  breakdown: () => invoke<StorageBreakdown>("storage_breakdown"),
+  cleanupCategories: (categories: StorageCleanupCategory[]) =>
+    invoke<StorageCleanupCategoriesReport>("storage_cleanup_categories", { categories }),
 };
 
 // ──────────── Images ────────────

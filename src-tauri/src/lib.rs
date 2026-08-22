@@ -555,6 +555,8 @@ pub fn run() {
             commands::edit_unsupported::edit_segment_run,
             commands::storage_cleanup::storage_cleanup_run,
             commands::storage_cleanup::storage_cleanup_inspect,
+            commands::storage_cleanup::storage_breakdown,
+            commands::storage_cleanup::storage_cleanup_categories,
             commands::auth::auth_read,
             commands::auth::auth_login_api_key,
             commands::auth::auth_login_chatgpt,

@@ -1,10 +1,14 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   higgsfieldMcp,
   type LegacySummary,
   magnific,
+  type StorageBreakdown,
+  type StorageCategoryKey,
+  type StorageCleanupCategory,
   type StorageSettings,
   storage,
+  storageCleanup,
 } from "../lib/ipc";
 import {
   beginStorageRootSwitch,
@@ -29,7 +33,6 @@ import { useWorldContexts } from "../lib/store/worldContexts";
 // SettingsCloudSection は v0.6.13 でα版非表示。β以降で復活予定。
 // import { SettingsCloudSection } from "./SettingsCloudSection";
 import { SettingsConnections } from "./SettingsConnections";
-import { StorageManagementSection } from "./StorageManagementSection";
 import { UpdateChecker } from "./UpdateChecker";
 import { FONT_SCALE_OPTIONS, useFontScale } from "../lib/store/fontScale";
 
@@ -920,15 +923,19 @@ function StorageSettingsTab() {
         共有・バックアップできる。未指定なら従来どおりアプリ内部に保存。
       */}
       <Field label="プロジェクトデータの保存先（作品一覧・企画ログ）">
-        <p className="mb-1.5 text-[11px] leading-relaxed text-neutral-400">
-          プロジェクト一覧や企画チャットのデータ (projects.json) を保存する場所です。 Google Drive
-          などのローカル同期フォルダ（例:{" "}
-          <span className="font-mono">
-            ~/Library/CloudStorage/GoogleDrive-…/マイドライブ/GORI GORI
-          </span>
-          ）を選ぶと、別の PC とデータを同期・バックアップできます。
-          未設定ならアプリ内部に保存します（従来どおり）。
+        <p className="mb-1.5 text-[11px] text-neutral-400">
+          作品一覧と企画ログの保存場所です。未設定ならアプリ内部に保存します。
         </p>
+        <details className="mb-2 text-[11px] text-neutral-500">
+          <summary className="cursor-pointer hover:text-neutral-300">同期・バックアップの詳細</summary>
+          <p className="mt-1.5 leading-relaxed">
+            Google Driveなどのローカル同期フォルダ（例: {" "}
+            <span className="font-mono">
+              ~/Library/CloudStorage/GoogleDrive-…/マイドライブ/GORI GORI
+            </span>
+            ）を選ぶと、別のPCともデータを同期できます。
+          </p>
+        </details>
         <div className="flex gap-2">
           <TextInput
             value={
@@ -967,10 +974,15 @@ function StorageSettingsTab() {
         ここから過去の状態にワンクリックで戻せる（対話サポート不要で自力復旧）。
       */}
       <Field label="プロジェクトのバックアップ（消えたとき・戻したいとき）">
-        <p className="mb-1.5 text-[11px] leading-relaxed text-neutral-400">
-          プロジェクト一覧は保存のたびに自動でバックアップされています。
-          もしプロジェクトが消えた・おかしくなった場合は、ここから過去の状態に戻せます。
+        <p className="mb-1.5 text-[11px] text-neutral-400">
+          保存のたびに自動でバックアップしています。
         </p>
+        <details className="mb-2 text-[11px] text-neutral-500">
+          <summary className="cursor-pointer hover:text-neutral-300">復元について</summary>
+          <p className="mt-1.5 leading-relaxed">
+            プロジェクトが消えた・おかしくなった場合に、過去の状態へ戻せます。
+          </p>
+        </details>
         <BackupHealthLine result={backups} />
         <button
           type="button"
@@ -1023,10 +1035,15 @@ function StorageSettingsTab() {
         （2026-07-30 全ユーザーデータ生存監査 §5）
       */}
       <Field label="プリセット・キャラクターのバックアップ（消えたとき・戻したいとき）">
-        <p className="mb-1.5 text-[11px] leading-relaxed text-neutral-400">
-          登録したキャラクターやプリセットは、保存のたびに自動でバックアップされています。
-          もしキャラクターやプリセットが消えた・おかしくなった場合は、ここから過去の状態に戻せます。
+        <p className="mb-1.5 text-[11px] text-neutral-400">
+          キャラクターとプリセットを保存のたびに自動で守ります。
         </p>
+        <details className="mb-2 text-[11px] text-neutral-500">
+          <summary className="cursor-pointer hover:text-neutral-300">復元について</summary>
+          <p className="mt-1.5 leading-relaxed">
+            登録内容が消えた・おかしくなった場合に、過去の状態へ戻せます。
+          </p>
+        </details>
         {presetsFileState === "corrupted" || presetsFileState === "unreadable" ? (
           <p className="mb-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[11px] font-bold leading-relaxed text-amber-200">
             プリセット正本ファイルが読み込めない状態です。復元をおすすめします
@@ -1083,10 +1100,15 @@ function StorageSettingsTab() {
         （2026-07-30 独立評価 H-2）
       */}
       <Field label="3Dシーンのバックアップ（消えたとき・戻したいとき）">
-        <p className="mb-1.5 text-[11px] leading-relaxed text-neutral-400">
-          3Dシーンは編集のたびに自動でバックアップされています。
-          おかしくなった・前の状態に戻したい場合は、ここから過去の状態に戻せます。
+        <p className="mb-1.5 text-[11px] text-neutral-400">
+          3Dシーンを編集のたびに自動でバックアップします。
         </p>
+        <details className="mb-2 text-[11px] text-neutral-500">
+          <summary className="cursor-pointer hover:text-neutral-300">復元について</summary>
+          <p className="mt-1.5 leading-relaxed">
+            シーンがおかしくなった・前へ戻したい場合に、過去の状態を選べます。
+          </p>
+        </details>
         <BackupHealthLine result={scene3dBackups} />
         <button
           type="button"
@@ -1151,8 +1173,241 @@ function StorageSettingsTab() {
           </div>
         </Field>
       ) : null}
-      <StorageManagementSection />
+      <StorageBreakdownSection />
     </Panel>
+  );
+}
+
+const STORAGE_CATEGORY_ROWS: Array<{
+  key: StorageCategoryKey;
+  label: string;
+  description: string;
+}> = [
+  {
+    key: "sessions",
+    label: "対話履歴",
+    description:
+      "消してOK。過去のAIとのやりとりを再開できなくなるだけで、作品・画像は消えません",
+  },
+  {
+    key: "logs",
+    label: "エンジンログ",
+    description: "消してOK。不具合調査用の記録です",
+  },
+  {
+    key: "webviewCache",
+    label: "表示キャッシュ",
+    description: "消してOK。次回表示が一瞬遅くなるだけです",
+  },
+  {
+    key: "backups",
+    label: "バックアップ世代",
+    description: "直近の復元用です。容量が気になる場合だけ消してください",
+  },
+  {
+    key: "brokenQuarantine",
+    label: "退避データ（broken）",
+    description: "壊れて自動退避したデータです。問題なく使えていれば消してOK",
+  },
+  {
+    key: "appData",
+    label: "実データ（参考）",
+    description: "作品・画像・登録データ。ここからは消しません",
+  },
+];
+
+const formatStorageBytes = (bytes: number): string => {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let value = bytes / 1024;
+  let unit = units[0];
+  for (let i = 1; i < units.length && value >= 1024; i += 1) {
+    value /= 1024;
+    unit = units[i];
+  }
+  return `${value >= 10 ? value.toFixed(1) : value.toFixed(2)} ${unit}`;
+};
+
+function StorageBreakdownSection() {
+  const push = useToasts((s) => s.push);
+  const [breakdown, setBreakdown] = useState<StorageBreakdown | null>(null);
+  const [selected, setSelected] = useState<StorageCleanupCategory[]>([]);
+  const [scanning, setScanning] = useState(false);
+  const [cleaning, setCleaning] = useState(false);
+
+  const refreshBreakdown = useCallback(async () => {
+    setScanning(true);
+    try {
+      const next = await storageCleanup.breakdown();
+      setBreakdown(next);
+    } catch (err) {
+      push({ kind: "error", text: `一時データの内訳を確認できません: ${String(err)}` });
+    } finally {
+      setScanning(false);
+    }
+  }, [push]);
+
+  useEffect(() => {
+    void refreshBreakdown();
+  }, [refreshBreakdown]);
+
+  const selectedTotal = selected.reduce(
+    (total, category) => total + (breakdown?.[category].deletableBytes ?? 0),
+    0,
+  );
+
+  const toggleCategory = (category: StorageCleanupCategory) => {
+    setSelected((current) =>
+      current.includes(category)
+        ? current.filter((item) => item !== category)
+        : [...current, category],
+    );
+  };
+
+  const runSelectedCleanup = async () => {
+    if (!breakdown || selected.length === 0) return;
+    const message =
+      `選んだ一時データ ${formatStorageBytes(selectedTotal)} を削除します。\n\n` +
+      "作品・画像・登録データは削除しません。続けますか？";
+    let ok = false;
+    try {
+      const { ask } = await import("@tauri-apps/plugin-dialog");
+      ok = await ask(message, { title: "選んだものを削除", kind: "warning" });
+    } catch {
+      ok = window.confirm(message);
+    }
+    if (!ok) return;
+
+    setCleaning(true);
+    try {
+      const report = await storageCleanup.cleanupCategories(selected);
+      const summary = selected
+        .map((category) => {
+          const label = STORAGE_CATEGORY_ROWS.find((row) => row.key === category)?.label ?? category;
+          return `${label} ${formatStorageBytes(report.freedBytesByCategory[category] ?? 0)}`;
+        })
+        .join(" / ");
+      push({
+        kind: "success",
+        text: summary ? `削除しました: ${summary}` : "削除対象はありませんでした",
+        ttlMs: 5200,
+      });
+      if (report.errors.length > 0) {
+        push({
+          kind: "warn",
+          text: `一部を削除できませんでした（${report.errors.length}件）。内訳を再計算しました。`,
+          ttlMs: 6200,
+        });
+      }
+      setSelected([]);
+      await refreshBreakdown();
+    } catch (err) {
+      push({ kind: "error", text: `選んだデータを削除できません: ${String(err)}` });
+    } finally {
+      setCleaning(false);
+    }
+  };
+
+  return (
+    <Field label="一時データの内訳">
+      <div className="rounded-lg border border-[#303030] bg-[#151515] p-3">
+        <div className="mb-3 flex items-start justify-between gap-3">
+          <div>
+            <p className="text-xs font-bold text-neutral-200">消す種類を自分で選べます</p>
+            <p className="mt-0.5 text-[11px] text-neutral-500">
+              対話履歴は、使用中の可能性がある直近24時間分を自動で残します。
+            </p>
+          </div>
+          <button
+            type="button"
+            disabled={scanning || cleaning}
+            onClick={() => void refreshBreakdown()}
+            className={`${MUTED_BUTTON} flex h-8 shrink-0 items-center gap-1.5 px-2.5 text-[11px] disabled:opacity-40`}
+          >
+            {scanning ? (
+              <span
+                aria-hidden="true"
+                className="h-3 w-3 animate-spin rounded-full border-2 border-neutral-500 border-t-white"
+              />
+            ) : null}
+            {scanning ? "計算中…" : "内訳を再計算"}
+          </button>
+        </div>
+
+        <div className="divide-y divide-[#2a2a2a] rounded-md border border-[#2a2a2a]">
+          {STORAGE_CATEGORY_ROWS.map((row) => {
+            const stats = breakdown?.[row.key];
+            const cleanupCategory: StorageCleanupCategory | null =
+              row.key === "appData" ? null : row.key;
+            const checked = cleanupCategory ? selected.includes(cleanupCategory) : false;
+            const shownBytes = cleanupCategory ? stats?.deletableBytes : stats?.bytes;
+            const shownCount = cleanupCategory ? stats?.deletableCount : stats?.count;
+            const protectedSessionBytes =
+              row.key === "sessions" && stats
+                ? Math.max(0, stats.bytes - stats.deletableBytes)
+                : 0;
+            return (
+              <label
+                key={row.key}
+                className={`flex gap-3 px-3 py-2.5 ${
+                  cleanupCategory ? "cursor-pointer hover:bg-white/[0.025]" : "cursor-not-allowed"
+                }`}
+              >
+                <input
+                  type="checkbox"
+                  checked={checked}
+                  disabled={!cleanupCategory || scanning || cleaning || !breakdown}
+                  onChange={() => cleanupCategory && toggleCategory(cleanupCategory)}
+                  className="mt-0.5 h-4 w-4 shrink-0 accent-pink-500 disabled:opacity-40"
+                />
+                <span className="min-w-0 flex-1">
+                  <span className="flex items-baseline justify-between gap-3">
+                    <span className="text-xs font-bold text-neutral-200">{row.label}</span>
+                    <span className="shrink-0 font-mono text-xs font-bold text-neutral-100">
+                      {stats ? formatStorageBytes(shownBytes ?? 0) : scanning ? "計算中…" : "—"}
+                    </span>
+                  </span>
+                  <span className="mt-0.5 block text-[11px] leading-relaxed text-neutral-400">
+                    {row.description}
+                  </span>
+                  {stats ? (
+                    <span className="mt-0.5 block text-[10px] text-neutral-600">
+                      {shownCount ?? 0}件
+                      {protectedSessionBytes > 0
+                        ? ` ／ 直近24時間分 ${formatStorageBytes(protectedSessionBytes)} は保護中`
+                        : ""}
+                    </span>
+                  ) : null}
+                </span>
+              </label>
+            );
+          })}
+        </div>
+
+        {breakdown && breakdown.errors.length > 0 ? (
+          <p className="mt-2 text-[10px] text-amber-300">
+            読み取れない項目が {breakdown.errors.length} 件ありました。表示は確認できた範囲です。
+          </p>
+        ) : null}
+
+        <div className="mt-3 flex items-center justify-between gap-3">
+          <div>
+            <p className="text-[11px] text-neutral-500">選択した合計</p>
+            <p className="font-mono text-sm font-bold text-white">
+              {formatStorageBytes(selectedTotal)}
+            </p>
+          </div>
+          <button
+            type="button"
+            disabled={selected.length === 0 || selectedTotal === 0 || scanning || cleaning}
+            onClick={() => void runSelectedCleanup()}
+            className={`${PRIMARY_BUTTON} h-9 px-4 text-xs disabled:cursor-not-allowed disabled:opacity-40`}
+          >
+            {cleaning ? "削除中…" : "選んだものを削除"}
+          </button>
+        </div>
+      </div>
+    </Field>
   );
 }
 
