@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useImagePreview } from "../lib/store/imagePreview";
+import { useComposer } from "../lib/store/composer";
 import { useImages } from "../lib/store/images";
 import { useMaskEditor } from "../lib/store/maskEditor";
 import { useProjects } from "../lib/store/projects";
@@ -10,8 +11,12 @@ import { sendImageToPlanForRediscuss } from "../lib/sendToPlan";
 import { setDragRef } from "../lib/dragRef";
 import { ContextMenu, type ContextMenuItem } from "./ContextMenu";
 import { useEditor } from "./edit/editor/editorStore";
-import { deleteGalleryImage } from "./galleryItemMenu";
-import { ImageMetaPanel } from "./ImageMetaPanel";
+import {
+  deleteGalleryImage,
+  getImagePreviewPrimaryActions,
+  resolveImagePreviewMetadata,
+  type ImagePreviewMetadata,
+} from "./galleryItemMenu";
 import { RegisterPresetDialog } from "./RegisterPresetDialog";
 import { SafeImage, SafeVideo } from "./SafeImage";
 import { SceneFromImageDialog } from "./skills/scene3d/SceneFromImageDialog";
@@ -54,6 +59,8 @@ export function ImagePreviewModal() {
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
   /** F-#1: プリセット登録ダイアログの開閉。null なら閉じ、文字列なら対象画像 path。 */
   const [presetTarget, setPresetTarget] = useState<string | null>(null);
+  const [previewMetadata, setPreviewMetadata] =
+    useState<ImagePreviewMetadata | null>(null);
   // 3Dシーン化 (Slice D)。写真は元画像のほうがポーズ検出精度が高いので正規化はスキップ可
   const [scene3dTarget, setScene3dTarget] = useState<string | null>(null);
   /**
@@ -155,12 +162,91 @@ export function ImagePreviewModal() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useEffect(() => {
+    if (!path) {
+      setPreviewMetadata(null);
+      return;
+    }
+    let cancelled = false;
+    setPreviewMetadata(null);
+    void resolveImagePreviewMetadata(path).then((metadata) => {
+      if (!cancelled) setPreviewMetadata(metadata);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [path]);
+
   if (!path) return null;
 
   const name = item?.name ?? path.split("/").pop() ?? "";
   // 動画は3Dシーン化の入力にできない (解析・ポーズ推定はどちらも静止画が前提)。
   // 表示の出し分けと右クリックメニューの出し分けで同じ判定を使う。
   const isVideo = /^.+\.(mp4|webm|mov|m4v)$/i.test(path);
+  const primaryActions = previewMetadata
+    ? getImagePreviewPrimaryActions(
+        previewMetadata,
+        isVideo ? "video" : "image",
+      )
+    : {
+        canUseAsReference: !isVideo,
+        canRecreate: false,
+        recreateDisabledReason: "生成情報を読み込み中です。",
+        canSave: true,
+      };
+
+  const useAsReference = () => {
+    if (!primaryActions.canUseAsReference) return;
+    useComposer.getState().addReference({
+      path,
+      name,
+      source: "gallery",
+    });
+    useWorkspace.getState().setActiveTab("generate");
+    pushToast({
+      kind: "success",
+      text: "制作タブの参照画像に追加しました",
+      ttlMs: 2600,
+    });
+    close();
+  };
+
+  const recreateWithSameSettings = () => {
+    if (
+      !previewMetadata ||
+      !primaryActions.canRecreate ||
+      !previewMetadata.prompt
+    ) {
+      return;
+    }
+    useComposer.getState().setText(previewMetadata.prompt);
+    useWorkspace.getState().setActiveTab("generate");
+    pushToast({
+      kind: "success",
+      text: "生成時のプロンプトを制作タブに読み込みました",
+      ttlMs: 2800,
+    });
+    close();
+  };
+
+  const copyPreviewPrompt = async () => {
+    const prompt = previewMetadata?.prompt?.trim();
+    if (!prompt) return;
+    try {
+      await navigator.clipboard.writeText(prompt);
+      pushToast({
+        kind: "success",
+        text: "プロンプトをコピーしました",
+        ttlMs: 2400,
+      });
+    } catch {
+      pushToast({
+        kind: "error",
+        text: "プロンプトのコピーに失敗しました",
+        ttlMs: 4000,
+      });
+    }
+  };
 
   return (
     <div
@@ -315,14 +401,14 @@ export function ImagePreviewModal() {
       {/* 右: アクションペイン (fullscreen 時は非表示) */}
       {!fullscreen && (
         <aside
-          className="flex h-full w-[360px] shrink-0 flex-col border-l border-[#2a2a2a] bg-[#161616]"
+          className="flex h-full w-[390px] shrink-0 flex-col border-l border-white/10 bg-black/75 backdrop-blur-xl"
           onClick={(e) => e.stopPropagation()}
         >
           {/* ヘッダ: タイトル + 閉じるボタン */}
           <div className="flex items-center justify-between border-b border-[#242424] px-4 py-3">
             <div className="min-w-0">
               <p className="text-[10px] font-black uppercase tracking-wide text-neutral-500">
-                PREVIEW
+                詳細
               </p>
               <p className="truncate text-sm font-bold text-white" title={name}>
                 {name}
@@ -339,114 +425,139 @@ export function ImagePreviewModal() {
                 緑フォーカスリングが出る問題対策。ブラウザデフォルト outline を
                 消し、キーボード操作時のみピンクの focus-visible ring を表示する。
               */
-              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-[#343434] bg-[#181818] text-neutral-300 outline-none transition hover:border-pink-400 hover:text-white focus-visible:border-pink-400 focus-visible:ring-2 focus-visible:ring-pink-400/40"
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-[#343434] bg-[#181818] text-neutral-300 outline-none transition hover:border-white/30 hover:text-white focus-visible:border-white/40 focus-visible:ring-2 focus-visible:ring-white/15"
             >
               <CloseIcon />
             </button>
           </div>
 
-          {/*
-            STΛCK 指示 (2026-05-19): 右ペインを上下 2 ブロックに固定分離。
-            - 上 (flex-1): メタ情報 (内部の ImageMetaPanel が自身で flex column を組み、
-              プロンプト欄が border-t (下のアクションエリア) の直前まで縦に拡張する)
-            - 下 (shrink-0): 次のアクションリスト
-            これでアクションボタンの位置が画像ごとに動かず、プロンプトの長短にも
-            影響されない安定したレイアウトになる。
-          */}
-          <div className="flex min-h-0 flex-1 flex-col overflow-hidden p-4">
-            <ImageMetaPanel path={path} />
-          </div>
-
-          {/* 次のアクションリスト (ペイン下部に固定) */}
-          <div className="shrink-0 border-t border-[#242424] p-4">
-            <p className="mb-2 text-[10px] font-black uppercase tracking-wide text-neutral-500">
-              次のアクション
-            </p>
-            <div className="flex flex-col gap-1.5">
-              {/*
-                判定 (採用 / ボツ) を横並びのトグルで置く。押している方が
-                色付きでハイライトされ、もう一度押すと候補に戻る (null)。
-                ImageGallery のフィルタ「採用」「ボツ」と連動する。
-              */}
-              <div className="flex gap-1.5">
-                <JudgementToggle
-                  label="採用"
-                  active={judgement === "adopted"}
-                  activeClass="border-pink-400 bg-pink-500/20 text-pink-100"
-                  onClick={() =>
-                    void setJudgement(
-                      path,
-                      judgement === "adopted" ? null : "adopted",
-                    )
-                  }
-                />
-                <JudgementToggle
-                  label="ボツ"
-                  active={judgement === "rejected"}
-                  activeClass="border-neutral-400 bg-neutral-500/25 text-neutral-100"
-                  onClick={() =>
-                    void setJudgement(
-                      path,
-                      judgement === "rejected" ? null : "rejected",
-                    )
-                  }
-                />
-              </div>
-              <ActionRow
-                icon={<ChatIcon />}
-                label="企画で再検討"
-                hint="GPT-5.5 と対話してプロンプトを練り直す"
-                primary
-                onClick={() => {
-                  void sendImageToPlanForRediscuss(path);
-                  close();
-                }}
+          <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+            {/* 採用 / ボツは判断だけを素早く付けられる小さなトグルとして上部に維持。 */}
+            <div className="flex gap-1.5 px-4 pt-3">
+              <JudgementToggle
+                label="採用"
+                active={judgement === "adopted"}
+                activeClass="border-white/30 bg-white/10 text-white"
+                onClick={() =>
+                  void setJudgement(
+                    path,
+                    judgement === "adopted" ? null : "adopted",
+                  )
+                }
               />
-              <ActionRow
-                icon={<EditStudioIcon />}
-                label="編集スタジオで開く"
-                hint="ことばで直す・切り抜く・文字を入れる"
-                onClick={() => {
-                  useEditor.getState().setPendingOpenPath(path);
-                  useWorkspace.getState().setActiveTab("edit");
-                  close();
-                }}
-              />
-              <ActionRow
-                icon={<MaskIcon />}
-                label="マスクで編集"
-                hint="部分的に塗って AI 編集"
-                onClick={() => {
-                  openMask({ path, name });
-                  close();
-                }}
-              />
-              <ActionRow
-                icon={<BookmarkIcon />}
-                label="プリセットに登録"
-                hint="プロンプト+画像をテンプレ化"
-                onClick={() => setPresetTarget(path)}
-              />
-              <ActionRow
-                icon={<SnsExportIcon />}
-                label="SNS用に書き出し"
-                hint="各 SNS の推奨サイズへリサイズ"
-                onClick={() => useSnsExport.getState().open([path])}
-              />
-              <SaveToProjectAction path={path} />
-              <ActionRow
-                icon={<DownloadIcon />}
-                label="名前を付けて保存"
-                hint="ローカル PC にダウンロード"
-                onClick={() => downloadImageAs(path, name)}
-              />
-              <ActionRow
-                icon={<FinderIcon />}
-                label="Finder で表示"
-                hint="保存場所を開く"
-                onClick={() => useImages.getState().revealInFinder(path)}
+              <JudgementToggle
+                label="ボツ"
+                active={judgement === "rejected"}
+                activeClass="border-neutral-400 bg-neutral-500/25 text-neutral-100"
+                onClick={() =>
+                  void setJudgement(
+                    path,
+                    judgement === "rejected" ? null : "rejected",
+                  )
+                }
               />
             </div>
+
+            {/* 生成情報。長いプロンプトだけを内部スクロールさせる。 */}
+            <div className="flex min-h-[240px] max-h-[44vh] flex-col overflow-hidden px-4 py-3">
+              <PreviewMetadataPanel
+                metadata={previewMetadata}
+                onCopyPrompt={() => void copyPreviewPrompt()}
+              />
+            </div>
+
+            {/* Higgsfield の Reference / Recreate / Download 相当。 */}
+            <section className="border-t border-white/10 px-4 py-3">
+              <p className="mb-2 text-[10px] font-black uppercase tracking-[0.16em] text-neutral-500">
+                アクション
+              </p>
+              <div className="grid grid-cols-3 gap-2">
+                <PrimaryActionButton
+                  icon={<ReferenceIcon />}
+                  label="参照に使う"
+                  disabled={!primaryActions.canUseAsReference}
+                  title={
+                    primaryActions.canUseAsReference
+                      ? "制作タブの参照画像に追加"
+                      : "動画は参照画像に追加できません"
+                  }
+                  onClick={useAsReference}
+                />
+                <PrimaryActionButton
+                  icon={<RecreateIcon />}
+                  label="同じ設定でもう一度"
+                  disabled={!primaryActions.canRecreate}
+                  title={primaryActions.recreateDisabledReason ?? undefined}
+                  onClick={recreateWithSameSettings}
+                />
+                <PrimaryActionButton
+                  icon={<DownloadIcon />}
+                  label="保存"
+                  disabled={!primaryActions.canSave}
+                  title="名前を付けてローカル保存"
+                  onClick={() => downloadImageAs(path, name)}
+                />
+              </div>
+              {!primaryActions.canRecreate &&
+                primaryActions.recreateDisabledReason && (
+                  <p className="mt-2 text-[10px] leading-relaxed text-neutral-500">
+                    {primaryActions.recreateDisabledReason}
+                  </p>
+                )}
+            </section>
+
+            {/* 既存機能は消さず、必要な時だけ開く二段目へ集約。 */}
+            <details className="group border-t border-white/10 px-4 py-3">
+              <summary className="flex cursor-pointer list-none items-center justify-between text-xs font-bold text-neutral-300 outline-none hover:text-white focus-visible:text-white">
+                <span>その他</span>
+                <span className="text-neutral-600 transition group-open:rotate-180">
+                  <ChevronDownIcon />
+                </span>
+              </summary>
+              <div className="mt-2 flex flex-col gap-1">
+                <ActionRow
+                  icon={<ChatIcon />}
+                  label="企画で再検討"
+                  onClick={() => {
+                    void sendImageToPlanForRediscuss(path);
+                    close();
+                  }}
+                />
+                <ActionRow
+                  icon={<EditStudioIcon />}
+                  label="編集スタジオで開く"
+                  onClick={() => {
+                    useEditor.getState().setPendingOpenPath(path);
+                    useWorkspace.getState().setActiveTab("edit");
+                    close();
+                  }}
+                />
+                <ActionRow
+                  icon={<MaskIcon />}
+                  label="マスクで編集"
+                  onClick={() => {
+                    openMask({ path, name });
+                    close();
+                  }}
+                />
+                <ActionRow
+                  icon={<BookmarkIcon />}
+                  label="プリセットに登録"
+                  onClick={() => setPresetTarget(path)}
+                />
+                <ActionRow
+                  icon={<SnsExportIcon />}
+                  label="SNS用に書き出し"
+                  onClick={() => useSnsExport.getState().open([path])}
+                />
+                <SaveToProjectAction path={path} />
+                <ActionRow
+                  icon={<FinderIcon />}
+                  label="Finder で表示"
+                  onClick={() => useImages.getState().revealInFinder(path)}
+                />
+              </div>
+            </details>
           </div>
         </aside>
       )}
@@ -531,6 +642,98 @@ export function ImagePreviewModal() {
   );
 }
 
+/* ── 生成メタ情報 ─────────────────────────────────────── */
+function PreviewMetadataPanel({
+  metadata,
+  onCopyPrompt,
+}: {
+  metadata: ImagePreviewMetadata | null;
+  onCopyPrompt: () => void;
+}) {
+  if (!metadata) {
+    return (
+      <p className="text-[11px] text-neutral-500">生成情報を読み込み中...</p>
+    );
+  }
+
+  const hasPrompt = !!metadata.prompt?.trim();
+  const hasGenerationDetails = metadata.source === "history";
+
+  return (
+    <div className="flex h-full min-h-0 flex-col gap-3 text-xs text-neutral-300">
+      {hasGenerationDetails && (
+        <dl className="grid shrink-0 grid-cols-[72px_1fr] gap-x-3 gap-y-1.5 rounded-lg border border-white/[0.08] bg-white/[0.025] p-3 text-[11px]">
+          <dt className="text-neutral-500">モデル</dt>
+          <dd className="min-w-0 break-words text-neutral-200">
+            {metadata.modelLabel ?? "未記録"}
+          </dd>
+          <dt className="text-neutral-500">生成日時</dt>
+          <dd className="text-neutral-200">
+            {metadata.generatedAt
+              ? new Date(metadata.generatedAt).toLocaleString("ja-JP")
+              : "未記録"}
+          </dd>
+        </dl>
+      )}
+
+      {metadata.notice && (
+        <p className="shrink-0 text-[11px] leading-relaxed text-neutral-500">
+          {metadata.notice}
+        </p>
+      )}
+
+      {hasPrompt && (
+        <div className="flex min-h-0 flex-1 flex-col gap-1.5">
+          <div className="flex shrink-0 items-center justify-between gap-2">
+            <span className="text-[10px] font-bold uppercase tracking-[0.14em] text-neutral-500">
+              プロンプト
+            </span>
+            <button
+              type="button"
+              onClick={onCopyPrompt}
+              className="rounded-md border border-white/10 bg-white/[0.03] px-2 py-1 text-[10px] font-bold text-neutral-300 transition hover:border-white/20 hover:text-white"
+              title="プロンプトをコピー"
+            >
+              コピー
+            </button>
+          </div>
+          <pre className="m-0 min-h-0 flex-1 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-white/[0.08] bg-black/35 p-3 font-sans text-[12px] leading-relaxed text-neutral-200">
+            {metadata.prompt}
+          </pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ── 主要3アクション ───────────────────────────────────── */
+function PrimaryActionButton({
+  icon,
+  label,
+  disabled,
+  title,
+  onClick,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  disabled?: boolean;
+  title?: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      title={title}
+      onClick={onClick}
+      className="flex min-h-[82px] flex-col items-center justify-center gap-2 rounded-lg border border-pink-400/45 bg-pink-500/10 px-2 py-3 text-center text-[11px] font-bold leading-tight text-pink-100 outline-none transition hover:border-pink-300 hover:bg-pink-500/20 focus-visible:ring-2 focus-visible:ring-pink-400/40 disabled:cursor-not-allowed disabled:border-white/10 disabled:bg-white/[0.025] disabled:text-neutral-600 disabled:ring-0"
+    >
+      <span className="flex h-7 w-7 items-center justify-center">{icon}</span>
+      <span>{label}</span>
+    </button>
+  );
+}
+
 /* ── 判定 (採用/ボツ) トグルボタン ───────────────────── */
 function JudgementToggle({
   label,
@@ -565,43 +768,24 @@ function ActionRow({
   icon,
   label,
   hint,
-  primary,
   onClick,
 }: {
   icon: React.ReactNode;
   label: string;
   hint?: string;
-  primary?: boolean;
   onClick: () => void;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
-      className={[
-        "group flex w-full items-center gap-3 rounded-md border px-3 py-2 text-left transition",
-        primary
-          ? "border-pink-400/60 bg-pink-500/10 hover:border-pink-400 hover:bg-pink-500/20"
-          : "border-[#262626] bg-[#141414] hover:border-pink-400/40 hover:bg-[#1a1a1a]",
-      ].join(" ")}
+      className="group flex w-full items-center gap-2.5 rounded-md border border-white/[0.07] bg-white/[0.025] px-2.5 py-1.5 text-left transition hover:border-white/15 hover:bg-white/[0.05]"
     >
-      <span
-        className={[
-          "flex h-8 w-8 shrink-0 items-center justify-center rounded-md",
-          primary
-            ? "bg-pink-500/20 text-pink-200"
-            : "bg-[#1f1f1f] text-neutral-400 group-hover:text-pink-300",
-        ].join(" ")}
-      >
+      <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-white/[0.04] text-neutral-500 group-hover:text-neutral-200">
         {icon}
       </span>
       <span className="min-w-0 flex-1">
-        <span
-          className={[
-            "block text-sm font-bold",
-            primary ? "text-pink-100" : "text-neutral-100",
-          ].join(" ")}
-        >
+        <span className="block text-xs font-bold text-neutral-200">
           {label}
         </span>
         {hint && (
@@ -754,6 +938,14 @@ function ChevronRightIcon() {
   );
 }
 
+function ChevronDownIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="6 9 12 15 18 9" />
+    </svg>
+  );
+}
+
 function MinimizeIcon() {
   return (
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -816,6 +1008,27 @@ function ProjectIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
       <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+    </svg>
+  );
+}
+
+function ReferenceIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="3" width="18" height="18" rx="2" />
+      <circle cx="8.5" cy="8.5" r="1.5" />
+      <path d="m21 15-5-5L5 21" />
+      <path d="M18 3v5" />
+      <path d="M15.5 5.5h5" />
+    </svg>
+  );
+}
+
+function RecreateIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 4v5h5" />
+      <path d="M4 13a8.1 8.1 0 0 0 15.5 2M20 20v-5h-5" />
     </svg>
   );
 }

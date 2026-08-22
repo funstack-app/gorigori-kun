@@ -2,6 +2,7 @@ import {
   images as imagesIpc,
   history,
   sessions as sessionsApi,
+  type GenerationInfo,
 } from "../lib/ipc";
 import { useComposer } from "../lib/store/composer";
 import { useImagePreview } from "../lib/store/imagePreview";
@@ -22,6 +23,126 @@ import type { ContextMenuItem } from "./ContextMenu";
 
 /** 履歴 turn の逆引き上限。ImageMetaPanel と揃える (Rust 側 clamp(1, 2000))。 */
 const HISTORY_LOOKUP_LIMIT = 2000;
+
+export type ImagePreviewMetadata = {
+  source: "history" | "project" | "missing" | "error";
+  prompt: string | null;
+  modelLabel: string | null;
+  generatedAt: number | null;
+  notice: string | null;
+};
+
+export type ImagePreviewPrimaryActions = {
+  canUseAsReference: boolean;
+  canRecreate: boolean;
+  recreateDisabledReason: string | null;
+  canSave: boolean;
+};
+
+function previewModelLabel(meta: GenerationInfo): string | null {
+  const displayName = meta.modelDisplayName?.trim();
+  if (displayName) {
+    if (meta.provider === "magnific") return `Magnific · ${displayName}`;
+    if (meta.provider === "higgsfield") return `Higgsfield · ${displayName}`;
+    if (meta.provider === "codex") return `Codex · ${displayName}`;
+    return displayName;
+  }
+  return meta.model?.trim() || null;
+}
+
+/**
+ * 詳細パネルの表示値を、取得済みの履歴と projects.json のプロンプトだけから作る。
+ * 履歴が無い場合にモデルや日時を推測しないことが、この関数の重要な境界。
+ */
+export function buildImagePreviewMetadata(
+  generation: GenerationInfo | null,
+  projectPrompt: string | null = null,
+): ImagePreviewMetadata {
+  if (generation) {
+    const prompt = generation.prompt?.trim() || null;
+    return {
+      source: "history",
+      prompt,
+      modelLabel: previewModelLabel(generation),
+      generatedAt:
+        Number.isFinite(generation.generatedAt) && generation.generatedAt > 0
+          ? generation.generatedAt
+          : null,
+      notice: prompt ? null : "生成プロンプトは記録されていません。",
+    };
+  }
+
+  const prompt = projectPrompt?.trim() || null;
+  if (prompt) {
+    return {
+      source: "project",
+      prompt,
+      modelLabel: null,
+      generatedAt: null,
+      notice: "プロンプトのみ保存されています。モデルと生成日時は未取得です。",
+    };
+  }
+
+  return {
+    source: "missing",
+    prompt: null,
+    modelLabel: null,
+    generatedAt: null,
+    notice: "この画像は取り込み画像のため、生成情報がありません。",
+  };
+}
+
+/** 主要3アクションの活性条件。UIとテストが同じ判断を使う。 */
+export function getImagePreviewPrimaryActions(
+  metadata: ImagePreviewMetadata,
+  mediaType: "image" | "video" = "image",
+): ImagePreviewPrimaryActions {
+  const hasRecordedPrompt =
+    metadata.source === "history" && !!metadata.prompt?.trim();
+  return {
+    canUseAsReference: mediaType === "image",
+    canRecreate: hasRecordedPrompt,
+    recreateDisabledReason: hasRecordedPrompt
+      ? null
+      : metadata.source === "history"
+        ? "生成プロンプトが記録されていないため、同じ設定を読み込めません。"
+        : metadata.source === "error"
+          ? "生成情報を取得できないため、同じ設定を読み込めません。"
+          : "生成履歴がないため、同じ設定を読み込めません。",
+    canSave: true,
+  };
+}
+
+function projectPromptForImage(path: string): string | null {
+  for (const project of useProjects.getState().projects) {
+    for (const item of project.items) {
+      if (item.imagePath === path && item.prompt?.trim()) {
+        return item.prompt.trim();
+      }
+    }
+  }
+  return null;
+}
+
+/** 既存の履歴APIを1回だけ使って、詳細パネル用の正直な表示値を解決する。 */
+export async function resolveImagePreviewMetadata(
+  path: string,
+): Promise<ImagePreviewMetadata> {
+  const projectPrompt = projectPromptForImage(path);
+  try {
+    const generation = await history.generationInfoForImage(path);
+    return buildImagePreviewMetadata(generation, projectPrompt);
+  } catch {
+    if (projectPrompt) return buildImagePreviewMetadata(null, projectPrompt);
+    return {
+      source: "error",
+      prompt: null,
+      modelLabel: null,
+      generatedAt: null,
+      notice: "生成情報を取得できませんでした。",
+    };
+  }
+}
 
 /**
  * ある画像 path の「生成時プロンプト」を解決する。ImageMetaPanel と同じ手順:
