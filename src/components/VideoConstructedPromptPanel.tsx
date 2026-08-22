@@ -44,6 +44,11 @@ import { ElementwisePromptModal } from "./ElementwisePromptModal";
 import { ReferenceLibraryModal } from "./ReferenceLibraryModal";
 import { ReferencePicker } from "./ReferencePicker";
 import { StockSearchModal } from "./StockSearchModal";
+import { HiggsfieldModelSelector } from "./HiggsfieldModelSelector";
+import {
+  isRemoteMcpJobRunning,
+  useRemoteMcpGen,
+} from "../lib/store/remoteMcpGen";
 
 type CostState =
   | { kind: "idle"; value: number | null; source: "api" | "static" | null }
@@ -150,6 +155,15 @@ export function VideoConstructedPromptPanel() {
   const compareModelIds = useVideoGen((s) => s.compareModelIds);
   const toggleCompareModel = useVideoGen((s) => s.toggleCompareModel);
   const compareMode = compareModelIds.length >= 2;
+  const remoteSelection = useRemoteMcpGen((s) => s.selections.video);
+  const latestRemoteRequestId = useRemoteMcpGen((s) => s.latestRequestId.video);
+  const latestRemoteJob = useRemoteMcpGen((s) => {
+    const requestId = s.latestRequestId.video;
+    return requestId ? (s.jobs[requestId] ?? null) : null;
+  });
+  const remoteValidationMessage = useRemoteMcpGen((s) => s.validationMessage.video);
+  const startRemoteGeneration = useRemoteMcpGen((s) => s.start);
+  const retryRemoteGeneration = useRemoteMcpGen((s) => s.retry);
 
   const isOverriding = promptOverride !== null;
 
@@ -347,6 +361,12 @@ export function VideoConstructedPromptPanel() {
   useEffect(() => {
     let cancelled = false;
     const fallback = model.costEstimate;
+    if (remoteSelection) {
+      setCost({ kind: "idle", value: null, source: null });
+      return () => {
+        cancelled = true;
+      };
+    }
     // @imgN を除去した本文でコスト計算する。
     // Higgsfield CLI は --prompt 内の "@..." をファイル参照と解釈するため、
     // @img1 を残すと "Failed to read img1" でコスト計算が失敗する (2026-06-04 修正)。
@@ -384,7 +404,30 @@ export function VideoConstructedPromptPanel() {
     duration,
     extraParamValues,
     higgsfieldAuthed,
+    remoteSelection,
   ]);
+
+  const runSelectedGeneration = async () => {
+    if (!remoteSelection) {
+      await generate();
+      return;
+    }
+    const result = await startRemoteGeneration({
+      kind: "video",
+      prompt: effectivePrompt,
+      aspectRatio,
+      count,
+    });
+    if (!result.ok) pushToast({ kind: "error", text: result.message });
+  };
+
+  const retryRemote = async () => {
+    if (!latestRemoteRequestId) return;
+    const result = await retryRemoteGeneration(latestRemoteRequestId);
+    if (!result.ok) pushToast({ kind: "error", text: result.message });
+  };
+
+  const remoteRunning = isRemoteMcpJobRunning(latestRemoteJob);
 
   // 設定サマリ行のラベル。
   // 比較モード: 「N モデルで比較 · 16:9」。単一モード: 「Kling · 9秒 · 16:9 · ...」
@@ -479,6 +522,11 @@ export function VideoConstructedPromptPanel() {
       </div>
 
       <div className="shrink-13-controls shrink-0 space-y-1 border-t border-[#2a2a2a] p-2">
+        <HiggsfieldModelSelector
+          media="video"
+          fallbackLabel="Higgsfield（既存の動画生成）"
+        />
+
         {/* 設定サマリ行 (モデル/尺/比率/モデル別パラメータ) → タップでモーダル */}
         <button
           type="button"
@@ -494,7 +542,7 @@ export function VideoConstructedPromptPanel() {
         </button>
 
         {/* 生成数: 比較モードはモデル数固定、単一モードは 1〜4 選択 */}
-        {compareMode ? (
+        {compareMode && !remoteSelection ? (
           <div className="flex items-center justify-between rounded-md border border-[#2a2a2a] bg-[#101010] px-2.5 py-1.5">
             <span className="text-[10px] font-black tracking-wide text-neutral-500">
               比較生成
@@ -507,8 +555,8 @@ export function VideoConstructedPromptPanel() {
           <CountAndCostControl
             count={count}
             onChangeCount={setCount}
-            unitCost={cost.value}
-            loading={cost.kind === "loading"}
+            unitCost={remoteSelection ? null : cost.value}
+            loading={!remoteSelection && cost.kind === "loading"}
           />
         )}
 
@@ -521,7 +569,7 @@ export function VideoConstructedPromptPanel() {
 
         {/* API-02: 未接続を「押せるが落ちる」から「押せない + 次の一手が読める」へ。
             原因不明のエラーで終わらせないため、案内をボタンの直上に置く。 */}
-        {!higgsfieldAuthed && (
+        {!higgsfieldAuthed && !remoteSelection && (
           <div className="rounded-md border border-amber-500/40 bg-amber-500/5 px-2.5 py-2">
             <p className="text-[11px] font-black text-amber-200">
               Higgsfield に接続してください
@@ -536,25 +584,59 @@ export function VideoConstructedPromptPanel() {
         <button
           data-tour="video-generation-submit"
           type="button"
-          onClick={() => void generate()}
-          disabled={disabled || !higgsfieldAuthed}
+          onClick={() => void runSelectedGeneration()}
+          disabled={
+            remoteSelection
+              ? remoteRunning || !effectivePrompt.trim()
+              : disabled || !higgsfieldAuthed
+          }
           title={
-            higgsfieldAuthed
+            remoteSelection || higgsfieldAuthed
               ? undefined
               : "Higgsfield 未接続のため生成できません (設定 → 接続先)"
           }
           className="h-9 w-full rounded-md bg-pink-500 px-4 py-1.5 text-sm font-black text-white transition hover:bg-pink-600 disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-500"
         >
-          {!higgsfieldAuthed
+          {remoteSelection && remoteRunning
+            ? latestRemoteJob?.phase === "saving"
+              ? "保存中…"
+              : "生成中…"
+            : !remoteSelection && !higgsfieldAuthed
             ? "Higgsfield 未接続"
-            : isQueueFull
+            : !remoteSelection && isQueueFull
               ? `生成中 ${runningBatchCount}/${maxConcurrentBatches}`
-              : compareMode
+              : !remoteSelection && compareMode
                 ? `${compareModelIds.length}モデルで比較生成`
                 : "動画を生成"}
         </button>
 
-        {status.kind !== "idle" && (
+        {(latestRemoteJob || remoteValidationMessage) && (
+          <div
+            data-request-id={latestRemoteJob?.requestId}
+            className={
+              latestRemoteJob?.phase === "error" || (!latestRemoteJob && remoteValidationMessage)
+                ? "rounded-md border border-red-500/30 bg-red-500/5 px-2.5 py-2 text-xs font-semibold text-red-300"
+                : "rounded-md border border-[#2a2a2a] bg-[#101010] px-2.5 py-2 text-xs font-semibold text-neutral-400"
+            }
+          >
+            <p>
+              {latestRemoteJob?.phase === "done"
+                ? "保存が完了しました。動画はギャラリー・履歴へ自動登録されます。"
+                : latestRemoteJob?.message ?? remoteValidationMessage}
+            </p>
+            {latestRemoteJob?.phase === "error" && (
+              <button
+                type="button"
+                onClick={() => void retryRemote()}
+                className="mt-2 rounded border border-red-300/30 px-2 py-1 text-[11px] font-bold text-red-200 hover:bg-red-500/10"
+              >
+                再試行
+              </button>
+            )}
+          </div>
+        )}
+
+        {!remoteSelection && status.kind !== "idle" && (
           <p
             className={
               status.kind === "error"

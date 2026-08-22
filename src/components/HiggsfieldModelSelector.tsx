@@ -1,10 +1,18 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type WheelEvent,
+} from "react";
 import {
   higgsfieldMcp,
   remoteMcp,
   type HiggsfieldModelInfo,
-  type RemoteMcpDiscoveredModel,
   type RemoteMcpDiscovery,
+  type RemoteMcpToolInfo,
+  type RemoteMcpToolsResult,
 } from "../lib/ipc";
 import { buildPrompt } from "../lib/scene/buildPrompt";
 import { resolveImageMentions } from "../lib/scene/resolveImageMentions";
@@ -28,16 +36,24 @@ import {
 } from "../lib/remoteMcpProviders";
 import { useSceneStore } from "../lib/store/scene";
 import { useScenePromptOverride } from "../lib/store/scenePrompt";
-import { useToasts } from "../lib/store/toasts";
+import {
+  classifyRemoteMcpTool,
+  groupRemoteMcpTools,
+  remoteMcpSchemaHasModelField,
+} from "../lib/remoteMcpTools";
+import {
+  useRemoteMcpGen,
+  type RemoteMcpSelection,
+} from "../lib/store/remoteMcpGen";
 
 // 接続先タブ。接続済みの汎用リモートMCPも同じ列へ動的に加える。
 type RemoteProviderId = RemoteMcpProviderCatalogEntry["id"];
 type ProviderTab = "default" | "higgsfield" | "magnific" | RemoteProviderId;
 
-type RemoteDiscoveryUiState =
+type RemoteToolsUiState =
   | { kind: "idle" }
   | { kind: "loading" }
-  | { kind: "ready"; result: RemoteMcpDiscovery }
+  | { kind: "ready"; result: RemoteMcpToolsResult }
   | { kind: "error"; message: string };
 
 type LoadState = "idle" | "loading" | "ready" | "missing" | "needsAuth" | "error";
@@ -97,7 +113,14 @@ function writeModelCache(media: "image" | "video", cache: ModelCache) {
   }
 }
 
-export function HiggsfieldModelSelector({ media }: { media: "image" | "video" }) {
+export function HiggsfieldModelSelector({
+  media,
+  fallbackLabel,
+}: {
+  media: "image" | "video";
+  /** 専用の既存生成経路を持つ画面で、リモート未選択時に表示する名前。 */
+  fallbackLabel?: string;
+}) {
   const selectedModels = useHiggsfieldModel((s) => s.selectedModels);
   const setSelectedModels = useHiggsfieldModel((s) => s.setSelectedModels);
   // Magnific選択をトリガーボタンに反映するため、メイン関数でも購読する(2026-06-08)。
@@ -105,7 +128,7 @@ export function HiggsfieldModelSelector({ media }: { media: "image" | "video" })
   // 段階7 (2026-06-10): Higgsfield は MCP接続方式に移行。installed 概念を廃止し、
   // 接続済み判定は accounts.higgsfield.authenticated (MCP status 由来) を正とする。
   const higgsfieldAuthed = useAccounts((s) => s.higgsfield.authenticated);
-  const pushToast = useToasts((s) => s.push);
+  const remoteSelection = useRemoteMcpGen((s) => s.selections[media]);
   const [models, setModels] = useState<HiggsfieldModelInfo[]>([]);
   const [planType, setPlanType] = useState<string | null>(null);
   const [loadState, setLoadState] = useState<LoadState>("idle");
@@ -188,7 +211,7 @@ export function HiggsfieldModelSelector({ media }: { media: "image" | "video" })
     return () => {
       cancelled = true;
     };
-  }, [media, pushToast, higgsfieldAuthed]);
+  }, [media, higgsfieldAuthed]);
 
   useEffect(() => {
     if (!open) return;
@@ -227,7 +250,10 @@ export function HiggsfieldModelSelector({ media }: { media: "image" | "video" })
     () => new Set(selectedModels.map((model) => model.jobSetType)),
     [selectedModels],
   );
-  const triggerText = getTriggerText(selectedModels, selectedMagnificForTrigger);
+  const triggerText =
+    fallbackLabel && !remoteSelection
+      ? fallbackLabel
+      : getTriggerText(selectedModels, selectedMagnificForTrigger, remoteSelection);
   const helperText = getHelperText(loadState, selectedModels.length);
   const sections = useMemo(() => buildSections(media, models, query), [media, models, query]);
   const totalVisibleModels = sections.reduce((sum, section) => sum + section.items.length, 0);
@@ -297,6 +323,8 @@ export function HiggsfieldModelSelector({ media }: { media: "image" | "video" })
 
       {open && (
         <ModelPickerPopover
+          media={media}
+          fallbackLabel={fallbackLabel}
           anchorRect={anchorRect}
           loadState={loadState}
           query={query}
@@ -318,6 +346,8 @@ export function HiggsfieldModelSelector({ media }: { media: "image" | "video" })
 }
 
 function ModelPickerPopover({
+  media,
+  fallbackLabel,
   anchorRect,
   // API-02 (2026-07-25): 以前は未使用 (_loadState) だったが、空一覧の理由を
   // 「未接続」と「該当なし/読込中」に書き分けるために使うようにした。
@@ -335,6 +365,8 @@ function ModelPickerPopover({
   onToggleModel,
   onClose,
 }: {
+  media: "image" | "video";
+  fallbackLabel?: string;
   anchorRect: DOMRect | null;
   loadState: LoadState;
   query: string;
@@ -359,8 +391,9 @@ function ModelPickerPopover({
   const selectedMagnificModels = useMagnificModel((s) => s.selectedModels);
   const toggleMagnific = useMagnificModel((s) => s.toggleModel);
   const clearMagnific = useMagnificModel((s) => s.clear);
-  const pushToast = useToasts((s) => s.push);
   const remoteMcpState = useAccounts((s) => s.remoteMcp);
+  const remoteSelection = useRemoteMcpGen((s) => s.selections[media]);
+  const setRemoteSelection = useRemoteMcpGen((s) => s.setSelection);
   const connectedRemoteProviders = useMemo(
     () =>
       REMOTE_MCP_PROVIDERS.filter(
@@ -368,55 +401,111 @@ function ModelPickerPopover({
       ),
     [remoteMcpState],
   );
-  const [remoteDiscovery, setRemoteDiscovery] = useState<
-    Partial<Record<RemoteProviderId, RemoteDiscoveryUiState>>
+  const [remoteTools, setRemoteTools] = useState<
+    Partial<Record<RemoteProviderId, RemoteToolsUiState>>
   >({});
-  const [selectedRemote, setSelectedRemote] = useState<{
-    providerId: RemoteProviderId;
-    model: RemoteMcpDiscoveredModel;
-  } | null>(null);
-  const cacheRequestedRef = useRef(new Set<RemoteProviderId>());
+  const [remoteCatalogs, setRemoteCatalogs] = useState<
+    Partial<Record<RemoteProviderId, RemoteMcpDiscovery | null>>
+  >({});
+  const toolsRequestedRef = useRef(new Set<RemoteProviderId>());
   const magnificCount = selectedMagnificModels.length;
-  const [providerTab, setProviderTab] = useState<ProviderTab>(
-    magnificCount > 0 ? "magnific" : selectedCount > 0 ? "higgsfield" : "default",
+  const [providerTab, setProviderTab] = useState<ProviderTab>(() => {
+    const selectedProvider = REMOTE_MCP_PROVIDERS.find(
+      (provider) => provider.id === remoteSelection?.providerId,
+    );
+    if (selectedProvider && remoteMcpState[selectedProvider.id]?.authenticated) {
+      return selectedProvider.id;
+    }
+    if (fallbackLabel) return "default";
+    return magnificCount > 0 ? "magnific" : selectedCount > 0 ? "higgsfield" : "default";
+  });
+  const activeRemoteProvider = connectedRemoteProviders.find(
+    (provider) => provider.id === providerTab,
   );
 
-  // ピッカーを開いたら、接続中サービスの前回実測だけをローカルから復元する。
-  // ネットワーク実測はユーザーが「モデル一覧を取得」を押すまで開始しない。
+  // プロバイダタブを開いた時点で、保存済みツールを即表示する。保存が無ければ
+  // 正規 API から自動取得する。旧モデル探索は、モデル欄を持つツールとの組合せ用に読む。
   useEffect(() => {
+    if (!activeRemoteProvider) return;
+    const providerId = activeRemoteProvider.id;
+    if (toolsRequestedRef.current.has(providerId)) return;
+    toolsRequestedRef.current.add(providerId);
     let cancelled = false;
-    const requested: RemoteProviderId[] = [];
-    for (const provider of connectedRemoteProviders) {
-      if (cacheRequestedRef.current.has(provider.id)) continue;
-      cacheRequestedRef.current.add(provider.id);
-      requested.push(provider.id);
-      setRemoteDiscovery((current) => ({
-        ...current,
-        [provider.id]: { kind: "loading" },
-      }));
-      void remoteMcp
-        .discoveryCached(provider.id)
-        .then((result) => {
-          if (cancelled) return;
-          setRemoteDiscovery((current) => ({
-            ...current,
-            [provider.id]: result ? { kind: "ready", result } : { kind: "idle" },
-          }));
-        })
-        .catch((error) => {
-          if (cancelled) return;
-          setRemoteDiscovery((current) => ({
-            ...current,
-            [provider.id]: { kind: "error", message: String(error) },
-          }));
-        });
-    }
+    let settled = false;
+    setRemoteTools((current) => ({
+      ...current,
+      [providerId]: { kind: "loading" },
+    }));
+
+    const load = async () => {
+      const [cachedTools, cachedCatalog] = await Promise.all([
+        remoteMcp.listToolsCached(providerId).catch(() => null),
+        remoteMcp.discoveryCached(providerId).catch(() => null),
+      ]);
+      if (cancelled) return;
+      setRemoteCatalogs((current) => ({ ...current, [providerId]: cachedCatalog }));
+      if (cachedTools) {
+        settled = true;
+        setRemoteTools((current) => ({
+          ...current,
+          [providerId]: { kind: "ready", result: cachedTools },
+        }));
+        return;
+      }
+      try {
+        const result = await remoteMcp.listTools(providerId);
+        if (cancelled) return;
+        settled = true;
+        setRemoteTools((current) => ({
+          ...current,
+          [providerId]: { kind: "ready", result },
+        }));
+      } catch (error) {
+        if (cancelled) return;
+        settled = true;
+        setRemoteTools((current) => ({
+          ...current,
+          [providerId]: { kind: "error", message: String(error) },
+        }));
+      }
+    };
+    void load();
+
     return () => {
       cancelled = true;
-      // 接続一覧が変わっただけなら、次の effect で取り直せるように戻す。
-      for (const providerId of requested) cacheRequestedRef.current.delete(providerId);
+      if (!settled) toolsRequestedRef.current.delete(providerId);
     };
-  }, [connectedRemoteProviders]);
+  }, [activeRemoteProvider]);
+
+  const refreshRemoteTools = async (providerId: RemoteProviderId) => {
+    setRemoteTools((current) => ({
+      ...current,
+      [providerId]: { kind: "loading" },
+    }));
+    try {
+      const [result, catalog] = await Promise.all([
+        remoteMcp.listTools(providerId),
+        remoteMcp.discover(providerId).catch(() => remoteCatalogs[providerId] ?? null),
+      ]);
+      setRemoteTools((current) => ({
+        ...current,
+        [providerId]: { kind: "ready", result },
+      }));
+      setRemoteCatalogs((current) => ({ ...current, [providerId]: catalog }));
+      const selected = useRemoteMcpGen.getState().selections[media];
+      if (
+        selected?.providerId === providerId &&
+        !result.tools.some((tool) => tool.name === selected.toolName)
+      ) {
+        setRemoteSelection(media, null);
+      }
+    } catch (error) {
+      setRemoteTools((current) => ({
+        ...current,
+        [providerId]: { kind: "error", message: String(error) },
+      }));
+    }
+  };
 
   // 接続解除でタブが消えたら、安全なデフォルト表示へ戻す。既定モデル自体は変更しない。
   useEffect(() => {
@@ -427,29 +516,9 @@ function ModelPickerPopover({
       !remoteMcpState[providerTab]?.authenticated
     ) {
       setProviderTab("default");
-      setSelectedRemote(null);
+      if (remoteSelection?.providerId === providerTab) setRemoteSelection(media, null);
     }
-  }, [providerTab, remoteMcpState]);
-
-  const discoverRemoteModels = async (providerId: RemoteProviderId) => {
-    setSelectedRemote((current) => (current?.providerId === providerId ? null : current));
-    setRemoteDiscovery((current) => ({
-      ...current,
-      [providerId]: { kind: "loading" },
-    }));
-    try {
-      const result = await remoteMcp.discover(providerId);
-      setRemoteDiscovery((current) => ({
-        ...current,
-        [providerId]: { kind: "ready", result },
-      }));
-    } catch (error) {
-      setRemoteDiscovery((current) => ({
-        ...current,
-        [providerId]: { kind: "error", message: String(error) },
-      }));
-    }
-  };
+  }, [media, providerTab, remoteMcpState, remoteSelection, setRemoteSelection]);
 
   // Magnific 未接続なのに magnific タブが開いたままだと、タブボタンは消えるのに
   // 中身 (モデル一覧+選択チェック) だけ残る (2026-06-10 実機FB)。強制的に default へ戻す。
@@ -513,27 +582,52 @@ function ModelPickerPopover({
     };
   }, [selectedModels, prompt, aspect]);
 
-  const activeRemoteProvider = connectedRemoteProviders.find(
-    (provider) => provider.id === providerTab,
-  );
   const activeRemoteState = activeRemoteProvider
-    ? (remoteDiscovery[activeRemoteProvider.id] ?? { kind: "idle" as const })
+    ? (remoteTools[activeRemoteProvider.id] ?? { kind: "idle" as const })
     : null;
   const normalizedRemoteQuery = query.trim().toLowerCase();
-  const activeRemoteModels =
+  const activeRemoteTools =
     activeRemoteState?.kind === "ready"
-      ? activeRemoteState.result.models.filter((model) =>
+      ? activeRemoteState.result.tools.filter((tool) =>
+          `${tool.name} ${tool.title ?? ""} ${tool.description ?? ""}`
+            .toLowerCase()
+            .includes(normalizedRemoteQuery),
+        )
+      : [];
+  const activeRemoteGroups = groupRemoteMcpTools(activeRemoteTools);
+  const remoteToolSections = (
+    media === "image"
+      ? (["image", "video", "other"] as const)
+      : (["video", "image", "other"] as const)
+  ).map((kind) => ({
+    kind,
+    title:
+      kind === "image" ? "画像生成" : kind === "video" ? "動画生成" : "その他",
+    items: activeRemoteGroups[kind],
+  }));
+  const activeRemoteModels =
+    activeRemoteProvider
+      ? (remoteCatalogs[activeRemoteProvider.id]?.models ?? []).filter((model) =>
           `${model.name} ${model.id} ${model.label ?? ""}`
             .toLowerCase()
             .includes(normalizedRemoteQuery),
         )
       : [];
   const selectedActiveRemote =
-    activeRemoteProvider && selectedRemote?.providerId === activeRemoteProvider.id
-      ? selectedRemote
+    activeRemoteProvider && remoteSelection?.providerId === activeRemoteProvider.id
+      ? remoteSelection
       : null;
+  const selectedActiveTool =
+    activeRemoteState?.kind === "ready" && selectedActiveRemote
+      ? activeRemoteState.result.tools.find(
+          (tool) => tool.name === selectedActiveRemote.toolName,
+        )
+      : null;
+  const selectedToolHasModels = Boolean(
+    selectedActiveTool && remoteMcpSchemaHasModelField(selectedActiveTool.inputSchemaJson),
+  );
   const displayedModelCount = activeRemoteProvider
-    ? activeRemoteModels.length
+    ? activeRemoteTools.length
     : providerTab === "magnific"
       ? FEATURED_MAGNIFIC_IMAGE_MODELS.length
       : providerTab === "default"
@@ -543,15 +637,41 @@ function ModelPickerPopover({
   const confirmSelection = () => {
     if (activeRemoteProvider) {
       if (!selectedActiveRemote) return;
-      pushToast({
-        kind: "info",
-        text: "このモデルでの生成は次のアップデートで対応します",
-        ttlMs: 4500,
-      });
       onClose();
       return;
     }
     onClose();
+  };
+
+  const selectRemoteTool = (tool: RemoteMcpToolInfo) => {
+    if (!activeRemoteProvider) return;
+    const kind = classifyRemoteMcpTool(tool);
+    if (kind !== media) return;
+    const isSelected = selectedActiveRemote?.toolName === tool.name;
+    setRemoteSelection(
+      media,
+      isSelected
+        ? null
+        : {
+            providerId: activeRemoteProvider.id,
+            providerLabel: activeRemoteProvider.label,
+            toolName: tool.name,
+            toolTitle: tool.title,
+            inputSchemaJson: tool.inputSchemaJson,
+            kind,
+          },
+    );
+    if (!isSelected) {
+      setSelectedModels([]);
+      clearMagnific();
+    }
+  };
+
+  const containHorizontalModelSwipe = (event: WheelEvent<HTMLDivElement>) => {
+    if (Math.abs(event.deltaX) <= Math.abs(event.deltaY)) return;
+    // 一覧上の横フリックを、横スクロール可能なタブ帯や外側画面へ渡さない。
+    event.preventDefault();
+    event.stopPropagation();
   };
 
   // ボタン下に出すと画面下端で隠れる場合は、ボタン上 (上方向にフリップ) に出す。
@@ -564,6 +684,7 @@ function ModelPickerPopover({
         left: placement.left,
         width: placement.width,
         maxHeight: placement.maxHeight,
+        overscrollBehavior: "contain",
         zIndex: 60,
       }
     : {
@@ -575,6 +696,7 @@ function ModelPickerPopover({
         // 狭い window でも横にはみ出さないよう viewport で打ち切る。
         width: `min(${PICKER_WIDTH}px, calc(100vw - 16px))`,
         maxHeight: "70vh",
+        overscrollBehavior: "contain",
         zIndex: 60,
       };
 
@@ -595,7 +717,7 @@ function ModelPickerPopover({
           value={query}
           autoFocus
           onChange={(event) => onQueryChange(event.target.value)}
-          placeholder="モデルを検索"
+          placeholder="モデル・ツールを検索"
           className="h-8 w-full rounded-md border border-[#343434] bg-[#101010] px-2 text-xs text-neutral-100 outline-none placeholder:text-neutral-600 focus:border-pink-400"
         />
       </div>
@@ -604,37 +726,44 @@ function ModelPickerPopover({
         接続済みの拡張ごとにモデルを切り替える。未接続の拡張はタブが出ない(degrade)。
         タブ切替時は他providerの選択をクリアして排他にする(コアを壊さない)。
       */}
-      <div className="flex shrink-0 gap-1 overflow-x-auto border-b border-[#242424] px-2 pt-2">
+      <div
+        className="flex shrink-0 gap-1 overflow-x-auto border-b border-[#242424] px-2 pt-2"
+        style={{ overscrollBehaviorX: "contain" }}
+      >
         <button
           type="button"
           onClick={() => {
             setProviderTab("default");
-            setSelectedModels([]);
-            clearMagnific();
-            setSelectedRemote(null);
+            if (!fallbackLabel) {
+              setSelectedModels([]);
+              clearMagnific();
+            }
+            setRemoteSelection(media, null);
           }}
           className={`shrink-0 whitespace-nowrap rounded-t-md px-2.5 py-1 text-[11px] font-bold ${providerTab === "default" ? "bg-[#1e1e1e] text-white" : "text-neutral-500 hover:text-white"}`}
         >
-          デフォルト
+          {fallbackLabel ? "既存" : "デフォルト"}
         </button>
-        <button
-          type="button"
-          onClick={() => {
-            setProviderTab("higgsfield");
-            clearMagnific();
-            setSelectedRemote(null);
-          }}
-          className={`shrink-0 whitespace-nowrap rounded-t-md px-2.5 py-1 text-[11px] font-bold ${providerTab === "higgsfield" ? "bg-pink-500/20 text-pink-100" : "text-neutral-500 hover:text-white"}`}
-        >
-          HiggsField
-        </button>
-        {magnificAuthed && (
+        {!fallbackLabel && (
+          <button
+            type="button"
+            onClick={() => {
+              setProviderTab("higgsfield");
+              clearMagnific();
+              setRemoteSelection(media, null);
+            }}
+            className={`shrink-0 whitespace-nowrap rounded-t-md px-2.5 py-1 text-[11px] font-bold ${providerTab === "higgsfield" ? "bg-pink-500/20 text-pink-100" : "text-neutral-500 hover:text-white"}`}
+          >
+            HiggsField
+          </button>
+        )}
+        {!fallbackLabel && magnificAuthed && (
           <button
             type="button"
             onClick={() => {
               setProviderTab("magnific");
               setSelectedModels([]);
-              setSelectedRemote(null);
+              setRemoteSelection(media, null);
             }}
             className={`shrink-0 whitespace-nowrap rounded-t-md px-2.5 py-1 text-[11px] font-bold ${providerTab === "magnific" ? "bg-violet-500/20 text-violet-100" : "text-neutral-500 hover:text-white"}`}
           >
@@ -645,24 +774,25 @@ function ModelPickerPopover({
           <button
             key={provider.id}
             type="button"
-            onClick={() => {
-              setProviderTab(provider.id);
-              if (selectedRemote?.providerId !== provider.id) setSelectedRemote(null);
-            }}
+            onClick={() => setProviderTab(provider.id)}
             className={`shrink-0 whitespace-nowrap rounded-t-md px-2.5 py-1 text-[11px] font-bold ${providerTab === provider.id ? "bg-sky-500/20 text-sky-100" : "text-neutral-500 hover:text-white"}`}
           >
             {provider.label}
           </button>
         ))}
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto p-2">
+      <div
+        className="min-h-0 flex-1 overflow-y-auto p-2"
+        style={{ overscrollBehavior: "contain", touchAction: "pan-y" }}
+        onWheel={containHorizontalModelSwipe}
+      >
         {providerTab === "default" && (
           <div className="mb-3">
             <ModelRow
-              title={CODEX_STANDARD_LABEL}
-              description="標準モデル。すぐに生成できます"
+              title={fallbackLabel ?? CODEX_STANDARD_LABEL}
+              description={fallbackLabel ? "この画面の既存設定で生成します" : "標準モデル。すぐに生成できます"}
               icon="C"
-              selected={selectedCount === 0 && magnificCount === 0}
+              selected={fallbackLabel ? !remoteSelection : selectedCount === 0 && magnificCount === 0}
               disabled={false}
               onToggle={onPickCodex}
               variant="muted"
@@ -756,34 +886,34 @@ function ModelPickerPopover({
         {activeRemoteProvider && activeRemoteState?.kind === "loading" && (
           <div className="flex items-center justify-center gap-2 rounded-md px-2 py-6 text-[11px] text-neutral-400">
             <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-sky-300/30 border-t-sky-300" />
-            保存済み結果を確認中、または実測中…
+            ツール(そのサービスでできる操作)を確認中…
           </div>
         )}
 
         {activeRemoteProvider && activeRemoteState?.kind === "idle" && (
           <div className="rounded-lg border border-sky-400/20 bg-sky-500/5 p-3 text-center">
             <p className="mb-3 text-[10px] leading-relaxed text-neutral-400">
-              実際のMCP応答を確認して、取得できたモデルだけを表示します。
+              ツール(そのサービスでできる操作)を自動取得します。
             </p>
             <button
               type="button"
-              onClick={() => void discoverRemoteModels(activeRemoteProvider.id)}
+              onClick={() => void refreshRemoteTools(activeRemoteProvider.id)}
               className="h-8 rounded-md bg-sky-500 px-3 text-xs font-bold text-white transition hover:bg-sky-400"
             >
-              モデル一覧を取得
+              ツール一覧を取得
             </button>
           </div>
         )}
 
         {activeRemoteProvider && activeRemoteState?.kind === "error" && (
           <div className="rounded-lg border border-amber-400/30 bg-amber-500/5 p-3">
-            <p className="text-[11px] font-bold text-amber-200">モデル一覧を取得できませんでした</p>
+            <p className="text-[11px] font-bold text-amber-200">ツール一覧を取得できませんでした</p>
             <p className="mt-1 line-clamp-4 break-all text-[10px] leading-relaxed text-neutral-400">
               {summarizeRawError(activeRemoteState.message)}
             </p>
             <button
               type="button"
-              onClick={() => void discoverRemoteModels(activeRemoteProvider.id)}
+              onClick={() => void refreshRemoteTools(activeRemoteProvider.id)}
               className="mt-3 h-8 w-full rounded-md border border-amber-300/30 bg-amber-500/10 px-3 text-xs font-bold text-amber-100 hover:bg-amber-500/20"
             >
               再試行
@@ -793,53 +923,129 @@ function ModelPickerPopover({
 
         {activeRemoteProvider &&
           activeRemoteState?.kind === "ready" &&
-          (activeRemoteState.result.models.length === 0 ? (
-            <div className="rounded-lg border border-amber-400/30 bg-amber-500/5 p-3">
+          (activeRemoteState.result.tools.length === 0 ? (
+            <div className="rounded-lg border border-amber-400/30 bg-amber-500/5 p-3 text-center">
               <p className="text-[11px] font-bold text-amber-200">
-                応答からモデル名を確認できませんでした
-              </p>
-              <p className="mt-1 line-clamp-4 break-all text-[10px] leading-relaxed text-neutral-400">
-                {summarizeDiscoveryFailure(activeRemoteState.result)}
+                利用できるツールを確認できませんでした
               </p>
               <button
                 type="button"
-                onClick={() => void discoverRemoteModels(activeRemoteProvider.id)}
+                onClick={() => void refreshRemoteTools(activeRemoteProvider.id)}
                 className="mt-3 h-8 w-full rounded-md border border-amber-300/30 bg-amber-500/10 px-3 text-xs font-bold text-amber-100 hover:bg-amber-500/20"
               >
-                再試行
+                再取得
               </button>
             </div>
-          ) : activeRemoteModels.length === 0 ? (
-            <p className="rounded-md px-2 py-3 text-center text-[11px] text-neutral-600">
-              該当モデルがありません
-            </p>
           ) : (
             <div>
-              <p className="mb-2 rounded-md bg-sky-500/5 px-2 py-1.5 text-[10px] text-sky-200">
-                モデル名は実測済みです。生成への接続は次のアップデートで対応します。
-              </p>
-              <div className="space-y-1">
-                {activeRemoteModels.map((model) => {
-                  const isSelected = selectedActiveRemote?.model.id === model.id;
-                  return (
-                    <ModelRow
-                      key={`${model.id}:${model.name}`}
-                      title={model.label ?? model.name}
-                      description={model.id === model.name ? "実測で取得" : `ID: ${model.id}`}
-                      icon={activeRemoteProvider.label.trim().charAt(0).toUpperCase() || "M"}
-                      selected={isSelected}
-                      disabled={false}
-                      onToggle={() =>
-                        setSelectedRemote(
-                          isSelected
-                            ? null
-                            : { providerId: activeRemoteProvider.id, model },
-                        )
-                      }
-                    />
-                  );
-                })}
+              <div className="mb-2 flex items-center justify-between gap-2 rounded-md bg-sky-500/5 px-2 py-1.5">
+                <p className="text-[10px] text-sky-200">
+                  ツール(そのサービスでできる操作)を選択
+                </p>
+                <button
+                  type="button"
+                  onClick={() => void refreshRemoteTools(activeRemoteProvider.id)}
+                  className="shrink-0 text-[10px] font-bold text-sky-200 hover:text-white"
+                >
+                  再取得
+                </button>
               </div>
+              {activeRemoteTools.length === 0 ? (
+                <p className="rounded-md px-2 py-3 text-center text-[11px] text-neutral-600">
+                  該当するツールがありません
+                </p>
+              ) : (
+                remoteToolSections.map((section) => (
+                  <section key={section.kind} className="mb-3 last:mb-0">
+                    <div className="mb-1 flex items-center justify-between gap-2 px-1">
+                      <h4 className="text-[10px] font-semibold tracking-wide text-neutral-500">
+                        {section.title}
+                      </h4>
+                      <span className="text-[10px] tabular-nums text-neutral-600">
+                        {section.items.length}
+                      </span>
+                    </div>
+                    {section.items.length === 0 ? (
+                      <p className="px-2 py-1 text-[10px] text-neutral-700">該当なし</p>
+                    ) : (
+                      <div className="space-y-1">
+                        {section.items.map((tool) => {
+                          const selectable = section.kind === media;
+                          const selected = selectedActiveRemote?.toolName === tool.name;
+                          const destination =
+                            section.kind === "image"
+                              ? "画像生成タブで選択できます"
+                              : section.kind === "video"
+                                ? "動画生成タブで選択できます"
+                                : "生成用ツールか確認できないため選択できません";
+                          return (
+                            <ModelRow
+                              key={tool.name}
+                              title={tool.title ?? tool.name}
+                              description={
+                                selectable
+                                  ? tool.description ?? `ツール名: ${tool.name}`
+                                  : destination
+                              }
+                              icon={
+                                activeRemoteProvider.label.trim().charAt(0).toUpperCase() || "M"
+                              }
+                              selected={selected}
+                              disabled={!selectable}
+                              onToggle={() => selectRemoteTool(tool)}
+                            />
+                          );
+                        })}
+                      </div>
+                    )}
+                  </section>
+                ))
+              )}
+
+              {selectedToolHasModels && (
+                <section className="mt-3 border-t border-[#242424] pt-2">
+                  <div className="mb-1 flex items-center justify-between gap-2 px-1">
+                    <h4 className="text-[10px] font-semibold tracking-wide text-neutral-500">
+                      モデル
+                    </h4>
+                    <span className="text-[10px] tabular-nums text-neutral-600">
+                      {activeRemoteModels.length}
+                    </span>
+                  </div>
+                  {activeRemoteModels.length === 0 ? (
+                    <p className="rounded-md px-2 py-2 text-[10px] text-neutral-600">
+                      保存済みモデルはありません。モデル指定が任意なら既定値で生成できます。
+                    </p>
+                  ) : (
+                    <div className="space-y-1">
+                      {activeRemoteModels.map((model) => {
+                        const selected = selectedActiveRemote?.model?.id === model.id;
+                        return (
+                          <ModelRow
+                            key={`${model.id}:${model.name}`}
+                            title={model.label ?? model.name}
+                            description={
+                              model.id === model.name ? "実測で取得" : `ID: ${model.id}`
+                            }
+                            icon={
+                              activeRemoteProvider.label.trim().charAt(0).toUpperCase() || "M"
+                            }
+                            selected={selected}
+                            disabled={false}
+                            onToggle={() => {
+                              if (!selectedActiveRemote) return;
+                              setRemoteSelection(media, {
+                                ...selectedActiveRemote,
+                                model: selected ? undefined : model,
+                              });
+                            }}
+                          />
+                        );
+                      })}
+                    </div>
+                  )}
+                </section>
+              )}
             </div>
           ))}
       </div>
@@ -848,8 +1054,10 @@ function ModelPickerPopover({
           <span className="font-medium text-neutral-300">
             {activeRemoteProvider
               ? selectedActiveRemote
-                ? `${activeRemoteProvider.label}: ${selectedActiveRemote.model.label ?? selectedActiveRemote.model.name}`
+                ? `${activeRemoteProvider.label}: ${selectedActiveRemote.model?.label ?? selectedActiveRemote.model?.name ?? selectedActiveRemote.toolTitle ?? selectedActiveRemote.toolName}`
                 : `${activeRemoteProvider.label}: 未選択`
+              : fallbackLabel && providerTab === "default"
+                ? fallbackLabel
               : magnificCount === 1
               ? `Magnific: ${getMagnificModelName(selectedMagnificModels[0])}`
               : magnificCount >= 2
@@ -869,8 +1077,10 @@ function ModelPickerPopover({
         >
           {activeRemoteProvider
             ? selectedActiveRemote
-              ? "このモデルを選択"
-              : "モデルを選択してください"
+              ? "このツールを選択"
+              : "ツールを選択してください"
+            : fallbackLabel && providerTab === "default"
+              ? "既存の動画設定を使う"
             : magnificCount >= 2
             ? `Magnific ${magnificCount} モデルで比較生成`
             : magnificCount === 1
@@ -1059,7 +1269,16 @@ function matchesModel(model: HiggsfieldModelInfo, normalizedQuery: string): bool
 function getTriggerText(
   selectedModels: SelectedModel[],
   selectedMagnific: string[] = [],
+  remoteSelection: RemoteMcpSelection | null = null,
 ): string {
+  if (remoteSelection) {
+    const choice =
+      remoteSelection.model?.label ??
+      remoteSelection.model?.name ??
+      remoteSelection.toolTitle ??
+      remoteSelection.toolName;
+    return `${remoteSelection.providerLabel}: ${choice}`;
+  }
   // Magnific選択は最優先で反映(Higgsfield/codexより優先する生成経路と一致)。
   if (selectedMagnific.length === 1)
     return `Magnific: ${getMagnificModelName(selectedMagnific[0])}`;
@@ -1094,16 +1313,6 @@ function summarizeRawError(raw: string): string {
   const compact = raw.replace(/\s+/g, " ").trim();
   if (!compact) return "生応答に説明がありませんでした。再試行できます。";
   return compact.length > 320 ? `${compact.slice(0, 320)}…` : compact;
-}
-
-function summarizeDiscoveryFailure(discovery: RemoteMcpDiscovery): string {
-  const failed = discovery.attempts.find(
-    (attempt) => !attempt.ok && attempt.raw.trim().length > 0,
-  );
-  const fallback = discovery.attempts.find((attempt) => attempt.raw.trim().length > 0);
-  return summarizeRawError(
-    failed?.raw ?? fallback?.raw ?? "モデル名として読める項目が応答にありませんでした。",
-  );
 }
 
 /**

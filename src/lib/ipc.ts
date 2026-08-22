@@ -24,6 +24,7 @@ export const EVENT_IMAGE_GENERATED = "codex://image-generated";
 export const EVENT_APP_SERVER_STATUS = "codex://app-server-status";
 export const EVENT_STORYBOARD = "codex://storyboard";
 export const EVENT_EDIT_MODEL_PROGRESS = "codex://edit-model-progress";
+export const EVENT_REMOTE_MCP_GEN = "remote-mcp-gen";
 
 // ──────────── Generic JSON-RPC bridge ────────────
 export type RpcNotification = { method: string; params: unknown };
@@ -644,6 +645,40 @@ export type RemoteMcpDiscovery = {
   models: RemoteMcpDiscoveredModel[];
 };
 
+export type RemoteMcpToolInfo = {
+  name: string;
+  title?: string;
+  description?: string;
+  inputSchemaJson: string;
+};
+
+export type RemoteMcpToolsResult = {
+  providerId: string;
+  authStatus: string;
+  tools: RemoteMcpToolInfo[];
+};
+
+export type RemoteMcpGenerateArgs = {
+  requestId: string;
+  providerId: string;
+  toolName: string;
+  paramsJson: string;
+  kind: "image" | "video";
+};
+
+export type RemoteMcpGenEvent = {
+  requestId: string;
+  providerId: string;
+  phase: "running" | "saving" | "done" | "error";
+  message?: string;
+  savedPaths?: string[];
+};
+
+export type RemoteMcpGenerateResult = {
+  savedPaths: string[];
+  errors: string[];
+};
+
 /** OAuth 対応リモート HTTP MCP の共通接続層。専用生成 UI とは独立している。 */
 export const remoteMcp = {
   providers: () => invoke<RemoteMcpProvider[]>("remote_mcp_providers"),
@@ -656,7 +691,22 @@ export const remoteMcp = {
   /** app data_dir に保存された前回結果。未実測なら null。 */
   discoveryCached: (id: string) =>
     invoke<RemoteMcpDiscovery | null>("remote_mcp_discovery_cached", { providerId: id }),
+  /** MCP が公開しているツール(そのサービスでできる操作)を実測する。 */
+  listTools: (id: string) =>
+    invoke<RemoteMcpToolsResult>("remote_mcp_list_tools", { providerId: id }),
+  /** app data_dir に保存された前回のツール一覧。未取得なら null。 */
+  listToolsCached: (id: string) =>
+    invoke<RemoteMcpToolsResult | null>("remote_mcp_list_tools_cached", { providerId: id }),
+  /** 生成を依頼する。画面の進捗・完了・失敗は remote-mcp-gen イベントを正とする。 */
+  generate: (args: RemoteMcpGenerateArgs) =>
+    invoke<RemoteMcpGenerateResult>("remote_mcp_generate", args),
 };
+
+export function onRemoteMcpGen(
+  cb: (event: RemoteMcpGenEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<RemoteMcpGenEvent>(EVENT_REMOTE_MCP_GEN, (event) => cb(event.payload));
+}
 
 // Higgsfield リモートMCP拡張 (2026-06-10 段階3)。CLI同梱方式の作り直し。
 // mcp.higgsfield.ai に codex mcp で接続するだけ。未接続なら全false で degrade。
