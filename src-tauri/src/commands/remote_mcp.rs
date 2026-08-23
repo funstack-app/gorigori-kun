@@ -1058,10 +1058,34 @@ fn extract_llm_tool_artifacts(
     (candidates.into_best(), errors)
 }
 
+/// 既知のプロバイダ側エラーを日常語へ翻訳する（原文は詳細として残す）。
+fn humanize_provider_failure(text: &str) -> Option<&'static str> {
+    let lower = text.to_ascii_lowercase();
+    if lower.contains("content_policy") || lower.contains("moderation") {
+        return Some(
+            "生成先サービスの安全フィルターが、この内容の生成を拒否しました。表現を変えて再試行してください",
+        );
+    }
+    if lower.contains("insufficient") && lower.contains("credit") {
+        return Some("生成先サービスのクレジット残高が不足しています");
+    }
+    if lower.contains("rate limit")
+        || lower.contains("rate_limit")
+        || lower.contains("too many requests")
+    {
+        return Some("生成先サービスの回数制限に達しました。少し待ってから再試行してください");
+    }
+    None
+}
+
 fn llm_failure_message(summary: &str, final_message: &str, tool_errors: &[String]) -> String {
     let mut parts = vec![summary.to_string()];
+    let combined = format!("{final_message} {}", tool_errors.join(" "));
+    if let Some(friendly) = humanize_provider_failure(&combined) {
+        parts.push(friendly.to_string());
+    }
     if !final_message.trim().is_empty() {
-        parts.push(format!("LLM報告: {}", final_message.trim()));
+        parts.push(format!("詳細（AIの報告）: {}", final_message.trim()));
     }
     if !tool_errors.is_empty() {
         parts.push(format!("ツールエラー: {}", tool_errors.join(" / ")));
@@ -2542,13 +2566,16 @@ mod tests {
             &["/tmp/reference.png".to_string()],
         );
 
-        assert!(prompt.contains("Krea のMCPツールを検索して使い、動画を生成せよ"));
+        // 2026-08-23 実測で強化した契約（AIの手抜き4パターン対策）を固定する。
+        assert!(prompt.contains("tool_search で Krea のツールを必ず検索・ロード"));
+        assert!(prompt.contains("Krea のMCPツールで動画を生成せよ"));
         assert!(prompt.contains("指示文: 白い餅が跳ねる"));
         assert!(prompt.contains("モデル: Flux 3 Video / 尺: 5秒 / 比率: 16:9"));
-        assert!(prompt.contains("成果物のURLまたは保存先だけを報告せよ"));
-        assert!(prompt.contains("ファイル直リンクのダウンロードURLだけを報告する"));
+        assert!(prompt.contains("Krea 以外のサービスのツールと内蔵 image_gen の使用は禁止"));
+        assert!(prompt.contains("完了するまでポーリングを続けよ"));
+        assert!(prompt
+            .contains("ツール結果の url フィールドにあるファイル直リンクのダウンロードURLだけ"));
         assert!(prompt.contains("共有ページ・プレビューURLは報告しない"));
-        assert!(prompt.contains("ツールが返したダウンロードURLをそのまま使う"));
         assert!(prompt.ends_with("ツール呼び出し以外の創作はするな"));
     }
 
