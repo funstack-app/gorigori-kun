@@ -66,6 +66,7 @@ import { initializeScene3d } from "./lib/store/scene3d";
 import { initializeGeneratedMotions } from "./lib/scene3d/motionStore";
 import { useReferenceRoles } from "./lib/store/referenceRoles";
 import { usePromptHistory } from "./lib/store/promptHistory";
+import { useRemoteMcpCredits } from "./lib/store/remoteMcpCredits";
 import { useWorldContexts } from "./lib/store/worldContexts";
 import { useUnsavedPlanChats } from "./lib/store/unsavedPlanChats";
 import { useSceneStore } from "./lib/store/scene";
@@ -1524,31 +1525,32 @@ function UsageGauges() {
   // Magnific オプショナル拡張 (2026-06-08)。接続済みならバッジを出す(degrade)。
   const magnificAuthed = useAccounts((s) => s.magnific.authenticated);
   const remoteMcpState = useAccounts((s) => s.remoteMcp);
+  const creditsByProvider = useRemoteMcpCredits((s) => s.providers);
 
-  // Higgsfield credits を取得 (認証済みのときだけ)。起動時 + 5 分ごとに refresh。
-  // Magnific の接続状態も同タイミングで refresh する。
+  // 接続状態を起動時に1回だけ確認し、接続済みサービスの残高を取得する。
+  // 定期問い合わせは行わず、以後は各ピルのクリック時だけ更新する。
   useEffect(() => {
     let cancelled = false;
-    const fetchCredits = async () => {
+    const fetchInitialCredits = async () => {
+      await Promise.all([
+        useAccounts.getState().refreshHiggsfield().catch(() => undefined),
+        useAccounts.getState().refreshMagnific().catch(() => undefined),
+        useAccounts.getState().refreshRemoteMcp().catch(() => undefined),
+      ]);
       if (cancelled) return;
-      await useAccounts
-        .getState()
-        .refreshHiggsfield()
-        .catch(() => undefined);
-      await useAccounts
-        .getState()
-        .refreshMagnific()
-        .catch(() => undefined);
-      await useAccounts
-        .getState()
-        .refreshRemoteMcp()
-        .catch(() => undefined);
+
+      const accounts = useAccounts.getState();
+      const providerIds = [
+        ...(accounts.magnific.authenticated ? ["magnific"] : []),
+        ...REMOTE_MCP_PROVIDERS.filter(
+          (provider) => accounts.remoteMcp[provider.id]?.authenticated,
+        ).map((provider) => provider.id),
+      ];
+      await useRemoteMcpCredits.getState().refreshConnected(providerIds);
     };
-    void fetchCredits();
-    const id = setInterval(fetchCredits, 5 * 60 * 1000);
+    void fetchInitialCredits();
     return () => {
       cancelled = true;
-      clearInterval(id);
     };
   }, []);
 
@@ -1557,6 +1559,7 @@ function UsageGauges() {
     label: string;
     tone: "higgsfield" | "magnific" | "remote";
     credits?: number;
+    refresh: () => void;
   }> = [
     ...(hfAuthed
       ? [
@@ -1565,6 +1568,9 @@ function UsageGauges() {
             label: "HiggsField",
             tone: "higgsfield" as const,
             credits: hfCredits,
+            refresh: () => {
+              void useAccounts.getState().refreshHiggsfield().catch(() => undefined);
+            },
           },
         ]
       : []),
@@ -1574,6 +1580,13 @@ function UsageGauges() {
             id: "magnific" as const,
             label: "Magnific",
             tone: "magnific" as const,
+            credits:
+              creditsByProvider.magnific?.status === "ok"
+                ? (creditsByProvider.magnific.value ?? undefined)
+                : undefined,
+            refresh: () => {
+              void useRemoteMcpCredits.getState().refreshProvider("magnific");
+            },
           },
         ]
       : []),
@@ -1583,6 +1596,13 @@ function UsageGauges() {
       id: provider.id,
       label: provider.label,
       tone: "remote" as const,
+      credits:
+        creditsByProvider[provider.id]?.status === "ok"
+          ? (creditsByProvider[provider.id].value ?? undefined)
+          : undefined,
+      refresh: () => {
+        void useRemoteMcpCredits.getState().refreshProvider(provider.id);
+      },
     })),
   ];
 
@@ -1624,6 +1644,7 @@ function HeaderProviderPill({
     label: string;
     tone: "higgsfield" | "magnific" | "remote";
     credits?: number;
+    refresh: () => void;
   };
   wide?: boolean;
 }) {
@@ -1639,12 +1660,14 @@ function HeaderProviderPill({
       : null;
 
   return (
-    <div
+    <button
+      type="button"
+      onClick={provider.refresh}
       className={`flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-[11px] font-bold ${colors} ${wide ? "w-full" : ""}`}
       title={
         measuredCredits === null
-          ? `${provider.label} 接続済み`
-          : `${provider.label} credits: ${measuredCredits}`
+          ? `${provider.label} 接続済み・クリックで更新`
+          : `${provider.label} credits: ${measuredCredits}・クリックで更新`
       }
     >
       <span className="flex min-w-0 items-center gap-1">
@@ -1658,7 +1681,7 @@ function HeaderProviderPill({
       {measuredCredits !== null && (
         <span className="ml-auto tabular-nums text-white">{measuredCredits}</span>
       )}
-    </div>
+    </button>
   );
 }
 
