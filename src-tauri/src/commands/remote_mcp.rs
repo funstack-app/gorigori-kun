@@ -1134,7 +1134,7 @@ fn build_remote_mcp_llm_prompt(
         reference_paths.join("、")
     };
     format!(
-        "あなたは生成実行係。{provider_label} のMCPツールを検索して使い、{}を生成せよ。指示文: {instruction} / モデル: {} / 尺: {duration} / 比率: {} / 参照画像: {references}。必要なツールを自分で選び、正しい引数で呼べ。生成完了まで待ち、成果物のURLまたは保存先だけを報告せよ。リモート成果物はファイル直リンクのダウンロードURLだけを報告する。共有ページ・プレビューURLは報告しない。ツールが返したダウンロードURLをそのまま使う。ツール呼び出し以外の創作はするな",
+        "あなたは生成実行係。まず tool_search で {provider_label} のツールを必ず検索・ロードしてから、{provider_label} のMCPツールで{}を生成せよ。指示文: {instruction} / モデル: {} / 尺: {duration} / 比率: {} / 参照画像: {references}。必要なツールを自分で選び、正しい引数で呼べ。**{provider_label} 以外のサービスのツールと内蔵 image_gen の使用は禁止**（失敗したら代替生成せず、エラー内容だけを報告せよ）。ジョブが非同期（pending/queued）の場合は、完了ツール（wait/get/history等）で**完了するまでポーリングを続けよ**（数分かかる。途中で諦めるな）。完了したら、**ツール結果の url フィールドにあるファイル直リンクのダウンロードURLだけ**を報告せよ。共有ページ・プレビューURLは報告しない。ツール呼び出し以外の創作はするな",
         kind.noun(),
         display_optional(model),
         display_optional(aspect),
