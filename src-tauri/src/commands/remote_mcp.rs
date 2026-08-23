@@ -39,6 +39,10 @@ const REMOTE_DOWNLOAD_TIMEOUT_SECS: u64 = 120;
 const REMOTE_DOWNLOAD_MAX_BYTES: u64 = 512 * 1024 * 1024;
 const REMOTE_DOWNLOAD_REDIRECT_LIMIT: usize = 5;
 const GENERATION_MESSAGE_LIMIT_CHARS: usize = 4_000;
+const REMOTE_DOWNLOAD_USER_AGENT: &str =
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36";
+const REMOTE_DOWNLOAD_RETRY_USER_AGENT: &str =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0 Safari/537.36";
 static REMOTE_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// 接続可能なリモート MCP の正本。
@@ -218,6 +222,32 @@ enum RemoteArtifactSource {
     },
     Url(String),
     LocalPath(String),
+}
+
+#[derive(Debug, Default)]
+struct ArtifactSourceCandidates {
+    preferred: Vec<RemoteArtifactSource>,
+    fallback: Vec<RemoteArtifactSource>,
+}
+
+impl ArtifactSourceCandidates {
+    fn push_preferred(&mut self, source: RemoteArtifactSource) {
+        push_unique_source(&mut self.preferred, source);
+    }
+
+    fn push_fallback(&mut self, source: RemoteArtifactSource) {
+        if !self.preferred.contains(&source) {
+            push_unique_source(&mut self.fallback, source);
+        }
+    }
+
+    fn into_best(self) -> Vec<RemoteArtifactSource> {
+        if self.preferred.is_empty() {
+            self.fallback
+        } else {
+            self.preferred
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -587,30 +617,101 @@ fn validated_https_url(value: &str) -> Result<reqwest::Url, String> {
     Ok(parsed)
 }
 
+fn normalized_field_name(field_name: Option<&str>) -> String {
+    field_name
+        .unwrap_or_default()
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn is_download_field(field_name: Option<&str>) -> bool {
+    normalized_field_name(field_name).contains("download")
+}
+
+fn is_direct_url_field(field_name: Option<&str>) -> bool {
+    let field_name = normalized_field_name(field_name);
+    if field_name.contains("web")
+        || field_name.contains("share")
+        || field_name.contains("preview")
+        || field_name.contains("page")
+    {
+        return false;
+    }
+    matches!(field_name.as_str(), "url" | "uri" | "href" | "src") || field_name.ends_with("url")
+}
+
+fn has_known_media_extension(url: &str) -> bool {
+    extension_from_url(RemoteMcpMediaKind::Image, url).is_some()
+        || extension_from_url(RemoteMcpMediaKind::Video, url).is_some()
+}
+
+fn has_shared_page_path(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    let path = parsed.path().to_ascii_lowercase();
+    [
+        "/creations/",
+        "/creation/",
+        "/share/",
+        "/preview/",
+        "/view/",
+    ]
+    .iter()
+    .any(|pattern| path.contains(pattern))
+}
+
+fn is_likely_shared_page_url(url: &str) -> bool {
+    has_shared_page_path(url) || !has_known_media_extension(url)
+}
+
+fn collect_url_candidates(
+    text: &str,
+    kind: RemoteMcpMediaKind,
+    field_name: Option<&str>,
+    candidates: &mut ArtifactSourceCandidates,
+) {
+    let download_field = is_download_field(field_name);
+    let direct_url_field = is_direct_url_field(field_name);
+    for url in https_urls_in_text(text) {
+        let source = RemoteArtifactSource::Url(url.clone());
+        if extension_from_url(kind, &url).is_some()
+            || ((download_field || direct_url_field) && !has_shared_page_path(&url))
+        {
+            candidates.push_preferred(source);
+        } else if !has_known_media_extension(&url) {
+            // 拡張子の無いURLは共有ページかもしれないため、直リンクが無い場合だけ使う。
+            candidates.push_fallback(source);
+        }
+        // 別メディア種別の明示的な拡張子は成果物ではないので採用しない。
+    }
+}
+
 fn collect_value_sources(
     value: &Value,
     kind: RemoteMcpMediaKind,
-    sources: &mut Vec<RemoteArtifactSource>,
+    field_name: Option<&str>,
+    candidates: &mut ArtifactSourceCandidates,
 ) {
     match value {
         Value::String(text) => {
             if kind == RemoteMcpMediaKind::Image {
                 if let Some(source) = data_uri_source(text) {
-                    push_unique_source(sources, source);
+                    candidates.push_preferred(source);
                 }
             }
-            for url in https_urls_in_text(text) {
-                push_unique_source(sources, RemoteArtifactSource::Url(url));
-            }
+            collect_url_candidates(text, kind, field_name, candidates);
             if matches!(text.trim().as_bytes().first(), Some(b'{') | Some(b'[')) {
                 if let Ok(nested) = serde_json::from_str::<Value>(text) {
-                    collect_value_sources(&nested, kind, sources);
+                    collect_value_sources(&nested, kind, None, candidates);
                 }
             }
         }
         Value::Array(values) => {
             for value in values {
-                collect_value_sources(value, kind, sources);
+                collect_value_sources(value, kind, field_name, candidates);
             }
         }
         Value::Object(object) => {
@@ -629,11 +730,11 @@ fn collect_value_sources(
                             data_base64: data_base64.to_string(),
                         }
                     });
-                    push_unique_source(sources, source);
+                    candidates.push_preferred(source);
                 }
             }
-            for value in object.values() {
-                collect_value_sources(value, kind, sources);
+            for (key, value) in object {
+                collect_value_sources(value, kind, Some(key), candidates);
             }
         }
         _ => {}
@@ -731,16 +832,16 @@ fn provider_output_error(output: &ToolCallOutput) -> String {
         .unwrap_or_else(|| "プロバイダがエラーを返しました".to_string())
 }
 
-/// MCP content / resource / structuredContent から保存候補だけを取り出す。
-fn extract_remote_artifacts(
+/// MCP content / resource / structuredContent から保存候補を優先度つきで取り出す。
+fn extract_remote_artifact_candidates(
     output: &ToolCallOutput,
     kind: RemoteMcpMediaKind,
-) -> Result<Vec<RemoteArtifactSource>, String> {
+) -> Result<ArtifactSourceCandidates, String> {
     if output.is_error {
         return Err(provider_output_error(output));
     }
 
-    let mut sources = Vec::new();
+    let mut candidates = ArtifactSourceCandidates::default();
     for item in &output.content {
         if kind == RemoteMcpMediaKind::Image
             && item.get("type").and_then(Value::as_str) == Some("image")
@@ -757,24 +858,37 @@ fn extract_remote_artifacts(
                         data_base64: data_base64.to_string(),
                     }
                 });
-                push_unique_source(&mut sources, source);
+                candidates.push_preferred(source);
             }
         }
-        collect_value_sources(item, kind, &mut sources);
+        collect_value_sources(item, kind, None, &mut candidates);
     }
     if let Some(structured) = output.structured.as_ref() {
-        collect_value_sources(structured, kind, &mut sources);
+        collect_value_sources(structured, kind, None, &mut candidates);
     }
-    collect_value_sources(&Value::String(output.text.clone()), kind, &mut sources);
+    collect_value_sources(
+        &Value::String(output.text.clone()),
+        kind,
+        None,
+        &mut candidates,
+    );
 
-    if sources.is_empty() {
+    if candidates.preferred.is_empty() && candidates.fallback.is_empty() {
         Err(format!(
             "MCP 応答に保存できる{}データまたは https URL がありませんでした",
             kind.noun()
         ))
     } else {
-        Ok(sources)
+        Ok(candidates)
     }
+}
+
+/// 単独の tool/call では、直リンクが1件でもあれば共有ページ候補を捨てる。
+fn extract_remote_artifacts(
+    output: &ToolCallOutput,
+    kind: RemoteMcpMediaKind,
+) -> Result<Vec<RemoteArtifactSource>, String> {
+    extract_remote_artifact_candidates(output, kind).map(ArtifactSourceCandidates::into_best)
 }
 
 fn tool_call_output_from_value(value: &Value) -> ToolCallOutput {
@@ -871,18 +985,18 @@ fn compact_tool_error(value: &Value) -> String {
 
 /// app-server の item 列から、MCP ツール結果だけを機械的に走査する。
 /// 引数や agentMessage は混ぜず、参照素材そのものを成果物と誤認しない。
-fn extract_llm_tool_artifacts(
+fn extract_llm_tool_artifact_candidates(
     items: &[Value],
     provider_id: &str,
     kind: RemoteMcpMediaKind,
     reference_paths: &[String],
-) -> (Vec<RemoteArtifactSource>, Vec<String>) {
+) -> (ArtifactSourceCandidates, Vec<String>) {
     let excluded_paths = reference_paths
         .iter()
         .map(Path::new)
         .map(normalized_local_path)
         .collect::<std::collections::HashSet<_>>();
-    let mut sources = Vec::new();
+    let mut candidates = ArtifactSourceCandidates::default();
     let mut errors = Vec::new();
 
     for item in items
@@ -914,16 +1028,34 @@ fn extract_llm_tool_artifacts(
                 }
                 continue;
             }
-            if let Ok(found) = extract_remote_artifacts(&output, kind) {
-                for source in found {
-                    push_unique_source(&mut sources, source);
+            if let Ok(found) = extract_remote_artifact_candidates(&output, kind) {
+                for source in found.preferred {
+                    candidates.push_preferred(source);
+                }
+                for source in found.fallback {
+                    candidates.push_fallback(source);
                 }
             }
-            collect_local_artifact_sources(result, kind, &excluded_paths, &mut sources);
+            let mut local_sources = Vec::new();
+            collect_local_artifact_sources(result, kind, &excluded_paths, &mut local_sources);
+            for source in local_sources {
+                candidates.push_preferred(source);
+            }
         }
     }
 
-    (sources, errors)
+    (candidates, errors)
+}
+
+fn extract_llm_tool_artifacts(
+    items: &[Value],
+    provider_id: &str,
+    kind: RemoteMcpMediaKind,
+    reference_paths: &[String],
+) -> (Vec<RemoteArtifactSource>, Vec<String>) {
+    let (candidates, errors) =
+        extract_llm_tool_artifact_candidates(items, provider_id, kind, reference_paths);
+    (candidates.into_best(), errors)
 }
 
 fn llm_failure_message(summary: &str, final_message: &str, tool_errors: &[String]) -> String {
@@ -943,6 +1075,37 @@ fn apply_final_report_url_fallback(sources: &mut Vec<RemoteArtifactSource>, fina
     }
     for url in https_urls_in_text(final_message) {
         push_unique_source(sources, RemoteArtifactSource::Url(url));
+    }
+}
+
+fn final_report_url_candidates(
+    final_message: &str,
+    kind: RemoteMcpMediaKind,
+) -> ArtifactSourceCandidates {
+    let mut candidates = ArtifactSourceCandidates::default();
+    collect_url_candidates(final_message, kind, None, &mut candidates);
+    candidates
+}
+
+fn select_llm_artifact_sources(
+    tool_candidates: ArtifactSourceCandidates,
+    final_message: &str,
+    kind: RemoteMcpMediaKind,
+) -> Vec<RemoteArtifactSource> {
+    let ArtifactSourceCandidates {
+        preferred,
+        fallback: tool_fallback,
+    } = tool_candidates;
+    if !preferred.is_empty() {
+        return preferred;
+    }
+    let final_candidates = final_report_url_candidates(final_message, kind);
+    if !final_candidates.preferred.is_empty() {
+        final_candidates.preferred
+    } else if !tool_fallback.is_empty() {
+        tool_fallback
+    } else {
+        final_candidates.fallback
     }
 }
 
@@ -971,7 +1134,7 @@ fn build_remote_mcp_llm_prompt(
         reference_paths.join("、")
     };
     format!(
-        "あなたは生成実行係。{provider_label} のMCPツールを検索して使い、{}を生成せよ。指示文: {instruction} / モデル: {} / 尺: {duration} / 比率: {} / 参照画像: {references}。必要なツールを自分で選び、正しい引数で呼べ。生成完了まで待ち、成果物のURLまたは保存先だけを報告せよ。ツール呼び出し以外の創作はするな",
+        "あなたは生成実行係。{provider_label} のMCPツールを検索して使い、{}を生成せよ。指示文: {instruction} / モデル: {} / 尺: {duration} / 比率: {} / 参照画像: {references}。必要なツールを自分で選び、正しい引数で呼べ。生成完了まで待ち、成果物のURLまたは保存先だけを報告せよ。リモート成果物はファイル直リンクのダウンロードURLだけを報告する。共有ページ・プレビューURLは報告しない。ツールが返したダウンロードURLをそのまま使う。ツール呼び出し以外の創作はするな",
         kind.noun(),
         display_optional(model),
         display_optional(aspect),
@@ -1034,6 +1197,62 @@ fn https_redirect_policy() -> reqwest::redirect::Policy {
             attempt.follow()
         }
     })
+}
+
+fn download_accept_header(kind: RemoteMcpMediaKind) -> &'static str {
+    match kind {
+        RemoteMcpMediaKind::Image => "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+        RemoteMcpMediaKind::Video => "video/mp4,video/webm,video/quicktime,video/*,*/*;q=0.8",
+    }
+}
+
+fn should_retry_download_status(status: reqwest::StatusCode) -> bool {
+    matches!(
+        status,
+        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+    )
+}
+
+async fn send_download_request(
+    http: &reqwest::Client,
+    url: &reqwest::Url,
+    kind: RemoteMcpMediaKind,
+    user_agent: &'static str,
+) -> Result<reqwest::Response, reqwest::Error> {
+    http.get(url.clone())
+        .header(reqwest::header::USER_AGENT, user_agent)
+        .header(reqwest::header::ACCEPT, download_accept_header(kind))
+        // Referer は意図的に付けない。CDN が共有ページ由来の値を拒否する場合がある。
+        .send()
+        .await
+}
+
+async fn download_response(
+    http: &reqwest::Client,
+    url: &reqwest::Url,
+    kind: RemoteMcpMediaKind,
+) -> Result<reqwest::Response, reqwest::Error> {
+    let first = send_download_request(http, url, kind, REMOTE_DOWNLOAD_USER_AGENT).await?;
+    if should_retry_download_status(first.status()) {
+        // 401/403だけ、Refererなし・別UAで一度だけ取り直す。二度目の結果は偽装しない。
+        send_download_request(http, url, kind, REMOTE_DOWNLOAD_RETRY_USER_AGENT).await
+    } else {
+        Ok(first)
+    }
+}
+
+fn http_download_failure_message(
+    kind: RemoteMcpMediaKind,
+    status: reqwest::StatusCode,
+    url: &str,
+) -> String {
+    let mut message = format!("{}の取得に失敗しました (HTTP {status})", kind.noun());
+    if should_retry_download_status(status) || is_likely_shared_page_url(url) {
+        message.push_str(
+            "。共有ページのURLの可能性があります。ファイル直リンクと有効期限を確認してください",
+        );
+    }
+    message
 }
 
 async fn download_response_bytes(
@@ -1183,7 +1402,7 @@ async fn save_remote_artifacts(
             }
             RemoteArtifactSource::Url(url) => match validated_https_url(&url) {
                 Err(error) => Err(error),
-                Ok(url) => match http.get(url).send().await {
+                Ok(url) => match download_response(&http, &url, kind).await {
                     Ok(response) if response.status().is_success() => {
                         let content_type = response
                             .headers()
@@ -1215,10 +1434,10 @@ async fn save_remote_artifacts(
                             )),
                         }
                     }
-                    Ok(response) => Err(format!(
-                        "{}の取得に失敗しました (HTTP {})",
-                        kind.noun(),
-                        response.status()
+                    Ok(response) => Err(http_download_failure_message(
+                        kind,
+                        response.status(),
+                        url.as_str(),
                     )),
                     Err(error) if error.is_timeout() => Err(format!(
                         "{}のダウンロードが120秒以内に完了しませんでした",
@@ -1666,7 +1885,7 @@ pub async fn remote_mcp_generate(
         let output =
             crate::codex::gen_server::run_llm_tool_turn(&app, &state, &llm_prompt, kind.timeout())
                 .await?;
-        let (mut sources, tool_errors) = extract_llm_tool_artifacts(
+        let (tool_candidates, tool_errors) = extract_llm_tool_artifact_candidates(
             &output.completed_items,
             provider_id,
             kind,
@@ -1680,8 +1899,8 @@ pub async fn remote_mcp_generate(
             ));
         }
 
-        // 正本はツール結果。そこに成果物が無い場合だけ、LLMの最終報告からURLを拾う。
-        apply_final_report_url_fallback(&mut sources, &output.final_message);
+        // 共有ページらしいツールURLより、最終文にある明示的な直リンクを優先する。
+        let sources = select_llm_artifact_sources(tool_candidates, &output.final_message, kind);
         if sources.is_empty() {
             return Err(llm_failure_message(
                 &format!(
@@ -2013,6 +2232,48 @@ mod tests {
     }
 
     #[test]
+    fn content_parser_prefers_download_field_over_shared_page() {
+        let output = tool_output(
+            Vec::new(),
+            Some(json!({
+                "result": {
+                    "webUrl": "https://studio.example.com/creations/123",
+                    "downloadUrl": "https://signed.example.com/download?id=123"
+                }
+            })),
+            "",
+            false,
+        );
+
+        assert_eq!(
+            extract_remote_artifacts(&output, RemoteMcpMediaKind::Video).unwrap(),
+            vec![RemoteArtifactSource::Url(
+                "https://signed.example.com/download?id=123".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn content_parser_accepts_extensionless_url_field_but_not_web_url() {
+        let output = tool_output(
+            Vec::new(),
+            Some(json!({
+                "webUrl": "https://studio.example.com/creations/123",
+                "url": "https://signed.example.com/asset?id=123&signature=abc"
+            })),
+            "",
+            false,
+        );
+
+        assert_eq!(
+            extract_remote_artifacts(&output, RemoteMcpMediaKind::Video).unwrap(),
+            vec![RemoteArtifactSource::Url(
+                "https://signed.example.com/asset?id=123&signature=abc".to_string()
+            )]
+        );
+    }
+
+    #[test]
     fn url_parser_accepts_only_https_and_trims_sentence_punctuation() {
         let urls = https_urls_in_text(
             "http://cdn.example.com/unsafe.png https://cdn.example.com/result.webp).",
@@ -2114,6 +2375,64 @@ mod tests {
             )]
         );
         assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn llm_artifact_parser_prefers_wait_result_direct_url_across_tool_calls() {
+        let items = vec![
+            json!({
+                "type": "mcpToolCall",
+                "server": "magnific",
+                "tool": "images_generate",
+                "status": "completed",
+                "result": {
+                    "structuredContent": {
+                        "webUrl": "https://magnific.example/creations/123"
+                    }
+                }
+            }),
+            json!({
+                "type": "mcpToolCall",
+                "server": "magnific",
+                "tool": "creations_wait",
+                "status": "completed",
+                "result": {
+                    "structuredContent": {
+                        "downloadUrl": "https://cdn.example.com/final.mp4"
+                    }
+                }
+            }),
+        ];
+
+        let (sources, errors) =
+            extract_llm_tool_artifacts(&items, "magnific", RemoteMcpMediaKind::Video, &[]);
+        assert_eq!(
+            sources,
+            vec![RemoteArtifactSource::Url(
+                "https://cdn.example.com/final.mp4".to_string()
+            )]
+        );
+        assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn final_direct_url_beats_tool_shared_page_as_last_resort() {
+        let mut tool_candidates = ArtifactSourceCandidates::default();
+        tool_candidates.push_fallback(RemoteArtifactSource::Url(
+            "https://studio.example.com/creations/123".to_string(),
+        ));
+        let sources = select_llm_artifact_sources(
+            tool_candidates,
+            "https://cdn.example.com/final.webm",
+            RemoteMcpMediaKind::Video,
+        );
+
+        assert_eq!(
+            sources,
+            vec![RemoteArtifactSource::Url(
+                "https://cdn.example.com/final.webm".to_string()
+            )]
+        );
     }
 
     #[test]
@@ -2227,7 +2546,29 @@ mod tests {
         assert!(prompt.contains("指示文: 白い餅が跳ねる"));
         assert!(prompt.contains("モデル: Flux 3 Video / 尺: 5秒 / 比率: 16:9"));
         assert!(prompt.contains("成果物のURLまたは保存先だけを報告せよ"));
+        assert!(prompt.contains("ファイル直リンクのダウンロードURLだけを報告する"));
+        assert!(prompt.contains("共有ページ・プレビューURLは報告しない"));
+        assert!(prompt.contains("ツールが返したダウンロードURLをそのまま使う"));
         assert!(prompt.ends_with("ツール呼び出し以外の創作はするな"));
+    }
+
+    #[test]
+    fn download_retries_only_auth_failures_and_mentions_shared_page_risk() {
+        assert!(should_retry_download_status(
+            reqwest::StatusCode::UNAUTHORIZED
+        ));
+        assert!(should_retry_download_status(reqwest::StatusCode::FORBIDDEN));
+        assert!(!should_retry_download_status(
+            reqwest::StatusCode::NOT_FOUND
+        ));
+
+        let message = http_download_failure_message(
+            RemoteMcpMediaKind::Video,
+            reqwest::StatusCode::FORBIDDEN,
+            "https://studio.example.com/creations/123",
+        );
+        assert!(message.contains("HTTP 403 Forbidden"));
+        assert!(message.contains("共有ページのURLの可能性"));
     }
 
     #[test]

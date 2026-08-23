@@ -170,6 +170,8 @@ export type SafeVideoProps = {
   hoverPlay?: boolean;
   /** 表示と同時に再生する (プレビューモーダル等)。省略時は自動再生しない。 */
   autoPlay?: boolean;
+  /** 一覧用。画面内に入った時だけ読み込み、先頭フレームを静止画として見せる。 */
+  thumbnailPreview?: boolean;
   /**
    * ループ再生。**省略時は従来どおり `hoverPlay` 由来**で、
    * 明示指定したときだけそちらを優先する。
@@ -195,16 +197,36 @@ export function SafeVideo({
   controls = false,
   hoverPlay = false,
   autoPlay,
+  thumbnailPreview = false,
   loop,
   onClick,
   onDoubleClick,
 }: SafeVideoProps) {
   const [errored, setErrored] = useState(false);
+  const [shouldLoad, setShouldLoad] = useState(!thumbnailPreview);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
 
   // F-#2 追補 (2026-06-16): SafeImage と同じく path 変化で errored をリセット。
   useEffect(() => {
     setErrored(false);
-  }, [path]);
+    setShouldLoad(!thumbnailPreview);
+  }, [path, thumbnailPreview]);
+
+  useEffect(() => {
+    if (!thumbnailPreview || errored) return;
+    const element = videoRef.current;
+    if (!element) return;
+    if (typeof IntersectionObserver === "undefined") {
+      setShouldLoad(true);
+      return;
+    }
+    const observer = new IntersectionObserver(
+      ([entry]) => setShouldLoad(entry?.isIntersecting ?? false),
+      { threshold: 0.01 },
+    );
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [path, thumbnailPreview, errored]);
 
   if (!path || errored) {
     return (
@@ -233,14 +255,31 @@ export function SafeVideo({
 
   return (
     <video
-      src={convertFileSrc(path)}
+      ref={videoRef}
+      src={shouldLoad ? convertFileSrc(path) : undefined}
       className={className}
       controls={controls}
       muted={!controls}
       autoPlay={autoPlay}
       loop={loop ?? hoverPlay}
       playsInline
-      preload="metadata"
+      preload={shouldLoad ? "metadata" : "none"}
+      onLoadedMetadata={(event) => {
+        if (!thumbnailPreview) return;
+        const element = event.currentTarget;
+        // WebKit は時刻0のままだと黒地を保つことがある。先頭にほぼ等しい位置を
+        // 一度だけ指定し、実フレームの復号を促す。
+        const previewTime = Number.isFinite(element.duration)
+          ? Math.min(0.001, element.duration / 2)
+          : 0.001;
+        if (previewTime > 0) {
+          try {
+            element.currentTime = previewTime;
+          } catch {
+            // シーク不能な形式は黒地の既存フォールバックを維持する。
+          }
+        }
+      }}
       onMouseEnter={onEnter}
       onMouseLeave={onLeave}
       onClick={onClick}

@@ -186,6 +186,100 @@ fn exec_failure_message(summary: &str, stdout: &str, stderr: &str, home: Option<
     parts.join("\n")
 }
 
+fn canonical_exec_item(mut item: Value) -> Value {
+    let Some(object) = item.as_object_mut() else {
+        return item;
+    };
+    let Some(item_type) = object
+        .get("type")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+    else {
+        return item;
+    };
+    let canonical = match item_type.as_str() {
+        "mcp_tool_call" => Some("mcpToolCall"),
+        "dynamic_tool_call" => Some("dynamicToolCall"),
+        "agent_message" => Some("agentMessage"),
+        _ => None,
+    };
+    if let Some(canonical) = canonical {
+        object.insert("type".to_string(), Value::String(canonical.to_string()));
+    }
+    item
+}
+
+fn exec_item_text(item: &Value) -> Option<String> {
+    if let Some(text) = item
+        .get("text")
+        .or_else(|| item.get("message"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+    {
+        return Some(text.to_string());
+    }
+    let content = item.get("content")?.as_array()?;
+    let text = content
+        .iter()
+        .filter_map(|part| {
+            part.as_str().or_else(|| {
+                part.get("text")
+                    .or_else(|| part.get("output_text"))
+                    .and_then(Value::as_str)
+            })
+        })
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!text.is_empty()).then_some(text)
+}
+
+/// `codex exec --json` の JSONL から item.completed を復元する。
+///
+/// MCP の result（structuredContent を含む）をそのまま残し、agent_message だけを
+/// 最終報告として分離する。イベントを1件も解釈できない旧CLIでは None を返し、
+/// 従来の自由文解析へ戻す。
+fn parse_exec_jsonl(stdout: &str) -> Option<(Vec<Value>, String)> {
+    let mut saw_event = false;
+    let mut completed_items = Vec::new();
+    let mut final_message = String::new();
+
+    for line in stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        let Ok(event) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let Some(event_type) = event.get("type").and_then(Value::as_str) else {
+            continue;
+        };
+        saw_event = true;
+        if !matches!(event_type, "item.completed" | "item/completed") {
+            continue;
+        }
+        let Some(item) = event
+            .get("item")
+            .or_else(|| event.get("params").and_then(|params| params.get("item")))
+            .cloned()
+        else {
+            continue;
+        };
+        let item = canonical_exec_item(item);
+        if item.get("type").and_then(Value::as_str) == Some("agentMessage") {
+            if let Some(text) = exec_item_text(&item) {
+                final_message = text;
+            }
+        }
+        completed_items.push(item);
+    }
+
+    saw_event.then_some((completed_items, final_message))
+}
+
 fn normalize_exec_turn(
     state: ExecTurnState,
     stdout: &str,
@@ -193,19 +287,25 @@ fn normalize_exec_turn(
     turn_timeout: Duration,
     home: Option<&Path>,
 ) -> LlmToolTurnOutput {
-    let urls = https_urls_in_exec_stdout(stdout);
     let mut output = LlmToolTurnOutput::new();
-    if urls.is_empty() {
-        output.final_message = redacted_exec_tail(stdout, home).unwrap_or_default();
+    if let Some((completed_items, final_message)) = parse_exec_jsonl(stdout) {
+        output.completed_items = completed_items;
+        output.final_message = final_message;
     } else {
-        output.final_message = urls.join("\n");
-        output.completed_items.push(json!({
-            "type": "mcpToolCall",
-            "status": "completed",
-            "result": {
-                "content": [{ "type": "text", "text": output.final_message.clone() }]
-            }
-        }));
+        // --json 非対応の旧CLIだけは従来の自由文解析へ戻す。
+        let urls = https_urls_in_exec_stdout(stdout);
+        if urls.is_empty() {
+            output.final_message = redacted_exec_tail(stdout, home).unwrap_or_default();
+        } else {
+            output.final_message = urls.join("\n");
+            output.completed_items.push(json!({
+                "type": "mcpToolCall",
+                "status": "completed",
+                "result": {
+                    "content": [{ "type": "text", "text": output.final_message.clone() }]
+                }
+            }));
+        }
     }
 
     let summary = match state {
@@ -405,6 +505,7 @@ pub(crate) async fn run_llm_tool_turn(
         "exec",
         "--dangerously-bypass-approvals-and-sandbox",
         "--skip-git-repo-check",
+        "--json",
         "-",
     ]);
     cmd.env("CODEX_HOME", &generation_home)
@@ -1908,8 +2009,8 @@ mod tests {
         exec_failure_message, extract_thread_id, extract_turn_id, gen_queue,
         https_urls_in_exec_stdout, is_gen_server_command, is_sqlite_state_corruption_error,
         is_stale_server_error, mcp_tool_calls_in_exec_output, normalize_exec_turn,
-        notification_matches, should_replace_server, spawn_permit_watchdog_with_timeout,
-        ExecTurnState, GenPhase, MAX_TURNS_PER_SERVER,
+        notification_matches, parse_exec_jsonl, should_replace_server,
+        spawn_permit_watchdog_with_timeout, ExecTurnState, GenPhase, MAX_TURNS_PER_SERVER,
     };
     use serde_json::{json, Value};
     use std::sync::Arc;
@@ -1961,6 +2062,50 @@ mod tests {
         assert_eq!(output.final_message, "https://cdn.example.test/result.png");
         assert_eq!(output.completed_items.len(), 1);
         assert!(output.terminal_error.is_none());
+    }
+
+    #[test]
+    fn exec_jsonl_keeps_mcp_structured_content_separate_from_final_message() {
+        let stdout = [
+            json!({"type": "thread.started", "thread_id": "thread-1"}).to_string(),
+            json!({
+                "type": "item.completed",
+                "item": {
+                    "id": "item-1",
+                    "type": "mcp_tool_call",
+                    "server": "magnific",
+                    "tool": "creations_wait",
+                    "result": {
+                        "structuredContent": {
+                            "results": [{
+                                "downloadUrl": "https://cdn.example.test/result.mp4",
+                                "webUrl": "https://example.test/creations/123"
+                            }]
+                        }
+                    }
+                }
+            })
+            .to_string(),
+            json!({
+                "type": "item.completed",
+                "item": {
+                    "id": "item-2",
+                    "type": "agent_message",
+                    "text": "https://example.test/creations/123"
+                }
+            })
+            .to_string(),
+        ]
+        .join("\n");
+
+        let (items, final_message) = parse_exec_jsonl(&stdout).expect("JSONL events");
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["type"], "mcpToolCall");
+        assert_eq!(
+            items[0]["result"]["structuredContent"]["results"][0]["downloadUrl"],
+            "https://cdn.example.test/result.mp4"
+        );
+        assert_eq!(final_message, "https://example.test/creations/123");
     }
 
     #[test]

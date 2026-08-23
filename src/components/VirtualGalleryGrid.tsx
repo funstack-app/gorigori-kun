@@ -668,11 +668,12 @@ function GalleryMedia({ item, className }: { item: GalleryItem; className: strin
         />
       );
     }
-    // 仮想グリッドで画面内の要素だけが mount される。自動再生せず metadata のみ
-    // 読むため、大量動画でも全ファイルを同時に開かない。
+    // 仮想グリッドに加えて SafeVideo 側でも交差判定し、実際に画面内へ入った動画だけ
+    // metadata と先頭フレームを読む。自動再生はせず、大量動画を同時に開かない。
     return (
       <SafeVideo
         path={item.path}
+        thumbnailPreview
         className={`${className} pointer-events-none bg-black`}
       />
     );
