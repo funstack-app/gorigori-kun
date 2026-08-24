@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type { FilmPhase, FilmProject } from "../../../lib/film/types";
 import { getAssetFactoryGateState } from "../../../lib/film/assetFactory";
@@ -294,11 +294,13 @@ export function FilmWorkspace() {
   const setPhase = useFilmProjectStore((state) => state.setPhase);
   const pushToast = useToasts((state) => state.push);
   const activeProject = projects.find((project) => project.id === activeProjectId) ?? null;
+  const activeProjectPhase = activeProject?.phase;
   const [ready, setReady] = useState(false);
   const [showScriptReview, setShowScriptReview] = useState(false);
   const [showEarlyChat, setShowEarlyChat] = useState(false);
   const [retryingSave, setRetryingSave] = useState(false);
-  const phase = activeProject?.phase ?? 1;
+  const previousPhaseRef = useRef(activeProjectPhase);
+  const phase = activeProjectPhase ?? 1;
 
   useEffect(() => {
     let active = true;
@@ -314,6 +316,13 @@ export function FilmWorkspace() {
     setShowScriptReview(false);
     setShowEarlyChat(false);
   }, [activeProjectId]);
+
+  useEffect(() => {
+    if (previousPhaseRef.current === activeProjectPhase) return;
+    previousPhaseRef.current = activeProjectPhase;
+    setShowScriptReview(false);
+    setShowEarlyChat(false);
+  }, [activeProjectPhase]);
 
   function startNewProject() {
     setActiveProjectId(null);

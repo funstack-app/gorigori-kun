@@ -797,6 +797,10 @@ export const useFilmProjectStore = create<FilmProjectState>((set, get) => ({
       approved = true;
       return touchProject({
         ...project,
+        phase:
+          stage === "blocks"
+            ? (Math.max(project.phase, 3) as FilmPhase)
+            : project.phase,
         approvals: {
           ...project.approvals,
           [stage]: { approvedAt: new Date().toISOString() },
