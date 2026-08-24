@@ -45,7 +45,7 @@ const DEFAULT_ENTRY: RemoteMcpCreditEntry = {
 const MUTATING_TOOL_NAME =
   /(^|_)(add|buy|charge|consume|create|delete|deposit|generate|order|purchase|remove|set|spend|transfer|update|withdraw)(_|$)/;
 const NON_BALANCE_CREDIT_TOOL_NAME =
-  /(^|_)(cost|history|ledger|price|pricing|spent|transaction|usage)(_|$)/;
+  /(^|_)(cost|history|ledger|log|logs|price|pricing|spent|transaction|usage|plan|plans|topup|top_up|recharge|purchase|upgrade)(_|$)/;
 
 function normalizeIdentifier(value: string): string {
   return value
@@ -63,26 +63,32 @@ function creditToolScore(tool: RemoteMcpToolInfo): number | null {
 
   const titleAndDescription = `${tool.title ?? ""} ${tool.description ?? ""}`.toLowerCase();
   const hasBalance = /(^|_)balance(_|$)/.test(name) || /\baccount balance\b|残高/.test(titleAndDescription);
-  const hasCredits = /(^|_)credits?(_|$)/.test(name) || /\bcredits?\b|クレジット/.test(titleAndDescription);
+  const hasCreditsName = /(^|_)credits?(_|$)/.test(name);
+  const hasCreditsDesc = /\bcredits?\b|クレジット/.test(titleAndDescription);
   const hasAccount = /(^|_)accounts?(_|$)/.test(name);
-  const readsValue = /^(get|read|fetch|check|retrieve|show|view|list)_/.test(name);
+  const readsValue = /(^|_)(get|read|fetch|check|retrieve|show|view|list|query)_/.test(name);
 
-  if (hasBalance && hasCredits) return 140;
+  if (hasBalance && (hasCreditsName || hasCreditsDesc)) return 140;
   if (hasBalance && hasAccount) return 130;
   if (hasBalance) return 120;
-  if (hasCredits && (readsValue || hasAccount || name === "credit" || name === "credits")) {
+  if (
+    hasCreditsName &&
+    (readsValue || hasAccount || name === "credit" || name === "credits")
+  ) {
     return 110;
+  }
+  if (readsValue && hasCreditsDesc) {
+    return /\b(balance|remaining|available|left)\b|残高/.test(titleAndDescription) ? 90 : 70;
   }
   if (
     name === "account" ||
     name === "account_info" ||
     name === "account_details" ||
     name === "account_status" ||
-    (hasAccount && readsValue)
+    (hasAccount && (readsValue || hasCreditsDesc))
   ) {
     return 80;
   }
-  if (readsValue && (hasBalance || hasCredits)) return 70;
   return null;
 }
 

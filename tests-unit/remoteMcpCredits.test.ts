@@ -77,6 +77,98 @@ describe("findRemoteMcpCreditTool", () => {
 
     expect(selected?.name).toBe("get_account_balance");
   });
+
+  it("Kling の query_membership_and_credits を残高ツールとして選ぶ", () => {
+    const selected = findRemoteMcpCreditTool([
+      { name: "query_membership_and_credits", inputSchemaJson: "{}" },
+      { name: "generate_video", description: "Costs credits", inputSchemaJson: "{}" },
+    ]);
+
+    expect(selected?.name).toBe("query_membership_and_credits");
+  });
+
+  it("TopView は利用ログでなく現在の残高ツールを選ぶ", () => {
+    const selected = findRemoteMcpCreditTool([
+      { name: "topview_list_credit_logs", inputSchemaJson: "{}" },
+      { name: "topview_get_credit", inputSchemaJson: "{}" },
+    ]);
+
+    expect(selected?.name).toBe("topview_get_credit");
+  });
+
+  it("Kling は説明文だけに credits がある先頭ツールより名前に credits があるツールを優先する", () => {
+    const selected = findRemoteMcpCreditTool([
+      {
+        name: "query_tasks",
+        description: "Query the task status. Insufficient credits are reported when charged credits run out.",
+        inputSchemaJson: "{}",
+      },
+      { name: "query_membership_and_credits", inputSchemaJson: "{}" },
+    ]);
+
+    expect(selected?.name).toBe("query_membership_and_credits");
+  });
+
+  it("TopView は説明文だけに credits がある先頭ツールより名前に credit があるツールを優先する", () => {
+    const selected = findRemoteMcpCreditTool([
+      {
+        name: "topview_get_generation_config",
+        description: "Get the generation config. Submit performs the normal model-price credit check.",
+        inputSchemaJson: "{}",
+      },
+      { name: "topview_get_credit", inputSchemaJson: "{}" },
+    ]);
+
+    expect(selected?.name).toBe("topview_get_credit");
+  });
+
+  it("実測済み4社の既存残高ツールを単独一覧でも選ぶ", () => {
+    const tools = [
+      { name: "get_credits", inputSchemaJson: "{}" },
+      { name: "account_balance", inputSchemaJson: "{}" },
+      { name: "identity_balance", inputSchemaJson: "{}" },
+      {
+        name: "openart_account_get",
+        description: "Get the authenticated OpenArt account summary and remaining credit balance.",
+        inputSchemaJson: "{}",
+      },
+    ];
+
+    for (const tool of tools) {
+      expect(findRemoteMcpCreditTool([tool])?.name).toBe(tool.name);
+    }
+  });
+
+  it("Pollo は購入カードでなく account_status を残高ツールに選ぶ", () => {
+    const selected = findRemoteMcpCreditTool([
+      {
+        name: "pollo_show_plans_and_credits",
+        description: "Open the Pollo plans-and-credits card. Call this whenever the user asks to buy or top up credits, upgrade or change plan, how to pay, or where to see pricing.",
+        inputSchemaJson: "{}",
+      },
+      {
+        name: "pollo_account_status",
+        description: "Get the Pollo account overview: identity, available credit balance, and subscription summary.",
+        inputSchemaJson: "{}",
+      },
+    ]);
+
+    // plans は購入案内で数値を返さないため、実残高を返す account_status を採用する。
+    expect(selected?.name).toBe("pollo_account_status");
+  });
+
+  it("Krea の購入案内 show_plans だけなら残高ツールなしにする", () => {
+    const selected = findRemoteMcpCreditTool([
+      {
+        name: "show_plans",
+        description: "Show Krea plans with pricing, monthly credits, and feature comparison.",
+        inputSchemaJson: "{}",
+      },
+    ]);
+
+    // plans は残高照会ではなく購入案内なので、残高ピルを表示しない。
+    expect(selected).toBeNull();
+  });
 });
 
 describe("remote MCP credits store", () => {

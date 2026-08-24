@@ -60,6 +60,8 @@ const IMAGE_PATTERN = /\b(image|images|picture|pictures|photo|photos|img)\b|\b(t
 const VIDEO_PATTERN = /\b(video|videos|movie|movies|clip|clips)\b|\b(txt2video|t2v|i2v)\b/;
 const TO_IMAGE_PATTERN = /\b(text|prompt)[\s_-]*to[\s_-]*(image|picture|photo)\b/;
 const TO_VIDEO_PATTERN = /\b(text|prompt|image|photo)[\s_-]*to[\s_-]*(video|movie|clip)\b/;
+const NON_GENERATION_NAME_PATTERN =
+  /(^|_)(edit|upscale|upload|remove|speak|lipsync|enhance|reframe|expand|extend|inpaint|outpaint|variation|variations|background|keyframes|reference)(_|$)/;
 
 function searchable(value: unknown): string {
   return String(value ?? "")
@@ -102,6 +104,7 @@ function schemaSearchText(schemaJson: string): string {
  * 一覧/削除ツールを生成と誤認しないよう、媒体名だけでなく generate/create 系の動詞も必須にする。
  */
 export function classifyRemoteMcpTool(tool: RemoteMcpToolLike): RemoteMcpToolKind {
+  const nameSearchable = searchable(tool.name);
   const identity = searchable(`${tool.name} ${tool.title ?? ""} ${tool.description ?? ""}`);
   const schemaText = schemaSearchText(tool.inputSchemaJson);
   const combined = `${identity} ${schemaText}`;
@@ -109,6 +112,19 @@ export function classifyRemoteMcpTool(tool: RemoteMcpToolLike): RemoteMcpToolKin
   // 元画像・元動画が required のツールは編集用。テキスト起点の生成候補には入れない。
   // required が object ラッパーの場合は schemaInputTarget が中へ降りるため除外しない。
   if (remoteMcpSchemaRequiresSourceMedia(tool.inputSchemaJson)) return "other";
+
+  if (TO_VIDEO_PATTERN.test(nameSearchable)) return "video";
+  if (TO_IMAGE_PATTERN.test(nameSearchable)) return "image";
+
+  const bypassNamePriority =
+    NON_GENERATION_NAME_PATTERN.test(tool.name.toLowerCase()) ||
+    /\b(video|clip|movie|image|photo)[\s_-]*to[\s_-]*/.test(nameSearchable);
+  if (!bypassNamePriority && ACTION_PATTERN.test(nameSearchable)) {
+    const nameHasVideo = VIDEO_PATTERN.test(nameSearchable);
+    const nameHasImage = IMAGE_PATTERN.test(nameSearchable);
+    if (nameHasVideo && !nameHasImage) return "video";
+    if (nameHasImage && !nameHasVideo) return "image";
+  }
 
   // image_to_video は入力側にも image が現れるので、変換先を最優先する。
   if (TO_VIDEO_PATTERN.test(combined)) return "video";

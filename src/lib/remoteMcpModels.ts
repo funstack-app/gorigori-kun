@@ -129,6 +129,7 @@ export function findRemoteMcpModelListTool<T extends RemoteMcpToolLike>(
       else if (name.endsWith("listmodels")) score = 98;
       else if (name === "getmodels") score = 95;
       else if (name === "models") score = 90;
+      else if (name.endsWith("modellist")) score = 85;
       else if (name.endsWith("modelslist")) score = 85;
       else if (name === "modelsexplore" || name.endsWith("modelsexplore")) score = 80;
       if (score > 0 && kind && normalized(tool.name).includes(kind)) score += 30;
@@ -475,6 +476,28 @@ export function extractRemoteMcpCatalogModels(
     if (!unique.has(key)) unique.set(key, model);
   }
   return [...unique.values()];
+}
+
+function hasExplicitModelCollection(value: unknown): boolean {
+  if (Array.isArray(value)) return true;
+  const record = objectRecord(value);
+  if (!record) return false;
+  return Object.entries(record).some(([key, nested]) => {
+    const compact = compactName(key);
+    if (MODEL_COLLECTION_KEYS.has(compact)) {
+      return Array.isArray(nested) || objectRecord(nested) !== null;
+    }
+    return MODEL_WRAPPER_KEYS.has(compact) && hasExplicitModelCollection(nested);
+  });
+}
+
+function hasReadableModelCatalogOutput(output: RemoteMcpQueryResult): boolean {
+  if (extractRemoteMcpCatalogModels(output).length > 0) return true;
+  const textJson = parseTextJson(output.contentText);
+  return (
+    hasExplicitModelCollection(output.structuredContent) ||
+    (textJson !== null && hasExplicitModelCollection(textJson))
+  );
 }
 
 type SchemaField = { name: string; normalizedName: string; property: Record<string, unknown> };
@@ -1286,6 +1309,19 @@ export async function fetchRemoteMcpModelCatalog(
       toolName: listTool.name,
       paramsJson: "{}",
     });
+    const listedModels = extractRemoteMcpCatalogModels(
+      output,
+      hintedKindFromToolName(listTool.name),
+    );
+    if (
+      listedModels.filter((model) => model.kind === input.kind).length === 0 &&
+      hasReadableModelCatalogOutput(output)
+    ) {
+      return {
+        ...buildRemoteMcpModelCatalog(input),
+        warning: "接続先のモデル一覧が空のため、標準モデルで生成します。",
+      };
+    }
     let catalog = buildRemoteMcpModelCatalog({
       ...input,
       catalogOutput: output,

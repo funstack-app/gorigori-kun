@@ -1,12 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import type { RemoteMcpToolInfo } from "../src/lib/ipc";
+import { remoteMcp, type RemoteMcpToolInfo } from "../src/lib/ipc";
 import {
   buildRemoteMcpModelCatalog,
   buildHiggsfieldVideoModelCatalog,
   classifyRemoteMcpModel,
   deriveRemoteMcpVideoSpecs,
   extractRemoteMcpCatalogModels,
+  fetchRemoteMcpModelCatalog,
   findRemoteMcpModelListTool,
   findRemoteMcpModelInfoTool,
   selectPrimaryRemoteMcpGenerationTool,
@@ -49,6 +50,69 @@ describe("remote MCP model catalog", () => {
       tool("pollo_generate_image"),
     ]);
     expect(selected?.name).toBe("pollo_list_models");
+  });
+
+  it("OpenArt の openart_model_list をモデル一覧ツールとして選ぶ", () => {
+    const selected = findRemoteMcpModelListTool([
+      tool("openart_generate_image"),
+      tool("openart_model_list"),
+    ]);
+    expect(selected?.name).toBe("openart_model_list");
+  });
+
+  it("接続先のモデル一覧が空なら標準モデルへ退避して警告する", async () => {
+    const query = vi.spyOn(remoteMcp, "query").mockResolvedValue({
+      contentText: "",
+      structuredContent: { models: [] },
+    });
+
+    try {
+      const catalog = await fetchRemoteMcpModelCatalog({
+        providerId: "ideogram",
+        providerLabel: "Ideogram",
+        kind: "image",
+        tools: [
+          tool("list_models"),
+          tool("generate_image", { prompt: { type: "string" } }),
+        ],
+      });
+
+      expect(query).toHaveBeenCalledWith({
+        providerId: "ideogram",
+        toolName: "list_models",
+        paramsJson: "{}",
+      });
+      expect(catalog.source).toBe("standard");
+      expect(catalog.warning).toBe(
+        "接続先のモデル一覧が空のため、標準モデルで生成します。",
+      );
+    } finally {
+      query.mockRestore();
+    }
+  });
+
+  it("モデル一覧の応答が読めない場合は既存の unavailable エラーを保つ", async () => {
+    const query = vi.spyOn(remoteMcp, "query").mockResolvedValue({
+      contentText: "モデル一覧を表示しました",
+    });
+
+    try {
+      await expect(
+        fetchRemoteMcpModelCatalog({
+          providerId: "magnific",
+          providerLabel: "Magnific",
+          kind: "video",
+          tools: [
+            tool("video_models_list"),
+            tool("video_generate", { prompt: { type: "string" } }),
+          ],
+        }),
+      ).rejects.toThrow(
+        "モデル一覧を取得できませんでした: Error: モデル一覧の応答から実モデルを読み取れませんでした。",
+      );
+    } finally {
+      query.mockRestore();
+    }
   });
 
   it("媒体ごとの主生成ツールを名前ヒューリスティックで選ぶ", () => {
