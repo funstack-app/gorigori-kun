@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import type { FilmPhase, FilmProject } from "../../../lib/film/types";
-import { getAssetFactoryGateState } from "../../../lib/film/assetFactory";
+import { canEnterGenerationPhase } from "../../../lib/film/generationPhaseGate";
 import {
   useFilmProjectStore,
   type FilmProjectBackup,
@@ -343,7 +343,7 @@ export function FilmWorkspace() {
     if (candidate === 3) return Boolean(activeProject.approvals.blocks);
     if (candidate === 4) return Boolean(activeProject.approvals.look);
     if (candidate === 5 || candidate === 6) {
-      return getAssetFactoryGateState(activeProject.assets).canProceed;
+      return canEnterGenerationPhase(activeProject);
     }
     return false;
   }
