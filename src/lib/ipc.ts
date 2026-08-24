@@ -690,6 +690,14 @@ export type RemoteMcpGenerateArgs = {
   aspect?: string;
   referencePaths: string[];
   kind: "image" | "video";
+  count?: number;
+};
+
+export type RemoteMcpSlotResult = {
+  slot: number;
+  status: "pending" | "running" | "saving" | "done" | "failed";
+  savedPath?: string;
+  error?: string;
 };
 
 export type RemoteMcpGenEvent = {
@@ -698,6 +706,9 @@ export type RemoteMcpGenEvent = {
   phase: "running" | "saving" | "done" | "error";
   message?: string;
   savedPaths?: string[];
+  count?: number;
+  slotResults?: RemoteMcpSlotResult[];
+  errors?: string[];
 };
 
 export type RemoteMcpGenerateResult = {

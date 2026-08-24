@@ -42,6 +42,7 @@ import { SkillRunActions } from "./SkillRunActions";
 import { extractDropped, isImageDrop, setDragRef } from "../lib/dragRef";
 import { sendImageToPlanForRediscuss } from "../lib/sendToPlan";
 import { GenerationGauge, type GenerationGaugeMode } from "./GenerationGauge";
+import { useRemoteMcpGen } from "../lib/store/remoteMcpGen";
 
 export function GenerationWorkspace() {
   const activeTab = useWorkspace((s) => s.activeTab);
@@ -1140,15 +1141,16 @@ function Spinner() {
  * 生成キューが満杯 or 生成不可状態のときは無効化する。
  */
 function RegenerateOneButton() {
-  const { generate, disabled, isQueueFull } = useSceneGeneration();
-  const blocked = disabled || isQueueFull;
+  const { generateSelected, disabled, effectivePrompt, isQueueFull } = useSceneGeneration();
+  const remoteSelection = useRemoteMcpGen((state) => state.selections.image);
+  const blocked = isQueueFull || (remoteSelection ? !effectivePrompt.trim() : disabled);
   return (
     <button
       type="button"
       disabled={blocked}
       onClick={(e) => {
         e.stopPropagation();
-        void generate({ countOverride: 1 }).catch(console.error);
+        void generateSelected({ countOverride: 1 }).catch(console.error);
       }}
       className="mt-0.5 rounded border border-red-400/50 bg-red-500/10 px-2 py-0.5 text-[9px] font-bold text-red-200 transition hover:bg-red-500/25 disabled:cursor-not-allowed disabled:opacity-40"
       title={

@@ -48,7 +48,6 @@ import { ReferencePicker } from "./ReferencePicker";
 import { StockSearchModal } from "./StockSearchModal";
 import { HiggsfieldModelSelector } from "./HiggsfieldModelSelector";
 import {
-  isRemoteMcpJobRunning,
   useRemoteMcpGen,
   type RemoteMcpSelection,
 } from "../lib/store/remoteMcpGen";
@@ -562,16 +561,6 @@ export function VideoConstructedPromptPanel() {
     if (!result.ok) pushToast({ kind: "error", text: result.message });
   };
 
-  const remoteRunning = Object.values(remoteJobs).some(
-    (job) =>
-      isRemoteMcpJobRunning(job) &&
-      remoteVideoSelections.some(
-        (selection) =>
-          selection.providerId === job.selection.providerId &&
-          selection.toolName === job.selection.toolName &&
-          selection.model?.id === job.selection.model?.id,
-      ),
-  );
   // 設定サマリ行のラベル。
   // 比較モード: 「N モデルで比較 · 16:9」。単一モード: 「Kling · 9秒 · 16:9 · ...」
   const settingsSummary = remoteSelection
@@ -736,7 +725,7 @@ export function VideoConstructedPromptPanel() {
             selectedModelCount === 0 ||
             hasNoCommonSettings ||
             (selectedBuiltInModels.length > 0 && (disabled || !higgsfieldAuthed)) ||
-            (remoteVideoSelections.length > 0 && (remoteRunning || !effectivePrompt.trim()))
+            (remoteVideoSelections.length > 0 && (isQueueFull || !effectivePrompt.trim()))
           }
           title={
             selectedModelCount === 0
@@ -749,15 +738,11 @@ export function VideoConstructedPromptPanel() {
           }
           className="h-9 w-full rounded-md bg-pink-500 px-4 py-1.5 text-sm font-black text-white transition hover:bg-pink-600 disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-500"
         >
-          {remoteSelection && remoteRunning
-            ? latestRemoteJobs.some((job) => job.phase === "saving")
-              ? "保存中…"
-              : "生成中…"
-            : selectedModelCount === 0
+          {selectedModelCount === 0
             ? "モデルを選択してください"
             : selectedBuiltInModels.length > 0 && !higgsfieldAuthed
             ? "Higgsfield 未接続"
-            : selectedBuiltInModels.length > 0 && isQueueFull
+            : isQueueFull
               ? `生成中 ${runningBatchCount}/${maxConcurrentBatches}`
               : compareMode
                 ? `${selectedModelCount}モデルで比較生成`

@@ -18,6 +18,7 @@ import { useProjects } from "../store/projects";
 import { useHiggsfieldModel } from "../store/higgsfieldModel";
 import { useMagnificModel } from "../store/magnificModel";
 import { getMagnificModelName } from "../magnific/models";
+import { useRemoteMcpGen } from "../store/remoteMcpGen";
 import { useSceneStore } from "../store/scene";
 import { useScenePromptOverride } from "../store/scenePrompt";
 import { useSessions } from "../store/sessions";
@@ -49,6 +50,7 @@ export type UseSceneGenerationReturn = {
   generate: (
     opts?: { countOverride?: SceneGenerationCount },
   ) => Promise<SceneGenerationResult | null>;
+  generateSelected: (options?: { countOverride?: number }) => Promise<void>;
 };
 
 const MAX_CONCURRENT_BATCHES = 3;
@@ -661,6 +663,31 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
     generationCount,
   ]);
 
+  const generateSelected = useCallback(async (
+    options?: { countOverride?: number },
+  ): Promise<void> => {
+    const remoteSelection = useRemoteMcpGen.getState().selections.image;
+    if (!remoteSelection) {
+      await generate(
+        options?.countOverride === undefined
+          ? undefined
+          : { countOverride: options.countOverride as SceneGenerationCount },
+      );
+      return;
+    }
+
+    const result = await useRemoteMcpGen.getState().start({
+      kind: "image",
+      prompt: effectivePrompt,
+      aspectRatio: scene.subjectFraming.aspectRatio,
+      count: Math.max(1, Math.trunc(options?.countOverride ?? count)),
+      referenceImagePaths: refImagePaths,
+    });
+    if (!result.ok) {
+      useToasts.getState().push({ kind: "error", text: result.message });
+    }
+  }, [count, effectivePrompt, generate, refImagePaths, scene.subjectFraming.aspectRatio]);
+
   return {
     scene,
     generatedPrompt,
@@ -678,5 +705,6 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
     activeBatchSummary,
     disabled,
     generate,
+    generateSelected,
   };
 }

@@ -126,6 +126,7 @@ export function findRemoteMcpModelListTool<T extends RemoteMcpToolLike>(
       const name = compactName(tool.name);
       let score = 0;
       if (name === "listmodels") score = 100;
+      else if (name.endsWith("listmodels")) score = 98;
       else if (name === "getmodels") score = 95;
       else if (name === "models") score = 90;
       else if (name.endsWith("modelslist")) score = 85;

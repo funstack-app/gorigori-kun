@@ -67,6 +67,24 @@ async function selectHiggsfieldVideo() {
   return { useBatches, useRemoteMcpGen };
 }
 
+async function selectKreaImage() {
+  const { useBatches, useRemoteMcpGen } = await stores();
+  useRemoteMcpGen.getState().setSelection("image", {
+    providerId: "krea",
+    providerLabel: "Krea",
+    toolName: "generate_image",
+    inputSchemaJson: "{}",
+    kind: "image",
+    model: {
+      id: "flux-1-1-pro",
+      name: "FLUX 1.1 Pro",
+      kind: "image",
+      passModel: true,
+    },
+  });
+  return { useBatches, useRemoteMcpGen };
+}
+
 describe("remoteMcpGen の生成タイムライン", () => {
   beforeEach(() => localStorage.clear());
 
@@ -191,6 +209,105 @@ describe("remoteMcpGen の生成タイムライン", () => {
       "Wan 2.6",
     ]);
     expect(batches.every((batch) => batch.status === "completed")).toBe(true);
+  });
+
+  it("slotResults を枠番号どおり成功・失敗へ写像する", async () => {
+    installRegistrationCommands(async () => ({
+      generatedPaths: [],
+      failedCount: 0,
+      errors: [],
+    }));
+    const { useBatches, useRemoteMcpGen } = await selectKreaImage();
+    const result = await useRemoteMcpGen.getState().start({
+      kind: "image",
+      prompt: "三つのお餅",
+      count: 3,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.message);
+
+    useRemoteMcpGen.getState().applyEvent({
+      requestId: result.requestId,
+      providerId: "krea",
+      phase: "done",
+      savedPaths: ["/generated/remote/mochi-1.png", "/generated/remote/mochi-3.png"],
+      errors: ["枠2: 焼き上がりませんでした"],
+      slotResults: [
+        { slot: 1, status: "done", savedPath: "/generated/remote/mochi-1.png" },
+        { slot: 2, status: "failed", error: "焼き上がりませんでした" },
+        { slot: 3, status: "done", savedPath: "/generated/remote/mochi-3.png" },
+      ],
+    });
+    await waitUntil(
+      () =>
+        useBatches.getState().batches.find((batch) => batch.batchId === result.requestId)
+          ?.status === "completed",
+    );
+
+    const batch = useBatches
+      .getState()
+      .batches.find((candidate) => candidate.batchId === result.requestId);
+    expect(batch?.workers).toEqual([
+      expect.objectContaining({
+        idx: 1,
+        status: "completed",
+        path: "/generated/remote/mochi-1.png",
+      }),
+      expect.objectContaining({ idx: 2, status: "failed" }),
+      expect.objectContaining({
+        idx: 3,
+        status: "completed",
+        path: "/generated/remote/mochi-3.png",
+      }),
+    ]);
+    expect(batch?.failedCount).toBe(1);
+    expect(useRemoteMcpGen.getState().jobs[result.requestId].registrationWarnings).toContain(
+      "枠2: 焼き上がりませんでした",
+    );
+  });
+
+  it("同じ slotResults スナップショットを2回受けても worker を二重適用しない", async () => {
+    installRegistrationCommands(async () => ({
+      generatedPaths: [],
+      failedCount: 0,
+      errors: [],
+    }));
+    const { useBatches, useRemoteMcpGen } = await selectKreaImage();
+    const result = await useRemoteMcpGen.getState().start({
+      kind: "image",
+      prompt: "三つのお餅",
+      count: 3,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.message);
+
+    const snapshot = {
+      requestId: result.requestId,
+      providerId: "krea",
+      phase: "running" as const,
+      slotResults: [
+        { slot: 1, status: "done" as const, savedPath: "/generated/remote/idempotent.png" },
+        { slot: 2, status: "failed" as const, error: "一時エラー" },
+        { slot: 3, status: "running" as const },
+      ],
+    };
+    useRemoteMcpGen.getState().applyEvent(snapshot);
+    const batchesAfterFirstSnapshot = useBatches.getState();
+    const workersAfterFirstSnapshot = batchesAfterFirstSnapshot.batches.find(
+      (batch) => batch.batchId === result.requestId,
+    )?.workers;
+
+    useRemoteMcpGen.getState().applyEvent(snapshot);
+    expect(useBatches.getState()).toBe(batchesAfterFirstSnapshot);
+    expect(
+      useBatches.getState().batches.find((batch) => batch.batchId === result.requestId)?.workers,
+    ).toEqual(workersAfterFirstSnapshot);
+    expect(useRemoteMcpGen.getState().jobs[result.requestId].appliedSlots).toEqual({
+      1: "done",
+      2: "failed",
+    });
+
+    useBatches.getState().removeBatch(result.requestId);
   });
 
   it("共通 remote MCP の done イベントでも同じ画像カードを完了へ置き換える", async () => {

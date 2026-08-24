@@ -11,6 +11,7 @@ import type {
 import type {
   RemoteMcpGenEvent,
   RemoteMcpGenerateArgs,
+  RemoteMcpSlotResult,
 } from "../ipc";
 import { useBatches } from "./batches";
 import { registerGeneratedMedia } from "./images";
@@ -50,6 +51,8 @@ export type RemoteMcpGenJob = {
   /** 保存後のライブラリ・履歴・プロジェクト登録まで試行済みか。 */
   registrationCompleted?: boolean;
   registrationWarnings?: string[];
+  slotResults?: RemoteMcpSlotResult[];
+  appliedSlots?: Record<number, "done" | "failed">;
   createdAt: number;
   updatedAt: number;
 };
@@ -209,14 +212,72 @@ function startRemoteTimelineBatch(
   }
 }
 
+function applyRemoteTimelineSlotResults(
+  requestId: string,
+  mediaType: RemoteMcpGenerationKind,
+  slotResults: readonly RemoteMcpSlotResult[],
+  appliedSlots: RemoteMcpGenJob["appliedSlots"],
+): NonNullable<RemoteMcpGenJob["appliedSlots"]> {
+  const nextAppliedSlots = { ...(appliedSlots ?? {}) };
+  for (const result of slotResults) {
+    if (nextAppliedSlots[result.slot]) continue;
+    if (result.status === "done" && result.savedPath) {
+      useBatches.getState().applyEvent({
+        kind: "workerCompleted",
+        batchId: requestId,
+        idx: result.slot,
+        path: result.savedPath,
+        mediaType,
+      });
+      nextAppliedSlots[result.slot] = "done";
+    } else if (result.status === "failed") {
+      useBatches.getState().applyEvent({
+        kind: "workerFailed",
+        batchId: requestId,
+        idx: result.slot,
+        error: friendlyRemoteMcpError(result.error),
+        mediaType,
+      });
+      nextAppliedSlots[result.slot] = "failed";
+    }
+  }
+  return nextAppliedSlots;
+}
+
 function completeRemoteTimelineBatch(
   requestId: string,
   mediaType: RemoteMcpGenerationKind,
   savedPaths: string[],
   warnings: string[],
-): void {
+  slotResults?: readonly RemoteMcpSlotResult[],
+  appliedSlots?: RemoteMcpGenJob["appliedSlots"],
+): NonNullable<RemoteMcpGenJob["appliedSlots"]> | undefined {
   const batch = useBatches.getState().batches.find((item) => item.batchId === requestId);
-  if (!batch || batch.status !== "running") return;
+  if (!batch || batch.status !== "running") return appliedSlots;
+
+  if (slotResults) {
+    const nextAppliedSlots = { ...(appliedSlots ?? {}) };
+    const failedSlots = slotResults.filter((result) => result.status === "failed");
+    for (const result of failedSlots) {
+      if (nextAppliedSlots[result.slot]) continue;
+      useBatches.getState().applyEvent({
+        kind: "workerFailed",
+        batchId: requestId,
+        idx: result.slot,
+        error: friendlyRemoteMcpError(result.error),
+        mediaType,
+      });
+      nextAppliedSlots[result.slot] = "failed";
+    }
+    useBatches.getState().applyEvent({
+      kind: "completed",
+      batchId: requestId,
+      generatedPaths: savedPaths,
+      failedCount: failedSlots.length,
+      mediaType,
+    });
+    return nextAppliedSlots;
+  }
 
   const missingCount = Math.max(0, batch.count - savedPaths.length);
   for (let offset = 0; offset < missingCount; offset += 1) {
@@ -237,18 +298,28 @@ function completeRemoteTimelineBatch(
     failedCount: missingCount,
     mediaType,
   });
+  return appliedSlots;
 }
 
-function failRemoteTimelineBatch(requestId: string, message: string): void {
+function failRemoteTimelineBatch(
+  requestId: string,
+  message: string,
+  slotResults?: readonly RemoteMcpSlotResult[],
+): void {
   const batch = useBatches.getState().batches.find((item) => item.batchId === requestId);
   if (!batch || batch.status !== "running") return;
 
   for (const worker of batch.workers) {
+    const slotError = slotResults?.find(
+      (result) => result.slot === worker.idx && result.status === "failed",
+    )?.error;
+    const error = slotError ? friendlyRemoteMcpError(slotError) : message;
+    if (worker.status === "failed" && worker.error === error) continue;
     useBatches.getState().applyEvent({
       kind: "workerFailed",
       batchId: requestId,
       idx: worker.idx,
-      error: message,
+      error,
       mediaType: worker.mediaType ?? batch.mediaType,
     });
   }
@@ -284,6 +355,7 @@ export const useRemoteMcpGen = create<RemoteMcpGenState>((set, get) => {
     input: RemoteMcpRunInput,
     savedPaths: string[],
     saveWarnings: string[] = [],
+    slotResults?: readonly RemoteMcpSlotResult[],
   ): Promise<void> => {
     const noun = input.kind === "video" ? "動画" : "画像";
     try {
@@ -329,12 +401,26 @@ export const useRemoteMcpGen = create<RemoteMcpGenState>((set, get) => {
           },
         };
       });
-      completeRemoteTimelineBatch(
+      const appliedSlots = completeRemoteTimelineBatch(
         requestId,
         input.kind,
         savedPaths,
         warnings,
+        slotResults,
+        get().jobs[requestId]?.appliedSlots,
       );
+      if (appliedSlots) {
+        set((state) => {
+          const current = state.jobs[requestId];
+          if (!current) return state;
+          return {
+            jobs: {
+              ...state.jobs,
+              [requestId]: { ...current, appliedSlots },
+            },
+          };
+        });
+      }
     } catch (error) {
       const warning = `${noun}は保存しましたが、ライブラリ・履歴への登録処理に失敗しました: ${String(error)}`;
       console.warn("[remote-mcp-registration]", warning);
@@ -417,6 +503,7 @@ export const useRemoteMcpGen = create<RemoteMcpGenState>((set, get) => {
       referencePaths: [...new Set(referencePaths)],
       kind: input.kind,
     };
+    args.count = Math.max(1, Math.trunc(input.count ?? 1));
 
     try {
       if (selection.providerId === "higgsfield" && input.kind === "video") {
@@ -577,8 +664,32 @@ export const useRemoteMcpGen = create<RemoteMcpGenState>((set, get) => {
     },
 
     applyEvent: (event) => {
-      const current = get().jobs[event.requestId];
+      let current = get().jobs[event.requestId];
       if (!current || current.providerId !== event.providerId) return;
+
+      if (event.slotResults) {
+        const appliedSlots = applyRemoteTimelineSlotResults(
+          event.requestId,
+          current.input.kind,
+          event.slotResults,
+          current.appliedSlots,
+        );
+        set((state) => {
+          const job = state.jobs[event.requestId];
+          if (!job) return state;
+          return {
+            jobs: {
+              ...state.jobs,
+              [event.requestId]: {
+                ...job,
+                slotResults: event.slotResults,
+                appliedSlots,
+              },
+            },
+          };
+        });
+        current = get().jobs[event.requestId] ?? current;
+      }
 
       if (event.phase === "done" && event.savedPaths?.length) {
         // 同じ done が再送されても履歴 turn を二重に作らない。
@@ -605,7 +716,8 @@ export const useRemoteMcpGen = create<RemoteMcpGenState>((set, get) => {
           current.selection,
           current.input,
           event.savedPaths,
-          event.message ? [event.message] : [],
+          event.errors ?? (event.message ? [event.message] : []),
+          event.slotResults,
         );
         return;
       }
@@ -630,15 +742,16 @@ export const useRemoteMcpGen = create<RemoteMcpGenState>((set, get) => {
             registrationCompleted:
               event.phase === "done" ? true : current.registrationCompleted,
             registrationWarnings:
-              event.phase === "done" && !event.savedPaths?.length
+              event.errors ??
+              (event.phase === "done" && !event.savedPaths?.length
                 ? [message]
-                : current.registrationWarnings,
+                : current.registrationWarnings),
             updatedAt: Date.now(),
           },
         },
       }));
       if (event.phase === "error" || (event.phase === "done" && !event.savedPaths?.length)) {
-        failRemoteTimelineBatch(event.requestId, message);
+        failRemoteTimelineBatch(event.requestId, message, event.slotResults);
       }
     },
   };

@@ -25,10 +25,7 @@ import {
 } from "../lib/dragRef";
 import { useSceneStore } from "../lib/store/scene";
 import { useWorkspace } from "../lib/store/workspace";
-import {
-  isRemoteMcpJobRunning,
-  useRemoteMcpGen,
-} from "../lib/store/remoteMcpGen";
+import { useRemoteMcpGen } from "../lib/store/remoteMcpGen";
 import {
   presetKind,
   type Preset,
@@ -71,7 +68,7 @@ export function ConstructedPromptPanel() {
     isQueueFull,
     activeBatchSummary,
     disabled,
-    generate,
+    generateSelected,
   } = useSceneGeneration();
 
   const [draft, setDraft] = useState<string>(generatedPrompt);
@@ -113,7 +110,6 @@ export function ConstructedPromptPanel() {
   const remoteValidationMessage = useRemoteMcpGen(
     (s) => s.validationMessage[modelMedia],
   );
-  const startRemoteGeneration = useRemoteMcpGen((s) => s.start);
   const retryRemoteGeneration = useRemoteMcpGen((s) => s.retry);
   const aspectRatio = useSceneStore((s) => s.subjectFraming.aspectRatio);
   const setSubjectFramingField = useSceneStore((s) => s.setSubjectFramingField);
@@ -367,20 +363,7 @@ export function ConstructedPromptPanel() {
   };
 
   const runSelectedGeneration = async () => {
-    if (!remoteSelection) {
-      await generate();
-      return;
-    }
-    const result = await startRemoteGeneration({
-      kind: modelMedia,
-      prompt: effectivePrompt,
-      aspectRatio,
-      count,
-      referenceImagePaths: references.map((reference) => reference.path),
-    });
-    if (!result.ok) {
-      pushToast({ kind: "error", text: result.message });
-    }
+    await generateSelected();
   };
 
   const retryRemote = async () => {
@@ -388,8 +371,6 @@ export function ConstructedPromptPanel() {
     const result = await retryRemoteGeneration(latestRemoteRequestId);
     if (!result.ok) pushToast({ kind: "error", text: result.message });
   };
-
-  const remoteRunning = isRemoteMcpJobRunning(latestRemoteJob);
 
   return (
     // STΛCK 報告 (2026-05-17 v0.6.7): 13インチWindows高DPI(縦512px)で
@@ -607,16 +588,12 @@ export function ConstructedPromptPanel() {
           type="button"
           data-tour="generation-submit"
           onClick={() => void runSelectedGeneration()}
-          disabled={remoteSelection ? remoteRunning || !effectivePrompt.trim() : disabled}
+          disabled={remoteSelection ? !effectivePrompt.trim() || isQueueFull : disabled}
           className="w-full rounded-md bg-pink-500 px-4 py-2 text-sm font-bold text-white transition hover:bg-pink-600 disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-500"
         >
-          {remoteSelection && remoteRunning
-            ? latestRemoteJob?.phase === "saving"
-              ? "保存中…"
-              : "生成中…"
-            : !remoteSelection && isQueueFull
-              ? `生成中 ${runningBatchCount}/${maxConcurrentBatches}`
-              : "この内容で生成"}
+          {isQueueFull
+            ? `生成中 ${runningBatchCount}/${maxConcurrentBatches}`
+            : "この内容で生成"}
         </button>
 
         {(latestRemoteJob || remoteValidationMessage) && (

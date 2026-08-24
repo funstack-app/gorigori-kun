@@ -42,6 +42,15 @@ describe("remote MCP model catalog", () => {
     ).toBe("video_models_list");
   });
 
+  it("Pollo の pollo_list_models をモデル一覧ツールとして選ぶ", () => {
+    const selected = findRemoteMcpModelListTool([
+      tool("get_models"),
+      tool("pollo_list_models"),
+      tool("pollo_generate_image"),
+    ]);
+    expect(selected?.name).toBe("pollo_list_models");
+  });
+
   it("媒体ごとの主生成ツールを名前ヒューリスティックで選ぶ", () => {
     const tools = [
       tool("create_video"),
