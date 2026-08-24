@@ -28,6 +28,7 @@ import {
   updateStressConditions,
   type AssetCandidateCount,
 } from "../../../lib/film/assetFactory";
+import { canEnterGenerationPhase } from "../../../lib/film/generationPhaseGate";
 import {
   buildAssetPromptDraftPrompt,
   buildStressTestImagePrompt,
@@ -1049,7 +1050,7 @@ export function AssetFactoryPanel({ project }: { project: FilmProject }) {
         <button
           type="button"
           onClick={() => setPhase(5)}
-          disabled={!gate.canProceed}
+          disabled={!canEnterGenerationPhase(project)}
           className="mt-4 rounded-md bg-emerald-500 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-400"
         >
           ⑤映像づくりへ進む

@@ -34,6 +34,18 @@ const KIND_LABELS: Record<VideoReferenceKind, string> = {
   audio: "音声",
 };
 
+export const FREE_PROMPT_BLOCK_ID = "__free-prompt__";
+
+type FreePromptHistoryItem = {
+  id: string;
+  path: string;
+  prompt: string;
+  createdAt: string;
+};
+
+const freePromptHistoryByProject = new Map<string, FreePromptHistoryItem[]>();
+let freePromptHistorySequence = 0;
+
 function basename(path: string): string {
   return path.split(/[\\/]/u).pop() || path;
 }
@@ -60,6 +72,17 @@ function statusClass(label: string): string {
 
 function adoptedPathFor(project: FilmProject, blockId: string): string | null {
   return project.takes.find((take) => take.blockId === blockId && take.adopted)?.path ?? null;
+}
+
+function defaultFreePromptDuration(serviceId: string): number {
+  const profile = findVideoServiceProfile(serviceId);
+  const modelId = profile ? HIGGSFIELD_VIDEO_MODEL_BY_SERVICE[profile.id] : null;
+  const model = modelId ? findVideoModel(modelId) : undefined;
+  if (model?.duration.kind === "enum") return model.duration.values[0] ?? 5;
+  if (model?.duration.kind === "integer") {
+    return Math.max(model.duration.min, Math.min(5, model.duration.max));
+  }
+  return Math.min(5, profile?.maxBlockSeconds ?? 5);
 }
 
 function ReferenceGuide({ project, referenceCount }: { project: FilmProject; referenceCount: number }) {
@@ -105,17 +128,19 @@ type PickerTarget = { blockId: string; index: number };
 
 function ReferenceSlots({
   project,
-  block,
+  blockId,
   run,
   missingAssetNames,
+  description,
   onPickCharacter,
   onPickLibrary,
   onPickLocal,
 }: {
   project: FilmProject;
-  block: FilmBlock;
+  blockId: string;
   run: FilmGenBlockRun;
   missingAssetNames: string[];
+  description: string;
   onPickCharacter: (target: PickerTarget) => void;
   onPickLibrary: (target: PickerTarget) => void;
   onPickLocal: (target: PickerTarget) => void;
@@ -123,7 +148,7 @@ function ReferenceSlots({
   const removeReference = useFilmGenRun((state) => state.removeReference);
   const pushToast = useToasts((state) => state.push);
   const packetService = isPacketService(project.videoServiceId);
-  const nextTarget = { blockId: block.id, index: run.references.length };
+  const nextTarget = { blockId, index: run.references.length };
 
   async function revealInFinder(path: string) {
     try {
@@ -138,7 +163,7 @@ function ReferenceSlots({
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h4 className="text-sm font-semibold text-zinc-100">参照画像</h4>
-          <p className="mt-1 text-[11px] text-zinc-500">このブロックに登場する決定版素材を自動で入れています。必要な所だけ差し替えられます。</p>
+          <p className="mt-1 text-[11px] text-zinc-500">{description}</p>
         </div>
         <div className="flex flex-wrap gap-2">
           <button type="button" onClick={() => onPickCharacter(nextTarget)} className="rounded-md border border-[#3a3a3a] px-2.5 py-1.5 text-[11px] text-zinc-300 hover:border-pink-500/50">登録キャラを追加</button>
@@ -155,11 +180,11 @@ function ReferenceSlots({
               <p className="mt-2 truncate text-xs font-semibold text-zinc-200">参照{index + 1}: {reference.name}</p>
               <p className="mt-0.5 text-[10px] text-zinc-600">{reference.source === "asset" ? `自動候補 ${reference.assetId ?? ""}` : "手動で選択"}</p>
               <div className="mt-2 flex flex-wrap gap-1.5">
-                <button type="button" onClick={() => onPickCharacter({ blockId: block.id, index })} className="rounded border border-[#343434] px-2 py-1 text-[10px] text-zinc-400">登録キャラ</button>
-                <button type="button" onClick={() => onPickLibrary({ blockId: block.id, index })} className="rounded border border-[#343434] px-2 py-1 text-[10px] text-zinc-400">ライブラリ</button>
-                <button type="button" onClick={() => onPickLocal({ blockId: block.id, index })} className="rounded border border-[#343434] px-2 py-1 text-[10px] text-zinc-400">手元</button>
+                <button type="button" onClick={() => onPickCharacter({ blockId, index })} className="rounded border border-[#343434] px-2 py-1 text-[10px] text-zinc-400">登録キャラ</button>
+                <button type="button" onClick={() => onPickLibrary({ blockId, index })} className="rounded border border-[#343434] px-2 py-1 text-[10px] text-zinc-400">ライブラリ</button>
+                <button type="button" onClick={() => onPickLocal({ blockId, index })} className="rounded border border-[#343434] px-2 py-1 text-[10px] text-zinc-400">手元</button>
                 {packetService ? <button type="button" onClick={() => void revealInFinder(reference.path)} className="rounded border border-[#343434] px-2 py-1 text-[10px] text-zinc-400">Finderで表示</button> : null}
-                <button type="button" onClick={() => removeReference(project.id, block.id, index)} className="rounded px-2 py-1 text-[10px] text-zinc-600 hover:text-red-300">外す</button>
+                <button type="button" onClick={() => removeReference(project.id, blockId, index)} className="rounded px-2 py-1 text-[10px] text-zinc-600 hover:text-red-300">外す</button>
               </div>
             </div>
           ))}
@@ -315,9 +340,10 @@ function BlockGenerationCard({
 
       <ReferenceSlots
         project={project}
-        block={block}
+        blockId={block.id}
         run={run}
         missingAssetNames={missingAssetNames}
+        description="このブロックに登場する決定版素材を自動で入れています。必要な所だけ差し替えられます。"
         onPickCharacter={onPickCharacter}
         onPickLibrary={onPickLibrary}
         onPickLocal={onPickLocal}
@@ -383,6 +409,206 @@ function BlockGenerationCard({
   );
 }
 
+function FreePromptGenerationCard({
+  project,
+  run,
+  onPickCharacter,
+  onPickLibrary,
+  onPickLocal,
+}: {
+  project: FilmProject;
+  run: FilmGenBlockRun;
+  onPickCharacter: (target: PickerTarget) => void;
+  onPickLibrary: (target: PickerTarget) => void;
+  onPickLocal: (target: PickerTarget) => void;
+}) {
+  const connectionStatus = useFilmGenRun((state) => state.connectionStatus);
+  const setPromptDraft = useFilmGenRun((state) => state.setPromptDraft);
+  const savePrompt = useFilmGenRun((state) => state.savePrompt);
+  const setImportedResult = useFilmGenRun((state) => state.setImportedResult);
+  const generate = useFilmGenRun((state) => state.generate);
+  const pushToast = useToasts((state) => state.push);
+  const videoInputRef = useRef<HTMLInputElement | null>(null);
+  const packetService = isPacketService(project.videoServiceId);
+  const [durationSeconds, setDurationSeconds] = useState(() =>
+    defaultFreePromptDuration(project.videoServiceId));
+  const [history, setHistory] = useState<FreePromptHistoryItem[]>(() =>
+    freePromptHistoryByProject.get(project.id) ?? []);
+  const prompt = run.promptDraft.trim();
+  const readyRun = { ...run, promptDraft: prompt, savedPrompt: prompt };
+  const disabledReason = prompt
+    ? getFilmGenerationDisabledReason({
+        run: readyRun,
+        serviceId: project.videoServiceId,
+        durationSeconds,
+        connectionStatus,
+      })
+    : "自由プロンプトを入力してください。";
+  const request = {
+    projectId: project.id,
+    blockId: FREE_PROMPT_BLOCK_ID,
+    serviceId: project.videoServiceId,
+    durationSeconds,
+  };
+
+  useEffect(() => {
+    setDurationSeconds(defaultFreePromptDuration(project.videoServiceId));
+    setHistory(freePromptHistoryByProject.get(project.id) ?? []);
+  }, [project.id, project.videoServiceId]);
+
+  function rememberResult(path: string) {
+    const createdAt = new Date().toISOString();
+    const item: FreePromptHistoryItem = {
+      id: `free-${Date.now()}-${freePromptHistorySequence += 1}`,
+      path,
+      prompt,
+      createdAt,
+    };
+    setHistory((current) => {
+      const next = [item, ...current];
+      freePromptHistoryByProject.set(project.id, next);
+      return next;
+    });
+  }
+
+  function saveCurrentPrompt(): boolean {
+    if (!prompt) return false;
+    setPromptDraft(project.id, FREE_PROMPT_BLOCK_ID, prompt);
+    return savePrompt(project.id, FREE_PROMPT_BLOCK_ID);
+  }
+
+  async function generateFreePrompt() {
+    if (disabledReason) {
+      pushToast({ kind: "warn", text: disabledReason, ttlMs: 5000 });
+      return;
+    }
+    if (!saveCurrentPrompt()) return;
+    try {
+      const path = await generate(request);
+      if (path) rememberResult(path);
+    } catch (error) {
+      pushToast({ kind: "error", text: `動画を生成できませんでした: ${String(error)}`, ttlMs: 6000 });
+    }
+  }
+
+  async function copyPacketPrompt() {
+    if (disabledReason) {
+      pushToast({ kind: "warn", text: disabledReason, ttlMs: 5000 });
+      return;
+    }
+    if (!saveCurrentPrompt()) return;
+    try {
+      await navigator.clipboard.writeText(prompt);
+      pushToast({ kind: "success", text: "プロンプトをコピーしました。", ttlMs: 2500 });
+    } catch (error) {
+      pushToast({ kind: "error", text: `プロンプトをコピーできませんでした: ${String(error)}`, ttlMs: 6000 });
+    }
+  }
+
+  async function importVideo(file: File | null) {
+    if (!file) return;
+    if (!/\.(mp4|webm|mov)$/iu.test(file.name)) {
+      pushToast({ kind: "error", text: "MP4、WebM、MOVの動画を選んでください。", ttlMs: 5000 });
+      return;
+    }
+    try {
+      const path = await imagesIpc.writeUpload(file.name, new Uint8Array(await file.arrayBuffer()));
+      setImportedResult(project.id, FREE_PROMPT_BLOCK_ID, path);
+      rememberResult(path);
+      pushToast({ kind: "success", text: "自由生成の履歴へ動画を取り込みました。", ttlMs: 4000 });
+    } catch (error) {
+      pushToast({ kind: "error", text: `動画を取り込めませんでした: ${String(error)}`, ttlMs: 6000 });
+    }
+  }
+
+  return (
+    <article data-testid="free-prompt-generation-card" className="rounded-xl border border-pink-500/40 bg-pink-500/5 p-5">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-[0.16em] text-pink-300">自由プロンプトで生成</p>
+          <h3 className="mt-1 text-lg font-semibold text-zinc-100">決め込みすぎず、書いた言葉からすぐ作る</h3>
+          <p className="mt-1 text-xs leading-5 text-zinc-400">設計・素材・ブロック台本は自動合成せず、下の文章をそのまま動画生成へ渡します。</p>
+        </div>
+        <label className="text-xs text-zinc-400">
+          動画の長さ（秒）
+          <input
+            aria-label="自由生成の動画の長さ"
+            type="number"
+            min={1}
+            value={durationSeconds}
+            disabled={run.status === "running"}
+            onChange={(event) => setDurationSeconds(Math.max(1, Number(event.target.value) || 1))}
+            className="ml-2 h-9 w-20 rounded-md border border-[#3a3a3a] bg-[#111111] px-2 text-sm text-zinc-100 outline-none focus:border-pink-500"
+          />
+        </label>
+      </div>
+
+      <label className="mt-5 block text-sm font-semibold text-zinc-100">
+        生成したい映像を自由に書く
+        <textarea
+          aria-label="自由プロンプト"
+          rows={7}
+          value={run.promptDraft}
+          disabled={run.status === "running"}
+          onChange={(event) => setPromptDraft(project.id, FREE_PROMPT_BLOCK_ID, event.target.value)}
+          placeholder="例: 雨上がりの夜の商店街。赤い傘の女性が水たまりをよけながら歩く。手持ちカメラで静かに追う。"
+          className="mt-2 w-full resize-y rounded-lg border border-[#303030] bg-[#101010] px-3 py-3 text-sm leading-6 text-zinc-200 outline-none placeholder:text-zinc-700 focus:border-pink-500 disabled:text-zinc-500"
+        />
+      </label>
+
+      <ReferenceSlots
+        project={project}
+        blockId={FREE_PROMPT_BLOCK_ID}
+        run={run}
+        missingAssetNames={[]}
+        description="必要なときだけ、登録キャラ・ライブラリ・手元の画像を追加できます。"
+        onPickCharacter={onPickCharacter}
+        onPickLibrary={onPickLibrary}
+        onPickLocal={onPickLocal}
+      />
+
+      {run.status === "running" ? (
+        <div className="mt-5 rounded-lg border border-sky-500/30 bg-sky-500/10 px-4 py-3">
+          <div className="flex items-center justify-between gap-3 text-xs text-sky-200"><span>{run.progressLabel}</span><span>{Math.round(run.progress * 100)}%</span></div>
+          <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-sky-950"><div className="h-full rounded-full bg-sky-400 transition-all" style={{ width: `${run.progress * 100}%` }} /></div>
+        </div>
+      ) : null}
+      {run.error ? <p className="mt-4 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs leading-5 text-red-200">{run.error}</p> : null}
+
+      <div className="mt-5 flex flex-wrap items-center gap-3">
+        {packetService ? (
+          <>
+            <button type="button" disabled={Boolean(disabledReason)} onClick={() => void copyPacketPrompt()} className="rounded-md border border-pink-500/60 px-5 py-2.5 text-sm font-semibold text-pink-100 hover:bg-pink-500/10 disabled:cursor-not-allowed disabled:opacity-40">プロンプトをコピー</button>
+            <button type="button" onClick={() => videoInputRef.current?.click()} className="rounded-md bg-pink-500 px-5 py-2.5 text-sm font-semibold text-white hover:bg-pink-400">できた動画を取り込む</button>
+            <input ref={videoInputRef} type="file" accept=".mp4,.webm,.mov" className="hidden" onChange={(event) => { void importVideo(event.target.files?.[0] ?? null); event.target.value = ""; }} />
+          </>
+        ) : (
+          <button type="button" disabled={Boolean(disabledReason)} onClick={() => void generateFreePrompt()} className="rounded-md bg-pink-500 px-5 py-2.5 text-sm font-semibold text-white hover:bg-pink-400 disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-400">自由プロンプトで生成</button>
+        )}
+        {disabledReason ? <p className="text-xs leading-5 text-amber-200">実行できない理由: {disabledReason}</p> : null}
+      </div>
+
+      <section className="mt-6 border-t border-[#303030] pt-5">
+        <h4 className="text-sm font-semibold text-zinc-100">自由生成の履歴（新しい順）</h4>
+        {history.length > 0 ? (
+          <div className="mt-3 grid gap-4 md:grid-cols-2">
+            {history.map((item) => (
+              <article key={item.id} className="rounded-lg border border-[#303030] bg-[#111111] p-3">
+                <video controls preload="metadata" src={convertFileSrc(item.path)} className="aspect-video w-full rounded-md bg-black" />
+                <p className="mt-2 break-all text-[10px] text-zinc-500">{item.path}</p>
+                <p className="mt-2 line-clamp-2 text-xs leading-5 text-zinc-400">{item.prompt}</p>
+                <p className="mt-1 text-[10px] text-zinc-600">{new Date(item.createdAt).toLocaleString("ja-JP")}</p>
+              </article>
+            ))}
+          </div>
+        ) : (
+          <p className="mt-3 rounded-md border border-dashed border-[#343434] px-3 py-4 text-center text-xs text-zinc-600">まだ履歴はありません。生成するとここに並びます。</p>
+        )}
+      </section>
+    </article>
+  );
+}
+
 export function GenerationPhasePanel({ project }: { project: FilmProject }) {
   const script = Array.isArray(project.script) ? null : project.script;
   const blocks = script?.blocks ?? [];
@@ -409,6 +635,13 @@ export function GenerationPhasePanel({ project }: { project: FilmProject }) {
   );
 
   useEffect(() => {
+    initializeBlock({
+      projectId: project.id,
+      blockId: FREE_PROMPT_BLOCK_ID,
+      prompt: "",
+      references: [],
+      adoptedPath: null,
+    });
     for (const block of blocks) {
       const assets = project.assets.filter((asset) => asset.blockIds.includes(block.id));
       initializeBlock({
@@ -476,6 +709,7 @@ export function GenerationPhasePanel({ project }: { project: FilmProject }) {
 
   const activeBlock = blocks.find((block) => block.id === activeBlockId) ?? blocks[0];
   const activeRun = activeBlock ? runs[filmGenRunKey(project.id, activeBlock.id)] : undefined;
+  const freePromptRun = runs[filmGenRunKey(project.id, FREE_PROMPT_BLOCK_ID)];
   const activeAssets = activeBlock
     ? project.assets.filter((asset) => asset.blockIds.includes(activeBlock.id))
     : [];
@@ -514,6 +748,21 @@ export function GenerationPhasePanel({ project }: { project: FilmProject }) {
         </div>
         {!packetService && connectionReason && connectionStatus !== "ready" ? <p className="mt-2 text-[11px] text-zinc-600">{connectionReason}</p> : null}
       </section>
+
+      {freePromptRun ? (
+        <FreePromptGenerationCard
+          project={project}
+          run={freePromptRun}
+          onPickCharacter={setCharacterTarget}
+          onPickLibrary={setLibraryTarget}
+          onPickLocal={(target) => {
+            localTargetRef.current = target;
+            localInputRef.current?.click();
+          }}
+        />
+      ) : (
+        <div className="rounded-xl border border-[#303030] bg-[#171717] p-5 text-sm text-zinc-500">自由生成カードを準備しています。</div>
+      )}
 
       <section className="rounded-xl border border-[#303030] bg-[#141414] p-4">
         <h3 className="text-sm font-semibold text-zinc-100">ブロック一覧</h3>
