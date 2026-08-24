@@ -12,12 +12,9 @@ import { AssetFactoryPanel } from "./AssetFactoryPanel";
 import { DesignPhasePanel } from "./DesignPhasePanel";
 import { FilmChatPanel } from "./FilmChatPanel";
 import { FilmPhaseRail } from "./FilmPhaseRail";
+import { FinishPhasePanel } from "./FinishPhasePanel";
 import { GenerationPhasePanel } from "./GenerationPhasePanel";
 import { ScriptPhasePanel } from "./ScriptPhasePanel";
-
-const LOCKED_PHASES: Record<Exclude<FilmPhase, 1 | 2 | 3 | 4 | 5>, { stage: string; name: string }> = {
-  6: { stage: "S6", name: "仕上げ" },
-};
 
 function FilmMarkIcon() {
   return (
@@ -285,35 +282,6 @@ function ProjectControls({
   );
 }
 
-function LockedPhasePanel({ phase }: { phase: Exclude<FilmPhase, 1 | 2 | 3 | 4 | 5> }) {
-  const detail = LOCKED_PHASES[phase];
-  return (
-    <div className="mx-auto flex w-full min-w-0 max-w-2xl items-center justify-center py-16">
-      <section className="w-full rounded-xl border border-[#242424] bg-[#171717] p-8 text-center">
-        <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-full border border-[#303030] bg-[#121212] text-zinc-500">
-          <svg
-            aria-hidden="true"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.8"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            className="h-5 w-5"
-          >
-            <rect x="5" y="10" width="14" height="10" rx="2" />
-            <path d="M8 10V7a4 4 0 0 1 8 0v3" />
-          </svg>
-        </div>
-        <h2 className="mt-4 text-lg font-semibold text-zinc-200">{detail.name}</h2>
-        <p className="mt-2 text-sm leading-6 text-zinc-400">
-          この工程は次の更新で使えるようになります。
-        </p>
-      </section>
-    </div>
-  );
-}
-
 export function FilmWorkspace() {
   const initialize = useFilmProjectStore((state) => state.initialize);
   const projects = useFilmProjectStore((state) => state.projects);
@@ -365,8 +333,9 @@ export function FilmWorkspace() {
     if (candidate === 1 || candidate === 2) return true;
     if (candidate === 3) return Boolean(activeProject.approvals.blocks);
     if (candidate === 4) return Boolean(activeProject.approvals.look);
-    if (candidate === 5) return getAssetFactoryGateState(activeProject.assets).canProceed;
-    // ⑥は未実装。完了条件を満たしていても偽の画面へ進ませない。
+    if (candidate === 5 || candidate === 6) {
+      return getAssetFactoryGateState(activeProject.assets).canProceed;
+    }
     return false;
   }
 
@@ -492,8 +461,8 @@ export function FilmWorkspace() {
             <AssetFactoryPanel project={activeProject} />
           ) : phase === 5 && activeProject ? (
             <GenerationPhasePanel project={activeProject} />
-          ) : phase >= 6 ? (
-            <LockedPhasePanel phase={phase as Exclude<FilmPhase, 1 | 2 | 3 | 4 | 5>} />
+          ) : phase === 6 && activeProject ? (
+            <FinishPhasePanel project={activeProject} />
           ) : (
             <FilmChatPanel project={activeProject} />
           )}

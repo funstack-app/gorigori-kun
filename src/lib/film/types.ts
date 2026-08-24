@@ -168,6 +168,12 @@ export type FilmProject = {
   /** AI生成ルックを選んだ場合に、Style Prefix起草へ渡す設計文。 */
   lookMasterDescription?: string;
   takes: FilmTake[];
+  /** ⑥仕上げで完成として登録した動画。旧データでは未設定。 */
+  finished?: {
+    path: string;
+    transition: "cut" | "crossfade";
+    at: number;
+  };
   /** 企画から脚本までのAIアドバイザーとの会話。旧データでは未設定。 */
   chatMessages?: FilmChatMessage[];
   /** 「YouTube横長」など、専門用語を使わず会話で確定した投稿先。 */

@@ -106,6 +106,10 @@ type FilmProjectState = {
     adopted: boolean,
     verdictNote: string,
   ) => boolean;
+  saveFinishedFilm: (
+    projectId: string,
+    finished: NonNullable<FilmProject["finished"]>,
+  ) => boolean;
 };
 
 const SCRIPT_STAGE_ORDER: FilmScriptApprovalStage[] = [
@@ -190,8 +194,7 @@ export function normalizeFilmProject(
     ...currentProject,
     assetServiceId: "gpt-image-2",
     videoServiceId,
-    // ⑤は実装済み。⑥へ進んだ過去データだけ、最後に使える⑤へ安全に戻す。
-    phase: project.phase >= 6 ? 5 : project.phase,
+    phase: project.phase,
     approvals: {
       ...project.approvals,
       blocks: project.approvals.blocks ?? null,
@@ -218,6 +221,7 @@ export function normalizeFilmProject(
     lookMasterPath: project.lookMasterPath ?? null,
     lookMasterDescription: project.lookMasterDescription ?? "",
     takes: Array.isArray(project.takes) ? project.takes : [],
+    finished: project.finished,
     chatMessages,
     postingTarget: project.postingTarget ?? "",
     updatedAt:
@@ -323,7 +327,6 @@ function makeFileData(
 }
 
 function projectNeedsHydrationRepair(project: StoredFilmProject): boolean {
-  if (project.phase >= 6) return true;
   return (project.assets ?? []).some((asset) => {
     if (
       asset.status === "generating"
@@ -489,8 +492,8 @@ async function readFilmProjectsFileIntoStore(
         ? currentActiveId
         : (projects[0]?.id ?? null);
     set({ projects, activeProjectId, planningChatMessages });
-    // 走行中のまま残った状態と、過去版で⑥へ進んだ状態は、再試行可能な
-    // スナップショットへ直して正本にも反映する。
+    // 走行中のまま残った素材生成状態は、再試行可能なスナップショットへ
+    // 直して正本にも反映する。
     if (needsHydrationRepair) pendingBeforeUnlock = true;
     return true;
   }
@@ -683,8 +686,7 @@ export const useFilmProjectStore = create<FilmProjectState>((set, get) => ({
   },
 
   setPhase: (phase) => {
-    // ⑤までは実装済み。⑥は未実装なので状態だけ進める経路も閉じておく。
-    if (!Number.isInteger(phase) || phase < 1 || phase > 5) return;
+    if (!Number.isInteger(phase) || phase < 1 || phase > 6) return;
     const activeProjectId = get().activeProjectId;
     if (!activeProjectId) return;
     let changed = false;
@@ -948,6 +950,30 @@ export const useFilmProjectStore = create<FilmProjectState>((set, get) => ({
       else takes.push(nextTake);
       saved = true;
       return touchProject({ ...project, takes });
+    });
+    if (!saved) return false;
+    persistProjects(projects, get().planningChatMessages);
+    set({ projects });
+    return true;
+  },
+
+  saveFinishedFilm: (projectId, finished) => {
+    const trimmedProjectId = projectId.trim();
+    const trimmedPath = finished.path.trim();
+    if (!trimmedProjectId || !trimmedPath || !Number.isFinite(finished.at)) return false;
+    let saved = false;
+    const projects = get().projects.map((sourceProject) => {
+      if (sourceProject.id !== trimmedProjectId) return sourceProject;
+      const project = normalizeFilmProject(sourceProject);
+      saved = true;
+      return touchProject({
+        ...project,
+        finished: {
+          path: trimmedPath,
+          transition: finished.transition,
+          at: finished.at,
+        },
+      });
     });
     if (!saved) return false;
     persistProjects(projects, get().planningChatMessages);
