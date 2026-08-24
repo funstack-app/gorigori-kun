@@ -490,6 +490,8 @@ pub(crate) async fn run_llm_tool_turn(
     prompt: &str,
     turn_timeout: Duration,
 ) -> Result<LlmToolTurnOutput, String> {
+    // RAII: 呼び出し元を問わず、ターン終了まで全生成共通の並列枠を保持する。
+    let _gen_permit = gen_queue::GenPermit::acquire(&GLOBAL_GEN_SEMAPHORE).await?;
     let source_home = crate::codex::home::resolve_command_codex_home()
         .ok_or_else(|| "生成用 CODEX_HOME のミラー元を解決できません".to_string())?;
     let generation_home = crate::codex::home::gen_codex_home_path()

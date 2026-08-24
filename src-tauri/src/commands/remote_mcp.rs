@@ -8,12 +8,14 @@ use std::io::Write;
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager, State};
+use tokio::sync::Mutex;
 
 use crate::codex::mcp_direct::{
     call_tool, call_tool_with_timeout, list_mcp_server_status_page, reload_mcp_servers,
@@ -39,6 +41,7 @@ const REMOTE_DOWNLOAD_TIMEOUT_SECS: u64 = 120;
 const REMOTE_DOWNLOAD_MAX_BYTES: u64 = 512 * 1024 * 1024;
 const REMOTE_DOWNLOAD_REDIRECT_LIMIT: usize = 5;
 const GENERATION_MESSAGE_LIMIT_CHARS: usize = 4_000;
+const MAX_REMOTE_COUNT: u32 = 30;
 const REMOTE_DOWNLOAD_USER_AGENT: &str =
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36";
 const REMOTE_DOWNLOAD_RETRY_USER_AGENT: &str =
@@ -186,11 +189,26 @@ impl RemoteMcpMediaKind {
     }
 }
 
+fn clamp_remote_count(count: Option<u32>) -> u32 {
+    count.unwrap_or(1).clamp(1, MAX_REMOTE_COUNT)
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoteMcpGenerateResult {
     pub saved_paths: Vec<String>,
     pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteMcpSlotResult {
+    pub slot: u32,
+    pub status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub saved_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// モデル一覧など、読み取り用途の tool/call 応答。ディスクには保存しない。
@@ -212,6 +230,33 @@ struct RemoteMcpGenerateEvent {
     message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     saved_paths: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    slot_results: Option<Vec<RemoteMcpSlotResult>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    errors: Option<Vec<String>>,
+}
+
+fn aggregate_slot_results(slots: &[RemoteMcpSlotResult]) -> (Vec<String>, Vec<String>) {
+    let mut slots = slots.to_vec();
+    slots.sort_by_key(|slot| slot.slot);
+
+    let saved_paths = slots
+        .iter()
+        .filter(|slot| slot.status == "done")
+        .filter_map(|slot| slot.saved_path.clone())
+        .collect();
+    let errors = slots
+        .iter()
+        .filter(|slot| slot.status == "failed")
+        .map(|slot| {
+            let error = slot.error.as_deref().unwrap_or("生成に失敗しました");
+            sanitize_generation_message(&format!("枠{}: {error}", slot.slot))
+        })
+        .collect();
+
+    (saved_paths, errors)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -309,7 +354,19 @@ fn generation_provider(provider_id: &str) -> Result<(&'static str, &'static str)
 fn discovery_tools(provider_id: &str) -> Vec<DiscoveryTool> {
     let (model_tools, balance_tools): (&[&str], &[&str]) = match provider_id {
         "krea" => (&["list_models"], &["account_balance", "balance"]),
-        "pollo" => (&["list_models", "models"], &["balance", "credits"]),
+        "pollo" => (
+            &["pollo_list_models", "list_models", "models"],
+            &[
+                "pollo_show_plans_and_credits",
+                "pollo_account_status",
+                "balance",
+                "credits",
+            ],
+        ),
+        "bfl" => (
+            &["list_models", "models_explore", "models_list"],
+            &["get_credits", "credits", "balance"],
+        ),
         "runway" => (
             &["list_models", "models", "get_models"],
             &["credits", "balance", "organization"],
@@ -1158,7 +1215,7 @@ fn build_remote_mcp_llm_prompt(
         reference_paths.join("、")
     };
     format!(
-        "あなたは生成実行係。まず tool_search で {provider_label} のツールを必ず検索・ロードしてから、{provider_label} のMCPツールで{}を生成せよ。指示文: {instruction} / モデル: {} / 尺: {duration} / 比率: {} / 参照画像: {references}。必要なツールを自分で選び、正しい引数で呼べ。**{provider_label} 以外のサービスのツールと内蔵 image_gen の使用は禁止**（失敗したら代替生成せず、エラー内容だけを報告せよ）。指示文が日本語の場合、意味を変えずに英語へ翻訳してツールへ渡してよい（固有名詞は保持）。content_policy 等の審査拒否で失敗した場合は、意味を保った安全な英語の言い換えで**1回だけ**自動再試行し、それでも拒否されたら理由を報告せよ。ジョブが非同期（pending/queued）の場合は、完了ツール（wait/get/history等）で**完了するまでポーリングを続けよ**（数分かかる。途中で諦めるな）。完了したら、**ツール結果の url フィールドにあるファイル直リンクのダウンロードURLだけ**を報告せよ。共有ページ・プレビューURLは報告しない。ツール呼び出し以外の創作はするな",
+        "あなたは生成実行係。まず tool_search で {provider_label} のツールを必ず検索・ロードしてから、{provider_label} のMCPツールで{}を生成せよ。**生成は1枚だけ**（count / numOutputs / num_images / n 等の枚数引数があれば 1 を指定し、複数枚を要求するな）。指示文: {instruction} / モデル: {} / 尺: {duration} / 比率: {} / 参照画像: {references}。必要なツールを自分で選び、正しい引数で呼べ。**{provider_label} 以外のサービスのツールと内蔵 image_gen の使用は禁止**（失敗したら代替生成せず、エラー内容だけを報告せよ）。指示文が日本語の場合、意味を変えずに英語へ翻訳してツールへ渡してよい（固有名詞は保持）。content_policy 等の審査拒否で失敗した場合は、意味を保った安全な英語の言い換えで**1回だけ**自動再試行し、それでも拒否されたら理由を報告せよ。ジョブが非同期（pending/queued）の場合は、完了ツール（wait/get/history等）で**完了するまでポーリングを続けよ**（数分かかる。途中で諦めるな）。完了したら、ツール結果の url フィールドにあるファイル直リンクのダウンロードURLを**1件だけ**報告せよ。共有ページ・プレビューURLは報告しない。ツール呼び出し以外の創作はするな",
         kind.noun(),
         display_optional(model),
         display_optional(aspect),
@@ -1387,6 +1444,16 @@ async fn save_remote_artifacts(
     kind: RemoteMcpMediaKind,
     sources: Vec<RemoteArtifactSource>,
 ) -> Result<RemoteMcpGenerateResult, String> {
+    save_remote_artifacts_from_index(provider_id, request_id, kind, sources, 1).await
+}
+
+async fn save_remote_artifacts_from_index(
+    provider_id: &str,
+    request_id: &str,
+    kind: RemoteMcpMediaKind,
+    sources: Vec<RemoteArtifactSource>,
+    first_index: usize,
+) -> Result<RemoteMcpGenerateResult, String> {
     let directory = generation_output_dir(kind)?;
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(REMOTE_DOWNLOAD_TIMEOUT_SECS))
@@ -1396,7 +1463,8 @@ async fn save_remote_artifacts(
     let mut saved_paths = Vec::new();
     let mut errors = Vec::new();
 
-    for (index, source) in sources.into_iter().enumerate() {
+    for (offset, source) in sources.into_iter().enumerate() {
+        let index = first_index + offset;
         let source_label = match &source {
             RemoteArtifactSource::InlineImage { .. } => "base64画像",
             RemoteArtifactSource::Url(_) => "HTTPS URL",
@@ -1415,7 +1483,7 @@ async fn save_remote_artifacts(
                             &directory,
                             provider_id,
                             request_id,
-                            index + 1,
+                            index,
                             extension,
                             &bytes,
                         ),
@@ -1445,7 +1513,7 @@ async fn save_remote_artifacts(
                                         &directory,
                                         provider_id,
                                         request_id,
-                                        index + 1,
+                                        index,
                                         extension,
                                         &bytes,
                                     ),
@@ -1488,7 +1556,7 @@ async fn save_remote_artifacts(
                                 &directory,
                                 provider_id,
                                 request_id,
-                                index + 1,
+                                index,
                                 extension,
                                 &bytes,
                             ),
@@ -1507,11 +1575,7 @@ async fn save_remote_artifacts(
         };
         match result {
             Ok(path) => saved_paths.push(path),
-            Err(error) => errors.push(format!(
-                "保存対象 {}（{}）: {error}",
-                index + 1,
-                source_label
-            )),
+            Err(error) => errors.push(format!("保存対象 {index}（{source_label}）: {error}")),
         }
     }
 
@@ -1548,6 +1612,9 @@ fn emit_generation_event(
     phase: &'static str,
     message: Option<String>,
     saved_paths: Option<Vec<String>>,
+    count: Option<u32>,
+    slot_results: Option<Vec<RemoteMcpSlotResult>>,
+    errors: Option<Vec<String>>,
 ) {
     let _ = app.emit(
         REMOTE_MCP_GEN_EVENT,
@@ -1557,7 +1624,42 @@ fn emit_generation_event(
             phase,
             message,
             saved_paths,
+            count,
+            slot_results,
+            errors,
         },
+    );
+}
+
+async fn update_remote_slot(
+    app: &AppHandle,
+    request_id: &str,
+    provider_id: &str,
+    slots: &Arc<Mutex<Vec<RemoteMcpSlotResult>>>,
+    slot_number: u32,
+    status: &'static str,
+    saved_path: Option<String>,
+    error: Option<String>,
+) {
+    let snapshot = {
+        let mut slots = slots.lock().await;
+        if let Some(slot) = slots.iter_mut().find(|slot| slot.slot == slot_number) {
+            slot.status = status;
+            slot.saved_path = saved_path;
+            slot.error = error;
+        }
+        slots.clone()
+    };
+    emit_generation_event(
+        app,
+        request_id,
+        provider_id,
+        "running",
+        None,
+        None,
+        Some(snapshot.len() as u32),
+        Some(snapshot),
+        None,
     );
 }
 
@@ -1866,6 +1968,120 @@ pub async fn remote_mcp_query(
 }
 
 /// 生成専用 Codex に MCP ツール選択を任せ、成果物を既存保存経路へ合流する。
+#[allow(clippy::too_many_arguments)]
+async fn run_remote_mcp_slot(
+    app: &AppHandle,
+    state: &AppState,
+    request_id: &str,
+    provider_id: &str,
+    llm_prompt: &str,
+    kind: RemoteMcpMediaKind,
+    reference_paths: &[String],
+    slots: &Arc<Mutex<Vec<RemoteMcpSlotResult>>>,
+    slot_number: u32,
+) {
+    update_remote_slot(
+        app,
+        request_id,
+        provider_id,
+        slots,
+        slot_number,
+        "running",
+        None,
+        None,
+    )
+    .await;
+
+    let result = async {
+        let output =
+            crate::codex::gen_server::run_llm_tool_turn(app, state, llm_prompt, kind.timeout())
+                .await?;
+        let (tool_candidates, tool_errors) = extract_llm_tool_artifact_candidates(
+            &output.completed_items,
+            provider_id,
+            kind,
+            reference_paths,
+        );
+        if let Some(error) = output.terminal_error.as_deref() {
+            return Err(llm_failure_message(
+                error,
+                &output.final_message,
+                &tool_errors,
+            ));
+        }
+
+        // 1枠は必ず1ファイル。複数候補が返っても先頭だけを保存する。
+        let source = select_llm_artifact_sources(tool_candidates, &output.final_message, kind)
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                llm_failure_message(
+                    &format!(
+                        "Codex のツール実行結果に保存できる{}がありませんでした",
+                        kind.noun()
+                    ),
+                    &output.final_message,
+                    &tool_errors,
+                )
+            })?;
+
+        update_remote_slot(
+            app,
+            request_id,
+            provider_id,
+            slots,
+            slot_number,
+            "saving",
+            None,
+            None,
+        )
+        .await;
+        let saved = save_remote_artifacts_from_index(
+            provider_id,
+            request_id,
+            kind,
+            vec![source],
+            slot_number as usize,
+        )
+        .await?;
+        saved
+            .saved_paths
+            .into_iter()
+            .next()
+            .ok_or_else(|| format!("{}を1件も保存できませんでした", kind.noun()))
+    }
+    .await;
+
+    match result {
+        Ok(saved_path) => {
+            update_remote_slot(
+                app,
+                request_id,
+                provider_id,
+                slots,
+                slot_number,
+                "done",
+                Some(saved_path),
+                None,
+            )
+            .await;
+        }
+        Err(error) => {
+            update_remote_slot(
+                app,
+                request_id,
+                provider_id,
+                slots,
+                slot_number,
+                "failed",
+                None,
+                Some(sanitize_generation_message(&error)),
+            )
+            .await;
+        }
+    }
+}
+
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn remote_mcp_generate(
@@ -1877,10 +2093,33 @@ pub async fn remote_mcp_generate(
     aspect: Option<String>,
     reference_paths: Vec<String>,
     kind: RemoteMcpMediaKind,
+    count: Option<u32>,
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<RemoteMcpGenerateResult, String> {
-    emit_generation_event(&app, &request_id, &provider_id, "running", None, None);
+    let count = clamp_remote_count(count);
+    let slots = Arc::new(Mutex::new(
+        (1..=count)
+            .map(|slot| RemoteMcpSlotResult {
+                slot,
+                status: "pending",
+                saved_path: None,
+                error: None,
+            })
+            .collect::<Vec<_>>(),
+    ));
+    let initial_slots = slots.lock().await.clone();
+    emit_generation_event(
+        &app,
+        &request_id,
+        &provider_id,
+        "running",
+        None,
+        None,
+        Some(count),
+        Some(initial_slots),
+        None,
+    );
 
     let result = async {
         let (provider_id, provider_label) = generation_provider(&provider_id)?;
@@ -1906,70 +2145,92 @@ pub async fn remote_mcp_generate(
             &reference_paths,
         );
 
-        let output =
-            crate::codex::gen_server::run_llm_tool_turn(&app, &state, &llm_prompt, kind.timeout())
-                .await?;
-        let (tool_candidates, tool_errors) = extract_llm_tool_artifact_candidates(
-            &output.completed_items,
-            provider_id,
-            kind,
-            &reference_paths,
-        );
-        if let Some(error) = output.terminal_error.as_deref() {
-            return Err(llm_failure_message(
-                error,
-                &output.final_message,
-                &tool_errors,
-            ));
-        }
+        let jobs = (1..=count).map(|slot_number| {
+            run_remote_mcp_slot(
+                &app,
+                &state,
+                &request_id,
+                provider_id,
+                &llm_prompt,
+                kind,
+                &reference_paths,
+                &slots,
+                slot_number,
+            )
+        });
+        futures::future::join_all(jobs).await;
 
-        // 共有ページらしいツールURLより、最終文にある明示的な直リンクを優先する。
-        let sources = select_llm_artifact_sources(tool_candidates, &output.final_message, kind);
-        if sources.is_empty() {
-            return Err(llm_failure_message(
-                &format!(
-                    "Codex のツール実行結果に保存できる{}がありませんでした",
-                    kind.noun()
-                ),
-                &output.final_message,
-                &tool_errors,
-            ));
-        }
-
-        emit_generation_event(&app, &request_id, provider_id, "saving", None, None);
-        save_remote_artifacts(provider_id, &request_id, kind, sources).await
+        Ok::<_, String>(slots.lock().await.clone())
     }
     .await;
 
     match result {
-        Ok(mut result) => {
-            result.errors = result
-                .errors
-                .into_iter()
-                .map(|error| sanitize_generation_message(&error))
-                .collect();
-            let message = (!result.errors.is_empty()).then(|| result.errors.join("\n"));
+        Ok(slot_results) => {
+            let (saved_paths, errors) = aggregate_slot_results(&slot_results);
+            let message = (!errors.is_empty()).then(|| errors.join("\n"));
+            let phase = if saved_paths.is_empty() {
+                "error"
+            } else {
+                "done"
+            };
+            let message = if phase == "error" && message.is_none() {
+                Some(format!("{}を1件も保存できませんでした", kind.noun()))
+            } else {
+                message
+            };
             emit_generation_event(
                 &app,
                 &request_id,
                 &provider_id,
-                "done",
+                phase,
                 message,
-                Some(result.saved_paths.clone()),
+                (!saved_paths.is_empty()).then(|| saved_paths.clone()),
+                Some(count),
+                Some(slot_results),
+                Some(errors.clone()),
             );
-            Ok(result)
+            Ok(RemoteMcpGenerateResult {
+                saved_paths,
+                errors,
+            })
         }
         Err(error) => {
-            let message = sanitize_generation_message(&error);
+            let error = sanitize_generation_message(&error);
+            for slot_number in 1..=count {
+                update_remote_slot(
+                    &app,
+                    &request_id,
+                    &provider_id,
+                    &slots,
+                    slot_number,
+                    "failed",
+                    None,
+                    Some(error.clone()),
+                )
+                .await;
+            }
+            let slot_results = slots.lock().await.clone();
+            let (saved_paths, errors) = aggregate_slot_results(&slot_results);
+            let message = if errors.is_empty() {
+                format!("{}を1件も保存できませんでした", kind.noun())
+            } else {
+                errors.join("\n")
+            };
             emit_generation_event(
                 &app,
                 &request_id,
                 &provider_id,
                 "error",
-                Some(message.clone()),
+                Some(message),
                 None,
+                Some(count),
+                Some(slot_results),
+                Some(errors.clone()),
             );
-            Err(message)
+            Ok(RemoteMcpGenerateResult {
+                saved_paths,
+                errors,
+            })
         }
     }
 }
@@ -2097,6 +2358,86 @@ mod tests {
         assert!(REMOTE_PROVIDERS
             .iter()
             .all(|provider| provider.url.starts_with("https://")));
+    }
+
+    #[test]
+    fn remote_count_is_clamped_to_supported_range() {
+        assert_eq!(clamp_remote_count(None), 1);
+        assert_eq!(clamp_remote_count(Some(0)), 1);
+        assert_eq!(clamp_remote_count(Some(4)), 4);
+        assert_eq!(clamp_remote_count(Some(99)), 30);
+    }
+
+    #[test]
+    fn slot_results_are_aggregated_in_slot_order() {
+        let slots = vec![
+            RemoteMcpSlotResult {
+                slot: 3,
+                status: "done",
+                saved_path: Some("p3".to_string()),
+                error: None,
+            },
+            RemoteMcpSlotResult {
+                slot: 2,
+                status: "failed",
+                saved_path: None,
+                error: Some("失敗理由".to_string()),
+            },
+            RemoteMcpSlotResult {
+                slot: 1,
+                status: "done",
+                saved_path: Some("p1".to_string()),
+                error: None,
+            },
+        ];
+
+        let (saved_paths, errors) = aggregate_slot_results(&slots);
+
+        assert_eq!(saved_paths, vec!["p1".to_string(), "p3".to_string()]);
+        assert_eq!(errors, vec!["枠2: 失敗理由".to_string()]);
+    }
+
+    #[test]
+    fn generation_event_serializes_slot_fields_as_camel_case_and_skips_none() {
+        let event = RemoteMcpGenerateEvent {
+            request_id: "request-1".to_string(),
+            provider_id: "krea".to_string(),
+            phase: "done",
+            message: None,
+            saved_paths: None,
+            count: Some(1),
+            slot_results: Some(vec![RemoteMcpSlotResult {
+                slot: 1,
+                status: "done",
+                saved_path: Some("/tmp/p1.png".to_string()),
+                error: None,
+            }]),
+            errors: Some(Vec::new()),
+        };
+
+        let value = serde_json::to_value(event).expect("event JSON");
+        assert_eq!(value["count"], 1);
+        assert_eq!(value["slotResults"][0]["savedPath"], "/tmp/p1.png");
+        assert_eq!(value["errors"], json!([]));
+        assert!(value.get("message").is_none());
+        assert!(value.get("savedPaths").is_none());
+        assert!(value["slotResults"][0].get("error").is_none());
+    }
+
+    #[test]
+    fn discovery_tools_include_pollo_and_bfl_specific_names() {
+        let pollo = discovery_tools("pollo")
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>();
+        assert!(pollo.contains(&"pollo_list_models"));
+        assert!(pollo.contains(&"pollo_show_plans_and_credits"));
+
+        let bfl = discovery_tools("bfl")
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>();
+        assert!(bfl.contains(&"get_credits"));
     }
 
     #[test]
@@ -2569,12 +2910,14 @@ mod tests {
         // 2026-08-23 実測で強化した契約（AIの手抜き4パターン対策）を固定する。
         assert!(prompt.contains("tool_search で Krea のツールを必ず検索・ロード"));
         assert!(prompt.contains("Krea のMCPツールで動画を生成せよ"));
+        assert!(prompt.contains("生成は1枚だけ"));
         assert!(prompt.contains("指示文: 白い餅が跳ねる"));
         assert!(prompt.contains("モデル: Flux 3 Video / 尺: 5秒 / 比率: 16:9"));
         assert!(prompt.contains("Krea 以外のサービスのツールと内蔵 image_gen の使用は禁止"));
         assert!(prompt.contains("完了するまでポーリングを続けよ"));
-        assert!(prompt
-            .contains("ツール結果の url フィールドにあるファイル直リンクのダウンロードURLだけ"));
+        assert!(prompt.contains(
+            "ツール結果の url フィールドにあるファイル直リンクのダウンロードURLを**1件だけ**報告せよ"
+        ));
         assert!(prompt.contains("共有ページ・プレビューURLは報告しない"));
         assert!(prompt.ends_with("ツール呼び出し以外の創作はするな"));
     }
