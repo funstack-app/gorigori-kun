@@ -20,6 +20,12 @@ import { useEditMagic } from "../../../lib/store/editMagic";
 import { useEditModels } from "../../../lib/store/editModels";
 import { useProjects } from "../../../lib/store/projects";
 import { useThreads } from "../../../lib/store/threads";
+import {
+  addEditVersion,
+  confirmEditCandidate,
+  switchEditVersion,
+  type EditSession,
+} from "../../../lib/store/editSession";
 import type { EditorTool } from "./editorStore";
 import { OBJECT_COUNT_BY_MODE, useEditor } from "./editorStore";
 import {
@@ -45,12 +51,11 @@ import {
   removeGrabPreviewOverlay,
   showGrabPreviewOverlay,
 } from "./magicLayerToFabric";
-import { restoreCanvas } from "./history";
+import { restoreCanvas, snapshotCanvas } from "./history";
 import { applyAdjustToCanvas, type AdjustValues } from "./adjustFilters";
 import {
   cropCanvasToRegion,
   flattenCanvas,
-  replaceCanvasWithImagePath,
   transformCanvas,
   type TransformKind,
 } from "./canvasTransforms";
@@ -64,6 +69,58 @@ import { normalizeGenre, type LayerGenre } from "../../../lib/edit/genre";
 import { resolveWord, splitWordsInput } from "../../../lib/edit/wordPresets";
 
 const IMAGE_EXTS = ["png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff"];
+
+export type OpenImageForEditingOptions = {
+  /** false のときは、読み込み確認だけ行い sourceImagePath の確定を呼び出し側へ任せる。 */
+  commitSourcePath?: boolean;
+};
+
+type ApplyEditedVersionOptions = {
+  session: EditSession;
+  path: string;
+  mode: "add" | "switch";
+  label?: string;
+  openImageForEditing: (
+    path: string,
+    options?: OpenImageForEditingOptions,
+  ) => Promise<boolean>;
+  commit: (sourceImagePath: string, session: EditSession) => void;
+};
+
+/**
+ * AI 編集版の追加と既存版への切替に共通する、唯一の確定経路。
+ * キャンバスへ読み込めた後だけ sourceImagePath と版選択を同時に進める。
+ */
+export async function applyEditedVersion({
+  session,
+  path,
+  mode,
+  label,
+  openImageForEditing,
+  commit,
+}: ApplyEditedVersionOptions): Promise<boolean> {
+  const normalizedPath = path.trim();
+  if (!normalizedPath) return false;
+
+  const nextSession = (() => {
+    if (mode === "switch") return switchEditVersion(session, normalizedPath);
+    const added = addEditVersion(session, normalizedPath, label ? { label } : {});
+    const confirmed = confirmEditCandidate(added, normalizedPath);
+    // 生成側が既存版と同じ path を返した場合も、重複追加せずその版へ切り替える。
+    return added === session
+      ? switchEditVersion(confirmed, normalizedPath)
+      : confirmed;
+  })();
+
+  // 選択済みの版をもう一度押した場合は、履歴を無用に消さない。
+  if (nextSession === session) return session.currentPath === normalizedPath;
+
+  const opened = await openImageForEditing(normalizedPath, { commitSourcePath: false });
+  if (!opened) return false;
+
+  commit(normalizedPath, nextSession);
+  return true;
+}
 
 export function useEditorActions() {
   const canvas = useEditor((state) => state.canvas);
@@ -541,22 +598,22 @@ export function useEditorActions() {
    * 透過は元画像そのものの加工であって、上に載せる素材ではない。重ねると
    * 下に不透明な元画像が残り続け、書き出しても透過にならない (見た目だけ透過)。
    *
-   * ## undo で戻る仕組み
+   * ## 版として戻る仕組み
    *
-   * 切り抜き・回転と同じ「焼く → 置き換える」経路 (canvasTransforms) を通す。
-   * 置き換えの**前**の状態は履歴に積まれているので、『戻す』1手で透過前へ戻る。
-   * 焼いてから渡すので、調整・置いた文字・重ねた素材も込みで切り抜かれる。
+   * ここでは透過 PNG の path までを返し、EditWorkspace の版確定経路で読み直す。
+   * そのため透過前へ戻る操作はキャンバス Undo ではなく、右の版履歴が担う。
+   * 入力は先に焼いてから渡すので、調整・置いた文字・重ねた素材も込みで切り抜かれる。
    */
-  const removeBackgroundOnCanvas = async (): Promise<boolean> => {
+  const removeBackgroundOnCanvas = async (): Promise<string | null> => {
     const liveCanvas = canvas ?? useEditor.getState().canvas;
     if (!liveCanvas) {
       setError("キャンバスを初期化中です。");
-      return false;
+      return null;
     }
     const flat = flattenCanvas(liveCanvas);
     if (!flat) {
       setError("透過する画像がありません。画像を開き直してください。");
-      return false;
+      return null;
     }
 
     setBusyTool("bgremove");
@@ -586,20 +643,15 @@ export function useEditorActions() {
         // Windows 互換版 (旧CPU向け・ort 抜き)。BiRefNet が無く Vision も無い。
         // 例外を投げると生の英語エラーが出るので、ユーザー向け文言で静かに止める。
         setError("お使いの構成（互換版）では背景透過を利用できません");
-        return false;
+        return null;
       }
 
-      // 3) 透過 PNG を新しいベースとして置き直す (切り抜き・回転と同じ replaceCanvas 経路)。
-      await replaceCanvasWithImagePath(liveCanvas, cutoutPath, flat.width, flat.height);
-      useEditor.getState().setSelectedLayerId(null);
-      setSourceImagePath(cutoutPath);
-      bumpRevision();
-      pushHistory();
-      setMessage("背景を透過しました。『戻す』で元に戻せます。");
-      return true;
+      // 3) 結果 path だけを返す。版としての読み込み・状態更新・Undo リセットは
+      //    EditWorkspace の applyEditedVersion に一本化する。
+      return cutoutPath;
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
-      return false;
+      return null;
     } finally {
       setBusyTool(null);
     }
@@ -844,7 +896,6 @@ export function useEditorActions() {
       filters: [{ name: "画像", extensions: IMAGE_EXTS }],
     });
     if (typeof selected !== "string") return;
-    setSourceImagePath(selected);
     await openImageForEditing(selected);
   };
 
@@ -853,22 +904,52 @@ export function useEditorActions() {
    * なぜ: 分解方法が「自動レイヤー分解」と「ことばで分離」の2系統になったため、
    * どちらでいくかはユーザーが選ぶ (2026-07-03 STΛCK指摘)。
    */
-  const openImageForEditing = async (path: string) => {
-    setSourceImagePath(path);
+  const openImageForEditing = async (
+    path: string,
+    options: OpenImageForEditingOptions = {},
+  ): Promise<boolean> => {
     const liveCanvas = canvas ?? (await waitForEditorCanvas());
     if (!liveCanvas) {
       setError("編集キャンバスを準備できませんでした。もう一度お試しください。");
       return false;
     }
+    const previousSnapshot = snapshotCanvas(liveCanvas);
+    const previousViewport = Array.isArray(
+      (liveCanvas as { viewportTransform?: number[] }).viewportTransform,
+    )
+      ? [...((liveCanvas as { viewportTransform: number[] }).viewportTransform)]
+      : null;
+    const previousBaseSize = (
+      liveCanvas as { __ggBaseSize?: { width: number; height: number } }
+    ).__ggBaseSize;
     try {
       await showSourceImagePreview(liveCanvas, path);
       resetHistory();
+      if (options.commitSourcePath !== false) setSourceImagePath(path);
       bumpRevision();
       // 2026-07-26: 編集タブを「ことばで直す」だけの画面に絞ったため、
       // 分解・ことばで分離への案内は実在しない導線になった。今ある操作を案内する。
-      setMessage("画像を開きました。右の入力欄に、直したいところをことばで書いてください。");
+      setMessage("画像を開きました。下の入力欄に、直したいところをことばで書いてください。");
       return true;
     } catch (caught) {
+      // showSourceImagePreview は読込前にキャンバスを空にするため、失敗時は直前の
+      // スナップショットと表示位置を復元して「前の版を表示したまま」にする。
+      if (previousSnapshot !== null) {
+        try {
+          await restoreCanvas(liveCanvas, previousSnapshot);
+          if (previousViewport) {
+            (liveCanvas as { setViewportTransform?: (transform: number[]) => void })
+              .setViewportTransform?.(previousViewport);
+          }
+          (
+            liveCanvas as { __ggBaseSize?: { width: number; height: number } }
+          ).__ggBaseSize = previousBaseSize;
+          (liveCanvas as { requestRenderAll?: () => void }).requestRenderAll?.();
+          bumpRevision();
+        } catch {
+          // 復元失敗より、元の読込エラーを優先して表示する。
+        }
+      }
       setError(caught instanceof Error ? caught.message : String(caught));
       return false;
     }
@@ -1137,7 +1218,6 @@ export function useEditorActions() {
     try {
       const bytes = new Uint8Array(await file.arrayBuffer());
       const path = await images.writeUpload(file.name || `drop-${Date.now()}.png`, bytes);
-      setSourceImagePath(path);
       await openImageForEditing(path);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
@@ -1170,7 +1250,6 @@ export function useEditorActions() {
     setBusyTool("magic");
     setError(null);
     try {
-      setSourceImagePath(path);
       await openImageForEditing(path);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));

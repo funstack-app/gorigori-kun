@@ -1,16 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { images as imagesIpc } from "../lib/ipc";
 import { useBatches } from "../lib/store/batches";
 import { beginDirectRun } from "../lib/store/generationStatus";
 import { useThreads } from "../lib/store/threads";
 import { useToasts } from "../lib/store/toasts";
-import {
-  addEditVersion,
-  confirmEditCandidate,
-  createEditSession,
-  switchEditVersion,
-} from "../lib/store/editSession";
+import { createEditSession } from "../lib/store/editSession";
 import { ReferenceLibraryModal } from "./ReferenceLibraryModal";
 import { AdjustPanel } from "./edit/AdjustPanel";
 import { CropPanel } from "./edit/CropPanel";
@@ -40,9 +35,8 @@ import type { ExportFormat, ExportSize } from "./edit/editor/exportImage";
 import {
   exportCanvasPngBase64,
   readOverlayTextValues,
-  SOURCE_PREVIEW_ID,
 } from "./edit/editor/magicLayerToFabric";
-import { useEditorActions } from "./edit/editor/useEditor";
+import { applyEditedVersion, useEditorActions } from "./edit/editor/useEditor";
 
 function basename(path: string) {
   return path.split(/[\\/]/).pop() ?? path;
@@ -79,7 +73,6 @@ export function EditWorkspace() {
   // selectedLayerId は EditorCanvas の selection:* イベントで更新される。
   const selectedLayerId = useEditor((state) => state.selectedLayerId);
   const canvas = useEditor((state) => state.canvas);
-  const revision = useEditor((state) => state.revision);
   const editMode = useEditor((state) => state.editMode);
   const setEditMode = useEditor((state) => state.setEditMode);
   const {
@@ -136,6 +129,7 @@ export function EditWorkspace() {
   const [removingBg, setRemovingBg] = useState(false);
   /** 元画像と、この画面で生まれた AI 編集版だけを持つ一時セッション。 */
   const [editSession, setEditSession] = useState(() => createEditSession(sourceImagePath));
+  const editSessionRef = useRef(editSession);
 
   const textMode = tool === "text";
   /** 囲みが要る道具かどうか (囲みオーバーレイを敷く判定を1箇所にまとめる)。 */
@@ -144,11 +138,17 @@ export function EditWorkspace() {
   /** 外から別画像が開かれたときだけ、版履歴を新しい元画像へ切り替える。 */
   useEffect(() => {
     setEditSession((current) => {
-      if (!sourceImagePath) return createEditSession(null);
+      if (!sourceImagePath) {
+        const next = createEditSession(null);
+        editSessionRef.current = next;
+        return next;
+      }
       const belongsToCurrentSession =
         current.basePath === sourceImagePath ||
         current.versions.some((version) => version.path === sourceImagePath);
-      return belongsToCurrentSession ? current : createEditSession(sourceImagePath);
+      const next = belongsToCurrentSession ? current : createEditSession(sourceImagePath);
+      editSessionRef.current = next;
+      return next;
     });
   }, [sourceImagePath]);
 
@@ -188,13 +188,6 @@ export function EditWorkspace() {
     }
   };
 
-  /** 成功した AI 編集を、候補と履歴へ同時に1件だけ積む。 */
-  const recordEditResult = (path: string, label: string) => {
-    setEditSession((current) =>
-      confirmEditCandidate(addEditVersion(current, path, { label }), path),
-    );
-  };
-
   /**
    * 囲み編集は透過パッチをキャンバスへ重ねる既存仕様で、結果 path を返さない。
    * 実行系は変えず、成功後の見えている1枚だけを既存 writeUpload で版として保存する。
@@ -206,10 +199,40 @@ export function EditWorkspace() {
     return imagesIpc.writeUpload(`edit-region-${Date.now()}.png`, base64ToBytes(base64));
   };
 
+  /**
+   * AI編集の追加と版切替を、読み込み成功後だけ確定する共通入口。
+   * openImageForEditing がキャンバスを新版で開き、同時に Undo 履歴も新版基準へ戻す。
+   */
+  const applyVersion = async (
+    path: string,
+    mode: "add" | "switch",
+    label?: string,
+  ): Promise<boolean> => {
+    const applied = await applyEditedVersion({
+      session: editSessionRef.current,
+      path,
+      mode,
+      label,
+      openImageForEditing,
+      commit: (nextSourcePath, nextSession) => {
+        useEditor.getState().setSourceImagePath(nextSourcePath);
+        editSessionRef.current = nextSession;
+        setEditSession(nextSession);
+      },
+    });
+    if (!applied) {
+      useToasts.getState().push({
+        kind: "error",
+        text: "画像を読み込めませんでした。前の版を表示したままにしています。",
+        ttlMs: 4800,
+      });
+    }
+    return applied;
+  };
+
   /** 候補ストリップと履歴レールに共通の版切替。 */
   const selectSessionVersion = async (path: string) => {
-    setEditSession((current) => switchEditVersion(current, path));
-    await openImageForEditing(path);
+    await applyVersion(path, "switch");
   };
 
   /**
@@ -396,21 +419,21 @@ export function EditWorkspace() {
     setRemovingBg(true);
     setError(null);
     try {
-      const done = await removeBackgroundOnCanvas();
-      if (done) {
+      const resultPath = await removeBackgroundOnCanvas();
+      if (!resultPath) {
+        setError("背景を透過できませんでした。キャンバス下のメッセージを確認してください。");
+      } else if (await applyVersion(resultPath, "add", "背景透過")) {
         useToasts.getState().push({
           kind: "success",
-          text: "背景を透過しました。『戻す』で元に戻せます。",
+          text: "背景を透過しました。右の履歴から前の版に戻せます。",
           ttlMs: 4000,
         });
         // 透過はベース画像そのものの入れ替え。焼き込み済みなので、
         // つまみは無調整からのやり直しになる (切り抜き・回転と同じ扱い)。
         setAdjust(NEUTRAL_ADJUST);
         setTool("select");
-        const resultPath = useEditor.getState().sourceImagePath;
-        if (resultPath) recordEditResult(resultPath, "背景透過");
       } else {
-        setError("背景を透過できませんでした。キャンバス下のメッセージを確認してください。");
+        setError("背景透過の結果を読み込めませんでした。前の版を表示しています。");
       }
     } catch (err) {
       setError(`背景を透過できませんでした: ${String(err)}`);
@@ -589,15 +612,24 @@ export function EditWorkspace() {
       if (applied) {
         useToasts.getState().push({
           kind: "success",
-          text: "囲んだところだけ直しました。外側は変えていません。『戻す』で戻せます。",
+          text: "囲んだところだけ直しました。外側は変えていません。",
           ttlMs: 5200,
         });
-        const resultPath = await captureCanvasVersion();
+        let resultPath: string | null = null;
+        let saveWarning = "囲み編集は完了しましたが、版の保存だけ失敗しました。";
+        try {
+          resultPath = await captureCanvasVersion();
+        } catch (captureError) {
+          saveWarning = `囲み編集は完了しましたが、版の保存だけ失敗しました: ${String(captureError)}`;
+        }
         if (resultPath) {
-          recordEditResult(resultPath, "囲んで直す");
-          // 表示中の合成結果はそのまま保ち、次の編集がこの版を参照するよう path だけ進める。
-          // openImageForEditing は履歴を初期化するため、ここでは呼ばない（「戻す」を守る）。
-          useEditor.getState().setSourceImagePath(resultPath);
+          await applyVersion(resultPath, "add", "囲んで直す");
+        } else {
+          useToasts.getState().push({
+            kind: "info",
+            text: saveWarning,
+            ttlMs: 6000,
+          });
         }
         setInstruction("");
       } else {
@@ -662,8 +694,7 @@ export function EditWorkspace() {
         });
         const resultPath = result.generatedPaths[0];
         if (resultPath) {
-          recordEditResult(resultPath, "ことばで直す");
-          await openImageForEditing(resultPath);
+          await applyVersion(resultPath, "add", "ことばで直す");
         }
         setInstruction("");
       }
@@ -679,7 +710,6 @@ export function EditWorkspace() {
     }
   };
 
-  const metrics = readCanvasMetrics(canvas, revision);
   const panelBusy = busy || busyTool !== null;
 
   return (
@@ -749,6 +779,7 @@ export function EditWorkspace() {
         className="relative flex min-h-0 flex-1 overflow-hidden bg-[#121212] [&>main]:!bg-[#121212] [&_.bg-pink-500]:!bg-indigo-500 [&_.border-pink-400\/50]:!border-indigo-400\/50 [&_.text-pink-300]:!text-indigo-300"
       >
         <EditorCanvas
+          panOnEmpty={tool === "ai" || tool === "select"}
           regionSelect={
             sourceImagePath && needsRegion
               ? {
@@ -812,7 +843,7 @@ export function EditWorkspace() {
                 <ShapeToolPanel />
               </EditFloatingPanel>
             ) : tool === "words" ? (
-              <EditFloatingPanel title="文字認識" onClose={() => selectTool("select")}>
+              <EditFloatingPanel title="ことばで分離" onClose={() => selectTool("select")}>
                 <WordsToolPanel />
               </EditFloatingPanel>
             ) : tool === "layers" ? (
@@ -886,10 +917,6 @@ export function EditWorkspace() {
               </>
             ) : null}
 
-            <div className="absolute bottom-2 right-[76px] z-10 text-[11px] text-neutral-500">
-              {metrics.zoom}% ▾　{metrics.width}x{metrics.height} px
-            </div>
-
             <div className="absolute bottom-6 left-1/2 z-40 flex -translate-x-1/2 flex-col items-center gap-2">
               {error ? (
                 <p className="w-[min(560px,calc(100vw-2rem))] rounded-lg border border-red-500/40 bg-[#1b1111]/95 px-3 py-2 text-[11px] font-bold leading-4 text-red-200 shadow-xl">
@@ -919,8 +946,10 @@ export function EditWorkspace() {
               <EditToolRail
                 activeTool={tool}
                 disabled={busy || busyTool !== null}
+                recognizingText={busyTool === "text-detect"}
                 removingBackground={removingBg}
                 onSelect={selectTool}
+                onDetectText={() => void runEditorTool("text-detect")}
                 onRemoveBackground={() => void runRemoveBackground()}
               />
             </div>
@@ -951,27 +980,6 @@ function base64ToBytes(base64: string): Uint8Array {
   const bytes = new Uint8Array(binary.length);
   for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
   return bytes;
-}
-
-function readCanvasMetrics(canvas: unknown, revision: number) {
-  void revision;
-  const liveCanvas = canvas as {
-    getZoom?: () => number;
-    getObjects?: () => Array<{
-      width?: number;
-      height?: number;
-      scaleX?: number;
-      scaleY?: number;
-      get?: (key: string) => unknown;
-    }>;
-  } | null;
-  const objects = liveCanvas?.getObjects?.() ?? [];
-  const base = objects.find((object) => object.get?.("id") === SOURCE_PREVIEW_ID) ?? objects[0];
-  return {
-    zoom: Math.round((liveCanvas?.getZoom?.() ?? 1) * 100),
-    width: Math.max(0, Math.round((base?.width ?? 0) * (base?.scaleX ?? 1))),
-    height: Math.max(0, Math.round((base?.height ?? 0) * (base?.scaleY ?? 1))),
-  };
 }
 
 export default EditWorkspace;

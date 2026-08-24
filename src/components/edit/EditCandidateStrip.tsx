@@ -64,4 +64,3 @@ function DownloadIcon() {
 }
 
 export default EditCandidateStrip;
-

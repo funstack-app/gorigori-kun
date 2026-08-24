@@ -71,4 +71,3 @@ export function switchEditVersion(session: EditSession, path: string): EditSessi
 
   return { ...session, currentPath: normalizedPath };
 }
-
