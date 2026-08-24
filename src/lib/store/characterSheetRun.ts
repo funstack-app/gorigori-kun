@@ -169,6 +169,9 @@ type CharacterSheetRunState = SkillJobLedger<SheetJob> & {
   /** キャラ登録の属性自動抽出。タブ移動中も二重起動を防ぐ。 */
   attributeExtracting: boolean;
   setAttributeExtracting: (extracting: boolean) => void;
+  /** 最初の参照画像を追加した直後だけ立つ、自動抽出開始の一時合図。永続化しない。 */
+  autoExtractPending: boolean;
+  setAutoExtractPending: (pending: boolean) => void;
   /** character_sheet_run の起動要求中だけ立つ同期ガード。 */
   characterSubmitting: boolean;
   setCharacterSubmitting: (submitting: boolean) => void;
@@ -464,6 +467,8 @@ export const useCharacterSheetRun = create<CharacterSheetRunState>((set, get) =>
   setStep: (step) => set({ step }),
   attributeExtracting: false,
   setAttributeExtracting: (attributeExtracting) => set({ attributeExtracting }),
+  autoExtractPending: false,
+  setAutoExtractPending: (autoExtractPending) => set({ autoExtractPending }),
   characterSubmitting: false,
   setCharacterSubmitting: (characterSubmitting) => set({ characterSubmitting }),
 
@@ -481,7 +486,8 @@ export const useCharacterSheetRun = create<CharacterSheetRunState>((set, get) =>
     set({ characterImagePaths: dedupeReferences(paths) }),
 
   addCharacterImages: (paths) => {
-    const current = get().characterImagePaths;
+    const state = get();
+    const current = state.characterImagePaths;
     const existing = new Set(current);
     let duplicates = 0;
     // 追加候補内の重複も 1 件として扱う (同じ画像を 2 回ドロップしたときに
@@ -500,7 +506,11 @@ export const useCharacterSheetRun = create<CharacterSheetRunState>((set, get) =>
     const accepted = fresh.slice(0, Math.max(0, space));
     const rejected = fresh.length - accepted.length;
     if (accepted.length > 0) {
-      set({ characterImagePaths: [...current, ...accepted] });
+      const shouldAutoExtract = current.length === 0 && state.attributes === "";
+      set({
+        characterImagePaths: [...current, ...accepted],
+        ...(shouldAutoExtract ? { autoExtractPending: true } : {}),
+      });
     }
     return { added: accepted.length, rejected, duplicates };
   },

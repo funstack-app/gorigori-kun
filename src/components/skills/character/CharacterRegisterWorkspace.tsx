@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useMemo, useState } from "react";
 
 import { ActiveProjectSelector } from "../../ActiveProjectSelector";
+import { ReferenceLibraryModal } from "../../ReferenceLibraryModal";
 import { SafeImage } from "../../SafeImage";
 import { useSkillVisible } from "../../SkillWorkspaceRouter";
 import { WorkspaceTabs } from "../../WorkspaceTabs";
@@ -474,7 +475,10 @@ function StepInput() {
   const openPreview = useImagePreview((s) => s.open);
   const extracting = useCharacterSheetRun((s) => s.attributeExtracting);
   const setExtracting = useCharacterSheetRun((s) => s.setAttributeExtracting);
+  const autoExtractPending = useCharacterSheetRun((s) => s.autoExtractPending);
+  const setAutoExtractPending = useCharacterSheetRun((s) => s.setAutoExtractPending);
   const [templatePickerOpen, setTemplatePickerOpen] = useState(false);
+  const [libraryPickerOpen, setLibraryPickerOpen] = useState(false);
   /**
    * invoke の往復中だけ立つ連打ガード (SQ2 / 2026-08-04)。
    *
@@ -508,6 +512,29 @@ function StepInput() {
     );
   }
 
+  function addCharacterImagesWithToast(paths: string[]) {
+    const result = addCharacterImages(paths);
+    if (result.rejected > 0) {
+      pushToast({
+        kind: "info",
+        text: `参照画像は最大6枚までです。${result.added} 枚を追加し、${result.rejected} 枚は追加できませんでした。`,
+        ttlMs: 4000,
+      });
+    } else if (result.added > 0) {
+      pushToast({
+        kind: "success",
+        text: `参照画像を ${result.added} 枚追加しました。`,
+        ttlMs: 2500,
+      });
+    } else if (result.duplicates > 0) {
+      pushToast({
+        kind: "info",
+        text: "選択した画像はすでに参照画像にあります。",
+        ttlMs: 3000,
+      });
+    }
+  }
+
   async function pickCharacterImage() {
     try {
       const { open: openDialog } = await import("@tauri-apps/plugin-dialog");
@@ -518,26 +545,7 @@ function StepInput() {
       // multiple: true でも実装によっては単一文字列が返るため両対応にする。
       const picked = Array.isArray(r) ? r : typeof r === "string" ? [r] : [];
       if (picked.length === 0) return;
-      const result = addCharacterImages(picked);
-      if (result.rejected > 0) {
-        pushToast({
-          kind: "info",
-          text: `参照画像は最大6枚までです。${result.added} 枚を追加し、${result.rejected} 枚は追加できませんでした。`,
-          ttlMs: 4000,
-        });
-      } else if (result.added > 0) {
-        pushToast({
-          kind: "success",
-          text: `参照画像を ${result.added} 枚追加しました。`,
-          ttlMs: 2500,
-        });
-      } else if (result.duplicates > 0) {
-        pushToast({
-          kind: "info",
-          text: "選択した画像はすでに参照画像にあります。",
-          ttlMs: 3000,
-        });
-      }
+      addCharacterImagesWithToast(picked);
     } catch (err) {
       pushToast({
         kind: "error",
@@ -600,6 +608,13 @@ function StepInput() {
       setExtracting(false);
     }
   }
+
+  useEffect(() => {
+    if (!autoExtractPending || extracting) return;
+    // 復元値ではなく、画像追加で立った一時合図だけを1回消費する。
+    setAutoExtractPending(false);
+    void autoExtractAttributes();
+  }, [autoExtractPending, extracting, setAutoExtractPending]);
 
   async function runGeneration() {
     if (submitting) return;
@@ -758,31 +773,50 @@ function StepInput() {
                 </div>
               ))}
               {characterImagePaths.length < MAX_CHARACTER_REFERENCE_IMAGES && (
-                <button
-                  type="button"
-                  onClick={pickCharacterImage}
-                  className="flex aspect-square w-full flex-col items-center justify-center gap-1 rounded-lg border border-dashed border-[#3a3a3a] bg-[#0d0d0d] text-neutral-500 transition hover:border-pink-400/60 hover:text-neutral-300"
-                >
-                  <span className="text-lg">＋</span>
-                  <span className="text-[10px] font-bold">追加</span>
-                </button>
+                <div className="col-span-3 grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={pickCharacterImage}
+                    className="rounded-md border border-[#3a3a3a] px-3 py-2 text-[10px] font-bold text-neutral-300 transition hover:bg-[#242424]"
+                  >
+                    参照画像を追加
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setLibraryPickerOpen(true)}
+                    className="rounded-md border border-[#3a3a3a] px-3 py-2 text-[10px] font-bold text-neutral-300 transition hover:bg-[#242424]"
+                  >
+                    ライブラリから選ぶ
+                  </button>
+                </div>
               )}
             </div>
           ) : (
-            <button
-              type="button"
-              onClick={pickCharacterImage}
-              className="flex aspect-square w-full flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-[#3a3a3a] bg-[#0d0d0d] text-neutral-500 hover:border-pink-400/60 hover:text-neutral-300"
-            >
+            <div className="flex aspect-square w-full flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-[#3a3a3a] bg-[#0d0d0d] px-4 text-neutral-500">
               <span className="text-2xl">＋</span>
-              <span className="text-[12px] font-bold">参照画像を選ぶ</span>
+              <div className="grid w-full grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={pickCharacterImage}
+                  className="rounded-md border border-[#3a3a3a] px-2 py-2 text-[10px] font-bold text-neutral-300 transition hover:bg-[#242424]"
+                >
+                  参照画像を選ぶ
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setLibraryPickerOpen(true)}
+                  className="rounded-md border border-[#3a3a3a] px-2 py-2 text-[10px] font-bold text-neutral-300 transition hover:bg-[#242424]"
+                >
+                  ライブラリから選ぶ
+                </button>
+              </div>
               <span className="text-[10px] text-neutral-600">
-                クリックで選択 / 画像をここへドラッグ&ドロップ
+                手持ちの画像か、今まで作った画像を使えます
               </span>
               <span className="text-[10px] text-neutral-600">
                 複数選択できます(最大6枚)
               </span>
-            </button>
+            </div>
           )}
         </div>
 
@@ -845,6 +879,16 @@ function StepInput() {
               {extracting ? "抽出中…" : "自動抽出"}
             </button>
           </div>
+          {extracting && (
+            <div
+              role="status"
+              aria-live="polite"
+              className="mb-2 flex items-center gap-2 rounded-lg border border-pink-500/30 bg-pink-500/10 px-3 py-2 text-[11px] font-bold text-pink-200"
+            >
+              <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-pink-200 border-t-transparent" />
+              <span>参照画像から属性を抽出しています…</span>
+            </div>
+          )}
           <textarea
             value={attributes}
             onChange={(e) => setAttributes(e.target.value)}
@@ -936,6 +980,11 @@ function StepInput() {
           onClose={() => setTemplatePickerOpen(false)}
         />
       )}
+      <ReferenceLibraryModal
+        open={libraryPickerOpen}
+        onClose={() => setLibraryPickerOpen(false)}
+        onPick={(path) => addCharacterImagesWithToast([path])}
+      />
     </div>
   );
 }

@@ -57,9 +57,12 @@ export function sendImageToCharacterRegister(
   // 1. 参照画像を先にセットする (切替後の初回描画から画像が入っている状態にする)。
   //    この連携は 1 枚 API のまま (複数送り込みはスコープ外)。
   const run = useCharacterSheetRun.getState();
-  run.setCharacterImages([imagePath]);
   // 属性は前スキルの文脈を持ち込まない。参照画像から「自動抽出」し直す前提。
+  // 属性クリア→画像クリア→addCharacterImages の順で通すと 0→1枚の追加として
+  // autoExtractPending が立ち、画面内の選択時自動抽出と同じ経路になる。
   run.setAttributes("");
+  run.setCharacterImages([]);
+  run.addCharacterImages([imagePath]);
   // シートの作り方・背景色・カスタムプロンプトも同様に初期値へ戻す
   // (前キャラの custom プロンプトを新キャラに持ち込む事故防止)。
   run.setSheetPromptMode("default");
