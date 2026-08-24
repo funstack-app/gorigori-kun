@@ -1215,7 +1215,7 @@ fn build_remote_mcp_llm_prompt(
         reference_paths.join("、")
     };
     format!(
-        "あなたは生成実行係。まず tool_search で {provider_label} のツールを必ず検索・ロードしてから、{provider_label} のMCPツールで{}を生成せよ。**生成は1枚だけ**（count / numOutputs / num_images / n 等の枚数引数があれば 1 を指定し、複数枚を要求するな）。指示文: {instruction} / モデル: {} / 尺: {duration} / 比率: {} / 参照画像: {references}。必要なツールを自分で選び、正しい引数で呼べ。**{provider_label} 以外のサービスのツールと内蔵 image_gen の使用は禁止**（失敗したら代替生成せず、エラー内容だけを報告せよ）。指示文が日本語の場合、意味を変えずに英語へ翻訳してツールへ渡してよい（固有名詞は保持）。content_policy 等の審査拒否で失敗した場合は、意味を保った安全な英語の言い換えで**1回だけ**自動再試行し、それでも拒否されたら理由を報告せよ。ジョブが非同期（pending/queued）の場合は、完了ツール（wait/get/history等）で**完了するまでポーリングを続けよ**（数分かかる。途中で諦めるな）。完了したら、ツール結果の url フィールドにあるファイル直リンクのダウンロードURLを**1件だけ**報告せよ。共有ページ・プレビューURLは報告しない。ツール呼び出し以外の創作はするな",
+        "あなたは生成実行係。まず tool_search で {provider_label} のツールを必ず検索・ロードしてから、tool_search は検索語に合うツールしか返さない。生成ツールに加えて、完了確認ツール（result / status / task / job / query / wait / get / history 等）も**検索語を変えて複数回**検索し、両方をロードしてから始めよ。{provider_label} のMCPツールで{}を生成せよ。**生成は1枚だけ**（count / numOutputs / num_images / n 等の枚数引数があれば 1 を指定し、複数枚を要求するな）。指示文: {instruction} / モデル: {} / 尺: {duration} / 比率: {} / 参照画像: {references}。必要なツールを自分で選び、正しい引数で呼べ。**{provider_label} 以外のサービスのツールと内蔵 image_gen の使用は禁止**（失敗したら代替生成せず、エラー内容だけを報告せよ）。指示文が日本語の場合、意味を変えずに英語へ翻訳してツールへ渡してよい（固有名詞は保持）。content_policy 等の審査拒否で失敗した場合は、意味を保った安全な英語の言い換えで**1回だけ**自動再試行し、それでも拒否されたら理由を報告せよ。ジョブが非同期（pending/queued）の場合は、完了ツール（wait/get/history等）で**完了するまでポーリングを続けよ**（数分かかる。途中で諦めるな）。完了したら、ツール結果の url フィールドにあるファイル直リンクのダウンロードURLを**1件だけ**報告せよ。共有ページ・プレビューURLは報告しない。ツール呼び出し以外の創作はするな",
         kind.noun(),
         display_optional(model),
         display_optional(aspect),
@@ -2909,6 +2909,7 @@ mod tests {
 
         // 2026-08-23 実測で強化した契約（AIの手抜き4パターン対策）を固定する。
         assert!(prompt.contains("tool_search で Krea のツールを必ず検索・ロード"));
+        assert!(prompt.contains("検索語を変えて複数回"));
         assert!(prompt.contains("Krea のMCPツールで動画を生成せよ"));
         assert!(prompt.contains("生成は1枚だけ"));
         assert!(prompt.contains("指示文: 白い餅が跳ねる"));
