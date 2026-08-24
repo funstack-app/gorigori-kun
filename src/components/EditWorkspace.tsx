@@ -5,14 +5,30 @@ import { useBatches } from "../lib/store/batches";
 import { beginDirectRun } from "../lib/store/generationStatus";
 import { useThreads } from "../lib/store/threads";
 import { useToasts } from "../lib/store/toasts";
+import {
+  addEditVersion,
+  confirmEditCandidate,
+  createEditSession,
+  switchEditVersion,
+} from "../lib/store/editSession";
 import { ReferenceLibraryModal } from "./ReferenceLibraryModal";
 import { AdjustPanel } from "./edit/AdjustPanel";
 import { CropPanel } from "./edit/CropPanel";
+import { EditCandidateStrip } from "./edit/EditCandidateStrip";
+import { EditChatBar } from "./edit/EditChatBar";
+import { EditFloatingPanel } from "./edit/EditFloatingPanel";
+import { EditHistoryRail } from "./edit/EditHistoryRail";
+import { EditModeSelector } from "./edit/EditModeSelector";
+import { EditToolRail, type EditToolId } from "./edit/EditToolRail";
 import { EditorCanvas } from "./edit/EditorCanvas";
+import { EditorLayerList } from "./edit/EditorLayerList";
+import { EditorPropertyPanel } from "./edit/EditorPropertyPanel";
 import { ExportDialog } from "./edit/ExportDialog";
 import { PlaceImagePanel } from "./edit/PlaceImagePanel";
 import type { NormalizedBbox } from "./edit/RegionSelectOverlay";
+import { ShapeToolPanel } from "./edit/ShapeToolPanel";
 import { TextOverlayPanel, type TextOverlayValues } from "./edit/TextOverlayPanel";
+import { WordsToolPanel } from "./edit/WordsToolPanel";
 import {
   NEUTRAL_ADJUST,
   readAdjustFromCanvas,
@@ -21,7 +37,11 @@ import {
 import type { TransformKind } from "./edit/editor/canvasTransforms";
 import { useEditor } from "./edit/editor/editorStore";
 import type { ExportFormat, ExportSize } from "./edit/editor/exportImage";
-import { readOverlayTextValues } from "./edit/editor/magicLayerToFabric";
+import {
+  exportCanvasPngBase64,
+  readOverlayTextValues,
+  SOURCE_PREVIEW_ID,
+} from "./edit/editor/magicLayerToFabric";
 import { useEditorActions } from "./edit/editor/useEditor";
 
 function basename(path: string) {
@@ -43,64 +63,11 @@ const DEFAULT_TEXT_VALUES: TextOverlayValues = {
   fillColor: "#ffffff",
 };
 
-/**
- * 編集タブの操作モード (2026-07-28 STΛCK 実機指摘で追加)。
- *
- * これまでは「ことばで直す」と「セリフ・文字を直す」の2択しかなく、どちらも
- * キャンバス全面に囲みオーバーレイを敷いていた。そのため**置いた文字を掴めない**
- * (オーバーレイがクリックを全部吸う) という詰みが起きていた。
- *
- * 素の状態 = "select" を既定に置き、囲みが要るモードのときだけオーバーレイを敷く。
- * これは画像編集ソフト共通の「矢印ツールが原点」に合わせた形でもある。
- *
- * 2026-07-28 追記: 「調整」「切り抜き」を追加した。どちらも **AI を一切通さない
- * 数学的処理だけ**で組んであり、Intel Mac / Apple Silicon / Windows で同じ結果になる
- * (待ち時間ゼロ・課金ゼロ)。中途半端に AI を混ぜると OS 差・待ち・課金が生えるため、
- * 決定論で出せる品質だけを入れる、という方針で選んでいる。
- *
- * 2026-07-28 追記2: 「素材を重ねる」("place") を追加した。これも AI を通さない。
- * 「背景を透過」はチップだが道具モードを持たない (押した瞬間に走り切るので、
- * 選び続ける状態が存在しない)。OS ごとに中の経路は違う (mac=Vision /
- * Windows=BiRefNet) が、ユーザーから見た操作は同じ1クリック。
- */
-type EditTool = "select" | "ai" | "text" | "adjust" | "crop" | "place";
+/** Magnific 型ツール帯の選択状態。select は配置物を直接掴むための退避状態。 */
+type EditTool = EditToolId | "select";
 
 /**
- * 編集タブ = 「ことばで直す」だけの画面 (2026-07-26 STΛCK 指示で全面再設計)。
- *
- * ## なぜ道具を全部外したか
- *
- * 直前まではレイヤー分解・人物切り抜き・図形・テキスト追加・領域消去など
- * 11個の道具が左レールと右パネルに並び、AI編集はその中の1パネルでしかなかった。
- * 結果「何をする画面なのか分からない」状態になっていた (STΛCK 指摘)。
- *
- * レイヤー分解系はさらに 3つの弱点を抱えていた:
- *   - ローカル AI (ort/ONNX) のモデル DL が要る = 初回に長い待ちが発生する
- *   - Intel Mac では動かない (v2.0.0 で Intel 版の配布を止めた原因そのもの)
- *   - 分解を経ないと他の道具が使えず、必須の関門になっていた
- *
- * 対して「ことばで直す」は通常の画像生成と同じ経路 (images_generate_batch) だけに
- * 依存する。モデル DL 不要・全 OS で同じに動く。**やることを1つに絞る**。
- *
- * ## 外した道具の行き先
- *
- * 部品 (EditorToolbar / EditorLayerList / EditPrimaryAction / WordsToolPanel 等) は
- * 削除せずファイルとして残している。理由は 2つ:
- *   - 赤入れ反映スキルが useEditorActions().applyRedlineFix を使っており、
- *     その内部実装がレイヤー機構の上に載っている (消すと赤入れが壊れる)
- *   - 「レイヤー分解に戻したい」となったとき、復帰が import 1行で済む
- * 画面に出さないだけで、機構は生きている。
- *
- * ## 範囲指定 (2026-07-26 追記)
- *
- * ChatGPT の画像編集と同じで「直したい場所を囲んでから言う」ができる。
- * 囲まなければ従来どおり画像全体。**道具は増やさない** — 増えたのは
- * 「キャンバスをドラッグすると四角ができる」ことだけで、押すボタンは
- * 「AIで直す」1つのまま。
- *
- * 範囲ありのときは applyRedlineFix (赤入れ反映と同じ経路) に流す。自前で
- * マスク生成を書き直さないのは、この経路がマスク外の非改変を**画素レベルで**
- * 保証しているため (詳細は下の runRegion() のコメント)。
+ * 編集タブ本体。処理は既存 actions を再利用し、入口と配置だけを Magnific 型へまとめる。
  */
 export function EditWorkspace() {
   const sourceImagePath = useEditor((state) => state.sourceImagePath);
@@ -112,7 +79,11 @@ export function EditWorkspace() {
   // selectedLayerId は EditorCanvas の selection:* イベントで更新される。
   const selectedLayerId = useEditor((state) => state.selectedLayerId);
   const canvas = useEditor((state) => state.canvas);
+  const revision = useEditor((state) => state.revision);
+  const editMode = useEditor((state) => state.editMode);
+  const setEditMode = useEditor((state) => state.setEditMode);
   const {
+    run: runEditorTool,
     chooseImage,
     performUndo,
     performRedo,
@@ -136,11 +107,8 @@ export function EditWorkspace() {
   const [savingArtwork, setSavingArtwork] = useState(false);
   /** 直す範囲 (0..1 の正規化 bbox)。null = 画像全体。 */
   const [region, setRegion] = useState<NormalizedBbox | null>(null);
-  /**
-   * いま選んでいる道具。既定は "select" (選択・移動) で、囲みオーバーレイを敷かない
-   * 素の状態。"ai" と "text" のときだけキャンバスがドラッグで囲むモードになる。
-   */
-  const [tool, setTool] = useState<EditTool>("select");
+  /** 既定は「ことばで直す」。select では囲みオーバーレイを敷かない。 */
+  const [tool, setTool] = useState<EditTool>("ai");
   /** 下地の色を画像から拾う待機状態 (スポイト)。 */
   const [eyedropper, setEyedropper] = useState(false);
   const [textValues, setTextValues] = useState<TextOverlayValues>(DEFAULT_TEXT_VALUES);
@@ -166,16 +134,29 @@ export function EditWorkspace() {
    * (透過は道具ではなく1回きりの実行なので、押した状態が残らない)。
    */
   const [removingBg, setRemovingBg] = useState(false);
+  /** 元画像と、この画面で生まれた AI 編集版だけを持つ一時セッション。 */
+  const [editSession, setEditSession] = useState(() => createEditSession(sourceImagePath));
 
   const textMode = tool === "text";
   /** 囲みが要る道具かどうか (囲みオーバーレイを敷く判定を1箇所にまとめる)。 */
-  const needsRegion = tool === "ai" || tool === "text" || tool === "crop";
+  const needsRegion = tool === "region" || tool === "text" || tool === "crop";
+
+  /** 外から別画像が開かれたときだけ、版履歴を新しい元画像へ切り替える。 */
+  useEffect(() => {
+    setEditSession((current) => {
+      if (!sourceImagePath) return createEditSession(null);
+      const belongsToCurrentSession =
+        current.basePath === sourceImagePath ||
+        current.versions.some((version) => version.path === sourceImagePath);
+      return belongsToCurrentSession ? current : createEditSession(sourceImagePath);
+    });
+  }, [sourceImagePath]);
 
   // 画像を差し替えたら選択は無効になる (前の画像の座標を持ち越さない)。
-  // 道具も既定 (選択・移動) に戻す (前の画像に対する作業の続きに見えるのを防ぐ)。
+  // 道具も既定の「ことばで直す」に戻す (前の画像の作業を持ち越さない)。
   useEffect(() => {
     setRegion(null);
-    setTool("select");
+    setTool("ai");
     setEyedropper(false);
     setEditingTextId(null);
     // 調整も画像ごとにやり直し。前の画像の補正値がつまみに残っていると
@@ -205,6 +186,30 @@ export function EditWorkspace() {
       active?.requestRenderAll?.();
       useEditor.getState().setSelectedLayerId(null);
     }
+  };
+
+  /** 成功した AI 編集を、候補と履歴へ同時に1件だけ積む。 */
+  const recordEditResult = (path: string, label: string) => {
+    setEditSession((current) =>
+      confirmEditCandidate(addEditVersion(current, path, { label }), path),
+    );
+  };
+
+  /**
+   * 囲み編集は透過パッチをキャンバスへ重ねる既存仕様で、結果 path を返さない。
+   * 実行系は変えず、成功後の見えている1枚だけを既存 writeUpload で版として保存する。
+   */
+  const captureCanvasVersion = async (): Promise<string | null> => {
+    const liveCanvas = useEditor.getState().canvas;
+    const base64 = exportCanvasPngBase64(liveCanvas as Parameters<typeof exportCanvasPngBase64>[0]);
+    if (!base64) return null;
+    return imagesIpc.writeUpload(`edit-region-${Date.now()}.png`, base64ToBytes(base64));
+  };
+
+  /** 候補ストリップと履歴レールに共通の版切替。 */
+  const selectSessionVersion = async (path: string) => {
+    setEditSession((current) => switchEditVersion(current, path));
+    await openImageForEditing(path);
   };
 
   /**
@@ -402,6 +407,8 @@ export function EditWorkspace() {
         // つまみは無調整からのやり直しになる (切り抜き・回転と同じ扱い)。
         setAdjust(NEUTRAL_ADJUST);
         setTool("select");
+        const resultPath = useEditor.getState().sourceImagePath;
+        if (resultPath) recordEditResult(resultPath, "背景透過");
       } else {
         setError("背景を透過できませんでした。キャンバス下のメッセージを確認してください。");
       }
@@ -585,6 +592,13 @@ export function EditWorkspace() {
           text: "囲んだところだけ直しました。外側は変えていません。『戻す』で戻せます。",
           ttlMs: 5200,
         });
+        const resultPath = await captureCanvasVersion();
+        if (resultPath) {
+          recordEditResult(resultPath, "囲んで直す");
+          // 表示中の合成結果はそのまま保ち、次の編集がこの版を参照するよう path だけ進める。
+          // openImageForEditing は履歴を初期化するため、ここでは呼ばない（「戻す」を守る）。
+          useEditor.getState().setSourceImagePath(resultPath);
+        }
         setInstruction("");
       } else {
         // applyRedlineFix は失敗理由を editor store の error に入れる。
@@ -646,6 +660,11 @@ export function EditWorkspace() {
           text: "直した画像ができました。制作タブに届いています。",
           ttlMs: 3600,
         });
+        const resultPath = result.generatedPaths[0];
+        if (resultPath) {
+          recordEditResult(resultPath, "ことばで直す");
+          await openImageForEditing(resultPath);
+        }
         setInstruction("");
       }
     } catch (err) {
@@ -660,15 +679,18 @@ export function EditWorkspace() {
     }
   };
 
+  const metrics = readCanvasMetrics(canvas, revision);
+  const panelBusy = busy || busyTool !== null;
+
   return (
     <div
       data-tour="editing-workspace"
-      className="relative flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-[#2a2a2a] bg-[#1e1e1e]"
+      className="relative flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-[#2a2a2a] bg-[#121212]"
     >
-      {/* 上部バー: 画像名と、画像の入れ替え・書き出しだけ。 */}
+      {/* GORI 共通の編集ヘッダーは残し、編集タブ内のアクセントだけ indigo に揃える。 */}
       <header
         data-tour="editing-toolbar"
-        className="flex h-10 shrink-0 items-center gap-2 border-b border-[#2a2a2a] bg-[#252525] px-3"
+        className="flex h-10 shrink-0 items-center gap-2 border-b border-[#2a2a2a] bg-[#1b1b1b] px-3"
       >
         <span
           className="min-w-0 flex-1 truncate text-xs font-bold text-neutral-300"
@@ -678,15 +700,11 @@ export function EditWorkspace() {
         </span>
         {sourceImagePath ? (
           <>
-            {/*
-              ⌘Z を知らない人・Windows の人でも戻せるようにする。
-              キーボードショートカット (下の useEffect) はそのまま併存する。
-            */}
             <button
               type="button"
               onClick={() => void undoWithSync()}
               disabled={!canUndo || busyTool !== null || busy}
-              className="rounded-md border border-[#3a3a3a] bg-[#1a1a1a] px-3 py-1.5 text-[11px] font-black text-neutral-200 hover:border-pink-400 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+              className="rounded-md border border-[#3a3a3a] bg-[#1a1a1a] px-3 py-1.5 text-[11px] font-black text-neutral-200 hover:border-indigo-400 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
             >
               戻す
             </button>
@@ -694,7 +712,7 @@ export function EditWorkspace() {
               type="button"
               onClick={() => void redoWithSync()}
               disabled={!canRedo || busyTool !== null || busy}
-              className="rounded-md border border-[#3a3a3a] bg-[#1a1a1a] px-3 py-1.5 text-[11px] font-black text-neutral-200 hover:border-pink-400 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+              className="rounded-md border border-[#3a3a3a] bg-[#1a1a1a] px-3 py-1.5 text-[11px] font-black text-neutral-200 hover:border-indigo-400 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
             >
               やり直す
             </button>
@@ -702,7 +720,7 @@ export function EditWorkspace() {
               type="button"
               onClick={() => void saveArtwork()}
               disabled={busyTool !== null || busy || savingArtwork}
-              className="rounded-md border border-pink-400/50 bg-pink-500/15 px-3 py-1.5 text-[11px] font-black text-pink-100 hover:border-pink-300 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+              className="rounded-md border border-indigo-400/50 bg-indigo-500/15 px-3 py-1.5 text-[11px] font-black text-indigo-100 hover:border-indigo-300 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
             >
               作品にする
             </button>
@@ -710,7 +728,7 @@ export function EditWorkspace() {
               type="button"
               onClick={() => setExportOpen(true)}
               disabled={busyTool !== null || busy}
-              className="rounded-md border border-[#3a3a3a] bg-[#1a1a1a] px-3 py-1.5 text-[11px] font-black text-neutral-200 hover:border-pink-400 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+              className="rounded-md border border-[#3a3a3a] bg-[#1a1a1a] px-3 py-1.5 text-[11px] font-black text-neutral-200 hover:border-indigo-400 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
             >
               書き出し
             </button>
@@ -718,7 +736,7 @@ export function EditWorkspace() {
               type="button"
               onClick={() => void chooseImage()}
               disabled={busyTool !== null || busy}
-              className="rounded-md border border-[#3a3a3a] bg-[#1a1a1a] px-3 py-1.5 text-[11px] font-black text-neutral-200 hover:border-pink-400 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+              className="rounded-md border border-[#3a3a3a] bg-[#1a1a1a] px-3 py-1.5 text-[11px] font-black text-neutral-200 hover:border-indigo-400 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
             >
               別の画像にする
             </button>
@@ -726,121 +744,50 @@ export function EditWorkspace() {
         ) : null}
       </header>
 
-      {/*
-        タスクチップ列。「なにをしたい?」を先に選ばせる。道具名 (インペイント等) は出さない。
-      */}
-      {sourceImagePath ? (
-        <div
-          data-tour="editing-tools"
-          className="flex h-9 shrink-0 items-center gap-2 border-b border-[#2a2a2a] bg-[#1e1e1e] px-3"
-        >
-          <span className="shrink-0 text-[10px] font-black text-neutral-500">なにをしたい?</span>
-          {/*
-            先頭は素の状態 (選択・移動)。囲みオーバーレイを敷かないので、置いた文字を
-            クリックして掴める。ここが原点で、他は「囲んでから何かする」道具。
-          */}
-          {([
-            { id: "select", label: "選択・移動" },
-            { id: "ai", label: "ことばで直す" },
-            { id: "text", label: "セリフ・文字を直す" },
-            { id: "place", label: "素材を重ねる" },
-            { id: "adjust", label: "調整" },
-            { id: "crop", label: "切り抜き" },
-          ] as const).map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              onClick={() => selectTool(item.id)}
-              className={[
-                "shrink-0 rounded-full border px-3 py-1 text-[11px] font-bold",
-                tool === item.id
-                  ? "border-pink-400 bg-pink-500/20 text-pink-100"
-                  : "border-[#3a3a3a] bg-[#1a1a1a] text-neutral-300 hover:border-pink-400 hover:text-white",
-              ].join(" ")}
-            >
-              {item.label}
-            </button>
-          ))}
-          {/*
-            「背景を透過」だけは道具モードを持たない。押した瞬間に走り切って終わるので、
-            選び続ける状態 (押されたまま) が存在しない。だから上のモード群とは別に置き、
-            実行中はチップ自身にスピナーを出す。
-          */}
-          <button
-            type="button"
-            onClick={() => void runRemoveBackground()}
-            disabled={removingBg || busy || busyTool !== null}
-            className="flex shrink-0 items-center gap-1.5 rounded-full border border-[#3a3a3a] bg-[#1a1a1a] px-3 py-1 text-[11px] font-bold text-neutral-300 hover:border-pink-400 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            {removingBg ? <ChipSpinner /> : null}
-            {removingBg ? "背景を透過しています…" : "背景を透過"}
-          </button>
-          <span className="ml-auto shrink-0 text-[10px] font-bold text-neutral-600">
-            Esc で「選択・移動」に戻ります
-          </span>
-        </div>
-      ) : null}
-
-      {/* 本体: キャンバス (主役) + 右に指示欄だけ。左レールは廃止。 */}
       <div
         data-tour="editing-canvas"
-        className="flex min-h-0 flex-1 overflow-hidden"
+        className="relative flex min-h-0 flex-1 overflow-hidden bg-[#121212] [&>main]:!bg-[#121212] [&_.bg-pink-500]:!bg-indigo-500 [&_.border-pink-400\/50]:!border-indigo-400\/50 [&_.text-pink-300]:!text-indigo-300"
       >
+        <EditorCanvas
+          regionSelect={
+            sourceImagePath && needsRegion
+              ? {
+                  value: region,
+                  onChange: setRegion,
+                  disabled: busy || busyTool !== null || eyedropper,
+                  hint: textMode
+                    ? "直したいセリフをドラッグで囲む"
+                    : tool === "crop"
+                      ? "残したいところをドラッグで囲む"
+                      : "直したいところをドラッグで囲む",
+                }
+              : undefined
+          }
+          eyedropper={{
+            active: eyedropper,
+            onPick: (hex) => {
+              setTextValues((current) => ({ ...current, fillColor: hex }));
+              setEyedropper(false);
+            },
+          }}
+        />
+
         {sourceImagePath ? (
           <>
             {/*
-              囲みオーバーレイは「囲んでから何かする」道具のときだけ渡す。
-              選択・移動のときに渡すと、オーバーレイがキャンバス全面のクリックを
-              吸ってしまい、置いた文字を掴めなくなる (STΛCK 実機指摘の詰み)。
+              囲みオーバーレイは region / 文字 / 切り抜きだけに渡す。
+              素の選択時に渡すと全面でクリックを吸い、置いた文字を掴めなくなる。
             */}
-            <EditorCanvas
-              regionSelect={
-                needsRegion
-                  ? {
-                      value: region,
-                      onChange: setRegion,
-                      disabled: busy || busyTool !== null || eyedropper,
-                      hint: textMode
-                        ? "直したいセリフをドラッグで囲む"
-                        : tool === "crop"
-                          ? "残したいところをドラッグで囲む"
-                          : "直したいところをドラッグで囲む",
-                    }
-                  : undefined
-              }
-              eyedropper={{
-                active: eyedropper,
-                onPick: (hex) => {
-                  setTextValues((current) => ({ ...current, fillColor: hex }));
-                  setEyedropper(false);
-                },
-              }}
-            />
-            <aside
-              data-tour="editing-options"
-              className="flex min-h-0 w-[320px] shrink-0 flex-col border-l border-[#2a2a2a] bg-[#252525]"
-            >
-              {/*
-                右パネルの出し分け:
-                  - 「素材を重ねる」    → 画像の選び先2つ (AI 不使用)
-                  - 文字を選んでいる → その文字の再編集フォーム (道具は問わない)
-                  - 「セリフ・文字を直す」 → 新しく置くフォーム
-                  - 「調整」            → 明るさ・色のパネル (AI 不使用)
-                  - 「切り抜き」        → 囲んで切るパネル (AI 不使用)
-                  - 「選択・移動」      → 何ができるかの案内
-                  - 「ことばで直す」    → AI 指示欄
-
-                「素材を重ねる」を先頭に置く理由: 素材を置いた直後は選択が発生するので、
-                editingTextId の分岐より先に評価しないと、直前に文字を触っていた場合に
-                文字フォームへ吸われる。
-              */}
-              {tool === "place" ? (
+            {tool === "place" ? (
+              <EditFloatingPanel title="画像を置く" onClose={() => selectTool("select")}>
                 <PlaceImagePanel
                   onPickFromDisk={() => void pickImageFromDisk()}
                   onPickFromLibrary={() => setLibraryOpen(true)}
-                  busy={busy || busyTool !== null}
+                  busy={panelBusy}
                 />
-              ) : tool === "adjust" ? (
+              </EditFloatingPanel>
+            ) : tool === "adjust" ? (
+              <EditFloatingPanel title="調整" onClose={() => selectTool("select")}>
                 <AdjustPanel
                   values={adjust}
                   onChange={changeAdjust}
@@ -848,31 +795,66 @@ export function EditWorkspace() {
                   onPreset={applyPreset}
                   onReset={resetAdjust}
                   onTransform={(kind) => void runTransform(kind)}
-                  busy={busy || busyTool !== null}
+                  busy={panelBusy}
                 />
-              ) : tool === "crop" ? (
+              </EditFloatingPanel>
+            ) : tool === "crop" ? (
+              <EditFloatingPanel title="切り抜き" onClose={() => selectTool("select")}>
                 <CropPanel
                   region={region}
                   onApply={() => void runCrop()}
                   onClear={() => setRegion(null)}
-                  busy={busy || busyTool !== null}
+                  busy={panelBusy}
                 />
-              ) : editingTextId ? (
+              </EditFloatingPanel>
+            ) : tool === "shape" ? (
+              <EditFloatingPanel title="図形" onClose={() => selectTool("select")}>
+                <ShapeToolPanel />
+              </EditFloatingPanel>
+            ) : tool === "words" ? (
+              <EditFloatingPanel title="文字認識" onClose={() => selectTool("select")}>
+                <WordsToolPanel />
+              </EditFloatingPanel>
+            ) : tool === "layers" ? (
+              <EditFloatingPanel title="レイヤー分解" onClose={() => selectTool("select")}>
+                <div className="flex min-h-0 flex-col">
+                  <div className="border-b border-[#2a2a2a] p-3">
+                    <button
+                      type="button"
+                      onClick={() => void runEditorTool("magic")}
+                      disabled={panelBusy}
+                      className="w-full rounded-xl bg-indigo-500 px-4 py-3 text-sm font-black text-white shadow-lg shadow-indigo-500/20 hover:bg-indigo-600 disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-500"
+                    >
+                      {busyTool === "magic" ? "レイヤーに分解しています…" : "レイヤーに分解する"}
+                    </button>
+                    <p className="mt-2 text-center text-[11px] font-bold leading-4 text-neutral-400">
+                      人物・小物・背景・文字に自動で切り分けます
+                    </p>
+                    <div className="mt-3 border-t border-[#2a2a2a] pt-3">
+                      <EditModeSelector activeMode={editMode} onSelectMode={setEditMode} />
+                    </div>
+                  </div>
+                  <EditorLayerList />
+                  <EditorPropertyPanel />
+                </div>
+              </EditFloatingPanel>
+            ) : editingTextId ? (
+              <EditFloatingPanel title="文字" onClose={deselectText}>
                 <TextOverlayPanel
                   region={region}
                   values={textValues}
                   onChange={(patch) => editSelectedText(patch)}
                   onApply={() => void placeText()}
-                  // 再編集中の「やめる」= この文字の編集をやめる (選択を外す)。
-                  // 道具の切り替えではない (もともと選択・移動にいることが多い)。
                   onExit={deselectText}
                   eyedropperActive={eyedropper}
                   onToggleEyedropper={() => setEyedropper((on) => !on)}
-                  busy={busy || busyTool !== null}
+                  busy={panelBusy}
                   editingExisting
                   onCommit={() => updateSelectedTextLayer({}, true)}
                 />
-              ) : textMode ? (
+              </EditFloatingPanel>
+            ) : textMode ? (
+              <EditFloatingPanel title="文字" onClose={() => selectTool("select")}>
                 <TextOverlayPanel
                   region={region}
                   values={textValues}
@@ -881,117 +863,71 @@ export function EditWorkspace() {
                   onExit={() => selectTool("select")}
                   eyedropperActive={eyedropper}
                   onToggleEyedropper={() => setEyedropper((on) => !on)}
-                  busy={busy || busyTool !== null}
+                  busy={panelBusy}
                 />
-              ) : tool === "select" ? (
-                <SelectToolPanel />
-              ) : (
-              <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-3">
-                <h3 className="text-xs font-black text-white">ことばで直す</h3>
-                <p className="mt-1 text-[10px] font-bold leading-4 text-neutral-500">
-                  直したいところを、ふつうの日本語で書いてください。
-                </p>
+              </EditFloatingPanel>
+            ) : null}
 
-                {/*
-                  どこが対象なのかを、押す前に必ず1行で見せる。
-                  「全体に効いたつもりが一部だった」の取り違えが一番こわい。
-                */}
-                <div className="mt-2.5 flex items-center gap-2 rounded-lg border border-[#343434] bg-[#1c1c1c] px-2.5 py-2">
-                  <span className={region ? "text-pink-300" : "text-neutral-500"}>
-                    {region ? <FrameIcon /> : <FullImageIcon />}
-                  </span>
-                  <span className="min-w-0 flex-1 text-[10px] font-bold leading-4 text-neutral-300">
-                    {region ? "囲んだところだけ直す" : "画像ぜんぶを直す"}
-                  </span>
-                  {region ? (
-                    <button
-                      type="button"
-                      onClick={() => setRegion(null)}
-                      disabled={busy}
-                      className="shrink-0 rounded border border-[#3a3a3a] px-1.5 py-0.5 text-[10px] font-bold text-neutral-400 hover:border-pink-400 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
-                    >
-                      範囲をやめる
-                    </button>
-                  ) : null}
-                </div>
-                <p className="mt-1 text-[10px] font-bold leading-4 text-neutral-500">
-                  {region
-                    ? "囲み直すには、もう一度ドラッグしてください。"
-                    : "画像の上をドラッグで囲むと、そこだけ直せます。"}
-                </p>
-
-                <textarea
-                  value={instruction}
-                  onChange={(event) => setInstruction(event.target.value)}
-                  rows={5}
-                  placeholder="例: 背景を夕暮れの海辺にする&#10;例: 服の色を白に変える&#10;例: 表情をもう少し笑顔にする"
-                  className="mt-2.5 w-full resize-none rounded-lg border border-[#343434] bg-[#101010] px-2.5 py-2 text-xs leading-5 text-neutral-100 outline-none placeholder:text-neutral-600 focus:border-pink-400"
+            {editSession.basePath && editSession.currentPath ? (
+              <>
+                <EditCandidateStrip
+                  basePath={editSession.basePath}
+                  candidates={editSession.candidates}
+                  currentPath={editSession.currentPath}
+                  onSelect={(path) => void selectSessionVersion(path)}
+                  onDownload={() => setExportOpen(true)}
                 />
+                <EditHistoryRail
+                  basePath={editSession.basePath}
+                  versions={editSession.versions}
+                  currentPath={editSession.currentPath}
+                  onSelect={(path) => void selectSessionVersion(path)}
+                />
+              </>
+            ) : null}
 
-                <button
-                  type="button"
-                  onClick={() => void run()}
-                  disabled={!canRun}
-                  className="mt-2.5 h-10 w-full rounded-lg bg-pink-500 text-xs font-black text-white hover:bg-pink-600 disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-500"
-                >
-                  {busy ? "AIが直しています…" : "AIで直す"}
-                </button>
-
-                {/*
-                  行き先は範囲の有無で本当に変わる (全体=制作タブ / 範囲=この場で重なる)。
-                  同じ文言を出すと「制作タブに無い」という問い合わせになるので出し分ける。
-                */}
-                <p className="mt-1.5 text-[10px] font-bold leading-4 text-neutral-500">
-                  {region
-                    ? "囲んだところだけを描き直し、この画面に重ねます。外側は変わりません。"
-                    : "画像全体に対して実行します。結果は制作タブに届きます。"}
-                </p>
-
-                {error ? (
-                  <p className="mt-2 rounded border border-red-500/40 bg-red-500/10 px-2 py-1.5 text-[10px] font-bold leading-4 text-red-200">
-                    {error}
-                  </p>
-                ) : null}
-
-                <div className="mt-4 rounded-lg border border-[#333] bg-[#1c1c1c] p-2.5">
-                  <p className="text-[10px] font-black text-neutral-400">コツ</p>
-                  <ul className="mt-1.5 space-y-1 text-[10px] font-bold leading-4 text-neutral-500">
-                    <li>・一度に1つずつ直すと、思ったとおりになりやすい</li>
-                    <li>・「何を」「どうする」の形で書く</li>
-                    <li>・気に入らなければ、そのまま書き直してもう一度</li>
-                  </ul>
-                </div>
-              </div>
-              )}
-            </aside>
-          </>
-        ) : (
-          /* 画像未選択: 迷わせない。やることは1つだけ置く。 */
-          <div className="flex flex-1 items-center justify-center p-8">
-            <div className="w-full max-w-sm text-center">
-              <h2 className="text-base font-black text-white">画像をことばで直す</h2>
-              <p className="mt-2 text-xs font-bold leading-5 text-neutral-400">
-                直したい画像を選んで、「背景を夕暮れにする」のように
-                <br />
-                ふつうの日本語で指示するだけです。
-              </p>
-              <button
-                type="button"
-                onClick={() => void chooseImage()}
-                disabled={busyTool !== null}
-                className="mt-5 h-11 w-full rounded-lg bg-pink-500 text-sm font-black text-white hover:bg-pink-600 disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-500"
-              >
-                {busyTool ? "処理中…" : "画像を選ぶ"}
-              </button>
+            <div className="absolute bottom-2 right-[76px] z-10 text-[11px] text-neutral-500">
+              {metrics.zoom}% ▾　{metrics.width}x{metrics.height} px
             </div>
-          </div>
-        )}
+
+            <div className="absolute bottom-6 left-1/2 z-40 flex -translate-x-1/2 flex-col items-center gap-2">
+              {error ? (
+                <p className="w-[min(560px,calc(100vw-2rem))] rounded-lg border border-red-500/40 bg-[#1b1111]/95 px-3 py-2 text-[11px] font-bold leading-4 text-red-200 shadow-xl">
+                  {error}
+                </p>
+              ) : null}
+              <EditChatBar
+                value={instruction}
+                activeTool={tool}
+                hasRegion={region !== null}
+                busy={busy}
+                disabled={
+                  !canRun ||
+                  (tool !== "ai" && tool !== "region") ||
+                  (tool === "region" && region === null)
+                }
+                onChange={setInstruction}
+                onSubmit={() => void run()}
+                onSelectWhole={() => selectTool("ai")}
+                onSelectRegion={() => {
+                  if (!region) return;
+                  setTool("region");
+                  setEyedropper(false);
+                  setError(null);
+                }}
+              />
+              <EditToolRail
+                activeTool={tool}
+                disabled={busy || busyTool !== null}
+                removingBackground={removingBg}
+                onSelect={selectTool}
+                onRemoveBackground={() => void runRemoveBackground()}
+              />
+            </div>
+          </>
+        ) : null}
       </div>
 
-      {/*
-        書き出しダイアログ。編集タブの中に閉じたオーバーレイにする (別ウィンドウにしない)。
-        親に relative があるので inset-0 がこのタブの領域にちょうど収まる。
-      */}
       {exportOpen && sourceImagePath ? (
         <ExportDialog
           onExport={(format, size) => void runExport(format, size)}
@@ -1000,11 +936,6 @@ export function EditWorkspace() {
         />
       ) : null}
 
-      {/*
-        「素材を重ねる」→「ライブラリから選ぶ」。漫画のキャラ画像追加と同じ部品を
-        そのまま使う (onPick を渡すと Composer へは足さず、こちらへ path だけ返る)。
-        選ぶ画面を作り直さないので、探し方・見え方がアプリ内で1つに揃う。
-      */}
       <ReferenceLibraryModal
         open={libraryOpen}
         onClose={() => setLibraryOpen(false)}
@@ -1012,93 +943,35 @@ export function EditWorkspace() {
       />
     </div>
   );
+
 }
 
-/** チップ内に出す小さなスピナー (背景を透過の実行中)。 */
-function ChipSpinner() {
-  return (
-    <svg
-      width={11}
-      height={11}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={3}
-      strokeLinecap="round"
-      className="animate-spin"
-      aria-hidden
-    >
-      <path d="M12 3a9 9 0 1 0 9 9" />
-    </svg>
-  );
+function base64ToBytes(base64: string): Uint8Array {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return bytes;
 }
 
-/**
- * 「選択・移動」を選んでいて、まだ何も選んでいないときの右パネル。
- *
- * ここは道具ではなく素の状態なので、設定するものが無い。代わりに
- * 「この状態で何ができるか」だけを短く置く。空パネルにすると
- * 「壊れている / 読み込み中」に見える。
- */
-function SelectToolPanel() {
-  return (
-    <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-3">
-      <h3 className="text-xs font-black text-white">選択・移動</h3>
-      <p className="mt-1 text-[10px] font-bold leading-4 text-neutral-500">
-        置いたものをクリックすると選べます。
-      </p>
-      <ul className="mt-3 space-y-1.5 rounded-lg border border-[#333] bg-[#1c1c1c] p-2.5 text-[10px] font-bold leading-4 text-neutral-400">
-        <li>・ドラッグで動かす</li>
-        <li>・四隅をつまんで大きさを変える</li>
-        <li>・上のつまみで回す</li>
-        <li>・置いた文字を選ぶと、ここで内容や色を直せます</li>
-      </ul>
-      <p className="mt-3 text-[10px] font-bold leading-4 text-neutral-500">
-        画像そのものを直すときは、上の「ことばで直す」か「セリフ・文字を直す」を選んでください。
-      </p>
-    </div>
-  );
-}
-
-/** 範囲あり: 破線の枠 (囲んだ状態)。絵文字は使わない方針。 */
-function FrameIcon() {
-  return (
-    <svg
-      width={14}
-      height={14}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.6}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3" />
-      <path d="M9 12h6" />
-    </svg>
-  );
-}
-
-/** 範囲なし: 画像ぜんぶ。 */
-function FullImageIcon() {
-  return (
-    <svg
-      width={14}
-      height={14}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.6}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden
-    >
-      <rect x="3" y="4" width="18" height="16" rx="2" />
-      <path d="M3 15l4.5-4.5 4 4 3-3L21 16" />
-      <circle cx="9" cy="9" r="1.4" />
-    </svg>
-  );
+function readCanvasMetrics(canvas: unknown, revision: number) {
+  void revision;
+  const liveCanvas = canvas as {
+    getZoom?: () => number;
+    getObjects?: () => Array<{
+      width?: number;
+      height?: number;
+      scaleX?: number;
+      scaleY?: number;
+      get?: (key: string) => unknown;
+    }>;
+  } | null;
+  const objects = liveCanvas?.getObjects?.() ?? [];
+  const base = objects.find((object) => object.get?.("id") === SOURCE_PREVIEW_ID) ?? objects[0];
+  return {
+    zoom: Math.round((liveCanvas?.getZoom?.() ?? 1) * 100),
+    width: Math.max(0, Math.round((base?.width ?? 0) * (base?.scaleX ?? 1))),
+    height: Math.max(0, Math.round((base?.height ?? 0) * (base?.scaleY ?? 1))),
+  };
 }
 
 export default EditWorkspace;
