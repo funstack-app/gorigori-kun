@@ -16,6 +16,7 @@ import { ActiveProjectSelector } from "./ActiveProjectSelector";
 import { EditWorkspace } from "./EditWorkspace";
 import { GenerationWorkspace, Timeline } from "./GenerationWorkspace";
 import { PlanWorkspace } from "./PlanWorkspace";
+import { SkillErrorBoundary } from "./SkillErrorBoundary";
 import { VideoGenerationWorkspace } from "./VideoGenerationWorkspace";
 import { WorkspaceTabs } from "./WorkspaceTabs";
 import { StoryboardWorkspace } from "./skills/storyboard/StoryboardWorkspace";
@@ -153,41 +154,45 @@ export function SkillWorkspaceRouter({
           (rendersOutsideGenerateTab || activeTab === "generate");
         return (
           <KeepAlive key={mode} visible={visible} mounted={isActiveMode}>
-            {mode === "default" ? (
-              <GenerationWorkspace />
-            ) : mode === "storyboard" ? (
-              <StoryboardWorkspace />
-            ) : mode === "film" ? (
-              <FilmWorkspace />
-            ) : (
-              <div
-                style={{ display: activeTab === "generate" ? "contents" : "none" }}
-              >
-                {renderSkillWorkspace(mode)}
-              </div>
-            )}
+            <SkillErrorBoundary mode={mode}>
+              {mode === "default" ? (
+                <GenerationWorkspace />
+              ) : mode === "storyboard" ? (
+                <StoryboardWorkspace />
+              ) : mode === "film" ? (
+                <FilmWorkspace />
+              ) : (
+                <div
+                  style={{ display: activeTab === "generate" ? "contents" : "none" }}
+                >
+                  {renderSkillWorkspace(mode)}
+                </div>
+              )}
+            </SkillErrorBoundary>
           </KeepAlive>
         );
       })}
 
       {/* 企画/動画/編集タブは全スキル共通の1インスタンス。スキルごとに複製しない。 */}
       {usesSharedTabs && activeTab !== "generate" && (
-        <section className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#121212]">
-          <div className="border-b border-[#242424] bg-[#121212] px-4 py-3">
-            <div className="flex items-center gap-3">
-              <WorkspaceTabs />
-              <ActiveProjectSelector />
+        <SkillErrorBoundary mode="sharedTabs">
+          <section className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#121212]">
+            <div className="border-b border-[#242424] bg-[#121212] px-4 py-3">
+              <div className="flex items-center gap-3">
+                <WorkspaceTabs />
+                <ActiveProjectSelector />
+              </div>
             </div>
-          </div>
 
-          <div className="min-h-0 flex-1 overflow-hidden px-4 py-4">
-            {activeTab === "plan" && <PlanWorkspace />}
-            {activeTab === "video" && (
-              <VideoGenerationWorkspace timeline={<Timeline />} />
-            )}
-            {activeTab === "edit" && <EditWorkspace />}
-          </div>
-        </section>
+            <div className="min-h-0 flex-1 overflow-hidden px-4 py-4">
+              {activeTab === "plan" && <PlanWorkspace />}
+              {activeTab === "video" && (
+                <VideoGenerationWorkspace timeline={<Timeline />} />
+              )}
+              {activeTab === "edit" && <EditWorkspace />}
+            </div>
+          </section>
+        </SkillErrorBoundary>
       )}
     </>
   );
