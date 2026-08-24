@@ -16,6 +16,7 @@ import {
   filmGenRunKey,
   getFilmGenerationDisabledReason,
   HIGGSFIELD_VIDEO_MODEL_BY_SERVICE,
+  isPacketService,
   useFilmGenRun,
   type FilmGenBlockRun,
   type FilmGenReference,
@@ -120,7 +121,18 @@ function ReferenceSlots({
   onPickLocal: (target: PickerTarget) => void;
 }) {
   const removeReference = useFilmGenRun((state) => state.removeReference);
+  const pushToast = useToasts((state) => state.push);
+  const packetService = isPacketService(project.videoServiceId);
   const nextTarget = { blockId: block.id, index: run.references.length };
+
+  async function revealInFinder(path: string) {
+    try {
+      await imagesIpc.revealInFinder(path);
+    } catch (error) {
+      pushToast({ kind: "error", text: `Finderで表示できませんでした: ${String(error)}`, ttlMs: 6000 });
+    }
+  }
+
   return (
     <section className="mt-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -146,6 +158,7 @@ function ReferenceSlots({
                 <button type="button" onClick={() => onPickCharacter({ blockId: block.id, index })} className="rounded border border-[#343434] px-2 py-1 text-[10px] text-zinc-400">登録キャラ</button>
                 <button type="button" onClick={() => onPickLibrary({ blockId: block.id, index })} className="rounded border border-[#343434] px-2 py-1 text-[10px] text-zinc-400">ライブラリ</button>
                 <button type="button" onClick={() => onPickLocal({ blockId: block.id, index })} className="rounded border border-[#343434] px-2 py-1 text-[10px] text-zinc-400">手元</button>
+                {packetService ? <button type="button" onClick={() => void revealInFinder(reference.path)} className="rounded border border-[#343434] px-2 py-1 text-[10px] text-zinc-400">Finderで表示</button> : null}
                 <button type="button" onClick={() => removeReference(project.id, block.id, index)} className="rounded px-2 py-1 text-[10px] text-zinc-600 hover:text-red-300">外す</button>
               </div>
             </div>
@@ -186,12 +199,15 @@ function BlockGenerationCard({
   const connectionStatus = useFilmGenRun((state) => state.connectionStatus);
   const setPromptDraft = useFilmGenRun((state) => state.setPromptDraft);
   const savePrompt = useFilmGenRun((state) => state.savePrompt);
+  const setImportedResult = useFilmGenRun((state) => state.setImportedResult);
   const setNgReason = useFilmGenRun((state) => state.setNgReason);
   const generate = useFilmGenRun((state) => state.generate);
   const retry = useFilmGenRun((state) => state.retry);
   const markAdopted = useFilmGenRun((state) => state.markAdopted);
   const saveBlockVideoTake = useFilmProjectStore((state) => state.saveBlockVideoTake);
   const pushToast = useToasts((state) => state.push);
+  const videoInputRef = useRef<HTMLInputElement | null>(null);
+  const packetService = isPacketService(project.videoServiceId);
   const disabledReason = getFilmGenerationDisabledReason({
     run,
     serviceId: project.videoServiceId,
@@ -205,6 +221,34 @@ function BlockGenerationCard({
     durationSeconds: block.durationSeconds,
   };
   const promptDirty = run.promptDraft.trim() !== run.savedPrompt.trim();
+
+  async function copyPacketPrompt() {
+    if (disabledReason) {
+      pushToast({ kind: "warn", text: disabledReason, ttlMs: 5000 });
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(run.savedPrompt);
+      pushToast({ kind: "success", text: "プロンプトをコピーしました。", ttlMs: 2500 });
+    } catch (error) {
+      pushToast({ kind: "error", text: `プロンプトをコピーできませんでした: ${String(error)}`, ttlMs: 6000 });
+    }
+  }
+
+  async function importVideo(file: File | null) {
+    if (!file) return;
+    if (!/\.(mp4|webm|mov)$/iu.test(file.name)) {
+      pushToast({ kind: "error", text: "MP4、WebM、MOVの動画を選んでください。", ttlMs: 5000 });
+      return;
+    }
+    try {
+      const path = await imagesIpc.writeUpload(file.name, new Uint8Array(await file.arrayBuffer()));
+      setImportedResult(project.id, block.id, path);
+      pushToast({ kind: "success", text: "動画を取り込みました。内容を確認してください。", ttlMs: 4000 });
+    } catch (error) {
+      pushToast({ kind: "error", text: `動画を取り込めませんでした: ${String(error)}`, ttlMs: 6000 });
+    }
+  }
 
   async function runRetry() {
     const reason = run.lastNgReason.trim();
@@ -287,7 +331,17 @@ function BlockGenerationCard({
       ) : null}
       {run.error ? <p className="mt-4 rounded-md border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs leading-5 text-red-200">{run.error}</p> : null}
 
-      {(run.status === "idle" || run.status === "error") ? (
+      {packetService ? (
+        <div className="mt-5 rounded-lg border border-[#303030] bg-[#111111] px-4 py-4">
+          <p className="text-xs leading-5 text-zinc-400">このサービスは Web で生成します。プロンプトと参照を渡して、できた動画をここへ取り込んでください。</p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button type="button" onClick={() => void copyPacketPrompt()} className="rounded-md border border-[#3a3a3a] px-4 py-2 text-sm font-semibold text-zinc-200 hover:border-pink-500/50">プロンプトをコピー</button>
+            <button type="button" disabled={run.status === "adopted"} onClick={() => videoInputRef.current?.click()} className="rounded-md bg-pink-500 px-4 py-2 text-sm font-semibold text-white hover:bg-pink-400 disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-400">できた動画を取り込む</button>
+            <input ref={videoInputRef} type="file" accept=".mp4,.webm,.mov" className="hidden" onChange={(event) => { void importVideo(event.target.files?.[0] ?? null); event.target.value = ""; }} />
+          </div>
+          {disabledReason ? <p className="mt-2 text-xs leading-5 text-amber-200">実行できない理由: {disabledReason}</p> : null}
+        </div>
+      ) : (run.status === "idle" || run.status === "error") ? (
         <div className="mt-5">
           <button
             type="button"
@@ -333,6 +387,7 @@ export function GenerationPhasePanel({ project }: { project: FilmProject }) {
   const script = Array.isArray(project.script) ? null : project.script;
   const blocks = script?.blocks ?? [];
   const profile = findVideoServiceProfile(project.videoServiceId);
+  const packetService = isPacketService(project.videoServiceId);
   const modelId = profile ? HIGGSFIELD_VIDEO_MODEL_BY_SERVICE[profile.id] : null;
   const model = modelId ? findVideoModel(modelId) : undefined;
   const runs = useFilmGenRun((state) => state.runs);
@@ -394,8 +449,8 @@ export function GenerationPhasePanel({ project }: { project: FilmProject }) {
   }, [blocks, initializeBlock, profile?.referenceNotation, project, sceneById]);
 
   useEffect(() => {
-    void refreshConnection();
-  }, [refreshConnection]);
+    if (!packetService) void refreshConnection();
+  }, [packetService, refreshConnection]);
 
   useEffect(() => {
     if (!blocks.some((block) => block.id === activeBlockId)) {
@@ -444,18 +499,20 @@ export function GenerationPhasePanel({ project }: { project: FilmProject }) {
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <p className="text-sm font-semibold text-zinc-100">動画サービス: {profile?.label ?? project.videoServiceId}</p>
-            <p className="mt-1 text-xs text-zinc-500">Higgsfieldモデル: {model ? `${model.label}（${model.jobSetType}）` : "対応ID未確認"}</p>
+            {!packetService ? <p className="mt-1 text-xs text-zinc-500">Higgsfieldモデル: {model ? `${model.label}（${model.jobSetType}）` : "対応ID未確認"}</p> : null}
           </div>
-          <div className="text-right">
-            <p className={connectionStatus === "ready" ? "text-xs font-semibold text-emerald-300" : "text-xs font-semibold text-amber-200"}>
-              {connectionStatus === "ready" ? "Higgsfield接続済み" : connectionStatus === "checking" ? "接続を確認中" : "Higgsfield未接続"}
-            </p>
-            {connectionStatus !== "ready" && connectionStatus !== "checking" ? (
-              <button type="button" onClick={() => void refreshConnection()} className="mt-1 text-[11px] text-pink-300 hover:text-pink-200">接続を再確認</button>
-            ) : null}
-          </div>
+          {!packetService ? (
+            <div className="text-right">
+              <p className={connectionStatus === "ready" ? "text-xs font-semibold text-emerald-300" : "text-xs font-semibold text-amber-200"}>
+                {connectionStatus === "ready" ? "Higgsfield接続済み" : connectionStatus === "checking" ? "接続を確認中" : "Higgsfield未接続"}
+              </p>
+              {connectionStatus !== "ready" && connectionStatus !== "checking" ? (
+                <button type="button" onClick={() => void refreshConnection()} className="mt-1 text-[11px] text-pink-300 hover:text-pink-200">接続を再確認</button>
+              ) : null}
+            </div>
+          ) : null}
         </div>
-        {connectionReason && connectionStatus !== "ready" ? <p className="mt-2 text-[11px] text-zinc-600">{connectionReason}</p> : null}
+        {!packetService && connectionReason && connectionStatus !== "ready" ? <p className="mt-2 text-[11px] text-zinc-600">{connectionReason}</p> : null}
       </section>
 
       <section className="rounded-xl border border-[#303030] bg-[#141414] p-4">

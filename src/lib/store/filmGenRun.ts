@@ -91,6 +91,7 @@ type FilmGenRunState = {
     reference: FilmGenReference,
   ) => void;
   removeReference: (projectId: string, blockId: string, index: number) => void;
+  setImportedResult: (projectId: string, blockId: string, path: string) => void;
   setNgReason: (projectId: string, blockId: string, reason: string) => void;
   refreshConnection: () => Promise<void>;
   generate: (request: FilmGenRequest) => Promise<string | null>;
@@ -128,6 +129,11 @@ export function createFilmGenReference(
   };
 }
 
+export function isPacketService(serviceId: string): boolean {
+  const profile = findVideoServiceProfile(serviceId);
+  return profile ? HIGGSFIELD_VIDEO_MODEL_BY_SERVICE[profile.id] === null : false;
+}
+
 export function getFilmGenerationDisabledReason(input: {
   run: FilmGenBlockRun;
   serviceId: string;
@@ -136,6 +142,28 @@ export function getFilmGenerationDisabledReason(input: {
 }): string | null {
   const profile = findVideoServiceProfile(input.serviceId);
   if (!profile) return `${input.serviceId}は⑤映像づくりに未登録です。`;
+  if (isPacketService(profile.id)) {
+    if (!input.run.savedPrompt.trim()) return "合成プロンプトを保存してください。";
+    if (input.run.promptDraft.trim() !== input.run.savedPrompt.trim()) {
+      return "合成プロンプトに未保存の変更があります。";
+    }
+    if (profile.maxBlockSeconds !== null && input.durationSeconds > profile.maxBlockSeconds) {
+      return `${profile.label}は1ブロック${profile.maxBlockSeconds}秒までです。現在は${input.durationSeconds}秒です。`;
+    }
+    const referenceCount = input.run.references.length;
+    if (!profile.referenceRules && referenceCount > 0) {
+      return `${profile.label}の参照条件は未取得です。参照画像を外すと文章だけで生成できます。`;
+    }
+    const imageLimit = profile.referenceRules?.limits.images ?? null;
+    if (imageLimit !== null && referenceCount > imageLimit) {
+      return `${profile.label}は参照画像${imageLimit}枚までです。現在${referenceCount}枚です。`;
+    }
+    const totalLimit = profile.referenceRules?.limits.total ?? null;
+    if (totalLimit !== null && referenceCount > totalLimit) {
+      return `${profile.label}は参照素材を合計${totalLimit}点まで渡せます。現在${referenceCount}点です。`;
+    }
+    return null;
+  }
   const modelId = HIGGSFIELD_VIDEO_MODEL_BY_SERVICE[profile.id];
   if (!modelId) {
     return `${profile.label}に対応するHiggsfieldモデルIDが既存の動画生成表にありません。対応を確認できるまで実行しません。`;
@@ -442,6 +470,31 @@ export const useFilmGenRun = create<FilmGenRunState>((set, get) => ({
     });
   },
 
+  setImportedResult: (projectId, blockId, path) => {
+    const key = filmGenRunKey(projectId, blockId);
+    const resultPath = path.trim();
+    if (!resultPath) return;
+    set((state) => {
+      const current = state.runs[key];
+      return current
+        ? {
+            runs: {
+              ...state.runs,
+              [key]: {
+                ...current,
+                status: "review",
+                progress: 0,
+                progressLabel: "",
+                resultPath,
+                error: null,
+                lastNgReason: "",
+              },
+            },
+          }
+        : state;
+    });
+  },
+
   setNgReason: (projectId, blockId, lastNgReason) => {
     const key = filmGenRunKey(projectId, blockId);
     set((state) => {
@@ -497,6 +550,7 @@ export const useFilmGenRun = create<FilmGenRunState>((set, get) => ({
         },
       },
     }));
+    if (isPacketService(request.serviceId)) return null;
     return performGeneration(get, set, request);
   },
 
