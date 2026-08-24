@@ -178,6 +178,7 @@ export function DesignPhasePanel({ project }: { project: FilmProject }) {
   const saveLookMaster = useFilmProjectStore((state) => state.saveLookMaster);
   const saveStylePrefix = useFilmProjectStore((state) => state.saveStylePrefix);
   const approveLook = useFilmProjectStore((state) => state.approveLook);
+  const approveLookLenient = useFilmProjectStore((state) => state.approveLookLenient);
   const pushToast = useToasts((state) => state.push);
 
   const script = Array.isArray(project.script) ? null : project.script;
@@ -498,6 +499,19 @@ export function DesignPhasePanel({ project }: { project: FilmProject }) {
         text: "映像の見た目の決定版・保存済みの共通指定・自動確認済みの素材一覧をそろえてください。",
         ttlMs: 5000,
       });
+    }
+  }
+
+  function skipDetailedDesign() {
+    if (!scriptReady) {
+      pushToast({ kind: "warn", text: "先に②脚本でブロック台本をOKしてください。", ttlMs: 4000 });
+      return;
+    }
+    if (!window.confirm("見た目や素材を作り込まず、おまかせの共通指定で先へ進みますか？")) {
+      return;
+    }
+    if (!approveLookLenient()) {
+      pushToast({ kind: "warn", text: "先に②脚本でブロック台本をOKしてください。", ttlMs: 4000 });
     }
   }
 
@@ -833,7 +847,10 @@ export function DesignPhasePanel({ project }: { project: FilmProject }) {
           <StatusLine ok={assetsReady}>素材が1件以上あり、自動確認のエラーなし</StatusLine>
         </ul>
         <p className="mt-3 text-[11px] leading-5 text-zinc-500">素材の一覧を書き切るまでは画像づくりへ進みません。先に文の上で食い違いを止めるためです。</p>
-        <button type="button" onClick={completeDesign} disabled={!canComplete} className="mt-4 rounded-md bg-emerald-500 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-400">④素材づくりへ進む</button>
+        <div className="mt-4 flex flex-wrap gap-3">
+          <button type="button" onClick={completeDesign} disabled={!canComplete} className="rounded-md bg-emerald-500 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-400">④素材づくりへ進む</button>
+          <button type="button" onClick={skipDetailedDesign} disabled={!scriptReady} className="rounded-md border border-[#3a3a3a] px-5 py-2.5 text-sm font-semibold text-zinc-200 transition hover:border-pink-500/50 disabled:cursor-not-allowed disabled:opacity-40">作り込みなしで進む（おまかせ）</button>
+        </div>
       </section>
     </div>
   );

@@ -101,6 +101,7 @@ type FilmProjectState = {
   saveLookMaster: (path: string | null, description?: string) => void;
   saveStylePrefix: (stylePrefix: string) => void;
   approveLook: () => boolean;
+  approveLookLenient: () => boolean;
   saveBlockVideoTake: (
     blockId: string,
     path: string,
@@ -917,6 +918,33 @@ export const useFilmProjectStore = create<FilmProjectState>((set, get) => ({
       return touchProject({
         ...project,
         phase: 4 as const,
+        approvals: {
+          ...project.approvals,
+          look: { approvedAt: new Date().toISOString() },
+        },
+      });
+    });
+    if (!approved) return false;
+    persistProjects(projects, get().planningChatMessages);
+    set({ projects });
+    return true;
+  },
+
+  approveLookLenient: () => {
+    const activeProjectId = get().activeProjectId;
+    if (!activeProjectId) return false;
+    let approved = false;
+    const projects = get().projects.map((sourceProject) => {
+      if (sourceProject.id !== activeProjectId) return sourceProject;
+      const project = normalizeFilmProject(sourceProject);
+      if (!project.approvals.blocks) return sourceProject;
+      approved = true;
+      return touchProject({
+        ...project,
+        phase: 4 as const,
+        stylePrefix: project.stylePrefix.trim()
+          ? project.stylePrefix
+          : `一貫した色調・自然光・実写系。作品テーマ: ${project.theme}`,
         approvals: {
           ...project.approvals,
           look: { approvedAt: new Date().toISOString() },
