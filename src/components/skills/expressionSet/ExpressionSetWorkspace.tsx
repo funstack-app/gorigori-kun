@@ -14,6 +14,7 @@ import { useToasts } from "../../../lib/store/toasts";
 import {
   ensureSheetSlotPhaseListener,
   selectModeJobs,
+  type SheetJob,
   useCharacterSheetRun,
   useFocusedSheetJob,
 } from "../../../lib/store/characterSheetRun";
@@ -125,28 +126,53 @@ const STEP_LABELS: { step: 1 | 2; label: string }[] = [
   { step: 2, label: "2. 生成・結果" },
 ];
 
+export function canReturnToExpressionResults(
+  jobs: ReadonlyArray<Pick<SheetJob, "jobMode">>,
+): boolean {
+  return jobs.some((job) => job.jobMode === "expression");
+}
+
 function StepIndicator() {
   const step = useCharacterSheetRun((s) => s.step);
+  const jobs = useCharacterSheetRun((s) => s.jobs);
+  const jobOrder = useCharacterSheetRun((s) => s.jobOrder);
+  const mode = useCharacterSheetRun((s) => s.mode);
+  const setStep = useCharacterSheetRun((s) => s.setStep);
+  const modeJobs = useMemo(
+    () => selectModeJobs({ jobs, jobOrder, mode }),
+    [jobs, jobOrder, mode],
+  );
+  const canReturnToResults = canReturnToExpressionResults(modeJobs);
+
   return (
     <div
       data-tour="expression-set-steps"
       className="flex items-center gap-2 border-b border-[#242424] px-4 py-2"
     >
-      {STEP_LABELS.map((s) => (
-        <div
-          key={s.step}
-          className={
-            "rounded-full px-3 py-1 text-[11px] font-black " +
-            (step === s.step
-              ? "bg-pink-500 text-white"
-              : step > s.step
-                ? "bg-[#1c2a20] text-emerald-300"
-                : "bg-[#1a1a1a] text-neutral-500")
-          }
-        >
-          {s.label}
-        </div>
-      ))}
+      {STEP_LABELS.map((s) => {
+        const canNavigate =
+          (s.step === 1 && step === 2) ||
+          (s.step === 2 && step === 1 && canReturnToResults);
+        return (
+          <button
+            key={s.step}
+            type="button"
+            disabled={!canNavigate}
+            onClick={() => setStep(s.step)}
+            className={
+              "rounded-full px-3 py-1 text-[11px] font-black transition disabled:cursor-default " +
+              (canNavigate ? "cursor-pointer hover:brightness-125 " : "") +
+              (step === s.step
+                ? "bg-pink-500 text-white"
+                : step > s.step
+                  ? "bg-[#1c2a20] text-emerald-300"
+                  : "bg-[#1a1a1a] text-neutral-500")
+            }
+          >
+            {s.label}
+          </button>
+        );
+      })}
     </div>
   );
 }
