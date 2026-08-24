@@ -95,6 +95,7 @@ import {
 } from "../../../lib/sticker/exportDir";
 import {
   collectCharacterSources,
+  selectCharacterLedgerAssets,
   type CharacterSource,
 } from "../../../lib/characterSources";
 import { useAssetLedger } from "../../../lib/store/assetLedger";
@@ -161,10 +162,21 @@ function StickerBody() {
   const pushToast = useToasts((s) => s.push);
   const presets = usePresets((s) => s.presets);
   const ledgerAssets = useAssetLedger((s) => s.assets);
-  const ledgerError = useAssetLedger((s) => s.error);
+  const ledgerLoading = useAssetLedger((s) => s.loading);
+  const ledgerLoaded = useAssetLedger((s) => s.loaded);
+  const ledgerLoadError = useAssetLedger((s) => s.loadError);
+  const ledgerLoadingInitially = ledgerLoading && !ledgerLoaded;
   const characters = useMemo(
-    () => collectCharacterSources(presets, ledgerError ? [] : ledgerAssets),
-    [presets, ledgerAssets, ledgerError],
+    () =>
+      collectCharacterSources(
+        presets,
+        selectCharacterLedgerAssets(ledgerAssets, {
+          loading: ledgerLoading,
+          loaded: ledgerLoaded,
+          loadError: ledgerLoadError,
+        }),
+      ),
+    [presets, ledgerAssets, ledgerLoading, ledgerLoaded, ledgerLoadError],
   );
 
   useEffect(() => {
@@ -1073,6 +1085,7 @@ function StickerBody() {
         {phase === "setup" && (
           <SetupPanel
             characters={characters}
+            charactersLoading={ledgerLoadingInitially}
             sourceImage={sourceImage}
             sourceLabel={sourceLabel}
             attributes={attributes}
@@ -1269,6 +1282,7 @@ function StepIndicator({ phase }: { phase: Phase }) {
 
 function SetupPanel({
   characters,
+  charactersLoading,
   sourceImage,
   sourceLabel,
   attributes,
@@ -1284,6 +1298,7 @@ function SetupPanel({
   onRun,
 }: {
   characters: CharacterSource[];
+  charactersLoading: boolean;
   sourceImage: string | null;
   sourceLabel: string;
   /** 選んだキャラの属性。生成に効くので画面に出す（C2）。手持ち画像なら空。 */
@@ -1315,7 +1330,11 @@ function SetupPanel({
           <div className="mb-1.5 text-[11px] font-black uppercase tracking-wider text-neutral-500">
             素材を選ぶ
           </div>
-          {characters.length === 0 ? (
+          {characters.length === 0 && charactersLoading ? (
+            <div className="rounded-lg border border-dashed border-[#3a3a3a] bg-[#0d0d0d] px-3 py-3 text-center text-[12px] text-neutral-500">
+              キャラクターを読み込んでいます…
+            </div>
+          ) : characters.length === 0 ? (
             <div className="rounded-lg border border-dashed border-[#3a3a3a] bg-[#0d0d0d] px-3 py-3 text-center text-[12px] text-neutral-500">
               登録済みのキャラがありません。
               <br />
@@ -1326,7 +1345,8 @@ function SetupPanel({
             // auto-fill + minmax にして、入る数だけ並べる（狭ければ3列・2列へ落ちる）。
             <div className="grid grid-cols-[repeat(auto-fill,minmax(4.5rem,1fr))] gap-2">
               {characters.map((c) => {
-                const thumb = c.preset?.thumbnail;
+                const presetThumb = c.preset?.thumbnail;
+                const ledgerThumb = c.origin === "ledger" ? c.imagePath : null;
                 const selected = sourceLabel === c.name;
                 const unavailable = c.unavailableReason !== null;
                 return (
@@ -1352,8 +1372,18 @@ function SetupPanel({
                     }
                   >
                     <div className="aspect-square w-full bg-[#0d0d0d]">
-                      {thumb ? (
-                        <img src={thumb} alt={c.name} className="h-full w-full object-cover" />
+                      {presetThumb ? (
+                        <img
+                          src={presetThumb}
+                          alt={c.name}
+                          className="h-full w-full object-cover"
+                        />
+                      ) : ledgerThumb ? (
+                        <SafeImage
+                          path={ledgerThumb}
+                          alt={c.name}
+                          className="h-full w-full object-cover"
+                        />
                       ) : (
                         <div className="flex h-full w-full items-center justify-center text-neutral-600">
                           <CharacterIcon className="h-5 w-5" />

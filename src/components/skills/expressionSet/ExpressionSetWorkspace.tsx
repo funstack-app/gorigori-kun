@@ -26,6 +26,7 @@ import type {
 } from "../../../lib/character/types";
 import {
   collectCharacterSources,
+  selectCharacterLedgerAssets,
   type CharacterSource,
 } from "../../../lib/characterSources";
 import { useAssetLedger } from "../../../lib/store/assetLedger";
@@ -177,10 +178,21 @@ function characterThumbSrc(character: CharacterSource): string | undefined {
 function StepSelect() {
   const presets = usePresets((s) => s.presets);
   const ledgerAssets = useAssetLedger((s) => s.assets);
-  const ledgerError = useAssetLedger((s) => s.error);
+  const ledgerLoading = useAssetLedger((s) => s.loading);
+  const ledgerLoaded = useAssetLedger((s) => s.loaded);
+  const ledgerLoadError = useAssetLedger((s) => s.loadError);
+  const ledgerLoadingInitially = ledgerLoading && !ledgerLoaded;
   const characters = useMemo(
-    () => collectCharacterSources(presets, ledgerError ? [] : ledgerAssets),
-    [presets, ledgerAssets, ledgerError],
+    () =>
+      collectCharacterSources(
+        presets,
+        selectCharacterLedgerAssets(ledgerAssets, {
+          loading: ledgerLoading,
+          loaded: ledgerLoaded,
+          loadError: ledgerLoadError,
+        }),
+      ),
+    [presets, ledgerAssets, ledgerLoading, ledgerLoaded, ledgerLoadError],
   );
 
   useEffect(() => {
@@ -318,7 +330,11 @@ function StepSelect() {
           <div className="mb-1.5 text-[11px] font-black uppercase tracking-wider text-neutral-500">
             登録キャラを選ぶ
           </div>
-          {characters.length === 0 ? (
+          {characters.length === 0 && ledgerLoadingInitially ? (
+            <div className="rounded-lg border border-dashed border-[#3a3a3a] bg-[#0d0d0d] px-3 py-4 text-center text-[12px] text-neutral-500">
+              キャラクターを読み込んでいます…
+            </div>
+          ) : characters.length === 0 ? (
             <div className="rounded-lg border border-dashed border-[#3a3a3a] bg-[#0d0d0d] px-3 py-4 text-center text-[12px] text-neutral-500">
               登録済みのキャラがありません。
               <br />

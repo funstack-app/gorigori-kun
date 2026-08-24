@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import type { AssetLedgerEntry } from "../src/lib/ipc";
-import { collectCharacterSources } from "../src/lib/characterSources";
+import {
+  collectCharacterSources,
+  selectCharacterLedgerAssets,
+} from "../src/lib/characterSources";
 import { characterRegisterAssetId } from "../src/lib/store/assetLedger";
 import type { Preset } from "../src/lib/store/presets";
 
@@ -41,6 +44,25 @@ function ledgerAsset(
 }
 
 describe("collectCharacterSources", () => {
+  it("writeError があっても台帳キャラを一覧へ渡す", () => {
+    const ledgerCharacter = ledgerAsset("kept-after-write-error");
+    const ledgerState = {
+      loading: false,
+      loaded: true,
+      loadError: null,
+      writeError: "保存に失敗しました",
+    };
+
+    const sources = collectCharacterSources(
+      [],
+      selectCharacterLedgerAssets([ledgerCharacter], ledgerState),
+    );
+
+    expect(sources.map((source) => source.id)).toEqual([
+      "kept-after-write-error",
+    ]);
+  });
+
   it("preset と台帳で決められた優先順から参照画像を解決する", () => {
     const sources = collectCharacterSources(
       [

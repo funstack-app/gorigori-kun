@@ -2,7 +2,10 @@ import { useEffect, useMemo, useState } from "react";
 
 import { convertFileSrc } from "@tauri-apps/api/core";
 
-import { collectCharacterSources } from "../../../lib/characterSources";
+import {
+  collectCharacterSources,
+  selectCharacterLedgerAssets,
+} from "../../../lib/characterSources";
 import { useAssetLedger } from "../../../lib/store/assetLedger";
 import { usePresets } from "../../../lib/store/presets";
 
@@ -28,12 +31,23 @@ type Props = {
 export function CharacterPresetPickerModal({ onClose, onPick }: Props) {
   const presets = usePresets((s) => s.presets);
   const ledgerAssets = useAssetLedger((s) => s.assets);
-  const ledgerError = useAssetLedger((s) => s.error);
+  const ledgerLoading = useAssetLedger((s) => s.loading);
+  const ledgerLoaded = useAssetLedger((s) => s.loaded);
+  const ledgerLoadError = useAssetLedger((s) => s.loadError);
+  const ledgerLoadingInitially = ledgerLoading && !ledgerLoaded;
   const [brokenPaths, setBrokenPaths] = useState<Set<string>>(new Set());
 
   const characterSources = useMemo(
-    () => collectCharacterSources(presets, ledgerError ? [] : ledgerAssets),
-    [presets, ledgerAssets, ledgerError],
+    () =>
+      collectCharacterSources(
+        presets,
+        selectCharacterLedgerAssets(ledgerAssets, {
+          loading: ledgerLoading,
+          loaded: ledgerLoaded,
+          loadError: ledgerLoadError,
+        }),
+      ),
+    [presets, ledgerAssets, ledgerLoading, ledgerLoaded, ledgerLoadError],
   );
 
   useEffect(() => {
@@ -74,7 +88,11 @@ export function CharacterPresetPickerModal({ onClose, onPick }: Props) {
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
-          {characterSources.length === 0 ? (
+          {characterSources.length === 0 && ledgerLoadingInitially ? (
+            <p className="py-10 text-center text-[12px] text-neutral-500">
+              キャラクターを読み込んでいます…
+            </p>
+          ) : characterSources.length === 0 ? (
             <p className="py-10 text-center text-[12px] text-neutral-500">
               登録済みのキャラクターがありません。先に「キャラクター登録」で作成してください。
             </p>

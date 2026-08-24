@@ -25,6 +25,9 @@ export type AssetLedgerState = {
   assets: AssetLedgerEntry[];
   loading: boolean;
   loaded: boolean;
+  loadError: string | null;
+  writeError: string | null;
+  /** 既存画面向けの互換値。読込エラーを優先し、無ければ書込エラーを返す。 */
   error: string | null;
   load: () => Promise<void>;
   upsert: (asset: AssetLedgerEntry) => Promise<AssetLedgerEntry>;
@@ -212,12 +215,15 @@ export const useAssetLedger = create<AssetLedgerState>((set, get) => ({
   assets: [],
   loading: false,
   loaded: false,
+  loadError: null,
+  writeError: null,
   error: null,
 
   load: () => {
+    if (get().loaded) return Promise.resolve();
     if (loadInFlight) return loadInFlight;
     const run = (async () => {
-      set({ loading: true, error: null });
+      set({ loading: true, loadError: null, error: get().writeError });
       try {
         const diskLedger = await assetLedger.read();
 
@@ -238,10 +244,12 @@ export const useAssetLedger = create<AssetLedgerState>((set, get) => ({
           assets: current.assets,
           loading: false,
           loaded: true,
-          error: null,
+          loadError: null,
+          error: get().writeError,
         });
       } catch (error) {
-        set({ loading: false, loaded: false, error: String(error) });
+        const loadError = String(error);
+        set({ loading: false, loaded: false, loadError, error: loadError });
         throw error;
       }
     })();
@@ -252,13 +260,18 @@ export const useAssetLedger = create<AssetLedgerState>((set, get) => ({
   },
 
   upsert: async (asset) => {
-    set({ error: null });
+    set({ writeError: null, error: get().loadError });
     try {
       const saved = await assetLedger.upsert(asset);
-      set({ assets: replaceOrAppend(get().assets, saved), error: null });
+      set({
+        assets: replaceOrAppend(get().assets, saved),
+        writeError: null,
+        error: get().loadError,
+      });
       return saved;
     } catch (error) {
-      set({ error: String(error) });
+      const writeError = String(error);
+      set({ writeError, error: get().loadError ?? writeError });
       throw error;
     }
   },
@@ -289,15 +302,17 @@ export const useAssetLedger = create<AssetLedgerState>((set, get) => ({
   },
 
   delete: async (id) => {
-    set({ error: null });
+    set({ writeError: null, error: get().loadError });
     try {
       await assetLedger.delete(id);
       set({
         assets: get().assets.filter((asset) => asset.id !== id),
-        error: null,
+        writeError: null,
+        error: get().loadError,
       });
     } catch (error) {
-      set({ error: String(error) });
+      const writeError = String(error);
+      set({ writeError, error: get().loadError ?? writeError });
       throw error;
     }
   },

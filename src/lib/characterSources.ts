@@ -12,6 +12,12 @@ export type CharacterSource = {
   unavailableReason: string | null;
 };
 
+export type CharacterLedgerReadState = {
+  loading: boolean;
+  loaded: boolean;
+  loadError: string | null;
+};
+
 const NO_IMAGE_REASON = "画像が登録されていません";
 
 const LEDGER_ORIGIN_LABELS: Record<string, string> = {
@@ -22,6 +28,15 @@ const LEDGER_ORIGIN_LABELS: Record<string, string> = {
 
 function ledgerOriginLabel(source: AssetLedgerEntry["source"]): string {
   return LEDGER_ORIGIN_LABELS[source] ?? "台帳";
+}
+
+/** 読込失敗または初回読込中だけ台帳を隠す。書込エラーは一覧へ影響させない。 */
+export function selectCharacterLedgerAssets(
+  ledgerAssets: AssetLedgerEntry[],
+  state: CharacterLedgerReadState,
+): AssetLedgerEntry[] {
+  if (state.loadError || (state.loading && !state.loaded)) return [];
+  return ledgerAssets;
 }
 
 export function collectCharacterSources(
