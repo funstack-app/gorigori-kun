@@ -2,35 +2,60 @@ import type { KeyboardEvent } from "react";
 
 import type { EditToolId } from "./EditToolRail";
 
+export const EDIT_CANDIDATE_COUNT_MIN = 1;
+export const EDIT_CANDIDATE_COUNT_MAX = 4;
+export const DEFAULT_EDIT_CANDIDATE_COUNT = 2;
+export const ERASE_INSTRUCTION_PREFIX = "この範囲のものを消して自然に埋めて。";
+
+export type RegionEditMode = "replace" | "erase";
+
+export function normalizeEditCandidateCount(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_EDIT_CANDIDATE_COUNT;
+  return Math.min(
+    EDIT_CANDIDATE_COUNT_MAX,
+    Math.max(EDIT_CANDIDATE_COUNT_MIN, Math.round(value)),
+  );
+}
+
+export function buildEraseInstruction(instruction: string): string {
+  const detail = instruction.trim();
+  return detail ? `${ERASE_INSTRUCTION_PREFIX}\n${detail}` : ERASE_INSTRUCTION_PREFIX;
+}
+
 type EditChatBarProps = {
   value: string;
-  activeTool: EditToolId | "select";
-  hasRegion: boolean;
+  activeTool: EditToolId;
+  candidateCount: number;
+  regionMode: RegionEditMode;
   busy: boolean;
   disabled: boolean;
   interactionDisabled?: boolean;
   onChange: (value: string) => void;
   onSubmit: () => void;
-  onSelectWhole: () => void;
-  onSelectRegion: () => void;
+  onCandidateCountChange: (count: number) => void;
+  onRegionModeChange: (mode: RegionEditMode) => void;
 };
 
 export function EditChatBar({
   value,
   activeTool,
-  hasRegion,
+  candidateCount,
+  regionMode,
   busy,
   disabled,
   interactionDisabled = false,
   onChange,
   onSubmit,
-  onSelectWhole,
-  onSelectRegion,
+  onCandidateCountChange,
+  onRegionModeChange,
 }: EditChatBarProps) {
+  const acceptsInstruction = activeTool === "ai" || activeTool === "region";
   const placeholder =
     activeTool === "crop"
-      ? "画像を拡張し、変更したい内容を記述（任意）"
-      : activeTool === "region" && hasRegion
+      ? "左上のパネルで切り抜く範囲を指定してください"
+      : activeTool === "adjust"
+        ? "左上のパネルで画像を調整してください"
+        : activeTool === "region"
         ? "選択範囲を囲んで、変更したい内容を説明してください"
         : "どこを変更したいですか？";
 
@@ -48,7 +73,7 @@ export function EditChatBar({
     >
       <textarea
         value={value}
-        disabled={interactionDisabled}
+        disabled={interactionDisabled || !acceptsInstruction}
         onChange={(event) => onChange(event.target.value)}
         onKeyDown={submitFromKeyboard}
         rows={2}
@@ -56,45 +81,82 @@ export function EditChatBar({
         className="max-h-[6.5rem] min-h-10 w-full resize-none bg-transparent text-sm leading-5 text-neutral-100 outline-none placeholder:text-neutral-500"
       />
       <div className="mt-1 flex items-center justify-between gap-3">
-        <div className="flex items-center gap-1.5">
+        <div className="flex min-h-7 items-center gap-1.5">
+          {activeTool === "region" ? (
+            <>
+              <ModeChip
+                active={regionMode === "replace"}
+                disabled={interactionDisabled}
+                onClick={() => onRegionModeChange("replace")}
+              >
+                差し替え
+              </ModeChip>
+              <ModeChip
+                active={regionMode === "erase"}
+                disabled={interactionDisabled}
+                onClick={() => onRegionModeChange("erase")}
+              >
+                消去
+              </ModeChip>
+            </>
+          ) : activeTool === "crop" || activeTool === "adjust" ? (
+            <span className="text-[11px] text-neutral-500">パネル操作のみ</span>
+          ) : null}
+        </div>
+        <div className="flex items-center gap-2">
+          <label className="flex items-center gap-1 text-[11px] text-neutral-400">
+            <span>候補</span>
+            <select
+              aria-label="候補枚数"
+              value={candidateCount}
+              disabled={interactionDisabled || busy || activeTool !== "ai"}
+              onChange={(event) =>
+                onCandidateCountChange(normalizeEditCandidateCount(Number(event.target.value)))
+              }
+              className="rounded-md border border-[#3a3a3a] bg-[#121212] px-1.5 py-1 text-neutral-200 outline-none disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {[1, 2, 3, 4].map((count) => (
+                <option key={count} value={count}>{count}枚</option>
+              ))}
+            </select>
+          </label>
           <button
             type="button"
-            onClick={onSelectWhole}
-            disabled={interactionDisabled}
-            className={`rounded-full px-2.5 py-0.5 text-[11px] ${
-              activeTool === "ai"
-                ? "bg-neutral-200 text-black"
-                : "border border-[#333] text-neutral-400"
-            }`}
+            onClick={onSubmit}
+            disabled={disabled}
+            aria-label="編集を実行"
+            className="flex h-8 w-8 items-center justify-center rounded-full bg-neutral-200 text-black hover:bg-white disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-500"
           >
-            全体
-          </button>
-          <button
-            type="button"
-            onClick={onSelectRegion}
-            disabled={interactionDisabled || !hasRegion}
-            className={`rounded-full px-2.5 py-0.5 text-[11px] ${
-              activeTool === "region" && hasRegion
-                ? "bg-neutral-200 text-black"
-                : `border border-[#333] text-neutral-400 ${
-                    hasRegion ? "" : "cursor-not-allowed opacity-40"
-                  }`
-            }`}
-          >
-            囲った場所
+            {busy ? <Spinner /> : <span className="-mt-0.5 text-lg leading-none">↑</span>}
           </button>
         </div>
-        <button
-          type="button"
-          onClick={onSubmit}
-          disabled={disabled}
-          aria-label="編集を実行"
-          className="flex h-8 w-8 items-center justify-center rounded-full bg-neutral-200 text-black hover:bg-white disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-500"
-        >
-          {busy ? <Spinner /> : <span className="-mt-0.5 text-lg leading-none">↑</span>}
-        </button>
       </div>
     </div>
+  );
+}
+
+function ModeChip({
+  active,
+  disabled,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  disabled: boolean;
+  onClick: () => void;
+  children: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className={`rounded-full px-2.5 py-0.5 text-[11px] ${
+        active ? "bg-neutral-200 text-black" : "border border-[#333] text-neutral-400"
+      } disabled:cursor-not-allowed disabled:opacity-40`}
+    >
+      {children}
+    </button>
   );
 }
 

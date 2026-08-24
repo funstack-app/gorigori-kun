@@ -60,21 +60,20 @@ describe("編集タブの Magnific 型レイアウト部品", () => {
           createElement(EditChatBar, {
             value: "",
             activeTool: "region",
-            hasRegion: false,
+            candidateCount: 2,
+            regionMode: "replace",
             busy: false,
             disabled: true,
             onChange: () => undefined,
             onSubmit: () => undefined,
-            onSelectWhole: () => undefined,
-            onSelectRegion: () => undefined,
+            onCandidateCountChange: () => undefined,
+            onRegionModeChange: () => undefined,
           }),
           createElement(EditToolRail, {
             activeTool: "ai",
             disabled: false,
-            recognizingText: false,
             removingBackground: false,
             onSelect: () => undefined,
-            onDetectText: () => undefined,
             onRemoveBackground: () => undefined,
           }),
         ),
@@ -88,15 +87,16 @@ describe("編集タブの Magnific 型レイアウト部品", () => {
     expect(host.querySelector("[data-edit-history-rail]")).not.toBeNull();
 
     const textarea = host.querySelector("textarea");
-    expect(textarea?.placeholder).toBe("どこを変更したいですか？");
-    const regionChip = Array.from(host.querySelectorAll("button")).find(
-      (button) => button.textContent === "囲った場所",
+    expect(textarea?.placeholder).toBe(
+      "選択範囲を囲んで、変更したい内容を説明してください",
     );
-    expect(regionChip?.disabled).toBe(true);
+    expect(host.querySelector('button[aria-label="文字認識"]')).toBeNull();
+    expect(host.querySelector('button[aria-label="ことばで分離"]')).toBeNull();
+    expect(host.querySelector('button[aria-label="レイヤー分解"]')).toBeNull();
   });
 
-  it("文字認識はOCRを即実行し、ことばで分離とは別の道具として表示する", () => {
-    const onDetectText = vi.fn();
+  it("ツール帯は5個だけを表示し、背景透過は押した瞬間に実行する", () => {
+    const onRemoveBackground = vi.fn();
     host = document.createElement("div");
     document.body.append(host);
     root = createRoot(host);
@@ -106,21 +106,25 @@ describe("編集タブの Magnific 型レイアウト部品", () => {
         createElement(EditToolRail, {
           activeTool: "ai",
           disabled: false,
-          recognizingText: false,
           removingBackground: false,
           onSelect: () => undefined,
-          onDetectText,
-          onRemoveBackground: () => undefined,
+          onRemoveBackground,
         }),
       );
     });
 
-    const ocr = host.querySelector<HTMLButtonElement>('button[aria-label="文字認識"]');
-    const words = host.querySelector<HTMLButtonElement>('button[aria-label="ことばで分離"]');
-    expect(ocr).not.toBeNull();
-    expect(words).not.toBeNull();
-    act(() => ocr?.click());
-    expect(onDetectText).toHaveBeenCalledOnce();
+    const toolButtons = host.querySelectorAll<HTMLButtonElement>(
+      "[data-edit-tool-rail] > button",
+    );
+    expect(Array.from(toolButtons, (button) => button.getAttribute("aria-label"))).toEqual([
+      "ことばで直す",
+      "囲んで直す",
+      "切り抜き",
+      "調整",
+      "背景透過",
+    ]);
+    act(() => host.querySelector<HTMLButtonElement>('button[aria-label="背景透過"]')?.click());
+    expect(onRemoveBackground).toHaveBeenCalledOnce();
   });
 
   it("ズームを25%〜400%に制限し、カーソル中心とフィット超パンを計算する", () => {

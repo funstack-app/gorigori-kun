@@ -1050,6 +1050,29 @@ export function useEditorActions() {
     }
   };
 
+  /** 現在見えている統合画像を、版として読み直せる PNG ファイルへ保存する。 */
+  const saveCanvasVersion = async (namePrefix = "edit-version"): Promise<string | null> => {
+    const liveCanvas = canvas ?? useEditor.getState().canvas;
+    if (!liveCanvas) {
+      setError("キャンバスを初期化中です。");
+      return null;
+    }
+    const base64 = exportCanvasPngBase64(liveCanvas);
+    if (!base64) {
+      setError("版にする画像データを作れませんでした。");
+      return null;
+    }
+    try {
+      return await images.writeUpload(
+        `${namePrefix}-${Date.now()}.png`,
+        base64ToBytes(base64),
+      );
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : String(caught));
+      return null;
+    }
+  };
+
   /**
    * 編集結果を「作品」としてギャラリーへ合流させる (ヘッダー「作品にする」)。
    *
@@ -1462,6 +1485,7 @@ export function useEditorActions() {
     ungroupSelection,
     exportPng,
     exportImageAs,
+    saveCanvasVersion,
     applyAdjust,
     cropToRegion,
     rotateOrFlip,

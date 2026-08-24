@@ -155,7 +155,7 @@ export function AdjustPanel({
         ))}
       </div>
       <p className="mt-1.5 text-[10px] font-bold leading-4 text-neutral-500">
-        画像ぜんぶに効きます。『戻す』で元に戻せます。
+        画像ぜんぶに効きます。右の履歴から戻せます。
       </p>
     </div>
   );

@@ -1,21 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 
-import { listenEditMagicProgress } from "../../lib/edit/events";
-import { extractDropped, fileToUploadReference, isImageDrop } from "../../lib/dragRef";
-import { useEditMagic } from "../../lib/store/editMagic";
 import { useEditor } from "./editor/editorStore";
 import { useEditorActions } from "./editor/useEditor";
 import {
-  convertTextImageToTextbox,
   fitCanvasToImage,
   getCanvasBaseSize,
-  pickCanvasColorAt,
 } from "./editor/magicLayerToFabric";
-import { objectId } from "./editor/layerHelpers";
-import {
-  applyBrandCanvasSelection,
-  applyBrandSelectionDefaults,
-} from "./editor/selectionStyle";
 import { RegionSelectOverlay, type NormalizedBbox } from "./RegionSelectOverlay";
 
 type EditorCanvasProps = {
@@ -31,14 +21,6 @@ type EditorCanvasProps = {
     disabled?: boolean;
     /** 未選択時の案内文 (AI に直させる範囲か、塗りつぶす範囲かで意味が変わる)。 */
     hint?: string;
-  };
-  /**
-   * スポイト (「セリフ・文字を直す」の下地色を画像から拾う)。active の間だけ
-   * キャンバス上のクリックを色拾いに使い、拾ったら onPick で返す。
-   */
-  eyedropper?: {
-    active: boolean;
-    onPick: (hex: string) => void;
   };
 };
 
@@ -98,7 +80,7 @@ export function isEditorViewportAboveFit(
   return zoom > editorFitZoom(canvasWidth, canvasHeight, imageWidth, imageHeight) + 0.001;
 }
 
-export function EditorCanvas({ panOnEmpty = false, regionSelect, eyedropper }: EditorCanvasProps = {}) {
+export function EditorCanvas({ panOnEmpty = false, regionSelect }: EditorCanvasProps = {}) {
   const hostRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fabricCanvasRef = useRef<any>(null);
@@ -111,19 +93,12 @@ export function EditorCanvas({ panOnEmpty = false, regionSelect, eyedropper }: E
   // store 経由で読む (ref だと fabric 初期化完了で再描画されず、オーバーレイが
   // canvas=null のまま固まる)。setCanvas が呼ばれた時点で再描画が走る。
   const liveCanvas = useEditor((state) => state.canvas);
-  const activeTool = useEditor((state) => state.activeTool);
   const message = useEditor((state) => state.message);
   const error = useEditor((state) => state.error);
   const setCanvas = useEditor((state) => state.setCanvas);
-  const setSelectedLayerId = useEditor((state) => state.setSelectedLayerId);
   const bumpRevision = useEditor((state) => state.bumpRevision);
   const revision = useEditor((state) => state.revision);
-  const progress = useEditMagic((state) => state.progress);
-  const grabPreview = useEditor((state) => state.grabPreview);
-  const busyTool = useEditor((state) => state.busyTool);
   const actions = useEditorActions();
-  const actionsRef = useRef(actions);
-  actionsRef.current = actions;
 
   useEffect(() => {
     let disposed = false;
@@ -132,16 +107,12 @@ export function EditorCanvas({ panOnEmpty = false, regionSelect, eyedropper }: E
     // @ts-ignore fabric is installed at runtime via package dependency
     void import("fabric").then((fabric) => {
       if (disposed || !canvasRef.current || !hostRef.current) return;
-      // 選択枠をブランド色 (ピンク) にする。オブジェクトを作る前に基底クラスの
-      // 既定値を書き換えるので、以後どこで作られたレイヤーにも効く
-      // (生成箇所ごとの指定は書き忘れるので1点に集約する)。
-      applyBrandSelectionDefaults(fabric as any);
       const canvas = new (fabric as any).Canvas(canvasRef.current, {
         backgroundColor: "#1a1a1a",
         preserveObjectStacking: true,
-        selection: true,
+        selection: false,
       });
-      applyBrandCanvasSelection(canvas);
+      canvas.skipTargetFind = true;
       fabricCanvasRef.current = canvas;
       setCanvas(canvas);
 
@@ -163,61 +134,6 @@ export function EditorCanvas({ panOnEmpty = false, regionSelect, eyedropper }: E
       const observer = new ResizeObserver(resize);
       observer.observe(hostRef.current);
 
-      canvas.on("selection:created", (event: any) => {
-        const object = event.selected?.[0];
-        setSelectedLayerId(object ? objectId(object) : null);
-        bumpRevision();
-      });
-      canvas.on("selection:updated", (event: any) => {
-        const object = event.selected?.[0];
-        setSelectedLayerId(object ? objectId(object) : null);
-        bumpRevision();
-      });
-      canvas.on("selection:cleared", () => {
-        setSelectedLayerId(null);
-        bumpRevision();
-      });
-      // object:modified は移動/拡縮/回転が「確定した」ときだけ発火する
-      // (moving/scaling/rotating の連打中は発火しない)。ここでだけ履歴を積む。
-      canvas.on("object:modified", () => {
-        bumpRevision();
-        useEditor.getState().pushHistory();
-      });
-      // 以下は連打イベント。プレビュー再描画のため revision は上げるが、履歴は積まない
-      // (moving 連打で 1 ドラッグが数十スナップショットになるのを防ぐ)。確定は
-      // object:modified が拾う。
-      canvas.on("object:moving", bumpRevision);
-      canvas.on("object:scaling", bumpRevision);
-      canvas.on("object:rotating", bumpRevision);
-      // 文字レイヤー (元画素そのまま) はダブルクリックで打ち替え可能なテキストへ変換する。
-      // 世界標準の「文字はダブルクリックで編集」に合わせる (2026-07-03 STΛCK指摘
-      // 「文字が画像になってるけどテキスト情報にならんかな」)。
-      canvas.on("mouse:dblclick", (event: any) => {
-        const target = event?.target;
-        if (!target?.get?.("textSpec")) return;
-        void convertTextImageToTextbox(canvas, target).then((converted) => {
-          if (!converted) return;
-          bumpRevision();
-          useEditor.getState().pushHistory();
-          useEditor
-            .getState()
-            .setMessage(
-              "編集できるテキストに変換しました。もう一度クリックで打ち替え、右のプロパティでフォント・色を変更できます。認識できなかった文字は打ち直してください。",
-            );
-        });
-      });
-      canvas.on("mouse:down", (event: any) => {
-        const tool = useEditor.getState().activeTool;
-        if (tool !== "clickseg" && tool !== "grab") return;
-        const pointer = canvas.getPointer(event.e);
-        const objects = canvas.getObjects?.() ?? [];
-        const imageWidth = Math.max(...objects.map((object: any) => object.left + (object.width ?? 0)), canvas.getWidth?.() ?? 1);
-        const imageHeight = Math.max(...objects.map((object: any) => object.top + (object.height ?? 0)), canvas.getHeight?.() ?? 1);
-        const x = Math.min(1, Math.max(0, pointer.x / Math.max(1, imageWidth)));
-        const y = Math.min(1, Math.max(0, pointer.y / Math.max(1, imageHeight)));
-        void actionsRef.current.handleCanvasClickForTool(x, y);
-      });
-
       cleanup = () => {
         observer.disconnect();
         canvas.dispose?.();
@@ -230,7 +146,27 @@ export function EditorCanvas({ panOnEmpty = false, regionSelect, eyedropper }: E
       disposed = true;
       cleanup?.();
     };
-  }, [bumpRevision, setCanvas, setSelectedLayerId]);
+  }, [bumpRevision, setCanvas]);
+
+  // 読み込まれた画像は常に「見るだけ」にする。選択・移動・拡縮を入口ごと閉じる。
+  useEffect(() => {
+    const viewerCanvas = liveCanvas as {
+      selection?: boolean;
+      skipTargetFind?: boolean;
+      discardActiveObject?: () => void;
+      getObjects?: () => Array<{ set?: (values: Record<string, unknown>) => void }>;
+      requestRenderAll?: () => void;
+    } | null;
+    if (!viewerCanvas) return;
+    viewerCanvas.selection = false;
+    viewerCanvas.skipTargetFind = true;
+    viewerCanvas.discardActiveObject?.();
+    for (const object of viewerCanvas.getObjects?.() ?? []) {
+      object.set?.({ selectable: false, evented: false, hasControls: false, hasBorders: false });
+    }
+    useEditor.getState().setSelectedLayerId(null);
+    viewerCanvas.requestRenderAll?.();
+  }, [liveCanvas, revision]);
 
   useEffect(() => {
     const typing = (target: EventTarget | null) => {
@@ -265,46 +201,7 @@ export function EditorCanvas({ panOnEmpty = false, regionSelect, eyedropper }: E
     };
   }, []);
 
-  useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    const store = useEditMagic.getState();
-    void listenEditMagicProgress((payload) => store.setProgress(payload)).then((fn) => {
-      unlisten = fn;
-    });
-    return () => unlisten?.();
-  }, []);
-
-  // 外部 OS ファイル / 別モニタからの Tauri ネイティブ D&D は window 全体イベント
-  // として attachWindowDragDrop が受ける。編集タブがアクティブな間だけ、path 取り込み
-  // ハンドラを store に登録して橋渡しする (非 React の attachWindowDragDrop から呼べる)。
-  const setPathIngestor = useEditor((state) => state.setPathIngestor);
-  useEffect(() => {
-    setPathIngestor((path) => {
-      void actionsRef.current.saveDroppedPathAndRunMagic(path);
-    });
-    return () => setPathIngestor(null);
-  }, [setPathIngestor]);
-
-  const drop = (event: React.DragEvent<HTMLDivElement>) => {
-    if (!isImageDrop(event.dataTransfer)) return;
-    event.preventDefault();
-    // アプリ内部の参照ドラッグ (gallery / preset) は path をそのまま取り込む。
-    // 外部 OS ファイルは File 経由で writeUpload してから取り込む。
-    const { refs, files } = extractDropped(event.dataTransfer);
-    const internalPath = refs[0]?.path;
-    if (internalPath) {
-      void actionsRef.current.saveDroppedPathAndRunMagic(internalPath);
-      return;
-    }
-    const file = files[0];
-    if (file) {
-      void fileToUploadReference(file).then((ref) => {
-        void actionsRef.current.saveDroppedPathAndRunMagic(ref.path);
-      });
-    }
-  };
-
-  const statusText = progress ? progressLabel(progress.kind) : message;
+  const statusText = message;
   void revision;
   const viewportCanvas = liveCanvas as ViewportCanvas | null;
   const baseSize = liveCanvas ? getCanvasBaseSize(liveCanvas as never) : null;
@@ -420,8 +317,6 @@ export function EditorCanvas({ panOnEmpty = false, regionSelect, eyedropper }: E
   return (
     <main
       ref={hostRef}
-      onDrop={drop}
-      onDragOver={(event) => event.preventDefault()}
       onWheel={wheelZoom}
       onPointerDownCapture={startPan}
       onPointerMoveCapture={movePan}
@@ -446,39 +341,13 @@ export function EditorCanvas({ panOnEmpty = false, regionSelect, eyedropper }: E
         />
       ) : null}
 
-      {/*
-        スポイト。範囲選択オーバーレイ (z-10) より上に置き、拾う間だけクリックを奪う。
-        fabric の座標変換は RegionSelectOverlay と同じ式 (画面 → scene) を使う。
-        pickCanvasColorAt はキャンバスの実ピクセルを読むので、下地の元画像でも
-        既に置いた塗りでも「見えている色」がそのまま拾える。
-      */}
-      {eyedropper?.active && sourceImagePath && liveCanvas ? (
-        <div
-          className="absolute inset-0 z-20 cursor-crosshair"
-          role="presentation"
-          onPointerDown={(event) => {
-            const rect = event.currentTarget.getBoundingClientRect();
-            const vpt = (liveCanvas as { viewportTransform?: number[] }).viewportTransform;
-            const zoom = vpt?.[0] ?? 1;
-            const x = (event.clientX - rect.left - (vpt?.[4] ?? 0)) / zoom;
-            const y = (event.clientY - rect.top - (vpt?.[5] ?? 0)) / zoom;
-            const hex = pickCanvasColorAt(liveCanvas, { x, y });
-            if (hex) eyedropper.onPick(hex);
-          }}
-        >
-          <div className="pointer-events-none absolute left-1/2 top-4 -translate-x-1/2 rounded-full border border-pink-400/60 bg-[#101010]/95 px-3 py-1.5 text-[11px] font-bold text-pink-100 shadow-xl">
-            下地にしたい色をクリック
-          </div>
-        </div>
-      ) : null}
-
       {!sourceImagePath ? (
         <div className="pointer-events-none absolute inset-0 flex items-center justify-center p-8">
           <div className="pointer-events-auto max-w-sm rounded-2xl border border-dashed border-pink-400/50 bg-[#101010]/90 p-6 text-center shadow-2xl">
             <div className="flex justify-center text-pink-300">
-              <DropLayersIcon />
+              <ImageIcon />
             </div>
-            <h3 className="mt-3 text-sm font-black text-white">画像をドロップ</h3>
+            <h3 className="mt-3 text-sm font-black text-white">画像を選ぶ</h3>
             <p className="mt-2 text-xs font-bold leading-5 text-neutral-400">
               開いたら下の入力欄に指示を書くだけ。
               直したい場所をドラッグで囲めば、そこだけ直せます。
@@ -520,40 +389,6 @@ export function EditorCanvas({ panOnEmpty = false, regionSelect, eyedropper }: E
             ) : null}
           </div>
           <span>{Math.round(baseSize.width)}x{Math.round(baseSize.height)} px</span>
-        </div>
-      ) : null}
-
-      {activeTool === "clickseg" ? (
-        <div className="absolute left-4 top-4 rounded-full border border-amber-300/60 bg-amber-300/15 px-3 py-1 text-xs font-black text-amber-100">
-          対象をクリック
-        </div>
-      ) : null}
-
-      {activeTool === "grab" && !grabPreview ? (
-        <div className="absolute left-4 top-4 rounded-full border border-pink-400/60 bg-pink-500/15 px-3 py-1 text-xs font-black text-pink-100">
-          掴みたい対象をクリック
-        </div>
-      ) : null}
-
-      {activeTool === "grab" && grabPreview ? (
-        <div className="absolute left-1/2 top-4 flex -translate-x-1/2 items-center gap-2 rounded-full border border-pink-400/60 bg-[#101010]/95 px-3 py-1.5 shadow-xl">
-          <span className="text-xs font-bold text-neutral-200">この範囲を掴みますか?</span>
-          <button
-            type="button"
-            onClick={() => void actions.confirmGrab()}
-            disabled={busyTool === "grab"}
-            className="rounded-full bg-pink-500 px-3 py-1 text-xs font-black text-white hover:bg-pink-600 disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-500"
-          >
-            {busyTool === "grab" ? "処理中…" : "掴む"}
-          </button>
-          <button
-            type="button"
-            onClick={() => actions.cancelGrab()}
-            disabled={busyTool === "grab"}
-            className="rounded-full border border-[#343434] px-3 py-1 text-xs font-bold text-neutral-300 hover:bg-[#1a1a1a] disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            やり直す
-          </button>
         </div>
       ) : null}
 
@@ -615,22 +450,7 @@ function CanvasErrorCard({ message, onDismiss }: { message: string; onDismiss: (
   );
 }
 
-function progressLabel(kind: string): string {
-  const labels: Record<string, string> = {
-    started: "レイヤー分解を開始…",
-    detectingText: "テキストを検出中…",
-    removingText: "テキストを除去中…",
-    segmenting: "人物を切り抜き中…",
-    segmentingObjects: "物体を検出中…",
-    inpaintingBackground: "背景を補完中…",
-    buildingTextLayers: "レイヤーを構築中…",
-    completed: "完了しました",
-    failed: "失敗しました",
-  };
-  return labels[kind] ?? kind;
-}
-
-function DropLayersIcon() {
+function ImageIcon() {
   return (
     <svg
       width={40}

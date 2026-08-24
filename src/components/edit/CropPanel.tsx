@@ -47,7 +47,7 @@ export function CropPanel({ region, onApply, onClear, busy }: Props) {
       </button>
 
       <p className="mt-1.5 text-[10px] font-bold leading-4 text-neutral-500">
-        置いた文字や直した部分も、位置関係そのままで一緒に切り抜かれます。『戻す』で元に戻せます。
+        置いた文字や直した部分も、位置関係そのままで一緒に切り抜かれます。右の履歴から戻せます。
       </p>
     </div>
   );

@@ -4,24 +4,17 @@ export type EditToolId =
   | "ai"
   | "region"
   | "crop"
-  | "text"
-  | "shape"
-  | "adjust"
-  | "words"
-  | "layers"
-  | "place";
+  | "adjust";
 
 type EditToolRailProps = {
-  activeTool: EditToolId | "select";
+  activeTool: EditToolId;
   disabled: boolean;
-  recognizingText: boolean;
   removingBackground: boolean;
   onSelect: (tool: EditToolId) => void;
-  onDetectText: () => void;
   onRemoveBackground: () => void;
 };
 
-type OneShotToolId = "text-detect" | "background";
+type OneShotToolId = "background";
 
 const TOOLS: ReadonlyArray<{
   id: EditToolId | OneShotToolId;
@@ -31,23 +24,15 @@ const TOOLS: ReadonlyArray<{
   { id: "ai", label: "ことばで直す", icon: <SparklesIcon /> },
   { id: "region", label: "囲んで直す", icon: <FrameIcon /> },
   { id: "crop", label: "切り抜き", icon: <CropIcon /> },
-  { id: "text", label: "文字", icon: <TextIcon /> },
-  { id: "shape", label: "図形", icon: <ShapeIcon /> },
   { id: "adjust", label: "調整", icon: <AdjustIcon /> },
-  { id: "text-detect", label: "文字認識", icon: <ScanTextIcon /> },
-  { id: "words", label: "ことばで分離", icon: <SplitWordsIcon /> },
   { id: "background", label: "背景透過", icon: <BackgroundIcon /> },
-  { id: "layers", label: "レイヤー分解", icon: <LayersIcon /> },
-  { id: "place", label: "画像を置く", icon: <ImageIcon /> },
 ];
 
 export function EditToolRail({
   activeTool,
   disabled,
-  recognizingText,
   removingBackground,
   onSelect,
-  onDetectText,
   onRemoveBackground,
 }: EditToolRailProps) {
   return (
@@ -56,11 +41,9 @@ export function EditToolRail({
       className="flex items-center rounded-xl border border-[#2a2a2a] bg-[#1b1b1b] px-2 py-1.5 shadow-2xl"
     >
       {TOOLS.map((item) => {
-        const oneShot = item.id === "background" || item.id === "text-detect";
+        const oneShot = item.id === "background";
         const active = !oneShot && activeTool === item.id;
-        const busy =
-          (item.id === "background" && removingBackground) ||
-          (item.id === "text-detect" && recognizingText);
+        const busy = item.id === "background" && removingBackground;
         return (
           <button
             key={item.id}
@@ -70,7 +53,6 @@ export function EditToolRail({
             disabled={disabled || busy}
             onClick={() => {
               if (item.id === "background") onRemoveBackground();
-              else if (item.id === "text-detect") onDetectText();
               else onSelect(item.id);
             }}
             className={`group relative flex h-9 w-9 items-center justify-center rounded-lg transition ${
@@ -119,36 +101,12 @@ function CropIcon() {
   return <Icon><path d="M6 3v13a2 2 0 0 0 2 2h13M3 6h13a2 2 0 0 1 2 2v13" /></Icon>;
 }
 
-function TextIcon() {
-  return <Icon><path d="M5 5h14M12 5v14M8 19h8" /></Icon>;
-}
-
-function ShapeIcon() {
-  return <Icon><rect x="3.5" y="3.5" width="9" height="9" rx="1.5" /><circle cx="16.5" cy="16.5" r="4" /></Icon>;
-}
-
 function AdjustIcon() {
   return <Icon><path d="M4 7h10M18 7h2M4 17h2M10 17h10" /><circle cx="16" cy="7" r="2" /><circle cx="8" cy="17" r="2" /></Icon>;
 }
 
-function ScanTextIcon() {
-  return <Icon><path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3M8 9h8M12 9v7M9 16h6" /></Icon>;
-}
-
-function SplitWordsIcon() {
-  return <Icon><path d="M5 6h6M5 10h9M5 14h5M5 18h8" /><path d="M17 5v14M14 8l3-3 3 3M14 16l3 3 3-3" /></Icon>;
-}
-
 function BackgroundIcon() {
   return <Icon><path d="M12 3s5 5.3 5 9a5 5 0 0 1-10 0c0-3.7 5-9 5-9Z" /><path d="M9 15c.8.8 1.7 1.2 3 1.2" /></Icon>;
-}
-
-function LayersIcon() {
-  return <Icon><path d="m12 3 9 5-9 5-9-5 9-5Z" /><path d="m3 12 9 5 9-5M3 16l9 5 9-5" /></Icon>;
-}
-
-function ImageIcon() {
-  return <Icon><rect x="3" y="4" width="18" height="16" rx="2" /><path d="m3 15 4-4 4 4 3-3 7 6" /><circle cx="15.5" cy="8.5" r="1.5" /></Icon>;
 }
 
 function Spinner() {

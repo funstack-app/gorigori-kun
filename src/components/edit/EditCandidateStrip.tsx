@@ -5,15 +5,35 @@ type EditCandidateStripProps = {
   candidates: string[];
   currentPath: string;
   disabled: boolean;
+  downloadDisabled: boolean;
   onSelect: (path: string) => void;
   onDownload: () => void;
 };
+
+type VersionSelectState = {
+  generationBusy: boolean;
+  backgroundRemovalBusy: boolean;
+  toolBusy: boolean;
+  versionInFlight: boolean;
+  versionRecoveryRequired: boolean;
+};
+
+/** 復旧に必要な版選択は、復元不能状態だけでは止めない。 */
+export function isVersionSelectDisabled({
+  generationBusy,
+  backgroundRemovalBusy,
+  toolBusy,
+  versionInFlight,
+}: VersionSelectState): boolean {
+  return generationBusy || backgroundRemovalBusy || toolBusy || versionInFlight;
+}
 
 export function EditCandidateStrip({
   basePath,
   candidates,
   currentPath,
   disabled,
+  downloadDisabled,
   onSelect,
   onDownload,
 }: EditCandidateStripProps) {
@@ -48,7 +68,7 @@ export function EditCandidateStrip({
         <button
           type="button"
           onClick={onDownload}
-          disabled={disabled}
+          disabled={downloadDisabled}
           title="ダウンロード"
           aria-label="ダウンロード"
           className="flex h-10 w-10 items-center justify-center rounded-xl border border-[#2a2a2a] bg-[#1b1b1b] text-neutral-300 shadow-2xl hover:bg-[#262626] hover:text-white disabled:cursor-wait disabled:opacity-50"

@@ -49,6 +49,29 @@ export function addEditVersion(
   };
 }
 
+/**
+ * 生成結果を「未選択の候補」として追加する。候補は版ではないため、現在表示も履歴も動かさない。
+ */
+export function addEditCandidates(session: EditSession, paths: readonly string[]): EditSession {
+  const candidates = [...session.candidates];
+  let changed = false;
+
+  for (const path of paths) {
+    const normalizedPath = path.trim();
+    if (
+      !normalizedPath ||
+      normalizedPath === session.basePath ||
+      candidates.includes(normalizedPath)
+    ) {
+      continue;
+    }
+    candidates.push(normalizedPath);
+    changed = true;
+  }
+
+  return changed ? { ...session, candidates } : session;
+}
+
 /** 候補ストリップへ成功版を確定する。同じ path は一度だけ載せる。 */
 export function confirmEditCandidate(session: EditSession, path: string): EditSession {
   const normalizedPath = path.trim();
