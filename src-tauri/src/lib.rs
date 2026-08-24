@@ -662,6 +662,7 @@ pub fn run() {
             commands::sessions::session_get_full,
             commands::sessions::turn_record,
             commands::sessions::image_record,
+            commands::sessions::list_registered_video_paths,
             commands::sessions::generation_info_for_image,
             commands::sessions::session_export,
             commands::sessions::turns_recent,

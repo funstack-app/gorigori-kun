@@ -1265,6 +1265,11 @@ export type GenerationInfo = {
   generatedAt: number;
 };
 
+export type RegisteredVideoPaths = {
+  paths: string[];
+  generatedRoots: string[];
+};
+
 export const sessions = {
   list: () => invoke<Session[]>("sessions_list"),
   create: (title?: string) => invoke<Session>("session_create", { title }),
@@ -1273,6 +1278,8 @@ export const sessions = {
   getFull: (id: string) => invoke<SessionFull>("session_get_full", { id }),
   recordTurn: (args: TurnRecordArgs) => invoke<TurnRow>("turn_record", { args }),
   recordImage: (args: ImageRecordArgs) => invoke<ImageRow>("image_record", { args }),
+  listRegisteredVideoPaths: () =>
+    invoke<RegisteredVideoPaths>("list_registered_video_paths"),
   exportZip: (id: string, destZipPath: string) =>
     invoke<ExportSummary>("session_export", { id, destZipPath }),
   /** Load a past turn (with all generated images) so the chat can

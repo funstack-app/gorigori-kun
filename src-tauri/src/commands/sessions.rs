@@ -180,7 +180,56 @@ pub struct GenerationInfo {
     pub generated_at: i64,
 }
 
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RegisteredVideoPaths {
+    pub paths: Vec<String>,
+    pub generated_roots: Vec<String>,
+}
+
+async fn registered_video_paths(pool: &sqlx::SqlitePool) -> Result<Vec<String>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT DISTINCT path FROM images \
+         WHERE media_type = 'video' AND turn_id IS NOT NULL AND turn_id != '' \
+         ORDER BY path ASC",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .iter()
+        .map(|row| row.get::<String, _>("path"))
+        .collect())
+}
+
+fn existing_generated_video_roots() -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    [
+        crate::images::watcher::generated_images_dir(),
+        crate::images::watcher::legacy_generated_images_dir(),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|path| path.is_dir())
+    .filter(|path| seen.insert(path.clone()))
+    .map(|path| path.to_string_lossy().into_owned())
+    .collect()
+}
+
 // ──────────────────────────── commands ────────────────────────────
+
+#[tauri::command]
+pub async fn list_registered_video_paths(app: AppHandle) -> Result<RegisteredVideoPaths, String> {
+    let pool = get_sqlite_pool(&app).await?;
+    let paths = registered_video_paths(&pool)
+        .await
+        .map_err(|e| format!("list_registered_video_paths failed: {e}"))?;
+
+    Ok(RegisteredVideoPaths {
+        paths,
+        generated_roots: existing_generated_video_roots(),
+    })
+}
 
 #[tauri::command]
 pub async fn sessions_list(app: AppHandle) -> Result<Vec<Session>, String> {
@@ -986,4 +1035,44 @@ pub async fn session_export(
         exported_images: exported,
         missing_images: missing,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::registered_video_paths;
+
+    #[tokio::test]
+    async fn registered_video_paths_only_returns_video_rows_with_non_empty_turn_ids() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite pool");
+        sqlx::query("CREATE TABLE images (path TEXT, media_type TEXT, turn_id TEXT)")
+            .execute(&pool)
+            .await
+            .expect("create images table");
+
+        for (path, media_type, turn_id) in [
+            ("/library/registered.mp4", "video", Some("turn-1")),
+            ("/library/registered.mp4", "video", Some("turn-2")),
+            ("/library/no-turn.mp4", "video", None),
+            ("/library/empty-turn.mp4", "video", Some("")),
+            ("/library/still.png", "image", Some("turn-3")),
+        ] {
+            sqlx::query("INSERT INTO images (path, media_type, turn_id) VALUES (?1, ?2, ?3)")
+                .bind(path)
+                .bind(media_type)
+                .bind(turn_id)
+                .execute(&pool)
+                .await
+                .expect("insert test image row");
+        }
+
+        let paths = registered_video_paths(&pool)
+            .await
+            .expect("query registered video paths");
+
+        assert_eq!(paths, vec!["/library/registered.mp4"]);
+    }
 }

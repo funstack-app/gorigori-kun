@@ -83,6 +83,82 @@ export function galleryItemMediaType(item: GalleryItem): "image" | "video" {
   return item.mediaType ?? inferGalleryMediaType(item.path);
 }
 
+export type LibraryVideoAllowlist = {
+  registeredPaths: ReadonlySet<string>;
+  generatedRoots: readonly string[];
+};
+
+const VIDEO_ALLOWLIST_TIMEOUT_MS = 3_000;
+const VIDEO_ALLOWLIST_REFRESH_MIN_INTERVAL_MS = 2_000;
+const CREATED_VIDEO_RETRY_INTERVAL_MS = 1_000;
+const CREATED_VIDEO_MAX_REFRESHES = 3;
+
+function normalizeLibraryPath(path: string): string {
+  const normalized = path.replace(/\\/g, "/");
+  return normalized === "/" ? normalized : normalized.replace(/\/+$/, "");
+}
+
+/** 動画だけを履歴台帳または生成専用フォルダに限定する。未取得時は fail-open。 */
+export function shouldIncludeLibraryMedia(
+  path: string,
+  mediaType: "image" | "video",
+  allowlist: LibraryVideoAllowlist | undefined,
+): boolean {
+  if (mediaType === "image" || allowlist === undefined) return true;
+
+  const candidate = normalizeLibraryPath(path);
+  if (allowlist.registeredPaths.has(candidate)) return true;
+
+  return allowlist.generatedRoots.some((rawRoot) => {
+    const root = normalizeLibraryPath(rawRoot);
+    if (!root) return false;
+    return (
+      candidate === root ||
+      candidate.startsWith(root === "/" ? "/" : `${root}/`)
+    );
+  });
+}
+
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchLibraryVideoAllowlist(): Promise<
+  LibraryVideoAllowlist | undefined
+> {
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const result = await Promise.race([
+      sessionsIpc.listRegisteredVideoPaths(),
+      new Promise<never>((_, reject) => {
+        timeoutHandle = setTimeout(
+          () =>
+            reject(
+              new Error(
+                `list_registered_video_paths timed out after ${VIDEO_ALLOWLIST_TIMEOUT_MS}ms`,
+              ),
+            ),
+          VIDEO_ALLOWLIST_TIMEOUT_MS,
+        );
+      }),
+    ]);
+    return {
+      registeredPaths: new Set(result.paths.map(normalizeLibraryPath)),
+      generatedRoots: result.generatedRoots.map(normalizeLibraryPath),
+    };
+  } catch (err) {
+    // fail-open: 台帳取得失敗やタイムアウトで生成動画まで全消えする方が
+    // 実害が大きいため、従来どおり全メディアを通す。
+    console.warn(
+      "list_registered_video_paths failed or timed out; keeping videos visible",
+      err,
+    );
+    return undefined;
+  } finally {
+    if (timeoutHandle !== undefined) clearTimeout(timeoutHandle);
+  }
+}
+
 export type GalleryFilter = "all" | "favorites" | "adopted" | "rejected";
 
 /** 画像の判定ステータス。未設定 (Map に無い) は「候補 (candidate)」扱い。 */
@@ -292,33 +368,105 @@ export const useImages = create<ImagesState>((set, get) => ({
     if (get().attached) return;
     set({ attached: true });
     listenerHandle?.();
-    listenerHandle = await onImageGenerated((ev: ImageEvent) => {
-      set((state) => {
-        // 起動時に届く旧履歴も含め、再生非対応の AVI / MKV は画像として混ぜない。
-        if (isUnsupportedGalleryVideo(ev.path)) return state;
-        if (state.knownPaths.has(ev.path)) return state;
-        const known = new Set(state.knownPaths);
-        known.add(ev.path);
-        // Bind to the most recently-started in-flight turn so concurrent
-        // turns don't smear provenance.
-        const turnId =
-          ev.kind === "created"
-            ? state.activeTurns[state.activeTurns.length - 1]
-            : undefined;
-        const item: GalleryItem = {
-          path: ev.path,
-          name: ev.name,
-          bucket: ev.bucket,
-          mtimeMs: ev.mtime_ms,
-          size: ev.size,
-          kind: ev.kind,
-          turnId,
-          // ImageEvent の旧形式には種別フィールドが無い。動画拡張子をここで
-          // mediaType="video" に補完し、画像と同じ仮想一覧へ載せる。
-          mediaType: inferGalleryMediaType(ev.path),
-        };
-        return { items: [item, ...state.items], knownPaths: known };
+    let currentVideoAllowlist: LibraryVideoAllowlist | undefined;
+    const initialVideoAllowlistPromise = fetchLibraryVideoAllowlist().then(
+      (allowlist) => {
+        currentVideoAllowlist = allowlist;
+        return allowlist;
+      },
+    );
+    let refreshInFlight:
+      | Promise<LibraryVideoAllowlist | undefined>
+      | undefined;
+    let lastRefreshStartedAt = Number.NEGATIVE_INFINITY;
+
+    const refreshVideoAllowlist = () => {
+      // 同時に外れた複数イベントは、同じ1本の再取得結果を共有する。
+      if (refreshInFlight) return refreshInFlight;
+
+      refreshInFlight = (async () => {
+        const throttleMs = Math.max(
+          0,
+          lastRefreshStartedAt +
+            VIDEO_ALLOWLIST_REFRESH_MIN_INTERVAL_MS -
+            Date.now(),
+        );
+        if (throttleMs > 0) await wait(throttleMs);
+        lastRefreshStartedAt = Date.now();
+        currentVideoAllowlist = await fetchLibraryVideoAllowlist();
+        return currentVideoAllowlist;
+      })().finally(() => {
+        refreshInFlight = undefined;
       });
+      return refreshInFlight;
+    };
+
+    listenerHandle = await onImageGenerated((ev: ImageEvent) => {
+      // 画像は従来どおり即時追加する。動画だけ台帳取得後に判定する。
+      if (isUnsupportedGalleryVideo(ev.path)) return;
+      const mediaType = inferGalleryMediaType(ev.path);
+      const activeTurnsAtEvent = get().activeTurns;
+      const eventTurnId =
+        ev.kind === "created"
+          ? activeTurnsAtEvent[activeTurnsAtEvent.length - 1]
+          : undefined;
+
+      const addEvent = () => {
+        set((state) => {
+          if (state.knownPaths.has(ev.path)) return state;
+          const known = new Set(state.knownPaths);
+          known.add(ev.path);
+          // Bind to the most recently-started in-flight turn so concurrent
+          // turns don't smear provenance.
+          const item: GalleryItem = {
+            path: ev.path,
+            name: ev.name,
+            bucket: ev.bucket,
+            mtimeMs: ev.mtime_ms,
+            size: ev.size,
+            kind: ev.kind,
+            turnId: eventTurnId,
+            // ImageEvent の旧形式には種別フィールドが無い。動画拡張子をここで
+            // mediaType="video" に補完し、画像と同じ仮想一覧へ載せる。
+            mediaType,
+          };
+          return { items: [item, ...state.items], knownPaths: known };
+        });
+      };
+
+      if (mediaType === "image") {
+        addEvent();
+        return;
+      }
+
+      void (async () => {
+        // 初回取得の完了だけを待つ。後続イベントで、再取得済みの新しいセットを
+        // 初回の古いセットへ巻き戻さない。
+        await initialVideoAllowlistPromise;
+        if (
+          shouldIncludeLibraryMedia(ev.path, mediaType, currentVideoAllowlist)
+        ) {
+          addEvent();
+          return;
+        }
+
+        const maxRefreshes =
+          ev.kind === "created" ? CREATED_VIDEO_MAX_REFRESHES : 1;
+        for (let attempt = 0; attempt < maxRefreshes; attempt += 1) {
+          // created は DB 書き込みが watcher 通知より遅れる場合があるため待つ。
+          // initial は起動スキャンなので待たずに1回だけ確認し、ループさせない。
+          if (ev.kind === "created") {
+            await wait(CREATED_VIDEO_RETRY_INTERVAL_MS);
+          }
+          const refreshedAllowlist = await refreshVideoAllowlist();
+          if (
+            shouldIncludeLibraryMedia(ev.path, mediaType, refreshedAllowlist)
+          ) {
+            addEvent();
+            return;
+          }
+        }
+      })();
     });
   },
 
