@@ -197,9 +197,6 @@ export function SkillsWorkspace({ onUseSkill }: { onUseSkill?: () => void }) {
       <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
           {VISIBLE_GORI_SKILLS.map((skill) => {
-            // ygn: 実パスは Rust が返したものだけを出す。実体が無い組み込み
-            // スキルにありもしないパス (~/.codex/...) を表示しない。
-            const realPath = installedPathById.get(skill.id) ?? null;
             const isComingSoon = skill.comingSoon === true;
             const isLocked = !skill.availableInApp;
             const isActive = skillEnabled && activeSkillId === skill.id;
@@ -235,11 +232,8 @@ export function SkillsWorkspace({ onUseSkill }: { onUseSkill?: () => void }) {
                 <p className="mt-2 min-h-[54px] text-xs leading-relaxed text-neutral-400">
                   {skill.description}
                 </p>
-                {realPath && (
-                  <p className="mt-3 truncate rounded-lg border border-[#242424] bg-[#101010] px-2 py-1.5 font-mono text-[10px] text-neutral-500">
-                    {realPath}
-                  </p>
-                )}
+                {/* 実パスの表示は STΛCK 指示 (2026-08-25) で撤去。ユーザーに
+                    ローカルの絶対パスを見せる意味がなく、視覚ノイズになるため。 */}
 
                 <div className="mt-auto space-y-2 pt-4">
                   <button

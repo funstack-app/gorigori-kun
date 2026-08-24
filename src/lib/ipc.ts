@@ -1199,7 +1199,8 @@ export type TurnRow = {
   prompt: string;
   model?: string;
   effort?: string;
-  provider?: ImageBatchProvider | null;
+  // DB は TEXT。接続先は12社に増えたためユニオンで縛らない (Krea 等のタグ消失の再発防止)
+  provider?: string | null;
   modelJobSetType?: string | null;
   modelDisplayName?: string | null;
   refImagePaths: string[];
@@ -1229,7 +1230,7 @@ export type TurnRecordArgs = {
   prompt: string;
   model?: string;
   effort?: string;
-  provider?: ImageBatchProvider | null;
+  provider?: string | null;
   modelJobSetType?: string | null;
   modelDisplayName?: string | null;
   refImagePaths?: string[];
@@ -1295,7 +1296,7 @@ export type PromptHistoryRow = {
   count: number;
   kind: "app-server" | "batch";
   createdAt: number;
-  provider?: ImageBatchProvider | null;
+  provider?: string | null;
   modelJobSetType?: string | null;
   modelDisplayName?: string | null;
   thumbPath?: string;

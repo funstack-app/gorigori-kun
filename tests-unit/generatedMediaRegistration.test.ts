@@ -170,4 +170,25 @@ describe("生成動画の明示登録", () => {
     expect(commands.filter((entry) => entry.cmd === "turn_record")).toHaveLength(1);
     expect(commands.filter((entry) => entry.cmd === "image_record")).toHaveLength(1);
   });
+
+  it("Krea など全接続先の provider を履歴 turn に残す (codex だけ無印)", async () => {
+    const commands = installRegistrationMock();
+    const { useSessions } = await import("../src/lib/store/sessions");
+    const { registerGeneratedMedia } = await import("../src/lib/store/images");
+    useSessions.setState({ activeSessionId: "session-1" });
+
+    await registerGeneratedMedia({
+      paths: ["/generated/krea/clip.mp4"],
+      mediaType: "video",
+      prompt: "ゴリラが踊る",
+      providerId: "krea",
+      providerLabel: "Krea",
+    });
+
+    const turns = commands.filter((entry) => entry.cmd === "turn_record");
+    expect(turns).toHaveLength(1);
+    const turnArgs = turns[0].args.args as Record<string, unknown>;
+    expect(turnArgs.provider).toBe("krea");
+    expect(turnArgs.modelDisplayName).toBe("Krea");
+  });
 });

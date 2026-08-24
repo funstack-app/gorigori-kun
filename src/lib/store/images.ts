@@ -982,10 +982,11 @@ export async function registerGeneratedMedia(
     const { useSessions } = await import("./sessions");
     const sessionStore = useSessions.getState();
     sourceSessionId = sessionStore.activeSessionId;
+    // どの接続先で作ったかは履歴の一次情報。Krea/Runway/Pollo 等もそのまま残す
+    // (旧実装は higgsfield/magnific だけ通すホワイトリストで、他社タグが消えていた。
+    // STΛCK 指摘 2026-08-25)。内蔵 codex 生成だけは従来どおり無印にする。
     const provider =
-      input.providerId === "higgsfield" || input.providerId === "magnific"
-        ? input.providerId
-        : null;
+      input.providerId && input.providerId !== "codex" ? input.providerId : null;
     dbTurnId = await sessionStore.recordTurn({
       sessionId: sessionStore.activeSessionId ?? "",
       prompt: input.prompt,
