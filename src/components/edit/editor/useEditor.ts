@@ -51,7 +51,7 @@ import {
   removeGrabPreviewOverlay,
   showGrabPreviewOverlay,
 } from "./magicLayerToFabric";
-import { restoreCanvas, snapshotCanvas } from "./history";
+import { EditorHistory, restoreCanvas, snapshotCanvas } from "./history";
 import { applyAdjustToCanvas, type AdjustValues } from "./adjustFilters";
 import {
   cropCanvasToRegion,
@@ -73,6 +73,18 @@ const IMAGE_EXTS = ["png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff"];
 export type OpenImageForEditingOptions = {
   /** false のときは、読み込み確認だけ行い sourceImagePath の確定を呼び出し側へ任せる。 */
   commitSourcePath?: boolean;
+};
+
+export type VersionOperationLock = { current: boolean };
+
+type RegionEditedVersionResult = "applied" | "patch-failed" | "version-failed";
+
+type ApplyRegionEditedVersionOptions = {
+  canvas: unknown;
+  applyPatch: () => Promise<boolean>;
+  saveVersion: () => Promise<string | null>;
+  applyVersion: (path: string) => Promise<boolean>;
+  rollbackSession: () => void;
 };
 
 type ApplyEditedVersionOptions = {
@@ -120,6 +132,170 @@ export async function applyEditedVersion({
 
   commit(normalizedPath, nextSession);
   return true;
+}
+
+/**
+ * 版の読み込みを1件ずつにする。null は「すでに別の版を読み込み中なので無視」。
+ * React 外の結合テストでも、画面と同じ連打防止経路を通せるよう小さく切り出す。
+ */
+export async function runVersionOperation(
+  lock: VersionOperationLock,
+  setInFlight: (inFlight: boolean) => void,
+  operation: () => Promise<boolean>,
+): Promise<boolean | null> {
+  if (lock.current) return null;
+  lock.current = true;
+  setInFlight(true);
+  try {
+    return await operation();
+  } finally {
+    lock.current = false;
+    setInFlight(false);
+  }
+}
+
+/**
+ * 囲み編集を「パッチ適用 → 統合画像の保存 → 新版の読み込み」の1取引にする。
+ * 途中で失敗した場合は、処理前のキャンバス・パス・Undo履歴へまとめて戻す。
+ */
+export async function applyRegionEditedVersion({
+  canvas,
+  applyPatch,
+  saveVersion,
+  applyVersion,
+  rollbackSession,
+}: ApplyRegionEditedVersionOptions): Promise<RegionEditedVersionResult> {
+  const beforeSnapshot = snapshotCanvas(canvas);
+  if (beforeSnapshot === null) return "version-failed";
+
+  const beforeState = useEditor.getState();
+  const beforeSourcePath = beforeState.sourceImagePath;
+  const beforeHistory = beforeState.history;
+  const beforeCanUndo = beforeState.canUndo;
+  const beforeCanRedo = beforeState.canRedo;
+  const beforeHistorySuppressed = beforeState.historySuppressed;
+  const beforeSelectedLayerId = beforeState.selectedLayerId;
+  const beforeMessage = beforeState.message;
+  const beforeError = beforeState.error;
+  const beforeViewport = Array.isArray(
+    (canvas as { viewportTransform?: number[] }).viewportTransform,
+  )
+    ? [...((canvas as { viewportTransform: number[] }).viewportTransform)]
+    : null;
+  const beforeBaseSize = (canvas as { __ggBaseSize?: { width: number; height: number } })
+    .__ggBaseSize;
+
+  // 取引中の履歴は仮の箱へ隔離する。失敗時は元の履歴オブジェクトをそのまま戻せる。
+  const transactionHistory = new EditorHistory();
+  transactionHistory.reset(beforeSnapshot);
+  useEditor.setState({ history: transactionHistory, canUndo: false, canRedo: false });
+
+  const rollback = async () => {
+    useEditor.getState().setHistorySuppressed(true);
+    try {
+      await restoreCanvas(canvas, beforeSnapshot);
+      if (beforeViewport) {
+        (canvas as { setViewportTransform?: (transform: number[]) => void })
+          .setViewportTransform?.(beforeViewport);
+      }
+      (canvas as { __ggBaseSize?: { width: number; height: number } }).__ggBaseSize =
+        beforeBaseSize;
+      (canvas as { requestRenderAll?: () => void }).requestRenderAll?.();
+    } catch {
+      // 復元処理の例外で、パス・履歴・サムネの巻き戻しまで止めない。
+    } finally {
+      useEditor.setState({
+        history: beforeHistory,
+        canUndo: beforeCanUndo,
+        canRedo: beforeCanRedo,
+        historySuppressed: beforeHistorySuppressed,
+        sourceImagePath: beforeSourcePath,
+        selectedLayerId: beforeSelectedLayerId,
+        message: beforeMessage,
+        error: beforeError,
+      });
+      useEditor.getState().bumpRevision();
+      rollbackSession();
+    }
+  };
+
+  try {
+    const patched = await applyPatch();
+    if (!patched) {
+      await rollback();
+      return "patch-failed";
+    }
+  } catch {
+    await rollback();
+    return "patch-failed";
+  }
+
+  try {
+    const path = await saveVersion();
+    if (!path || !(await applyVersion(path))) {
+      await rollback();
+      return "version-failed";
+    }
+    return "applied";
+  } catch {
+    await rollback();
+    return "version-failed";
+  }
+}
+
+/**
+ * 画像をキャンバスへ読み込み、成功したときだけ新版をベースラインにする実経路。
+ * 読み込み途中で canvas が空になっても、失敗時は直前の表示へ復元する。
+ */
+export async function openImageForEditing(
+  path: string,
+  options: OpenImageForEditingOptions = {},
+): Promise<boolean> {
+  const liveCanvas = useEditor.getState().canvas ?? (await waitForEditorCanvas());
+  if (!liveCanvas) {
+    useEditor.getState().setError("編集キャンバスを準備できませんでした。もう一度お試しください。");
+    return false;
+  }
+  const previousSnapshot = snapshotCanvas(liveCanvas);
+  const previousViewport = Array.isArray(
+    (liveCanvas as { viewportTransform?: number[] }).viewportTransform,
+  )
+    ? [...((liveCanvas as { viewportTransform: number[] }).viewportTransform)]
+    : null;
+  const previousBaseSize = (
+    liveCanvas as { __ggBaseSize?: { width: number; height: number } }
+  ).__ggBaseSize;
+  try {
+    await showSourceImagePreview(liveCanvas, path);
+    useEditor.getState().resetHistory();
+    if (options.commitSourcePath !== false) useEditor.getState().setSourceImagePath(path);
+    useEditor.getState().bumpRevision();
+    useEditor
+      .getState()
+      .setMessage("画像を開きました。下の入力欄に、直したいところをことばで書いてください。");
+    return true;
+  } catch (caught) {
+    // showSourceImagePreview は読込前にキャンバスを空にするため、失敗時は直前の
+    // スナップショットと表示位置を復元して「前の版を表示したまま」にする。
+    if (previousSnapshot !== null) {
+      try {
+        await restoreCanvas(liveCanvas, previousSnapshot);
+        if (previousViewport) {
+          (liveCanvas as { setViewportTransform?: (transform: number[]) => void })
+            .setViewportTransform?.(previousViewport);
+        }
+        (
+          liveCanvas as { __ggBaseSize?: { width: number; height: number } }
+        ).__ggBaseSize = previousBaseSize;
+        (liveCanvas as { requestRenderAll?: () => void }).requestRenderAll?.();
+        useEditor.getState().bumpRevision();
+      } catch {
+        // 復元失敗より、元の読込エラーを優先して表示する。
+      }
+    }
+    useEditor.getState().setError(caught instanceof Error ? caught.message : String(caught));
+    return false;
+  }
 }
 
 export function useEditorActions() {
@@ -897,62 +1073,6 @@ export function useEditorActions() {
     });
     if (typeof selected !== "string") return;
     await openImageForEditing(selected);
-  };
-
-  /**
-   * 画像を開いた直後の待機状態を作る (勝手に分解を始めない)。
-   * なぜ: 分解方法が「自動レイヤー分解」と「ことばで分離」の2系統になったため、
-   * どちらでいくかはユーザーが選ぶ (2026-07-03 STΛCK指摘)。
-   */
-  const openImageForEditing = async (
-    path: string,
-    options: OpenImageForEditingOptions = {},
-  ): Promise<boolean> => {
-    const liveCanvas = canvas ?? (await waitForEditorCanvas());
-    if (!liveCanvas) {
-      setError("編集キャンバスを準備できませんでした。もう一度お試しください。");
-      return false;
-    }
-    const previousSnapshot = snapshotCanvas(liveCanvas);
-    const previousViewport = Array.isArray(
-      (liveCanvas as { viewportTransform?: number[] }).viewportTransform,
-    )
-      ? [...((liveCanvas as { viewportTransform: number[] }).viewportTransform)]
-      : null;
-    const previousBaseSize = (
-      liveCanvas as { __ggBaseSize?: { width: number; height: number } }
-    ).__ggBaseSize;
-    try {
-      await showSourceImagePreview(liveCanvas, path);
-      resetHistory();
-      if (options.commitSourcePath !== false) setSourceImagePath(path);
-      bumpRevision();
-      // 2026-07-26: 編集タブを「ことばで直す」だけの画面に絞ったため、
-      // 分解・ことばで分離への案内は実在しない導線になった。今ある操作を案内する。
-      setMessage("画像を開きました。下の入力欄に、直したいところをことばで書いてください。");
-      return true;
-    } catch (caught) {
-      // showSourceImagePreview は読込前にキャンバスを空にするため、失敗時は直前の
-      // スナップショットと表示位置を復元して「前の版を表示したまま」にする。
-      if (previousSnapshot !== null) {
-        try {
-          await restoreCanvas(liveCanvas, previousSnapshot);
-          if (previousViewport) {
-            (liveCanvas as { setViewportTransform?: (transform: number[]) => void })
-              .setViewportTransform?.(previousViewport);
-          }
-          (
-            liveCanvas as { __ggBaseSize?: { width: number; height: number } }
-          ).__ggBaseSize = previousBaseSize;
-          (liveCanvas as { requestRenderAll?: () => void }).requestRenderAll?.();
-          bumpRevision();
-        } catch {
-          // 復元失敗より、元の読込エラーを優先して表示する。
-        }
-      }
-      setError(caught instanceof Error ? caught.message : String(caught));
-      return false;
-    }
   };
 
   /**

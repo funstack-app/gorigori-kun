@@ -4,6 +4,7 @@ type EditCandidateStripProps = {
   basePath: string;
   candidates: string[];
   currentPath: string;
+  disabled: boolean;
   onSelect: (path: string) => void;
   onDownload: () => void;
 };
@@ -12,6 +13,7 @@ export function EditCandidateStrip({
   basePath,
   candidates,
   currentPath,
+  disabled,
   onSelect,
   onDownload,
 }: EditCandidateStripProps) {
@@ -28,9 +30,10 @@ export function EditCandidateStrip({
             key={path}
             type="button"
             onClick={() => onSelect(path)}
+            disabled={disabled}
             title={index === 0 ? "オリジナル" : `編集候補 ${index}`}
             aria-label={index === 0 ? "オリジナル" : `編集候補 ${index}`}
-            className={`h-12 w-12 overflow-hidden rounded-lg border bg-[#101010] ${
+            className={`h-12 w-12 overflow-hidden rounded-lg border bg-[#101010] disabled:cursor-wait disabled:opacity-50 ${
               currentPath === path
                 ? "border-indigo-400 ring-1 ring-indigo-400"
                 : "border-[#333] hover:border-neutral-500"
@@ -44,9 +47,10 @@ export function EditCandidateStrip({
         <button
           type="button"
           onClick={onDownload}
+          disabled={disabled}
           title="ダウンロード"
           aria-label="ダウンロード"
-          className="flex h-10 w-10 items-center justify-center rounded-xl border border-[#2a2a2a] bg-[#1b1b1b] text-neutral-300 shadow-2xl hover:bg-[#262626] hover:text-white"
+          className="flex h-10 w-10 items-center justify-center rounded-xl border border-[#2a2a2a] bg-[#1b1b1b] text-neutral-300 shadow-2xl hover:bg-[#262626] hover:text-white disabled:cursor-wait disabled:opacity-50"
         >
           <DownloadIcon />
         </button>

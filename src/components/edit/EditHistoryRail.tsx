@@ -6,6 +6,7 @@ type EditHistoryRailProps = {
   basePath: string;
   versions: EditVersion[];
   currentPath: string;
+  disabled: boolean;
   onSelect: (path: string) => void;
 };
 
@@ -13,6 +14,7 @@ export function EditHistoryRail({
   basePath,
   versions,
   currentPath,
+  disabled,
   onSelect,
 }: EditHistoryRailProps) {
   const paths = [...versions].reverse().map((version) => version.path);
@@ -27,8 +29,9 @@ export function EditHistoryRail({
           key={path}
           type="button"
           onClick={() => onSelect(path)}
+          disabled={disabled}
           aria-label={index === paths.length ? "元画像" : `編集履歴 ${paths.length - index}`}
-          className={`w-14 shrink-0 overflow-hidden rounded-lg border bg-[#101010] ${
+          className={`w-14 shrink-0 overflow-hidden rounded-lg border bg-[#101010] disabled:cursor-wait disabled:opacity-50 ${
             currentPath === path
               ? "border-indigo-400 ring-2 ring-indigo-400/70"
               : "border-[#333] hover:border-neutral-500"
