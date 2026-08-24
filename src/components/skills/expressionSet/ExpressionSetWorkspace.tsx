@@ -52,6 +52,7 @@ import {
  */
 export function ExpressionSetWorkspace() {
   const openPreview = useImagePreview((s) => s.open);
+  const hydrate = useCharacterSheetRun((s) => s.hydrate);
   const enterMode = useCharacterSheetRun((s) => s.enterMode);
   const pushToast = useToasts((s) => s.push);
 
@@ -64,7 +65,6 @@ export function ExpressionSetWorkspace() {
   useEffect(() => {
     if (!visible) return;
     let cancelled = false;
-    enterMode("expression");
     async function registerEventListener() {
       try {
         await ensureCharacterSheetEventListener();
@@ -78,13 +78,19 @@ export function ExpressionSetWorkspace() {
         });
       }
     }
-    void registerEventListener();
-    // 生成枠のフェーズ通知 (キャラ登録側と同じ。張れなくても生成は動く)。
-    void ensureSheetSlotPhaseListener().catch(() => {});
+    async function enterWorkspace() {
+      await hydrate();
+      if (cancelled) return;
+      enterMode("expression");
+      void registerEventListener();
+      // 生成枠のフェーズ通知 (キャラ登録側と同じ。張れなくても生成は動く)。
+      void ensureSheetSlotPhaseListener().catch(() => {});
+    }
+    void enterWorkspace();
     return () => {
       cancelled = true;
     };
-  }, [visible, enterMode, pushToast]);
+  }, [visible, hydrate, enterMode, pushToast]);
 
   return (
     <section

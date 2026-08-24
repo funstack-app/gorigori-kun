@@ -163,6 +163,7 @@ function buildCompositeSheetParams(
  */
 export function CharacterRegisterWorkspace() {
   const openPreview = useImagePreview((s) => s.open);
+  const hydrate = useCharacterSheetRun((s) => s.hydrate);
   const enterMode = useCharacterSheetRun((s) => s.enterMode);
   const pushToast = useToasts((s) => s.push);
 
@@ -180,7 +181,6 @@ export function CharacterRegisterWorkspace() {
   useEffect(() => {
     if (!visible) return;
     let cancelled = false;
-    enterMode("character");
     async function registerEventListener() {
       try {
         await ensureCharacterSheetEventListener();
@@ -194,14 +194,20 @@ export function CharacterRegisterWorkspace() {
         });
       }
     }
-    void registerEventListener();
-    // 生成枠のフェーズ通知。失敗しても生成は動くので画面は止めない
-    // (「順番待ち」の判別が従来どおりカットイベント基準に落ちるだけ)。
-    void ensureSheetSlotPhaseListener().catch(() => {});
+    async function enterWorkspace() {
+      await hydrate();
+      if (cancelled) return;
+      enterMode("character");
+      void registerEventListener();
+      // 生成枠のフェーズ通知。失敗しても生成は動くので画面は止めない
+      // (「順番待ち」の判別が従来どおりカットイベント基準に落ちるだけ)。
+      void ensureSheetSlotPhaseListener().catch(() => {});
+    }
+    void enterWorkspace();
     return () => {
       cancelled = true;
     };
-  }, [visible, enterMode, pushToast]);
+  }, [visible, hydrate, enterMode, pushToast]);
 
   return (
     <section

@@ -8,7 +8,14 @@ import type {
   SheetPromptMode,
 } from "../character/types";
 import type { SkillJob, SkillJobLedger } from "../skillJobs";
+import {
+  characterSheetRunGuard,
+  isDraftPristine,
+  normalizeSnapshotOnLoad,
+  snapshotCharacterSheetRun,
+} from "./characterSheetRunPersist";
 import { syncCutRunStatus, useGenerationStatus } from "./generationStatus";
+import { describeOutcome } from "./persistGuard";
 import { useToasts } from "./toasts";
 
 /**
@@ -102,6 +109,18 @@ export type SheetJobInput = {
   regenerateTargetPresetId: string | null;
 };
 
+/** 下書きの初期値。ストア初期化と復元時の pristine 判定で共有する唯一の正本。 */
+export const INITIAL_DRAFT: SheetJobInput = {
+  characterName: "",
+  characterImagePaths: [],
+  attributes: "",
+  aspectRatio: "1:1",
+  sheetPromptMode: "default",
+  customSheetPrompt: "",
+  sheetBackground: "auto",
+  regenerateTargetPresetId: null,
+};
+
 /**
  * 生成枠 (Rust の GLOBAL_GEN_SEMAPHORE) から見た、この run の状態。
  *
@@ -126,16 +145,7 @@ const IDLE_JOB: SheetJob = {
   jobId: "",
   jobMode: "character",
   activeRunId: "",
-  input: {
-    characterName: "",
-    characterImagePaths: [],
-    attributes: "",
-    aspectRatio: "1:1",
-    sheetPromptMode: "default",
-    customSheetPrompt: "",
-    sheetBackground: "auto",
-    regenerateTargetPresetId: null,
-  },
+  input: { ...INITIAL_DRAFT, characterImagePaths: [...INITIAL_DRAFT.characterImagePaths] },
   cuts: {},
   cutOrder: [],
   cutStartedAt: {},
@@ -145,6 +155,10 @@ const IDLE_JOB: SheetJob = {
 };
 
 type CharacterSheetRunState = SkillJobLedger<SheetJob> & {
+  /** 保存済みの作業状態を読み終えたか。読み終えるまでは自動保存しない。 */
+  hydrated: boolean;
+  hydrate: () => Promise<void>;
+
   // ===== 所有スキル判別 =====
   /** この画面を所有するスキル(character/expression)。混線防止の判別子。 */
   mode: CharacterSheetRunMode;
@@ -378,7 +392,72 @@ function withJob(
   return { ...jobs, [jobId]: { ...prev, ...patch } };
 }
 
+let characterSheetHydrateInFlight: Promise<void> | null = null;
+
 export const useCharacterSheetRun = create<CharacterSheetRunState>((set, get) => ({
+  hydrated: false,
+  hydrate: () => {
+    if (get().hydrated) return Promise.resolve();
+    if (characterSheetHydrateInFlight) return characterSheetHydrateInFlight;
+
+    characterSheetHydrateInFlight = (async () => {
+      try {
+        const outcome = await characterSheetRunGuard.load();
+        if (outcome.status === "ok") {
+          const snapshot = normalizeSnapshotOnLoad(outcome.value);
+          set((state) => {
+            if (isDraftPristine(state)) {
+              return {
+                mode: snapshot.mode,
+                step: snapshot.step,
+                characterName: snapshot.characterName,
+                characterImagePaths: [...snapshot.characterImagePaths],
+                attributes: snapshot.attributes,
+                aspectRatio: snapshot.aspectRatio,
+                sheetPromptMode: snapshot.sheetPromptMode,
+                customSheetPrompt: snapshot.customSheetPrompt,
+                sheetBackground: snapshot.sheetBackground,
+                regenerateTargetPresetId: snapshot.regenerateTargetPresetId,
+                jobs: snapshot.jobs,
+                jobOrder: [...snapshot.jobOrder],
+                focusedJobId: snapshot.focusedJobId,
+                // 復元中に始めた run の逆引きは消さない (Sol 検証 blocking#1 / 2026-08-24)。
+                // 復元ジョブの run は追加しない = 復元 run の後着イベントだけが落ちる。
+                runIndex: state.runIndex,
+              };
+            }
+
+            const jobs = { ...state.jobs };
+            const restoredOrder: string[] = [];
+            for (const jobId of snapshot.jobOrder) {
+              if (jobs[jobId]) continue;
+              const restored = snapshot.jobs[jobId];
+              if (!restored) continue;
+              jobs[jobId] = restored;
+              restoredOrder.push(jobId);
+            }
+            return {
+              jobs,
+              jobOrder: [...state.jobOrder, ...restoredOrder],
+              runIndex: state.runIndex,
+            };
+          });
+        } else if (outcome.status !== "absent") {
+          console.warn(`[characterSheetRun] ${describeOutcome(outcome)}`);
+        }
+      } finally {
+        set({ hydrated: true });
+        // 復元中 (hydrated=false) の編集は購読側で保存予約されない。復元完了時点で
+        // 下書き・台帳が空でなければ 1 回保存を予約して取りこぼしを防ぐ
+        // (Sol 再検証 non-blocking#1 / 2026-08-24)。
+        if (!isDraftPristine(get())) scheduleCharacterSheetSave();
+      }
+    })().finally(() => {
+      characterSheetHydrateInFlight = null;
+    });
+    return characterSheetHydrateInFlight;
+  },
+
   mode: null,
 
   step: 1,
@@ -393,13 +472,8 @@ export const useCharacterSheetRun = create<CharacterSheetRunState>((set, get) =>
   runIndex: {},
   focusedJobId: null,
 
-  characterName: "",
-  characterImagePaths: [],
-  attributes: "",
-  aspectRatio: "1:1",
-  sheetPromptMode: "default",
-  customSheetPrompt: "",
-  sheetBackground: "auto",
+  ...INITIAL_DRAFT,
+  characterImagePaths: [...INITIAL_DRAFT.characterImagePaths],
 
   setCharacterName: (name) => set({ characterName: name }),
 
@@ -458,7 +532,6 @@ export const useCharacterSheetRun = create<CharacterSheetRunState>((set, get) =>
     set({ customSheetPrompt: text.slice(0, MAX_CUSTOM_SHEET_PROMPT_CHARS) }),
   setSheetBackground: (background) => set({ sheetBackground: background }),
 
-  regenerateTargetPresetId: null,
   setRegenerateTarget: (presetId) => set({ regenerateTargetPresetId: presetId }),
 
   beginRun: (mode, runId, cuts) => {
@@ -794,6 +867,39 @@ export const useCharacterSheetRun = create<CharacterSheetRunState>((set, get) =>
       };
     }),
 }));
+
+let characterSheetSaveTimer: ReturnType<typeof setTimeout> | null = null;
+
+useCharacterSheetRun.subscribe((state, previousState) => {
+  if (!state.hydrated) return;
+  const persistedFieldsChanged =
+    state.mode !== previousState.mode ||
+    state.step !== previousState.step ||
+    state.characterName !== previousState.characterName ||
+    state.characterImagePaths !== previousState.characterImagePaths ||
+    state.attributes !== previousState.attributes ||
+    state.aspectRatio !== previousState.aspectRatio ||
+    state.sheetPromptMode !== previousState.sheetPromptMode ||
+    state.customSheetPrompt !== previousState.customSheetPrompt ||
+    state.sheetBackground !== previousState.sheetBackground ||
+    state.regenerateTargetPresetId !== previousState.regenerateTargetPresetId ||
+    state.jobs !== previousState.jobs ||
+    state.jobOrder !== previousState.jobOrder ||
+    state.focusedJobId !== previousState.focusedJobId;
+  if (!persistedFieldsChanged) return;
+  scheduleCharacterSheetSave();
+});
+
+/** 300ms デバウンスで正本へ保存する。hydrate 前は書かない (初期値で正本を潰さない)。 */
+function scheduleCharacterSheetSave(): void {
+  if (characterSheetSaveTimer) clearTimeout(characterSheetSaveTimer);
+  characterSheetSaveTimer = setTimeout(() => {
+    characterSheetSaveTimer = null;
+    const current = useCharacterSheetRun.getState();
+    if (!current.hydrated) return;
+    void characterSheetRunGuard.save(snapshotCharacterSheetRun(current));
+  }, 300);
+}
 
 let slotPhaseListener: Promise<() => void> | null = null;
 
