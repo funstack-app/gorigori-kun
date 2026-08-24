@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 
 import { collectAdoptedTakePaths } from "../../../lib/film/finishTakes";
@@ -21,6 +21,8 @@ export function FinishPhasePanel({ project }: { project: FilmProject }) {
   const [inFlight, setInFlight] = useState(false);
   const [outputPath, setOutputPath] = useState<string | null>(project.finished?.path ?? null);
   const [error, setError] = useState<string | null>(null);
+  const currentProjectIdRef = useRef(project.id);
+  currentProjectIdRef.current = project.id;
 
   useEffect(() => {
     setTransition("cut");
@@ -31,6 +33,7 @@ export function FinishPhasePanel({ project }: { project: FilmProject }) {
 
   async function finishFilm() {
     if (inFlight || adoptedPaths.length === 0) return;
+    const projectId = project.id;
     setInFlight(true);
     setError(null);
     try {
@@ -45,30 +48,32 @@ export function FinishPhasePanel({ project }: { project: FilmProject }) {
         appliedTransition = result.transitionApplied;
       }
 
-      await registerGeneratedMedia({
+      const registration = await registerGeneratedMedia({
         paths: [path],
         mediaType: "video",
         prompt: `${project.title} 完成`,
         providerId: "film",
         providerLabel: "AIフィルム",
       });
-      const saved = saveFinishedFilm(project.id, {
+      const saved = saveFinishedFilm(projectId, {
         path,
         transition: appliedTransition,
         at: Date.now(),
       });
       if (!saved) throw new Error("完成動画をフィルムへ保存できませんでした");
 
-      setOutputPath(path);
+      if (currentProjectIdRef.current === projectId) setOutputPath(path);
       pushToast({
         kind: "success",
-        text: "完成動画をライブラリ・履歴へ登録しました。",
+        text: registration.warnings.length > 0
+          ? `完成動画をライブラリ・履歴へ登録しました。注意: ${registration.warnings.join(" ")}`
+          : "完成動画をライブラリ・履歴へ登録しました。",
         ttlMs: 4000,
       });
     } catch (caught) {
-      setError(String(caught));
+      if (currentProjectIdRef.current === projectId) setError(String(caught));
     } finally {
-      setInFlight(false);
+      if (currentProjectIdRef.current === projectId) setInFlight(false);
     }
   }
 

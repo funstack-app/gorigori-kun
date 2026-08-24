@@ -464,7 +464,6 @@ function StressTestSection({
 }
 
 export function AssetFactoryPanel({ project }: { project: FilmProject }) {
-  const saveAssets = useFilmProjectStore((state) => state.saveAssets);
   const updateAsset = useFilmProjectStore((state) => state.updateAssetFactoryAsset);
   const setPhase = useFilmProjectStore((state) => state.setPhase);
   const upsertFilmAsset = useAssetLedger((state) => state.upsertFilmAsset);
@@ -509,7 +508,7 @@ export function AssetFactoryPanel({ project }: { project: FilmProject }) {
       return;
     }
 
-    saveAssets(project.assets.map((current) => current.id === asset.id ? adopted : current));
+    persist(asset.id, () => adopted);
     void upsertFilmAsset(project.id, adopted).catch((error) => {
       pushToast({
         kind: "warn",
