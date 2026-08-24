@@ -192,6 +192,7 @@ export function VideoConstructedPromptPanel() {
         : [],
     [latestRemoteBatchId, remoteJobs],
   );
+  const errorRemoteJobs = latestRemoteJobs.filter((job) => job.phase === "error");
   const startRemoteGeneration = useRemoteMcpGen((s) => s.startSelectedVideos);
   const retryRemoteGeneration = useRemoteMcpGen((s) => s.retry);
 
@@ -757,14 +758,14 @@ export function VideoConstructedPromptPanel() {
           </div>
         )}
 
-        {latestRemoteJobs.length > 0 && (
-          <div className="space-y-1.5" data-remote-job-count={latestRemoteJobs.length}>
+        {errorRemoteJobs.length > 0 && (
+          <div className="space-y-1.5" data-remote-job-count={errorRemoteJobs.length}>
             {compareMode && (
               <p className="text-[10px] font-bold text-neutral-500">
-                比較生成 {latestRemoteJobs.length}モデルの状況
+                比較生成 {errorRemoteJobs.length}モデルの状況
               </p>
             )}
-            {latestRemoteJobs.map((job) => (
+            {errorRemoteJobs.map((job) => (
               <div
                 key={job.requestId}
                 data-request-id={job.requestId}
@@ -796,7 +797,7 @@ export function VideoConstructedPromptPanel() {
           </div>
         )}
 
-        {selectedBuiltInModels.length > 0 && status.kind !== "idle" && (
+        {selectedBuiltInModels.length > 0 && status.kind === "error" && (
           <p
             className={
               status.kind === "error"

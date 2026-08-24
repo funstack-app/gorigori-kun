@@ -596,19 +596,17 @@ export function ConstructedPromptPanel() {
             : "この内容で生成"}
         </button>
 
-        {(latestRemoteJob || remoteValidationMessage) && (
+        {/* ボタン直下はエラーだけ出す（進行状況・完了文は右上の生成枠パネルとタイムラインが持つ。2026-08-24 STΛCK指示）。
+            入力検証エラーは直前ジョブの有無に関係なく出す。 */}
+        {(latestRemoteJob?.phase === "error" || remoteValidationMessage) && (
           <div
             data-request-id={latestRemoteJob?.requestId}
-            className={
-              latestRemoteJob?.phase === "error" || (!latestRemoteJob && remoteValidationMessage)
-                ? "rounded-md border border-red-500/30 bg-red-500/5 px-2.5 py-2 text-xs font-semibold text-red-300"
-                : "rounded-md border border-[#2a2a2a] bg-[#101010] px-2.5 py-2 text-xs font-semibold text-neutral-400"
-            }
+            className="rounded-md border border-red-500/30 bg-red-500/5 px-2.5 py-2 text-xs font-semibold text-red-300"
           >
             <p>
-              {latestRemoteJob?.phase === "done"
-                ? latestRemoteJob.message ?? "保存と登録が完了しました。"
-                : latestRemoteJob?.message ?? remoteValidationMessage}
+              {latestRemoteJob?.phase === "error"
+                ? latestRemoteJob.message ?? remoteValidationMessage
+                : remoteValidationMessage}
             </p>
             {latestRemoteJob?.phase === "error" && (
               <button
@@ -622,7 +620,7 @@ export function ConstructedPromptPanel() {
           </div>
         )}
 
-        {!remoteSelection && status.kind !== "idle" && (
+        {!remoteSelection && status.kind === "error" && (
           <p
             className={
               status.kind === "error"
