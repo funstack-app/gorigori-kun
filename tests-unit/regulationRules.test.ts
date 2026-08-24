@@ -1,4 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+import type { RegulationRulesFile } from "../src/lib/store/regulationRules";
 
 import {
   checkImageSpecification,
@@ -109,5 +111,124 @@ describe("画像規格の決定論チェック", () => {
 
     expect(results.find((result) => result.name === "アスペクト比")?.status).toBe("pass");
     expect(results.find((result) => result.name === "画像サイズ")?.status).toBe("fail");
+  });
+});
+
+describe("クライアント別ルールの保存", () => {
+  it("保存済みの媒体とカスタムルール下書きを復元する", async () => {
+    const storeModule = await import("../src/lib/store/regulationRules");
+    vi.spyOn(storeModule.regulationRulesGuard, "load").mockResolvedValue({
+      status: "ok",
+      value: {
+        version: 1,
+        savedRules: [],
+        draft: { ruleSetId: "google-ads", customRule: "ロゴを右上に置く" },
+      },
+    });
+
+    await storeModule.useRegulationRules.getState().hydrate();
+
+    expect(storeModule.useRegulationRules.getState()).toMatchObject({
+      hydrated: true,
+      draft: { ruleSetId: "google-ads", customRule: "ロゴを右上に置く" },
+    });
+  });
+
+  it("hydrate前は保存せず、下書きの連続変更を300ms後の1回にまとめる", async () => {
+    vi.useFakeTimers();
+    try {
+      const storeModule = await import("../src/lib/store/regulationRules");
+      vi.spyOn(storeModule.regulationRulesGuard, "load").mockResolvedValue({
+        status: "absent",
+      });
+      const save = vi
+        .spyOn(storeModule.regulationRulesGuard, "save")
+        .mockResolvedValue(true);
+
+      storeModule.useRegulationRules.getState().setDraft("meta-ads", "復元前");
+      await vi.advanceTimersByTimeAsync(500);
+      expect(save).not.toHaveBeenCalled();
+
+      await storeModule.useRegulationRules.getState().hydrate();
+      storeModule.useRegulationRules.getState().setDraft("google-ads", "1回目");
+      storeModule.useRegulationRules.getState().setDraft("line-ads", "2回目");
+      await vi.advanceTimersByTimeAsync(299);
+      expect(save).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(save).toHaveBeenCalledTimes(1);
+      expect(save.mock.calls[0][0]).toMatchObject({
+        version: 1,
+        draft: { ruleSetId: "line-ads", customRule: "2回目" },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("同名保存を上書きし、適用・削除・ファイル往復ができる", async () => {
+    vi.useFakeTimers();
+    try {
+      let disk: RegulationRulesFile | undefined;
+      let storeModule = await import("../src/lib/store/regulationRules");
+      vi.spyOn(storeModule.regulationRulesGuard, "load").mockImplementation(async () =>
+        disk ? { status: "ok", value: disk } : { status: "absent" },
+      );
+      vi.spyOn(storeModule.regulationRulesGuard, "save").mockImplementation(async (value) => {
+        disk = structuredClone(value);
+        return true;
+      });
+
+      await storeModule.useRegulationRules.getState().hydrate();
+      storeModule.useRegulationRules.getState().setDraft("meta-ads", "初版");
+      const first = await storeModule.useRegulationRules.getState().saveRule("案件A");
+      expect(first).not.toBeNull();
+
+      storeModule.useRegulationRules.getState().setDraft("google-ads", "改訂版");
+      const overwritten = await storeModule.useRegulationRules.getState().saveRule(" 案件A ");
+      expect(overwritten?.id).toBe(first?.id);
+      expect(storeModule.useRegulationRules.getState().savedRules).toHaveLength(1);
+      expect(overwritten).toMatchObject({
+        name: "案件A",
+        ruleSetId: "google-ads",
+        customRule: "改訂版",
+      });
+
+      storeModule.useRegulationRules.getState().setDraft("line-ads", "別の編集中ルール");
+      const applied = storeModule.useRegulationRules.getState().applyRule(first!.id);
+      expect(applied?.id).toBe(first?.id);
+      expect(storeModule.useRegulationRules.getState().draft).toEqual({
+        ruleSetId: "google-ads",
+        customRule: "改訂版",
+      });
+      await vi.advanceTimersByTimeAsync(300);
+
+      vi.restoreAllMocks();
+      vi.resetModules();
+      storeModule = await import("../src/lib/store/regulationRules");
+      vi.spyOn(storeModule.regulationRulesGuard, "load").mockResolvedValue({
+        status: "ok",
+        value: disk!,
+      });
+      vi.spyOn(storeModule.regulationRulesGuard, "save").mockImplementation(async (value) => {
+        disk = structuredClone(value);
+        return true;
+      });
+
+      await storeModule.useRegulationRules.getState().hydrate();
+      expect(storeModule.useRegulationRules.getState().savedRules).toEqual([overwritten]);
+      expect(storeModule.useRegulationRules.getState().draft).toEqual({
+        ruleSetId: "google-ads",
+        customRule: "改訂版",
+      });
+
+      expect(
+        await storeModule.useRegulationRules.getState().deleteRule(overwritten!.id),
+      ).toBe(true);
+      expect(storeModule.useRegulationRules.getState().savedRules).toEqual([]);
+      expect(disk?.savedRules).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

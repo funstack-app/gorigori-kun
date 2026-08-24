@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { ActiveProjectSelector } from "../../ActiveProjectSelector";
 import { WorkspaceTabs } from "../../WorkspaceTabs";
@@ -8,9 +8,18 @@ import { SceneSectionModal } from "../../scene/SceneSectionModal";
 import { useToasts } from "../../../lib/store/toasts";
 import {
   useRegulationCheckRun,
+  type PendingRegulationRecheck,
   type RegulationCheckResultsState,
   type RegulationRuleSetSnapshot,
 } from "../../../lib/store/regulationCheckRun";
+import { useRegulationRules } from "../../../lib/store/regulationRules";
+import { openRedlineWithImage } from "../../../lib/regulation/openRedlineWithImage";
+import {
+  createPendingRegulationRecheck,
+  replaceImageForRecheck,
+  selectFrozenRecheckRules,
+  type RegulationRecheckRuleSelection,
+} from "../../../lib/regulation/recheck";
 import {
   checkImage,
   formatResultsAsText,
@@ -31,6 +40,10 @@ import {
 } from "../../../lib/regulationCheck/rules";
 
 const IMAGE_EXTS = ["png", "jpg", "jpeg", "webp", "gif", "bmp"];
+
+type RecheckRunOptions = RegulationRecheckRuleSelection & {
+  pendingImagePath: string;
+};
 
 const SEVERITY_STYLE: Record<
   RegulationSeverity,
@@ -116,7 +129,20 @@ export function RegulationCheckWorkspace() {
   const setImagePaths = useRegulationCheckRun((s) => s.setImagePaths);
   const ruleSetId = useRegulationCheckRun((s) => s.ruleSetId);
   const setRuleSetId = useRegulationCheckRun((s) => s.setRuleSetId);
-  const [customRule, setCustomRule] = useState("");
+  const pendingRechecks = useRegulationCheckRun((s) => s.pendingRechecks);
+  const queuePendingRecheck = useRegulationCheckRun((s) => s.queuePendingRecheck);
+  const removeImageFromRun = useRegulationCheckRun((s) => s.removeImage);
+  const clearImages = useRegulationCheckRun((s) => s.clearImages);
+  const retargetPendingRecheck = useRegulationCheckRun((s) => s.retargetPendingRecheck);
+  const completePendingRecheck = useRegulationCheckRun((s) => s.completePendingRecheck);
+  const customRule = useRegulationRules((s) => s.draft?.customRule ?? "");
+  const savedRules = useRegulationRules((s) => s.savedRules);
+  const hydrateRules = useRegulationRules((s) => s.hydrate);
+  const setRuleDraft = useRegulationRules((s) => s.setDraft);
+  const saveRule = useRegulationRules((s) => s.saveRule);
+  const applyRule = useRegulationRules((s) => s.applyRule);
+  const deleteRule = useRegulationRules((s) => s.deleteRule);
+  const [savedRuleName, setSavedRuleName] = useState("");
   const [open, setOpen] = useState(false);
   const running = useRegulationCheckRun((s) => s.running);
   const setRunning = useRegulationCheckRun((s) => s.setRunning);
@@ -138,6 +164,82 @@ export function RegulationCheckWorkspace() {
   const canRun = imagePaths.length > 0 && !running;
   const results = resultState?.results ?? [];
   const resultRules = resultState?.ruleSet.rules ?? [];
+
+  useEffect(() => {
+    let disposed = false;
+    const initialRuleSetId = useRegulationCheckRun.getState().ruleSetId;
+    const hadDraft = useRegulationRules.getState().draft !== null;
+
+    void hydrateRules().then(() => {
+      if (disposed) return;
+      const rulesState = useRegulationRules.getState();
+      const runState = useRegulationCheckRun.getState();
+      const draft = rulesState.draft;
+      if (!draft) {
+        rulesState.setDraft(runState.ruleSetId, "");
+        return;
+      }
+
+      // 初期値のままなら保存済み媒体を復元する。読込中や再表示前の選択は潰さない。
+      if (
+        !hadDraft &&
+        runState.ruleSetId === initialRuleSetId &&
+        initialRuleSetId === DEFAULT_RULE_SETS[0].id
+      ) {
+        runState.setRuleSetId(draft.ruleSetId);
+      } else if (runState.ruleSetId !== draft.ruleSetId) {
+        rulesState.setDraft(runState.ruleSetId, draft.customRule);
+      }
+    });
+
+    return () => {
+      disposed = true;
+    };
+  }, [hydrateRules]);
+
+  function changeRuleSet(nextRuleSetId: string) {
+    setRuleSetId(nextRuleSetId);
+    setRuleDraft(nextRuleSetId, customRule);
+  }
+
+  function changeCustomRule(nextCustomRule: string) {
+    setRuleDraft(ruleSetId, nextCustomRule);
+  }
+
+  async function saveCurrentRule() {
+    setRuleDraft(ruleSetId, customRule);
+    const saved = await saveRule(savedRuleName);
+    if (!saved) {
+      pushToast({ kind: "error", text: "ルールを保存できませんでした。", ttlMs: 4000 });
+      return;
+    }
+    setSavedRuleName("");
+    pushToast({ kind: "success", text: `「${saved.name}」を保存しました。`, ttlMs: 2500 });
+  }
+
+  function applySavedRule(id: string) {
+    const saved = applyRule(id);
+    if (!saved) return;
+    setRuleSetId(saved.ruleSetId);
+    pushToast({ kind: "success", text: `「${saved.name}」を適用しました。`, ttlMs: 2500 });
+  }
+
+  async function removeSavedRule(id: string) {
+    const removed = await deleteRule(id);
+    pushToast({
+      kind: removed ? "success" : "error",
+      text: removed ? "保存済みルールを削除しました。" : "ルールを削除できませんでした。",
+      ttlMs: removed ? 2500 : 4000,
+    });
+  }
+
+  function sendToRedline(imagePath: string) {
+    if (!resultState) return;
+    queuePendingRecheck(
+      createPendingRegulationRecheck(imagePath, resultState),
+    );
+    openRedlineWithImage(imagePath);
+  }
 
   async function pickImages() {
     try {
@@ -165,31 +267,47 @@ export function RegulationCheckWorkspace() {
   }
 
   function removeImage(path: string) {
-    setImagePaths((prev) => prev.filter((p) => p !== path));
+    removeImageFromRun(path);
   }
 
   function clearAll() {
     invalidateRun();
-    setImagePaths([]);
+    clearImages();
     setResultState(null);
   }
 
-  async function runCheck() {
-    if (imagePaths.length === 0) {
+  async function runCheck(recheckOptions?: RecheckRunOptions) {
+    const runState = useRegulationCheckRun.getState();
+    const pathsForRun = [...runState.imagePaths];
+    if (pathsForRun.length === 0) {
       pushToast({ kind: "info", text: "先に検査する画像を選んでください。", ttlMs: 3000 });
       return;
     }
+    const ruleDraft = useRegulationRules.getState().draft;
+    const ruleSelection: RegulationRecheckRuleSelection = recheckOptions ?? {
+      ruleSetId: runState.ruleSetId,
+      customRule: ruleDraft?.customRule ?? "",
+    };
+    const ruleSetForRun =
+      DEFAULT_RULE_SETS.find((candidate) => candidate.id === ruleSelection.ruleSetId) ??
+      DEFAULT_RULE_SETS[0];
+    const rulesForRun = resolveRules(ruleSetForRun, ruleSelection.customRule);
     const runToken = beginRun();
     const ruleSnapshot: RegulationRuleSetSnapshot = {
-      id: ruleSet.id,
-      name: ruleSet.name,
-      rules: activeRules.map((rule) => ({ ...rule })),
+      id: ruleSetForRun.id,
+      name: ruleSetForRun.name,
+      rules: rulesForRun.map((rule) => ({ ...rule })),
+    };
+    const resultSnapshot = {
+      ruleSetId: ruleSetForRun.id,
+      customRule: ruleSelection.customRule,
+      ruleSet: ruleSnapshot,
     };
     setRunning(true);
-    setResultState({ ruleSet: ruleSnapshot, results: [] });
+    setResultState({ ...resultSnapshot, results: [] });
     try {
       const rules = ruleSnapshot.rules;
-      const paths = [...imagePaths];
+      const paths = pathsForRun;
       const collected: RegulationImageResult[] = [];
       // 画像は1枚ずつ、機械チェック→画面表示→Codex の順で進める。
       for (const path of paths) {
@@ -206,7 +324,7 @@ export function RegulationCheckWorkspace() {
             description: "",
             error: `画像規格の確認に失敗しました: ${(err as Error)?.message ?? err}`,
           });
-          setResultState({ ruleSet: ruleSnapshot, results: [...collected] });
+          setResultState({ ...resultSnapshot, results: [...collected] });
           continue;
         }
         if (!isCurrentRun(runToken)) return;
@@ -219,7 +337,7 @@ export function RegulationCheckWorkspace() {
           error: null,
         });
         // ここで先に画面へ出す。Codexの応答待ちでも寸法等の結果を確認できる。
-        setResultState({ ruleSet: ruleSnapshot, results: [...collected] });
+        setResultState({ ...resultSnapshot, results: [...collected] });
 
         const result = await checkImage(path, rules);
         if (!isCurrentRun(runToken)) return;
@@ -228,7 +346,7 @@ export function RegulationCheckWorkspace() {
           machineChecks,
           aiPending: false,
         };
-        setResultState({ ruleSet: ruleSnapshot, results: [...collected] });
+        setResultState({ ...resultSnapshot, results: [...collected] });
       }
       const failed = collected.filter((r) => r.error).length;
       const flagged = collected.filter(
@@ -252,6 +370,12 @@ export function RegulationCheckWorkspace() {
           ttlMs: 4000,
         });
       }
+      if (recheckOptions) {
+        completePendingRecheck(
+          recheckOptions.pendingImagePath,
+          collected.find((result) => result.imagePath === recheckOptions.pendingImagePath),
+        );
+      }
     } catch (err) {
       if (!isCurrentRun(runToken)) return;
       pushToast({
@@ -261,6 +385,44 @@ export function RegulationCheckWorkspace() {
       });
     } finally {
       if (isCurrentRun(runToken)) setRunning(false);
+    }
+  }
+
+  async function recheckPending(pending: PendingRegulationRecheck) {
+    try {
+      const { open: openDialog } = await import("@tauri-apps/plugin-dialog");
+      const selected = await openDialog({
+        multiple: false,
+        filters: [{ name: "画像", extensions: IMAGE_EXTS }],
+      });
+      if (!selected) return;
+      const revisedPath = Array.isArray(selected) ? selected[0] : selected;
+      if (!revisedPath) return;
+
+      const currentPaths = useRegulationCheckRun.getState().imagePaths;
+      if (!currentPaths.includes(pending.imagePath)) {
+        pushToast({
+          kind: "warn",
+          text: "元画像が検査対象から外れています。もう一度追加してください。",
+          ttlMs: 4000,
+        });
+        return;
+      }
+
+      setImagePaths(
+        replaceImageForRecheck(currentPaths, pending.imagePath, revisedPath),
+      );
+      retargetPendingRecheck(pending.imagePath, revisedPath);
+      const frozenRules = selectFrozenRecheckRules(pending);
+      setRuleSetId(frozenRules.ruleSetId);
+      setRuleDraft(frozenRules.ruleSetId, frozenRules.customRule);
+      await runCheck({ ...frozenRules, pendingImagePath: revisedPath });
+    } catch (err) {
+      pushToast({
+        kind: "error",
+        text: `修正版の選択に失敗しました: ${(err as Error)?.message ?? err}`,
+        ttlMs: 5000,
+      });
     }
   }
 
@@ -351,7 +513,7 @@ export function RegulationCheckWorkspace() {
                 <label className="text-xs font-medium text-neutral-300">媒体ルールセット</label>
                 <select
                   value={ruleSetId}
-                  onChange={(e) => setRuleSetId(e.target.value)}
+                  onChange={(e) => changeRuleSet(e.target.value)}
                   disabled={running}
                   className="rounded-md border border-[#2c2c2c] bg-[#1a1a1a] px-2 py-1.5 text-xs text-neutral-200 outline-none focus:border-neutral-500 disabled:opacity-50"
                 >
@@ -413,12 +575,73 @@ export function RegulationCheckWorkspace() {
                 <label className="text-xs font-medium text-neutral-300">追加ルール（自由記述・任意）</label>
                 <textarea
                   value={customRule}
-                  onChange={(e) => setCustomRule(e.target.value)}
+                  onChange={(e) => changeCustomRule(e.target.value)}
                   disabled={running}
                   rows={3}
                   placeholder="例: 画面下部に「PR」の表記が必須。無ければ指摘してください。"
                   className="resize-none rounded-md border border-[#2c2c2c] bg-[#1a1a1a] px-2 py-1.5 text-xs text-neutral-200 outline-none placeholder:text-neutral-600 focus:border-neutral-500 disabled:opacity-50"
                 />
+              </div>
+
+              {/* クライアント・案件別の保存ルール */}
+              <div className="flex flex-col gap-1.5 border-t border-[#242424] pt-3">
+                <span className="text-xs font-medium text-neutral-300">保存済みルール</span>
+                {savedRules.length === 0 ? (
+                  <p className="text-[11px] text-neutral-500">まだ保存されていません</p>
+                ) : (
+                  <ul className="flex flex-col gap-1">
+                    {savedRules.map((saved) => {
+                      const mediaName =
+                        DEFAULT_RULE_SETS.find((candidate) => candidate.id === saved.ruleSetId)
+                          ?.name ?? saved.ruleSetId;
+                      return (
+                        <li
+                          key={saved.id}
+                          className="flex items-center gap-1 rounded border border-[#242424] bg-[#171717] p-1"
+                        >
+                          <button
+                            type="button"
+                            onClick={() => applySavedRule(saved.id)}
+                            disabled={running}
+                            className="min-w-0 flex-1 rounded px-1.5 py-1 text-left hover:bg-[#222] disabled:opacity-50"
+                          >
+                            <span className="block truncate text-[11px] font-medium text-neutral-300">
+                              {saved.name}
+                            </span>
+                            <span className="block truncate text-[10px] text-neutral-500">
+                              {mediaName}
+                            </span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void removeSavedRule(saved.id)}
+                            disabled={running}
+                            className="rounded border border-[#2c2c2c] px-1.5 py-1 text-[10px] text-neutral-500 hover:bg-[#222] hover:text-neutral-300 disabled:opacity-50"
+                          >
+                            削除
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+                <div className="flex gap-1.5">
+                  <input
+                    value={savedRuleName}
+                    onChange={(event) => setSavedRuleName(event.target.value)}
+                    disabled={running}
+                    placeholder="クライアント名・案件名"
+                    className="min-w-0 flex-1 rounded-md border border-[#2c2c2c] bg-[#1a1a1a] px-2 py-1.5 text-xs text-neutral-200 outline-none placeholder:text-neutral-600 focus:border-neutral-500 disabled:opacity-50"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => void saveCurrentRule()}
+                    disabled={running || !savedRuleName.trim()}
+                    className="rounded-md border border-[#2c2c2c] px-2 py-1.5 text-[11px] text-neutral-300 hover:bg-[#222] disabled:opacity-40"
+                  >
+                    この内容を保存
+                  </button>
+                </div>
               </div>
             </div>
           </SceneSectionModal>
@@ -481,7 +704,7 @@ export function RegulationCheckWorkspace() {
           <button
             data-tour="regulation-run"
             type="button"
-            onClick={runCheck}
+            onClick={() => void runCheck()}
             disabled={!canRun}
             className="mt-auto flex items-center justify-center gap-2 rounded-md bg-neutral-100 px-3 py-2 text-xs font-semibold text-neutral-900 hover:bg-white disabled:cursor-not-allowed disabled:opacity-40"
           >
@@ -503,6 +726,18 @@ export function RegulationCheckWorkspace() {
               {resultState ? `（${resultState.ruleSet.name}）` : ""}
             </span>
             <div className="flex items-center gap-2">
+              {pendingRechecks.map((pending) => (
+                <button
+                  key={pending.imagePath}
+                  type="button"
+                  onClick={() => void recheckPending(pending)}
+                  disabled={running}
+                  title={`${basename(pending.imagePath)} の修正版を選ぶ`}
+                  className="rounded border border-[#2c2c2c] px-2 py-1 text-[11px] text-neutral-300 hover:bg-[#222] disabled:opacity-40"
+                >
+                  修正版を再検品
+                </button>
+              ))}
               <button
                 type="button"
                 onClick={copyResults}
@@ -537,6 +772,7 @@ export function RegulationCheckWorkspace() {
                     key={result.imagePath}
                     result={result}
                     ruleName={(id) => findRule(resultRules, id)?.name ?? id}
+                    onOpenRedline={sendToRedline}
                   />
                 ))}
                 {running && (
@@ -558,9 +794,11 @@ export function RegulationCheckWorkspace() {
 function ResultCard({
   result,
   ruleName,
+  onOpenRedline,
 }: {
   result: RegulationImageResult;
   ruleName: (ruleId: string) => string;
+  onOpenRedline: (imagePath: string) => void;
 }) {
   const hasIssues = result.issues.length > 0;
   const machineChecks = result.machineChecks ?? [];
@@ -652,6 +890,13 @@ function ResultCard({
                 {issue.evidence && (
                   <p className="mt-0.5 text-[11px] text-neutral-500">根拠: {issue.evidence}</p>
                 )}
+                <button
+                  type="button"
+                  onClick={() => onOpenRedline(result.imagePath)}
+                  className="mt-2 rounded border border-[#2c2c2c] px-2 py-1 text-[11px] text-neutral-300 hover:bg-[#222]"
+                >
+                  レッドラインで直す
+                </button>
               </li>
             );
           })}
