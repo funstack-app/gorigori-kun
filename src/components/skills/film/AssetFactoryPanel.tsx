@@ -39,12 +39,14 @@ import type {
   FilmAsset,
   FilmProject,
 } from "../../../lib/film/types";
-import { images } from "../../../lib/ipc";
+import { images as imagesIpc } from "../../../lib/ipc";
 import { useAssetLedger } from "../../../lib/store/assetLedger";
 import { beginDirectRun } from "../../../lib/store/generationStatus";
 import { useFilmProjectStore } from "../../../lib/store/filmProject";
 import { useToasts } from "../../../lib/store/toasts";
+import { ReferenceLibraryModal } from "../../ReferenceLibraryModal";
 import { SafeImage } from "../../SafeImage";
+import { CharacterPresetPickerModal } from "../multiAngle/CharacterPresetPickerModal";
 
 const TYPE_LABELS: Record<AssetType, string> = {
   character: "登場人物",
@@ -58,6 +60,27 @@ const IMPORTANCE_LABELS: Record<AssetImportance, string> = {
   supporting: "補助",
   background: "背景",
 };
+
+/**
+ * 生成候補と既存画像を、同じ状態遷移で正典へ採用する。
+ * 既存画像は採用判定の間だけ候補へ加え、生成候補の履歴自体は増やさない。
+ */
+export function buildCanonicalImageAdoption(asset: FilmAsset, path: string): FilmAsset {
+  if (!path.trim()) throw new Error("採用する画像を選んでください");
+  if (asset.locked) throw new Error("確定済みの素材は変更できません");
+  if (asset.canonicalImagePath) throw new Error("採用画像が設定済みです");
+
+  const alreadyCandidate = asset.generatedImagePaths.includes(path);
+  const adopted = adoptAssetCandidate(
+    alreadyCandidate
+      ? asset
+      : { ...asset, generatedImagePaths: [...asset.generatedImagePaths, path] },
+    path,
+  );
+  return alreadyCandidate
+    ? adopted
+    : { ...adopted, generatedImagePaths: asset.generatedImagePaths };
+}
 
 /**
  * 検品用の拡大表示。クリックで全画面、もう一度クリックか Esc で閉じる。
@@ -441,6 +464,7 @@ function StressTestSection({
 }
 
 export function AssetFactoryPanel({ project }: { project: FilmProject }) {
+  const saveAssets = useFilmProjectStore((state) => state.saveAssets);
   const updateAsset = useFilmProjectStore((state) => state.updateAssetFactoryAsset);
   const setPhase = useFilmProjectStore((state) => state.setPhase);
   const upsertFilmAsset = useAssetLedger((state) => state.upsertFilmAsset);
@@ -453,7 +477,11 @@ export function AssetFactoryPanel({ project }: { project: FilmProject }) {
   const [draftProgress, setDraftProgress] = useState<FilmTextTurnProgress>();
   const [stressRunningAssetId, setStressRunningAssetId] = useState<string | null>(null);
   const [zoomPath, setZoomPath] = useState<string | null>(null);
+  const [characterPickerAssetId, setCharacterPickerAssetId] = useState<string | null>(null);
+  const [libraryPickerAssetId, setLibraryPickerAssetId] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const localAssetIdRef = useRef<string | null>(null);
+  const localInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => () => abortRef.current?.abort(), []);
 
@@ -470,6 +498,50 @@ export function AssetFactoryPanel({ project }: { project: FilmProject }) {
         ttlMs: 7000,
       });
     });
+  }
+
+  function adoptCanonicalImage(asset: FilmAsset, path: string) {
+    let adopted: FilmAsset;
+    try {
+      adopted = buildCanonicalImageAdoption(asset, path);
+    } catch (error) {
+      pushToast({ kind: "warn", text: String((error as Error)?.message ?? error), ttlMs: 5000 });
+      return;
+    }
+
+    saveAssets(project.assets.map((current) => current.id === asset.id ? adopted : current));
+    void upsertFilmAsset(project.id, adopted).catch((error) => {
+      pushToast({
+        kind: "warn",
+        text: `${asset.name}は採用できましたが、アセット台帳への登録に失敗しました: ${(error as Error)?.message ?? error}`,
+        ttlMs: 7000,
+      });
+    });
+    pushToast({
+      kind: "success",
+      text: asset.type === "character"
+        ? `${asset.name}の決定版となる人物シートを採用しました。次は同一人物チェックです。`
+        : `${asset.name}を採用し、確定しました。`,
+      ttlMs: 5000,
+    });
+  }
+
+  async function pickLocalCanonicalImage(file: File | null) {
+    const assetId = localAssetIdRef.current;
+    localAssetIdRef.current = null;
+    if (!assetId || !file) return;
+    if (!/\.(png|jpe?g|webp)$/iu.test(file.name)) {
+      pushToast({ kind: "warn", text: "PNG、JPEG、WebPの画像を選んでください。", ttlMs: 4000 });
+      return;
+    }
+    const asset = assets.find((candidate) => candidate.id === assetId);
+    if (!asset || asset.locked || asset.canonicalImagePath) return;
+    try {
+      const path = await imagesIpc.writeUpload(file.name, new Uint8Array(await file.arrayBuffer()));
+      adoptCanonicalImage(asset, path);
+    } catch (error) {
+      pushToast({ kind: "error", text: `画像を取り込めませんでした: ${String(error)}`, ttlMs: 6000 });
+    }
   }
 
   async function draftOne(asset: FilmAsset, controller?: AbortController): Promise<boolean> {
@@ -536,7 +608,7 @@ export function AssetFactoryPanel({ project }: { project: FilmProject }) {
     const pairReference = findLocationPairReferencePath(asset, project.assets);
     const tracker = beginDirectRun("characterSheet", 1, `film-asset-${project.id}-${asset.id}-${Date.now()}`);
     try {
-      const result = await tracker.step(() => images.generateBatch({
+      const result = await tracker.step(() => imagesIpc.generateBatch({
         prompt: started.promptDraft,
         count: 3,
         refImagePaths: pairReference ? [pairReference] : undefined,
@@ -577,7 +649,7 @@ export function AssetFactoryPanel({ project }: { project: FilmProject }) {
       for (let index = 0; index < 5; index += 1) {
         const condition = started.stressTest?.conditions[index];
         if (!condition || !started.canonicalImagePath) throw new Error("5つの条件または採用した人物シートが不足しています");
-        const result = await tracker.step(() => images.generateBatch({
+        const result = await tracker.step(() => imagesIpc.generateBatch({
           prompt: buildStressTestImagePrompt(started, condition, otherNames),
           count: 1,
           refImagePaths: [started.canonicalImagePath as string],
@@ -692,6 +764,38 @@ export function AssetFactoryPanel({ project }: { project: FilmProject }) {
                 </p>
               ) : null}
 
+              {!asset.canonicalImagePath && !asset.locked ? (
+                <div className="mt-4 flex flex-wrap items-center gap-2 rounded-lg border border-[#303030] bg-[#111111] p-3">
+                  <p className="mr-1 text-xs font-semibold text-zinc-300">既存から正典を選ぶ</p>
+                  {asset.type === "character" ? (
+                    <button
+                      type="button"
+                      onClick={() => setCharacterPickerAssetId(asset.id)}
+                      className="rounded-md border border-[#3a3a3a] px-3 py-1.5 text-[11px] font-semibold text-zinc-200 transition hover:bg-[#242424]"
+                    >
+                      登録キャラから
+                    </button>
+                  ) : null}
+                  <button
+                    type="button"
+                    onClick={() => setLibraryPickerAssetId(asset.id)}
+                    className="rounded-md border border-[#3a3a3a] px-3 py-1.5 text-[11px] font-semibold text-zinc-200 transition hover:bg-[#242424]"
+                  >
+                    ライブラリから
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      localAssetIdRef.current = asset.id;
+                      localInputRef.current?.click();
+                    }}
+                    className="rounded-md border border-[#3a3a3a] px-3 py-1.5 text-[11px] font-semibold text-zinc-200 transition hover:bg-[#242424]"
+                  >
+                    手持ちから
+                  </button>
+                </div>
+              ) : null}
+
               <PromptEditor
                 asset={asset}
                 drafting={draftingAssetId === asset.id}
@@ -704,24 +808,7 @@ export function AssetFactoryPanel({ project }: { project: FilmProject }) {
               <CandidateReview
                 asset={asset}
                 onZoom={setZoomPath}
-                onAdopt={(path) => {
-                  const adopted = adoptAssetCandidate(asset, path);
-                  persist(asset.id, () => adopted);
-                  void upsertFilmAsset(project.id, adopted).catch((error) => {
-                    pushToast({
-                      kind: "warn",
-                      text: `${asset.name}は採用できましたが、アセット台帳への登録に失敗しました: ${(error as Error)?.message ?? error}`,
-                      ttlMs: 7000,
-                    });
-                  });
-                  pushToast({
-                    kind: "success",
-                    text: asset.type === "character"
-                      ? `${asset.name}の決定版となる人物シートを採用しました。次は同一人物チェックです。`
-                      : `${asset.name}を採用し、確定しました。`,
-                    ttlMs: 5000,
-                  });
-                }}
+                onAdopt={(path) => adoptCanonicalImage(asset, path)}
                 onReject={(note) => {
                   persist(asset.id, (current) => rejectAssetCandidates(current, note));
                   pushToast({ kind: "warn", text: "不採用の理由を保存しました。指示文を直してから、もう一度作ってください。", ttlMs: 6000 });
@@ -803,6 +890,39 @@ export function AssetFactoryPanel({ project }: { project: FilmProject }) {
           ⑤映像づくりへ進む
         </button>
       </section>
+      <input
+        ref={localInputRef}
+        type="file"
+        accept="image/png,image/jpeg,image/webp"
+        className="hidden"
+        onChange={(event) => {
+          void pickLocalCanonicalImage(event.target.files?.[0] ?? null);
+          event.target.value = "";
+        }}
+      />
+      {characterPickerAssetId ? (
+        <CharacterPresetPickerModal
+          onClose={() => setCharacterPickerAssetId(null)}
+          onPick={(path) => {
+            const asset = assets.find((candidate) => candidate.id === characterPickerAssetId);
+            if (asset && !asset.locked && !asset.canonicalImagePath) {
+              adoptCanonicalImage(asset, path);
+            }
+            setCharacterPickerAssetId(null);
+          }}
+        />
+      ) : null}
+      <ReferenceLibraryModal
+        open={libraryPickerAssetId !== null}
+        onClose={() => setLibraryPickerAssetId(null)}
+        onPick={(path) => {
+          const asset = assets.find((candidate) => candidate.id === libraryPickerAssetId);
+          if (asset && !asset.locked && !asset.canonicalImagePath) {
+            adoptCanonicalImage(asset, path);
+          }
+          setLibraryPickerAssetId(null);
+        }}
+      />
       {zoomPath ? <ImageZoomOverlay path={zoomPath} onClose={() => setZoomPath(null)} /> : null}
     </div>
   );
