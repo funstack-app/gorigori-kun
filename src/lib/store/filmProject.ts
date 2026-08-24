@@ -96,6 +96,7 @@ type FilmProjectState = {
     assetId: string,
     update: (asset: AssetLedgerEntry) => AssetLedgerEntry,
   ) => void;
+  unlockAssetCanonical: (assetId: string) => void;
   saveForeshadow: (entries: ForeshadowEntry[]) => void;
   saveLookMaster: (path: string | null, description?: string) => void;
   saveStylePrefix: (stylePrefix: string) => void;
@@ -857,6 +858,15 @@ export const useFilmProjectStore = create<FilmProjectState>((set, get) => ({
       ...project,
       assets: project.assets.map((asset) =>
         asset.id === assetId ? normalizeFilmAsset(update(normalizeFilmAsset(asset))) : asset,
+      ),
+    }));
+  },
+
+  unlockAssetCanonical: (assetId) => {
+    updateActiveFactory(get, set, (project) => ({
+      ...project,
+      assets: project.assets.map((asset) =>
+        asset.id === assetId ? { ...asset, locked: false } : asset,
       ),
     }));
   },

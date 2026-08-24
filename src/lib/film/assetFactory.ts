@@ -18,6 +18,121 @@ export const DEFAULT_STRESS_CONDITIONS = [
   "しゃがみ",
 ];
 
+export const ASSET_CANDIDATE_COUNTS = [1, 2, 3] as const;
+export type AssetCandidateCount = (typeof ASSET_CANDIDATE_COUNTS)[number];
+export const DEFAULT_ASSET_CANDIDATE_COUNT: AssetCandidateCount = 1;
+
+export type AssetTaskPoolResult<TItem, TValue> =
+  | { item: TItem; status: "fulfilled"; value: TValue }
+  | { item: TItem; status: "rejected"; reason: unknown };
+
+/**
+ * 順番待ちの仕事を最大 concurrency 件ずつ動かす、小さな並列プール。
+ * 1件が失敗しても別の仕事は続け、shouldStop が true なら未着手分を開始しない。
+ */
+export async function runAssetTaskPool<TItem, TValue>(
+  items: readonly TItem[],
+  worker: (item: TItem, index: number) => Promise<TValue>,
+  concurrency = 3,
+  shouldStop: () => boolean = () => false,
+): Promise<Array<AssetTaskPoolResult<TItem, TValue>>> {
+  if (!Number.isInteger(concurrency) || concurrency < 1) {
+    throw new Error("並列数は1以上の整数で指定してください");
+  }
+
+  const results: Array<AssetTaskPoolResult<TItem, TValue> | undefined> = new Array(items.length);
+  let nextIndex = 0;
+  const runWorker = async () => {
+    while (!shouldStop()) {
+      const index = nextIndex;
+      nextIndex += 1;
+      if (index >= items.length) return;
+      const item = items[index];
+      try {
+        results[index] = { item, status: "fulfilled", value: await worker(item, index) };
+      } catch (reason) {
+        results[index] = { item, status: "rejected", reason };
+      }
+    }
+  };
+
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, items.length) }, () => runWorker()),
+  );
+  return results.filter(
+    (result): result is AssetTaskPoolResult<TItem, TValue> => result !== undefined,
+  );
+}
+
+/**
+ * 素材IDごとの実行権を1回だけ取る。同じ集合にある実行中・順番待ち素材は拒否する。
+ * 下書き用と画像生成用で別の Set を渡し、処理完了時に releaseAssetRunRight で戻す。
+ */
+export function acquireAssetRunRight(claimedAssetIds: Set<string>, assetId: string): boolean {
+  if (claimedAssetIds.has(assetId)) return false;
+  claimedAssetIds.add(assetId);
+  return true;
+}
+
+export function releaseAssetRunRight(claimedAssetIds: Set<string>, assetId: string): void {
+  claimedAssetIds.delete(assetId);
+}
+
+/** 一括下書きの中止が、後から始まった個別下書きに上書きされないための小さな管理役。 */
+export function createAssetDraftAbortRegistry() {
+  let batchController: AbortController | null = null;
+  const individualControllers = new Map<string, AbortController>();
+
+  return {
+    startBatch(): AbortController | null {
+      if (batchController) return null;
+      batchController = new AbortController();
+      return batchController;
+    },
+    finishBatch(controller: AbortController): void {
+      if (batchController === controller) batchController = null;
+    },
+    startIndividual(assetId: string): AbortController | null {
+      if (individualControllers.has(assetId)) return null;
+      const controller = new AbortController();
+      individualControllers.set(assetId, controller);
+      return controller;
+    },
+    finishIndividual(assetId: string, controller: AbortController): void {
+      if (individualControllers.get(assetId) === controller) {
+        individualControllers.delete(assetId);
+      }
+    },
+    hasBatch(): boolean {
+      return batchController !== null;
+    },
+    abortBatch(): void {
+      batchController?.abort();
+    },
+    abortIndividuals(): void {
+      for (const controller of individualControllers.values()) controller.abort();
+    },
+    abortAll(): void {
+      batchController?.abort();
+      for (const controller of individualControllers.values()) controller.abort();
+    },
+  };
+}
+
+/** 0枚だけを失敗にし、希望枚数未満でも完成分は候補として返す。 */
+export function inspectGeneratedAssetCandidates(
+  generatedPaths: string[],
+  requestedCount: AssetCandidateCount,
+): { paths: string[]; missingCount: number; isPartial: boolean } {
+  if (!ASSET_CANDIDATE_COUNTS.includes(requestedCount)) {
+    throw new Error("候補枚数は1〜3枚で指定してください");
+  }
+  const paths = generatedPaths.filter(Boolean);
+  if (paths.length === 0) throw new Error("候補画像が1枚も完成しませんでした");
+  const missingCount = Math.max(0, requestedCount - paths.length);
+  return { paths, missingCount, isPartial: missingCount > 0 };
+}
+
 function emptyStressRound(): FilmAssetStressRound {
   return { status: "idle", imagePaths: [], verdicts: [] };
 }

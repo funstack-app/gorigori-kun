@@ -1,25 +1,32 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
+  ASSET_CANDIDATE_COUNTS,
+  DEFAULT_ASSET_CANDIDATE_COUNT,
+  acquireAssetRunRight,
   adoptAssetCandidate,
-  areAllAssetPromptsDrafted,
   beginAssetGeneration,
   beginStressTest,
   canStartStressTest,
   chooseExtraStressRound,
   completeAssetGeneration,
   completeStressTestGeneration,
+  createAssetDraftAbortRegistry,
   evaluateStressTest,
   failAssetGeneration,
   failStressTestGeneration,
   findLocationPairReferencePath,
   getAssetFactoryGateState,
+  inspectGeneratedAssetCandidates,
   needsPromptRevisionBeforeRegeneration,
   rejectAssetCandidates,
+  releaseAssetRunRight,
+  runAssetTaskPool,
   saveAssetPromptDraft,
   setStressTestVerdict,
   sortAssetsForFactory,
   updateStressConditions,
+  type AssetCandidateCount,
 } from "../../../lib/film/assetFactory";
 import {
   buildAssetPromptDraftPrompt,
@@ -30,7 +37,6 @@ import {
   FilmTextTurnAbortedError,
   FilmTextTurnTimeoutError,
   runFilmTextTurn,
-  type FilmTextTurnProgress,
 } from "../../../lib/film/codexText";
 import type {
   AssetImportance,
@@ -83,10 +89,10 @@ export function buildCanonicalImageAdoption(asset: FilmAsset, path: string): Fil
 }
 
 /**
- * 検品用の拡大表示。クリックで全画面、もう一度クリックか Esc で閉じる。
+ * 検品用の拡大表示。ダブルクリックで全画面、クリックか Esc で閉じる。
  * STΛCK実機FB 2026-08-22:「拡大できないので検品がやりづらい」への対応。
  */
-function ZoomableImage({
+export function ZoomableImage({
   path,
   alt,
   className,
@@ -100,9 +106,9 @@ function ZoomableImage({
   return (
     <button
       type="button"
-      onClick={() => onZoom(path)}
+      onDoubleClick={() => onZoom(path)}
       className="block w-full cursor-zoom-in"
-      title="クリックで拡大"
+      title="ダブルクリックで拡大"
     >
       <SafeImage path={path} alt={alt} className={className} />
     </button>
@@ -143,20 +149,21 @@ function statusLabel(asset: FilmAsset): string {
   if (asset.status === "generating") return "作成中";
   if (asset.status === "interrupted") return "中断されました";
   if (asset.status === "planned") return "下書き済";
+  if (asset.status === "locked") return "編集可";
   return "未下書き";
 }
 
 function PromptEditor({
   asset,
   drafting,
-  generationLocked,
+  candidateCount,
   onDraft,
   onSave,
   onGenerate,
 }: {
   asset: FilmAsset;
   drafting: boolean;
-  generationLocked: boolean;
+  candidateCount: AssetCandidateCount;
   onDraft: () => void;
   onSave: (prompt: string) => void;
   onGenerate: () => void;
@@ -227,10 +234,14 @@ function PromptEditor({
         <button
           type="button"
           onClick={onGenerate}
-          disabled={generationLocked || generating || mustRevise || dirty || asset.status === "reviewed"}
+          disabled={generating || mustRevise || dirty || asset.status === "reviewed"}
           className="mt-3 rounded-md bg-pink-500 px-4 py-2 text-xs font-semibold text-white transition hover:bg-pink-400 disabled:cursor-not-allowed disabled:bg-zinc-700 disabled:text-zinc-400"
         >
-          {generating ? "3枚を作成中…" : interrupted ? "再試行" : "この素材を3枚作る"}
+          {generating
+            ? `${candidateCount}枚を作成中…`
+            : interrupted
+              ? "再試行"
+              : `この素材を${candidateCount}枚作る`}
         </button>
       ) : null}
     </div>
@@ -253,10 +264,10 @@ function CandidateReview({
 
   return (
     <section className="mt-5 rounded-lg border border-pink-500/30 bg-pink-500/5 p-4">
-      <h4 className="text-sm font-semibold text-zinc-100">3枚を人の目で確認</h4>
+      <h4 className="text-sm font-semibold text-zinc-100">{asset.generatedImagePaths.length}枚を人の目で確認</h4>
       {asset.type === "text" ? (
         <p className="mt-1 text-xs leading-5 text-amber-200">
-          文字入りの物は3〜4枚から、文字が一字一句すべて正しいものだけを選びます。今回は3枚です。
+          文字入りの物は、文字が一字一句すべて正しいものだけを選びます。
         </p>
       ) : null}
       <div className="mt-3 grid gap-3 md:grid-cols-3">
@@ -277,7 +288,7 @@ function CandidateReview({
         ))}
       </div>
       <div className="mt-4 border-t border-[#303030] pt-4">
-        <p className="text-xs font-semibold text-zinc-300">3枚とも不採用</p>
+        <p className="text-xs font-semibold text-zinc-300">候補をすべて不採用</p>
         <p className="mt-1 text-[11px] leading-5 text-zinc-500">
           理由を一言残し、生成の指示文を直してから作り直します。直さずにやり直しません。
         </p>
@@ -465,24 +476,29 @@ function StressTestSection({
 
 export function AssetFactoryPanel({ project }: { project: FilmProject }) {
   const updateAsset = useFilmProjectStore((state) => state.updateAssetFactoryAsset);
+  const unlockAssetCanonical = useFilmProjectStore((state) => state.unlockAssetCanonical);
   const setPhase = useFilmProjectStore((state) => state.setPhase);
   const upsertFilmAsset = useAssetLedger((state) => state.upsertFilmAsset);
   const pushToast = useToasts((state) => state.push);
   const assets = useMemo(() => sortAssetsForFactory(project.assets), [project.assets]);
-  const allDrafted = areAllAssetPromptsDrafted(project.assets);
   const gate = useMemo(() => getAssetFactoryGateState(project.assets), [project.assets]);
-  const [draftingAssetId, setDraftingAssetId] = useState<string | null>(null);
-  const [draftingAll, setDraftingAll] = useState(false);
-  const [draftProgress, setDraftProgress] = useState<FilmTextTurnProgress>();
+  const [candidateCount, setCandidateCount] = useState<AssetCandidateCount>(
+    DEFAULT_ASSET_CANDIDATE_COUNT,
+  );
+  const [draftingAssetIds, setDraftingAssetIds] = useState<Set<string>>(() => new Set());
+  const [batchMode, setBatchMode] = useState<"draft" | "draft-and-generate" | null>(null);
   const [stressRunningAssetId, setStressRunningAssetId] = useState<string | null>(null);
   const [zoomPath, setZoomPath] = useState<string | null>(null);
   const [characterPickerAssetId, setCharacterPickerAssetId] = useState<string | null>(null);
   const [libraryPickerAssetId, setLibraryPickerAssetId] = useState<string | null>(null);
-  const abortRef = useRef<AbortController | null>(null);
+  const draftRunAssetIdsRef = useRef<Set<string>>(new Set());
+  const generationRunAssetIdsRef = useRef<Set<string>>(new Set());
+  const draftAbortRegistryRef = useRef(createAssetDraftAbortRegistry());
   const localAssetIdRef = useRef<string | null>(null);
   const localInputRef = useRef<HTMLInputElement | null>(null);
+  const draftingAll = batchMode !== null;
 
-  useEffect(() => () => abortRef.current?.abort(), []);
+  useEffect(() => () => draftAbortRegistryRef.current.abortAll(), []);
 
   function persist(assetId: string, next: (asset: AssetLedgerEntry) => AssetLedgerEntry) {
     updateAsset(assetId, next);
@@ -543,22 +559,49 @@ export function AssetFactoryPanel({ project }: { project: FilmProject }) {
     }
   }
 
-  async function draftOne(asset: FilmAsset, controller?: AbortController): Promise<boolean> {
-    if (asset.locked) return false;
-    const ownController = controller ?? new AbortController();
-    if (!controller) abortRef.current = ownController;
-    setDraftingAssetId(asset.id);
-    setDraftProgress({ phase: "waiting", receivedChars: 0 });
+  function syncDraftingAssetIds() {
+    setDraftingAssetIds(new Set(draftRunAssetIdsRef.current));
+  }
+
+  function acquireDraftRun(assetId: string): boolean {
+    const acquired = acquireAssetRunRight(draftRunAssetIdsRef.current, assetId);
+    if (acquired) syncDraftingAssetIds();
+    return acquired;
+  }
+
+  function releaseDraftRun(assetId: string) {
+    releaseAssetRunRight(draftRunAssetIdsRef.current, assetId);
+    syncDraftingAssetIds();
+  }
+
+  async function createAndSaveDraft(
+    asset: FilmAsset,
+    controller: AbortController,
+  ): Promise<FilmAsset> {
+    if (asset.locked) throw new Error("確定済みの素材は下書きし直せません");
+    const raw = await runFilmTextTurn(buildAssetPromptDraftPrompt(project, asset), {
+      label: "素材の生成指示文",
+      signal: controller.signal,
+    });
+    const prompt = cleanAssetPromptDraftResponse(raw);
+    if (!prompt) throw new Error("AIから空の文面が返りました");
+    let saved = saveAssetPromptDraft(asset, prompt);
+    persist(asset.id, (current) => {
+      saved = saveAssetPromptDraft(current, prompt);
+      return saved;
+    });
+    return saved;
+  }
+
+  async function draftOne(asset: FilmAsset) {
+    if (asset.locked || !acquireDraftRun(asset.id)) return;
+    const controller = draftAbortRegistryRef.current.startIndividual(asset.id);
+    if (!controller) {
+      releaseDraftRun(asset.id);
+      return;
+    }
     try {
-      const raw = await runFilmTextTurn(buildAssetPromptDraftPrompt(project, asset), {
-        label: "素材の生成指示文",
-        signal: ownController.signal,
-        onProgress: setDraftProgress,
-      });
-      const prompt = cleanAssetPromptDraftResponse(raw);
-      if (!prompt) throw new Error("AIから空の文面が返りました");
-      persist(asset.id, (current) => saveAssetPromptDraft(current, prompt));
-      return true;
+      await createAndSaveDraft(asset, controller);
     } catch (error) {
       if (!(error instanceof FilmTextTurnAbortedError)) {
         pushToast({
@@ -567,65 +610,138 @@ export function AssetFactoryPanel({ project }: { project: FilmProject }) {
           ttlMs: 7000,
         });
       }
-      return false;
     } finally {
-      setDraftingAssetId(null);
-      setDraftProgress(undefined);
-      if (!controller) abortRef.current = null;
+      draftAbortRegistryRef.current.finishIndividual(asset.id, controller);
+      releaseDraftRun(asset.id);
     }
   }
 
-  async function draftAllMissing() {
-    const targets = assets.filter((asset) => !asset.promptDraft.trim() && !asset.locked);
-    if (targets.length === 0) return;
-    const controller = new AbortController();
-    abortRef.current = controller;
-    setDraftingAll(true);
-    let completed = 0;
-    for (const asset of targets) {
-      if (controller.signal.aborted) break;
-      if (await draftOne(asset, controller)) completed += 1;
-      else if (!controller.signal.aborted) break;
-    }
-    setDraftingAll(false);
-    abortRef.current = null;
-    if (completed > 0) {
-      pushToast({ kind: "success", text: `${completed}件の生成指示文を下書きして保存しました。`, ttlMs: 4000 });
-    }
+  function canAutoGenerate(asset: FilmAsset): boolean {
+    return !asset.locked
+      && !asset.canonicalImagePath
+      && Boolean(asset.promptDraft.trim())
+      && asset.status !== "generating"
+      && asset.status !== "reviewed"
+      && !needsPromptRevisionBeforeRegeneration(asset);
   }
 
-  async function generateAsset(asset: FilmAsset) {
-    if (!allDrafted) return;
-    let started: FilmAsset;
-    try {
-      started = beginAssetGeneration(asset);
-    } catch (error) {
-      pushToast({ kind: "warn", text: String((error as Error)?.message ?? error), ttlMs: 5000 });
+  async function runDraftBatch(autoGenerate: boolean) {
+    const controller = draftAbortRegistryRef.current.startBatch();
+    if (!controller) return;
+
+    const targets = assets.filter(
+      (asset) => !asset.promptDraft.trim() && !asset.locked && !asset.canonicalImagePath,
+    );
+    const claimedTargets = targets.filter((asset) => (
+      acquireAssetRunRight(draftRunAssetIdsRef.current, asset.id)
+    ));
+    if (claimedTargets.length > 0) syncDraftingAssetIds();
+    const readyToGenerate = autoGenerate ? assets.filter(canAutoGenerate) : [];
+    if (claimedTargets.length === 0 && readyToGenerate.length === 0) {
+      draftAbortRegistryRef.current.finishBatch(controller);
       return;
     }
-    persist(asset.id, () => started);
-    const pairReference = findLocationPairReferencePath(asset, project.assets);
-    const tracker = beginDirectRun("characterSheet", 1, `film-asset-${project.id}-${asset.id}-${Date.now()}`);
+    const requestedCount = candidateCount;
+    setBatchMode(autoGenerate ? "draft-and-generate" : "draft");
+
+    for (const asset of readyToGenerate) {
+      void generateAsset(asset, requestedCount);
+    }
+
+    const results = await runAssetTaskPool(
+      claimedTargets,
+      async (asset) => {
+        try {
+          const saved = await createAndSaveDraft(asset, controller);
+          if (autoGenerate) void generateAsset(saved, requestedCount);
+          return saved;
+        } finally {
+          releaseDraftRun(asset.id);
+        }
+      },
+      3,
+      () => controller.signal.aborted,
+    );
+
+    for (const asset of claimedTargets) {
+      if (draftRunAssetIdsRef.current.has(asset.id)) releaseDraftRun(asset.id);
+    }
+    setBatchMode(null);
+    draftAbortRegistryRef.current.finishBatch(controller);
+
+    const completed = results.filter((result) => result.status === "fulfilled").length;
+    const failures = results.filter(
+      (result) => result.status === "rejected"
+        && !(result.reason instanceof FilmTextTurnAbortedError),
+    );
+    if (completed > 0 || readyToGenerate.length > 0) {
+      pushToast({
+        kind: "success",
+        text: autoGenerate
+          ? `${completed}件を下書きし、保存済み${readyToGenerate.length}件と合わせて画像生成へ渡しました。`
+          : `${completed}件の生成指示文を下書きして保存しました。`,
+        ttlMs: 5000,
+      });
+    }
+    if (controller.signal.aborted) {
+      pushToast({
+        kind: "warn",
+        text: "下書きの一括処理を中止しました。すでに画像生成へ渡した素材は、そのまま完成まで進みます。",
+        ttlMs: 6000,
+      });
+    }
+    if (failures.length > 0) {
+      pushToast({
+        kind: "error",
+        text: `${failures.length}件の下書きに失敗しました: ${failures.map((result) => result.item.name).join("、")}`,
+        ttlMs: 7000,
+      });
+    }
+  }
+
+  async function generateAsset(
+    asset: FilmAsset,
+    requestedCount: AssetCandidateCount = candidateCount,
+  ) {
+    if (!acquireAssetRunRight(generationRunAssetIdsRef.current, asset.id)) return;
     try {
-      const result = await tracker.step(() => imagesIpc.generateBatch({
-        prompt: started.promptDraft,
-        count: 3,
-        refImagePaths: pairReference ? [pairReference] : undefined,
-        aspect: "16:9",
-        enforceAspect: true,
-        maxAttempts: 1,
-        sourceTag: tracker.id,
-      }));
-      if (result.generatedPaths.length !== 3) {
-        throw new Error(`3枚のうち${result.generatedPaths.length}枚だけ完成しました。3枚そろえてから確認します。`);
+      let started: FilmAsset;
+      try {
+        started = beginAssetGeneration(asset);
+      } catch (error) {
+        pushToast({ kind: "warn", text: String((error as Error)?.message ?? error), ttlMs: 5000 });
+        return;
       }
-      persist(asset.id, (current) => completeAssetGeneration(current, result.generatedPaths));
-      pushToast({ kind: "success", text: `${asset.name}の候補3枚ができました。採用1枚を選んでください。`, ttlMs: 5000 });
-    } catch (error) {
-      persist(asset.id, failAssetGeneration);
-      pushToast({ kind: "error", text: `${asset.name}の作成に失敗しました: ${(error as Error)?.message ?? error}` });
+      persist(asset.id, () => started);
+      const pairReference = findLocationPairReferencePath(asset, project.assets);
+      const tracker = beginDirectRun("characterSheet", 1, `film-asset-${project.id}-${asset.id}-${Date.now()}`);
+      try {
+        const result = await tracker.step(() => imagesIpc.generateBatch({
+          prompt: started.promptDraft,
+          count: requestedCount,
+          refImagePaths: pairReference ? [pairReference] : undefined,
+          aspect: "16:9",
+          enforceAspect: true,
+          maxAttempts: 1,
+          sourceTag: tracker.id,
+        }));
+        const inspected = inspectGeneratedAssetCandidates(result.generatedPaths, requestedCount);
+        persist(asset.id, (current) => completeAssetGeneration(current, inspected.paths));
+        pushToast({
+          kind: inspected.isPartial ? "warn" : "success",
+          text: inspected.isPartial
+            ? `${asset.name}は${requestedCount}枚中${inspected.paths.length}枚が完成しました。完成分を候補に入れました。`
+            : `${asset.name}の候補${inspected.paths.length}枚ができました。採用1枚を選んでください。`,
+          ttlMs: 5000,
+        });
+      } catch (error) {
+        persist(asset.id, failAssetGeneration);
+        pushToast({ kind: "error", text: `${asset.name}の作成に失敗しました: ${(error as Error)?.message ?? error}` });
+      } finally {
+        tracker.done();
+      }
     } finally {
-      tracker.done();
+      releaseAssetRunRight(generationRunAssetIdsRef.current, asset.id);
     }
   }
 
@@ -676,7 +792,7 @@ export function AssetFactoryPanel({ project }: { project: FilmProject }) {
     <div className="mx-auto flex w-full min-w-0 max-w-6xl flex-col gap-6">
       <header>
         <p className="text-xs font-semibold uppercase tracking-[0.18em] text-pink-400">④ 素材づくり</p>
-        <h2 className="mt-2 text-2xl font-semibold text-zinc-100">設計を全部書いてから、素材を確定する</h2>
+        <h2 className="mt-2 text-2xl font-semibold text-zinc-100">指示文から素材を作り、決定版を選ぶ</h2>
         <p className="mt-2 max-w-3xl text-sm leading-6 text-zinc-400">
           今から人物・場所・小物のお手本画像を決めます。ここで確定すると、後の映像で見た目がぶれにくくなります。
         </p>
@@ -690,26 +806,70 @@ export function AssetFactoryPanel({ project }: { project: FilmProject }) {
               主要人物 → 主な場所 → 文字入りの物 → 小道具 → 補助の人物
             </p>
             <p className="mt-2 text-xs leading-5 text-zinc-500">
-              画像を作りながら考えると、後半の設定が前半と食い違います。だから画像を1枚も作らないうちに、すべての生成指示文を書き切ります。
+              推奨: 先に指示文を書き切ると見た目がぶれにくいです。保存できた素材から先に画像を作ることもできます。
             </p>
           </div>
-          <button
-            type="button"
-            onClick={() => void draftAllMissing()}
-            disabled={draftingAll || Boolean(draftingAssetId) || allDrafted}
-            className="rounded-md bg-pink-500 px-4 py-2 text-xs font-semibold text-white transition hover:bg-pink-400 disabled:bg-zinc-700 disabled:text-zinc-400"
-          >
-            {draftingAll ? "未下書きを順番に作成中…" : "未下書きをすべてAIで作る"}
-          </button>
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <label className="flex items-center gap-2 rounded-md border border-[#3a3a3a] bg-[#111111] px-3 py-2 text-xs text-zinc-300">
+              候補枚数
+              <select
+                aria-label="候補枚数"
+                value={candidateCount}
+                onChange={(event) => setCandidateCount(Number(event.target.value) as AssetCandidateCount)}
+                disabled={draftingAll}
+                className="rounded border border-[#444] bg-[#181818] px-2 py-1 text-zinc-100 outline-none"
+              >
+                {ASSET_CANDIDATE_COUNTS.map((count) => (
+                  <option key={count} value={count}>{count}枚</option>
+                ))}
+              </select>
+            </label>
+            <button
+              type="button"
+              onClick={() => void runDraftBatch(false)}
+              disabled={draftingAll || draftingAssetIds.size > 0 || !assets.some(
+                (asset) => !asset.promptDraft.trim() && !asset.locked && !asset.canonicalImagePath,
+              )}
+              className="rounded-md bg-pink-500 px-4 py-2 text-xs font-semibold text-white transition hover:bg-pink-400 disabled:bg-zinc-700 disabled:text-zinc-400"
+            >
+              {batchMode === "draft" ? "未下書きを並列で作成中…" : "未下書きをすべてAIで作る"}
+            </button>
+            <button
+              type="button"
+              onClick={() => void runDraftBatch(true)}
+              disabled={draftingAll || draftingAssetIds.size > 0 || !assets.some(
+                (asset) => (
+                  !asset.promptDraft.trim()
+                  && !asset.locked
+                  && !asset.canonicalImagePath
+                ) || canAutoGenerate(asset),
+              )}
+              className="rounded-md border border-pink-500/60 px-4 py-2 text-xs font-semibold text-pink-200 transition hover:bg-pink-500/10 disabled:border-zinc-700 disabled:text-zinc-600"
+            >
+              {batchMode === "draft-and-generate" ? "下書きから画像へ進行中…" : "下書きから画像まで一気に進める"}
+            </button>
+          </div>
         </div>
-        {draftingAssetId ? (
+        {draftingAssetIds.size > 0 ? (
           <div className="mt-4 flex items-center gap-3 rounded-md border border-[#303030] bg-[#121212] px-3 py-3">
             <span className="h-4 w-4 animate-spin rounded-full border-2 border-pink-300 border-t-transparent" />
             <div className="min-w-0 flex-1">
-              <p className="text-xs font-semibold text-pink-200">{draftingAssetId} の指示文をAIが下書き中</p>
-              <p className="mt-0.5 text-[11px] text-zinc-500">{draftProgress?.receivedChars ?? 0}文字を受信</p>
+              <p className="text-xs font-semibold text-pink-200">{[...draftingAssetIds].join("、")} の指示文をAIが下書き中</p>
+              <p className="mt-0.5 text-[11px] text-zinc-500">同時に最大3件ずつ進めています</p>
             </div>
-            <button type="button" onClick={() => abortRef.current?.abort()} className="rounded border border-[#3a3a3a] px-3 py-1.5 text-[11px] text-zinc-300">中止</button>
+            <button
+              type="button"
+              onClick={() => {
+                if (draftAbortRegistryRef.current.hasBatch()) {
+                  draftAbortRegistryRef.current.abortBatch();
+                } else {
+                  draftAbortRegistryRef.current.abortIndividuals();
+                }
+              }}
+              className="rounded border border-[#3a3a3a] px-3 py-1.5 text-[11px] text-zinc-300"
+            >
+              中止
+            </button>
           </div>
         ) : null}
         <div className="mt-4 h-2 overflow-hidden rounded-full bg-[#252525]">
@@ -722,16 +882,6 @@ export function AssetFactoryPanel({ project }: { project: FilmProject }) {
           下書き済み {project.assets.filter((asset) => Boolean(asset.promptDraft?.trim())).length} / {project.assets.length}
         </p>
       </section>
-
-      {!allDrafted ? (
-        <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
-          画像づくりはまだ始められません。すべての素材の生成指示文を保存すると始められます。
-        </div>
-      ) : (
-        <div className="rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-200">
-          すべての素材の指示文がそろいました。ここから1素材につき3枚ずつ作れます。
-        </div>
-      )}
 
       <div className="grid gap-5">
         {assets.map((asset) => {
@@ -749,7 +899,23 @@ export function AssetFactoryPanel({ project }: { project: FilmProject }) {
                   <h3 className="mt-2 text-lg font-semibold text-zinc-100">{asset.name}</h3>
                   <p className="mt-1 text-[11px] text-zinc-600">登場: {asset.blockIds.join(", ") || "未設定"}</p>
                 </div>
-                {asset.locked ? <span className="text-xs font-semibold text-emerald-300">決定版として確定済み</span> : null}
+                {asset.locked ? (
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-semibold text-emerald-300">決定版として確定済み</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (window.confirm("解除して編集し直すと、この素材を使った後工程の画像・映像は作り直しが必要になることがあります。解除しますか？")) {
+                          unlockAssetCanonical(asset.id);
+                          pushToast({ kind: "warn", text: `${asset.name}の確定を解除しました。画像と下書きは残しています。`, ttlMs: 5000 });
+                        }
+                      }}
+                      className="rounded-md border border-amber-500/50 px-2.5 py-1 text-[11px] font-semibold text-amber-200 transition hover:bg-amber-500/10"
+                    >
+                      確定を解除
+                    </button>
+                  </div>
+                ) : null}
               </div>
 
               {asset.type === "prop" ? (
@@ -797,8 +963,8 @@ export function AssetFactoryPanel({ project }: { project: FilmProject }) {
 
               <PromptEditor
                 asset={asset}
-                drafting={draftingAssetId === asset.id}
-                generationLocked={!allDrafted}
+                drafting={draftingAssetIds.has(asset.id)}
+                candidateCount={candidateCount}
                 onDraft={() => void draftOne(asset)}
                 onSave={(prompt) => persist(asset.id, (current) => saveAssetPromptDraft(current, prompt))}
                 onGenerate={() => void generateAsset(asset)}
