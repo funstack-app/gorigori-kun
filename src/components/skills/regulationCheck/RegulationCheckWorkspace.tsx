@@ -414,8 +414,9 @@ export function RegulationCheckWorkspace() {
       );
       retargetPendingRecheck(pending.imagePath, revisedPath);
       const frozenRules = selectFrozenRecheckRules(pending);
-      setRuleSetId(frozenRules.ruleSetId);
-      setRuleDraft(frozenRules.ruleSetId, frozenRules.customRule);
+      // 凍結ルールは runCheck の引数として渡すだけにする。画面の媒体選択・編集中の
+      // 下書きへ書き戻すと、利用者が別クライアント向けに編集中のルールを黙って失う
+      // (Sol 再検証 non-blocking#1 / 2026-08-24)。
       await runCheck({ ...frozenRules, pendingImagePath: revisedPath });
     } catch (err) {
       pushToast({
