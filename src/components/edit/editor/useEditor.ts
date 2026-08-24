@@ -73,11 +73,30 @@ const IMAGE_EXTS = ["png", "jpg", "jpeg", "webp", "gif", "bmp", "tif", "tiff"];
 export type OpenImageForEditingOptions = {
   /** false のときは、読み込み確認だけ行い sourceImagePath の確定を呼び出し側へ任せる。 */
   commitSourcePath?: boolean;
+  /** 読込失敗後のスナップショット復元にも失敗したとき、ファイルから開き直す版。null は再試行済み。 */
+  recoveryPath?: string | null;
+  /** ファイルからの開き直しにも失敗し、安全のため編集を止める必要があることを通知する。 */
+  onRecoveryFailure?: (error: unknown) => void;
 };
 
 export type VersionOperationLock = { current: boolean };
 
-type RegionEditedVersionResult = "applied" | "patch-failed" | "version-failed";
+export const EDITOR_RECOVERY_ERROR = "画面の復元に失敗しました。画像を開き直してください。";
+
+let editorRecoveryFailureHandler: ((error: unknown) => void) | null = null;
+
+/** useEditorActions から直接画像を開く経路でも、復元不能を画面側へ通知する。 */
+export function setEditorRecoveryFailureHandler(
+  handler: ((error: unknown) => void) | null,
+): void {
+  editorRecoveryFailureHandler = handler;
+}
+
+type RegionEditedVersionResult =
+  | "applied"
+  | "patch-failed"
+  | "version-failed"
+  | "recovery-failed";
 
 type ApplyRegionEditedVersionOptions = {
   canvas: unknown;
@@ -85,6 +104,9 @@ type ApplyRegionEditedVersionOptions = {
   saveVersion: () => Promise<string | null>;
   applyVersion: (path: string) => Promise<boolean>;
   rollbackSession: () => void;
+  recoveryPath: string;
+  reloadVersion: (path: string) => Promise<boolean>;
+  onRecoveryFailure: (error: unknown) => void;
 };
 
 type ApplyEditedVersionOptions = {
@@ -97,6 +119,8 @@ type ApplyEditedVersionOptions = {
     options?: OpenImageForEditingOptions,
   ) => Promise<boolean>;
   commit: (sourceImagePath: string, session: EditSession) => void;
+  forceReload?: boolean;
+  onRecoveryFailure?: (error: unknown) => void;
 };
 
 /**
@@ -110,6 +134,8 @@ export async function applyEditedVersion({
   label,
   openImageForEditing,
   commit,
+  forceReload = false,
+  onRecoveryFailure,
 }: ApplyEditedVersionOptions): Promise<boolean> {
   const normalizedPath = path.trim();
   if (!normalizedPath) return false;
@@ -125,9 +151,13 @@ export async function applyEditedVersion({
   })();
 
   // 選択済みの版をもう一度押した場合は、履歴を無用に消さない。
-  if (nextSession === session) return session.currentPath === normalizedPath;
+  if (nextSession === session && !forceReload) return session.currentPath === normalizedPath;
 
-  const opened = await openImageForEditing(normalizedPath, { commitSourcePath: false });
+  const opened = await openImageForEditing(normalizedPath, {
+    commitSourcePath: false,
+    recoveryPath: session.currentPath,
+    onRecoveryFailure,
+  });
   if (!opened) return false;
 
   commit(normalizedPath, nextSession);
@@ -138,11 +168,11 @@ export async function applyEditedVersion({
  * 版の読み込みを1件ずつにする。null は「すでに別の版を読み込み中なので無視」。
  * React 外の結合テストでも、画面と同じ連打防止経路を通せるよう小さく切り出す。
  */
-export async function runVersionOperation(
+export async function runVersionOperation<Result>(
   lock: VersionOperationLock,
   setInFlight: (inFlight: boolean) => void,
-  operation: () => Promise<boolean>,
-): Promise<boolean | null> {
+  operation: () => Promise<Result>,
+): Promise<Result | null> {
   if (lock.current) return null;
   lock.current = true;
   setInFlight(true);
@@ -164,6 +194,9 @@ export async function applyRegionEditedVersion({
   saveVersion,
   applyVersion,
   rollbackSession,
+  recoveryPath,
+  reloadVersion,
+  onRecoveryFailure,
 }: ApplyRegionEditedVersionOptions): Promise<RegionEditedVersionResult> {
   const beforeSnapshot = snapshotCanvas(canvas);
   if (beforeSnapshot === null) return "version-failed";
@@ -190,7 +223,8 @@ export async function applyRegionEditedVersion({
   transactionHistory.reset(beforeSnapshot);
   useEditor.setState({ history: transactionHistory, canUndo: false, canRedo: false });
 
-  const rollback = async () => {
+  const rollback = async (): Promise<boolean> => {
+    let restoreError: unknown = null;
     useEditor.getState().setHistorySuppressed(true);
     try {
       await restoreCanvas(canvas, beforeSnapshot);
@@ -201,8 +235,12 @@ export async function applyRegionEditedVersion({
       (canvas as { __ggBaseSize?: { width: number; height: number } }).__ggBaseSize =
         beforeBaseSize;
       (canvas as { requestRenderAll?: () => void }).requestRenderAll?.();
-    } catch {
-      // 復元処理の例外で、パス・履歴・サムネの巻き戻しまで止めない。
+    } catch (caught) {
+      restoreError = caught;
+      console.error(
+        "囲み編集前のキャンバス復元に失敗したため、現在の版を再読込します。",
+        caught,
+      );
     } finally {
       useEditor.setState({
         history: beforeHistory,
@@ -217,29 +255,40 @@ export async function applyRegionEditedVersion({
       useEditor.getState().bumpRevision();
       rollbackSession();
     }
+
+    if (restoreError === null) return true;
+    try {
+      if (await reloadVersion(recoveryPath)) return true;
+    } catch (caught) {
+      console.error("現在の版の再読込処理で例外が発生しました。", caught);
+    }
+
+    const recoveryError = new Error(EDITOR_RECOVERY_ERROR);
+    console.error("現在の版の再読込にも失敗したため、編集を無効化します。", recoveryError);
+    useEditor.getState().setError(EDITOR_RECOVERY_ERROR);
+    onRecoveryFailure(recoveryError);
+    return false;
   };
 
   try {
     const patched = await applyPatch();
     if (!patched) {
-      await rollback();
-      return "patch-failed";
+      return (await rollback()) ? "patch-failed" : "recovery-failed";
     }
-  } catch {
-    await rollback();
-    return "patch-failed";
+  } catch (caught) {
+    console.error("囲み編集のパッチ適用に失敗したため、変更を取り消します。", caught);
+    return (await rollback()) ? "patch-failed" : "recovery-failed";
   }
 
   try {
     const path = await saveVersion();
     if (!path || !(await applyVersion(path))) {
-      await rollback();
-      return "version-failed";
+      return (await rollback()) ? "version-failed" : "recovery-failed";
     }
     return "applied";
-  } catch {
-    await rollback();
-    return "version-failed";
+  } catch (caught) {
+    console.error("囲み編集の保存または版適用に失敗したため、変更を取り消します。", caught);
+    return (await rollback()) ? "version-failed" : "recovery-failed";
   }
 }
 
@@ -265,6 +314,10 @@ export async function openImageForEditing(
   const previousBaseSize = (
     liveCanvas as { __ggBaseSize?: { width: number; height: number } }
   ).__ggBaseSize;
+  const recoveryPath =
+    options.recoveryPath === undefined
+      ? useEditor.getState().sourceImagePath
+      : options.recoveryPath;
   try {
     await showSourceImagePreview(liveCanvas, path);
     useEditor.getState().resetHistory();
@@ -289,8 +342,30 @@ export async function openImageForEditing(
         ).__ggBaseSize = previousBaseSize;
         (liveCanvas as { requestRenderAll?: () => void }).requestRenderAll?.();
         useEditor.getState().bumpRevision();
-      } catch {
-        // 復元失敗より、元の読込エラーを優先して表示する。
+      } catch (restoreError) {
+        console.error(
+          "画像読込前のキャンバス復元に失敗したため、現在の版を再読込します。",
+          restoreError,
+        );
+        let recovered = false;
+        if (recoveryPath) {
+          try {
+            recovered = await openImageForEditing(recoveryPath, {
+              commitSourcePath: options.commitSourcePath,
+              recoveryPath: null,
+              onRecoveryFailure: () => {},
+            });
+          } catch (recoveryError) {
+            console.error("現在の版の再読込処理で例外が発生しました。", recoveryError);
+          }
+        }
+        if (!recovered) {
+          const recoveryError = new Error(EDITOR_RECOVERY_ERROR);
+          console.error("現在の版の再読込にも失敗したため、編集を無効化します。", recoveryError);
+          useEditor.getState().setError(EDITOR_RECOVERY_ERROR);
+          (options.onRecoveryFailure ?? editorRecoveryFailureHandler)?.(recoveryError);
+          return false;
+        }
       }
     }
     useEditor.getState().setError(caught instanceof Error ? caught.message : String(caught));

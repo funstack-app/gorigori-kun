@@ -11,6 +11,7 @@ import { EditorHistory } from "../src/components/edit/editor/history";
 import {
   applyEditedVersion,
   applyRegionEditedVersion,
+  EDITOR_RECOVERY_ERROR,
   openImageForEditing,
   runVersionOperation,
   type VersionOperationLock,
@@ -100,6 +101,14 @@ function createVersionHarness(basePath = "/images/original.png") {
   let canvasPath = basePath;
   let uploadPath = "/images/region-saved.png";
   let uploadError: Error | null = null;
+  let restoreFailuresRemaining = 0;
+  let recoveryDisabled = false;
+  let pendingRegionPatch: {
+    started: Promise<void>;
+    markStarted: () => void;
+    wait: Promise<void>;
+    resolve: () => void;
+  } | null = null;
   const lock: VersionOperationLock = { current: false };
   const inFlightChanges: boolean[] = [];
   const objects: Array<Record<string, unknown>> = [];
@@ -109,6 +118,10 @@ function createVersionHarness(basePath = "/images/original.png") {
     __ggBaseSize: { width: 640, height: 480 },
     toJSON: () => ({ path: canvasPath, objects: [...objects] }),
     loadFromJSON: (snapshot: unknown) => {
+      if (restoreFailuresRemaining > 0) {
+        restoreFailuresRemaining -= 1;
+        throw new Error("キャンバス復元失敗");
+      }
       const restored = snapshot as { path: string; objects?: Array<Record<string, unknown>> };
       canvasPath = restored.path;
       objects.splice(0, objects.length, ...(restored.objects ?? []));
@@ -151,37 +164,75 @@ function createVersionHarness(basePath = "/images/original.png") {
   });
   mockConvertFileSrc("macos");
 
+  const applyWithoutLock = async (
+    path: string,
+    mode: "add" | "switch",
+    label?: string,
+    forceReload = false,
+  ) =>
+    applyEditedVersion({
+      session,
+      path,
+      mode,
+      label,
+      openImageForEditing,
+      forceReload,
+      onRecoveryFailure: () => {
+        recoveryDisabled = true;
+      },
+      commit: (sourceImagePath, nextSession) => {
+        useEditor.getState().setSourceImagePath(sourceImagePath);
+        session = nextSession;
+      },
+    });
+
   const apply = async (path: string, mode: "add" | "switch", label?: string) =>
     runVersionOperation(lock, (inFlight) => inFlightChanges.push(inFlight), () =>
-      applyEditedVersion({
-        session,
-        path,
-        mode,
-        label,
-        openImageForEditing,
-        commit: (sourceImagePath, nextSession) => {
-          useEditor.getState().setSourceImagePath(sourceImagePath);
-          session = nextSession;
-        },
-      }),
+      applyWithoutLock(path, mode, label),
     );
 
   const editRegion = async () => {
     const sessionBeforeEdit = session;
-    return applyRegionEditedVersion({
-      canvas,
-      applyPatch: async () => {
-        canvasPath = `${canvasPath}#region-patch`;
-        useEditor.getState().pushHistory();
-        return true;
-      },
-      saveVersion: () =>
-        images.writeUpload("edit-region.png", new Uint8Array([1, 2, 3])),
-      applyVersion: async (path) => (await apply(path, "add", "囲んで直す")) === true,
-      rollbackSession: () => {
-        session = sessionBeforeEdit;
-      },
-    });
+    return runVersionOperation(lock, (inFlight) => inFlightChanges.push(inFlight), () =>
+      applyRegionEditedVersion({
+        canvas,
+        applyPatch: async () => {
+          if (pendingRegionPatch) {
+            pendingRegionPatch.markStarted();
+            await pendingRegionPatch.wait;
+          }
+          canvasPath = `${canvasPath}#region-patch`;
+          useEditor.getState().pushHistory();
+          return true;
+        },
+        saveVersion: () =>
+          images.writeUpload("edit-region.png", new Uint8Array([1, 2, 3])),
+        applyVersion: (path) => applyWithoutLock(path, "add", "囲んで直す"),
+        rollbackSession: () => {
+          session = sessionBeforeEdit;
+        },
+        recoveryPath: sessionBeforeEdit.currentPath ?? basePath,
+        reloadVersion: (path) =>
+          openImageForEditing(path, {
+            recoveryPath: null,
+            onRecoveryFailure: () => {},
+          }),
+        onRecoveryFailure: () => {
+          recoveryDisabled = true;
+        },
+      }),
+    );
+  };
+
+  const select = async (path: string) => {
+    const result = await runVersionOperation(lock, (inFlight) => inFlightChanges.push(inFlight), () =>
+      applyWithoutLock(path, "switch", undefined, recoveryDisabled),
+    );
+    if (result === true && recoveryDisabled) {
+      recoveryDisabled = false;
+      useEditor.getState().setError(null);
+    }
+    return result;
   };
 
   return {
@@ -193,6 +244,24 @@ function createVersionHarness(basePath = "/images/original.png") {
     },
     failImage(path: string) {
       fabricMock.failedPaths.add(path);
+    },
+    allowImage(path: string) {
+      fabricMock.failedPaths.delete(path);
+    },
+    failNextRestores(count = 1) {
+      restoreFailuresRemaining = count;
+    },
+    deferRegionPatch() {
+      let markStarted = () => {};
+      let resolve = () => {};
+      const started = new Promise<void>((done) => {
+        markStarted = done;
+      });
+      const wait = new Promise<void>((done) => {
+        resolve = done;
+      });
+      pendingRegionPatch = { started, markStarted, wait, resolve };
+      return pendingRegionPatch;
     },
     failUpload(message = "保存失敗") {
       uploadError = new Error(message);
@@ -212,9 +281,13 @@ function createVersionHarness(basePath = "/images/original.png") {
     get inFlightChanges() {
       return inFlightChanges;
     },
+    get recoveryDisabled() {
+      return recoveryDisabled;
+    },
     get session(): EditSession {
       return session;
     },
+    select,
   };
 }
 
@@ -354,5 +427,72 @@ describe("AI編集版とキャンバスUndoの結合", () => {
     expect(harness.session.currentPath).toBe("/images/candidate-1.png");
     expect(harness.inFlight).toBe(false);
     expect(harness.inFlightChanges.slice(-2)).toEqual([true, false]);
+  });
+
+  it("復元失敗時は現在の版をファイルから再読込して立て直す", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    harness.failUpload();
+    harness.failNextRestores();
+
+    await expect(harness.editRegion()).resolves.toBe("version-failed");
+
+    expect(harness.openedPaths).toEqual(["/images/original.png"]);
+    expect(harness.canvasPath).toBe("/images/original.png");
+    expect(harness.session.currentPath).toBe("/images/original.png");
+    expect(harness.recoveryDisabled).toBe(false);
+    expect(consoleError).toHaveBeenCalledWith(
+      "囲み編集前のキャンバス復元に失敗したため、現在の版を再読込します。",
+      expect.any(Error),
+    );
+    consoleError.mockRestore();
+  });
+
+  it("復元も再読込も失敗すると無効化し、版クリックの再読込成功で復帰する", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    harness.failUpload();
+    harness.failNextRestores();
+    harness.failImage("/images/original.png");
+
+    await expect(harness.editRegion()).resolves.toBe("recovery-failed");
+
+    expect(harness.recoveryDisabled).toBe(true);
+    expect(useEditor.getState().error).toBe(EDITOR_RECOVERY_ERROR);
+    expect(harness.session.currentPath).toBe("/images/original.png");
+
+    harness.allowImage("/images/original.png");
+    await expect(harness.select("/images/original.png")).resolves.toBe(true);
+
+    expect(harness.recoveryDisabled).toBe(false);
+    expect(useEditor.getState().error).toBeNull();
+    expect(harness.canvasPath).toBe("/images/original.png");
+    expect(harness.openedPaths).toEqual([
+      "/images/original.png",
+      "/images/original.png",
+    ]);
+    expect(consoleError).toHaveBeenCalledWith(
+      "現在の版の再読込にも失敗したため、編集を無効化します。",
+      expect.any(Error),
+    );
+    consoleError.mockRestore();
+  });
+
+  it("囲み編集のパッチ実行中に押した候補は全工程ロックで無視される", async () => {
+    await harness.apply("/images/candidate-1.png", "add", "ことばで直す");
+    await harness.apply("/images/original.png", "switch");
+    const patch = harness.deferRegionPatch();
+    const openedBeforeClicks = harness.openedPaths.length;
+
+    const regionEdit = harness.editRegion();
+    await patch.started;
+    expect(harness.inFlight).toBe(true);
+
+    await expect(harness.apply("/images/candidate-1.png", "switch")).resolves.toBeNull();
+    expect(harness.session.currentPath).toBe("/images/original.png");
+    expect(harness.openedPaths).toHaveLength(openedBeforeClicks);
+
+    patch.resolve();
+    await expect(regionEdit).resolves.toBe("applied");
+    expect(harness.session.currentPath).toBe("/images/region-saved.png");
+    expect(harness.inFlight).toBe(false);
   });
 });

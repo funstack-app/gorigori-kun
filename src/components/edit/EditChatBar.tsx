@@ -8,6 +8,7 @@ type EditChatBarProps = {
   hasRegion: boolean;
   busy: boolean;
   disabled: boolean;
+  interactionDisabled?: boolean;
   onChange: (value: string) => void;
   onSubmit: () => void;
   onSelectWhole: () => void;
@@ -20,6 +21,7 @@ export function EditChatBar({
   hasRegion,
   busy,
   disabled,
+  interactionDisabled = false,
   onChange,
   onSubmit,
   onSelectWhole,
@@ -46,6 +48,7 @@ export function EditChatBar({
     >
       <textarea
         value={value}
+        disabled={interactionDisabled}
         onChange={(event) => onChange(event.target.value)}
         onKeyDown={submitFromKeyboard}
         rows={2}
@@ -57,6 +60,7 @@ export function EditChatBar({
           <button
             type="button"
             onClick={onSelectWhole}
+            disabled={interactionDisabled}
             className={`rounded-full px-2.5 py-0.5 text-[11px] ${
               activeTool === "ai"
                 ? "bg-neutral-200 text-black"
@@ -68,7 +72,7 @@ export function EditChatBar({
           <button
             type="button"
             onClick={onSelectRegion}
-            disabled={!hasRegion}
+            disabled={interactionDisabled || !hasRegion}
             className={`rounded-full px-2.5 py-0.5 text-[11px] ${
               activeTool === "region" && hasRegion
                 ? "bg-neutral-200 text-black"

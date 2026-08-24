@@ -39,7 +39,9 @@ import {
 import {
   applyEditedVersion,
   applyRegionEditedVersion,
+  EDITOR_RECOVERY_ERROR,
   runVersionOperation,
+  setEditorRecoveryFailureHandler,
   useEditorActions,
 } from "./edit/editor/useEditor";
 
@@ -104,6 +106,8 @@ export function EditWorkspace() {
   /** 版画像の読み込み中。候補・履歴の連打とAI送信を同時に止める。 */
   const [versionInFlight, setVersionInFlight] = useState(false);
   const versionInFlightRef = useRef(false);
+  /** 自動復元と版ファイル再読込の両方が失敗した状態。版を開き直すまで編集を止める。 */
+  const [versionRecoveryRequired, setVersionRecoveryRequired] = useState(false);
   /** 「作品にする」の実行中フラグ (二重押しでギャラリーに2枚入るのを防ぐ)。 */
   const [savingArtwork, setSavingArtwork] = useState(false);
   /** 直す範囲 (0..1 の正規化 bbox)。null = 画像全体。 */
@@ -211,32 +215,46 @@ export function EditWorkspace() {
    * AI編集の追加と版切替を、読み込み成功後だけ確定する共通入口。
    * openImageForEditing がキャンバスを新版で開き、同時に Undo 履歴も新版基準へ戻す。
    */
-  const applyVersion = async (
+  const handleVersionRecoveryFailure = (_caught: unknown) => {
+    setVersionRecoveryRequired(true);
+    setError(EDITOR_RECOVERY_ERROR);
+    useToasts.getState().push({
+      kind: "error",
+      text: EDITOR_RECOVERY_ERROR,
+      ttlMs: 7000,
+    });
+  };
+
+  useEffect(() => {
+    setEditorRecoveryFailureHandler(handleVersionRecoveryFailure);
+    return () => setEditorRecoveryFailureHandler(null);
+  }, [handleVersionRecoveryFailure]);
+
+  const applyVersionWithoutLock = async (
     path: string,
     mode: "add" | "switch",
     label?: string,
-    options: { showFailureToast?: boolean } = {},
+    options: { showFailureToast?: boolean; forceReload?: boolean } = {},
   ): Promise<boolean> => {
-    const applied = await runVersionOperation(
-      versionInFlightRef,
-      setVersionInFlight,
-      () =>
-        applyEditedVersion({
-          session: editSessionRef.current,
-          path,
-          mode,
-          label,
-          openImageForEditing,
-          commit: (nextSourcePath, nextSession) => {
-            useEditor.getState().setSourceImagePath(nextSourcePath);
-            editSessionRef.current = nextSession;
-            setEditSession(nextSession);
-          },
-        }),
-    );
-    // null は連打による後発操作。何も変えず、失敗通知も出さない。
-    if (applied === null) return false;
-    if (!applied && options.showFailureToast !== false) {
+    let recoveryFailed = false;
+    const applied = await applyEditedVersion({
+      session: editSessionRef.current,
+      path,
+      mode,
+      label,
+      openImageForEditing,
+      forceReload: options.forceReload,
+      onRecoveryFailure: (caught) => {
+        recoveryFailed = true;
+        handleVersionRecoveryFailure(caught);
+      },
+      commit: (nextSourcePath, nextSession) => {
+        useEditor.getState().setSourceImagePath(nextSourcePath);
+        editSessionRef.current = nextSession;
+        setEditSession(nextSession);
+      },
+    });
+    if (!applied && !recoveryFailed && options.showFailureToast !== false) {
       useToasts.getState().push({
         kind: "error",
         text: "画像を読み込めませんでした。前の版を表示したままにしています。",
@@ -246,10 +264,32 @@ export function EditWorkspace() {
     return applied;
   };
 
+  const applyVersion = async (
+    path: string,
+    mode: "add" | "switch",
+    label?: string,
+    options: { showFailureToast?: boolean; forceReload?: boolean } = {},
+  ): Promise<boolean> => {
+    const applied = await runVersionOperation(
+      versionInFlightRef,
+      setVersionInFlight,
+      () => applyVersionWithoutLock(path, mode, label, options),
+    );
+    // null は連打による後発操作。何も変えず、失敗通知も出さない。
+    return applied ?? false;
+  };
+
   /** 候補ストリップと履歴レールに共通の版切替。 */
   const selectSessionVersion = async (path: string) => {
     if (versionInFlightRef.current) return;
-    await applyVersion(path, "switch");
+    const applied = await applyVersion(path, "switch", undefined, {
+      forceReload: versionRecoveryRequired,
+    });
+    if (applied && versionRecoveryRequired) {
+      setVersionRecoveryRequired(false);
+      setError(null);
+      useEditor.getState().setError(null);
+    }
   };
 
   /**
@@ -432,7 +472,7 @@ export function EditWorkspace() {
    * エラーカードに出る (エラーログセンターにも流れる) ので、ここで二重に出さない。
    */
   const runRemoveBackground = async () => {
-    if (removingBg || versionInFlightRef.current) return;
+    if (removingBg || versionInFlightRef.current || versionRecoveryRequired) return;
     setRemovingBg(true);
     setError(null);
     try {
@@ -505,7 +545,8 @@ export function EditWorkspace() {
     Boolean(sourceImagePath && instruction.trim()) &&
     !busy &&
     busyTool === null &&
-    !versionInFlight;
+    !versionInFlight &&
+    !versionRecoveryRequired;
 
   /**
    * 戻す / やり直したあとに、調整のつまみをキャンバスの実値へ引き直す。
@@ -559,6 +600,7 @@ export function EditWorkspace() {
       if (event.key.toLowerCase() !== "z") return;
       if (typing) return;
       event.preventDefault();
+      if (versionRecoveryRequired) return;
       // ショートカット経由でも、戻したあとに調整のつまみを実値へ引き直す
       // (ヘッダーのボタン経由と挙動を揃える)。setAdjust は setter なので
       // 依存配列に足す必要がなく、listener を張り替えずに済む。
@@ -572,7 +614,7 @@ export function EditWorkspace() {
     // selectTool は毎レンダー作り直されるが、中で読むのは state setter と
     // useEditor.getState() だけ (古い値を掴まない) ので依存に入れない。
     // 入れると keydown listener が毎レンダー張り替わる。
-  }, [performUndo, performRedo]);
+  }, [performUndo, performRedo, versionRecoveryRequired]);
 
   /**
    * 編集結果を「作品」にする (ギャラリーへ合流)。保存先は聞かない。
@@ -625,7 +667,14 @@ export function EditWorkspace() {
    */
   const runRegion = async () => {
     const prompt = instruction.trim();
-    if (!sourceImagePath || !prompt || !region || busy || versionInFlightRef.current) return;
+    if (
+      !sourceImagePath ||
+      !prompt ||
+      !region ||
+      busy ||
+      versionInFlightRef.current ||
+      versionRecoveryRequired
+    ) return;
     setBusy(true);
     setError(null);
     try {
@@ -635,17 +684,32 @@ export function EditWorkspace() {
         setError("編集キャンバスを準備できませんでした。もう一度お試しください。");
         return;
       }
-      const result = await applyRegionEditedVersion({
-        canvas: liveCanvas,
-        applyPatch: () => applyRedlineFix(sourceImagePath, region, prompt),
-        saveVersion: captureCanvasVersion,
-        applyVersion: (path) =>
-          applyVersion(path, "add", "囲んで直す", { showFailureToast: false }),
-        rollbackSession: () => {
-          editSessionRef.current = sessionBeforeEdit;
-          setEditSession(sessionBeforeEdit);
-        },
-      });
+      const result = await runVersionOperation(
+        versionInFlightRef,
+        setVersionInFlight,
+        () =>
+          applyRegionEditedVersion({
+            canvas: liveCanvas,
+            applyPatch: () => applyRedlineFix(sourceImagePath, region, prompt),
+            saveVersion: captureCanvasVersion,
+            applyVersion: (path) =>
+              applyVersionWithoutLock(path, "add", "囲んで直す", {
+                showFailureToast: false,
+              }),
+            rollbackSession: () => {
+              editSessionRef.current = sessionBeforeEdit;
+              setEditSession(sessionBeforeEdit);
+            },
+            recoveryPath: sessionBeforeEdit.currentPath ?? sourceImagePath,
+            reloadVersion: (path) =>
+              openImageForEditing(path, {
+                recoveryPath: null,
+                onRecoveryFailure: () => {},
+              }),
+            onRecoveryFailure: handleVersionRecoveryFailure,
+          }),
+      );
+      if (result === null) return;
       if (result === "applied") {
         useToasts.getState().push({
           kind: "success",
@@ -659,7 +723,7 @@ export function EditWorkspace() {
           text: "編集結果を保存できなかったため、変更を取り消しました。もう一度お試しください。",
           ttlMs: 6000,
         });
-      } else {
+      } else if (result === "patch-failed") {
         // applyRedlineFix は失敗理由を editor store の error に入れる。
         // キャンバス下部のエラーカードに出るので、ここで二重に出さない。
         setError("直せませんでした。キャンバス下のメッセージを確認してください。");
@@ -677,7 +741,13 @@ export function EditWorkspace() {
       return;
     }
     const prompt = instruction.trim();
-    if (!sourceImagePath || !prompt || busy || versionInFlightRef.current) return;
+    if (
+      !sourceImagePath ||
+      !prompt ||
+      busy ||
+      versionInFlightRef.current ||
+      versionRecoveryRequired
+    ) return;
 
     const threads = useThreads.getState();
     const tempId = `ai-edit-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -737,7 +807,8 @@ export function EditWorkspace() {
     }
   };
 
-  const panelBusy = busy || busyTool !== null || versionInFlight;
+  const panelBusy = busy || busyTool !== null || versionInFlight || versionRecoveryRequired;
+  const displayedError = versionRecoveryRequired ? EDITOR_RECOVERY_ERROR : error;
 
   return (
     <div
@@ -760,7 +831,7 @@ export function EditWorkspace() {
             <button
               type="button"
               onClick={() => void undoWithSync()}
-              disabled={!canUndo || busyTool !== null || busy || versionInFlight}
+              disabled={!canUndo || busyTool !== null || busy || versionInFlight || versionRecoveryRequired}
               className="rounded-md border border-[#3a3a3a] bg-[#1a1a1a] px-3 py-1.5 text-[11px] font-black text-neutral-200 hover:border-indigo-400 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
             >
               戻す
@@ -768,7 +839,7 @@ export function EditWorkspace() {
             <button
               type="button"
               onClick={() => void redoWithSync()}
-              disabled={!canRedo || busyTool !== null || busy || versionInFlight}
+              disabled={!canRedo || busyTool !== null || busy || versionInFlight || versionRecoveryRequired}
               className="rounded-md border border-[#3a3a3a] bg-[#1a1a1a] px-3 py-1.5 text-[11px] font-black text-neutral-200 hover:border-indigo-400 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
             >
               やり直す
@@ -776,7 +847,7 @@ export function EditWorkspace() {
             <button
               type="button"
               onClick={() => void saveArtwork()}
-              disabled={busyTool !== null || busy || savingArtwork || versionInFlight}
+              disabled={busyTool !== null || busy || savingArtwork || versionInFlight || versionRecoveryRequired}
               className="rounded-md border border-indigo-400/50 bg-indigo-500/15 px-3 py-1.5 text-[11px] font-black text-indigo-100 hover:border-indigo-300 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
             >
               作品にする
@@ -784,7 +855,7 @@ export function EditWorkspace() {
             <button
               type="button"
               onClick={() => setExportOpen(true)}
-              disabled={busyTool !== null || busy || versionInFlight}
+              disabled={busyTool !== null || busy || versionInFlight || versionRecoveryRequired}
               className="rounded-md border border-[#3a3a3a] bg-[#1a1a1a] px-3 py-1.5 text-[11px] font-black text-neutral-200 hover:border-indigo-400 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
             >
               書き出し
@@ -792,7 +863,7 @@ export function EditWorkspace() {
             <button
               type="button"
               onClick={() => void chooseImage()}
-              disabled={busyTool !== null || busy || versionInFlight}
+              disabled={busyTool !== null || busy || versionInFlight || versionRecoveryRequired}
               className="rounded-md border border-[#3a3a3a] bg-[#1a1a1a] px-3 py-1.5 text-[11px] font-black text-neutral-200 hover:border-indigo-400 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
             >
               別の画像にする
@@ -803,7 +874,17 @@ export function EditWorkspace() {
 
       <div
         data-tour="editing-canvas"
-        className="relative flex min-h-0 flex-1 overflow-hidden bg-[#121212] [&>main]:!bg-[#121212] [&_.bg-pink-500]:!bg-indigo-500 [&_.border-pink-400\/50]:!border-indigo-400\/50 [&_.text-pink-300]:!text-indigo-300"
+        aria-disabled={versionRecoveryRequired}
+        onKeyDownCapture={(event) => {
+          if (!versionRecoveryRequired) return;
+          const target = event.target as HTMLElement;
+          if (target.closest("[data-edit-version-select]")) return;
+          event.preventDefault();
+          event.stopPropagation();
+        }}
+        className={`relative flex min-h-0 flex-1 overflow-hidden bg-[#121212] [&>main]:!bg-[#121212] [&_.bg-pink-500]:!bg-indigo-500 [&_.border-pink-400\/50]:!border-indigo-400\/50 [&_.text-pink-300]:!text-indigo-300 ${
+          versionRecoveryRequired ? "pointer-events-none" : ""
+        }`}
       >
         <EditorCanvas
           panOnEmpty={tool === "ai" || tool === "select"}
@@ -812,7 +893,12 @@ export function EditWorkspace() {
               ? {
                   value: region,
                   onChange: setRegion,
-                  disabled: busy || busyTool !== null || versionInFlight || eyedropper,
+                  disabled:
+                    busy ||
+                    busyTool !== null ||
+                    versionInFlight ||
+                    versionRecoveryRequired ||
+                    eyedropper,
                   hint: textMode
                     ? "直したいセリフをドラッグで囲む"
                     : tool === "crop"
@@ -947,9 +1033,9 @@ export function EditWorkspace() {
             ) : null}
 
             <div className="absolute bottom-6 left-1/2 z-40 flex -translate-x-1/2 flex-col items-center gap-2">
-              {error ? (
+              {displayedError ? (
                 <p className="w-[min(560px,calc(100vw-2rem))] rounded-lg border border-red-500/40 bg-[#1b1111]/95 px-3 py-2 text-[11px] font-bold leading-4 text-red-200 shadow-xl">
-                  {error}
+                  {displayedError}
                 </p>
               ) : null}
               <EditChatBar
@@ -957,6 +1043,7 @@ export function EditWorkspace() {
                 activeTool={tool}
                 hasRegion={region !== null}
                 busy={busy || versionInFlight}
+                interactionDisabled={versionRecoveryRequired}
                 disabled={
                   !canRun ||
                   (tool !== "ai" && tool !== "region") ||
@@ -974,7 +1061,7 @@ export function EditWorkspace() {
               />
               <EditToolRail
                 activeTool={tool}
-                disabled={busy || busyTool !== null || versionInFlight}
+                disabled={busy || busyTool !== null || versionInFlight || versionRecoveryRequired}
                 recognizingText={busyTool === "text-detect"}
                 removingBackground={removingBg}
                 onSelect={selectTool}
@@ -990,7 +1077,7 @@ export function EditWorkspace() {
         <ExportDialog
           onExport={(format, size) => void runExport(format, size)}
           onClose={() => setExportOpen(false)}
-          busy={busy || busyTool !== null || versionInFlight}
+          busy={busy || busyTool !== null || versionInFlight || versionRecoveryRequired}
         />
       ) : null}
 

@@ -28,12 +28,13 @@ export function EditCandidateStrip({
         {paths.map((path, index) => (
           <button
             key={path}
+            data-edit-version-select
             type="button"
             onClick={() => onSelect(path)}
             disabled={disabled}
             title={index === 0 ? "オリジナル" : `編集候補 ${index}`}
             aria-label={index === 0 ? "オリジナル" : `編集候補 ${index}`}
-            className={`h-12 w-12 overflow-hidden rounded-lg border bg-[#101010] disabled:cursor-wait disabled:opacity-50 ${
+            className={`pointer-events-auto h-12 w-12 overflow-hidden rounded-lg border bg-[#101010] disabled:cursor-wait disabled:opacity-50 ${
               currentPath === path
                 ? "border-indigo-400 ring-1 ring-indigo-400"
                 : "border-[#333] hover:border-neutral-500"

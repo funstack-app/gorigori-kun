@@ -27,11 +27,12 @@ export function EditHistoryRail({
       {[...paths, basePath].map((path, index) => (
         <button
           key={path}
+          data-edit-version-select
           type="button"
           onClick={() => onSelect(path)}
           disabled={disabled}
           aria-label={index === paths.length ? "元画像" : `編集履歴 ${paths.length - index}`}
-          className={`w-14 shrink-0 overflow-hidden rounded-lg border bg-[#101010] disabled:cursor-wait disabled:opacity-50 ${
+          className={`pointer-events-auto w-14 shrink-0 overflow-hidden rounded-lg border bg-[#101010] disabled:cursor-wait disabled:opacity-50 ${
             currentPath === path
               ? "border-indigo-400 ring-2 ring-indigo-400/70"
               : "border-[#333] hover:border-neutral-500"
