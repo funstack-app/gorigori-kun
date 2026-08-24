@@ -2,7 +2,9 @@ import { useEffect, useMemo, useState } from "react";
 
 import { convertFileSrc } from "@tauri-apps/api/core";
 
-import { presetKind, usePresets, type Preset } from "../../../lib/store/presets";
+import { collectCharacterSources } from "../../../lib/characterSources";
+import { useAssetLedger } from "../../../lib/store/assetLedger";
+import { usePresets } from "../../../lib/store/presets";
 
 /**
  * キャラクター登録済みプリセットから、マルチアングルの被写体参照画像を選ぶモーダル。
@@ -23,21 +25,20 @@ type Props = {
   onPick: (imagePath: string) => void;
 };
 
-function resolveCharacterImage(preset: Preset): string | null {
-  return preset.characterMeta?.sourceImage ?? preset.attachedImages?.[0]?.path ?? null;
-}
-
 export function CharacterPresetPickerModal({ onClose, onPick }: Props) {
   const presets = usePresets((s) => s.presets);
+  const ledgerAssets = useAssetLedger((s) => s.assets);
+  const ledgerError = useAssetLedger((s) => s.error);
   const [brokenPaths, setBrokenPaths] = useState<Set<string>>(new Set());
 
-  const characterPresets = useMemo(
-    () =>
-      presets
-        .filter((p) => presetKind(p) === "character")
-        .map((p) => ({ preset: p, imagePath: resolveCharacterImage(p) })),
-    [presets],
+  const characterSources = useMemo(
+    () => collectCharacterSources(presets, ledgerError ? [] : ledgerAssets),
+    [presets, ledgerAssets, ledgerError],
   );
+
+  useEffect(() => {
+    void useAssetLedger.getState().load().catch(() => {});
+  }, []);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -73,23 +74,22 @@ export function CharacterPresetPickerModal({ onClose, onPick }: Props) {
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
-          {characterPresets.length === 0 ? (
+          {characterSources.length === 0 ? (
             <p className="py-10 text-center text-[12px] text-neutral-500">
               登録済みのキャラクターがありません。先に「キャラクター登録」で作成してください。
             </p>
           ) : (
             <div className="grid grid-cols-4 gap-3">
-              {characterPresets.map(({ preset, imagePath }) => {
+              {characterSources.map((character) => {
+                const { imagePath } = character;
                 const broken = imagePath !== null && brokenPaths.has(imagePath);
-                const usable = imagePath !== null && !broken;
-                const reason = !imagePath
-                  ? "画像が登録されていません"
-                  : broken
-                    ? "画像ファイルが見つかりません"
-                    : null;
+                const reason =
+                  character.unavailableReason ??
+                  (broken ? "画像ファイルが見つかりません" : null);
+                const usable = reason === null && imagePath !== null;
                 return (
                   <button
-                    key={preset.id}
+                    key={character.id}
                     type="button"
                     disabled={!usable}
                     onClick={() => {
@@ -102,13 +102,17 @@ export function CharacterPresetPickerModal({ onClose, onPick }: Props) {
                         ? "border-[#2a2a2a] bg-[#101010] hover:border-pink-400"
                         : "cursor-not-allowed border-[#242424] bg-[#0d0d0d] opacity-50"
                     }`}
-                    title={reason ? `${preset.name}（${reason}）` : preset.name}
+                    title={
+                      reason
+                        ? `${character.name}（${reason}）`
+                        : character.name
+                    }
                   >
                     <div className="aspect-square overflow-hidden rounded-lg bg-[#0a0a0a]">
                       {imagePath && !broken ? (
                         <img
                           src={convertFileSrc(imagePath)}
-                          alt={preset.name}
+                          alt={character.name}
                           onError={() =>
                             setBrokenPaths((prev) => new Set(prev).add(imagePath))
                           }
@@ -121,8 +125,13 @@ export function CharacterPresetPickerModal({ onClose, onPick }: Props) {
                       )}
                     </div>
                     <span className="truncate text-[11px] font-bold text-neutral-200">
-                      {preset.name}
+                      {character.name}
                     </span>
+                    {character.origin === "ledger" && (
+                      <span className="text-[10px] text-neutral-500">
+                        {character.originLabel}
+                      </span>
+                    )}
                   </button>
                 );
               })}

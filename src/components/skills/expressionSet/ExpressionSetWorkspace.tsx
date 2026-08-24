@@ -24,7 +24,12 @@ import type {
   CharacterSheetParams,
   SheetCutState,
 } from "../../../lib/character/types";
-import { usePresets, presetKind, type Preset } from "../../../lib/store/presets";
+import {
+  collectCharacterSources,
+  type CharacterSource,
+} from "../../../lib/characterSources";
+import { useAssetLedger } from "../../../lib/store/assetLedger";
+import { usePresets } from "../../../lib/store/presets";
 import {
   DEFAULT_EXPRESSION_IDS,
   EXPRESSIONS,
@@ -156,21 +161,13 @@ function ExpressionSetBody({
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// キャラ型プリセットのヘルパー
+// キャラ選択ソースのヘルパー
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** キャラの参照画像を解決する。sourceImage 優先、無ければ attachedImages の先頭。 */
-function resolveCharacterSource(preset: Preset): string | undefined {
-  const source = preset.characterMeta?.sourceImage;
-  if (source) return source;
-  return preset.attachedImages?.[0]?.path;
-}
-
 /** キャラのサムネ用画像を解決する（thumbnail data URL 優先、無ければ参照画像を convertFileSrc）。 */
-function characterThumbSrc(preset: Preset): string | undefined {
-  if (preset.thumbnail) return preset.thumbnail;
-  const source = resolveCharacterSource(preset);
-  return source ? convertFileSrc(source) : undefined;
+function characterThumbSrc(character: CharacterSource): string | undefined {
+  if (character.preset?.thumbnail) return character.preset.thumbnail;
+  return character.imagePath ? convertFileSrc(character.imagePath) : undefined;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -179,10 +176,16 @@ function characterThumbSrc(preset: Preset): string | undefined {
 
 function StepSelect() {
   const presets = usePresets((s) => s.presets);
+  const ledgerAssets = useAssetLedger((s) => s.assets);
+  const ledgerError = useAssetLedger((s) => s.error);
   const characters = useMemo(
-    () => presets.filter((p) => presetKind(p) === "character"),
-    [presets],
+    () => collectCharacterSources(presets, ledgerError ? [] : ledgerAssets),
+    [presets, ledgerAssets, ledgerError],
   );
+
+  useEffect(() => {
+    void useAssetLedger.getState().load().catch(() => {});
+  }, []);
 
   const beginRun = useCharacterSheetRun((s) => s.beginRun);
   const setAspectRatio = useCharacterSheetRun((s) => s.setAspectRatio);
@@ -203,9 +206,7 @@ function StepSelect() {
   );
 
   const running = status === "running";
-  const sourceImage = selectedCharacter
-    ? resolveCharacterSource(selectedCharacter)
-    : undefined;
+  const sourceImage = selectedCharacter?.imagePath ?? undefined;
   const canRun =
     Boolean(selectedCharacter) &&
     Boolean(sourceImage) &&
@@ -237,7 +238,7 @@ function StepSelect() {
       return;
     }
 
-    const attributes = selectedCharacter.characterMeta?.attributes ?? "";
+    const attributes = selectedCharacter.preset?.characterMeta?.attributes ?? "";
     const cutSpecs = expressions.map((expr) => ({
       cutId: expr.id,
       role: expr.role,
@@ -328,16 +329,26 @@ function StepSelect() {
               {characters.map((c) => {
                 const thumb = characterThumbSrc(c);
                 const selected = c.id === selectedCharacterId;
+                const unavailable = c.unavailableReason !== null;
                 return (
                   <button
                     key={c.id}
                     type="button"
-                    onClick={() => setSelectedCharacterId(c.id)}
-                    title={c.name}
+                    disabled={unavailable}
+                    onClick={() => {
+                      if (!unavailable) setSelectedCharacterId(c.id);
+                    }}
+                    title={
+                      unavailable
+                        ? `${c.name}（${c.unavailableReason}）`
+                        : c.name
+                    }
                     className={
                       "flex flex-col overflow-hidden rounded-lg border text-left transition " +
                       (selected
                         ? "border-pink-400 ring-1 ring-pink-400/50"
+                        : unavailable
+                          ? "cursor-not-allowed border-[#242424] opacity-50"
                         : "border-[#2a2a2a] hover:border-neutral-500")
                     }
                   >
@@ -357,6 +368,11 @@ function StepSelect() {
                     <span className="truncate px-1 py-1 text-[10px] font-bold text-neutral-300">
                       {c.name}
                     </span>
+                    {c.origin === "ledger" && (
+                      <span className="px-1 pb-1 text-[10px] text-neutral-500">
+                        {c.originLabel}
+                      </span>
+                    )}
                   </button>
                 );
               })}
@@ -440,9 +456,9 @@ function StepSelect() {
             <p className="mt-1 text-[12px]">
               同一人物・アングル固定で、選んだ表情だけをまとめて生成します。
             </p>
-            {selectedCharacter.characterMeta?.attributes && (
+            {selectedCharacter.preset?.characterMeta?.attributes && (
               <p className="mt-2 truncate text-[11px] text-neutral-600">
-                属性: {selectedCharacter.characterMeta.attributes}
+                属性: {selectedCharacter.preset.characterMeta.attributes}
               </p>
             )}
           </div>

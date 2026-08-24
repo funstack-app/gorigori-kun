@@ -93,7 +93,12 @@ import {
   pickExportFolderName,
   joinExportPath,
 } from "../../../lib/sticker/exportDir";
-import { usePresets, presetKind, type Preset } from "../../../lib/store/presets";
+import {
+  collectCharacterSources,
+  type CharacterSource,
+} from "../../../lib/characterSources";
+import { useAssetLedger } from "../../../lib/store/assetLedger";
+import { usePresets } from "../../../lib/store/presets";
 import { useToasts } from "../../../lib/store/toasts";
 import {
   beginStickerWave,
@@ -112,11 +117,6 @@ import { StickerReeditModal } from "./StickerReeditModal";
 import { StickerTextPanel } from "./StickerTextPanel";
 
 const IMAGE_EXTS = ["png", "jpg", "jpeg", "webp"];
-
-/** キャラの参照画像を解決する（表情差分と同じ規則）。 */
-function resolveCharacterSource(preset: Preset): string | undefined {
-  return preset.characterMeta?.sourceImage ?? preset.attachedImages?.[0]?.path;
-}
 
 /**
  * フォルダ直下の名前一覧（L6 の連番回避に使う）。
@@ -160,10 +160,16 @@ export function StickerWorkspace() {
 function StickerBody() {
   const pushToast = useToasts((s) => s.push);
   const presets = usePresets((s) => s.presets);
+  const ledgerAssets = useAssetLedger((s) => s.assets);
+  const ledgerError = useAssetLedger((s) => s.error);
   const characters = useMemo(
-    () => presets.filter((p) => presetKind(p) === "character"),
-    [presets],
+    () => collectCharacterSources(presets, ledgerError ? [] : ledgerAssets),
+    [presets, ledgerAssets, ledgerError],
   );
+
+  useEffect(() => {
+    void useAssetLedger.getState().load().catch(() => {});
+  }, []);
 
   // ① 素材
   const [sourceImage, setSourceImage] = useState<string | null>(null);
@@ -1076,7 +1082,7 @@ function StickerBody() {
             running={running}
             eventSubscriptionStatus={eventSubscriptionStatus}
             onPickCharacter={(c) => {
-              const src = resolveCharacterSource(c);
+              const src = c.imagePath;
               if (!src) {
                 pushToast({
                   kind: "error",
@@ -1085,7 +1091,11 @@ function StickerBody() {
                 });
                 return;
               }
-              void adoptReference(src, c.name, c.characterMeta?.attributes ?? "");
+              void adoptReference(
+                src,
+                c.name,
+                c.preset?.characterMeta?.attributes ?? "",
+              );
             }}
             onPickLocal={() => void pickLocalImage()}
             onCount={setCount}
@@ -1273,7 +1283,7 @@ function SetupPanel({
   onTone,
   onRun,
 }: {
-  characters: Preset[];
+  characters: CharacterSource[];
   sourceImage: string | null;
   sourceLabel: string;
   /** 選んだキャラの属性。生成に効くので画面に出す（C2）。手持ち画像なら空。 */
@@ -1283,7 +1293,7 @@ function SetupPanel({
   shortfall: number;
   running: boolean;
   eventSubscriptionStatus: EventSubscriptionStatus;
-  onPickCharacter: (preset: Preset) => void;
+  onPickCharacter: (character: CharacterSource) => void;
   onPickLocal: () => void;
   onCount: (count: StickerCount) => void;
   onTone: (tone: StickerToneId) => void;
@@ -1316,20 +1326,28 @@ function SetupPanel({
             // auto-fill + minmax にして、入る数だけ並べる（狭ければ3列・2列へ落ちる）。
             <div className="grid grid-cols-[repeat(auto-fill,minmax(4.5rem,1fr))] gap-2">
               {characters.map((c) => {
-                const thumb =
-                  c.thumbnail ??
-                  (resolveCharacterSource(c) ? undefined : undefined);
+                const thumb = c.preset?.thumbnail;
                 const selected = sourceLabel === c.name;
+                const unavailable = c.unavailableReason !== null;
                 return (
                   <button
                     key={c.id}
                     type="button"
-                    onClick={() => onPickCharacter(c)}
-                    title={c.name}
+                    disabled={unavailable}
+                    onClick={() => {
+                      if (!unavailable) onPickCharacter(c);
+                    }}
+                    title={
+                      unavailable
+                        ? `${c.name}（${c.unavailableReason}）`
+                        : c.name
+                    }
                     className={
                       "flex flex-col overflow-hidden rounded-lg border text-left transition " +
                       (selected
                         ? "border-pink-400 ring-1 ring-pink-400/50"
+                        : unavailable
+                          ? "cursor-not-allowed border-[#242424] opacity-50"
                         : "border-[#2a2a2a] hover:border-neutral-500")
                     }
                   >
@@ -1345,6 +1363,11 @@ function SetupPanel({
                     <span className="truncate px-1 py-1 text-[10px] font-bold text-neutral-300">
                       {c.name}
                     </span>
+                    {c.origin === "ledger" && (
+                      <span className="px-1 pb-1 text-[10px] text-neutral-500">
+                        {c.originLabel}
+                      </span>
+                    )}
                   </button>
                 );
               })}
