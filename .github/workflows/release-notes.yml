@@ -1,0 +1,34 @@
+# リリース公開の瞬間に、.github/release-notes/<tag>.md（外向きノート）を本文の先頭へ差し込む。
+# なぜ: リリース作業者のPCが閉じていても、ユーザー向けノートの反映まで自動で終わらせるため
+# (2026-08-25 STΛCK指示「ビルド後の作業をクラウドに任せたい」)。
+# ノートファイルが無いタグでは何もしない (exit 0)。
+name: release-notes
+on:
+  release:
+    types: [published]
+permissions:
+  contents: write
+jobs:
+  attach-notes:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main   # タグ時点にノートが無くても main の最新を見る
+      - name: Prepend human release notes if present
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+          RELEASE_ID: ${{ github.event.release.id }}
+        run: |
+          FILE=".github/release-notes/${TAG}.md"
+          if [ ! -f "$FILE" ]; then
+            echo "no notes file for ${TAG}, skipping"
+            exit 0
+          fi
+          gh api "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" --jq .body > /tmp/current.md || true
+          cat "$FILE" > /tmp/new.md
+          printf '\n\n---\n\n' >> /tmp/new.md
+          cat /tmp/current.md >> /tmp/new.md
+          gh release edit "$TAG" --notes-file /tmp/new.md
+          echo "notes attached to ${TAG}"
