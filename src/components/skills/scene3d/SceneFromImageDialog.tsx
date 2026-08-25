@@ -95,8 +95,8 @@ export function SceneFromImageDialog({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6">
-      <div className="flex w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-[#2a2a2a] bg-[#161616] shadow-2xl">
-        <header className="flex items-center justify-between border-b border-[#242424] px-4 py-3">
+      <div className="flex max-h-[calc(100vh-80px)] min-h-0 w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-[#2a2a2a] bg-[#161616] shadow-2xl">
+        <header className="flex shrink-0 items-center justify-between border-b border-[#242424] px-4 py-3">
           <div>
             <h2 className="text-sm font-bold text-neutral-100">画像から3Dシーンを起こす</h2>
             <p className="text-[11px] text-neutral-500">
@@ -113,7 +113,7 @@ export function SceneFromImageDialog({
           </button>
         </header>
 
-        <div className="flex gap-4 px-4 py-4">
+        <div className="flex min-h-0 flex-1 gap-4 overflow-y-auto px-4 py-4">
           <div className="w-40 shrink-0">
             <SafeImage
               path={imagePath}
@@ -229,7 +229,7 @@ export function SceneFromImageDialog({
           </div>
         </div>
 
-        <footer className="flex items-center justify-end gap-2 border-t border-[#242424] px-4 py-3">
+        <footer className="flex shrink-0 items-center justify-end gap-2 border-t border-[#242424] px-4 py-3">
           {result?.ok ? (
             <button
               type="button"

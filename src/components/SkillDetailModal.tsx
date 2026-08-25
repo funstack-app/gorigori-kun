@@ -67,10 +67,10 @@ export function SkillDetailModal({
       onClick={onClose}
     >
       <div
-        className="flex max-h-[calc(100vh-2rem)] w-full max-w-3xl flex-col overflow-y-auto rounded-2xl border border-[#343434] bg-[#1a1a1a] shadow-2xl"
+        className="flex max-h-[calc(100vh-80px)] min-h-0 w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-[#343434] bg-[#1a1a1a] shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
-        <header className="flex items-start justify-between border-b border-[#2a2a2a] px-5 py-4">
+        <header className="flex shrink-0 items-start justify-between border-b border-[#2a2a2a] px-5 py-4">
           <div className="flex items-start gap-3">
             <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-[#101010] text-pink-300">
               <SkillIcon id={skillId} className="h-6 w-6" />
@@ -93,7 +93,7 @@ export function SkillDetailModal({
           </button>
         </header>
 
-        <div className="overflow-y-auto px-5 py-4">
+        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
           <section className="mb-4 rounded-xl border border-[#2a2a2a] bg-[#101010] p-3">
             <h3 className="text-xs font-black text-neutral-300">概要</h3>
             <p className="mt-1.5 text-xs leading-relaxed text-neutral-200">

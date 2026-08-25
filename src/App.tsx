@@ -1624,7 +1624,7 @@ function UsageGauges() {
           <summary className="cursor-pointer list-none rounded-md border border-[#3a3a3a] bg-[#1b1b1b] px-2.5 py-1 text-[11px] font-bold text-neutral-200 hover:bg-[#242424] [&::-webkit-details-marker]:hidden">
             +{overflowProviders.length}
           </summary>
-          <div className="absolute right-0 top-full z-50 mt-2 flex min-w-44 flex-col gap-1.5 rounded-lg border border-[#333] bg-[#151515] p-2 shadow-2xl">
+          <div className="absolute right-0 top-full z-50 mt-2 flex max-h-[calc(100vh-80px)] min-w-44 flex-col gap-1.5 overflow-y-auto rounded-lg border border-[#333] bg-[#151515] p-2 shadow-2xl">
             {overflowProviders.map((provider) => (
               <HeaderProviderPill key={provider.id} provider={provider} wide />
             ))}
@@ -1950,15 +1950,15 @@ function LibraryDeleteButton() {
             }
           }}
         >
-          <div className="w-full max-w-md rounded-2xl border border-rose-400/30 bg-[#181818] p-5 shadow-2xl">
-            <h3 id="library-delete-title" className="text-base font-black text-white">
+          <div className="flex max-h-[calc(100vh-80px)] min-h-0 w-full max-w-md flex-col overflow-hidden rounded-2xl border border-rose-400/30 bg-[#181818] p-5 shadow-2xl">
+            <h3 id="library-delete-title" className="shrink-0 text-base font-black text-white">
               {pendingDeletePaths.length}件の素材を削除しますか？
             </h3>
-            <p className="mt-1 text-[12px] text-neutral-400">
+            <p className="mt-1 shrink-0 text-[12px] text-neutral-400">
               元に戻せません。削除する内容を確認してください。
             </p>
 
-            <ul className="mt-4 max-h-80 space-y-2 overflow-y-auto pr-1">
+            <ul className="mt-4 min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
               {deleteItems.map(({ path, item }) => {
                 const thumbnailPath =
                   item && galleryItemMediaType(item) === "video"
@@ -1989,12 +1989,12 @@ function LibraryDeleteButton() {
               })}
             </ul>
             {hiddenPreviewCount > 0 && (
-              <p className="mt-2 text-[11px] text-neutral-500">
+              <p className="mt-2 shrink-0 text-[11px] text-neutral-500">
                 ほか {hiddenPreviewCount} 件（一覧をスクロールして全件確認できます）
               </p>
             )}
 
-            <div className="mt-5 flex justify-end gap-2">
+            <div className="mt-5 flex shrink-0 justify-end gap-2">
               <button
                 type="button"
                 onClick={() => setPendingDeletePaths(null)}

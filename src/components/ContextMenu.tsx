@@ -73,7 +73,7 @@ export function ContextMenu({ x, y, items, onClose }: Props) {
       role="menu"
       aria-label="画像メニュー"
       style={{ left: pos.x, top: pos.y }}
-      className="fixed z-[60] min-w-[190px] rounded-md border border-neutral-700 bg-neutral-900 py-1 text-xs text-neutral-300 shadow-2xl"
+      className="fixed z-[60] max-h-[calc(100vh-8px)] min-w-[190px] overflow-y-auto rounded-md border border-neutral-700 bg-neutral-900 py-1 text-xs text-neutral-300 shadow-2xl"
       onContextMenu={(e) => e.preventDefault()}
     >
       {items.map((it, i) =>

@@ -624,7 +624,7 @@ export function StockSearchModal({ open, onClose, onPick }: Props) {
           }}
         >
           <div
-            className="relative flex max-h-[calc(100vh-2rem)] max-w-6xl flex-col items-center gap-3 overflow-y-auto"
+            className="relative flex max-h-[calc(100vh-80px)] min-h-0 max-w-6xl flex-col items-center gap-3 overflow-hidden"
             onClick={(event) => event.stopPropagation()}
           >
             <img
@@ -634,10 +634,10 @@ export function StockSearchModal({ open, onClose, onPick }: Props) {
                   ? `Pexels by ${previewPhoto.author}`
                   : "Pexels preview"
               }
-              className="max-h-[80vh] max-w-full rounded-lg object-contain shadow-2xl"
+              className="min-h-0 max-w-full flex-1 rounded-lg object-contain shadow-2xl"
               loading="eager"
             />
-            <div className="flex flex-wrap items-center gap-3 rounded-lg bg-black/60 px-4 py-2 text-xs text-neutral-200 backdrop-blur">
+            <div className="flex shrink-0 flex-wrap items-center gap-3 rounded-lg bg-black/60 px-4 py-2 text-xs text-neutral-200 backdrop-blur">
               <span>
                 クレジット: <span className="font-semibold">{previewPhoto.author || "unknown"}</span>
               </span>

@@ -321,7 +321,7 @@ function SuggestionList({
   return (
     <div
       style={{ left, top, width: 240 }}
-      className="absolute z-30 rounded-xl border border-[#2a2a2a] bg-[#141414] p-1 shadow-2xl"
+      className="absolute z-30 max-h-48 overflow-y-auto rounded-xl border border-[#2a2a2a] bg-[#141414] p-1 shadow-2xl"
     >
       {items.map((item, idx) => {
         const active = idx === activeIndex;

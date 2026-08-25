@@ -91,7 +91,7 @@ export function ApprovalDialog() {
       {params?.reason && (
         <p className="mt-2 text-xs text-neutral-400">{params.reason}</p>
       )}
-      <div className="mt-5 flex justify-between gap-2">
+      <div className="mt-5 flex shrink-0 justify-between gap-2">
         <button
           onClick={() => decide("cancel")}
           className="rounded-md border border-rose-700/60 px-3 py-1.5 text-sm text-rose-300 hover:bg-rose-700/20"
@@ -135,8 +135,8 @@ function Frame({
 }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-      <div className="w-full max-w-lg rounded-xl border border-neutral-800 bg-neutral-900 p-5 shadow-2xl">
-        <div className="flex items-start justify-between">
+      <div className="flex max-h-[calc(100vh-80px)] min-h-0 w-full max-w-lg flex-col overflow-hidden rounded-xl border border-neutral-800 bg-neutral-900 p-5 shadow-2xl">
+        <div className="flex shrink-0 items-start justify-between">
           <h3 className="text-sm font-semibold text-neutral-100">{title}</h3>
           <button
             onClick={onCancel}
@@ -170,7 +170,7 @@ function UserInputForm({
   const [values, setValues] = useState<Record<string, string>>({});
   return (
     <form
-      className="mt-3 space-y-3"
+      className="mt-3 min-h-0 flex-1 space-y-3 overflow-y-auto"
       onSubmit={(e) => {
         e.preventDefault();
         const out: Record<string, { answers: string[] }> = {};
@@ -194,7 +194,7 @@ function UserInputForm({
           />
         </label>
       ))}
-      <div className="flex justify-end gap-2">
+      <div className="sticky bottom-0 flex shrink-0 justify-end gap-2 bg-neutral-900 pt-2">
         <button
           type="submit"
           className="rounded-md bg-emerald-600 px-3 py-1.5 text-sm text-white hover:bg-emerald-500"

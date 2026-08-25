@@ -1402,13 +1402,13 @@ function PresetFormModal(props: PresetFormProps) {
       }}
     >
       <div
-        className="max-h-[calc(100vh-2rem)] w-full max-w-xl overflow-y-auto rounded-xl border border-[#2a2a2a] bg-[#161616] shadow-2xl"
+        className="flex max-h-[calc(100vh-80px)] min-h-0 w-full max-w-xl flex-col overflow-hidden rounded-xl border border-[#2a2a2a] bg-[#161616] shadow-2xl"
         onMouseDown={(event) => event.stopPropagation()}
         role="dialog"
         aria-modal="true"
         aria-label={props.isNew ? "新規プリセット" : "プリセット編集"}
       >
-        <div className="flex items-center justify-between border-b border-[#242424] px-4 py-3">
+        <div className="flex shrink-0 items-center justify-between border-b border-[#242424] px-4 py-3">
           <h3 className="text-sm font-black text-white">
             {props.isNew ? "新規プリセット" : "プリセット編集"}
           </h3>
@@ -1421,7 +1421,7 @@ function PresetFormModal(props: PresetFormProps) {
             ×
           </button>
         </div>
-        <div className="p-4">
+        <div className="min-h-0 flex-1 overflow-y-auto p-4">
           <PresetForm {...props} />
         </div>
       </div>
@@ -1735,7 +1735,7 @@ function PresetForm({
         </div>
       </div>
 
-      <div className="flex items-center justify-between gap-2 pt-1">
+      <div className="sticky bottom-0 z-10 flex shrink-0 items-center justify-between gap-2 border-t border-[#242424] bg-[#161616] py-2">
         <span className="text-[10px] text-neutral-600">
           ⌘/Ctrl + Enter で保存
         </span>

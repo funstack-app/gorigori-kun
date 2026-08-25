@@ -122,18 +122,18 @@ export function SnsExportModal({ paths, onClose }: SnsExportModalProps) {
       }}
     >
       <div
-        className="w-[440px] max-h-[85vh] overflow-y-auto rounded-xl border border-[#2a2a2a] bg-[#181818] p-5 shadow-2xl"
+        className="flex max-h-[calc(100vh-80px)] min-h-0 w-[440px] flex-col overflow-hidden rounded-xl border border-[#2a2a2a] bg-[#181818] p-5 shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
-        <h3 className="mb-1 text-[14px] font-bold text-neutral-100">
+        <h3 className="mb-1 shrink-0 text-[14px] font-bold text-neutral-100">
           入稿サイズに書き出し
         </h3>
-        <p className="mb-4 text-[11px] text-neutral-400">
+        <p className="mb-4 shrink-0 text-[11px] text-neutral-400">
           選択中の {paths.length} 枚を、SNS・広告バナー・ECモールの規格サイズにリサイズして書き出します。
         </p>
 
         {/* cover / contain 切替 */}
-        <div className="mb-4">
+        <div className="mb-4 shrink-0">
           <span className="mb-1.5 block text-[11px] font-medium text-neutral-300">
             リサイズ方式
           </span>
@@ -193,7 +193,7 @@ export function SnsExportModal({ paths, onClose }: SnsExportModalProps) {
         </div>
 
         {/* ターゲット選択 */}
-        <div className="mb-4">
+        <div className="mb-4 min-h-0 flex-1 overflow-y-auto pr-1">
           <span className="mb-1.5 block text-[11px] font-medium text-neutral-300">
             書き出しサイズ
           </span>
@@ -244,7 +244,7 @@ export function SnsExportModal({ paths, onClose }: SnsExportModalProps) {
         </div>
 
         {/* 出力見込み */}
-        <div className="mb-4 rounded-md border border-[#2a2a2a] bg-[#0b0b0b] px-3 py-2">
+        <div className="mb-4 shrink-0 rounded-md border border-[#2a2a2a] bg-[#0b0b0b] px-3 py-2">
           <span className="text-[10px] text-neutral-500">書き出し予定</span>
           <p className="mt-0.5 text-[12px] text-neutral-200">
             {paths.length} 枚 × {selectedCount} サイズ ={" "}
@@ -254,7 +254,7 @@ export function SnsExportModal({ paths, onClose }: SnsExportModalProps) {
 
         {/* 結果表示 */}
         {result && (
-          <div className="mb-4 rounded-md border border-[#2a2a2a] bg-[#0b0b0b] px-3 py-2">
+          <div className="mb-4 shrink-0 rounded-md border border-[#2a2a2a] bg-[#0b0b0b] px-3 py-2">
             <p className="text-[12px] text-emerald-300">
               成功 {result.outputs.length} 件
               {result.failed.length > 0 && (
@@ -280,7 +280,7 @@ export function SnsExportModal({ paths, onClose }: SnsExportModalProps) {
         )}
 
         {/* アクション */}
-        <div className="flex justify-end gap-2">
+        <div className="flex shrink-0 justify-end gap-2">
           <button
             type="button"
             onClick={onClose}

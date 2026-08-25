@@ -1694,10 +1694,10 @@ function StoryboardDetailModal({
       onClick={onClose}
     >
       <div
-        className="flex max-h-[85vh] w-full max-w-2xl flex-col rounded-2xl border border-[#343434] bg-[#1a1a1a] shadow-2xl"
+        className="flex max-h-[calc(100vh-80px)] min-h-0 w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-[#343434] bg-[#1a1a1a] shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
-        <header className="flex items-center justify-between border-b border-[#2a2a2a] px-5 py-4">
+        <header className="flex shrink-0 items-center justify-between border-b border-[#2a2a2a] px-5 py-4">
           <div>
             <h2 className="text-base font-black text-white">現在の構成</h2>
             <p className="mt-0.5 text-[11px] text-neutral-500">
@@ -1715,7 +1715,7 @@ function StoryboardDetailModal({
             閉じる
           </button>
         </header>
-        <div className="overflow-y-auto px-5 py-4">
+        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
           <StoryboardConfigDetail params={params} construction={construction} />
         </div>
       </div>
