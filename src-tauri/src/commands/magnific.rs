@@ -722,14 +722,30 @@ fn build_magnific_image_edit_call(
                 clamped_integer_param(params, "elevation", 0, -90, 90),
                 &[-90, -45, 0, 45, 90],
             );
+            // ライト色: #rrggbb が来たら gel ライト、無ければ白 (neutral)。
+            // 形式外の値は送らない (Magnific 側の enum/hex 制約に合わせる)。
+            let gel_color = params
+                .get("color")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| {
+                    value.len() == 7
+                        && value.starts_with('#')
+                        && value[1..].chars().all(|c| c.is_ascii_hexdigit())
+                })
+                .map(str::to_ascii_lowercase);
+            let mut light = json!({
+                "azimuth": azimuth,
+                "elevation": elevation,
+                "intensity": clamped_integer_param(params, "intensity", 5, 1, 10),
+                "type": if gel_color.is_some() { "gel" } else { "neutral" },
+            });
+            if let Some(color) = gel_color {
+                light["color"] = json!(color);
+            }
             json!({
                 "creationIdentifier": creation_identifier,
-                "lights": [{
-                    "azimuth": azimuth,
-                    "elevation": elevation,
-                    "intensity": clamped_integer_param(params, "intensity", 5, 1, 10),
-                    "type": "neutral",
-                }],
+                "lights": [light],
                 "numImages": 1,
                 "resolution": "2k",
             })
@@ -1761,6 +1777,25 @@ mod tests {
                 "resolution": "2k"
             })
         );
+    }
+
+    #[test]
+    fn image_edit_relight_accepts_hex_gel_color_and_rejects_garbage() {
+        let (_, with_color) = build_magnific_image_edit_call(
+            MagnificImageEditTool::Relight,
+            "creation-3",
+            &json!({ "azimuth": 0, "elevation": 0, "color": "#FFD27F" }),
+        );
+        assert_eq!(with_color["lights"][0]["type"], json!("gel"));
+        assert_eq!(with_color["lights"][0]["color"], json!("#ffd27f"));
+
+        let (_, bad_color) = build_magnific_image_edit_call(
+            MagnificImageEditTool::Relight,
+            "creation-3",
+            &json!({ "azimuth": 0, "elevation": 0, "color": "red; DROP" }),
+        );
+        assert_eq!(bad_color["lights"][0]["type"], json!("neutral"));
+        assert!(bad_color["lights"][0].get("color").is_none());
     }
 
     #[test]

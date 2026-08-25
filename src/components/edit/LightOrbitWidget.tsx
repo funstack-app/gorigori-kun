@@ -1,5 +1,5 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { useState, type MouseEvent } from "react";
+import { useRef, useState, type PointerEvent } from "react";
 
 import {
   snapLightAzimuth,
@@ -8,136 +8,199 @@ import {
   type LightElevation,
 } from "./editToolLogic";
 
+/**
+ * 再ライティングの 3D プレビュー (Magnific 本家と同じ見た目 / 2026-08-26 STΛCK指示)。
+ *
+ * - 遠近グリッドの床 + 立っている画像プレーン
+ * - 光源の玉をドラッグすると、光錐 (コーン) がプレーンへ当たる向きが変わる
+ * - API は 8方位 × 5段しか受けないため、ドラッグはその位置へスナップする
+ *   (見た目は3Dでも、作られるのは同じ直接MCP引数)
+ */
+
 type Props = {
   imagePath: string;
   azimuth: LightAzimuth;
   elevation: LightElevation;
+  /** 強さ 1-10。光錐の濃さに反映する。 */
+  intensity?: number;
+  /** ライト色 (#rrggbb)。白 = neutral。 */
+  color?: string;
   disabled?: boolean;
   onChange: (value: { azimuth: LightAzimuth; elevation: LightElevation }) => void;
 };
 
-const QUICK_DIRECTIONS: ReadonlyArray<{
-  label: string;
-  azimuth: LightAzimuth;
-  elevation: LightElevation;
-}> = [
-  { label: "上", azimuth: 0, elevation: 90 },
-  { label: "前", azimuth: 0, elevation: 0 },
-  { label: "右", azimuth: 90, elevation: 0 },
-  { label: "左", azimuth: -90, elevation: 0 },
-  { label: "後ろ", azimuth: 180, elevation: 0 },
-  { label: "下", azimuth: 0, elevation: -90 },
-];
+const W = 260;
+const H = 196;
+const CX = 130;
+/** プレーン(画像)の中心と実寸 (画面座標)。 */
+const PLANE = { cx: CX + 18, cy: 96, width: 88, height: 66 };
 
-const VIEW_WIDTH = 260;
-const VIEW_HEIGHT = 164;
-const CENTER_X = VIEW_WIDTH / 2;
-const CENTER_Y = 72;
-
-function lightPoint(azimuth: LightAzimuth, elevation: LightElevation) {
+/** 光源の画面位置。方位で左右へ回り、高さで上下する。 */
+function lightPoint(azimuth: number, elevation: number) {
+  const azRad = (azimuth * Math.PI) / 180;
+  const depth = Math.cos(azRad); // 1=正面, -1=真後ろ
   return {
-    x: CENTER_X + (azimuth / 180) * 98,
-    y: CENTER_Y - (elevation / 90) * 46,
+    x: CX - 34 + Math.sin(azRad) * 88,
+    y: 96 - (elevation / 90) * 56 + (1 - Math.abs(depth)) * 6,
+    behind: depth < 0,
   };
 }
 
-/** 画像の前に置いたライトを動かす、見た目だけ3Dの操作盤。 */
 export function LightOrbitWidget({
   imagePath,
   azimuth,
   elevation,
+  intensity = 5,
+  color = "#ffffff",
   disabled = false,
   onChange,
 }: Props) {
   const [dragging, setDragging] = useState(false);
-  const point = lightPoint(azimuth, elevation);
+  const hostRef = useRef<HTMLDivElement>(null);
 
-  const updateFromMouse = (event: MouseEvent<SVGSVGElement>) => {
-    if (disabled) return;
-    const rect = event.currentTarget.getBoundingClientRect();
-    const x = ((event.clientX - rect.left) / rect.width) * VIEW_WIDTH;
-    const y = ((event.clientY - rect.top) / rect.height) * VIEW_HEIGHT;
+  const light = lightPoint(azimuth, elevation);
+  const beamOpacity = 0.16 + (Math.max(1, Math.min(10, intensity)) / 10) * 0.38;
+
+  const updateFromPointer = (event: PointerEvent) => {
+    const host = hostRef.current;
+    if (!host) return;
+    const rect = host.getBoundingClientRect();
+    const x = ((event.clientX - rect.left) / rect.width) * W;
+    const y = ((event.clientY - rect.top) / rect.height) * H;
+    const azimuthRaw = ((x - (CX - 34)) / 88) * 90; // 中央=0°, 端で±90°超
+    const elevationRaw = ((96 - y) / 56) * 90;
     onChange({
-      azimuth: snapLightAzimuth(((x - CENTER_X) / 98) * 180),
-      elevation: snapLightElevation(((CENTER_Y - y) / 46) * 90),
+      azimuth: snapLightAzimuth(azimuthRaw),
+      elevation: snapLightElevation(elevationRaw),
     });
   };
 
+  const begin = (event: PointerEvent) => {
+    if (disabled || event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    (event.currentTarget as Element).setPointerCapture(event.pointerId);
+    setDragging(true);
+    updateFromPointer(event);
+  };
+  const move = (event: PointerEvent) => {
+    if (!dragging) return;
+    event.preventDefault();
+    updateFromPointer(event);
+  };
+  const end = (event: PointerEvent) => {
+    if (!dragging) return;
+    if ((event.currentTarget as Element).hasPointerCapture(event.pointerId)) {
+      (event.currentTarget as Element).releasePointerCapture(event.pointerId);
+    }
+    setDragging(false);
+  };
+
+  const src = convertFileSrc(imagePath);
+  const planeLeft = PLANE.cx - PLANE.width / 2;
+  const planeRight = PLANE.cx + PLANE.width / 2;
+  const planeBottom = PLANE.cy + PLANE.height / 2;
+  const planeTop = PLANE.cy - PLANE.height / 2;
+
   return (
-    <div>
-      <svg
-        viewBox={`0 0 ${VIEW_WIDTH} ${VIEW_HEIGHT}`}
-        className={`w-full select-none rounded-xl border border-[#343434] bg-[#101010] ${
-          disabled ? "cursor-not-allowed opacity-50" : dragging ? "cursor-grabbing" : "cursor-grab"
-        }`}
-        aria-label="ライト位置プレビュー"
-        role="img"
-        onMouseDown={(event) => {
-          if (disabled || event.button !== 0) return;
-          setDragging(true);
-          updateFromMouse(event);
-          event.preventDefault();
+    <div
+      ref={hostRef}
+      className="relative select-none overflow-hidden rounded-xl border border-white/10"
+      style={{
+        width: "100%",
+        aspectRatio: `${W} / ${H}`,
+        background: "radial-gradient(120% 100% at 50% 0%, #191531 0%, #100d20 45%, #090714 100%)",
+        cursor: disabled ? "default" : dragging ? "grabbing" : "grab",
+        touchAction: "none",
+      }}
+      onPointerDown={begin}
+      onPointerMove={move}
+      onPointerUp={end}
+      onPointerCancel={end}
+      role="presentation"
+    >
+      {/* 遠近グリッドの床 */}
+      <div
+        className="pointer-events-none absolute left-1/2 top-[62%]"
+        style={{
+          width: 420,
+          height: 420,
+          transform: "translate(-50%, -50%) perspective(420px) rotateX(72deg)",
+          backgroundImage:
+            "repeating-linear-gradient(0deg, rgba(122,110,255,0.13) 0 1px, transparent 1px 26px), repeating-linear-gradient(90deg, rgba(122,110,255,0.13) 0 1px, transparent 1px 26px)",
+          maskImage: "radial-gradient(closest-side, black 35%, transparent 72%)",
+          WebkitMaskImage: "radial-gradient(closest-side, black 35%, transparent 72%)",
         }}
-        onMouseMove={(event) => {
-          if (dragging) updateFromMouse(event);
-        }}
-        onMouseUp={() => setDragging(false)}
-        onMouseLeave={() => setDragging(false)}
-      >
+      />
+
+      {/* 光錐: 光源からプレーン全体へ。後ろからの光はプレーンの裏に回す */}
+      <svg viewBox={`0 0 ${W} ${H}`} className="absolute inset-0 h-full w-full" aria-hidden>
         <defs>
-          <linearGradient id="light-cone" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0" stopColor="#fff" stopOpacity=".7" />
-            <stop offset="1" stopColor="#fff" stopOpacity=".04" />
+          <linearGradient
+            id="light-beam"
+            gradientUnits="userSpaceOnUse"
+            x1={light.x}
+            y1={light.y}
+            x2={PLANE.cx}
+            y2={PLANE.cy}
+          >
+            <stop offset="0%" stopColor={color} stopOpacity={beamOpacity} />
+            <stop offset="100%" stopColor={color} stopOpacity="0.02" />
           </linearGradient>
-          <clipPath id="light-image-plane">
-            <path d="M58 73 L202 73 L218 145 L42 145 Z" />
-          </clipPath>
+          <filter id="light-soft" x="-40%" y="-40%" width="180%" height="180%">
+            <feGaussianBlur stdDeviation="2.4" />
+          </filter>
         </defs>
-        <path d="M58 73 L202 73 L218 145 L42 145 Z" fill="#222" stroke="#555" />
-        <image
-          href={convertFileSrc(imagePath)}
-          x="42"
-          y="73"
-          width="176"
-          height="72"
-          preserveAspectRatio="xMidYMid slice"
-          clipPath="url(#light-image-plane)"
-          opacity=".86"
+        <polygon
+          points={`${light.x},${light.y} ${planeLeft},${planeTop} ${planeLeft},${planeBottom} ${planeRight},${planeBottom} ${planeRight},${planeTop}`}
+          fill="url(#light-beam)"
+          filter="url(#light-soft)"
+          opacity={light.behind ? 0.4 : 1}
         />
-        <path
-          d={`M${point.x} ${point.y} L96 112 L164 112 Z`}
-          fill="url(#light-cone)"
-          stroke="rgba(255,255,255,.25)"
-        />
-        <line x1={point.x} y1={point.y} x2={CENTER_X} y2="112" stroke="#f9a8d4" strokeDasharray="3 4" />
-        <circle cx={point.x} cy={point.y} r="11" fill="#ec4899" opacity=".2" />
-        <circle cx={point.x} cy={point.y} r="6" fill="#fff" stroke="#ec4899" strokeWidth="3" />
-        <text x="10" y="18" fill="#a3a3a3" fontSize="9">ドラッグで光の方向を決める</text>
-        <text x="250" y="18" textAnchor="end" fill="#fbcfe8" fontSize="9">
-          {azimuth}° / {elevation}°
-        </text>
       </svg>
 
-      <div className="mt-2 grid grid-cols-6 gap-1">
-        {QUICK_DIRECTIONS.map((item) => {
-          const active = item.azimuth === azimuth && item.elevation === elevation;
-          return (
-            <button
-              key={item.label}
-              type="button"
-              disabled={disabled}
-              onClick={() => onChange({ azimuth: item.azimuth, elevation: item.elevation })}
-              className={`rounded-md border px-1 py-1.5 text-[10px] font-black transition ${
-                active
-                  ? "border-pink-400 bg-pink-500/20 text-pink-100"
-                  : "border-[#3a3a3a] bg-[#101010] text-neutral-300 hover:border-pink-400"
-              } disabled:cursor-not-allowed disabled:opacity-40`}
-            >
-              {item.label}
-            </button>
-          );
-        })}
+      {/* 立っている画像プレーン。光の向きでハイライトの縁を変える */}
+      <div
+        className="pointer-events-none absolute"
+        style={{
+          left: planeLeft,
+          top: planeTop,
+          width: PLANE.width,
+          height: PLANE.height,
+          perspective: 320,
+        }}
+      >
+        <img
+          src={src}
+          alt=""
+          className="h-full w-full rounded-[3px] object-cover"
+          style={{
+            transform: "rotateY(-18deg)",
+            boxShadow: `0 10px 18px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.14), ${light.x < PLANE.cx ? "-3px" : "3px"} ${light.y < PLANE.cy ? "-3px" : "3px"} 14px ${color}44`,
+            filter: light.behind ? "brightness(0.82)" : undefined,
+          }}
+          draggable={false}
+        />
       </div>
+
+      {/* 光源の玉 (掴んで動かす) */}
+      <div
+        className="pointer-events-none absolute"
+        style={{
+          left: light.x - 9,
+          top: light.y - 9,
+          width: 18,
+          height: 18,
+          borderRadius: 999,
+          background: color,
+          opacity: light.behind ? 0.65 : 1,
+          boxShadow: `0 0 10px 3px ${color}aa, 0 0 26px 8px ${color}55, inset 0 0 4px rgba(0,0,0,0.25)`,
+        }}
+      />
+
+      <p className="pointer-events-none absolute inset-x-0 bottom-1.5 text-center text-[10px] font-bold text-neutral-400">
+        ドラッグしてライトの位置を調整
+      </p>
     </div>
   );
 }

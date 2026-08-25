@@ -79,10 +79,14 @@ function CameraPanel({ imagePath, busy, connected, onRun }: PanelProps) {
   );
 }
 
+/** ライト色のクイックスワッチ (Magnific 準拠: 白/暖黄/橙/青 + 自由色)。 */
+const LIGHT_COLORS = ["#ffffff", "#ffd27f", "#ff9d5c", "#7fc5ff"] as const;
+
 function RelightPanel({ imagePath, busy, connected, onRun }: PanelProps) {
   const [azimuth, setAzimuth] = useState<LightAzimuth>(0);
   const [elevation, setElevation] = useState<LightElevation>(0);
   const [intensity, setIntensity] = useState(5);
+  const [color, setColor] = useState<string>("#ffffff");
 
   return (
     <PanelBody>
@@ -90,6 +94,8 @@ function RelightPanel({ imagePath, busy, connected, onRun }: PanelProps) {
         imagePath={imagePath}
         azimuth={azimuth}
         elevation={elevation}
+        intensity={intensity}
+        color={color}
         disabled={busy}
         onChange={(next) => {
           setAzimuth(next.azimuth);
@@ -128,15 +134,51 @@ function RelightPanel({ imagePath, busy, connected, onRun }: PanelProps) {
         />
       </div>
       <div className="mt-1 flex items-center gap-2 rounded-lg border border-[#343434] bg-[#101010] px-2.5 py-2">
-        <span className="h-5 w-5 rounded-full border border-neutral-300 bg-white" aria-hidden />
-        <span className="text-[10px] font-bold text-neutral-400">
-          ライト色: 白（neutral）
-        </span>
+        <span className="text-[10px] font-bold text-neutral-400">ライト色</span>
+        <div className="flex items-center gap-1.5">
+          {LIGHT_COLORS.map((swatch) => (
+            <button
+              key={swatch}
+              type="button"
+              disabled={busy}
+              onClick={() => setColor(swatch)}
+              aria-label={`ライト色 ${swatch}`}
+              className={`h-5 w-5 rounded-full border transition ${
+                color.toLowerCase() === swatch
+                  ? "border-pink-400 ring-2 ring-pink-400/60"
+                  : "border-white/25 hover:border-white/60"
+              }`}
+              style={{ background: swatch }}
+            />
+          ))}
+          <label
+            className="relative h-5 w-5 cursor-pointer overflow-hidden rounded-full border border-white/25 hover:border-white/60"
+            title="自由な色を選ぶ"
+            style={{
+              background:
+                "conic-gradient(#f66 0deg, #fc6 60deg, #6f6 140deg, #6cf 220deg, #a6f 300deg, #f66 360deg)",
+            }}
+          >
+            <input
+              type="color"
+              value={color}
+              disabled={busy}
+              onChange={(event) => setColor(event.target.value)}
+              className="absolute inset-0 cursor-pointer opacity-0"
+            />
+          </label>
+        </div>
       </div>
       <RunButton
         busy={busy}
         connected={connected}
-        onClick={() => onRun({ azimuth, elevation, intensity })}
+        onClick={() =>
+          onRun(
+            color.toLowerCase() === "#ffffff"
+              ? { azimuth, elevation, intensity }
+              : { azimuth, elevation, intensity, color },
+          )
+        }
       />
     </PanelBody>
   );
