@@ -676,17 +676,30 @@ export function useSceneGeneration(): UseSceneGenerationReturn {
       return;
     }
 
+    const mentionResult = resolveImageMentions(effectivePrompt, composerReferences);
+    const prompt = mentionResult.cleanedPrompt.trim();
+    const effectiveRefPaths =
+      mentionResult.mentioned.length > 0
+        ? mentionResult.mentioned.map((mention) => mention.path)
+        : refImagePaths;
     const result = await useRemoteMcpGen.getState().start({
       kind: "image",
-      prompt: effectivePrompt,
+      prompt,
       aspectRatio: scene.subjectFraming.aspectRatio,
       count: Math.max(1, Math.trunc(options?.countOverride ?? count)),
-      referenceImagePaths: refImagePaths,
+      referenceImagePaths: effectiveRefPaths,
     });
     if (!result.ok) {
       useToasts.getState().push({ kind: "error", text: result.message });
     }
-  }, [count, effectivePrompt, generate, refImagePaths, scene.subjectFraming.aspectRatio]);
+  }, [
+    composerReferences,
+    count,
+    effectivePrompt,
+    generate,
+    refImagePaths,
+    scene.subjectFraming.aspectRatio,
+  ]);
 
   return {
     scene,

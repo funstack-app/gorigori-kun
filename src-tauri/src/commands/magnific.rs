@@ -35,7 +35,8 @@ use serde_json::{json, Value};
 use tauri::State;
 
 use crate::codex::mcp_direct::{
-    call_tool, call_tool_with_timeout, list_mcp_server_status_page, reload_mcp_servers,
+    call_tool, call_tool_once_with_timeout, call_tool_with_timeout, list_mcp_server_status_page,
+    reload_mcp_servers,
 };
 use crate::codex::mcp_shared::{
     entry_is_authenticated, find_mcp_entry, gori_codex_command, run_codex_capture,
@@ -44,6 +45,11 @@ use crate::state::AppState;
 
 const MAGNIFIC_MCP_NAME: &str = "magnific";
 const MAGNIFIC_MCP_URL: &str = "https://mcp.magnific.com";
+const ORPHAN_CHARGE_GUIDANCE: &str = "サービス側では生成が完了している可能性があります（クレジット消費済みの場合あり）。再生成の前に各サービスの履歴をご確認ください";
+
+fn with_orphan_charge_guidance(message: impl AsRef<str>) -> String {
+    format!("{}。{ORPHAN_CHARGE_GUIDANCE}", message.as_ref())
+}
 
 /// Magnific 拡張の接続状態。未接続なら全 false で UI が degrade する。
 #[derive(Debug, Clone, Serialize)]
@@ -626,11 +632,12 @@ pub async fn magnific_generate_batch(
     if !references.is_empty() {
         gen_args.insert("references".into(), Value::Array(references));
     }
-    let out = call_tool(
+    let out = call_tool_once_with_timeout(
         &state,
         MAGNIFIC_MCP_NAME,
         "images_generate",
         Value::Object(gen_args),
+        Duration::from_secs(300),
     )
     .await?;
     if out.is_error {
@@ -660,10 +667,10 @@ pub async fn magnific_generate_batch(
     let mut completed_urls: Vec<String> = Vec::new();
     while !pending.is_empty() {
         if Instant::now() >= deadline {
-            errors.push(format!(
+            errors.push(with_orphan_charge_guidance(format!(
                 "Magnific 生成がタイムアウトしました ({} 件未完了)",
                 pending.len()
-            ));
+            )));
             break;
         }
         let out = call_tool(
@@ -672,12 +679,13 @@ pub async fn magnific_generate_batch(
             "creations_wait",
             json!({ "identifiers": pending, "timeoutSeconds": 25 }),
         )
-        .await?;
+        .await
+        .map_err(with_orphan_charge_guidance)?;
         if out.is_error {
-            errors.push(format!(
+            errors.push(with_orphan_charge_guidance(format!(
                 "Magnific 生成の完了待ちに失敗しました: {}",
                 out.text
-            ));
+            )));
             break;
         }
         let entries = parse_wait_results(out.structured.as_ref());
@@ -694,9 +702,9 @@ pub async fn magnific_generate_batch(
             match (entry.url, entry.error) {
                 (Some(url), _) => completed_urls.push(url),
                 (None, Some(e)) => errors.push(e),
-                (None, None) => {
-                    errors.push("生成は完了しましたが、結果URLを取得できませんでした".to_string())
-                }
+                (None, None) => errors.push(with_orphan_charge_guidance(
+                    "生成は完了しましたが、結果URLを取得できませんでした",
+                )),
             }
         }
     }
@@ -712,15 +720,20 @@ pub async fn magnific_generate_batch(
                         .unwrap_or(0);
                     let dest = dir.join(format!("magnific-{ts}-{i}.png"));
                     if let Err(e) = std::fs::write(&dest, &bytes) {
-                        errors.push(format!("画像保存失敗: {e}"));
+                        errors.push(with_orphan_charge_guidance(format!("画像保存失敗: {e}")));
                     } else {
                         generated_paths.push(dest.to_string_lossy().into_owned());
                     }
                 }
-                _ => errors.push("Magnific 画像データが空でした".to_string()),
+                _ => errors.push(with_orphan_charge_guidance("Magnific 画像データが空でした")),
             },
-            Ok(res) => errors.push(format!("Magnific 画像取得に失敗 (HTTP {})", res.status())),
-            Err(e) => errors.push(format!("Magnific 画像取得に失敗: {e}")),
+            Ok(res) => errors.push(with_orphan_charge_guidance(format!(
+                "Magnific 画像取得に失敗 (HTTP {})",
+                res.status()
+            ))),
+            Err(e) => errors.push(with_orphan_charge_guidance(format!(
+                "Magnific 画像取得に失敗: {e}"
+            ))),
         }
     }
 
@@ -1368,6 +1381,13 @@ mod tests {
         assert_eq!(magnific_mime_for_path("/a/b.jpeg"), Some("image/jpeg"));
         assert_eq!(magnific_mime_for_path("/a/b.webp"), Some("image/webp"));
         assert_eq!(magnific_mime_for_path("/a/b.gif"), None);
+    }
+
+    #[test]
+    fn orphan_charge_guidance_tells_user_to_check_service_history() {
+        let message = with_orphan_charge_guidance("Magnific 生成の完了待ちに失敗しました");
+        assert!(message.contains("クレジット消費済みの場合あり"));
+        assert!(message.contains("各サービスの履歴をご確認ください"));
     }
 
     #[test]

@@ -41,7 +41,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::State;
 
-use crate::codex::mcp_direct::{call_tool, reload_mcp_servers};
+use crate::codex::mcp_direct::{call_tool, call_tool_once_with_timeout, reload_mcp_servers};
 use crate::codex::mcp_shared::{
     entry_is_authenticated, find_mcp_entry, gori_codex_command, run_codex_capture,
 };
@@ -49,6 +49,11 @@ use crate::state::AppState;
 
 const HIGGSFIELD_MCP_NAME: &str = "higgsfield";
 const HIGGSFIELD_MCP_URL: &str = "https://mcp.higgsfield.ai/mcp";
+const ORPHAN_CHARGE_GUIDANCE: &str = "サービス側では生成が完了している可能性があります（クレジット消費済みの場合あり）。再生成の前に各サービスの履歴をご確認ください";
+
+fn with_orphan_charge_guidance(message: impl AsRef<str>) -> String {
+    format!("{}。{ORPHAN_CHARGE_GUIDANCE}", message.as_ref())
+}
 
 /// JSON 値から数値 (クレジット数・コスト) を取り出す。トップレベルが数値ならそれを、
 /// オブジェクトなら credits / cost / value / amount 等の代表キーを順に探す。
@@ -568,9 +573,13 @@ async fn poll_higgsfield_job(
             "job_status",
             json!({ "jobId": job_id, "sync": true }),
         )
-        .await?;
+        .await
+        .map_err(with_orphan_charge_guidance)?;
         if out.is_error {
-            return Err(format!("生成状況の取得に失敗しました: {}", out.text));
+            return Err(with_orphan_charge_guidance(format!(
+                "生成状況の取得に失敗しました: {}",
+                super::remote_mcp::short_direct_error(&out.text)
+            )));
         }
         let gen = out
             .structured
@@ -613,7 +622,7 @@ async fn poll_higgsfield_job(
             // pending / processing / queued / 不明ステータスは継続。
             _ => {
                 if Instant::now() >= deadline {
-                    return Err("生成がタイムアウトしました (混雑している可能性があります。少し時間をおいて再試行してください)".to_string());
+                    return Err(with_orphan_charge_guidance("生成がタイムアウトしました (混雑している可能性があります。少し時間をおいて再試行してください)"));
                 }
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
@@ -646,7 +655,8 @@ pub async fn higgsfield_mcp_generate_batch(
     let is_video = args.is_video();
     let noun = if is_video { "動画" } else { "画像" };
     // 生成全体の締め切り。動画は画像より重い (DEV-PLAYBOOK 生成3点セットの 900 秒に揃える)。
-    let deadline = Instant::now() + Duration::from_secs(if is_video { 900 } else { 300 });
+    let generation_timeout = Duration::from_secs(if is_video { 900 } else { 300 });
+    let deadline = Instant::now() + generation_timeout;
 
     let base = crate::images::watcher::generated_images_dir()
         .ok_or_else(|| "generated_images ディレクトリの解決に失敗".to_string())?;
@@ -702,14 +712,21 @@ pub async fn higgsfield_mcp_generate_batch(
     } else {
         "generate_image"
     };
-    let out = call_tool(&state, HIGGSFIELD_MCP_NAME, tool, arguments).await?;
+    let out = call_tool_once_with_timeout(
+        &state,
+        HIGGSFIELD_MCP_NAME,
+        tool,
+        arguments,
+        generation_timeout,
+    )
+    .await?;
     if out.is_error {
         return Ok(HiggsfieldMcpGenResult {
             generated_paths,
             failed_count: count,
             errors: vec![format!(
                 "Higgsfield {noun}生成の投入に失敗しました: {}",
-                out.text
+                super::remote_mcp::short_direct_error(&out.text)
             )],
         });
     }
@@ -753,26 +770,30 @@ pub async fn higgsfield_mcp_generate_batch(
                     let dest = dir.join(format!("higgsfield-{ts}-{i}.{ext}"));
                     if let Err(e) = std::fs::write(&dest, &bytes) {
                         failed_count += 1;
-                        errors.push(format!("{noun}保存失敗: {e}"));
+                        errors.push(with_orphan_charge_guidance(format!("{noun}保存失敗: {e}")));
                     } else {
                         generated_paths.push(dest.to_string_lossy().into_owned());
                     }
                 }
                 _ => {
                     failed_count += 1;
-                    errors.push(format!("Higgsfield {noun}データが空でした"));
+                    errors.push(with_orphan_charge_guidance(format!(
+                        "Higgsfield {noun}データが空でした"
+                    )));
                 }
             },
             Ok(res) => {
                 failed_count += 1;
-                errors.push(format!(
+                errors.push(with_orphan_charge_guidance(format!(
                     "Higgsfield {noun}取得に失敗 (HTTP {})",
                     res.status()
-                ));
+                )));
             }
             Err(e) => {
                 failed_count += 1;
-                errors.push(format!("Higgsfield {noun}取得に失敗: {e}"));
+                errors.push(with_orphan_charge_guidance(format!(
+                    "Higgsfield {noun}取得に失敗: {e}"
+                )));
             }
         }
     }
@@ -931,7 +952,14 @@ pub async fn higgsfield_mcp_generate_cost(
         &[],
         true,
     );
-    let out = call_tool(&state, HIGGSFIELD_MCP_NAME, tool, arguments).await?;
+    let out = call_tool_once_with_timeout(
+        &state,
+        HIGGSFIELD_MCP_NAME,
+        tool,
+        arguments,
+        Duration::from_secs(if args.is_video() { 900 } else { 300 }),
+    )
+    .await?;
     if out.is_error {
         return Err(format!(
             "Higgsfield コスト見積もりに失敗しました: {}",
@@ -1108,5 +1136,24 @@ mod tests {
             extract_first_number("Credits: 445.77 | Plan: creator"),
             Some(445.77)
         );
+    }
+
+    #[test]
+    fn submit_and_poll_error_text_is_short_and_has_no_json() {
+        let raw = format!(
+            "{} {{\"schema\":{{\"secret\":true}}}}",
+            "bad request ".repeat(30)
+        );
+        let message = crate::commands::remote_mcp::short_direct_error(&raw);
+        assert!(message.chars().count() <= 120);
+        assert!(!message.contains("schema"));
+        assert!(!message.contains('{'));
+    }
+
+    #[test]
+    fn orphan_charge_guidance_tells_user_to_check_service_history() {
+        let message = with_orphan_charge_guidance("生成状況の取得に失敗しました");
+        assert!(message.contains("クレジット消費済みの場合あり"));
+        assert!(message.contains("各サービスの履歴をご確認ください"));
     }
 }

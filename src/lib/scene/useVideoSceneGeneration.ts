@@ -3,6 +3,7 @@ import { buildVideoScenePrompt } from "./buildVideoScenePrompt";
 import { resolveImageMentions } from "./resolveImageMentions";
 import { resolveVideoRefPaths } from "./resolveVideoRefPaths";
 import { higgsfieldMcp, type HiggsfieldVideoParams } from "../ipc";
+import { humanizeError } from "../humanizeError";
 import {
   isMcpAuthError,
   mcpReauthMessage,
@@ -395,10 +396,11 @@ export function useVideoSceneGeneration(): UseVideoSceneGenerationReturn {
         // 出さず、再接続導線つきの日本語に差し替える。プロンプトを変えても直らない
         // ので、他の失敗と同じ再試行ガイドを出すのは誤り。認証切れ以外は従来どおり。
         const isAuthError = uniqueReasons.some((reason) => isMcpAuthError(reason));
+        const friendlyReasons = uniqueReasons.map((reason) => humanizeError(reason));
         const message = isAuthError
           ? mcpReauthMessage("Higgsfield")
-          : uniqueReasons.length > 0
-            ? "動画生成に失敗しました。\n\n理由:\n" + uniqueReasons.join("\n\n")
+          : friendlyReasons.length > 0
+            ? "動画生成に失敗しました。\n\n理由:\n" + friendlyReasons.join("\n\n")
             : "動画生成に失敗しました。\n" +
               "・モデル・尺・アスペクト比を変えて再試行してください\n" +
               "・i2v の場合は元画像のアスペクト比とモデルの対応を確認してください";
@@ -444,7 +446,7 @@ export function useVideoSceneGeneration(): UseVideoSceneGenerationReturn {
       const isAuthError = isMcpAuthError(errorMessage);
       const message = isAuthError
         ? mcpReauthMessage("Higgsfield")
-        : `動画生成に失敗しました: ${errorMessage}`;
+        : `動画生成に失敗しました: ${humanizeError(errorMessage)}`;
       setStatus({ kind: "error", message });
       if (isAuthError) {
         pushMcpReauthToast("Higgsfield");

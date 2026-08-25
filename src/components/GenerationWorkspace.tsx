@@ -812,9 +812,11 @@ function BatchBlock({
           <WorkerTile
             // Bug修正 (2026-05-28): local→real batchId の差し替えでタイルを再マウントさせない。
             key={worker.idx}
+            batchId={batchId}
             worker={worker}
             compareMode={compareMode}
             provider={provider}
+            source={source}
             batchCancelled={batchStatus === "cancelled" || batchStatus === "cancelling"}
             siblings={workers
               .filter(
@@ -893,12 +895,15 @@ function formatElapsed(sec: number): string {
 }
 
 function WorkerTile({
+  batchId,
   worker,
   siblings,
   compareMode,
   batchCancelled,
   provider,
+  source,
 }: {
+  batchId: string;
   worker: BatchWorker;
   siblings?: string[];
   /**
@@ -907,6 +912,7 @@ function WorkerTile({
    * 推定の前提が崩れる。
    */
   provider?: string;
+  source?: "remoteMcp";
   /** 比較モード (各モデル1枚) のバッチか。再生成ボタンの出し分けに使う。 */
   compareMode?: boolean;
   /**
@@ -1032,10 +1038,12 @@ function WorkerTile({
         {worker.status === "failed" ? (
           <>
             <span>失敗</span>
-            {/* DEV-PLAYBOOK §6 B: 失敗ワーカーの再生成。現在の設定 (プロンプト/モデル) で
-                1 枚だけ生成し直す。比較モード (各モデル1枚で index 対応) では枚数を
-                変えられないため再生成ボタンは出さない。 */}
-            {!compareMode && <RegenerateOneButton />}
+            {source === "remoteMcp" && worker.mediaType === "video" ? (
+              <RemoteVideoRegenerateOneButton requestId={batchId} />
+            ) : (
+              /* 既存の画像経路は現在の画面設定で1枚だけ作り直す。 */
+              !compareMode && <RegenerateOneButton />
+            )}
           </>
         ) : (
           <>
@@ -1158,6 +1166,30 @@ function RegenerateOneButton() {
           ? "生成キューが空くまで待ってください"
           : "今の設定 (プロンプト/モデル) で 1 枚だけ生成し直します"
       }
+    >
+      再生成
+    </button>
+  );
+}
+
+/** 接続先動画は、失敗したジョブに保存済みのモデル・入力をそのまま使って1本だけ再生成する。 */
+function RemoteVideoRegenerateOneButton({ requestId }: { requestId: string }) {
+  const job = useRemoteMcpGen((state) => state.jobs[requestId]);
+  const regenerateOne = useRemoteMcpGen((state) => state.regenerateOne);
+  const pushToast = useToasts((state) => state.push);
+  if (!job) return null;
+
+  return (
+    <button
+      type="button"
+      onClick={(event) => {
+        event.stopPropagation();
+        void regenerateOne(requestId).then((result) => {
+          if (!result.ok) pushToast({ kind: "error", text: result.message });
+        });
+      }}
+      className="mt-0.5 rounded border border-red-400/50 bg-red-500/10 px-2 py-0.5 text-[9px] font-bold text-red-200 transition hover:bg-red-500/25"
+      title="失敗したときと同じ接続先・モデル・設定で1本だけ生成し直します"
     >
       再生成
     </button>

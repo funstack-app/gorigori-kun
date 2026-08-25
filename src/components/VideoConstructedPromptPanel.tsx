@@ -142,9 +142,8 @@ export function VideoConstructedPromptPanel() {
     generate,
   } = useVideoSceneGeneration();
 
-  // API-02 (2026-07-25): 動画生成は必ず Higgsfield MCP (higgsfieldMcp.generateBatch) を叩く。
-  // 未接続のまま押せると MCP エラーで落ち、ユーザーには原因が見えなかった。
-  // 接続済み判定は HiggsfieldModelSelector と同じ accounts.higgsfield.authenticated を正とする。
+  // 旧Higgsfield経路の実コスト取得にだけ使う接続判定。
+  // 接続先モデルを選んだ生成は remoteMcpGen 側が担当するため、ここでは判定しない。
   const higgsfieldAuthed = useAccounts((s) => s.higgsfield.authenticated);
 
   const [draft, setDraft] = useState<string>(generatedPrompt);
@@ -581,17 +580,23 @@ export function VideoConstructedPromptPanel() {
     }
 
     if (hasRemote) {
+      const mentionResult = resolveImageMentions(effectivePrompt, references);
+      const mentionedPaths = mentionResult.mentioned.map((mention) => mention.path);
       tasks.push(
         (async () => {
           const result = await startRemoteGeneration({
             kind: "video",
-            prompt: effectivePrompt,
+            prompt: mentionResult.cleanedPrompt.trim(),
             aspectRatio,
             resolution,
             count,
             durationSeconds: duration,
-            startImagePath: sourceImagePath ?? undefined,
-            referenceImagePaths: references.map((reference) => reference.path),
+            startImagePath:
+              mentionedPaths.length > 0 ? undefined : sourceImagePath ?? undefined,
+            referenceImagePaths:
+              mentionedPaths.length > 0
+                ? mentionedPaths
+                : references.map((reference) => reference.path),
             compareEach: compareMode,
           });
           if (!result.ok) pushToast({ kind: "error", text: result.message });

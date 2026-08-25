@@ -48,9 +48,10 @@ const REMOTE_DOWNLOAD_USER_AGENT: &str =
 const REMOTE_DOWNLOAD_RETRY_USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0 Safari/537.36";
 const DIRECT_POLL_INTERVAL: Duration = Duration::from_secs(4);
-const DIRECT_ERROR_LIMIT_CHARS: usize = 320;
+const DIRECT_ERROR_LIMIT_CHARS: usize = 120;
 const LEGACY_ERROR_DETAIL_LIMIT_CHARS: usize = 120;
 const TRANSLATION_TIMEOUT: Duration = Duration::from_secs(60);
+const ORPHAN_CHARGE_GUIDANCE: &str = "サービス側では生成が完了している可能性があります（クレジット消費済みの場合あり）。再生成の前に各サービスの履歴をご確認ください";
 static REMOTE_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static KREA_VIDEO_SERIAL: Mutex<()> = Mutex::const_new(());
 
@@ -1225,19 +1226,16 @@ fn llm_failure_message(summary: &str, final_message: &str, tool_errors: &[String
         "従来LLM生成経路が失敗しました"
     );
 
-    let display_summary = humanize_provider_failure(&combined).unwrap_or(summary);
-    let detail = combined
-        .split(['{', '['])
-        .next()
-        .unwrap_or_default()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .chars()
-        .take(LEGACY_ERROR_DETAIL_LIMIT_CHARS)
-        .collect::<String>();
+    let display_summary = humanize_provider_failure(&combined)
+        .map(str::to_string)
+        .unwrap_or_else(|| short_direct_error(summary));
+    let detail = if combined.trim().is_empty() {
+        String::new()
+    } else {
+        short_direct_error(&combined)
+    };
     if detail.is_empty() {
-        display_summary.to_string()
+        display_summary
     } else {
         format!("{display_summary}: {detail}")
     }
@@ -1311,7 +1309,10 @@ fn is_processing_status_value(value: &str) -> bool {
 }
 
 fn is_completed_status_value(value: &str) -> bool {
-    value.trim().eq_ignore_ascii_case("completed")
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "completed" | "succeeded" | "success" | "done" | "finished"
+    )
 }
 
 fn is_terminal_failure_status_value(value: &str) -> bool {
@@ -1321,7 +1322,17 @@ fn is_terminal_failure_status_value(value: &str) -> bool {
             .to_ascii_lowercase()
             .replace(['-', ' '], "_")
             .as_str(),
-        "failed" | "failure" | "rejected" | "cancelled" | "canceled" | "content_policy"
+        "failed"
+            | "failure"
+            | "rejected"
+            | "cancelled"
+            | "canceled"
+            | "content_policy"
+            | "error"
+            | "errored"
+            | "timeout"
+            | "expired"
+            | "moderated"
     )
 }
 
@@ -2501,8 +2512,17 @@ fn reference_mime_type(path: &Path) -> Option<&'static str> {
         "png" => Some("image/png"),
         "jpg" | "jpeg" => Some("image/jpeg"),
         "webp" => Some("image/webp"),
+        "gif" => Some("image/gif"),
+        "bmp" => Some("image/bmp"),
         _ => None,
     }
+}
+
+fn reference_name(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| path.to_string_lossy().into_owned())
 }
 
 fn direct_reference_urls(paths: &[String]) -> Result<Vec<String>, String> {
@@ -2513,8 +2533,12 @@ fn direct_reference_urls(paths: &[String]) -> Result<Vec<String>, String> {
                 return Ok(value.clone());
             }
             let path = Path::new(value);
-            let mime_type = reference_mime_type(path)
-                .ok_or_else(|| "参照画像は PNG / JPEG / WebP を選んでください".to_string())?;
+            let mime_type = reference_mime_type(path).ok_or_else(|| {
+                format!(
+                    "参照画像「{}」はこの形式を使えません。PNG / JPEG / WebP / GIF / BMP を選んでください",
+                    reference_name(path)
+                )
+            })?;
             let bytes = fs::read(path).map_err(|_| "参照画像を読み取れませんでした".to_string())?;
             Ok(format!(
                 "data:{mime_type};base64,{}",
@@ -2559,8 +2583,13 @@ async fn upload_direct_magnific_reference(
     http: &reqwest::Client,
     path: &str,
 ) -> Result<String, String> {
-    let mime_type = reference_mime_type(Path::new(path))
-        .ok_or_else(|| "Magnific の参照画像は PNG / JPEG / WebP を選んでください".to_string())?;
+    let reference_path = Path::new(path);
+    let mime_type = reference_mime_type(reference_path).ok_or_else(|| {
+        format!(
+            "Magnific の参照画像「{}」はこの形式を使えません。PNG / JPEG / WebP / GIF / BMP を選んでください",
+            reference_name(reference_path)
+        )
+    })?;
     let bytes = tokio::fs::read(path)
         .await
         .map_err(|_| "Magnific の参照画像を読み取れませんでした".to_string())?;
@@ -2681,7 +2710,7 @@ fn nested_error_message(value: &Value) -> Option<String> {
     }
 }
 
-fn short_direct_error(message: &str) -> String {
+pub(super) fn short_direct_error(message: &str) -> String {
     let sanitized = sanitize_generation_message(message);
     let without_json = sanitized
         .split(['{', '['])
@@ -2752,13 +2781,95 @@ fn require_direct_tool_success(output: &ToolCallOutput) -> Result<Value, String>
     }
 }
 
-fn first_direct_artifact(
+fn value_without_excluded_identifiers(
+    value: &Value,
+    excluded_identifiers: &[String],
+) -> Option<Value> {
+    match value {
+        Value::Object(object) => {
+            let excluded = object.iter().any(|(key, value)| {
+                normalized_field_name(Some(key)) == "identifier"
+                    && scalar_string(value)
+                        .is_some_and(|identifier| excluded_identifiers.contains(&identifier))
+            });
+            if excluded {
+                return None;
+            }
+            Some(Value::Object(
+                object
+                    .iter()
+                    .filter_map(|(key, value)| {
+                        value_without_excluded_identifiers(value, excluded_identifiers)
+                            .map(|value| (key.clone(), value))
+                    })
+                    .collect(),
+            ))
+        }
+        Value::Array(values) => Some(Value::Array(
+            values
+                .iter()
+                .filter_map(|value| value_without_excluded_identifiers(value, excluded_identifiers))
+                .collect(),
+        )),
+        Value::String(text) => {
+            if let Some(parsed) = parsed_json_string(text) {
+                return value_without_excluded_identifiers(&parsed, excluded_identifiers)
+                    .map(|value| Value::String(value.to_string()));
+            }
+            Some(value.clone())
+        }
+        _ => Some(value.clone()),
+    }
+}
+
+fn first_direct_artifact_excluding_references(
     output: &ToolCallOutput,
     kind: RemoteMcpMediaKind,
+    excluded_references: &[String],
 ) -> Option<RemoteArtifactSource> {
-    extract_remote_artifacts(output, kind)
+    let filtered = ToolCallOutput {
+        content: output
+            .content
+            .iter()
+            .filter_map(|value| value_without_excluded_identifiers(value, excluded_references))
+            .collect(),
+        structured: output
+            .structured
+            .as_ref()
+            .and_then(|value| value_without_excluded_identifiers(value, excluded_references)),
+        text: parsed_json_string(output.text.trim())
+            .and_then(|value| value_without_excluded_identifiers(&value, excluded_references))
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| output.text.clone()),
+        is_error: output.is_error,
+    };
+    let excluded_sources = excluded_references
+        .iter()
+        .filter_map(|reference| {
+            data_uri_source(reference).or_else(|| {
+                reqwest::Url::parse(reference)
+                    .ok()
+                    .filter(|url| url.scheme() == "https")
+                    .map(|url| RemoteArtifactSource::Url(url.to_string()))
+            })
+        })
+        .collect::<Vec<_>>();
+    extract_remote_artifacts(&filtered, kind)
         .ok()
-        .and_then(|sources| sources.into_iter().next())
+        .and_then(|sources| {
+            sources
+                .into_iter()
+                .find(|source| !excluded_sources.contains(source))
+        })
+}
+
+fn with_orphan_charge_guidance(message: &str) -> String {
+    let message = short_direct_error(message);
+    if message.contains(ORPHAN_CHARGE_GUIDANCE) {
+        message
+    } else {
+        format!("{message}。{ORPHAN_CHARGE_GUIDANCE}")
+    }
 }
 
 fn collect_magnific_identifiers(value: &Value, identifiers: &mut Vec<String>) {
@@ -2862,6 +2973,7 @@ fn magnific_submit_call(input: DirectGenerationInput<'_>) -> Result<(&'static st
         .map(|identifier| json!({ "type": "image", "identifier": identifier }))
         .collect::<Vec<_>>();
     match input.kind {
+        // 現状 UI 未接続。Magnific の画像生成は専用 magnific_generate_batch 経路を使う。
         RemoteMcpMediaKind::Image => {
             let mut arguments = serde_json::Map::new();
             arguments.insert(
@@ -3014,15 +3126,23 @@ async fn run_krea_direct<IO: DirectGenerationIo>(
     loop {
         let output = io
             .poll(input.provider_id, "get_job", json!({ "jobId": identifier }))
-            .await?;
-        let value = require_direct_tool_success(&output)?;
+            .await
+            .map_err(|error| with_orphan_charge_guidance(&error))?;
+        let value = require_direct_tool_success(&output)
+            .map_err(|error| with_orphan_charge_guidance(&error))?;
         let status = direct_status(&value).unwrap_or_default();
         if is_terminal_failure_status_value(&status) {
             return Err(direct_failure_message(&value));
         }
         if is_completed_status_value(&status) {
-            return first_direct_artifact(&output, input.kind)
-                .ok_or_else(|| "生成は完了しましたが、結果URLがありません".to_string());
+            return first_direct_artifact_excluding_references(
+                &output,
+                input.kind,
+                input.reference_urls,
+            )
+            .ok_or_else(|| {
+                with_orphan_charge_guidance("生成は完了しましたが、結果URLがありません")
+            });
         }
         io.wait_for_next_poll().await;
     }
@@ -3037,6 +3157,7 @@ async fn run_magnific_direct<IO: DirectGenerationIo>(
     let submit_value = require_direct_tool_success(&submit)?;
     let mut identifiers = Vec::new();
     collect_magnific_identifiers(&submit_value, &mut identifiers);
+    identifiers.retain(|identifier| !input.reference_urls.contains(identifier));
     let identifier = identifiers
         .into_iter()
         .next()
@@ -3049,15 +3170,25 @@ async fn run_magnific_direct<IO: DirectGenerationIo>(
                 "creations_wait",
                 json!({ "identifiers": [identifier], "timeoutSeconds": 25 }),
             )
-            .await?;
-        let value = require_direct_tool_success(&output)?;
+            .await
+            .map_err(|error| with_orphan_charge_guidance(&error))?;
+        let value = require_direct_tool_success(&output)
+            .map_err(|error| with_orphan_charge_guidance(&error))?;
+        let value =
+            value_without_excluded_identifiers(&value, input.reference_urls).unwrap_or(Value::Null);
         let status = direct_status(&value).unwrap_or_default();
         if is_terminal_failure_status_value(&status) {
             return Err(direct_failure_message(&value));
         }
         if is_completed_status_value(&status) {
-            return first_direct_artifact(&output, input.kind)
-                .ok_or_else(|| "生成は完了しましたが、結果URLがありません".to_string());
+            return first_direct_artifact_excluding_references(
+                &output,
+                input.kind,
+                input.reference_urls,
+            )
+            .ok_or_else(|| {
+                with_orphan_charge_guidance("生成は完了しましたが、結果URLがありません")
+            });
         }
         io.wait_for_next_poll().await;
     }
@@ -3085,7 +3216,9 @@ async fn run_direct_generation_after_serial_lock<IO: DirectGenerationIo>(
         None => return Err("直接呼びアダプタがありません".to_string()),
     };
     io.mark_saving().await;
-    io.save(source).await
+    io.save(source)
+        .await
+        .map_err(|error| with_orphan_charge_guidance(&error))
 }
 
 async fn run_llm_tool_turn_before_deadline(
@@ -3125,6 +3258,13 @@ fn slot_deadline_message(kind: RemoteMcpMediaKind) -> String {
     )
 }
 
+fn slot_deadline_from_permit(
+    permit_acquired_at: std::time::Instant,
+    kind: RemoteMcpMediaKind,
+) -> tokio::time::Instant {
+    tokio::time::Instant::from_std(permit_acquired_at) + kind.timeout()
+}
+
 /// 直接アダプタがある接続先は MCP tool/call、無い接続先は従来の LLM 経路で実行する。
 #[allow(clippy::too_many_arguments)]
 async fn run_remote_mcp_slot(
@@ -3156,17 +3296,16 @@ async fn run_remote_mcp_slot(
     )
     .await;
 
-    // krea×video の15分は、直列ロックの順番待ちを終えてから計り始める。
     let direct_adapter = direct_provider_adapter(provider_id);
-    let serial_guard = if direct_adapter.is_some() && direct_generation_is_serial(provider_id, kind)
-    {
-        Some(KREA_VIDEO_SERIAL.lock().await)
-    } else {
-        None
-    };
-    let deadline = tokio::time::Instant::now() + kind.timeout();
-    let result = tokio::time::timeout_at(deadline, async {
-        if direct_adapter.is_some() {
+    let result = if direct_adapter.is_some() {
+        // krea×video の15分は、直列ロックの順番待ちを終えてから計り始める。
+        let serial_guard = if direct_generation_is_serial(provider_id, kind) {
+            Some(KREA_VIDEO_SERIAL.lock().await)
+        } else {
+            None
+        };
+        let deadline = tokio::time::Instant::now() + kind.timeout();
+        let result = tokio::time::timeout_at(deadline, async {
             let io = AppDirectGenerationIo {
                 app,
                 state,
@@ -3176,7 +3315,7 @@ async fn run_remote_mcp_slot(
                 slots,
                 slot_number,
             };
-            return run_direct_generation_after_serial_lock(
+            run_direct_generation_after_serial_lock(
                 &io,
                 DirectGenerationInput {
                     provider_id,
@@ -3189,92 +3328,119 @@ async fn run_remote_mcp_slot(
                     kind,
                 },
             )
-            .await;
+            .await
+        })
+        .await
+        .unwrap_or_else(|_| Err(with_orphan_charge_guidance(&slot_deadline_message(kind))));
+        drop(serial_guard);
+        result
+    } else {
+        let first_turn = async {
+            let llm_prompt =
+                llm_prompt.ok_or_else(|| "生成指示を作成できませんでした".to_string())?;
+            crate::codex::gen_server::run_llm_tool_turn_with_started_at(
+                app,
+                state,
+                llm_prompt,
+                kind.timeout(),
+            )
+            .await
         }
+        .await;
 
-        let llm_prompt = llm_prompt.ok_or_else(|| "生成指示を作成できませんでした".to_string())?;
-        let mut output =
-            run_llm_tool_turn_before_deadline(app, state, llm_prompt, kind, deadline).await?;
-        let (_, provider_label) = generation_provider(provider_id)?;
-        let mut follow_up_count = 0usize;
+        match first_turn {
+            Err(error) => Err(error),
+            Ok((mut output, permit_acquired_at)) => {
+                // 全生成枠の締め切りは、共通セマフォの permit 取得後から数える。
+                let deadline = slot_deadline_from_permit(permit_acquired_at, kind);
+                tokio::time::timeout_at(deadline, async {
+                    let (_, provider_label) = generation_provider(provider_id)?;
+                    let mut follow_up_count = 0usize;
 
-        // 1枠は必ず1ファイル。processing の間だけ同じジョブを最大2回追いかける。
-        let source = loop {
-            match evaluate_llm_artifact_turn(&output, provider_id, kind, reference_paths) {
-                LlmArtifactTurnEvaluation::Ready(source) => break source,
-                LlmArtifactTurnEvaluation::Failed(error) => return Err(error),
-                LlmArtifactTurnEvaluation::Processing {
-                    tool_errors,
-                    identifier,
-                } => {
-                    let Some(delay_seconds) = PROCESSING_FOLLOW_UP_DELAYS_SECS
-                        .get(follow_up_count)
-                        .copied()
-                    else {
-                        return Err(processing_retry_exhausted_message(
-                            kind,
+                    // 1枠は必ず1ファイル。processing の間だけ同じジョブを最大2回追いかける。
+                    let source = loop {
+                        match evaluate_llm_artifact_turn(
                             &output,
-                            &tool_errors,
-                        ));
+                            provider_id,
+                            kind,
+                            reference_paths,
+                        ) {
+                            LlmArtifactTurnEvaluation::Ready(source) => break source,
+                            LlmArtifactTurnEvaluation::Failed(error) => return Err(error),
+                            LlmArtifactTurnEvaluation::Processing {
+                                tool_errors,
+                                identifier,
+                            } => {
+                                let Some(delay_seconds) = PROCESSING_FOLLOW_UP_DELAYS_SECS
+                                    .get(follow_up_count)
+                                    .copied()
+                                else {
+                                    return Err(processing_retry_exhausted_message(
+                                        kind,
+                                        &output,
+                                        &tool_errors,
+                                    ));
+                                };
+                                let delay = Duration::from_secs(delay_seconds);
+                                let now = tokio::time::Instant::now();
+                                if deadline.saturating_duration_since(now) <= delay {
+                                    return Err(processing_retry_exhausted_message(
+                                        kind,
+                                        &output,
+                                        &tool_errors,
+                                    ));
+                                }
+                                tokio::time::sleep(delay).await;
+                                let follow_up_prompt = build_processing_follow_up_prompt(
+                                    provider_label,
+                                    provider_id,
+                                    &output,
+                                    &identifier,
+                                    follow_up_count + 1,
+                                );
+                                output = run_llm_tool_turn_before_deadline(
+                                    app,
+                                    state,
+                                    &follow_up_prompt,
+                                    kind,
+                                    deadline,
+                                )
+                                .await?;
+                                follow_up_count += 1;
+                            }
+                        }
                     };
-                    let delay = Duration::from_secs(delay_seconds);
-                    let now = tokio::time::Instant::now();
-                    if deadline.saturating_duration_since(now) <= delay {
-                        return Err(processing_retry_exhausted_message(
-                            kind,
-                            &output,
-                            &tool_errors,
-                        ));
-                    }
-                    tokio::time::sleep(delay).await;
-                    let follow_up_prompt = build_processing_follow_up_prompt(
-                        provider_label,
-                        provider_id,
-                        &output,
-                        &identifier,
-                        follow_up_count + 1,
-                    );
-                    output = run_llm_tool_turn_before_deadline(
+
+                    update_remote_slot(
                         app,
-                        state,
-                        &follow_up_prompt,
+                        request_id,
+                        provider_id,
+                        slots,
+                        slot_number,
+                        "saving",
+                        None,
+                        None,
+                    )
+                    .await;
+                    let saved = save_remote_artifacts_from_index(
+                        provider_id,
+                        request_id,
                         kind,
-                        deadline,
+                        vec![source],
+                        slot_number as usize,
                     )
                     .await?;
-                    follow_up_count += 1;
-                }
+                    saved
+                        .saved_paths
+                        .into_iter()
+                        .next()
+                        .ok_or_else(|| format!("{}を1件も保存できませんでした", kind.noun()))
+                })
+                .await
+                .unwrap_or_else(|_| Err(slot_deadline_message(kind)))
             }
-        };
-
-        update_remote_slot(
-            app,
-            request_id,
-            provider_id,
-            slots,
-            slot_number,
-            "saving",
-            None,
-            None,
-        )
-        .await;
-        let saved = save_remote_artifacts_from_index(
-            provider_id,
-            request_id,
-            kind,
-            vec![source],
-            slot_number as usize,
-        )
-        .await?;
-        saved
-            .saved_paths
-            .into_iter()
-            .next()
-            .ok_or_else(|| format!("{}を1件も保存できませんでした", kind.noun()))
-    })
-    .await
-    .unwrap_or_else(|_| Err(slot_deadline_message(kind)));
-    drop(serial_guard);
+        }
+    };
 
     match result {
         Ok(saved_path) => {
@@ -3809,9 +3975,13 @@ mod tests {
 
     impl MockDirectIo {
         fn new(outputs: Vec<ToolCallOutput>) -> Self {
+            Self::with_results(outputs.into_iter().map(Ok).collect())
+        }
+
+        fn with_results(outputs: Vec<Result<ToolCallOutput, String>>) -> Self {
             Self {
                 calls: Mutex::new(Vec::new()),
-                outputs: Mutex::new(outputs.into_iter().map(Ok).collect()),
+                outputs: Mutex::new(outputs.into()),
                 polls: AtomicUsize::new(0),
                 saving_marks: AtomicUsize::new(0),
                 saved: Mutex::new(Vec::new()),
@@ -3827,14 +3997,7 @@ mod tests {
         }
 
         fn failing_submit(error: &str) -> Self {
-            Self {
-                calls: Mutex::new(Vec::new()),
-                outputs: Mutex::new(VecDeque::from([Err(error.to_string())])),
-                polls: AtomicUsize::new(0),
-                saving_marks: AtomicUsize::new(0),
-                saved: Mutex::new(Vec::new()),
-                probe: None,
-            }
+            Self::with_results(vec![Err(error.to_string())])
         }
     }
 
@@ -3919,6 +4082,34 @@ mod tests {
         let calls = io.calls.lock().await;
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].0, "generate_image");
+    }
+
+    #[tokio::test]
+    async fn direct_poll_failure_warns_about_possible_orphan_charge() {
+        let io = MockDirectIo::with_results(vec![
+            Ok(direct_success_output(json!({ "job_id": "job-image-1" }))),
+            Err("poll connection lost".to_string()),
+        ]);
+        let references = Vec::new();
+        let error = run_krea_direct(
+            &io,
+            DirectGenerationInput {
+                provider_id: "krea",
+                prompt: "white rice cake",
+                model: Some("google/nano-banana-2"),
+                duration_seconds: None,
+                aspect: Some("1:1"),
+                resolution: None,
+                reference_urls: &references,
+                kind: RemoteMcpMediaKind::Image,
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("poll connection lost"));
+        assert!(error.contains(ORPHAN_CHARGE_GUIDANCE));
+        assert_eq!(io.calls.lock().await.len(), 2);
     }
 
     #[tokio::test]
@@ -4040,6 +4231,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn krea_direct_excludes_echoed_reference_data_uri_from_artifact() {
+        let reference = "data:image/png;base64,cmVm".to_string();
+        let io = MockDirectIo::new(vec![
+            direct_success_output(json!({ "job_id": "job-image-1" })),
+            direct_success_output(json!({
+                "status": "completed",
+                "result": {
+                    "images": [reference, "data:image/png;base64,b3V0cHV0"]
+                }
+            })),
+        ]);
+        let references = vec![reference];
+        run_direct_generation(
+            &io,
+            DirectGenerationInput {
+                provider_id: "krea",
+                prompt: "white rice cake",
+                model: Some("google/nano-banana-2"),
+                duration_seconds: None,
+                aspect: Some("1:1"),
+                resolution: None,
+                reference_urls: &references,
+                kind: RemoteMcpMediaKind::Image,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            io.saved.lock().await.as_slice(),
+            &[RemoteArtifactSource::InlineImage {
+                mime_type: "image/png".to_string(),
+                data_base64: "b3V0cHV0".to_string(),
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn magnific_direct_excludes_reference_identifier_from_wait_and_artifact() {
+        let io = MockDirectIo::new(vec![
+            direct_success_output(json!({
+                "creations": [
+                    {"identifier": "reference-id"},
+                    {"identifier": "generated-id"}
+                ]
+            })),
+            direct_success_output(json!({
+                "results": [
+                    {
+                        "identifier": "reference-id",
+                        "status": "failed",
+                        "error": "reference expired",
+                        "url": "https://cdn.example.com/reference.png"
+                    },
+                    {
+                        "identifier": "generated-id",
+                        "status": "completed",
+                        "url": "https://cdn.example.com/output.png"
+                    }
+                ]
+            })),
+        ]);
+        let references = vec!["reference-id".to_string()];
+        run_direct_generation(
+            &io,
+            DirectGenerationInput {
+                provider_id: "magnific",
+                prompt: "white rice cake",
+                model: Some("magnific-v2"),
+                duration_seconds: None,
+                aspect: Some("1:1"),
+                resolution: None,
+                reference_urls: &references,
+                kind: RemoteMcpMediaKind::Image,
+            },
+        )
+        .await
+        .unwrap();
+
+        let calls = io.calls.lock().await;
+        assert_eq!(
+            calls[1].1,
+            json!({ "identifiers": ["generated-id"], "timeoutSeconds": 25 })
+        );
+        assert_eq!(
+            io.saved.lock().await.as_slice(),
+            &[RemoteArtifactSource::Url(
+                "https://cdn.example.com/output.png".to_string()
+            )]
+        );
+    }
+
+    #[tokio::test]
     async fn magnific_video_direct_flow_matches_fixture_shape() {
         let io = MockDirectIo::new(vec![
             direct_success_output(json!({ "identifier": "video-1" })),
@@ -4155,6 +4439,53 @@ mod tests {
     }
 
     #[test]
+    fn terminal_status_vocabulary_covers_provider_variants() {
+        for status in ["completed", "succeeded", "success", "done", "finished"] {
+            assert!(is_completed_status_value(status), "missing: {status}");
+        }
+        for status in [
+            "failed",
+            "error",
+            "errored",
+            "timeout",
+            "expired",
+            "moderated",
+        ] {
+            assert!(
+                is_terminal_failure_status_value(status),
+                "missing: {status}"
+            );
+        }
+    }
+
+    #[test]
+    fn reference_conversion_accepts_gif_bmp_and_names_unsupported_reference() {
+        assert_eq!(
+            reference_mime_type(Path::new("/tmp/ref.GIF")),
+            Some("image/gif")
+        );
+        assert_eq!(
+            reference_mime_type(Path::new("/tmp/ref.bmp")),
+            Some("image/bmp")
+        );
+
+        let error =
+            direct_reference_urls(&["/tmp/unsupported-reference.tiff".to_string()]).unwrap_err();
+        assert!(error.contains("unsupported-reference.tiff"));
+        assert!(error.contains("この形式を使えません"));
+    }
+
+    #[test]
+    fn slot_deadline_starts_at_permit_acquisition() {
+        let permit_acquired_at = std::time::Instant::now();
+        let deadline = slot_deadline_from_permit(permit_acquired_at, RemoteMcpMediaKind::Image);
+        assert_eq!(
+            deadline.duration_since(tokio::time::Instant::from_std(permit_acquired_at)),
+            RemoteMcpMediaKind::Image.timeout()
+        );
+    }
+
+    #[test]
     fn direct_error_uses_service_message_without_schema_json() {
         let value = json!({
             "status": "failed",
@@ -4195,6 +4526,23 @@ mod tests {
         assert!(message.starts_with("生成先サービスが生成に失敗しました: "));
         let detail = message.split_once(": ").unwrap().1;
         assert!(detail.chars().count() <= LEGACY_ERROR_DETAIL_LIMIT_CHARS);
+        assert!(!message.contains("schema"));
+        assert!(!message.contains('{'));
+    }
+
+    #[test]
+    fn legacy_terminal_error_summary_removes_json_and_is_bounded() {
+        let terminal_error = format!(
+            "{} {{\"schema\":{{\"secret\":true}}}}",
+            "terminal failure ".repeat(30)
+        );
+        let message = llm_failure_message(&terminal_error, "", &[]);
+        let summary = message
+            .split_once(": ")
+            .map(|(summary, _)| summary)
+            .unwrap_or(&message);
+
+        assert!(summary.chars().count() <= LEGACY_ERROR_DETAIL_LIMIT_CHARS);
         assert!(!message.contains("schema"));
         assert!(!message.contains('{'));
     }

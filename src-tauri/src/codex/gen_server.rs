@@ -491,6 +491,19 @@ pub(crate) async fn run_llm_tool_turn(
     prompt: &str,
     turn_timeout: Duration,
 ) -> Result<LlmToolTurnOutput, String> {
+    run_llm_tool_turn_with_model(prompt, turn_timeout, None, false)
+        .await
+        .map(|(output, _)| output)
+}
+
+/// 生成枠の permit を取得した時刻も返す。呼び出し側の締め切りがキュー待ちを
+/// 消費しないようにするため、リモート MCP の複数枠生成だけが使う。
+pub(crate) async fn run_llm_tool_turn_with_started_at(
+    _app: &AppHandle,
+    _state: &AppState,
+    prompt: &str,
+    turn_timeout: Duration,
+) -> Result<(LlmToolTurnOutput, Instant), String> {
     run_llm_tool_turn_with_model(prompt, turn_timeout, None, false).await
 }
 
@@ -515,7 +528,7 @@ pub(crate) async fn translate_generation_prompt(
     let instruction = format!(
         "次の文章を、意味と固有名詞を変えずに自然な英語へ翻訳してください。MCPや外部ツールは使わず、翻訳文だけを返してください。\n\n{prompt}"
     );
-    let output =
+    let (output, _) =
         run_llm_tool_turn_with_model(&instruction, turn_timeout, Some("gpt-5.6"), true).await?;
     if let Some(error) = output.terminal_error {
         return Err(error);
@@ -536,9 +549,10 @@ async fn run_llm_tool_turn_with_model(
     turn_timeout: Duration,
     model: Option<&str>,
     ignore_user_config: bool,
-) -> Result<LlmToolTurnOutput, String> {
+) -> Result<(LlmToolTurnOutput, Instant), String> {
     // RAII: 呼び出し元を問わず、ターン終了まで全生成共通の並列枠を保持する。
     let _gen_permit = gen_queue::GenPermit::acquire(&GLOBAL_GEN_SEMAPHORE).await?;
+    let started_at = Instant::now();
     let source_home = crate::codex::home::resolve_command_codex_home()
         .ok_or_else(|| "生成用 CODEX_HOME のミラー元を解決できません".to_string())?;
     let generation_home = crate::codex::home::gen_codex_home_path()
@@ -633,12 +647,15 @@ async fn run_llm_tool_turn_with_model(
         );
     }
 
-    Ok(normalize_exec_turn(
-        state,
-        &stdout,
-        &stderr,
-        turn_timeout,
-        dirs::home_dir().as_deref(),
+    Ok((
+        normalize_exec_turn(
+            state,
+            &stdout,
+            &stderr,
+            turn_timeout,
+            dirs::home_dir().as_deref(),
+        ),
+        started_at,
     ))
 }
 

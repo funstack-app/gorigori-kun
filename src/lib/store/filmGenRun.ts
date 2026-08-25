@@ -12,6 +12,7 @@ import {
   pushMcpReauthToast,
 } from "../mcpAuthError";
 import { paramsToVideoArgs } from "../scene/useVideoSceneGeneration";
+import { humanizeError } from "../humanizeError";
 import {
   clampDurationForModel,
   findVideoModel,
@@ -348,7 +349,7 @@ async function performGeneration(
     if (batchStarted) useBatches.getState().removeBatch(batchId);
     const raw = error instanceof Error ? error.message : String(error);
     const authError = isMcpAuthError(raw);
-    const message = authError ? mcpReauthMessage("Higgsfield") : raw;
+    const message = authError ? mcpReauthMessage("Higgsfield") : humanizeError(raw);
     set((state) => ({
       runs: {
         ...state.runs,

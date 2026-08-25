@@ -13,6 +13,8 @@ import type {
   RemoteMcpGenerateArgs,
   RemoteMcpSlotResult,
 } from "../ipc";
+import { paramsToVideoArgs } from "../scene/useVideoSceneGeneration";
+import { findVideoModelByJobSetType } from "../videoModels";
 import { useBatches } from "./batches";
 import { registerGeneratedMedia } from "./images";
 
@@ -81,7 +83,7 @@ type RemoteMcpGenState = {
   removeModelCatalogs: (providerId: string) => void;
   start: (input: RemoteMcpRunInput) => Promise<RemoteMcpStartResult>;
   startSelectedVideos: (input: RemoteMcpRunInput) => Promise<RemoteMcpStartResult>;
-  retry: (requestId: string) => Promise<RemoteMcpStartResult>;
+  regenerateOne: (requestId: string) => Promise<RemoteMcpStartResult>;
   applyEvent: (event: RemoteMcpGenEvent) => void;
 };
 
@@ -127,7 +129,24 @@ export function reconcileRemoteMcpSelections(
 
 const MODEL_CATALOG_CACHE_KEY = "gori.remoteMcp.modelCatalogs.v1";
 const DIRECT_ERROR_PROVIDER_IDS = new Set(["higgsfield", "krea", "magnific"]);
+const DIRECT_ADAPTER_PROVIDER_IDS = new Set(["krea", "magnific"]);
 const remoteMcpCatalogRefreshes = new Map<string, Promise<unknown>>();
+const remoteMcpGenerationStarts = new Set<RemoteMcpGenerationKind>();
+
+async function withRemoteMcpStartLock(
+  kind: RemoteMcpGenerationKind,
+  start: () => Promise<RemoteMcpStartResult>,
+): Promise<RemoteMcpStartResult> {
+  if (remoteMcpGenerationStarts.has(kind)) {
+    return { ok: false, message: "生成の開始処理中です。完了するまでお待ちください。" };
+  }
+  remoteMcpGenerationStarts.add(kind);
+  try {
+    return await start();
+  } finally {
+    remoteMcpGenerationStarts.delete(kind);
+  }
+}
 
 /**
  * React StrictMode や手動更新との重なりでも、同じ接続先・媒体の一覧通信は1本だけにする。
@@ -398,9 +417,17 @@ function completeRemoteTimelineBatch(
   }
 
   const missingCount = Math.max(0, batch.count - savedPaths.length);
+  const failedSlots = new Set<number>();
   for (let offset = 0; offset < missingCount; offset += 1) {
-    const idx = savedPaths.length + offset + 1;
     const detail = warnings[offset] ?? "生成結果を保存できませんでした。";
+    const parsedSlot = /^枠(\d+)\s*[:：]/u.exec(detail.trim())?.[1];
+    const parsedIdx = parsedSlot ? Number(parsedSlot) : Number.NaN;
+    const fallbackIdx = savedPaths.length + offset + 1;
+    const idx =
+      Number.isInteger(parsedIdx) && parsedIdx >= 1 && parsedIdx <= batch.count
+        ? parsedIdx
+        : fallbackIdx;
+    failedSlots.add(idx);
     useBatches.getState().applyEvent({
       kind: "workerFailed",
       batchId: requestId,
@@ -409,10 +436,17 @@ function completeRemoteTimelineBatch(
       mediaType,
     });
   }
+  const generatedPathsBySlot = Array.from({ length: batch.count }, () => "");
+  let savedOffset = 0;
+  for (let idx = 1; idx <= batch.count && savedOffset < savedPaths.length; idx += 1) {
+    if (failedSlots.has(idx)) continue;
+    generatedPathsBySlot[idx - 1] = savedPaths[savedOffset];
+    savedOffset += 1;
+  }
   useBatches.getState().applyEvent({
     kind: "completed",
     batchId: requestId,
-    generatedPaths: savedPaths,
+    generatedPaths: generatedPathsBySlot,
     failedCount: missingCount,
     mediaType,
   });
@@ -540,7 +574,9 @@ export const useRemoteMcpGen = create<RemoteMcpGenState>((set, get) => {
         });
       }
     } catch (error) {
-      const warning = `${noun}は保存しましたが、ライブラリ・履歴への登録処理に失敗しました: ${String(error)}`;
+      const warning =
+        `${noun}は保存しましたが、ライブラリ・履歴への登録処理に失敗しました: ` +
+        friendlyRemoteMcpError(error, 120);
       console.warn("[remote-mcp-registration]", warning);
       set((state) => {
         const current = state.jobs[requestId];
@@ -568,6 +604,7 @@ export const useRemoteMcpGen = create<RemoteMcpGenState>((set, get) => {
     selection: RemoteMcpSelection,
     input: RemoteMcpRunInput,
     requestedBatchId?: string,
+    forceRemoteMcp = false,
   ): Promise<RemoteMcpStartResult> => {
     const validationMessage = validationFailure(input);
     if (validationMessage) {
@@ -575,6 +612,18 @@ export const useRemoteMcpGen = create<RemoteMcpGenState>((set, get) => {
         validationMessage: { ...state.validationMessage, [input.kind]: validationMessage },
       }));
       return { ok: false, message: validationMessage };
+    }
+
+    if (
+      DIRECT_ADAPTER_PROVIDER_IDS.has(selection.providerId) &&
+      selection.model?.passModel === false
+    ) {
+      const message =
+        "モデル一覧を取得できていません。モデル一覧の「再取得」をしてから選び直してください";
+      set((state) => ({
+        validationMessage: { ...state.validationMessage, [input.kind]: message },
+      }));
+      return { ok: false, message };
     }
 
     const effectiveInput: RemoteMcpRunInput = {
@@ -630,8 +679,23 @@ export const useRemoteMcpGen = create<RemoteMcpGenState>((set, get) => {
     args.count = Math.max(1, Math.trunc(effectiveInput.count ?? 1));
 
     try {
-      if (selection.providerId === "higgsfield" && effectiveInput.kind === "video") {
+      if (
+        !forceRemoteMcp &&
+        selection.providerId === "higgsfield" &&
+        effectiveInput.kind === "video"
+      ) {
         const { higgsfieldMcp } = await import("../ipc");
+        const videoModel = selection.model
+          ? findVideoModelByJobSetType(selection.model.id)
+          : undefined;
+        const {
+          quality: _quality,
+          i2vInputField: _i2vInputField,
+          resolution: defaultResolution,
+          ...videoExtraParams
+        } = paramsToVideoArgs(videoModel?.extraParams ?? [], {});
+        void _quality;
+        void _i2vInputField;
         const refImagePaths = [
           effectiveInput.startImagePath,
           effectiveInput.endImagePath,
@@ -645,7 +709,8 @@ export const useRemoteMcpGen = create<RemoteMcpGenState>((set, get) => {
           refImagePaths: [...new Set(refImagePaths)],
           mediaType: "video",
           duration: effectiveInput.durationSeconds,
-          resolution: effectiveInput.resolution,
+          resolution: effectiveInput.resolution ?? defaultResolution,
+          ...videoExtraParams,
         });
         if (result.generatedPaths.length === 0) {
           throw new Error(result.errors.join(" ") || "HiggsField の動画を保存できませんでした。");
@@ -753,7 +818,7 @@ export const useRemoteMcpGen = create<RemoteMcpGenState>((set, get) => {
         return { modelCatalogs };
       }),
 
-    start: async (input) => {
+    start: (input) => withRemoteMcpStartLock(input.kind, async () => {
       const selection = get().selections[input.kind];
       if (!selection) {
         const message = "生成に使うモデルを選択してください。";
@@ -763,12 +828,20 @@ export const useRemoteMcpGen = create<RemoteMcpGenState>((set, get) => {
         return { ok: false, message };
       }
       return launch(selection, input);
-    },
+    }),
 
-    startSelectedVideos: async (input) => {
+    startSelectedVideos: (input) => withRemoteMcpStartLock(input.kind, async () => {
       const selections = get().videoSelections;
       if (input.kind !== "video" || selections.length === 0) {
-        return get().start(input);
+        const selection = get().selections[input.kind];
+        if (!selection) {
+          const message = "生成に使うモデルを選択してください。";
+          set((state) => ({
+            validationMessage: { ...state.validationMessage, [input.kind]: message },
+          }));
+          return { ok: false, message };
+        }
+        return launch(selection, input);
       }
       const compare = selections.length >= 2 || input.compareEach === true;
       const batchId = createRequestId();
@@ -791,12 +864,20 @@ export const useRemoteMcpGen = create<RemoteMcpGenState>((set, get) => {
         ok: false,
         message: "生成に使うモデルを選択してください。",
       };
-    },
+    }),
 
-    retry: async (requestId) => {
+    regenerateOne: (requestId) => {
       const job = get().jobs[requestId];
-      if (!job) return { ok: false, message: "再試行する生成情報が見つかりません。" };
-      return launch(job.selection, job.input, job.batchId);
+      if (!job) {
+        return Promise.resolve({
+          ok: false,
+          message: "再生成する元の情報が見つかりません。",
+        });
+      }
+      // 失敗した動画枠は provider によらず remoteMcp.generate へ戻し、同じ入力で1本だけ作る。
+      return withRemoteMcpStartLock(job.kind, () =>
+        launch(job.selection, { ...job.input, count: 1 }, undefined, true),
+      );
     },
 
     applyEvent: (event) => {
