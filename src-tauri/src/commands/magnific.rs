@@ -565,6 +565,328 @@ fn parse_wait_results(structured: Option<&Value>) -> Vec<WaitEntry> {
         .collect()
 }
 
+const MAGNIFIC_IMAGE_EDIT_TIMEOUT_SECS: u64 = 300;
+const MAGNIFIC_IMAGE_EDIT_ERROR_LIMIT_CHARS: usize = 700;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MagnificImageEditTool {
+    Expand,
+    Camera,
+    Relight,
+    Upscale,
+}
+
+impl MagnificImageEditTool {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "expand" => Ok(Self::Expand),
+            "camera" => Ok(Self::Camera),
+            "relight" => Ok(Self::Relight),
+            "upscale" => Ok(Self::Upscale),
+            _ => Err("Magnific の編集ツールが正しくありません".to_string()),
+        }
+    }
+
+    fn slug(self) -> &'static str {
+        match self {
+            Self::Expand => "expand",
+            Self::Camera => "camera",
+            Self::Relight => "relight",
+            Self::Upscale => "upscale",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Expand => "拡張",
+            Self::Camera => "カメラ",
+            Self::Relight => "ライティング",
+            Self::Upscale => "高画質化",
+        }
+    }
+
+    fn mcp_tool(self) -> &'static str {
+        match self {
+            Self::Expand => "images_expand",
+            Self::Camera => "images_change_camera",
+            Self::Relight => "images_relight",
+            Self::Upscale => "images_upscale",
+        }
+    }
+}
+
+/// Magnific の生エラーからホームディレクトリ等を隠し、編集画面に収まる長さへ縮める。
+fn sanitize_magnific_image_edit_message(message: &str) -> String {
+    sanitize_magnific_video_message(message)
+        .chars()
+        .take(MAGNIFIC_IMAGE_EDIT_ERROR_LIMIT_CHARS)
+        .collect()
+}
+
+fn short_magnific_image_edit_detail(message: &str) -> String {
+    sanitize_magnific_video_message(message)
+        .chars()
+        .take(240)
+        .collect()
+}
+
+fn clamped_integer_param(params: &Value, key: &str, default: i64, min: i64, max: i64) -> i64 {
+    params
+        .get(key)
+        .and_then(Value::as_f64)
+        .filter(|value| value.is_finite())
+        .map(|value| value.round().clamp(min as f64, max as f64) as i64)
+        .unwrap_or(default)
+}
+
+fn nearest_allowed(value: i64, allowed: &[i64]) -> i64 {
+    allowed
+        .iter()
+        .copied()
+        .min_by_key(|candidate| (value - candidate).abs())
+        .unwrap_or(value)
+}
+
+/// フロントから受け取った params を、各 Magnific ツールの許可キーだけに組み直す。
+/// 固定値もここで付与し、未知キーが MCP 側へ漏れないようにする。
+fn build_magnific_image_edit_call(
+    tool: MagnificImageEditTool,
+    creation_identifier: &str,
+    params: &Value,
+) -> (&'static str, Value) {
+    let arguments = match tool {
+        MagnificImageEditTool::Expand => {
+            let allowed_aspects = ["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3", "21:9"];
+            let aspect_ratio = params
+                .get("aspectRatio")
+                .and_then(Value::as_str)
+                .filter(|value| allowed_aspects.contains(value))
+                .unwrap_or("16:9");
+            let mut arguments = serde_json::Map::new();
+            arguments.insert("creationIdentifier".to_string(), json!(creation_identifier));
+            arguments.insert("aspectRatio".to_string(), json!(aspect_ratio));
+            if let Some(prompt) = params
+                .get("prompt")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                arguments.insert("prompt".to_string(), json!(prompt));
+            }
+            Value::Object(arguments)
+        }
+        MagnificImageEditTool::Camera => json!({
+            "creationIdentifier": creation_identifier,
+            "rotate": clamped_integer_param(params, "rotate", 45, 0, 360),
+            "vertical": clamped_integer_param(params, "vertical", 0, -30, 90),
+            "closeup": clamped_integer_param(params, "closeup", 5, 0, 10),
+        }),
+        MagnificImageEditTool::Relight => {
+            let azimuth = nearest_allowed(
+                clamped_integer_param(params, "azimuth", 0, -135, 180),
+                &[-135, -90, -45, 0, 45, 90, 135, 180],
+            );
+            let elevation = nearest_allowed(
+                clamped_integer_param(params, "elevation", 0, -90, 90),
+                &[-90, -45, 0, 45, 90],
+            );
+            json!({
+                "creationIdentifier": creation_identifier,
+                "lights": [{
+                    "azimuth": azimuth,
+                    "elevation": elevation,
+                    "intensity": clamped_integer_param(params, "intensity", 5, 1, 10),
+                    "type": "neutral",
+                }],
+                "numImages": 1,
+                "resolution": "2k",
+            })
+        }
+        MagnificImageEditTool::Upscale => {
+            let scale = params
+                .get("scale")
+                .and_then(Value::as_str)
+                .filter(|value| matches!(*value, "2x" | "4x"))
+                .unwrap_or("2x");
+            json!({
+                "creationIdentifier": creation_identifier,
+                "mode": "creative",
+                "scale": scale,
+            })
+        }
+    };
+    (tool.mcp_tool(), arguments)
+}
+
+/// 編集中の1版を Magnific の専用画像ツールへ直接渡し、完成画像を新しいローカル版として保存する。
+/// 課金を伴う編集 submit は自動再送せず、完了確認だけを long-poll する。
+#[tauri::command]
+pub async fn magnific_image_edit(
+    state: State<'_, AppState>,
+    source_path: String,
+    tool: String,
+    params: Value,
+) -> Result<Vec<String>, String> {
+    let result = async {
+        // 未知ツールは画像アップロード前に止める。入力ミスで外部送信しないための allowlist。
+        let edit_tool = MagnificImageEditTool::parse(tool.trim())?;
+        if source_path.trim().is_empty() {
+            return Err("編集する画像が選ばれていません".to_string());
+        }
+
+        let base = crate::images::watcher::generated_images_dir()
+            .ok_or_else(|| "画像の保存先を準備できませんでした".to_string())?;
+        let directory = base.join("magnific");
+        std::fs::create_dir_all(&directory)
+            .map_err(|_| "画像の保存先を作成できませんでした".to_string())?;
+        let http = reqwest::Client::new();
+
+        let creation_identifier = upload_magnific_reference(&state, &http, &source_path)
+            .await
+            .map_err(|error| {
+                format!(
+                    "Magnific に編集画像を渡せませんでした: {}",
+                    short_magnific_image_edit_detail(&error)
+                )
+            })?;
+        let (mcp_tool, arguments) =
+            build_magnific_image_edit_call(edit_tool, &creation_identifier, &params);
+
+        // 課金操作は once 経路。通信エラーやタイムアウトでも同じ編集を自動再送しない。
+        let output = call_tool_once_with_timeout(
+            &state,
+            MAGNIFIC_MCP_NAME,
+            mcp_tool,
+            arguments,
+            Duration::from_secs(MAGNIFIC_IMAGE_EDIT_TIMEOUT_SECS),
+        )
+        .await
+        .map_err(|error| {
+            with_orphan_charge_guidance(format!(
+                "Magnific の{}を開始したか確認できませんでした: {}",
+                edit_tool.label(),
+                short_magnific_image_edit_detail(&error)
+            ))
+        })?;
+        if output.is_error {
+            return Err(format!(
+                "Magnific の{}を開始できませんでした: {}",
+                edit_tool.label(),
+                short_magnific_image_edit_detail(&output.text)
+            ));
+        }
+
+        let creation_ids = extract_creation_ids(output.structured.as_ref());
+        if creation_ids.is_empty() {
+            return Err(with_orphan_charge_guidance(format!(
+                "Magnific の{}結果を追跡できませんでした",
+                edit_tool.label()
+            )));
+        }
+
+        let deadline = Instant::now() + Duration::from_secs(MAGNIFIC_IMAGE_EDIT_TIMEOUT_SECS);
+        let mut pending = creation_ids;
+        let mut completed_urls = Vec::new();
+        while !pending.is_empty() {
+            if Instant::now() >= deadline {
+                return Err(with_orphan_charge_guidance(format!(
+                    "Magnific の{}が5分以内に完了しませんでした",
+                    edit_tool.label()
+                )));
+            }
+            let wait = call_tool(
+                &state,
+                MAGNIFIC_MCP_NAME,
+                "creations_wait",
+                json!({ "identifiers": pending, "timeoutSeconds": 25 }),
+            )
+            .await
+            .map_err(|error| {
+                with_orphan_charge_guidance(format!(
+                    "Magnific の{}完了を確認できませんでした: {}",
+                    edit_tool.label(),
+                    short_magnific_image_edit_detail(&error)
+                ))
+            })?;
+            if wait.is_error {
+                return Err(with_orphan_charge_guidance(format!(
+                    "Magnific の{}完了を確認できませんでした: {}",
+                    edit_tool.label(),
+                    short_magnific_image_edit_detail(&wait.text)
+                )));
+            }
+
+            let entries = parse_wait_results(wait.structured.as_ref());
+            if entries.is_empty() {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            }
+            for entry in entries {
+                if !entry.terminal {
+                    continue;
+                }
+                pending.retain(|identifier| identifier != &entry.identifier);
+                if let Some(url) = entry.url {
+                    completed_urls.push(url);
+                } else {
+                    return Err(with_orphan_charge_guidance(format!(
+                        "Magnific の{}に失敗しました: {}",
+                        edit_tool.label(),
+                        short_magnific_image_edit_detail(
+                            entry.error.as_deref().unwrap_or("結果URLがありません")
+                        )
+                    )));
+                }
+            }
+        }
+
+        if completed_urls.is_empty() {
+            return Err(with_orphan_charge_guidance(format!(
+                "Magnific の{}結果を取得できませんでした",
+                edit_tool.label()
+            )));
+        }
+
+        let mut saved_paths = Vec::new();
+        for url in completed_urls {
+            let response = http.get(&url).send().await.map_err(|_| {
+                with_orphan_charge_guidance("Magnific の完成画像をダウンロードできませんでした")
+            })?;
+            if !response.status().is_success() {
+                return Err(with_orphan_charge_guidance(format!(
+                    "Magnific の完成画像を取得できませんでした (HTTP {})",
+                    response.status()
+                )));
+            }
+            let bytes = response.bytes().await.map_err(|_| {
+                with_orphan_charge_guidance("Magnific の完成画像を読み取れませんでした")
+            })?;
+            if bytes.is_empty() {
+                return Err(with_orphan_charge_guidance(
+                    "Magnific の完成画像データが空でした",
+                ));
+            }
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0);
+            let destination = directory.join(format!(
+                "magnific-edit-{}-{timestamp}.png",
+                edit_tool.slug()
+            ));
+            std::fs::write(&destination, &bytes).map_err(|_| {
+                with_orphan_charge_guidance("Magnific の完成画像を保存できませんでした")
+            })?;
+            saved_paths.push(destination.to_string_lossy().into_owned());
+        }
+
+        Ok(saved_paths)
+    }
+    .await;
+
+    result.map_err(|error| sanitize_magnific_image_edit_message(&error))
+}
+
 /// Magnific MCP 経由で画像を生成し、結果 URL を generated_images/magnific/ に
 /// ダウンロードする。コア(batch_gen)は触らず、Magnific モデルが選ばれたときだけこの経路を通る。
 ///
@@ -1311,6 +1633,90 @@ mod tests {
         assert!(entries[1].terminal);
         assert_eq!(entries[1].error.as_deref(), Some("nsfw detected"));
         assert!(!entries[2].terminal);
+    }
+
+    #[test]
+    fn image_edit_expand_keeps_only_allowed_arguments() {
+        let (tool, arguments) = build_magnific_image_edit_call(
+            MagnificImageEditTool::Expand,
+            "creation-1",
+            &json!({
+                "aspectRatio": "21:9",
+                "prompt": "  森をつなげる  ",
+                "unexpected": "must-not-leak"
+            }),
+        );
+        assert_eq!(tool, "images_expand");
+        assert_eq!(
+            arguments,
+            json!({
+                "creationIdentifier": "creation-1",
+                "aspectRatio": "21:9",
+                "prompt": "森をつなげる"
+            })
+        );
+    }
+
+    #[test]
+    fn image_edit_camera_clamps_numeric_arguments() {
+        let (tool, arguments) = build_magnific_image_edit_call(
+            MagnificImageEditTool::Camera,
+            "creation-2",
+            &json!({ "rotate": 999, "vertical": -999, "closeup": 4.6, "scale": "4x" }),
+        );
+        assert_eq!(tool, "images_change_camera");
+        assert_eq!(
+            arguments,
+            json!({
+                "creationIdentifier": "creation-2",
+                "rotate": 360,
+                "vertical": -30,
+                "closeup": 5
+            })
+        );
+    }
+
+    #[test]
+    fn image_edit_relight_snaps_direction_and_fixes_output_shape() {
+        let (tool, arguments) = build_magnific_image_edit_call(
+            MagnificImageEditTool::Relight,
+            "creation-3",
+            &json!({ "azimuth": -999, "elevation": 44, "intensity": 99, "numImages": 8 }),
+        );
+        assert_eq!(tool, "images_relight");
+        assert_eq!(
+            arguments,
+            json!({
+                "creationIdentifier": "creation-3",
+                "lights": [{
+                    "azimuth": -135,
+                    "elevation": 45,
+                    "intensity": 10,
+                    "type": "neutral"
+                }],
+                "numImages": 1,
+                "resolution": "2k"
+            })
+        );
+    }
+
+    #[test]
+    fn image_edit_upscale_defaults_invalid_scale_and_tool_is_allowlisted() {
+        let (tool, arguments) = build_magnific_image_edit_call(
+            MagnificImageEditTool::Upscale,
+            "creation-4",
+            &json!({ "scale": "8x", "mode": "unsafe" }),
+        );
+        assert_eq!(tool, "images_upscale");
+        assert_eq!(
+            arguments,
+            json!({
+                "creationIdentifier": "creation-4",
+                "mode": "creative",
+                "scale": "2x"
+            })
+        );
+        assert!(MagnificImageEditTool::parse("unknown").is_err());
     }
 
     /// 2026-08-06 の実害 (参照つき生成が全滅) を固定するテスト。

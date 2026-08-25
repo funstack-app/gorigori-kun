@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { images as imagesIpc } from "../lib/ipc";
+import {
+  images as imagesIpc,
+  magnificImageEdit,
+  type MagnificImageEditTool,
+} from "../lib/ipc";
+import { useAccounts } from "../lib/store/accounts";
 import { useBatches } from "../lib/store/batches";
 import {
   addEditCandidates,
@@ -23,6 +28,7 @@ import {
 } from "./edit/EditChatBar";
 import { EditFloatingPanel } from "./edit/EditFloatingPanel";
 import { EditHistoryRail } from "./edit/EditHistoryRail";
+import { MagnificToolPanel } from "./edit/MagnificToolPanels";
 import { EditToolRail, type EditToolId } from "./edit/EditToolRail";
 import { EditorCanvas } from "./edit/EditorCanvas";
 import { ExportDialog } from "./edit/ExportDialog";
@@ -47,11 +53,35 @@ function basename(path: string) {
   return path.split(/[\\/]/).pop() ?? path;
 }
 
+const MAGNIFIC_TOOL_LABELS: Record<MagnificImageEditTool, string> = {
+  expand: "拡張",
+  camera: "カメラ",
+  relight: "ライティング",
+  upscale: "高画質化",
+};
+
+const MAGNIFIC_TOOL_SUCCESS_TEXT: Record<MagnificImageEditTool, string> = {
+  expand: "拡張した画像",
+  camera: "カメラを変えた画像",
+  relight: "光を調整した画像",
+  upscale: "高画質化した画像",
+};
+
+function isMagnificTool(tool: EditToolId): tool is MagnificImageEditTool {
+  return (
+    tool === "expand" ||
+    tool === "camera" ||
+    tool === "relight" ||
+    tool === "upscale"
+  );
+}
+
 /** 1枚の画像を、候補から選びながら版として育てる編集画面。 */
 export function EditWorkspace() {
   const sourceImagePath = useEditor((state) => state.sourceImagePath);
   const busyTool = useEditor((state) => state.busyTool);
   const pendingOpenPath = useEditor((state) => state.pendingOpenPath);
+  const magnificConnected = useAccounts((state) => state.magnific.authenticated);
   const {
     chooseImage,
     exportImageAs,
@@ -79,6 +109,8 @@ export function EditWorkspace() {
   const [adjust, setAdjust] = useState<AdjustValues>(NEUTRAL_ADJUST);
   const [exportOpen, setExportOpen] = useState(false);
   const [removingBg, setRemovingBg] = useState(false);
+  const [magnificBusyTool, setMagnificBusyTool] =
+    useState<MagnificImageEditTool | null>(null);
   const [editSession, setEditSession] = useState(() => createEditSession(sourceImagePath));
   const editSessionRef = useRef(editSession);
 
@@ -179,7 +211,12 @@ export function EditWorkspace() {
 
   /** 未選択候補はここで初めて版になる。既存版と元画像は表示だけを切り替える。 */
   const selectSessionImage = async (path: string) => {
-    if (busy || removingBg || versionInFlightRef.current) return;
+    if (
+      busy ||
+      removingBg ||
+      magnificBusyTool !== null ||
+      versionInFlightRef.current
+    ) return;
     const session = editSessionRef.current;
     const isExistingVersion =
       path === session.basePath || session.versions.some((version) => version.path === path);
@@ -333,7 +370,12 @@ export function EditWorkspace() {
   };
 
   const runRemoveBackground = async () => {
-    if (removingBg || versionInFlightRef.current || versionRecoveryRequired) return;
+    if (
+      removingBg ||
+      magnificBusyTool !== null ||
+      versionInFlightRef.current ||
+      versionRecoveryRequired
+    ) return;
     setRemovingBg(true);
     setError(null);
     try {
@@ -362,6 +404,48 @@ export function EditWorkspace() {
     setError(null);
     setExportOpen(false);
     await exportImageAs(format, size);
+  };
+
+  const runMagnificEdit = async (
+    editTool: MagnificImageEditTool,
+    params: Record<string, unknown>,
+  ) => {
+    if (
+      !sourceImagePath ||
+      !magnificConnected ||
+      busy ||
+      removingBg ||
+      busyTool !== null ||
+      magnificBusyTool !== null ||
+      versionInFlightRef.current ||
+      versionRecoveryRequired
+    ) return;
+
+    const label = MAGNIFIC_TOOL_LABELS[editTool];
+    setMagnificBusyTool(editTool);
+    setError(null);
+    try {
+      const paths = await magnificImageEdit(sourceImagePath, editTool, params);
+      const resultPath = paths.find((path) => Boolean(path?.trim()));
+      if (!resultPath) {
+        setError(`${label}の結果画像を受け取れませんでした。`);
+        return;
+      }
+      if (!(await applyVersion(resultPath, "add", label))) {
+        setError(`${label}の結果を新しい版として読み込めませんでした。前の版を表示しています。`);
+        return;
+      }
+      setAdjust(NEUTRAL_ADJUST);
+      useToasts.getState().push({
+        kind: "success",
+        text: `${MAGNIFIC_TOOL_SUCCESS_TEXT[editTool]}を新しい版にしました。右の履歴から戻せます。`,
+        ttlMs: 4400,
+      });
+    } catch (caught) {
+      setError(`${label}を実行できませんでした: ${String(caught)}`);
+    } finally {
+      setMagnificBusyTool(null);
+    }
   };
 
   useEffect(() => {
@@ -559,14 +643,20 @@ export function EditWorkspace() {
     (tool === "ai" || (tool === "region" && region !== null)) &&
     !busy &&
     busyTool === null &&
+    magnificBusyTool === null &&
     !versionInFlight &&
     !versionRecoveryRequired;
   const panelBusy =
-    busy || removingBg || busyTool !== null || versionInFlight || versionRecoveryRequired;
+    busy ||
+    removingBg ||
+    busyTool !== null ||
+    magnificBusyTool !== null ||
+    versionInFlight ||
+    versionRecoveryRequired;
   const versionSelectDisabled = isVersionSelectDisabled({
     generationBusy: busy,
     backgroundRemovalBusy: removingBg,
-    toolBusy: busyTool !== null,
+    toolBusy: busyTool !== null || magnificBusyTool !== null,
     versionInFlight,
     versionRecoveryRequired,
   });
@@ -671,6 +761,18 @@ export function EditWorkspace() {
                   busy={panelBusy}
                 />
               </EditFloatingPanel>
+            ) : isMagnificTool(tool) ? (
+              <EditFloatingPanel
+                title={MAGNIFIC_TOOL_LABELS[tool]}
+                onClose={() => selectTool("ai")}
+              >
+                <MagnificToolPanel
+                  tool={tool}
+                  busy={magnificBusyTool !== null || versionInFlight}
+                  connected={magnificConnected}
+                  onRun={(params) => void runMagnificEdit(tool, params)}
+                />
+              </EditFloatingPanel>
             ) : null}
 
             {editSession.basePath && editSession.currentPath ? (
@@ -717,6 +819,7 @@ export function EditWorkspace() {
                 activeTool={tool}
                 disabled={panelBusy}
                 removingBackground={removingBg}
+                magnificConnected={magnificConnected}
                 onSelect={selectTool}
                 onRemoveBackground={() => void runRemoveBackground()}
               />

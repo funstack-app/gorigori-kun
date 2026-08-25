@@ -632,6 +632,7 @@ pub fn run() {
             commands::magnific::magnific_login,
             commands::magnific::magnific_logout,
             commands::magnific::magnific_generate_batch,
+            commands::magnific::magnific_image_edit,
             commands::magnific::magnific_account,
             commands::magnific::magnific_video_models_list,
             commands::magnific::magnific_video_generate,

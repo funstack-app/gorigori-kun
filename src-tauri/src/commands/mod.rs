@@ -36,6 +36,7 @@ pub mod higgsfield_mcp;
 pub mod images;
 pub mod layer_splitter;
 pub mod magnific;
+pub use magnific::magnific_image_edit;
 pub mod mcp;
 pub mod multiangle;
 pub mod raw_payload;

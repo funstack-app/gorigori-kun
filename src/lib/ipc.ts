@@ -611,6 +611,17 @@ export type MagnificVideoGenArgs = {
   localImagePaths?: string[];
 };
 
+export type MagnificImageEditTool = "expand" | "camera" | "relight" | "upscale";
+
+/** LLMを介さず Magnific の専用編集ツールを1回だけ呼び、新しい版のパスを返す。 */
+export function magnificImageEdit(
+  sourcePath: string,
+  tool: MagnificImageEditTool,
+  params: Record<string, unknown>,
+): Promise<string[]> {
+  return invoke<string[]>("magnific_image_edit", { sourcePath, tool, params });
+}
+
 export const magnific = {
   status: () => invoke<MagnificStatus>("magnific_status"),
   /** codex mcp add で MCP登録+OAuthフロー開始。ブラウザでログイン完了する。 */
