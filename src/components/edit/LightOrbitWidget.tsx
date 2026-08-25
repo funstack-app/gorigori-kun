@@ -105,11 +105,10 @@ export function LightOrbitWidget({
   return (
     <div
       ref={hostRef}
-      className="relative select-none overflow-hidden rounded-xl border border-white/10"
+      className="relative select-none overflow-hidden rounded-xl border border-white/10 bg-[#0a0a0d]"
       style={{
         width: "100%",
         aspectRatio: `${W} / ${H}`,
-        background: "radial-gradient(120% 100% at 50% 0%, #191531 0%, #100d20 45%, #090714 100%)",
         cursor: disabled ? "default" : dragging ? "grabbing" : "grab",
         touchAction: "none",
       }}
@@ -119,21 +118,21 @@ export function LightOrbitWidget({
       onPointerCancel={end}
       role="presentation"
     >
-      {/* 遠近グリッドの床 */}
+      {/* ごく薄い遠近グリッド */}
       <div
         className="pointer-events-none absolute left-1/2 top-[62%]"
         style={{
           width: 420,
           height: 420,
-          transform: "translate(-50%, -50%) perspective(420px) rotateX(72deg)",
+          transform: "translate(-50%, -50%) perspective(420px) rotateX(74deg)",
           backgroundImage:
-            "repeating-linear-gradient(0deg, rgba(122,110,255,0.13) 0 1px, transparent 1px 26px), repeating-linear-gradient(90deg, rgba(122,110,255,0.13) 0 1px, transparent 1px 26px)",
-          maskImage: "radial-gradient(closest-side, black 35%, transparent 72%)",
-          WebkitMaskImage: "radial-gradient(closest-side, black 35%, transparent 72%)",
+            "repeating-linear-gradient(0deg, rgba(148,155,190,0.10) 0 1px, transparent 1px 26px), repeating-linear-gradient(90deg, rgba(148,155,190,0.10) 0 1px, transparent 1px 26px)",
+          maskImage: "radial-gradient(closest-side, black 30%, transparent 70%)",
+          WebkitMaskImage: "radial-gradient(closest-side, black 30%, transparent 70%)",
         }}
       />
 
-      {/* 光錐: 光源からプレーン全体へ。後ろからの光はプレーンの裏に回す */}
+      {/* 光錐: プロジェクターからプレーン全体へ (発光なし・柔らかい面) */}
       <svg viewBox={`0 0 ${W} ${H}`} className="absolute inset-0 h-full w-full" aria-hidden>
         <defs>
           <linearGradient
@@ -145,21 +144,28 @@ export function LightOrbitWidget({
             y2={PLANE.cy}
           >
             <stop offset="0%" stopColor={color} stopOpacity={beamOpacity} />
-            <stop offset="100%" stopColor={color} stopOpacity="0.02" />
+            <stop offset="100%" stopColor={color} stopOpacity="0.03" />
           </linearGradient>
-          <filter id="light-soft" x="-40%" y="-40%" width="180%" height="180%">
-            <feGaussianBlur stdDeviation="2.4" />
-          </filter>
         </defs>
         <polygon
           points={`${light.x},${light.y} ${planeLeft},${planeTop} ${planeLeft},${planeBottom} ${planeRight},${planeBottom} ${planeRight},${planeTop}`}
           fill="url(#light-beam)"
-          filter="url(#light-soft)"
-          opacity={light.behind ? 0.4 : 1}
+          opacity={light.behind ? 0.35 : 1}
         />
       </svg>
 
-      {/* 立っている画像プレーン。光の向きでハイライトの縁を変える */}
+      {/* 床の接地影 */}
+      <div
+        className="pointer-events-none absolute rounded-[50%] bg-black/70 blur-[6px]"
+        style={{
+          left: planeLeft + 4,
+          top: planeBottom + 4,
+          width: PLANE.width + 8,
+          height: 13,
+        }}
+      />
+
+      {/* 立っている画像プレーン (強めの遠近で立体に見せる) */}
       <div
         className="pointer-events-none absolute"
         style={{
@@ -167,36 +173,43 @@ export function LightOrbitWidget({
           top: planeTop,
           width: PLANE.width,
           height: PLANE.height,
-          perspective: 320,
+          perspective: 260,
         }}
       >
         <img
           src={src}
           alt=""
-          className="h-full w-full rounded-[3px] object-cover"
+          className="h-full w-full rounded-[2px] object-cover"
           style={{
-            transform: "rotateY(-18deg)",
-            boxShadow: `0 10px 18px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.14), ${light.x < PLANE.cx ? "-3px" : "3px"} ${light.y < PLANE.cy ? "-3px" : "3px"} 14px ${color}44`,
-            filter: light.behind ? "brightness(0.82)" : undefined,
+            transform: "rotateY(-26deg) rotateX(2deg)",
+            boxShadow: `0 8px 16px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.12), ${light.x < PLANE.cx ? "-2px" : "2px"} ${light.y < PLANE.cy ? "-2px" : "2px"} 10px ${color}33`,
+            filter: light.behind ? "brightness(0.8)" : undefined,
           }}
           draggable={false}
         />
       </div>
 
-      {/* 光源の玉 (掴んで動かす) */}
+      {/* プロジェクター (光源)。掴んで動かす対象はビュー全体 */}
       <div
         className="pointer-events-none absolute"
         style={{
-          left: light.x - 9,
-          top: light.y - 9,
-          width: 18,
-          height: 18,
-          borderRadius: 999,
-          background: color,
-          opacity: light.behind ? 0.65 : 1,
-          boxShadow: `0 0 10px 3px ${color}aa, 0 0 26px 8px ${color}55, inset 0 0 4px rgba(0,0,0,0.25)`,
+          left: light.x - 11,
+          top: light.y - 8,
+          width: 22,
+          height: 15,
+          borderRadius: 4,
+          background: "linear-gradient(180deg, #3d3d46 0%, #23232a 100%)",
+          border: "1px solid rgba(255,255,255,0.22)",
+          opacity: light.behind ? 0.6 : 1,
+          transform: `rotate(${(Math.atan2(PLANE.cy - light.y, PLANE.cx - light.x) * 180) / Math.PI}deg)`,
         }}
-      />
+      >
+        {/* レンズ (発光させず、色だけ見せる) */}
+        <span
+          className="absolute right-[-4px] top-1/2 h-[9px] w-[9px] -translate-y-1/2 rounded-full"
+          style={{ background: color, border: "1px solid rgba(0,0,0,0.5)" }}
+        />
+      </div>
 
       <p className="pointer-events-none absolute inset-x-0 bottom-1.5 text-center text-[10px] font-bold text-neutral-400">
         ドラッグしてライトの位置を調整

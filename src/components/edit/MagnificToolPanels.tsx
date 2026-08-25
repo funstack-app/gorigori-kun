@@ -59,6 +59,7 @@ function CameraPanel({ imagePath, busy, connected, onRun }: PanelProps) {
         imagePath={imagePath}
         rotate={rotate}
         vertical={vertical}
+        closeup={closeup}
         disabled={busy}
         onChange={(next) => {
           setRotate(next.rotate);

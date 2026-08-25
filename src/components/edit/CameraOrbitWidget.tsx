@@ -4,20 +4,20 @@ import { useRef, useState, type PointerEvent } from "react";
 import { clampCameraVertical, normalizeCameraRotate } from "./editToolLogic";
 
 /**
- * カメラ変更の 3D プレビュー (Magnific 本家と同じ見た目 / 2026-08-26 STΛCK指示)。
+ * カメラ変更の 3D プレビュー (Magnific 本家準拠 / 2026-08-26 STΛCK指示で再調整)。
  *
- * - 遠近グリッドの床 + 中央に立つ画像プレーン
- * - 青いオービットリング上の玉 = 水平回転、紫のアーク上の玉 = 垂直方向
- * - 玉を掴んで個別に、背景を掴めば両方まとめて (オービット操作) 動かせる
- * - 右上のミニプレビューが「その角度から見た画像」を擬似再現する
- *
- * 実体は同じ直接MCP引数 (rotate/vertical) を作るだけ。3Dはあくまで操作盤。
+ * - 真っ黒に近い背景 + ごく薄いグリッド。発光 (グロー) は使わない
+ * - 水平の青リングと、それに直交する縦の紫アーク (子午線) のジャイロ構造
+ * - 青い玉 = 回転、紫の玉 = 高さ。背景ドラッグで両方まとめてオービット
+ * - 右上ミニプレビューは回転・高さ・寄り (ズーム) を全部反映する
  */
 
 type Props = {
   imagePath: string;
   rotate: number;
   vertical: number;
+  /** 寄り 0-10。ミニプレビューの拡大率に反映する。 */
+  closeup?: number;
   disabled?: boolean;
   onChange: (value: { rotate: number; vertical: number }) => void;
 };
@@ -25,29 +25,48 @@ type Props = {
 const W = 260;
 const H = 196;
 const CX = 130;
-const CY = 118;
-const RX = 100;
-const RY = 34;
+const CY = 108;
+/** 水平リング (床と平行な楕円)。 */
+const RING_RX = 108;
+const RING_RY = 38;
+/** 縦アーク (子午線)。リングと同じ半径の縦楕円を少し傾けて見せる。 */
+const MER_RX = 30;
+const MER_RY = 92;
+const MER_TILT = (-14 * Math.PI) / 180;
 
-/** リング上の玉 (水平回転)。0°=手前、時計回り。 */
 function ringPoint(rotate: number) {
   const rad = (normalizeCameraRotate(rotate) * Math.PI) / 180;
-  return { x: CX + RX * Math.sin(rad), y: CY + RY * Math.cos(rad) };
+  return { x: CX + RING_RX * Math.sin(rad), y: CY + RING_RY * Math.cos(rad) };
 }
 
-/** アーク上の玉 (垂直 -30..90)。二次ベジェで手前下→左上→真上をなぞる。 */
-const ARC_P0 = { x: CX - 8, y: CY + RY - 2 };
-const ARC_P1 = { x: CX - 102, y: CY - 66 };
-const ARC_P2 = { x: CX + 6, y: CY - RY - 44 };
-
-function arcPoint(vertical: number) {
-  const t = (clampCameraVertical(vertical) + 30) / 120;
-  const u = 1 - t;
+/** 子午線上の点。φ=0 が手前下、φ=180° が真後ろ上。 */
+function meridianPoint(phi: number) {
+  const x0 = MER_RX * Math.sin(phi);
+  const y0 = MER_RY * Math.cos(phi);
   return {
-    x: u * u * ARC_P0.x + 2 * u * t * ARC_P1.x + t * t * ARC_P2.x,
-    y: u * u * ARC_P0.y + 2 * u * t * ARC_P1.y + t * t * ARC_P2.y,
+    x: CX + x0 * Math.cos(MER_TILT) - y0 * Math.sin(MER_TILT) * 0.22,
+    y: CY + x0 * Math.sin(MER_TILT) + y0 * Math.cos(MER_TILT),
   };
 }
+
+/** 垂直 -30..90° → 子午線パラメータ。手前下 (10°) から真上 (180°) へ。 */
+function verticalToPhi(vertical: number) {
+  const t = (clampCameraVertical(vertical) + 30) / 120;
+  return (0.12 + t * 0.88) * Math.PI;
+}
+
+function meridianPath() {
+  const steps = 48;
+  const points: string[] = [];
+  for (let index = 0; index <= steps; index += 1) {
+    const phi = (0.06 + (index / steps) * 0.99) * Math.PI;
+    const point = meridianPoint(phi);
+    points.push(`${index === 0 ? "M" : "L"} ${point.x.toFixed(1)} ${point.y.toFixed(1)}`);
+  }
+  return points.join(" ");
+}
+
+const MERIDIAN_D = meridianPath();
 
 type DragKind = "ring" | "arc" | "orbit";
 
@@ -55,6 +74,7 @@ export function CameraOrbitWidget({
   imagePath,
   rotate,
   vertical,
+  closeup = 5,
   disabled = false,
   onChange,
 }: Props) {
@@ -64,7 +84,7 @@ export function CameraOrbitWidget({
   );
 
   const ring = ringPoint(rotate);
-  const arc = arcPoint(vertical);
+  const arc = meridianPoint(verticalToPhi(vertical));
 
   const toLocal = (event: PointerEvent) => {
     const rect = (event.currentTarget as Element).getBoundingClientRect();
@@ -90,7 +110,7 @@ export function CameraOrbitWidget({
     if (dragging === "ring") {
       const local = toLocal(event);
       const angle =
-        (Math.atan2((local.x - CX) / RX, (local.y - CY) / RY) * 180) / Math.PI;
+        (Math.atan2((local.x - CX) / RING_RX, (local.y - CY) / RING_RY) * 180) / Math.PI;
       onChange({ rotate: normalizeCameraRotate(angle), vertical });
       return;
     }
@@ -117,16 +137,15 @@ export function CameraOrbitWidget({
   };
 
   const src = convertFileSrc(imagePath);
-  // 玉が手前 (リング下半分) にいる時だけプレーンより上に描く。
   const ballInFront = Math.cos((normalizeCameraRotate(rotate) * Math.PI) / 180) >= 0;
+  const previewScale = 0.72 + (Math.max(0, Math.min(10, closeup)) / 10) * 0.75;
 
   return (
     <div
-      className="relative select-none overflow-hidden rounded-xl border border-white/10"
+      className="relative select-none overflow-hidden rounded-xl border border-white/10 bg-[#0a0a0d]"
       style={{
         width: "100%",
         aspectRatio: `${W} / ${H}`,
-        background: "radial-gradient(120% 100% at 50% 0%, #1b1633 0%, #120e24 45%, #0a0817 100%)",
         cursor: disabled ? "default" : dragging ? "grabbing" : "grab",
         touchAction: "none",
       }}
@@ -136,114 +155,94 @@ export function CameraOrbitWidget({
       onPointerCancel={end}
       role="presentation"
     >
-      {/* 遠近グリッドの床 */}
+      {/* ごく薄い遠近グリッド */}
       <div
-        className="pointer-events-none absolute left-1/2 top-[60%]"
+        className="pointer-events-none absolute left-1/2 top-[62%]"
         style={{
           width: 420,
           height: 420,
-          transform: "translate(-50%, -50%) perspective(420px) rotateX(72deg)",
+          transform: "translate(-50%, -50%) perspective(420px) rotateX(74deg)",
           backgroundImage:
-            "repeating-linear-gradient(0deg, rgba(122,110,255,0.16) 0 1px, transparent 1px 26px), repeating-linear-gradient(90deg, rgba(122,110,255,0.16) 0 1px, transparent 1px 26px)",
-          maskImage: "radial-gradient(closest-side, black 35%, transparent 72%)",
-          WebkitMaskImage: "radial-gradient(closest-side, black 35%, transparent 72%)",
+            "repeating-linear-gradient(0deg, rgba(148,155,190,0.10) 0 1px, transparent 1px 26px), repeating-linear-gradient(90deg, rgba(148,155,190,0.10) 0 1px, transparent 1px 26px)",
+          maskImage: "radial-gradient(closest-side, black 30%, transparent 70%)",
+          WebkitMaskImage: "radial-gradient(closest-side, black 30%, transparent 70%)",
         }}
       />
 
-      <svg
-        viewBox={`0 0 ${W} ${H}`}
-        className="absolute inset-0 h-full w-full"
-        aria-hidden
-      >
-        <defs>
-          <filter id="cam-glow" x="-60%" y="-60%" width="220%" height="220%">
-            <feGaussianBlur stdDeviation="3.2" result="b" />
-            <feMerge>
-              <feMergeNode in="b" />
-              <feMergeNode in="SourceGraphic" />
-            </feMerge>
-          </filter>
-        </defs>
-
-        {/* リング奥半分 (プレーンの後ろ) */}
+      <svg viewBox={`0 0 ${W} ${H}`} className="absolute inset-0 h-full w-full" aria-hidden>
+        {/* リング奥半分 (暗め・プレーンの後ろ) */}
         <path
-          d={`M ${CX - RX} ${CY} A ${RX} ${RY} 0 0 1 ${CX + RX} ${CY}`}
+          d={`M ${CX - RING_RX} ${CY} A ${RING_RX} ${RING_RY} 0 0 1 ${CX + RING_RX} ${CY}`}
           fill="none"
-          stroke="#4353e6"
-          strokeWidth="6"
+          stroke="#3b46c9"
+          strokeWidth="9"
           strokeLinecap="round"
-          opacity="0.85"
-          filter="url(#cam-glow)"
         />
       </svg>
 
+      {/* 床の接地影 */}
+      <div
+        className="pointer-events-none absolute left-1/2 top-[68%] h-[14px] w-[92px] -translate-x-1/2 rounded-[50%] bg-black/70 blur-[6px]"
+      />
+
       {/* 立っている画像プレーン */}
       <div
-        className="pointer-events-none absolute left-1/2 top-[46%] -translate-x-1/2 -translate-y-1/2"
-        style={{ perspective: 320 }}
+        className="pointer-events-none absolute left-1/2 top-[44%] -translate-x-1/2 -translate-y-1/2"
+        style={{ perspective: 300 }}
       >
         <img
           src={src}
           alt=""
-          className="block h-[64px] w-auto max-w-[96px] rounded-[3px] object-cover"
+          className="block h-[62px] w-auto max-w-[92px] rounded-[2px] object-cover"
           style={{
-            transform: "rotateY(-24deg)",
-            boxShadow: "0 10px 18px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.14)",
+            transform: "rotateY(-22deg) rotateX(2deg)",
+            boxShadow: "0 8px 16px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,255,255,0.12)",
           }}
           draggable={false}
         />
       </div>
 
-      <svg
-        viewBox={`0 0 ${W} ${H}`}
-        className="absolute inset-0 h-full w-full"
-        aria-hidden
-      >
-        {/* リング手前半分 (プレーンの前) */}
+      <svg viewBox={`0 0 ${W} ${H}`} className="absolute inset-0 h-full w-full" aria-hidden>
+        {/* リング手前半分 (明るめ・プレーンの前) */}
         <path
-          d={`M ${CX - RX} ${CY} A ${RX} ${RY} 0 0 0 ${CX + RX} ${CY}`}
+          d={`M ${CX - RING_RX} ${CY} A ${RING_RX} ${RING_RY} 0 0 0 ${CX + RING_RX} ${CY}`}
           fill="none"
-          stroke="#5b6cff"
-          strokeWidth="7"
+          stroke="#5563f2"
+          strokeWidth="10"
           strokeLinecap="round"
-          filter="url(#cam-glow)"
         />
-        {/* 垂直アーク (紫) */}
+        {/* 縦アーク (子午線・紫)。リングに直交する軸 */}
         <path
-          d={`M ${ARC_P0.x} ${ARC_P0.y} Q ${ARC_P1.x} ${ARC_P1.y} ${ARC_P2.x} ${ARC_P2.y}`}
+          d={MERIDIAN_D}
           fill="none"
           stroke="#8a5cf6"
-          strokeWidth="5"
+          strokeWidth="8"
           strokeLinecap="round"
-          opacity="0.95"
-          filter="url(#cam-glow)"
         />
 
-        {/* 垂直の玉 (紫) */}
+        {/* 高さの玉 (紫) */}
         <circle
           cx={arc.x}
           cy={arc.y}
-          r="10"
-          fill="#8a5cf6"
-          stroke="#c4b1ff"
-          strokeWidth="2"
-          filter="url(#cam-glow)"
+          r="13"
+          fill="#9a70ff"
+          stroke="#0a0a0d"
+          strokeWidth="3"
           style={{ cursor: disabled ? "default" : "grab", pointerEvents: "auto" }}
           onPointerDown={begin("arc")}
           onPointerMove={move}
           onPointerUp={end}
           onPointerCancel={end}
         />
-        {/* 回転の玉 (青)。奥にいる時は少し沈める */}
+        {/* 回転の玉 (青) */}
         <circle
           cx={ring.x}
           cy={ring.y}
-          r="11"
+          r="14"
           fill="#4b5df0"
-          stroke="#aab4ff"
-          strokeWidth="2"
-          opacity={ballInFront ? 1 : 0.55}
-          filter="url(#cam-glow)"
+          stroke="#0a0a0d"
+          strokeWidth="3"
+          opacity={ballInFront ? 1 : 0.6}
           style={{ cursor: disabled ? "default" : "grab", pointerEvents: "auto" }}
           onPointerDown={begin("ring")}
           onPointerMove={move}
@@ -252,18 +251,17 @@ export function CameraOrbitWidget({
         />
       </svg>
 
-      {/* 右上: その角度から見た擬似プレビュー */}
+      {/* 右上: 回転・高さ・寄りを反映した擬似プレビュー */}
       <div
-        className="pointer-events-none absolute right-2 top-2 flex h-[46px] w-[64px] items-center justify-center overflow-hidden rounded-md border border-white/20 bg-black/70"
+        className="pointer-events-none absolute right-2 top-2 flex h-[48px] w-[66px] items-center justify-center overflow-hidden rounded-md border border-white/20 bg-black"
         style={{ perspective: 240 }}
       >
         <img
           src={src}
           alt=""
-          className="h-[38px] w-auto max-w-[54px] rounded-[2px] object-cover"
+          className="h-[40px] w-auto max-w-[58px] rounded-[2px] object-cover"
           style={{
-            transform: `rotateY(${-normalizeCameraRotate(rotate)}deg) rotateX(${clampCameraVertical(vertical) * 0.45}deg)`,
-            boxShadow: "0 0 0 1px rgba(255,255,255,0.18)",
+            transform: `scale(${previewScale}) rotateY(${-normalizeCameraRotate(rotate)}deg) rotateX(${clampCameraVertical(vertical) * 0.45}deg)`,
           }}
           draggable={false}
         />
