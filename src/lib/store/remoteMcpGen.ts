@@ -126,6 +126,7 @@ export function reconcileRemoteMcpSelections(
 }
 
 const MODEL_CATALOG_CACHE_KEY = "gori.remoteMcp.modelCatalogs.v1";
+const DIRECT_ERROR_PROVIDER_IDS = new Set(["higgsfield", "krea", "magnific"]);
 const remoteMcpCatalogRefreshes = new Map<string, Promise<unknown>>();
 
 /**
@@ -199,16 +200,82 @@ function createRequestId(): string {
   return `remote-mcp-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
-function friendlyRemoteMcpError(error: unknown): string {
+function nestedServiceError(value: unknown): string | null {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const message = nestedServiceError(item);
+      if (message) return message;
+    }
+    return null;
+  }
+  if (!value || typeof value !== "object") return null;
+  const object = value as Record<string, unknown>;
+  const serviceError = object.error;
+  if (typeof serviceError === "string" && serviceError.trim()) return serviceError;
+  if (serviceError && typeof serviceError === "object") {
+    const message = (serviceError as Record<string, unknown>).message;
+    if (typeof message === "string" && message.trim()) return message;
+  }
+  for (const item of Object.values(object)) {
+    const message = nestedServiceError(item);
+    if (message) return message;
+  }
+  return null;
+}
+
+function nestedServiceStatus(value: unknown): string | null {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const status = nestedServiceStatus(item);
+      if (status) return status;
+    }
+    return null;
+  }
+  if (!value || typeof value !== "object") return null;
+  const object = value as Record<string, unknown>;
+  for (const key of ["status", "state", "phase"]) {
+    const status = object[key];
+    if (typeof status === "string" && status.trim()) return status;
+  }
+  for (const item of Object.values(object)) {
+    const status = nestedServiceStatus(item);
+    if (status) return status;
+  }
+  return null;
+}
+
+/** サービス理由だけを1行に収め、スキーマや生JSONを画面へ流さない。 */
+export function friendlyRemoteMcpError(error: unknown, maxChars = 320): string {
   const raw = error instanceof Error ? error.message : String(error ?? "");
-  const detail = raw
+  let detail = raw
     .replace(/^error:\s*/i, "")
     .replace(/\s+/g, " ")
     .trim();
-  if (!detail) {
-    return "生成に失敗しました。接続状態を確認して、もう一度お試しください。";
+  const jsonStarts = [detail.indexOf("{"), detail.indexOf("[")].filter((index) => index >= 0);
+  const jsonStart = jsonStarts.length > 0 ? Math.min(...jsonStarts) : -1;
+  if (jsonStart >= 0) {
+    try {
+      const parsed = JSON.parse(detail.slice(jsonStart)) as unknown;
+      detail =
+        nestedServiceError(parsed) ??
+        nestedServiceStatus(parsed) ??
+        detail.slice(0, jsonStart).trim();
+    } catch {
+      detail = detail.slice(0, jsonStart).trim();
+    }
   }
-  return `生成に失敗しました。接続状態や入力内容を確認してください。詳細: ${detail}`;
+  detail = detail
+    .split(/[\[{]/, 1)[0]
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!detail) {
+    return "生成に失敗しました";
+  }
+  return Array.from(detail).slice(0, maxChars).join("");
+}
+
+function friendlyRemoteMcpEventError(providerId: string, error: unknown): string {
+  return friendlyRemoteMcpError(error, DIRECT_ERROR_PROVIDER_IDS.has(providerId) ? 320 : 120);
 }
 
 function validationFailure(input: RemoteMcpRunInput): string | null {
@@ -600,7 +667,7 @@ export const useRemoteMcpGen = create<RemoteMcpGenState>((set, get) => {
       // invoke の解決だけでは完了表示にしない。done イベントだけを完了の根拠にする。
       return { ok: true, requestId };
     } catch (error) {
-      const message = friendlyRemoteMcpError(error);
+      const message = friendlyRemoteMcpEventError(selection.providerId, error);
       set((state) => {
         const current = state.jobs[requestId];
         if (!current) return state;
@@ -793,7 +860,7 @@ export const useRemoteMcpGen = create<RemoteMcpGenState>((set, get) => {
 
       const message =
         event.phase === "error"
-          ? friendlyRemoteMcpError(event.message)
+          ? friendlyRemoteMcpEventError(event.providerId, event.message)
           : event.message ??
             (event.phase === "saving"
               ? "生成結果を保存しています…"

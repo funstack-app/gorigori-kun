@@ -26,7 +26,6 @@ import {
   durationValuesForConstraint,
   durationValuesForConstraintOrGeneric,
   intersectVideoModelCapabilities,
-  type VideoDurationConstraint,
   type VideoModelCapabilities,
   type VideoModelDefinition,
   type VideoModelParam,
@@ -104,12 +103,6 @@ function remoteSelectionCapabilities(
   };
 }
 
-function remoteSelectionLabel(selection: RemoteMcpSelection): string {
-  return `${selection.providerLabel}: ${
-    selection.model?.label ?? selection.model?.name ?? selection.toolTitle ?? selection.toolName
-  }`;
-}
-
 function commonRemoteResolutions(
   selections: readonly RemoteMcpSelection[],
 ): string[] | null {
@@ -119,13 +112,6 @@ function commonRemoteResolutions(
   return (lists[0] ?? []).filter((resolution) =>
     lists.slice(1).every((list) => list?.includes(resolution)),
   );
-}
-
-function remoteJobPhaseLabel(phase: "running" | "saving" | "done" | "error"): string {
-  if (phase === "running") return "生成中";
-  if (phase === "saving") return "登録中";
-  if (phase === "done") return "完了";
-  return "失敗";
 }
 
 /**
@@ -147,7 +133,6 @@ export function VideoConstructedPromptPanel() {
     promptOverride,
     setPromptOverride,
     effectivePrompt,
-    status,
     hasRunningBatch,
     runningBatchCount,
     maxConcurrentBatches,
@@ -166,7 +151,10 @@ export function VideoConstructedPromptPanel() {
   const [elementModalOpen, setElementModalOpen] = useState(false);
   /** 「AIで整える」実行中フラグ。二重起動を防ぐ。 */
   const [refining, setRefining] = useState(false);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [openSetting, setOpenSetting] = useState<
+    "duration" | "aspect" | "resolution" | null
+  >(null);
+  const settingChipsRef = useRef<HTMLDivElement | null>(null);
   const [libraryOpen, setLibraryOpen] = useState(false);
   const [stockOpen, setStockOpen] = useState(false);
   const [presetOpen, setPresetOpen] = useState(false);
@@ -196,21 +184,7 @@ export function VideoConstructedPromptPanel() {
   const setExtraParam = useVideoGen((s) => s.setExtraParam);
   const remoteSelection = useRemoteMcpGen((s) => s.selections.video);
   const remoteVideoSelections = useRemoteMcpGen((s) => s.videoSelections);
-  const latestRemoteBatchId = useRemoteMcpGen((s) => s.latestBatchId.video);
-  const remoteValidationMessage = useRemoteMcpGen((s) => s.validationMessage.video);
-  const remoteJobs = useRemoteMcpGen((s) => s.jobs);
-  const latestRemoteJobs = useMemo(
-    () =>
-      latestRemoteBatchId
-        ? Object.values(remoteJobs)
-            .filter((job) => job.kind === "video" && job.batchId === latestRemoteBatchId)
-            .sort((left, right) => left.createdAt - right.createdAt)
-        : [],
-    [latestRemoteBatchId, remoteJobs],
-  );
-  const errorRemoteJobs = latestRemoteJobs.filter((job) => job.phase === "error");
   const startRemoteGeneration = useRemoteMcpGen((s) => s.startSelectedVideos);
-  const retryRemoteGeneration = useRemoteMcpGen((s) => s.retry);
 
   // 「内蔵」区分は廃止。動画は接続先から実取得したモデルだけを選択扱いにする。
   const selectedBuiltInModels = useMemo<VideoModelDefinition[]>(() => [], []);
@@ -275,7 +249,40 @@ export function VideoConstructedPromptPanel() {
     generateRef.current = generate;
   }, [generate]);
 
+  useEffect(() => {
+    if (!openSetting) return;
+    const closeOnOutside = (event: PointerEvent) => {
+      if (!settingChipsRef.current?.contains(event.target as Node)) setOpenSetting(null);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpenSetting(null);
+    };
+    document.addEventListener("pointerdown", closeOnOutside);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutside);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [openSetting]);
+
   const isOverriding = promptOverride !== null;
+
+  const changeDuration = (next: number) => {
+    if (remoteVideoSelections.length > 0) useVideoGen.setState({ duration: Math.max(1, next) });
+    else setDuration(next);
+    setOpenSetting(null);
+  };
+
+  const changeAspectRatio = (next: string) => {
+    if (remoteVideoSelections.length > 0) useVideoGen.setState({ aspectRatio: next });
+    else setAspectRatio(next);
+    setOpenSetting(null);
+  };
+
+  const changeResolution = (next: string) => {
+    setExtraParam("resolution", next);
+    setOpenSetting(null);
+  };
 
   // モデル選択が変わったら、全選択モデルが使える値へだけ安全に寄せて知らせる。
   useEffect(() => {
@@ -595,11 +602,6 @@ export function VideoConstructedPromptPanel() {
     await Promise.all(tasks);
   };
 
-  const retryRemote = async (requestId: string) => {
-    const result = await retryRemoteGeneration(requestId);
-    if (!result.ok) pushToast({ kind: "error", text: result.message });
-  };
-
   return (
     <section
       data-tour="video-generation-controls"
@@ -679,27 +681,94 @@ export function VideoConstructedPromptPanel() {
       <div className="shrink-13-controls shrink-0 space-y-1 border-t border-[#2a2a2a] p-2">
         <HiggsfieldModelSelector media="video" />
 
-        {/* モデル行の直下に、よく触る3設定だけを横並びで置く。 */}
-        <div data-video-setting-chips className="grid grid-cols-3 gap-1">
-          <VideoSettingChip
-            label="尺"
-            value={`${duration}秒`}
-            disabled={reconciledVideoSettings.options.durations.length === 0}
-            onClick={() => setSettingsOpen(true)}
-          />
-          <VideoSettingChip
-            label="比率"
-            value={aspectRatio}
-            disabled={reconciledVideoSettings.options.aspectRatios.length === 0}
-            onClick={() => setSettingsOpen(true)}
-          />
-          <VideoSettingChip
-            label="解像度"
-            value={resolution}
-            disabled={reconciledVideoSettings.options.resolutions.length === 0}
-            onClick={() => setSettingsOpen(true)}
-          />
+        {/* 3設定は画面を覆うモーダルではなく、押したチップの直上だけで選ぶ。 */}
+        <div ref={settingChipsRef} data-video-setting-chips className="grid grid-cols-3 gap-1">
+          <div className="relative min-w-0">
+            <VideoSettingChip
+              label="尺"
+              value={`${duration}秒`}
+              disabled={reconciledVideoSettings.options.durations.length === 0}
+              expanded={openSetting === "duration"}
+              onClick={() =>
+                setOpenSetting((current) => current === "duration" ? null : "duration")
+              }
+            />
+            {openSetting === "duration" && (
+              <VideoSettingPopover
+                label="尺"
+                value={String(duration)}
+                options={reconciledVideoSettings.options.durations.map((seconds) => ({
+                  value: String(seconds),
+                  label: `${seconds}秒`,
+                }))}
+                onSelect={(next) => changeDuration(Number(next))}
+              />
+            )}
+          </div>
+          <div className="relative min-w-0">
+            <VideoSettingChip
+              label="比率"
+              value={aspectRatio}
+              disabled={reconciledVideoSettings.options.aspectRatios.length === 0}
+              expanded={openSetting === "aspect"}
+              onClick={() =>
+                setOpenSetting((current) => current === "aspect" ? null : "aspect")
+              }
+            />
+            {openSetting === "aspect" && (
+              <VideoSettingPopover
+                label="比率"
+                value={aspectRatio}
+                options={reconciledVideoSettings.options.aspectRatios.map((ratio) => ({
+                  value: ratio,
+                  label: ratio,
+                }))}
+                onSelect={changeAspectRatio}
+              />
+            )}
+          </div>
+          <div className="relative min-w-0">
+            <VideoSettingChip
+              label="解像度"
+              value={resolution}
+              disabled={reconciledVideoSettings.options.resolutions.length === 0}
+              expanded={openSetting === "resolution"}
+              onClick={() =>
+                setOpenSetting((current) => current === "resolution" ? null : "resolution")
+              }
+            />
+            {openSetting === "resolution" && (
+              <VideoSettingPopover
+                label="解像度"
+                value={resolution}
+                options={reconciledVideoSettings.options.resolutions.map((item) => ({
+                  value: item,
+                  label: item,
+                }))}
+                onSelect={changeResolution}
+              />
+            )}
+          </div>
         </div>
+
+        {hasUnknownRemoteSpecs && (
+          <p className="text-[9px] font-bold text-amber-300">
+            対応値は未取得です。非対応の値はサービス側で止まることがあります
+          </p>
+        )}
+
+        {remoteVideoSelections.length === 0 && !compareMode && model.extraParams.length > 0 && (
+          <div className="grid grid-cols-2 items-end gap-1.5">
+            {model.extraParams.filter((param) => param.name !== "resolution").map((param) => (
+              <ExtraParamControl
+                key={param.name}
+                param={param}
+                value={extraParamValues[param.name] ?? String(param.default)}
+                onChange={(next) => setExtraParam(param.name, next)}
+              />
+            ))}
+          </div>
+        )}
 
         {/* 生成数: 比較モードはモデル数固定、単一モードは 1〜4 選択 */}
         {compareMode ? (
@@ -773,64 +842,6 @@ export function VideoConstructedPromptPanel() {
                 : "動画を生成"}
         </button>
 
-        {remoteValidationMessage && (
-          <div
-            className="rounded-md border border-red-500/30 bg-red-500/5 px-2.5 py-2 text-xs font-semibold text-red-300"
-          >
-            <p>{remoteValidationMessage}</p>
-          </div>
-        )}
-
-        {errorRemoteJobs.length > 0 && (
-          <div className="space-y-1.5" data-remote-job-count={errorRemoteJobs.length}>
-            {compareMode && (
-              <p className="text-[10px] font-bold text-neutral-500">
-                比較生成 {errorRemoteJobs.length}モデルの状況
-              </p>
-            )}
-            {errorRemoteJobs.map((job) => (
-              <div
-                key={job.requestId}
-                data-request-id={job.requestId}
-                data-phase={job.phase}
-                className={
-                  job.phase === "error"
-                    ? "rounded-md border border-red-500/30 bg-red-500/5 px-2.5 py-2 text-xs font-semibold text-red-300"
-                    : "rounded-md border border-[#2a2a2a] bg-[#101010] px-2.5 py-2 text-xs font-semibold text-neutral-400"
-                }
-              >
-                <div className="flex items-start justify-between gap-2">
-                  <span className="min-w-0 truncate text-neutral-200">
-                    {remoteSelectionLabel(job.selection)}
-                  </span>
-                  <span className="shrink-0 text-[10px]">{remoteJobPhaseLabel(job.phase)}</span>
-                </div>
-                <p className="mt-1 whitespace-pre-wrap">{job.message}</p>
-                {job.phase === "error" && !job.savedPaths?.length && (
-                  <button
-                    type="button"
-                    onClick={() => void retryRemote(job.requestId)}
-                    className="mt-2 rounded border border-red-300/30 px-2 py-1 text-[11px] font-bold text-red-200 hover:bg-red-500/10"
-                  >
-                    再試行
-                  </button>
-                )}
-              </div>
-            ))}
-          </div>
-        )}
-
-        {selectedBuiltInModels.length > 0 && status.kind === "error" && (
-          <p
-            className={
-              status.kind === "error"
-                ? "whitespace-pre-wrap text-xs font-semibold text-red-400"
-                : "whitespace-pre-wrap text-xs font-semibold text-neutral-400"
-            }
-          >
-            {status.message}
-          </p>
-        )}
       </div>
 
       <ReferenceLibraryModal open={libraryOpen} onClose={() => setLibraryOpen(false)} />
@@ -859,33 +870,6 @@ export function VideoConstructedPromptPanel() {
         anchorRect={skillAnchor}
       />
       <ReferencePicker />
-      <VideoSettingsModal
-        open={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
-        model={model}
-        selectedBuiltInModels={selectedBuiltInModels}
-        remoteSelections={remoteVideoSelections}
-        capabilities={selectedCapabilities}
-        hasUnknownRemoteSpecs={hasUnknownRemoteSpecs}
-        duration={duration}
-        onDurationChange={(next) => {
-          if (remoteVideoSelections.length > 0) {
-            useVideoGen.setState({ duration: Math.max(1, next) });
-          } else {
-            setDuration(next);
-          }
-        }}
-        aspectRatio={aspectRatio}
-        onAspectRatioChange={(next) => {
-          if (remoteVideoSelections.length > 0) useVideoGen.setState({ aspectRatio: next });
-          else setAspectRatio(next);
-        }}
-        extraParamValues={extraParamValues}
-        onExtraParamChange={setExtraParam}
-        resolutionOptions={reconciledVideoSettings.options.resolutions}
-        resolution={resolution}
-        onResolutionChange={(next) => setExtraParam("resolution", next)}
-      />
       <ElementwisePromptModal
         open={elementModalOpen}
         prompt={isOverriding ? draft : generatedPrompt}
@@ -900,11 +884,13 @@ function VideoSettingChip({
   label,
   value,
   disabled,
+  expanded,
   onClick,
 }: {
   label: string;
   value: string;
   disabled: boolean;
+  expanded: boolean;
   onClick: () => void;
 }) {
   return (
@@ -912,7 +898,9 @@ function VideoSettingChip({
       type="button"
       disabled={disabled}
       onClick={onClick}
-      className="flex h-9 min-w-0 items-center justify-between gap-1 rounded-md border border-[#343434] bg-[#101010] px-2 text-left transition hover:border-pink-400 disabled:cursor-not-allowed disabled:border-[#292929] disabled:text-neutral-600"
+      aria-expanded={expanded}
+      aria-haspopup="listbox"
+      className="flex h-9 w-full min-w-0 items-center justify-between gap-1 rounded-md border border-[#343434] bg-[#101010] px-2 text-left transition hover:border-pink-400 disabled:cursor-not-allowed disabled:border-[#292929] disabled:text-neutral-600"
       title={disabled ? `${label}に共通する対応値がありません` : `${label}を変更`}
     >
       <span className="shrink-0 text-[9px] font-black tracking-wide text-neutral-500">
@@ -925,134 +913,44 @@ function VideoSettingChip({
   );
 }
 
-function DurationControl({
-  constraint,
+function VideoSettingPopover({
+  label,
   value,
-  onChange,
+  options,
+  onSelect,
 }: {
-  constraint: VideoDurationConstraint | null;
-  value: number;
-  onChange: (duration: number) => void;
-}) {
-  const values = durationValuesForConstraintOrGeneric(constraint);
-  return (
-    <div className="space-y-1">
-      <label className="block text-[10px] font-black tracking-wide text-neutral-500">
-        尺
-      </label>
-      {values.length > 0 ? (
-        <select
-          value={values.includes(value) ? value : values[0]}
-          onChange={(event) => onChange(Number(event.currentTarget.value))}
-          className="h-8 w-full rounded-md border border-[#343434] bg-[#101010] px-2 text-xs font-bold text-neutral-100 outline-none transition hover:border-[#444] focus:border-pink-500"
-        >
-          {values.map((seconds) => (
-            <option key={seconds} value={seconds}>
-              {seconds}秒
-            </option>
-          ))}
-        </select>
-      ) : (
-        <p className="rounded-md border border-amber-400/20 px-2 py-2 text-[10px] text-amber-200">
-          全モデルで共通する尺がありません。モデルの選択を減らしてください。
-        </p>
-      )}
-      {!constraint && (
-        <p className="text-[9px] leading-relaxed text-amber-300">
-          対応範囲は未取得です。汎用の2〜15秒を表示しています。
-        </p>
-      )}
-    </div>
-  );
-}
-
-/** 比率セレクタ。仕様取得済みなら、全選択モデルが使える比率だけを表示する。 */
-function AspectControl({
-  ratios,
-  value,
-  onChange,
-}: {
-  ratios: string[] | null;
+  label: string;
   value: string;
-  onChange: (aspectRatio: string) => void;
-}) {
-  const options = ratios ?? ALL_VIDEO_ASPECT_RATIOS;
-  return (
-    <div className="space-y-0.5">
-      <p className="block h-3.5 text-[10px] font-black leading-[14px] tracking-wide text-neutral-500">
-        比率
-      </p>
-      {options.length > 0 ? (
-        <div className="grid grid-cols-4 gap-1">
-          {options.map((ratio) => {
-            const selected = value === ratio;
-            return (
-              <button
-                key={ratio}
-                type="button"
-                onClick={() => onChange(ratio)}
-                title={ratio}
-                className={[
-                  "h-8 rounded-md border px-1 text-[10px] font-black transition",
-                  selected
-                    ? "border-pink-400 bg-pink-500/10 text-white"
-                    : "border-[#2a2a2a] bg-[#101010] text-neutral-400 hover:border-neutral-500",
-                ].join(" ")}
-              >
-                {ratio}
-              </button>
-            );
-          })}
-        </div>
-      ) : (
-        <p className="rounded-md border border-amber-400/20 px-2 py-2 text-[10px] text-amber-200">
-          全モデルで共通する比率がありません。モデルの選択を減らしてください。
-        </p>
-      )}
-    </div>
-  );
-}
-
-function ResolutionControl({
-  resolutions,
-  value,
-  onChange,
-}: {
-  resolutions: string[];
-  value: string;
-  onChange: (resolution: string) => void;
+  options: Array<{ value: string; label: string }>;
+  onSelect: (value: string) => void;
 }) {
   return (
-    <div className="space-y-0.5">
-      <p className="block h-3.5 text-[10px] font-black leading-[14px] tracking-wide text-neutral-500">
-        解像度
-      </p>
-      {resolutions.length > 0 ? (
-        <div className="grid grid-cols-3 gap-1">
-          {resolutions.map((resolution) => {
-            const selected = value === resolution;
-            return (
-              <button
-                key={resolution}
-                type="button"
-                onClick={() => onChange(resolution)}
-                className={[
-                  "h-8 rounded-md border px-1 text-[10px] font-black transition",
-                  selected
-                    ? "border-pink-400 bg-pink-500/10 text-white"
-                    : "border-[#2a2a2a] bg-[#101010] text-neutral-400 hover:border-neutral-500",
-                ].join(" ")}
-              >
-                {resolution}
-              </button>
-            );
-          })}
-        </div>
-      ) : (
-        <p className="rounded-md border border-amber-400/20 px-2 py-2 text-[10px] text-amber-200">
-          全モデルで共通する解像度がありません。モデルの選択を減らしてください。
-        </p>
-      )}
+    <div
+      data-video-setting-popover={label}
+      role="listbox"
+      aria-label={`${label}を選択`}
+      className="absolute bottom-full left-0 z-40 mb-1 max-h-48 w-full min-w-[108px] overflow-y-auto rounded-md border border-[#3a3a3a] bg-[#181818] p-1 shadow-2xl"
+    >
+      {options.map((option) => {
+        const selected = option.value === value;
+        return (
+          <button
+            key={option.value}
+            type="button"
+            role="option"
+            aria-selected={selected}
+            onClick={() => onSelect(option.value)}
+            className={[
+              "block w-full rounded px-2 py-1.5 text-left text-[11px] font-bold transition",
+              selected
+                ? "bg-pink-500/15 text-pink-200"
+                : "text-neutral-300 hover:bg-[#242424] hover:text-white",
+            ].join(" ")}
+          >
+            {option.label}
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -1161,232 +1059,6 @@ function CountAndCostControl({
             {n}
           </button>
         ))}
-      </div>
-    </div>
-  );
-}
-
-function commonRemoteFeatureDetails(
-  builtInModels: readonly VideoModelDefinition[],
-  selections: readonly RemoteMcpSelection[],
-): Array<{ label: string; value: string }> {
-  if (selections.length === 0) return [];
-  const specs = selections.map((selection) => selection.model?.videoSpecs);
-  const details: Array<{ label: string; value: string }> = [];
-  if (specs.every((item) => item?.modes)) {
-    const modeLists = [
-      ...builtInModels.map((model) => {
-        const param = model.extraParams.find(
-          (candidate): candidate is Extract<VideoModelParam, { kind: "enum" }> =>
-            candidate.kind === "enum" && candidate.name === "mode",
-        );
-        return param?.values ?? [];
-      }),
-      ...specs.map((item) => item?.modes ?? []),
-    ];
-    const commonModes = modeLists[0].filter((mode) =>
-      modeLists.slice(1).every((values) => values.includes(mode)),
-    );
-    if (commonModes.length > 0) details.push({ label: "モード", value: commonModes.join(" / ") });
-  }
-  if (
-    builtInModels.every((model) => model.extraParams.some((param) => param.name === "sound")) &&
-    specs.every((item) => item?.audio === "supported")
-  ) {
-    details.push({ label: "音声", value: "全選択モデルが対応" });
-  }
-  if (builtInModels.length === 0 && specs.every((item) => item?.multiCut === "supported")) {
-    details.push({ label: "マルチカット", value: "全選択モデルが対応" });
-  }
-  return details;
-}
-
-/**
- * 動画設定モーダル (モデル / 尺 / 比率 / モデル別パラメータ)。
- * 下部コントロールを圧迫しないよう、頻繁に変えない設定はここに逃がす。
- * 生成数・生成ボタンは下部常駐のまま。
- */
-function VideoSettingsModal({
-  open,
-  onClose,
-  model,
-  selectedBuiltInModels,
-  remoteSelections,
-  capabilities,
-  hasUnknownRemoteSpecs,
-  duration,
-  onDurationChange,
-  aspectRatio,
-  onAspectRatioChange,
-  extraParamValues,
-  onExtraParamChange,
-  resolutionOptions,
-  resolution,
-  onResolutionChange,
-}: {
-  open: boolean;
-  onClose: () => void;
-  model: VideoModelDefinition;
-  selectedBuiltInModels: VideoModelDefinition[];
-  remoteSelections: RemoteMcpSelection[];
-  capabilities: VideoModelCapabilities;
-  hasUnknownRemoteSpecs: boolean;
-  duration: number;
-  onDurationChange: (duration: number) => void;
-  aspectRatio: string;
-  onAspectRatioChange: (aspectRatio: string) => void;
-  extraParamValues: Record<string, string>;
-  onExtraParamChange: (name: string, value: string) => void;
-  resolutionOptions: string[];
-  resolution: string;
-  onResolutionChange: (resolution: string) => void;
-}) {
-  const compareMode = remoteSelections.length + selectedBuiltInModels.length >= 2;
-  const selectedLabels = [
-    ...selectedBuiltInModels.map((item) => item.label),
-    ...remoteSelections.map(remoteSelectionLabel),
-  ];
-  const remoteFeatureDetails = commonRemoteFeatureDetails(
-    selectedBuiltInModels,
-    remoteSelections,
-  );
-
-  // モデル変更でアスペクト比が自動補正されたときの通知 (store 由来)。
-  // モーダルを閉じたら通知を消す (次に開いたとき古い通知が残らないように)。
-  const aspectAdjustment = useVideoGen((s) => s.lastAspectAdjustment);
-  const clearAspectAdjustment = useVideoGen((s) => s.clearAspectAdjustment);
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
-  useEffect(() => {
-    if (!open) clearAspectAdjustment();
-  }, [open, clearAspectAdjustment]);
-
-  if (!open) return null;
-
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
-      onClick={onClose}
-    >
-      <div
-        className="w-full max-w-sm rounded-lg border border-[#2a2a2a] bg-[#181818] shadow-2xl"
-        onClick={(event) => event.stopPropagation()}
-      >
-        <div className="flex items-center justify-between border-b border-[#2a2a2a] px-3 py-2.5">
-          <p className="text-xs font-black tracking-wide text-neutral-200">動画の設定</p>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="閉じる"
-            className="flex h-6 w-6 items-center justify-center rounded text-neutral-400 transition hover:bg-[#222] hover:text-white"
-          >
-            ×
-          </button>
-        </div>
-
-        <div className="space-y-3 p-3">
-          <div className="space-y-1 rounded-md border border-[#262626] bg-[#101010] p-2.5">
-            <div className="flex items-center justify-between gap-2">
-              <p className="text-[10px] font-black tracking-wide text-neutral-500">選択中モデル</p>
-              <span className="text-[10px] font-bold text-neutral-500">
-                {selectedLabels.length}/3
-              </span>
-            </div>
-            {selectedLabels.map((label) => (
-              <p key={label} className="truncate text-xs font-bold text-neutral-200" title={label}>
-                {label}
-              </p>
-            ))}
-            <p className="text-[10px] leading-relaxed text-neutral-500">
-              モデルの追加・変更は、画面下の「モデル」一覧で行います。
-              {compareMode
-                ? " 比較時のモデル固有項目は、それぞれのおすすめ値を使います。"
-                : ""}
-            </p>
-          </div>
-
-          {remoteFeatureDetails.length > 0 && (
-            <div className="space-y-1 rounded-md border border-[#262626] bg-[#101010] p-2">
-              {remoteFeatureDetails.map((item) => (
-                <div key={item.label} className="flex items-baseline gap-2">
-                  <span className="w-[72px] shrink-0 text-[9px] font-black tracking-wide text-neutral-600">
-                    {item.label}
-                  </span>
-                  <span className="text-[10px] font-bold leading-snug text-neutral-300">
-                    {item.value}
-                  </span>
-                </div>
-              ))}
-            </div>
-          )}
-
-          {hasUnknownRemoteSpecs && (
-            <p className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1.5 text-[10px] font-bold leading-relaxed text-amber-300">
-              このモデルの対応値は未取得です。非対応の値はサービス側でエラーになることがあります
-            </p>
-          )}
-
-          {/* 尺 + 比率: 比較モードでは全選択モデルの共通値だけを表示する。 */}
-          <div className="space-y-1.5">
-            <div className="grid grid-cols-1 gap-1.5">
-              <DurationControl
-                constraint={capabilities.duration}
-                value={duration}
-                onChange={onDurationChange}
-              />
-            </div>
-            <AspectControl
-              ratios={capabilities.aspectRatios}
-              value={aspectRatio}
-              onChange={onAspectRatioChange}
-            />
-            <ResolutionControl
-              resolutions={resolutionOptions}
-              value={resolution}
-              onChange={onResolutionChange}
-            />
-            {selectedLabels.length > 0 && remoteSelections.length === 0 && aspectAdjustment && (
-              <p className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[10px] font-bold leading-snug text-amber-300">
-                モデル変更のため {aspectAdjustment.to} に調整しました（{aspectAdjustment.from} は{" "}
-                {model.label} 未対応）
-              </p>
-            )}
-          </div>
-
-          {/* モデル別パラメータ(mode/resolution/genre等)は単一モード時のみ
-              (比較時はモデルごとに項目が違うため各デフォルトを使う) */}
-          {selectedLabels.length > 0 &&
-            remoteSelections.length === 0 &&
-            !compareMode &&
-            model.extraParams.length > 0 && (
-            <div className="grid grid-cols-2 items-end gap-1.5">
-              {model.extraParams.filter((param) => param.name !== "resolution").map((param) => (
-                <ExtraParamControl
-                  key={param.name}
-                  param={param}
-                  value={extraParamValues[param.name] ?? String(param.default)}
-                  onChange={(next) => onExtraParamChange(param.name, next)}
-                />
-              ))}
-            </div>
-          )}
-        </div>
-
-        <div className="border-t border-[#2a2a2a] p-3">
-          <button
-            type="button"
-            onClick={onClose}
-            className="h-9 w-full rounded-md bg-pink-500 text-sm font-black text-white transition hover:bg-pink-600"
-          >
-            完了
-          </button>
-        </div>
       </div>
     </div>
   );

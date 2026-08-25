@@ -18,8 +18,8 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::Mutex;
 
 use crate::codex::mcp_direct::{
-    call_tool, call_tool_with_timeout, list_mcp_server_status_page, reload_mcp_servers,
-    ToolCallOutput,
+    call_tool, call_tool_once_with_timeout, call_tool_with_timeout, list_mcp_server_status_page,
+    reload_mcp_servers, ToolCallOutput,
 };
 use crate::codex::mcp_shared::{
     entry_is_authenticated, find_mcp_entry, gori_codex_command, run_codex_capture,
@@ -47,7 +47,12 @@ const REMOTE_DOWNLOAD_USER_AGENT: &str =
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36";
 const REMOTE_DOWNLOAD_RETRY_USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0 Safari/537.36";
+const DIRECT_POLL_INTERVAL: Duration = Duration::from_secs(4);
+const DIRECT_ERROR_LIMIT_CHARS: usize = 320;
+const LEGACY_ERROR_DETAIL_LIMIT_CHARS: usize = 120;
+const TRANSLATION_TIMEOUT: Duration = Duration::from_secs(60);
 static REMOTE_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static KREA_VIDEO_SERIAL: Mutex<()> = Mutex::const_new(());
 
 /// 接続可能なリモート MCP の正本。
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -190,6 +195,36 @@ impl RemoteMcpMediaKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DirectProviderAdapter {
+    Krea,
+    Magnific,
+}
+
+fn direct_provider_adapter(provider_id: &str) -> Option<DirectProviderAdapter> {
+    match provider_id {
+        "krea" => Some(DirectProviderAdapter::Krea),
+        "magnific" => Some(DirectProviderAdapter::Magnific),
+        _ => None,
+    }
+}
+
+fn direct_generation_is_serial(provider_id: &str, kind: RemoteMcpMediaKind) -> bool {
+    provider_id == "krea" && kind == RemoteMcpMediaKind::Video
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DirectGenerationInput<'a> {
+    provider_id: &'a str,
+    prompt: &'a str,
+    model: Option<&'a str>,
+    duration_seconds: Option<f64>,
+    aspect: Option<&'a str>,
+    resolution: Option<&'a str>,
+    reference_urls: &'a [String],
+    kind: RemoteMcpMediaKind,
+}
+
 fn clamp_remote_count(count: Option<u32>) -> u32 {
     count.unwrap_or(1).clamp(1, MAX_REMOTE_COUNT)
 }
@@ -253,7 +288,11 @@ fn aggregate_slot_results(slots: &[RemoteMcpSlotResult]) -> (Vec<String>, Vec<St
         .filter(|slot| slot.status == "failed")
         .map(|slot| {
             let error = slot.error.as_deref().unwrap_or("生成に失敗しました");
-            sanitize_generation_message(&format!("枠{}: {error}", slot.slot))
+            if slots.len() == 1 {
+                sanitize_generation_message(error)
+            } else {
+                sanitize_generation_message(&format!("枠{}: {error}", slot.slot))
+            }
         })
         .collect();
 
@@ -1177,18 +1216,31 @@ fn humanize_provider_failure(text: &str) -> Option<&'static str> {
 }
 
 fn llm_failure_message(summary: &str, final_message: &str, tool_errors: &[String]) -> String {
-    let mut parts = vec![summary.to_string()];
     let combined = format!("{final_message} {}", tool_errors.join(" "));
-    if let Some(friendly) = humanize_provider_failure(&combined) {
-        parts.push(friendly.to_string());
+    let diagnostic = super::diagnostics::redact_text(&combined, dirs::home_dir().as_deref());
+    tracing::warn!(
+        target: "remote_mcp",
+        summary,
+        detail = diagnostic,
+        "従来LLM生成経路が失敗しました"
+    );
+
+    let display_summary = humanize_provider_failure(&combined).unwrap_or(summary);
+    let detail = combined
+        .split(['{', '['])
+        .next()
+        .unwrap_or_default()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(LEGACY_ERROR_DETAIL_LIMIT_CHARS)
+        .collect::<String>();
+    if detail.is_empty() {
+        display_summary.to_string()
+    } else {
+        format!("{display_summary}: {detail}")
     }
-    if !final_message.trim().is_empty() {
-        parts.push(format!("詳細（AIの報告）: {}", final_message.trim()));
-    }
-    if !tool_errors.is_empty() {
-        parts.push(format!("ツールエラー: {}", tool_errors.join(" / ")));
-    }
-    parts.join("\n")
 }
 
 fn apply_final_report_url_fallback(sources: &mut Vec<RemoteArtifactSource>, final_message: &str) {
@@ -2408,6 +2460,634 @@ pub async fn remote_mcp_query(
     result.map_err(|error| sanitize_generation_message(&error))
 }
 
+fn contains_japanese(text: &str) -> bool {
+    text.chars().any(|character| {
+        matches!(
+            character as u32,
+            0x3040..=0x30ff | 0x3400..=0x4dbf | 0x4e00..=0x9fff | 0xf900..=0xfaff | 0xff66..=0xff9f
+        )
+    })
+}
+
+async fn translate_if_japanese_with<F, Fut>(prompt: &str, translate: F) -> String
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = Result<String, String>>,
+{
+    if !contains_japanese(prompt) {
+        return prompt.to_string();
+    }
+    match translate(prompt.to_string()).await {
+        Ok(translated) if !translated.trim().is_empty() => translated.trim().to_string(),
+        _ => prompt.to_string(),
+    }
+}
+
+async fn translate_direct_prompt(prompt: &str) -> String {
+    translate_if_japanese_with(prompt, |source| async move {
+        crate::codex::gen_server::translate_generation_prompt(&source, TRANSLATION_TIMEOUT).await
+    })
+    .await
+}
+
+fn reference_mime_type(path: &Path) -> Option<&'static str> {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "webp" => Some("image/webp"),
+        _ => None,
+    }
+}
+
+fn direct_reference_urls(paths: &[String]) -> Result<Vec<String>, String> {
+    paths
+        .iter()
+        .map(|value| {
+            if value.starts_with("https://") || value.starts_with("data:image/") {
+                return Ok(value.clone());
+            }
+            let path = Path::new(value);
+            let mime_type = reference_mime_type(path)
+                .ok_or_else(|| "参照画像は PNG / JPEG / WebP を選んでください".to_string())?;
+            let bytes = fs::read(path).map_err(|_| "参照画像を読み取れませんでした".to_string())?;
+            Ok(format!(
+                "data:{mime_type};base64,{}",
+                general_purpose::STANDARD.encode(bytes)
+            ))
+        })
+        .collect()
+}
+
+fn magnific_upload_url(value: &Value) -> Option<String> {
+    for key in [
+        "proxyUploadUrl",
+        "directUploadUrl",
+        "uploadUrl",
+        "url",
+        "putUrl",
+        "signedUrl",
+    ] {
+        if let Some(url) = value
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|url| !url.trim().is_empty())
+        {
+            return Some(url.to_string());
+        }
+    }
+    value.as_object().and_then(|object| {
+        object
+            .iter()
+            .filter(|(key, _)| key.as_str() != "path")
+            .find_map(|(_, value)| {
+                value
+                    .as_str()
+                    .filter(|url| url.starts_with("http://") || url.starts_with("https://"))
+                    .map(str::to_string)
+            })
+    })
+}
+
+async fn upload_direct_magnific_reference(
+    state: &AppState,
+    http: &reqwest::Client,
+    path: &str,
+) -> Result<String, String> {
+    let mime_type = reference_mime_type(Path::new(path))
+        .ok_or_else(|| "Magnific の参照画像は PNG / JPEG / WebP を選んでください".to_string())?;
+    let bytes = tokio::fs::read(path)
+        .await
+        .map_err(|_| "Magnific の参照画像を読み取れませんでした".to_string())?;
+
+    let request = call_tool(
+        state,
+        "magnific",
+        "creations_request_upload",
+        json!({ "mimeType": mime_type }),
+    )
+    .await?;
+    let request_value = require_direct_tool_success(&request)?;
+    let upload_url = magnific_upload_url(&request_value)
+        .ok_or_else(|| "Magnific の参照画像アップロード先を取得できませんでした".to_string())?;
+    let upload_path = request_value
+        .get("path")
+        .and_then(Value::as_str)
+        .filter(|path| !path.trim().is_empty())
+        .ok_or_else(|| "Magnific の参照画像アップロード先を取得できませんでした".to_string())?;
+
+    let response = http
+        .put(upload_url)
+        .header(reqwest::header::CONTENT_TYPE, mime_type)
+        .body(bytes)
+        .send()
+        .await
+        .map_err(|error| format!("Magnific の参照画像アップロードに失敗しました: {error}"))?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "Magnific の参照画像アップロードに失敗しました (HTTP {})",
+            response.status()
+        ));
+    }
+
+    let finalize = call_tool(
+        state,
+        "magnific",
+        "creations_finalize_upload",
+        json!({ "path": upload_path }),
+    )
+    .await?;
+    let finalize_value = require_direct_tool_success(&finalize)?;
+    let mut identifiers = Vec::new();
+    collect_magnific_identifiers(&finalize_value, &mut identifiers);
+    identifiers
+        .into_iter()
+        .next()
+        .ok_or_else(|| "Magnific の参照画像識別子を取得できませんでした".to_string())
+}
+
+async fn prepare_direct_references(
+    state: &AppState,
+    provider_id: &str,
+    paths: &[String],
+) -> Result<Vec<String>, String> {
+    match direct_provider_adapter(provider_id) {
+        Some(DirectProviderAdapter::Krea) => direct_reference_urls(paths),
+        Some(DirectProviderAdapter::Magnific) => {
+            let http = reqwest::Client::new();
+            let mut identifiers = Vec::with_capacity(paths.len());
+            for path in paths {
+                identifiers.push(upload_direct_magnific_reference(state, &http, path).await?);
+            }
+            Ok(identifiers)
+        }
+        None => Ok(Vec::new()),
+    }
+}
+
+fn direct_output_value(output: &ToolCallOutput) -> Value {
+    output
+        .structured
+        .clone()
+        .or_else(|| parsed_json_string(output.text.trim()))
+        .unwrap_or(Value::Null)
+}
+
+fn direct_status(value: &Value) -> Option<String> {
+    match value {
+        Value::Object(object) => {
+            for (key, nested) in object {
+                if status_field(key) {
+                    if let Some(status) = scalar_string(nested) {
+                        return Some(status);
+                    }
+                }
+            }
+            object.values().find_map(direct_status)
+        }
+        Value::Array(values) => values.iter().find_map(direct_status),
+        Value::String(text) => parsed_json_string(text).as_ref().and_then(direct_status),
+        _ => None,
+    }
+}
+
+fn nested_error_message(value: &Value) -> Option<String> {
+    match value {
+        Value::Object(object) => {
+            if let Some(error) = object.get("error") {
+                if let Some(message) = error.as_str().filter(|message| !message.trim().is_empty()) {
+                    return Some(message.to_string());
+                }
+                if let Some(message) = error
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .filter(|message| !message.trim().is_empty())
+                {
+                    return Some(message.to_string());
+                }
+            }
+            object.values().find_map(nested_error_message)
+        }
+        Value::Array(values) => values.iter().find_map(nested_error_message),
+        Value::String(text) => parsed_json_string(text)
+            .as_ref()
+            .and_then(nested_error_message),
+        _ => None,
+    }
+}
+
+fn short_direct_error(message: &str) -> String {
+    let sanitized = sanitize_generation_message(message);
+    let without_json = sanitized
+        .split(['{', '['])
+        .next()
+        .unwrap_or_default()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let source = if without_json.trim().is_empty() {
+        "生成に失敗しました"
+    } else {
+        without_json.trim()
+    };
+    source.chars().take(DIRECT_ERROR_LIMIT_CHARS).collect()
+}
+
+fn direct_failure_message(value: &Value) -> String {
+    let diagnostic =
+        super::diagnostics::redact_text(&value.to_string(), dirs::home_dir().as_deref());
+    tracing::warn!(
+        target: "remote_mcp",
+        detail = diagnostic,
+        "直接生成サービスが失敗状態を返しました"
+    );
+    if let Some(message) = nested_error_message(value) {
+        return short_direct_error(&message);
+    }
+    if let Some(status) = direct_status(value) {
+        return short_direct_error(&status);
+    }
+    "生成に失敗しました".to_string()
+}
+
+fn direct_tool_error(output: &ToolCallOutput) -> String {
+    let value = direct_output_value(output);
+    let diagnostic = super::diagnostics::redact_text(
+        &format!("text={} structured={value}", output.text),
+        dirs::home_dir().as_deref(),
+    );
+    tracing::warn!(
+        target: "remote_mcp",
+        detail = diagnostic,
+        "直接生成ツールがエラーを返しました"
+    );
+    if let Some(message) = nested_error_message(&value) {
+        return short_direct_error(&message);
+    }
+    let text = output.text.trim();
+    if let Some(parsed) = parsed_json_string(text) {
+        if let Some(message) = nested_error_message(&parsed) {
+            return short_direct_error(&message);
+        }
+        if let Some(status) = direct_status(&parsed) {
+            return short_direct_error(&status);
+        }
+    }
+    if !text.is_empty() && !text.starts_with('{') && !text.starts_with('[') {
+        return short_direct_error(text);
+    }
+    direct_failure_message(&value)
+}
+
+fn require_direct_tool_success(output: &ToolCallOutput) -> Result<Value, String> {
+    if output.is_error {
+        Err(direct_tool_error(output))
+    } else {
+        Ok(direct_output_value(output))
+    }
+}
+
+fn first_direct_artifact(
+    output: &ToolCallOutput,
+    kind: RemoteMcpMediaKind,
+) -> Option<RemoteArtifactSource> {
+    extract_remote_artifacts(output, kind)
+        .ok()
+        .and_then(|sources| sources.into_iter().next())
+}
+
+fn collect_magnific_identifiers(value: &Value, identifiers: &mut Vec<String>) {
+    match value {
+        Value::Object(object) => {
+            for (key, nested) in object {
+                let normalized = normalized_field_name(Some(key));
+                if normalized == "identifier" {
+                    if let Some(identifier) = scalar_string(nested) {
+                        if !identifiers.contains(&identifier) {
+                            identifiers.push(identifier);
+                        }
+                    }
+                } else if normalized == "identifiers" {
+                    if let Some(values) = nested.as_array() {
+                        for value in values {
+                            if let Some(identifier) = scalar_string(value) {
+                                if !identifiers.contains(&identifier) {
+                                    identifiers.push(identifier);
+                                }
+                            }
+                        }
+                    }
+                }
+                collect_magnific_identifiers(nested, identifiers);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_magnific_identifiers(value, identifiers);
+            }
+        }
+        Value::String(text) => {
+            if let Some(parsed) = parsed_json_string(text) {
+                collect_magnific_identifiers(&parsed, identifiers);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn required_direct_model(model: Option<&str>) -> Result<&str, String> {
+    model
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .ok_or_else(|| "生成モデルを選択してください".to_string())
+}
+
+fn insert_optional_string(
+    object: &mut serde_json::Map<String, Value>,
+    key: &str,
+    value: Option<&str>,
+) {
+    if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
+        object.insert(key.to_string(), Value::String(value.to_string()));
+    }
+}
+
+fn duration_json(duration: f64) -> Value {
+    if duration.fract() == 0.0 && duration >= 0.0 {
+        json!(duration as u64)
+    } else {
+        json!(duration)
+    }
+}
+
+fn krea_submit_call(input: DirectGenerationInput<'_>) -> Result<(&'static str, Value), String> {
+    let model = required_direct_model(input.model)?;
+    let mut generation_input = serde_json::Map::new();
+    generation_input.insert(
+        "prompt".to_string(),
+        Value::String(input.prompt.to_string()),
+    );
+    insert_optional_string(&mut generation_input, "aspect_ratio", input.aspect);
+    insert_optional_string(&mut generation_input, "resolution", input.resolution);
+    if let Some(duration) = input.duration_seconds {
+        generation_input.insert("duration".to_string(), duration_json(duration));
+    }
+    if !input.reference_urls.is_empty() {
+        generation_input.insert("image_urls".to_string(), json!(input.reference_urls));
+    }
+    let tool = match input.kind {
+        RemoteMcpMediaKind::Image => "generate_image",
+        RemoteMcpMediaKind::Video => "generate_video",
+    };
+    Ok((
+        tool,
+        json!({
+            "model": model,
+            "input": Value::Object(generation_input),
+            "sync": false,
+        }),
+    ))
+}
+
+fn magnific_submit_call(input: DirectGenerationInput<'_>) -> Result<(&'static str, Value), String> {
+    let model = required_direct_model(input.model)?;
+    let references = input
+        .reference_urls
+        .iter()
+        .map(|identifier| json!({ "type": "image", "identifier": identifier }))
+        .collect::<Vec<_>>();
+    match input.kind {
+        RemoteMcpMediaKind::Image => {
+            let mut arguments = serde_json::Map::new();
+            arguments.insert(
+                "prompt".to_string(),
+                Value::String(input.prompt.to_string()),
+            );
+            arguments.insert("mode".to_string(), Value::String(model.to_string()));
+            arguments.insert("count".to_string(), json!(1));
+            insert_optional_string(&mut arguments, "aspectRatio", input.aspect);
+            if !references.is_empty() {
+                arguments.insert("references".to_string(), Value::Array(references));
+            }
+            Ok(("images_generate", Value::Object(arguments)))
+        }
+        RemoteMcpMediaKind::Video => {
+            let mut clip = serde_json::Map::new();
+            clip.insert("slug".to_string(), Value::String(model.to_string()));
+            clip.insert(
+                "prompt".to_string(),
+                Value::String(input.prompt.to_string()),
+            );
+            clip.insert("position".to_string(), json!(0));
+            if let Some(duration) = input.duration_seconds {
+                clip.insert("duration".to_string(), duration_json(duration));
+            }
+            insert_optional_string(&mut clip, "aspectRatio", input.aspect);
+            insert_optional_string(&mut clip, "resolution", input.resolution);
+            if !references.is_empty() {
+                clip.insert("references".to_string(), Value::Array(references));
+            }
+            Ok((
+                "video_generate",
+                json!({ "video": { "clips": [Value::Object(clip)] } }),
+            ))
+        }
+    }
+}
+
+trait DirectGenerationIo {
+    async fn submit(
+        &self,
+        provider_id: &str,
+        tool: &str,
+        arguments: Value,
+    ) -> Result<ToolCallOutput, String>;
+    async fn poll(
+        &self,
+        provider_id: &str,
+        tool: &str,
+        arguments: Value,
+    ) -> Result<ToolCallOutput, String>;
+    async fn wait_for_next_poll(&self);
+    async fn mark_saving(&self);
+    async fn save(&self, source: RemoteArtifactSource) -> Result<String, String>;
+}
+
+struct AppDirectGenerationIo<'a> {
+    app: &'a AppHandle,
+    state: &'a AppState,
+    request_id: &'a str,
+    provider_id: &'a str,
+    kind: RemoteMcpMediaKind,
+    slots: &'a Arc<Mutex<Vec<RemoteMcpSlotResult>>>,
+    slot_number: u32,
+}
+
+impl DirectGenerationIo for AppDirectGenerationIo<'_> {
+    async fn submit(
+        &self,
+        provider_id: &str,
+        tool: &str,
+        arguments: Value,
+    ) -> Result<ToolCallOutput, String> {
+        call_tool_once_with_timeout(
+            self.state,
+            provider_id,
+            tool,
+            arguments,
+            self.kind.timeout(),
+        )
+        .await
+        .map_err(|error| {
+            tracing::warn!(
+                target: "remote_mcp",
+                provider = provider_id,
+                tool,
+                "生成 submit に失敗しました: {error}"
+            );
+            short_direct_error(&error)
+        })
+    }
+
+    async fn poll(
+        &self,
+        provider_id: &str,
+        tool: &str,
+        arguments: Value,
+    ) -> Result<ToolCallOutput, String> {
+        call_tool(self.state, provider_id, tool, arguments)
+            .await
+            .map_err(|error| short_direct_error(&error))
+    }
+
+    async fn wait_for_next_poll(&self) {
+        tokio::time::sleep(DIRECT_POLL_INTERVAL).await;
+    }
+
+    async fn mark_saving(&self) {
+        update_remote_slot(
+            self.app,
+            self.request_id,
+            self.provider_id,
+            self.slots,
+            self.slot_number,
+            "saving",
+            None,
+            None,
+        )
+        .await;
+    }
+
+    async fn save(&self, source: RemoteArtifactSource) -> Result<String, String> {
+        let saved = save_remote_artifacts_from_index(
+            self.provider_id,
+            self.request_id,
+            self.kind,
+            vec![source],
+            self.slot_number as usize,
+        )
+        .await?;
+        saved
+            .saved_paths
+            .into_iter()
+            .next()
+            .ok_or_else(|| format!("{}を1件も保存できませんでした", self.kind.noun()))
+    }
+}
+
+async fn run_krea_direct<IO: DirectGenerationIo>(
+    io: &IO,
+    input: DirectGenerationInput<'_>,
+) -> Result<RemoteArtifactSource, String> {
+    let (tool, arguments) = krea_submit_call(input)?;
+    let submit = io.submit(input.provider_id, tool, arguments).await?;
+    let submit_value = require_direct_tool_success(&submit)?;
+    let identifier = extract_job_identifier(&submit_value)
+        .map(|identifier| identifier.value)
+        .ok_or_else(|| "生成ジョブを開始できませんでした".to_string())?;
+
+    loop {
+        let output = io
+            .poll(input.provider_id, "get_job", json!({ "jobId": identifier }))
+            .await?;
+        let value = require_direct_tool_success(&output)?;
+        let status = direct_status(&value).unwrap_or_default();
+        if is_terminal_failure_status_value(&status) {
+            return Err(direct_failure_message(&value));
+        }
+        if is_completed_status_value(&status) {
+            return first_direct_artifact(&output, input.kind)
+                .ok_or_else(|| "生成は完了しましたが、結果URLがありません".to_string());
+        }
+        io.wait_for_next_poll().await;
+    }
+}
+
+async fn run_magnific_direct<IO: DirectGenerationIo>(
+    io: &IO,
+    input: DirectGenerationInput<'_>,
+) -> Result<RemoteArtifactSource, String> {
+    let (tool, arguments) = magnific_submit_call(input)?;
+    let submit = io.submit(input.provider_id, tool, arguments).await?;
+    let submit_value = require_direct_tool_success(&submit)?;
+    let mut identifiers = Vec::new();
+    collect_magnific_identifiers(&submit_value, &mut identifiers);
+    let identifier = identifiers
+        .into_iter()
+        .next()
+        .ok_or_else(|| "生成ジョブを開始できませんでした".to_string())?;
+
+    loop {
+        let output = io
+            .poll(
+                input.provider_id,
+                "creations_wait",
+                json!({ "identifiers": [identifier], "timeoutSeconds": 25 }),
+            )
+            .await?;
+        let value = require_direct_tool_success(&output)?;
+        let status = direct_status(&value).unwrap_or_default();
+        if is_terminal_failure_status_value(&status) {
+            return Err(direct_failure_message(&value));
+        }
+        if is_completed_status_value(&status) {
+            return first_direct_artifact(&output, input.kind)
+                .ok_or_else(|| "生成は完了しましたが、結果URLがありません".to_string());
+        }
+        io.wait_for_next_poll().await;
+    }
+}
+
+async fn run_direct_generation<IO: DirectGenerationIo>(
+    io: &IO,
+    input: DirectGenerationInput<'_>,
+) -> Result<String, String> {
+    let _serial_guard = if direct_generation_is_serial(input.provider_id, input.kind) {
+        Some(KREA_VIDEO_SERIAL.lock().await)
+    } else {
+        None
+    };
+    run_direct_generation_after_serial_lock(io, input).await
+}
+
+async fn run_direct_generation_after_serial_lock<IO: DirectGenerationIo>(
+    io: &IO,
+    input: DirectGenerationInput<'_>,
+) -> Result<String, String> {
+    let source = match direct_provider_adapter(input.provider_id) {
+        Some(DirectProviderAdapter::Krea) => run_krea_direct(io, input).await?,
+        Some(DirectProviderAdapter::Magnific) => run_magnific_direct(io, input).await?,
+        None => return Err("直接呼びアダプタがありません".to_string()),
+    };
+    io.mark_saving().await;
+    io.save(source).await
+}
+
 async fn run_llm_tool_turn_before_deadline(
     app: &AppHandle,
     state: &AppState,
@@ -2445,14 +3125,20 @@ fn slot_deadline_message(kind: RemoteMcpMediaKind) -> String {
     )
 }
 
-/// 生成専用 Codex に MCP ツール選択を任せ、成果物を既存保存経路へ合流する。
+/// 直接アダプタがある接続先は MCP tool/call、無い接続先は従来の LLM 経路で実行する。
 #[allow(clippy::too_many_arguments)]
 async fn run_remote_mcp_slot(
     app: &AppHandle,
     state: &AppState,
     request_id: &str,
     provider_id: &str,
-    llm_prompt: &str,
+    prompt: &str,
+    model: Option<&str>,
+    duration_seconds: Option<f64>,
+    aspect: Option<&str>,
+    resolution: Option<&str>,
+    direct_reference_urls: &[String],
+    llm_prompt: Option<&str>,
     kind: RemoteMcpMediaKind,
     reference_paths: &[String],
     slots: &Arc<Mutex<Vec<RemoteMcpSlotResult>>>,
@@ -2470,8 +3156,43 @@ async fn run_remote_mcp_slot(
     )
     .await;
 
+    // krea×video の15分は、直列ロックの順番待ちを終えてから計り始める。
+    let direct_adapter = direct_provider_adapter(provider_id);
+    let serial_guard = if direct_adapter.is_some() && direct_generation_is_serial(provider_id, kind)
+    {
+        Some(KREA_VIDEO_SERIAL.lock().await)
+    } else {
+        None
+    };
     let deadline = tokio::time::Instant::now() + kind.timeout();
     let result = tokio::time::timeout_at(deadline, async {
+        if direct_adapter.is_some() {
+            let io = AppDirectGenerationIo {
+                app,
+                state,
+                request_id,
+                provider_id,
+                kind,
+                slots,
+                slot_number,
+            };
+            return run_direct_generation_after_serial_lock(
+                &io,
+                DirectGenerationInput {
+                    provider_id,
+                    prompt,
+                    model,
+                    duration_seconds,
+                    aspect,
+                    resolution,
+                    reference_urls: direct_reference_urls,
+                    kind,
+                },
+            )
+            .await;
+        }
+
+        let llm_prompt = llm_prompt.ok_or_else(|| "生成指示を作成できませんでした".to_string())?;
         let mut output =
             run_llm_tool_turn_before_deadline(app, state, llm_prompt, kind, deadline).await?;
         let (_, provider_label) = generation_provider(provider_id)?;
@@ -2553,6 +3274,7 @@ async fn run_remote_mcp_slot(
     })
     .await
     .unwrap_or_else(|_| Err(slot_deadline_message(kind)));
+    drop(serial_guard);
 
     match result {
         Ok(saved_path) => {
@@ -2638,16 +3360,29 @@ pub async fn remote_mcp_generate(
             .map(|path| path.trim().to_string())
             .filter(|path| !path.is_empty())
             .collect::<Vec<_>>();
-        let llm_prompt = build_remote_mcp_llm_prompt(
-            provider_label,
-            kind,
-            prompt,
-            model.as_deref(),
-            duration_seconds,
-            aspect.as_deref(),
-            resolution.as_deref(),
-            &reference_paths,
-        );
+        let has_direct_adapter = direct_provider_adapter(provider_id).is_some();
+        let generation_prompt = if has_direct_adapter {
+            translate_direct_prompt(prompt).await
+        } else {
+            prompt.to_string()
+        };
+        let direct_reference_urls = if has_direct_adapter {
+            prepare_direct_references(&state, provider_id, &reference_paths).await?
+        } else {
+            Vec::new()
+        };
+        let llm_prompt = (!has_direct_adapter).then(|| {
+            build_remote_mcp_llm_prompt(
+                provider_label,
+                kind,
+                prompt,
+                model.as_deref(),
+                duration_seconds,
+                aspect.as_deref(),
+                resolution.as_deref(),
+                &reference_paths,
+            )
+        });
 
         let jobs = (1..=count).map(|slot_number| {
             run_remote_mcp_slot(
@@ -2655,7 +3390,13 @@ pub async fn remote_mcp_generate(
                 &state,
                 &request_id,
                 provider_id,
-                &llm_prompt,
+                &generation_prompt,
+                model.as_deref(),
+                duration_seconds,
+                aspect.as_deref(),
+                resolution.as_deref(),
+                &direct_reference_urls,
+                llm_prompt.as_deref(),
                 kind,
                 &reference_paths,
                 &slots,
@@ -2839,7 +3580,8 @@ pub async fn remote_mcp_logout(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
+    use std::collections::{HashSet, VecDeque};
+    use std::sync::atomic::AtomicUsize;
 
     fn discovered_model(id: &str, name: &str, label: Option<&str>) -> RemoteMcpDiscoveredModel {
         RemoteMcpDiscoveredModel {
@@ -3048,6 +3790,413 @@ mod tests {
             text: text.to_string(),
             is_error,
         }
+    }
+
+    #[derive(Default)]
+    struct ConcurrencyProbe {
+        active: AtomicUsize,
+        maximum: AtomicUsize,
+    }
+
+    struct MockDirectIo {
+        calls: Mutex<Vec<(String, Value)>>,
+        outputs: Mutex<VecDeque<Result<ToolCallOutput, String>>>,
+        polls: AtomicUsize,
+        saving_marks: AtomicUsize,
+        saved: Mutex<Vec<RemoteArtifactSource>>,
+        probe: Option<Arc<ConcurrencyProbe>>,
+    }
+
+    impl MockDirectIo {
+        fn new(outputs: Vec<ToolCallOutput>) -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+                outputs: Mutex::new(outputs.into_iter().map(Ok).collect()),
+                polls: AtomicUsize::new(0),
+                saving_marks: AtomicUsize::new(0),
+                saved: Mutex::new(Vec::new()),
+                probe: None,
+            }
+        }
+
+        fn with_probe(outputs: Vec<ToolCallOutput>, probe: Arc<ConcurrencyProbe>) -> Self {
+            Self {
+                probe: Some(probe),
+                ..Self::new(outputs)
+            }
+        }
+
+        fn failing_submit(error: &str) -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+                outputs: Mutex::new(VecDeque::from([Err(error.to_string())])),
+                polls: AtomicUsize::new(0),
+                saving_marks: AtomicUsize::new(0),
+                saved: Mutex::new(Vec::new()),
+                probe: None,
+            }
+        }
+    }
+
+    impl DirectGenerationIo for MockDirectIo {
+        async fn submit(
+            &self,
+            _provider_id: &str,
+            tool: &str,
+            arguments: Value,
+        ) -> Result<ToolCallOutput, String> {
+            self.calls.lock().await.push((tool.to_string(), arguments));
+            if tool == "generate_video" {
+                if let Some(probe) = &self.probe {
+                    let active = probe.active.fetch_add(1, Ordering::SeqCst) + 1;
+                    probe.maximum.fetch_max(active, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }
+            self.outputs
+                .lock()
+                .await
+                .pop_front()
+                .expect("mock tool output")
+        }
+
+        async fn poll(
+            &self,
+            _provider_id: &str,
+            tool: &str,
+            arguments: Value,
+        ) -> Result<ToolCallOutput, String> {
+            self.calls.lock().await.push((tool.to_string(), arguments));
+            self.outputs
+                .lock()
+                .await
+                .pop_front()
+                .expect("mock tool output")
+        }
+
+        async fn wait_for_next_poll(&self) {
+            self.polls.fetch_add(1, Ordering::SeqCst);
+        }
+
+        async fn mark_saving(&self) {
+            self.saving_marks.fetch_add(1, Ordering::SeqCst);
+        }
+
+        async fn save(&self, source: RemoteArtifactSource) -> Result<String, String> {
+            self.saved.lock().await.push(source);
+            if let Some(probe) = &self.probe {
+                probe.active.fetch_sub(1, Ordering::SeqCst);
+            }
+            Ok("/saved/result".to_string())
+        }
+    }
+
+    fn direct_success_output(value: Value) -> ToolCallOutput {
+        tool_output(Vec::new(), Some(value), "", false)
+    }
+
+    #[tokio::test]
+    async fn submit_timeout_is_not_retried() {
+        let io = MockDirectIo::failing_submit("submit timed out");
+        let references = Vec::new();
+        let error = run_krea_direct(
+            &io,
+            DirectGenerationInput {
+                provider_id: "krea",
+                prompt: "white rice cake",
+                model: Some("google/nano-banana-2"),
+                duration_seconds: None,
+                aspect: Some("1:1"),
+                resolution: None,
+                reference_urls: &references,
+                kind: RemoteMcpMediaKind::Image,
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, "submit timed out");
+        let calls = io.calls.lock().await;
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "generate_image");
+    }
+
+    #[tokio::test]
+    async fn krea_image_direct_flow_is_submit_poll_save() {
+        let io = MockDirectIo::new(vec![
+            direct_success_output(json!({ "job_id": "job-image-1" })),
+            direct_success_output(json!({ "status": "processing" })),
+            direct_success_output(json!({
+                "status": "completed",
+                "result": { "urls": ["https://cdn.example.com/result.jpeg"] }
+            })),
+        ]);
+        let references = Vec::new();
+        let saved = run_direct_generation(
+            &io,
+            DirectGenerationInput {
+                provider_id: "krea",
+                prompt: "soft white rice cake",
+                model: Some("google/nano-banana-2"),
+                duration_seconds: None,
+                aspect: Some("16:9"),
+                resolution: Some("1K"),
+                reference_urls: &references,
+                kind: RemoteMcpMediaKind::Image,
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(saved, "/saved/result");
+        assert_eq!(io.polls.load(Ordering::SeqCst), 1);
+        assert_eq!(io.saving_marks.load(Ordering::SeqCst), 1);
+        let calls = io.calls.lock().await;
+        assert_eq!(calls[0].0, "generate_image");
+        assert_eq!(calls[0].1["model"], "google/nano-banana-2");
+        assert_eq!(calls[0].1["input"]["aspect_ratio"], "16:9");
+        assert_eq!(calls[0].1["input"]["resolution"], "1K");
+        assert_eq!(calls[0].1["sync"], false);
+        assert_eq!(
+            calls[1],
+            ("get_job".to_string(), json!({ "jobId": "job-image-1" }))
+        );
+        assert_eq!(io.saved.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn krea_video_direct_flow_uses_generate_video_and_duration() {
+        let io = MockDirectIo::new(vec![
+            direct_success_output(json!({ "job": { "job_id": "job-video-1" } })),
+            direct_success_output(json!({
+                "status": "completed",
+                "result": { "urls": ["https://cdn.example.com/result.mp4"] }
+            })),
+        ]);
+        let references = Vec::new();
+        run_direct_generation(
+            &io,
+            DirectGenerationInput {
+                provider_id: "krea",
+                prompt: "cinematic rice cake",
+                model: Some("minimax/hailuo-3"),
+                duration_seconds: Some(6.0),
+                aspect: Some("16:9"),
+                resolution: None,
+                reference_urls: &references,
+                kind: RemoteMcpMediaKind::Video,
+            },
+        )
+        .await
+        .unwrap();
+
+        let calls = io.calls.lock().await;
+        assert_eq!(calls[0].0, "generate_video");
+        assert_eq!(calls[0].1["input"]["duration"], 6);
+        assert_eq!(calls[1].0, "get_job");
+        assert_eq!(io.saved.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn magnific_image_direct_flow_is_submit_poll_save() {
+        let io = MockDirectIo::new(vec![
+            direct_success_output(json!({ "creations": [{ "identifier": "image-1" }] })),
+            direct_success_output(json!({
+                "results": [{
+                    "identifier": "image-1",
+                    "status": "completed",
+                    "url": "https://cdn.example.com/result.png"
+                }]
+            })),
+        ]);
+        let references = vec!["uploaded-image-id".to_string()];
+        run_direct_generation(
+            &io,
+            DirectGenerationInput {
+                provider_id: "magnific",
+                prompt: "soft white rice cake",
+                model: Some("magnific-v2"),
+                duration_seconds: None,
+                aspect: Some("1:1"),
+                resolution: None,
+                reference_urls: &references,
+                kind: RemoteMcpMediaKind::Image,
+            },
+        )
+        .await
+        .unwrap();
+
+        let calls = io.calls.lock().await;
+        assert_eq!(calls[0].0, "images_generate");
+        assert_eq!(calls[0].1["mode"], "magnific-v2");
+        assert_eq!(calls[0].1["count"], 1);
+        assert_eq!(
+            calls[0].1["references"][0],
+            json!({ "type": "image", "identifier": "uploaded-image-id" })
+        );
+        assert_eq!(calls[1].0, "creations_wait");
+        assert_eq!(calls[1].1["timeoutSeconds"], 25);
+        assert_eq!(io.saved.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn magnific_video_direct_flow_matches_fixture_shape() {
+        let io = MockDirectIo::new(vec![
+            direct_success_output(json!({ "identifier": "video-1" })),
+            direct_success_output(json!({
+                "results": [{
+                    "identifier": "video-1",
+                    "status": "completed",
+                    "downloadUrl": "https://cdn.example.com/result.mp4"
+                }]
+            })),
+        ]);
+        let references = vec!["reference-id".to_string()];
+        run_direct_generation(
+            &io,
+            DirectGenerationInput {
+                provider_id: "magnific",
+                prompt: "cinematic rice cake",
+                model: Some("minimax-video-3_0"),
+                duration_seconds: Some(6.0),
+                aspect: Some("16:9"),
+                resolution: Some("2K"),
+                reference_urls: &references,
+                kind: RemoteMcpMediaKind::Video,
+            },
+        )
+        .await
+        .unwrap();
+
+        let calls = io.calls.lock().await;
+        let clip = &calls[0].1["video"]["clips"][0];
+        assert_eq!(calls[0].0, "video_generate");
+        assert_eq!(clip["slug"], "minimax-video-3_0");
+        assert_eq!(clip["duration"], 6);
+        assert_eq!(clip["aspectRatio"], "16:9");
+        assert_eq!(clip["resolution"], "2K");
+        assert_eq!(
+            clip["references"][0],
+            json!({ "type": "image", "identifier": "reference-id" })
+        );
+        assert!(clip["references"][0].get("url").is_none());
+        assert_eq!(
+            calls[1].1,
+            json!({ "identifiers": ["video-1"], "timeoutSeconds": 25 })
+        );
+        assert_eq!(io.saved.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn krea_video_direct_runs_are_serial() {
+        let probe = Arc::new(ConcurrencyProbe::default());
+        let make_io = || {
+            Arc::new(MockDirectIo::with_probe(
+                vec![
+                    direct_success_output(json!({ "job_id": "video-job" })),
+                    direct_success_output(json!({
+                        "status": "completed",
+                        "result": { "urls": ["https://cdn.example.com/result.mp4"] }
+                    })),
+                ],
+                Arc::clone(&probe),
+            ))
+        };
+        let first = make_io();
+        let second = make_io();
+        let run = |io: Arc<MockDirectIo>| async move {
+            let references = Vec::new();
+            run_direct_generation(
+                io.as_ref(),
+                DirectGenerationInput {
+                    provider_id: "krea",
+                    prompt: "video",
+                    model: Some("minimax/hailuo-3"),
+                    duration_seconds: Some(6.0),
+                    aspect: Some("16:9"),
+                    resolution: None,
+                    reference_urls: &references,
+                    kind: RemoteMcpMediaKind::Video,
+                },
+            )
+            .await
+        };
+        let (first_result, second_result) = tokio::join!(run(first), run(second));
+        first_result.unwrap();
+        second_result.unwrap();
+        assert_eq!(probe.maximum.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn japanese_translation_runs_once_and_falls_back_to_original() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let translated = translate_if_japanese_with("白いお餅が跳ねる", {
+            let calls = Arc::clone(&calls);
+            move |_| async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok("A white rice cake bounces".to_string())
+            }
+        })
+        .await;
+        assert_eq!(translated, "A white rice cake bounces");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        let original = translate_if_japanese_with("白いお餅が跳ねる", |_| async {
+            Err("translation unavailable".to_string())
+        })
+        .await;
+        assert_eq!(original, "白いお餅が跳ねる");
+
+        let english = translate_if_japanese_with("A rice cake bounces", |_| async {
+            panic!("English prompt must not call translation")
+        })
+        .await;
+        assert_eq!(english, "A rice cake bounces");
+    }
+
+    #[test]
+    fn direct_error_uses_service_message_without_schema_json() {
+        let value = json!({
+            "status": "failed",
+            "error": {
+                "message": "Quota exhausted",
+                "schema": { "properties": { "prompt": { "type": "string" } } }
+            }
+        });
+        let message = direct_failure_message(&value);
+        assert_eq!(message, "Quota exhausted");
+        assert!(!message.contains("schema"));
+        assert!(!message.contains('{'));
+        assert!(message.chars().count() <= DIRECT_ERROR_LIMIT_CHARS);
+    }
+
+    #[test]
+    fn direct_error_message_is_sanitized_again_after_json_extraction() {
+        let value = json!({
+            "status": "failed",
+            "error": {
+                "message": "Invalid params: {schema: {prompt: string}}"
+            }
+        });
+
+        assert_eq!(direct_failure_message(&value), "Invalid params:");
+        assert!(!direct_failure_message(&value).contains("schema"));
+    }
+
+    #[test]
+    fn legacy_llm_error_is_summary_plus_bounded_non_json_detail() {
+        let long_report = format!("{} {{schema: secret}}", "long report ".repeat(30));
+        let message = llm_failure_message(
+            "生成先サービスが生成に失敗しました",
+            &long_report,
+            &["tool detail".to_string()],
+        );
+
+        assert!(message.starts_with("生成先サービスが生成に失敗しました: "));
+        let detail = message.split_once(": ").unwrap().1;
+        assert!(detail.chars().count() <= LEGACY_ERROR_DETAIL_LIMIT_CHARS);
+        assert!(!message.contains("schema"));
+        assert!(!message.contains('{'));
     }
 
     #[test]

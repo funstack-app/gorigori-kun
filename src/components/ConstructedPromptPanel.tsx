@@ -61,7 +61,6 @@ export function ConstructedPromptPanel() {
     promptOverride,
     setPromptOverride,
     effectivePrompt,
-    status,
     hasRunningBatch,
     runningBatchCount,
     maxConcurrentBatches,
@@ -102,15 +101,6 @@ export function ConstructedPromptPanel() {
   const purpose = useWorkspace((s) => s.purpose);
   const modelMedia = purpose === "videoStory" ? "video" : "image";
   const remoteSelection = useRemoteMcpGen((s) => s.selections[modelMedia]);
-  const latestRemoteRequestId = useRemoteMcpGen((s) => s.latestRequestId[modelMedia]);
-  const latestRemoteJob = useRemoteMcpGen((s) => {
-    const requestId = s.latestRequestId[modelMedia];
-    return requestId ? (s.jobs[requestId] ?? null) : null;
-  });
-  const remoteValidationMessage = useRemoteMcpGen(
-    (s) => s.validationMessage[modelMedia],
-  );
-  const retryRemoteGeneration = useRemoteMcpGen((s) => s.retry);
   const aspectRatio = useSceneStore((s) => s.subjectFraming.aspectRatio);
   const setSubjectFramingField = useSceneStore((s) => s.setSubjectFramingField);
   const pushToast = useToasts((s) => s.push);
@@ -366,12 +356,6 @@ export function ConstructedPromptPanel() {
     await generateSelected();
   };
 
-  const retryRemote = async () => {
-    if (!latestRemoteRequestId) return;
-    const result = await retryRemoteGeneration(latestRemoteRequestId);
-    if (!result.ok) pushToast({ kind: "error", text: result.message });
-  };
-
   return (
     // STΛCK 報告 (2026-05-17 v0.6.7): 13インチWindows高DPI(縦512px)で
     // 下部の生成ボタンが画面外に押し出される問題への根本対処。
@@ -595,42 +579,6 @@ export function ConstructedPromptPanel() {
             ? `生成中 ${runningBatchCount}/${maxConcurrentBatches}`
             : "この内容で生成"}
         </button>
-
-        {/* ボタン直下はエラーだけ出す（進行状況・完了文は右上の生成枠パネルとタイムラインが持つ。2026-08-24 STΛCK指示）。
-            入力検証エラーは直前ジョブの有無に関係なく出す。 */}
-        {(latestRemoteJob?.phase === "error" || remoteValidationMessage) && (
-          <div
-            data-request-id={latestRemoteJob?.requestId}
-            className="rounded-md border border-red-500/30 bg-red-500/5 px-2.5 py-2 text-xs font-semibold text-red-300"
-          >
-            <p>
-              {latestRemoteJob?.phase === "error"
-                ? latestRemoteJob.message ?? remoteValidationMessage
-                : remoteValidationMessage}
-            </p>
-            {latestRemoteJob?.phase === "error" && (
-              <button
-                type="button"
-                onClick={() => void retryRemote()}
-                className="mt-2 rounded border border-red-300/30 px-2 py-1 text-[11px] font-bold text-red-200 hover:bg-red-500/10"
-              >
-                再試行
-              </button>
-            )}
-          </div>
-        )}
-
-        {!remoteSelection && status.kind === "error" && (
-          <p
-            className={
-              status.kind === "error"
-                ? "text-xs font-semibold text-red-400"
-                : "text-xs font-semibold text-neutral-400"
-            }
-          >
-            {status.message}
-          </p>
-        )}
       </div>
 
       <ReferenceLibraryModal

@@ -179,7 +179,7 @@ pub async fn call_tool(
     tool: &str,
     arguments: Value,
 ) -> Result<ToolCallOutput, String> {
-    call_tool_inner(state, server, tool, arguments, None).await
+    call_tool_inner(state, server, tool, arguments, None, true).await
 }
 
 /// 画像・動画生成向けに、app-server の応答待ち時間を明示して MCP ツールを直接呼ぶ。
@@ -190,7 +190,26 @@ pub async fn call_tool_with_timeout(
     arguments: Value,
     request_timeout: Duration,
 ) -> Result<ToolCallOutput, String> {
-    call_tool_inner(state, server, tool, arguments, Some(request_timeout)).await
+    call_tool_inner(state, server, tool, arguments, Some(request_timeout), true).await
+}
+
+/// 課金を伴う生成 submit 専用。応答を失っても同じ生成を自動再送しない。
+pub async fn call_tool_once_with_timeout(
+    state: &AppState,
+    server: &str,
+    tool: &str,
+    arguments: Value,
+    request_timeout: Duration,
+) -> Result<ToolCallOutput, String> {
+    call_tool_inner(state, server, tool, arguments, Some(request_timeout), false).await
+}
+
+fn tool_call_attempts(retry_invalid_thread: bool) -> usize {
+    if retry_invalid_thread {
+        2
+    } else {
+        1
+    }
 }
 
 async fn call_tool_inner(
@@ -199,10 +218,12 @@ async fn call_tool_inner(
     tool: &str,
     arguments: Value,
     request_timeout: Option<Duration>,
+    retry_invalid_thread: bool,
 ) -> Result<ToolCallOutput, String> {
     let client = rpc_client(state).await?;
 
-    for attempt in 0..2 {
+    let attempts = tool_call_attempts(retry_invalid_thread);
+    for attempt in 0..attempts {
         let tid = ensure_utility_thread(&client).await?;
         let params = json!({
             "server": server,
@@ -248,7 +269,7 @@ async fn call_tool_inner(
                 let msg = e.to_string();
                 let unknown_server =
                     msg.contains("unknown MCP server") || msg.contains("unknown mcp server");
-                if unknown_server && attempt == 0 {
+                if unknown_server && attempt + 1 < attempts {
                     tracing::warn!(
                         target: "mcp_direct",
                         "{server} が見つからないと言われました。MCP 設定を読み直して再試行します"
@@ -264,7 +285,7 @@ async fn call_tool_inner(
                     }
                 }
 
-                if attempt == 1 {
+                if attempt + 1 == attempts {
                     // 最後まで見つからなかった場合は、次の行動が分かる言い方にする。
                     // 生の rpc error だけだと非エンジニアには何をすべきか分からない。
                     if unknown_server {
@@ -278,7 +299,7 @@ async fn call_tool_inner(
             }
         }
     }
-    unreachable!("loop returns on attempt == 1");
+    unreachable!("loop returns on its final attempt");
 }
 
 /// 稼働中 app-server に config.toml の MCP 設定を再読込させる。
@@ -366,5 +387,11 @@ mod tests {
             Some("xyz")
         );
         assert!(extract_thread_id(&json!({})).is_none());
+    }
+
+    #[test]
+    fn submit_timeout_has_exactly_one_attempt() {
+        assert_eq!(tool_call_attempts(false), 1);
+        assert_eq!(tool_call_attempts(true), 2);
     }
 }

@@ -41,6 +41,7 @@ const STALE_SERVER_ERROR: &str =
     "生成サーバーが応答しません（接続が古くなっている可能性があります）。別の経路で再試行します。";
 const EXEC_DIAGNOSTIC_LIMIT_CHARS: usize = 2_000;
 const EXEC_STOP_TIMEOUT: Duration = Duration::from_secs(5);
+const TRANSLATION_EXEC_ARGS: [&str; 2] = ["--ignore-user-config", "--ephemeral"];
 
 /// LLM が MCP ツールを選んで実行した1ターンの機械可読な結果。
 ///
@@ -490,6 +491,52 @@ pub(crate) async fn run_llm_tool_turn(
     prompt: &str,
     turn_timeout: Duration,
 ) -> Result<LlmToolTurnOutput, String> {
+    run_llm_tool_turn_with_model(prompt, turn_timeout, None, false).await
+}
+
+fn translation_output_used_tool(output: &LlmToolTurnOutput) -> bool {
+    output.completed_items.iter().any(|item| {
+        let item_type = item
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .replace('_', "")
+            .to_ascii_lowercase();
+        !matches!(item_type.as_str(), "agentmessage" | "reasoning")
+    })
+}
+
+/// 生成サービスへ渡す日本語プロンプトを、生成制御とは独立した1ターンで英訳する。
+/// 出力は呼び出し側で検査し、失敗時は必ず原文へ戻す。
+pub(crate) async fn translate_generation_prompt(
+    prompt: &str,
+    turn_timeout: Duration,
+) -> Result<String, String> {
+    let instruction = format!(
+        "次の文章を、意味と固有名詞を変えずに自然な英語へ翻訳してください。MCPや外部ツールは使わず、翻訳文だけを返してください。\n\n{prompt}"
+    );
+    let output =
+        run_llm_tool_turn_with_model(&instruction, turn_timeout, Some("gpt-5.6"), true).await?;
+    if let Some(error) = output.terminal_error {
+        return Err(error);
+    }
+    if translation_output_used_tool(&output) {
+        return Err("英訳中にツール呼び出しを検出しました".to_string());
+    }
+    let translated = output.final_message.trim();
+    if translated.is_empty() {
+        Err("英訳結果が空でした".to_string())
+    } else {
+        Ok(translated.to_string())
+    }
+}
+
+async fn run_llm_tool_turn_with_model(
+    prompt: &str,
+    turn_timeout: Duration,
+    model: Option<&str>,
+    ignore_user_config: bool,
+) -> Result<LlmToolTurnOutput, String> {
     // RAII: 呼び出し元を問わず、ターン終了まで全生成共通の並列枠を保持する。
     let _gen_permit = gen_queue::GenPermit::acquire(&GLOBAL_GEN_SEMAPHORE).await?;
     let source_home = crate::codex::home::resolve_command_codex_home()
@@ -508,8 +555,15 @@ pub(crate) async fn run_llm_tool_turn(
         "--dangerously-bypass-approvals-and-sandbox",
         "--skip-git-repo-check",
         "--json",
-        "-",
     ]);
+    if ignore_user_config {
+        // 認証は同じ CODEX_HOME を使うが、config.toml の MCP 登録は翻訳へ見せない。
+        cmd.args(TRANSLATION_EXEC_ARGS);
+    }
+    if let Some(model) = model {
+        cmd.args(["--model", model]);
+    }
+    cmd.arg("-");
     cmd.env("CODEX_HOME", &generation_home)
         .env("PATH", enriched_path())
         .stdin(Stdio::piped())
@@ -2012,7 +2066,8 @@ mod tests {
         https_urls_in_exec_stdout, is_gen_server_command, is_sqlite_state_corruption_error,
         is_stale_server_error, mcp_tool_calls_in_exec_output, normalize_exec_turn,
         notification_matches, parse_exec_jsonl, should_replace_server,
-        spawn_permit_watchdog_with_timeout, ExecTurnState, GenPhase, MAX_TURNS_PER_SERVER,
+        spawn_permit_watchdog_with_timeout, translation_output_used_tool, ExecTurnState, GenPhase,
+        LlmToolTurnOutput, MAX_TURNS_PER_SERVER, TRANSLATION_EXEC_ARGS,
     };
     use serde_json::{json, Value};
     use std::sync::Arc;
@@ -2149,6 +2204,29 @@ mod tests {
                 ("krea".to_string(), "generate_image".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn translation_exec_does_not_load_mcp_configuration() {
+        assert!(TRANSLATION_EXEC_ARGS.contains(&"--ignore-user-config"));
+        assert!(TRANSLATION_EXEC_ARGS.contains(&"--ephemeral"));
+    }
+
+    #[test]
+    fn translation_rejects_any_completed_tool_item() {
+        let tool_output = LlmToolTurnOutput {
+            completed_items: vec![json!({"type": "mcpToolCall", "tool": "generate_image"})],
+            final_message: "translated".to_string(),
+            terminal_error: None,
+        };
+        assert!(translation_output_used_tool(&tool_output));
+
+        let text_only = LlmToolTurnOutput {
+            completed_items: vec![json!({"type": "agentMessage", "text": "translated"})],
+            final_message: "translated".to_string(),
+            terminal_error: None,
+        };
+        assert!(!translation_output_used_tool(&text_only));
     }
 
     #[test]
