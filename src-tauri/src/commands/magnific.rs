@@ -489,7 +489,7 @@ async fn upload_magnific_reference(
 
 /// images_generate の応答 structuredContent.creations[] から identifier を集める。
 fn extract_creation_ids(structured: Option<&Value>) -> Vec<String> {
-    structured
+    let from_array: Vec<String> = structured
         .and_then(|s| s.get("creations"))
         .and_then(|v| v.as_array())
         .map(|arr| {
@@ -501,6 +501,18 @@ fn extract_creation_ids(structured: Option<&Value>) -> Vec<String> {
                 })
                 .collect()
         })
+        .unwrap_or_default();
+    if !from_array.is_empty() {
+        return from_array;
+    }
+    // 編集系ツール (images_change_camera / images_relight / images_expand /
+    // images_upscale) は `creation` (単数オブジェクト) で返す (2026-08-26 実測:
+    // {"creation":{"identifier":"...","status":"processing",...}})。
+    structured
+        .and_then(|s| s.get("creation"))
+        .and_then(|c| c.get("identifier"))
+        .and_then(|v| v.as_str())
+        .map(|s| vec![s.to_string()])
         .unwrap_or_default()
 }
 
@@ -635,6 +647,15 @@ fn sanitize_magnific_image_edit_message(message: &str) -> String {
 }
 
 fn short_magnific_image_edit_detail(message: &str) -> String {
+    // rpc/transport の内部ダンプはユーザーに読ませない (2026-08-26 実害:
+    // "rpc error -32603 ... Transport [rmcp::transport::worker::...]" が UI に全文出た)。
+    let lowered = message.to_ascii_lowercase();
+    if lowered.contains("transport")
+        || lowered.contains("rpc error")
+        || lowered.contains("rmcp::")
+    {
+        return "Magnific との通信が途切れました。少し待ってからもう一度お試しください。".to_string();
+    }
     sanitize_magnific_video_message(message)
         .chars()
         .take(240)
@@ -1644,6 +1665,21 @@ mod tests {
         assert!(entries[1].terminal);
         assert_eq!(entries[1].error.as_deref(), Some("quota exceeded"));
         assert!(!entries[2].terminal);
+    }
+
+    #[test]
+    fn extract_creation_ids_reads_singular_creation() {
+        // 編集系ツールの実測応答形 (2026-08-26)。
+        let s = json!({"creation": {"identifier": "xyz", "status": "processing", "tool": "relight"}});
+        assert_eq!(extract_creation_ids(Some(&s)), vec!["xyz".to_string()]);
+    }
+
+    #[test]
+    fn short_detail_replaces_transport_dump_with_japanese() {
+        let raw = "rpc error -32603: tool call failed for `magnific/images_expand`: Transport send error: Transport [rmcp::transport::worker::WorkerTransport]";
+        let out = short_magnific_image_edit_detail(raw);
+        assert!(out.contains("通信が途切れました"), "got: {out}");
+        assert!(!out.contains("rpc"));
     }
 
     #[test]
