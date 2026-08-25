@@ -545,10 +545,21 @@ fn parse_wait_results(structured: Option<&Value>) -> Vec<WaitEntry> {
                     identifier,
                     terminal: true,
                     url: None,
+                    // 実 API は失敗理由を failureReason で返す (2026-08-26 実測:
+                    // {"status":"failed","failureReason":"NSFW: Content detected"})。
+                    // error は旧形の保険として残す。NSFW はそのまま出すと英語かつ
+                    // 意味が伝わらないため、日本語の説明に置き換える。
                     error: Some(
-                        r.get("error")
+                        r.get("failureReason")
+                            .or_else(|| r.get("error"))
                             .and_then(|v| v.as_str())
-                            .map(|s| s.to_string())
+                            .map(|reason| {
+                                if reason.to_ascii_lowercase().contains("nsfw") {
+                                    "画像の内容が Magnific の生成ポリシーに触れたため処理できませんでした".to_string()
+                                } else {
+                                    reason.to_string()
+                                }
+                            })
                             .unwrap_or_else(|| format!("生成が {status} で終了しました")),
                     ),
                 },
@@ -1623,7 +1634,7 @@ mod tests {
     fn parse_wait_results_classifies_status() {
         let s = json!({"results": [
             {"identifier": "a", "status": "completed", "results": {"url": "https://x/r.png"}},
-            {"identifier": "b", "status": "failed", "error": "nsfw detected"},
+            {"identifier": "b", "status": "failed", "error": "quota exceeded"},
             {"identifier": "c", "status": "queued"}
         ], "allTerminal": false});
         let entries = parse_wait_results(Some(&s));
@@ -1631,8 +1642,24 @@ mod tests {
         assert!(entries[0].terminal);
         assert_eq!(entries[0].url.as_deref(), Some("https://x/r.png"));
         assert!(entries[1].terminal);
-        assert_eq!(entries[1].error.as_deref(), Some("nsfw detected"));
+        assert_eq!(entries[1].error.as_deref(), Some("quota exceeded"));
         assert!(!entries[2].terminal);
+    }
+
+    #[test]
+    fn parse_wait_results_reads_failure_reason_and_translates_nsfw() {
+        // 実 API 応答の実測形 (2026-08-26): failureReason フィールドで返る。
+        let s = json!({"results": [
+            {"identifier": "a", "status": "failed", "failureReason": "NSFW: Content detected"},
+            {"identifier": "b", "status": "failed", "failureReason": "internal error"}
+        ], "allTerminal": true});
+        let entries = parse_wait_results(Some(&s));
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            entries[0].error.as_deref(),
+            Some("画像の内容が Magnific の生成ポリシーに触れたため処理できませんでした")
+        );
+        assert_eq!(entries[1].error.as_deref(), Some("internal error"));
     }
 
     #[test]
