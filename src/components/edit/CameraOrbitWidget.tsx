@@ -39,9 +39,9 @@ function ringPoint(rotate: number) {
   return { x: CX + RING_RX * Math.sin(rad), y: CY + RING_RY * Math.cos(rad) };
 }
 
-/** 子午線上の点。φ=0 が手前下、φ=180° が真後ろ上。 */
+/** 子午線上の点。φ=0 が手前下、φ=180° が真後ろ上。Magnific と同じく左へ膨らむ。 */
 function meridianPoint(phi: number) {
-  const x0 = MER_RX * Math.sin(phi);
+  const x0 = -MER_RX * Math.sin(phi);
   const y0 = MER_RY * Math.cos(phi);
   return {
     x: CX + x0 * Math.cos(MER_TILT) - y0 * Math.sin(MER_TILT) * 0.22,
@@ -142,10 +142,11 @@ export function CameraOrbitWidget({
 
   return (
     <div
-      className="relative select-none overflow-hidden rounded-xl border border-white/10 bg-[#0a0a0d]"
+      className="relative select-none overflow-hidden rounded-xl border border-white/10"
       style={{
         width: "100%",
         aspectRatio: `${W} / ${H}`,
+        background: "radial-gradient(130% 110% at 50% 8%, #201b3a 0%, #161226 48%, #0e0b1c 100%)",
         cursor: disabled ? "default" : dragging ? "grabbing" : "grab",
         touchAction: "none",
       }}
@@ -163,9 +164,9 @@ export function CameraOrbitWidget({
           height: 420,
           transform: "translate(-50%, -50%) perspective(420px) rotateX(74deg)",
           backgroundImage:
-            "repeating-linear-gradient(0deg, rgba(148,155,190,0.10) 0 1px, transparent 1px 26px), repeating-linear-gradient(90deg, rgba(148,155,190,0.10) 0 1px, transparent 1px 26px)",
-          maskImage: "radial-gradient(closest-side, black 30%, transparent 70%)",
-          WebkitMaskImage: "radial-gradient(closest-side, black 30%, transparent 70%)",
+            "repeating-linear-gradient(0deg, rgba(150,140,235,0.20) 0 1px, transparent 1px 26px), repeating-linear-gradient(90deg, rgba(150,140,235,0.20) 0 1px, transparent 1px 26px)",
+          maskImage: "radial-gradient(closest-side, black 38%, transparent 78%)",
+          WebkitMaskImage: "radial-gradient(closest-side, black 38%, transparent 78%)",
         }}
       />
 
@@ -185,7 +186,7 @@ export function CameraOrbitWidget({
         className="pointer-events-none absolute left-1/2 top-[68%] h-[14px] w-[92px] -translate-x-1/2 rounded-[50%] bg-black/70 blur-[6px]"
       />
 
-      {/* 立っている画像プレーン */}
+      {/* 立っている画像プレーン + 床への映り込み */}
       <div
         className="pointer-events-none absolute left-1/2 top-[44%] -translate-x-1/2 -translate-y-1/2"
         style={{ perspective: 300 }}
@@ -200,6 +201,24 @@ export function CameraOrbitWidget({
           }}
           draggable={false}
         />
+        <div
+          className="overflow-hidden"
+          style={{
+            height: 26,
+            marginTop: 2,
+            opacity: 0.2,
+            maskImage: "linear-gradient(180deg, black 0%, transparent 90%)",
+            WebkitMaskImage: "linear-gradient(180deg, black 0%, transparent 90%)",
+          }}
+        >
+          <img
+            src={src}
+            alt=""
+            className="block h-[62px] w-auto max-w-[92px] rounded-[2px] object-cover"
+            style={{ transform: "rotateY(-22deg) scaleY(-1)" }}
+            draggable={false}
+          />
+        </div>
       </div>
 
       <svg viewBox={`0 0 ${W} ${H}`} className="absolute inset-0 h-full w-full" aria-hidden>
@@ -226,7 +245,7 @@ export function CameraOrbitWidget({
           cy={arc.y}
           r="13"
           fill="#9a70ff"
-          stroke="#0a0a0d"
+          stroke="#12101f"
           strokeWidth="3"
           style={{ cursor: disabled ? "default" : "grab", pointerEvents: "auto" }}
           onPointerDown={begin("arc")}
@@ -240,7 +259,7 @@ export function CameraOrbitWidget({
           cy={ring.y}
           r="14"
           fill="#4b5df0"
-          stroke="#0a0a0d"
+          stroke="#12101f"
           strokeWidth="3"
           opacity={ballInFront ? 1 : 0.6}
           style={{ cursor: disabled ? "default" : "grab", pointerEvents: "auto" }}
