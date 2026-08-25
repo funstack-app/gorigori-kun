@@ -30,6 +30,8 @@ export type RemoteMcpSelection = {
 
 export type RemoteMcpRunInput = RemoteMcpParamInput & {
   kind: RemoteMcpGenerationKind;
+  /** モデルの実測対応表に含まれる場合だけ生成先へ渡す。 */
+  resolution?: string;
   /** 内蔵モデルとの混在比較でも、接続先モデルは1モデル1本に固定する。 */
   compareEach?: boolean;
 };
@@ -88,6 +90,16 @@ export type RemoteMcpSelectionReconcileResult = {
   removed: RemoteMcpSelection[];
 };
 
+/** 対応表が無いモデルや対応外の値へ、推測した解像度を送らない。 */
+export function supportedRemoteMcpResolution(
+  selection: RemoteMcpSelection,
+  resolution: string | undefined,
+): string | undefined {
+  const supported = selection.model?.videoSpecs?.resolutions;
+  if (!resolution || !supported?.includes(resolution)) return undefined;
+  return resolution;
+}
+
 /** 再取得した実モデル一覧に残っている選択だけを保つ。 */
 export function reconcileRemoteMcpSelections(
   selections: readonly RemoteMcpSelection[],
@@ -114,6 +126,31 @@ export function reconcileRemoteMcpSelections(
 }
 
 const MODEL_CATALOG_CACHE_KEY = "gori.remoteMcp.modelCatalogs.v1";
+const remoteMcpCatalogRefreshes = new Map<string, Promise<unknown>>();
+
+/**
+ * React StrictMode や手動更新との重なりでも、同じ接続先・媒体の一覧通信は1本だけにする。
+ * 成功・失敗のどちらでも完了後に共有を解除し、次の更新は新しく実行できる。
+ */
+export function shareRemoteMcpCatalogRefresh<T>(
+  providerId: string,
+  kind: RemoteMcpGenerationKind,
+  refresh: () => Promise<T>,
+): Promise<T> {
+  const key = `${providerId}:${kind}`;
+  const existing = remoteMcpCatalogRefreshes.get(key) as Promise<T> | undefined;
+  if (existing) return existing;
+
+  const pending = Promise.resolve().then(refresh);
+  remoteMcpCatalogRefreshes.set(key, pending);
+  const clear = () => {
+    if (remoteMcpCatalogRefreshes.get(key) === pending) {
+      remoteMcpCatalogRefreshes.delete(key);
+    }
+  };
+  void pending.then(clear, clear);
+  return pending;
+}
 
 function readModelCatalogCache(): Record<string, RemoteMcpModelCatalog> {
   if (typeof localStorage === "undefined") return {};
@@ -473,12 +510,17 @@ export const useRemoteMcpGen = create<RemoteMcpGenState>((set, get) => {
       return { ok: false, message: validationMessage };
     }
 
+    const effectiveInput: RemoteMcpRunInput = {
+      ...input,
+      resolution: supportedRemoteMcpResolution(selection, input.resolution),
+    };
+
     const referencePaths = [
-      input.startImagePath,
-      input.endImagePath,
-      ...(input.referenceImagePaths ?? []),
-      ...(input.referenceVideoPaths ?? []),
-      ...(input.motionReferencePaths ?? []),
+      effectiveInput.startImagePath,
+      effectiveInput.endImagePath,
+      ...(effectiveInput.referenceImagePaths ?? []),
+      ...(effectiveInput.referenceVideoPaths ?? []),
+      ...(effectiveInput.motionReferencePaths ?? []),
     ].filter((path): path is string => Boolean(path?.trim()));
 
     const requestId = createRequestId();
@@ -491,50 +533,52 @@ export const useRemoteMcpGen = create<RemoteMcpGenState>((set, get) => {
       providerLabel: selection.providerLabel,
       toolName: selection.toolName,
       toolTitle: selection.toolTitle,
-      kind: input.kind,
+      kind: effectiveInput.kind,
       phase: "running",
       message: "生成を開始しています…",
       selection,
-      input,
+      input: effectiveInput,
       createdAt: now,
       updatedAt: now,
     };
     set((state) => ({
       jobs: { ...state.jobs, [requestId]: job },
-      latestRequestId: { ...state.latestRequestId, [input.kind]: requestId },
-      latestBatchId: { ...state.latestBatchId, [input.kind]: batchId },
-      validationMessage: { ...state.validationMessage, [input.kind]: null },
+      latestRequestId: { ...state.latestRequestId, [effectiveInput.kind]: requestId },
+      latestBatchId: { ...state.latestBatchId, [effectiveInput.kind]: batchId },
+      validationMessage: { ...state.validationMessage, [effectiveInput.kind]: null },
     }));
-    startRemoteTimelineBatch(requestId, selection, input, referencePaths);
+    startRemoteTimelineBatch(requestId, selection, effectiveInput, referencePaths);
 
     const args: RemoteMcpGenerateArgs = {
       requestId,
       providerId: selection.providerId,
-      prompt: input.prompt,
+      prompt: effectiveInput.prompt,
       model: selection.model?.passModel === false ? undefined : selection.model?.id,
-      durationSeconds: input.durationSeconds,
-      aspect: input.aspectRatio,
+      durationSeconds: effectiveInput.durationSeconds,
+      aspect: effectiveInput.aspectRatio,
+      resolution: effectiveInput.resolution,
       referencePaths: [...new Set(referencePaths)],
-      kind: input.kind,
+      kind: effectiveInput.kind,
     };
-    args.count = Math.max(1, Math.trunc(input.count ?? 1));
+    args.count = Math.max(1, Math.trunc(effectiveInput.count ?? 1));
 
     try {
-      if (selection.providerId === "higgsfield" && input.kind === "video") {
+      if (selection.providerId === "higgsfield" && effectiveInput.kind === "video") {
         const { higgsfieldMcp } = await import("../ipc");
         const refImagePaths = [
-          input.startImagePath,
-          input.endImagePath,
-          ...(input.referenceImagePaths ?? []),
+          effectiveInput.startImagePath,
+          effectiveInput.endImagePath,
+          ...(effectiveInput.referenceImagePaths ?? []),
         ].filter((path): path is string => Boolean(path?.trim()));
         const result = await higgsfieldMcp.generateBatch({
-          prompt: input.prompt,
+          prompt: effectiveInput.prompt,
           model: selection.model?.passModel === false ? undefined : selection.model?.id,
-          aspect: input.aspectRatio,
-          count: input.count,
+          aspect: effectiveInput.aspectRatio,
+          count: effectiveInput.count,
           refImagePaths: [...new Set(refImagePaths)],
           mediaType: "video",
-          duration: input.durationSeconds,
+          duration: effectiveInput.durationSeconds,
+          resolution: effectiveInput.resolution,
         });
         if (result.generatedPaths.length === 0) {
           throw new Error(result.errors.join(" ") || "HiggsField の動画を保存できませんでした。");
@@ -542,7 +586,7 @@ export const useRemoteMcpGen = create<RemoteMcpGenState>((set, get) => {
         await completeRegistration(
           requestId,
           selection,
-          input,
+          effectiveInput,
           result.generatedPaths,
           result.errors,
         );

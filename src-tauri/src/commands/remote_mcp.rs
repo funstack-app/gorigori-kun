@@ -41,6 +41,7 @@ const REMOTE_DOWNLOAD_TIMEOUT_SECS: u64 = 120;
 const REMOTE_DOWNLOAD_MAX_BYTES: u64 = 512 * 1024 * 1024;
 const REMOTE_DOWNLOAD_REDIRECT_LIMIT: usize = 5;
 const GENERATION_MESSAGE_LIMIT_CHARS: usize = 4_000;
+const PROCESSING_FOLLOW_UP_DELAYS_SECS: [u64; 2] = [30, 60];
 const MAX_REMOTE_COUNT: u32 = 30;
 const REMOTE_DOWNLOAD_USER_AGENT: &str =
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0 Safari/537.36";
@@ -1204,6 +1205,320 @@ fn select_llm_artifact_sources(
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum LlmArtifactTurnEvaluation {
+    Ready(RemoteArtifactSource),
+    Processing {
+        tool_errors: Vec<String>,
+        identifier: ProviderJobIdentifier,
+    },
+    Failed(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProviderJobIdentifier {
+    field: &'static str,
+    value: String,
+}
+
+fn is_processing_status_value(value: &str) -> bool {
+    matches!(
+        value
+            .trim()
+            .to_ascii_lowercase()
+            .replace(['-', ' '], "_")
+            .as_str(),
+        "processing" | "pending" | "queued" | "in_progress" | "running" | "submitted"
+    )
+}
+
+fn is_terminal_failure_status_value(value: &str) -> bool {
+    matches!(
+        value
+            .trim()
+            .to_ascii_lowercase()
+            .replace(['-', ' '], "_")
+            .as_str(),
+        "failed" | "failure" | "rejected" | "cancelled" | "canceled" | "content_policy"
+    )
+}
+
+fn status_field(key: &str) -> bool {
+    matches!(
+        normalized_field_name(Some(key)).as_str(),
+        "status" | "state" | "phase" | "jobstatus" | "taskstatus"
+    )
+}
+
+fn parsed_json_string(value: &str) -> Option<Value> {
+    matches!(value.trim().as_bytes().first(), Some(b'{') | Some(b'['))
+        .then(|| serde_json::from_str::<Value>(value).ok())
+        .flatten()
+}
+
+fn value_has_explicit_processing_status(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => object.iter().any(|(key, nested)| {
+            (status_field(key) && nested.as_str().is_some_and(is_processing_status_value))
+                || value_has_explicit_processing_status(nested)
+        }),
+        Value::Array(values) => values.iter().any(value_has_explicit_processing_status),
+        Value::String(text) => parsed_json_string(text)
+            .as_ref()
+            .is_some_and(value_has_explicit_processing_status),
+        _ => false,
+    }
+}
+
+fn identifier_value(value: &Value) -> Option<String> {
+    match value {
+        Value::String(value) if !value.trim().is_empty() => Some(value.to_string()),
+        Value::Number(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn extract_job_identifier(value: &Value) -> Option<ProviderJobIdentifier> {
+    match value {
+        Value::Object(object) => {
+            for (key, value) in object {
+                let field = match normalized_field_name(Some(key)).as_str() {
+                    "identifier" => Some("identifier"),
+                    "jobid" => Some("jobId"),
+                    "taskid" => Some("taskId"),
+                    _ => None,
+                };
+                if let Some(field) = field {
+                    if let Some(value) = identifier_value(value) {
+                        return Some(ProviderJobIdentifier { field, value });
+                    }
+                }
+            }
+            object.values().find_map(extract_job_identifier)
+        }
+        Value::Array(values) => values.iter().find_map(extract_job_identifier),
+        Value::String(text) => parsed_json_string(text)
+            .as_ref()
+            .and_then(extract_job_identifier),
+        _ => None,
+    }
+}
+
+fn error_value_is_present(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::Bool(value) => *value,
+        Value::String(value) => !value.trim().is_empty(),
+        Value::Array(values) => !values.is_empty(),
+        Value::Object(values) => !values.is_empty(),
+        Value::Number(_) => true,
+    }
+}
+
+fn value_has_terminal_failure(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => object.iter().any(|(key, nested)| {
+            let normalized = normalized_field_name(Some(key));
+            (status_field(key)
+                && nested
+                    .as_str()
+                    .is_some_and(is_terminal_failure_status_value))
+                || (normalized == "iserror" && nested.as_bool() == Some(true))
+                || (normalized == "error" && error_value_is_present(nested))
+                || value_has_terminal_failure(nested)
+        }),
+        Value::Array(values) => values.iter().any(value_has_terminal_failure),
+        Value::String(text) => {
+            parsed_json_string(text)
+                .as_ref()
+                .is_some_and(value_has_terminal_failure)
+                || text.to_ascii_lowercase().contains("content_policy")
+        }
+        _ => false,
+    }
+}
+
+fn final_message_has_terminal_failure(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("content_policy")
+        || [
+            "status: failed",
+            "status=failed",
+            "status: rejected",
+            "status=rejected",
+            "status: cancelled",
+            "status=cancelled",
+            "status: canceled",
+            "status=canceled",
+        ]
+        .iter()
+        .any(|marker| lower.contains(marker))
+}
+
+fn inspect_provider_tool_progress(
+    output: &crate::codex::gen_server::LlmToolTurnOutput,
+    provider_id: &str,
+) -> Result<Option<ProviderJobIdentifier>, String> {
+    let mut processing = None;
+    for item in output
+        .completed_items
+        .iter()
+        .filter(|item| is_provider_tool_item(item, provider_id))
+    {
+        let item_failed = item
+            .get("status")
+            .and_then(Value::as_str)
+            .is_some_and(is_terminal_failure_status_value)
+            || item.get("isError").and_then(Value::as_bool) == Some(true)
+            || item.get("is_error").and_then(Value::as_bool) == Some(true);
+        let results = tool_result_values(item);
+        if item_failed && results.is_empty() {
+            let error = compact_tool_error(item);
+            return Err(if error.is_empty() {
+                "生成先サービスが生成に失敗しました".to_string()
+            } else {
+                error
+            });
+        }
+
+        for result in results {
+            let tool_output = tool_call_output_from_value(result);
+            if item_failed || tool_output.is_error || value_has_terminal_failure(result) {
+                let error = if tool_output.text.trim().is_empty() {
+                    compact_tool_error(result)
+                } else {
+                    provider_output_error(&tool_output)
+                };
+                return Err(if error.is_empty() {
+                    "生成先サービスが生成に失敗しました".to_string()
+                } else {
+                    error
+                });
+            }
+            if value_has_explicit_processing_status(result) {
+                if let Some(identifier) = extract_job_identifier(result) {
+                    processing = Some(identifier);
+                }
+            }
+        }
+    }
+    Ok(processing)
+}
+
+fn evaluate_llm_artifact_turn(
+    output: &crate::codex::gen_server::LlmToolTurnOutput,
+    provider_id: &str,
+    kind: RemoteMcpMediaKind,
+    reference_paths: &[String],
+) -> LlmArtifactTurnEvaluation {
+    let (tool_candidates, tool_errors) = extract_llm_tool_artifact_candidates(
+        &output.completed_items,
+        provider_id,
+        kind,
+        reference_paths,
+    );
+    if let Some(error) = output.terminal_error.as_deref() {
+        return LlmArtifactTurnEvaluation::Failed(llm_failure_message(
+            error,
+            &output.final_message,
+            &tool_errors,
+        ));
+    }
+    let processing = match inspect_provider_tool_progress(output, provider_id) {
+        Ok(processing) => processing,
+        Err(error) => {
+            return LlmArtifactTurnEvaluation::Failed(llm_failure_message(
+                "生成先サービスが生成に失敗しました",
+                &output.final_message,
+                &[error],
+            ));
+        }
+    };
+    if final_message_has_terminal_failure(&output.final_message) {
+        return LlmArtifactTurnEvaluation::Failed(llm_failure_message(
+            "生成先サービスが生成に失敗しました",
+            &output.final_message,
+            &tool_errors,
+        ));
+    }
+    if let Some(source) = select_llm_artifact_sources(tool_candidates, &output.final_message, kind)
+        .into_iter()
+        .next()
+    {
+        return LlmArtifactTurnEvaluation::Ready(source);
+    }
+    if kind == RemoteMcpMediaKind::Video {
+        if let Some(identifier) = processing {
+            return LlmArtifactTurnEvaluation::Processing {
+                tool_errors,
+                identifier,
+            };
+        }
+    }
+    LlmArtifactTurnEvaluation::Failed(llm_failure_message(
+        &format!(
+            "Codex のツール実行結果に保存できる{}がありませんでした",
+            kind.noun()
+        ),
+        &output.final_message,
+        &tool_errors,
+    ))
+}
+
+fn processing_retry_exhausted_message(
+    kind: RemoteMcpMediaKind,
+    output: &crate::codex::gen_server::LlmToolTurnOutput,
+    tool_errors: &[String],
+) -> String {
+    llm_failure_message(
+        &format!(
+            "{}の処理がまだ完了していません。時間をおいて再生成してください",
+            kind.noun()
+        ),
+        &output.final_message,
+        tool_errors,
+    )
+}
+
+fn processing_turn_context(
+    output: &crate::codex::gen_server::LlmToolTurnOutput,
+    provider_id: &str,
+) -> String {
+    let tool_results = output
+        .completed_items
+        .iter()
+        .filter(|item| is_provider_tool_item(item, provider_id))
+        .flat_map(tool_result_values)
+        .cloned()
+        .collect::<Vec<_>>();
+    let raw = format!(
+        "最終報告: {}\nツール結果: {}",
+        output.final_message.trim(),
+        serde_json::to_string(&tool_results).unwrap_or_else(|_| "[]".to_string())
+    );
+    super::diagnostics::redact_text(&raw, dirs::home_dir().as_deref())
+        .chars()
+        .take(GENERATION_MESSAGE_LIMIT_CHARS)
+        .collect()
+}
+
+fn build_processing_follow_up_prompt(
+    provider_label: &str,
+    provider_id: &str,
+    output: &crate::codex::gen_server::LlmToolTurnOutput,
+    identifier: &ProviderJobIdentifier,
+    attempt: usize,
+) -> String {
+    let context = processing_turn_context(output, provider_id);
+    let identifier_value =
+        serde_json::to_string(&identifier.value).unwrap_or_else(|_| "\"\"".to_string());
+    format!(
+        "あなたは生成完了確認係。新しい生成ジョブは開始するな。次の専用ジョブ識別子を必ず引き継ぎ、tool_searchで{provider_label}の result / status / task / job / query / wait / get / history 等の完了確認ツールを検索・ロードせよ。{provider_label}以外のサービスと内蔵 image_gen は使用禁止。さっきのジョブの完了を確認し、完了まで待って、ツール結果の url フィールドにあるファイル直リンクを1件だけ返せ。共有ページ・プレビューURLは返すな。完了確認 {attempt}/{}。\n専用ジョブ識別子（{}）: {identifier_value}\n\n直前結果:\n{context}",
+        PROCESSING_FOLLOW_UP_DELAYS_SECS.len(),
+        identifier.field
+    )
+}
+
 fn display_optional(value: Option<&str>) -> &str {
     value
         .filter(|value| !value.trim().is_empty())
@@ -1217,6 +1532,7 @@ fn build_remote_mcp_llm_prompt(
     model: Option<&str>,
     duration_seconds: Option<f64>,
     aspect: Option<&str>,
+    resolution: Option<&str>,
     reference_paths: &[String],
 ) -> String {
     let duration = duration_seconds
@@ -1228,8 +1544,13 @@ fn build_remote_mcp_llm_prompt(
     } else {
         reference_paths.join("、")
     };
+    let resolution_instruction = resolution
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| value.split_whitespace().collect::<Vec<_>>().join(" "))
+        .map(|value| format!("\n解像度: {value} で生成せよ。"))
+        .unwrap_or_default();
     format!(
-        "あなたは生成実行係。まず tool_search で {provider_label} のツールを必ず検索・ロードしてから、tool_search は検索語に合うツールしか返さない。生成ツールに加えて、完了確認ツール（result / status / task / job / query / wait / get / history 等）も**検索語を変えて複数回**検索し、両方をロードしてから始めよ。{provider_label} のMCPツールで{}を生成せよ。**生成は1枚だけ**（count / numOutputs / num_images / n 等の枚数引数があれば 1 を指定し、複数枚を要求するな）。指示文: {instruction} / モデル: {} / 尺: {duration} / 比率: {} / 参照画像: {references}。必要なツールを自分で選び、正しい引数で呼べ。**{provider_label} 以外のサービスのツールと内蔵 image_gen の使用は禁止**（失敗したら代替生成せず、エラー内容だけを報告せよ）。指示文が日本語の場合、意味を変えずに英語へ翻訳してツールへ渡してよい（固有名詞は保持）。content_policy 等の審査拒否で失敗した場合は、意味を保った安全な英語の言い換えで**1回だけ**自動再試行し、それでも拒否されたら理由を報告せよ。ジョブが非同期（pending/queued）の場合は、完了ツール（wait/get/history等）で**完了するまでポーリングを続けよ**（数分かかる。途中で諦めるな）。完了したら、ツール結果の url フィールドにあるファイル直リンクのダウンロードURLを**1件だけ**報告せよ。共有ページ・プレビューURLは報告しない。ツール呼び出し以外の創作はするな",
+        "あなたは生成実行係。まず tool_search で {provider_label} のツールを必ず検索・ロードしてから、tool_search は検索語に合うツールしか返さない。生成ツールに加えて、完了確認ツール（result / status / task / job / query / wait / get / history 等）も**検索語を変えて複数回**検索し、両方をロードしてから始めよ。{provider_label} のMCPツールで{}を生成せよ。**生成は1枚だけ**（count / numOutputs / num_images / n 等の枚数引数があれば 1 を指定し、複数枚を要求するな）。指示文: {instruction} / モデル: {} / 尺: {duration} / 比率: {} / 参照画像: {references}。必要なツールを自分で選び、正しい引数で呼べ。**{provider_label} 以外のサービスのツールと内蔵 image_gen の使用は禁止**（失敗したら代替生成せず、エラー内容だけを報告せよ）。指示文が日本語の場合、意味を変えずに英語へ翻訳してツールへ渡してよい（固有名詞は保持）。content_policy 等の審査拒否で失敗した場合は、意味を保った安全な英語の言い換えで**1回だけ**自動再試行し、それでも拒否されたら理由を報告せよ。ジョブが非同期（pending/queued）の場合は、完了ツール（wait/get/history等）で**完了するまでポーリングを続けよ**（数分かかる。途中で諦めるな）。完了したら、ツール結果の url フィールドにあるファイル直リンクのダウンロードURLを**1件だけ**報告せよ。共有ページ・プレビューURLは報告しない。ツール呼び出し以外の創作はするな{resolution_instruction}",
         kind.noun(),
         display_optional(model),
         display_optional(aspect),
@@ -2043,6 +2364,43 @@ pub async fn remote_mcp_query(
     result.map_err(|error| sanitize_generation_message(&error))
 }
 
+async fn run_llm_tool_turn_before_deadline(
+    app: &AppHandle,
+    state: &AppState,
+    prompt: &str,
+    kind: RemoteMcpMediaKind,
+    deadline: tokio::time::Instant,
+) -> Result<crate::codex::gen_server::LlmToolTurnOutput, String> {
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    if remaining.is_zero() {
+        return Err(format!(
+            "{}の生成確認が{}分でタイムアウトしました",
+            kind.noun(),
+            kind.timeout().as_secs() / 60
+        ));
+    }
+    tokio::time::timeout(
+        remaining,
+        crate::codex::gen_server::run_llm_tool_turn(app, state, prompt, remaining),
+    )
+    .await
+    .map_err(|_| {
+        format!(
+            "{}の生成確認が{}分でタイムアウトしました",
+            kind.noun(),
+            kind.timeout().as_secs() / 60
+        )
+    })?
+}
+
+fn slot_deadline_message(kind: RemoteMcpMediaKind) -> String {
+    format!(
+        "{}の生成と保存が{}分でタイムアウトしました",
+        kind.noun(),
+        kind.timeout().as_secs() / 60
+    )
+}
+
 /// 生成専用 Codex に MCP ツール選択を任せ、成果物を既存保存経路へ合流する。
 #[allow(clippy::too_many_arguments)]
 async fn run_remote_mcp_slot(
@@ -2068,38 +2426,61 @@ async fn run_remote_mcp_slot(
     )
     .await;
 
-    let result = async {
-        let output =
-            crate::codex::gen_server::run_llm_tool_turn(app, state, llm_prompt, kind.timeout())
-                .await?;
-        let (tool_candidates, tool_errors) = extract_llm_tool_artifact_candidates(
-            &output.completed_items,
-            provider_id,
-            kind,
-            reference_paths,
-        );
-        if let Some(error) = output.terminal_error.as_deref() {
-            return Err(llm_failure_message(
-                error,
-                &output.final_message,
-                &tool_errors,
-            ));
-        }
+    let deadline = tokio::time::Instant::now() + kind.timeout();
+    let result = tokio::time::timeout_at(deadline, async {
+        let mut output =
+            run_llm_tool_turn_before_deadline(app, state, llm_prompt, kind, deadline).await?;
+        let (_, provider_label) = generation_provider(provider_id)?;
+        let mut follow_up_count = 0usize;
 
-        // 1枠は必ず1ファイル。複数候補が返っても先頭だけを保存する。
-        let source = select_llm_artifact_sources(tool_candidates, &output.final_message, kind)
-            .into_iter()
-            .next()
-            .ok_or_else(|| {
-                llm_failure_message(
-                    &format!(
-                        "Codex のツール実行結果に保存できる{}がありませんでした",
-                        kind.noun()
-                    ),
-                    &output.final_message,
-                    &tool_errors,
-                )
-            })?;
+        // 1枠は必ず1ファイル。processing の間だけ同じジョブを最大2回追いかける。
+        let source = loop {
+            match evaluate_llm_artifact_turn(&output, provider_id, kind, reference_paths) {
+                LlmArtifactTurnEvaluation::Ready(source) => break source,
+                LlmArtifactTurnEvaluation::Failed(error) => return Err(error),
+                LlmArtifactTurnEvaluation::Processing {
+                    tool_errors,
+                    identifier,
+                } => {
+                    let Some(delay_seconds) = PROCESSING_FOLLOW_UP_DELAYS_SECS
+                        .get(follow_up_count)
+                        .copied()
+                    else {
+                        return Err(processing_retry_exhausted_message(
+                            kind,
+                            &output,
+                            &tool_errors,
+                        ));
+                    };
+                    let delay = Duration::from_secs(delay_seconds);
+                    let now = tokio::time::Instant::now();
+                    if deadline.saturating_duration_since(now) <= delay {
+                        return Err(processing_retry_exhausted_message(
+                            kind,
+                            &output,
+                            &tool_errors,
+                        ));
+                    }
+                    tokio::time::sleep(delay).await;
+                    let follow_up_prompt = build_processing_follow_up_prompt(
+                        provider_label,
+                        provider_id,
+                        &output,
+                        &identifier,
+                        follow_up_count + 1,
+                    );
+                    output = run_llm_tool_turn_before_deadline(
+                        app,
+                        state,
+                        &follow_up_prompt,
+                        kind,
+                        deadline,
+                    )
+                    .await?;
+                    follow_up_count += 1;
+                }
+            }
+        };
 
         update_remote_slot(
             app,
@@ -2125,8 +2506,9 @@ async fn run_remote_mcp_slot(
             .into_iter()
             .next()
             .ok_or_else(|| format!("{}を1件も保存できませんでした", kind.noun()))
-    }
-    .await;
+    })
+    .await
+    .unwrap_or_else(|_| Err(slot_deadline_message(kind)));
 
     match result {
         Ok(saved_path) => {
@@ -2167,6 +2549,7 @@ pub async fn remote_mcp_generate(
     model: Option<String>,
     duration_seconds: Option<f64>,
     aspect: Option<String>,
+    resolution: Option<String>,
     reference_paths: Vec<String>,
     kind: RemoteMcpMediaKind,
     count: Option<u32>,
@@ -2218,6 +2601,7 @@ pub async fn remote_mcp_generate(
             model.as_deref(),
             duration_seconds,
             aspect.as_deref(),
+            resolution.as_deref(),
             &reference_paths,
         );
 
@@ -2980,6 +3364,7 @@ mod tests {
             Some("Flux 3 Video"),
             Some(5.0),
             Some("16:9"),
+            None,
             &["/tmp/reference.png".to_string()],
         );
 
@@ -2997,6 +3382,207 @@ mod tests {
         ));
         assert!(prompt.contains("共有ページ・プレビューURLは報告しない"));
         assert!(prompt.ends_with("ツール呼び出し以外の創作はするな"));
+
+        let resolution_prompt = build_remote_mcp_llm_prompt(
+            "Krea",
+            RemoteMcpMediaKind::Video,
+            "白い餅が跳ねる",
+            Some("Flux 3 Video"),
+            Some(5.0),
+            Some("16:9"),
+            Some("1080p"),
+            &[],
+        );
+        assert!(resolution_prompt.ends_with("\n解像度: 1080p で生成せよ。"));
+        assert_eq!(resolution_prompt.matches("解像度:").count(), 1);
+    }
+
+    fn mock_video_turn(
+        status: &str,
+        url: Option<&str>,
+    ) -> crate::codex::gen_server::LlmToolTurnOutput {
+        let mut structured = json!({
+            "status": status,
+            "identifier": "job-123"
+        });
+        if let Some(url) = url {
+            structured["url"] = Value::String(url.to_string());
+        }
+        crate::codex::gen_server::LlmToolTurnOutput {
+            completed_items: vec![json!({
+                "type": "mcpToolCall",
+                "server": "krea",
+                "tool": "video_status",
+                "status": "completed",
+                "result": { "structuredContent": structured }
+            })],
+            final_message: format!("状態: {status}"),
+            terminal_error: None,
+        }
+    }
+
+    #[test]
+    fn processing_turn_uses_one_follow_up_mock_and_accepts_its_url() {
+        let mut mock_turns = std::collections::VecDeque::from([
+            mock_video_turn("processing", None),
+            mock_video_turn("completed", Some("https://cdn.example.com/final.mp4")),
+        ]);
+        let mut output = mock_turns.pop_front().expect("initial turn");
+        let mut follow_ups = 0usize;
+
+        let source = loop {
+            match evaluate_llm_artifact_turn(&output, "krea", RemoteMcpMediaKind::Video, &[]) {
+                LlmArtifactTurnEvaluation::Ready(source) => break source,
+                LlmArtifactTurnEvaluation::Processing { identifier, .. } => {
+                    output.final_message = "x".repeat(GENERATION_MESSAGE_LIMIT_CHARS + 100);
+                    let prompt = build_processing_follow_up_prompt(
+                        "Krea",
+                        "krea",
+                        &output,
+                        &identifier,
+                        follow_ups + 1,
+                    );
+                    assert!(prompt.contains("新しい生成ジョブは開始するな"));
+                    assert!(prompt.contains("専用ジョブ識別子（identifier）"));
+                    assert!(prompt.contains("job-123"));
+                    output = mock_turns.pop_front().expect("follow-up turn");
+                    follow_ups += 1;
+                }
+                LlmArtifactTurnEvaluation::Failed(error) => panic!("unexpected failure: {error}"),
+            }
+        };
+
+        assert_eq!(follow_ups, 1);
+        assert_eq!(
+            source,
+            RemoteArtifactSource::Url("https://cdn.example.com/final.mp4".to_string())
+        );
+    }
+
+    #[test]
+    fn job_identifier_is_extracted_mechanically_from_supported_fields() {
+        assert_eq!(
+            extract_job_identifier(&json!({"result": {"identifier": "id-1"}})),
+            Some(ProviderJobIdentifier {
+                field: "identifier",
+                value: "id-1".to_string(),
+            })
+        );
+        assert_eq!(
+            extract_job_identifier(&json!({"structuredContent": {"job_id": 42}})),
+            Some(ProviderJobIdentifier {
+                field: "jobId",
+                value: "42".to_string(),
+            })
+        );
+        assert_eq!(
+            extract_job_identifier(&Value::String(r#"{"taskId":"task-9"}"#.to_string())),
+            Some(ProviderJobIdentifier {
+                field: "taskId",
+                value: "task-9".to_string(),
+            })
+        );
+        assert_eq!(extract_job_identifier(&json!({"id": "too-broad"})), None);
+    }
+
+    #[test]
+    fn processing_follow_up_requires_successful_explicit_status_and_identifier() {
+        assert!(matches!(
+            evaluate_llm_artifact_turn(
+                &mock_video_turn("processing", None),
+                "krea",
+                RemoteMcpMediaKind::Video,
+                &[],
+            ),
+            LlmArtifactTurnEvaluation::Processing { .. }
+        ));
+
+        let missing_identifier = crate::codex::gen_server::LlmToolTurnOutput {
+            completed_items: vec![json!({
+                "type": "mcpToolCall",
+                "server": "krea",
+                "status": "completed",
+                "result": {"structuredContent": {"status": "processing"}}
+            })],
+            final_message: "状態: processing".to_string(),
+            terminal_error: None,
+        };
+        assert!(matches!(
+            evaluate_llm_artifact_turn(&missing_identifier, "krea", RemoteMcpMediaKind::Video, &[],),
+            LlmArtifactTurnEvaluation::Failed(_)
+        ));
+
+        let report_only = crate::codex::gen_server::LlmToolTurnOutput {
+            completed_items: vec![],
+            final_message: "status: processing / identifier: job-report-only".to_string(),
+            terminal_error: None,
+        };
+        assert!(matches!(
+            evaluate_llm_artifact_turn(&report_only, "krea", RemoteMcpMediaKind::Video, &[],),
+            LlmArtifactTurnEvaluation::Failed(_)
+        ));
+
+        assert!(matches!(
+            evaluate_llm_artifact_turn(
+                &mock_video_turn("failed", None),
+                "krea",
+                RemoteMcpMediaKind::Video,
+                &[],
+            ),
+            LlmArtifactTurnEvaluation::Failed(_)
+        ));
+
+        let is_error = crate::codex::gen_server::LlmToolTurnOutput {
+            completed_items: vec![json!({
+                "type": "mcpToolCall",
+                "server": "krea",
+                "status": "completed",
+                "result": {
+                    "isError": true,
+                    "structuredContent": {
+                        "status": "processing",
+                        "jobId": "must-not-follow"
+                    }
+                }
+            })],
+            final_message: "処理中".to_string(),
+            terminal_error: None,
+        };
+        assert!(matches!(
+            evaluate_llm_artifact_turn(&is_error, "krea", RemoteMcpMediaKind::Video, &[],),
+            LlmArtifactTurnEvaluation::Failed(_)
+        ));
+    }
+
+    #[test]
+    fn processing_turn_stops_after_two_follow_ups_with_retry_later_message() {
+        assert_eq!(PROCESSING_FOLLOW_UP_DELAYS_SECS, [30, 60]);
+        let mut mock_follow_ups = std::collections::VecDeque::from([
+            mock_video_turn("processing", None),
+            mock_video_turn("processing", None),
+        ]);
+        let mut output = mock_video_turn("processing", None);
+        let mut follow_ups = 0usize;
+
+        let error = loop {
+            match evaluate_llm_artifact_turn(&output, "krea", RemoteMcpMediaKind::Video, &[]) {
+                LlmArtifactTurnEvaluation::Processing { tool_errors, .. } => {
+                    if follow_ups == PROCESSING_FOLLOW_UP_DELAYS_SECS.len() {
+                        break processing_retry_exhausted_message(
+                            RemoteMcpMediaKind::Video,
+                            &output,
+                            &tool_errors,
+                        );
+                    }
+                    output = mock_follow_ups.pop_front().expect("bounded follow-up");
+                    follow_ups += 1;
+                }
+                other => panic!("unexpected evaluation: {other:?}"),
+            }
+        };
+
+        assert_eq!(follow_ups, 2);
+        assert!(error.contains("時間をおいて再生成してください"));
     }
 
     #[test]

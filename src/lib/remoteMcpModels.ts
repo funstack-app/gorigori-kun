@@ -12,6 +12,7 @@ import {
   type RemoteMcpToolLike,
 } from "./remoteMcpTools";
 import {
+  durationValuesForConstraint,
   findVideoModelByJobSetType,
   type VideoDurationConstraint,
 } from "./videoModels";
@@ -33,6 +34,7 @@ export type RemoteMcpVideoSpecField =
   | "referenceLimit"
   | "duration"
   | "aspectRatios"
+  | "resolutions"
   | "modes"
   | "audio"
   | "multiCut";
@@ -50,6 +52,7 @@ export type RemoteMcpVideoSpecs = {
   duration: string | null;
   durationConstraint: VideoDurationConstraint | null;
   aspectRatios: string[] | null;
+  resolutions: string[] | null;
   modes: string[] | null;
   audio: RemoteMcpSpecStatus;
   multiCut: RemoteMcpSpecStatus;
@@ -85,6 +88,70 @@ export type RemoteMcpModelCatalog = {
 };
 
 export const REMOTE_MCP_CATALOG_MAX_AGE_MS = 24 * 60 * 60 * 1_000;
+export const GENERIC_REMOTE_MCP_VIDEO_RESOLUTIONS = ["自動"] as const;
+
+export type RemoteMcpVideoSettingValues = {
+  duration: number;
+  aspectRatio: string;
+  resolution: string;
+};
+
+export type RemoteMcpVideoSettingOptions = {
+  durations: number[];
+  aspectRatios: string[];
+  resolutions: string[];
+};
+
+export type RemoteMcpVideoSettingAdjustment =
+  | "duration"
+  | "aspectRatio"
+  | "resolution";
+
+/**
+ * 選択モデルの対応表を設定UIへ渡し、非対応の現在値だけ先頭候補へ寄せる。
+ * null は「仕様未取得」なので、従来の汎用候補をそのまま使う。
+ */
+export function reconcileRemoteMcpVideoSettings(
+  support: Pick<
+    RemoteMcpVideoSpecs,
+    "durationConstraint" | "aspectRatios" | "resolutions"
+  >,
+  current: RemoteMcpVideoSettingValues,
+  generic: RemoteMcpVideoSettingOptions,
+): {
+  options: RemoteMcpVideoSettingOptions;
+  values: RemoteMcpVideoSettingValues;
+  adjusted: RemoteMcpVideoSettingAdjustment[];
+} {
+  const options = {
+    durations: support.durationConstraint
+      ? durationValuesForConstraint(support.durationConstraint)
+      : [...generic.durations],
+    aspectRatios: support.aspectRatios
+      ? [...support.aspectRatios]
+      : [...generic.aspectRatios],
+    resolutions: support.resolutions
+      ? [...support.resolutions]
+      : [...generic.resolutions],
+  };
+  const values = { ...current };
+  const adjusted: RemoteMcpVideoSettingAdjustment[] = [];
+
+  if (options.durations.length > 0 && !options.durations.includes(values.duration)) {
+    values.duration = options.durations[0];
+    adjusted.push("duration");
+  }
+  if (options.aspectRatios.length > 0 && !options.aspectRatios.includes(values.aspectRatio)) {
+    values.aspectRatio = options.aspectRatios[0];
+    adjusted.push("aspectRatio");
+  }
+  if (options.resolutions.length > 0 && !options.resolutions.includes(values.resolution)) {
+    values.resolution = options.resolutions[0];
+    adjusted.push("resolution");
+  }
+
+  return { options, values, adjusted };
+}
 
 /** 保存済み一覧を表示したまま、裏で取り直す必要があるかを判定する。 */
 export function isCatalogStale(
@@ -911,6 +978,32 @@ function aspectRatiosFromMetadata(
   return ratios.length > 0 ? [...new Set(ratios)] : null;
 }
 
+function resolutionsFromSchema(fields: SchemaField[]): string[] | null {
+  const field = fields.find(({ normalizedName }) =>
+    ["resolution", "outputresolution", "videoresolution"].includes(normalizedName),
+  );
+  return field ? stringList(field.property.enum) : null;
+}
+
+function resolutionsFromMetadata(
+  metadata: Record<string, unknown> | undefined,
+): string[] | null {
+  const direct = stringList(
+    deepMetadataValue(metadata, [
+      "resolutions",
+      "supportedResolutions",
+      "resolutionOptions",
+      "outputResolutions",
+      "videoResolutions",
+    ]),
+  );
+  if (direct) return direct;
+  const resolutions = [
+    ...modelInfoText(metadata).matchAll(/\b(?:\d{3,4}p|[248]k)\b/gi),
+  ].map((match) => match[0]);
+  return resolutions.length > 0 ? [...new Set(resolutions)] : null;
+}
+
 function schemaFeatureStatus(
   parsed: { valid: boolean; fields: SchemaField[] },
   pattern: RegExp,
@@ -1026,6 +1119,10 @@ export function deriveRemoteMcpVideoSpecs(
   const aspectRatios = aspectRatiosFromCatalog ?? aspectRatiosFromSchema(parsed.fields);
   if (aspectRatiosFromCatalog) sources.aspectRatios = metadataSource;
   else if (aspectRatios) sources.aspectRatios = "generation-schema";
+  const resolutionsFromCatalog = resolutionsFromMetadata(model.metadata);
+  const resolutions = resolutionsFromCatalog ?? resolutionsFromSchema(parsed.fields);
+  if (resolutionsFromCatalog) sources.resolutions = metadataSource;
+  else if (resolutions) sources.resolutions = "generation-schema";
 
   const modes =
     stringList(
@@ -1078,6 +1175,7 @@ export function deriveRemoteMcpVideoSpecs(
     duration,
     durationConstraint,
     aspectRatios,
+    resolutions,
     modes,
     audio,
     multiCut,
@@ -1211,6 +1309,13 @@ function withMeasuredHiggsfieldFallback(
   if (!videoSpecs.aspectRatios) {
     videoSpecs.aspectRatios = [...measured.aspectRatios];
     sources.aspectRatios = "measured-fallback";
+  }
+  const resolution = measured.extraParams.find(
+    (param) => param.kind === "enum" && param.name === "resolution",
+  );
+  if (!videoSpecs.resolutions && resolution?.kind === "enum") {
+    videoSpecs.resolutions = [...resolution.values];
+    sources.resolutions = "measured-fallback";
   }
   if (!videoSpecs.referenceTypes) {
     videoSpecs.referenceTypes = measured.inputMode === "t2v" ? [] : ["image"];

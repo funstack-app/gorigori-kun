@@ -688,6 +688,7 @@ export type RemoteMcpGenerateArgs = {
   model?: string;
   durationSeconds?: number;
   aspect?: string;
+  resolution?: string;
   referencePaths: string[];
   kind: "image" | "video";
   count?: number;

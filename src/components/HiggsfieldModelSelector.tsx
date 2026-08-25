@@ -54,6 +54,7 @@ import {
 } from "../lib/remoteMcpModels";
 import {
   reconcileRemoteMcpSelections,
+  shareRemoteMcpCatalogRefresh,
   useRemoteMcpGen,
   type RemoteMcpSelection,
 } from "../lib/store/remoteMcpGen";
@@ -634,21 +635,28 @@ function ModelPickerPopover({
       }
 
       try {
-        const tools = await remoteMcp.listTools(providerId);
-        if (cancelled) return;
-        ensureRemoteMcpToolsAvailable(activeRemoteProvider.label, tools.tools);
-        const catalog = await fetchRemoteMcpModelCatalog({
+        const { tools, catalog } = await shareRemoteMcpCatalogRefresh(
           providerId,
-          providerLabel: activeRemoteProvider.label,
-          kind: media,
-          tools: tools.tools,
-        });
+          media,
+          async () => {
+            const tools = await remoteMcp.listTools(providerId);
+            ensureRemoteMcpToolsAvailable(activeRemoteProvider.label, tools.tools);
+            const catalog = await fetchRemoteMcpModelCatalog({
+              providerId,
+              providerLabel: activeRemoteProvider.label,
+              kind: media,
+              tools: tools.tools,
+            });
+            return { tools, catalog };
+          },
+        );
         if (cancelled) return;
         setModelCatalog(catalogKey, catalog);
         setRemoteModels((current) => ({
           ...current,
           [providerId]: { kind: "ready", tools, catalog },
         }));
+        removeUnavailableSelections(providerId, catalog);
       } catch (error) {
         if (cancelled) return;
         const message = remoteMcpCatalogErrorMessage(activeRemoteProvider.label, error);
@@ -686,20 +694,27 @@ function ModelPickerPopover({
       [providerId]: { kind: "loading" },
     }));
     try {
-      const [tools, discovery] = await Promise.all([
-        remoteMcp.listTools(providerId),
-        remoteMcp.discoveryCached(providerId).catch(() => null),
-      ]);
       const provider = REMOTE_MCP_PROVIDERS.find((item) => item.id === providerId);
       if (!provider) throw new Error("接続先が見つかりませんでした");
-      ensureRemoteMcpToolsAvailable(provider.label, tools.tools);
-      const catalog = await fetchRemoteMcpModelCatalog({
+      const { tools, catalog } = await shareRemoteMcpCatalogRefresh(
         providerId,
-        providerLabel: provider.label,
-        kind: media,
-        tools: tools.tools,
-        cachedModels: discovery?.models,
-      });
+        media,
+        async () => {
+          const [tools, discovery] = await Promise.all([
+            remoteMcp.listTools(providerId),
+            remoteMcp.discoveryCached(providerId).catch(() => null),
+          ]);
+          ensureRemoteMcpToolsAvailable(provider.label, tools.tools);
+          const catalog = await fetchRemoteMcpModelCatalog({
+            providerId,
+            providerLabel: provider.label,
+            kind: media,
+            tools: tools.tools,
+            cachedModels: discovery?.models,
+          });
+          return { tools, catalog };
+        },
+      );
       setModelCatalog(remoteMcpCatalogKey(providerId, media), catalog);
       setRemoteModels((current) => ({
         ...current,
@@ -733,28 +748,31 @@ function ModelPickerPopover({
     }
   };
 
-  const refreshMagnificVideoModels = async () => {
+  const refreshMagnificVideoModels = async (options: { keepVisible?: boolean } = {}) => {
     if (media !== "video") return;
-    setMagnificVideoState({ kind: "loading" });
+    if (!options.keepVisible) setMagnificVideoState({ kind: "loading" });
     try {
-      const result = await magnific.videoModelsList();
-      const generationTool: RemoteMcpToolInfo = {
-        name: "video_generate",
-        title: "動画生成",
-        inputSchemaJson: result.inputSchemaJson ?? "",
-      };
-      const catalog = buildRemoteMcpModelCatalog({
-        providerId: "magnific",
-        providerLabel: "Magnific",
-        kind: "video",
-        tools: [generationTool],
-        catalogOutput: result,
-        catalogToolName: "video_models_list",
-        requireExplicitModels: true,
+      const catalog = await shareRemoteMcpCatalogRefresh("magnific", "video", async () => {
+        const result = await magnific.videoModelsList();
+        const generationTool: RemoteMcpToolInfo = {
+          name: "video_generate",
+          title: "動画生成",
+          inputSchemaJson: result.inputSchemaJson ?? "",
+        };
+        const catalog = buildRemoteMcpModelCatalog({
+          providerId: "magnific",
+          providerLabel: "Magnific",
+          kind: "video",
+          tools: [generationTool],
+          catalogOutput: result,
+          catalogToolName: "video_models_list",
+          requireExplicitModels: true,
+        });
+        if (catalog.source === "unavailable") {
+          throw new Error(catalog.warning ?? "Magnific の実モデル一覧を読み取れませんでした");
+        }
+        return catalog;
       });
-      if (catalog.source === "unavailable") {
-        throw new Error(catalog.warning ?? "Magnific の実モデル一覧を読み取れませんでした");
-      }
       setModelCatalog(remoteMcpCatalogKey("magnific", "video"), catalog);
       setMagnificVideoState({ kind: "ready", catalog });
       removeUnavailableSelections("magnific", catalog);
@@ -784,7 +802,7 @@ function ModelPickerPopover({
       setMagnificVideoState({ kind: "ready", catalog: cached });
       if (!isCatalogStale(cached)) return;
     }
-    void refreshMagnificVideoModels();
+    void refreshMagnificVideoModels({ keepVisible: Boolean(cached) });
     // タブを開いた時だけ取得する。取得後のストア更新で同じ通信を繰り返さない。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [media, providerTab, magnificAuthed]);
@@ -1711,6 +1729,12 @@ function remoteVideoSpecDetails(
       label: "比率 (Aspect ratio)",
       value: specs.aspectRatios
         ? withSpecSource(specs.aspectRatios.join(" / "), specs.sources?.aspectRatios)
+        : "未取得",
+    },
+    {
+      label: "解像度 (Resolution)",
+      value: specs.resolutions
+        ? withSpecSource(specs.resolutions.join(" / "), specs.sources?.resolutions)
         : "未取得",
     },
   ];
