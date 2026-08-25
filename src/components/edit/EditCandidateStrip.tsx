@@ -63,7 +63,7 @@ export function EditCandidateStrip({
           </button>
         ) : null}
       </div>
-      <div className="flex min-h-0 flex-col items-center gap-2 overflow-y-auto">
+      <div className="flex min-h-0 flex-col items-center gap-2 overflow-y-auto overflow-x-hidden">
         {paths.map((path, index) => (
           <button
             key={path}

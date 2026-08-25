@@ -207,19 +207,6 @@ export function EditorCanvas({ panOnEmpty = false, regionSelect }: EditorCanvasP
   const viewportCanvas = liveCanvas as ViewportCanvas | null;
   const baseSize = liveCanvas ? getCanvasBaseSize(liveCanvas as never) : null;
 
-  const canPan = () =>
-    Boolean(
-      viewportCanvas &&
-        baseSize &&
-        isEditorViewportAboveFit(
-          viewportCanvas.getWidth?.() ?? 0,
-          viewportCanvas.getHeight?.() ?? 0,
-          baseSize.width,
-          baseSize.height,
-          viewportCanvas.getZoom?.() ?? viewportCanvas.viewportTransform?.[0] ?? 1,
-        ),
-    );
-
   const wheelZoom = (event: React.WheelEvent<HTMLElement>) => {
     if (!viewportCanvas || !baseSize) return;
     event.preventDefault();
@@ -240,7 +227,9 @@ export function EditorCanvas({ panOnEmpty = false, regionSelect }: EditorCanvasP
   };
 
   const startPan = (event: React.PointerEvent<HTMLElement>) => {
-    if (!viewportCanvas || !baseSize || !canPan()) return;
+    // Magnific 同様、ズーム段階に関係なくいつでも手のひらで動かせる
+    // (2026-08-26 STΛCK実機FB)。位置は「ウィンドウに合わせる」でいつでも戻せる。
+    if (!viewportCanvas || !baseSize) return;
     if (event.button !== 0) return;
     const rect = event.currentTarget.getBoundingClientRect();
     const viewport = viewportCanvas.viewportTransform ?? [1, 0, 0, 1, 0, 0];
@@ -303,7 +292,7 @@ export function EditorCanvas({ panOnEmpty = false, regionSelect }: EditorCanvasP
         cursor:
           panning
             ? "grabbing"
-            : canPan() && (spacePressed || !regionSelect)
+            : Boolean(viewportCanvas && baseSize) && (spacePressed || !regionSelect)
               ? "grab"
               : undefined,
       }}

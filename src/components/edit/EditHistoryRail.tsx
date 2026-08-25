@@ -46,7 +46,7 @@ export function EditHistoryRail({
       ) : null}
       <section aria-label="版" className="flex min-h-0 flex-1 flex-col px-2 pb-3 pt-3">
         <span className="mb-2 px-0.5 text-[10px] font-black text-neutral-400">版</span>
-        <div className="flex min-h-0 flex-1 flex-col items-center gap-2 overflow-y-auto">
+        <div className="flex min-h-0 flex-1 flex-col items-center gap-2 overflow-y-auto overflow-x-hidden">
           {[...paths, basePath].map((path, index) => (
             <button
               key={path}
