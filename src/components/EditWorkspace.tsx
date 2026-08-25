@@ -144,30 +144,36 @@ export function EditWorkspace() {
   const needsRegion = tool === "region" || (tool === "crop" && resizeMode === "crop");
 
   useEffect(() => {
-    setEditSession((current) => {
+    const current = editSessionRef.current;
+    const belongsToCurrentSession = Boolean(
+      sourceImagePath &&
+        (current.basePath === sourceImagePath ||
+          current.versions.some((version) => version.path === sourceImagePath)),
+    );
+    setEditSession(() => {
       if (!sourceImagePath) {
         const next = createEditSession(null);
         editSessionRef.current = next;
         return next;
       }
-      const belongsToCurrentSession =
-        current.basePath === sourceImagePath ||
-        current.versions.some((version) => version.path === sourceImagePath);
       const next = belongsToCurrentSession ? current : createEditSession(sourceImagePath);
       editSessionRef.current = next;
       return next;
     });
-  }, [sourceImagePath]);
-
-  useEffect(() => {
+    // 実行のたびにツールパネルが閉じるのをやめる (2026-08-26 STΛCK実機FB)。
+    // 同じ画像の版の行き来ではツール選択・パネル設定を維持し、別の画像を開いた
+    // ときだけ全初期化する。範囲と調整スライダーは新しい版に焼き込み済みのため
+    // 毎回リセットする (二重適用防止)。
     setRegion(null);
-    setTool("ai");
-    setRegionMode("replace");
-    setResizeMode("expand");
-    setCropAspect("1:1");
-    setExpandAspect("16:9");
-    setExpandPrompt("");
     setAdjust(NEUTRAL_ADJUST);
+    if (!belongsToCurrentSession) {
+      setTool("ai");
+      setRegionMode("replace");
+      setResizeMode("expand");
+      setCropAspect("1:1");
+      setExpandAspect("16:9");
+      setExpandPrompt("");
+    }
   }, [sourceImagePath]);
 
   useEffect(() => {

@@ -82,7 +82,7 @@ export function isEditorViewportAboveFit(
   return zoom > editorFitZoom(canvasWidth, canvasHeight, imageWidth, imageHeight) + 0.001;
 }
 
-export function EditorCanvas({ panOnEmpty = false, regionSelect }: EditorCanvasProps = {}) {
+export function EditorCanvas({ regionSelect }: EditorCanvasProps = {}) {
   const hostRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fabricCanvasRef = useRef<any>(null);
@@ -114,6 +114,11 @@ export function EditorCanvas({ panOnEmpty = false, regionSelect }: EditorCanvasP
         selection: false,
       });
       canvas.skipTargetFind = true;
+      // fabric が canvas 要素へ独自カーソルを刷り続けるため、親 (<main>) の
+      // 手のひらカーソルが負ける。inherit にして親のカーソルを全域で使う。
+      canvas.defaultCursor = "inherit";
+      canvas.hoverCursor = "inherit";
+      canvas.moveCursor = "inherit";
       fabricCanvasRef.current = canvas;
       setCanvas(canvas);
 
@@ -231,21 +236,13 @@ export function EditorCanvas({ panOnEmpty = false, regionSelect }: EditorCanvasP
     // (2026-08-26 STΛCK実機FB)。位置は「ウィンドウに合わせる」でいつでも戻せる。
     if (!viewportCanvas || !baseSize) return;
     if (event.button !== 0) return;
-    const rect = event.currentTarget.getBoundingClientRect();
-    const viewport = viewportCanvas.viewportTransform ?? [1, 0, 0, 1, 0, 0];
-    const pointerX = event.clientX - rect.left;
-    const pointerY = event.clientY - rect.top;
-    const currentZoom = viewportCanvas.getZoom?.() ?? viewport[0] ?? 1;
-    const outsideImage =
-      pointerX < (viewport[4] ?? 0) ||
-      pointerY < (viewport[5] ?? 0) ||
-      pointerX > (viewport[4] ?? 0) + baseSize.width * currentZoom ||
-      pointerY > (viewport[5] ?? 0) + baseSize.height * currentZoom;
     const interactive = (event.target as Element | null)?.closest(
       "button, input, textarea, select, [contenteditable='true']",
     );
     if (!spacePressedRef.current && interactive) return;
-    const directPan = !regionSelect && (!outsideImage || (panOnEmpty && outsideImage));
+    // ビューエリア全域が手のひら (2026-08-26 STΛCK実機FB)。画像の内外を問わず
+    // ドラッグでパンする。範囲選択中だけはドラッグを選択操作に譲る。
+    const directPan = !regionSelect;
     if (!spacePressedRef.current && !directPan) return;
 
     event.preventDefault();
