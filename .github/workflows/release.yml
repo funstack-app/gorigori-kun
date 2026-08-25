@@ -161,8 +161,24 @@ jobs:
           chmod +x src-tauri/resources/codex-app-server
           rm -rf codex-app-server.tar.gz tmp-app-server
 
+          # codex-code-mode-host (0.148+ のツール実行の相棒バイナリ)。
+          # これが無いと image_gen 等の全ツール呼び出しが
+          # 「failed to spawn code-mode host」で失敗する
+          # (v2.6.0 配布事故 2026-08-25。npm 配布も codex+host の2本組が正)。
+          curl -L -o code-mode-host.tar.gz "$base/codex-code-mode-host-${codex_arch}.tar.gz"
+          mkdir -p tmp-host
+          tar -xzf code-mode-host.tar.gz -C tmp-host
+          find tmp-host -type f -name "codex-code-mode-host*" -exec mv {} src-tauri/resources/codex-code-mode-host \;
+          if [ ! -f "src-tauri/resources/codex-code-mode-host" ]; then
+            echo "Failed to find codex-code-mode-host in extracted tar"
+            ls -la tmp-host/
+            exit 1
+          fi
+          chmod +x src-tauri/resources/codex-code-mode-host
+          rm -rf code-mode-host.tar.gz tmp-host
+
           # 確認
-          ls -lh src-tauri/resources/codex src-tauri/resources/codex-app-server
+          ls -lh src-tauri/resources/codex src-tauri/resources/codex-app-server src-tauri/resources/codex-code-mode-host
 
       # 2026-08-15: MCP 認可専用の補助バイナリによる二段構えは **撤去済み**。
       # 認可 (mcp add / mcp login) も日常実行も、上で同梱した 0.147.0 一本で動く。
@@ -182,7 +198,7 @@ jobs:
           with open(path) as f:
               conf = json.load(f)
           existing = conf["bundle"].get("resources", [])
-          additions = ["resources/codex", "resources/codex-app-server"]
+          additions = ["resources/codex", "resources/codex-app-server", "resources/codex-code-mode-host"]
           for a in additions:
               if a not in existing:
                   existing.append(a)
@@ -302,6 +318,23 @@ jobs:
           Remove-Item "codex-app-server.zip"
           Remove-Item "tmp-app-server" -Recurse -Force
 
+          # codex-code-mode-host.exe (0.148+ のツール実行の相棒バイナリ)。
+          # 無いと image_gen 等の全ツール呼び出しが失敗する (v2.6.0 配布事故 2026-08-25)。
+          Invoke-WebRequest -Uri "$base/codex-code-mode-host-x86_64-pc-windows-msvc.exe.zip" -OutFile "code-mode-host.zip"
+          Expand-Archive -Path "code-mode-host.zip" -DestinationPath "tmp-host" -Force
+          Get-ChildItem "tmp-host" -Recurse |
+            Where-Object { $_.Name -eq "codex-code-mode-host-x86_64-pc-windows-msvc.exe" } |
+            Select-Object -First 1 |
+            ForEach-Object {
+              Move-Item -Path $_.FullName -Destination "src-tauri/resources/codex-code-mode-host.exe" -Force
+            }
+          if (-not (Test-Path "src-tauri/resources/codex-code-mode-host.exe")) {
+            Write-Error "Failed to find codex-code-mode-host-x86_64-pc-windows-msvc.exe in extracted zip"
+            exit 1
+          }
+          Remove-Item "code-mode-host.zip"
+          Remove-Item "tmp-host" -Recurse -Force
+
           Write-Host "✓ Codex binaries staged in src-tauri/resources/"
           Get-ChildItem "src-tauri/resources" | Format-Table Name, Length
 
@@ -315,7 +348,7 @@ jobs:
           $confPath = "src-tauri/tauri.conf.json"
           $conf = Get-Content $confPath -Raw | ConvertFrom-Json
           $existing = @($conf.bundle.resources)
-          $additions = @("resources/codex.exe", "resources/codex-app-server.exe")
+          $additions = @("resources/codex.exe", "resources/codex-app-server.exe", "resources/codex-code-mode-host.exe")
           $conf.bundle.resources = $existing + $additions
           $conf | ConvertTo-Json -Depth 50 | Set-Content $confPath -Encoding UTF8
           Write-Host "✓ tauri.conf.json updated:"
@@ -431,6 +464,23 @@ jobs:
           Remove-Item "codex-app-server.zip"
           Remove-Item "tmp-app-server" -Recurse -Force
 
+          # codex-code-mode-host.exe (0.148+ のツール実行の相棒バイナリ)。
+          # 無いと image_gen 等の全ツール呼び出しが失敗する (v2.6.0 配布事故 2026-08-25)。
+          Invoke-WebRequest -Uri "$base/codex-code-mode-host-x86_64-pc-windows-msvc.exe.zip" -OutFile "code-mode-host.zip"
+          Expand-Archive -Path "code-mode-host.zip" -DestinationPath "tmp-host" -Force
+          Get-ChildItem "tmp-host" -Recurse |
+            Where-Object { $_.Name -eq "codex-code-mode-host-x86_64-pc-windows-msvc.exe" } |
+            Select-Object -First 1 |
+            ForEach-Object {
+              Move-Item -Path $_.FullName -Destination "src-tauri/resources/codex-code-mode-host.exe" -Force
+            }
+          if (-not (Test-Path "src-tauri/resources/codex-code-mode-host.exe")) {
+            Write-Error "Failed to find codex-code-mode-host-x86_64-pc-windows-msvc.exe in extracted zip"
+            exit 1
+          }
+          Remove-Item "code-mode-host.zip"
+          Remove-Item "tmp-host" -Recurse -Force
+
           Write-Host "✓ Codex binaries staged in src-tauri/resources/"
           Get-ChildItem "src-tauri/resources" | Format-Table Name, Length
 
@@ -446,7 +496,7 @@ jobs:
           $confPath = "src-tauri/tauri.conf.json"
           $conf = Get-Content $confPath -Raw | ConvertFrom-Json
           $existing = @($conf.bundle.resources)
-          $additions = @("resources/codex.exe", "resources/codex-app-server.exe")
+          $additions = @("resources/codex.exe", "resources/codex-app-server.exe", "resources/codex-code-mode-host.exe")
           $conf.bundle.resources = $existing + $additions
 
           # 互換版は専用チャンネルを見る。通常版の latest.json を読ませると、
