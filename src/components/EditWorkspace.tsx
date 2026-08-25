@@ -2,9 +2,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   images as imagesIpc,
+  magnific,
   magnificImageEdit,
-  type MagnificImageEditTool,
 } from "../lib/ipc";
+import { FEATURED_MAGNIFIC_IMAGE_MODELS } from "../lib/magnific/models";
 import { useAccounts } from "../lib/store/accounts";
 import { useBatches } from "../lib/store/batches";
 import {
@@ -12,14 +13,12 @@ import {
   createEditSession,
 } from "../lib/store/editSession";
 import { beginDirectRun } from "../lib/store/generationStatus";
+import { useMagnificModel } from "../lib/store/magnificModel";
 import { useThreads } from "../lib/store/threads";
 import { useToasts } from "../lib/store/toasts";
 import { AdjustPanel } from "./edit/AdjustPanel";
 import { CropPanel } from "./edit/CropPanel";
-import {
-  EditCandidateStrip,
-  isVersionSelectDisabled,
-} from "./edit/EditCandidateStrip";
+import { isVersionSelectDisabled } from "./edit/EditCandidateStrip";
 import {
   buildEraseInstruction,
   DEFAULT_EDIT_CANDIDATE_COUNT,
@@ -28,9 +27,12 @@ import {
 } from "./edit/EditChatBar";
 import { EditFloatingPanel } from "./edit/EditFloatingPanel";
 import { EditHistoryRail } from "./edit/EditHistoryRail";
-import { MagnificToolPanel } from "./edit/MagnificToolPanels";
+import {
+  MagnificToolPanel,
+  type MagnificPanelTool,
+} from "./edit/MagnificToolPanels";
 import { EditToolRail, type EditToolId } from "./edit/EditToolRail";
-import { EditorCanvas } from "./edit/EditorCanvas";
+import { EditorCanvas, EditorZoomControls } from "./edit/EditorCanvas";
 import { ExportDialog } from "./edit/ExportDialog";
 import type { NormalizedBbox } from "./edit/RegionSelectOverlay";
 import {
@@ -53,27 +55,20 @@ function basename(path: string) {
   return path.split(/[\\/]/).pop() ?? path;
 }
 
-const MAGNIFIC_TOOL_LABELS: Record<MagnificImageEditTool, string> = {
-  expand: "拡張",
+type ActiveMagnificTool = Extract<EditToolId, MagnificPanelTool>;
+
+const MAGNIFIC_TOOL_LABELS: Record<ActiveMagnificTool, string> = {
   camera: "カメラ",
   relight: "ライティング",
-  upscale: "高画質化",
 };
 
-const MAGNIFIC_TOOL_SUCCESS_TEXT: Record<MagnificImageEditTool, string> = {
-  expand: "拡張した画像",
+const MAGNIFIC_TOOL_SUCCESS_TEXT: Record<ActiveMagnificTool, string> = {
   camera: "カメラを変えた画像",
   relight: "光を調整した画像",
-  upscale: "高画質化した画像",
 };
 
-function isMagnificTool(tool: EditToolId): tool is MagnificImageEditTool {
-  return (
-    tool === "expand" ||
-    tool === "camera" ||
-    tool === "relight" ||
-    tool === "upscale"
-  );
+function isMagnificTool(tool: EditToolId): tool is ActiveMagnificTool {
+  return tool === "camera" || tool === "relight";
 }
 
 /** 1枚の画像を、候補から選びながら版として育てる編集画面。 */
@@ -82,13 +77,13 @@ export function EditWorkspace() {
   const busyTool = useEditor((state) => state.busyTool);
   const pendingOpenPath = useEditor((state) => state.pendingOpenPath);
   const magnificConnected = useAccounts((state) => state.magnific.authenticated);
+  const selectedMagnificModels = useMagnificModel((state) => state.selectedModels);
   const {
     chooseImage,
     exportImageAs,
     applyAdjust,
     cropToRegion,
     rotateOrFlip,
-    removeBackgroundOnCanvas,
     saveAsArtwork,
     saveCanvasVersion,
     applyRedlineFix,
@@ -108,9 +103,8 @@ export function EditWorkspace() {
   const [tool, setTool] = useState<EditToolId>("ai");
   const [adjust, setAdjust] = useState<AdjustValues>(NEUTRAL_ADJUST);
   const [exportOpen, setExportOpen] = useState(false);
-  const [removingBg, setRemovingBg] = useState(false);
   const [magnificBusyTool, setMagnificBusyTool] =
-    useState<MagnificImageEditTool | null>(null);
+    useState<ActiveMagnificTool | "restyle" | null>(null);
   const [editSession, setEditSession] = useState(() => createEditSession(sourceImagePath));
   const editSessionRef = useRef(editSession);
 
@@ -213,7 +207,6 @@ export function EditWorkspace() {
   const selectSessionImage = async (path: string) => {
     if (
       busy ||
-      removingBg ||
       magnificBusyTool !== null ||
       versionInFlightRef.current
     ) return;
@@ -281,7 +274,7 @@ export function EditWorkspace() {
     if (result === "version-failed") {
       setError(`${action}結果を版として保存できなかったため、変更を取り消しました。`);
     } else if (result === "patch-failed") {
-      setError(`${action}ませんでした。キャンバス下のメッセージを確認してください。`);
+      setError(`${action}ませんでした。画像を開き直してお試しください。`);
     }
   };
 
@@ -369,37 +362,6 @@ export function EditWorkspace() {
     });
   };
 
-  const runRemoveBackground = async () => {
-    if (
-      removingBg ||
-      magnificBusyTool !== null ||
-      versionInFlightRef.current ||
-      versionRecoveryRequired
-    ) return;
-    setRemovingBg(true);
-    setError(null);
-    try {
-      const resultPath = await removeBackgroundOnCanvas();
-      if (!resultPath) {
-        setError("背景を透過できませんでした。キャンバス下のメッセージを確認してください。");
-      } else if (await applyVersion(resultPath, "add", "背景透過")) {
-        useToasts.getState().push({
-          kind: "success",
-          text: "背景を透過しました。右の履歴から前の版に戻せます。",
-          ttlMs: 4000,
-        });
-        setAdjust(NEUTRAL_ADJUST);
-        setTool("ai");
-      } else {
-        setError("背景透過の結果を読み込めませんでした。前の版を表示しています。");
-      }
-    } catch (caught) {
-      setError(`背景を透過できませんでした: ${String(caught)}`);
-    } finally {
-      setRemovingBg(false);
-    }
-  };
-
   const runExport = async (format: ExportFormat, size: ExportSize) => {
     setError(null);
     setExportOpen(false);
@@ -407,14 +369,13 @@ export function EditWorkspace() {
   };
 
   const runMagnificEdit = async (
-    editTool: MagnificImageEditTool,
+    editTool: ActiveMagnificTool,
     params: Record<string, unknown>,
   ) => {
     if (
       !sourceImagePath ||
       !magnificConnected ||
       busy ||
-      removingBg ||
       busyTool !== null ||
       magnificBusyTool !== null ||
       versionInFlightRef.current ||
@@ -422,19 +383,22 @@ export function EditWorkspace() {
     ) return;
 
     const label = MAGNIFIC_TOOL_LABELS[editTool];
+    const track = beginDirectRun("magnificEdit", 1);
     setMagnificBusyTool(editTool);
     setError(null);
+    track.markStarted();
     try {
       const paths = await magnificImageEdit(sourceImagePath, editTool, params);
       const resultPath = paths.find((path) => Boolean(path?.trim()));
       if (!resultPath) {
-        setError(`${label}の結果画像を受け取れませんでした。`);
+        track.fail(`${label}の結果画像を受け取れませんでした。`);
         return;
       }
       if (!(await applyVersion(resultPath, "add", label))) {
-        setError(`${label}の結果を新しい版として読み込めませんでした。前の版を表示しています。`);
+        track.fail(`${label}の結果を新しい版として読み込めませんでした。`);
         return;
       }
+      track.markCompleted();
       setAdjust(NEUTRAL_ADJUST);
       useToasts.getState().push({
         kind: "success",
@@ -442,8 +406,61 @@ export function EditWorkspace() {
         ttlMs: 4400,
       });
     } catch (caught) {
-      setError(`${label}を実行できませんでした: ${String(caught)}`);
+      track.fail(String(caught));
     } finally {
+      track.done();
+      setMagnificBusyTool(null);
+    }
+  };
+
+  /** B1の簡易リスタイル。プリセット付き本パネルはB2で追加する。 */
+  const runRestyle = async () => {
+    const prompt = instruction.trim();
+    if (
+      !sourceImagePath ||
+      !prompt ||
+      !magnificConnected ||
+      busy ||
+      busyTool !== null ||
+      magnificBusyTool !== null ||
+      versionInFlightRef.current ||
+      versionRecoveryRequired
+    ) return;
+
+    const track = beginDirectRun("magnificEdit", 1);
+    const model =
+      selectedMagnificModels[0] ?? FEATURED_MAGNIFIC_IMAGE_MODELS[0].id;
+    setMagnificBusyTool("restyle");
+    setError(null);
+    track.markStarted();
+    try {
+      const result = await magnific.generateBatch({
+        prompt,
+        model,
+        count: 1,
+        refImagePaths: [sourceImagePath],
+      });
+      const resultPath = result.generatedPaths.find((path) => Boolean(path?.trim()));
+      if (!resultPath) {
+        track.fail(result.errors?.[0] ?? "リスタイル結果を受け取れませんでした。");
+        return;
+      }
+      if (!(await applyVersion(resultPath, "add", "リスタイル"))) {
+        track.fail("リスタイル結果を新しい版として読み込めませんでした。");
+        return;
+      }
+      track.markCompleted();
+      setInstruction("");
+      setAdjust(NEUTRAL_ADJUST);
+      useToasts.getState().push({
+        kind: "success",
+        text: "リスタイルした画像を新しい版にしました。右の履歴から戻せます。",
+        ttlMs: 4400,
+      });
+    } catch (caught) {
+      track.fail(String(caught));
+    } finally {
+      track.done();
       setMagnificBusyTool(null);
     }
   };
@@ -485,7 +502,7 @@ export function EditWorkspace() {
           ttlMs: 4000,
         });
       } else {
-        setError("作品にできませんでした。キャンバス下のメッセージを確認してください。");
+        setError("作品にできませんでした。画像を開き直してお試しください。");
       }
     } catch (caught) {
       setError(`作品にできませんでした: ${String(caught)}`);
@@ -508,15 +525,18 @@ export function EditWorkspace() {
       versionRecoveryRequired
     ) return;
 
+    const liveCanvas = useEditor.getState().canvas;
+    if (!liveCanvas) {
+      setError("編集キャンバスを準備できませんでした。もう一度お試しください。");
+      return;
+    }
+
+    const track = beginDirectRun("aiEdit", 1);
     setBusy(true);
     setError(null);
+    track.markStarted();
     try {
-      const liveCanvas = useEditor.getState().canvas;
       const sessionBeforeEdit = editSessionRef.current;
-      if (!liveCanvas) {
-        setError("編集キャンバスを準備できませんでした。もう一度お試しください。");
-        return;
-      }
       const result = await runVersionOperation(
         versionInFlightRef,
         setVersionInFlight,
@@ -542,8 +562,12 @@ export function EditWorkspace() {
             onRecoveryFailure: handleVersionRecoveryFailure,
           }),
       );
-      if (result === null) return;
+      if (result === null) {
+        track.fail("部分編集を開始できませんでした。");
+        return;
+      }
       if (result === "applied") {
+        track.markCompleted();
         useToasts.getState().push({
           kind: "success",
           text: "囲んだところだけ直して、新しい版にしました。",
@@ -552,13 +576,18 @@ export function EditWorkspace() {
         setInstruction("");
         setRegion(null);
       } else if (result === "version-failed") {
-        setError("編集結果を保存できなかったため、変更を取り消しました。");
+        track.fail("編集結果を保存できなかったため、変更を取り消しました。");
       } else if (result === "patch-failed") {
-        setError("直せませんでした。キャンバス下のメッセージを確認してください。");
+        const detail = useEditor.getState().error ?? "部分編集を実行できませんでした。";
+        track.fail(detail);
+        if (detail !== EDITOR_RECOVERY_ERROR) useEditor.getState().setError(null);
+      } else if (result === "recovery-failed") {
+        track.fail(EDITOR_RECOVERY_ERROR);
       }
     } catch (caught) {
-      setError(`直せませんでした: ${String(caught)}`);
+      track.fail(String(caught));
     } finally {
+      track.done();
       setBusy(false);
     }
   };
@@ -605,24 +634,22 @@ export function EditWorkspace() {
           editSessionRef.current = next;
           return next;
         });
-        track.markCompleted();
+        generatedPaths.forEach(() => track.markCompleted());
         useToasts.getState().push({
           kind: "success",
-          text: `候補が${generatedPaths.length}枚できました。左下から1枚選んでください。`,
+          text: `候補が${generatedPaths.length}枚できました。右の「候補」から1枚選んでください。`,
           ttlMs: 4800,
         });
         setInstruction("");
       } else {
         const detail = result.errors?.[0];
-        setError(detail ? `直せませんでした: ${detail}` : "直せませんでした。");
         track.fail(detail ?? "編集に失敗しました");
       }
       if (result.failedCount > 0 && generatedPaths.length > 0) {
-        setError(`一部の候補を作れませんでした。できた${generatedPaths.length}枚から選べます。`);
+        track.fail(result.errors?.[0] ?? "一部の編集候補を作れませんでした。");
       }
     } catch (caught) {
       useBatches.getState().removeBatch(tempId);
-      setError(`直せませんでした: ${String(caught)}`);
       track.fail(String(caught));
     } finally {
       track.done();
@@ -633,6 +660,7 @@ export function EditWorkspace() {
   const run = async () => {
     if (tool === "region") await runRegion();
     else if (tool === "ai") await runWholeImage();
+    else if (tool === "restyle") await runRestyle();
   };
 
   const canRun =
@@ -640,7 +668,9 @@ export function EditWorkspace() {
       sourceImagePath &&
         (instruction.trim() || (tool === "region" && regionMode === "erase")),
     ) &&
-    (tool === "ai" || (tool === "region" && region !== null)) &&
+    (tool === "ai" ||
+      tool === "restyle" ||
+      (tool === "region" && region !== null)) &&
     !busy &&
     busyTool === null &&
     magnificBusyTool === null &&
@@ -648,14 +678,12 @@ export function EditWorkspace() {
     !versionRecoveryRequired;
   const panelBusy =
     busy ||
-    removingBg ||
     busyTool !== null ||
     magnificBusyTool !== null ||
     versionInFlight ||
     versionRecoveryRequired;
   const versionSelectDisabled = isVersionSelectDisabled({
     generationBusy: busy,
-    backgroundRemovalBusy: removingBg,
     toolBusy: busyTool !== null || magnificBusyTool !== null,
     versionInFlight,
     versionRecoveryRequired,
@@ -683,7 +711,7 @@ export function EditWorkspace() {
               type="button"
               onClick={() => void saveArtwork()}
               disabled={panelBusy || savingArtwork}
-              className="rounded-md border border-indigo-400/50 bg-indigo-500/15 px-3 py-1.5 text-[11px] font-black text-indigo-100 hover:border-indigo-300 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+              className="rounded-md border border-pink-400/50 bg-pink-500/15 px-3 py-1.5 text-[11px] font-black text-pink-100 hover:border-pink-300 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
             >
               作品にする
             </button>
@@ -691,7 +719,7 @@ export function EditWorkspace() {
               type="button"
               onClick={() => setExportOpen(true)}
               disabled={panelBusy}
-              className="rounded-md border border-[#3a3a3a] bg-[#1a1a1a] px-3 py-1.5 text-[11px] font-black text-neutral-200 hover:border-indigo-400 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+              className="rounded-md border border-[#3a3a3a] bg-[#1a1a1a] px-3 py-1.5 text-[11px] font-black text-neutral-200 hover:border-pink-400 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
             >
               書き出し
             </button>
@@ -699,7 +727,7 @@ export function EditWorkspace() {
               type="button"
               onClick={() => void chooseImage()}
               disabled={versionSelectDisabled}
-              className="rounded-md border border-[#3a3a3a] bg-[#1a1a1a] px-3 py-1.5 text-[11px] font-black text-neutral-200 hover:border-indigo-400 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+              className="rounded-md border border-[#3a3a3a] bg-[#1a1a1a] px-3 py-1.5 text-[11px] font-black text-neutral-200 hover:border-pink-400 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
             >
               別の画像にする
             </button>
@@ -708,8 +736,7 @@ export function EditWorkspace() {
       </header>
 
       <div
-        data-tour="editing-canvas"
-        aria-disabled={versionRecoveryRequired}
+        className="flex min-h-0 flex-1 overflow-hidden bg-[#121212]"
         onKeyDownCapture={(event) => {
           if (!versionRecoveryRequired) return;
           const target = event.target as HTMLElement;
@@ -717,30 +744,35 @@ export function EditWorkspace() {
           event.preventDefault();
           event.stopPropagation();
         }}
-        className={`relative flex min-h-0 flex-1 overflow-hidden bg-[#121212] [&>main]:!bg-[#121212] [&_.bg-pink-500]:!bg-indigo-500 [&_.border-pink-400\/50]:!border-indigo-400\/50 [&_.text-pink-300]:!text-indigo-300 ${
-          versionRecoveryRequired ? "pointer-events-none" : ""
-        }`}
       >
-        <EditorCanvas
-          panOnEmpty={!needsRegion}
-          regionSelect={
-            sourceImagePath && needsRegion
-              ? {
-                  value: region,
-                  onChange: setRegion,
-                  disabled: panelBusy,
-                  hint:
-                    tool === "crop"
-                      ? "残したいところをドラッグで囲む"
-                      : "直したいところをドラッグで囲む",
-                }
-              : undefined
-          }
-        />
+        <div
+          aria-disabled={versionRecoveryRequired}
+          className={`flex min-w-0 flex-1 flex-col ${
+            versionRecoveryRequired ? "pointer-events-none" : ""
+          }`}
+        >
+          <div
+            data-tour="editing-canvas"
+            className="relative flex min-h-0 flex-1 overflow-hidden bg-[#121212] [&>main]:!bg-[#121212]"
+          >
+            <EditorCanvas
+              panOnEmpty={!needsRegion}
+              regionSelect={
+                sourceImagePath && needsRegion
+                  ? {
+                      value: region,
+                      onChange: setRegion,
+                      disabled: panelBusy,
+                      hint:
+                        tool === "crop"
+                          ? "残したいところをドラッグで囲む"
+                          : "直したいところをドラッグで囲む",
+                    }
+                  : undefined
+              }
+            />
 
-        {sourceImagePath ? (
-          <>
-            {tool === "adjust" ? (
+            {sourceImagePath && tool === "adjust" ? (
               <EditFloatingPanel title="調整" onClose={() => selectTool("ai")}>
                 <AdjustPanel
                   values={adjust}
@@ -752,8 +784,8 @@ export function EditWorkspace() {
                   busy={panelBusy}
                 />
               </EditFloatingPanel>
-            ) : tool === "crop" ? (
-              <EditFloatingPanel title="切り抜き" onClose={() => selectTool("ai")}>
+            ) : sourceImagePath && tool === "crop" ? (
+              <EditFloatingPanel title="リサイズ" onClose={() => selectTool("ai")}>
                 <CropPanel
                   region={region}
                   onApply={() => void runCrop()}
@@ -761,7 +793,7 @@ export function EditWorkspace() {
                   busy={panelBusy}
                 />
               </EditFloatingPanel>
-            ) : isMagnificTool(tool) ? (
+            ) : sourceImagePath && isMagnificTool(tool) ? (
               <EditFloatingPanel
                 title={MAGNIFIC_TOOL_LABELS[tool]}
                 onClose={() => selectTool("ai")}
@@ -774,57 +806,63 @@ export function EditWorkspace() {
                 />
               </EditFloatingPanel>
             ) : null}
+          </div>
 
-            {editSession.basePath && editSession.currentPath ? (
-              <>
-                <EditCandidateStrip
-                  basePath={editSession.basePath}
-                  candidates={editSession.candidates}
-                  currentPath={editSession.currentPath}
-                  disabled={versionSelectDisabled}
-                  downloadDisabled={panelBusy}
-                  onSelect={(path) => void selectSessionImage(path)}
-                  onDownload={() => setExportOpen(true)}
-                />
-                <EditHistoryRail
-                  basePath={editSession.basePath}
-                  versions={editSession.versions}
-                  currentPath={editSession.currentPath}
-                  disabled={versionSelectDisabled}
-                  onSelect={(path) => void selectSessionImage(path)}
-                />
-              </>
-            ) : null}
-
-            <div className="absolute bottom-6 left-1/2 z-40 flex -translate-x-1/2 flex-col items-center gap-2">
+          {sourceImagePath ? (
+            <div
+              data-edit-bottom-dock
+              className="shrink-0 border-t border-[#2a2a2a] bg-[#151515] px-3 pb-2 pt-2"
+            >
               {displayedError ? (
-                <p className="w-[min(560px,calc(100vw-2rem))] rounded-lg border border-red-500/40 bg-[#1b1111]/95 px-3 py-2 text-[11px] font-bold leading-4 text-red-200 shadow-xl">
+                <p
+                  title={displayedError}
+                  className="mx-auto mb-2 max-w-[560px] truncate rounded-md border border-red-500/35 bg-[#1b1111] px-3 py-1.5 text-[11px] font-bold text-red-200"
+                >
                   {displayedError}
                 </p>
               ) : null}
-              <EditChatBar
-                value={instruction}
-                activeTool={tool}
-                candidateCount={candidateCount}
-                regionMode={regionMode}
-                busy={busy || versionInFlight}
-                interactionDisabled={versionRecoveryRequired}
-                disabled={!canRun}
-                onChange={setInstruction}
-                onSubmit={() => void run()}
-                onCandidateCountChange={setCandidateCount}
-                onRegionModeChange={setRegionMode}
-              />
-              <EditToolRail
-                activeTool={tool}
-                disabled={panelBusy}
-                removingBackground={removingBg}
-                magnificConnected={magnificConnected}
-                onSelect={selectTool}
-                onRemoveBackground={() => void runRemoveBackground()}
-              />
+              <div className="flex justify-center">
+                <EditChatBar
+                  value={instruction}
+                  activeTool={tool}
+                  candidateCount={candidateCount}
+                  regionMode={regionMode}
+                  busy={busy || magnificBusyTool === "restyle" || versionInFlight}
+                  interactionDisabled={versionRecoveryRequired}
+                  disabled={!canRun}
+                  onChange={setInstruction}
+                  onSubmit={() => void run()}
+                  onCandidateCountChange={setCandidateCount}
+                  onRegionModeChange={setRegionMode}
+                />
+              </div>
+              <div className="mt-2 grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-3">
+                <span aria-hidden />
+                <EditToolRail
+                  activeTool={tool}
+                  disabled={panelBusy}
+                  magnificConnected={magnificConnected}
+                  onSelect={selectTool}
+                />
+                <div className="flex min-w-0 justify-end">
+                  <EditorZoomControls />
+                </div>
+              </div>
             </div>
-          </>
+          ) : null}
+        </div>
+
+        {editSession.basePath && editSession.currentPath ? (
+          <EditHistoryRail
+            basePath={editSession.basePath}
+            versions={editSession.versions}
+            candidates={editSession.candidates}
+            currentPath={editSession.currentPath}
+            disabled={versionSelectDisabled}
+            downloadDisabled={panelBusy}
+            onSelect={(path) => void selectSessionImage(path)}
+            onDownload={() => setExportOpen(true)}
+          />
         ) : null}
       </div>
 

@@ -35,7 +35,8 @@ export type GenerationKind =
   | "sceneRecreate"
   | "characterSheet"
   | "video"
-  | "aiEdit";
+  | "aiEdit"
+  | "magnificEdit";
 
 /**
  * 中止 (cancel_generation) が実際に効く種類か (2026-07-27 追加 / 2026-07-28 更新)。
@@ -93,6 +94,7 @@ export const GENERATION_KIND_LABEL: Record<GenerationKind, string> = {
   characterSheet: "キャラクターシート",
   video: "動画生成",
   aiEdit: "AI編集",
+  magnificEdit: "画像編集 (Magnific)",
 };
 
 /**
@@ -113,6 +115,7 @@ const GENERATION_KIND_UI_MODE: Record<GenerationKind, UiMode | null> = {
   batch: null,
   video: null,
   aiEdit: null,
+  magnificEdit: null,
   multiangle: "multiAngle",
   storyboard: "storyboard",
   expressionSet: "expressionSet",
@@ -157,6 +160,7 @@ export function skillIdForKind(kind: GenerationKind): string | null {
 const GENERATION_KIND_TAB: Record<GenerationKind, WorkspaceTab> = {
   // 作品モードの3種は行き先がそれぞれ違う (上のコメント)。
   aiEdit: "edit",
+  magnificEdit: "edit",
   video: "video",
   batch: "generate",
   // 専用スキル画面を持つ種類は、その画面が乗る「画像生成」タブ。

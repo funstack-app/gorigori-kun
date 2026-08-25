@@ -4,89 +4,117 @@ export type EditToolId =
   | "ai"
   | "region"
   | "crop"
-  | "adjust"
-  | "expand"
-  | "camera"
+  | "restyle"
   | "relight"
-  | "upscale";
+  | "camera"
+  | "adjust";
 
 type EditToolRailProps = {
   activeTool: EditToolId;
   disabled: boolean;
-  removingBackground: boolean;
-  /** 省略は旧レイアウト利用向け。編集画面では必ず接続状態を渡す。 */
   magnificConnected?: boolean;
   onSelect: (tool: EditToolId) => void;
-  onRemoveBackground: () => void;
+  /** 旧レイアウトから単体利用された場合だけ受け取る互換口。本体の編集タブは渡さない。 */
+  removingBackground?: boolean;
+  /** @deprecated B1以降の編集タブUIでは背景透過を表示しない。 */
+  onRemoveBackground?: () => void;
 };
 
-type OneShotToolId = "background";
-
 const TOOLS: ReadonlyArray<{
-  id: EditToolId | OneShotToolId;
+  id: EditToolId;
   label: string;
   icon: ReactNode;
   magnific?: boolean;
 }> = [
-  { id: "ai", label: "ことばで直す", icon: <SparklesIcon /> },
-  { id: "region", label: "囲んで直す", icon: <FrameIcon /> },
-  { id: "crop", label: "切り抜き", icon: <CropIcon /> },
-  { id: "adjust", label: "調整", icon: <AdjustIcon /> },
-  { id: "background", label: "背景透過", icon: <BackgroundIcon /> },
-  { id: "expand", label: "拡張", icon: <ExpandIcon />, magnific: true },
-  { id: "camera", label: "カメラ", icon: <CameraIcon />, magnific: true },
+  { id: "ai", label: "レタッチ", icon: <SparklesIcon /> },
+  { id: "region", label: "部分選択", icon: <FrameIcon /> },
+  { id: "crop", label: "リサイズ", icon: <CropIcon /> },
+  { id: "restyle", label: "リスタイル", icon: <RestyleIcon />, magnific: true },
   { id: "relight", label: "ライティング", icon: <RelightIcon />, magnific: true },
-  { id: "upscale", label: "高画質化", icon: <UpscaleIcon />, magnific: true },
+  { id: "camera", label: "カメラ", icon: <CameraIcon />, magnific: true },
+  { id: "adjust", label: "調整", icon: <AdjustIcon /> },
 ];
 
 export function EditToolRail({
   activeTool,
   disabled,
-  removingBackground,
   magnificConnected,
   onSelect,
+  removingBackground = false,
   onRemoveBackground,
 }: EditToolRailProps) {
+  if (onRemoveBackground) {
+    const legacyTools: ReadonlyArray<{
+      id: EditToolId | "background";
+      label: string;
+      icon: ReactNode;
+    }> = [
+      { id: "ai", label: "ことばで直す", icon: <SparklesIcon /> },
+      { id: "region", label: "囲んで直す", icon: <FrameIcon /> },
+      { id: "crop", label: "切り抜き", icon: <CropIcon /> },
+      { id: "adjust", label: "調整", icon: <AdjustIcon /> },
+      { id: "background", label: "背景透過", icon: <BackgroundIcon /> },
+    ];
+    return (
+      <div
+        data-edit-tool-rail
+        className="flex items-center rounded-xl border border-[#2a2a2a] bg-[#1b1b1b] px-2 py-1.5 shadow-2xl"
+      >
+        {legacyTools.map((item) => {
+          const busy = item.id === "background" && removingBackground;
+          return (
+            <button
+              key={item.id}
+              type="button"
+              aria-label={item.label}
+              disabled={disabled || busy}
+              onClick={() => {
+                if (item.id === "background") onRemoveBackground();
+                else onSelect(item.id);
+              }}
+              className="group relative flex h-9 w-9 items-center justify-center rounded-lg text-neutral-300 transition hover:bg-[#262626] disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {busy ? <Spinner /> : item.icon}
+            </button>
+          );
+        })}
+      </div>
+    );
+  }
+
   return (
     <div
       data-edit-tool-rail
       className="flex items-center rounded-xl border border-[#2a2a2a] bg-[#1b1b1b] px-2 py-1.5 shadow-2xl"
     >
-      {TOOLS.filter(
-        (item) => !item.magnific || magnificConnected !== undefined,
-      ).map((item) => {
-          const oneShot = item.id === "background";
-          const active = !oneShot && activeTool === item.id;
-          const busy = item.id === "background" && removingBackground;
-          const disconnected = Boolean(item.magnific && !magnificConnected);
-          return (
-            <button
-              key={item.id}
-              type="button"
-              title={
-                disconnected
-                  ? "設定で Magnific に接続すると使えます"
-                  : item.label
-              }
-              aria-label={item.label}
-              disabled={disabled || busy || disconnected}
-              onClick={() => {
-                if (item.id === "background") onRemoveBackground();
-                else onSelect(item.id);
-              }}
-              className={`group relative flex h-9 w-9 items-center justify-center rounded-lg transition ${
-                active
-                  ? "bg-indigo-500/90 text-white"
-                  : "text-neutral-300 hover:bg-[#262626]"
-              } disabled:cursor-not-allowed disabled:opacity-40`}
-            >
-              {busy ? <Spinner /> : item.icon}
-              <span className="pointer-events-none absolute bottom-full left-1/2 z-50 mb-2 hidden -translate-x-1/2 whitespace-nowrap rounded-md bg-black px-2 py-1 text-[10px] font-medium text-white shadow-lg group-hover:block">
-                {item.label}
-              </span>
-            </button>
-          );
-        })}
+      {TOOLS.map((item) => {
+        const active = activeTool === item.id;
+        const disconnected = item.magnific && magnificConnected === false;
+        return (
+          <button
+            key={item.id}
+            type="button"
+            title={
+              disconnected
+                ? "設定で Magnific に接続すると使えます"
+                : item.label
+            }
+            aria-label={item.label}
+            disabled={disabled || disconnected}
+            onClick={() => onSelect(item.id)}
+            className={`group relative flex h-9 w-9 items-center justify-center rounded-lg transition ${
+              active
+                ? "bg-pink-500 text-white hover:bg-pink-400"
+                : "text-neutral-300 hover:bg-[#262626]"
+            } disabled:cursor-not-allowed disabled:opacity-40`}
+          >
+            {item.icon}
+            <span className="pointer-events-none absolute bottom-full left-1/2 z-50 mb-2 hidden -translate-x-1/2 whitespace-nowrap rounded-md bg-black px-2 py-1 text-[10px] font-medium text-white shadow-lg group-hover:block">
+              {item.label}
+            </span>
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -124,12 +152,12 @@ function AdjustIcon() {
   return <Icon><path d="M4 7h10M18 7h2M4 17h2M10 17h10" /><circle cx="16" cy="7" r="2" /><circle cx="8" cy="17" r="2" /></Icon>;
 }
 
-function BackgroundIcon() {
-  return <Icon><path d="M12 3s5 5.3 5 9a5 5 0 0 1-10 0c0-3.7 5-9 5-9Z" /><path d="M9 15c.8.8 1.7 1.2 3 1.2" /></Icon>;
+function RestyleIcon() {
+  return <Icon><path d="M5 19 19 5M7 5l1 2 2 1-2 1-1 2-1-2-2-1 2-1 1-2ZM17 13l1 2 2 1-2 1-1 2-1-2-2-1 2-1 1-2Z" /></Icon>;
 }
 
-function ExpandIcon() {
-  return <Icon><path d="M8 3H3v5M16 3h5v5M3 16v5h5M21 16v5h-5" /><path d="m9 9-6-6M15 9l6-6M9 15l-6 6M15 15l6 6" /></Icon>;
+function BackgroundIcon() {
+  return <Icon><path d="M12 3s5 5.3 5 9a5 5 0 0 1-10 0c0-3.7 5-9 5-9Z" /><path d="M9 15c.8.8 1.7 1.2 3 1.2" /></Icon>;
 }
 
 function CameraIcon() {
@@ -138,10 +166,6 @@ function CameraIcon() {
 
 function RelightIcon() {
   return <Icon><circle cx="12" cy="12" r="3.5" /><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4" /></Icon>;
-}
-
-function UpscaleIcon() {
-  return <Icon><path d="M8 3H3v5M16 21h5v-5M3 8l6-6M21 16l-6 6" /><path d="m15 5 .8 2.2L18 8l-2.2.8L15 11l-.8-2.2L12 8l2.2-.8L15 5Z" /></Icon>;
 }
 
 function Spinner() {

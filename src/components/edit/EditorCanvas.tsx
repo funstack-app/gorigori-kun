@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { useEditor } from "./editor/editorStore";
 import { useEditorActions } from "./editor/useEditor";
@@ -88,7 +88,6 @@ export function EditorCanvas({ panOnEmpty = false, regionSelect }: EditorCanvasP
   const panRef = useRef<{ pointerId: number; x: number; y: number } | null>(null);
   const [spacePressed, setSpacePressed] = useState(false);
   const [panning, setPanning] = useState(false);
-  const [zoomMenuOpen, setZoomMenuOpen] = useState(false);
   const sourceImagePath = useEditor((state) => state.sourceImagePath);
   // store 経由で読む (ref だと fabric 初期化完了で再描画されず、オーバーレイが
   // canvas=null のまま固まる)。setCanvas が呼ばれた時点で再描画が走る。
@@ -205,7 +204,6 @@ export function EditorCanvas({ panOnEmpty = false, regionSelect }: EditorCanvasP
   void revision;
   const viewportCanvas = liveCanvas as ViewportCanvas | null;
   const baseSize = liveCanvas ? getCanvasBaseSize(liveCanvas as never) : null;
-  const zoom = viewportCanvas?.getZoom?.() ?? viewportCanvas?.viewportTransform?.[0] ?? 1;
 
   const canPan = () =>
     Boolean(
@@ -241,6 +239,7 @@ export function EditorCanvas({ panOnEmpty = false, regionSelect }: EditorCanvasP
 
   const startPan = (event: React.PointerEvent<HTMLElement>) => {
     if (!viewportCanvas || !baseSize || !canPan()) return;
+    if (event.button !== 0) return;
     const rect = event.currentTarget.getBoundingClientRect();
     const viewport = viewportCanvas.viewportTransform ?? [1, 0, 0, 1, 0, 0];
     const pointerX = event.clientX - rect.left;
@@ -255,7 +254,8 @@ export function EditorCanvas({ panOnEmpty = false, regionSelect }: EditorCanvasP
       "button, input, textarea, select, [contenteditable='true']",
     );
     if (!spacePressedRef.current && interactive) return;
-    if (!spacePressedRef.current && !(panOnEmpty && outsideImage)) return;
+    const directPan = !regionSelect && (!outsideImage || (panOnEmpty && outsideImage));
+    if (!spacePressedRef.current && !directPan) return;
 
     event.preventDefault();
     event.stopPropagation();
@@ -289,31 +289,6 @@ export function EditorCanvas({ panOnEmpty = false, regionSelect }: EditorCanvasP
     setPanning(false);
   };
 
-  const showFit = () => {
-    if (!viewportCanvas || !baseSize) return;
-    fitCanvasToImage(viewportCanvas as never, baseSize.width, baseSize.height);
-    viewportCanvas.requestRenderAll?.();
-    bumpRevision();
-    setZoomMenuOpen(false);
-  };
-
-  const showActualSize = () => {
-    if (!viewportCanvas || !baseSize) return;
-    const width = viewportCanvas.getWidth?.() ?? 0;
-    const height = viewportCanvas.getHeight?.() ?? 0;
-    viewportCanvas.setViewportTransform?.([
-      1,
-      0,
-      0,
-      1,
-      (width - baseSize.width) / 2,
-      (height - baseSize.height) / 2,
-    ]);
-    viewportCanvas.requestRenderAll?.();
-    bumpRevision();
-    setZoomMenuOpen(false);
-  };
-
   return (
     <main
       ref={hostRef}
@@ -322,7 +297,14 @@ export function EditorCanvas({ panOnEmpty = false, regionSelect }: EditorCanvasP
       onPointerMoveCapture={movePan}
       onPointerUpCapture={endPan}
       onPointerCancelCapture={endPan}
-      style={{ cursor: panning ? "grabbing" : spacePressed && canPan() ? "grab" : undefined }}
+      style={{
+        cursor:
+          panning
+            ? "grabbing"
+            : canPan() && (spacePressed || !regionSelect)
+              ? "grab"
+              : undefined,
+      }}
       className="relative min-w-0 flex-1 overflow-hidden bg-[#1a1a1a]"
     >
       <canvas ref={canvasRef} id="editor-canvas" className="block" />
@@ -363,45 +345,14 @@ export function EditorCanvas({ panOnEmpty = false, regionSelect }: EditorCanvasP
         </div>
       ) : null}
 
-      {sourceImagePath && baseSize ? (
-        <div
-          data-edit-zoom-control
-          className="absolute bottom-2 right-[76px] z-30 flex items-center gap-2 text-[11px] text-neutral-500"
-        >
-          <div className="relative">
-            <button
-              type="button"
-              onClick={() => setZoomMenuOpen((open) => !open)}
-              aria-expanded={zoomMenuOpen}
-              className="rounded px-1.5 py-1 hover:bg-[#262626] hover:text-neutral-200"
-            >
-              {Math.round(zoom * 100)}% ▾
-            </button>
-            {zoomMenuOpen ? (
-              <div className="absolute bottom-full right-0 mb-1 min-w-24 rounded-lg border border-[#333] bg-[#1b1b1b] p-1 text-neutral-200 shadow-xl">
-                <button type="button" onClick={showFit} className="block w-full rounded px-2 py-1.5 text-left hover:bg-[#2a2a2a]">
-                  フィット
-                </button>
-                <button type="button" onClick={showActualSize} className="block w-full rounded px-2 py-1.5 text-left hover:bg-[#2a2a2a]">
-                  100%
-                </button>
-              </div>
-            ) : null}
-          </div>
-          <span>{Math.round(baseSize.width)}x{Math.round(baseSize.height)} px</span>
-        </div>
-      ) : null}
-
-      {/*
-        エラー/ステータスのオーバーレイ。
-        以前は error 文字列をそのまま full-width で描画していたため、ツールが返す
-        Python traceback 全文がキャンバスを覆う事故が起きていた (2026-07-02 修正)。
-        エラーは固定サイズのカード (最大3行 + コピー) に必ず収め、どれだけ長い
-        traceback でもキャンバスへ流れ込まないようにする。ステータス (短文) だけ pill 表示。
-      */}
       {error ? (
-        <div className="absolute bottom-4 left-1/2 w-[min(24rem,calc(100%-2rem))] -translate-x-1/2">
-          <CanvasErrorCard message={error} onDismiss={() => useEditor.getState().setError(null)} />
+        <div className="pointer-events-none absolute bottom-3 left-3 right-3 flex justify-center">
+          <p
+            title={error}
+            className="max-w-2xl truncate rounded-full border border-red-500/35 bg-[#160d0d]/90 px-3 py-1.5 text-[11px] font-bold text-red-100 shadow-lg"
+          >
+            {error}
+          </p>
         </div>
       ) : statusText ? (
         <div className="absolute bottom-4 left-4 right-4 flex justify-center">
@@ -414,39 +365,88 @@ export function EditorCanvas({ panOnEmpty = false, regionSelect }: EditorCanvasP
   );
 }
 
-/**
- * キャンバス上のエラーカード。長い traceback でもレイアウトを壊さないよう最大3行に抑え、
- * 全文はコピーで取り出す。閉じるとオーバーレイが消えてキャンバスが再び主役になる。
- */
-function CanvasErrorCard({ message, onDismiss }: { message: string; onDismiss: () => void }) {
-  const copy = () => {
-    void navigator.clipboard?.writeText(message).catch(() => undefined);
+/** キャンバス外の下段ドックに置く、倍率メニューと画像の実寸表示。 */
+export function EditorZoomControls() {
+  const [open, setOpen] = useState(false);
+  const liveCanvas = useEditor((state) => state.canvas);
+  const revision = useEditor((state) => state.revision);
+  const bumpRevision = useEditor((state) => state.bumpRevision);
+  const viewportCanvas = liveCanvas as ViewportCanvas | null;
+  const baseSize = liveCanvas ? getCanvasBaseSize(liveCanvas as never) : null;
+  const zoom = viewportCanvas?.getZoom?.() ?? viewportCanvas?.viewportTransform?.[0] ?? 1;
+  void revision;
+
+  if (!viewportCanvas || !baseSize) return null;
+
+  const applyZoom = (requestedZoom: number) => {
+    const width = viewportCanvas.getWidth?.() ?? 0;
+    const height = viewportCanvas.getHeight?.() ?? 0;
+    const viewport = viewportCanvas.viewportTransform ?? [1, 0, 0, 1, 0, 0];
+    viewportCanvas.setViewportTransform?.(
+      zoomViewportAtPoint(
+        viewport,
+        { x: width / 2, y: height / 2 },
+        clampEditorZoom(requestedZoom),
+      ),
+    );
+    viewportCanvas.requestRenderAll?.();
+    bumpRevision();
+    setOpen(false);
   };
+
+  const showFit = () => {
+    fitCanvasToImage(viewportCanvas as never, baseSize.width, baseSize.height);
+    viewportCanvas.requestRenderAll?.();
+    bumpRevision();
+    setOpen(false);
+  };
+
   return (
-    <div className="rounded-lg border border-red-500/50 bg-[#160d0d]/95 px-3 py-2 shadow-2xl">
-      <div className="flex items-start justify-between gap-2">
-        <p className="line-clamp-3 whitespace-pre-wrap break-words text-[11px] font-bold leading-4 text-red-100">
-          {message}
-        </p>
+    <div data-edit-zoom-control className="flex items-center gap-2 text-[11px] text-neutral-400">
+      <div className="relative">
         <button
           type="button"
-          onClick={onDismiss}
-          aria-label="閉じる"
-          className="shrink-0 rounded p-0.5 text-red-200/70 hover:text-red-100"
+          onClick={() => setOpen((current) => !current)}
+          aria-haspopup="menu"
+          aria-expanded={open}
+          className="rounded-md px-2 py-1.5 font-bold hover:bg-[#2a2a2a] hover:text-white"
         >
-          <svg width={14} height={14} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.2} strokeLinecap="round" aria-hidden>
-            <path d="M6 6l12 12M18 6L6 18" />
-          </svg>
+          {Math.round(zoom * 100)}% ▾
         </button>
+        {open ? (
+          <div
+            role="menu"
+            className="absolute bottom-full right-0 z-50 mb-2 w-44 rounded-xl border border-[#333] bg-[#1b1b1b] p-1.5 text-neutral-200 shadow-2xl"
+          >
+            {[3, 2, 1, 0.5].map((value) => (
+              <ZoomMenuItem key={value} onClick={() => applyZoom(value)}>
+                {Math.round(value * 100)}%
+              </ZoomMenuItem>
+            ))}
+            <div className="my-1 border-t border-[#333]" />
+            <ZoomMenuItem onClick={showFit}>ウィンドウに合わせる</ZoomMenuItem>
+            <ZoomMenuItem onClick={() => applyZoom(zoom * 1.25)}>ズームイン +</ZoomMenuItem>
+            <ZoomMenuItem onClick={() => applyZoom(zoom / 1.25)}>ズームアウト -</ZoomMenuItem>
+          </div>
+        ) : null}
       </div>
-      <button
-        type="button"
-        onClick={copy}
-        className="mt-1.5 rounded border border-red-400/40 bg-red-500/10 px-2 py-0.5 text-[10px] font-bold text-red-200 hover:bg-red-500/20"
-      >
-        詳細をコピー
-      </button>
+      <span className="whitespace-nowrap font-mono text-neutral-500">
+        {Math.round(baseSize.width)}x{Math.round(baseSize.height)} px
+      </span>
     </div>
+  );
+}
+
+function ZoomMenuItem({ children, onClick }: { children: ReactNode; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      role="menuitem"
+      onClick={onClick}
+      className="block w-full rounded-lg px-2.5 py-1.5 text-left hover:bg-[#2a2a2a] hover:text-white"
+    >
+      {children}
+    </button>
   );
 }
 

@@ -2,8 +2,10 @@ import { useState, type ReactNode } from "react";
 
 import type { MagnificImageEditTool } from "../../lib/ipc";
 
+export type MagnificPanelTool = Exclude<MagnificImageEditTool, "upscale">;
+
 type MagnificToolPanelProps = {
-  tool: MagnificImageEditTool;
+  tool: MagnificPanelTool;
   busy: boolean;
   connected: boolean;
   onRun: (params: Record<string, unknown>) => void;
@@ -29,7 +31,7 @@ const LIGHT_DIRECTIONS = [
   { label: "後ろ", azimuth: 180, elevation: 0 },
 ] as const;
 
-/** Magnific 専用4ツールの、迷いにくい最小設定パネル。 */
+/** B2で作り直すまで使う、Magnific 専用3ツールの暫定設定パネル。 */
 export function MagnificToolPanel({
   tool,
   busy,
@@ -42,10 +44,7 @@ export function MagnificToolPanel({
   if (tool === "camera") {
     return <CameraPanel busy={busy} connected={connected} onRun={onRun} />;
   }
-  if (tool === "relight") {
-    return <RelightPanel busy={busy} connected={connected} onRun={onRun} />;
-  }
-  return <UpscalePanel busy={busy} connected={connected} onRun={onRun} />;
+  return <RelightPanel busy={busy} connected={connected} onRun={onRun} />;
 }
 
 type PanelProps = Omit<MagnificToolPanelProps, "tool">;
@@ -181,32 +180,6 @@ function RelightPanel({ busy, connected, onRun }: PanelProps) {
           })
         }
       />
-    </PanelBody>
-  );
-}
-
-function UpscalePanel({ busy, connected, onRun }: PanelProps) {
-  const [scale, setScale] = useState<"2x" | "4x">("2x");
-
-  return (
-    <PanelBody>
-      <PanelLabel>倍率</PanelLabel>
-      <ChipGrid columns={2}>
-        {(["2x", "4x"] as const).map((value) => (
-          <Chip
-            key={value}
-            active={scale === value}
-            disabled={busy}
-            onClick={() => setScale(value)}
-          >
-            {value}
-          </Chip>
-        ))}
-      </ChipGrid>
-      <p className="mt-3 text-[10px] font-bold leading-4 text-neutral-500">
-        細部を描き足しながら、画像を大きくします。
-      </p>
-      <RunButton busy={busy} connected={connected} onClick={() => onRun({ scale })} />
     </PanelBody>
   );
 }

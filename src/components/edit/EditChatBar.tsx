@@ -49,12 +49,15 @@ export function EditChatBar({
   onCandidateCountChange,
   onRegionModeChange,
 }: EditChatBarProps) {
-  const acceptsInstruction = activeTool === "ai" || activeTool === "region";
+  const acceptsInstruction =
+    activeTool === "ai" || activeTool === "region" || activeTool === "restyle";
   const placeholder =
     activeTool === "crop"
       ? "左上のパネルで切り抜く範囲を指定してください"
       : activeTool === "adjust"
         ? "左上のパネルで画像を調整してください"
+        : activeTool === "restyle"
+          ? "どんな雰囲気に変えたいですか？"
         : activeTool === "region"
         ? "選択範囲を囲んで、変更したい内容を説明してください"
         : "どこを変更したいですか？";
@@ -104,28 +107,30 @@ export function EditChatBar({
           ) : null}
         </div>
         <div className="flex items-center gap-2">
-          <label className="flex items-center gap-1 text-[11px] text-neutral-400">
-            <span>候補</span>
-            <select
-              aria-label="候補枚数"
-              value={candidateCount}
-              disabled={interactionDisabled || busy || activeTool !== "ai"}
-              onChange={(event) =>
-                onCandidateCountChange(normalizeEditCandidateCount(Number(event.target.value)))
-              }
-              className="rounded-md border border-[#3a3a3a] bg-[#121212] px-1.5 py-1 text-neutral-200 outline-none disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              {[1, 2, 3, 4].map((count) => (
-                <option key={count} value={count}>{count}枚</option>
-              ))}
-            </select>
-          </label>
+          {activeTool === "ai" ? (
+            <label className="flex items-center gap-1 text-[11px] text-neutral-400">
+              <span>候補</span>
+              <select
+                aria-label="候補枚数"
+                value={candidateCount}
+                disabled={interactionDisabled || busy}
+                onChange={(event) =>
+                  onCandidateCountChange(normalizeEditCandidateCount(Number(event.target.value)))
+                }
+                className="rounded-md border border-[#3a3a3a] bg-[#121212] px-1.5 py-1 text-neutral-200 outline-none disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {[1, 2, 3, 4].map((count) => (
+                  <option key={count} value={count}>{count}枚</option>
+                ))}
+              </select>
+            </label>
+          ) : null}
           <button
             type="button"
             onClick={onSubmit}
             disabled={disabled}
             aria-label="編集を実行"
-            className="flex h-8 w-8 items-center justify-center rounded-full bg-neutral-200 text-black hover:bg-white disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-500"
+            className="flex h-8 w-8 items-center justify-center rounded-full bg-pink-500 text-white hover:bg-pink-400 disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-500"
           >
             {busy ? <Spinner /> : <span className="-mt-0.5 text-lg leading-none">↑</span>}
           </button>
@@ -152,7 +157,7 @@ function ModeChip({
       onClick={onClick}
       disabled={disabled}
       className={`rounded-full px-2.5 py-0.5 text-[11px] ${
-        active ? "bg-neutral-200 text-black" : "border border-[#333] text-neutral-400"
+        active ? "bg-pink-500 text-white" : "border border-[#333] text-neutral-400"
       } disabled:cursor-not-allowed disabled:opacity-40`}
     >
       {children}

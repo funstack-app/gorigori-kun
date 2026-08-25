@@ -1,18 +1,18 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 
 type EditCandidateStripProps = {
-  basePath: string;
+  basePath?: string;
   candidates: string[];
   currentPath: string;
-  disabled: boolean;
-  downloadDisabled: boolean;
+  disabled?: boolean;
+  downloadDisabled?: boolean;
+  showBase?: boolean;
   onSelect: (path: string) => void;
-  onDownload: () => void;
+  onDownload?: () => void;
 };
 
 type VersionSelectState = {
   generationBusy: boolean;
-  backgroundRemovalBusy: boolean;
   toolBusy: boolean;
   versionInFlight: boolean;
   versionRecoveryRequired: boolean;
@@ -21,30 +21,49 @@ type VersionSelectState = {
 /** 復旧に必要な版選択は、復元不能状態だけでは止めない。 */
 export function isVersionSelectDisabled({
   generationBusy,
-  backgroundRemovalBusy,
   toolBusy,
   versionInFlight,
 }: VersionSelectState): boolean {
-  return generationBusy || backgroundRemovalBusy || toolBusy || versionInFlight;
+  return generationBusy || toolBusy || versionInFlight;
 }
 
 export function EditCandidateStrip({
   basePath,
   candidates,
   currentPath,
-  disabled,
-  downloadDisabled,
+  disabled = false,
+  downloadDisabled = false,
+  showBase = true,
   onSelect,
   onDownload,
 }: EditCandidateStripProps) {
-  const paths = [basePath, ...candidates.filter((path) => path !== basePath)];
+  const paths = [
+    ...(showBase && basePath ? [basePath] : []),
+    ...candidates.filter((path) => path !== basePath),
+  ];
 
   return (
-    <div
+    <section
       data-edit-candidate-strip
-      className="absolute bottom-6 left-6 z-20 flex items-center gap-2"
+      aria-label="候補"
+      className="flex max-h-[45%] shrink-0 flex-col border-b border-[#2a2a2a] px-2 pb-2 pt-3"
     >
-      <div className="flex items-center gap-1.5 rounded-xl border border-[#2a2a2a] bg-[#1b1b1b]/95 p-1.5 shadow-2xl">
+      <div className="mb-2 flex items-center justify-between gap-1 px-0.5">
+        <span className="text-[10px] font-black text-neutral-400">候補</span>
+        {candidates.length > 0 && onDownload ? (
+          <button
+            type="button"
+            onClick={onDownload}
+            disabled={downloadDisabled}
+            title="候補を書き出す"
+            aria-label="候補を書き出す"
+            className="flex h-6 w-6 items-center justify-center rounded-md text-neutral-400 hover:bg-[#2a2a2a] hover:text-white disabled:cursor-wait disabled:opacity-50"
+          >
+            <DownloadIcon />
+          </button>
+        ) : null}
+      </div>
+      <div className="flex min-h-0 flex-col items-center gap-2 overflow-y-auto">
         {paths.map((path, index) => (
           <button
             key={path}
@@ -52,11 +71,11 @@ export function EditCandidateStrip({
             type="button"
             onClick={() => onSelect(path)}
             disabled={disabled}
-            title={index === 0 ? "オリジナル" : `編集候補 ${index}`}
-            aria-label={index === 0 ? "オリジナル" : `編集候補 ${index}`}
-            className={`pointer-events-auto h-12 w-12 overflow-hidden rounded-lg border bg-[#101010] disabled:cursor-wait disabled:opacity-50 ${
+            title={showBase && index === 0 ? "オリジナル" : `編集候補 ${showBase ? index : index + 1}`}
+            aria-label={showBase && index === 0 ? "オリジナル" : `編集候補 ${showBase ? index : index + 1}`}
+            className={`pointer-events-auto h-12 w-12 shrink-0 overflow-hidden rounded-lg border bg-[#101010] disabled:cursor-wait disabled:opacity-50 ${
               currentPath === path
-                ? "border-indigo-400 ring-1 ring-indigo-400"
+                ? "border-pink-400 ring-2 ring-pink-400/70"
                 : "border-[#333] hover:border-neutral-500"
             }`}
           >
@@ -64,25 +83,13 @@ export function EditCandidateStrip({
           </button>
         ))}
       </div>
-      {candidates.length > 0 ? (
-        <button
-          type="button"
-          onClick={onDownload}
-          disabled={downloadDisabled}
-          title="ダウンロード"
-          aria-label="ダウンロード"
-          className="flex h-10 w-10 items-center justify-center rounded-xl border border-[#2a2a2a] bg-[#1b1b1b] text-neutral-300 shadow-2xl hover:bg-[#262626] hover:text-white disabled:cursor-wait disabled:opacity-50"
-        >
-          <DownloadIcon />
-        </button>
-      ) : null}
-    </div>
+    </section>
   );
 }
 
 function DownloadIcon() {
   return (
-    <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+    <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.7} strokeLinecap="round" strokeLinejoin="round" aria-hidden>
       <path d="M12 3v12M7 10l5 5 5-5M5 20h14" />
     </svg>
   );

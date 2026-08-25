@@ -34,7 +34,7 @@ export function EditFloatingPanel({ title, onClose, children }: EditFloatingPane
           </svg>
         </button>
       </div>
-      <div className="-mx-4 mt-2 min-h-0 overflow-y-auto [&_.accent-pink-500]:accent-indigo-500 [&_.bg-pink-500]:!bg-indigo-500 [&_.bg-pink-500\/10]:!bg-indigo-500/10 [&_.bg-pink-500\/15]:!bg-indigo-500/15 [&_.bg-pink-500\/20]:!bg-indigo-500/20 [&_.border-pink-400]:!border-indigo-400 [&_.border-pink-400\/50]:!border-indigo-400/50 [&_.border-pink-400\/60]:!border-indigo-400/60 [&_.border-pink-500]:!border-indigo-500 [&_.focus\:border-pink-400:focus]:!border-indigo-400 [&_.hover\:border-pink-400:hover]:!border-indigo-400 [&_.hover\:bg-pink-600:hover]:!bg-indigo-600 [&_.shadow-pink-500\/20]:!shadow-indigo-500/20 [&_.text-pink-100]:!text-indigo-100 [&_.text-pink-200]:!text-indigo-200 [&_.text-pink-300]:!text-indigo-300 [&_.text-pink-400]:!text-indigo-400">
+      <div className="-mx-4 mt-2 min-h-0 overflow-y-auto">
         {children}
       </div>
     </section>
