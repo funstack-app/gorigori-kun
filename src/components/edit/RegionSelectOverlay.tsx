@@ -74,7 +74,7 @@ function constrainedScreenRect(
 }
 
 /** キャンバスの現在のズームと平行移動を読む。無ければ等倍。 */
-function readViewport(canvas: unknown): { zoom: number; offsetX: number; offsetY: number } {
+export function readViewport(canvas: unknown): { zoom: number; offsetX: number; offsetY: number } {
   const vpt = (canvas as { viewportTransform?: number[] } | null)?.viewportTransform;
   const zoom = vpt?.[0];
   return {
@@ -85,7 +85,7 @@ function readViewport(canvas: unknown): { zoom: number; offsetX: number; offsetY
 }
 
 /** 元画像の実寸 (fitCanvasToImage が __ggBaseSize に記録している)。 */
-function readBaseSize(canvas: unknown): { width: number; height: number } | null {
+export function readBaseSize(canvas: unknown): { width: number; height: number } | null {
   const size = (canvas as { __ggBaseSize?: { width: number; height: number } } | null)
     ?.__ggBaseSize;
   return size && size.width > 0 && size.height > 0 ? size : null;

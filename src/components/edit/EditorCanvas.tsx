@@ -6,6 +6,7 @@ import {
   fitCanvasToImage,
   getCanvasBaseSize,
 } from "./editor/magicLayerToFabric";
+import { CropFrameOverlay } from "./CropFrameOverlay";
 import { RegionSelectOverlay, type NormalizedBbox } from "./RegionSelectOverlay";
 
 type EditorCanvasProps = {
@@ -23,6 +24,20 @@ type EditorCanvasProps = {
     aspectRatio?: number | null;
     /** 未選択時の案内文 (AI に直させる範囲か、塗りつぶす範囲かで意味が変わる)。 */
     hint?: string;
+  };
+  /**
+   * リサイズツールの「掴める外枠」(Magnific 準拠)。渡されたときだけ表示。
+   * regionSelect と同時には使わない。
+   */
+  cropFrame?: {
+    mode: "crop" | "expand";
+    value: NormalizedBbox | null;
+    onChange: (bbox: NormalizedBbox) => void;
+    aspectRatio?: number | null;
+    expandAspect?: number;
+    onExpandAspectSnap?: (ratio: number) => void;
+    expandAspectChoices?: number[];
+    disabled?: boolean;
   };
 };
 
@@ -82,7 +97,7 @@ export function isEditorViewportAboveFit(
   return zoom > editorFitZoom(canvasWidth, canvasHeight, imageWidth, imageHeight) + 0.001;
 }
 
-export function EditorCanvas({ regionSelect }: EditorCanvasProps = {}) {
+export function EditorCanvas({ regionSelect, cropFrame }: EditorCanvasProps = {}) {
   const hostRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fabricCanvasRef = useRef<any>(null);
@@ -309,6 +324,20 @@ export function EditorCanvas({ regionSelect }: EditorCanvasProps = {}) {
           disabled={regionSelect.disabled}
           aspectRatio={regionSelect.aspectRatio}
           hint={regionSelect.hint}
+        />
+      ) : null}
+
+      {cropFrame && sourceImagePath && liveCanvas ? (
+        <CropFrameOverlay
+          canvas={liveCanvas}
+          mode={cropFrame.mode}
+          value={cropFrame.value}
+          onChange={cropFrame.onChange}
+          aspectRatio={cropFrame.aspectRatio}
+          expandAspect={cropFrame.expandAspect}
+          onExpandAspectSnap={cropFrame.onExpandAspectSnap}
+          expandAspectChoices={cropFrame.expandAspectChoices}
+          disabled={cropFrame.disabled}
         />
       ) : null}
 

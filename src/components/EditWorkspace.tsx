@@ -45,6 +45,7 @@ import {
   centeredCropRegion,
   closestMagnificAspect,
   cropPixelSizeForAspect,
+  MAGNIFIC_ASPECT_RATIOS,
   parseAspectRatio,
   type CropAspectRatio,
   type MagnificAspectRatio,
@@ -141,7 +142,7 @@ export function EditWorkspace() {
   const [editSession, setEditSession] = useState(() => createEditSession(sourceImagePath));
   const editSessionRef = useRef(editSession);
 
-  const needsRegion = tool === "region" || (tool === "crop" && resizeMode === "crop");
+  const needsRegion = tool === "region";
 
   useEffect(() => {
     const current = editSessionRef.current;
@@ -239,10 +240,6 @@ export function EditWorkspace() {
     setCropWidth(Math.max(1, Math.round(next[2] * imageSize.width)));
     setCropHeight(Math.max(1, Math.round(next[3] * imageSize.height)));
   };
-
-  const cropAspectValue = cropWidth > 0 && cropHeight > 0
-    ? cropWidth / cropHeight
-    : parseAspectRatio(cropAspect);
 
   const handleVersionRecoveryFailure = useCallback((_caught: unknown) => {
     setVersionRecoveryRequired(true);
@@ -873,21 +870,37 @@ export function EditWorkspace() {
             className="relative flex min-h-0 flex-1 overflow-hidden bg-[#121212] [&>main]:!bg-[#121212]"
           >
             <EditorCanvas
-              panOnEmpty={!needsRegion}
               regionSelect={
                 sourceImagePath && needsRegion
                   ? {
                       value: region,
                       onChange: changeRegion,
                       disabled: panelBusy,
+                      aspectRatio: null,
+                      hint: "直したいところをドラッグで囲む",
+                    }
+                  : undefined
+              }
+              cropFrame={
+                sourceImagePath && tool === "crop"
+                  ? {
+                      mode: resizeMode,
+                      value: region,
+                      onChange: (bbox) => changeRegion(bbox),
                       aspectRatio:
-                        tool === "crop" && resizeMode === "crop"
-                          ? cropAspectValue
-                          : null,
-                      hint:
-                        tool === "crop"
-                          ? "残したいところをドラッグで囲む"
-                          : "直したいところをドラッグで囲む",
+                        cropAspect === "custom" ? null : parseAspectRatio(cropAspect),
+                      expandAspect: parseAspectRatio(expandAspect) ?? 16 / 9,
+                      onExpandAspectSnap: (ratio) => {
+                        const hit = MAGNIFIC_ASPECT_RATIOS.find(
+                          (candidate) =>
+                            Math.abs((parseAspectRatio(candidate) ?? 0) - ratio) < 0.001,
+                        );
+                        if (hit) setExpandAspect(hit);
+                      },
+                      expandAspectChoices: MAGNIFIC_ASPECT_RATIOS.map(
+                        (candidate) => parseAspectRatio(candidate) ?? 1,
+                      ),
+                      disabled: panelBusy,
                     }
                   : undefined
               }
