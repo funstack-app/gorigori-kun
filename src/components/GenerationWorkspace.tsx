@@ -43,6 +43,7 @@ import { extractDropped, isImageDrop, setDragRef } from "../lib/dragRef";
 import { sendImageToPlanForRediscuss } from "../lib/sendToPlan";
 import { GenerationGauge, type GenerationGaugeMode } from "./GenerationGauge";
 import { useRemoteMcpGen } from "../lib/store/remoteMcpGen";
+import { ModalPortal } from "./ModalPortal";
 
 export function GenerationWorkspace() {
   const activeTab = useWorkspace((s) => s.activeTab);
@@ -1689,6 +1690,7 @@ function StoryboardDetailModal({
   onClose: () => void;
 }) {
   return (
+    <ModalPortal>
     <div
       className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
       onClick={onClose}
@@ -1720,6 +1722,7 @@ function StoryboardDetailModal({
         </div>
       </div>
     </div>
+    </ModalPortal>
   );
 }
 

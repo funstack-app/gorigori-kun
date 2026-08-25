@@ -9,6 +9,7 @@ import { useAccounts } from "../lib/store/accounts";
 import { useActiveProject } from "../lib/store/activeProject";
 import { useProjects } from "../lib/store/projects";
 import { useToasts } from "../lib/store/toasts";
+import { ModalPortal } from "./ModalPortal";
 
 /**
  * `onPick` でストック素材を「参照に追加」する際、写真本体のローカルパス
@@ -253,6 +254,7 @@ export function StockSearchModal({ open, onClose, onPick }: Props) {
   //     と衝突するため、素材ソースは Pexels 単独に絞る)
 
   return (
+    <ModalPortal>
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
       onClick={onClose}
@@ -613,6 +615,7 @@ export function StockSearchModal({ open, onClose, onPick }: Props) {
         モーダル背景クリック / Escape で閉じる (Escape は親モーダルが拾うのでここでは追加実装不要)。
       */}
       {previewPhoto && (
+        <ModalPortal>
         <div
           className="fixed inset-0 z-[60] flex items-center justify-center bg-black/90 p-4"
           onClick={(event) => {
@@ -670,6 +673,7 @@ export function StockSearchModal({ open, onClose, onPick }: Props) {
             </div>
           </div>
         </div>
+        </ModalPortal>
       )}
 
       {/*
@@ -679,6 +683,7 @@ export function StockSearchModal({ open, onClose, onPick }: Props) {
         ストック素材は「合成・シーン素材」用途に限定する設計に統一した。
       */}
     </div>
+    </ModalPortal>
   );
 }
 

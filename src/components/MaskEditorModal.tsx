@@ -9,6 +9,7 @@ import {
   type MaskCanvasHandle,
   type MaskMode,
 } from "./MaskCanvas";
+import { ModalPortal } from "./ModalPortal";
 
 export function MaskEditorModal() {
   const source = useMaskEditor((s) => s.source);
@@ -72,6 +73,7 @@ function Modal() {
   void version; // referenced to trigger re-evaluation when bumped
 
   return (
+    <ModalPortal>
     <div
       className="fixed inset-0 z-50 flex max-h-[calc(100vh-2rem)] flex-col overflow-y-auto bg-black/80 backdrop-blur-sm"
       role="dialog"
@@ -133,6 +135,7 @@ function Modal() {
         白く塗った領域だけが指示通りに編集されます。それ以外はオリジナルのまま残ります。
       </div>
     </div>
+    </ModalPortal>
   );
 }
 

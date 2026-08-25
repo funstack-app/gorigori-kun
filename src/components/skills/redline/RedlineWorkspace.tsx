@@ -14,6 +14,7 @@ import {
 } from "../../../lib/redline/types";
 import { useToasts } from "../../../lib/store/toasts";
 import { useWorkspace } from "../../../lib/store/workspace";
+import { ModalPortal } from "../../ModalPortal";
 
 /**
  * 赤入れ反映 Workspace（スキル一覧v2.1 #10）
@@ -390,6 +391,7 @@ function PdfPagePicker({
   }, [pdf]);
 
   return (
+    <ModalPortal>
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4">
       <div className="flex max-h-[80vh] w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-[#343434] bg-[#161616]">
         <div className="flex items-center justify-between border-b border-[#242424] px-4 py-3">
@@ -435,6 +437,7 @@ function PdfPagePicker({
         </div>
       </div>
     </div>
+    </ModalPortal>
   );
 }
 

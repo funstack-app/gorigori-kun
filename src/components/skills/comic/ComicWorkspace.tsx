@@ -150,6 +150,7 @@ import {
   stencilAspectLabel,
   stencilAspectWithinTolerance,
 } from "../../../lib/comic/stencil";
+import { ModalPortal } from "../../ModalPortal";
 
 /** PC から画像を添付するときの拡張子フィルタ（GoalChatPanel と同値）。 */
 const IMAGE_EXTS = ["png", "jpg", "jpeg", "webp", "gif", "bmp"];
@@ -3943,6 +3944,7 @@ function PanelReeditModal({
   const polygon = points.map((point) => `${point.x},${point.y}`).join(" ");
 
   return (
+    <ModalPortal>
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-3 backdrop-blur-sm" role="dialog" aria-modal="true" aria-label={`ページ ${page.page} の1コマ編集`}>
       <div className="flex max-h-[calc(100vh-1.5rem)] w-full max-w-6xl flex-col overflow-hidden rounded-lg border border-[#444] bg-[#151515] shadow-2xl">
         <div className="flex items-center justify-between border-b border-[#303030] px-4 py-3">
@@ -4206,6 +4208,7 @@ function PanelReeditModal({
         </div>
       </div>
     </div>
+    </ModalPortal>
   );
 }
 

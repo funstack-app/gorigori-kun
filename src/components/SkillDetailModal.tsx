@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 
 import { skills as skillsIpc } from "../lib/ipc";
 import { SkillIcon } from "./SkillIcon";
+import { ModalPortal } from "./ModalPortal";
 
 type SkillDetailModalProps = {
   skillId: string;
@@ -62,6 +63,7 @@ export function SkillDetailModal({
   }, [skillId]);
 
   return (
+    <ModalPortal>
     <div
       className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
       onClick={onClose}
@@ -130,5 +132,6 @@ export function SkillDetailModal({
         </div>
       </div>
     </div>
+    </ModalPortal>
   );
 }

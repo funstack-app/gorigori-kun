@@ -7,6 +7,7 @@ import {
   MAX_CUTS,
   type AngleCut,
 } from "../../../lib/multiangle/angles";
+import { ModalPortal } from "../../ModalPortal";
 
 /**
  * 構図ピッカー（中央ポップアップ）
@@ -47,6 +48,7 @@ export function AnglePickerModal({ onClose }: { onClose: () => void }) {
   const atLimit = count >= MAX_CUTS;
 
   return (
+    <ModalPortal>
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6"
       onClick={onClose}
@@ -187,5 +189,6 @@ export function AnglePickerModal({ onClose }: { onClose: () => void }) {
         </div>
       </div>
     </div>
+    </ModalPortal>
   );
 }

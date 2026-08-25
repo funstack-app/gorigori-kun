@@ -21,6 +21,7 @@ import {
   type SortKey,
   type ThumbnailFocus,
 } from "../lib/store/presets";
+import { ModalPortal } from "./ModalPortal";
 
 const DEFAULT_NEW_CATEGORY_COLOR = "#6366f1";
 const CATEGORY_COLOR_OPTIONS = [
@@ -1394,6 +1395,7 @@ function PresetFormModal(props: PresetFormProps) {
   }, []);
 
   return (
+    <ModalPortal>
     <div
       className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/65 p-4 sm:items-center"
       onMouseDown={(event) => {
@@ -1426,6 +1428,7 @@ function PresetFormModal(props: PresetFormProps) {
         </div>
       </div>
     </div>
+    </ModalPortal>
   );
 }
 

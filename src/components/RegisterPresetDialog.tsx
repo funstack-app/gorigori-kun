@@ -10,6 +10,7 @@ import { usePresets, type PresetKind } from "../lib/store/presets";
 import { useToasts } from "../lib/store/toasts";
 import { SafeImage } from "./SafeImage";
 import { CharacterIcon } from "./SkillIcon";
+import { ModalPortal } from "./ModalPortal";
 
 /**
  * 画像 path から 256x256 のサムネ JPEG (base64 data URL) を生成する。
@@ -207,6 +208,7 @@ export function RegisterPresetDialog({ imagePath, defaultName, onClose }: Props)
   };
 
   return (
+    <ModalPortal>
     <div
       className="fixed inset-0 z-[80] flex items-center justify-center bg-black/70 p-4"
       onClick={onClose}
@@ -412,6 +414,7 @@ export function RegisterPresetDialog({ imagePath, defaultName, onClose }: Props)
         </div>
       </div>
     </div>
+    </ModalPortal>
   );
 }
 

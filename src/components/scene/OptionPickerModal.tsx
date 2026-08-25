@@ -5,6 +5,7 @@ import {
   type SceneOption,
 } from "../../lib/scene/catalog";
 import { CinePlaceholder } from "./CinePlaceholder";
+import { ModalPortal } from "../ModalPortal";
 
 type Props = {
   open: boolean;
@@ -55,6 +56,7 @@ export function OptionPickerModal({
         });
 
   return (
+    <ModalPortal>
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
       onClick={onClose}
@@ -134,6 +136,7 @@ export function OptionPickerModal({
         </div>
       </div>
     </div>
+    </ModalPortal>
   );
 }
 

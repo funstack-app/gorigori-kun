@@ -8,6 +8,7 @@ import type {
 } from "../../../lib/comic/types";
 import { buildSpreads } from "../../../lib/comic/spreads";
 import { normalizeComicPageGenMode } from "../../../lib/comic/types";
+import { ModalPortal } from "../../ModalPortal";
 
 export { buildSpreads };
 
@@ -108,6 +109,7 @@ export function ComicSpreadPreviewModal({
   const genModeLabel = spreadGenModeLabel(spread, results);
 
   return (
+    <ModalPortal>
     <div
       className="fixed inset-0 z-50 flex flex-col bg-black/85 backdrop-blur-md"
       role="dialog"
@@ -232,6 +234,7 @@ export function ComicSpreadPreviewModal({
         ) : null}
       </div>
     </div>
+    </ModalPortal>
   );
 }
 

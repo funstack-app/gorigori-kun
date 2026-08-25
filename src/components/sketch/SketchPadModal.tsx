@@ -19,6 +19,7 @@ import {
   type PenType,
 } from "./sketchModel";
 import { SceneFromImageDialog } from "../skills/scene3d/SceneFromImageDialog";
+import { ModalPortal } from "../ModalPortal";
 
 /** ペン色8色 (設計書 §1 論点1 の確定値)。 */
 const PEN_COLORS: { id: string; label: string; value: string }[] = [
@@ -274,6 +275,7 @@ export function SketchPadModal({
   const disabled = busy !== null;
 
   return (
+    <ModalPortal>
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6">
       <div className="flex h-full max-h-[92vh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-[#2a2a2a] bg-[#161616] shadow-2xl">
         <header className="flex items-center justify-between border-b border-[#242424] px-4 py-3">
@@ -470,5 +472,6 @@ export function SketchPadModal({
         }}
       />
     </div>
+    </ModalPortal>
   );
 }

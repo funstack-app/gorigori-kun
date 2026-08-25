@@ -54,6 +54,7 @@ import { useToasts } from "../../../lib/store/toasts";
 import { ReferenceLibraryModal } from "../../ReferenceLibraryModal";
 import { SafeImage } from "../../SafeImage";
 import { CharacterPresetPickerModal } from "../multiAngle/CharacterPresetPickerModal";
+import { ModalPortal } from "../../ModalPortal";
 
 const TYPE_LABELS: Record<AssetType, string> = {
   character: "登場人物",
@@ -125,6 +126,7 @@ function ImageZoomOverlay({ path, onClose }: { path: string; onClose: () => void
     return () => window.removeEventListener("keydown", handleEscape);
   }, [onClose]);
   return (
+    <ModalPortal>
     <div
       className="fixed inset-0 z-[80] flex cursor-zoom-out flex-col items-center justify-center gap-2 bg-black/90 p-6"
       onClick={onClose}
@@ -135,6 +137,7 @@ function ImageZoomOverlay({ path, onClose }: { path: string; onClose: () => void
       <SafeImage path={path} alt="拡大表示" className="max-h-[85vh] w-auto max-w-full object-contain" />
       <p className="text-xs text-zinc-400">{basename(path)}（クリックか Esc で閉じる）</p>
     </div>
+    </ModalPortal>
   );
 }
 

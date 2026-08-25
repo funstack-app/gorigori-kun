@@ -7,6 +7,7 @@ import {
 } from "../../../lib/character/sheetTemplates";
 import { usePresets } from "../../../lib/store/presets";
 import { useToasts } from "../../../lib/store/toasts";
+import { ModalPortal } from "../../ModalPortal";
 
 type Props = {
   selectedId: string;
@@ -75,6 +76,7 @@ export function SheetTemplatePickerModal({ selectedId, onSelect, onClose }: Prop
   ];
 
   return (
+    <ModalPortal>
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6"
       onClick={onClose}
@@ -242,5 +244,6 @@ export function SheetTemplatePickerModal({ selectedId, onSelect, onClose }: Prop
         </div>
       </div>
     </div>
+    </ModalPortal>
   );
 }

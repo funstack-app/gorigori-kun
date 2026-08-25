@@ -3,6 +3,7 @@ import { useMemo, useState } from "react";
 import { images as imagesIpc, type ResizeResult } from "../lib/ipc";
 import { SNS_TARGETS, groupTargetsByCategory, type ResizeMode } from "../lib/snsTargets";
 import { useToasts } from "../lib/store/toasts";
+import { ModalPortal } from "./ModalPortal";
 
 /**
  * SNS リサイズ書き出しモーダル (W2-2 / 監査B-1)。
@@ -115,6 +116,7 @@ export function SnsExportModal({ paths, onClose }: SnsExportModalProps) {
   const totalOutputs = paths.length * selectedCount;
 
   return (
+    <ModalPortal>
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
       onClick={() => {
@@ -300,5 +302,6 @@ export function SnsExportModal({ paths, onClose }: SnsExportModalProps) {
         </div>
       </div>
     </div>
+    </ModalPortal>
   );
 }

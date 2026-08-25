@@ -16,6 +16,7 @@ import {
   type SceneFromImagePhase,
 } from "../../../lib/store/sceneFromImage";
 import { SafeImage } from "../../SafeImage";
+import { ModalPortal } from "../../ModalPortal";
 
 /** フェーズの表示名と補足。①は分単位でかかるので明示する。 */
 const PHASE_STEPS: { id: SceneFromImagePhase; label: string; note?: string }[] = [
@@ -94,6 +95,7 @@ export function SceneFromImageDialog({
   };
 
   return (
+    <ModalPortal>
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6">
       <div className="flex max-h-[calc(100vh-80px)] min-h-0 w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-[#2a2a2a] bg-[#161616] shadow-2xl">
         <header className="flex shrink-0 items-center justify-between border-b border-[#242424] px-4 py-3">
@@ -251,5 +253,6 @@ export function SceneFromImageDialog({
         </footer>
       </div>
     </div>
+    </ModalPortal>
   );
 }

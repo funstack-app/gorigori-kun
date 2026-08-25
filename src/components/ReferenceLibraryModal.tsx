@@ -9,6 +9,7 @@ import {
   REFERENCE_ROLE_KINDS,
   REFERENCE_ROLE_META,
 } from "../lib/store/referenceRoles";
+import { ModalPortal } from "./ModalPortal";
 
 // Why: Zustand selector が毎レンダーで新しい Set を返すと
 //      React が Maximum update depth exceeded で白画面になる。
@@ -84,6 +85,7 @@ export function ReferenceLibraryModal({ open, onClose, onPick, roleMode }: Props
   };
 
   return (
+    <ModalPortal>
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6"
       onClick={onClose}
@@ -188,5 +190,6 @@ export function ReferenceLibraryModal({ open, onClose, onPick, roleMode }: Props
         </div>
       </div>
     </div>
+    </ModalPortal>
   );
 }

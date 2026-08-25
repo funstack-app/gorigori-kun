@@ -1,4 +1,5 @@
 import { useEffect, type ReactNode } from "react";
+import { ModalPortal } from "../ModalPortal";
 
 type Props = {
   open: boolean;
@@ -30,6 +31,7 @@ export function SceneSectionModal({ open, title, number, onClose, children }: Pr
   if (!open) return null;
 
   return (
+    <ModalPortal>
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6"
       onClick={onClose}
@@ -63,5 +65,6 @@ export function SceneSectionModal({ open, title, number, onClose, children }: Pr
         <div className="min-h-0 flex-1 overflow-y-auto p-6">{children}</div>
       </div>
     </div>
+    </ModalPortal>
   );
 }

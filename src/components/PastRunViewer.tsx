@@ -13,6 +13,7 @@ import {
   type RunSnapshotV1,
 } from "../lib/store/storyboardRunSnapshot";
 import type { CutState } from "../lib/store/storyboardRun";
+import { ModalPortal } from "./ModalPortal";
 
 type Props = {
   runId: string;
@@ -83,6 +84,7 @@ export function PastRunViewer({ runId, onClose }: Props) {
   const cuts = snapshot ? orderedCuts(snapshot) : [];
 
   return (
+    <ModalPortal>
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
       <div className="flex max-h-full w-full max-w-5xl flex-col overflow-hidden rounded-lg border border-[#242424] bg-[#0b0b0b]">
         <header className="flex items-start justify-between gap-3 border-b border-[#242424] px-4 py-3">
@@ -223,5 +225,6 @@ export function PastRunViewer({ runId, onClose }: Props) {
         </div>
       </div>
     </div>
+    </ModalPortal>
   );
 }

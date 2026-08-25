@@ -23,6 +23,7 @@ import {
 } from "./galleryItemMenu";
 import { SafeImage, SafeVideo } from "./SafeImage";
 import { SceneFromImageDialog } from "./skills/scene3d/SceneFromImageDialog";
+import { ModalPortal } from "./ModalPortal";
 
 type LedgerUpsertInput = Parameters<
   ReturnType<typeof useAssetLedger.getState>["upsert"]
@@ -352,6 +353,7 @@ export function ImagePreviewModal() {
   };
 
   return (
+    <ModalPortal>
     <div
       ref={dialogRef}
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 p-6 backdrop-blur-md"
@@ -785,6 +787,7 @@ export function ImagePreviewModal() {
         onClose={() => setScene3dTarget(null)}
       />
     </div>
+    </ModalPortal>
   );
 }
 

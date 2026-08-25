@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { onServerRequest, resolveServerRequest, type ServerRequest } from "../lib/ipc";
+import { ModalPortal } from "./ModalPortal";
 
 const APPROVAL_METHODS = new Set([
   "item/commandExecution/requestApproval",
@@ -134,6 +135,7 @@ function Frame({
   children: React.ReactNode;
 }) {
   return (
+    <ModalPortal>
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
       <div className="flex max-h-[calc(100vh-80px)] min-h-0 w-full max-w-lg flex-col overflow-hidden rounded-xl border border-neutral-800 bg-neutral-900 p-5 shadow-2xl">
         <div className="flex shrink-0 items-start justify-between">
@@ -149,6 +151,7 @@ function Frame({
         {children}
       </div>
     </div>
+    </ModalPortal>
   );
 }
 

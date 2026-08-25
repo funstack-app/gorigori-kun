@@ -43,6 +43,7 @@ import {
 } from "../../../lib/sticker/reedit";
 import type { CutoutOutcome } from "../../../lib/sticker/cutout";
 import type { StickerPickItem } from "./StickerPickPanel";
+import { ModalPortal } from "../../ModalPortal";
 
 type Props = {
   item: StickerPickItem;
@@ -184,6 +185,7 @@ export function StickerReeditModal({
   };
 
   return (
+    <ModalPortal>
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6">
       <div className="flex h-full max-h-[46rem] w-full max-w-5xl flex-col overflow-hidden rounded-xl border border-[#242424] bg-[#121212]">
         <header className="flex items-center gap-3 border-b border-[#242424] px-4 py-3">
@@ -309,5 +311,6 @@ export function StickerReeditModal({
         </footer>
       </div>
     </div>
+    </ModalPortal>
   );
 }

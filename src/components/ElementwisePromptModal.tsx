@@ -18,6 +18,7 @@ import {
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
+import { ModalPortal } from "./ModalPortal";
 
 /**
  * 要素別プロンプト編集モーダル (STΛCK 指示 2026-05-19)。
@@ -284,6 +285,7 @@ function CategoryPicker({
   onClose: () => void;
 }) {
   return (
+    <ModalPortal>
     <div
       className="fixed inset-0 z-[90] flex items-center justify-center bg-black/70 p-6"
       onClick={onClose}
@@ -373,6 +375,7 @@ function CategoryPicker({
         </div>
       </div>
     </div>
+    </ModalPortal>
   );
 }
 
@@ -466,6 +469,7 @@ export function ElementwisePromptModal({ open, prompt, onClose, onApply }: Props
     : null;
 
   return (
+    <ModalPortal>
     <div
       className="fixed inset-0 z-[80] flex items-center justify-center bg-black/70 p-6"
       onClick={onClose}
@@ -557,5 +561,6 @@ export function ElementwisePromptModal({ open, prompt, onClose, onApply }: Props
         />
       )}
     </div>
+    </ModalPortal>
   );
 }

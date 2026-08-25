@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useErrorLog, type ErrorLogEntry } from "../lib/store/errorLog";
+import { ModalPortal } from "./ModalPortal";
 
 /**
  * エラーログパネル。
@@ -88,6 +89,7 @@ export function ErrorLogPanel({ open, onClose }: Props) {
   const ordered = [...entries].reverse();
 
   return (
+    <ModalPortal>
     <div
       ref={dialogRef}
       data-tour="error-log-dialog"
@@ -192,5 +194,6 @@ export function ErrorLogPanel({ open, onClose }: Props) {
         </div>
       </div>
     </div>
+    </ModalPortal>
   );
 }

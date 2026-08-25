@@ -15,6 +15,7 @@ import {
   type TourStep,
 } from "../lib/tour";
 import { useWorkspace } from "../lib/store/workspace";
+import { ModalPortal } from "./ModalPortal";
 
 type HighlightRect = {
   top: number;
@@ -226,6 +227,7 @@ export function TourOverlay({
   const hasNextStep = stepIndex < tour.steps.length - 1;
 
   return (
+    <ModalPortal>
     <div className="fixed inset-0 z-[200]" role="presentation">
       <div
         className="pointer-events-none fixed rounded-xl border-2 border-pink-400"
@@ -293,5 +295,6 @@ export function TourOverlay({
         </div>
       </section>
     </div>
+    </ModalPortal>
   );
 }

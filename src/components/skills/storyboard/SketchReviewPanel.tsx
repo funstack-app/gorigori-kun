@@ -31,6 +31,7 @@ import type {
   StoryboardSketchVersion,
   StoryboardShotType,
 } from "../../../lib/storyboard/types";
+import { ModalPortal } from "../../ModalPortal";
 
 const IMAGE_EXTS = ["png", "jpg", "jpeg", "webp", "gif", "bmp"];
 const ALTERNATIVE_SKETCH_PROMPT_APPEND =
@@ -862,6 +863,7 @@ export function SketchReviewPanel() {
 
       {/* === 自由記述モーダル (書き直し中のカットがあれば表示) === */}
       {editing && editingCut && (
+        <ModalPortal>
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6"
           onClick={cancelEdit}
@@ -904,6 +906,7 @@ export function SketchReviewPanel() {
             </div>
           </div>
         </div>
+        </ModalPortal>
       )}
     </div>
   );

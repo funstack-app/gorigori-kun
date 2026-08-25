@@ -7,6 +7,7 @@ import {
   normalizeFocus,
   type ThumbnailFocus,
 } from "../lib/store/presets";
+import { ModalPortal } from "./ModalPortal";
 
 /**
  * サムネ focal point + zoom を編集する 16:9 プレビュー領域。
@@ -241,6 +242,7 @@ export function PresetThumbnailFocusModal({
   }, [focus, onSave, onCancel]);
 
   return (
+    <ModalPortal>
     <div
       className="fixed inset-0 z-[60] flex items-center justify-center bg-black/75 p-4"
       onMouseDown={(event) => {
@@ -292,5 +294,6 @@ export function PresetThumbnailFocusModal({
         </div>
       </div>
     </div>
+    </ModalPortal>
   );
 }

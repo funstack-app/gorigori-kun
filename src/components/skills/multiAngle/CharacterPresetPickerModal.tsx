@@ -8,6 +8,7 @@ import {
 } from "../../../lib/characterSources";
 import { useAssetLedger } from "../../../lib/store/assetLedger";
 import { usePresets } from "../../../lib/store/presets";
+import { ModalPortal } from "../../ModalPortal";
 
 /**
  * キャラクター登録済みプリセットから、マルチアングルの被写体参照画像を選ぶモーダル。
@@ -63,6 +64,7 @@ export function CharacterPresetPickerModal({ onClose, onPick }: Props) {
   }, [onClose]);
 
   return (
+    <ModalPortal>
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6"
       onClick={onClose}
@@ -158,5 +160,6 @@ export function CharacterPresetPickerModal({ onClose, onPick }: Props) {
         </div>
       </div>
     </div>
+    </ModalPortal>
   );
 }

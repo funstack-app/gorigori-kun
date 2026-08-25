@@ -18,6 +18,7 @@ import { useAccounts, type SecretsState } from "../lib/store/accounts";
 import { invalidateRemoteMcpProviderCache } from "../lib/store/remoteMcpGen";
 import { useToasts } from "../lib/store/toasts";
 import { ProviderIcon } from "./ProviderIcon";
+import { ModalPortal } from "./ModalPortal";
 
 const PRIMARY_BUTTON = "rounded-md bg-pink-500 font-bold text-white hover:bg-pink-600";
 /**
@@ -632,6 +633,7 @@ function PasswordInput(props: { label: string; value: string; onChange: (value: 
 
 function Modal({ title, children, onClose }: { title: string; children: ReactNode; onClose: () => void }) {
   return (
+    <ModalPortal>
     <div className="fixed inset-0 z-50 grid place-items-center bg-black/70 px-4">
       <section className="w-full max-w-md rounded-lg border border-[#343434] bg-[#151515] p-5 shadow-2xl">
         <div className="flex items-center justify-between gap-3">
@@ -643,6 +645,7 @@ function Modal({ title, children, onClose }: { title: string; children: ReactNod
         <div className="mt-4">{children}</div>
       </section>
     </div>
+    </ModalPortal>
   );
 }
 

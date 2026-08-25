@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { ModalPortal } from "./ModalPortal";
 
 const STORAGE_KEY = "gori_gori_kun.first_run_storage_notice_v1";
 
@@ -100,6 +101,7 @@ export function FirstRunStorageNotice() {
   if (!visible) return null;
 
   return (
+    <ModalPortal>
     <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/70 backdrop-blur-sm">
       <div className="mx-4 max-w-md rounded-2xl border border-[#343434] bg-[#1a1a1a] p-6 shadow-2xl">
         <h2 className="text-[19px] font-black tracking-tight text-pink-300">
@@ -165,5 +167,6 @@ export function FirstRunStorageNotice() {
         </button>
       </div>
     </div>
+    </ModalPortal>
   );
 }

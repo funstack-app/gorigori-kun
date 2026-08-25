@@ -89,6 +89,7 @@ import { requestViewPreset, Scene3dViewport } from "./Scene3dViewport";
 import { GenerationGauge } from "../../GenerationGauge";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import { SceneFromImageDialog } from "./SceneFromImageDialog";
+import { ModalPortal } from "../../ModalPortal";
 
 const PRESET_ORDER: CameraPresetId[] = [
   "fixed",
@@ -463,6 +464,7 @@ function Popup({
   children: ReactNode;
 }) {
   return (
+    <ModalPortal>
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
       onClick={onClose}
@@ -485,6 +487,7 @@ function Popup({
         {children}
       </div>
     </div>
+    </ModalPortal>
   );
 }
 
