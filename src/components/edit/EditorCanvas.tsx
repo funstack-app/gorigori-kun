@@ -251,6 +251,10 @@ export function EditorCanvas({ regionSelect, cropFrame }: EditorCanvasProps = {}
     // (2026-08-26 STΛCK実機FB)。位置は「ウィンドウに合わせる」でいつでも戻せる。
     if (!viewportCanvas || !baseSize) return;
     if (event.button !== 0) return;
+    // 切り抜き枠の持ち手は capture 段のこのハンドラより先に止められないため、
+    // 発生元がオーバーレイの掴み要素ならパンを始めない (2026-08-26 実害:
+    // 枠のリサイズと画像パンが同時に動いた)。
+    if ((event.target as Element | null)?.closest("[data-editor-overlay-grab]")) return;
     const interactive = (event.target as Element | null)?.closest(
       "button, input, textarea, select, [contenteditable='true']",
     );

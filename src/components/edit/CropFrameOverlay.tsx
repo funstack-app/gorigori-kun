@@ -280,58 +280,69 @@ export function CropFrameOverlay({
     onExpandAspectSnap(best);
   };
 
-  const bracket = "absolute h-5 w-5 border-pink-400";
-  const bar = "absolute rounded-full bg-pink-400";
+  // Magnific と同じ見た目: 白い四隅ブラケット + 白い辺バーのみ。色付きの塗り・
+  // 枠線は使わない (2026-08-26 STΛCK実機FB: ピンクの塗りが画像に被って見えた)。
+  const bracket = "absolute h-5 w-5 border-white drop-shadow-[0_0_2px_rgba(0,0,0,0.9)]";
+  const bar =
+    "absolute rounded-full bg-white shadow-[0_0_2px_rgba(0,0,0,0.9)]";
   const hit = disabled ? "pointer-events-none" : "pointer-events-auto";
+  const frameHole = `polygon(0% 0%, 0% 100%, ${rect.left}px 100%, ${rect.left}px ${rect.top}px, ${rect.left + rect.width}px ${rect.top}px, ${rect.left + rect.width}px ${rect.top + rect.height}px, ${rect.left}px ${rect.top + rect.height}px, ${rect.left}px 100%, 100% 100%, 100% 0%)`;
 
   return (
     <div ref={hostRef} className="pointer-events-none absolute inset-0 z-10" role="presentation">
       {mode === "crop" ? (
+        // 枠の外 = 切り落とされる範囲。暗くして「残る範囲」を見せる。
         <div
           className="pointer-events-none absolute inset-0 bg-black/45"
-          style={{
-            clipPath: `polygon(0% 0%, 0% 100%, ${rect.left}px 100%, ${rect.left}px ${rect.top}px, ${rect.left + rect.width}px ${rect.top}px, ${rect.left + rect.width}px ${rect.top + rect.height}px, ${rect.left}px ${rect.top + rect.height}px, ${rect.left}px 100%, 100% 100%, 100% 0%)`,
-          }}
+          style={{ clipPath: frameHole }}
         />
       ) : (
-        // 拡張: 画像と枠の間 = これから生成される領域。薄く塗って見せる。
+        // 拡張: 画像と枠の間 = これから生成される領域。画像には一切色を被せず、
+        // 枠内から画像を抜いた部分だけをごく薄く見せる。
         <div
-          className="pointer-events-none absolute border border-dashed border-pink-400/70 bg-pink-400/10"
-          style={{ left: rect.left, top: rect.top, width: rect.width, height: rect.height }}
+          className="pointer-events-none absolute bg-white/[0.06]"
+          style={{
+            left: rect.left,
+            top: rect.top,
+            width: rect.width,
+            height: rect.height,
+            clipPath: `polygon(0% 0%, 0% 100%, ${image.left - rect.left}px 100%, ${image.left - rect.left}px ${image.top - rect.top}px, ${image.left - rect.left + image.width}px ${image.top - rect.top}px, ${image.left - rect.left + image.width}px ${image.top - rect.top + image.height}px, ${image.left - rect.left}px ${image.top - rect.top + image.height}px, ${image.left - rect.left}px 100%, 100% 100%, 100% 0%)`,
+          }}
         />
       )}
 
-      {/* 枠本体。中を掴んで移動 (切り抜きのみ)。 */}
+      {/* 枠本体 (掴んで移動・切り抜きのみ)。線は引かず、境界は暗転とブラケットで見せる。 */}
       <div
+        data-editor-overlay-grab
         onPointerDown={beginDrag("move")}
         onPointerMove={moveDrag}
         onPointerUp={endDrag}
         onPointerCancel={endDrag}
-        className={`absolute ${mode === "crop" ? `${hit} cursor-move` : "pointer-events-none"} border-2 border-pink-400`}
+        className={`absolute ${mode === "crop" ? `${hit} cursor-move` : "pointer-events-none"} border border-white/25`}
         style={{
           left: rect.left,
           top: rect.top,
           width: rect.width,
           height: rect.height,
-          boxShadow: "0 0 0 1px rgba(0,0,0,0.6)",
         }}
       />
 
-      {/* 四隅ブラケット + 辺バー (Magnific 風の持ち手)。 */}
+      {/* 四隅ブラケット + 辺バー (Magnific と同じ白の持ち手)。 */}
       {(
         [
-          ["nw", { left: rect.left - 6, top: rect.top - 6 }, `${bracket} border-l-4 border-t-4`],
-          ["ne", { left: rect.left + rect.width - 14, top: rect.top - 6 }, `${bracket} border-r-4 border-t-4`],
-          ["sw", { left: rect.left - 6, top: rect.top + rect.height - 14 }, `${bracket} border-b-4 border-l-4`],
-          ["se", { left: rect.left + rect.width - 14, top: rect.top + rect.height - 14 }, `${bracket} border-b-4 border-r-4`],
-          ["n", { left: rect.left + rect.width / 2 - 16, top: rect.top - 3, width: 32, height: 5 }, bar],
-          ["s", { left: rect.left + rect.width / 2 - 16, top: rect.top + rect.height - 2, width: 32, height: 5 }, bar],
-          ["w", { left: rect.left - 3, top: rect.top + rect.height / 2 - 16, width: 5, height: 32 }, bar],
-          ["e", { left: rect.left + rect.width - 2, top: rect.top + rect.height / 2 - 16, width: 5, height: 32 }, bar],
+          ["nw", { left: rect.left - 4, top: rect.top - 4 }, `${bracket} border-l-[3px] border-t-[3px]`],
+          ["ne", { left: rect.left + rect.width - 16, top: rect.top - 4 }, `${bracket} border-r-[3px] border-t-[3px]`],
+          ["sw", { left: rect.left - 4, top: rect.top + rect.height - 16 }, `${bracket} border-b-[3px] border-l-[3px]`],
+          ["se", { left: rect.left + rect.width - 16, top: rect.top + rect.height - 16 }, `${bracket} border-b-[3px] border-r-[3px]`],
+          ["n", { left: rect.left + rect.width / 2 - 14, top: rect.top - 2, width: 28, height: 4 }, bar],
+          ["s", { left: rect.left + rect.width / 2 - 14, top: rect.top + rect.height - 2, width: 28, height: 4 }, bar],
+          ["w", { left: rect.left - 2, top: rect.top + rect.height / 2 - 14, width: 4, height: 28 }, bar],
+          ["e", { left: rect.left + rect.width - 2, top: rect.top + rect.height / 2 - 14, width: 4, height: 28 }, bar],
         ] as const
       ).map(([handle, style, className]) => (
         <div
           key={handle}
+          data-editor-overlay-grab
           onPointerDown={beginDrag(handle)}
           onPointerMove={moveDrag}
           onPointerUp={endDrag}
