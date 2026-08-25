@@ -19,6 +19,8 @@ type EditorCanvasProps = {
     value: NormalizedBbox | null;
     onChange: (bbox: NormalizedBbox | null) => void;
     disabled?: boolean;
+    /** 切り抜きプリセットの横÷縦。指定時はドラッグ枠の比率を固定する。 */
+    aspectRatio?: number | null;
     /** 未選択時の案内文 (AI に直させる範囲か、塗りつぶす範囲かで意味が変わる)。 */
     hint?: string;
   };
@@ -319,6 +321,7 @@ export function EditorCanvas({ panOnEmpty = false, regionSelect }: EditorCanvasP
           value={regionSelect.value}
           onChange={regionSelect.onChange}
           disabled={regionSelect.disabled}
+          aspectRatio={regionSelect.aspectRatio}
           hint={regionSelect.hint}
         />
       ) : null}

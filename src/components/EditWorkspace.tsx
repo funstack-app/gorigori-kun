@@ -17,7 +17,11 @@ import { useMagnificModel } from "../lib/store/magnificModel";
 import { useThreads } from "../lib/store/threads";
 import { useToasts } from "../lib/store/toasts";
 import { AdjustPanel } from "./edit/AdjustPanel";
-import { CropPanel } from "./edit/CropPanel";
+import {
+  ResizeActionBar,
+  ResizePanel,
+  type ResizeMode,
+} from "./edit/CropPanel";
 import { isVersionSelectDisabled } from "./edit/EditCandidateStrip";
 import {
   buildEraseInstruction,
@@ -34,7 +38,17 @@ import {
 import { EditToolRail, type EditToolId } from "./edit/EditToolRail";
 import { EditorCanvas, EditorZoomControls } from "./edit/EditorCanvas";
 import { ExportDialog } from "./edit/ExportDialog";
+import { RestylePanel } from "./edit/RestylePanel";
 import type { NormalizedBbox } from "./edit/RegionSelectOverlay";
+import {
+  buildRestylePrompt,
+  centeredCropRegion,
+  closestMagnificAspect,
+  cropPixelSizeForAspect,
+  parseAspectRatio,
+  type CropAspectRatio,
+  type MagnificAspectRatio,
+} from "./edit/editToolLogic";
 import {
   NEUTRAL_ADJUST,
   type AdjustValues,
@@ -56,13 +70,16 @@ function basename(path: string) {
 }
 
 type ActiveMagnificTool = Extract<EditToolId, MagnificPanelTool>;
+type DirectMagnificTool = ActiveMagnificTool | "expand";
 
-const MAGNIFIC_TOOL_LABELS: Record<ActiveMagnificTool, string> = {
+const MAGNIFIC_TOOL_LABELS: Record<DirectMagnificTool, string> = {
+  expand: "画像拡張",
   camera: "カメラ",
   relight: "ライティング",
 };
 
-const MAGNIFIC_TOOL_SUCCESS_TEXT: Record<ActiveMagnificTool, string> = {
+const MAGNIFIC_TOOL_SUCCESS_TEXT: Record<DirectMagnificTool, string> = {
+  expand: "広げた画像",
   camera: "カメラを変えた画像",
   relight: "光を調整した画像",
 };
@@ -71,11 +88,21 @@ function isMagnificTool(tool: EditToolId): tool is ActiveMagnificTool {
   return tool === "camera" || tool === "relight";
 }
 
+function readEditorImageSize(canvas: unknown): { width: number; height: number } | null {
+  const size = (canvas as { __ggBaseSize?: { width: number; height: number } } | null)
+    ?.__ggBaseSize;
+  return size && size.width > 0 && size.height > 0 ? size : null;
+}
+
 /** 1枚の画像を、候補から選びながら版として育てる編集画面。 */
 export function EditWorkspace() {
   const sourceImagePath = useEditor((state) => state.sourceImagePath);
   const busyTool = useEditor((state) => state.busyTool);
   const pendingOpenPath = useEditor((state) => state.pendingOpenPath);
+  const editorCanvas = useEditor((state) => state.canvas);
+  const editorRevision = useEditor((state) => state.revision);
+  const imageSize = readEditorImageSize(editorCanvas);
+  void editorRevision;
   const magnificConnected = useAccounts((state) => state.magnific.authenticated);
   const selectedMagnificModels = useMagnificModel((state) => state.selectedModels);
   const {
@@ -101,14 +128,20 @@ export function EditWorkspace() {
   const [savingArtwork, setSavingArtwork] = useState(false);
   const [region, setRegion] = useState<NormalizedBbox | null>(null);
   const [tool, setTool] = useState<EditToolId>("ai");
+  const [resizeMode, setResizeMode] = useState<ResizeMode>("expand");
+  const [cropAspect, setCropAspect] = useState<CropAspectRatio>("1:1");
+  const [expandAspect, setExpandAspect] = useState<MagnificAspectRatio>("16:9");
+  const [cropWidth, setCropWidth] = useState(1);
+  const [cropHeight, setCropHeight] = useState(1);
+  const [expandPrompt, setExpandPrompt] = useState("");
   const [adjust, setAdjust] = useState<AdjustValues>(NEUTRAL_ADJUST);
   const [exportOpen, setExportOpen] = useState(false);
   const [magnificBusyTool, setMagnificBusyTool] =
-    useState<ActiveMagnificTool | "restyle" | null>(null);
+    useState<DirectMagnificTool | "restyle" | null>(null);
   const [editSession, setEditSession] = useState(() => createEditSession(sourceImagePath));
   const editSessionRef = useRef(editSession);
 
-  const needsRegion = tool === "region" || tool === "crop";
+  const needsRegion = tool === "region" || (tool === "crop" && resizeMode === "crop");
 
   useEffect(() => {
     setEditSession((current) => {
@@ -130,8 +163,19 @@ export function EditWorkspace() {
     setRegion(null);
     setTool("ai");
     setRegionMode("replace");
+    setResizeMode("expand");
+    setCropAspect("1:1");
+    setExpandAspect("16:9");
+    setExpandPrompt("");
     setAdjust(NEUTRAL_ADJUST);
   }, [sourceImagePath]);
+
+  useEffect(() => {
+    if (!imageSize) return;
+    const size = cropPixelSizeForAspect(imageSize.width, imageSize.height, 1);
+    setCropWidth(size.width);
+    setCropHeight(size.height);
+  }, [sourceImagePath, imageSize?.width, imageSize?.height]);
 
   const selectTool = (next: EditToolId) => {
     setTool(next);
@@ -139,6 +183,60 @@ export function EditWorkspace() {
     setRegionMode("replace");
     setError(null);
   };
+
+  const setCropFrameFromPixels = (requestedWidth: number, requestedHeight: number) => {
+    if (!imageSize) return;
+    const next = centeredCropRegion(
+      imageSize.width,
+      imageSize.height,
+      requestedWidth,
+      requestedHeight,
+    );
+    if (!next) return;
+    setRegion(next);
+    setCropWidth(Math.max(1, Math.round(next[2] * imageSize.width)));
+    setCropHeight(Math.max(1, Math.round(next[3] * imageSize.height)));
+  };
+
+  const selectCropAspect = (ratio: CropAspectRatio) => {
+    setCropAspect(ratio);
+    if (!imageSize) return;
+    if (ratio === "custom") {
+      setCropFrameFromPixels(cropWidth, cropHeight);
+      return;
+    }
+    const aspect = parseAspectRatio(ratio) ?? 1;
+    const size = cropPixelSizeForAspect(imageSize.width, imageSize.height, aspect);
+    setCropFrameFromPixels(size.width, size.height);
+  };
+
+  const changeResizeMode = (next: ResizeMode) => {
+    setResizeMode(next);
+    if (next === "expand") {
+      setRegion(null);
+      return;
+    }
+    selectCropAspect(cropAspect);
+  };
+
+  const changeCropWidth = (width: number) => {
+    setCropFrameFromPixels(width, cropHeight);
+  };
+
+  const changeCropHeight = (height: number) => {
+    setCropFrameFromPixels(cropWidth, height);
+  };
+
+  const changeRegion = (next: NormalizedBbox | null) => {
+    setRegion(next);
+    if (!next || !imageSize || tool !== "crop") return;
+    setCropWidth(Math.max(1, Math.round(next[2] * imageSize.width)));
+    setCropHeight(Math.max(1, Math.round(next[3] * imageSize.height)));
+  };
+
+  const cropAspectValue = cropWidth > 0 && cropHeight > 0
+    ? cropWidth / cropHeight
+    : parseAspectRatio(cropAspect);
 
   const handleVersionRecoveryFailure = useCallback((_caught: unknown) => {
     setVersionRecoveryRequired(true);
@@ -369,7 +467,7 @@ export function EditWorkspace() {
   };
 
   const runMagnificEdit = async (
-    editTool: ActiveMagnificTool,
+    editTool: DirectMagnificTool,
     params: Record<string, unknown>,
   ) => {
     if (
@@ -399,6 +497,7 @@ export function EditWorkspace() {
         return;
       }
       track.markCompleted();
+      if (editTool === "expand") setExpandPrompt("");
       setAdjust(NEUTRAL_ADJUST);
       useToasts.getState().push({
         kind: "success",
@@ -413,12 +512,22 @@ export function EditWorkspace() {
     }
   };
 
-  /** B1の簡易リスタイル。プリセット付き本パネルはB2で追加する。 */
+  const runResize = async () => {
+    if (resizeMode === "crop") {
+      await runCrop();
+      return;
+    }
+    await runMagnificEdit("expand", {
+      aspectRatio: expandAspect,
+      ...(expandPrompt.trim() ? { prompt: expandPrompt.trim() } : {}),
+    });
+  };
+
   const runRestyle = async () => {
-    const prompt = instruction.trim();
+    const style = instruction.trim();
     if (
       !sourceImagePath ||
-      !prompt ||
+      !style ||
       !magnificConnected ||
       busy ||
       busyTool !== null ||
@@ -430,15 +539,18 @@ export function EditWorkspace() {
     const track = beginDirectRun("magnificEdit", 1);
     const model =
       selectedMagnificModels[0] ?? FEATURED_MAGNIFIC_IMAGE_MODELS[0].id;
+    const size = readEditorImageSize(useEditor.getState().canvas);
+    const aspect = closestMagnificAspect(size?.width ?? 1, size?.height ?? 1);
     setMagnificBusyTool("restyle");
     setError(null);
     track.markStarted();
     try {
       const result = await magnific.generateBatch({
-        prompt,
+        prompt: buildRestylePrompt(style),
         model,
         count: 1,
         refImagePaths: [sourceImagePath],
+        aspect,
       });
       const resultPath = result.generatedPaths.find((path) => Boolean(path?.trim()));
       if (!resultPath) {
@@ -475,7 +587,6 @@ export function EditWorkspace() {
   // タブ切替で戻るとキャンバスは作り直され空になるが、store には開いていた版が
   // 残っている (右上の版レールだけ表示される状態)。新しいキャンバスが空のままなら
   // 開いていた版を自動で再表示する。ifIdleOnly で通常読込とのレースを防ぐ。
-  const editorCanvas = useEditor((state) => state.canvas);
   useEffect(() => {
     if (!editorCanvas) return;
     const state = useEditor.getState();
@@ -761,8 +872,12 @@ export function EditWorkspace() {
                 sourceImagePath && needsRegion
                   ? {
                       value: region,
-                      onChange: setRegion,
+                      onChange: changeRegion,
                       disabled: panelBusy,
+                      aspectRatio:
+                        tool === "crop" && resizeMode === "crop"
+                          ? cropAspectValue
+                          : null,
                       hint:
                         tool === "crop"
                           ? "残したいところをドラッグで囲む"
@@ -775,6 +890,7 @@ export function EditWorkspace() {
             {sourceImagePath && tool === "adjust" ? (
               <EditFloatingPanel title="調整" onClose={() => selectTool("ai")}>
                 <AdjustPanel
+                  imagePath={sourceImagePath}
                   values={adjust}
                   onChange={changeAdjust}
                   onCommit={commitAdjust}
@@ -785,21 +901,45 @@ export function EditWorkspace() {
                 />
               </EditFloatingPanel>
             ) : sourceImagePath && tool === "crop" ? (
-              <EditFloatingPanel title="リサイズ" onClose={() => selectTool("ai")}>
-                <CropPanel
-                  region={region}
-                  onApply={() => void runCrop()}
-                  onClear={() => setRegion(null)}
+              <EditFloatingPanel
+                title="リサイズ"
+                width="wide"
+                onClose={() => selectTool("ai")}
+              >
+                <ResizePanel
+                  mode={resizeMode}
+                  cropAspect={cropAspect}
+                  expandAspect={expandAspect}
+                  expandPrompt={expandPrompt}
                   busy={panelBusy}
+                  onModeChange={changeResizeMode}
+                  onCropAspectChange={selectCropAspect}
+                  onExpandAspectChange={setExpandAspect}
+                  onExpandPromptChange={setExpandPrompt}
+                />
+              </EditFloatingPanel>
+            ) : sourceImagePath && tool === "restyle" ? (
+              <EditFloatingPanel
+                title="リスタイル"
+                width="wide"
+                onClose={() => selectTool("ai")}
+              >
+                <RestylePanel
+                  imagePath={sourceImagePath}
+                  value={instruction}
+                  busy={panelBusy}
+                  onSelect={setInstruction}
                 />
               </EditFloatingPanel>
             ) : sourceImagePath && isMagnificTool(tool) ? (
               <EditFloatingPanel
                 title={MAGNIFIC_TOOL_LABELS[tool]}
+                width="wide"
                 onClose={() => selectTool("ai")}
               >
                 <MagnificToolPanel
                   tool={tool}
+                  imagePath={sourceImagePath}
                   busy={magnificBusyTool !== null || versionInFlight}
                   connected={magnificConnected}
                   onRun={(params) => void runMagnificEdit(tool, params)}
@@ -830,6 +970,23 @@ export function EditWorkspace() {
                   busy={busy || magnificBusyTool === "restyle" || versionInFlight}
                   interactionDisabled={versionRecoveryRequired}
                   disabled={!canRun}
+                  resizeControls={
+                    <ResizeActionBar
+                      mode={resizeMode}
+                      cropAspect={cropAspect}
+                      expandAspect={expandAspect}
+                      cropWidth={cropWidth}
+                      cropHeight={cropHeight}
+                      cropReady={region !== null}
+                      busy={panelBusy}
+                      connected={magnificConnected}
+                      onCropAspectChange={selectCropAspect}
+                      onExpandAspectChange={setExpandAspect}
+                      onCropWidthChange={changeCropWidth}
+                      onCropHeightChange={changeCropHeight}
+                      onRun={() => void runResize()}
+                    />
+                  }
                   onChange={setInstruction}
                   onSubmit={() => void run()}
                   onCandidateCountChange={setCandidateCount}

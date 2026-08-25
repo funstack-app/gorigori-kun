@@ -1,4 +1,4 @@
-import type { KeyboardEvent } from "react";
+import type { KeyboardEvent, ReactNode } from "react";
 
 import type { EditToolId } from "./EditToolRail";
 
@@ -30,10 +30,18 @@ type EditChatBarProps = {
   busy: boolean;
   disabled: boolean;
   interactionDisabled?: boolean;
+  /** リサイズだけは文章欄を持たず、比率とpxの操作列へ丸ごと変形する。 */
+  resizeControls?: ReactNode;
   onChange: (value: string) => void;
   onSubmit: () => void;
   onCandidateCountChange: (count: number) => void;
   onRegionModeChange: (mode: RegionEditMode) => void;
+};
+
+const PASSIVE_TOOL_COPY: Partial<Record<EditToolId, { label: string; hint: string }>> = {
+  relight: { label: "ライティング", hint: "左上の光点・方向・強さを決めて実行します" },
+  camera: { label: "カメラ", hint: "左上のオービットを動かして視点を決めます" },
+  adjust: { label: "調整", hint: "左上のプリセットまたはスライダーで調整します" },
 };
 
 export function EditChatBar({
@@ -44,30 +52,69 @@ export function EditChatBar({
   busy,
   disabled,
   interactionDisabled = false,
+  resizeControls,
   onChange,
   onSubmit,
   onCandidateCountChange,
   onRegionModeChange,
 }: EditChatBarProps) {
-  const acceptsInstruction =
-    activeTool === "ai" || activeTool === "region" || activeTool === "restyle";
-  const placeholder =
-    activeTool === "crop"
-      ? "左上のパネルで切り抜く範囲を指定してください"
-      : activeTool === "adjust"
-        ? "左上のパネルで画像を調整してください"
-        : activeTool === "restyle"
-          ? "どんな雰囲気に変えたいですか？"
-        : activeTool === "region"
-        ? "選択範囲を囲んで、変更したい内容を説明してください"
-        : "どこを変更したいですか？";
-
-  const submitFromKeyboard = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+  const submitFromKeyboard = (
+    event: KeyboardEvent<HTMLTextAreaElement | HTMLInputElement>,
+  ) => {
     const submitKey = event.key === "Enter" && (event.metaKey || event.ctrlKey || !event.shiftKey);
     if (!submitKey) return;
     event.preventDefault();
     if (!disabled) onSubmit();
   };
+
+  if (activeTool === "crop") {
+    return (
+      <div
+        data-edit-chat-bar
+        className="w-[min(720px,calc(100vw-2rem))] rounded-2xl border border-[#2a2a2a] bg-[#1b1b1b] px-4 py-3 shadow-2xl"
+      >
+        {resizeControls ?? <span className="text-[11px] text-neutral-500">リサイズ設定を選んでください</span>}
+      </div>
+    );
+  }
+
+  const passive = PASSIVE_TOOL_COPY[activeTool];
+  if (passive) {
+    return (
+      <div
+        data-edit-chat-bar
+        className="flex w-[min(560px,calc(100vw-2rem))] items-center gap-3 rounded-2xl border border-[#2a2a2a] bg-[#1b1b1b] px-4 py-3 shadow-2xl"
+      >
+        <span className="shrink-0 text-xs font-black text-white">{passive.label}</span>
+        <span className="min-w-0 truncate text-[11px] font-bold text-neutral-500">{passive.hint}</span>
+      </div>
+    );
+  }
+
+  if (activeTool === "restyle") {
+    return (
+      <div
+        data-edit-chat-bar
+        className="flex w-[min(680px,calc(100vw-2rem))] items-center gap-2 rounded-2xl border border-[#2a2a2a] bg-[#1b1b1b] px-4 py-3 shadow-2xl"
+      >
+        <span className="shrink-0 text-xs font-black text-white">スタイル</span>
+        <input
+          type="text"
+          value={value}
+          disabled={interactionDisabled}
+          onChange={(event) => onChange(event.target.value)}
+          onKeyDown={submitFromKeyboard}
+          placeholder="例：やわらかな水彩画"
+          className="min-w-0 flex-1 bg-transparent text-sm text-neutral-100 outline-none placeholder:text-neutral-500 disabled:opacity-40"
+        />
+        <SubmitButton busy={busy} disabled={disabled} label="リスタイルを実行" onClick={onSubmit} />
+      </div>
+    );
+  }
+
+  const placeholder = activeTool === "region"
+    ? "選択範囲を囲んで、変更したい内容を説明してください"
+    : "どこを変更したいですか？";
 
   return (
     <div
@@ -76,12 +123,12 @@ export function EditChatBar({
     >
       <textarea
         value={value}
-        disabled={interactionDisabled || !acceptsInstruction}
+        disabled={interactionDisabled}
         onChange={(event) => onChange(event.target.value)}
         onKeyDown={submitFromKeyboard}
         rows={2}
         placeholder={placeholder}
-        className="max-h-[6.5rem] min-h-10 w-full resize-none bg-transparent text-sm leading-5 text-neutral-100 outline-none placeholder:text-neutral-500"
+        className="max-h-[6.5rem] min-h-10 w-full resize-none bg-transparent text-sm leading-5 text-neutral-100 outline-none placeholder:text-neutral-500 disabled:opacity-40"
       />
       <div className="mt-1 flex items-center justify-between gap-3">
         <div className="flex min-h-7 items-center gap-1.5">
@@ -102,8 +149,6 @@ export function EditChatBar({
                 消去
               </ModeChip>
             </>
-          ) : activeTool === "crop" || activeTool === "adjust" ? (
-            <span className="text-[11px] text-neutral-500">パネル操作のみ</span>
           ) : null}
         </div>
         <div className="flex items-center gap-2">
@@ -125,18 +170,38 @@ export function EditChatBar({
               </select>
             </label>
           ) : null}
-          <button
-            type="button"
-            onClick={onSubmit}
-            disabled={disabled}
-            aria-label="編集を実行"
-            className="flex h-8 w-8 items-center justify-center rounded-full bg-pink-500 text-white hover:bg-pink-400 disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-500"
-          >
-            {busy ? <Spinner /> : <span className="-mt-0.5 text-lg leading-none">↑</span>}
-          </button>
+          <SubmitButton busy={busy} disabled={disabled} label="編集を実行" onClick={onSubmit} round />
         </div>
       </div>
     </div>
+  );
+}
+
+function SubmitButton({
+  busy,
+  disabled,
+  label,
+  onClick,
+  round = false,
+}: {
+  busy: boolean;
+  disabled: boolean;
+  label: string;
+  onClick: () => void;
+  round?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      aria-label={label}
+      className={`flex h-8 shrink-0 items-center justify-center bg-pink-500 text-white hover:bg-pink-400 disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-500 ${
+        round ? "w-8 rounded-full" : "gap-2 rounded-lg px-3 text-[11px] font-black"
+      }`}
+    >
+      {busy ? <Spinner /> : round ? <span className="-mt-0.5 text-lg leading-none">↑</span> : "実行"}
+    </button>
   );
 }
 

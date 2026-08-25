@@ -66,58 +66,58 @@ export type AdjustPreset = {
   id: string;
   label: string;
   values: AdjustValues;
-  /** チップのサムネイルに使う CSS グラデーション (軽量表現)。 */
-  swatch: string;
+  /** 現在画像のサムネイルに掛ける、実処理へ近いCSSプレビュー。 */
+  cssFilter: string;
 };
 
 export const ADJUST_PRESETS: readonly AdjustPreset[] = [
   {
-    id: "warm",
-    label: "あたたかい",
-    values: { ...NEUTRAL_ADJUST, brightness: 0.05, saturation: 0.1, hue: -10 },
-    swatch: "linear-gradient(135deg, #ffd9a0, #ff9a6b)",
+    id: "vintage",
+    label: "vintage",
+    values: { ...NEUTRAL_ADJUST, contrast: 0.08, saturation: -0.2, noise: 18, sepia: true },
+    cssFilter: "sepia(.65) saturate(.75) contrast(1.08)",
   },
   {
-    id: "cool",
-    label: "つめたい",
-    values: { ...NEUTRAL_ADJUST, hue: 10, brightness: 0.02 },
-    swatch: "linear-gradient(135deg, #a8d8ff, #6b8bff)",
+    id: "retrofilm",
+    label: "retrofilm",
+    values: { ...NEUTRAL_ADJUST, brightness: 0.04, contrast: 0.12, saturation: -0.12, hue: -8, noise: 30 },
+    cssFilter: "sepia(.2) saturate(.8) contrast(1.12) brightness(1.04)",
   },
   {
-    id: "vivid",
-    label: "ビビッド",
-    values: { ...NEUTRAL_ADJUST, saturation: 0.35, contrast: 0.15 },
-    swatch: "linear-gradient(135deg, #ff5fa2, #ffd12e)",
+    id: "duotone",
+    label: "duotone",
+    values: { ...NEUTRAL_ADJUST, contrast: 0.25, grayscale: true },
+    cssFilter: "grayscale(1) contrast(1.35) sepia(.18)",
   },
   {
-    id: "soft",
-    label: "ふんわり",
-    values: { ...NEUTRAL_ADJUST, brightness: 0.12, contrast: -0.12 },
-    swatch: "linear-gradient(135deg, #ffe9f2, #d9e6ff)",
+    id: "vibrant",
+    label: "vibrant",
+    values: { ...NEUTRAL_ADJUST, brightness: 0.03, contrast: 0.18, saturation: 0.45 },
+    cssFilter: "saturate(1.5) contrast(1.18) brightness(1.03)",
   },
   {
-    id: "mono",
-    label: "モノクロ",
-    values: { ...NEUTRAL_ADJUST, grayscale: true },
-    swatch: "linear-gradient(135deg, #f2f2f2, #4a4a4a)",
+    id: "warmtone",
+    label: "warmtone",
+    values: { ...NEUTRAL_ADJUST, brightness: 0.05, saturation: 0.12, hue: -12 },
+    cssFilter: "sepia(.2) saturate(1.18) brightness(1.05)",
   },
   {
-    id: "sepia",
-    label: "セピア",
-    values: { ...NEUTRAL_ADJUST, sepia: true },
-    swatch: "linear-gradient(135deg, #e6ceac, #8a6a44)",
+    id: "coolbreeze",
+    label: "coolbreeze",
+    values: { ...NEUTRAL_ADJUST, brightness: 0.03, saturation: 0.05, hue: 12 },
+    cssFilter: "hue-rotate(12deg) saturate(1.05) brightness(1.05)",
   },
   {
-    id: "film",
-    label: "フィルム",
-    values: { ...NEUTRAL_ADJUST, contrast: 0.1, saturation: -0.15, noise: 25 },
-    swatch: "linear-gradient(135deg, #cfc7b8, #6f6a5f)",
+    id: "redtint",
+    label: "redtint",
+    values: { ...NEUTRAL_ADJUST, saturation: 0.15, hue: -25 },
+    cssFilter: "hue-rotate(-18deg) saturate(1.25)",
   },
   {
-    id: "crisp",
-    label: "くっきり",
-    values: { ...NEUTRAL_ADJUST, contrast: 0.25 },
-    swatch: "linear-gradient(135deg, #ffffff, #1a1a1a)",
+    id: "coldtone",
+    label: "coldtone",
+    values: { ...NEUTRAL_ADJUST, contrast: 0.1, saturation: -0.05, hue: 20 },
+    cssFilter: "hue-rotate(20deg) saturate(.9) contrast(1.1)",
   },
 ] as const;
 

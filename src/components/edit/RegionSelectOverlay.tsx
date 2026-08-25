@@ -39,6 +39,8 @@ type Props = {
   onChange: (bbox: NormalizedBbox | null) => void;
   /** 実行中は選択を触らせない。 */
   disabled?: boolean;
+  /** 切り抜き時だけ指定。画面上の枠をこの横÷縦へ固定する。 */
+  aspectRatio?: number | null;
   /**
    * 未選択時に出す案内文。用途で意味が変わる (AI に直させる範囲 / 塗りつぶす範囲)
    * ため、呼び出し側が指定できるようにする。未指定なら AI 修正向けの既定文。
@@ -48,6 +50,28 @@ type Props = {
 
 /** ドラッグ中の画面座標での矩形 (オーバーレイ div のローカル座標)。 */
 type ScreenRect = { left: number; top: number; width: number; height: number };
+
+function constrainedScreenRect(
+  start: { x: number; y: number },
+  x: number,
+  y: number,
+  aspectRatio?: number | null,
+): ScreenRect {
+  const dx = x - start.x;
+  const dy = y - start.y;
+  let width = Math.abs(dx);
+  let height = Math.abs(dy);
+  if (aspectRatio && Number.isFinite(aspectRatio) && aspectRatio > 0) {
+    if (height === 0 || width / height > aspectRatio) height = width / aspectRatio;
+    else width = height * aspectRatio;
+  }
+  return {
+    left: dx < 0 ? start.x - width : start.x,
+    top: dy < 0 ? start.y - height : start.y,
+    width,
+    height,
+  };
+}
 
 /** キャンバスの現在のズームと平行移動を読む。無ければ等倍。 */
 function readViewport(canvas: unknown): { zoom: number; offsetX: number; offsetY: number } {
@@ -84,9 +108,17 @@ function bboxToScreen(
   };
 }
 
-export function RegionSelectOverlay({ canvas, value, onChange, disabled, hint }: Props) {
+export function RegionSelectOverlay({
+  canvas,
+  value,
+  onChange,
+  disabled,
+  aspectRatio,
+  hint,
+}: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const startRef = useRef<{ x: number; y: number } | null>(null);
+  const dragRectRef = useRef<ScreenRect | null>(null);
   const [dragRect, setDragRect] = useState<ScreenRect | null>(null);
   // viewportTransform は fabric が内部で書き換えるので React は再描画のきっかけを持たない。
   // ウィンドウリサイズ時に選択枠がズレたまま残らないよう、リサイズで強制再計算する。
@@ -111,7 +143,9 @@ export function RegionSelectOverlay({ canvas, value, onChange, disabled, hint }:
     const x = event.clientX - rect.left;
     const y = event.clientY - rect.top;
     startRef.current = { x, y };
-    setDragRect({ left: x, top: y, width: 0, height: 0 });
+    const next = { left: x, top: y, width: 0, height: 0 };
+    dragRectRef.current = next;
+    setDragRect(next);
     host.setPointerCapture(event.pointerId);
     event.preventDefault();
   };
@@ -123,12 +157,9 @@ export function RegionSelectOverlay({ canvas, value, onChange, disabled, hint }:
     const rect = host.getBoundingClientRect();
     const x = event.clientX - rect.left;
     const y = event.clientY - rect.top;
-    setDragRect({
-      left: Math.min(start.x, x),
-      top: Math.min(start.y, y),
-      width: Math.abs(x - start.x),
-      height: Math.abs(y - start.y),
-    });
+    const next = constrainedScreenRect(start, x, y, aspectRatio);
+    dragRectRef.current = next;
+    setDragRect(next);
   };
 
   const pointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -138,7 +169,8 @@ export function RegionSelectOverlay({ canvas, value, onChange, disabled, hint }:
     if (host?.hasPointerCapture(event.pointerId)) {
       host.releasePointerCapture(event.pointerId);
     }
-    const rect = dragRect;
+    const rect = dragRectRef.current;
+    dragRectRef.current = null;
     setDragRect(null);
     if (!start || !rect || !base) return;
 

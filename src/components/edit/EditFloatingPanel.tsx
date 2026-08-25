@@ -4,14 +4,22 @@ type EditFloatingPanelProps = {
   title: string;
   onClose: () => void;
   children: ReactNode;
+  width?: "normal" | "wide";
 };
 
 /** Magnific 型の、左上に浮く道具パネル共通枠。 */
-export function EditFloatingPanel({ title, onClose, children }: EditFloatingPanelProps) {
+export function EditFloatingPanel({
+  title,
+  onClose,
+  children,
+  width = "normal",
+}: EditFloatingPanelProps) {
   return (
     <section
       data-edit-floating-panel
-      className="absolute left-6 top-6 z-30 flex max-h-[calc(100%-3rem)] w-[280px] flex-col overflow-hidden rounded-2xl border border-[#2a2a2a] bg-[#1b1b1b] p-4 shadow-2xl"
+      className={`absolute left-6 top-6 z-30 flex max-h-[calc(100%-3rem)] flex-col overflow-hidden rounded-2xl border border-[#2a2a2a] bg-[#1b1b1b] p-4 shadow-2xl ${
+        width === "wide" ? "w-[390px] max-w-[calc(100%-3rem)]" : "w-[280px]"
+      }`}
     >
       <div className="flex shrink-0 items-center justify-between gap-3">
         <h2 className="text-sm font-semibold text-neutral-100">{title}</h2>
