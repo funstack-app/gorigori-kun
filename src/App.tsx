@@ -8,6 +8,7 @@ import { ErrorLogPanel } from "./components/ErrorLogPanel";
 import { deleteGalleryImages } from "./components/galleryItemMenu";
 import { ImagePreviewModal } from "./components/ImagePreviewModal";
 import { LibraryBatchSaveButton } from "./components/LibraryBatchSaveButton";
+import { ModalPortal } from "./components/ModalPortal";
 import { MaskEditorModal } from "./components/MaskEditorModal";
 import { PresetsDrawer } from "./components/PresetsDrawer";
 import { SnsExportModal } from "./components/SnsExportModal";
@@ -714,6 +715,7 @@ function SignedInScaffold() {
         />
       ) : null}
       {createModalOpen && (
+        <ModalPortal>
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
           onClick={() => setCreateModalOpen(false)}
@@ -762,6 +764,7 @@ function SignedInScaffold() {
             </div>
           </div>
         </div>
+        </ModalPortal>
       )}
     </>
   );
@@ -1939,6 +1942,7 @@ function LibraryDeleteButton() {
       </button>
 
       {pendingDeletePaths && (
+        <ModalPortal>
         <div
           className="fixed inset-0 z-[80] flex items-center justify-center bg-black/80 p-5 backdrop-blur-sm"
           role="dialog"
@@ -2014,6 +2018,7 @@ function LibraryDeleteButton() {
             </div>
           </div>
         </div>
+        </ModalPortal>
       )}
     </>
   );

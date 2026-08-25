@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { ModalPortal } from "./ModalPortal";
 
 import { images as imagesIpc } from "../lib/ipc";
 import { useLibrarySelection } from "../lib/store/librarySelection";
@@ -222,6 +223,7 @@ export function LibraryBatchSaveButton() {
       </button>
 
       {open && (
+        <ModalPortal>
         <div
           className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 pb-[72px] pt-4"
           onClick={() => {
@@ -367,6 +369,7 @@ export function LibraryBatchSaveButton() {
             </div>
           </div>
         </div>
+        </ModalPortal>
       )}
     </>
   );

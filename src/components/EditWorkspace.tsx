@@ -371,6 +371,23 @@ export function EditWorkspace() {
     void openImageForEditing(path);
   }, [pendingOpenPath, openImageForEditing]);
 
+  // タブ切替で戻るとキャンバスは作り直され空になるが、store には開いていた版が
+  // 残っている (右上の版レールだけ表示される状態)。新しいキャンバスが空のままなら
+  // 開いていた版を自動で再表示する。ifIdleOnly で通常読込とのレースを防ぐ。
+  const editorCanvas = useEditor((state) => state.canvas);
+  useEffect(() => {
+    if (!editorCanvas) return;
+    const state = useEditor.getState();
+    if (!state.sourceImagePath || state.pendingOpenPath) return;
+    const objects =
+      (editorCanvas as { getObjects?: () => unknown[] }).getObjects?.() ?? [];
+    if (objects.length > 0) return;
+    void openImageForEditing(state.sourceImagePath, {
+      ifIdleOnly: true,
+      recoveryPath: null,
+    });
+  }, [editorCanvas, openImageForEditing]);
+
   const saveArtwork = async () => {
     if (savingArtwork) return;
     setSavingArtwork(true);

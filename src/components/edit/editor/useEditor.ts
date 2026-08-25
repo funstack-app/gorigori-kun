@@ -77,7 +77,16 @@ export type OpenImageForEditingOptions = {
   recoveryPath?: string | null;
   /** ファイルからの開き直しにも失敗し、安全のため編集を止める必要があることを通知する。 */
   onRecoveryFailure?: (error: unknown) => void;
+  /**
+   * true のとき、別の画像読込が進行中なら何もせず成功扱いで戻る。
+   * タブ復帰時の自動復元 (EditWorkspace) 専用。ユーザー操作の読込とレースして
+   * 同じキャンバスへ二重に読み込むのを防ぐ。
+   */
+  ifIdleOnly?: boolean;
 };
+
+/** 進行中の openImageForEditing の数。ifIdleOnly の判定に使う。 */
+let openImageInFlight = 0;
 
 export type VersionOperationLock = { current: boolean };
 
@@ -297,6 +306,19 @@ export async function applyRegionEditedVersion({
  * 読み込み途中で canvas が空になっても、失敗時は直前の表示へ復元する。
  */
 export async function openImageForEditing(
+  path: string,
+  options: OpenImageForEditingOptions = {},
+): Promise<boolean> {
+  if (options.ifIdleOnly && openImageInFlight > 0) return true;
+  openImageInFlight += 1;
+  try {
+    return await openImageForEditingInner(path, options);
+  } finally {
+    openImageInFlight -= 1;
+  }
+}
+
+async function openImageForEditingInner(
   path: string,
   options: OpenImageForEditingOptions = {},
 ): Promise<boolean> {

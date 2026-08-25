@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { ModalPortal } from "./ModalPortal";
 
 import {
   images as imagesIpc,
@@ -408,6 +409,7 @@ export function LibraryAutoRenameButton() {
       </button>
 
       {patternMode && (
+        <ModalPortal>
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
           onClick={() => setPatternMode(null)}
@@ -469,6 +471,7 @@ export function LibraryAutoRenameButton() {
             </div>
           </div>
         </div>
+        </ModalPortal>
       )}
     </div>
   );
