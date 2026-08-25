@@ -6,7 +6,11 @@ import {
   useState,
 } from "react";
 import { Grid, type CellComponentProps } from "react-window";
-import { SafeImage, SafeVideo } from "./SafeImage";
+import {
+  galleryMediaSupportsFullResOnInteraction,
+  SafeImage,
+  SafeVideo,
+} from "./SafeImage";
 import {
   galleryItemMediaType,
   type GalleryItem,
@@ -657,7 +661,8 @@ function HeartIcon({ filled }: { filled: boolean }) {
 }
 
 function GalleryMedia({ item, className }: { item: GalleryItem; className: string }) {
-  if (galleryItemMediaType(item) === "video") {
+  const mediaType = galleryItemMediaType(item);
+  if (mediaType === "video") {
     if (item.thumbnailPath) {
       return (
         <SafeImage
@@ -682,6 +687,7 @@ function GalleryMedia({ item, className }: { item: GalleryItem; className: strin
     <SafeImage
       path={item.path}
       thumbnail
+      fullResOnInteraction={galleryMediaSupportsFullResOnInteraction(mediaType)}
       alt={item.name}
       className={className}
       loading="lazy"

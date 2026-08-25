@@ -44,13 +44,49 @@ export type SafeImageProps = Omit<ImgHTMLAttributes<HTMLImageElement>, "src"> & 
   retryOnError?: boolean;
   /** 一覧用。true のとき512pxのディスクキャッシュを表示する。 */
   thumbnail?: boolean;
+  /**
+   * サムネ表示中、pointerenter / pointerdown をきっかけに原画像を先読みする。
+   * 読み込み完了まではサムネを保ち、完了後だけ原画像へ差し替える。
+   */
+  fullResOnInteraction?: boolean;
 };
+
+type SafeImageDisplayPathOptions = {
+  path?: string;
+  thumbnailPath?: string;
+  thumbnail: boolean;
+  fullResOnInteraction: boolean;
+  interactionStarted: boolean;
+  fullResLoaded: boolean;
+};
+
+/** 操作前と原画像の先読み中はサムネを保ち、準備完了後だけ原画像を返す。 */
+export function resolveSafeImageDisplayPath({
+  path,
+  thumbnailPath,
+  thumbnail,
+  fullResOnInteraction,
+  interactionStarted,
+  fullResLoaded,
+}: SafeImageDisplayPathOptions): string | undefined {
+  if (!thumbnail) return path;
+  if (fullResOnInteraction && interactionStarted && fullResLoaded) return path;
+  return thumbnailPath;
+}
+
+/** 動画サムネは原動画へ差し替えず、静止画像タイルだけ原寸へ昇格する。 */
+export function galleryMediaSupportsFullResOnInteraction(
+  mediaType: "image" | "video",
+): boolean {
+  return mediaType === "image";
+}
 
 export function SafeImage({
   path,
   fallbackLabel = "画像が見つかりません",
   retryOnError = false,
   thumbnail = false,
+  fullResOnInteraction = false,
   className,
   alt,
   loading = "lazy",
@@ -65,6 +101,8 @@ export function SafeImage({
     sourcePath: string;
     displayPath: string;
   } | null>(null);
+  const [fullResRequestPath, setFullResRequestPath] = useState<string | null>(null);
+  const [fullResLoadedPath, setFullResLoadedPath] = useState<string | null>(null);
 
   // F-#2 追補 (2026-06-16): path が変わったら errored をリセットする。
   // これが無いと、旧パスで一度 onError が発火して errored=true になった後、
@@ -77,6 +115,8 @@ export function SafeImage({
     setErrored(false);
     retried.current = false;
     setThumbnailResult(null);
+    setFullResRequestPath(null);
+    setFullResLoadedPath(null);
 
     if (thumbnail && path) {
       void images
@@ -93,13 +133,64 @@ export function SafeImage({
     return () => {
       cancelled = true;
     };
-  }, [path, thumbnail]);
+  }, [path, thumbnail, fullResOnInteraction]);
 
-  const displayPath = thumbnail
+  useEffect(() => {
+    if (
+      !thumbnail ||
+      !fullResOnInteraction ||
+      !fullResRequestPath ||
+      fullResRequestPath !== path
+    ) {
+      return;
+    }
+
+    let cancelled = false;
+    const requestedPath = fullResRequestPath;
+    const preload = new Image();
+    preload.onload = () => {
+      if (!cancelled) setFullResLoadedPath(requestedPath);
+    };
+    preload.onerror = () => {
+      // 原画像を読めない場合は現在のサムネを保ち、次の操作で再試行できるようにする。
+      if (!cancelled) {
+        setFullResRequestPath((current) =>
+          current === requestedPath ? null : current,
+        );
+      }
+    };
+    preload.src = convertFileSrc(requestedPath);
+
+    return () => {
+      cancelled = true;
+      preload.onload = null;
+      preload.onerror = null;
+    };
+  }, [path, thumbnail, fullResOnInteraction, fullResRequestPath]);
+
+  const thumbnailPath = thumbnail
     ? thumbnailResult && thumbnailResult.sourcePath === path
       ? thumbnailResult.displayPath
       : undefined
     : path;
+  const displayPath = resolveSafeImageDisplayPath({
+    path,
+    thumbnailPath,
+    thumbnail,
+    fullResOnInteraction,
+    interactionStarted: fullResRequestPath === path,
+    fullResLoaded: fullResLoadedPath === path,
+  });
+  const requestFullResolution = () => {
+    if (
+      thumbnail &&
+      fullResOnInteraction &&
+      path &&
+      fullResRequestPath !== path
+    ) {
+      setFullResRequestPath(path);
+    }
+  };
 
   if (!path || !displayPath || errored) {
     return (
@@ -109,6 +200,8 @@ export function SafeImage({
           className ?? "",
         ].join(" ")}
         title={path}
+        onPointerEnter={requestFullResolution}
+        onPointerDown={requestFullResolution}
       >
         <svg
           xmlns="http://www.w3.org/2000/svg"
@@ -140,11 +233,32 @@ export function SafeImage({
       className={className}
       loading={loading}
       decoding={decoding}
+      onPointerEnter={(e) => {
+        requestFullResolution();
+        rest.onPointerEnter?.(e);
+      }}
+      onPointerDown={(e) => {
+        requestFullResolution();
+        rest.onPointerDown?.(e);
+      }}
       onError={(e) => {
         // キャッシュ掃除との競合などでサムネ自体を読めない場合も元画像へ戻す。
         if (thumbnail && displayPath !== path) {
           setThumbnailResult({ sourcePath: path, displayPath: path });
           retried.current = false;
+          return;
+        }
+        // 先読み済み原画像への差し替えだけが失敗した場合は、フォールバックではなく
+        // 元のサムネへ戻す。次の pointerdown で再試行できる。
+        if (
+          thumbnail &&
+          fullResOnInteraction &&
+          fullResLoadedPath === path &&
+          thumbnailPath &&
+          thumbnailPath !== path
+        ) {
+          setFullResLoadedPath(null);
+          setFullResRequestPath(null);
           return;
         }
         rest.onError?.(e);

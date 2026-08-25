@@ -223,122 +223,128 @@ export function LibraryBatchSaveButton() {
 
       {open && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+          className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 pb-[72px] pt-4"
           onClick={() => {
             if (!running) setOpen(false);
           }}
         >
           <div
-            className="w-[360px] rounded-xl border border-[#2a2a2a] bg-[#181818] p-4 shadow-2xl"
+            className="flex w-[360px] flex-col overflow-hidden rounded-xl border border-[#2a2a2a] bg-[#181818] p-4 shadow-2xl"
+            style={{ maxHeight: "calc(100vh - 120px)" }}
             onClick={(e) => e.stopPropagation()}
           >
-            <h3 className="mb-1 text-[13px] font-black text-neutral-100">
-              ローカルに一括保存
-            </h3>
-            <p className="mb-3 text-[11px] text-neutral-400">
-              {selectedPaths.length} 件を 1 フォルダに保存します。
-            </p>
+            <div className="min-h-0 overflow-y-auto pr-1">
+              <h3 className="mb-1 text-[13px] font-black text-neutral-100">
+                ローカルに一括保存
+              </h3>
+              <p className="mb-3 text-[11px] text-neutral-400">
+                {selectedPaths.length} 件を 1 フォルダに保存します。
+              </p>
 
-            <div className="space-y-3">
-              <div>
-                <span className="mb-1 block text-[12px] font-bold text-neutral-200">
-                  命名方法
-                </span>
-                <div
-                  role="radiogroup"
-                  aria-label="命名方法"
-                  className="grid grid-cols-2 gap-1 rounded-lg border border-[#343434] bg-[#121212] p-1"
-                >
-                  {(
-                    [
-                      ["serial", "連番で命名"],
-                      ["original", "今の名前のまま"],
-                    ] as const
-                  ).map(([mode, label]) => {
-                    const active = namingMode === mode;
-                    return (
-                      <button
-                        key={mode}
-                        type="button"
-                        role="radio"
-                        aria-checked={active}
-                        onClick={() => selectNamingMode(mode)}
-                        disabled={running}
-                        className={[
-                          "h-8 rounded-md px-2 text-[11px] font-bold transition",
-                          active
-                            ? "bg-pink-500 text-white"
-                            : "text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100",
-                          running ? "cursor-not-allowed opacity-50" : "",
-                        ].join(" ")}
-                      >
-                        {label}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-
-              {namingMode === "serial" && (
-                <>
-                  <label className="block">
-                    <span className="mb-1 block text-[12px] font-bold text-neutral-200">
-                      プレフィックス
-                    </span>
-                    <input
-                      type="text"
-                      value={prefix}
-                      onChange={(e) => setPrefix(e.target.value)}
-                      placeholder="gori_"
-                      className="h-8 w-full rounded-md border border-[#343434] bg-[#0b0b0b] px-2 text-[12px] text-neutral-100 outline-none focus:border-pink-400"
-                    />
-                  </label>
-
-                  <div className="flex gap-3">
-                    <label className="flex-1">
-                      <span className="mb-1 block text-[12px] font-bold text-neutral-200">
-                        開始番号
-                      </span>
-                      <input
-                        type="number"
-                        min={0}
-                        value={start}
-                        onChange={(e) =>
-                          setStart(Math.max(0, Math.floor(Number(e.target.value) || 0)))
-                        }
-                        className="h-8 w-full rounded-md border border-[#343434] bg-[#0b0b0b] px-2 text-[12px] text-neutral-100 outline-none focus:border-pink-400"
-                      />
-                    </label>
-                    <label className="flex-1">
-                      <span className="mb-1 block text-[12px] font-bold text-neutral-200">
-                        ゼロ埋め桁数
-                      </span>
-                      <input
-                        type="number"
-                        min={1}
-                        max={10}
-                        value={pad}
-                        onChange={(e) =>
-                          setPad(
-                            Math.min(10, Math.max(1, Math.floor(Number(e.target.value) || 1))),
-                          )
-                        }
-                        className="h-8 w-full rounded-md border border-[#343434] bg-[#0b0b0b] px-2 text-[12px] text-neutral-100 outline-none focus:border-pink-400"
-                      />
-                    </label>
+              <div className="space-y-3">
+                <div>
+                  <span className="mb-1 block text-[12px] font-bold text-neutral-200">
+                    命名方法
+                  </span>
+                  <div
+                    role="radiogroup"
+                    aria-label="命名方法"
+                    className="grid grid-cols-2 gap-1 rounded-lg border border-[#343434] bg-[#121212] p-1"
+                  >
+                    {(
+                      [
+                        ["serial", "連番で命名"],
+                        ["original", "今の名前のまま"],
+                      ] as const
+                    ).map(([mode, label]) => {
+                      const active = namingMode === mode;
+                      return (
+                        <button
+                          key={mode}
+                          type="button"
+                          role="radio"
+                          aria-checked={active}
+                          onClick={() => selectNamingMode(mode)}
+                          disabled={running}
+                          className={[
+                            "h-8 rounded-md px-2 text-[11px] font-bold transition",
+                            active
+                              ? "bg-pink-500 text-white"
+                              : "text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100",
+                            running ? "cursor-not-allowed opacity-50" : "",
+                          ].join(" ")}
+                        >
+                          {label}
+                        </button>
+                      );
+                    })}
                   </div>
-                </>
-              )}
+                </div>
 
-              <div className="rounded-md border border-[#2a2a2a] bg-[#0b0b0b] px-3 py-2">
-                <span className="text-[10px] text-neutral-500">プレビュー</span>
-                <p className="mt-0.5 font-mono text-[12px] text-neutral-200">
-                  {previewName}
-                </p>
+                {namingMode === "serial" && (
+                  <>
+                    <label className="block">
+                      <span className="mb-1 block text-[12px] font-bold text-neutral-200">
+                        プレフィックス
+                      </span>
+                      <input
+                        type="text"
+                        value={prefix}
+                        onChange={(e) => setPrefix(e.target.value)}
+                        placeholder="gori_"
+                        className="h-8 w-full rounded-md border border-[#343434] bg-[#0b0b0b] px-2 text-[12px] text-neutral-100 outline-none focus:border-pink-400"
+                      />
+                    </label>
+
+                    <div className="flex gap-3">
+                      <label className="flex-1">
+                        <span className="mb-1 block text-[12px] font-bold text-neutral-200">
+                          開始番号
+                        </span>
+                        <input
+                          type="number"
+                          min={0}
+                          value={start}
+                          onChange={(e) =>
+                            setStart(Math.max(0, Math.floor(Number(e.target.value) || 0)))
+                          }
+                          className="h-8 w-full rounded-md border border-[#343434] bg-[#0b0b0b] px-2 text-[12px] text-neutral-100 outline-none focus:border-pink-400"
+                        />
+                      </label>
+                      <label className="flex-1">
+                        <span className="mb-1 block text-[12px] font-bold text-neutral-200">
+                          ゼロ埋め桁数
+                        </span>
+                        <input
+                          type="number"
+                          min={1}
+                          max={10}
+                          value={pad}
+                          onChange={(e) =>
+                            setPad(
+                              Math.min(
+                                10,
+                                Math.max(1, Math.floor(Number(e.target.value) || 1)),
+                              ),
+                            )
+                          }
+                          className="h-8 w-full rounded-md border border-[#343434] bg-[#0b0b0b] px-2 text-[12px] text-neutral-100 outline-none focus:border-pink-400"
+                        />
+                      </label>
+                    </div>
+                  </>
+                )}
+
+                <div className="rounded-md border border-[#2a2a2a] bg-[#0b0b0b] px-3 py-2">
+                  <span className="text-[10px] text-neutral-500">プレビュー</span>
+                  <p className="mt-0.5 font-mono text-[12px] text-neutral-200">
+                    {previewName}
+                  </p>
+                </div>
               </div>
             </div>
 
-            <div className="mt-4 flex justify-end gap-2">
+            <div className="mt-4 flex shrink-0 justify-end gap-2">
               <button
                 type="button"
                 onClick={() => setOpen(false)}
