@@ -1027,6 +1027,18 @@ fn is_provider_tool_item(item: &Value, provider_id: &str) -> bool {
     }
 }
 
+fn is_completion_check_tool_item(item: &Value) -> bool {
+    let tool_name = item
+        .get("tool")
+        .or_else(|| item.get("name"))
+        .and_then(Value::as_str)
+        .map(|name| name.to_ascii_lowercase())
+        .unwrap_or_default();
+    ["wait", "result", "status"]
+        .iter()
+        .any(|marker| tool_name.contains(marker))
+}
+
 fn tool_result_values(item: &Value) -> Vec<&Value> {
     ["result", "output", "contentItems"]
         .into_iter()
@@ -1069,12 +1081,14 @@ fn extract_llm_tool_artifact_candidates(
         .map(normalized_local_path)
         .collect::<std::collections::HashSet<_>>();
     let mut candidates = ArtifactSourceCandidates::default();
+    let mut completion_urls = Vec::new();
     let mut errors = Vec::new();
 
     for item in items
         .iter()
         .filter(|item| is_provider_tool_item(item, provider_id))
     {
+        let completion_check_tool = is_completion_check_tool_item(item);
         let item_failed = item.get("status").and_then(Value::as_str) == Some("failed");
         let results = tool_result_values(item);
         if item_failed && results.is_empty() {
@@ -1085,6 +1099,8 @@ fn extract_llm_tool_artifact_candidates(
         }
 
         for result in results {
+            let completion_result =
+                completion_check_tool || value_has_explicit_completed_status(result);
             let output = tool_call_output_from_value(result);
             let result_failed = output.is_error
                 || item_failed
@@ -1102,6 +1118,9 @@ fn extract_llm_tool_artifact_candidates(
             }
             if let Ok(found) = extract_remote_artifact_candidates(&output, kind) {
                 for source in found.preferred {
+                    if completion_result && matches!(source, RemoteArtifactSource::Url(_)) {
+                        push_unique_source(&mut completion_urls, source.clone());
+                    }
                     candidates.push_preferred(source);
                 }
                 for source in found.fallback {
@@ -1114,6 +1133,13 @@ fn extract_llm_tool_artifact_candidates(
                 candidates.push_preferred(source);
             }
         }
+    }
+
+    if !completion_urls.is_empty() {
+        for source in std::mem::take(&mut candidates.preferred) {
+            push_unique_source(&mut completion_urls, source);
+        }
+        candidates.preferred = completion_urls;
     }
 
     (candidates, errors)
@@ -1232,6 +1258,10 @@ fn is_processing_status_value(value: &str) -> bool {
     )
 }
 
+fn is_completed_status_value(value: &str) -> bool {
+    value.trim().eq_ignore_ascii_case("completed")
+}
+
 fn is_terminal_failure_status_value(value: &str) -> bool {
     matches!(
         value
@@ -1266,6 +1296,20 @@ fn value_has_explicit_processing_status(value: &Value) -> bool {
         Value::String(text) => parsed_json_string(text)
             .as_ref()
             .is_some_and(value_has_explicit_processing_status),
+        _ => false,
+    }
+}
+
+fn value_has_explicit_completed_status(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => object.iter().any(|(key, nested)| {
+            (status_field(key) && nested.as_str().is_some_and(is_completed_status_value))
+                || value_has_explicit_completed_status(nested)
+        }),
+        Value::Array(values) => values.iter().any(value_has_explicit_completed_status),
+        Value::String(text) => parsed_json_string(text)
+            .as_ref()
+            .is_some_and(value_has_explicit_completed_status),
         _ => false,
     }
 }
@@ -1441,12 +1485,6 @@ fn evaluate_llm_artifact_turn(
             &tool_errors,
         ));
     }
-    if let Some(source) = select_llm_artifact_sources(tool_candidates, &output.final_message, kind)
-        .into_iter()
-        .next()
-    {
-        return LlmArtifactTurnEvaluation::Ready(source);
-    }
     if kind == RemoteMcpMediaKind::Video {
         if let Some(identifier) = processing {
             return LlmArtifactTurnEvaluation::Processing {
@@ -1454,6 +1492,12 @@ fn evaluate_llm_artifact_turn(
                 identifier,
             };
         }
+    }
+    if let Some(source) = select_llm_artifact_sources(tool_candidates, &output.final_message, kind)
+        .into_iter()
+        .next()
+    {
+        return LlmArtifactTurnEvaluation::Ready(source);
     }
     LlmArtifactTurnEvaluation::Failed(llm_failure_message(
         &format!(
@@ -3241,6 +3285,45 @@ mod tests {
     }
 
     #[test]
+    fn completion_tool_direct_url_beats_generation_tool_direct_url() {
+        let output = crate::codex::gen_server::LlmToolTurnOutput {
+            completed_items: vec![
+                json!({
+                    "type": "mcpToolCall",
+                    "server": "krea",
+                    "tool": "videos_generate",
+                    "status": "completed",
+                    "result": {
+                        "structuredContent": {
+                            "url": "https://cdn.example.com/generation-start.mp4"
+                        }
+                    }
+                }),
+                json!({
+                    "type": "mcpToolCall",
+                    "server": "krea",
+                    "tool": "creations_wait",
+                    "status": "completed",
+                    "result": {
+                        "structuredContent": {
+                            "url": "https://cdn.example.com/completed.mp4"
+                        }
+                    }
+                }),
+            ],
+            final_message: String::new(),
+            terminal_error: None,
+        };
+
+        assert_eq!(
+            evaluate_llm_artifact_turn(&output, "krea", RemoteMcpMediaKind::Video, &[]),
+            LlmArtifactTurnEvaluation::Ready(RemoteArtifactSource::Url(
+                "https://cdn.example.com/completed.mp4".to_string()
+            ))
+        );
+    }
+
+    #[test]
     fn final_direct_url_beats_tool_shared_page_as_last_resort() {
         let mut tool_candidates = ArtifactSourceCandidates::default();
         tool_candidates.push_fallback(RemoteArtifactSource::Url(
@@ -3457,6 +3540,25 @@ mod tests {
             source,
             RemoteArtifactSource::Url("https://cdn.example.com/final.mp4".to_string())
         );
+    }
+
+    #[test]
+    fn processing_turn_with_job_id_and_url_requires_follow_up() {
+        assert!(matches!(
+            evaluate_llm_artifact_turn(
+                &mock_video_turn(
+                    "processing",
+                    Some("https://cdn.example.com/not-ready-yet.mp4"),
+                ),
+                "krea",
+                RemoteMcpMediaKind::Video,
+                &[],
+            ),
+            LlmArtifactTurnEvaluation::Processing {
+                identifier: ProviderJobIdentifier { ref value, .. },
+                ..
+            } if value == "job-123"
+        ));
     }
 
     #[test]
