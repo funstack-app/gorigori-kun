@@ -76,6 +76,7 @@ type RemoteMcpGenState = {
   ) => void;
   setVideoSelections: (selections: RemoteMcpSelection[]) => void;
   setModelCatalog: (key: string, catalog: RemoteMcpModelCatalog) => void;
+  removeModelCatalogs: (providerId: string) => void;
   start: (input: RemoteMcpRunInput) => Promise<RemoteMcpStartResult>;
   startSelectedVideos: (input: RemoteMcpRunInput) => Promise<RemoteMcpStartResult>;
   retry: (requestId: string) => Promise<RemoteMcpStartResult>;
@@ -120,12 +121,25 @@ function readModelCatalogCache(): Record<string, RemoteMcpModelCatalog> {
     const parsed = JSON.parse(localStorage.getItem(MODEL_CATALOG_CACHE_KEY) ?? "{}") as unknown;
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
     const catalogs: Record<string, RemoteMcpModelCatalog> = {};
+    let discarded = false;
     for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
-      if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+      if (!value || typeof value !== "object" || Array.isArray(value)) {
+        discarded = true;
+        continue;
+      }
       const catalog = value as RemoteMcpModelCatalog;
-      if (!Array.isArray(catalog.models) || !catalog.providerId || !catalog.kind) continue;
+      if (
+        !Array.isArray(catalog.models) ||
+        catalog.models.length === 0 ||
+        !catalog.providerId ||
+        !catalog.kind
+      ) {
+        discarded = true;
+        continue;
+      }
       catalogs[key] = { ...catalog, loadedFromCache: true };
     }
+    if (discarded) writeModelCatalogCache(catalogs);
     return catalogs;
   } catch {
     return {};
@@ -617,6 +631,17 @@ export const useRemoteMcpGen = create<RemoteMcpGenState>((set, get) => {
         return { modelCatalogs };
       }),
 
+    removeModelCatalogs: (providerId) =>
+      set((state) => {
+        const modelCatalogs = Object.fromEntries(
+          Object.entries(state.modelCatalogs).filter(
+            ([, catalog]) => catalog.providerId !== providerId,
+          ),
+        );
+        writeModelCatalogCache(modelCatalogs);
+        return { modelCatalogs };
+      }),
+
     start: async (input) => {
       const selection = get().selections[input.kind];
       if (!selection) {
@@ -759,4 +784,14 @@ export const useRemoteMcpGen = create<RemoteMcpGenState>((set, get) => {
 
 export function isRemoteMcpJobRunning(job: RemoteMcpGenJob | null): boolean {
   return job?.phase === "running" || job?.phase === "saving";
+}
+
+/** 再接続後は、Rust側のツール一覧と画面側のモデル一覧を両方捨てる。 */
+export async function invalidateRemoteMcpProviderCache(providerId: string): Promise<void> {
+  try {
+    const { remoteMcp } = await import("../ipc");
+    await remoteMcp.invalidateToolsCache(providerId);
+  } finally {
+    useRemoteMcpGen.getState().removeModelCatalogs(providerId);
+  }
 }

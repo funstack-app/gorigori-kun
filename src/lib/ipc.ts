@@ -747,6 +747,9 @@ export const remoteMcp = {
   /** app data_dir に保存された前回のツール一覧。未取得なら null。 */
   listToolsCached: (id: string) =>
     invoke<RemoteMcpToolsResult | null>("remote_mcp_list_tools_cached", { providerId: id }),
+  /** 再接続後に前回のツール一覧を捨て、次回表示でライブ取得させる。 */
+  invalidateToolsCache: (id: string) =>
+    invoke<null>("remote_mcp_list_tools_cached", { providerId: id, invalidate: true }),
   /** モデル一覧などの読み取り専用ツールを、結果を保存せず直接呼ぶ。 */
   query: (args: RemoteMcpQueryArgs) =>
     invoke<RemoteMcpQueryResult>("remote_mcp_query", args),

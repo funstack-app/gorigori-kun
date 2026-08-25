@@ -41,7 +41,11 @@ import { useScenePromptOverride } from "../lib/store/scenePrompt";
 import {
   buildRemoteMcpModelCatalog,
   buildHiggsfieldVideoModelCatalog,
+  ensureRemoteMcpToolsAvailable,
   fetchRemoteMcpModelCatalog,
+  isCatalogStale,
+  isRemoteMcpCatalogModelSelectable,
+  remoteMcpCatalogErrorMessage,
   remoteMcpCatalogKey,
   type RemoteMcpCatalogModel,
   type RemoteMcpModelCatalog,
@@ -559,8 +563,7 @@ function ModelPickerPopover({
     });
   };
 
-  // プロバイダタブを開いた時点で、保存済みツール/モデルを再利用する。
-  // 未取得なら「モデル一覧ツール → 保存済み一覧 → model enum」の順で自動取得する。
+  // 保存済み一覧は即表示し、24時間より古い場合だけ裏で取り直す。
   useEffect(() => {
     if (!activeRemoteProvider) return;
     const providerId = activeRemoteProvider.id;
@@ -572,6 +575,26 @@ function ModelPickerPopover({
       [providerId]: { kind: "loading" },
     }));
 
+    let fallbackCatalog: RemoteMcpModelCatalog | null = null;
+    const showCachedCatalog = (
+      catalog: RemoteMcpModelCatalog,
+      tools?: RemoteMcpToolsResult,
+    ) => {
+      fallbackCatalog = { ...catalog, loadedFromCache: true };
+      setRemoteModels((current) => ({
+        ...current,
+        [providerId]: {
+          kind: "ready",
+          tools: tools ?? {
+            providerId,
+            authStatus: "cached",
+            tools: catalog.generationTool ? [catalog.generationTool] : [],
+          },
+          catalog: fallbackCatalog,
+        },
+      }));
+    };
+
     const load = async () => {
       const catalogKey = remoteMcpCatalogKey(providerId, media);
       const storedCatalog = modelCatalogs[catalogKey];
@@ -580,43 +603,46 @@ function ModelPickerPopover({
         storedCatalog.source !== "standard" &&
         storedCatalog.source !== "unavailable"
       ) {
-        setRemoteModels((current) => ({
-          ...current,
-          [providerId]: {
-            kind: "ready",
-            tools: {
-              providerId,
-              authStatus: "cached",
-              tools: storedCatalog.generationTool ? [storedCatalog.generationTool] : [],
-            },
-            catalog: { ...storedCatalog, loadedFromCache: true },
-          },
-        }));
-        return;
+        showCachedCatalog(storedCatalog);
+        if (!isCatalogStale(storedCatalog)) return;
       }
-      const [cachedTools, cachedCatalog] = await Promise.all([
-        remoteMcp.listToolsCached(providerId).catch(() => null),
-        remoteMcp.discoveryCached(providerId).catch(() => null),
-      ]);
-      if (cancelled) return;
-      try {
-        const tools = cachedTools ?? (await remoteMcp.listTools(providerId));
+
+      if (!fallbackCatalog) {
+        const [cachedTools, cachedDiscovery] = await Promise.all([
+          remoteMcp.listToolsCached(providerId).catch(() => null),
+          remoteMcp.discoveryCached(providerId).catch(() => null),
+        ]);
         if (cancelled) return;
-        const catalog = cachedCatalog?.models.length
-          ? buildRemoteMcpModelCatalog({
-              providerId,
-              providerLabel: activeRemoteProvider.label,
-              kind: media,
-              tools: tools.tools,
-              cachedModels: cachedCatalog.models,
-              loadedFromCache: true,
-            })
-          : await fetchRemoteMcpModelCatalog({
-                providerId,
-                providerLabel: activeRemoteProvider.label,
-                kind: media,
-                tools: tools.tools,
-              });
+        if (cachedTools?.tools.length) {
+          const cachedCatalog = buildRemoteMcpModelCatalog({
+            providerId,
+            providerLabel: activeRemoteProvider.label,
+            kind: media,
+            tools: cachedTools.tools,
+            cachedModels: cachedDiscovery?.models,
+            loadedFromCache: true,
+          });
+          if (
+            cachedCatalog.models.length > 0 &&
+            cachedCatalog.source !== "standard" &&
+            cachedCatalog.source !== "unavailable"
+          ) {
+            showCachedCatalog(cachedCatalog, cachedTools);
+            setModelCatalog(catalogKey, cachedCatalog);
+          }
+        }
+      }
+
+      try {
+        const tools = await remoteMcp.listTools(providerId);
+        if (cancelled) return;
+        ensureRemoteMcpToolsAvailable(activeRemoteProvider.label, tools.tools);
+        const catalog = await fetchRemoteMcpModelCatalog({
+          providerId,
+          providerLabel: activeRemoteProvider.label,
+          kind: media,
+          tools: tools.tools,
+        });
         if (cancelled) return;
         setModelCatalog(catalogKey, catalog);
         setRemoteModels((current) => ({
@@ -625,9 +651,22 @@ function ModelPickerPopover({
         }));
       } catch (error) {
         if (cancelled) return;
+        const message = remoteMcpCatalogErrorMessage(activeRemoteProvider.label, error);
         setRemoteModels((current) => ({
           ...current,
-          [providerId]: { kind: "error", message: String(error) },
+          [providerId]: fallbackCatalog
+            ? {
+                kind: "ready",
+                tools: {
+                  providerId,
+                  authStatus: "cached",
+                  tools: fallbackCatalog.generationTool
+                    ? [fallbackCatalog.generationTool]
+                    : [],
+                },
+                catalog: { ...fallbackCatalog, warning: message },
+              }
+            : { kind: "error", message },
         }));
       }
     };
@@ -653,6 +692,7 @@ function ModelPickerPopover({
       ]);
       const provider = REMOTE_MCP_PROVIDERS.find((item) => item.id === providerId);
       if (!provider) throw new Error("接続先が見つかりませんでした");
+      ensureRemoteMcpToolsAvailable(provider.label, tools.tools);
       const catalog = await fetchRemoteMcpModelCatalog({
         providerId,
         providerLabel: provider.label,
@@ -667,12 +707,14 @@ function ModelPickerPopover({
       }));
       removeUnavailableSelections(providerId, catalog);
     } catch (error) {
+      const provider = REMOTE_MCP_PROVIDERS.find((item) => item.id === providerId);
+      const message = remoteMcpCatalogErrorMessage(provider?.label ?? providerId, error);
       const cached = useRemoteMcpGen.getState().modelCatalogs[
         remoteMcpCatalogKey(providerId, media)
       ];
       setRemoteModels((current) => ({
         ...current,
-        [providerId]: cached
+        [providerId]: cached?.models.length
           ? {
               kind: "ready",
               tools: {
@@ -683,10 +725,10 @@ function ModelPickerPopover({
               catalog: {
                 ...cached,
                 loadedFromCache: true,
-                warning: `再取得できませんでした: ${String(error)}`,
+                warning: message,
               },
             }
-          : { kind: "error", message: String(error) },
+          : { kind: "error", message },
       }));
     }
   };
@@ -740,7 +782,7 @@ function ModelPickerPopover({
     const cached = modelCatalogs[remoteMcpCatalogKey("magnific", "video")];
     if (cached && cached.source !== "standard" && cached.source !== "unavailable") {
       setMagnificVideoState({ kind: "ready", catalog: cached });
-      return;
+      if (!isCatalogStale(cached)) return;
     }
     void refreshMagnificVideoModels();
     // タブを開いた時だけ取得する。取得後のストア更新で同じ通信を繰り返さない。
@@ -965,14 +1007,14 @@ function ModelPickerPopover({
 
   const selectCatalogModel = (model: RemoteMcpCatalogModel) => {
     if (!activeCatalog || !activeCatalogProviderId || !activeCatalogProviderLabel) return;
+    if (!isRemoteMcpCatalogModelSelectable(activeCatalog, model.id)) return;
     const tool = activeCatalog.generationTool;
-    if (!tool || !tool.inputSchemaJson.trim()) return;
     const nextSelection: RemoteMcpSelection = {
       providerId: activeCatalogProviderId,
       providerLabel: activeCatalogProviderLabel,
-      toolName: tool.name,
-      toolTitle: tool.title,
-      inputSchemaJson: tool.inputSchemaJson,
+      toolName: tool?.name ?? "",
+      toolTitle: tool?.title,
+      inputSchemaJson: tool?.inputSchemaJson ?? "",
       kind: media,
       model,
     };
@@ -980,7 +1022,7 @@ function ModelPickerPopover({
       const selectedIndex = remoteVideoSelections.findIndex(
         (selection) =>
           selection.providerId === activeCatalogProviderId &&
-          selection.toolName === tool.name &&
+          selection.toolName === (tool?.name ?? "") &&
           selection.model?.id === model.id,
       );
       if (selectedIndex >= 0) {
@@ -1352,14 +1394,14 @@ function ModelPickerPopover({
                               selection.model?.id === model.id,
                           )
                         : selectedActiveCatalog?.model?.id === model.id;
-                    const selectable = Boolean(
-                      activeCatalog.generationTool?.inputSchemaJson.trim(),
+                    const selectable = isRemoteMcpCatalogModelSelectable(
+                      activeCatalog,
+                      model.id,
                     );
                     return (
                       <ModelRow
                         key={`${model.id}:${model.name}`}
                         title={model.label ?? model.name}
-                        description={remoteCatalogModelDescription(model, activeCatalog.source)}
                         details={
                           media === "video" && model.videoSpecs
                             ? remoteVideoSpecDetails(model.videoSpecs)
@@ -1378,11 +1420,6 @@ function ModelPickerPopover({
                     );
                   })}
                 </div>
-              )}
-              {!activeCatalog.generationTool?.inputSchemaJson.trim() && (
-                <p className="mt-2 rounded-md border border-amber-400/20 px-2 py-2 text-[10px] text-amber-200">
-                  テキストから生成できるツールの入力形式を取得できないため、現在は選択できません。
-                </p>
               )}
             </div>
           )}
@@ -1463,7 +1500,7 @@ function ModelRow({
   variant = "primary",
 }: {
   title: string;
-  description: string;
+  description?: string;
   details?: Array<{ label: string; value: string }>;
   /** 1 文字のアイコンプレースホルダ (Higgsfield 公式 UI と同じ位置の枠) */
   icon: string;
@@ -1511,9 +1548,11 @@ function ModelRow({
           </span>
           {label && <HiggsfieldWebModelLabelView label={label} />}
         </span>
-        <span className="line-clamp-2 text-[10px] leading-snug text-neutral-500">
-          {description || "説明なし"}
-        </span>
+        {description && (
+          <span className="line-clamp-2 text-[10px] leading-snug text-neutral-500">
+            {description}
+          </span>
+        )}
         {details && details.length > 0 && (
           <span className="mt-1 grid gap-0.5 border-t border-[#252525] pt-1 text-[9px] leading-snug text-neutral-500">
             {details.map((detail) => (
@@ -1624,19 +1663,6 @@ function matchesModel(model: HiggsfieldModelInfo, normalizedQuery: string): bool
   const description = MODEL_DESCRIPTIONS[model.jobSetType] ?? "";
   const haystack = `${model.displayName} ${model.jobSetType} ${description}`.toLowerCase();
   return haystack.includes(normalizedQuery);
-}
-
-function remoteCatalogModelDescription(
-  model: RemoteMcpCatalogModel,
-  source: RemoteMcpModelCatalog["source"],
-): string {
-  if (!model.passModel || source === "standard") {
-    return "モデル指定なし。接続先の標準設定を使います";
-  }
-  if (source === "enum") return "生成設定から取得";
-  if (source === "cache") return "保存済みのモデル一覧から取得";
-  if (source === "fallback") return "実取得失敗時の実測補完データ";
-  return "接続先のモデル一覧から取得";
 }
 
 function withSpecSource(

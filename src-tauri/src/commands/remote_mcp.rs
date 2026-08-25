@@ -613,6 +613,20 @@ fn persist_tool_list(app: &AppHandle, list: &RemoteMcpToolList) -> Result<(), St
     fs::write(path, cache).map_err(|error| format!("MCP ツール一覧を保存できませんでした: {error}"))
 }
 
+fn should_persist_tool_list(list: &RemoteMcpToolList) -> bool {
+    !list.tools.is_empty()
+}
+
+fn remove_tool_list_cache(path: &Path) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "保存済みのモデル情報を消去できませんでした: {error}"
+        )),
+    }
+}
+
 fn push_unique_source(sources: &mut Vec<RemoteArtifactSource>, source: RemoteArtifactSource) {
     if !sources.contains(&source) {
         sources.push(source);
@@ -1294,6 +1308,10 @@ fn should_retry_download_status(status: reqwest::StatusCode) -> bool {
     )
 }
 
+fn should_retry_transient_download_status(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::NOT_FOUND || status.is_server_error()
+}
+
 async fn send_download_request(
     http: &reqwest::Client,
     url: &reqwest::Url,
@@ -1322,12 +1340,63 @@ async fn download_response(
     }
 }
 
+async fn retry_transient_download<T, E, Fetch, FetchFuture, ShouldRetry, Sleep, SleepFuture>(
+    mut fetch: Fetch,
+    should_retry: ShouldRetry,
+    mut sleep: Sleep,
+) -> Result<T, E>
+where
+    Fetch: FnMut() -> FetchFuture,
+    FetchFuture: std::future::Future<Output = Result<T, E>>,
+    ShouldRetry: Fn(&T) -> bool,
+    Sleep: FnMut(Duration) -> SleepFuture,
+    SleepFuture: std::future::Future<Output = ()>,
+{
+    let mut response = fetch().await?;
+    for delay_seconds in [2, 4, 8] {
+        if !should_retry(&response) {
+            break;
+        }
+        sleep(Duration::from_secs(delay_seconds)).await;
+        response = fetch().await?;
+    }
+    Ok(response)
+}
+
+async fn download_response_with_transient_retry(
+    http: &reqwest::Client,
+    url: &reqwest::Url,
+    kind: RemoteMcpMediaKind,
+) -> Result<reqwest::Response, reqwest::Error> {
+    retry_transient_download(
+        || download_response(http, url, kind),
+        |response: &reqwest::Response| should_retry_transient_download_status(response.status()),
+        tokio::time::sleep,
+    )
+    .await
+}
+
+fn download_url_location(url: &str) -> Option<String> {
+    let parsed = reqwest::Url::parse(url).ok()?;
+    let host = parsed.host_str()?;
+    let tail = parsed
+        .path_segments()
+        .and_then(|segments| segments.filter(|segment| !segment.is_empty()).next_back());
+    Some(match tail {
+        Some(tail) => format!("{host}/…/{tail}"),
+        None => host.to_string(),
+    })
+}
+
 fn http_download_failure_message(
     kind: RemoteMcpMediaKind,
     status: reqwest::StatusCode,
     url: &str,
 ) -> String {
     let mut message = format!("{}の取得に失敗しました (HTTP {status})", kind.noun());
+    if let Some(location) = download_url_location(url) {
+        message.push_str(&format!("。取得先: {location}"));
+    }
     if should_retry_download_status(status) || is_likely_shared_page_url(url) {
         message.push_str(
             "。共有ページのURLの可能性があります。ファイル直リンクと有効期限を確認してください",
@@ -1494,7 +1563,7 @@ async fn save_remote_artifacts_from_index(
             }
             RemoteArtifactSource::Url(url) => match validated_https_url(&url) {
                 Err(error) => Err(error),
-                Ok(url) => match download_response(&http, &url, kind).await {
+                Ok(url) => match download_response_with_transient_retry(&http, &url, kind).await {
                     Ok(response) if response.status().is_success() => {
                         let content_type = response
                             .headers()
@@ -1529,7 +1598,7 @@ async fn save_remote_artifacts_from_index(
                     Ok(response) => Err(http_download_failure_message(
                         kind,
                         response.status(),
-                        url.as_str(),
+                        response.url().as_str(),
                     )),
                     Err(error) if error.is_timeout() => Err(format!(
                         "{}のダウンロードが120秒以内に完了しませんでした",
@@ -1873,7 +1942,9 @@ pub async fn remote_mcp_list_tools(
             .find(|server| server.get("name").and_then(Value::as_str) == Some(provider.id))
         {
             let list = tool_list_from_server(provider.id, server)?;
-            persist_tool_list(&app, &list)?;
+            if should_persist_tool_list(&list) {
+                persist_tool_list(&app, &list)?;
+            }
             return Ok(list);
         }
 
@@ -1899,10 +1970,15 @@ pub async fn remote_mcp_list_tools(
 #[tauri::command]
 pub fn remote_mcp_list_tools_cached(
     provider_id: String,
+    invalidate: Option<bool>,
     app: AppHandle,
 ) -> Result<Option<RemoteMcpToolList>, String> {
     let provider = provider_by_id(&provider_id)?;
     let path = discovery_dir(&app)?.join(format!("{}.tools.json", provider.id));
+    if invalidate.unwrap_or(false) {
+        remove_tool_list_cache(&path)?;
+        return Ok(None);
+    }
     let raw = match fs::read(path) {
         Ok(raw) => raw,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -2942,6 +3018,66 @@ mod tests {
         assert!(message.contains("共有ページのURLの可能性"));
     }
 
+    #[tokio::test]
+    async fn transient_download_retries_404_after_two_seconds_and_stops_after_three_retries() {
+        let mut statuses = std::collections::VecDeque::from([
+            reqwest::StatusCode::NOT_FOUND,
+            reqwest::StatusCode::OK,
+        ]);
+        let mut delays = Vec::new();
+        let status = retry_transient_download(
+            || std::future::ready(Ok::<_, ()>(statuses.pop_front().expect("mock response"))),
+            |status| should_retry_transient_download_status(*status),
+            |delay| {
+                delays.push(delay);
+                std::future::ready(())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, reqwest::StatusCode::OK);
+        assert_eq!(delays, vec![Duration::from_secs(2)]);
+
+        let mut attempts = 0;
+        let mut permanent_delays = Vec::new();
+        let status = retry_transient_download(
+            || {
+                attempts += 1;
+                std::future::ready(Ok::<_, ()>(reqwest::StatusCode::NOT_FOUND))
+            },
+            |status| should_retry_transient_download_status(*status),
+            |delay| {
+                permanent_delays.push(delay);
+                std::future::ready(())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, reqwest::StatusCode::NOT_FOUND);
+        assert_eq!(attempts, 4);
+        assert_eq!(
+            permanent_delays,
+            vec![
+                Duration::from_secs(2),
+                Duration::from_secs(4),
+                Duration::from_secs(8),
+            ]
+        );
+    }
+
+    #[test]
+    fn download_failure_mentions_host_and_path_tail_without_query() {
+        let message = http_download_failure_message(
+            RemoteMcpMediaKind::Video,
+            reqwest::StatusCode::NOT_FOUND,
+            "https://cdn.example.com/private/jobs/final.mp4?X-Amz-Signature=secret",
+        );
+        assert!(message.contains("HTTP 404 Not Found"));
+        assert!(message.contains("cdn.example.com/…/final.mp4"));
+        assert!(!message.contains("X-Amz-Signature"));
+        assert!(!message.contains("secret"));
+    }
+
     #[test]
     fn content_parser_returns_provider_error_instead_of_success() {
         let output = tool_output(
@@ -2988,6 +3124,29 @@ mod tests {
             list.tools[0].input_schema_json,
             r#"{"required":["prompt"],"type":"object"}"#
         );
+    }
+
+    #[test]
+    fn empty_tool_list_is_not_persisted_and_cache_can_be_invalidated() {
+        let empty = tool_list_from_server(
+            "krea",
+            &json!({
+                "authStatus": "oAuth",
+                "tools": {}
+            }),
+        )
+        .unwrap();
+        assert!(!should_persist_tool_list(&empty));
+
+        let path = std::env::temp_dir().join(format!(
+            "gori-remote-mcp-tools-{}-{}.json",
+            std::process::id(),
+            REMOTE_FILE_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        fs::write(&path, b"cached tools").expect("temporary tool cache");
+        remove_tool_list_cache(&path).expect("cache invalidation");
+        assert!(!path.exists());
+        remove_tool_list_cache(&path).expect("missing cache is already invalidated");
     }
 
     #[tokio::test]

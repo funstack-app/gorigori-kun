@@ -15,6 +15,7 @@ import {
   findVideoModelByJobSetType,
   type VideoDurationConstraint,
 } from "./videoModels";
+import { isMcpAuthError, mcpReauthMessage } from "./mcpAuthError";
 
 export type RemoteMcpModelKind = RemoteMcpToolKind;
 export type RemoteMcpCatalogSource =
@@ -82,6 +83,52 @@ export type RemoteMcpModelCatalog = {
   /** 一覧ツールが失敗して enum/cache/標準へ退避した場合だけ保持する。 */
   warning?: string;
 };
+
+export const REMOTE_MCP_CATALOG_MAX_AGE_MS = 24 * 60 * 60 * 1_000;
+
+/** 保存済み一覧を表示したまま、裏で取り直す必要があるかを判定する。 */
+export function isCatalogStale(
+  catalog: Pick<RemoteMcpModelCatalog, "fetchedAt">,
+  now = Date.now(),
+): boolean {
+  const fetchedAt = catalog.fetchedAt;
+  return (
+    typeof fetchedAt !== "number" ||
+    !Number.isFinite(fetchedAt) ||
+    now - fetchedAt > REMOTE_MCP_CATALOG_MAX_AGE_MS
+  );
+}
+
+/** ツール情報の有無ではなく、一覧に実在するモデルかだけで選択可否を決める。 */
+export function isRemoteMcpCatalogModelSelectable(
+  catalog: Pick<RemoteMcpModelCatalog, "models">,
+  modelId: string,
+): boolean {
+  return catalog.models.some((model) => model.id === modelId);
+}
+
+export function remoteMcpDisconnectedMessage(providerLabel: string): string {
+  return `${providerLabel}の接続が切れている可能性があります。設定 → 接続先 から再接続してください。`;
+}
+
+/** ライブ取得の異常を、内部用語を含まない案内へ変換する。 */
+export function remoteMcpCatalogErrorMessage(
+  providerLabel: string,
+  error: unknown,
+): string {
+  if (isMcpAuthError(error)) return mcpReauthMessage(providerLabel);
+  const disconnected = remoteMcpDisconnectedMessage(providerLabel);
+  if (String(error).includes(disconnected)) return disconnected;
+  return "モデル一覧を取得できませんでした。接続を確認して、もう一度お試しください。";
+}
+
+/** 0件は正常な一覧として扱わず、前回の保存値を上書きさせない。 */
+export function ensureRemoteMcpToolsAvailable(
+  providerLabel: string,
+  tools: readonly RemoteMcpToolInfo[],
+): void {
+  if (tools.length === 0) throw new Error(remoteMcpDisconnectedMessage(providerLabel));
+}
 
 type BuildCatalogInput = {
   providerId: string;

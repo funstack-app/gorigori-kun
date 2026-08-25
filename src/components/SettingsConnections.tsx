@@ -15,6 +15,7 @@ import {
   type RemoteMcpProviderCatalogEntry,
 } from "../lib/remoteMcpProviders";
 import { useAccounts, type SecretsState } from "../lib/store/accounts";
+import { invalidateRemoteMcpProviderCache } from "../lib/store/remoteMcpGen";
 import { useToasts } from "../lib/store/toasts";
 import { ProviderIcon } from "./ProviderIcon";
 
@@ -932,6 +933,15 @@ function RemoteMcpConnectionCard({
       const connected =
         useAccounts.getState().remoteMcp[provider.id]?.authenticated ?? false;
       if (connected) {
+        try {
+          await invalidateRemoteMcpProviderCache(provider.id);
+        } catch {
+          toast.push({
+            kind: "warn",
+            text: "接続は完了しましたが、モデル一覧を更新する準備ができませんでした。次回、再取得を押してください。",
+            ttlMs: 6000,
+          });
+        }
         toast.push({
           kind: "success",
           text: `${provider.label} に接続しました`,
