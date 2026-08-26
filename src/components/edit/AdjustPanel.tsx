@@ -56,7 +56,8 @@ export function AdjustPanel({
   onTransform,
   busy = false,
 }: Props) {
-  const [open, setOpen] = useState({ light: true, color: false, rotate: false });
+  // 初期状態は全アコーディオン閉 (2026-08-26 STΛCK指示: プリセットが主役の画面で開く)
+  const [open, setOpen] = useState({ light: false, color: false, rotate: false });
   const neutral = isNeutralAdjust(values);
   const src = convertFileSrc(imagePath);
 

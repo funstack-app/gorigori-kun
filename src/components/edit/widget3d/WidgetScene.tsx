@@ -47,7 +47,14 @@ function InvalidateOnChange({ signature }: { signature: string }) {
   return null;
 }
 
-function ImageBoard({ imagePath }: { imagePath: string }) {
+function ImageBoard({
+  imagePath,
+  unlitFront = false,
+}: {
+  imagePath: string;
+  /** true なら前面(画像)を照明の影響を受けない素材にする (カメラ用。白飛び防止)。 */
+  unlitFront?: boolean;
+}) {
   const invalidate = useThree((state) => state.invalidate);
   const [texture, setTexture] = useState<Texture | null>(null);
   const source = useMemo(() => {
@@ -101,13 +108,22 @@ function ImageBoard({ imagePath }: { imagePath: string }) {
       <meshStandardMaterial attach="material-1" color="#51515c" roughness={0.72} />
       <meshStandardMaterial attach="material-2" color="#666673" roughness={0.68} />
       <meshStandardMaterial attach="material-3" color="#414149" roughness={0.78} />
-      <meshStandardMaterial
-        attach="material-4"
-        color={texture ? "#ffffff" : "#747480"}
-        map={texture}
-        roughness={0.62}
-        metalness={0.02}
-      />
+      {unlitFront ? (
+        <meshBasicMaterial
+          attach="material-4"
+          color={texture ? "#ffffff" : "#747480"}
+          map={texture}
+          toneMapped={false}
+        />
+      ) : (
+        <meshStandardMaterial
+          attach="material-4"
+          color={texture ? "#ffffff" : "#747480"}
+          map={texture}
+          roughness={0.62}
+          metalness={0.02}
+        />
+      )}
       <meshStandardMaterial attach="material-5" color="#34343c" roughness={0.8} />
     </mesh>
   );
@@ -136,23 +152,28 @@ export function WidgetScene({
       <CameraDolly closeup={closeup} />
       <InvalidateOnChange signature={invalidateKey} />
 
-      <ambientLight intensity={isCamera ? 0.34 : 0.12} />
+      {/* 暗すぎて何も見えない、を避ける下限照明 (2026-08-26 実機FB)。
+          ライト版もスポットの効果は残しつつ、舞台と板が常に判別できる明るさにする。 */}
+      <ambientLight intensity={isCamera ? 0.5 : 0.5} />
       <hemisphereLight
-        args={[0xb8c2ff, 0x171720, isCamera ? 0.62 : 0.28]}
+        args={[0xb8c2ff, 0x1c1c28, isCamera ? 0.85 : 0.8]}
         position={[0, 5, 0]}
       />
+      {!isCamera && (
+        <directionalLight position={[2.5, 4.5, 3.5]} color="#cfd4ff" intensity={0.5} />
+      )}
       {isCamera && (
         <>
           <directionalLight
             position={[3.6, 5.2, 4.2]}
             color="#f2efff"
-            intensity={2.3}
+            intensity={1.4}
             castShadow
             shadow-mapSize-width={512}
             shadow-mapSize-height={512}
             shadow-bias={-0.0004}
           />
-          <directionalLight position={[-3, 2.8, 2]} color="#7183ff" intensity={0.85} />
+          <directionalLight position={[-3, 2.8, 2]} color="#7183ff" intensity={0.7} />
         </>
       )}
 
@@ -165,16 +186,16 @@ export function WidgetScene({
         position={[0, 0.004, 0]}
         cellSize={0.32}
         cellThickness={0.55}
-        cellColor="#2a2a3a"
+        cellColor="#3a3a52"
         sectionSize={1.6}
         sectionThickness={0.8}
-        sectionColor="#35354a"
+        sectionColor="#4a4a68"
         fadeDistance={7.5}
         fadeStrength={1.25}
         infiniteGrid
       />
 
-      <ImageBoard imagePath={imagePath} />
+      <ImageBoard imagePath={imagePath} unlitFront={isCamera} />
       <ContactShadows
         position={[0, 0.006, 0]}
         scale={7}

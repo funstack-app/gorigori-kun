@@ -22,7 +22,7 @@ type Props = {
   onChange: (value: CameraChange) => void;
 };
 
-type DragKind = "ring" | "meridian" | "orbit";
+type DragKind = "ring" | "meridian";
 type DragStart = {
   kind: DragKind;
   x: number;
@@ -108,7 +108,7 @@ function CameraGizmo({
         />
       </mesh>
 
-      <mesh position={ringBall} onPointerDown={begin("ring")} castShadow>
+      <mesh position={ringBall} raycast={() => null} castShadow>
         <sphereGeometry args={[0.16, 28, 20]} />
         <meshStandardMaterial
           color="#5265ff"
@@ -118,7 +118,7 @@ function CameraGizmo({
           emissiveIntensity={0.4}
         />
       </mesh>
-      <mesh position={meridianBall} onPointerDown={begin("meridian")} castShadow>
+      <mesh position={meridianBall} raycast={() => null} castShadow>
         <sphereGeometry args={[0.15, 28, 20]} />
         <meshStandardMaterial
           color="#9a70ff"
@@ -127,6 +127,16 @@ function CameraGizmo({
           emissive="#391474"
           emissiveIntensity={0.42}
         />
+      </mesh>
+
+      {/* 掴み用の見えない拡大ヒット球。小さい玉を狙わなくても掴める + 軸が混ざらない */}
+      <mesh position={ringBall} onPointerDown={begin("ring")}>
+        <sphereGeometry args={[0.4, 12, 8]} />
+        <meshBasicMaterial transparent opacity={0} depthWrite={false} />
+      </mesh>
+      <mesh position={meridianBall} onPointerDown={begin("meridian")}>
+        <sphereGeometry args={[0.4, 12, 8]} />
+        <meshBasicMaterial transparent opacity={0} depthWrite={false} />
       </mesh>
     </group>
   );
@@ -172,6 +182,8 @@ export function CameraOrbitWidget({
     const dx = event.clientX - start.x;
     const dy = start.y - event.clientY;
 
+    // 軸は完全分離 (2026-08-26 実機FB「別軸ですよ全て」)。
+    // 青玉=回転だけ、紫玉=高さだけ。両方同時に動かすモードは置かない。
     if (start.kind === "ring") {
       onChange({
         rotate: normalizeCameraRotate(start.rotate + dx * 1.2),
@@ -184,12 +196,7 @@ export function CameraOrbitWidget({
         rotate,
         vertical: clampCameraVertical(start.vertical + dy * 0.75),
       });
-      return;
     }
-    onChange({
-      rotate: normalizeCameraRotate(start.rotate + dx * 1.2),
-      vertical: clampCameraVertical(start.vertical + dy * 0.75),
-    });
   };
 
   const end = (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -213,10 +220,6 @@ export function CameraOrbitWidget({
         background: "#0d0d12",
         cursor: disabled ? "default" : dragging ? "grabbing" : "grab",
         touchAction: "none",
-      }}
-      onPointerDownCapture={(event) => {
-        if ((event.target as Element).closest("button")) return;
-        startDrag("orbit", event);
       }}
       onPointerMove={move}
       onPointerUp={end}

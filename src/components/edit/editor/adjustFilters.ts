@@ -57,10 +57,9 @@ export const NEUTRAL_ADJUST: AdjustValues = {
 const HUE_DEGREES_PER_UNIT = 180;
 
 /**
- * プリセット8種 (設計確定値・変更禁止)。
+ * 調整プリセット16種 (基本8 + LUT風フィルム8。2026-08-26 STΛCK指示で増量)。
  *
- * 値は設計書のとおりで、発明しない。サムネイルは CSS グラデーションで表現するため
- * 画像アセットを持たない (全 OS で同じ見え方・追加ファイルゼロ)。
+ * サムネイルは現在画像 + cssFilter で表現するため画像アセットを持たない。
  */
 export type AdjustPreset = {
   id: string;
@@ -118,6 +117,55 @@ export const ADJUST_PRESETS: readonly AdjustPreset[] = [
     label: "coldtone",
     values: { ...NEUTRAL_ADJUST, contrast: 0.1, saturation: -0.05, hue: 20 },
     cssFilter: "hue-rotate(20deg) saturate(.9) contrast(1.1)",
+  },
+  // ここから LUT 風フィルムプリセット (2026-08-26 STΛCK指示で増量)
+  {
+    id: "cineteal",
+    label: "cineteal",
+    values: { ...NEUTRAL_ADJUST, hue: 8, contrast: 0.18, saturation: 0.18 },
+    cssFilter: "hue-rotate(8deg) saturate(1.2) contrast(1.2)",
+  },
+  {
+    id: "noir",
+    label: "noir",
+    values: { ...NEUTRAL_ADJUST, grayscale: true, contrast: 0.35, brightness: -0.03, noise: 12 },
+    cssFilter: "grayscale(1) contrast(1.4) brightness(.97)",
+  },
+  {
+    id: "kodakgold",
+    label: "kodakgold",
+    values: { ...NEUTRAL_ADJUST, hue: -18, brightness: 0.06, saturation: 0.2, contrast: 0.08 },
+    cssFilter: "sepia(.28) saturate(1.25) brightness(1.06) contrast(1.08)",
+  },
+  {
+    id: "fujigreen",
+    label: "fujigreen",
+    values: { ...NEUTRAL_ADJUST, hue: 25, saturation: 0.08, contrast: 0.1, brightness: 0.02 },
+    cssFilter: "hue-rotate(25deg) saturate(1.08) contrast(1.1)",
+  },
+  {
+    id: "pastel",
+    label: "pastel",
+    values: { ...NEUTRAL_ADJUST, brightness: 0.1, saturation: -0.25, contrast: -0.15 },
+    cssFilter: "brightness(1.1) saturate(.75) contrast(.85)",
+  },
+  {
+    id: "mattefade",
+    label: "mattefade",
+    values: { ...NEUTRAL_ADJUST, contrast: -0.2, brightness: 0.06, saturation: -0.08, noise: 8 },
+    cssFilter: "contrast(.8) brightness(1.06) saturate(.92)",
+  },
+  {
+    id: "sunset",
+    label: "sunset",
+    values: { ...NEUTRAL_ADJUST, hue: -30, saturation: 0.3, brightness: 0.04, contrast: 0.12 },
+    cssFilter: "hue-rotate(-22deg) saturate(1.3) brightness(1.04) contrast(1.12)",
+  },
+  {
+    id: "arctic",
+    label: "arctic",
+    values: { ...NEUTRAL_ADJUST, hue: 35, saturation: -0.1, brightness: 0.05, contrast: 0.08 },
+    cssFilter: "hue-rotate(35deg) saturate(.9) brightness(1.05) contrast(1.08)",
   },
 ] as const;
 
