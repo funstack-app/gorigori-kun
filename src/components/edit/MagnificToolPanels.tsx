@@ -15,7 +15,6 @@ type MagnificToolPanelProps = {
   tool: MagnificPanelTool;
   imagePath: string;
   busy: boolean;
-  connected: boolean;
   onRun: (params: Record<string, unknown>) => void;
 };
 
@@ -23,7 +22,6 @@ export function MagnificToolPanel({
   tool,
   imagePath,
   busy,
-  connected,
   onRun,
 }: MagnificToolPanelProps) {
   if (tool === "camera") {
@@ -31,7 +29,6 @@ export function MagnificToolPanel({
       <CameraPanel
         imagePath={imagePath}
         busy={busy}
-        connected={connected}
         onRun={onRun}
       />
     );
@@ -40,7 +37,6 @@ export function MagnificToolPanel({
     <RelightPanel
       imagePath={imagePath}
       busy={busy}
-      connected={connected}
       onRun={onRun}
     />
   );
@@ -48,7 +44,7 @@ export function MagnificToolPanel({
 
 type PanelProps = Omit<MagnificToolPanelProps, "tool">;
 
-function CameraPanel({ imagePath, busy, connected, onRun }: PanelProps) {
+function CameraPanel({ imagePath, busy, onRun }: PanelProps) {
   const [rotate, setRotate] = useState(45);
   const [vertical, setVertical] = useState(0);
   const [closeup, setCloseup] = useState(5);
@@ -64,6 +60,8 @@ function CameraPanel({ imagePath, busy, connected, onRun }: PanelProps) {
         onChange={(next) => {
           setRotate(next.rotate);
           setVertical(next.vertical);
+          // ↺リセット時だけ届く任意フィールド (widget 側の設計)。
+          if (typeof next.closeup === "number") setCloseup(next.closeup);
         }}
       />
       <div className="mt-3">
@@ -73,17 +71,16 @@ function CameraPanel({ imagePath, busy, connected, onRun }: PanelProps) {
       </div>
       <RunButton
         busy={busy}
-        connected={connected}
         onClick={() => onRun({ rotate, vertical, closeup })}
       />
     </PanelBody>
   );
 }
 
-/** ライト色のクイックスワッチ (Magnific 準拠: 白/暖黄/橙/青 + 自由色)。 */
+/** ライト色のクイックスワッチ (白/暖黄/橙/青 + 自由色)。 */
 const LIGHT_COLORS = ["#ffffff", "#ffd27f", "#ff9d5c", "#7fc5ff"] as const;
 
-function RelightPanel({ imagePath, busy, connected, onRun }: PanelProps) {
+function RelightPanel({ imagePath, busy, onRun }: PanelProps) {
   const [azimuth, setAzimuth] = useState<LightAzimuth>(0);
   const [elevation, setElevation] = useState<LightElevation>(0);
   const [intensity, setIntensity] = useState(5);
@@ -101,6 +98,9 @@ function RelightPanel({ imagePath, busy, connected, onRun }: PanelProps) {
         onChange={(next) => {
           setAzimuth(next.azimuth);
           setElevation(next.elevation);
+          // ↺リセット時だけ届く任意フィールド (widget 側の設計)。
+          if (typeof next.intensity === "number") setIntensity(next.intensity);
+          if (typeof next.color === "string") setColor(next.color);
         }}
       />
       <div className="mt-3">
@@ -172,7 +172,6 @@ function RelightPanel({ imagePath, busy, connected, onRun }: PanelProps) {
       </div>
       <RunButton
         busy={busy}
-        connected={connected}
         onClick={() =>
           onRun(
             color.toLowerCase() === "#ffffff"
@@ -231,18 +230,16 @@ function Slider({
 
 function RunButton({
   busy,
-  connected,
   onClick,
 }: {
   busy: boolean;
-  connected: boolean;
   onClick: () => void;
 }) {
   return (
     <button
       type="button"
-      disabled={busy || !connected}
-      title={!connected ? "設定で Magnific に接続すると使えます" : "実行"}
+      disabled={busy}
+      title="実行"
       onClick={onClick}
       className="mt-4 flex w-full items-center justify-center gap-2 rounded-md bg-pink-500 px-3 py-2 text-[11px] font-black text-white shadow-lg shadow-pink-500/20 hover:bg-pink-600 disabled:cursor-not-allowed disabled:opacity-40"
     >

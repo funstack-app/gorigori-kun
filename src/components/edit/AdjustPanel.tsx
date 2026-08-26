@@ -12,7 +12,7 @@ type Props = {
   imagePath: string;
   values: AdjustValues;
   onChange: (patch: Partial<AdjustValues>) => void;
-  onCommit: () => void;
+  onApply: () => void;
   onPreset: (values: AdjustValues) => void;
   onReset: () => void;
   onTransform: (kind: TransformKind) => void;
@@ -50,7 +50,7 @@ export function AdjustPanel({
   imagePath,
   values,
   onChange,
-  onCommit,
+  onApply,
   onPreset,
   onReset,
   onTransform,
@@ -100,7 +100,6 @@ export function AdjustPanel({
             values={values}
             busy={busy}
             onChange={onChange}
-            onCommit={onCommit}
           />
         </Accordion>
 
@@ -114,7 +113,6 @@ export function AdjustPanel({
             values={values}
             busy={busy}
             onChange={onChange}
-            onCommit={onCommit}
           />
         </Accordion>
 
@@ -139,14 +137,24 @@ export function AdjustPanel({
         </Accordion>
       </div>
 
-      <button
-        type="button"
-        onClick={onReset}
-        disabled={busy || neutral}
-        className="mt-3 w-full rounded-md border border-[#3a3a3a] bg-[#101010] px-2 py-2 text-[10px] font-black text-neutral-300 hover:border-pink-400 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
-      >
-        すべてリセット
-      </button>
+      <div className="mt-3 grid grid-cols-2 gap-2">
+        <button
+          type="button"
+          onClick={onApply}
+          disabled={busy || neutral}
+          className="rounded-md bg-pink-500 px-2 py-2 text-[10px] font-black text-white hover:bg-pink-400 disabled:cursor-not-allowed disabled:bg-neutral-700 disabled:text-neutral-500"
+        >
+          適用
+        </button>
+        <button
+          type="button"
+          onClick={onReset}
+          disabled={busy || neutral}
+          className="rounded-md border border-[#3a3a3a] bg-[#101010] px-2 py-2 text-[10px] font-black text-neutral-300 hover:border-pink-400 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          リセット
+        </button>
+      </div>
     </div>
   );
 }
@@ -183,13 +191,11 @@ function SliderGroup({
   values,
   busy,
   onChange,
-  onCommit,
 }: {
   sliders: readonly SliderSpec[];
   values: AdjustValues;
   busy: boolean;
   onChange: (patch: Partial<AdjustValues>) => void;
-  onCommit: () => void;
 }) {
   return (
     <div className="space-y-2.5">
@@ -212,9 +218,6 @@ function SliderGroup({
             onChange={(event) =>
               onChange({ [slider.key]: Number(event.target.value) } as Partial<AdjustValues>)
             }
-            onPointerUp={onCommit}
-            onKeyUp={onCommit}
-            onTouchEnd={onCommit}
             className="mt-1 w-full accent-pink-500 disabled:cursor-not-allowed disabled:opacity-40"
           />
         </label>

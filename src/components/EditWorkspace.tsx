@@ -1,19 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import {
-  images as imagesIpc,
-  magnific,
-  magnificImageEdit,
-} from "../lib/ipc";
-import { FEATURED_MAGNIFIC_IMAGE_MODELS } from "../lib/magnific/models";
-import { useAccounts } from "../lib/store/accounts";
-import { useBatches } from "../lib/store/batches";
+import { images as imagesIpc } from "../lib/ipc";
+import { EDIT_DIRECT_SOURCE_TAG_PREFIX } from "../lib/store/batches";
 import {
   addEditCandidates,
   createEditSession,
 } from "../lib/store/editSession";
 import { beginDirectRun } from "../lib/store/generationStatus";
-import { useMagnificModel } from "../lib/store/magnificModel";
 import { useThreads } from "../lib/store/threads";
 import { useToasts } from "../lib/store/toasts";
 import { AdjustPanel } from "./edit/AdjustPanel";
@@ -41,9 +34,11 @@ import { ExportDialog } from "./edit/ExportDialog";
 import { RestylePanel } from "./edit/RestylePanel";
 import type { NormalizedBbox } from "./edit/RegionSelectOverlay";
 import {
+  buildCameraPrompt,
+  buildExpandPrompt,
+  buildRelightPrompt,
   buildRestylePrompt,
   centeredCropRegion,
-  closestMagnificAspect,
   cropPixelSizeForAspect,
   MAGNIFIC_ASPECT_RATIOS,
   parseAspectRatio,
@@ -51,6 +46,7 @@ import {
   type MagnificAspectRatio,
 } from "./edit/editToolLogic";
 import {
+  isNeutralAdjust,
   NEUTRAL_ADJUST,
   type AdjustValues,
 } from "./edit/editor/adjustFilters";
@@ -70,22 +66,24 @@ function basename(path: string) {
   return path.split(/[\\/]/).pop() ?? path;
 }
 
-type ActiveMagnificTool = Extract<EditToolId, MagnificPanelTool>;
-type DirectMagnificTool = ActiveMagnificTool | "expand";
+type GeneratedPanelTool = Extract<EditToolId, MagnificPanelTool>;
+type GeneratedEditTool = GeneratedPanelTool | "expand" | "restyle";
 
-const MAGNIFIC_TOOL_LABELS: Record<DirectMagnificTool, string> = {
+const GENERATED_TOOL_LABELS: Record<GeneratedEditTool, string> = {
   expand: "画像拡張",
+  restyle: "リスタイル",
   camera: "カメラ",
   relight: "ライティング",
 };
 
-const MAGNIFIC_TOOL_SUCCESS_TEXT: Record<DirectMagnificTool, string> = {
+const GENERATED_TOOL_SUCCESS_TEXT: Record<GeneratedEditTool, string> = {
   expand: "広げた画像",
+  restyle: "リスタイルした画像",
   camera: "カメラを変えた画像",
   relight: "光を調整した画像",
 };
 
-function isMagnificTool(tool: EditToolId): tool is ActiveMagnificTool {
+function isGeneratedPanelTool(tool: EditToolId): tool is GeneratedPanelTool {
   return tool === "camera" || tool === "relight";
 }
 
@@ -104,8 +102,6 @@ export function EditWorkspace() {
   const editorRevision = useEditor((state) => state.revision);
   const imageSize = readEditorImageSize(editorCanvas);
   void editorRevision;
-  const magnificConnected = useAccounts((state) => state.magnific.authenticated);
-  const selectedMagnificModels = useMagnificModel((state) => state.selectedModels);
   const {
     chooseImage,
     exportImageAs,
@@ -136,9 +132,11 @@ export function EditWorkspace() {
   const [cropHeight, setCropHeight] = useState(1);
   const [expandPrompt, setExpandPrompt] = useState("");
   const [adjust, setAdjust] = useState<AdjustValues>(NEUTRAL_ADJUST);
+  const adjustRef = useRef<AdjustValues>(NEUTRAL_ADJUST);
+  const adjustPreviewTokenRef = useRef(0);
   const [exportOpen, setExportOpen] = useState(false);
-  const [magnificBusyTool, setMagnificBusyTool] =
-    useState<DirectMagnificTool | "restyle" | null>(null);
+  const [generatedEditBusyTool, setGeneratedEditBusyTool] =
+    useState<GeneratedEditTool | null>(null);
   const [editSession, setEditSession] = useState(() => createEditSession(sourceImagePath));
   const editSessionRef = useRef(editSession);
 
@@ -166,6 +164,8 @@ export function EditWorkspace() {
     // ときだけ全初期化する。範囲と調整スライダーは新しい版に焼き込み済みのため
     // 毎回リセットする (二重適用防止)。
     setRegion(null);
+    adjustPreviewTokenRef.current += 1;
+    adjustRef.current = NEUTRAL_ADJUST;
     setAdjust(NEUTRAL_ADJUST);
     if (!belongsToCurrentSession) {
       setTool("ai");
@@ -184,7 +184,22 @@ export function EditWorkspace() {
     setCropHeight(size.height);
   }, [sourceImagePath, imageSize?.width, imageSize?.height]);
 
+  /** 最新値だけが最後に残るよう、遅れて終わったプレビューは現在値で上書きする。 */
+  const previewAdjust = (values: AdjustValues) => {
+    const token = ++adjustPreviewTokenRef.current;
+    adjustRef.current = values;
+    setAdjust(values);
+    void applyAdjust(values, false).then(() => {
+      if (token !== adjustPreviewTokenRef.current) {
+        void applyAdjust(adjustRef.current, false);
+      }
+    });
+  };
+
   const selectTool = (next: EditToolId) => {
+    if (tool === "adjust" && next !== "adjust" && !isNeutralAdjust(adjustRef.current)) {
+      previewAdjust(NEUTRAL_ADJUST);
+    }
     setTool(next);
     setRegion(null);
     setRegionMode("replace");
@@ -308,7 +323,7 @@ export function EditWorkspace() {
   const selectSessionImage = async (path: string) => {
     if (
       busy ||
-      magnificBusyTool !== null ||
+      generatedEditBusyTool !== null ||
       versionInFlightRef.current
     ) return;
     const session = editSessionRef.current;
@@ -392,6 +407,7 @@ export function EditWorkspace() {
       return;
     }
     setRegion(null);
+    adjustRef.current = NEUTRAL_ADJUST;
     setAdjust(NEUTRAL_ADJUST);
     setTool("ai");
     useToasts.getState().push({
@@ -401,9 +417,8 @@ export function EditWorkspace() {
     });
   };
 
-  /** スライダー中は値だけを変え、離した時に初めて画像へ反映して版にする。 */
   const changeAdjust = (patch: Partial<AdjustValues>) => {
-    setAdjust((current) => ({ ...current, ...patch }));
+    previewAdjust({ ...adjustRef.current, ...patch });
   };
 
   const runAdjust = async (values: AdjustValues, label = "調整") => {
@@ -417,6 +432,8 @@ export function EditWorkspace() {
       reportCanvasOperationFailure(result, "調整でき");
       return;
     }
+    adjustPreviewTokenRef.current += 1;
+    adjustRef.current = NEUTRAL_ADJUST;
     setAdjust(NEUTRAL_ADJUST);
     useToasts.getState().push({
       kind: "success",
@@ -425,17 +442,12 @@ export function EditWorkspace() {
     });
   };
 
-  const commitAdjust = () => {
-    void runAdjust(adjust);
-  };
-
   const applyPreset = (values: AdjustValues) => {
-    setAdjust(values);
-    void runAdjust(values);
+    previewAdjust(values);
   };
 
   const resetAdjust = () => {
-    setAdjust(NEUTRAL_ADJUST);
+    previewAdjust(NEUTRAL_ADJUST);
   };
 
   const runTransform = async (kind: TransformKind) => {
@@ -446,15 +458,23 @@ export function EditWorkspace() {
       "flip-v": "上下反転",
     };
     setError(null);
+    // 未適用の色調プレビューは回転・反転へ混ぜない。「適用」だけが焼き込み口。
+    adjustPreviewTokenRef.current += 1;
+    adjustRef.current = NEUTRAL_ADJUST;
+    setAdjust(NEUTRAL_ADJUST);
     const result = await applyCanvasOperationAsVersion(
       labelByKind[kind],
       "edit-transform",
-      () => rotateOrFlip(kind),
+      async () => {
+        if (!(await applyAdjust(NEUTRAL_ADJUST, false))) return false;
+        return rotateOrFlip(kind);
+      },
     );
     if (result !== "applied") {
       reportCanvasOperationFailure(result, "向きを変えられ");
       return;
     }
+    adjustRef.current = NEUTRAL_ADJUST;
     setAdjust(NEUTRAL_ADJUST);
     useToasts.getState().push({
       kind: "success",
@@ -469,30 +489,42 @@ export function EditWorkspace() {
     await exportImageAs(format, size);
   };
 
-  const runMagnificEdit = async (
-    editTool: DirectMagnificTool,
-    params: Record<string, unknown>,
+  const runGeneratedEdit = async (
+    editTool: GeneratedEditTool,
+    prompt: string,
+    options: { aspect?: MagnificAspectRatio; enforceAspect?: boolean } = {},
   ) => {
     if (
       !sourceImagePath ||
-      !magnificConnected ||
+      !prompt.trim() ||
       busy ||
       busyTool !== null ||
-      magnificBusyTool !== null ||
+      generatedEditBusyTool !== null ||
       versionInFlightRef.current ||
       versionRecoveryRequired
     ) return;
 
-    const label = MAGNIFIC_TOOL_LABELS[editTool];
-    const track = beginDirectRun("magnificEdit", 1);
-    setMagnificBusyTool(editTool);
+    const label = GENERATED_TOOL_LABELS[editTool];
+    const track = beginDirectRun("aiEdit", 1);
+    const threads = useThreads.getState();
+    setGeneratedEditBusyTool(editTool);
     setError(null);
     track.markStarted();
     try {
-      const paths = await magnificImageEdit(sourceImagePath, editTool, params);
-      const resultPath = paths.find((path) => Boolean(path?.trim()));
+      const result = await imagesIpc.generateBatch({
+        prompt,
+        count: 1,
+        cwd: threads.cwd,
+        refImagePaths: [sourceImagePath],
+        model: threads.selectedModel,
+        effort: threads.selectedEffort,
+        sourceTag: `${EDIT_DIRECT_SOURCE_TAG_PREFIX}${track.id}`,
+        maxAttempts: 1,
+        ...options,
+      });
+      const resultPath = result.generatedPaths.find((path) => Boolean(path?.trim()));
       if (!resultPath) {
-        track.fail(`${label}の結果画像を受け取れませんでした。`);
+        track.fail(result.errors?.[0] ?? `${label}の結果画像を受け取れませんでした。`);
         return;
       }
       if (!(await applyVersion(resultPath, "add", label))) {
@@ -501,17 +533,19 @@ export function EditWorkspace() {
       }
       track.markCompleted();
       if (editTool === "expand") setExpandPrompt("");
+      if (editTool === "restyle") setInstruction("");
+      adjustRef.current = NEUTRAL_ADJUST;
       setAdjust(NEUTRAL_ADJUST);
       useToasts.getState().push({
         kind: "success",
-        text: `${MAGNIFIC_TOOL_SUCCESS_TEXT[editTool]}を新しい版にしました。右の履歴から戻せます。`,
+        text: `${GENERATED_TOOL_SUCCESS_TEXT[editTool]}を新しい版にしました。右の履歴から戻せます。`,
         ttlMs: 4400,
       });
     } catch (caught) {
       track.fail(String(caught));
     } finally {
       track.done();
-      setMagnificBusyTool(null);
+      setGeneratedEditBusyTool(null);
     }
   };
 
@@ -520,64 +554,46 @@ export function EditWorkspace() {
       await runCrop();
       return;
     }
-    await runMagnificEdit("expand", {
-      aspectRatio: expandAspect,
-      ...(expandPrompt.trim() ? { prompt: expandPrompt.trim() } : {}),
+    await runGeneratedEdit("expand", buildExpandPrompt(expandAspect, expandPrompt), {
+      aspect: expandAspect,
+      enforceAspect: true,
     });
   };
 
   const runRestyle = async () => {
     const style = instruction.trim();
-    if (
-      !sourceImagePath ||
-      !style ||
-      !magnificConnected ||
-      busy ||
-      busyTool !== null ||
-      magnificBusyTool !== null ||
-      versionInFlightRef.current ||
-      versionRecoveryRequired
-    ) return;
+    if (!style) return;
+    await runGeneratedEdit("restyle", buildRestylePrompt(style));
+  };
 
-    const track = beginDirectRun("magnificEdit", 1);
-    const model =
-      selectedMagnificModels[0] ?? FEATURED_MAGNIFIC_IMAGE_MODELS[0].id;
-    const size = readEditorImageSize(useEditor.getState().canvas);
-    const aspect = closestMagnificAspect(size?.width ?? 1, size?.height ?? 1);
-    setMagnificBusyTool("restyle");
-    setError(null);
-    track.markStarted();
-    try {
-      const result = await magnific.generateBatch({
-        prompt: buildRestylePrompt(style),
-        model,
-        count: 1,
-        refImagePaths: [sourceImagePath],
-        aspect,
-      });
-      const resultPath = result.generatedPaths.find((path) => Boolean(path?.trim()));
-      if (!resultPath) {
-        track.fail(result.errors?.[0] ?? "リスタイル結果を受け取れませんでした。");
-        return;
-      }
-      if (!(await applyVersion(resultPath, "add", "リスタイル"))) {
-        track.fail("リスタイル結果を新しい版として読み込めませんでした。");
-        return;
-      }
-      track.markCompleted();
-      setInstruction("");
-      setAdjust(NEUTRAL_ADJUST);
-      useToasts.getState().push({
-        kind: "success",
-        text: "リスタイルした画像を新しい版にしました。右の履歴から戻せます。",
-        ttlMs: 4400,
-      });
-    } catch (caught) {
-      track.fail(String(caught));
-    } finally {
-      track.done();
-      setMagnificBusyTool(null);
+  const runGeneratedPanelEdit = async (
+    editTool: GeneratedPanelTool,
+    params: Record<string, unknown>,
+  ) => {
+    const numberParam = (key: string, fallback: number) => {
+      const value = params[key];
+      return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+    };
+    if (editTool === "camera") {
+      await runGeneratedEdit(
+        editTool,
+        buildCameraPrompt(
+          numberParam("rotate", 45),
+          numberParam("vertical", 0),
+          numberParam("closeup", 5),
+        ),
+      );
+      return;
     }
+    await runGeneratedEdit(
+      editTool,
+      buildRelightPrompt(
+        numberParam("azimuth", 0),
+        numberParam("elevation", 0),
+        numberParam("intensity", 5),
+        typeof params.color === "string" ? params.color : "#ffffff",
+      ),
+    );
   };
 
   useEffect(() => {
@@ -725,12 +741,6 @@ export function EditWorkspace() {
 
     const track = beginDirectRun("aiEdit", candidateCount, tempId);
     track.markStarted();
-    useBatches.getState().startBatch({
-      batchId: tempId,
-      prompt,
-      references: [{ path: sourceImagePath, name: basename(sourceImagePath) }],
-      count: candidateCount,
-    });
 
     try {
       const result = await imagesIpc.generateBatch({
@@ -740,6 +750,7 @@ export function EditWorkspace() {
         refImagePaths: [sourceImagePath],
         model: threads.selectedModel,
         effort: threads.selectedEffort,
+        sourceTag: `${EDIT_DIRECT_SOURCE_TAG_PREFIX}${track.id}`,
       });
       const generatedPaths = result.generatedPaths.filter((path) => Boolean(path?.trim()));
       if (generatedPaths.length > 0) {
@@ -763,7 +774,6 @@ export function EditWorkspace() {
         track.fail(result.errors?.[0] ?? "一部の編集候補を作れませんでした。");
       }
     } catch (caught) {
-      useBatches.getState().removeBatch(tempId);
       track.fail(String(caught));
     } finally {
       track.done();
@@ -787,18 +797,18 @@ export function EditWorkspace() {
       (tool === "region" && region !== null)) &&
     !busy &&
     busyTool === null &&
-    magnificBusyTool === null &&
+    generatedEditBusyTool === null &&
     !versionInFlight &&
     !versionRecoveryRequired;
   const panelBusy =
     busy ||
     busyTool !== null ||
-    magnificBusyTool !== null ||
+    generatedEditBusyTool !== null ||
     versionInFlight ||
     versionRecoveryRequired;
   const versionSelectDisabled = isVersionSelectDisabled({
     generationBusy: busy,
-    toolBusy: busyTool !== null || magnificBusyTool !== null,
+    toolBusy: busyTool !== null || generatedEditBusyTool !== null,
     versionInFlight,
     versionRecoveryRequired,
   });
@@ -912,7 +922,7 @@ export function EditWorkspace() {
                   imagePath={sourceImagePath}
                   values={adjust}
                   onChange={changeAdjust}
-                  onCommit={commitAdjust}
+                  onApply={() => void runAdjust(adjustRef.current)}
                   onPreset={applyPreset}
                   onReset={resetAdjust}
                   onTransform={(kind) => void runTransform(kind)}
@@ -925,17 +935,24 @@ export function EditWorkspace() {
                 width="wide"
                 onClose={() => selectTool("ai")}
               >
-                <ResizePanel
-                  mode={resizeMode}
-                  cropAspect={cropAspect}
-                  expandAspect={expandAspect}
-                  expandPrompt={expandPrompt}
-                  busy={panelBusy}
-                  onModeChange={changeResizeMode}
-                  onCropAspectChange={selectCropAspect}
-                  onExpandAspectChange={setExpandAspect}
-                  onExpandPromptChange={setExpandPrompt}
-                />
+                <div className="[&_label>span]:hidden">
+                  <ResizePanel
+                    mode={resizeMode}
+                    cropAspect={cropAspect}
+                    expandAspect={expandAspect}
+                    expandPrompt={expandPrompt}
+                    busy={panelBusy}
+                    onModeChange={changeResizeMode}
+                    onCropAspectChange={selectCropAspect}
+                    onExpandAspectChange={setExpandAspect}
+                    onExpandPromptChange={setExpandPrompt}
+                  />
+                </div>
+                {resizeMode === "expand" ? (
+                  <p className="px-4 pb-2 text-[10px] font-bold leading-4 text-neutral-600">
+                    画像拡張は8種類の比率に対応しています。カスタムpxは切り抜きで使えます。
+                  </p>
+                ) : null}
               </EditFloatingPanel>
             ) : sourceImagePath && tool === "restyle" ? (
               <EditFloatingPanel
@@ -950,18 +967,17 @@ export function EditWorkspace() {
                   onSelect={setInstruction}
                 />
               </EditFloatingPanel>
-            ) : sourceImagePath && isMagnificTool(tool) ? (
+            ) : sourceImagePath && isGeneratedPanelTool(tool) ? (
               <EditFloatingPanel
-                title={MAGNIFIC_TOOL_LABELS[tool]}
+                title={GENERATED_TOOL_LABELS[tool]}
                 width="wide"
                 onClose={() => selectTool("ai")}
               >
                 <MagnificToolPanel
                   tool={tool}
                   imagePath={sourceImagePath}
-                  busy={magnificBusyTool !== null || versionInFlight}
-                  connected={magnificConnected}
-                  onRun={(params) => void runMagnificEdit(tool, params)}
+                  busy={generatedEditBusyTool !== null || versionInFlight}
+                  onRun={(params) => void runGeneratedPanelEdit(tool, params)}
                 />
               </EditFloatingPanel>
             ) : null}
@@ -986,7 +1002,7 @@ export function EditWorkspace() {
                   activeTool={tool}
                   candidateCount={candidateCount}
                   regionMode={regionMode}
-                  busy={busy || magnificBusyTool === "restyle" || versionInFlight}
+                  busy={busy || generatedEditBusyTool === "restyle" || versionInFlight}
                   interactionDisabled={versionRecoveryRequired}
                   disabled={!canRun}
                   resizeControls={
@@ -998,7 +1014,7 @@ export function EditWorkspace() {
                       cropHeight={cropHeight}
                       cropReady={region !== null}
                       busy={panelBusy}
-                      connected={magnificConnected}
+                      connected
                       onCropAspectChange={selectCropAspect}
                       onExpandAspectChange={setExpandAspect}
                       onCropWidthChange={changeCropWidth}
@@ -1017,7 +1033,7 @@ export function EditWorkspace() {
                 <EditToolRail
                   activeTool={tool}
                   disabled={panelBusy}
-                  magnificConnected={magnificConnected}
+                  magnificConnected
                   onSelect={selectTool}
                 />
                 <div className="flex min-w-0 justify-end">

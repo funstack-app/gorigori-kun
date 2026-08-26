@@ -16,6 +16,9 @@ import { stallFromFailure, useGenerationStatus } from "./generationStatus";
 export type MediaType = "image" | "video";
 export type BatchSource = "remoteMcp";
 
+/** 編集タブの direct-run は生成タブのバッチカードへ重ねて表示しない。 */
+export const EDIT_DIRECT_SOURCE_TAG_PREFIX = "edit-direct-";
+
 /**
  * 生成1枚の進み具合 (設計書 S1)。
  *
@@ -238,6 +241,13 @@ export const useBatches = create<BatchesState>((set, _get) => ({
       const batches = [...s.batches];
 
       if (e.kind === "started") {
+        // 編集タブは beginDirectRun("aiEdit") を表示の正本にする。
+        // sourceTag 付きの編集生成を通常バッチへ登録すると、右上に
+        // 「AI編集」「画像生成」の2行が出て、生成タブにも不要なカードが増える。
+        // started をここで消費すれば、後続イベントも対応 batch が無いため無視される。
+        if (e.sourceTag?.startsWith(EDIT_DIRECT_SOURCE_TAG_PREFIX)) {
+          return s;
+        }
         // Idempotency guard: a duplicate listener registration (e.g.
         // HMR replaying useEffect before its previous cleanup ran)
         // would cause `applyEvent` to fire twice per event. The first

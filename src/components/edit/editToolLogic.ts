@@ -56,6 +56,36 @@ export function buildRestylePrompt(style: string): string {
   return `Restyle this exact image in ${style.trim()}. Keep the composition, subjects and framing identical.`;
 }
 
+export function buildExpandPrompt(ratio: string, hint: string): string {
+  const extraHint = hint.trim();
+  return `Recompose this exact image onto a larger ${ratio} canvas (outpainting). Keep the original content unchanged and centered; seamlessly extend the scene into the new areas.${extraHint ? ` ${extraHint}` : ""}`;
+}
+
+function signedCameraDegrees(angle: number): number {
+  if (!Number.isFinite(angle)) return 0;
+  const normalized = ((Math.round(angle) % 360) + 360) % 360;
+  return normalized > 180 ? normalized - 360 : normalized;
+}
+
+function cameraFraming(closeup: number): string {
+  const value = Math.max(0, Math.min(10, Math.round(closeup)));
+  if (value <= 2) return "wide";
+  if (value <= 4) return "medium-wide";
+  if (value <= 6) return "medium";
+  if (value <= 8) return "close-up";
+  return "extreme close-up";
+}
+
+export function buildCameraPrompt(
+  rotate: number,
+  vertical: number,
+  closeup: number,
+): string {
+  const orbit = signedCameraDegrees(rotate);
+  const cameraHeight = Math.max(-30, Math.min(90, Math.round(vertical)));
+  return `Re-render this exact scene from a different camera angle: orbit ${Math.abs(orbit)}° to the ${orbit < 0 ? "left" : "right"} around the subject, camera ${Math.abs(cameraHeight)}° ${cameraHeight < 0 ? "below" : "above"} eye level, ${cameraFraming(closeup)} framing. Keep the subjects, environment, materials and lighting identical.`;
+}
+
 export const LIGHT_AZIMUTHS = [-135, -90, -45, 0, 45, 90, 135, 180] as const;
 export const LIGHT_ELEVATIONS = [-90, -45, 0, 45, 90] as const;
 
@@ -83,6 +113,52 @@ export function snapLightElevation(angle: number): LightElevation {
   return LIGHT_ELEVATIONS.reduce((best, candidate) =>
     Math.abs(clamped - candidate) < Math.abs(clamped - best) ? candidate : best,
   LIGHT_ELEVATIONS[0]);
+}
+
+function lightDirectionPhrase(azimuth: number, elevation: number): string {
+  const snappedAzimuth = snapLightAzimuth(azimuth);
+  const snappedElevation = snapLightElevation(elevation);
+  if (snappedElevation === 90) return "directly above";
+  if (snappedElevation === -90) return "directly below";
+
+  const horizontal: Record<LightAzimuth, string> = {
+    0: "front",
+    45: "front right",
+    90: "right",
+    135: "rear right",
+    180: "behind",
+    [-135]: "rear left",
+    [-90]: "left",
+    [-45]: "front left",
+  };
+  if (snappedAzimuth === 180) {
+    if (snappedElevation > 0) return "above and behind the subject";
+    if (snappedElevation < 0) return "below and behind the subject";
+    return "behind the subject";
+  }
+  const height = snappedElevation > 0 ? "upper " : snappedElevation < 0 ? "lower " : "";
+  return `the ${height}${horizontal[snappedAzimuth]}`;
+}
+
+function lightColorPhrase(color: string): string {
+  const normalized = color.trim().toLowerCase();
+  const knownColors: Record<string, string> = {
+    "#ffffff": "neutral white",
+    "#ffd27f": "warm golden",
+    "#ff9d5c": "warm orange",
+    "#7fc5ff": "cool blue",
+  };
+  return knownColors[normalized] ?? normalized;
+}
+
+export function buildRelightPrompt(
+  azimuth: number,
+  elevation: number,
+  intensity: number,
+  color: string,
+): string {
+  const strength = Math.max(1, Math.min(10, Math.round(intensity)));
+  return `Relight this exact image with a single ${lightColorPhrase(color)} key light from ${lightDirectionPhrase(azimuth, elevation)} (intensity ${strength}/10). Keep the composition, subjects and every detail identical; change only the lighting and shadows.`;
 }
 
 export function normalizeCameraRotate(angle: number): number {
