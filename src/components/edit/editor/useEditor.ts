@@ -21,6 +21,7 @@ import { useEditMagic } from "../../../lib/store/editMagic";
 import { useEditModels } from "../../../lib/store/editModels";
 import { useProjects } from "../../../lib/store/projects";
 import { useThreads } from "../../../lib/store/threads";
+import { EDIT_DIRECT_SOURCE_TAG_PREFIX } from "../../../lib/store/batches";
 import {
   addEditVersion,
   confirmEditCandidate,
@@ -896,7 +897,7 @@ export function useEditorActions() {
     try {
       // 1) いまのキャンバスをファイルに落とす。どちらの経路も「path を受けて path を返す」
       //    Rust コマンドなので、先にディスクへ出す必要がある。
-      const inputPath = await images.writeUpload(
+      const inputPath = await editExport.writeSession(
         `nobg-src-${Date.now()}.png`,
         dataUrlToBytes(flat.dataUrl),
       );
@@ -1086,7 +1087,7 @@ export function useEditorActions() {
       return null;
     }
     try {
-      return await images.writeUpload(
+      return await editExport.writeSession(
         `${namePrefix}-${Date.now()}.png`,
         base64ToBytes(base64),
       );
@@ -1154,7 +1155,10 @@ export function useEditorActions() {
       // 1) 選択レイヤーの領域マスク (フルサイズ座標) を作る。
       const maskDataUrl = await buildFullSizeMaskFromCrop(sourcePath, sourceBbox, canvas);
       const maskBytes = dataUrlToBytes(maskDataUrl);
-      const maskPath = await images.writeUpload(`restyle-mask-${Date.now()}.png`, maskBytes);
+      const maskPath = await editExport.writeSession(
+        `restyle-mask-${Date.now()}.png`,
+        maskBytes,
+      );
 
       // 2) Codex にインペイント編集させる (白い領域だけ変更)。
       const result = await images.generateBatch({
@@ -1162,6 +1166,7 @@ export function useEditorActions() {
         count: 1,
         refImagePaths: [sourceImagePath],
         maskPaths: [maskPath],
+        sourceTag: `${EDIT_DIRECT_SOURCE_TAG_PREFIX}restyle-${Date.now()}`,
       });
       const generatedPath = result.generatedPaths[0];
       if (!generatedPath || result.failedCount > 0) {
@@ -1227,7 +1232,7 @@ export function useEditorActions() {
     try {
       // 1) 正規化 bbox を元画像の実寸へ変換し、黒地に白い矩形のマスクを作る。
       const mask = await buildFullSizeMaskFromNormalizedBbox(imagePath, bboxNorm);
-      const maskPath = await images.writeUpload(
+      const maskPath = await editExport.writeSession(
         `redline-mask-${Date.now()}.png`,
         dataUrlToBytes(mask.dataUrl),
       );
@@ -1245,6 +1250,7 @@ export function useEditorActions() {
         maskPaths: [maskPath],
         model: threads.selectedModel,
         effort: threads.selectedEffort,
+        sourceTag: `${EDIT_DIRECT_SOURCE_TAG_PREFIX}region-${Date.now()}`,
       });
       const generatedPath = result.generatedPaths[0];
       if (!generatedPath || result.failedCount > 0) {
@@ -1253,7 +1259,7 @@ export function useEditorActions() {
 
       // 3) 既存の差分化を通し、bbox 外を透明に固定したパッチだけを新規レイヤーにする。
       const patch = await buildDiffPatch(imagePath, generatedPath, mask.bbox, true);
-      const patchPath = await images.writeUpload(
+      const patchPath = await editExport.writeSession(
         `redline-patch-${Date.now()}.png`,
         dataUrlToBytes(patch.dataUrl),
       );

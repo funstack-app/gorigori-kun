@@ -516,6 +516,8 @@ pub fn run() {
             commands::edit_models::edit_platform_info,
             commands::edit_export::edit_export_psd,
             commands::edit_export::edit_export_png,
+            commands::edit_export::edit_write_session,
+            commands::edit_export::edit_save_to_library,
             commands::edit_fonts::edit_fonts_list,
             // ── ort (ONNX Runtime) 依存の編集コマンド群 ──────────────────
             // ort は Windows 限定依存に格下げした (2026-07-28、Intel Mac 対応の復活)。

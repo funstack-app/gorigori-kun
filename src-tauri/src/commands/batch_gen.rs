@@ -84,6 +84,30 @@ pub struct BatchGenArgs {
 /// ことがある(2026-06-09 通常生成にもリトライを横展開)。
 const DEFAULT_MAX_ATTEMPTS: u32 = 3;
 
+/// 編集タブが `sourceTag` に付ける印。通常生成の保存先は一切変えず、
+/// この接頭辞がある batch だけを `generated_images/edit-session/` へ隔離する。
+const EDIT_SOURCE_TAG_PREFIX: &str = "edit-direct-";
+
+fn is_edit_source_tag(source_tag: Option<&str>) -> bool {
+    source_tag
+        .map(str::trim)
+        .is_some_and(|tag| tag.starts_with(EDIT_SOURCE_TAG_PREFIX))
+}
+
+fn select_batch_output_dir(
+    standard_output_dir: PathBuf,
+    generated_images_dir: Option<PathBuf>,
+    source_tag: Option<&str>,
+    batch_id: &str,
+) -> Result<PathBuf, String> {
+    if !is_edit_source_tag(source_tag) {
+        return Ok(standard_output_dir);
+    }
+    generated_images_dir
+        .map(|base| base.join("edit-session").join(batch_id))
+        .ok_or_else(|| "編集生成の保存先を解決できません".to_string())
+}
+
 /// 呼び出し元指定の `max_attempts` を有効範囲へ丸める。
 ///
 /// 0 や巨大値を素通しすると「1回も試さない」「生成枠を延々燃やす」の両方が起きるため、
@@ -210,7 +234,15 @@ pub async fn images_generate_batch(
     let _active_run = gen_queue::ActiveRunGuard::begin(&batch_id);
     let storage_settings = StorageSettings::load()?;
     let project_name = project_name_from_cwd(args.cwd.as_deref());
-    let out_dir = resolve_output_dir(&storage_settings, project_name.as_deref(), &batch_id);
+    let standard_out_dir =
+        resolve_output_dir(&storage_settings, project_name.as_deref(), &batch_id);
+    let edit_generated = is_edit_source_tag(args.source_tag.as_deref());
+    let out_dir = select_batch_output_dir(
+        standard_out_dir,
+        crate::images::watcher::generated_images_dir(),
+        args.source_tag.as_deref(),
+        &batch_id,
+    )?;
     std::fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
 
     let _ = app.emit(
@@ -242,6 +274,7 @@ pub async fn images_generate_batch(
         let turn_id = args.turn_id.clone();
         let total_count = args.count;
         let enforce_aspect = args.enforce_aspect;
+        let record_in_history = !edit_generated;
         let max_attempts = resolve_max_attempts(args.max_attempts);
         handles.push(tokio::spawn(async move {
             run_one_worker(
@@ -260,6 +293,7 @@ pub async fn images_generate_batch(
                 aspect,
                 total_count,
                 turn_id,
+                record_in_history,
                 enforce_aspect,
                 max_attempts,
             )
@@ -328,6 +362,8 @@ async fn run_one_worker(
     aspect: Option<String>,
     total_count: u32,
     turn_id: Option<String>,
+    // 編集途中版は履歴 DB へ直接挿入しない。明示的なライブラリ保存後に watcher が拾う。
+    record_in_history: bool,
     // true なら回収点で規格寸法へ正規化する (通常生成のみ)。
     enforce_aspect: bool,
     // 試行回数の上限 (呼び出し元指定。`resolve_max_attempts` で clamp 済み)。
@@ -439,16 +475,19 @@ async fn run_one_worker(
 
     // DB 記録失敗で画像生成そのものを再試行しないよう、既存の生成リトライが
     // 終わった後に1回だけ確定記録する。PNG は inner ですでに保存済み。
-    if let (Some(path), Some(turn_id)) = (
-        result.as_ref().ok().cloned(),
-        turn_id.as_deref().filter(|id| !id.trim().is_empty()),
-    ) {
-        if let Err(error) =
-            crate::commands::sessions::record_generated_image(&app, turn_id, Path::new(&path)).await
-        {
-            result = Err(format!(
-                "画像は保存しましたが、履歴DBへの記録に失敗しました: {error}"
-            ));
+    if record_in_history {
+        if let (Some(path), Some(turn_id)) = (
+            result.as_ref().ok().cloned(),
+            turn_id.as_deref().filter(|id| !id.trim().is_empty()),
+        ) {
+            if let Err(error) =
+                crate::commands::sessions::record_generated_image(&app, turn_id, Path::new(&path))
+                    .await
+            {
+                result = Err(format!(
+                    "画像は保存しましたが、履歴DBへの記録に失敗しました: {error}"
+                ));
+            }
         }
     }
     if gen_queue::is_cancelled(&batch_id) {
@@ -1088,6 +1127,58 @@ mod tests {
     fn resident_timeout_switches_only_the_next_attempt_to_exec() {
         assert_eq!(next_attempt_path(true), AttemptPath::Exec);
         assert_eq!(next_attempt_path(false), AttemptPath::Resident);
+    }
+}
+
+#[cfg(test)]
+mod edit_session_output_tests {
+    use super::{is_edit_source_tag, select_batch_output_dir};
+    use std::path::PathBuf;
+
+    #[test]
+    fn edit_source_tag_routes_batch_under_generated_images_edit_session() {
+        let standard = PathBuf::from("/library/batch-123");
+        let generated = PathBuf::from("/codex/generated_images");
+        let selected = select_batch_output_dir(
+            standard,
+            Some(generated.clone()),
+            Some("edit-direct-aiEdit-123"),
+            "batch-123",
+        )
+        .unwrap();
+
+        assert_eq!(selected, generated.join("edit-session").join("batch-123"));
+        assert!(is_edit_source_tag(Some(" edit-direct-region-456 ")));
+    }
+
+    #[test]
+    fn normal_generation_keeps_the_existing_output_directory() {
+        let standard = PathBuf::from("/library/project/batch-123");
+        let selected = select_batch_output_dir(
+            standard.clone(),
+            Some(PathBuf::from("/codex/generated_images")),
+            Some("comic-run-123"),
+            "batch-123",
+        )
+        .unwrap();
+
+        assert_eq!(selected, standard);
+        assert!(!is_edit_source_tag(None));
+    }
+
+    #[test]
+    fn edit_generation_fails_closed_when_generated_images_is_unavailable() {
+        let result = select_batch_output_dir(
+            PathBuf::from("/library/batch-123"),
+            None,
+            Some("edit-direct-aiEdit-123"),
+            "batch-123",
+        );
+
+        assert!(
+            result.is_err(),
+            "通常ライブラリへ退避して汚染してはいけない"
+        );
     }
 }
 

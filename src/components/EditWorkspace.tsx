@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { images as imagesIpc } from "../lib/ipc";
+import { editExport, images as imagesIpc } from "../lib/ipc";
 import { EDIT_DIRECT_SOURCE_TAG_PREFIX } from "../lib/store/batches";
 import {
   addEditCandidates,
@@ -123,6 +123,7 @@ export function EditWorkspace() {
   const versionInFlightRef = useRef(false);
   const [versionRecoveryRequired, setVersionRecoveryRequired] = useState(false);
   const [savingArtwork, setSavingArtwork] = useState(false);
+  const [savingToLibrary, setSavingToLibrary] = useState(false);
   const [region, setRegion] = useState<NormalizedBbox | null>(null);
   const [tool, setTool] = useState<EditToolId>("ai");
   const [resizeMode, setResizeMode] = useState<ResizeMode>("expand");
@@ -641,6 +642,24 @@ export function EditWorkspace() {
     }
   };
 
+  const saveCurrentVersionToLibrary = async () => {
+    if (!sourceImagePath || savingToLibrary) return;
+    setSavingToLibrary(true);
+    setError(null);
+    try {
+      await editExport.saveToLibrary(sourceImagePath);
+      useToasts.getState().push({
+        kind: "success",
+        text: "ライブラリに保存しました",
+        ttlMs: 4000,
+      });
+    } catch (caught) {
+      setError(`ライブラリに保存できませんでした: ${String(caught)}`);
+    } finally {
+      setSavingToLibrary(false);
+    }
+  };
+
   const runRegion = async () => {
     const prompt =
       regionMode === "erase"
@@ -838,6 +857,14 @@ export function EditWorkspace() {
               className="rounded-md border border-pink-400/50 bg-pink-500/15 px-3 py-1.5 text-[11px] font-black text-pink-100 hover:border-pink-300 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
             >
               作品にする
+            </button>
+            <button
+              type="button"
+              onClick={() => void saveCurrentVersionToLibrary()}
+              disabled={panelBusy || savingToLibrary}
+              className="rounded-md border border-[#3a3a3a] bg-[#1a1a1a] px-3 py-1.5 text-[11px] font-black text-neutral-200 hover:border-pink-400 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              ライブラリに保存
             </button>
             <button
               type="button"

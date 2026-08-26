@@ -76,7 +76,23 @@ fn is_in_masks_dir(path: &Path) -> bool {
     })
 }
 
+/// 編集途中版の専用作業場は、起動時走査・リアルタイム監視のどちらでも無視する。
+/// ファイル自体は版レールが絶対パスで使うため残し、ライブラリの索引だけに載せない。
+fn is_in_edit_session_dir(path: &Path) -> bool {
+    path.components().any(|component| {
+        component
+            .as_os_str()
+            .to_str()
+            .map(|name| name == "edit-session")
+            .unwrap_or(false)
+    })
+}
+
 fn payload(path: &Path, kind: &'static str) -> Option<ImageEvent> {
+    // 呼び出し側の走査ガードが将来変わっても、イベント生成の最後の入口で止める。
+    if is_in_edit_session_dir(path) {
+        return None;
+    }
     let meta = std::fs::metadata(path).ok()?;
     if !meta.is_file() {
         return None;
@@ -121,6 +137,9 @@ pub fn scan_existing(app: &AppHandle, dir: &Path) {
             if p.file_name().and_then(|s| s.to_str()) == Some(".masks") {
                 continue;
             }
+            if p.file_name().and_then(|s| s.to_str()) == Some("edit-session") {
+                continue;
+            }
             collect_media_recursive(&p, &mut media);
         } else if is_supported_media(&p) {
             media.push(p);
@@ -160,6 +179,9 @@ fn collect_media_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
             if p.file_name().and_then(|s| s.to_str()) == Some(".masks") {
                 continue;
             }
+            if p.file_name().and_then(|s| s.to_str()) == Some("edit-session") {
+                continue;
+            }
             collect_media_recursive(&p, out);
         } else if ft.is_file() && is_supported_media(&p) {
             out.push(p);
@@ -194,6 +216,9 @@ pub fn start_watcher(
                             continue;
                         }
                         if is_in_masks_dir(p) {
+                            continue;
+                        }
+                        if is_in_edit_session_dir(p) {
                             continue;
                         }
                         // CREATE / MODIFY only. REMOVE is deliberately not picked up:
@@ -233,7 +258,7 @@ pub fn start_watcher(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_in_masks_dir, is_supported_media};
+    use super::{is_in_edit_session_dir, is_in_masks_dir, is_supported_media, payload};
     use std::path::Path;
 
     #[test]
@@ -265,5 +290,32 @@ mod tests {
     fn watcher_still_excludes_hidden_masks() {
         assert!(is_in_masks_dir(Path::new("/gallery/.masks/edit.png")));
         assert!(!is_in_masks_dir(Path::new("/gallery/movie.mp4")));
+    }
+
+    #[test]
+    fn watcher_excludes_edit_session_at_any_nested_depth() {
+        assert!(is_in_edit_session_dir(Path::new(
+            "/generated_images/edit-session/ig_edit.png"
+        )));
+        assert!(is_in_edit_session_dir(Path::new(
+            "/generated_images/edit-session/batch-1/ig_b01.png"
+        )));
+        assert!(!is_in_edit_session_dir(Path::new(
+            "/generated_images/ig_edit_saved.png"
+        )));
+    }
+
+    #[test]
+    fn payload_hides_intermediate_version_but_accepts_library_copy() {
+        let root = tempfile::tempdir().unwrap();
+        let edit_dir = root.path().join("edit-session");
+        std::fs::create_dir_all(&edit_dir).unwrap();
+        let intermediate = edit_dir.join("current.png");
+        let library_copy = root.path().join("saved.png");
+        std::fs::write(&intermediate, b"intermediate").unwrap();
+        std::fs::write(&library_copy, b"saved").unwrap();
+
+        assert!(payload(&intermediate, "created").is_none());
+        assert!(payload(&library_copy, "created").is_some());
     }
 }

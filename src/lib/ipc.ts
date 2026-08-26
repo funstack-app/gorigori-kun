@@ -539,6 +539,12 @@ export const editExport = {
   /** キャンバスの統合PNG保存 (dataBase64 は data: プレフィックスなし)。 */
   png: (path: string, dataBase64: string) =>
     invoke<void>("edit_export_png", { path, dataBase64 }),
+  /** 編集途中版をライブラリ対象外の generated_images/edit-session/ へ保存する。 */
+  writeSession: (fileName: string, bytes: Uint8Array) =>
+    invokeWithBytes<string>("edit_write_session", bytes, { "file-name": fileName }),
+  /** 現在表示中の版ファイルを generated_images 直下へ非破壊コピーする。 */
+  saveToLibrary: (sourcePath: string) =>
+    invoke<string>("edit_save_to_library", { sourcePath }),
 };
 
 export const layerSplitter = {
