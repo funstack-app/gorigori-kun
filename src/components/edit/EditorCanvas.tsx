@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode, type Ref } from "react";
 
 import { useEditor } from "./editor/editorStore";
 import { useEditorActions } from "./editor/useEditor";
@@ -6,6 +6,10 @@ import {
   fitCanvasToImage,
   getCanvasBaseSize,
 } from "./editor/magicLayerToFabric";
+import {
+  BrushSelectOverlay,
+  type BrushSelectOverlayHandle,
+} from "./BrushSelectOverlay";
 import { CropFrameOverlay } from "./CropFrameOverlay";
 import { RegionSelectOverlay, type NormalizedBbox } from "./RegionSelectOverlay";
 
@@ -24,6 +28,17 @@ type EditorCanvasProps = {
     aspectRatio?: number | null;
     /** 未選択時の案内文 (AI に直させる範囲か、塗りつぶす範囲かで意味が変わる)。 */
     hint?: string;
+  };
+  /**
+   * ブラシ選択オーバーレイ。regionSelect と同格だが、呼び出し側は同時に渡さない。
+   * 塗り本体は BrushSelectOverlay 内の画像実寸 canvas に保持される。
+   */
+  brushSelect?: {
+    brushSize: number;
+    erasing: boolean;
+    disabled?: boolean;
+    overlayRef?: Ref<BrushSelectOverlayHandle>;
+    onHasStrokesChange?: (hasStrokes: boolean) => void;
   };
   /**
    * リサイズツールの「掴める外枠」(Magnific 準拠)。渡されたときだけ表示。
@@ -97,7 +112,7 @@ export function isEditorViewportAboveFit(
   return zoom > editorFitZoom(canvasWidth, canvasHeight, imageWidth, imageHeight) + 0.001;
 }
 
-export function EditorCanvas({ regionSelect, cropFrame }: EditorCanvasProps = {}) {
+export function EditorCanvas({ regionSelect, brushSelect, cropFrame }: EditorCanvasProps = {}) {
   const hostRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fabricCanvasRef = useRef<any>(null);
@@ -261,7 +276,7 @@ export function EditorCanvas({ regionSelect, cropFrame }: EditorCanvasProps = {}
     if (!spacePressedRef.current && interactive) return;
     // ビューエリア全域が手のひら (2026-08-26 STΛCK実機FB)。画像の内外を問わず
     // ドラッグでパンする。範囲選択中だけはドラッグを選択操作に譲る。
-    const directPan = !regionSelect;
+    const directPan = !regionSelect && !brushSelect;
     if (!spacePressedRef.current && !directPan) return;
 
     event.preventDefault();
@@ -308,7 +323,8 @@ export function EditorCanvas({ regionSelect, cropFrame }: EditorCanvasProps = {}
         cursor:
           panning
             ? "grabbing"
-            : Boolean(viewportCanvas && baseSize) && (spacePressed || !regionSelect)
+            : Boolean(viewportCanvas && baseSize) &&
+                (spacePressed || (!regionSelect && !brushSelect))
               ? "grab"
               : undefined,
       }}
@@ -328,6 +344,17 @@ export function EditorCanvas({ regionSelect, cropFrame }: EditorCanvasProps = {}
           disabled={regionSelect.disabled}
           aspectRatio={regionSelect.aspectRatio}
           hint={regionSelect.hint}
+        />
+      ) : null}
+
+      {brushSelect && !regionSelect && sourceImagePath && liveCanvas ? (
+        <BrushSelectOverlay
+          ref={brushSelect.overlayRef}
+          canvas={liveCanvas}
+          brushSize={brushSelect.brushSize}
+          erasing={brushSelect.erasing}
+          disabled={brushSelect.disabled}
+          onHasStrokesChange={brushSelect.onHasStrokesChange}
         />
       ) : null}
 

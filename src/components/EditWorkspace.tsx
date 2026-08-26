@@ -20,6 +20,7 @@ import {
   buildEraseInstruction,
   DEFAULT_EDIT_CANDIDATE_COUNT,
   type RegionEditMode,
+  type RegionSelectionMode,
   EditChatBar,
 } from "./edit/EditChatBar";
 import { EditFloatingPanel } from "./edit/EditFloatingPanel";
@@ -30,6 +31,7 @@ import {
 } from "./edit/MagnificToolPanels";
 import { EditToolRail, type EditToolId } from "./edit/EditToolRail";
 import { EditorCanvas, EditorZoomControls } from "./edit/EditorCanvas";
+import type { BrushSelectOverlayHandle } from "./edit/BrushSelectOverlay";
 import { ExportDialog } from "./edit/ExportDialog";
 import { RestylePanel } from "./edit/RestylePanel";
 import type { NormalizedBbox } from "./edit/RegionSelectOverlay";
@@ -64,6 +66,17 @@ import {
 
 function basename(path: string) {
   return path.split(/[\\/]/).pop() ?? path;
+}
+
+function dataUrlToBytes(dataUrl: string): Uint8Array {
+  const comma = dataUrl.indexOf(",");
+  const base64 = comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl;
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
 }
 
 type GeneratedPanelTool = Extract<EditToolId, MagnificPanelTool>;
@@ -117,6 +130,12 @@ export function EditWorkspace() {
   const [instruction, setInstruction] = useState("");
   const [candidateCount, setCandidateCount] = useState(DEFAULT_EDIT_CANDIDATE_COUNT);
   const [regionMode, setRegionMode] = useState<RegionEditMode>("replace");
+  const [regionSelectionMode, setRegionSelectionMode] =
+    useState<RegionSelectionMode>("rectangle");
+  const [brushSize, setBrushSize] = useState(40);
+  const [brushEraser, setBrushEraser] = useState(false);
+  const [brushHasStrokes, setBrushHasStrokes] = useState(false);
+  const brushOverlayRef = useRef<BrushSelectOverlayHandle>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [versionInFlight, setVersionInFlight] = useState(false);
@@ -143,6 +162,11 @@ export function EditWorkspace() {
 
   const needsRegion = tool === "region";
 
+  const clearBrushSelection = useCallback(() => {
+    brushOverlayRef.current?.clear();
+    setBrushHasStrokes(false);
+  }, []);
+
   useEffect(() => {
     const current = editSessionRef.current;
     const belongsToCurrentSession = Boolean(
@@ -165,18 +189,22 @@ export function EditWorkspace() {
     // ときだけ全初期化する。範囲と調整スライダーは新しい版に焼き込み済みのため
     // 毎回リセットする (二重適用防止)。
     setRegion(null);
+    clearBrushSelection();
     adjustPreviewTokenRef.current += 1;
     adjustRef.current = NEUTRAL_ADJUST;
     setAdjust(NEUTRAL_ADJUST);
     if (!belongsToCurrentSession) {
       setTool("ai");
       setRegionMode("replace");
+      setRegionSelectionMode("rectangle");
+      setBrushSize(40);
+      setBrushEraser(false);
       setResizeMode("expand");
       setCropAspect("1:1");
       setExpandAspect("16:9");
       setExpandPrompt("");
     }
-  }, [sourceImagePath]);
+  }, [clearBrushSelection, sourceImagePath]);
 
   useEffect(() => {
     if (!imageSize) return;
@@ -203,6 +231,7 @@ export function EditWorkspace() {
     }
     setTool(next);
     setRegion(null);
+    clearBrushSelection();
     setRegionMode("replace");
     setError(null);
   };
@@ -660,11 +689,84 @@ export function EditWorkspace() {
     }
   };
 
+  /** ブラシの実寸マスクを既存 generateBatch へ渡し、結果を候補レールへ並べる。 */
+  const runBrushRegion = async (prompt: string) => {
+    if (
+      !sourceImagePath ||
+      !prompt ||
+      !brushHasStrokes ||
+      busy ||
+      versionInFlightRef.current ||
+      versionRecoveryRequired
+    ) return;
+
+    const maskDataUrl = brushOverlayRef.current?.getMaskDataUrl();
+    if (!maskDataUrl) {
+      setBrushHasStrokes(false);
+      setError("直したいところをブラシで塗ってください。");
+      return;
+    }
+
+    const threads = useThreads.getState();
+    const tempId = `brush-edit-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const track = beginDirectRun("aiEdit", candidateCount, tempId);
+    setBusy(true);
+    setError(null);
+    track.markStarted();
+    try {
+      // マスクも生成結果も watcher 対象外の edit-session/ に置く。
+      const maskPath = await editExport.writeSession(
+        `brush-mask-${Date.now()}.png`,
+        dataUrlToBytes(maskDataUrl),
+      );
+      const result = await imagesIpc.generateBatch({
+        prompt,
+        count: candidateCount,
+        cwd: threads.cwd,
+        refImagePaths: [sourceImagePath],
+        maskPaths: [maskPath],
+        model: threads.selectedModel,
+        effort: threads.selectedEffort,
+        sourceTag: `${EDIT_DIRECT_SOURCE_TAG_PREFIX}${track.id}`,
+      });
+      const generatedPaths = result.generatedPaths.filter((path) => Boolean(path?.trim()));
+      if (generatedPaths.length > 0) {
+        setEditSession((current) => {
+          const next = addEditCandidates(current, generatedPaths);
+          editSessionRef.current = next;
+          return next;
+        });
+        generatedPaths.forEach(() => track.markCompleted());
+        useToasts.getState().push({
+          kind: "success",
+          text: `塗ったところを直した候補が${generatedPaths.length}枚できました。右の「候補」から選んでください。`,
+          ttlMs: 5200,
+        });
+        setInstruction("");
+        clearBrushSelection();
+      } else {
+        track.fail(result.errors?.[0] ?? "ブラシで選んだ部分を編集できませんでした。");
+      }
+      if (result.failedCount > 0 && generatedPaths.length > 0) {
+        track.fail(result.errors?.[0] ?? "一部の編集候補を作れませんでした。");
+      }
+    } catch (caught) {
+      track.fail(String(caught));
+    } finally {
+      track.done();
+      setBusy(false);
+    }
+  };
+
   const runRegion = async () => {
     const prompt =
       regionMode === "erase"
         ? buildEraseInstruction(instruction)
         : instruction.trim();
+    if (regionSelectionMode === "brush") {
+      await runBrushRegion(prompt);
+      return;
+    }
     if (
       !sourceImagePath ||
       !prompt ||
@@ -806,6 +908,8 @@ export function EditWorkspace() {
     else if (tool === "restyle") await runRestyle();
   };
 
+  const regionSelectionReady =
+    regionSelectionMode === "brush" ? brushHasStrokes : region !== null;
   const canRun =
     Boolean(
       sourceImagePath &&
@@ -813,7 +917,7 @@ export function EditWorkspace() {
     ) &&
     (tool === "ai" ||
       tool === "restyle" ||
-      (tool === "region" && region !== null)) &&
+      (tool === "region" && regionSelectionReady)) &&
     !busy &&
     busyTool === null &&
     generatedEditBusyTool === null &&
@@ -908,13 +1012,24 @@ export function EditWorkspace() {
           >
             <EditorCanvas
               regionSelect={
-                sourceImagePath && needsRegion
+                sourceImagePath && needsRegion && regionSelectionMode === "rectangle"
                   ? {
                       value: region,
                       onChange: changeRegion,
                       disabled: panelBusy,
                       aspectRatio: null,
                       hint: "直したいところをドラッグで囲む",
+                    }
+                  : undefined
+              }
+              brushSelect={
+                sourceImagePath && needsRegion && regionSelectionMode === "brush"
+                  ? {
+                      brushSize,
+                      erasing: brushEraser,
+                      disabled: panelBusy,
+                      overlayRef: brushOverlayRef,
+                      onHasStrokesChange: setBrushHasStrokes,
                     }
                   : undefined
               }
@@ -1029,6 +1144,10 @@ export function EditWorkspace() {
                   activeTool={tool}
                   candidateCount={candidateCount}
                   regionMode={regionMode}
+                  regionSelectionMode={regionSelectionMode}
+                  brushSize={brushSize}
+                  brushEraser={brushEraser}
+                  brushHasStrokes={brushHasStrokes}
                   busy={busy || generatedEditBusyTool === "restyle" || versionInFlight}
                   interactionDisabled={versionRecoveryRequired}
                   disabled={!canRun}
@@ -1053,6 +1172,10 @@ export function EditWorkspace() {
                   onSubmit={() => void run()}
                   onCandidateCountChange={setCandidateCount}
                   onRegionModeChange={setRegionMode}
+                  onRegionSelectionModeChange={setRegionSelectionMode}
+                  onBrushSizeChange={setBrushSize}
+                  onBrushEraserChange={setBrushEraser}
+                  onBrushClear={clearBrushSelection}
                 />
               </div>
               <div className="mt-2 grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-3">

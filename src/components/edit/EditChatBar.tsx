@@ -8,6 +8,7 @@ export const DEFAULT_EDIT_CANDIDATE_COUNT = 2;
 export const ERASE_INSTRUCTION_PREFIX = "この範囲のものを消して自然に埋めて。";
 
 export type RegionEditMode = "replace" | "erase";
+export type RegionSelectionMode = "rectangle" | "brush";
 
 export function normalizeEditCandidateCount(value: number): number {
   if (!Number.isFinite(value)) return DEFAULT_EDIT_CANDIDATE_COUNT;
@@ -27,6 +28,10 @@ type EditChatBarProps = {
   activeTool: EditToolId;
   candidateCount: number;
   regionMode: RegionEditMode;
+  regionSelectionMode: RegionSelectionMode;
+  brushSize: number;
+  brushEraser: boolean;
+  brushHasStrokes: boolean;
   busy: boolean;
   disabled: boolean;
   interactionDisabled?: boolean;
@@ -36,6 +41,10 @@ type EditChatBarProps = {
   onSubmit: () => void;
   onCandidateCountChange: (count: number) => void;
   onRegionModeChange: (mode: RegionEditMode) => void;
+  onRegionSelectionModeChange: (mode: RegionSelectionMode) => void;
+  onBrushSizeChange: (size: number) => void;
+  onBrushEraserChange: (enabled: boolean) => void;
+  onBrushClear: () => void;
 };
 
 const PASSIVE_TOOL_COPY: Partial<Record<EditToolId, { label: string; hint: string }>> = {
@@ -49,6 +58,10 @@ export function EditChatBar({
   activeTool,
   candidateCount,
   regionMode,
+  regionSelectionMode,
+  brushSize,
+  brushEraser,
+  brushHasStrokes,
   busy,
   disabled,
   interactionDisabled = false,
@@ -57,6 +70,10 @@ export function EditChatBar({
   onSubmit,
   onCandidateCountChange,
   onRegionModeChange,
+  onRegionSelectionModeChange,
+  onBrushSizeChange,
+  onBrushEraserChange,
+  onBrushClear,
 }: EditChatBarProps) {
   const submitFromKeyboard = (
     event: KeyboardEvent<HTMLTextAreaElement | HTMLInputElement>,
@@ -113,13 +130,19 @@ export function EditChatBar({
   }
 
   const placeholder = activeTool === "region"
-    ? "選択範囲を囲んで、変更したい内容を説明してください"
+    ? regionSelectionMode === "brush"
+      ? "直したいところを塗って、変更したい内容を説明してください"
+      : "選択範囲を囲んで、変更したい内容を説明してください"
     : "どこを変更したいですか？";
 
   return (
     <div
       data-edit-chat-bar
-      className="w-[min(560px,calc(100vw-2rem))] rounded-2xl border border-[#2a2a2a] bg-[#1b1b1b] px-4 pb-2 pt-3 shadow-2xl"
+      className={`${
+        activeTool === "region" && regionSelectionMode === "brush"
+          ? "w-[min(760px,calc(100vw-2rem))]"
+          : "w-[min(560px,calc(100vw-2rem))]"
+      } rounded-2xl border border-[#2a2a2a] bg-[#1b1b1b] px-4 pb-2 pt-3 shadow-2xl`}
     >
       <textarea
         value={value}
@@ -130,29 +153,82 @@ export function EditChatBar({
         placeholder={placeholder}
         className="max-h-[6.5rem] min-h-10 w-full resize-none bg-transparent text-sm leading-5 text-neutral-100 outline-none placeholder:text-neutral-500 disabled:opacity-40"
       />
-      <div className="mt-1 flex items-center justify-between gap-3">
-        <div className="flex min-h-7 items-center gap-1.5">
+      <div className="mt-1 flex items-end justify-between gap-3">
+        <div className="flex min-h-7 min-w-0 flex-col gap-1.5">
           {activeTool === "region" ? (
             <>
-              <ModeChip
-                active={regionMode === "replace"}
-                disabled={interactionDisabled}
-                onClick={() => onRegionModeChange("replace")}
-              >
-                差し替え
-              </ModeChip>
-              <ModeChip
-                active={regionMode === "erase"}
-                disabled={interactionDisabled}
-                onClick={() => onRegionModeChange("erase")}
-              >
-                消去
-              </ModeChip>
+              <div className="flex flex-wrap items-center gap-1.5">
+                <ModeChip
+                  active={regionSelectionMode === "rectangle"}
+                  disabled={interactionDisabled || busy}
+                  onClick={() => onRegionSelectionModeChange("rectangle")}
+                >
+                  四角
+                </ModeChip>
+                <span className="text-[10px] font-bold text-neutral-600" aria-hidden>⇄</span>
+                <ModeChip
+                  active={regionSelectionMode === "brush"}
+                  disabled={interactionDisabled || busy}
+                  onClick={() => onRegionSelectionModeChange("brush")}
+                >
+                  ブラシ
+                </ModeChip>
+                <span className="mx-0.5 h-4 border-l border-[#333]" aria-hidden />
+                <ModeChip
+                  active={regionMode === "replace"}
+                  disabled={interactionDisabled}
+                  onClick={() => onRegionModeChange("replace")}
+                >
+                  差し替え
+                </ModeChip>
+                <ModeChip
+                  active={regionMode === "erase"}
+                  disabled={interactionDisabled}
+                  onClick={() => onRegionModeChange("erase")}
+                >
+                  消去
+                </ModeChip>
+              </div>
+              {regionSelectionMode === "brush" ? (
+                <div className="flex flex-wrap items-center gap-2">
+                  <label className="flex items-center gap-2 text-[11px] font-bold text-neutral-400">
+                    <span className="whitespace-nowrap">サイズ</span>
+                    <input
+                      type="range"
+                      min={10}
+                      max={120}
+                      step={1}
+                      value={brushSize}
+                      disabled={interactionDisabled || busy}
+                      onChange={(event) => onBrushSizeChange(Number(event.target.value))}
+                      aria-label="ブラシサイズ"
+                      className="w-28 accent-pink-500 disabled:opacity-40"
+                    />
+                    <span className="w-10 font-mono text-neutral-500">{brushSize}px</span>
+                  </label>
+                  <ModeChip
+                    active={brushEraser}
+                    disabled={interactionDisabled || busy}
+                    onClick={() => onBrushEraserChange(!brushEraser)}
+                  >
+                    消しゴム
+                  </ModeChip>
+                  <button
+                    type="button"
+                    onClick={onBrushClear}
+                    disabled={interactionDisabled || busy || !brushHasStrokes}
+                    className="rounded-full border border-[#333] px-2.5 py-0.5 text-[11px] text-neutral-400 hover:border-pink-400 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    クリア
+                  </button>
+                </div>
+              ) : null}
             </>
           ) : null}
         </div>
         <div className="flex items-center gap-2">
-          {activeTool === "ai" ? (
+          {activeTool === "ai" ||
+          (activeTool === "region" && regionSelectionMode === "brush") ? (
             <label className="flex items-center gap-1 text-[11px] text-neutral-400">
               <span>候補</span>
               <select
