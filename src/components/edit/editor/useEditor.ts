@@ -13,6 +13,7 @@ import {
   codexVision,
   images,
 } from "../../../lib/ipc";
+import { exportTimestamp } from "../../../lib/exportNaming";
 import { segmentImage } from "../../../lib/segmentation";
 import { useActiveProject } from "../../../lib/store/activeProject";
 import { onEditModelProgress } from "../../../lib/edit/events";
@@ -943,7 +944,7 @@ export function useEditorActions() {
     }
     const { save } = await import("@tauri-apps/plugin-dialog");
     const target = await save({
-      defaultPath: "gori-export.png",
+      defaultPath: `gori-export-${exportTimestamp()}.png`,
       filters: [{ name: "PNG", extensions: ["png"] }],
     });
     if (typeof target !== "string") {

@@ -17,7 +17,7 @@
  * `supportsWebp()` で事前に判定し、非対応なら選択肢自体を出さない。
  */
 
-import { buildExportFileName } from "../../../lib/exportNaming";
+import { buildExportFileName, exportTimestamp } from "../../../lib/exportNaming";
 
 /** 書き出し形式。 */
 export type ExportFormat = "png" | "jpeg" | "webp";
@@ -173,7 +173,11 @@ export async function saveExportedImage(
   const ext = extOf(format);
   const { save } = await import("@tauri-apps/plugin-dialog");
   const dest = await save({
-    defaultPath: buildExportFileName({ style: "plain", prefix: "gori-export", ext }),
+    defaultPath: buildExportFileName({
+      style: "plain",
+      prefix: `gori-export-${exportTimestamp()}`,
+      ext,
+    }),
     filters: [{ name: format.toUpperCase(), extensions: [ext] }],
   });
   if (typeof dest !== "string") return null;

@@ -218,3 +218,15 @@ export function buildExportFileName(opts: NamingOptions): string {
 //   - gori-storyboard        (絵コンテ: 連番 C001 形式にすべき)
 //   - gori-character-register (キャラ登録: キャラ名_役割 形式にすべき)
 //   - gori-scene-3d          (3D: 連番形式にすべき)
+
+/**
+ * 書き出しダイアログの既定名に付ける日時スタンプ (`20260826-1131` 形式)。
+ *
+ * なぜ: 既定名が固定 (`gori-export.png`) だと2回目の書き出しで必ず
+ * 「同名があります。置き換えますか?」の OS 警告になる (2026-08-26 実機FB)。
+ * 秒までは要らない (同一分内の連打は稀で、その時は OS 警告が正しく働く)。
+ */
+export function exportTimestamp(now: Date = new Date()): string {
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}`;
+}
