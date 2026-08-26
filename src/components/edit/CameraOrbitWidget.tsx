@@ -1,7 +1,7 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 import type { ThreeEvent } from "@react-three/fiber";
 import { useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
-import { MathUtils } from "three";
+import { CatmullRomCurve3, MathUtils, TubeGeometry, Vector3 } from "three";
 
 import { clampCameraVertical, normalizeCameraRotate } from "./editToolLogic";
 import { WIDGET_BOARD_CENTER, WidgetScene } from "./widget3d/WidgetScene";
@@ -35,6 +35,22 @@ const RING_RADIUS = 1.66;
 const RING_HEIGHT = 0.09;
 const MERIDIAN_RADIUS = 1.48;
 
+/** 縦アークの実ジオメトリ。玉の軌道 (-30°〜90°) をそのままチューブ化する。 */
+const meridianTube = (() => {
+  const points: Vector3[] = [];
+  for (let deg = -30; deg <= 90; deg += 4) {
+    const rad = MathUtils.degToRad(deg);
+    points.push(
+      new Vector3(
+        0,
+        WIDGET_BOARD_CENTER[1] + Math.sin(rad) * MERIDIAN_RADIUS,
+        Math.cos(rad) * MERIDIAN_RADIUS,
+      ),
+    );
+  }
+  return new TubeGeometry(new CatmullRomCurve3(points), 64, 0.052, 12, false);
+})();
+
 function CameraGizmo({
   rotate,
   vertical,
@@ -53,10 +69,11 @@ function CameraGizmo({
     RING_HEIGHT + 0.035,
     Math.cos(rotateRad) * RING_RADIUS,
   ];
+  // 玉は手前側 (+z) から真上へ。0°=手前・リングの高さ、90°=真上 (2026-08-26 実機FB: 逆だった)
   const meridianBall: [number, number, number] = [
     0,
     WIDGET_BOARD_CENTER[1] + Math.sin(verticalRad) * MERIDIAN_RADIUS,
-    -Math.cos(verticalRad) * MERIDIAN_RADIUS,
+    Math.cos(verticalRad) * MERIDIAN_RADIUS,
   ];
 
   const begin = (kind: "ring" | "meridian") => (event: ThreeEvent<PointerEvent>) => {
@@ -79,18 +96,17 @@ function CameraGizmo({
         />
       </mesh>
 
-      <group position={[0, WIDGET_BOARD_CENTER[1], 0]} rotation={[0, Math.PI / 2, 0]}>
-        <mesh rotation={[0, 0, -Math.PI / 4]}>
-          <torusGeometry args={[MERIDIAN_RADIUS, 0.052, 16, 80, Math.PI]} />
-          <meshStandardMaterial
-            color="#8a5cf6"
-            roughness={0.36}
-            metalness={0.13}
-            emissive="#2d145d"
-            emissiveIntensity={0.42}
-          />
-        </mesh>
-      </group>
+      {/* 縦アーク: 玉の軌道 (-30°〜90°) と完全に同じ曲線をチューブで描く。
+          90°ぴったりで終端する (2026-08-26 実機FB)。 */}
+      <mesh geometry={meridianTube}>
+        <meshStandardMaterial
+          color="#8a5cf6"
+          roughness={0.36}
+          metalness={0.13}
+          emissive="#2d145d"
+          emissiveIntensity={0.42}
+        />
+      </mesh>
 
       <mesh position={ringBall} onPointerDown={begin("ring")} castShadow>
         <sphereGeometry args={[0.16, 28, 20]} />
@@ -232,7 +248,7 @@ export function CameraOrbitWidget({
           alt=""
           className="h-[40px] w-auto max-w-[58px] rounded-[2px] object-cover"
           style={{
-            transform: `scale(${previewScale}) rotateY(${-normalizeCameraRotate(rotate)}deg) rotateX(${clampCameraVertical(vertical) * 0.45}deg)`,
+            transform: `scale(${previewScale}) rotateY(${-normalizeCameraRotate(rotate)}deg) rotateX(${clampCameraVertical(vertical) * 0.9}deg)`,
           }}
           draggable={false}
         />

@@ -194,9 +194,10 @@ export function LightOrbitWidget({
     event.preventDefault();
     const dx = event.clientX - start.x;
     const dy = start.y - event.clientY;
+    // dy は「上ドラッグで正」。上ドラッグ=ライトが上がる (2026-08-26 実機FB: 逆だった)
     onChange({
       azimuth: snapLightAzimuth(start.azimuth + dx * 1.15),
-      elevation: snapLightElevation(start.elevation - dy * 1.05),
+      elevation: snapLightElevation(start.elevation + dy * 1.05),
     });
   };
 
